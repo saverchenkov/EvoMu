@@ -1,0 +1,11 @@
+[package]
+name = "eve-destiny"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+eve-proto = { path = "../eve-proto" }
+eve-sde = { path = "../eve-sde" }
+glam.workspace = true
+serde.workspace = true

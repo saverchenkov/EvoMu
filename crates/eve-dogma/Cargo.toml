@@ -1,0 +1,9 @@
+[package]
+name = "eve-dogma"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+eve-sde = { path = "../eve-sde" }
+serde.workspace = true
