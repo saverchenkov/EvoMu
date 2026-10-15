@@ -72,6 +72,7 @@ version = "0.1.0"
 dependencies = [
  "eve-sde",
  "serde",
+ "serde_json",
  "thiserror",
 ]
 

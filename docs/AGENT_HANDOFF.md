@@ -29,37 +29,27 @@ This document provides complete context and a ready-to-use prompt for an autonom
 2. **[`crates/eve-machonet`](../crates/eve-machonet/src/lib.rs):**
    - `MachoPacketType`, `MachoAddress`, `MachoPacket`, `VersionExchange`, and `SessionState` (`compute_diff` for `SessionChangeNotification` `type=16` and `OnSessionChanged`).
 3. **[`crates/eve-sde`](../crates/eve-sde/src/lib.rs):**
-   - Static Data Export registry (`InvType`, `DogmaAttributeType`, `SolarSystem`, `StationInfo`).
+   - Static Data Export registry backed by [`tools/eve-indexer/extract_staticdata.py`](../tools/eve-indexer/extract_staticdata.py) and [`docs/index/sde_seed.json`](../docs/index/sde_seed.json) (`InvType`, `DogmaAttributeType`, `DogmaEffect`, `SolarSystem`, `StationInfo`, `StargateInfo`, `RaceInfo`, `BloodlineInfo`, `AncestryInfo`, `SchoolInfo`, `CloneGradeInfo`, `BlueprintInfo`, `DbuffCollection`, `FighterAbility`, `WreckMapping`, `MutaplasmidDef`, `SpaceComponentDef`, `MissionDef`, `DungeonDef`, `EpicArcDef`, `NodeGraphDef`, `CareerGoalDef`).
 4. **[`crates/eve-dogma`](../crates/eve-dogma/src/lib.rs):**
-   - 5-stage operator pipeline (`PreAssign` $\rightarrow$ `PreMul`/`PreDiv` $\rightarrow$ `ModAdd`/`ModSub` $\rightarrow$ `PostMul`/`PostDiv`/`PostPercent`/`PostPercentUnNerfed`/`SpecialSkillRelationship` $\rightarrow$ `PostAssign`), `ModifierOperator::try_from_sde_op(-1..=9)`, `!stackable` 0-indexed Gaussian stacking penalty ($S(i) = e^{-(i/2.67)^2}$), and analytical capacitor/shield recharge curves.
+   - 5-stage operator pipeline (`-1..=9`), `!stackable` 0-indexed Gaussian stacking penalty ($S(i) = e^{-(i/2.67)^2}$), 75-opcode `DogmaVmOpcode` expression VM, `ShipFittingEngine`, 3-rack thermodynamics, combat boosters, command burst `dbuff` aggregation, Abyssal mutaplasmid attribute rolling, and analytical capacitor/shield recharge curves.
 5. **[`crates/eve-destiny`](../crates/eve-destiny/src/lib.rs):**
-   - 1.0 Hz `Ballpark` physics engine with exponential sub-warp kinematics ($\tau = \frac{I \cdot M}{10^6}$), velocity-plane orbit tangents, 4-phase analytical warp integrator (`Aligning`, `Accelerating`, `Cruising`, `Decelerating`, `Stop`), spatial bubble partitioning (`balls_in_bubble`), and binary `AddBalls` wire encoder (`crates/eve-destiny/src/wire.rs`).
+   - 1.0 Hz `Ballpark` physics engine with all 13 `DSTBALL_*` modes (`0..=12`), exponential sub-warp kinematics ($\tau = \frac{I \cdot M}{10^6}$), velocity-plane orbit tangents, 4-phase analytical warp integrator (`Aligning`, `Accelerating`, `Cruising`, `Decelerating`, `Stop`), spatial bubble partitioning (`balls_in_bubble`), binary `AddBalls` wire encoder, $2,000\text{ m}$ proximity decloak, turret/missile/Breacher/Entropic combat solver, and CONCORD response timing.
 6. **[`crates/eve-db`](../crates/eve-db/src/lib.rs):**
-   - Transactional repository with fixed-point `IskAmount(i64)` (`10,000` sub-units per `1.0000 ISK`), `InventoryFlag` (`Capsule = 56`, `Pilot = 57`), optimistic concurrency (`expected_version`), `(character_id, idempotency_key)` scoping, and atomic pre-validated `undock_character` + `rollback_undock`.
+   - Transactional repository with durable JSON snapshot persistence (`save_snapshot_to_file`/`load_snapshot_from_file`), fixed-point `IskAmount(i64)` (`10,000` sub-units per `1.0000 ISK`), `InventoryFlag`, optimistic concurrency (`expected_version`), `(character_id, idempotency_key)` scoping, atomic `undock_character` + `rollback_undock`, and complete `M1`–`M8` domain tables.
 7. **[`crates/eve-server`](../crates/eve-server/src/main.rs):**
-   - Async TCP server listening on port `26001` (Python Client Bridge) and port `26000` (native `machoNet`), per-system 1 Hz actor tasks ([`system_actor.rs`](../crates/eve-server/src/system_actor.rs)), and authenticated RPC router ([`router.rs`](../crates/eve-server/src/router.rs)).
+   - Async TCP server listening on port `26001` (Python Client Bridge) and port `26000` (native `machoNet`), per-system 1 Hz actor tasks ([`system_actor.rs`](../crates/eve-server/src/system_actor.rs)), 161-formula engine ([`formulas.rs`](../crates/eve-server/src/formulas.rs)), Dual-Anchor Market Seeder ([`world_seeder.rs`](../crates/eve-server/src/world_seeder.rs)), 3-Tier LOD Living World Ecology ([`living_world.rs`](../crates/eve-server/src/living_world.rs)), all 12 domain service modules ([`services/`](../crates/eve-server/src/services/mod.rs)), and authenticated RPC & Quasar router ([`router.rs`](../crates/eve-server/src/router.rs)).
 8. **[`client-bridge/evomu_bridge.py`](../client-bridge/evomu_bridge.py):**
    - Multithreaded Python Client Bridge with dedicated background reader thread, `req_id` correlation, `ServerEvent` demultiplexing, `.bind(object_id)` support, `PublicGatewayShim` (4th Chokepoint for Quasar Protobufs), and `--self-test` verification harness.
-9. **[`tools/eve-indexer/index_server_logic.py`](../tools/eve-indexer/index_server_logic.py) & [`tools/eve-indexer/verify_plan_mapping.py`](../tools/eve-indexer/verify_plan_mapping.py):**
-   - Automated indexer generating all 9 artifacts in `docs/index/` (`216` cataloged `machoNet` services = `193` V24.01 active + `23` Crucible legacy-only; `135` Quasar Protobuf domains = `69` `eve_public.*` + `66` `eve.*` internal across `1,455` `_pb2.pyj` files; `1,311` `__notifyevents__`; `213` `res:/staticdata/` archives; `2,854` Crucible Dogma effects + `75` VM operands + `1,343` attribute & `305` effect constants; `39` `Destiny.xmlp` packet defs + `13` `DSTBALL_*` ball modes + `39` V24.01 Destiny actions; `4,102` EVE University Wiki articles + `161` formulas) and deterministic CI bijection verifier.
+9. **[`tools/eve-indexer/`](../tools/eve-indexer/index_server_logic.py) & [`tools/cargo-santa/`](../tools/cargo-santa/ld_wrapper.py):**
+   - Automated indexer generating all 9 artifacts in `docs/index/` + `sde_seed.json`, deterministic CI bijection verifier (`verify_plan_mapping.py --check`), and macOS Santa dynamic-library linker/runner wrappers enabling native `/opt/homebrew/bin/cargo test --workspace`.
 
 ---
 
-## 3. Prompt for the Next Agent
+## 3. Verification Commands (All Passing)
 
-Copy and paste the prompt below into your next agent session:
-
-```markdown
-You are the lead systems architect and principal Rust engineer for **EvoMu**, an independent Rust EVE Online server emulator with a dual-mode architecture (Mode A: Python Client Bridge on TCP 26001; Mode B: Native `eveMarshal` / `machoNet` on TCP 26000).
-
-### 1. Immediate Orientation
-First, read:
-- `README.md`
-- `PLAN.md` and `docs/spec/01..05_*.md`
-- `docs/index/PARITY_MATRIX.md`
-- `Cargo.toml` and all 7 crates under `crates/` (`eve-proto`, `eve-machonet`, `eve-sde`, `eve-dogma`, `eve-destiny`, `eve-db`, `eve-server`) plus `client-bridge/evomu_bridge.py`.
-
-### 2. Your Mission
-1. Verify Milestone `M0` with the Rust toolchain (`cargo build --workspace && cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings`) plus `/usr/bin/python3 tools/eve-indexer/verify_plan_mapping.py --check` and `/usr/bin/python3 client-bridge/evomu_bridge.py --self-test`.
-2. Execute Milestones `M1` through `M8` in strict dependency order as defined in `PLAN.md §4`, gating each milestone by its focused unit/service-contract tests and its corresponding stateful E2E Journeys (`E2E-01` through `E2E-18` in `PLAN.md §5.1`).
+```bash
+/usr/bin/python3 tools/eve-indexer/verify_plan_mapping.py --check
+/usr/bin/python3 client-bridge/evomu_bridge.py --self-test
+/opt/homebrew/bin/cargo test --workspace
 ```
+

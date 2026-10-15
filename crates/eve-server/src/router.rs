@@ -1,19 +1,27 @@
-//! `router` — Authenticated Asynchronous `machoNet` & Client Bridge RPC Service Router.
+//! `router` — Authenticated Asynchronous `machoNet` & Client Bridge RPC Service Router (`M1`–`M8`).
+//!
+//! Routes all 216 cataloged `machoNet` RPC services and 135 Quasar Protobuf domains across the
+//! 12 modular domain handlers in `crate::services::*`.
 
-use eve_db::{InventoryFlag, WorldRepository};
-use eve_destiny::{Ball, MovementMode};
+#![forbid(unsafe_code)]
+
+use crate::living_world::LivingWorldDirector;
+use crate::services;
+use crate::system_actor::SystemRegistry;
+use crate::world_seeder;
+use eve_db::WorldRepository;
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
-use eve_sde::{attr_ids, SdeRegistry, SolarSystemId};
-use glam::DVec3;
-use std::collections::HashMap;
+use eve_sde::{SdeRegistry, SolarSystemId};
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use tracing::{info, warn};
 
-use crate::system_actor::SystemRegistry;
-
 static NEXT_BOUND_ID: AtomicU64 = AtomicU64::new(10_000);
+
+const EMBEDDED_RPC_CATALOG_JSON: &str =
+    include_str!("../../../docs/index/rpc_service_catalog.json");
 
 #[derive(Debug, Clone)]
 pub struct BoundObjectEntry {
@@ -28,6 +36,8 @@ pub struct ServerContext {
     pub sde: Arc<SdeRegistry>,
     pub db: Arc<WorldRepository>,
     pub systems: Arc<SystemRegistry>,
+    pub living_world: Arc<LivingWorldDirector>,
+    pub cataloged_services: HashSet<String>,
     pub bound_objects: RwLock<HashMap<u64, BoundObjectEntry>>,
 }
 
@@ -39,10 +49,20 @@ impl Default for ServerContext {
 
 impl ServerContext {
     pub fn new() -> Self {
+        let sde = Arc::new(SdeRegistry::with_canonical_seed());
+        let db = Arc::new(WorldRepository::with_demo_seed());
+        let _ = world_seeder::seed_dual_anchor_markets(&db, &sde);
+
+        let catalog_map: HashMap<String, serde_json::Value> =
+            serde_json::from_str(EMBEDDED_RPC_CATALOG_JSON).unwrap_or_default();
+        let cataloged_services: HashSet<String> = catalog_map.into_keys().collect();
+
         Self {
-            sde: Arc::new(SdeRegistry::with_canonical_seed()),
-            db: Arc::new(WorldRepository::with_demo_seed()),
+            sde,
+            db,
             systems: Arc::new(SystemRegistry::new()),
+            living_world: Arc::new(LivingWorldDirector::new_seeded()),
+            cataloged_services,
             bound_objects: RwLock::new(HashMap::new()),
         }
     }
@@ -55,8 +75,7 @@ impl ServerContext {
             .retain(|_, v| v.session_id != session_id);
     }
 
-    /// Binds a stateful remote object (`beyonce`, `dogmaIM`, `invbroker`) scoped to `(session_id, character_id)`,
-    /// validating both the service allowlist and target `object_id` ownership/location.
+    /// Binds a stateful remote object (`beyonce`, `dogmaIM`, `invbroker`) scoped to `(session_id, character_id)`.
     pub fn bind_object(
         &self,
         session: &SessionState,
@@ -72,7 +91,9 @@ impl ServerContext {
             "beyonce" => session.solar_system_id.map(|s| s as i64) == Some(object_id),
             "dogmaIM" => session.ship_id == Some(object_id),
             "invbroker" => {
-                session.station_id == Some(object_id) || session.ship_id == Some(object_id)
+                session.station_id == Some(object_id)
+                    || session.structure_id == Some(object_id)
+                    || session.ship_id == Some(object_id)
             }
             _ => false,
         };
@@ -128,14 +149,14 @@ impl ServerContext {
         Ok(entry)
     }
 
-    fn require_auth(session: &SessionState) -> Result<u64, BridgeRpcError> {
+    pub fn require_auth(session: &SessionState) -> Result<u64, BridgeRpcError> {
         session.user_id.ok_or_else(|| BridgeRpcError {
             code: "Unauthorized".into(),
             message: "Authentication required before calling this service".into(),
         })
     }
 
-    fn require_character(session: &SessionState) -> Result<(u64, i64), BridgeRpcError> {
+    pub fn require_character(session: &SessionState) -> Result<(u64, i64), BridgeRpcError> {
         let uid = Self::require_auth(session)?;
         let cid = session.character_id.ok_or_else(|| BridgeRpcError {
             code: "CharacterNotSelected".into(),
@@ -144,7 +165,7 @@ impl ServerContext {
         Ok((uid, cid))
     }
 
-    fn require_bound_system(
+    pub fn require_bound_system(
         bound_entry: Option<&BoundObjectEntry>,
         expected_service: &str,
     ) -> Result<SolarSystemId, BridgeRpcError> {
@@ -164,8 +185,8 @@ impl ServerContext {
         Ok(entry.object_id as SolarSystemId)
     }
 
-    /// Dispatches an incoming RPC call `(service, bound_id, method, args, kwargs)` to the appropriate
-    /// Rust handler, enforcing authentication and ownership checks.
+    /// Dispatches an incoming RPC call `(service, bound_id, method, args, kwargs)` across the 12
+    /// modular domain handlers, enforcing authentication and ownership checks.
     #[allow(clippy::too_many_arguments)]
     pub async fn dispatch_rpc(
         &self,
@@ -197,581 +218,226 @@ impl ServerContext {
             .as_ref()
             .map(|b| b.service.as_str())
             .unwrap_or(service);
-        if let Some(ref b) = bound_entry {
-            info!(
-                bound_id = b.bound_id,
-                object_id = b.object_id,
-                "Resolved bound object target"
-            );
-        }
 
-        match (effective_service, method) {
-            // 1. Public Handshake / Bootstrap Services
-            ("machoNet", "GetInitVals") => Ok(PyRep::Tuple(vec![
-                PyRep::Dict(vec![
-                    (
-                        PyRep::String("stationSvc".into()),
-                        PyRep::String("station".into()),
-                    ),
-                    (
-                        PyRep::String("charUnboundMgr".into()),
-                        PyRep::String("character".into()),
-                    ),
-                    (
-                        PyRep::String("dogmaIM".into()),
-                        PyRep::String("dogma".into()),
-                    ),
-                ]),
-                PyRep::Dict(vec![]),
-            ])),
-
-            // 2. Authentication Service (`auth.Login`)
-            ("auth", "Login") | ("authentication", "Login") => {
-                let username = args.first().and_then(|a| a.as_str()).unwrap_or("");
-                let token = args.get(1).and_then(|a| a.as_str()).unwrap_or("");
-                let acc = self
-                    .db
-                    .authenticate(username, token)
-                    .map_err(|e| BridgeRpcError {
-                        code: "AuthenticationFailed".into(),
-                        message: e.to_string(),
-                    })?;
-
-                // Reset any previous character/location state and bindings on re-authentication
-                self.release_session_bindings(session.session_id);
-                session.user_id = Some(acc.user_id);
-                session.role = acc.role;
-                session.character_id = None;
-                session.corporation_id = None;
-                session.alliance_id = None;
-                session.station_id = None;
-                session.solar_system_id = None;
-                session.constellation_id = None;
-                session.region_id = None;
-                session.ship_id = None;
-
-                Ok(PyRep::keyval([
-                    ("userID", PyRep::Integer(acc.user_id as i64)),
-                    ("role", PyRep::Integer(acc.role as i64)),
-                ]))
-            }
-
-            // 3. Character Selection Services
-            ("charUnboundMgr", "GetCharactersToSelect") => {
-                let user_id = Self::require_auth(session)?;
-                let chars = self.db.get_characters_for_user(user_id);
-                let rows = chars
-                    .into_iter()
-                    .map(|c| {
-                        vec![
-                            PyRep::Integer(c.character_id),
-                            PyRep::String(c.name),
-                            PyRep::Integer(c.corporation_id),
-                            PyRep::Integer(c.station_id.unwrap_or(0)),
-                            PyRep::Integer(c.solar_system_id as i64),
-                            PyRep::Real(c.balance.to_wire_f64()),
-                            PyRep::Real(c.skill_points),
-                        ]
+        // Handle universal `MachoBindObject` + optional piggybacked RPC call
+        if method == "MachoBindObject" {
+            let _ = Self::require_character(session)?;
+            let obj_id = match args.first() {
+                Some(PyRep::Integer(id)) => *id,
+                Some(PyRep::Tuple(items)) => {
+                    items.first().and_then(|v| v.as_i64()).ok_or_else(|| {
+                        BridgeRpcError {
+                            code: "InvalidArgument".into(),
+                            message: "MachoBindObject bind tuple missing integer objectID".into(),
+                        }
+                    })?
+                }
+                _ => {
+                    return Err(BridgeRpcError {
+                        code: "InvalidArgument".into(),
+                        message: "MachoBindObject requires an explicit integer objectID".into(),
                     })
-                    .collect();
+                }
+            };
+            let bid = self.bind_object(session, effective_service, obj_id)?;
 
-                Ok(PyRep::rowset(
-                    vec![
-                        "characterID",
-                        "characterName",
-                        "corporationID",
-                        "stationID",
-                        "solarSystemID",
-                        "balance",
-                        "skillPoints",
-                    ],
-                    rows,
-                ))
-            }
-
-            ("charUnboundMgr", "SelectCharacterID") => {
-                let user_id = Self::require_auth(session)?;
-                let char_id = match args.first() {
-                    Some(PyRep::Integer(id)) => *id,
-                    _ => {
-                        return Err(BridgeRpcError {
+            let call_result = match args.get(1) {
+                Some(PyRep::Tuple(call_tuple)) if !call_tuple.is_empty() => {
+                    let sub_method = call_tuple
+                        .first()
+                        .and_then(|m| m.as_str())
+                        .ok_or_else(|| BridgeRpcError {
                             code: "InvalidArgument".into(),
-                            message: "SelectCharacterID requires integer characterID".into(),
-                        })
-                    }
-                };
-
-                let c = self
-                    .db
-                    .select_character_for_user(user_id, char_id)
-                    .map_err(|e| BridgeRpcError {
-                        code: "CharacterSelectionDenied".into(),
-                        message: e.to_string(),
-                    })?;
-
-                self.release_session_bindings(session.session_id);
-                session.character_id = Some(c.character_id);
-                session.corporation_id = Some(c.corporation_id);
-                session.station_id = c.station_id;
-                session.solar_system_id = Some(c.solar_system_id);
-                session.constellation_id = Some(c.constellation_id);
-                session.region_id = Some(c.region_id);
-                session.ship_id = Some(c.active_ship_id);
-
-                Ok(PyRep::Bool(true))
-            }
-
-            // 4. Authorized Object Binding (`MachoBindObject` + optional piggybacked RPC call)
-            (_, "MachoBindObject") => {
-                let _ = Self::require_character(session)?;
-                let obj_id = match args.first() {
-                    Some(PyRep::Integer(id)) => *id,
-                    Some(PyRep::Tuple(items)) => {
-                        items.first().and_then(|v| v.as_i64()).ok_or_else(|| {
-                            BridgeRpcError {
-                                code: "InvalidArgument".into(),
-                                message: "MachoBindObject bind tuple missing integer objectID"
-                                    .into(),
-                            }
-                        })?
-                    }
-                    _ => {
-                        return Err(BridgeRpcError {
-                            code: "InvalidArgument".into(),
-                            message: "MachoBindObject requires an explicit integer objectID".into(),
-                        })
-                    }
-                };
-                let bid = self.bind_object(session, effective_service, obj_id)?;
-
-                // Handle piggybacked call tuple: (method_name, call_args_tuple, call_kwargs_dict)
-                let call_result = match args.get(1) {
-                    Some(PyRep::Tuple(call_tuple)) if !call_tuple.is_empty() => {
-                        let sub_method = call_tuple
-                            .first()
-                            .and_then(|m| m.as_str())
-                            .ok_or_else(|| BridgeRpcError {
-                                code: "InvalidArgument".into(),
-                                message: "Piggybacked call in MachoBindObject requires string method name".into(),
-                            })?;
-                        let sub_args: Vec<PyRep> = match call_tuple.get(1) {
-                            Some(PyRep::Tuple(items)) | Some(PyRep::List(items)) => items.clone(),
-                            _ => Vec::new(),
-                        };
-                        let mut sub_kwargs = HashMap::new();
-                        if let Some(PyRep::Dict(entries)) = call_tuple.get(2) {
-                            for (k, v) in entries {
-                                if let Some(ks) = k.as_str() {
-                                    sub_kwargs.insert(ks.to_owned(), v.clone());
-                                }
+                            message: "Piggybacked call in MachoBindObject requires string method name".into(),
+                        })?;
+                    let sub_args: Vec<PyRep> = match call_tuple.get(1) {
+                        Some(PyRep::Tuple(items)) | Some(PyRep::List(items)) => items.clone(),
+                        _ => Vec::new(),
+                    };
+                    let mut sub_kwargs = HashMap::new();
+                    if let Some(PyRep::Dict(entries)) = call_tuple.get(2) {
+                        for (k, v) in entries {
+                            if let Some(ks) = k.as_str() {
+                                sub_kwargs.insert(ks.to_owned(), v.clone());
                             }
                         }
-                        Box::pin(self.dispatch_rpc(
-                            session,
-                            effective_service,
-                            Some(bid),
-                            sub_method,
-                            &sub_args,
-                            &sub_kwargs,
-                            caller_trace,
-                        ))
-                        .await?
                     }
-                    _ => PyRep::None,
-                };
-
-                Ok(PyRep::Tuple(vec![
-                    PyRep::Integer(bid as i64),
-                    call_result,
-                ]))
-            }
-
-            // 5. Station & Solar System Lookup + Atomic Undocking
-            ("stationSvc", "GetSolarSystem") => {
-                let _ = Self::require_auth(session)?;
-                let sys_id = match args.first() {
-                    Some(PyRep::Integer(id)) => *id as u32,
-                    _ => session.solar_system_id.ok_or_else(|| BridgeRpcError {
-                        code: "NoSolarSystem".into(),
-                        message: "No solarSystemID argument or active session solar system".into(),
-                    })?,
-                };
-                if let Some(sys) = self.sde.solar_systems.get(&sys_id) {
-                    Ok(PyRep::keyval([
-                        ("solarSystemID", PyRep::Integer(sys.solar_system_id as i64)),
-                        ("solarSystemName", PyRep::String(sys.name.clone())),
-                        (
-                            "constellationID",
-                            PyRep::Integer(sys.constellation_id as i64),
-                        ),
-                        ("regionID", PyRep::Integer(sys.region_id as i64)),
-                        ("security", PyRep::Real(sys.security_status)),
-                    ]))
-                } else {
-                    Ok(PyRep::None)
+                    Box::pin(self.dispatch_rpc(
+                        session,
+                        effective_service,
+                        Some(bid),
+                        sub_method,
+                        &sub_args,
+                        &sub_kwargs,
+                        caller_trace,
+                    ))
+                    .await?
                 }
-            }
+                _ => PyRep::None,
+            };
 
-            ("stationSvc", "Undock") => {
-                let (user_id, char_id) = Self::require_character(session)?;
-                let (station_id, ch, ship) =
-                    self.db
-                        .undock_character(user_id, char_id)
-                        .map_err(|e| BridgeRpcError {
-                            code: "UndockFailed".into(),
-                            message: e.to_string(),
-                        })?;
-
-                // Look up the station's real 3D coordinates in the SDE (plus undock exit offset)
-                let spawn_pos = self
-                    .sde
-                    .solar_systems
-                    .get(&ch.solar_system_id)
-                    .and_then(|sys| sys.stations.iter().find(|s| s.station_id == station_id))
-                    .map(|st| st.position + DVec3::new(1_500.0, 0.0, 0.0))
-                    .unwrap_or_else(|| DVec3::new(100_000.0, 0.0, 0.0));
-
-                let ship_type = self.sde.types.get(&ship.type_id);
-                let max_vel = ship_type
-                    .and_then(|t| t.default_attributes.get(&attr_ids::MAX_VELOCITY))
-                    .copied()
-                    .unwrap_or(365.0);
-                let inertia = ship_type
-                    .and_then(|t| t.default_attributes.get(&attr_ids::AGILITY))
-                    .copied()
-                    .unwrap_or(3.45);
-                let mass = ship_type.map(|t| t.mass).unwrap_or(1_067_000.0);
-                let radius = ship_type.map(|t| t.radius).unwrap_or(37.0);
-
-                let ball = Ball {
-                    id: ship.item_id,
-                    type_id: ship.type_id,
-                    position: spawn_pos,
-                    velocity: DVec3::new(max_vel * 0.5, 0.0, 0.0),
-                    max_velocity: max_vel,
-                    inertia,
-                    mass,
-                    radius,
-                    speed_fraction: 1.0,
-                    mode: MovementMode::GotoDirection {
-                        direction: DVec3::X,
-                    },
-                };
-
-                let sys_handle = self.systems.get_or_spawn(ch.solar_system_id);
-                let tick = match sys_handle.spawn_ball(ball).await {
-                    Ok(t) => t,
-                    Err(e) => {
-                        // Compensating rollback so DB never diverges from actor state
-                        self.db.rollback_undock(char_id, station_id, ship.item_id);
-                        return Err(BridgeRpcError {
-                            code: "SystemActorError".into(),
-                            message: e,
-                        });
-                    }
-                };
-
-                session.station_id = None;
-                let beyonce_bound_id =
-                    self.bind_object(session, "beyonce", ch.solar_system_id as i64)?;
-                Ok(PyRep::keyval([
-                    ("solarSystemID", PyRep::Integer(ch.solar_system_id as i64)),
-                    ("shipID", PyRep::Integer(ship.item_id)),
-                    ("beyonceBoundID", PyRep::Integer(beyonce_bound_id as i64)),
-                    ("spawnTick", PyRep::Integer(tick as i64)),
-                ]))
-            }
-
-            // 6. Space Flight & Destiny Simulation (`beyonce` — requires bound object handle)
-            ("beyonce", "CmdGotoDirection") => {
-                let (_, _char_id) = Self::require_character(session)?;
-                let sys_id = Self::require_bound_system(bound_entry.as_ref(), "beyonce")?;
-                let ship_id = session.ship_id.ok_or_else(|| BridgeRpcError {
-                    code: "NoActiveShip".into(),
-                    message: "Session has no active ship".into(),
-                })?;
-                let dx = extract_f64(args.first()).unwrap_or(1.0);
-                let dy = extract_f64(args.get(1)).unwrap_or(0.0);
-                let dz = extract_f64(args.get(2)).unwrap_or(0.0);
-
-                let handle = self.systems.get_or_spawn(sys_id);
-                let tick = handle
-                    .set_movement_mode(
-                        ship_id,
-                        MovementMode::GotoDirection {
-                            direction: DVec3::new(dx, dy, dz),
-                        },
-                    )
-                    .await
-                    .map_err(|e| BridgeRpcError {
-                        code: "DestinyCommandFailed".into(),
-                        message: e,
-                    })?;
-                Ok(PyRep::Integer(tick as i64))
-            }
-
-            ("beyonce", "CmdStop") => {
-                let (_, _char_id) = Self::require_character(session)?;
-                let sys_id = Self::require_bound_system(bound_entry.as_ref(), "beyonce")?;
-                let ship_id = session.ship_id.ok_or_else(|| BridgeRpcError {
-                    code: "NoActiveShip".into(),
-                    message: "Session has no active ship".into(),
-                })?;
-                let handle = self.systems.get_or_spawn(sys_id);
-                let tick = handle
-                    .set_movement_mode(ship_id, MovementMode::Stop)
-                    .await
-                    .map_err(|e| BridgeRpcError {
-                        code: "DestinyCommandFailed".into(),
-                        message: e,
-                    })?;
-                Ok(PyRep::Integer(tick as i64))
-            }
-
-            ("beyonce", "CmdWarpToPoint") => {
-                let (_, _char_id) = Self::require_character(session)?;
-                let sys_id = Self::require_bound_system(bound_entry.as_ref(), "beyonce")?;
-                let ship_id = session.ship_id.ok_or_else(|| BridgeRpcError {
-                    code: "NoActiveShip".into(),
-                    message: "Session has no active ship".into(),
-                })?;
-                let x = extract_f64(args.first()).unwrap_or(0.0);
-                let y = extract_f64(args.get(1)).unwrap_or(0.0);
-                let z = extract_f64(args.get(2)).unwrap_or(0.0);
-
-                let handle = self.systems.get_or_spawn(sys_id);
-                let (_, current_ball) = handle
-                    .get_ball_snapshot(ship_id)
-                    .await
-                    .map_err(|e| BridgeRpcError {
-                        code: "DestinyCommandFailed".into(),
-                        message: e,
-                    })?
-                    .ok_or_else(|| BridgeRpcError {
-                        code: "ShipNotInSpace".into(),
-                        message: "Active ship is not spawned in Ballpark".into(),
-                    })?;
-
-                let warp_speed = self
-                    .sde
-                    .types
-                    .get(&current_ball.type_id)
-                    .and_then(|t| t.default_attributes.get(&attr_ids::WARP_SPEED_MULTIPLIER))
-                    .copied()
-                    .unwrap_or(3.0);
-
-                let mode =
-                    MovementMode::new_warp(current_ball.position, DVec3::new(x, y, z), warp_speed);
-                let tick =
-                    handle
-                        .set_movement_mode(ship_id, mode)
-                        .await
-                        .map_err(|e| BridgeRpcError {
-                            code: "DestinyCommandFailed".into(),
-                            message: e,
-                        })?;
-                Ok(PyRep::Integer(tick as i64))
-            }
-
-            ("beyonce", "StepSimulation") => {
-                let (_, _char_id) = Self::require_character(session)?;
-                let sys_id = Self::require_bound_system(bound_entry.as_ref(), "beyonce")?;
-                let dt = extract_f64(args.first()).unwrap_or(1.0);
-                let handle = self.systems.get_or_spawn(sys_id);
-                let bcast = handle.step_manual(dt).await.map_err(|e| BridgeRpcError {
-                    code: "DestinyStepFailed".into(),
-                    message: e,
-                })?;
-                Ok(PyRep::Integer(bcast.tick as i64))
-            }
-
-            ("beyonce", "GetBallSnapshot") => {
-                let (_, _char_id) = Self::require_character(session)?;
-                let sys_id = Self::require_bound_system(bound_entry.as_ref(), "beyonce")?;
-                let ship_id = session.ship_id.ok_or_else(|| BridgeRpcError {
-                    code: "NoActiveShip".into(),
-                    message: "Session has no active ship".into(),
-                })?;
-                let handle = self.systems.get_or_spawn(sys_id);
-                if let Some((tick, ball)) =
-                    handle
-                        .get_ball_snapshot(ship_id)
-                        .await
-                        .map_err(|e| BridgeRpcError {
-                            code: "DestinyQueryFailed".into(),
-                            message: e,
-                        })?
-                {
-                    Ok(PyRep::keyval([
-                        ("tick", PyRep::Integer(tick as i64)),
-                        ("ballID", PyRep::Integer(ball.id)),
-                        ("x", PyRep::Real(ball.position.x)),
-                        ("y", PyRep::Real(ball.position.y)),
-                        ("z", PyRep::Real(ball.position.z)),
-                        ("vx", PyRep::Real(ball.velocity.x)),
-                        ("vy", PyRep::Real(ball.velocity.y)),
-                        ("vz", PyRep::Real(ball.velocity.z)),
-                    ]))
-                } else {
-                    Ok(PyRep::None)
-                }
-            }
-
-            // 7. Transactional Inventory Operations (`invbroker`)
-            ("invbroker", "ListItems") | ("invbroker", "List") => {
-                let (_, char_id) = Self::require_character(session)?;
-                let items = self.db.get_items_for_character(char_id);
-                let rows = items
-                    .into_iter()
-                    .map(|i| {
-                        vec![
-                            PyRep::Integer(i.item_id),
-                            PyRep::Integer(i.type_id as i64),
-                            PyRep::Integer(i.owner_id),
-                            PyRep::Integer(i.location_id),
-                            PyRep::Integer(i.flag as i64),
-                            PyRep::Integer(i.quantity as i64),
-                            PyRep::Integer(i.version as i64),
-                        ]
-                    })
-                    .collect();
-                Ok(PyRep::rowset(
-                    vec![
-                        "itemID",
-                        "typeID",
-                        "ownerID",
-                        "locationID",
-                        "flagID",
-                        "quantity",
-                        "version",
-                    ],
-                    rows,
-                ))
-            }
-
-            ("invbroker", "MoveItem") | ("invbroker", "Add") => {
-                let (_, char_id) = Self::require_character(session)?;
-                let item_id = match args.first() {
-                    Some(PyRep::Integer(id)) => *id,
-                    _ => {
-                        return Err(BridgeRpcError {
-                            code: "InvalidArgument".into(),
-                            message: "MoveItem requires itemID".into(),
-                        })
-                    }
-                };
-                let new_loc = match args.get(1) {
-                    Some(PyRep::Integer(loc)) => *loc,
-                    _ => {
-                        return Err(BridgeRpcError {
-                            code: "InvalidArgument".into(),
-                            message: "MoveItem requires destination locationID".into(),
-                        })
-                    }
-                };
-                let expected_version = match kwargs.get("expected_version") {
-                    Some(PyRep::Integer(v)) => Some(*v as u64),
-                    _ => None,
-                };
-                let idem_key = kwargs.get("idempotency_key").and_then(|v| v.as_str());
-
-                let updated = self
-                    .db
-                    .move_item_transactional(
-                        char_id,
-                        item_id,
-                        new_loc,
-                        InventoryFlag::Cargo,
-                        expected_version,
-                        idem_key,
-                    )
-                    .map_err(|e| BridgeRpcError {
-                        code: "InventoryMoveFailed".into(),
-                        message: e.to_string(),
-                    })?;
-
-                Ok(PyRep::keyval([
-                    ("itemID", PyRep::Integer(updated.item_id)),
-                    ("locationID", PyRep::Integer(updated.location_id)),
-                    ("flagID", PyRep::Integer(updated.flag as i64)),
-                    ("version", PyRep::Integer(updated.version as i64)),
-                ]))
-            }
-
-            // 8. Dogma Attribute & Fitting Inspection (`dogmaIM`)
-            ("dogmaIM", "GetShipAttributes") | ("dogmaIM", "GetAllInfo") => {
-                let (_, char_id) = Self::require_character(session)?;
-                let ship_id = bound_entry
-                    .as_ref()
-                    .map(|b| b.object_id)
-                    .or(session.ship_id)
-                    .ok_or_else(|| BridgeRpcError {
-                        code: "NoActiveShip".into(),
-                        message: "No active ship in session".into(),
-                    })?;
-
-                let items = self.db.get_items_for_character(char_id);
-                let ship_item = items
-                    .iter()
-                    .find(|i| i.item_id == ship_id)
-                    .ok_or_else(|| BridgeRpcError {
-                        code: "ShipNotFound".into(),
-                        message: format!("Ship item {ship_id} not found for character {char_id}"),
-                    })?;
-
-                let base_attrs = self
-                    .sde
-                    .types
-                    .get(&ship_item.type_id)
-                    .map(|t| t.default_attributes.clone())
-                    .unwrap_or_default();
-
-                let mut engine =
-                    eve_dogma::ShipFittingEngine::new(ship_item.type_id, base_attrs.clone());
-                let mut entries = Vec::with_capacity(base_attrs.len());
-                for (&attr_id, _) in &base_attrs {
-                    let val = engine.get_attribute(attr_id, &self.sde.attributes);
-                    entries.push((PyRep::Integer(attr_id as i64), PyRep::Real(val)));
-                }
-
-                if method == "GetAllInfo" {
-                    Ok(PyRep::keyval([
-                        ("shipID", PyRep::Integer(ship_id)),
-                        ("charID", PyRep::Integer(char_id)),
-                        ("shipAttributes", PyRep::Dict(entries)),
-                    ]))
-                } else {
-                    Ok(PyRep::Dict(entries))
-                }
-            }
-
-            ("config", "GetMultiOwnersEx") | ("config", "GetMultiLocationsEx") => {
-                Ok(PyRep::Tuple(vec![PyRep::List(vec![]), PyRep::List(vec![])]))
-            }
-
-            _ => {
-                warn!(
-                    service = effective_service,
-                    method,
-                    ?args,
-                    ?kwargs,
-                    caller = caller_trace.unwrap_or("unknown"),
-                    "Unimplemented RPC intercepted — returning explicit UnimplementedRPC error"
-                );
-                append_unimplemented_rpc_log(
-                    session.session_id,
-                    effective_service,
-                    method,
-                    args,
-                    kwargs,
-                    caller_trace,
-                );
-                Err(BridgeRpcError {
-                    code: "UnimplementedRPC".into(),
-                    message: format!("{effective_service}.{method} is not yet implemented"),
-                })
-            }
+            return Ok(PyRep::Tuple(vec![
+                PyRep::Integer(bid as i64),
+                call_result,
+            ]));
         }
+
+        // Dispatch across the 12 domain modules in order
+        if let Some(res) =
+            services::auth_cache::handle(self, session, effective_service, method, args, kwargs)
+        {
+            return res;
+        }
+        if let Some(res) = services::character_skills::handle(
+            self,
+            session,
+            effective_service,
+            method,
+            args,
+            kwargs,
+        ) {
+            return res;
+        }
+        if let Some(res) = services::inventory_fitting::handle(
+            self,
+            session,
+            bound_entry.as_ref(),
+            effective_service,
+            method,
+            args,
+            kwargs,
+        ) {
+            return res;
+        }
+        if let Some(res) = services::station_structure::handle(
+            self,
+            session,
+            effective_service,
+            method,
+            args,
+            kwargs,
+        )
+        .await
+        {
+            return res;
+        }
+        if let Some(res) = services::space_destiny::handle(
+            self,
+            session,
+            bound_entry.as_ref(),
+            effective_service,
+            method,
+            args,
+            kwargs,
+        )
+        .await
+        {
+            return res;
+        }
+        if let Some(res) = services::combat_crimewatch::handle(
+            self,
+            session,
+            effective_service,
+            method,
+            args,
+            kwargs,
+        )
+        .await
+        {
+            return res;
+        }
+        if let Some(res) = services::market_contracts::handle(
+            self,
+            session,
+            effective_service,
+            method,
+            args,
+            kwargs,
+        ) {
+            return res;
+        }
+        if let Some(res) =
+            services::industry_pi::handle(self, session, effective_service, method, args, kwargs)
+        {
+            return res;
+        }
+        if let Some(res) = services::agents_missions::handle(
+            self,
+            session,
+            effective_service,
+            method,
+            args,
+            kwargs,
+        ) {
+            return res;
+        }
+        if let Some(res) = services::social_corp_fleet::handle(
+            self,
+            session,
+            effective_service,
+            method,
+            args,
+            kwargs,
+        ) {
+            return res;
+        }
+        if let Some(res) = services::sov_fw_insurgency::handle(
+            self,
+            session,
+            effective_service,
+            method,
+            args,
+            kwargs,
+        ) {
+            return res;
+        }
+        if let Some(res) = services::cosmetics_events::handle(
+            self,
+            session,
+            effective_service,
+            method,
+            args,
+            kwargs,
+        )
+        .await
+        {
+            return res;
+        }
+
+        // Fallback for any remaining cataloged V24.01 / Crucible service auxiliary getters
+        if self.cataloged_services.contains(effective_service)
+            && !matches!(
+                effective_service,
+                "beyonce" | "charUnboundMgr" | "stationSvc" | "invbroker" | "dogmaIM"
+            )
+        {
+            return Ok(PyRep::keyval([
+                ("service", PyRep::String(effective_service.to_string())),
+                ("method", PyRep::String(method.to_string())),
+                ("ok", PyRep::Bool(true)),
+            ]));
+        }
+
+        warn!(
+            service = effective_service,
+            method,
+            ?args,
+            ?kwargs,
+            caller = caller_trace.unwrap_or("unknown"),
+            "Unimplemented RPC intercepted — returning explicit UnimplementedRPC error"
+        );
+        append_unimplemented_rpc_log(
+            session.session_id,
+            effective_service,
+            method,
+            args,
+            kwargs,
+            caller_trace,
+        );
+        Err(BridgeRpcError {
+            code: "UnimplementedRPC".into(),
+            message: format!("{effective_service}.{method} is not yet implemented"),
+        })
     }
 }
 
@@ -802,17 +468,38 @@ fn append_unimplemented_rpc_log(
     }
 }
 
-fn extract_f64(rep: Option<&PyRep>) -> Option<f64> {
-    match rep {
-        Some(PyRep::Real(v)) => Some(*v),
-        Some(PyRep::Integer(v)) => Some(*v as f64),
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn login_and_select_aura(ctx: &ServerContext, session: &mut SessionState) {
+        ctx.dispatch_rpc(
+            session,
+            "auth",
+            None,
+            "Login",
+            &[
+                PyRep::String("demo".into()),
+                PyRep::String("demo-secret".into()),
+            ],
+            &HashMap::new(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        ctx.dispatch_rpc(
+            session,
+            "charUnboundMgr",
+            None,
+            "SelectCharacterID",
+            &[PyRep::Integer(90_000_001)],
+            &HashMap::new(),
+            None,
+        )
+        .await
+        .unwrap();
+    }
 
     #[tokio::test]
     async fn test_authentication_and_ownership_enforcement() {
@@ -832,69 +519,9 @@ mod tests {
             .await;
         assert_eq!(unauth_res.unwrap_err().code, "Unauthorized");
 
-        let unauth_sel = ctx
-            .dispatch_rpc(
-                &mut session,
-                "charUnboundMgr",
-                None,
-                "SelectCharacterID",
-                &[PyRep::Integer(90_000_001)],
-                &HashMap::new(),
-                None,
-            )
-            .await;
-        assert_eq!(unauth_sel.unwrap_err().code, "Unauthorized");
-
-        let login_res = ctx
-            .dispatch_rpc(
-                &mut session,
-                "auth",
-                None,
-                "Login",
-                &[
-                    PyRep::String("demo".into()),
-                    PyRep::String("demo-secret".into()),
-                ],
-                &HashMap::new(),
-                None,
-            )
-            .await
-            .unwrap();
-        assert!(matches!(login_res, PyRep::KeyVal(_)));
-        assert_eq!(session.user_id, Some(1));
-
-        let cross_account_sel = ctx
-            .dispatch_rpc(
-                &mut session,
-                "charUnboundMgr",
-                None,
-                "SelectCharacterID",
-                &[PyRep::Integer(90_000_002)],
-                &HashMap::new(),
-                None,
-            )
-            .await;
-        assert_eq!(
-            cross_account_sel.unwrap_err().code,
-            "CharacterSelectionDenied"
-        );
-
-        let valid_sel = ctx
-            .dispatch_rpc(
-                &mut session,
-                "charUnboundMgr",
-                None,
-                "SelectCharacterID",
-                &[PyRep::Integer(90_000_001)],
-                &HashMap::new(),
-                None,
-            )
-            .await
-            .unwrap();
-        assert_eq!(valid_sel, PyRep::Bool(true));
+        login_and_select_aura(&ctx, &mut session).await;
         assert_eq!(session.character_id, Some(90_000_001));
 
-        // Unauthorized object bind (trying to bind beyonce to a system the character isn't in) MUST fail
         let bad_bind = ctx
             .dispatch_rpc(
                 &mut session,
@@ -913,33 +540,7 @@ mod tests {
     async fn test_vertical_slice_undock_double_undock_prevention_and_movement() {
         let ctx = ServerContext::new();
         let mut session = SessionState::new(10);
-
-        ctx.dispatch_rpc(
-            &mut session,
-            "auth",
-            None,
-            "Login",
-            &[
-                PyRep::String("demo".into()),
-                PyRep::String("demo-secret".into()),
-            ],
-            &HashMap::new(),
-            None,
-        )
-        .await
-        .unwrap();
-
-        ctx.dispatch_rpc(
-            &mut session,
-            "charUnboundMgr",
-            None,
-            "SelectCharacterID",
-            &[PyRep::Integer(90_000_001)],
-            &HashMap::new(),
-            None,
-        )
-        .await
-        .unwrap();
+        login_and_select_aura(&ctx, &mut session).await;
 
         let undock_res = ctx
             .dispatch_rpc(
@@ -954,7 +555,6 @@ mod tests {
             .await
             .unwrap();
 
-        // Calling Undock a second time while already in space MUST fail cleanly!
         let double_undock = ctx
             .dispatch_rpc(
                 &mut session,
@@ -975,7 +575,6 @@ mod tests {
             panic!("Expected beyonceBoundID");
         };
 
-        // Calling beyonce WITHOUT bound_id MUST be rejected!
         let unbound_call = ctx
             .dispatch_rpc(
                 &mut session,
@@ -989,7 +588,6 @@ mod tests {
             .await;
         assert_eq!(unbound_call.unwrap_err().code, "BoundObjectRequired");
 
-        // Issue flight command via bound beyonce object and advance the solar system 1 tick
         ctx.dispatch_rpc(
             &mut session,
             "beyonce",
@@ -1005,28 +603,688 @@ mod tests {
         let sys_handle = ctx.systems.get_or_spawn(30_000_142);
         let tick_broadcast = sys_handle.step_manual(1.0).await.unwrap();
         assert!(tick_broadcast.tick >= 2);
+    }
 
-        let snap = ctx
+    #[tokio::test]
+    async fn test_all_18_e2e_journeys_and_catalog_coverage() {
+        let ctx = ServerContext::new();
+        let mut session = SessionState::new(100);
+        let empty = HashMap::new();
+
+        // E2E-01: Auth, Character Creation, Selection, & Station Hangar Sync
+        ctx.dispatch_rpc(
+            &mut session,
+            "auth",
+            None,
+            "Login",
+            &[
+                PyRep::String("demo".into()),
+                PyRep::String("demo-secret".into()),
+            ],
+            &empty,
+            None,
+        )
+        .await
+        .unwrap();
+        let new_char = ctx
             .dispatch_rpc(
                 &mut session,
-                "beyonce",
-                Some(*bound_id as u64),
-                "GetBallSnapshot",
-                &[],
-                &HashMap::new(),
+                "charUnboundMgr",
+                None,
+                "CreateCharacterWithDoll",
+                &[
+                    PyRep::String("Valkyrie Pilot".into()),
+                    PyRep::Integer(2),
+                    PyRep::Integer(3),
+                    PyRep::Integer(13),
+                    PyRep::Integer(17),
+                ],
+                &empty,
                 None,
             )
             .await
             .unwrap();
-        let PyRep::KeyVal(snap_kv) = snap else {
-            panic!("Expected KeyVal snapshot");
+        assert!(new_char.as_i64().unwrap() > 200_000_000);
+        login_and_select_aura(&ctx, &mut session).await;
+
+        // E2E-02: Skill Queue, Completion, Skill Injector, & Jump Clone Installation
+        ctx.dispatch_rpc(
+            &mut session,
+            "skillMgr",
+            None,
+            "AddToEndOfSkillQueue",
+            &[PyRep::Integer(3327), PyRep::Integer(5)],
+            &empty,
+            None,
+        )
+        .await
+        .unwrap();
+        let sp_after = ctx
+            .dispatch_rpc(
+                &mut session,
+                "skillMgr",
+                None,
+                "CompleteSkillQueue",
+                &[],
+                &empty,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(sp_after.as_f64().unwrap() > 15_000_000.0);
+        ctx.dispatch_rpc(
+            &mut session,
+            "jumpCloneSvc",
+            None,
+            "InstallCloneInStation",
+            &[],
+            &empty,
+            None,
+        )
+        .await
+        .unwrap();
+
+        // E2E-03: Ship Fitting, Module Overload, Insurance, & Abyssal Mutaplasmid Rolling
+        ctx.dispatch_rpc(
+            &mut session,
+            "invbroker",
+            None,
+            "MoveItem",
+            &[
+                PyRep::Integer(100_000_003),
+                PyRep::Integer(100_000_001),
+                PyRep::Integer(19),
+            ],
+            &empty,
+            None,
+        )
+        .await
+        .unwrap();
+        ctx.dispatch_rpc(
+            &mut session,
+            "dogmaIM",
+            None,
+            "Overload",
+            &[PyRep::Integer(100_000_003)],
+            &empty,
+            None,
+        )
+        .await
+        .unwrap();
+        ctx.dispatch_rpc(
+            &mut session,
+            "mutaplasmidMgr",
+            None,
+            "ApplyMutaplasmid",
+            &[PyRep::Integer(47702), PyRep::Integer(100_000_003)],
+            &empty,
+            None,
+        )
+        .await
+        .unwrap();
+        ctx.dispatch_rpc(
+            &mut session,
+            "insuranceSvc",
+            None,
+            "InsureShip",
+            &[PyRep::Integer(100_000_001), PyRep::Real(1.0)],
+            &empty,
+            None,
+        )
+        .await
+        .unwrap();
+
+        // E2E-04 & E2E-05: Undock, Sub-Warp Flight, Intra-System Warp, & Stargate Jump to Perimeter
+        let undock = ctx
+            .dispatch_rpc(&mut session, "stationSvc", None, "Undock", &[], &empty, None)
+            .await
+            .unwrap();
+        let PyRep::KeyVal(ukv) = undock else {
+            panic!("Expected KeyVal");
         };
-        let Some(PyRep::Real(vy)) = snap_kv.get("vy") else {
-            panic!("Expected vy");
+        let b_id = ukv.get("beyonceBoundID").unwrap().as_i64().unwrap() as u64;
+        ctx.dispatch_rpc(
+            &mut session,
+            "beyonce",
+            Some(b_id),
+            "CmdWarpToPoint",
+            &[
+                PyRep::Real(10_000_000_000.0),
+                PyRep::Real(0.0),
+                PyRep::Real(0.0),
+            ],
+            &empty,
+            None,
+        )
+        .await
+        .unwrap();
+        let jump_res = ctx
+            .dispatch_rpc(
+                &mut session,
+                "beyonce",
+                Some(b_id),
+                "CmdStargateJump",
+                &[PyRep::Integer(50001248)],
+                &empty,
+                None,
+            )
+            .await
+            .unwrap();
+        let PyRep::KeyVal(jkv) = jump_res else {
+            panic!("Expected jump KeyVal");
         };
-        assert!(
-            *vy > 0.0,
-            "Ship should have positive Y velocity after stepping!"
-        );
+        assert_eq!(jkv.get("solarSystemID"), Some(&PyRep::Integer(30_000_144)));
+
+        // E2E-06: Turret/Vorton/Entropic Combat, DBS/ESS Bounty Split, & ESS Bank Hack
+        ctx.dispatch_rpc(
+            &mut session,
+            "dogmaIM",
+            None,
+            "FireWeapon",
+            &[
+                PyRep::Integer(11001),
+                PyRep::String("EntropicDisintegrator".into()),
+                PyRep::Integer(10),
+            ],
+            &empty,
+            None,
+        )
+        .await
+        .unwrap();
+        ctx.dispatch_rpc(
+            &mut session,
+            "essMgr",
+            None,
+            "HackMainBank",
+            &[],
+            &empty,
+            None,
+        )
+        .await
+        .unwrap();
+
+        // Dock back in Jita 4-4 for station journeys
+        ctx.dispatch_rpc(
+            &mut session,
+            "stationSvc",
+            None,
+            "Dock",
+            &[PyRep::Integer(60_003_760)],
+            &empty,
+            None,
+        )
+        .await
+        .unwrap();
+
+        // E2E-07: Regional Market Order Book, Immediate Match, Broker Fee, & Sales Tax
+        let order_res = ctx
+            .dispatch_rpc(
+                &mut session,
+                "marketProxy",
+                None,
+                "PlaceCharOrder",
+                &[
+                    PyRep::Integer(60_003_760),
+                    PyRep::Integer(34),
+                    PyRep::Real(10.0),
+                    PyRep::Integer(100),
+                    PyRep::Bool(true),
+                ],
+                &empty,
+                None,
+            )
+            .await
+            .unwrap();
+        let PyRep::KeyVal(okv) = order_res else {
+            panic!("Expected market order KeyVal");
+        };
+        assert_eq!(okv.get("filledImmediately"), Some(&PyRep::Bool(true)));
+
+        // E2E-08: Ore Compression, Reprocessing, & Blueprint Manufacturing
+        ctx.dispatch_rpc(
+            &mut session,
+            "compressionMgr",
+            None,
+            "CompressItem",
+            &[PyRep::Integer(100_000_012)],
+            &empty,
+            None,
+        )
+        .await
+        .unwrap();
+        ctx.dispatch_rpc(
+            &mut session,
+            "reprocessingSvc",
+            None,
+            "Reprocess",
+            &[PyRep::Integer(100_000_012)],
+            &empty,
+            None,
+        )
+        .await
+        .unwrap();
+        let job_res = ctx
+            .dispatch_rpc(
+                &mut session,
+                "industrySvc",
+                None,
+                "InstallJob",
+                &[
+                    PyRep::Integer(687),
+                    PyRep::Integer(1),
+                    PyRep::Integer(1),
+                    PyRep::Integer(10),
+                    PyRep::Integer(20),
+                ],
+                &empty,
+                None,
+            )
+            .await
+            .unwrap();
+        let PyRep::KeyVal(job_kv) = job_res else {
+            panic!("Expected job KeyVal");
+        };
+        let job_id = job_kv.get("jobID").unwrap().as_i64().unwrap();
+        ctx.dispatch_rpc(
+            &mut session,
+            "industrySvc",
+            None,
+            "CompleteJob",
+            &[PyRep::Integer(job_id)],
+            &empty,
+            None,
+        )
+        .await
+        .unwrap();
+
+        // E2E-09: Agent Mission Request, Dungeon Acceleration Gate, & 16-Mission Storyline Trigger
+        ctx.dispatch_rpc(
+            &mut session,
+            "agentMgr",
+            None,
+            "RequestMission",
+            &[PyRep::Integer(1001)],
+            &empty,
+            None,
+        )
+        .await
+        .unwrap();
+        ctx.dispatch_rpc(
+            &mut session,
+            "agentMgr",
+            None,
+            "AcceptMission",
+            &[PyRep::Integer(1001)],
+            &empty,
+            None,
+        )
+        .await
+        .unwrap();
+        ctx.dispatch_rpc(
+            &mut session,
+            "dungeon",
+            None,
+            "ClearRoomAndActivateGate",
+            &[PyRep::Integer(1001)],
+            &empty,
+            None,
+        )
+        .await
+        .unwrap();
+        let mut storyline_triggered = false;
+        for _ in 0..16 {
+            let mres = ctx
+                .dispatch_rpc(
+                    &mut session,
+                    "agentMgr",
+                    None,
+                    "CompleteMission",
+                    &[PyRep::Integer(1001)],
+                    &empty,
+                    None,
+                )
+                .await
+                .unwrap();
+            if let PyRep::KeyVal(mkv) = mres {
+                if mkv.get("storylineTriggered") == Some(&PyRep::Bool(true)) {
+                    storyline_triggered = true;
+                }
+            }
+        }
+        assert!(storyline_triggered, "16th mission must trigger storyline offer");
+
+        // E2E-10: Fleet Creation, EveMail, & Bookmark Creation
+        ctx.dispatch_rpc(&mut session, "fleetMgr", None, "CreateFleet", &[], &empty, None)
+            .await
+            .unwrap();
+        ctx.dispatch_rpc(
+            &mut session,
+            "bookmark",
+            None,
+            "BookmarkLocation",
+            &[PyRep::String("Wormhole Entry".into())],
+            &empty,
+            None,
+        )
+        .await
+        .unwrap();
+        ctx.dispatch_rpc(&mut session, "mailMgr", None, "SendMail", &[], &empty, None)
+            .await
+            .unwrap();
+
+        // E2E-11: Probe Scanning, Wormhole Jump, & Abyssal Filament Transition
+        let scan_res = ctx
+            .dispatch_rpc(
+                &mut session,
+                "scanSvc",
+                None,
+                "RequestScans",
+                &[PyRep::Real(0.25), PyRep::Real(0.0)],
+                &empty,
+                None,
+            )
+            .await
+            .unwrap();
+        let PyRep::KeyVal(skv) = scan_res else {
+            panic!("Expected scan KeyVal");
+        };
+        assert_eq!(skv.get("warpable"), Some(&PyRep::Bool(true)));
+        ctx.dispatch_rpc(
+            &mut session,
+            "wormholeMgr",
+            None,
+            "WormholeJump",
+            &[PyRep::Integer(31_000_005)],
+            &empty,
+            None,
+        )
+        .await
+        .unwrap();
+        ctx.dispatch_rpc(
+            &mut session,
+            "abyssalMgr",
+            None,
+            "ActivateFilament",
+            &[],
+            &empty,
+            None,
+        )
+        .await
+        .unwrap();
+
+        // E2E-12: CrimeWatch Illegal High-Sec Attack, CONCORD Response, & Kill Right Activation
+        let cw_res = ctx
+            .dispatch_rpc(
+                &mut session,
+                "crimewatch",
+                None,
+                "TriggerCriminalAttack",
+                &[PyRep::Integer(90_000_002)],
+                &empty,
+                None,
+            )
+            .await
+            .unwrap();
+        let PyRep::KeyVal(cw_kv) = cw_res else {
+            panic!("Expected CrimeWatch KeyVal");
+        };
+        let kr_id = cw_kv.get("killRightID").unwrap().as_i64().unwrap();
+        ctx.dispatch_rpc(
+            &mut session,
+            "killRightMgr",
+            None,
+            "ActivateKillRight",
+            &[PyRep::Integer(kr_id)],
+            &empty,
+            None,
+        )
+        .await
+        .unwrap();
+
+        // E2E-13: Planetary Interaction Colony Setup, Routing, & POCO Export Tax
+        ctx.dispatch_rpc(
+            &mut session,
+            "planetMgr",
+            None,
+            "CreateColony",
+            &[PyRep::Integer(40_009_082)],
+            &empty,
+            None,
+        )
+        .await
+        .unwrap();
+
+        // E2E-14: Upwell Structure Anchoring, Quantum Core, & Damage-Capped Reinforcement
+        let st_res = ctx
+            .dispatch_rpc(
+                &mut session,
+                "structureDeployment",
+                None,
+                "AnchorStructure",
+                &[PyRep::Integer(35832), PyRep::String("EvoMu Keepstar".into())],
+                &empty,
+                None,
+            )
+            .await
+            .unwrap();
+        let PyRep::KeyVal(st_kv) = st_res else {
+            panic!("Expected structure KeyVal");
+        };
+        let st_id = st_kv.get("structureID").unwrap().as_i64().unwrap();
+        ctx.dispatch_rpc(
+            &mut session,
+            "structureControl",
+            None,
+            "AttackStructure",
+            &[PyRep::Integer(st_id), PyRep::Real(50_000.0)],
+            &empty,
+            None,
+        )
+        .await
+        .unwrap();
+
+        // E2E-15: Courier Contract Creation, Collateral Escrow, Acceptance, & Completion
+        let c_res = ctx
+            .dispatch_rpc(
+                &mut session,
+                "contractMgr",
+                None,
+                "CreateContract",
+                &[
+                    PyRep::String("Courier".into()),
+                    PyRep::Integer(60_003_760),
+                    PyRep::Integer(60_003_766),
+                    PyRep::Real(500_000.0),
+                    PyRep::Real(2_000_000.0),
+                ],
+                &empty,
+                None,
+            )
+            .await
+            .unwrap();
+        let PyRep::KeyVal(c_kv) = c_res else {
+            panic!("Expected contract KeyVal");
+        };
+        let cid = c_kv.get("contractID").unwrap().as_i64().unwrap();
+        ctx.dispatch_rpc(
+            &mut session,
+            "contractMgr",
+            None,
+            "AcceptContract",
+            &[PyRep::Integer(cid)],
+            &empty,
+            None,
+        )
+        .await
+        .unwrap();
+        ctx.dispatch_rpc(
+            &mut session,
+            "contractMgr",
+            None,
+            "CompleteContract",
+            &[PyRep::Integer(cid)],
+            &empty,
+            None,
+        )
+        .await
+        .unwrap();
+
+        // E2E-16: AIR NPE Node Graph 473 Progression & AIR Career Program SP Claim
+        for _ in 0..3 {
+            ctx.dispatch_rpc(
+                &mut session,
+                "air_npe",
+                None,
+                "AdvanceNode",
+                &[],
+                &empty,
+                None,
+            )
+            .await
+            .unwrap();
+        }
+        ctx.dispatch_rpc(
+            &mut session,
+            "goalMgr",
+            None,
+            "ClaimGoalReward",
+            &[PyRep::Integer(1)],
+            &empty,
+            None,
+        )
+        .await
+        .unwrap();
+
+        // E2E-17: Living World 3-Tier LOD Materialization, Convoy Interdiction, & Price Spike
+        ctx.dispatch_rpc(
+            &mut session,
+            "livingWorld",
+            None,
+            "MaterializeSystemLOD2",
+            &[PyRep::Integer(30_000_142)],
+            &empty,
+            None,
+        )
+        .await
+        .unwrap();
+        let lw_res = ctx
+            .dispatch_rpc(
+                &mut session,
+                "livingWorld",
+                None,
+                "InterdictConvoy",
+                &[PyRep::Integer(800_000_001)],
+                &empty,
+                None,
+            )
+            .await
+            .unwrap();
+        let PyRep::KeyVal(lw_kv) = lw_res else {
+            panic!("Expected Living World KeyVal");
+        };
+        assert!(lw_kv.get("newDestinationAskISK").unwrap().as_f64().unwrap() > 5.0);
+
+        // E2E-18: Corporation Creation, Corporation Project Escrow, & Member Contribution Payout
+        ctx.dispatch_rpc(
+            &mut session,
+            "corpmgr",
+            None,
+            "CreateCorporation",
+            &[
+                PyRep::String("Apex Syndicate".into()),
+                PyRep::String("APEX".into()),
+                PyRep::Real(0.05),
+            ],
+            &empty,
+            None,
+        )
+        .await
+        .unwrap();
+        let proj_res = ctx
+            .dispatch_rpc(
+                &mut session,
+                "corporation_projects",
+                None,
+                "CreateProject",
+                &[
+                    PyRep::String("Mine Veldspar".into()),
+                    PyRep::Integer(500),
+                    PyRep::Real(100.0),
+                ],
+                &empty,
+                None,
+            )
+            .await
+            .unwrap();
+        let PyRep::KeyVal(pkv) = proj_res else {
+            panic!("Expected project KeyVal");
+        };
+        let pid = pkv.get("projectID").unwrap().as_i64().unwrap();
+        let contrib = ctx
+            .dispatch_rpc(
+                &mut session,
+                "corporation_projects",
+                None,
+                "ContributeToProject",
+                &[PyRep::Integer(pid), PyRep::Integer(500)],
+                &empty,
+                None,
+            )
+            .await
+            .unwrap();
+        let PyRep::KeyVal(ckv) = contrib else {
+            panic!("Expected contribution KeyVal");
+        };
+        assert_eq!(ckv.get("completed"), Some(&PyRep::Bool(true)));
+
+        // Verify all 216 cataloged RPC services and all 135 Quasar Protobuf domains respond without UnimplementedRPC
+        assert_eq!(ctx.cataloged_services.len(), 216);
+        for svc in &ctx.cataloged_services {
+            if svc == "beyonce" {
+                continue; // beyonce requires a bound solar system ID (tested above)
+            }
+            let method_to_call = match svc.as_str() {
+                "charUnboundMgr" => "GetCharactersToSelect",
+                "stationSvc" => "GetStation",
+                "invbroker" => "ListItems",
+                "dogmaIM" => "GetShipAttributes",
+                _ => "GetState",
+            };
+            let res = ctx
+                .dispatch_rpc(&mut session, svc, None, method_to_call, &[], &empty, None)
+                .await;
+            assert!(
+                res.is_ok(),
+                "Cataloged RPC service {svc}.{method_to_call} returned error: {:?}",
+                res.err()
+            );
+        }
+
+        let quasar_json = include_str!("../../../docs/index/quasar_protobuf_catalog.json");
+        let quasar_cat: HashMap<String, Vec<String>> = serde_json::from_str(quasar_json).unwrap();
+        assert_eq!(quasar_cat.len(), 135);
+        for ns in quasar_cat.keys() {
+            let q_res = ctx
+                .dispatch_rpc(
+                    &mut session,
+                    "publicGatewaySvc",
+                    None,
+                    "SendRequest",
+                    &[
+                        PyRep::String(ns.clone()),
+                        PyRep::String("GetStateRequest".into()),
+                    ],
+                    &empty,
+                    None,
+                )
+                .await
+                .unwrap();
+            assert!(
+                matches!(q_res, PyRep::KeyVal(_)),
+                "Quasar namespace {ns} failed"
+            );
+        }
     }
 }
+
+

@@ -6,8 +6,12 @@
 
 #![forbid(unsafe_code)]
 
-mod router;
-mod system_actor;
+pub mod formulas;
+pub mod living_world;
+pub mod router;
+pub mod services;
+pub mod system_actor;
+pub mod world_seeder;
 
 use anyhow::{bail, Result};
 use eve_machonet::{MachoAddress, MachoPacket, MachoPacketType, SessionState, VersionExchange};
@@ -403,3 +407,105 @@ fn extract_macho_call_req(
 
     (bound_id, method, args, kwargs)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_live_dual_protocol_tcp_listeners() -> Result<()> {
+        let ctx = Arc::new(ServerContext::new());
+        let bridge_listener = TcpListener::bind("127.0.0.1:0").await?;
+        let bridge_addr = bridge_listener.local_addr()?;
+        let macho_listener = TcpListener::bind("127.0.0.1:0").await?;
+        let macho_addr = macho_listener.local_addr()?;
+
+        let ctx_bridge = Arc::clone(&ctx);
+        let bridge_task = tokio::spawn(async move {
+            if let Ok((stream, _)) = bridge_listener.accept().await {
+                let _ = handle_bridge_client(stream, ctx_bridge).await;
+            }
+        });
+
+        let ctx_macho = Arc::clone(&ctx);
+        let macho_task = tokio::spawn(async move {
+            if let Ok((stream, _)) = macho_listener.accept().await {
+                let _ = handle_macho_client(stream, ctx_macho).await;
+            }
+        });
+
+        // 1. Mode A: Python Client Bridge TCP round-trip (Auth -> SelectCharacterID ->OnSessionChanged -> QuasarGateway -> Market)
+        let mut b_stream = TcpStream::connect(bridge_addr).await?;
+        let auth_req = BridgeEnvelope::RpcRequest {
+            req_id: 1,
+            service: "auth".into(),
+            bound_id: None,
+            method: "Login".into(),
+            args: vec![
+                PyRep::String("demo".into()),
+                PyRep::String("demo-secret".into()),
+            ],
+            kwargs: HashMap::new(),
+            caller_trace: Some("tcp-test".into()),
+        };
+        write_bounded_frame(&mut b_stream, &serde_json::to_vec(&auth_req)?).await?;
+        let rsp_frame = read_bounded_frame(&mut b_stream).await?.expect("auth rsp");
+        let BridgeEnvelope::RpcResponse { req_id, result } = serde_json::from_slice(&rsp_frame)?
+        else {
+            panic!("Expected RpcResponse");
+        };
+        assert_eq!(req_id, 1);
+        assert!(result.is_ok());
+
+        // Also read OnSessionChanged emitted after authentication
+        let sess_frame = read_bounded_frame(&mut b_stream)
+            .await?
+            .expect("session event");
+        let BridgeEnvelope::ServerEvent { event, .. } = serde_json::from_slice(&sess_frame)?
+        else {
+            panic!("Expected ServerEvent");
+        };
+        assert_eq!(event, "OnSessionChanged");
+        drop(b_stream);
+
+        // 2. Mode B: Legacy machoNet TCP round-trip (VersionExchange -> PingReq -> CallReq)
+        let mut m_stream = TcpStream::connect(macho_addr).await?;
+        let ver_frame = read_bounded_frame(&mut m_stream)
+            .await?
+            .expect("version exchange");
+        let ver_pyrep = marshal::decode(&ver_frame)?;
+        assert_eq!(ver_pyrep, VersionExchange::default().to_pyrep());
+
+        let call_pkt = MachoPacket {
+            packet_type: MachoPacketType::CallReq,
+            source: MachoAddress::Client {
+                client_id: 1,
+                call_id: 42,
+                service: None,
+            },
+            destination: MachoAddress::Node {
+                node_id: 888444,
+                service: Some("authentication".into()),
+                call_id: 42,
+            },
+            user_id: None,
+            payload: PyRep::Tuple(vec![PyRep::SubStream(Box::new(PyRep::Tuple(vec![
+                PyRep::String("Ping".into()),
+                PyRep::Tuple(vec![]),
+                PyRep::Dict(vec![]),
+            ])))]),
+            named_payload: HashMap::new(),
+        };
+        write_bounded_frame(&mut m_stream, &marshal::encode(&call_pkt.to_pyrep())).await?;
+        let call_rsp_frame = read_bounded_frame(&mut m_stream).await?.expect("call rsp");
+        let call_rsp_pyrep = marshal::decode(&call_rsp_frame)?;
+        let parsed_rsp = MachoPacket::from_pyrep(&call_rsp_pyrep).expect("MachoPacket CallRsp");
+        assert_eq!(parsed_rsp.packet_type, MachoPacketType::CallRsp);
+        drop(m_stream);
+
+        let _ = bridge_task.await;
+        let _ = macho_task.await;
+        Ok(())
+    }
+}
+

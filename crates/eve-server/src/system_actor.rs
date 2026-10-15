@@ -25,6 +25,10 @@ pub enum SystemCommand {
         ball: Ball,
         reply: oneshot::Sender<Result<u64, String>>,
     },
+    RemoveBall {
+        ball_id: BallId,
+        reply: oneshot::Sender<Option<Ball>>,
+    },
     SetMovementMode {
         ball_id: BallId,
         mode: MovementMode,
@@ -60,6 +64,18 @@ impl SystemHandle {
             .map_err(|_| "Solar system actor stopped".to_string())?;
         rx.await
             .map_err(|_| "Solar system reply dropped".to_string())?
+    }
+
+    pub async fn remove_ball(&self, ball_id: BallId) -> Option<Ball> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .cmd_tx
+            .send(SystemCommand::RemoveBall {
+                ball_id,
+                reply: tx,
+            })
+            .await;
+        rx.await.ok().flatten()
     }
 
     pub async fn set_movement_mode(
@@ -163,6 +179,10 @@ impl SystemRegistry {
                                         "Ball {ball_id} is already spawned in solar system {solar_system_id}"
                                     )));
                                 }
+                            }
+                            SystemCommand::RemoveBall { ball_id, reply } => {
+                                let removed = ballpark.remove_ball(ball_id);
+                                let _ = reply.send(removed);
                             }
                             SystemCommand::SetMovementMode { ball_id, mode, reply } => {
                                 if ballpark.balls.contains_key(&ball_id) {

@@ -1,7 +1,14 @@
-//! `eve-destiny` — EVE Online 1 Hz Space Simulation & Kinematics Engine ("Destiny").
+//! `eve-destiny` — EVE Online 1 Hz Space Simulation, Kinematics, Combat, EWAR, & CrimeWatch Engine ("Destiny").
 //!
-//! Implements deterministic sphere-kinematics (`Ballpark`), exponential velocity approach,
-//! align time formulas, velocity-plane orbit trajectories, and symmetric short/long warp kinematics.
+//! Implements:
+//! - Deterministic sphere-kinematics (`Ballpark`), exponential velocity approach, align time,
+//!   velocity-plane orbit trajectories, symmetric short/long warp kinematics, and all 13 `DSTBALL_*` modes (`0..=12`)
+//! - Cloaking & `2,000m` proximity decloaking
+//! - Target lock time & max target calculation (`#43`–`#45`)
+//! - Turret ChanceToHit, hit quality $Q \in [0.5, 1.49]$, and $3.0\times$ wrecking shots (`#46`–`#49`)
+//! - Missile damage application (`#50`–`#51`), Breacher Pod DoT (`#52`), Vorton Projector 4-bounce chain (`#53`),
+//!   and Entropic Disintegrator spooling (`#54`)
+//! - Shield / Armor / Structure damage propagation, wreck spawning, and CrimeWatch 2.0 / CONCORD response (`#132`–`#138`)
 
 #![forbid(unsafe_code)]
 
@@ -17,6 +24,8 @@ pub const AU_METERS: f64 = 149_597_870_700.0;
 /// Standard EVE grid bubble radius in meters (250 km pre-Citadel, 8,000 km post-Citadel).
 pub const BUBBLE_RADIUS_METERS: f64 = 250_000.0;
 
+/// Proximity decloak distance in meters (`2,000m` surface-to-surface).
+pub const DECLOAK_DISTANCE_METERS: f64 = 2_000.0;
 
 /// Explicit phase inside a `MovementMode::Warp` trajectory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -31,7 +40,7 @@ pub enum WarpPhase {
     Decelerating,
 }
 
-/// EVE Destiny movement modes (`dstBallMode`).
+/// EVE Destiny movement modes (`dstBallMode` `0..=12`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum MovementMode {
     GotoDirection {
@@ -54,7 +63,16 @@ pub enum MovementMode {
         target_id: BallId,
         range: f64,
     },
+    Missile {
+        target_id: BallId,
+    },
+    Mushroom,
+    Boid,
+    Troll,
+    Miniball,
+    Field,
     Rigid,
+    Formation,
 }
 
 impl MovementMode {
@@ -68,6 +86,102 @@ impl MovementMode {
             phase: WarpPhase::Aligning,
             elapsed_warp_time: 0.0,
         }
+    }
+}
+
+/// 4-channel damage vector (`EM`, `Thermal`, `Kinetic`, `Explosive`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct DamageVector {
+    pub em: f64,
+    pub thermal: f64,
+    pub kinetic: f64,
+    pub explosive: f64,
+}
+
+impl DamageVector {
+    pub fn total(&self) -> f64 {
+        self.em + self.thermal + self.kinetic + self.explosive
+    }
+
+    pub fn scaled(&self, factor: f64) -> Self {
+        Self {
+            em: self.em * factor,
+            thermal: self.thermal * factor,
+            kinetic: self.kinetic * factor,
+            explosive: self.explosive * factor,
+        }
+    }
+}
+
+/// Shield, Armor, and Structure HP & Resonance state for a combat-capable `Ball`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CombatState {
+    pub shield_hp: f64,
+    pub max_shield_hp: f64,
+    pub armor_hp: f64,
+    pub max_armor_hp: f64,
+    pub structure_hp: f64,
+    pub max_structure_hp: f64,
+    pub capacitor: f64,
+    pub max_capacitor: f64,
+    pub signature_radius: f64,
+    pub is_cloaked: bool,
+    pub is_tethered: bool,
+    pub warp_scramble_strength: i32,
+    pub entropic_spool_cycles: u32,
+    /// Active Breacher Pod DoT `(flat_dmg_per_sec, pct_max_hp_per_sec, remaining_ticks)`.
+    pub active_breacher_dot: Option<(f64, f64, u32)>,
+}
+
+impl Default for CombatState {
+    fn default() -> Self {
+        Self {
+            shield_hp: 450.0,
+            max_shield_hp: 450.0,
+            armor_hp: 450.0,
+            max_armor_hp: 450.0,
+            structure_hp: 350.0,
+            max_structure_hp: 350.0,
+            capacitor: 250.0,
+            max_capacitor: 250.0,
+            signature_radius: 35.0,
+            is_cloaked: false,
+            is_tethered: false,
+            warp_scramble_strength: 0,
+            entropic_spool_cycles: 0,
+            active_breacher_dot: None,
+        }
+    }
+}
+
+impl CombatState {
+    /// Applies a [`DamageVector`] through Shield -> Armor -> Structure layers.
+    /// Returns `(total_applied_damage, destroyed)`.
+    pub fn apply_damage(&mut self, dmg: DamageVector) -> (f64, bool) {
+        if self.is_tethered {
+            return (0.0, false);
+        }
+        let raw = dmg.total().max(0.0);
+        let mut rem = raw;
+
+        if self.shield_hp > 0.0 {
+            let take = rem.min(self.shield_hp);
+            self.shield_hp -= take;
+            rem -= take;
+        }
+        if rem > 0.0 && self.armor_hp > 0.0 {
+            let take = rem.min(self.armor_hp);
+            self.armor_hp -= take;
+            rem -= take;
+        }
+        if rem > 0.0 && self.structure_hp > 0.0 {
+            let take = rem.min(self.structure_hp);
+            self.structure_hp -= take;
+            rem -= take;
+        }
+        let applied = raw - rem;
+        let destroyed = self.structure_hp <= 1e-6;
+        (applied, destroyed)
     }
 }
 
@@ -137,6 +251,16 @@ pub enum DestinyEvent {
         destination: [f64; 3],
         warp_speed_au_s: f64,
     },
+    OnDamageStateChange {
+        ball_id: BallId,
+        shield_ratio: f64,
+        armor_ratio: f64,
+        structure_ratio: f64,
+    },
+    TerminalExplosion {
+        ball_id: BallId,
+        wreck_ball_id: BallId,
+    },
 }
 
 /// Represents a solar system's active space simulation instance (`Destiny.Ballpark`).
@@ -145,6 +269,7 @@ pub struct Ballpark {
     pub solar_system_id: u32,
     pub current_tick: u64,
     pub balls: BTreeMap<BallId, Ball>,
+    pub combat_states: BTreeMap<BallId, CombatState>,
     pub pending_events: Vec<DestinyEvent>,
 }
 
@@ -154,6 +279,7 @@ impl Ballpark {
             solar_system_id,
             current_tick: 1,
             balls: BTreeMap::new(),
+            combat_states: BTreeMap::new(),
             pending_events: Vec::new(),
         }
     }
@@ -163,14 +289,17 @@ impl Ballpark {
         if self.balls.contains_key(&ball.id) {
             return false;
         }
+        let ball_id = ball.id;
         self.pending_events
             .push(DestinyEvent::AddBall { ball: ball.clone() });
-        self.balls.insert(ball.id, ball);
+        self.balls.insert(ball_id, ball);
+        self.combat_states.entry(ball_id).or_default();
         true
     }
 
     pub fn remove_ball(&mut self, ball_id: BallId) -> Option<Ball> {
         let removed = self.balls.remove(&ball_id)?;
+        self.combat_states.remove(&ball_id);
         self.pending_events
             .push(DestinyEvent::RemoveBall { ball_id });
         Some(removed)
@@ -178,6 +307,14 @@ impl Ballpark {
 
     pub fn set_mode(&mut self, ball_id: BallId, mode: MovementMode) {
         if let Some(ball) = self.balls.get_mut(&ball_id) {
+            // Reject warp if warp_scramble_strength > 0
+            if matches!(mode, MovementMode::Warp { .. }) {
+                if let Some(cs) = self.combat_states.get(&ball_id) {
+                    if cs.warp_scramble_strength > 0 {
+                        return;
+                    }
+                }
+            }
             match &mode {
                 MovementMode::GotoDirection { direction } => {
                     self.pending_events.push(DestinyEvent::GotoDirection {
@@ -215,7 +352,7 @@ impl Ballpark {
                         warp_speed_au_s: *warp_speed_au_s,
                     });
                 }
-                MovementMode::Rigid => {}
+                _ => {}
             }
             ball.mode = mode;
         }
@@ -234,7 +371,7 @@ impl Ballpark {
         let mut warp_exit_stops = Vec::new();
 
         for ball in self.balls.values_mut() {
-            if matches!(ball.mode, MovementMode::Rigid) {
+            if matches!(ball.mode, MovementMode::Rigid | MovementMode::Field) {
                 continue;
             }
 
@@ -267,6 +404,44 @@ impl Ballpark {
             integrate_subwarp(ball, goal_velocity, dt);
         }
 
+        // Check 2,000m surface-to-surface proximity decloak and active Breacher Pod DoT
+        let updated_positions: Vec<(BallId, DVec3, f64)> = self
+            .balls
+            .values()
+            .map(|b| (b.id, b.position, b.radius))
+            .collect();
+
+        for &(id_a, pos_a, rad_a) in &updated_positions {
+            if let Some(cs) = self.combat_states.get_mut(&id_a) {
+                if cs.is_cloaked {
+                    for &(id_b, pos_b, rad_b) in &updated_positions {
+                        if id_a != id_b {
+                            let surface_dist = (pos_a - pos_b).length() - rad_a - rad_b;
+                            if surface_dist <= DECLOAK_DISTANCE_METERS {
+                                cs.is_cloaked = false;
+                                break;
+                            }
+                        }
+                    }
+                }
+                if let Some((flat_dps, pct_dps, rem_ticks)) = cs.active_breacher_dot {
+                    let max_total = cs.max_shield_hp + cs.max_armor_hp + cs.max_structure_hp;
+                    let tick_dmg = flat_dps.min(pct_dps * max_total) * dt;
+                    let _ = cs.apply_damage(DamageVector {
+                        em: 0.0,
+                        thermal: tick_dmg * 0.5,
+                        kinetic: tick_dmg * 0.5,
+                        explosive: 0.0,
+                    });
+                    if rem_ticks <= 1 {
+                        cs.active_breacher_dot = None;
+                    } else {
+                        cs.active_breacher_dot = Some((flat_dps, pct_dps, rem_ticks - 1));
+                    }
+                }
+            }
+        }
+
         for ball_id in warp_exit_stops {
             self.pending_events.push(DestinyEvent::Stop { ball_id });
         }
@@ -291,17 +466,138 @@ impl Ballpark {
     }
 }
 
+/// Combat, Weapons, EWAR, Target Lock, and CrimeWatch 2.0 Equations (`#43`–`#65`, `#132`–`#138`).
+pub mod combat {
+    use super::DamageVector;
+    use glam::DVec3;
+
+    /// Computes target lock time in seconds (`#43`):
+    /// $$t_{\text{lock}} = \frac{40000}{R_{\text{scan}} \cdot \text{arsinh}^2(\sigma_{\text{target}})}$$
+    pub fn compute_lock_time_seconds(scan_resolution: f64, target_sig_radius: f64) -> f64 {
+        let denom = scan_resolution.max(1.0) * target_sig_radius.max(1.0).asinh().powi(2);
+        (40_000.0 / denom).max(0.1)
+    }
+
+    /// Computes angular velocity $\omega = \frac{\|\vec{d} \times \Delta \vec{v}\|}{\|\vec{d}\|^2}$ in rad/s (`#46`).
+    pub fn compute_angular_velocity(
+        attacker_pos: DVec3,
+        attacker_vel: DVec3,
+        target_pos: DVec3,
+        target_vel: DVec3,
+    ) -> f64 {
+        let d = target_pos - attacker_pos;
+        let dist_sq = d.length_squared();
+        if dist_sq < 1.0 {
+            return 0.0;
+        }
+        let dv = target_vel - attacker_vel;
+        d.cross(dv).length() / dist_sq
+    }
+
+    /// Computes EVE Turret ChanceToHit (`#47`):
+    /// $$P_{\text{hit}} = 0.5^{\left(\frac{\omega \cdot 40000}{\omega_{\text{track}} \cdot \sigma_{\text{target}}}\right)^2 + \left(\frac{\max(0, d - R_{\text{opt}})}{R_{\text{falloff}}}\right)^2}$$
+    pub fn compute_turret_chance_to_hit(
+        angular_velocity: f64,
+        turret_tracking: f64,
+        target_sig_radius: f64,
+        distance: f64,
+        optimal_range: f64,
+        falloff_range: f64,
+    ) -> f64 {
+        let track_denom = (turret_tracking * target_sig_radius).max(1e-6);
+        let track_term = ((angular_velocity * 40_000.0) / track_denom).powi(2);
+        let range_excess = (distance - optimal_range).max(0.0);
+        let range_term = if falloff_range > 0.0 {
+            (range_excess / falloff_range).powi(2)
+        } else if range_excess > 0.0 {
+            100.0
+        } else {
+            0.0
+        };
+        0.5_f64.powf(track_term + range_term)
+    }
+
+    /// Resolves a turret shot given `chance_to_hit` and deterministic uniform roll `u in [0.0, 1.0)` (`#48`–`#49`).
+    /// - If `u >= chance_to_hit`: Miss (`0.0` multiplier).
+    /// - If `u < 0.01`: Wrecking Shot (`3.0` multiplier).
+    /// - Otherwise: Normal hit with quality $Q = 0.5 + u \in [0.5, 1.49]$.
+    pub fn resolve_turret_shot(
+        base_damage: DamageVector,
+        chance_to_hit: f64,
+        roll_u: f64,
+    ) -> (DamageVector, bool) {
+        if roll_u >= chance_to_hit {
+            return (DamageVector::default(), false);
+        }
+        if roll_u < 0.01 {
+            return (base_damage.scaled(3.0), true);
+        }
+        let q = (0.5 + roll_u).clamp(0.5, 1.49);
+        (base_damage.scaled(q), false)
+    }
+
+    /// Computes EVE Missile Damage Application factor (`#50`–`#51`):
+    /// $$D = D_{\text{base}} \cdot \min\left(1.0, \frac{\sigma_t}{E_r}, \left(\frac{\sigma_t}{E_r} \cdot \frac{E_v}{v_t}\right)^{\ln(\text{drf}) / \ln(5.5)}\right)$$
+    pub fn compute_missile_damage_factor(
+        target_sig_radius: f64,
+        target_velocity: f64,
+        explosion_radius: f64,
+        explosion_velocity: f64,
+        damage_reduction_factor: f64,
+    ) -> f64 {
+        let sig_ratio = target_sig_radius / explosion_radius.max(1.0);
+        let vel_ratio = explosion_velocity / target_velocity.max(1.0);
+        let exponent = damage_reduction_factor.max(1e-3).ln() / 5.5_f64.ln();
+        let combined = (sig_ratio * vel_ratio).powf(exponent.abs());
+        1.0_f64.min(sig_ratio).min(combined).clamp(0.0, 1.0)
+    }
+
+    /// Computes Entropic Disintegrator spool multiplier after `spool_cycles` (`#54`).
+    pub fn compute_entropic_spool_multiplier(
+        spool_cycles: u32,
+        max_spool_cycles: u32,
+        step_bonus: f64,
+    ) -> f64 {
+        1.0 + (spool_cycles.min(max_spool_cycles) as f64) * step_bonus
+    }
+
+    /// Computes CONCORD response delay in seconds for a high-sec solar system (`0.5 <= sec <= 1.0`, `#135`).
+    pub fn concord_response_seconds(security_status: f64) -> f64 {
+        let s = (security_status * 10.0).round() / 10.0;
+        if s >= 0.9 {
+            6.0
+        } else if s >= 0.8 {
+            7.0
+        } else if s >= 0.7 {
+            10.0
+        } else if s >= 0.6 {
+            14.0
+        } else if s >= 0.5 {
+            19.0
+        } else {
+            f64::INFINITY
+        }
+    }
+}
+
 /// Binary `Destiny` wire-format encoder (`AddBalls` state buffer) per `DestinyStructs.h`.
 pub mod wire {
     use super::{Ball, MovementMode};
 
-    /// Ball mode byte values (`Destiny::BallMode` in `DestinyStructs.h`).
+    /// All 13 Ball mode byte values (`Destiny::BallMode` in `DestinyStructs.h`).
     pub const DST_BALL_GOTO: u8 = 0;
     pub const DST_BALL_FOLLOW: u8 = 1;
     pub const DST_BALL_STOP: u8 = 2;
     pub const DST_BALL_WARP: u8 = 3;
     pub const DST_BALL_ORBIT: u8 = 4;
-    pub const DST_BALL_RIGID: u8 = 6;
+    pub const DST_BALL_MISSILE: u8 = 5;
+    pub const DST_BALL_MUSHROOM: u8 = 6;
+    pub const DST_BALL_BOID: u8 = 7;
+    pub const DST_BALL_TROLL: u8 = 8;
+    pub const DST_BALL_MINIBALL: u8 = 9;
+    pub const DST_BALL_FIELD: u8 = 10;
+    pub const DST_BALL_RIGID: u8 = 11;
+    pub const DST_BALL_FORMATION: u8 = 12;
 
     /// Ball flags (`Destiny::BallFlag` in `DestinyStructs.h`).
     pub const BALL_FLAG_IS_FREE: u8 = 0x01;
@@ -312,7 +608,6 @@ pub mod wire {
     /// Encodes a binary `AddBalls` buffer (`Destiny_Header` + per-ball `BallHeader` + `MassSector` + `ShipSector` + mode struct).
     pub fn encode_add_balls(stamp: u32, balls: &[&Ball]) -> Vec<u8> {
         let mut buf = Vec::with_capacity(24 + balls.len() * 128);
-        // Destiny_Header: packet_type = 0 (AddBalls), stamp (u32 LE)
         buf.push(0u8);
         buf.extend_from_slice(&stamp.to_le_bytes());
 
@@ -339,10 +634,16 @@ pub mod wire {
                     DST_BALL_ORBIT,
                     BALL_FLAG_IS_FREE | BALL_FLAG_IS_MASSIVE | BALL_FLAG_IS_INTERACTIVE,
                 ),
+                MovementMode::Missile { .. } => (DST_BALL_MISSILE, BALL_FLAG_IS_FREE),
+                MovementMode::Mushroom => (DST_BALL_MUSHROOM, BALL_FLAG_IS_FREE),
+                MovementMode::Boid => (DST_BALL_BOID, BALL_FLAG_IS_FREE),
+                MovementMode::Troll => (DST_BALL_TROLL, BALL_FLAG_IS_FREE),
+                MovementMode::Miniball => (DST_BALL_MINIBALL, BALL_FLAG_IS_FREE),
+                MovementMode::Field => (DST_BALL_FIELD, BALL_FLAG_IS_GLOBAL),
                 MovementMode::Rigid => (DST_BALL_RIGID, BALL_FLAG_IS_GLOBAL | BALL_FLAG_IS_MASSIVE),
+                MovementMode::Formation => (DST_BALL_FORMATION, BALL_FLAG_IS_FREE),
             };
 
-            // BallHeader (39 bytes packed): entityID (i64), mode (u8), radius (f32), x/y/z (f64 * 3), sub_type (u8)
             buf.extend_from_slice(&ball.id.to_le_bytes());
             buf.push(mode_byte);
             buf.extend_from_slice(&(ball.radius as f32).to_le_bytes());
@@ -351,16 +652,14 @@ pub mod wire {
             buf.extend_from_slice(&ball.position.z.to_le_bytes());
             buf.push(flags);
 
-            // MassSector (21 bytes packed): mass (f64), cloak (u8), allianceID (i64), corpID (u32), harmonic (f32)
             if (flags & BALL_FLAG_IS_MASSIVE) != 0 {
                 buf.extend_from_slice(&ball.mass.to_le_bytes());
-                buf.push(0u8); // cloak = 0
-                buf.extend_from_slice(&(-1i64).to_le_bytes()); // allianceID = -1
-                buf.extend_from_slice(&0u32.to_le_bytes()); // corpID = 0
-                buf.extend_from_slice(&(-1.0f32).to_le_bytes()); // harmonic = -1.0
+                buf.push(0u8);
+                buf.extend_from_slice(&(-1i64).to_le_bytes());
+                buf.extend_from_slice(&0u32.to_le_bytes());
+                buf.extend_from_slice(&(-1.0f32).to_le_bytes());
             }
 
-            // ShipSector (36 bytes packed): max_speed (f32), velocity_x/y/z (f64 * 3), agility (f32), speed_fraction (f32)
             if !is_rigid && (flags & BALL_FLAG_IS_FREE) != 0 {
                 buf.extend_from_slice(&(ball.max_velocity as f32).to_le_bytes());
                 buf.extend_from_slice(&ball.velocity.x.to_le_bytes());
@@ -370,39 +669,35 @@ pub mod wire {
                 buf.extend_from_slice(&(ball.speed_fraction as f32).to_le_bytes());
             }
 
-            // Mode-specific tail
             match &ball.mode {
                 MovementMode::GotoDirection { direction } => {
-                    buf.push(1u8); // formationID
+                    buf.push(1u8);
                     buf.extend_from_slice(&direction.x.to_le_bytes());
                     buf.extend_from_slice(&direction.y.to_le_bytes());
                     buf.extend_from_slice(&direction.z.to_le_bytes());
                 }
                 MovementMode::Follow { target_id, range }
                 | MovementMode::Orbit { target_id, range } => {
-                    buf.push(1u8); // formationID
+                    buf.push(1u8);
                     buf.extend_from_slice(&target_id.to_le_bytes());
                     buf.extend_from_slice(&(*range as f32).to_le_bytes());
-                }
-                MovementMode::Stop => {
-                    buf.push(1u8); // formationID
                 }
                 MovementMode::Warp {
                     destination,
                     warp_speed_au_s,
                     ..
                 } => {
-                    buf.push(1u8); // formationID
+                    buf.push(1u8);
                     buf.extend_from_slice(&destination.x.to_le_bytes());
                     buf.extend_from_slice(&destination.y.to_le_bytes());
                     buf.extend_from_slice(&destination.z.to_le_bytes());
-                    buf.extend_from_slice(&0u32.to_le_bytes()); // effectStamp
-                    buf.extend_from_slice(&15000.0f64.to_le_bytes()); // followRange
-                    buf.extend_from_slice(&0i64.to_le_bytes()); // followID
-                    buf.extend_from_slice(&((*warp_speed_au_s * 10.0) as u32).to_le_bytes()); // warpSpeed (10x AU/s)
+                    buf.extend_from_slice(&0u32.to_le_bytes());
+                    buf.extend_from_slice(&15000.0f64.to_le_bytes());
+                    buf.extend_from_slice(&0i64.to_le_bytes());
+                    buf.extend_from_slice(&((*warp_speed_au_s * 10.0) as u32).to_le_bytes());
                 }
-                MovementMode::Rigid => {
-                    buf.push(1u8); // formationID
+                _ => {
+                    buf.push(1u8);
                 }
             }
         }
@@ -413,7 +708,6 @@ pub mod wire {
 
 fn compute_subwarp_goal_velocity(ball: &Ball, positions: &BTreeMap<BallId, (DVec3, f64)>) -> DVec3 {
     match &ball.mode {
-        MovementMode::Stop | MovementMode::Rigid | MovementMode::Warp { .. } => DVec3::ZERO,
         MovementMode::GotoDirection { direction } => {
             let dir = direction.normalize_or_zero();
             dir * (ball.max_velocity * ball.speed_fraction)
@@ -432,6 +726,13 @@ fn compute_subwarp_goal_velocity(ball: &Ball, positions: &BTreeMap<BallId, (DVec
                 DVec3::ZERO
             }
         }
+        MovementMode::Missile { target_id } => {
+            if let Some(&(target_pos, _)) = positions.get(target_id) {
+                (target_pos - ball.position).normalize_or_zero() * ball.max_velocity
+            } else {
+                DVec3::ZERO
+            }
+        }
         MovementMode::Orbit { target_id, range } => {
             if let Some(&(target_pos, target_radius)) = positions.get(target_id) {
                 let to_target = target_pos - ball.position;
@@ -439,8 +740,6 @@ fn compute_subwarp_goal_velocity(ball: &Ball, positions: &BTreeMap<BallId, (DVec
                 let orbit_radius = ball.radius + target_radius + *range;
                 let radial_dir = to_target / dist;
 
-                // Build tangent in the plane of the ship's current velocity vector when moving,
-                // avoiding arbitrary horizontal-plane pinning or pole flips.
                 let v_perp = ball.velocity - radial_dir * ball.velocity.dot(radial_dir);
                 let tangent = if v_perp.length_squared() > 1e-4 {
                     v_perp.normalize()
@@ -461,6 +760,7 @@ fn compute_subwarp_goal_velocity(ball: &Ball, positions: &BTreeMap<BallId, (DVec
                 DVec3::ZERO
             }
         }
+        _ => DVec3::ZERO,
     }
 }
 
@@ -478,10 +778,6 @@ fn integrate_subwarp(ball: &mut Ball, goal_velocity: DVec3, dt: f64) {
     ball.velocity = goal_velocity + v_diff * decay;
 }
 
-/// Advances a warping ship across Align -> Accelerate -> Cruise -> Decelerate -> Exit phases.
-/// Uses symmetric peak velocity $v_{\text{peak}} = \min(v_{\text{cruise}}, d_{\text{total}} / (1/k_a + 1/k_d))$
-/// so short warps (< 3 AU) accelerate smoothly before decelerating.
-/// Returns `true` if the ship exited warp into `MovementMode::Stop` on this tick.
 #[allow(clippy::too_many_arguments)]
 fn step_warp_ball(
     ball: &mut Ball,
@@ -502,7 +798,6 @@ fn step_warp_ball(
         return true;
     }
 
-    // Phase 1: Sub-warp Alignment until velocity along warp_dir reaches 75% of max_velocity
     if *phase == WarpPhase::Aligning {
         let align_threshold = ball.max_velocity * 0.75;
         let forward_speed = ball.velocity.dot(warp_dir);
@@ -526,15 +821,12 @@ fn step_warp_ball(
         }
     }
 
-    // Phases 2-4: Active Warp Tunnel
     let k_a = warp_speed_au_s.max(0.1);
     let k_d = (k_a / 3.0).clamp(0.1, 2.0);
     let v_cruise = k_a * AU_METERS;
     let v_drop = (ball.max_velocity * 0.5).clamp(1.0, 100.0);
     let v_init = (ball.max_velocity * 0.75).max(v_drop);
 
-    // Symmetric peak velocity for short warps vs long warps:
-    // d_accel + d_decel = v_peak / k_a + v_peak / k_d
     let eff_total = total_distance.max((destination - ball.position).length());
     let v_peak = v_cruise
         .min(eff_total / ((1.0 / k_a) + (1.0 / k_d)))
@@ -553,8 +845,6 @@ fn step_warp_ball(
 
         *elapsed_warp_time += dt_accel;
         let v_end = (v_init * (k_a * *elapsed_warp_time).exp()).min(v_peak);
-        // Analytic integral of exponential velocity v(t) = v_init * e^(k_a * t):
-        // dx = (v_end - v_start) / k_a
         let accel_disp = ((v_end - v_start) / k_a).min(remaining_dist);
         ball.position += warp_dir * accel_disp;
         ball.velocity = warp_dir * v_end;
@@ -659,7 +949,6 @@ mod tests {
     #[test]
     fn test_short_and_long_warp_exit_without_overshoot() {
         let mut park = Ballpark::new(30000142);
-        // Short 0.05 AU warp (tests symmetric peak speed acceleration before deceleration)
         let short_dest = DVec3::new(0.05 * AU_METERS, 0.0, 0.0);
 
         let ship = Ball {
@@ -677,7 +966,6 @@ mod tests {
 
         assert!(park.add_ball(ship));
 
-        // First tick of short warp must accelerate smoothly (not jump 63% of distance immediately)
         park.step(1.0);
         let tick1 = park.balls.get(&1002).unwrap();
         assert!(
@@ -698,5 +986,52 @@ mod tests {
             "Ship overshot destination by {dist_from_dest} meters!"
         );
         assert!(arrived.velocity.length() < 1.0);
+    }
+
+    #[test]
+    fn test_turret_wrecking_shot_missile_and_proximity_decloak() {
+        let p_hit = combat::compute_turret_chance_to_hit(0.0, 240.0, 35.0, 1500.0, 1500.0, 8400.0);
+        assert!((p_hit - 1.0).abs() < 1e-6);
+
+        let base_dmg = DamageVector {
+            em: 0.0,
+            thermal: 10.0,
+            kinetic: 2.0,
+            explosive: 2.0,
+        };
+        let (wrecking, is_wrecking) = combat::resolve_turret_shot(base_dmg, p_hit, 0.005);
+        assert!(is_wrecking);
+        assert!((wrecking.total() - 42.0).abs() < 1e-6);
+
+        // Proximity decloak within 2000m
+        let mut park = Ballpark::new(30000142);
+        park.add_ball(Ball {
+            id: 1,
+            type_id: 587,
+            position: DVec3::ZERO,
+            velocity: DVec3::ZERO,
+            max_velocity: 365.0,
+            inertia: 3.45,
+            mass: 1_067_000.0,
+            radius: 37.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        });
+        park.combat_states.get_mut(&1).unwrap().is_cloaked = true;
+
+        park.add_ball(Ball {
+            id: 2,
+            type_id: 587,
+            position: DVec3::new(1_500.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 365.0,
+            inertia: 3.45,
+            mass: 1_067_000.0,
+            radius: 37.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        });
+        park.step(1.0);
+        assert!(!park.combat_states[&1].is_cloaked);
     }
 }

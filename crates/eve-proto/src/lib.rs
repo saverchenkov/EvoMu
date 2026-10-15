@@ -186,6 +186,30 @@ impl PyRep {
         }
     }
 
+    pub fn as_i64(&self) -> Option<i64> {
+        match self {
+            Self::Integer(v) => Some(*v),
+            Self::Bool(b) => Some(if *b { 1 } else { 0 }),
+            _ => None,
+        }
+    }
+
+    pub fn as_f64(&self) -> Option<f64> {
+        match self {
+            Self::Real(v) => Some(*v),
+            Self::Integer(v) => Some(*v as f64),
+            _ => None,
+        }
+    }
+
+    pub fn as_bool(&self) -> Option<bool> {
+        match self {
+            Self::Bool(b) => Some(*b),
+            Self::Integer(v) => Some(*v != 0),
+            _ => None,
+        }
+    }
+
     /// Counts total AST nodes in this `PyRep` subtree (used to enforce `MAX_DECODED_NODES`).
     pub fn node_count(&self) -> usize {
         match self {
