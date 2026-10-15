@@ -101,6 +101,25 @@ pub enum PyRep {
         columns: Vec<String>,
         rows: Vec<Vec<PyRep>>,
     },
+    /// High-level `util.IndexRowset` projection (`key_column`, `columns`, `items`).
+    IndexRowset {
+        key_column: String,
+        columns: Vec<String>,
+        items: Vec<(PyRep, Vec<PyRep>)>,
+    },
+    /// High-level `TupleSet` projection (`(columns, rows)`).
+    TupleSet {
+        columns: Vec<String>,
+        rows: Vec<Vec<PyRep>>,
+    },
+    /// High-level `blue.DBRow` / `PyPackedRow` (`0x2A`) projection.
+    DBRow {
+        header: Box<PyRep>,
+        columns: Vec<(String, PyRep)>,
+        raw_rle: Vec<u8>,
+    },
+    /// Embedded Python `cPickle` payload (`Op_PyPicked` `0x21`).
+    Picked(Vec<u8>),
     /// Legacy `PyObject` (`Op_PyObject` `0x17`: `type_name` token + `args`).
     Object {
         type_name: String,
@@ -140,6 +159,25 @@ impl PyRep {
         }
     }
 
+    pub fn index_rowset(
+        key_column: &str,
+        columns: Vec<&str>,
+        items: Vec<(PyRep, Vec<PyRep>)>,
+    ) -> Self {
+        Self::IndexRowset {
+            key_column: key_column.to_string(),
+            columns: columns.into_iter().map(String::from).collect(),
+            items,
+        }
+    }
+
+    pub fn tuple_set(columns: Vec<&str>, rows: Vec<Vec<PyRep>>) -> Self {
+        Self::TupleSet {
+            columns: columns.into_iter().map(String::from).collect(),
+            rows,
+        }
+    }
+
     pub fn as_str(&self) -> Option<&str> {
         match self {
             Self::String(s) | Self::Token(s) => Some(s.as_str()),
@@ -157,6 +195,7 @@ impl PyRep {
             | Self::Real(_)
             | Self::Buffer(_)
             | Self::Bytes(_)
+            | Self::Picked(_)
             | Self::Token(_)
             | Self::String(_) => 1,
             Self::Tuple(v) | Self::List(v) => 1 + v.iter().map(Self::node_count).sum::<usize>(),
@@ -167,12 +206,30 @@ impl PyRep {
                     .sum::<usize>()
             }
             Self::KeyVal(map) => 1 + map.values().map(Self::node_count).sum::<usize>(),
-            Self::Rowset { columns, rows } => {
+            Self::Rowset { columns, rows } | Self::TupleSet { columns, rows } => {
                 1 + columns.len()
                     + rows
                         .iter()
                         .flat_map(|r| r.iter())
                         .map(Self::node_count)
+                        .sum::<usize>()
+            }
+            Self::IndexRowset {
+                columns, items, ..
+            } => {
+                1 + columns.len()
+                    + items
+                        .iter()
+                        .map(|(k, r)| k.node_count() + r.iter().map(Self::node_count).sum::<usize>())
+                        .sum::<usize>()
+            }
+            Self::DBRow {
+                header, columns, ..
+            } => {
+                1 + header.node_count()
+                    + columns
+                        .iter()
+                        .map(|(_, v)| v.node_count())
                         .sum::<usize>()
             }
             Self::Object { args, .. }
@@ -192,6 +249,205 @@ impl PyRep {
         }
     }
 }
+
+/// Authoritative 1-based string table from `EVEMarshalStringTable.cpp` (`s_mStringTable`).
+pub const MARSHAL_STRING_TABLE: &[&str] = &[
+    "*corpid",
+    "*locationid",
+    "age",
+    "Asteroid",
+    "authentication",
+    "ballID",
+    "beyonce",
+    "bloodlineID",
+    "capacity",
+    "categoryID",
+    "character",
+    "characterID",
+    "characterName",
+    "characterType",
+    "charID",
+    "chatx",
+    "clientID",
+    "config",
+    "contraband",
+    "corporationDateTime",
+    "corporationID",
+    "createDateTime",
+    "customInfo",
+    "description",
+    "divisionID",
+    "DoDestinyUpdate",
+    "dogmaIM",
+    "EVE System",
+    "flag",
+    "foo.SlimItem",
+    "gangID",
+    "Gemini",
+    "gender",
+    "graphicID",
+    "groupID",
+    "header",
+    "idName",
+    "invbroker",
+    "itemID",
+    "items",
+    "jumps",
+    "line",
+    "lines",
+    "locationID",
+    "locationName",
+    "macho.CallReq",
+    "macho.CallRsp",
+    "macho.MachoAddress",
+    "macho.Notification",
+    "macho.SessionChangeNotification",
+    "modules",
+    "name",
+    "objectCaching",
+    "objectCaching.CachedObject",
+    "OnChatJoin",
+    "OnChatLeave",
+    "OnChatSpeak",
+    "OnGodmaShipEffect",
+    "OnItemChange",
+    "OnModuleAttributeChange",
+    "OnMultiEvent",
+    "orbitID",
+    "ownerID",
+    "ownerName",
+    "quantity",
+    "raceID",
+    "RowClass",
+    "securityStatus",
+    "Sentry Gun",
+    "sessionchange",
+    "singleton",
+    "skillEffect",
+    "squadronID",
+    "typeID",
+    "used",
+    "userID",
+    "util.CachedObject",
+    "util.IndexRowset",
+    "util.Moniker",
+    "util.Row",
+    "util.Rowset",
+    "*multicastID",
+    "AddBalls",
+    "AttackHit3",
+    "AttackHit3R",
+    "AttackHit4R",
+    "DoDestinyUpdates",
+    "GetLocationsEx",
+    "InvalidateCachedObjects",
+    "JoinChannel",
+    "LSC",
+    "LaunchMissile",
+    "LeaveChannel",
+    "OID+",
+    "OID-",
+    "OnAggressionChange",
+    "OnCharGangChange",
+    "OnCharNoLongerInStation",
+    "OnCharNowInStation",
+    "OnDamageMessage",
+    "OnDamageStateChange",
+    "OnEffectHit",
+    "OnGangDamageStateChange",
+    "OnLSC",
+    "OnSpecialFX",
+    "OnTarget",
+    "RemoveBalls",
+    "SendMessage",
+    "SetMaxSpeed",
+    "SetSpeedFraction",
+    "TerminalExplosion",
+    "address",
+    "alert",
+    "allianceID",
+    "allianceid",
+    "bid",
+    "bookmark",
+    "bounty",
+    "channel",
+    "charid",
+    "constellationid",
+    "corpID",
+    "corpid",
+    "corprole",
+    "damage",
+    "duration",
+    "effects.Laser",
+    "gangid",
+    "gangrole",
+    "hqID",
+    "issued",
+    "jit",
+    "languageID",
+    "locationid",
+    "machoVersion",
+    "marketProxy",
+    "minVolume",
+    "orderID",
+    "price",
+    "range",
+    "regionID",
+    "regionid",
+    "role",
+    "rolesAtAll",
+    "rolesAtBase",
+    "rolesAtHQ",
+    "rolesAtOther",
+    "shipid",
+    "sn",
+    "solarSystemID",
+    "solarsystemid",
+    "solarsystemid2",
+    "source",
+    "splash",
+    "stationID",
+    "stationid",
+    "target",
+    "userType",
+    "userid",
+    "volEntered",
+    "volRemaining",
+    "weapon",
+    "agent.missionTemplatizedContent_BasicKillMission",
+    "agent.missionTemplatizedContent_ResearchKillMission",
+    "agent.missionTemplatizedContent_StorylineKillMission",
+    "agent.missionTemplatizedContent_GenericStorylineKillMission",
+    "agent.missionTemplatizedContent_BasicCourierMission",
+    "agent.missionTemplatizedContent_ResearchCourierMission",
+    "agent.missionTemplatizedContent_StorylineCourierMission",
+    "agent.missionTemplatizedContent_GenericStorylineCourierMission",
+    "agent.missionTemplatizedContent_BasicTradeMission",
+    "agent.missionTemplatizedContent_ResearchTradeMission",
+    "agent.missionTemplatizedContent_StorylineTradeMission",
+    "agent.missionTemplatizedContent_GenericStorylineTradeMission",
+    "agent.offerTemplatizedContent_BasicExchangeOffer",
+    "agent.offerTemplatizedContent_BasicExchangeOffer_ContrabandDemand",
+    "agent.offerTemplatizedContent_BasicExchangeOffer_Crafting",
+    "agent.LoyaltyPoints",
+    "agent.ResearchPoints",
+    "agent.Credits",
+    "agent.Item",
+    "agent.Entity",
+    "agent.Objective",
+    "agent.FetchObjective",
+    "agent.EncounterObjective",
+    "agent.DungeonObjective",
+    "agent.TransportObjective",
+    "agent.Reward",
+    "agent.TimeBonusReward",
+    "agent.MissionReferral",
+    "agent.Location",
+    "agent.StandardMissionDetails",
+    "agent.OfferDetails",
+    "agent.ResearchMissionDetails",
+    "agent.StorylineMissionDetails",
+];
 
 /// Exact wire opcodes from `evemu_Crucible/src/eve-common/marshal/EVEMarshalOpcodes.h`.
 #[repr(u8)]
@@ -448,6 +704,49 @@ pub mod marshal {
                 ]);
                 encode_inner(&dict, out);
             }
+            PyRep::IndexRowset {
+                key_column,
+                columns,
+                items,
+            } => {
+                out.push(MarshalOpcode::PyObject as u8);
+                encode_inner(&PyRep::Token("util.IndexRowset".to_string()), out);
+                let cols = PyRep::List(columns.iter().cloned().map(PyRep::String).collect());
+                let items_dict = PyRep::Dict(
+                    items
+                        .iter()
+                        .map(|(k, r)| (k.clone(), PyRep::List(r.clone())))
+                        .collect(),
+                );
+                let dict = PyRep::Dict(vec![
+                    (PyRep::String("header".into()), cols),
+                    (
+                        PyRep::String("RowClass".into()),
+                        PyRep::Token("util.Row".into()),
+                    ),
+                    (PyRep::String("idName".into()), PyRep::String(key_column.clone())),
+                    (PyRep::String("items".into()), items_dict),
+                ]);
+                encode_inner(&dict, out);
+            }
+            PyRep::TupleSet { columns, rows } => {
+                let cols = PyRep::List(columns.iter().cloned().map(PyRep::String).collect());
+                let row_list = PyRep::List(rows.iter().cloned().map(PyRep::List).collect());
+                encode_inner(&PyRep::Tuple(vec![cols, row_list]), out);
+            }
+            PyRep::DBRow {
+                header, raw_rle, ..
+            } => {
+                out.push(MarshalOpcode::PyPackedRow as u8);
+                encode_inner(header, out);
+                write_size_ex(out, raw_rle.len());
+                out.extend_from_slice(raw_rle);
+            }
+            PyRep::Picked(b) => {
+                out.push(MarshalOpcode::PyPicked as u8);
+                write_size_ex(out, b.len());
+                out.extend_from_slice(b);
+            }
             PyRep::Object { type_name, args } => {
                 out.push(MarshalOpcode::PyObject as u8);
                 encode_inner(&PyRep::Token(type_name.clone()), out);
@@ -698,6 +997,40 @@ pub mod marshal {
                 *input = &input[len..];
                 PyRep::Bytes(b)
             }
+            x if x == MarshalOpcode::PyStringTableItem as u8 => {
+                if input.is_empty() {
+                    return Err(ProtoError::UnexpectedEof);
+                }
+                let idx = input[0] as usize;
+                *input = &input[1..];
+                let s = idx
+                    .checked_sub(1)
+                    .and_then(|i| MARSHAL_STRING_TABLE.get(i))
+                    .ok_or(ProtoError::UnsupportedOpcode(opcode))?;
+                PyRep::String((*s).to_string())
+            }
+            x if x == MarshalOpcode::PyWStringUCS2Char as u8 => {
+                if input.len() < 2 {
+                    return Err(ProtoError::UnexpectedEof);
+                }
+                let code_unit = u16::from_le_bytes([input[0], input[1]]);
+                *input = &input[2..];
+                let s = String::from_utf16_lossy(&[code_unit]);
+                PyRep::String(s)
+            }
+            x if x == MarshalOpcode::PyWStringUCS2 as u8 => {
+                let char_len = read_collection_len(input)?;
+                let byte_len = char_len.checked_mul(2).ok_or(ProtoError::UnexpectedEof)?;
+                if input.len() < byte_len {
+                    return Err(ProtoError::UnexpectedEof);
+                }
+                let mut units = Vec::with_capacity(char_len.min(1024));
+                for chunk in input[..byte_len].chunks_exact(2) {
+                    units.push(u16::from_le_bytes([chunk[0], chunk[1]]));
+                }
+                *input = &input[byte_len..];
+                PyRep::String(String::from_utf16_lossy(&units))
+            }
             x if x == MarshalOpcode::PyLongString as u8 => {
                 let len = read_size_ex(input)?;
                 if input.len() < len {
@@ -706,6 +1039,30 @@ pub mod marshal {
                 let b = input[..len].to_vec();
                 *input = &input[len..];
                 PyRep::Bytes(b)
+            }
+            x if x == MarshalOpcode::PyPicked as u8 => {
+                let len = read_size_ex(input)?;
+                if input.len() < len {
+                    return Err(ProtoError::UnexpectedEof);
+                }
+                let b = input[..len].to_vec();
+                *input = &input[len..];
+                PyRep::Picked(b)
+            }
+            x if x == MarshalOpcode::PyPackedRow as u8 => {
+                let header =
+                    decode_inner(input, save_map, depth + 1, saved_slots, remaining_budget)?;
+                let rle_len = read_size_ex(input)?;
+                if input.len() < rle_len {
+                    return Err(ProtoError::UnexpectedEof);
+                }
+                let raw_rle = input[..rle_len].to_vec();
+                *input = &input[rle_len..];
+                PyRep::DBRow {
+                    header: Box::new(header),
+                    columns: Vec::new(),
+                    raw_rle,
+                }
             }
             x if x == MarshalOpcode::PyEmptyWString as u8 => PyRep::String(String::new()),
             x if x == MarshalOpcode::PyWStringUTF8 as u8 => {
@@ -805,6 +1162,19 @@ pub mod marshal {
                 } else if type_name == "util.Rowset" {
                     if let Some((columns, rows)) = try_extract_rowset(&args) {
                         PyRep::Rowset { columns, rows }
+                    } else {
+                        PyRep::Object {
+                            type_name,
+                            args: Box::new(args),
+                        }
+                    }
+                } else if type_name == "util.IndexRowset" {
+                    if let Some((key_column, columns, items)) = try_extract_index_rowset(&args) {
+                        PyRep::IndexRowset {
+                            key_column,
+                            columns,
+                            items,
+                        }
                     } else {
                         PyRep::Object {
                             type_name,
@@ -916,6 +1286,91 @@ pub mod marshal {
         }
 
         Ok(value)
+    }
+
+    /// Decodes a `PyPackedRow` zero-compressed RLE byte stream per `EVEUnmarshal.cpp` `LoadRLE`.
+    pub fn decode_rle(rle_bytes: &[u8], expected_len: usize) -> Option<Vec<u8>> {
+        let mut out = vec![0u8; expected_len];
+        let mut in_ix = 0usize;
+        let mut out_ix = 0usize;
+        let mut run = 0i32;
+        let mut nibble = false;
+
+        while in_ix < rle_bytes.len() {
+            nibble = !nibble;
+            let mut count = if nibble {
+                run = rle_bytes[in_ix] as i32;
+                in_ix += 1;
+                (run & 0x0F) - 8
+            } else {
+                (run >> 4) - 8
+            };
+
+            if count >= 0 {
+                let zeros = (count + 1) as usize;
+                if out_ix.checked_add(zeros)? > out.len() {
+                    return None;
+                }
+                for _ in 0..zeros {
+                    out[out_ix] = 0;
+                    out_ix += 1;
+                }
+            } else {
+                while count < 0 && in_ix < rle_bytes.len() {
+                    if out_ix >= out.len() {
+                        return None;
+                    }
+                    out[out_ix] = rle_bytes[in_ix];
+                    out_ix += 1;
+                    in_ix += 1;
+                    count += 1;
+                }
+            }
+        }
+        Some(out)
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn try_extract_index_rowset(
+        args: &PyRep,
+    ) -> Option<(String, Vec<String>, Vec<(PyRep, Vec<PyRep>)>)> {
+        let PyRep::Dict(entries) = args else {
+            return None;
+        };
+        let mut key_column = None;
+        let mut columns = None;
+        let mut items = None;
+        for (k, v) in entries {
+            match k.as_str() {
+                Some("idName") => {
+                    key_column = Some(v.as_str()?.to_string());
+                }
+                Some("header") => {
+                    if let PyRep::List(col_reps) = v {
+                        let mut cols = Vec::with_capacity(col_reps.len());
+                        for c in col_reps {
+                            cols.push(c.as_str()?.to_string());
+                        }
+                        columns = Some(cols);
+                    }
+                }
+                Some("items") => {
+                    if let PyRep::Dict(item_entries) = v {
+                        let mut extracted = Vec::with_capacity(item_entries.len());
+                        for (ik, iv) in item_entries {
+                            if let PyRep::List(cells) = iv {
+                                extracted.push((ik.clone(), cells.clone()));
+                            } else {
+                                return None;
+                            }
+                        }
+                        items = Some(extracted);
+                    }
+                }
+                _ => {}
+            }
+        }
+        Some((key_column?, columns?, items?))
     }
 
     fn try_extract_rowset(args: &PyRep) -> Option<(Vec<String>, Vec<Vec<PyRep>>)> {

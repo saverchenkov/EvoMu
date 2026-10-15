@@ -39,8 +39,28 @@ class LocalRowset(list):
     def __init__(self, columns, rows):
         super(LocalRowset, self).__init__()
         self.header = columns
+        self.columns = columns
         for row_vals in rows:
             self.append(LocalKeyVal(zip(columns, row_vals)))
+
+
+class LocalIndexRowset(dict):
+    """Pure-Python drop-in replacement for EVE's `util.IndexRowset` (keyed by `idName`)."""
+
+    def __init__(self, columns, key_column, items_dict):
+        super(LocalIndexRowset, self).__init__()
+        self.header = columns
+        self.columns = columns
+        self.idName = key_column
+        for k, row_vals in items_dict.items():
+            self[k] = LocalKeyVal(zip(columns, row_vals))
+
+
+class LocalTupleSet(tuple):
+    """Pure-Python drop-in replacement for EVE's `(columns, rows)` `TupleSet`."""
+
+    def __new__(cls, columns, rows):
+        return super(LocalTupleSet, cls).__new__(cls, (columns, rows))
 
 
 def to_pyrep_json(val):
@@ -79,7 +99,7 @@ def from_pyrep_json(node):
         return None
     if tag in ("Bool", "Integer", "Real", "String", "AsciiString"):
         return val
-    if tag == "Buffer":
+    if tag in ("Buffer", "Picked"):
         return bytes(val)
     if tag == "Tuple":
         return tuple(from_pyrep_json(x) for x in val)
@@ -87,12 +107,24 @@ def from_pyrep_json(node):
         return [from_pyrep_json(x) for x in val]
     if tag == "Dict":
         return {from_pyrep_json(k): from_pyrep_json(v) for k, v in val}
-    if tag == "KeyVal":
+    if tag in ("KeyVal", "DBRow"):
         return LocalKeyVal({k: from_pyrep_json(v) for k, v in val.items()})
     if tag == "Rowset":
         cols = val["columns"]
         rows = [[from_pyrep_json(cell) for cell in row] for row in val["rows"]]
         return LocalRowset(cols, rows)
+    if tag == "IndexRowset":
+        cols = val["columns"]
+        key_col = val["key_column"]
+        items = {
+            from_pyrep_json(k): [from_pyrep_json(c) for c in row]
+            for k, row in val["items"]
+        }
+        return LocalIndexRowset(cols, key_col, items)
+    if tag == "TupleSet":
+        cols = val["columns"]
+        rows = [[from_pyrep_json(cell) for cell in row] for row in val["rows"]]
+        return LocalTupleSet(cols, rows)
     return val
 
 
@@ -139,7 +171,7 @@ class EvoMuBridgeConnection(object):
         if kind == "ServerEvent":
             event_name = envelope.get("event")
             args = [from_pyrep_json(a) for a in envelope.get("args", [])]
-            self.event_queue.append(( envelope.get("tick", 0), event_name, args))
+            self.event_queue.append((envelope.get("tick", 0), event_name, args))
             if self._event_dispatcher is not None:
                 self._event_dispatcher(event_name, *args)
             return
@@ -248,10 +280,23 @@ class RemoteServiceShim(object):
 
     def bind(self, object_id):
         res = self._bridge.call_remote(
-            self._service_name, "MachoBindObject", (object_id,), {}
+            self._service_name, "MachoBindObject", (object_id, None), {}
         )
         bound_id = res[0] if isinstance(res, tuple) else res
         return RemoteServiceShim(self._bridge, self._service_name, bound_id=bound_id)
+
+    def MachoBindObject(self, bind_params, call=None):
+        """Supports EVE's native `MachoBindObject(bindParams, call)` with optional piggybacked call tuple."""
+        res = self._bridge.call_remote(
+            self._service_name, "MachoBindObject", (bind_params, call), {}
+        )
+        if isinstance(res, tuple) and len(res) == 2:
+            bound_id, call_res = res
+            return (
+                RemoteServiceShim(self._bridge, self._service_name, bound_id=bound_id),
+                call_res,
+            )
+        return RemoteServiceShim(self._bridge, self._service_name, bound_id=res), None
 
     def __getattr__(self, method_name):
         def _rpc_call(*args, **kwargs):
@@ -266,9 +311,160 @@ class RemoteServiceShim(object):
         return _rpc_call
 
 
+class PublicGatewayShim(object):
+    """
+    4th Chokepoint for modern EVE V24.01 Client (`publicGatewaySvc`).
+    Intercepts Quasar Protobuf requests (`eve_public.*`) and routes them over the EvoMu Bridge.
+    """
+
+    def __init__(self, bridge):
+        self._bridge = bridge
+        self._notice_handlers = collections.defaultdict(list)
+
+    def send_character_request(self, request_proto, response_cls, timeout=DEFAULT_RPC_TIMEOUT):
+        type_name = getattr(request_proto, "DESCRIPTOR", None)
+        full_name = type_name.full_name if type_name is not None else type(request_proto).__name__
+        payload_bytes = (
+            request_proto.SerializeToString()
+            if hasattr(request_proto, "SerializeToString")
+            else b""
+        )
+        raw_rsp = self._bridge.call_remote(
+            "publicGatewaySvc",
+            full_name,
+            (payload_bytes,),
+            {},
+            timeout=timeout,
+        )
+        if response_cls is not None and hasattr(response_cls, "FromString") and isinstance(raw_rsp, bytes):
+            rsp = response_cls()
+            rsp.ParseFromString(raw_rsp)
+            return rsp
+        return raw_rsp
+
+    def subscribe_to_notice(self, notice_cls, callback):
+        name = getattr(getattr(notice_cls, "DESCRIPTOR", None), "full_name", str(notice_cls))
+        self._notice_handlers[name].append((notice_cls, callback))
+
+
 def install_service_manager_hook(sm, host="127.0.0.1", port=26001):
-    """Hooks EVE's global `sm.RemoteSvc` and `sm.ScatterEvent` to route through `EvoMu`."""
+    """Hooks EVE's global `sm.RemoteSvc`, `sm.ScatterEvent`, and `publicGatewaySvc` to route through `EvoMu`."""
     scatter = getattr(sm, "ScatterEvent", None)
     bridge = EvoMuBridgeConnection(host, port, event_dispatcher=scatter)
     sm.RemoteSvc = lambda service_name: RemoteServiceShim(bridge, service_name)
+    sm.ProxySvc = lambda service_name: RemoteServiceShim(bridge, service_name)
+    if hasattr(sm, "services") and isinstance(sm.services, dict):
+        sm.services["publicGatewaySvc"] = PublicGatewayShim(bridge)
     return bridge
+
+
+def _run_self_tests():
+    """Offline unit test suite verifying container hydration and frame demultiplexing."""
+    # 1. Verify KeyVal, Rowset, IndexRowset, TupleSet, DBRow hydration
+    kv = from_pyrep_json({"$py": "KeyVal", "val": {"shipID": {"$py": "Integer", "val": 1001001}}})
+    assert isinstance(kv, LocalKeyVal) and kv.shipID == 1001001
+
+    dbrow = from_pyrep_json({"$py": "DBRow", "val": {"itemID": {"$py": "Integer", "val": 42}}})
+    assert isinstance(dbrow, LocalKeyVal) and dbrow.itemID == 42
+
+    rs = from_pyrep_json({
+        "$py": "Rowset",
+        "val": {
+            "columns": ["itemID", "typeID"],
+            "rows": [[{"$py": "Integer", "val": 1001001}, {"$py": "Integer", "val": 587}]],
+        },
+    })
+    assert len(rs) == 1 and rs[0].typeID == 587
+
+    irs = from_pyrep_json({
+        "$py": "IndexRowset",
+        "val": {
+            "columns": ["itemID", "typeID"],
+            "key_column": "itemID",
+            "items": [[{"$py": "Integer", "val": 1001001}, [{"$py": "Integer", "val": 1001001}, {"$py": "Integer", "val": 587}]]],
+        },
+    })
+    assert isinstance(irs, LocalIndexRowset) and irs[1001001].typeID == 587
+
+    ts = from_pyrep_json({
+        "$py": "TupleSet",
+        "val": {
+            "columns": ["stationID"],
+            "rows": [[{"$py": "Integer", "val": 60003760}]],
+        },
+    })
+    assert isinstance(ts, LocalTupleSet) and ts[0] == ["stationID"]
+
+    # 2. Verify frame demultiplexer separates ServerEvent from RpcResponse
+    events = []
+    bridge = EvoMuBridgeConnection(event_dispatcher=lambda ev, *a: events.append((ev, a)))
+    slot = _PendingCall()
+    bridge._pending[7] = slot
+    bridge.process_incoming_frame({
+        "kind": "ServerEvent",
+        "tick": 12,
+        "event": "OnSessionChanged",
+        "args": [{"$py": "Bool", "val": False}],
+    })
+    bridge.process_incoming_frame({
+        "kind": "RpcResponse",
+        "req_id": 7,
+        "result": {"Ok": {"$py": "Integer", "val": 99}},
+    })
+    assert len(events) == 1 and events[0][0] == "OnSessionChanged"
+    assert slot.event.is_set() and from_pyrep_json(slot.response["Ok"]) == 99
+    print("[OK] evomu_bridge.py self-tests passed!")
+
+
+def _run_live_demo(host="127.0.0.1", port=26001):
+    """Executes the Phase 1 vertical slice against a running `eve-server` instance."""
+    class DummySM(object):
+        def __init__(self):
+            self.services = {}
+            self.events = []
+
+        def ScatterEvent(self, event_name, *args):
+            print("[ServerEvent] %s -> %r" % (event_name, args))
+            self.events.append((event_name, args))
+
+    sm = DummySM()
+    bridge = install_service_manager_hook(sm, host=host, port=port)
+    try:
+        auth = sm.RemoteSvc("auth")
+        print("1. Calling auth.Login('demo', 'demo-secret')...")
+        res = auth.Login("demo", "demo-secret")
+        print("   -> Login result:", res)
+
+        char_mgr = sm.RemoteSvc("charUnboundMgr")
+        chars = char_mgr.GetCharactersToSelect()
+        print("2. Characters:", chars)
+        char_id = chars[0].characterID
+        char_mgr.SelectCharacterID(char_id)
+        print("3. Selected characterID:", char_id)
+
+        inv_bound, items = sm.RemoteSvc("invbroker").MachoBindObject(60003760, ("List", (), {}))
+        print("4. Piggybacked invbroker.List items:", items)
+
+        dogma_bound, ship_attrs = sm.RemoteSvc("dogmaIM").MachoBindObject(
+            1001001, ("GetShipAttributes", (), {})
+        )
+        print("5. Piggybacked dogmaIM.GetShipAttributes:", ship_attrs)
+
+        undock_info = sm.RemoteSvc("stationSvc").Undock()
+        print("6. Undocked into Jita:", undock_info)
+    finally:
+        bridge.close()
+
+
+if __name__ == "__main__":
+    import sys
+
+    if "--self-test" in sys.argv:
+        _run_self_tests()
+    else:
+        _run_self_tests()
+        try:
+            _run_live_demo()
+        except Exception as exc:
+            print("[INFO] Live server not reachable on 127.0.0.1:26001 (%s); self-tests succeeded." % exc)
+

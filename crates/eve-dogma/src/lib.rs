@@ -1,6 +1,6 @@
 //! `eve-dogma` — EVE Online Dogma Attribute & Effect Modifier Engine.
 //!
-//! Implements the exact operator precedence, SDE operation code mapping (`-1..=7`),
+//! Implements the exact operator precedence, SDE operation code mapping (`-1..=9`),
 //! attribute-aware stacking penalty curve, and passive capacitor/shield regeneration equations.
 
 #![forbid(unsafe_code)]
@@ -28,12 +28,16 @@ pub enum ModifierOperator {
     PostDiv = 6,
     /// Applies a percentage bonus/penalty (`dgmAssPostPercent`, SDE op `6`).
     PostPercent = 7,
+    /// Applies a stacking-penalty-exempt percentage bonus/penalty (`dgmAssPostPercentUnNerfed`, SDE op `8`).
+    PostPercentUnNerfed = 8,
+    /// Applies a skill-relationship percentage modifier (`dgmAssSpecialSkillRelationship`, SDE op `9`).
+    SpecialSkillRelationship = 9,
     /// Final hard override (`dgmAssPostAssignment`, SDE op `7`).
-    PostAssign = 8,
+    PostAssign = 10,
 }
 
 impl ModifierOperator {
-    /// Converts an EVE SDE `operation` integer (`-1..=7`) into a [`ModifierOperator`].
+    /// Converts an EVE SDE `operation` integer (`-1..=9`) into a [`ModifierOperator`].
     pub fn try_from_sde_op(op: i32) -> Option<Self> {
         match op {
             -1 => Some(Self::PreAssign),
@@ -45,6 +49,8 @@ impl ModifierOperator {
             5 => Some(Self::PostDiv),
             6 => Some(Self::PostPercent),
             7 => Some(Self::PostAssign),
+            8 => Some(Self::PostPercentUnNerfed),
+            9 => Some(Self::SpecialSkillRelationship),
             _ => None,
         }
     }
@@ -182,20 +188,23 @@ impl DogmaItemState {
             val -= m.value;
         }
 
-        // 4. PostMul / PostDiv / PostPercent
+        // 4. PostMul / PostDiv / PostPercent / PostPercentUnNerfed / SpecialSkillRelationship
         let mut unpenalized_deltas = Vec::new();
         let mut penalized_pos_deltas = Vec::new();
         let mut penalized_neg_deltas = Vec::new();
 
         for m in &relevant {
-            let delta_opt = match m.operator {
-                ModifierOperator::PostMul => Some(m.value - 1.0),
-                ModifierOperator::PostDiv if m.value != 0.0 => Some((1.0 / m.value) - 1.0),
-                ModifierOperator::PostPercent => Some(m.value / 100.0),
-                _ => None,
+            let (delta_opt, force_unpenalized) = match m.operator {
+                ModifierOperator::PostMul => (Some(m.value - 1.0), false),
+                ModifierOperator::PostDiv if m.value != 0.0 => (Some((1.0 / m.value) - 1.0), false),
+                ModifierOperator::PostPercent => (Some(m.value / 100.0), false),
+                ModifierOperator::PostPercentUnNerfed
+                | ModifierOperator::SpecialSkillRelationship => (Some(m.value / 100.0), true),
+                _ => (None, false),
             };
             if let Some(d) = delta_opt {
-                let is_penalized = !attr_allows_free_stacking && m.stacking_penalized;
+                let is_penalized =
+                    !force_unpenalized && !attr_allows_free_stacking && m.stacking_penalized;
                 if !is_penalized {
                     unpenalized_deltas.push(d);
                 } else if d >= 0.0 {
@@ -269,6 +278,14 @@ mod tests {
         assert_eq!(
             ModifierOperator::try_from_sde_op(7),
             Some(ModifierOperator::PostAssign)
+        );
+        assert_eq!(
+            ModifierOperator::try_from_sde_op(8),
+            Some(ModifierOperator::PostPercentUnNerfed)
+        );
+        assert_eq!(
+            ModifierOperator::try_from_sde_op(9),
+            Some(ModifierOperator::SpecialSkillRelationship)
         );
         assert_eq!(ModifierOperator::try_from_sde_op(99), None);
     }

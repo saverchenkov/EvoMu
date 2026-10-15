@@ -1,241 +1,261 @@
-# `EvoMu` Master Execution Plan & Server Logic Indexing Blueprint
+# EvoMu: Complete EVE Online Server Implementation Plan & Technical Specification
 
-## 1. Objective
+## 1. Objective & Authoritative Sources
 
-Achieve **complete, verifiable server feature parity** for `EvoMu` by:
-1. **Systematically indexing 100% of required EVE Online server logic** across three authoritative sources:
-   - **Decompiled EVE Client Python Codebase** (the ground truth of every remote call the client can ever make and every notification it expects).
-   - **Reference [`evemu_Crucible`](https://github.com/EvEmu-Project/evemu_Crucible) C++ Codebase** (~150k LOC of partial 2011 implementation, XML packet definitions, and SQL schemas).
-   - **CCP Official Static Data Export (SDE)** (all item types, Dogma attributes, effects, expression bytecode, solar systems, stations, skills, and blueprints).
-2. **Implementing each domain subsystem in clean, modular, `#![forbid(unsafe_code)]` Rust** on top of the existing 7-crate `EvoMu` workspace (`eve-proto`, `eve-machonet`, `eve-sde`, `eve-dogma`, `eve-destiny`, `eve-db`, `eve-server`).
+This document defines the master architecture, modular technical specifications ([`docs/spec/`](./docs/spec/)), machine-verified RPC/Quasar catalogs ([`docs/index/`](./docs/index/)), prioritized vertical-slice milestones (`M0`–`M8`), and end-to-end (E2E) testing strategy for **`EvoMu`** — an independent Rust EVE Online server emulator targeting full feature parity with the modern **EVE Online V24.01 Tranquility client (`build 3619879`)**.
 
----
-
-## 2. Current Foundation Status (Completed & Verified)
-
-The foundational vertical slice and security invariants are already implemented and tested (`18/18` unit tests passing, zero Clippy warnings):
-- **`eve-proto`:** Dual JSON/MessagePack Bridge + authoritative `EVEMarshalOpcodes.h` binary codec, `PyRep::Bytes` vs `String` vs `Token`, trailing `save_count * 4` reference table decoding (`EVEUnmarshal.cpp` `LoadRep`), `zlib` streams, and `MAX_DECODED_NODES` reference-bomb protection.
-- **`eve-machonet`:** `MachoPacket`, `MachoAddress`, `VersionExchange` (`build 360229`), and unauthenticated-by-default `SessionState`.
-- **`eve-sde`:** In-memory `SdeRegistry` with canonical attribute, ship, and solar-system definitions.
-- **`eve-dogma`:** 5-stage operator pipeline (`PreAssign` $\rightarrow$ `PreMul`/`PreDiv` $\rightarrow$ `ModAdd`/`ModSub` $\rightarrow$ `PostMul`/`PostDiv`/`PostPercent` $\rightarrow$ `PostAssign`), SDE operator mapping (`-1..=7`), `!stackable` Gaussian stacking penalty ($S(n) = e^{-(n/2.67)^2}$), and analytical capacitor/shield recharge curves.
-- **`eve-destiny`:** 1 Hz `Ballpark` with exponential sub-warp kinematics ($\tau = \frac{I \cdot M}{10^6}$), velocity-plane orbit tangents, and a 4-phase analytical warp integrator (`Aligning`, `Accelerating`, `Cruising`, `Decelerating`, `Stop`) with symmetric short-warp $v_{\text{peak}}$ and sub-warp dropout clamping.
-- **`eve-db`:** Transactional repository with fixed-point `IskCents`, `InventoryFlag`, optimistic concurrency (`expected_version`), `(character_id, idempotency_key)` scoping, and atomic pre-validated `undock_character` + `rollback_undock`.
-- **`eve-server` & `client-bridge`:** Dual TCP listeners (`26001` Bridge + `26000` `machoNet`), per-system 1 Hz actor tasks (`system_actor.rs`), bound-object ownership verification (`beyonce`, `dogmaIM`, `invbroker`, `stationSvc`), and a multithreaded Python client bridge (`evomu_bridge.py`).
+All mechanics, wire structures, service names, notification contracts, and mathematical equations in this plan are cross-referenced against four primary sources:
+1. **Installed Live EVE Online V24.01 Client (`/Applications/eve-online.app`, `build 3619879`):**
+   - `code.ccp` (`12,794` `.pyj` Python 2.7 bytecode modules) — disassembled via two-pass opcode analysis in [`tools/eve-indexer/index_server_logic.py`](./tools/eve-indexer/index_server_logic.py) to extract **193 active V24.01 `machoNet` remote services**, **1,311 `__notifyevents__`**, **135 Quasar Protobuf domains** (`69` `eve_public.*` public gateway domains + `66` `eve.*` internal domains across `1,455` `_pb2.pyj` files), **1,343 Dogma attribute constants & 305 Dogma effect constants** (`dogma/const.pyj`, including all `11` `dgmAss*` operators `-1..9` and `8` `dgmEff*` categories `0..7`), **39 V24.01 `DoDestinyUpdate` actions** (`michelle.pyj` & `spaceMgr.pyj`), and **98 Space Component classes** (`spacecomponents/common/componentConst.pyj`).
+   - `resfileindex.txt` — indexing **213 client-bundled static data archives** (`res:/staticdata/*.fsdbinary`, `*.static` SQLite3 databases, and `res:/localizationfsd/*.pickle`), including `missions.fsdbinary` (`1.28 MB`), `dungeons.fsdbinary` (`52.3 MB`), `epicarcs.fsdbinary` (`16.6 KB`), `nodegraphs.fsdbinary` (`8.25 MB`), `solarsystemcontent.static` (`92.3 MB` SQLite3), `blueprints.static`, `clonegrades.static` (`49,152 B` SQLite3), `dogmaattributes.fsdbinary` (`451,325 B`), `dogmaeffects.fsdbinary` (`877,864 B`), and `spacecomponentsbytype.fsdbinary` (`23.7 MB`).
+2. **Legacy Open-Source Reference (`EvEmu-Project/evemu_Crucible`):**
+   - Cross-referenced for historical C++ wire protocol structures (`EVEMarshalOpcodes.h`, `DestinyStructs.h` with **13 `DSTBALL_*` ball modes `0..12`**, `Destiny.xmlp` with **39 packet element definitions**, `AttributeEnum.h` NPC AI attributes, and `dgmEffects.sql.gz` / `dgmOperands.sql.gz` with **2,854 Crucible Dogma effects & 75 VM operands**), contributing **64 shared services** and **23 Crucible legacy-only services** (**216 cataloged `machoNet` services total**).
+3. **Local EVE University Wiki Knowledge Base (`~/ai/eve-wiki`):**
+   - **4,102 articles**, **161 LaTeX mathematical formulas across 38 mechanics articles**, **449 ship specification pages**, and **34 curated PvE/gameplay categories** indexed in [`docs/index/wiki_mechanics_catalog.json`](./docs/index/wiki_mechanics_catalog.json).
+4. **Public Community Static Data Exports:**
+   - **Fuzzwork SDE (`fuzzwork.co.uk/dump/`)**, **Everef (`everef.net`)**, and **Hoboleaks (`hoboleaks.space`)**.
 
 ---
 
-## 3. Phase 1: Exhaustive Server Logic Indexing Pipeline
+## 2. Current Foundation Status & Automated Indexing Architecture
 
-Before writing additional domain services by hand, the next engineering phase must build an **automated static analysis & indexing pipeline** (`tools/eve-indexer/` or `docs/index/`) that produces a complete, machine-readable specification of every server contract.
+### 2.1 Current Implementation vs. Planned Specification Scope
 
-### 3.1 Four-Source Extraction Methodology
+To maintain strict engineering transparency, the table below separates **what is already implemented in the repository (`Milestone M0`)** from **what is specified for Milestones `M1`–`M8`**:
 
-```mermaid
-flowchart LR
-    subgraph Sources ["Authoritative Input Sources"]
-        ClientPy["1. Decompiled EVE Client Python<br/>(client/, carbon/, eve/client/script/)"]
-        CrucibleCPP["2. evemu_Crucible C++ Repo<br/>(src/eve-server/, packets/*.xml)"]
-        SDEData["3. CCP Static Data Export<br/>(invTypes, dgmEffects, dgmExpressions)"]
-        LiveBridge["4. Runtime Bridge Gap Logger<br/>(logs/unimplemented_rpcs.jsonl)"]
-    end
+| Workspace Component | Source Files on Disk | Current `M0` Status | Planned `M1`–`M8` Expansion |
+|---|---|---|---|
+| **1. `crates/eve-proto`** | [`crates/eve-proto/src/lib.rs`](./crates/eve-proto/src/lib.rs) | **Implemented in `M0` *(Pending Rust Toolchain Verification)*:** JSON/MessagePack `BridgeEnvelope` + binary `eveMarshal` (`0x01`–`0x2C`), 195-entry `STRING_TABLE`, `PyPackedRow` zero-RLE (`0x2A`), `IndexRowset`, `TupleSet`, `DBRow`, `ObjectEx`, `save_count * 4` storage-index map, and `MAX_DECODED_NODES = 65_536`. | Add Quasar Protobuf schema decoders (`prost`) for the `69` `eve_public.*` + `66` `eve.*` domains (`M1`–`M8`). |
+| **2. `crates/eve-machonet`** | [`crates/eve-machonet/src/lib.rs`](./crates/eve-machonet/src/lib.rs) | **Implemented in `M0` *(Pending Rust Toolchain Verification)*:** `MachoPacket`, `MachoAddress`, `VersionExchange`, and `SessionState::compute_diff` (`SessionChangeNotification` `type=16` & `OnSessionChanged`). | Add multi-node service routing, bulk cache priming, and session-role bitmask enforcement (`M1`). |
+| **3. `crates/eve-sde`** | [`crates/eve-sde/src/lib.rs`](./crates/eve-sde/src/lib.rs) | **Implemented in `M0` *(Pending Rust Toolchain Verification)*:** Core `SdeRegistry` structs (`InvType`, `DogmaAttributeType`, `SolarSystem`, `StationInfo`) with canonical in-memory seed. | Ingest all `213` V24.01 `.static` (SQLite3) & `.fsdbinary` archives via `tools/eve-indexer` (`M1`). |
+| **4. `crates/eve-dogma`** | [`crates/eve-dogma/src/lib.rs`](./crates/eve-dogma/src/lib.rs) | **Implemented in `M0` *(Pending Rust Toolchain Verification)*:** 5-stage modifier pipeline (`-1..=9` incl. `PostPercentUnNerfed = 8` & `SpecialSkillRelationship = 9`), 0-indexed Gaussian stacking penalty $S(i) = e^{-(i/2.67)^2}$, and analytical Capacitor/Shield recharge ODEs. | Add 75-operand `dgmExpressions` VM, 3-rack overheating damage, active module capacitor cycling, and `dbuffcollections.static` command bursts (`M2`, `M5`). |
+| **5. `crates/eve-destiny`** | [`crates/eve-destiny/src/lib.rs`](./crates/eve-destiny/src/lib.rs) | **Implemented in `M0` *(Pending Rust Toolchain Verification)*:** 1.0 Hz `Ballpark`, exponential sub-warp align ($\tau = I\cdot M/10^6$), velocity-plane orbit tangents, 4-phase analytical warp integrator, `balls_in_bubble`, and binary `AddBalls` wire encoder (`DestinyStructs.h`). | Add turret/missile/Vorton/Breacher combat solver, drones/fighters, space components ECS, and Tier 1/Tier 2 NPC AI (`M2`, `M6`, `M7`). |
+| **6. `crates/eve-db`** | [`crates/eve-db/src/lib.rs`](./crates/eve-db/src/lib.rs) | **Implemented in `M0` *(Pending Rust Toolchain Verification)*:** Transactional in-memory `WorldRepository`, fixed-point `IskAmount(i64)` (`10,000` sub-units per `1.0000 ISK`), optimistic concurrency (`expected_version`), idempotency keys, and atomic `undock_character` + `rollback_undock`. | Add durable SQLite/PostgreSQL schema migrations (`accounts`, `characters`, `inventory`, `market_orders`, `contracts`, `industry_jobs`, `structures`) (`M1`–`M6`). |
+| **7. `crates/eve-server`** | [`main.rs`](./crates/eve-server/src/main.rs), [`router.rs`](./crates/eve-server/src/router.rs), [`system_actor.rs`](./crates/eve-server/src/system_actor.rs) | **Implemented in `M0` *(Pending Rust Toolchain Verification)*:** Dual TCP listeners (`26001` Bridge + `26000` `machoNet`), piggybacked `MachoBindObject`, `OnSessionChanged` push, 1 Hz `SystemActor`, and 19 RPC methods across 8 canonical services (`authentication`, `machoNet`, `charUnboundMgr`, `station`, `stationSvc`, `beyonce`, `dogmaIM`, `invbroker`). | Modularize into the 12 domain service modules (`crates/eve-server/src/services/*.rs`), `world_seeder/`, `living_world/`, `space_components/`, and `behaviors/` (`M1`–`M8`). |
+| **8. `client-bridge/` & `tools/eve-indexer/`** | [`evomu_bridge.py`](./client-bridge/evomu_bridge.py), [`index_server_logic.py`](./tools/eve-indexer/index_server_logic.py), [`verify_plan_mapping.py`](./tools/eve-indexer/verify_plan_mapping.py) | **Implemented & Verified on Host (`M0`):** 4-chokepoint Python Client Bridge (`RemoteSvc`, `ProxySvc`, `ScatterEvent`, `PublicGatewayShim`) passing `--self-test`, plus automated indexer & CI bijection verifier passing `--check`. | Add `extract_staticdata.py` `.static`/`.fsdbinary` converter and `thinclients/clientsetup.py` real-client E2E runner (`M1`–`M8`). |
 
-    subgraph Indexer ["Indexing & Cross-Reference Engine"]
-        ASTScanner["Python AST & Regex Scanner<br/>(RemoteSvc, Moniker, __notifyevents__)"]
-        XMLParser["Crucible Service & XML Packet Parser<br/>(PyCallable_DECL_CALL, .xml schemas)"]
-        DogmaAnalyzer["Dogma Effect & Expression Bytecode Indexer"]
-    end
-
-    subgraph Catalog ["Machine-Readable Parity Catalog (docs/index/)"]
-        RPCCatalog["rpc_service_catalog.json<br/>(All ~85 Services & ~900+ Methods)"]
-        EventCatalog["client_notifications.json<br/>(All __notifyevents__ & ScatterEvents)"]
-        DestinyCatalog["destiny_opcodes.json<br/>(All Ballpark & FX Updates)"]
-        ParityTracker["PARITY_MATRIX.md<br/>(Crucible vs. Client vs. EvoMu Status)"]
-    end
-
-    ClientPy --> ASTScanner
-    CrucibleCPP --> XMLParser
-    SDEData --> DogmaAnalyzer
-    LiveBridge --> ASTScanner
-    ASTScanner --> RPCCatalog
-    ASTScanner --> EventCatalog
-    XMLParser --> RPCCatalog
-    XMLParser --> DestinyCatalog
-    DogmaAnalyzer --> ParityTracker
-    RPCCatalog --> ParityTracker
-    EventCatalog --> ParityTracker
-    DestinyCatalog --> ParityTracker
-```
-
-### 3.2 What Must Be Indexed & How
-
-1. **Client Outbound RPC Calls (`docs/index/rpc_service_catalog.json`):**
-   - Scan decompiled client Python AST for:
-     - `sm.RemoteSvc('<service>').<Method>(...)`
-     - `sm.ProxySvc('<service>').<Method>(...)`
-     - `session.ConnectToRemoteService('<service>').<Method>(...)`
-     - `Moniker('<service>', <bindParams>).<Method>(...)` and `util.Moniker` subclasses (`GetStationInventory`, `GetShipAccess`, `GetPlanet`, `GetCorpRegistry`, etc.).
-   - For each call site, extract:
-     - `service_name`, `is_bound_moniker`, `bind_param_schema`
-     - `method_name`, positional `args`, keyword `kwargs`
-     - **Return value destructuring pattern** in the caller (e.g., `rowset = svc.GetOrders(...)`; `for row in rowset: row.price, row.volRemaining` — this automatically reveals the exact column names and types required in returned `KeyVal`/`Rowset`/`IndexRowset`/`DBRow` payloads!).
-2. **Server-to-Client Asynchronous Notifications (`docs/index/client_notifications.json`):**
-   - Scan all client Python classes for `__notifyevents__ = [...]` and `def On<EventName>(self, *args):`.
-   - Extract exact parameter signatures for every `On*` handler (`OnSessionChanged`, `OnItemChange`, `OnModuleAttributeChange`, `OnDamageStateChange`, `OnSpecialFX`, `OnLSC`, `OnSkillTrained`, `OnAccountChange`, `OnMarketOrderChanged`, etc.).
-3. **`evemu_Crucible` Reference Cross-Check (`docs/index/crucible_comparison.json`):**
-   - Parse every `PyCallable_DECL_CALL(<Method>)` and `PyCallable_REG_CALL(<Service>, <Method>)` across `evemu_Crucible/src/eve-server/`.
-   - Classify each method into one of four states:
-     - `ImplementedInCrucible` (working C++ logic available as reference)
-     - `StubbedInCrucible` (returns empty `PyNone` / dummy `Rowset` in C++)
-     - `BrokenInCrucible` (known bugs, crashes, or `TODO` comments in C++)
-     - `MissingInCrucible` (called by client Python code, completely absent from `evemu_Crucible`)
-4. **Dogma Effects & Expression VM Bytecode (`docs/index/dogma_effects.json`):**
-   - Index all rows in `dgmEffects` and `dgmExpressions` (`preExpression`, `postExpression`, `operandID` opcodes `1..75` in CCP's Dogma expression tree) and map them to `eve-dogma` `Modifier` edges or active effect handlers.
-5. **Destiny `DoDestinyUpdate` & `AddBalls` Schema (`docs/index/destiny_opcodes.json`):**
-   - Catalog every `DoDestinyUpdate` method invoked on `michelle`'s `Ballpark` (`AddBalls`, `AddBalls2`, `RemoveBalls`, `SetState`, `GotoDirection`, `GotoPoint`, `Orbit`, `FollowBall`, `WarpTo`, `SetBallMass`, `SetMaxSpeed`, `SetSpeedFraction`, `SetBallInteractive`, `SetBallFree`, `SetBallGlobal`, `SetBallTroll`, `SetBallHarmonic`, `OnSpecialFX`, `OnDamageStateChange`, `TerminalPlayDestructionEffect`).
+> **Important Note on `M0` Rust Toolchain Verification:**
+> Approximately `1,240` lines of Rust were added across `crates/eve-*` after commit `2c4c3f5` on a macOS workstation where `rustc`/`cargo` is not installed on `PATH`. While Python tooling (`evomu_bridge.py --self-test` and `verify_plan_mapping.py --check`) is verified directly on this host, **Milestone `M0` remains `IN PROGRESS — Pending Rust Toolchain Verification`** until `cargo build --workspace && cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings` is executed and passes on a machine or CI runner with the Rust toolchain installed.
 
 ---
 
-## 4. Complete EVE Server Subsystem & Service Taxonomy
+### 2.2 Automated Server-Logic Indexing Architecture (`tools/eve-indexer` & `docs/index/`)
 
-The following 14 domain categories encompass the complete server surface area to be indexed and implemented:
+[`tools/eve-indexer/index_server_logic.py`](./tools/eve-indexer/index_server_logic.py) deterministically generates 9 machine-readable and human-readable catalogs in [`docs/index/`](./docs/index/) that serve as the single source of truth for `EvoMu`:
 
-### Domain 1: Core Session, Authentication & Bootstrap
-| Service Name | Type | Core Responsibilities & Methods |
-| :--- | :--- | :--- |
-| `machoNet` | Core | `GetInitVals`, cluster service node resolution (`ResolveReq`), `MachoBindObject`, session state synchronization (`SessionInitialStateNotification`, `SessionChangeNotification`). |
-| `authentication` / `auth` | Unbound | `Login`, `Ping`, VIP key & queue checks, account role bitmask assignment (`ROLE_LOGIN`, `ROLE_PLAYER`, `ROLE_GML`, `ROLE_ADMIN`). |
-| `account` | Unbound | `GetCashBalance`, `GetEntryTypes`, `GetJournal`, `GetKeyMap`, `GiveCash`, `GiveCashFromCorpAccount`, AUR/PLEX transactions. |
-| `alert` / `clientStatsMgr` | Unbound | `BeanCount`, `SendClientStackTraceAlert`, `LogClientStats` (client error telemetry — must acknowledge cleanly and log). |
-| `config` | Unbound | `GetMultiOwnersEx`, `GetMultiLocationsEx`, `GetMultiAllianceShortNamesEx`, `GetMultiCorpTickerNamesEx`, `GetMap`, `GetMapOffices`, `GetStationSolarSystemsByOwner`. |
-| `objectCaching` | Unbound | `GetCachableObject` — serves versioned cached `PySubStream` objects (`config.BulkData.*`, station services, market groups). |
-
-### Domain 2: Character Creation, Selection, Skills & Clones
-| Service Name | Type | Core Responsibilities & Methods |
-| :--- | :--- | :--- |
-| `charUnboundMgr` | Unbound | `GetCharacterToSelect`, `GetCharactersToSelect`, `GetCharacterInfo`, `SelectCharacterID`, `ValidateNameEx`, `CreateCharacterWithDoll`, `DeleteCharacter`, `PrepareCharacterForDelete`. |
-| `charMgr` | Unbound | `GetPublicInfo`, `GetPublicInfo3`, `GetPrivateInfo`, `GetTopBounties`, `AddToBounty`, `GetCloneTypeID`, `GetHomeStation`, `SetCharacterDescription`, `GetNote`, `SetNote`. |
-| `paperDollServer` | Unbound | `GetPaperDollData`, `UpdateExistingCharacterFull`, `GetMyPaperDollData` (3D character portrait/body sculpt data). |
-| `skillMgr` | Bound | `GetSkillQueueAndFreePoints`, `SaveSkillQueue`, `CharStartTrainingSkillByTypeID`, `CharStopTrainingSkill`, `GetRespecInfo`, `RespecCharacter`, `InjectSkillIntoBrain`. |
-| `certificateMgr` | Unbound | `GetMyCertificates`, `GetCertificateCategories`, `GrantCertificate`, `UpdateCertificateFlags`, `BatchCertificateGrant`. |
-| `jumpCloneSvc` | Bound | `GetCloneState`, `InstallCloneInStation`, `GetPriceForClone`, `DestroyInstalledClone`, `CloneJump`. |
-
-### Domain 3: Inventory, Ship Fitting & Dogma Instance Manager
-| Service Name | Type | Core Responsibilities & Methods |
-| :--- | :--- | :--- |
-| `invbroker` | Bound (Location) | `GetInventoryFromId`, `GetInventory` (`flagHangar`, `flagCargo`, `flagDroneBay`, `flagCorpSAG1..7`), `List`, `Add`, `MultiAdd`, `Merge`, `StackAll`, `Split`, `SetLabel`, `TrashItems`, `AssembleCargoContainer`. |
-| `dogmaIM` / `dogma` | Bound (Location) | `GetAllInfo` (`charInfo`, `shipInfo`, `shipModifiedCharAttribs`, `shipState`), `GetLocationInfo`, `GetCharacterBaseAttributes`, `Activate`, `Deactivate`, `Overload`, `StopOverload`, `RepairModule`, `ChangeAmmo`, `FitItem`, `UnfitItem`, `SetModuleOnline`. |
-| `ship` | Bound (System/Station) | `Board`, `BoardStoredShip`, `LeaveShip`, `Eject`, `AssembleShip`, `RepackageShip`, `Jettison`, `Scoop`, `ScoopDrone`. |
-| `insuranceSvc` | Bound (Station) | `GetContracts`, `GetInsurancePrice`, `InsureShip`, `UnInsureShip`. |
-| `repairSvc` | Bound (Station) | `GetDamageReports`, `DamageModules`, `RepairItems`, `RepairAll`. |
-| `reprocessingSvc` | Bound (Station) | `GetReprocessingInfo`, `GetQuotes`, `Reprocess`. |
-
-### Domain 4: Station Services, Docking & Medical
-| Service Name | Type | Core Responsibilities & Methods |
-| :--- | :--- | :--- |
-| `stationSvc` | Unbound | `GetStation`, `GetSolarSystem`, `GetStationItemBits`, `Undock`. |
-| `station` | Bound (Station) | `GetGuests`, `GetTechTree`. |
-| `medical` / `cloneMgr` | Bound (Station) | `GetMedical`, `SetHomeStation`, `UpgradeClone`, `ActivateClone` (pod death respawn flow). |
-| `corpStationMgr` | Bound (Station) | `GetCorporateStationInfo`, `GetNumberOfUnrentedOffices`, `GetQuoteForRentingAnOffice`, `RentOffice`, `MoveCorpHQHere`, `SetCloneTypeID`. |
-
-### Domain 5: Solar System Simulation, Destiny Physics & Navigation
-| Service Name | Type | Core Responsibilities & Methods |
-| :--- | :--- | :--- |
-| `beyonce` | Bound (SolarSystem) | `GetFormations`, `GotoDirection`, `GotoPoint`, `AlignTo`, `WarpToStuff`, `WarpToStuffAutopilot`, `Orbit`, `CmdFollowBall`, `Stop`, `SetSpeedFraction`, `Dock`, `StargateJump`, `UpdateStateRequest`. |
-| `map` | Unbound | `GetSolarSystemPseudoSecurities`, `GetStationCount`, `GetHistory`, `GetDynamicSystemInfo`, `GetStuckSystems`, `GetBeaconCount`. |
-| `bookmarkSvc` | Unbound | `GetBookmarks`, `BookmarkLocation`, `DeleteBookmarks`, `UpdateBookmark`, `CopyBookmarks`. |
-| `wormholeMgr` | Bound (System) | `WormholeJump`, dynamic wormhole mass exhaustion & collapse lifecycle. |
-| `jumpbeaconsvc` | Unbound | Cynosural field & capital jump drive endpoints (`JumpToBeacon`, `GetFleetBeacons`). |
-
-### Domain 6: Combat, Targeting, Weapons, Drones & EWAR
-| Service Name | Type | Core Responsibilities & Methods |
-| :--- | :--- | :--- |
-| `target` / `dogmaIM` | Bound (System) | `AddTarget`, `RemoveTarget`, `ClearTargets`, `CancelAddTarget`, lock time calculation ($t_{\text{lock}} = \frac{40000}{\text{scanRes} \cdot \text{arsinh}^2(\text{sigRadius})}$), max locked targets. |
-| `combat` (Internal Actor) | System Actor | Turret tracking & hit-quality math ($\text{ChanceToHit} = 0.5^{\left(\frac{\omega_{\text{trans}} \cdot 40000}{\text{tracking} \cdot \text{sigRadius}}\right)^2 + \left(\frac{\max(0, d - \text{optimal})}{\text{falloff}}\right)^2}$), missile flight & explosion velocity/radius damage formula, shield/armor/hull resistance application, pod ejection on hull breach, wreck & `entity_loot` generation. |
-| `entity` (Drone Control) | Bound (System) | `CmdLaunchDrones`, `CmdEngage`, `CmdReturnBay`, `CmdReturnAndOrbit`, `CmdAbandonDrone`, `CmdAssist`, `CmdGuard`, `CmdMine`, `CmdSalvage`. |
-
-### Domain 7: Market, Wallet & Contracts
-| Service Name | Type | Core Responsibilities & Methods |
-| :--- | :--- | :--- |
-| `marketProxy` | Unbound | `GetMarketGroups`, `GetStationAsks`, `GetSystemAsks`, `GetRegionBest`, `GetOrders`, `GetOldPriceHistory`, `GetNewPriceHistory`, `PlaceCharOrder`, `ModifyCharOrder`, `CancelCharOrder`, `GetCharOrders`, `GetCorporationOrders`, `GetMarketESCROW`. |
-| `contractMgr` / `contractProxy` | Unbound | `GetContractListForOwner`, `GetItemsInContainer`, `CreateContract`, `AcceptContract`, `DeleteContract`, `SplitStack`, `FinishAuction`, `PlaceBid`, `CollectMyPageInfo`, `SearchContracts`. |
-
-### Domain 8: Corporations, Alliances, Standings & Faction Warfare
-| Service Name | Type | Core Responsibilities & Methods |
-| :--- | :--- | :--- |
-| `corporationSvc` / `corpmgr` | Unbound / Bound | `GetCorporation`, `GetCorporations`, `CreateAlliance`, `UpdateCorporationAbilities`, `GetMember`, `GetMembers`, `UpdateMember`, `ExecuteActions`, `GetRoleGrouping`, `GetTitles`, `UpdateTitle`, `CanLeaveCurrentCorporation`, `ApplyForMembership`. |
-| `allianceRegistry` | Bound | `GetAlliance`, `GetAllianceMembers`, `DeclareWarAgainst`, `ChangeMutualWarFlag`, `GetWars`, `GetRelationship`. |
-| `standing2` | Unbound | `GetMyKillRights`, `GetNPCStandings`, `GetCharStandings`, `GetCorpStandings`, `GetStandingTransactions`, `SetPlayerStanding`, `SetCorpStanding`. |
-| `facWarMgr` | Unbound | `GetFactionalWarStatus`, `GetWarFactions`, `GetSystemStatus`, `JoinFactionAsCharacter`, `LeaveFactionAsCharacter`, `GetCharacterRankInfo`. |
-
-### Domain 9: Chat (`LSC`), Mail & Notifications
-| Service Name | Type | Core Responsibilities & Methods |
-| :--- | :--- | :--- |
-| `LSC` (Large Scale Chat) | Unbound | `GetChannels`, `JoinChannels`, `LeaveChannels`, `SendMessage`, `CreateChannel`, `Configure`, `DestroyChannel`, `Invite`, `AccessControl` (Local solar-system channel auto-join on system change, Corp/Alliance channels). |
-| `mailMgr` | Unbound | `MoveToTrash`, `MoveFromTrash`, `MarkAsRead`, `MarkAsUnread`, `DeleteMail`, `GetMailHeaders`, `GetBody`, `SendMail`, `SyncMail`, `GetLabels`, `CreateLabel`. |
-| `notificationMgr` | Unbound | `GetByGroupID`, `GetAllNotifications`, `GetAllFormattedNotifications`, `MarkAsRead`. |
-
-### Domain 10: Agents, Missions, LP Store & NPC AI
-| Service Name | Type | Core Responsibilities & Methods |
-| :--- | :--- | :--- |
-| `agentMgr` | Bound (Agent) | `GetAgents`, `GetAgentByID`, `GetInfoServiceDetails`, `DoAction`, `GetEntryPoint`, `GetMissionBriefingInfo`, `GetMissionKeywords`, `GetMyJournalDetails`, `GetMyEpicJournalDetails`. |
-| `lpstore` | Unbound | `GetLPForCharacterCorp`, `GetAvailableOffers`, `TakeOffer`. |
-| `dungeon` / `spawnMgr` | System Actor | Belt rat spawning, deadspace complexes, acceleration gates, mission room triggers, NPC aggro/orbit/weapon AI ticks. |
-
-### Domain 11: Industry, Science, Manufacturing & Planetary Interaction
-| Service Name | Type | Core Responsibilities & Methods |
-| :--- | :--- | :--- |
-| `ramProxy` | Unbound | `GetJobs2`, `GetRelevantCharSkills`, `InstallJob`, `CompleteJob`, `AbortJob`, `GetAssemblyLines`, `GetAssemblyLinesSelect` (Manufacturing, ME/TE Research, Copying, Invention). |
-| `planetMgr` / `planetBase` | Bound (Planet) | `GetPlanetsForChar`, `GetPlanetInfo`, `GetColonyForCharacter`, `UserNetworkCommand` (Extractors, Processors, Launchpads, Customs Office `planetOrbitalRegistryBroker`). |
-
-### Domain 12: Fleet, Watchlist & Broadcasts
-| Service Name | Type | Core Responsibilities & Methods |
-| :--- | :--- | :--- |
-| `fleetObjectHandler` / `fleetMgr` | Bound (Fleet) | `CreateFleet`, `Init`, `Invite`, `AcceptInvite`, `LeaveFleet`, `KickMember`, `MoveMember`, `CreateWing`, `DeleteWing`, `CreateSquad`, `DeleteSquad`, `SetBooster`, `SendBroadcast`, `AddToWatchlist`, `GetFleetAds`, `RegisterForDamageUpdates`. |
-
-### Domain 13: Exploration, Scanning & Cosmic Anomalies
-| Service Name | Type | Core Responsibilities & Methods |
-| :--- | :--- | :--- |
-| `scanSvc` | Bound (System) | `GetSystemAnomalies`, `RequestScans`, `ConeScan` (Directional Scanner / D-Scan), Probe Launcher tri-lateration math, Hacking/Archaeology/Salvaging mini-game triggers. |
-
-### Domain 14: Starbases (POS) & Sovereignty
-| Service Name | Type | Core Responsibilities & Methods |
-| :--- | :--- | :--- |
-| `posMgr` | Bound (System) | `AnchorOrbital`, `UnanchorOrbital`, `GetControlTowerFuelRequirements`, `SetTowerPassword`, force-field harmonic state (`SetBallHarmonic`), strontium reinforcement timers. |
-| `sovMgr` | Unbound | `GetSystemSovereigntyInfo`, `GetContestedState`, Territorial Claim Units (TCU), Infrastructure Hubs (IHub), Station Services outposts. |
+| Catalog Artifact | Source Evidence | Exact Indexed Count (Verified by `verify_plan_mapping.py --check`) |
+|---|---|---|
+| [`docs/index/rpc_service_catalog.json`](./docs/index/rpc_service_catalog.json) | V24.01 `code.ccp` bytecode disassembly (`RemoteSvc`, `ProxySvc`, `ConnectToRemoteService`, `Moniker`, `eveMoniker.Get*`), `evemu_Crucible` `this->Add(...)`, and `EvoMu` `router.rs` | **`216` cataloged `machoNet` services** (`193` V24.01 active + `23` `evemu_Crucible` legacy-only; `0` un-evidenced keys) |
+| [`docs/index/crucible_comparison.json`](./docs/index/crucible_comparison.json) | Cross-reference of V24.01 vs. `evemu_Crucible` + Quasar `eve_public` vs. `eve` internal split + `EvoMu` `router.rs` | **`64` shared (`both_v24_and_crucible`) + `129` V24.01-only + `23` Crucible legacy-only = `216` services**; **`8` `EvoMu` services touched / `19` RPC methods implemented** |
+| [`docs/index/client_notifications.json`](./docs/index/client_notifications.json) | Every client-subscribed `__notifyevents__` (`On*`, `Do*`, `Process*`) in `code.ccp` | **`1,311` unique server-to-client notification events** |
+| [`docs/index/quasar_protobuf_catalog.json`](./docs/index/quasar_protobuf_catalog.json) | `eveProto/generated/` Protobuf descriptors in V24.01 `code.ccp` | **`135` Quasar Protobuf domains** (**`69` `eve_public.*`** public gateway domains + **`66` `eve.*`** internal domains across **`1,455` `_pb2.pyj` files**) |
+| [`docs/index/staticdata_catalog.json`](./docs/index/staticdata_catalog.json) | V24.01 `resfileindex.txt` (`res:/staticdata/` & `res:/localizationfsd/`) | **`213` static data archives** (`.fsdbinary`, `.static` SQLite3, `.pickle`) |
+| [`docs/index/dogma_effects.json`](./docs/index/dogma_effects.json) | `evemu_Crucible` `dgmEffects.sql.gz` & `dgmOperands.sql.gz` + V24.01 `dogma/const.pyj` | **`2,854` Crucible Dogma effects** (V24.01 uses `res:/staticdata/dogmaeffects.fsdbinary`), **`75` VM operands**, **`1,343` attribute constants**, **`305` effect constants**, and **`19` `dgmAss*`/`dgmEff*` operator/category constants** |
+| [`docs/index/destiny_opcodes.json`](./docs/index/destiny_opcodes.json) | `evemu_Crucible` `Destiny.xmlp` & `DestinyStructs.h` + V24.01 `michelle.pyj` & `spaceMgr.pyj` | **`39` `Destiny.xmlp` packet definitions**, **`13` `DSTBALL_*` ball modes (`0..12`)**, and **`39` V24.01 `DoDestinyUpdate` actions** |
+| [`docs/index/wiki_mechanics_catalog.json`](./docs/index/wiki_mechanics_catalog.json) | Local `~/ai/eve-wiki` (`catalog.json` + `articles/*.md`) | **`4,102` articles**, **`161` LaTeX formulas across `38` mechanics articles**, **`449` ship spec pages**, and **`34` curated PvE categories** |
+| [`docs/index/PARITY_MATRIX.md`](./docs/index/PARITY_MATRIX.md) | Domain-by-domain comparison of V24.01 Client vs. `evemu_Crucible` vs. `EvoMu` | **14-domain executive comparison & static data guide** |
 
 ---
 
-## 5. Step-by-Step Execution Plan for the Next Agent
+## 3. Deep-Dive Technical Specification of All Core Game Systems (`docs/spec/`)
 
-### Step 1: Build the Automated Indexer (`tools/eve-indexer`)
-1. Clone or point at local reference repositories:
-   - `evemu_Crucible` (reference C++ server & XML packet specs).
-   - Extracted/decompiled EVE client Python scripts (if present locally, or fetch reference client service interfaces).
-2. Create a Rust binary crate `crates/eve-indexer` (or Python script `tools/index_server_logic.py`) that scans all service definitions, XML packets, and client `RemoteSvc` / `Moniker` / `__notifyevents__` signatures and writes:
-   - `docs/index/services_index.json`
-   - `docs/index/packets_and_rowsets.json`
-   - `docs/index/PARITY_MATRIX.md`
+To keep this master plan concise while preserving 100% mathematical, schema, and behavioral detail, the deep-dive technical specifications for Sections `3.1` through `3.11` are organized into **5 modular specification documents under [`docs/spec/`](./docs/spec/)**, summarized below and followed by the complete **216-Service / 135-Domain Master Mapping Table (`Section 3.12`)**:
 
-### Step 2: SQLx Durable Persistence & Full SDE Importer (`eve-db`, `eve-sde`)
-1. Add SQLite / PostgreSQL migrations (`crates/eve-db/migrations/`) backing `accounts`, `characters`, `character_skills`, `skill_queue`, `inventory_items`, `item_attributes`, `market_orders`, `wallet_journal`, `corporations`, `mails`, and `bookmarks`.
-2. Expand `eve-sde` to load the full SDE (`invTypes`, `dgmAttributeTypes`, `dgmEffects`, `dgmTypeAttributes`, `dgmTypeEffects`, `mapSolarSystems`, `mapSolarSystemJumps`, `staStations`) with an `rkyv`/`bincode` pre-compiled cache for `<100ms` server startup.
+| Deep-Dive Spec Document | Covered Sections | Key Mechanics, Data Sources & Equations Specified |
+|---|---|---|
+| **[`docs/spec/01_session_world_inventory.md`](./docs/spec/01_session_world_inventory.md)** | **`§3.1`–`§3.5`** | **Character Creation, Skills, Clone Grades, Ships & 18-Domain Overview:** 4 Empires + 12 Bloodlines + 36 Ancestries + 12 Schools (`corpID 1000044..1000172`, `schoolID 11..22` in `schools.fsdbinary`), Corvettes (`588, 596, 601, 606`), `99` starting neural points, exact SP formula $\text{SP}(L, R) = \lceil 250 \cdot R \cdot (\sqrt{32})^{L-1} \rceil$, Alpha/Omega caps (`res:/staticdata/clonegrades.static`, `CLONE_STATE_ALPHA_MAX_TRAINING_SP = 5,000,000`), T3 Tactical Modes & 4-Subsystem refitting, Abyssal Mutaplasmids (`dynamicItemService`), `trademgr` (`pvptradesvc.pyj` `InitiateTrade` + bound `tradeSession` moniker), Vorton Projectors (`attributeLightningWeaponTargetAmount = 2104`, up to `9` additional targets = `10` total within `10 km`), CONCORD response timing table (`CONCORD.md:70-82`), and Frigate Escape Bay hulls (Battleships, Marauders, Black Ops, Rorqual). |
+| **[`docs/spec/02_dogma_destiny_combat.md`](./docs/spec/02_dogma_destiny_combat.md)** | **`§3.6`** | **Canonical Mathematical Formulas Reference (`38` Mechanics Domains, `161` Equations):** 5-stage Dogma operator pipeline (`-1..=9` including `dgmAssPostPercentUnNerfed = 8` and `dgmAssSpecialSkillRelationship = 9`), 0-indexed stacking penalty $S(i) = e^{-(i/2.67)^2}$, analytical Capacitor/Shield recharge ODEs, 1 Hz sub-warp exponential kinematics ($\tau = I\cdot M / 10^6$), 4-phase symmetric short/long warp integrator, target lock time, turret tracking & wrecking shots ($\text{ hitRoll } < 0.01 \Rightarrow 3.0\times$, else $\text{hitRoll} + 0.4995$), missile DRF, per-rack overheating $P_{\text{heatDmg}}$, EWAR, reprocessing, and invention math. |
+| **[`docs/spec/03_economy_industry_social.md`](./docs/spec/03_economy_industry_social.md)** | **`§3.7` & `§3.11`** | **Comprehensive PvE/Structure Taxonomy & V24.01 Modern Feature Parity:** Cosmic Anomalies, DED `1/10`–`10/10` Complexes, Unrated Expeditions, Ghost Sites, Sleeper Caches, Sansha Incursions (`taleMgr`), Homefront Operations (`operationsManager`), C1–C6 Wormholes, T0–T6 Abyssal Deadspace, Upwell Structures (Full Power / Low Power / Abandoned `0`-timer `100%` loot drop + `100%` Quantum Core drop + 5-day `0.5%` / 20-day `15%` `structureAssetSafety`), all **`98` Space Component classes** (`spacecomponents/common/componentConst.pyj` `ALL_COMPONENTS`, `57` `.pyj` modules in `code.ccp`), Equinox Sovereignty (`orbitalSkyhook`, `sovHub`, `autoMoonMiner`), Pirate Insurgencies (`insurgencySolarsystem` Corruption/Suppression Stages `1–5`), Zarzakh (`6`-hour Emanation Lock), Freelance & Corp Projects (`corporationgoal`), and Paragon Hub / SKINR (`shipCosmeticsMgr`). |
+| **[`docs/spec/04_pve_narrative_dungeons.md`](./docs/spec/04_pve_narrative_dungeons.md)** | **`§3.8`** | **Storylines, Quests, Missions, Career Agents, 9 Epic Arcs & NPE Tutorial Engine:** `air_npe` (`NodeGraph 707` Act 1 & `NodeGraph 708` Act 2), **Exordium (`1.0` safe-sec)** starter constellations & one-time Empire Shipcasters (`starterShipcasterTravelMgr`), **20 Career Agent stations** (`5` tracks $\times 10$ missions = `50` missions), **AIR Career Program** (`res:/staticdata/careerpaths.fsdbinary` & `goals.fsdbinary`), **39 Dungeon Event/Trigger types** (`dungeons.fsdbinary`), **9 Epic Arcs** (`epicarcs.fsdbinary`: `29, 1, 20, 22, 23, 27, 28, 128, 132`), 16th-mission Storyline dispatcher + Derived Standings, Level 4 Anomic Burners, and COSMOS / Data Center / Circle agents. |
+| **[`docs/spec/05_living_world_and_ai.md`](./docs/spec/05_living_world_and_ai.md)** | **`§3.9`–`§3.10`** | **Universe Seeding, Autonomous Living Economy & Dual-Tier NPC AI:** `11:00 UTC` downtime seeding pipeline (`world_seeder/`), **Dual-Anchor Reference Price** $P_{\text{ref}}(\text{typeID}) = C_{\text{build}}(\text{typeID})$ (for blueprint-manufactured items) and $C_{\text{seed}}(\text{typeID})$ (for non-manufactured raw ores, faction/deadspace/officer loot, skillbooks, PLEX, and injectors) clamping autonomous Virtual Capsuleer Market Makers to $[0.50 \cdot P_{\text{ref}},\, 2.50 \cdot P_{\text{ref}}]$, dynamic `SCI`/`BRM`, all **45 `AttributeEnum.h` NPC AI attributes**, Tier 1 `NPCAI` + Tier 2 Behavior-Tree (`behaviors/` Diamond `♦` Mining Fleets, FOBs, Drifter `turboshield` + `750,000` Doomsday + Podding + Corpse Harvesting), and the **3-Tier Solar System LOD Benchmark Harness (`crates/eve-server/benches/lod_tick_bench.rs`)**. |
 
-### Step 3: Modularize `eve-server` into Domain Service Modules
-Refactor `crates/eve-server/src/router.rs` into trait-based domain modules under `crates/eve-server/src/services/`:
-- `services/auth.rs` (`authentication`, `machoNet`, `objectCaching`, `config`, `alert`)
-- `services/character.rs` (`charUnboundMgr`, `charMgr`, `paperDollServer`, `skillMgr`, `certificateMgr`, `jumpCloneSvc`)
-- `services/inventory.rs` (`invbroker`, `dogmaIM`, `ship`, `insuranceSvc`, `repairSvc`, `reprocessingSvc`)
-- `services/station.rs` (`stationSvc`, `station`, `medical`, `corpStationMgr`)
-- `services/space.rs` (`beyonce`, `map`, `bookmarkSvc`, `scanSvc`, `wormholeMgr`)
-- `services/market.rs` (`marketProxy`, `account`, `contractMgr`)
-- `services/social.rs` (`LSC`, `mailMgr`, `notificationMgr`, `corporationSvc`, `standing2`, `fleetMgr`)
-- `services/pve_industry.rs` (`agentMgr`, `lpstore`, `ramProxy`, `planetMgr`, `posMgr`, `sovMgr`)
+### Summary Index of Sections `3.1`–`3.11` (Full Text in `docs/spec/01..05_*.md`)
 
-### Step 4: Complete Space Simulation & Combat Loop (`eve-destiny`, `eve-dogma`)
-1. Add dynamic spatial grid partitioning (`Bubble` / `Grid` management, 250 km–8,000 km radius) to `eve-destiny`.
-2. Implement `StargateJump` with epoch-fenced cross-system actor handoffs and `Dock` with 2,500m docking perimeter verification.
-3. Implement target locking (`AddTarget`), weapon module activation cycles in `eve-dogma`, turret/missile damage calculation, shield/armor/hull damage state propagation (`OnDamageStateChange`), ship destruction (`TerminalPlayDestructionEffect`), pod spawning, and wreck/loot creation.
+- ### 3.1 Races, Bloodlines, Ancestries, Schools & Character Creation $\rightarrow$ [`docs/spec/01_session_world_inventory.md#31`](./docs/spec/01_session_world_inventory.md)
+- ### 3.2 Skills, Neural Attributes, Clone Grades (Alpha/Omega), Certificates, Mastery & Skill Plans $\rightarrow$ [`docs/spec/01_session_world_inventory.md#32`](./docs/spec/01_session_world_inventory.md)
+- ### 3.3 Ships, Hull Classes, Tech I/II/III, Tactical Modes, Subsystems, Capitals, Mutaplasmids & SKINR $\rightarrow$ [`docs/spec/01_session_world_inventory.md#33`](./docs/spec/01_session_world_inventory.md)
+- ### 3.4 Complete 18-Domain Server Architecture & Implementation Roadmap $\rightarrow$ [`docs/spec/01_session_world_inventory.md#34`](./docs/spec/01_session_world_inventory.md)
+- ### 3.5 Additional Subsystems Required for Full V24.01 Client Parity $\rightarrow$ [`docs/spec/01_session_world_inventory.md#35`](./docs/spec/01_session_world_inventory.md)
+- ### 3.6 Canonical Mathematical Formulas Reference (Extracted from `~/ai/eve-wiki` — 38 Mechanics Domains, 161 Equations) $\rightarrow$ [`docs/spec/02_dogma_destiny_combat.md#36`](./docs/spec/02_dogma_destiny_combat.md)
+- ### 3.7 Comprehensive PvE, Exploration, Incursion, Insurgency, Zarzakh & Structure Taxonomy $\rightarrow$ [`docs/spec/03_economy_industry_social.md#37`](./docs/spec/03_economy_industry_social.md)
+- ### 3.8 Complete Storylines, Quests, Missions, Career Agents, Epic Arcs, AIR Career Program & NPE Tutorial Engine Specification $\rightarrow$ [`docs/spec/04_pve_narrative_dungeons.md#38`](./docs/spec/04_pve_narrative_dungeons.md)
+- ### 3.9 Universe Seeding, Daily Downtime Lifecycle & Autonomous Living Market / Economy Engine $\rightarrow$ [`docs/spec/05_living_world_and_ai.md#39`](./docs/spec/05_living_world_and_ai.md)
+- ### 3.10 Complete NPC Taxonomy, Faction Profiles, Spawning Mechanics & Dual-Tier AI Engine (`eve-destiny` + `behaviors/`) $\rightarrow$ [`docs/spec/05_living_world_and_ai.md#310`](./docs/spec/05_living_world_and_ai.md)
+- ### 3.11 Complete V24.01 Modern Feature Parity Specification $\rightarrow$ [`docs/spec/03_economy_industry_social.md#311`](./docs/spec/03_economy_industry_social.md)
 
-### Step 5: Native Client Wire Adapters & MITM Proxy (`eve-proto`, `eve-machonet`)
-1. Implement `PyPackedRow` (`0x2A`) RLE zero-compressed byte packing using `DBRowDescriptor` schemas and binary `AddBalls` packing (`DestinyBinDump`) for unmodified Mode B clients.
-2. Add the `--mitm-proxy <upstream_addr>` mode to `eve-server` on port `26000` for live packet fixture capture and automated regression testing.
+---
+
+### 3.12 Complete 216-Service RPC (`193` V24.01 Active + `23` Crucible Legacy-Only) & 135-Domain Quasar Protobuf Master Mapping Table
+
+> **Automated Bijection Guarantee (`tools/eve-indexer/verify_plan_mapping.py --check`):**
+> This table is deterministically generated and CI-verified by [`tools/eve-indexer/verify_plan_mapping.py`](./tools/eve-indexer/verify_plan_mapping.py) against [`docs/index/rpc_service_catalog.json`](./docs/index/rpc_service_catalog.json) (`216` services: `193` V24.01 active + `23` `evemu_Crucible` legacy-only) and [`docs/index/quasar_protobuf_catalog.json`](./docs/index/quasar_protobuf_catalog.json) (`135` Quasar Protobuf domains: `69` `eve_public.*` public gateway domains + `66` `eve.*` internal domains across `1,455` `_pb2.pyj` files) with **0 invented names, 0 unmapped entries, and 0 duplicates**.
+
+| Domain Module (`crates/eve-server/src/services/`) | Assigned `machoNet` Remote Services & Monikers (`216` Cataloged: `193` V24.01 Active + `23` Crucible Legacy-Only) | Assigned Quasar Protobuf Domains (`135` Total: `69` `eve_public.*` + `66` `eve.*` Internal) |
+|---|---|---|
+| **1. `auth_cache.rs` *(Core Bus, Auth, Config, Caching, Telemetry & GM)*** | `alert`, `authentication`, `bannedwords`, `browserLockdownSvc`, `bulkMgr`, `cache`, `clientStatLogger`, `clientStatsMgr`, `config`, `debug`, `devToolsProvider`, `eveguard_report`, `eventLog`, `externalQueueMgr`, `i2`, `infoGatheringMgr`, `ingamereport`, `kiringMgr`, `languageSvc`, `loadService`, `localizationServer`, `lookupSvc`, `machoNet`, `multiLoginBlocker`, `objectCaching`, `onlineStatus`, `overviewPresetMgr`, `petitioner`, `photoUploadSvc`, `pingService`, `populationCap`, `publicQaToolsServer`, `securityMgr`, `serviceGatewayMgr`, `sessionMgr`, `sharedSettingsMgr`, `slash`, `survey`, `tcpRawProxyService`, `userSvc`, `voiceMgr`, `worldSpaceServer`, `zActionServer` (`43 services`) | `app`, `auth`, `botdetection`, `cdn`, `client`, `color`, `csat`, `debug`, `device`, `entitlement`, `eve`, `eve_public_root`, `graphics`, `id`, `idempotency`, `legacy`, `legal`, `localization`, `login`, `math`, `monolith`, `network`, `pii`, `presence`, `quasar`, `search`, `thirdpartyapi`, `ui`, `user`, `vanguard` |
+| **2. `character_skills.rs` *(Character Creation, PaperDoll, Clones, Skills & Progression)*** | `alphaInjectorMgr`, `certificateMgr`, `charMgr`, `charUnboundMgr`, `characterEnergyMgr`, `expertSystemMgr`, `home_station`, `jumpCloneSvc`, `milestoneMgr`, `monolithTaskTrackerMgr`, `nonDiminishingInjectionMgr`, `paperDollServer`, `skillMgr2`, `subscriptionMgr`, `voucher` (`15 services`) | `academy`, `achievement`, `ancestry`, `bloodline`, `career`, `character`, `implant`, `omega`, `owner`, `race`, `school`, `skill`, `starterspace` |
+| **3. `inventory_fitting.rs` *(Inventory, Dogma, Ships, Fitting, Mutaplasmids & Insurance)*** | `allianceFittingMgr`, `charFittingMgr`, `corpFittingMgr`, `crateService`, `dogmaIM`, `dynamicItemService`, `eject`, `encodedItems`, `insuranceSvc`, `invbroker`, `inventoryAssetHoldingMgr`, `itemLocking`, `repackagingSvc`, `repairSvc`, `ship`, `shipKillCounter`, `shipStanceMgr` (`17 services`) | `asset`, `assetholding`, `capacitor`, `container`, `dogma`, `effect`, `inventory`, `module`, `ship` |
+| **4. `station_structure.rs` *(Stations, Upwell Structures, Tethering, Asset Safety & POS)*** | `autoMoonMining`, `corpStationMgr`, `moonExtractions`, `posMgr`, `station`, `stationSvc`, `structure`, `structureAssetSafety`, `structureCargoDelivery`, `structureCompressionMgr`, `structureControl`, `structureCynoBeaconMgr`, `structureDeliveries`, `structureDeployment`, `structureDirectory`, `structureDocking`, `structureGuests`, `structureHangarViewMgr`, `structureJumpBridgeMgr`, `structureSettings`, `structureVulnerability` (`21 services`) | `moon`, `starbase`, `station`, `structure` |
+| **5. `space_destiny.rs` *(Destiny Physics, Warp, Jumps, Scanning, Wormholes, Filaments & Abyss)*** | `abyssalMgr`, `abyssal_content_manager`, `accessGroupBookmarkMgr`, `beyonce`, `bookmark`, `corpBookmarkMgr`, `hackingMgr`, `jumpTimers`, `map`, `movementServer`, `pvpFilamentMgr`, `randomJumpMgr`, `scanMgr`, `voidSpaceMgr`, `warpVectorMgr`, `wormholeMgr` (`16 services`) | `asteroidbelt`, `bookmark`, `bubble`, `constellation`, `deadspace`, `probe`, `region`, `solarsystem`, `space`, `spacecomponent`, `star`, `stargate`, `universe`, `wormhole` |
+| **6. `combat_crimewatch.rs` *(1 Hz Combat, Drones, Fighters, Doomsdays, CrimeWatch & Bounties)*** | `aggressionMgr`, `bountyProxy`, `crimewatch`, `entity`, `fighterMgr`, `killRightMgr`, `superWeaponMgr`, `warStatisticMgr` (`8 services`) | `ai`, `duel`, `fighter`, `killmail`, `npc`, `pirate`, `piratestronghold`, `pvp`, `securitystatus`, `tag` |
+| **7. `market_contracts.rs` *(Markets, Wallet, PLEX, Contracts, HyperNet, Trade & LP Stores)*** | `FastCheckoutService`, `LPStore`, `LPStoreMgr`, `LPSvc`, `account`, `billMgr`, `contextualOfferMgr`, `contractProxy`, `marketProxy`, `nes_intro`, `raffleMgr`, `raffleProxy`, `rewardMgr`, `storeManager`, `trademgr`, `vaultManager` (`16 services`) | `accounting`, `contextualoffer`, `contract`, `fulfillment`, `isk`, `loyaltypoints`, `market`, `payment`, `plex`, `raffle`, `store`, `vendors` |
+| **8. `industry_pi.rs` *(Blueprints, Manufacturing, Invention, Reprocessing, Compression & PI)*** | `blueprintManager`, `characterMiningLedger`, `colonyResourcesMgr`, `corpMiningLedger`, `facilityManager`, `factory`, `inSpaceCompressionMgr`, `industryManager`, `industryMonitor`, `miningScanMgr`, `planetBaseBroker`, `planetMgr`, `planetOrbitalRegistryBroker`, `ramProxy`, `reprocessingSvc` (`15 services`) | `blueprint`, `industry`, `ore`, `planet`, `planetinteraction` |
+| **9. `agents_missions.rs` *(Agents, Missions, NPE, Dungeons, Incursions, Homefronts & Epic Arcs)*** | `RWManager`, `activityMgr`, `agentMgr`, `air_npe`, `custom_agency_provider`, `dungeon`, `dungeonExplorationMgr`, `dungeonInstanceCacheMgr`, `encounterSpawnServer`, `epicArcStatus`, `keeper`, `missionMgr`, `missionTrackerMgr`, `node_graph`, `operationsManager`, `scenario`, `taleMgr`, `tutorialSvc` (`18 services`) | `agent`, `content`, `dailygoal`, `dungeon`, `epicarc`, `goal`, `mission`, `narrative`, `nodegraph`, `operation`, `opportunity`, `tale` |
+| **10. `social_corp_fleet.rs` *(Chat, Mail, Fleets, Corporations, Alliances, Standings & Wars)*** | `LSC`, `XmppChatMgr`, `allianceRegistry`, `calendarMgr`, `calendarProxy`, `chatAuthenticationService`, `corpRecProxy`, `corpRegistry`, `corpmgr`, `corporationSvc`, `fleetMgr`, `fleetObjectHandler`, `fleetProxy`, `mailMgr`, `mailingListsMgr`, `mutualWarInviteMgr`, `notificationMgr`, `peaceTreatyMgr`, `search`, `standingMgr`, `voteManager`, `warRegistry`, `warsInfoMgr` (`23 services`) | `acl`, `alliance`, `calendar`, `chat`, `contact`, `corporation`, `corporationgoal`, `fleet`, `freelance`, `mail`, `medal`, `membership`, `notification`, `standing`, `war` |
+| **11. `sov_fw_insurgency.rs` *(Sovereignty, Equinox, Faction Warfare, Insurgencies & Dynamic Bounties)*** | `devIndexManager`, `dynamicBountyMgr`, `dynamicResourceCacheMgr`, `essMgr`, `facWarMgr`, `fwCharacterEnlistmentMgr`, `fwVictoryPointMgr`, `fwWarzoneSolarsystem`, `insurgencySolarsystem`, `shipCasterLandingPadMgr`, `shipCasterLauncherMgr`, `shipcasterTravelMgr`, `solarsystemInterferenceMgr`, `sovMgr`, `starterShipcasterTravelMgr` (`15 services`) | `dynamicbountysystem`, `faction`, `factionwarfare`, `sovereignty` |
+| **12. `cosmetics_events.rs` *(SKINR, Paragon Hub, Project Discovery, Tournaments & Seasonal Events)*** | `ProjectDiscovery`, `communityTrackMgr`, `holoscreenMgr`, `loginCampaignManager`, `loginRewardFacilities`, `seasonManager`, `seasonalLoginCampaignManager`, `shipCosmeticsMgr`, `tourneyMgr` (`9 services`) | `battlepass`, `campaign`, `communitytrack`, `cosmetic`, `projectdiscovery`, `seasonalevent`, `tournament` |
+
+---
+
+## 4. Prioritized Vertical-Slice Milestones (`M0`–`M8`) & Step-by-Step Agent Handoff Plan
+
+Rather than deferring verification to monolithic end-stage tests, `EvoMu` is organized into **9 dependency-ordered vertical-slice Milestones (`M0` through `M8`)**. Each milestone defines both **Focused Unit & Service-Contract Test Gates** (testing individual Rust modules and RPC schemas in isolation) and **Full-Stack E2E Journey Gates (`Section 5.1`)**:
+
+### Milestone `M0`: Wire Protocol, Dual-Bus Bridge, Core Kinematics & Server-Logic Indexer (IN PROGRESS — Pending Rust Toolchain Verification)
+- **Deliverables:**
+  - `eve-proto` (`0x01`–`0x2C`, 195-entry string table, `PyPackedRow` RLE, `IndexRowset`, `TupleSet`, `DBRow`), `eve-machonet` (`SessionState::compute_diff`, `MachoPacket`), `eve-dogma` (5-stage stacking pipeline `-1..=9`, Cap/Shield ODEs), `eve-destiny` (1 Hz `Ballpark`, sub-warp align, 4-phase warp, `balls_in_bubble`, binary `encode_add_balls`), `eve-db` (transactional in-memory repo, `IskAmount`), `eve-server` (`26000`/`26001` listeners, piggybacked `MachoBindObject`, `OnSessionChanged`, gap logger), `client-bridge/evomu_bridge.py` (`PublicGatewayShim`), and `tools/eve-indexer` (`9` catalog artifacts in `docs/index/`).
+- **Exit Criteria:**
+  - **Host-Verified Python & Index Checks (Passing Now):**
+    - `/usr/bin/python3 client-bridge/evomu_bridge.py --self-test` passes (`0` errors).
+    - `/usr/bin/python3 tools/eve-indexer/verify_plan_mapping.py --check` passes (`216/216` services, `135/135` Quasar domains, `0` uncataloged prose tokens, `0` count mismatches, `0` broken links).
+  - **Pending Rust Toolchain Gate (Required to Close `M0`):**
+    - `cargo build --workspace && cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings` passes with `0` warnings across all 7 workspace crates.
+
+### Milestone `M1`: Playable Vertical Slice — StaticData Importer, Durable DB, Character Creation, Hangar & Space Navigation
+- **Deliverables:**
+  1. **StaticData Ingestion (`tools/eve-indexer/extract_staticdata.py` $\rightarrow$ `crates/eve-sde`):** Load `systems.static`, `jumps.static`, `solarsystemcontent.static`, `types.fsdbinary`, `typedogma.fsdbinary`, `races.fsdbinary`, `bloodlines.fsdbinary`, `ancestries.fsdbinary`, `schools.fsdbinary`, and `schoolmap.fsdbinary`.
+  2. **Durable SQLite/PostgreSQL Persistence (`crates/eve-db`):** Add migrations for `accounts`, `characters`, `character_skills`, `inventory_items`, and `stations`.
+  3. **Core Services (`services/auth_cache.rs`, `character_skills.rs`, `inventory_fitting.rs`, `station_structure.rs`, `space_destiny.rs`):** Implement `authentication`, `machoNet.GetInitVals`, `objectCaching`, `config`, `slash`, `charUnboundMgr.CreateCharacterWithDoll`, `invbroker.List`/`Add`/`StackAll`/`Split`, `stationSvc.Undock`, `beyonce` (`CmdGotoDirection`, `CmdOrbit`, `CmdWarpToPoint`, `CmdStargateJump` with cross-`SystemActor` handoff & 60s Gate Cloak), and `CmdDock` ($2,500\text{ m}$ perimeter check).
+- **Focused Unit & Contract Test Gates:**
+  - `cargo test -p eve-sde` (verifies `schools.fsdbinary` IDs `11..22` $\rightarrow$ `corpID 1000044..1000172`, Corvette `typeID` mapping, and stargate jump graph).
+  - `cargo test -p eve-db` (verifies durable SQLite migrations, optimistic concurrency `expected_version`, and atomic `undock_character` rollback).
+- **Full-Stack E2E Gates:** **`E2E-01`** and **`E2E-04`** pass over `TCP 26001` and `TCP 26000`.
+
+### Milestone `M2`: Ship Fitting, Skill Queue, 1 Hz Subcapital Combat, Drones/Fighters, Belt Rats, CrimeWatch & Kill Rights
+- **Deliverables:**
+  1. **Skills & Clones (`character_skills.rs`):** Implement `skillMgr2` (`GetSkillQueueAndFreePoints`, `SaveNewQueue`, real-time SP training tick, `InjectSkillIntoBrain`, Free SP, Skill Injectors/Extractors, Neural Remap) and `subscriptionMgr` (`clonegrades.static` Alpha/Omega effective skill clamping + `eve_public.omega`).
+  2. **Ship Fitting & Dogma (`inventory_fitting.rs`, `eve-dogma`):** Implement `ship.AssembleShip`/`Board`, `dogmaIM.FitItem`/`UnfitItem`/`SetModuleOnline`/`Activate`/`Deactivate`/`Overload` (CPU/Powergrid/Calibration checks, 3-rack overheating & burnout, T3 Tactical Destroyer modes, T3 Cruiser 4-Subsystem refitting, and Abyssal Mutaplasmids via `dynamicItemService`).
+  3. **1 Hz Combat, Drones, Fighters, Space Components, CrimeWatch & Kill Rights (`combat_crimewatch.rs`, `eve-destiny`):** Implement target lock timers (`AddTarget`), Turret tracking/wrecking shots, Missile DRF, Shield$\rightarrow$Armor$\rightarrow$Hull damage (`OnDamageStateChange`), Loot Fairy 50% roll + `wrecks.static` wreck spawning, Pod ejection & Medical Clone respawn,Hull Killmarks (`shipKillCounter`), Drones (`entity`), Carrier Fighters (`fighterMgr` + `fighterabilities.static`), core deployables (`Mobile Depot`, `MTU` `autoTractorBeam`/`autoLooter`), Tier 1 `NPCAI` belt rats (20-minute belt chaining), `crimewatch` (Suspect/Criminal flags + $6\text{s}–19\text{s}$ Highsec CONCORD response), and **30-day Kill Rights (`killRightMgr` — granted on criminal Highsec ship kills and Lowsec pod kills, activating a 15-minute Suspect flag)**.
+- **Focused Unit & Contract Test Gates:**
+  - `cargo test -p eve-dogma` (verifies `-1..=9` operator pipeline, 0-indexed stacking penalty, per-rack heat $P_{\text{heatDmg}}$, and CPU/PG validation).
+  - `cargo test -p eve-destiny` (verifies turret tracking/wrecking formula, missile DRF, `CONCORD.md` response timer table, and `killRightMgr` state machine).
+- **Full-Stack E2E Gates:** **`E2E-02`**, **`E2E-03`**, **`E2E-05`**, and **`E2E-06`** pass end-to-end.
+
+### Milestone `M3`: Regional Market Order Book, Direct Trade, Contracts, Mining, Compression, Reprocessing & Blueprint Industry
+- **Deliverables:**
+  1. **Market, Trade, Contracts & HyperNet (`market_contracts.rs`, `world_seeder/`):** Implement `marketProxy` (regional bid/ask order book, immediate vs. limit matching, Broker Fee, Relist Fee, Sales Tax, Escrow, OHLCV price history), NPC Market Seeding (Skillbooks, T1 BPOs, Quantum Cores, Blue/Red/Overseer loot sinks), `trademgr` (`InitiateTrade` + bound `tradeSession` moniker), `contractProxy` (Item Exchange, Courier, Auction), `raffleMgr`/`raffleProxy` (HyperNet Relay), and `LPStore`/`LPStoreMgr`/`LPSvc`.
+  2. **Mining, Reprocessing, Blueprints & PI (`industry_pi.rs`):** Implement asteroid/ice mining (`miningScanMgr`, crystal volatility, `characterMiningLedger`), `inSpaceCompressionMgr` / `structureCompressionMgr` (`compressibletypes.fsdbinary`), `reprocessingSvc` (`typematerials.fsdbinary`), `ramProxy` & `industryManager` (`blueprints.static` Manufacturing, ME/TE Research, Copying, Invention with Datacores/Decryptors, Reactions), and `planetMgr` (Planetary Industry colonies & POCO taxes).
+- **Focused Unit & Contract Test Gates:**
+  - `cargo test -p eve-server --test market_contracts_unit` (verifies fixed-point `IskAmount` order matching, broker/relist/tax math, `trademgr` atomic swap, and `contractProxy` escrow).
+  - `cargo test -p eve-server --test industry_reprocessing_unit` (verifies reprocessing yield, blueprint ME/TE formulas, and invention probability).
+- **Full-Stack E2E Gates:** **`E2E-07`** and **`E2E-08`** pass end-to-end.
+
+### Milestone `M4`: Narrative Engine — NPE Acts 1–2, Exordium, Career Agents, 39-Trigger Dungeons, Storylines, Epic Arcs & Incursions
+- **Deliverables:**
+  - Implement `agents_missions.rs` (`agentMgr`, `missionMgr`, `air_npe`, `dungeonExplorationMgr`, `taleMgr`, `operationsManager`, Quasar `eve_public.opportunity`, `eve_public.career`, `eve_public.dailygoal`) backed by `missions.fsdbinary`, `dungeons.fsdbinary` (all 39 room event triggers & acceleration gates), `epicarcs.fsdbinary` (all 9 Epic Arcs), `nodegraphs.fsdbinary` (AIR NPE Acts 1–2), Exordium (`1.0` safe-sec + one-time Shipcasters via `starterShipcasterTravelMgr`), 20 Career Agent stations, AIR Career Program (`careerpaths.fsdbinary` & `goals.fsdbinary`), 16th-mission Storyline dispatcher + Derived Standings, Level 4 Anomic Burners, COSMOS/Data Center/Circle agents, DED `1/10`–`10/10` + 4-stage Expeditions, Sansha Incursions (`taleMgr`), and Homefront Operations (`operationsManager`).
+- **Focused Unit & Contract Test Gates:**
+  - `cargo test -p eve-server --test dungeon_triggers_unit` (verifies all 39 `dunTrigger*`/`dunEvent*` state transitions and acceleration gate lock predicates).
+  - `cargo test -p eve-server --test standings_epicarc_unit` (verifies `standingMgr` asymptotic formula, Derived Standings exclusion for Career Agents, and 9 Epic Arc branching DAGs).
+- **Full-Stack E2E Gates:** **`E2E-09`** and **`E2E-14`** pass end-to-end.
+
+### Milestone `M5`: Social, `LSC` Chat, Mail, Shared Bookmarks, Fleets, Command Bursts, Corporations, Projects & Wars
+- **Deliverables:**
+  - Implement `social_corp_fleet.rs`: `LSC` & `XmppChatMgr` (Local/Corp/Alliance/Custom channels), `mailMgr`, `mailingListsMgr`, `notificationMgr`, `calendarMgr`, `bookmark`, `corpBookmarkMgr` & `accessGroupBookmarkMgr` (ACL shared folders via `eve_public.acl`), `fleetMgr` & `fleetObjectHandler` (Boss/Wing/Squad hierarchy, Fleet Warp, Watchlist, Command Bursts via `dbuffcollections.static`), `corporationSvc` & `corpRegistry` (7 divisions, roles/titles, medals, votes), `allianceRegistry`, `standingMgr`, `warRegistry`/`warsInfoMgr`/`mutualWarInviteMgr`/`peaceTreatyMgr` (War HQ & 14-day peace treaties), and `eve_public.freelance` / `eve_public.corporationgoal` (12 contribution types with automatic escrow payouts).
+- **Focused Unit & Contract Test Gates:**
+  - `cargo test -p eve-server --test fleet_dbuff_unit` (verifies fleet hierarchy, command burst `dbuffcollections.static` aggregation, and `LSC` channel ACLs).
+  - `cargo test -p eve-server --test corp_war_unit` (verifies 7-division wallet/hangar role bitmasks and War HQ vulnerability windows).
+- **Full-Stack E2E Gates:** **`E2E-10`** passes end-to-end.
+
+### Milestone `M6`: Upwell Structures, Space Components ECS, Equinox Sovereignty, Faction Warfare & Pirate Insurgencies
+- **Deliverables:**
+  - Implement `station_structure.rs` (`structureDocking`, `structureSettings`, `structureControl`, Tethering, Full/Low/Abandoned power states, mandatory Quantum Core 100% drop, 5-day/20-day `structureAssetSafety`, POS forcefields), `space_components/` (all `98` component classes in `spacecomponents/common/componentConst.pyj` mapped via `spacecomponentsbytype.fsdbinary`), and `sov_fw_insurgency.rs` (`sovMgr`, `orbitalSkyhook` reagent harvesting & 10-minute silo raiding, `autoMoonMiner` / `moonExtractions` Metenox Moon Drill, `mercenaryDen`, `essMgr` Main/Reserve Bank, `facWarMgr` + `fwCharacterEnlistmentMgr`, `insurgencySolarsystem` Corruption/Suppression Stages 1–5, Ambition Modifier, and Zarzakh Gate Toll + 6-hour Emanation Lock).
+- **Focused Unit & Contract Test Gates:**
+  - `cargo test -p eve-server --test structure_assetsafety_unit` (verifies Full/Low/Abandoned state transitions, Quantum Core drop, and 5-day `0.5%` / 20-day `15%` Asset Safety fees).
+  - `cargo test -p eve-server --test sov_insurgency_unit` (verifiesCorruption/Suppression Stages 1–5 rules, ESS reserve bank payouts, and Zarzakh 6-hour emanation lock).
+- **Full-Stack E2E Gates:** **`E2E-11`** and **`E2E-15`** pass end-to-end.
+
+### Milestone `M7`: Exploration, Probe Trilateration, Hacking, Wormholes, Abyssal, Special Weapons & Tier 2 Behavior-Tree AI
+- **Deliverables:**
+  - Implement `scanMgr` (`ConeScan` D-Scan & 8-probe 3D trilateration), `hackingMgr` (Rule of 6/8 hexagonal minigame, Ghost Sites, Sleeper Caches), `wormholeMgr` (C1–C6 weather, mass collapse, polarization), `abyssalMgr` & `voidSpaceMgr` (3-pocket 20-minute Abyssal Deadspace), Entropic Disintegrator spooling, EDENCOM Vorton 10-target arcing (`attributeLightningWeaponTargetAmount = 2104`), Deathless SCARAB Breacher Pod raw-HP DoT, Combat Boosters & side effects, Lowsec Clone Soldier Tags (`crimewatch`), 24 Named Pirate Officers, Capital NPC spawns, and the Tier 2 Rust Behavior-Tree + 6-Scope Blackboard AI (`behaviors/`: Diamond `♦` NPC Mining Operations & Threat-Scaled Response Fleets, Pirate FOBs, Autothysian Lancers, Drifter `turboshield` Overshield + `750,000` Doomsday + Podding + Corpse Harvesting, and Pochven).
+- **Focused Unit & Contract Test Gates:**
+  - `cargo test -p eve-server --test scanning_wormhole_unit` (verifies 8-probe 3D trilateration convergence, hacking graph Rule of 6/8, and wormhole mass collapse).
+  - `cargo test -p eve-server --test special_weapons_ai_unit` (verifies Vorton 10-target bounce rules, SCARAB raw-HP DoT cap, and Behavior-Tree blackboard transitions).
+- **Full-Stack E2E Gates:** **`E2E-12`**, **`E2E-13`**, and **`E2E-17`** pass end-to-end.
+
+### Milestone `M8`: Autonomous Living Economy Engine, *Catalyst* Phased Asteroid Fields, CRAB Beacons, Filaments, Titan Doomsdays & SKINR
+- **Deliverables:**
+  - Implement `living_world/` (`world_seeder` `11:00 UTC` downtime tick, Virtual Capsuleer Market Makers with Dual-Anchor $[0.50, 2.50] \times P_{\text{ref}}$ bounds covering both $C_{\text{build}}$ and $C_{\text{seed}}$, dynamic `SCI`/`BRM`, 3-tier LOD physical NPC Hauler convoys, and `crates/eve-server/benches/lod_tick_bench.rs`), *Catalyst* Phased Asteroid Fields (`Prismaticite`, `Mobile Phase Anchor` 100-energy Command Burst activation, Erratic Reprocessing & Unrefined Mineral Reactions), `CRAB` beacons (`characterEnergyMgr` CEQ & `solarsystemInterferenceMgr`), Travel/Pochven/Arena Filaments (`randomJumpMgr`, `pvpFilamentMgr`), Titan Doomsdays (`superWeaponMgr`), and `cosmetics_events.rs` (`shipCosmeticsMgr`, `ProjectDiscovery`, `seasonManager`, `seasonalLoginCampaignManager`, `tourneyMgr`).
+- **Focused Unit & Benchmark Gates:**
+  - `cargo test -p eve-server --test living_economy_unit` (verifies Dual-Anchor $C_{\text{build}}$/$C_{\text{seed}}$ price clamps, `SCI`/`BRM` feedback equations, and *Catalyst* Prismaticite reactions).
+  - `cargo bench --bench lod_tick_bench` (verifies `LOD0 < 2.0 ms/tick`, `LOD1 < 0.15 ms/tick`, and `LOD2 < 25 ms/pulse` across `8,035` systems).
+- **Full-Stack E2E Gates:** **`E2E-16`** and **`E2E-18`** pass, and the complete `E2E-01`..`E2E-18` suite passes across both Mode A (`TCP 26001`) and Mode B (`TCP 26000`).
+
+---
+
+## 5. Testing-First Engineering Mandate & Full End-to-End (E2E) Journey Suite
+
+`EvoMu` is built under a **Testing-First Mandate**: no domain service or state transition is considered complete until verified by:
+1. **Atomic & Formula Unit Tests** (verifying exact EVE math against the 161 `~/ai/eve-wiki` formulas, wire encoding, and edge-case rejection),
+2. **Client Bytecode Return-Schema Conformance Tests** (verifying that every returned `KeyVal`/`Rowset`/`IndexRowset` matches the attributes destructured by the V24.01 client in `code.ccp`),
+3. **3-Tier LOD Performance Benchmarks (`crates/eve-server/benches/lod_tick_bench.rs`)** (verifying tick latency and memory budgets across `5,431` K-space + `2,604` W-space solar systems),
+4. **Full End-to-End (E2E) Multi-Step Player Journey Tests** (exercising complete stateful user flows across multiple services, asynchronous `ServerEvent` / `OnSessionChanged` / `DoDestinyUpdate` notifications, and database transactions), and
+5. **Real V24.01 Client E2E Automation Tests** (running the actual EVE client binary via its built-in `/thinclient` and `svc.noddiTestRunner` hooks).
+
+### 5.1 The 18 Mandatory End-to-End (E2E) Stateful Journey Tests (`crates/eve-server/tests/e2e_journeys.rs` & `client-bridge/`)
+
+Each milestone `M1`–`M8` is gated by its corresponding multi-step stateful journeys over both **Mode A (`TCP 26001`)** and **Mode B (`TCP 26000` `machoNet`)**:
+
+| Journey ID | Milestone Gate | E2E Journey Name | Full Multi-Step Stateful Scenario & Verified Assertions |
+|---|---|---|---|
+| **E2E-01** | `M1` | **Account Bootstrap, Character Creation & Racial Seeding** | Connect unauthenticated $\rightarrow$ verify pre-login RPC rejection $\rightarrow$ `authentication.Login` $\rightarrow$ `ValidateNameEx` $\rightarrow$ `CreateCharacterWithDoll` (test all 4 Empires: Caldari/Minmatar/Amarr/Gallente and school IDs `11..22`) $\rightarrow$ `GetCharactersToSelect` $\rightarrow$ `SelectCharacterID` $\rightarrow$ assert `OnSessionChanged` (`userid`, `charid`, `corpid`, `stationid`, `solarsystemid2`, `shipid`) $\rightarrow$ assert racial Corvette (`Ibis`/`Reaper`/`Impairor`/`Velator`), Capsule (`670`), neural attributes (`99` points), and SDE-derived racial/school starter skills exist in `eve-db`. |
+| **E2E-02** | `M2` | **Skill Training Queue, Alpha/Omega Clone Grades, Injectors & Remap** | Docked character binds `skillMgr2` $\rightarrow$ `InjectSkillIntoBrain` $\rightarrow$ `SaveNewQueue` (queue 3 skills of Ranks 1, 2, 5; verify $\text{SP}(2, 2) = 2,829$) $\rightarrow$ advance virtual server clock $\rightarrow$ assert `OnSkillTrained` notification fires at exact $T = \frac{\Delta\text{SP}}{\text{Primary} + 0.5\cdot\text{Secondary}}$ $\rightarrow$ switch clone state to Alpha (`cloneGrade = 0` via `subscriptionMgr`) $\rightarrow$ assert `eve-dogma` clamps `effectiveSkillLevel` to `clonegrades.static` cap while preserving trained SP $\rightarrow$ apply `Skill Injector` & `ApplyFreeSkillPoints` (verify diminishing returns bracket). |
+| **E2E-03** | `M2` | **Hangar Inventory, Ship Boarding, Fitting, CPU/PG & Mutaplasmids** | Bind station `invbroker` with piggybacked `("List", (), {})` $\rightarrow$ `StackAll` & `Split` item stacks (verify optimistic concurrency & `OnItemChange` `ixQuantity`/`ixLocationID` transitions) $\rightarrow$ `ship.AssembleShip` & `Board` $\rightarrow$ `dogmaIM.FitItem` (fit High/Med/Low modules + Rigs + Ammo charges) $\rightarrow$ assert CPU/Powergrid/Calibration enforcement rejects over-fitting $\rightarrow$ assert `dogmaIM.GetAllInfo` reflects 5-stage (`-1..=9`) 0-indexed stacking-penalized attributes $\rightarrow$ test Tech III Tactical Destroyer mode switch (`shipStanceMgr`) & Strategic Cruiser 4-Subsystem refit $\rightarrow$ roll Abyssal Mutaplasmid (`dynamicItemService`) and verify custom item attributes persist. |
+| **E2E-04** | `M1` | **Undock, Sub-Warp Flight, 4-Phase Warp, Stargate Jump & Docking** | Call `stationSvc.Undock` $\rightarrow$ assert `OnSessionChanged` (`stationid -> None`, `solarsystemid -> 30000142`) $\rightarrow$ assert `AddBalls2` spawns ship with 30s undock invulnerability $\rightarrow$ bind `beyonce` $\rightarrow$ `CmdGotoDirection` & `CmdOrbit` (step 1 Hz ticks, verify exponential align $\tau = I\cdot M/10^6$ breaks invulnerability) $\rightarrow$ `CmdWarpToPoint` to Perimeter Stargate (verify capacitor deduction & 4-phase long/short warp dropout within $2,500\text{ m}$) $\rightarrow$ `CmdStargateJump` $\rightarrow$ assert atomic cross-actor transfer from Jita (`30000142`) to Perimeter (`30000144`), `OnSessionChanged`, and 60s Gate Cloak $\rightarrow$ warp to station & `CmdDock` (verify $2,500\text{ m}$ perimeter check and despawn). |
+| **E2E-05** | `M2` | **1 Hz Space Combat, Capacitor/Heat, EWAR, Wrecks, Podding, CrimeWatch & Kill Rights** | Spawn two player sessions (Attacker & Defender) in a 0.9 Highsec grid bubble $\rightarrow$ Attacker calls `AddTarget` (verify $t_{\text{lock}}$ delay before lock completes) $\rightarrow$ Attacker activates Overloaded Turret, Missile Launcher, and Warp Scrambler (`dogmaIM.Activate` / `Overload`) $\rightarrow$ step 1 Hz ticks $\rightarrow$ verify nonlinear capacitor drain/recharge, per-rack heat accumulation, `OnSpecialFX`, and `OnDamageStateChange` (Shield $\rightarrow$ Armor $\rightarrow$ Hull) $\rightarrow$ verify Defender's `CmdWarpToPoint` and `CmdDock` are blocked by Warp Scrambler & Weapons Timer $\rightarrow$ verify Highsec illegal aggression triggers `crimewatch` Criminal flag, security status penalty, and CONCORD spawn after $7\text{s}$ $\rightarrow$ when Defender hull hits $0$, verify `TerminalPlayDestructionEffect`, Loot Fairy 50% roll into spawned Wreck (`wrecks.static`), Insurance ISK payout, Hull Killmark increment (`shipKillCounter`), **30-day Kill Right (`killRightMgr.ActivateKillRight` $\rightarrow$ 15-min Suspect flag)**, and Defender ejection into Capsule (`typeID = 670`) $\rightarrow$ pod Defender and verify Medical Clone respawn at Home Station. |
+| **E2E-06** | `M2` | **Drones, Carrier Fighter Squadrons & Space Components (MTU / Mobile Depot)** | Launch 5 combat drones (`entity`, verify `droneBandwidth` limit) $\rightarrow$ `CmdEngage` target $\rightarrow$ verify drone orbit/attack ticks $\rightarrow$ `CmdReturnBay` $\rightarrow$ Launch Carrier Fighter Squadron (`fighterMgr`, activate 3 abilities from `fighterabilities.static`) $\rightarrow$ Deploy Mobile Tractor Unit (`spacecomponents`: `deploy` $\rightarrow$ $10\text{s}$ activation $\rightarrow$ `autoTractorBeam` pulls wreck at $1,000\text{ m/s}$ $\rightarrow$ `autoLooter` transfers loot into MTU `cargoBay` $\rightarrow$ `scoop` MTU and loot back to ship). |
+| **E2E-07** | `M3` | **Direct Player Trade, Regional Market Order Book, Contracts & HyperNet** | **Part A (Direct Trade):** Two players docked in Jita 4-4 open `trademgr.InitiateTrade` (`pvptradesvc.pyj`) $\rightarrow$ on the returned bound `tradeSession` moniker, Player A calls `Add` with PLEX and Player B calls `OfferMoney` with $5,000,000\text{ ISK}$ $\rightarrow$ both call `ToggleAccept` $\rightarrow$ verify atomic item + ISK swap and `OnAccountChange`.<br>**Part B (Market):** Player A places limit sell order (`PlaceCharOrder`, verify Broker Fee & Relist Fee deduction based on `BrokerRelations`, `AdvBrokerRelations`, & standings) $\rightarrow$ Player B places immediate buy order (`duration = 0`) $\rightarrow$ verify matching engine fills order at best price, deducts Sales Tax (`Accounting` skill), updates price history, and delivers item to Player B's hangar.<br>**Part C (Contracts & Raffles):** Create & accept Item Exchange, Auction, and Courier contracts (`contractProxy`) + create & complete an 8-ticket HyperNet Raffle (`raffleMgr` / `raffleProxy`). |
+| **E2E-08** | `M3` | **Mining, In-Space Compression, Reprocessing, Blueprints, Invention & PI** | Undock Mining Barge + Industrial Command Ship $\rightarrow$ scan asteroid with `miningScanMgr` $\rightarrow$ cycle Strip Miner (verify mining crystal volatility damage, cycle duration math, & `characterMiningLedger` entry) to harvest Veldspar $\rightarrow$ compress into Compressed Veldspar in space via `inSpaceCompressionMgr` (`compressibletypes.fsdbinary`) $\rightarrow$ dock & `reprocessingSvc.Reprocess` into Tritanium (verify skill/implant yield formula) $\rightarrow$ `ramProxy.InstallJob` / `industryManager` Manufacturing run using a 10% ME / 20% TE BPO (`blueprints.static`, verify EIV & SCI job fee) $\rightarrow$ run Copying (`activityID = 5`) to create BPC $\rightarrow$ run Invention (`activityID = 8`) with Datacores + Decryptor to produce Tech II BPC $\rightarrow$ deliver completed job item $\rightarrow$ place Extractor & Processor pins on a planet via `planetMgr` and export P2 commodity through POCO. |
+| **E2E-09** | `M4` | **NPE Storyline Tutorial, Exordium, Career Agents, Multi-Room Dungeons & Epic Arcs** | **Part A (AIR NPE & Exordium):** Query `air_npe.get_air_npe_state()` (`ACTIVE = 1`) $\rightarrow$ progress through Act 1 (`NodeGraph 707`, Checkpoints `12..30, 81`: forced ship loss & clone rebirth) and Act 2 (`NodeGraph 708`, Checkpoints `83..92`: Astero gate battle & stargate jump) $\rightarrow$ verify `OnAirNpeStateChanged(COMPLETED = 2)` $\rightarrow$ verify **Exordium (`1.0` safe-sec)** locks safety to Green, blocks Suspect/Criminal entry (`CantEnterExordiumWhileFlagged`), and allows one-time Empire Shipcaster transit (`starterShipcasterTravelMgr`).<br>**Part B (Career Agents & AIR Career Program):** Complete a 10-mission Career Agent chain (`agentTypeCareerAgent = 9`, `GetCompletedCareerAgentIDs()`, including `Soldier of Fortune` scripted ship sacrifice) $\rightarrow$ verify $+1.5\%$ Faction Standing with **zero negative Derived Standings**, 3-day AIR Expert System, and **AIR Career Program** (`eve_public.career` / `careerpaths.fsdbinary` & `goals.fsdbinary`) Career Points + $100\text{k SP}$ graduation reward.<br>**Part C (Standard Missions, 39 Dungeon Triggers & 9 Epic Arcs):** Bind Level 2 Security Agent (`eveMoniker.GetAgent`) $\rightarrow$ `InteractWithAgent(RequestMission)` & `GetMissionBriefingInfo()` (`missions.fsdbinary` keyword substitution) $\rightarrow$ `InteractWithAgent(Accept)` $\rightarrow$ warp to bookmark (`OnDungeonEntered`) $\rightarrow$ `SystemActor` instantiates `dungeons.fsdbinary` Room 1 $\rightarrow$ verify Acceleration Gate is locked while Room 1 `dunTriggerRoomWipedOut` / `dunTriggerExploding` triggers are pending $\rightarrow$ destroy Wave 1 $\rightarrow$ verify Wave 2 spawns and Gate unlocks $\rightarrow$ activate Gate (`CmdActivateGate`) to Room 2 $\rightarrow$ loot mission item (`dunTriggerItemInCargo`) $\rightarrow$ dock & `InteractWithAgent(Complete)` $\rightarrow$ verify ISK, security-scaled LP (`LPStore`), and `standingMgr` rewards $\rightarrow$ test branching **Epic Arc** (`epicArcStatus`, `OnEpicJournalChange`, 90-day cooldown) across *The Blood-Stained Stars* (`29`), *Fractured Legacy* (`128`), and *Vision of Greatness* (`132`). |
+| **E2E-10** | `M5` | **Social, LSC Chat, Mail, Fleets, Command Bursts, Corporations & Wars** | Player A creates Corporation (`corporationSvc`), configures 7 hangar/wallet divisions & titles $\rightarrow$ invites Player B (`ApplyForMembership`) $\rightarrow$ verify `LSC` auto-joins Corp & Local chat channels and broadcasts messages $\rightarrow$ send EVE Mail (`mailMgr`) & create ACL Shared Bookmark Folder (`accessGroupBookmarkMgr`) $\rightarrow$ form Fleet (`fleetMgr`) with Wing/Squad hierarchy $\rightarrow$ execute Fleet Warp (`CmdFleetWarp`) $\rightarrow$ activate Shield Command Burst in space (`dbuffcollections.static`) and verify AoE shield resistance buff on squadmates $\rightarrow$ declare mutual war (`warRegistry`) and verify legal Highsec engagement between warring corps. |
+| **E2E-11** | `M6` | **Upwell Structures, Tethering, Reinforcement, Equinox Sov Hubs & Skyhooks** | Anchor Upwell Citadel $\rightarrow$ verify `structureSettings` ACL permissions $\rightarrow$ undock from Citadel (`session.structureid -> None`) and verify automatic Upwell Tether (`linkWithShip` invulnerability + free module/armor/hull repair) $\rightarrow$ dock back at Citadel (`structureDocking.Dock`) $\rightarrow$ simulate hostile fleet attacking structure shield to 0% $\rightarrow$ verify `reinforce` component transitions structure into invulnerable reinforcement timer $\rightarrow$ test Asset Safety wrap (`structureAssetSafety`, 5-day $0.5\%$ same-system & 20-day $15\%$ NPC station delivery) $\rightarrow$ test Equinox `orbitalSkyhook` reagent harvesting and `sovHub` power/workforce allocation. |
+| **E2E-12** | `M7` | **Exploration, D-Scan, Probe Trilateration, Hacking, Wormholes & Abyssal** | Undock Exploration Frigate $\rightarrow$ run `scanMgr.ConeScan` (D-Scan) $\rightarrow$ launch 8 Core Scanner Probes & call `RequestScans` across 3 decreasing probe radii until Cosmic Signature reaches $100\%$ signal strength $\rightarrow$ warp to Relic Site & complete hexagonal node-graph Hacking minigame (`hackingMgr`, verifying Rule of 8, Rule of 6, Coherence, and Subsystems) $\rightarrow$ jump through Wormhole (`wormholeMgr.WormholeJump`) $\rightarrow$ verify C1–C6 weather system effects, ship mass deducted from wormhole stability, polarization timer applied, and wormhole collapses when mass reaches $0$ $\rightarrow$ activate Calm Exotic Filament (`abyssalMgr`) $\rightarrow$ clear 3 Abyssal Deadspace pockets before the 20-minute boundary/collapse timer expires. |
+| **E2E-13** | `M7` | **Special Weapons (Disintegrators, Vorton Projectors, Breacher Pods), Boosters & Overheating** | **Part A (Special Weapons):** Fire Triglavian Entropic Disintegrator across 10 consecutive cycles (verify per-cycle damage spool multiplier cap) $\rightarrow$ fire EDENCOM Vorton Projector at primary target surrounded by 12 ships within $10\text{ km}$ (verify missile-formula damage arcs from primary to up to 9 additional targets via `attributeLightningWeaponTargetAmount = 2104` within `attributeLightningWeaponTargetRange = 2105` of $10\text{ km}$ while respecting CrimeWatch safety) $\rightarrow$ fire Deathless SCARAB Breacher Pod at a target with active Assault Damage Control / Tether (verify $\min(\text{flat}, \text{pct raw HP})$ DoT bypasses resistances/invulnerability, only highest-DPS debuff ticks, and docking clears the DoT).<br>**Part B (Boosters & Heat):** Consume Strong Blue Pill combat booster (verify Slot 1 buff + side-effect probability/potency rolls modified by `Biology`, `Neurotoxin Control`, and `Neurotoxin Recovery`) $\rightarrow$ overload High-rack modules until per-rack slot ratio & heat $H(t)$ trigger distance-attenuated module burnout. |
+| **E2E-14** | `M4` | **Advanced PvE (Storyline 16th-Mission, Anomic Burners, COSMOS, DED Escalations, Incursions & Homefronts)** | Complete 16th regular faction mission $\rightarrow$ verify automatic Storyline Mission offer & Derived Standing propagation across all 20 factions $\rightarrow$ enter ship-restricted Level 4 Anomic Burner gate and defeat Burner Frigate AI $\rightarrow$ turn in Pirate Dog Tags at a Data Center Agent & complete a space-agent COSMOS mission $\rightarrow$ clear a Combat Anomaly trigger wave $\rightarrow$ verify 4-stage DED Expedition bookmark escalation and Overseer's Personal Effects drop $\rightarrow$ run a 10-pilot Highsec Sansha Incursion Vanguard site (`taleMgr`, $10,395,000\text{ ISK} + 1,400\text{ LP}$, plus test 11-pilot overstack payout decay) and defeat the Mothership (*The Kundalini Manifest*) to disburse the constellation LP bank $\rightarrow$ complete a 5-player Homefront Operation (`operationsManager`, *Emergency Aid* / *Raid*). |
+| **E2E-15** | `M6` | **Pirate Insurgencies (Corruption/Suppression 1–5), Zarzakh, Ghost Sites, Sleeper Caches, ESS & Skyhook Raiding** | **Part A (Insurgency & Zarzakh):** Advance an Insurgency system (`insurgencySolarsystem`) to **Corruption Stage 5** $\rightarrow$ verify Highsec ship aggression no longer triggers Criminal flag or CONCORD response, and Lowsec unlocks Interdiction Bubbles & Bombs $\rightarrow$ advance a system to **Suppression Stage 5** (verify Counter-Insurgency Sentry Guns & Corruption cap at Stage 4) $\rightarrow$ pay mass-based Gate Toll to enter **Zarzakh** $\rightarrow$ verify 6-hour **Emanation Lock** blocks exiting via the other 3 stargates while allowing exit via the **Deathless Shipcaster** (`shipCasterLauncherMgr`) to the Insurgency FOB.<br>**Part B (Ghost Sites, Sleeper Caches, ESS & Skyhook Theft):** Decloak in a Ghost Site (verify hidden explosion/rat timer & failed-hack can detonation) $\rightarrow$ traverse a Sleeper Cache hazard pocket $\rightarrow$ enter an **ESS** (`essMgr`) 75km deadspace bubble (verify Warp/MWD/MJD/Cloak disabled) and complete a 5-minute Main Bank link robbery + SCC Key Reserve Bank unlock $\rightarrow$ damage an **Orbital Skyhook** Reagent Silo to $\le 10\%$ shield during its 2-hour vulnerability window, maintain the 10-minute `linkWithShip` siphon ($1,000\text{ m/s}$ cap + 0m/2m/5m jump notifications), and loot the dropped Surplus Bay reagents. |
+| **E2E-16** | `M8` | **Universe Downtime Seeding, Living Market Maker AI, Dynamic SCI/BRM & NPC Hauler Convoys** | **Part A (Downtime & Seeding):** Trigger `world_seeder` bootstrap & `11:00 UTC` downtime tick $\rightarrow$ verify Asteroid Belts, Ice Belts, Cosmic Anomalies/Signatures, Jove Observatories, NPC Skillbooks (`basePrice` vs. $+30\%$ remote injection), T1 BPOs, Quantum Cores, and NPC Trade Goods are seeded $\rightarrow$ verify **Virtual Capsuleer Market Makers** (`ChaCha8Rng` seeded) populate two-sided order books within Dual-Anchor $[0.50, 2.50] \times P_{\text{ref}}$ ($C_{\text{build}}$ for manufactured items, $C_{\text{seed}}$ for non-manufactured items) and 365-day OHLCV price history in Jita 4-4.<br>**Part B (Living Economy & Convoys):** Player lists mined Tritanium & manufactured Caracal at fair market value $\rightarrow$ advance `living_world` tick $\rightarrow$ verify Virtual Industrialist/PvP agent purchases player order, updates regional `SCI` and `BRM`, and spawns a physical **NPC Hauler Convoy** (*Iteron Mark V*) that undocks, warps to stargate, jumps systems across `LOD1`/`LOD0` `SystemActor` tiers, and carries the manifest in its cargo hold. |
+| **E2E-17** | `M7` | **Dual-Tier NPC AI (`NPCAI` + `behaviors/`), Diamond (`♦`) Mining/FOB Fleets, Drifters, Pochven & Law Enforcement** | **Part A (Belt Chaining, Officers, Clone Soldiers & CONCORD):** Clear partial vs. full Nullsec belt spawn (verify 20-min chaining vs. full respawn, Hauler `100M ISK` mineral drop, 24 Officer & Capital Dreadnought spawn rolls) $\rightarrow$ destroy Lowsec **Clone Soldier Negotiator** ($0.1$ sec) and turn in Security Tag at CONCORD Security Office (`crimewatch.ProcessSecurityTagExchange`) to repair security status $\rightarrow$ test Highsec illegal aggression across $1.0\text{–}0.5$ systems and verify exact CONCORD response times across on-grid ($2\text{s}–9\text{s}$), fresh ($6\text{s}–19\text{s}$), and pulled ($11\text{s}–24\text{s}$) states.<br>**Part B (Behavior-Tree `♦` AI, FOBs & Drifters):** Attack an **NPC Mining Operation** in belt $\rightarrow$ verify miners post `HAULER_REQUESTED` / warp to combat-probable safespot while spawning a **Diamond (`♦`) Response Fleet** scaled to player fleet EHP within $375\text{ km}$ $\rightarrow$ verify Fleet Commander anchoring, promotion on Commander death, on-grid ping-warping, and neutral logi aggro (`MonitorAssistanceToGroupTargets`) $\rightarrow$ destroy a **Pirate Stronghold (`FOB`)** ($25\text{M–}30\text{M ISK}$ fleet payout) $\rightarrow$ attack **Apollo Tyrannos** Drifter Battleship $\rightarrow$ verify **Blue Overshield (`turboshield`)** depletion triggers **`750,000` omni Doomsday** (`superweapon.pyj`), **Pod Hunting (`AddCharacterForPodding`)**, and **Corpse Harvesting (`corpseharvesting.pyj`)**. |
+| **E2E-18** | `M8` | **Catalyst Phased Asteroid Fields (`Prismaticite`), CRAB Beacons, Filaments, Doomsdays, Abandoned Structures, Corp Projects & SKINR** | **Part A (Phased Fields & CRAB):** Warp Rorqual (`100` energy) to a **Phased Asteroid Field** $\rightarrow$ deploy & power **Mobile Phase Anchor** to $100$ energy $\rightarrow$ verify **Prismaticite** transitions from Phased-Out ($10\%$ yield) to Phased-In ($100\%$ yield) and spawns Rogue Drone waves $\rightarrow$ test both Erratic Reprocessing (random 1-of-8 mineral) and Standup Unrefined Mineral Reaction $\rightarrow$ deploy **CRAB Beacon** with Dreadnought (verify $2,160\text{ CEQ}$ deduction via `characterEnergyMgr`, 4-min link, 10-min defense waves, and `solarsystemInterferenceMgr` cap).<br>**Part B (Filaments, Doomsdays, Quantum Cores, Projects & SKINR):** Activate **Noise-5 ‘Needlejack’ Filament** (`randomJumpMgr`) to jump 5-ship fleet to Nullsec $\rightarrow$ fire Titan **Bosonic Field Generator** (`superWeaponMgr`) $\rightarrow$ transition an Upwell Astrahus through 7-day Low Power into **Abandoned State** and destroy it (verify 0 reinforcement timers, no Asset Safety, **100% loot drop**, and **100% Quantum Core drop**) $\rightarrow$ complete a **Freelance Corporation Project** (`eve_public.corporationgoal` automatic escrow payout) and sequence a custom ship skin in **SKINR** (`shipCosmeticsMgr`). |
+
+---
+
+### 5.2 Real V24.01 Client End-to-End (E2E) Testing Architecture
+
+Automated E2E tests can also be driven through the **installed EVE Online V24.01 client** (`/Applications/eve-online.app`) using two first-party QA/automation hooks present in `code.ccp`:
+
+1. **First-Party `/thinclient=HEADLESS` & `/thinclient=HEADED` Python Startup Hook (`autoexec_client_core.pyj` line 33):**
+   - At the beginning of `Startup()` in `autoexec_client_core.pyj`, before `ServiceManager` or network services initialize, the client checks `blue.pyos.GetArg()` for `/thinclient`:
+     - If `/thinclient=HEADLESS` is passed, it imports `thinclients.clientsetup` and calls `clientsetup.patch_all(clientsetup.HEADLESS)` (stubbing out 3D `trinity` rendering so the client logic runs headlessly in CI).
+     - If `/thinclient=HEADED` is passed, it calls `clientsetup.patch_all(clientsetup.HEADED)`, `clientsetup.enable_live_updates()`, and `clientsetup.install_commands()` while rendering the full 3D client window.
+   - *Technical Clarification:* Supplying a custom `thinclients/clientsetup.py` package that loads [`client-bridge/evomu_bridge.py`](./client-bridge/evomu_bridge.py) **does inject custom Python code into the client runtime process**, hooking `sm.RemoteSvc`, `sm.ProxySvc`, `sm.ScatterEvent`, and `publicGatewaySvc` (`Mode A`, `TCP 26001`). Its engineering advantage is that it uses the client's built-in `/thinclient` Python import hook rather than patching C++ Mach-O/PE binaries. For testing without any Python bridge hooks, `EvoMu` provides `Mode B` (`TCP 26000`), which speaks native binary `machoNet` / `eveMarshal` (`0x01`–`0x2C`).
+2. **First-Party `svc.noddiTestRunner` E2E Client Test Runner (`eve/client/script/environment/nodditestrunner.pyj` & `nodditests/client/runner.pyj`):**
+   - The V24.01 client includes a built-in E2E test orchestrator service (`svc.noddiTestRunner`) activated via command-line flags:
+     - `/select_character=<charID>` — listens for `OnCharacterSelectionViewEntered` and automatically calls `uicore.layer.charsel.TryEnterGame(charID, secondChoiceID=None, skipTutorial=True)`.
+     - `/noddi_test=<nodeGraphID_or_tag>` — listens for `OnGameViewEntered`, calls `wait_for_session_ready()`, executes a client `NodeGraph` (`sm.GetService('node_graph').StartClientNodeGraph(...)`), records `OnTestStarted` / `OnTestSucceeded` / `OnTestFailed` to `/test_report_folder=<dir>`, and
+     - `/noddi_close_at_completion` — automatically calls `uicore.cmd.DoQuitGame()` when the E2E run completes.
+3. **In-Client Automation Control Channel (`UITree` + Client Service Inspector):**
+   - Inside `thinclients/clientsetup.py` (`install_commands()`), a localhost automation socket inside the running client allows the test runner to:
+     - Drive client UI actions and service calls (`uicore.layer.charsel`, `sm.GetService('station').Undock()`, `sm.GetService('menu').StargateJump(...)`, `sm.GetService('invCache')`, `sm.GetService('marketQuote')`),
+     - Inspect the live CarbonUI widget tree (`UITree/main.pyj` / `uicore.registry.GetWindows()`), and
+     - Assert that the client's internal caches (`godma`, `michelle`, `invCache`, `skillQueueSvc`, `wallet`) match the server's state with zero unhandled exceptions in `logmodule`.
+
+---
+
+## 6. Independent Rust Implementation, Reference Provenance & Licensing
+
+1. **Independent Rust Implementation (`#![forbid(unsafe_code)]`) & Reference Provenance:**
+   - All `EvoMu` server crates (`eve-proto`, `eve-machonet`, `eve-sde`, `eve-dogma`, `eve-destiny`, `eve-db`, `eve-server`) and Python tools (`client-bridge/evomu_bridge.py`, `tools/eve-indexer/`) are **independent implementations written from scratch** in Rust and Python under the MIT License ([`LICENSE`](./LICENSE)).
+   - Note on Terminology & Reference Sources: Rather than claiming strict "two-team Chinese-wall clean-room" isolation, `EvoMu` documents its exact reference methodology transparently: [`tools/eve-indexer/index_server_logic.py`](./tools/eve-indexer/index_server_logic.py) inspects wire-protocol metadata (service names, RPC method names, `__notifyevents__`, `EVEMarshalOpcodes.h`, `DestinyStructs.h` packed struct layouts, and `AttributeEnum.h` integer constants) from the open-source `evemu_Crucible` repository (licensed under GNU LGPL v2.1+) and local V24.01 client metadata. No C++ implementation bodies from `evemu_Crucible` and no proprietary CCP source code, bytecode, or binary game assets are copied into `EvoMu`.
+2. **Zero Proprietary Assets Committed to Git:**
+   - [`tools/eve-indexer/index_server_logic.py`](./tools/eve-indexer/index_server_logic.py) reads the user's locally installed EVE Online client (`/Applications/eve-online.app`) read-only to extract interface metadata (service names, method names, notification names, and archive catalogs). Raw `.pyj` bytecode, `.fsdbinary` files, `.static` SQLite databases, and `code.ccp` archives are excluded from version control.
+3. **Local Interoperability & Offline Research Scope:**
+   - `EvoMu` and `client-bridge/evomu_bridge.py` are designed strictly for local, offline server-emulation research, protocol interoperability analysis, and automated testing against a local `127.0.0.1` `eve-server` instance. They must never be used to connect to, modify, or automate interactions with CCP Games' live Tranquility or Singularity production servers.

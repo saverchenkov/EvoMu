@@ -14,6 +14,10 @@ pub type BallId = i64;
 /// 1 Astronomical Unit in meters (exact EVE constant).
 pub const AU_METERS: f64 = 149_597_870_700.0;
 
+/// Standard EVE grid bubble radius in meters (250 km pre-Citadel, 8,000 km post-Citadel).
+pub const BUBBLE_RADIUS_METERS: f64 = 250_000.0;
+
+
 /// Explicit phase inside a `MovementMode::Warp` trajectory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WarpPhase {
@@ -268,6 +272,142 @@ impl Ballpark {
         }
 
         std::mem::take(&mut self.pending_events)
+    }
+
+    /// Returns all balls within `radius_meters` (default `BUBBLE_RADIUS_METERS`) of `observer_ball_id`,
+    /// implementing spatial grid bubble interest management.
+    pub fn balls_in_bubble(&self, observer_ball_id: BallId, radius_meters: f64) -> Vec<&Ball> {
+        let Some(observer) = self.balls.get(&observer_ball_id) else {
+            return Vec::new();
+        };
+        let r2 = radius_meters * radius_meters;
+        self.balls
+            .values()
+            .filter(|b| {
+                matches!(b.mode, MovementMode::Rigid)
+                    || (b.position - observer.position).length_squared() <= r2
+            })
+            .collect()
+    }
+}
+
+/// Binary `Destiny` wire-format encoder (`AddBalls` state buffer) per `DestinyStructs.h`.
+pub mod wire {
+    use super::{Ball, MovementMode};
+
+    /// Ball mode byte values (`Destiny::BallMode` in `DestinyStructs.h`).
+    pub const DST_BALL_GOTO: u8 = 0;
+    pub const DST_BALL_FOLLOW: u8 = 1;
+    pub const DST_BALL_STOP: u8 = 2;
+    pub const DST_BALL_WARP: u8 = 3;
+    pub const DST_BALL_ORBIT: u8 = 4;
+    pub const DST_BALL_RIGID: u8 = 6;
+
+    /// Ball flags (`Destiny::BallFlag` in `DestinyStructs.h`).
+    pub const BALL_FLAG_IS_FREE: u8 = 0x01;
+    pub const BALL_FLAG_IS_GLOBAL: u8 = 0x02;
+    pub const BALL_FLAG_IS_MASSIVE: u8 = 0x04;
+    pub const BALL_FLAG_IS_INTERACTIVE: u8 = 0x08;
+
+    /// Encodes a binary `AddBalls` buffer (`Destiny_Header` + per-ball `BallHeader` + `MassSector` + `ShipSector` + mode struct).
+    pub fn encode_add_balls(stamp: u32, balls: &[&Ball]) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(24 + balls.len() * 128);
+        // Destiny_Header: packet_type = 0 (AddBalls), stamp (u32 LE)
+        buf.push(0u8);
+        buf.extend_from_slice(&stamp.to_le_bytes());
+
+        for ball in balls {
+            let is_rigid = matches!(ball.mode, MovementMode::Rigid);
+            let (mode_byte, flags) = match ball.mode {
+                MovementMode::GotoDirection { .. } => (
+                    DST_BALL_GOTO,
+                    BALL_FLAG_IS_FREE | BALL_FLAG_IS_MASSIVE | BALL_FLAG_IS_INTERACTIVE,
+                ),
+                MovementMode::Follow { .. } => (
+                    DST_BALL_FOLLOW,
+                    BALL_FLAG_IS_FREE | BALL_FLAG_IS_MASSIVE | BALL_FLAG_IS_INTERACTIVE,
+                ),
+                MovementMode::Stop => (
+                    DST_BALL_STOP,
+                    BALL_FLAG_IS_FREE | BALL_FLAG_IS_MASSIVE | BALL_FLAG_IS_INTERACTIVE,
+                ),
+                MovementMode::Warp { .. } => (
+                    DST_BALL_WARP,
+                    BALL_FLAG_IS_FREE | BALL_FLAG_IS_MASSIVE | BALL_FLAG_IS_INTERACTIVE,
+                ),
+                MovementMode::Orbit { .. } => (
+                    DST_BALL_ORBIT,
+                    BALL_FLAG_IS_FREE | BALL_FLAG_IS_MASSIVE | BALL_FLAG_IS_INTERACTIVE,
+                ),
+                MovementMode::Rigid => (DST_BALL_RIGID, BALL_FLAG_IS_GLOBAL | BALL_FLAG_IS_MASSIVE),
+            };
+
+            // BallHeader (39 bytes packed): entityID (i64), mode (u8), radius (f32), x/y/z (f64 * 3), sub_type (u8)
+            buf.extend_from_slice(&ball.id.to_le_bytes());
+            buf.push(mode_byte);
+            buf.extend_from_slice(&(ball.radius as f32).to_le_bytes());
+            buf.extend_from_slice(&ball.position.x.to_le_bytes());
+            buf.extend_from_slice(&ball.position.y.to_le_bytes());
+            buf.extend_from_slice(&ball.position.z.to_le_bytes());
+            buf.push(flags);
+
+            // MassSector (21 bytes packed): mass (f64), cloak (u8), allianceID (i64), corpID (u32), harmonic (f32)
+            if (flags & BALL_FLAG_IS_MASSIVE) != 0 {
+                buf.extend_from_slice(&ball.mass.to_le_bytes());
+                buf.push(0u8); // cloak = 0
+                buf.extend_from_slice(&(-1i64).to_le_bytes()); // allianceID = -1
+                buf.extend_from_slice(&0u32.to_le_bytes()); // corpID = 0
+                buf.extend_from_slice(&(-1.0f32).to_le_bytes()); // harmonic = -1.0
+            }
+
+            // ShipSector (36 bytes packed): max_speed (f32), velocity_x/y/z (f64 * 3), agility (f32), speed_fraction (f32)
+            if !is_rigid && (flags & BALL_FLAG_IS_FREE) != 0 {
+                buf.extend_from_slice(&(ball.max_velocity as f32).to_le_bytes());
+                buf.extend_from_slice(&ball.velocity.x.to_le_bytes());
+                buf.extend_from_slice(&ball.velocity.y.to_le_bytes());
+                buf.extend_from_slice(&ball.velocity.z.to_le_bytes());
+                buf.extend_from_slice(&(ball.inertia as f32).to_le_bytes());
+                buf.extend_from_slice(&(ball.speed_fraction as f32).to_le_bytes());
+            }
+
+            // Mode-specific tail
+            match &ball.mode {
+                MovementMode::GotoDirection { direction } => {
+                    buf.push(1u8); // formationID
+                    buf.extend_from_slice(&direction.x.to_le_bytes());
+                    buf.extend_from_slice(&direction.y.to_le_bytes());
+                    buf.extend_from_slice(&direction.z.to_le_bytes());
+                }
+                MovementMode::Follow { target_id, range }
+                | MovementMode::Orbit { target_id, range } => {
+                    buf.push(1u8); // formationID
+                    buf.extend_from_slice(&target_id.to_le_bytes());
+                    buf.extend_from_slice(&(*range as f32).to_le_bytes());
+                }
+                MovementMode::Stop => {
+                    buf.push(1u8); // formationID
+                }
+                MovementMode::Warp {
+                    destination,
+                    warp_speed_au_s,
+                    ..
+                } => {
+                    buf.push(1u8); // formationID
+                    buf.extend_from_slice(&destination.x.to_le_bytes());
+                    buf.extend_from_slice(&destination.y.to_le_bytes());
+                    buf.extend_from_slice(&destination.z.to_le_bytes());
+                    buf.extend_from_slice(&0u32.to_le_bytes()); // effectStamp
+                    buf.extend_from_slice(&15000.0f64.to_le_bytes()); // followRange
+                    buf.extend_from_slice(&0i64.to_le_bytes()); // followID
+                    buf.extend_from_slice(&((*warp_speed_au_s * 10.0) as u32).to_le_bytes()); // warpSpeed (10x AU/s)
+                }
+                MovementMode::Rigid => {
+                    buf.push(1u8); // formationID
+                }
+            }
+        }
+
+        buf
     }
 }
 

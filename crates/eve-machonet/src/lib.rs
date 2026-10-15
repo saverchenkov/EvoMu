@@ -132,6 +132,62 @@ impl MachoAddress {
             args: Box::new(PyRep::Tuple(tuple)),
         }
     }
+
+    pub fn from_pyrep(rep: &PyRep) -> Option<Self> {
+        let tuple = match rep {
+            PyRep::Object { args, .. } => match args.as_ref() {
+                PyRep::Tuple(items) => items,
+                _ => return None,
+            },
+            PyRep::ObjectEx { header, .. } => match header.as_ref() {
+                PyRep::Tuple(items) if items.len() >= 2 => match &items[1] {
+                    PyRep::Tuple(inner) => inner,
+                    _ => items,
+                },
+                _ => return None,
+            },
+            PyRep::Tuple(items) => items,
+            _ => return None,
+        };
+        let tag = tuple.first()?.as_str()?;
+        match tag {
+            "N" => Some(Self::Node {
+                node_id: tuple.get(1)?.as_i64()? as u64,
+                service: tuple.get(2).and_then(|v| v.as_str()).map(ToOwned::to_owned),
+                call_id: tuple.get(3).and_then(|v| v.as_i64()).unwrap_or(0) as u64,
+            }),
+            "C" => Some(Self::Client {
+                client_id: tuple.get(1)?.as_i64()? as u64,
+                call_id: tuple.get(2).and_then(|v| v.as_i64()).unwrap_or(0) as u64,
+                service: tuple.get(3).and_then(|v| v.as_str()).map(ToOwned::to_owned),
+            }),
+            "B" => {
+                let broadcast_id = tuple.get(1)?.as_str()?.to_owned();
+                let narrowcast = match tuple.get(2) {
+                    Some(PyRep::List(items)) | Some(PyRep::Tuple(items)) => items
+                        .iter()
+                        .filter_map(|i| i.as_i64().map(|v| v as u64))
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                let id_type = tuple
+                    .get(3)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("*multicastID")
+                    .to_owned();
+                Some(Self::Broadcast {
+                    broadcast_id,
+                    id_type,
+                    narrowcast,
+                })
+            }
+            "A" => Some(Self::Any {
+                service: tuple.get(1).and_then(|v| v.as_str()).map(ToOwned::to_owned),
+                call_id: tuple.get(2).and_then(|v| v.as_i64()).unwrap_or(0) as u64,
+            }),
+            _ => None,
+        }
+    }
 }
 
 /// High-level `macho.MachoPacket` structure.
@@ -143,6 +199,99 @@ pub struct MachoPacket {
     pub user_id: Option<u64>,
     pub payload: PyRep,
     pub named_payload: HashMap<String, PyRep>,
+}
+
+impl MachoPacket {
+    pub fn class_name(packet_type: MachoPacketType) -> &'static str {
+        match packet_type {
+            MachoPacketType::AuthenticationReq => "macho.AuthenticationReq",
+            MachoPacketType::AuthenticationRsp => "macho.AuthenticationRsp",
+            MachoPacketType::IdentificationReq => "macho.IdentificationReq",
+            MachoPacketType::IdentificationRsp => "macho.IdentificationRsp",
+            MachoPacketType::CallReq => "macho.CallReq",
+            MachoPacketType::CallRsp => "macho.CallRsp",
+            MachoPacketType::TransportClosed => "macho.TransportClosed",
+            MachoPacketType::ResolveReq => "macho.ResolveReq",
+            MachoPacketType::ResolveRsp => "macho.ResolveRsp",
+            MachoPacketType::Notification => "macho.Notification",
+            MachoPacketType::ErrorResponse => "macho.ErrorResponse",
+            MachoPacketType::SessionChangeNotification => "macho.SessionChangeNotification",
+            MachoPacketType::SessionInitialStateNotification => {
+                "macho.SessionInitialStateNotification"
+            }
+            MachoPacketType::PingReq => "macho.PingReq",
+            MachoPacketType::PingRsp => "macho.PingRsp",
+        }
+    }
+
+    pub fn to_pyrep(&self) -> PyRep {
+        let named = if self.named_payload.is_empty() {
+            PyRep::None
+        } else {
+            PyRep::Dict(
+                self.named_payload
+                    .iter()
+                    .map(|(k, v)| (PyRep::ascii_bytes(k), v.clone()))
+                    .collect(),
+            )
+        };
+        PyRep::Object {
+            type_name: Self::class_name(self.packet_type).into(),
+            args: Box::new(PyRep::Tuple(vec![
+                PyRep::Integer(self.packet_type as i64),
+                self.source.to_pyrep(),
+                self.destination.to_pyrep(),
+                self.user_id
+                    .map(|u| PyRep::Integer(u as i64))
+                    .unwrap_or(PyRep::None),
+                self.payload.clone(),
+                named,
+                PyRep::None,
+            ])),
+        }
+    }
+
+    pub fn from_pyrep(rep: &PyRep) -> Option<Self> {
+        let tuple = match rep {
+            PyRep::Object { args, .. } => match args.as_ref() {
+                PyRep::Tuple(items) => items,
+                _ => return None,
+            },
+            PyRep::ObjectEx { header, .. } => match header.as_ref() {
+                PyRep::Tuple(items) if items.len() >= 2 => match &items[1] {
+                    PyRep::Tuple(inner) => inner,
+                    _ => items,
+                },
+                _ => return None,
+            },
+            PyRep::Tuple(items) => items,
+            _ => return None,
+        };
+        if tuple.len() < 6 {
+            return None;
+        }
+        let packet_type = MachoPacketType::from_i64(tuple[0].as_i64()?)?;
+        let source = MachoAddress::from_pyrep(&tuple[1])?;
+        let destination = MachoAddress::from_pyrep(&tuple[2])?;
+        let user_id = tuple[3].as_i64().map(|u| u as u64);
+        let payload = tuple[4].clone();
+        let mut named_payload = HashMap::new();
+        if let PyRep::Dict(entries) = &tuple[5] {
+            for (k, v) in entries {
+                if let Some(key) = k.as_str() {
+                    named_payload.insert(key.to_owned(), v.clone());
+                }
+            }
+        }
+        Some(Self {
+            packet_type,
+            source,
+            destination,
+            user_id,
+            payload,
+            named_payload,
+        })
+    }
 }
 
 /// Low-level `VersionExchange` handshake parameters exchanged when a client connects on TCP 26000.
@@ -183,7 +332,7 @@ impl VersionExchange {
     }
 }
 
-/// Tracks a connected player's `machoNet` session attributes (`userid`, `charid`, `solarsystemid2`, `stationid`, etc.).
+/// Tracks a connected player's `machoNet` session attributes (`userid`, `charid`, `solarsystemid2`, `stationid`, `structureid`, etc.).
 /// New sessions start strictly unauthenticated (`user_id: None`, `role: 0`).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SessionState {
@@ -193,6 +342,7 @@ pub struct SessionState {
     pub corporation_id: Option<i64>,
     pub alliance_id: Option<i64>,
     pub station_id: Option<i64>,
+    pub structure_id: Option<i64>,
     pub solar_system_id: Option<u32>,
     pub constellation_id: Option<u32>,
     pub region_id: Option<u32>,
@@ -214,6 +364,145 @@ impl SessionState {
 
     pub fn is_authenticated(&self) -> bool {
         self.user_id.is_some()
+    }
+
+    /// Computes the `(old_value, new_value)` dictionary of changed session attributes between `self` and `next`.
+    /// This exact layout is required by `SessionChangeNotification` (`packet_type = 16`) and `OnSessionChanged`.
+    pub fn compute_diff(&self, next: &Self) -> HashMap<String, (PyRep, PyRep)> {
+        let mut changes = HashMap::new();
+        let opt_i64 = |v: Option<i64>| v.map(PyRep::Integer).unwrap_or(PyRep::None);
+        let opt_u64 = |v: Option<u64>| v.map(|u| PyRep::Integer(u as i64)).unwrap_or(PyRep::None);
+        let opt_u32 = |v: Option<u32>| v.map(|u| PyRep::Integer(u as i64)).unwrap_or(PyRep::None);
+
+        if self.user_id != next.user_id {
+            changes.insert(
+                "userid".into(),
+                (opt_u64(self.user_id), opt_u64(next.user_id)),
+            );
+        }
+        if self.character_id != next.character_id {
+            changes.insert(
+                "charid".into(),
+                (opt_i64(self.character_id), opt_i64(next.character_id)),
+            );
+        }
+        if self.corporation_id != next.corporation_id {
+            changes.insert(
+                "corpid".into(),
+                (opt_i64(self.corporation_id), opt_i64(next.corporation_id)),
+            );
+        }
+        if self.alliance_id != next.alliance_id {
+            changes.insert(
+                "allianceid".into(),
+                (opt_i64(self.alliance_id), opt_i64(next.alliance_id)),
+            );
+        }
+        if self.station_id != next.station_id {
+            changes.insert(
+                "stationid".into(),
+                (opt_i64(self.station_id), opt_i64(next.station_id)),
+            );
+            changes.insert(
+                "stationid2".into(),
+                (opt_i64(self.station_id), opt_i64(next.station_id)),
+            );
+        }
+        if self.structure_id != next.structure_id {
+            changes.insert(
+                "structureid".into(),
+                (opt_i64(self.structure_id), opt_i64(next.structure_id)),
+            );
+        }
+        if self.solar_system_id != next.solar_system_id {
+            changes.insert(
+                "solarsystemid2".into(),
+                (opt_u32(self.solar_system_id), opt_u32(next.solar_system_id)),
+            );
+            // In EVE, `solarsystemid` is only set when in space (neither docked in station nor structure)
+            let old_space_sys = if self.station_id.is_none() && self.structure_id.is_none() {
+                self.solar_system_id
+            } else {
+                None
+            };
+            let new_space_sys = if next.station_id.is_none() && next.structure_id.is_none() {
+                next.solar_system_id
+            } else {
+                None
+            };
+            if old_space_sys != new_space_sys {
+                changes.insert(
+                    "solarsystemid".into(),
+                    (opt_u32(old_space_sys), opt_u32(new_space_sys)),
+                );
+            }
+        } else {
+            let old_in_space = self.station_id.is_none() && self.structure_id.is_none();
+            let new_in_space = next.station_id.is_none() && next.structure_id.is_none();
+            if old_in_space != new_in_space {
+                let old_space_sys = if old_in_space {
+                    self.solar_system_id
+                } else {
+                    None
+                };
+                let new_space_sys = if new_in_space {
+                    next.solar_system_id
+                } else {
+                    None
+                };
+                changes.insert(
+                    "solarsystemid".into(),
+                    (opt_u32(old_space_sys), opt_u32(new_space_sys)),
+                );
+            }
+        }
+        if self.constellation_id != next.constellation_id {
+            changes.insert(
+                "constellationid".into(),
+                (
+                    opt_u32(self.constellation_id),
+                    opt_u32(next.constellation_id),
+                ),
+            );
+        }
+        if self.region_id != next.region_id {
+            changes.insert(
+                "regionid".into(),
+                (opt_u32(self.region_id), opt_u32(next.region_id)),
+            );
+        }
+        if self.ship_id != next.ship_id {
+            changes.insert(
+                "shipid".into(),
+                (opt_i64(self.ship_id), opt_i64(next.ship_id)),
+            );
+        }
+        if self.role != next.role {
+            changes.insert(
+                "role".into(),
+                (
+                    PyRep::Integer(self.role as i64),
+                    PyRep::Integer(next.role as i64),
+                ),
+            );
+        }
+        changes
+    }
+
+    /// Formats a session diff as the `PyRep` payload of a `SessionChangeNotification` (`(clueless=0, changes_dict)`).
+    pub fn to_session_change_pyrep(&self, next: &Self, nodes_of_interest: Vec<i64>) -> Option<PyRep> {
+        let diff = self.compute_diff(next);
+        if diff.is_empty() {
+            return None;
+        }
+        let dict_entries = diff
+            .into_iter()
+            .map(|(k, (old_v, new_v))| (PyRep::ascii_bytes(k), PyRep::Tuple(vec![old_v, new_v])))
+            .collect();
+        Some(PyRep::Tuple(vec![
+            PyRep::Tuple(vec![PyRep::Integer(0), PyRep::Dict(dict_entries)]),
+            PyRep::List(nodes_of_interest.into_iter().map(PyRep::Integer).collect()),
+        ]))
     }
 }
 
@@ -241,10 +530,29 @@ mod tests {
     }
 
     #[test]
-    fn test_session_starts_unauthenticated() {
-        let session = SessionState::new(7);
-        assert!(!session.is_authenticated());
-        assert_eq!(session.user_id, None);
-        assert_eq!(session.role, 0);
+    fn test_session_starts_unauthenticated_and_computes_diffs() {
+        let s1 = SessionState::new(7);
+        assert!(!s1.is_authenticated());
+        assert_eq!(s1.user_id, None);
+        assert_eq!(s1.role, 0);
+
+        let mut s2 = s1.clone();
+        s2.user_id = Some(1001);
+        s2.character_id = Some(140000001);
+        s2.station_id = Some(60003760);
+        s2.solar_system_id = Some(30000142);
+        let diff = s1.compute_diff(&s2);
+        assert!(diff.contains_key("userid"));
+        assert!(diff.contains_key("charid"));
+        assert!(diff.contains_key("stationid"));
+        assert!(diff.contains_key("solarsystemid2"));
+        assert!(!diff.contains_key("solarsystemid")); // Docked in station, so solarsystemid remains None
+
+        // Undock into space: stationid becomes None, solarsystemid becomes Some(30000142)
+        let mut s3 = s2.clone();
+        s3.station_id = None;
+        let undock_diff = s2.compute_diff(&s3);
+        assert!(undock_diff.contains_key("stationid"));
+        assert!(undock_diff.contains_key("solarsystemid"));
     }
 }

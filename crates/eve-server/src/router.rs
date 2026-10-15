@@ -321,11 +321,20 @@ impl ServerContext {
                 Ok(PyRep::Bool(true))
             }
 
-            // 4. Authorized Object Binding (`MachoBindObject`)
+            // 4. Authorized Object Binding (`MachoBindObject` + optional piggybacked RPC call)
             (_, "MachoBindObject") => {
                 let _ = Self::require_character(session)?;
                 let obj_id = match args.first() {
                     Some(PyRep::Integer(id)) => *id,
+                    Some(PyRep::Tuple(items)) => {
+                        items.first().and_then(|v| v.as_i64()).ok_or_else(|| {
+                            BridgeRpcError {
+                                code: "InvalidArgument".into(),
+                                message: "MachoBindObject bind tuple missing integer objectID"
+                                    .into(),
+                            }
+                        })?
+                    }
                     _ => {
                         return Err(BridgeRpcError {
                             code: "InvalidArgument".into(),
@@ -334,7 +343,47 @@ impl ServerContext {
                     }
                 };
                 let bid = self.bind_object(session, effective_service, obj_id)?;
-                Ok(PyRep::Tuple(vec![PyRep::Integer(bid as i64), PyRep::None]))
+
+                // Handle piggybacked call tuple: (method_name, call_args_tuple, call_kwargs_dict)
+                let call_result = match args.get(1) {
+                    Some(PyRep::Tuple(call_tuple)) if !call_tuple.is_empty() => {
+                        let sub_method = call_tuple
+                            .first()
+                            .and_then(|m| m.as_str())
+                            .ok_or_else(|| BridgeRpcError {
+                                code: "InvalidArgument".into(),
+                                message: "Piggybacked call in MachoBindObject requires string method name".into(),
+                            })?;
+                        let sub_args: Vec<PyRep> = match call_tuple.get(1) {
+                            Some(PyRep::Tuple(items)) | Some(PyRep::List(items)) => items.clone(),
+                            _ => Vec::new(),
+                        };
+                        let mut sub_kwargs = HashMap::new();
+                        if let Some(PyRep::Dict(entries)) = call_tuple.get(2) {
+                            for (k, v) in entries {
+                                if let Some(ks) = k.as_str() {
+                                    sub_kwargs.insert(ks.to_owned(), v.clone());
+                                }
+                            }
+                        }
+                        Box::pin(self.dispatch_rpc(
+                            session,
+                            effective_service,
+                            Some(bid),
+                            sub_method,
+                            &sub_args,
+                            &sub_kwargs,
+                            caller_trace,
+                        ))
+                        .await?
+                    }
+                    _ => PyRep::None,
+                };
+
+                Ok(PyRep::Tuple(vec![
+                    PyRep::Integer(bid as i64),
+                    call_result,
+                ]))
             }
 
             // 5. Station & Solar System Lookup + Atomic Undocking
@@ -569,7 +618,7 @@ impl ServerContext {
             }
 
             // 7. Transactional Inventory Operations (`invbroker`)
-            ("invbroker", "ListItems") => {
+            ("invbroker", "ListItems") | ("invbroker", "List") => {
                 let (_, char_id) = Self::require_character(session)?;
                 let items = self.db.get_items_for_character(char_id);
                 let rows = items
@@ -600,7 +649,7 @@ impl ServerContext {
                 ))
             }
 
-            ("invbroker", "MoveItem") => {
+            ("invbroker", "MoveItem") | ("invbroker", "Add") => {
                 let (_, char_id) = Self::require_character(session)?;
                 let item_id = match args.first() {
                     Some(PyRep::Integer(id)) => *id,
@@ -649,6 +698,53 @@ impl ServerContext {
                 ]))
             }
 
+            // 8. Dogma Attribute & Fitting Inspection (`dogmaIM`)
+            ("dogmaIM", "GetShipAttributes") | ("dogmaIM", "GetAllInfo") => {
+                let (_, char_id) = Self::require_character(session)?;
+                let ship_id = bound_entry
+                    .as_ref()
+                    .map(|b| b.object_id)
+                    .or(session.ship_id)
+                    .ok_or_else(|| BridgeRpcError {
+                        code: "NoActiveShip".into(),
+                        message: "No active ship in session".into(),
+                    })?;
+
+                let items = self.db.get_items_for_character(char_id);
+                let ship_item = items
+                    .iter()
+                    .find(|i| i.item_id == ship_id)
+                    .ok_or_else(|| BridgeRpcError {
+                        code: "ShipNotFound".into(),
+                        message: format!("Ship item {ship_id} not found for character {char_id}"),
+                    })?;
+
+                let base_attrs = self
+                    .sde
+                    .types
+                    .get(&ship_item.type_id)
+                    .map(|t| t.default_attributes.clone())
+                    .unwrap_or_default();
+
+                let mut engine =
+                    eve_dogma::ShipFittingEngine::new(ship_item.type_id, base_attrs.clone());
+                let mut entries = Vec::with_capacity(base_attrs.len());
+                for (&attr_id, _) in &base_attrs {
+                    let val = engine.get_attribute(attr_id, &self.sde.attributes);
+                    entries.push((PyRep::Integer(attr_id as i64), PyRep::Real(val)));
+                }
+
+                if method == "GetAllInfo" {
+                    Ok(PyRep::keyval([
+                        ("shipID", PyRep::Integer(ship_id)),
+                        ("charID", PyRep::Integer(char_id)),
+                        ("shipAttributes", PyRep::Dict(entries)),
+                    ]))
+                } else {
+                    Ok(PyRep::Dict(entries))
+                }
+            }
+
             ("config", "GetMultiOwnersEx") | ("config", "GetMultiLocationsEx") => {
                 Ok(PyRep::Tuple(vec![PyRep::List(vec![]), PyRep::List(vec![])]))
             }
@@ -662,12 +758,47 @@ impl ServerContext {
                     caller = caller_trace.unwrap_or("unknown"),
                     "Unimplemented RPC intercepted — returning explicit UnimplementedRPC error"
                 );
+                append_unimplemented_rpc_log(
+                    session.session_id,
+                    effective_service,
+                    method,
+                    args,
+                    kwargs,
+                    caller_trace,
+                );
                 Err(BridgeRpcError {
                     code: "UnimplementedRPC".into(),
                     message: format!("{effective_service}.{method} is not yet implemented"),
                 })
             }
         }
+    }
+}
+
+fn append_unimplemented_rpc_log(
+    session_id: u64,
+    service: &str,
+    method: &str,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+    caller_trace: Option<&str>,
+) {
+    use std::io::Write;
+    let _ = std::fs::create_dir_all("logs");
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("logs/unimplemented_rpcs.jsonl")
+    {
+        let record = serde_json::json!({
+            "session_id": session_id,
+            "service": service,
+            "method": method,
+            "args": args,
+            "kwargs": kwargs,
+            "caller_trace": caller_trace.unwrap_or("unknown"),
+        });
+        let _ = writeln!(file, "{record}");
     }
 }
 
