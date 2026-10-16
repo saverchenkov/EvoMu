@@ -210,18 +210,13 @@ impl PyRep {
         }
     }
 
-    /// Counts total AST nodes in this `PyRep` subtree (used to enforce `MAX_DECODED_NODES`).
+    /// Counts total AST and byte-weight units in this `PyRep` subtree (used to enforce `MAX_DECODED_NODES`
+    /// and prevent saved-stream reference memory amplification DoS).
     pub fn node_count(&self) -> usize {
         match self {
-            Self::None
-            | Self::Bool(_)
-            | Self::Integer(_)
-            | Self::Real(_)
-            | Self::Buffer(_)
-            | Self::Bytes(_)
-            | Self::Picked(_)
-            | Self::Token(_)
-            | Self::String(_) => 1,
+            Self::None | Self::Bool(_) | Self::Integer(_) | Self::Real(_) => 1,
+            Self::Buffer(b) | Self::Bytes(b) | Self::Picked(b) => 1 + (b.len() / 64),
+            Self::Token(s) | Self::String(s) => 1 + (s.len() / 64),
             Self::Tuple(v) | Self::List(v) => 1 + v.iter().map(Self::node_count).sum::<usize>(),
             Self::Dict(entries) => {
                 1 + entries
@@ -248,9 +243,12 @@ impl PyRep {
                         .sum::<usize>()
             }
             Self::DBRow {
-                header, columns, ..
+                header,
+                columns,
+                raw_rle,
             } => {
-                1 + header.node_count()
+                1 + (raw_rle.len() / 64)
+                    + header.node_count()
                     + columns
                         .iter()
                         .map(|(_, v)| v.node_count())
@@ -1082,9 +1080,10 @@ pub mod marshal {
                 }
                 let raw_rle = input[..rle_len].to_vec();
                 *input = &input[rle_len..];
+                let columns = unpack_packed_row_columns(&header, &raw_rle);
                 PyRep::DBRow {
                     header: Box::new(header),
-                    columns: Vec::new(),
+                    columns,
                     raw_rle,
                 }
             }
@@ -1289,18 +1288,17 @@ pub mod marshal {
                 let zero_idx = idx
                     .checked_sub(1)
                     .ok_or(ProtoError::InvalidSaveReference(idx))?;
-                let cloned = saved_slots
+                let target_ref = saved_slots
                     .get(zero_idx)
                     .and_then(|opt| opt.as_ref())
-                    .cloned()
                     .ok_or(ProtoError::InvalidSaveReference(idx))?;
 
-                // Charge the full expanded node count of the referenced subtree against budget!
-                let extra_nodes = cloned.node_count().saturating_sub(1);
+                // Charge the full expanded node & byte-weight count BEFORE cloning to prevent DoS!
+                let extra_nodes = target_ref.node_count().saturating_sub(1);
                 *remaining_budget = remaining_budget
                     .checked_sub(extra_nodes)
                     .ok_or(ProtoError::NodeBudgetExceeded)?;
-                cloned
+                target_ref.clone()
             }
             other => return Err(ProtoError::UnsupportedOpcode(other)),
         };
@@ -1352,6 +1350,98 @@ pub mod marshal {
             }
         }
         Some(out)
+    }
+
+    fn unpack_packed_row_columns(header: &PyRep, raw_rle: &[u8]) -> Vec<(String, PyRep)> {
+        // Extract (col_name, dbtype_code) pairs from a blue.DBRowDescriptor ObjectEx or Tuple header
+        let col_defs: Option<Vec<(String, i64)>> = match header {
+            PyRep::ObjectEx { header: h, .. } => match h.as_ref() {
+                PyRep::Tuple(items) => items.get(1).and_then(extract_dbrow_col_defs),
+                _ => None,
+            },
+            PyRep::Tuple(items) => items.get(1).and_then(extract_dbrow_col_defs),
+            _ => None,
+        };
+        let Some(defs) = col_defs else {
+            return Vec::new();
+        };
+
+        let mut expected_bytes = 0usize;
+        let mut bool_count = 0usize;
+        for (_, dbtype) in &defs {
+            match *dbtype {
+                20 | 64 | 5 | 6 => expected_bytes += 8, // I8, FILETIME, R8, CY
+                3 | 19 | 4 => expected_bytes += 4,      // I4, UI4, R4
+                2 | 18 => expected_bytes += 2,          // I2, UI2
+                16 | 17 => expected_bytes += 1,         // I1, UI1
+                11 => bool_count += 1,                  // BOOL (1 bit)
+                _ => {}
+            }
+        }
+        expected_bytes += bool_count.div_ceil(8);
+        if expected_bytes == 0 || expected_bytes > MAX_COLLECTION_LEN {
+            return Vec::new();
+        }
+        let Some(unpacked) = decode_rle(raw_rle, expected_bytes) else {
+            return Vec::new();
+        };
+
+        // Per EVEUnmarshal.cpp: columns are packed widest-first (64-bit, 32-bit, 16-bit, 8-bit, 1-bit)
+        let mut offset = 0usize;
+        let mut out = Vec::with_capacity(defs.len());
+        for (name, dbtype) in &defs {
+            let val = match *dbtype {
+                20 | 64 if offset + 8 <= unpacked.len() => {
+                    let v = i64::from_le_bytes(unpacked[offset..offset + 8].try_into().unwrap());
+                    offset += 8;
+                    PyRep::Integer(v)
+                }
+                5 if offset + 8 <= unpacked.len() => {
+                    let v = f64::from_le_bytes(unpacked[offset..offset + 8].try_into().unwrap());
+                    offset += 8;
+                    PyRep::Real(v)
+                }
+                3 | 19 if offset + 4 <= unpacked.len() => {
+                    let v = i32::from_le_bytes(unpacked[offset..offset + 4].try_into().unwrap()) as i64;
+                    offset += 4;
+                    PyRep::Integer(v)
+                }
+                2 | 18 if offset + 2 <= unpacked.len() => {
+                    let v = i16::from_le_bytes([unpacked[offset], unpacked[offset + 1]]) as i64;
+                    offset += 2;
+                    PyRep::Integer(v)
+                }
+                16 | 17 if offset < unpacked.len() => {
+                    let v = unpacked[offset] as i64;
+                    offset += 1;
+                    PyRep::Integer(v)
+                }
+                _ => PyRep::None,
+            };
+            out.push((name.clone(), val));
+        }
+        out
+    }
+
+    fn extract_dbrow_col_defs(rep: &PyRep) -> Option<Vec<(String, i64)>> {
+        let PyRep::Tuple(outer) = rep else {
+            return None;
+        };
+        let col_tuple = match outer.first() {
+            Some(PyRep::Tuple(t)) => t,
+            _ => outer,
+        };
+        let mut defs = Vec::with_capacity(col_tuple.len());
+        for entry in col_tuple {
+            if let PyRep::Tuple(pair) = entry {
+                if pair.len() >= 2 {
+                    let name = pair[0].as_str()?.to_string();
+                    let dbtype = pair[1].as_i64()?;
+                    defs.push((name, dbtype));
+                }
+            }
+        }
+        Some(defs)
     }
 
     #[allow(clippy::type_complexity)]

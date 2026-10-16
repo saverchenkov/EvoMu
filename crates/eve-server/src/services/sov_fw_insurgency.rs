@@ -24,6 +24,7 @@ pub fn handle(
                 Err(e) => return Some(Err(e)),
             };
             let faction_id = args.first().and_then(|a| a.as_i64()).unwrap_or(500_001);
+            session.war_faction_id = Some(faction_id);
             Some(Ok(PyRep::keyval([
                 ("factionID", PyRep::Integer(faction_id)),
                 ("enlisted", PyRep::Bool(true)),
@@ -35,27 +36,46 @@ pub fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            if session.station_id.is_some() || session.structure_id.is_some() {
+                return Some(Err(BridgeRpcError {
+                    code: "ShipDocked".into(),
+                    message: "Cannot capture FW/Insurgency complex while docked".into(),
+                }));
+            }
             let sys_id = session.solar_system_id.unwrap_or(30_002_813);
             let lp_payout = 15_000i64;
-            let (contested, corruption) = ctx.db.with_mut_snapshot(|snap| {
-                if let Some(ch) = snap.characters.get_mut(&char_id) {
-                    *ch.loyalty_points.entry(500_001).or_insert(0) += lp_payout;
-                }
+            let res = ctx.db.with_mut_snapshot(|snap| {
                 if let Some(st) = snap.system_states.get_mut(&sys_id) {
+                    if st.fw_contested_pct >= 100.0 {
+                        return Err(BridgeRpcError {
+                            code: "ComplexAlreadyCaptured".into(),
+                            message: format!("System {sys_id} is already 100% contested"),
+                        });
+                    }
                     st.fw_contested_pct = (st.fw_contested_pct + 25.0).min(100.0);
                     st.insurgency_corruption_stage = (st.insurgency_corruption_stage + 1).min(5);
-                    (st.fw_contested_pct, st.insurgency_corruption_stage)
+                    let res_pair = (st.fw_contested_pct, st.insurgency_corruption_stage);
+                    if let Some(ch) = snap.characters.get_mut(&char_id) {
+                        *ch.loyalty_points.entry(500_001).or_insert(0) += lp_payout;
+                    }
+                    Ok(res_pair)
                 } else {
-                    (70.0, 5)
+                    Err(BridgeRpcError {
+                        code: "SystemStateNotFound".into(),
+                        message: format!("System {sys_id} has no FW/Insurgency state"),
+                    })
                 }
             });
 
-            Some(Ok(PyRep::keyval([
-                ("solarSystemID", PyRep::Integer(sys_id as i64)),
-                ("contestedPct", PyRep::Real(contested)),
-                ("corruptionStage", PyRep::Integer(corruption as i64)),
-                ("lpAwarded", PyRep::Integer(lp_payout)),
-            ])))
+            match res {
+                Ok((contested, corruption)) => Some(Ok(PyRep::keyval([
+                    ("solarSystemID", PyRep::Integer(sys_id as i64)),
+                    ("contestedPct", PyRep::Real(contested)),
+                    ("corruptionStage", PyRep::Integer(corruption as i64)),
+                    ("lpAwarded", PyRep::Integer(lp_payout)),
+                ]))),
+                Err(e) => Some(Err(e)),
+            }
         }
 
         ("sovMgr", "ClaimSovereignty")
@@ -100,17 +120,18 @@ pub fn handle(
             ])))
         }
 
-        ("sovMgr", _)
-        | ("devIndexMgr", _)
-        | ("facWarMgr", _)
-        | ("fwCharacterEnlistmentMgr", _)
-        | ("fwEnlistmentMgr", _)
-        | ("insurgencyMgr", _)
-        | ("pirateInsurgencySvc", _)
-        | ("mercenaryDenMgr", _)
-        | ("orbitalSkyhookMgr", _)
-        | ("territorialClaimSvc", _)
-        | ("allianceSovMgr", _) => Some(Ok(PyRep::Bool(true))),
+        ("sovMgr", "GetSystemSovereigntyInfo")
+        | ("devIndexMgr", "GetDevelopmentIndicesForSystem")
+        | ("facWarMgr", "GetFactionalWarStatus")
+        | ("pirateInsurgencySvc", "GetInsurgencyState")
+        | ("orbitalSkyhookMgr", "GetSkyhookState")
+        | ("mercenaryDenMgr", "GetMercenaryDens") => {
+            let _ = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            Some(Ok(PyRep::List(vec![])))
+        }
 
         _ => None,
     }

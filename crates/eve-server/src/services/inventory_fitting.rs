@@ -5,7 +5,7 @@
 use crate::formulas::{abyssal_attribute_roll, compute_insurance_quote};
 use crate::router::{BoundObjectEntry, ServerContext};
 use eve_db::{InventoryFlag, IskCents, SavedFittingRecord};
-use eve_dogma::{AttributeModifier, DogmaItemState, ModifierOperator, ShipFittingEngine};
+use eve_dogma::ShipFittingEngine;
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::{attr_ids, AttributeId, TypeId};
@@ -104,7 +104,11 @@ pub fn handle(
             }
         }
 
-        ("dogmaIM", "GetShipAttributes") | ("dogmaIM", "GetAllInfo") => {
+        ("dogmaIM", "GetShipAttributes")
+        | ("dogmaIM", "GetAllInfo")
+        | ("dogmaIM", "CharGetInfo")
+        | ("dogmaIM", "ShipGetInfo")
+        | ("dogmaIM", "ItemGetInfo") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -154,7 +158,7 @@ pub fn handle(
                 PyRep::Real(fit.ship.get_attribute(attr_ids::POWER_LOAD, &ctx.sde)),
             ));
 
-            if method == "GetAllInfo" {
+            if method == "GetAllInfo" || method == "ShipGetInfo" || method == "CharGetInfo" {
                 Some(Ok(PyRep::keyval([
                     ("shipID", PyRep::Integer(ship_id)),
                     ("charID", PyRep::Integer(char_id)),
@@ -165,32 +169,72 @@ pub fn handle(
             }
         }
 
-        ("dogmaIM", "Activate") | ("dogmaIM", "Overload") => {
+        ("dogmaIM", "Activate")
+        | ("dogmaIM", "Overload")
+        | ("dogmaIM", "Deactivate")
+        | ("dogmaIM", "SetModuleOnline") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
             let module_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let ship_id = session.ship_id.unwrap_or(100_000_001);
+            let Some(ship_id) = session.ship_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "NoActiveShip".into(),
+                    message: "No active ship in session".into(),
+                }));
+            };
             let items = ctx.db.get_items_for_character(char_id);
-            let mut engine = DogmaItemState::from_sde(ship_id, 587, &ctx.sde);
-            for i in &items {
-                if i.item_id == module_id {
-                    if let Some(t) = ctx.sde.types.get(&i.type_id) {
-                        if let Some(&spd) = t.default_attributes.get(&attr_ids::SPEED_FACTOR) {
-                            let mult = if method == "Overload" { 1.5 } else { 1.0 };
-                            engine.add_modifier(AttributeModifier {
-                                source_item_id: module_id,
-                                target_attribute_id: attr_ids::MAX_VELOCITY,
-                                operator: ModifierOperator::PostPercent,
-                                value: spd * mult,
-                                stacking_penalized: true,
-                            });
-                        }
-                    }
+            let Some(ship_item) = items.iter().find(|i| i.item_id == ship_id) else {
+                return Some(Err(BridgeRpcError {
+                    code: "ShipNotFound".into(),
+                    message: format!("Active ship {ship_id} not found for character {char_id}"),
+                }));
+            };
+            let Some(mod_item) = items.iter().find(|i| i.item_id == module_id && i.owner_id == char_id) else {
+                return Some(Err(BridgeRpcError {
+                    code: "ModuleNotFound".into(),
+                    message: format!("Module {module_id} not owned by character {char_id}"),
+                }));
+            };
+
+            let mut fit = ShipFittingEngine::from_sde(ship_id, ship_item.type_id, &ctx.sde);
+            for item in &items {
+                if item.location_id == ship_id && (item.flag as u16) >= 11 {
+                    let _ = fit.fit_and_online_module(
+                        item.item_id,
+                        item.type_id,
+                        item.flag as u16,
+                        &ctx.sde,
+                    );
                 }
             }
-            let max_vel = engine.get_attribute(attr_ids::MAX_VELOCITY, &ctx.sde);
+            if !fit.modules.contains_key(&module_id) {
+                let _ = fit.fit_and_online_module(
+                    mod_item.item_id,
+                    mod_item.type_id,
+                    (mod_item.flag as u16).max(19),
+                    &ctx.sde,
+                );
+            }
+
+            if method == "Deactivate" {
+                if let Err(e) = fit.deactivate_module(module_id, &ctx.sde) {
+                    return Some(Err(BridgeRpcError {
+                        code: "DogmaDeactivateFailed".into(),
+                        message: e.to_string(),
+                    }));
+                }
+            } else if method == "Activate" || method == "Overload" {
+                if let Err(e) = fit.activate_module(module_id, method == "Overload", &ctx.sde) {
+                    return Some(Err(BridgeRpcError {
+                        code: "DogmaActivateFailed".into(),
+                        message: e.to_string(),
+                    }));
+                }
+            }
+
+            let max_vel = fit.ship.get_attribute(attr_ids::MAX_VELOCITY, &ctx.sde);
             Some(Ok(PyRep::keyval([
                 ("moduleID", PyRep::Integer(module_id)),
                 ("overloaded", PyRep::Bool(method == "Overload")),
@@ -227,7 +271,9 @@ pub fn handle(
             Some(Ok(PyRep::Integer(fid)))
         }
 
-        ("fittingSvc", "GetFittings") | ("corpFittingMgr", "GetFittings") => {
+        ("fittingSvc", "GetFittings")
+        | ("fittingSvc", "GetFittingMgr")
+        | ("corpFittingMgr", "GetFittings") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -251,7 +297,29 @@ pub fn handle(
             )))
         }
 
-        ("insuranceSvc", "InsureShip") => {
+        ("fittingSvc", "DeleteFitting") | ("corpFittingMgr", "DeleteFitting") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let fid = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let deleted = ctx.db.with_mut_snapshot(|snap| {
+                if snap
+                    .saved_fittings
+                    .get(&fid)
+                    .map(|f| f.owner_id == char_id)
+                    .unwrap_or(false)
+                {
+                    snap.saved_fittings.remove(&fid);
+                    true
+                } else {
+                    false
+                }
+            });
+            Some(Ok(PyRep::Bool(deleted)))
+        }
+
+        ("insuranceSvc", "InsureShip") | ("insuranceSvc", "GetContractForShip") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -261,26 +329,64 @@ pub fn handle(
                 .and_then(|a| a.as_i64())
                 .or(session.ship_id)
                 .unwrap_or(100_000_001);
-            let level_fraction = args.get(1).and_then(|a| a.as_f64()).unwrap_or(1.0);
-            let (cost, payout) = compute_insurance_quote(230_000.0, level_fraction);
+            let level_fraction = args
+                .get(1)
+                .and_then(|a| a.as_f64())
+                .unwrap_or(1.0)
+                .clamp(0.0, 1.0);
 
-            ctx.db.with_mut_snapshot(|snap| {
-                if let Some(ch) = snap.characters.get_mut(&char_id) {
-                    ch.balance = IskCents((ch.balance.0 - IskCents::from_f64_isk(cost).0).max(0));
+            let res = ctx.db.with_mut_snapshot(|snap| {
+                let Some(ship) = snap.items.get(&ship_id).cloned() else {
+                    return Err(BridgeRpcError {
+                        code: "ShipNotFound".into(),
+                        message: format!("Ship {ship_id} not found"),
+                    });
+                };
+                if ship.owner_id != char_id {
+                    return Err(BridgeRpcError {
+                        code: "OwnershipViolation".into(),
+                        message: format!("Ship {ship_id} does not belong to character {char_id}"),
+                    });
                 }
-                if let Some(ship) = snap.items.get_mut(&ship_id) {
-                    ship.insured_payout_isk = payout;
+                let base_price = ctx
+                    .sde
+                    .types
+                    .get(&ship.type_id)
+                    .map(|t| t.base_price)
+                    .unwrap_or(230_000.0);
+                let (cost, payout) = compute_insurance_quote(base_price, level_fraction);
+                let cost_cents = IskCents::from_f64_isk(cost);
+
+                let Some(ch) = snap.characters.get_mut(&char_id) else {
+                    return Err(BridgeRpcError {
+                        code: "CharacterNotFound".into(),
+                        message: format!("Character {char_id} not found"),
+                    });
+                };
+                if ch.balance.0 < cost_cents.0 {
+                    return Err(BridgeRpcError {
+                        code: "InsufficientFunds".into(),
+                        message: "Not enough ISK to insure ship".into(),
+                    });
                 }
+                ch.balance = IskCents(ch.balance.0 - cost_cents.0);
+                if let Some(ship_mut) = snap.items.get_mut(&ship_id) {
+                    ship_mut.insured_payout_isk = payout;
+                }
+                Ok((cost, payout))
             });
 
-            Some(Ok(PyRep::keyval([
-                ("shipID", PyRep::Integer(ship_id)),
-                ("costISK", PyRep::Real(cost)),
-                ("payoutISK", PyRep::Real(payout)),
-            ])))
+            match res {
+                Ok((cost, payout)) => Some(Ok(PyRep::keyval([
+                    ("shipID", PyRep::Integer(ship_id)),
+                    ("costISK", PyRep::Real(cost)),
+                    ("payoutISK", PyRep::Real(payout)),
+                ]))),
+                Err(e) => Some(Err(e)),
+            }
         }
 
-        ("mutaplasmidMgr", "ApplyMutaplasmid") | ("dynamicItemSvc", "MutateItem") => {
+        ("dynamicItemSvc", "MutateItem") | ("mutaplasmidMgr", "ApplyMutaplasmid") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -296,41 +402,135 @@ pub fn handle(
                 }));
             };
 
-            let base_attrs = ctx
-                .sde
-                .types
-                .get(&438)
-                .map(|t| t.default_attributes.clone())
-                .unwrap_or_default();
-            let rolls: HashMap<AttributeId, f64> = muta_def
-                .attribute_ranges
-                .keys()
-                .map(|&k| (k, 0.85))
-                .collect();
-            let rolled = abyssal_attribute_roll(&base_attrs, &muta_def.attribute_ranges, &rolls);
+            let res = ctx.db.with_mut_snapshot(|snap| {
+                // Verify target item exists, belongs to char_id, and has an applicable type_id
+                let Some(target_item) = snap.items.get(&target_item_id).cloned() else {
+                    return Err(BridgeRpcError {
+                        code: "TargetItemNotFound".into(),
+                        message: format!("Target item {target_item_id} not found"),
+                    });
+                };
+                if target_item.owner_id != char_id {
+                    return Err(BridgeRpcError {
+                        code: "OwnershipViolation".into(),
+                        message: format!(
+                            "Target item {target_item_id} is not owned by character {char_id}"
+                        ),
+                    });
+                }
+                if !muta_def.applicable_type_ids.contains(&target_item.type_id) {
+                    return Err(BridgeRpcError {
+                        code: "InapplicableMutaplasmid".into(),
+                        message: format!(
+                            "Mutaplasmid {mutaplasmid_type_id} cannot be applied to item type {}",
+                            target_item.type_id
+                        ),
+                    });
+                }
 
-            ctx.db.with_mut_snapshot(|snap| {
+                // Locate and consume 1 mutaplasmid item owned by char_id
+                let muta_item_id = snap
+                    .items
+                    .values()
+                    .find(|i| {
+                        i.owner_id == char_id
+                            && i.type_id == mutaplasmid_type_id
+                            && i.quantity >= 1
+                    })
+                    .map(|i| i.item_id);
+                let Some(mid) = muta_item_id else {
+                    return Err(BridgeRpcError {
+                        code: "MutaplasmidItemNotFound".into(),
+                        message: format!(
+                            "Character does not own mutaplasmid type {mutaplasmid_type_id}"
+                        ),
+                    });
+                };
+
+                if let Some(m_item) = snap.items.get_mut(&mid) {
+                    if m_item.quantity > 1 {
+                        m_item.quantity -= 1;
+                        m_item.version += 1;
+                    } else {
+                        snap.items.remove(&mid);
+                    }
+                }
+
+                let base_attrs = ctx
+                    .sde
+                    .types
+                    .get(&target_item.type_id)
+                    .map(|t| t.default_attributes.clone())
+                    .unwrap_or_default();
+                let rolls: HashMap<AttributeId, f64> = muta_def
+                    .attribute_ranges
+                    .keys()
+                    .map(|&k| (k, 0.85))
+                    .collect();
+                let rolled =
+                    abyssal_attribute_roll(&base_attrs, &muta_def.attribute_ranges, &rolls);
+
                 if let Some(item) = snap.items.get_mut(&target_item_id) {
+                    item.type_id = muta_def.resulting_type_id;
+                    item.dynamic_attributes = rolled.clone();
+                    item.source_mutaplasmid_id = Some(mutaplasmid_type_id);
+                    item.version += 1;
+                }
+                Ok(rolled)
+            });
+
+            match res {
+                Ok(rolled) => {
+                    let spd = rolled
+                        .get(&attr_ids::SPEED_FACTOR)
+                        .copied()
+                        .unwrap_or(150.0);
+                    Some(Ok(PyRep::keyval([
+                        ("itemID", PyRep::Integer(target_item_id)),
+                        (
+                            "resultingTypeID",
+                            PyRep::Integer(muta_def.resulting_type_id as i64),
+                        ),
+                        ("rolledSpeedFactor", PyRep::Real(spd)),
+                    ])))
+                }
+                Err(e) => Some(Err(e)),
+            }
+        }
+
+        ("repackagingSvc", "RepackageItems") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            if session.station_id.is_none() && session.structure_id.is_none() {
+                return Some(Err(BridgeRpcError {
+                    code: "NotDocked".into(),
+                    message: "Repackaging items requires being docked".into(),
+                }));
+            }
+            let item_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            ctx.db.with_mut_snapshot(|snap| {
+                if let Some(item) = snap.items.get_mut(&item_id) {
                     if item.owner_id == char_id {
-                        item.type_id = muta_def.resulting_type_id;
-                        item.dynamic_attributes = rolled.clone();
-                        item.source_mutaplasmid_id = Some(mutaplasmid_type_id);
+                        item.singleton = false;
                         item.version += 1;
                     }
                 }
             });
-
-            let spd = rolled.get(&attr_ids::SPEED_FACTOR).copied().unwrap_or(150.0);
-            Some(Ok(PyRep::keyval([
-                ("itemID", PyRep::Integer(target_item_id)),
-                ("resultingTypeID", PyRep::Integer(muta_def.resulting_type_id as i64)),
-                ("rolledSpeedFactor", PyRep::Real(spd)),
-            ])))
+            Some(Ok(PyRep::Bool(true)))
         }
 
-        ("repairSvc", "DamageModules") | ("repairSvc", "RepairAll") | ("repackagingSvc", _)
-        | ("ghostFittingSvc", _) | ("ship", _) | ("shipConfig", _) | ("ship_emblems", _)
-        | ("shipTreeSvc", _) | ("dogma", _) => Some(Ok(PyRep::Bool(true))),
+        ("repairSvc", "RepairItems")
+        | ("repairSvc", "GetRepairQuote")
+        | ("repairSvc", "RepairAll")
+        | ("repairSvc", "DamageModules") => {
+            let _ = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            Some(Ok(PyRep::Bool(true)))
+        }
 
         _ => None,
     }

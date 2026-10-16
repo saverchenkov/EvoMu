@@ -306,14 +306,14 @@ pub struct VersionExchange {
 }
 
 impl Default for VersionExchange {
-    /// Defaults to `evemu_Crucible/src/eve-common/EVEVersion.h` (Crucible v1.6.5 build 360229).
+    /// Defaults to V24.01 (`build 3619879`, `EVE-EVE-TRANQUILITY@ccp`).
     fn default() -> Self {
         Self {
             birthday: 170472,
-            macho_version: 320,
+            macho_version: 409,
             user_count: 1,
-            version_number: 7.31,
-            build_version: 360229,
+            version_number: 24.01,
+            build_version: 3619879,
             project_version: "EVE-EVE-TRANQUILITY@ccp".to_string(),
         }
     }
@@ -332,7 +332,7 @@ impl VersionExchange {
     }
 }
 
-/// Tracks a connected player's `machoNet` session attributes (`userid`, `charid`, `solarsystemid2`, `stationid`, `structureid`, etc.).
+/// Tracks a connected player's `machoNet` session attributes (`userid`, `charid`, `solarsystemid2`, `stationid`, `structureid`, `locationid`, etc.).
 /// New sessions start strictly unauthenticated (`user_id: None`, `role: 0`).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SessionState {
@@ -347,6 +347,10 @@ pub struct SessionState {
     pub constellation_id: Option<u32>,
     pub region_id: Option<u32>,
     pub ship_id: Option<i64>,
+    pub race_id: Option<u32>,
+    pub corp_role: u64,
+    pub fleet_id: Option<i64>,
+    pub war_faction_id: Option<i64>,
     pub role: u64,
     pub language_id: String,
 }
@@ -356,6 +360,7 @@ impl SessionState {
         Self {
             session_id,
             user_id: None,
+            corp_role: 0,
             role: 0,
             language_id: "EN".to_string(),
             ..Default::default()
@@ -364,6 +369,13 @@ impl SessionState {
 
     pub fn is_authenticated(&self) -> bool {
         self.user_id.is_some()
+    }
+
+    /// Computes effective `locationid` (`stationid` -> `structureid` -> `solarsystemid2`).
+    pub fn effective_location_id(&self) -> Option<i64> {
+        self.station_id
+            .or(self.structure_id)
+            .or_else(|| self.solar_system_id.map(|s| s as i64))
     }
 
     /// Computes the `(old_value, new_value)` dictionary of changed session attributes between `self` and `next`.
@@ -413,6 +425,11 @@ impl SessionState {
                 "structureid".into(),
                 (opt_i64(self.structure_id), opt_i64(next.structure_id)),
             );
+        }
+        let old_loc = self.effective_location_id();
+        let new_loc = next.effective_location_id();
+        if old_loc != new_loc {
+            changes.insert("locationid".into(), (opt_i64(old_loc), opt_i64(new_loc)));
         }
         if self.solar_system_id != next.solar_system_id {
             changes.insert(
@@ -475,6 +492,33 @@ impl SessionState {
             changes.insert(
                 "shipid".into(),
                 (opt_i64(self.ship_id), opt_i64(next.ship_id)),
+            );
+        }
+        if self.race_id != next.race_id {
+            changes.insert(
+                "raceID".into(),
+                (opt_u32(self.race_id), opt_u32(next.race_id)),
+            );
+        }
+        if self.corp_role != next.corp_role {
+            changes.insert(
+                "corprole".into(),
+                (
+                    PyRep::Integer(self.corp_role as i64),
+                    PyRep::Integer(next.corp_role as i64),
+                ),
+            );
+        }
+        if self.fleet_id != next.fleet_id {
+            changes.insert(
+                "fleetid".into(),
+                (opt_i64(self.fleet_id), opt_i64(next.fleet_id)),
+            );
+        }
+        if self.war_faction_id != next.war_faction_id {
+            changes.insert(
+                "warfactionid".into(),
+                (opt_i64(self.war_faction_id), opt_i64(next.war_faction_id)),
             );
         }
         if self.role != next.role {

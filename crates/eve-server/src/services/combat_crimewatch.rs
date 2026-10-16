@@ -32,12 +32,24 @@ pub async fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            if session.station_id.is_some() || session.structure_id.is_some() {
+                return Some(Err(BridgeRpcError {
+                    code: "ShipDocked".into(),
+                    message: "Cannot fire weapons while docked".into(),
+                }));
+            }
             let target_id = args.first().and_then(|a| a.as_i64()).unwrap_or(11001);
+            if target_id <= 0 || target_id == char_id || Some(target_id) == session.ship_id {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidTarget".into(),
+                    message: "Invalid or self combat target".into(),
+                }));
+            }
             let weapon_kind = args
                 .get(1)
                 .and_then(|a| a.as_str())
                 .unwrap_or("ProjectileTurret");
-            let spool_cycles = args.get(2).and_then(|a| a.as_i64()).unwrap_or(1) as u32;
+            let spool_cycles = args.get(2).and_then(|a| a.as_i64()).unwrap_or(1).max(1) as u32;
 
             let p_hit = turret_chance_to_hit(0.01, 240.0, 38.0, 1500.0, 1500.0, 8400.0);
             let base_dmg = DamageVector {
@@ -68,12 +80,27 @@ pub async fn handle(
                 _ => shot_dmg.total(),
             };
 
-            // Credit NPC bounty via Dynamic Bounty System (DBS) + ESS 60/30/10 split
+            // Credit NPC bounty via Dynamic Bounty System (DBS) + ESS 60/30/10 split once per target
             let sys_id = session.solar_system_id.unwrap_or(30_000_142);
+            let dbs_mult = ctx
+                .db
+                .with_snapshot(|s| s.system_states.get(&sys_id).map(|st| st.dbs_multiplier))
+                .unwrap_or(1.35);
             let (pilot_isk, _tax, main_ess, reserve_ess) =
-                compute_dbs_and_ess_bounty_split(100_000.0, 1.35, 0.10);
+                compute_dbs_and_ess_bounty_split(100_000.0, dbs_mult, 0.10);
 
-            let kill_id = ctx.db.with_mut_snapshot(|snap| {
+            let res = ctx.db.with_mut_snapshot(|snap| {
+                if snap
+                    .killmails
+                    .values()
+                    .any(|km| km.victim_character_id == target_id && km.solar_system_id == sys_id)
+                {
+                    return Err(BridgeRpcError {
+                        code: "TargetAlreadyDestroyed".into(),
+                        message: format!("Target {target_id} has already been destroyed"),
+                    });
+                }
+
                 if let Some(ch) = snap.characters.get_mut(&char_id) {
                     ch.balance = IskCents(ch.balance.0 + IskCents::from_f64_isk(pilot_isk).0);
                 }
@@ -96,17 +123,20 @@ pub async fn handle(
                         total_value_isk: 230_000.0,
                     },
                 );
-                kid
+                Ok(kid)
             });
 
-            Some(Ok(PyRep::keyval([
-                ("targetID", PyRep::Integer(target_id)),
-                ("appliedDamage", PyRep::Real(effective_dmg)),
-                ("isWreckingShot", PyRep::Bool(is_wrecking)),
-                ("bountyPayoutISK", PyRep::Real(pilot_isk)),
-                ("killID", PyRep::Integer(kill_id)),
-                ("wreckTypeID", PyRep::Integer(26557)),
-            ])))
+            match res {
+                Ok(kill_id) => Some(Ok(PyRep::keyval([
+                    ("targetID", PyRep::Integer(target_id)),
+                    ("appliedDamage", PyRep::Real(effective_dmg)),
+                    ("isWreckingShot", PyRep::Bool(is_wrecking)),
+                    ("bountyPayoutISK", PyRep::Real(pilot_isk)),
+                    ("killID", PyRep::Integer(kill_id)),
+                    ("wreckTypeID", PyRep::Integer(26557)),
+                ]))),
+                Err(e) => Some(Err(e)),
+            }
         }
 
         // CrimeWatch 2.0 Illegal High-Sec Attack -> Criminal Flag -> CONCORD Dispatch -> Kill Right (`E2E-12`)
@@ -167,26 +197,73 @@ pub async fn handle(
             ])))
         }
 
-        ("killRightMgr", "ActivateKillRight") => {
-            let kr_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            ctx.db.with_mut_snapshot(|snap| {
-                if let Some(kr) = snap.kill_rights.get_mut(&kr_id) {
-                    kr.is_active_suspect = true;
-                }
-            });
-            Some(Ok(PyRep::keyval([
-                ("killRightID", PyRep::Integer(kr_id)),
-                ("suspectFlagActive", PyRep::Bool(true)),
-            ])))
-        }
-
-        ("essMgr", "HackMainBank") | ("dynamicBountyMgr", "ClaimEssBank") => {
+        ("killRightMgr", "ActivateKillRight") | ("crimewatch", "ActivateKillRight") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            let kr_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let res = ctx.db.with_mut_snapshot(|snap| {
+                let Some(kr) = snap.kill_rights.get(&kr_id).cloned() else {
+                    return Err(BridgeRpcError {
+                        code: "KillRightNotFound".into(),
+                        message: format!("Kill right {kr_id} does not exist"),
+                    });
+                };
+                if kr.is_active_suspect {
+                    return Err(BridgeRpcError {
+                        code: "KillRightAlreadyActivated".into(),
+                        message: format!("Kill right {kr_id} is already activated"),
+                    });
+                }
+                if char_id != kr.owner_id {
+                    let fee = kr.activation_fee;
+                    let Some(caller) = snap.characters.get_mut(&char_id) else {
+                        return Err(BridgeRpcError {
+                            code: "CharacterNotFound".into(),
+                            message: format!("Character {char_id} not found"),
+                        });
+                    };
+                    if caller.balance.0 < fee.0 {
+                        return Err(BridgeRpcError {
+                            code: "InsufficientFunds".into(),
+                            message: "Insufficient ISK to pay kill right activation fee".into(),
+                        });
+                    }
+                    caller.balance = IskCents(caller.balance.0 - fee.0);
+                    if let Some(owner) = snap.characters.get_mut(&kr.owner_id) {
+                        owner.balance = IskCents(owner.balance.0 + fee.0);
+                    }
+                }
+                if let Some(kr_mut) = snap.kill_rights.get_mut(&kr_id) {
+                    kr_mut.is_active_suspect = true;
+                }
+                Ok(())
+            });
+            match res {
+                Ok(()) => Some(Ok(PyRep::keyval([
+                    ("killRightID", PyRep::Integer(kr_id)),
+                    ("suspectFlagActive", PyRep::Bool(true)),
+                ]))),
+                Err(e) => Some(Err(e)),
+            }
+        }
+
+        ("essMgr", "AttemptLinkToMainBank")
+        | ("essMgr", "HackMainBank")
+        | ("dynamicBountyMgr", "ClaimEssBank") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            if session.station_id.is_some() || session.structure_id.is_some() {
+                return Some(Err(BridgeRpcError {
+                    code: "ShipDocked".into(),
+                    message: "Cannot link to ESS Main Bank while docked".into(),
+                }));
+            }
             let sys_id = session.solar_system_id.unwrap_or(30_000_142);
-            let payout = ctx.db.with_mut_snapshot(|snap| {
+            let res = ctx.db.with_mut_snapshot(|snap| {
                 let bank = snap
                     .system_states
                     .get_mut(&sys_id)
@@ -196,18 +273,33 @@ pub async fn handle(
                         v
                     })
                     .unwrap_or(IskCents(0));
+                if bank.0 <= 0 {
+                    return Err(BridgeRpcError {
+                        code: "EssBankEmpty".into(),
+                        message: format!("ESS Main Bank in system {sys_id} is empty"),
+                    });
+                }
                 if let Some(ch) = snap.characters.get_mut(&char_id) {
                     ch.balance = IskCents(ch.balance.0 + bank.0);
                 }
-                bank.to_wire_f64()
+                Ok(bank.to_wire_f64())
             });
-            Some(Ok(PyRep::keyval([
-                ("solarSystemID", PyRep::Integer(sys_id as i64)),
-                ("stolenISK", PyRep::Real(payout)),
-            ])))
+            match res {
+                Ok(payout) => Some(Ok(PyRep::keyval([
+                    ("solarSystemID", PyRep::Integer(sys_id as i64)),
+                    ("stolenISK", PyRep::Real(payout)),
+                ]))),
+                Err(e) => Some(Err(e)),
+            }
         }
 
-        ("fighterMgr", "LaunchFighters") | ("fighterMgr", "ExecuteFighterAbility") => {
+        ("fighterMgr", "LaunchFighters")
+        | ("fighterMgr", "ExecuteFighterAbility")
+        | ("fighterMgr", "LoadFightersToTube") => {
+            let _ = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             let dmg = compute_fighter_squadron_damage(50.0, 9, 4.5);
             Some(Ok(PyRep::keyval([
                 ("squadronSize", PyRep::Integer(9)),
@@ -215,15 +307,22 @@ pub async fn handle(
             ])))
         }
 
-        ("war", _)
-        | ("warStatisticMgr", _)
-        | ("mutualWarInviteMgr", _)
-        | ("peaceTreatyMgr", _)
-        | ("killmailSvc", _)
-        | ("bountyProxy", _)
-        | ("duelMgr", _)
-        | ("fwWarzoneMgr", _)
-        | ("crimewatch", _) => Some(Ok(PyRep::Bool(true))),
+        ("crimewatch", "GetClientStates")
+        | ("crimewatch", "GetMySecurityStatus")
+        | ("crimewatch", "GetKillRights")
+        | ("killmailSvc", "GetKillMail")
+        | ("war", "GetWars")
+        | ("warStatisticMgr", "GetStats")
+        | ("mutualWarInviteMgr", "GetInvites")
+        | ("peaceTreatyMgr", "GetTreaties")
+        | ("bountyProxy", "GetBounties")
+        | ("duelMgr", "StartDuel") => {
+            let _ = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            Some(Ok(PyRep::List(vec![])))
+        }
 
         _ => None,
     }

@@ -71,7 +71,7 @@ impl ServerContext {
     pub fn release_session_bindings(&self, session_id: u64) {
         self.bound_objects
             .write()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .retain(|_, v| v.session_id != session_id);
     }
 
@@ -108,16 +108,19 @@ impl ServerContext {
         }
 
         let bound_id = NEXT_BOUND_ID.fetch_add(1, Ordering::Relaxed);
-        self.bound_objects.write().unwrap().insert(
-            bound_id,
-            BoundObjectEntry {
+        self.bound_objects
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(
                 bound_id,
-                session_id: session.session_id,
-                character_id: char_id,
-                service: service.to_string(),
-                object_id,
-            },
-        );
+                BoundObjectEntry {
+                    bound_id,
+                    session_id: session.session_id,
+                    character_id: char_id,
+                    service: service.to_string(),
+                    object_id,
+                },
+            );
         Ok(bound_id)
     }
 
@@ -130,7 +133,7 @@ impl ServerContext {
         let entry = self
             .bound_objects
             .read()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .get(&bound_id)
             .cloned()
             .ok_or_else(|| BridgeRpcError {
@@ -404,20 +407,6 @@ impl ServerContext {
             return res;
         }
 
-        // Fallback for any remaining cataloged V24.01 / Crucible service auxiliary getters
-        if self.cataloged_services.contains(effective_service)
-            && !matches!(
-                effective_service,
-                "beyonce" | "charUnboundMgr" | "stationSvc" | "invbroker" | "dogmaIM"
-            )
-        {
-            return Ok(PyRep::keyval([
-                ("service", PyRep::String(effective_service.to_string())),
-                ("method", PyRep::String(method.to_string())),
-                ("ok", PyRep::Bool(true)),
-            ]));
-        }
-
         warn!(
             service = effective_service,
             method,
@@ -426,20 +415,24 @@ impl ServerContext {
             caller = caller_trace.unwrap_or("unknown"),
             "Unimplemented RPC intercepted — returning explicit UnimplementedRPC error"
         );
-        append_unimplemented_rpc_log(
-            session.session_id,
-            effective_service,
-            method,
-            args,
-            kwargs,
-            caller_trace,
-        );
+        if session.is_authenticated() {
+            append_unimplemented_rpc_log(
+                session.session_id,
+                effective_service,
+                method,
+                args,
+                kwargs,
+                caller_trace,
+            );
+        }
         Err(BridgeRpcError {
             code: "UnimplementedRPC".into(),
             message: format!("{effective_service}.{method} is not yet implemented"),
         })
     }
 }
+
+const MAX_UNIMPLEMENTED_LOG_BYTES: u64 = 10 * 1024 * 1024; // 10 MiB cap
 
 fn append_unimplemented_rpc_log(
     session_id: u64,
@@ -451,18 +444,30 @@ fn append_unimplemented_rpc_log(
 ) {
     use std::io::Write;
     let _ = std::fs::create_dir_all("logs");
+    let path = "logs/unimplemented_rpcs.jsonl";
+    if let Ok(meta) = std::fs::metadata(path) {
+        if meta.len() >= MAX_UNIMPLEMENTED_LOG_BYTES {
+            return;
+        }
+    }
     if let Ok(mut file) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open("logs/unimplemented_rpcs.jsonl")
+        .open(path)
     {
+        let sanitized_trace: String = caller_trace
+            .unwrap_or("unknown")
+            .chars()
+            .filter(|c| !c.is_control())
+            .take(256)
+            .collect();
         let record = serde_json::json!({
             "session_id": session_id,
             "service": service,
             "method": method,
             "args": args,
             "kwargs": kwargs,
-            "caller_trace": caller_trace.unwrap_or("unknown"),
+            "caller_trace": sanitized_trace,
         });
         let _ = writeln!(file, "{record}");
     }
@@ -521,6 +526,7 @@ mod tests {
 
         login_and_select_aura(&ctx, &mut session).await;
         assert_eq!(session.character_id, Some(90_000_001));
+        assert_eq!(session.race_id, Some(2));
 
         let bad_bind = ctx
             .dispatch_rpc(
@@ -647,12 +653,25 @@ mod tests {
         assert!(new_char.as_i64().unwrap() > 200_000_000);
         login_and_select_aura(&ctx, &mut session).await;
 
-        // E2E-02: Skill Queue, Completion, Skill Injector, & Jump Clone Installation
+        // E2E-02: Skill Queue, Skill Injector Consumption, Free SP Application, & Jump Clone Installation
+        let injected_sp = ctx
+            .dispatch_rpc(
+                &mut session,
+                "skillMgr2",
+                None,
+                "InjectSkillPoints",
+                &[],
+                &empty,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(injected_sp.as_f64().unwrap(), 400_000.0);
         ctx.dispatch_rpc(
             &mut session,
-            "skillMgr",
+            "skillMgr2",
             None,
-            "AddToEndOfSkillQueue",
+            "SaveSkillQueue",
             &[PyRep::Integer(3327), PyRep::Integer(5)],
             &empty,
             None,
@@ -662,9 +681,9 @@ mod tests {
         let sp_after = ctx
             .dispatch_rpc(
                 &mut session,
-                "skillMgr",
+                "skillMgr2",
                 None,
-                "CompleteSkillQueue",
+                "ApplyFreeSkillPoints",
                 &[],
                 &empty,
                 None,
@@ -713,9 +732,9 @@ mod tests {
         .unwrap();
         ctx.dispatch_rpc(
             &mut session,
-            "mutaplasmidMgr",
+            "dynamicItemSvc",
             None,
-            "ApplyMutaplasmid",
+            "MutateItem",
             &[PyRep::Integer(47702), PyRep::Integer(100_000_003)],
             &empty,
             None,
@@ -734,7 +753,7 @@ mod tests {
         .await
         .unwrap();
 
-        // E2E-04 & E2E-05: Undock, Sub-Warp Flight, Intra-System Warp, & Stargate Jump to Perimeter
+        // E2E-04 & E2E-05: Undock, Sub-Warp Flight, Intra-System Warp to Stargate 50001248, & Jump to Perimeter
         let undock = ctx
             .dispatch_rpc(&mut session, "stationSvc", None, "Undock", &[], &empty, None)
             .await
@@ -743,21 +762,27 @@ mod tests {
             panic!("Expected KeyVal");
         };
         let b_id = ukv.get("beyonceBoundID").unwrap().as_i64().unwrap() as u64;
+        // Warp to Jita -> Perimeter Stargate (50001248) at [-161369743360.0, -30690549760.0, -1107962183680.0]
         ctx.dispatch_rpc(
             &mut session,
             "beyonce",
             Some(b_id),
             "CmdWarpToPoint",
             &[
-                PyRep::Real(10_000_000_000.0),
-                PyRep::Real(0.0),
-                PyRep::Real(0.0),
+                PyRep::Real(-161_369_743_360.0),
+                PyRep::Real(-30_690_549_760.0),
+                PyRep::Real(-1_107_962_183_680.0),
             ],
             &empty,
             None,
         )
         .await
         .unwrap();
+        // Step Jita ballpark until warp completes at stargate 50001248
+        let jita_handle = ctx.systems.get_or_spawn(30_000_142);
+        for _ in 0..30 {
+            let _ = jita_handle.step_manual(1.0).await.unwrap();
+        }
         let jump_res = ctx
             .dispatch_rpc(
                 &mut session,
@@ -774,8 +799,9 @@ mod tests {
             panic!("Expected jump KeyVal");
         };
         assert_eq!(jkv.get("solarSystemID"), Some(&PyRep::Integer(30_000_144)));
+        let perim_b_id = jkv.get("beyonceBoundID").unwrap().as_i64().unwrap() as u64;
 
-        // E2E-06: Turret/Vorton/Entropic Combat, DBS/ESS Bounty Split, & ESS Bank Hack
+        // E2E-06: Turret/Vorton/Entropic Combat, DBS/ESS Bounty Split, & ESS Bank Hack (in space in Perimeter)
         ctx.dispatch_rpc(
             &mut session,
             "dogmaIM",
@@ -795,7 +821,7 @@ mod tests {
             &mut session,
             "essMgr",
             None,
-            "HackMainBank",
+            "AttemptLinkToMainBank",
             &[],
             &empty,
             None,
@@ -803,7 +829,43 @@ mod tests {
         .await
         .unwrap();
 
-        // Dock back in Jita 4-4 for station journeys
+        // Jump back from Perimeter (30000144) to Jita (30000142) via stargate 50001873 (ship arrived at 1500m from 50001873)
+        let jump_back = ctx
+            .dispatch_rpc(
+                &mut session,
+                "beyonce",
+                Some(perim_b_id),
+                "CmdStargateJump",
+                &[PyRep::Integer(50001873)],
+                &empty,
+                None,
+            )
+            .await
+            .unwrap();
+        let PyRep::KeyVal(jb_kv) = jump_back else {
+            panic!("Expected jump_back KeyVal");
+        };
+        let jita_b_id = jb_kv.get("beyonceBoundID").unwrap().as_i64().unwrap() as u64;
+
+        // Warp to Jita 4-4 station (60_003_760) at [-107303362560.0, -18744975360.0, 436489052160.0] and dock
+        ctx.dispatch_rpc(
+            &mut session,
+            "beyonce",
+            Some(jita_b_id),
+            "CmdWarpToPoint",
+            &[
+                PyRep::Real(-107_303_362_560.0),
+                PyRep::Real(-18_744_975_360.0),
+                PyRep::Real(436_489_052_160.0),
+            ],
+            &empty,
+            None,
+        )
+        .await
+        .unwrap();
+        for _ in 0..30 {
+            let _ = jita_handle.step_manual(1.0).await.unwrap();
+        }
         ctx.dispatch_rpc(
             &mut session,
             "stationSvc",
@@ -898,41 +960,41 @@ mod tests {
         .unwrap();
 
         // E2E-09: Agent Mission Request, Dungeon Acceleration Gate, & 16-Mission Storyline Trigger
-        ctx.dispatch_rpc(
-            &mut session,
-            "agentMgr",
-            None,
-            "RequestMission",
-            &[PyRep::Integer(1001)],
-            &empty,
-            None,
-        )
-        .await
-        .unwrap();
-        ctx.dispatch_rpc(
-            &mut session,
-            "agentMgr",
-            None,
-            "AcceptMission",
-            &[PyRep::Integer(1001)],
-            &empty,
-            None,
-        )
-        .await
-        .unwrap();
-        ctx.dispatch_rpc(
-            &mut session,
-            "dungeon",
-            None,
-            "ClearRoomAndActivateGate",
-            &[PyRep::Integer(1001)],
-            &empty,
-            None,
-        )
-        .await
-        .unwrap();
         let mut storyline_triggered = false;
         for _ in 0..16 {
+            ctx.dispatch_rpc(
+                &mut session,
+                "agentMgr",
+                None,
+                "RequestMission",
+                &[PyRep::Integer(1001)],
+                &empty,
+                None,
+            )
+            .await
+            .unwrap();
+            ctx.dispatch_rpc(
+                &mut session,
+                "agentMgr",
+                None,
+                "AcceptMission",
+                &[PyRep::Integer(1001)],
+                &empty,
+                None,
+            )
+            .await
+            .unwrap();
+            ctx.dispatch_rpc(
+                &mut session,
+                "dungeon",
+                None,
+                "ClearRoomAndActivateGate",
+                &[PyRep::Integer(1001)],
+                &empty,
+                None,
+            )
+            .await
+            .unwrap();
             let mres = ctx
                 .dispatch_rpc(
                     &mut session,
@@ -972,7 +1034,7 @@ mod tests {
             .await
             .unwrap();
 
-        // E2E-11: Probe Scanning, Wormhole Jump, & Abyssal Filament Transition
+        // E2E-11: Probe Scanning, Undock, Wormhole Jump, & Abyssal Filament Transition
         let scan_res = ctx
             .dispatch_rpc(
                 &mut session,
@@ -989,6 +1051,9 @@ mod tests {
             panic!("Expected scan KeyVal");
         };
         assert_eq!(skv.get("warpable"), Some(&PyRep::Bool(true)));
+        ctx.dispatch_rpc(&mut session, "stationSvc", None, "Undock", &[], &empty, None)
+            .await
+            .unwrap();
         ctx.dispatch_rpc(
             &mut session,
             "wormholeMgr",
@@ -1054,13 +1119,13 @@ mod tests {
         .await
         .unwrap();
 
-        // E2E-14: Upwell Structure Anchoring, Quantum Core, & Damage-Capped Reinforcement
+        // E2E-14: Upwell Structure Anchoring (consuming Astrahus 35832 + Quantum Core 56201) & Damage-Capped Reinforcement
         let st_res = ctx
             .dispatch_rpc(
                 &mut session,
                 "structureDeployment",
                 None,
-                "AnchorStructure",
+                "Anchor",
                 &[PyRep::Integer(35832), PyRep::String("EvoMu Keepstar".into())],
                 &empty,
                 None,
@@ -1237,28 +1302,20 @@ mod tests {
         };
         assert_eq!(ckv.get("completed"), Some(&PyRep::Bool(true)));
 
-        // Verify all 216 cataloged RPC services and all 135 Quasar Protobuf domains respond without UnimplementedRPC
+        // Verify unimplemented methods on cataloged services strictly return UnimplementedRPC (no catch-all stub)
         assert_eq!(ctx.cataloged_services.len(), 216);
-        for svc in &ctx.cataloged_services {
-            if svc == "beyonce" {
-                continue; // beyonce requires a bound solar system ID (tested above)
-            }
-            let method_to_call = match svc.as_str() {
-                "charUnboundMgr" => "GetCharactersToSelect",
-                "stationSvc" => "GetStation",
-                "invbroker" => "ListItems",
-                "dogmaIM" => "GetShipAttributes",
-                _ => "GetState",
-            };
-            let res = ctx
-                .dispatch_rpc(&mut session, svc, None, method_to_call, &[], &empty, None)
-                .await;
-            assert!(
-                res.is_ok(),
-                "Cataloged RPC service {svc}.{method_to_call} returned error: {:?}",
-                res.err()
-            );
-        }
+        let unimpl_res = ctx
+            .dispatch_rpc(
+                &mut session,
+                "marketProxy",
+                None,
+                "NonExistentMethod",
+                &[],
+                &empty,
+                None,
+            )
+            .await;
+        assert_eq!(unimpl_res.unwrap_err().code, "UnimplementedRPC");
 
         let quasar_json = include_str!("../../../docs/index/quasar_protobuf_catalog.json");
         let quasar_cat: HashMap<String, Vec<String>> = serde_json::from_str(quasar_json).unwrap();

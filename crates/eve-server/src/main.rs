@@ -6,17 +6,10 @@
 
 #![forbid(unsafe_code)]
 
-pub mod formulas;
-pub mod living_world;
-pub mod router;
-pub mod services;
-pub mod system_actor;
-pub mod world_seeder;
-
 use anyhow::{bail, Result};
 use eve_machonet::{MachoAddress, MachoPacket, MachoPacketType, SessionState, VersionExchange};
 use eve_proto::{marshal, BridgeEnvelope, PyRep, MAX_FRAME_SIZE};
-use router::ServerContext;
+use eve_server::router::ServerContext;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -93,14 +86,18 @@ async fn main() -> Result<()> {
 }
 
 /// Reads a length-prefixed frame with strict `MAX_FRAME_SIZE` validation BEFORE allocating memory.
-async fn read_bounded_frame(stream: &mut TcpStream) -> Result<Option<Vec<u8>>> {
+/// Waiting for the first byte of a new frame has no idle timeout so connected clients are not dropped
+/// when quiet; once the first header byte arrives, the remaining header and body must complete within `IO_TIMEOUT`.
+async fn read_bounded_frame<R: tokio::io::AsyncRead + Unpin>(
+    stream: &mut R,
+) -> Result<Option<Vec<u8>>> {
     let mut len_buf = [0u8; 4];
-    match timeout(IO_TIMEOUT, stream.read_exact(&mut len_buf)).await {
-        Ok(Ok(_)) => {}
-        Ok(Err(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
-        Ok(Err(e)) => return Err(e.into()),
-        Err(_) => bail!("Frame header read timed out after {:?}", IO_TIMEOUT),
+    match stream.read_exact(&mut len_buf[..1]).await {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+        Err(e) => return Err(e.into()),
     }
+    timeout(IO_TIMEOUT, stream.read_exact(&mut len_buf[1..])).await??;
 
     let frame_len = u32::from_le_bytes(len_buf) as usize;
     if frame_len == 0 {
@@ -119,7 +116,10 @@ async fn read_bounded_frame(stream: &mut TcpStream) -> Result<Option<Vec<u8>>> {
     Ok(Some(payload))
 }
 
-async fn write_bounded_frame(stream: &mut TcpStream, payload: &[u8]) -> Result<()> {
+async fn write_bounded_frame<W: tokio::io::AsyncWrite + Unpin>(
+    stream: &mut W,
+    payload: &[u8],
+) -> Result<()> {
     if payload.len() > MAX_FRAME_SIZE {
         bail!("Outbound frame exceeds MAX_FRAME_SIZE");
     }
@@ -134,19 +134,41 @@ async fn write_bounded_frame(stream: &mut TcpStream, payload: &[u8]) -> Result<(
 }
 
 /// Handles connections from the Python Client Bridge (`evomu_bridge.py`) using length-prefixed JSON.
-async fn handle_bridge_client(mut stream: TcpStream, ctx: Arc<ServerContext>) -> Result<()> {
+/// Uses a dedicated reader task feeding a cancel-safe `mpsc::channel` so 1 Hz `sys_rx` broadcast ticks
+/// inside `tokio::select!` can never cancel an in-flight `read_exact` call.
+async fn handle_bridge_client(stream: TcpStream, ctx: Arc<ServerContext>) -> Result<()> {
     let session_id = NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed);
     // New sessions start strictly unauthenticated (`user_id: None`, `role: 0`)
     let mut session = SessionState::new(session_id);
     let mut sys_rx = ctx.systems.get_or_spawn(30000142).subscribe();
 
+    let (mut reader, mut writer) = stream.into_split();
+    let (frame_tx, mut frame_rx) = tokio::sync::mpsc::channel::<Result<Vec<u8>>>(16);
+    let reader_task = tokio::spawn(async move {
+        loop {
+            match read_bounded_frame(&mut reader).await {
+                Ok(Some(payload)) => {
+                    if frame_tx.send(Ok(payload)).await.is_err() {
+                        break;
+                    }
+                }
+                Ok(None) => break,
+                Err(e) => {
+                    let _ = frame_tx.send(Err(e)).await;
+                    break;
+                }
+            }
+        }
+    });
+
     let res: Result<()> = async {
         loop {
             tokio::select! {
-                frame_res = read_bounded_frame(&mut stream) => {
-                    let Some(payload) = frame_res? else {
+                frame_opt = frame_rx.recv() => {
+                    let Some(frame_res) = frame_opt else {
                         break;
                     };
+                    let payload = frame_res?;
                     let envelope: BridgeEnvelope = serde_json::from_slice(&payload)?;
                     if let BridgeEnvelope::RpcRequest {
                         req_id,
@@ -179,7 +201,7 @@ async fn handle_bridge_client(mut stream: TcpStream, ctx: Arc<ServerContext>) ->
                         }
                         let response = BridgeEnvelope::RpcResponse { req_id, result };
                         let out_bytes = serde_json::to_vec(&response)?;
-                        write_bounded_frame(&mut stream, &out_bytes).await?;
+                        write_bounded_frame(&mut writer, &out_bytes).await?;
 
                         // Emit OnSessionChanged whenever an RPC mutated session state
                         let diff = prev_session.compute_diff(&session);
@@ -197,7 +219,7 @@ async fn handle_bridge_client(mut stream: TcpStream, ctx: Arc<ServerContext>) ->
                                 args: vec![PyRep::Bool(false), changes_dict],
                             };
                             let sess_bytes = serde_json::to_vec(&session_event)?;
-                            write_bounded_frame(&mut stream, &sess_bytes).await?;
+                            write_bounded_frame(&mut writer, &sess_bytes).await?;
                         }
                     }
                 }
@@ -214,7 +236,7 @@ async fn handle_bridge_client(mut stream: TcpStream, ctx: Arc<ServerContext>) ->
                             args: vec![PyRep::String(event_json)],
                         };
                         let out_bytes = serde_json::to_vec(&server_event)?;
-                        write_bounded_frame(&mut stream, &out_bytes).await?;
+                        write_bounded_frame(&mut writer, &out_bytes).await?;
                     }
                 }
             }
@@ -223,6 +245,7 @@ async fn handle_bridge_client(mut stream: TcpStream, ctx: Arc<ServerContext>) ->
     }
     .await;
 
+    reader_task.abort();
     ctx.release_session_bindings(session.session_id);
     res
 }
@@ -239,7 +262,6 @@ async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>) -> 
     let res: Result<()> = async {
         while let Some(frame) = read_bounded_frame(&mut stream).await? {
             let decoded = marshal::decode(&frame)?;
-            info!(?decoded, "Received machoNet frame");
 
             if let Some(pkt) = MachoPacket::from_pyrep(&decoded) {
                 match pkt.packet_type {

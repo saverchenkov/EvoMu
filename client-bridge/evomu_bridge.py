@@ -14,7 +14,12 @@ import inspect
 import json
 import socket
 import struct
+import sys
 import threading
+
+PY2 = sys.version_info[0] < 3
+_INT_TYPES = (int, long) if PY2 else (int,)  # noqa: F821
+_TEXT_TYPE = unicode if PY2 else str  # noqa: F821
 
 MAX_FRAME_SIZE = 4 * 1024 * 1024  # 4 MiB
 DEFAULT_RPC_TIMEOUT = 10.0
@@ -64,19 +69,26 @@ class LocalTupleSet(tuple):
 
 
 def to_pyrep_json(val):
-    """Encodes a Python primitive/collection into the tagged `PyRep` JSON format expected by `eve-proto`."""
+    """Encodes a Python 2.7 / Python 3 primitive or collection into the tagged `PyRep` JSON format expected by `eve-proto`."""
     if val is None:
         return {"$py": "None"}
     if isinstance(val, bool):
         return {"$py": "Bool", "val": val}
-    if isinstance(val, int):
-        return {"$py": "Integer", "val": val}
+    if isinstance(val, _INT_TYPES):
+        return {"$py": "Integer", "val": int(val)}
     if isinstance(val, float):
         return {"$py": "Real", "val": val}
-    if isinstance(val, bytes):
+    if isinstance(val, bytearray):
+        return {"$py": "Buffer", "val": [int(b) for b in val]}
+    if not PY2 and isinstance(val, bytes):
         return {"$py": "Buffer", "val": list(val)}
-    if isinstance(val, str):
+    if isinstance(val, _TEXT_TYPE):
         return {"$py": "String", "val": val}
+    if PY2 and isinstance(val, str):
+        try:
+            return {"$py": "String", "val": val.decode("utf-8")}
+        except UnicodeDecodeError:
+            return {"$py": "Buffer", "val": [ord(b) for b in val]}
     if isinstance(val, tuple):
         return {"$py": "Tuple", "val": [to_pyrep_json(x) for x in val]}
     if isinstance(val, list):
@@ -100,7 +112,7 @@ def from_pyrep_json(node):
     if tag in ("Bool", "Integer", "Real", "String", "AsciiString"):
         return val
     if tag in ("Buffer", "Picked"):
-        return bytes(val)
+        return bytes(bytearray(val))
     if tag == "Tuple":
         return tuple(from_pyrep_json(x) for x in val)
     if tag == "List":
@@ -153,7 +165,8 @@ class EvoMuBridgeConnection(object):
         self.sock = socket.create_connection((self.host, self.port), timeout=DEFAULT_RPC_TIMEOUT)
         self.sock.settimeout(None)
         self._closed = False
-        self._reader_thread = threading.Thread(target=self._reader_loop, daemon=True)
+        self._reader_thread = threading.Thread(target=self._reader_loop)
+        self._reader_thread.daemon = True
         self._reader_thread.start()
 
     def close(self):
@@ -246,7 +259,7 @@ class EvoMuBridgeConnection(object):
         if not slot.event.wait(timeout=timeout):
             with self._pending_lock:
                 self._pending.pop(req_id, None)
-            raise TimeoutError(
+            raise socket.timeout(
                 "Timed out waiting for RPC %s.%s (req_id=%d)"
                 % (service_name, method_name, req_id)
             )
@@ -324,7 +337,7 @@ class PublicGatewayShim(object):
     def send_character_request(self, request_proto, response_cls, timeout=DEFAULT_RPC_TIMEOUT):
         type_name = getattr(request_proto, "DESCRIPTOR", None)
         full_name = type_name.full_name if type_name is not None else type(request_proto).__name__
-        payload_bytes = (
+        payload_bytes = bytearray(
             request_proto.SerializeToString()
             if hasattr(request_proto, "SerializeToString")
             else b""
@@ -336,9 +349,9 @@ class PublicGatewayShim(object):
             {},
             timeout=timeout,
         )
-        if response_cls is not None and hasattr(response_cls, "FromString") and isinstance(raw_rsp, bytes):
+        if response_cls is not None and hasattr(response_cls, "FromString") and isinstance(raw_rsp, (bytes, bytearray)):
             rsp = response_cls()
-            rsp.ParseFromString(raw_rsp)
+            rsp.ParseFromString(bytes(raw_rsp))
             return rsp
         return raw_rsp
 

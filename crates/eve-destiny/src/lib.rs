@@ -122,6 +122,12 @@ pub struct CombatState {
     pub max_armor_hp: f64,
     pub structure_hp: f64,
     pub max_structure_hp: f64,
+    /// Shield damage resonance `[EM, Thermal, Kinetic, Explosive]` (`1.0` = 0% resistance).
+    pub shield_resonance: [f64; 4],
+    /// Armor damage resonance `[EM, Thermal, Kinetic, Explosive]` (`1.0` = 0% resistance).
+    pub armor_resonance: [f64; 4],
+    /// Structure damage resonance `[EM, Thermal, Kinetic, Explosive]` (`1.0` = 0% resistance).
+    pub structure_resonance: [f64; 4],
     pub capacitor: f64,
     pub max_capacitor: f64,
     pub signature_radius: f64,
@@ -142,6 +148,9 @@ impl Default for CombatState {
             max_armor_hp: 450.0,
             structure_hp: 350.0,
             max_structure_hp: 350.0,
+            shield_resonance: [1.0, 1.0, 1.0, 1.0],
+            armor_resonance: [1.0, 1.0, 1.0, 1.0],
+            structure_resonance: [1.0, 1.0, 1.0, 1.0],
             capacitor: 250.0,
             max_capacitor: 250.0,
             signature_radius: 35.0,
@@ -155,33 +164,84 @@ impl Default for CombatState {
 }
 
 impl CombatState {
-    /// Applies a [`DamageVector`] through Shield -> Armor -> Structure layers.
+    /// Applies a [`DamageVector`] through Shield -> Armor -> Structure layers using each layer's
+    /// 4-channel `[EM, Thermal, Kinetic, Explosive]` resonance profile.
     /// Returns `(total_applied_damage, destroyed)`.
     pub fn apply_damage(&mut self, dmg: DamageVector) -> (f64, bool) {
         if self.is_tethered {
             return (0.0, false);
         }
-        let raw = dmg.total().max(0.0);
-        let mut rem = raw;
+        let mut rem_vec = DamageVector {
+            em: dmg.em.max(0.0),
+            thermal: dmg.thermal.max(0.0),
+            kinetic: dmg.kinetic.max(0.0),
+            explosive: dmg.explosive.max(0.0),
+        };
+        if rem_vec.total() <= 0.0 {
+            return (0.0, self.structure_hp <= 1e-6);
+        }
 
-        if self.shield_hp > 0.0 {
-            let take = rem.min(self.shield_hp);
-            self.shield_hp -= take;
-            rem -= take;
+        let mut total_applied = 0.0;
+
+        // 1. Shield layer
+        if self.shield_hp > 0.0 && rem_vec.total() > 0.0 {
+            let eff = rem_vec.em * self.shield_resonance[0]
+                + rem_vec.thermal * self.shield_resonance[1]
+                + rem_vec.kinetic * self.shield_resonance[2]
+                + rem_vec.explosive * self.shield_resonance[3];
+            if eff > 0.0 {
+                if self.shield_hp >= eff {
+                    self.shield_hp -= eff;
+                    total_applied += eff;
+                    rem_vec = DamageVector::default();
+                } else {
+                    let absorbed_fraction = (self.shield_hp / eff).clamp(0.0, 1.0);
+                    total_applied += self.shield_hp;
+                    self.shield_hp = 0.0;
+                    rem_vec = rem_vec.scaled(1.0 - absorbed_fraction);
+                }
+            } else {
+                rem_vec = DamageVector::default();
+            }
         }
-        if rem > 0.0 && self.armor_hp > 0.0 {
-            let take = rem.min(self.armor_hp);
-            self.armor_hp -= take;
-            rem -= take;
+
+        // 2. Armor layer
+        if self.armor_hp > 0.0 && rem_vec.total() > 0.0 {
+            let eff = rem_vec.em * self.armor_resonance[0]
+                + rem_vec.thermal * self.armor_resonance[1]
+                + rem_vec.kinetic * self.armor_resonance[2]
+                + rem_vec.explosive * self.armor_resonance[3];
+            if eff > 0.0 {
+                if self.armor_hp >= eff {
+                    self.armor_hp -= eff;
+                    total_applied += eff;
+                    rem_vec = DamageVector::default();
+                } else {
+                    let absorbed_fraction = (self.armor_hp / eff).clamp(0.0, 1.0);
+                    total_applied += self.armor_hp;
+                    self.armor_hp = 0.0;
+                    rem_vec = rem_vec.scaled(1.0 - absorbed_fraction);
+                }
+            } else {
+                rem_vec = DamageVector::default();
+            }
         }
-        if rem > 0.0 && self.structure_hp > 0.0 {
-            let take = rem.min(self.structure_hp);
-            self.structure_hp -= take;
-            rem -= take;
+
+        // 3. Structure layer
+        if self.structure_hp > 0.0 && rem_vec.total() > 0.0 {
+            let eff = rem_vec.em * self.structure_resonance[0]
+                + rem_vec.thermal * self.structure_resonance[1]
+                + rem_vec.kinetic * self.structure_resonance[2]
+                + rem_vec.explosive * self.structure_resonance[3];
+            if eff > 0.0 {
+                let take = eff.min(self.structure_hp);
+                self.structure_hp -= take;
+                total_applied += take;
+            }
         }
-        let applied = raw - rem;
+
         let destroyed = self.structure_hp <= 1e-6;
-        (applied, destroyed)
+        (total_applied, destroyed)
     }
 }
 
@@ -359,7 +419,11 @@ impl Ballpark {
     }
 
     /// Advances the entire solar system simulation by `dt` seconds (standard EVE server tick `dt = 1.0`).
+    /// Rejects non-positive or non-finite `dt`.
     pub fn step(&mut self, dt: f64) -> Vec<DestinyEvent> {
+        if dt <= 0.0 || !dt.is_finite() {
+            return Vec::new();
+        }
         self.current_tick += 1;
 
         let positions: BTreeMap<BallId, (DVec3, f64)> = self
@@ -520,7 +584,7 @@ pub mod combat {
     /// Resolves a turret shot given `chance_to_hit` and deterministic uniform roll `u in [0.0, 1.0)` (`#48`–`#49`).
     /// - If `u >= chance_to_hit`: Miss (`0.0` multiplier).
     /// - If `u < 0.01`: Wrecking Shot (`3.0` multiplier).
-    /// - Otherwise: Normal hit with quality $Q = 0.5 + u \in [0.5, 1.49]$.
+    /// - Otherwise: Normal hit with quality $Q = 0.4995 + u \in [0.5095, 1.4995)$.
     pub fn resolve_turret_shot(
         base_damage: DamageVector,
         chance_to_hit: f64,
@@ -532,12 +596,13 @@ pub mod combat {
         if roll_u < 0.01 {
             return (base_damage.scaled(3.0), true);
         }
-        let q = (0.5 + roll_u).clamp(0.5, 1.49);
+        let q = (0.4995 + roll_u).clamp(0.4995, 1.4995);
         (base_damage.scaled(q), false)
     }
 
     /// Computes EVE Missile Damage Application factor (`#50`–`#51`):
-    /// $$D = D_{\text{base}} \cdot \min\left(1.0, \frac{\sigma_t}{E_r}, \left(\frac{\sigma_t}{E_r} \cdot \frac{E_v}{v_t}\right)^{\ln(\text{drf}) / \ln(5.5)}\right)$$
+    /// $$D = D_{\text{base}} \cdot \min\left(1.0, \frac{\sigma_t}{E_r}, \left(\frac{\sigma_t}{E_r} \cdot \frac{E_v}{v_t}\right)^{\text{drf}}\right)$$
+    /// Accepts either the SDE pre-computed `aoeDamageReductionFactor` (`<= 1.0`) or raw DRF (`> 1.0`).
     pub fn compute_missile_damage_factor(
         target_sig_radius: f64,
         target_velocity: f64,
@@ -547,8 +612,12 @@ pub mod combat {
     ) -> f64 {
         let sig_ratio = target_sig_radius / explosion_radius.max(1.0);
         let vel_ratio = explosion_velocity / target_velocity.max(1.0);
-        let exponent = damage_reduction_factor.max(1e-3).ln() / 5.5_f64.ln();
-        let combined = (sig_ratio * vel_ratio).powf(exponent.abs());
+        let exponent = if damage_reduction_factor <= 1.0 {
+            damage_reduction_factor.max(1e-3)
+        } else {
+            (damage_reduction_factor.ln() / 5.5_f64.ln()).abs()
+        };
+        let combined = (sig_ratio * vel_ratio).powf(exponent);
         1.0_f64.min(sig_ratio).min(combined).clamp(0.0, 1.0)
     }
 
@@ -760,7 +829,17 @@ fn compute_subwarp_goal_velocity(ball: &Ball, positions: &BTreeMap<BallId, (DVec
                 DVec3::ZERO
             }
         }
-        _ => DVec3::ZERO,
+        MovementMode::Boid | MovementMode::Formation => {
+            let dir = ball.velocity.normalize_or_zero();
+            let heading = if dir == DVec3::ZERO { DVec3::X } else { dir };
+            heading * (ball.max_velocity * ball.speed_fraction.max(0.5))
+        }
+        MovementMode::Mushroom | MovementMode::Troll | MovementMode::Miniball => {
+            ball.velocity * 0.25
+        }
+        MovementMode::Stop | MovementMode::Warp { .. } | MovementMode::Field | MovementMode::Rigid => {
+            DVec3::ZERO
+        }
     }
 }
 

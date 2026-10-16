@@ -4,7 +4,7 @@
 
 use crate::formulas::{compute_jump_fatigue_and_cooldown_minutes, compute_probe_scan_signal_pct};
 use crate::router::{BoundObjectEntry, ServerContext};
-use eve_destiny::{Ball, MovementMode};
+use eve_destiny::MovementMode;
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::{attr_ids, SolarSystemId};
@@ -169,27 +169,7 @@ pub async fn handle(
             }
         }
 
-        ("beyonce", "StepSimulation") => {
-            let _ = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let sys_id = match ServerContext::require_bound_system(bound_entry, "beyonce") {
-                Ok(s) => s,
-                Err(e) => return Some(Err(e)),
-            };
-            let dt = args.first().and_then(|a| a.as_f64()).unwrap_or(1.0);
-            let handle = ctx.systems.get_or_spawn(sys_id);
-            match handle.step_manual(dt).await {
-                Ok(bcast) => Some(Ok(PyRep::Integer(bcast.tick as i64))),
-                Err(e) => Some(Err(BridgeRpcError {
-                    code: "DestinyStepFailed".into(),
-                    message: e,
-                })),
-            }
-        }
-
-        ("beyonce", "GetBallSnapshot") => {
+        ("beyonce", "GetBallSnapshot") | ("beyonce", "GetFormations") => {
             let _ = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -226,6 +206,7 @@ pub async fn handle(
 
         // Stargate Jump, Cyno Jump, Wormhole Traversal, and Abyssal Filament Transition
         ("beyonce", "CmdStargateJump")
+        | ("beyonce", "StargateJump")
         | ("jumpbeaconsvc", "JumpToBeacon")
         | ("wormholeMgr", "WormholeJump")
         | ("abyssalMgr", "ActivateFilament")
@@ -236,31 +217,116 @@ pub async fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let dest_sys_id: SolarSystemId = if method == "CmdStargateJump" {
-                let gate_id = args.first().and_then(|a| a.as_i64()).unwrap_or(50001248);
-                ctx.sde
-                    .jumps
-                    .get(&gate_id)
-                    .map(|j| j.to_solar_system_id)
-                    .or_else(|| args.get(1).and_then(|a| a.as_i64()).map(|v| v as u32))
-                    .unwrap_or(30_000_144)
-            } else if service == "wormholeMgr" {
-                args.first()
-                    .and_then(|a| a.as_i64())
-                    .map(|v| v as u32)
-                    .unwrap_or(31_000_005)
-            } else if service == "abyssalMgr" || service == "voidSpaceMgr" {
-                32_000_001
-            } else {
-                args.first()
-                    .and_then(|a| a.as_i64())
-                    .map(|v| v as u32)
-                    .unwrap_or(30_000_144)
+            if session.station_id.is_some() || session.structure_id.is_some() {
+                return Some(Err(BridgeRpcError {
+                    code: "ShipDocked".into(),
+                    message: "Cannot jump or activate filament while docked".into(),
+                }));
+            }
+            let Some(old_sys) = session.solar_system_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "NoSolarSystem".into(),
+                    message: "Session has no active solarSystemID".into(),
+                }));
+            };
+            let Some(ship_id) = session.ship_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "NoActiveShip".into(),
+                    message: "Session has no active ship".into(),
+                }));
             };
 
-            let old_sys = session.solar_system_id.unwrap_or(30_000_142);
-            let ship_id = session.ship_id.unwrap_or(100_000_001);
             let old_handle = ctx.systems.get_or_spawn(old_sys);
+            let Some((_, current_ball)) = (match old_handle.get_ball_snapshot(ship_id).await {
+                Ok(v) => v,
+                Err(e) => {
+                    return Some(Err(BridgeRpcError {
+                        code: "DestinyQueryFailed".into(),
+                        message: e,
+                    }))
+                }
+            }) else {
+                return Some(Err(BridgeRpcError {
+                    code: "ShipNotInSpace".into(),
+                    message: "Active ship ball is not in space".into(),
+                }));
+            };
+
+            if matches!(current_ball.mode, MovementMode::Warp { .. }) {
+                return Some(Err(BridgeRpcError {
+                    code: "ShipInWarp".into(),
+                    message: "Cannot jump while ship is mid-warp".into(),
+                }));
+            }
+
+            let dest_sys_id: SolarSystemId =
+                if method == "CmdStargateJump" || method == "StargateJump" {
+                    let _ = match ServerContext::require_bound_system(bound_entry, "beyonce") {
+                        Ok(s) => s,
+                        Err(e) => return Some(Err(e)),
+                    };
+                    let Some(gate_id) = args.first().and_then(|a| a.as_i64()) else {
+                        return Some(Err(BridgeRpcError {
+                            code: "InvalidArgument".into(),
+                            message: "CmdStargateJump requires integer stargateID".into(),
+                        }));
+                    };
+                    let Some(jump) = ctx.sde.jumps.get(&gate_id) else {
+                        return Some(Err(BridgeRpcError {
+                            code: "UnknownStargate".into(),
+                            message: format!("Stargate {gate_id} does not exist in SDE"),
+                        }));
+                    };
+                    if jump.from_solar_system_id != old_sys {
+                        return Some(Err(BridgeRpcError {
+                            code: "StargateWrongSystem".into(),
+                            message: format!(
+                                "Stargate {gate_id} is in system {}, not current system {old_sys}",
+                                jump.from_solar_system_id
+                            ),
+                        }));
+                    }
+                    let dist = current_ball.position.distance(jump.position);
+                    if dist > 2_500.0 {
+                        return Some(Err(BridgeRpcError {
+                            code: "OutsideStargateJumpRange".into(),
+                            message: format!(
+                                "Ship is {:.1} m from stargate {gate_id} (must be <= 2500 m)",
+                                dist
+                            ),
+                        }));
+                    }
+                    jump.to_solar_system_id
+                } else if service == "wormholeMgr" {
+                    let target = args
+                        .first()
+                        .and_then(|a| a.as_i64())
+                        .map(|v| v as u32)
+                        .unwrap_or(31_000_005);
+                    if !ctx.sde.solar_systems.contains_key(&target) {
+                        return Some(Err(BridgeRpcError {
+                            code: "UnknownSolarSystem".into(),
+                            message: format!("Target wormhole system {target} does not exist"),
+                        }));
+                    }
+                    target
+                } else if service == "abyssalMgr" || service == "voidSpaceMgr" {
+                    32_000_001
+                } else {
+                    let target = args
+                        .first()
+                        .and_then(|a| a.as_i64())
+                        .map(|v| v as u32)
+                        .unwrap_or(30_000_144);
+                    if !ctx.sde.solar_systems.contains_key(&target) {
+                        return Some(Err(BridgeRpcError {
+                            code: "UnknownSolarSystem".into(),
+                            message: format!("Target system {target} does not exist"),
+                        }));
+                    }
+                    target
+                };
+
             let existing_ball = old_handle.remove_ball(ship_id).await;
 
             let updated_ch = match ctx
@@ -276,22 +342,21 @@ pub async fn handle(
                 }
             };
 
+            let arrival_pos = ctx
+                .sde
+                .jumps
+                .values()
+                .find(|j| j.from_solar_system_id == dest_sys_id && j.to_solar_system_id == old_sys)
+                .map(|j| j.position + DVec3::new(1_500.0, 0.0, 0.0))
+                .unwrap_or_else(|| DVec3::new(15_000.0, 0.0, 0.0));
+
             let new_handle = ctx.systems.get_or_spawn(dest_sys_id);
-            let mut new_ball = existing_ball.unwrap_or(Ball {
-                id: ship_id,
-                type_id: 587,
-                position: DVec3::new(15_000.0, 0.0, 0.0),
-                velocity: DVec3::ZERO,
-                max_velocity: 365.0,
-                inertia: 3.45,
-                mass: 1_067_000.0,
-                radius: 37.0,
-                speed_fraction: 0.0,
-                mode: MovementMode::Stop,
-            });
-            new_ball.position = DVec3::new(15_000.0, 0.0, 0.0);
+            let mut new_ball = existing_ball.unwrap_or(current_ball);
+            new_ball.position = arrival_pos;
             new_ball.velocity = DVec3::ZERO;
+            new_ball.speed_fraction = 0.0;
             new_ball.mode = MovementMode::Stop;
+            let ship_mass = new_ball.mass;
             let _ = new_handle.spawn_ball(new_ball).await;
 
             // Update wormhole mass if jumping through wormhole
@@ -299,7 +364,7 @@ pub async fn handle(
                 ctx.db.with_mut_snapshot(|snap| {
                     if let Some(st) = snap.system_states.get_mut(&dest_sys_id) {
                         st.wormhole_remaining_mass_kg =
-                            (st.wormhole_remaining_mass_kg - 1_067_000.0).max(0.0);
+                            (st.wormhole_remaining_mass_kg - ship_mass).max(0.0);
                     }
                 });
             }
@@ -325,7 +390,13 @@ pub async fn handle(
         }
 
         // Probe Scanning (`scanSvc`) & Directional Scanner (`directionalScanner`)
-        ("scanSvc", "RequestScans") | ("sensorSuite", "ScanSignatures") => {
+        ("scanSvc", "RequestScans")
+        | ("scanSvc", "GetSystemStatistics")
+        | ("sensorSuite", "ScanSignatures") => {
+            let _ = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             let range_au = args.first().and_then(|a| a.as_f64()).unwrap_or(0.25);
             let dist_au = args.get(1).and_then(|a| a.as_f64()).unwrap_or(0.0);
             let sig_pct = compute_probe_scan_signal_pct(40.0, 10.0, range_au, dist_au);
@@ -338,6 +409,10 @@ pub async fn handle(
         }
 
         ("directionalScanner", "DirectionalScan") | ("scanSvc", "ConeScan") => {
+            let _ = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             let sys_id = session.solar_system_id.unwrap_or(30_000_142);
             let convoys = ctx.living_world.list_convoys();
             let matches: Vec<PyRep> = convoys
@@ -353,12 +428,13 @@ pub async fn handle(
             Some(Ok(PyRep::List(matches)))
         }
 
-        ("keeper", _)
-        | ("space", _)
-        | ("spaceMgr", _)
-        | ("michelle", _)
-        | ("map", _)
-        | ("solarsystemInterferenceMgr", _) => Some(Ok(PyRep::Bool(true))),
+        ("map", "GetSolarSystemPseudoSecurities") | ("map", "GetStuckSystems") => {
+            let _ = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            Some(Ok(PyRep::List(vec![])))
+        }
 
         _ => None,
     }

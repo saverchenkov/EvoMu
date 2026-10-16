@@ -85,6 +85,7 @@ pub mod attr_ids {
     pub const SIGNATURE_RADIUS: AttributeId = 552;
     pub const SCAN_RESOLUTION: AttributeId = 564;
     pub const WARP_SPEED_MULTIPLIER: AttributeId = 600;
+    pub const MASS_ADDITION: AttributeId = 796;
     pub const UPGRADE_CAPACITY: AttributeId = 1132;
     pub const RIG_SLOTS: AttributeId = 1137;
     pub const UPGRADE_COST: AttributeId = 1153;

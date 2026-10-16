@@ -145,7 +145,7 @@ xychart-beta
 
 ## 2. Granular Subsystem Progress Tracker
 
-> **Note on `M0`–`M8` Verification Status:** Both Python tooling (`evomu_bridge.py --self-test` and `verify_plan_mapping.py --check`) and all 7 Rust workspace crates (`cargo test --workspace`) are **100% implemented and verified on host** (`23` passed test suites, `0` failures, `0` warnings).
+> **Note on `M0`–`M8` Verification Status:** Python tooling (`evomu_bridge.py --self-test` and `verify_plan_mapping.py --check`) and all 7 Rust workspace crates (`RUSTFLAGS="-D warnings -D unused" cargo check --workspace --all-targets`, including unit tests, `tests/e2e_journeys.rs`, and `benches/lod_tick_bench.rs`) compile and verify cleanly with `0` errors and `0` warnings.
 
 | # | Subsystem / Domain | Crate / Module | Relative Size | Progress | Status & Key Deliverables |
 |---|---|---|---|---|---|

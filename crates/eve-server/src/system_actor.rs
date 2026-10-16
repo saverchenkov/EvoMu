@@ -136,11 +136,16 @@ impl SystemRegistry {
 
     /// Spawns or retrieves a running 1 Hz Solar System Actor for `solar_system_id`.
     pub fn get_or_spawn(&self, solar_system_id: SolarSystemId) -> SystemHandle {
-        if let Some(existing) = self.systems.read().unwrap().get(&solar_system_id) {
+        if let Some(existing) = self
+            .systems
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&solar_system_id)
+        {
             return existing.clone();
         }
 
-        let mut guard = self.systems.write().unwrap();
+        let mut guard = self.systems.write().unwrap_or_else(|e| e.into_inner());
         if let Some(existing) = guard.get(&solar_system_id) {
             return existing.clone();
         }

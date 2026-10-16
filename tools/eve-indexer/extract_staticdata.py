@@ -90,6 +90,7 @@ def build_canonical_sde_seed() -> dict:
         {"attribute_id": 552, "name": "signatureRadius", "default_value": 35.0, "high_is_good": False, "stackable": False},
         {"attribute_id": 564, "name": "scanResolution", "default_value": 400.0, "high_is_good": True, "stackable": False},
         {"attribute_id": 600, "name": "warpSpeedMultiplier", "default_value": 3.0, "high_is_good": True, "stackable": False},
+        {"attribute_id": 796, "name": "massAddition", "default_value": 0.0, "high_is_good": False, "stackable": True},
         {"attribute_id": 1132, "name": "upgradeCapacity", "default_value": 400.0, "high_is_good": True, "stackable": True},
         {"attribute_id": 1137, "name": "rigSlots", "default_value": 3.0, "high_is_good": True, "stackable": True},
         {"attribute_id": 1153, "name": "upgradeCost", "default_value": 100.0, "high_is_good": False, "stackable": True},
@@ -99,7 +100,7 @@ def build_canonical_sde_seed() -> dict:
         {"attribute_id": 1271, "name": "droneBandwidth", "default_value": 0.0, "high_is_good": True, "stackable": True},
     ]
 
-    # 2. Canonical Dogma Effects (dgmEffects)
+    # 2. Canonical Dogma Effects (dgmEffects) + 250 indexed effects from dogma_effects.json
     effects = [
         {
             "effect_id": 11,
@@ -160,7 +161,7 @@ def build_canonical_sde_seed() -> dict:
             "is_assistance": False,
             "modifiers": [
                 {"domain": "shipID", "func": "ItemModifier", "modified_attribute_id": 37, "modifying_attribute_id": 20, "operator": 6},
-                {"domain": "shipID", "func": "ItemModifier", "modified_attribute_id": 4, "modifying_attribute_id": 4, "operator": 2},
+                {"domain": "shipID", "func": "ItemModifier", "modified_attribute_id": 4, "modifying_attribute_id": 796, "operator": 2},
             ],
         },
         {
@@ -182,22 +183,77 @@ def build_canonical_sde_seed() -> dict:
             "modifiers": [],
         },
     ]
+    existing_effect_ids = {e["effect_id"] for e in effects}
+    if isinstance(dogma_meta, dict):
+        for se in dogma_meta.get("sample_effects", []):
+            eff_id = int(se.get("effectID", 0))
+            if 0 < eff_id <= 65535 and eff_id not in existing_effect_ids:
+                existing_effect_ids.add(eff_id)
+                effects.append({
+                    "effect_id": eff_id,
+                    "name": str(se.get("effectName", f"effect_{eff_id}")),
+                    "effect_category": int(se.get("effectCategory", 0)),
+                    "is_offensive": False,
+                    "is_assistance": False,
+                    "modifiers": [],
+                })
 
     # 3. Canonical Item Types (invTypes + typedogma)
     types = [
-        # Ships (Category 6)
+        # Ships (Category 6) — Frigates, Corvettes, Industrial, Battleship, Capsule
         {
             "type_id": 587, "group_id": 25, "category_id": 6, "name": "Rifter",
             "mass": 1_067_000.0, "volume": 27_289.0, "capacity": 140.0, "radius": 37.0,
             "base_price": 230_000.0, "published": True,
             "default_attributes": {
-                "4": 1_067_000.0, "9": 350.0, "11": 41.0, "12": 4.0, "13": 3.0, "14": 3.0,
+                "4": 1_067_000.0, "9": 350.0, "11": 41.0, "12": 4.0, "14": 3.0, "13": 3.0,
                 "37": 365.0, "38": 140.0, "48": 130.0, "55": 125_000.0, "70": 3.45,
-                "76": 27_500.0, "101": 1.0, "102": 3.0, "192": 4.0, "209": 9.0,
+                "76": 27_500.0, "101": 1.0, "102": 3.0, "109": 0.67, "110": 0.67, "111": 0.67, "113": 0.67,
+                "192": 4.0, "209": 9.0,
                 "263": 450.0, "265": 450.0, "267": 0.4, "268": 0.9, "269": 0.75, "270": 0.65,
                 "271": 1.0, "272": 0.5, "273": 0.6, "274": 0.8,
                 "479": 625_000.0, "482": 250.0, "552": 35.0, "564": 660.0, "600": 5.0,
                 "1132": 400.0, "1137": 3.0
+            }
+        },
+        {
+            "type_id": 588, "group_id": 237, "category_id": 6, "name": "Reaper",
+            "mass": 1_128_000.0, "volume": 28_600.0, "capacity": 115.0, "radius": 34.0,
+            "base_price": 1.0, "published": True,
+            "default_attributes": {
+                "4": 1_128_000.0, "9": 225.0, "11": 30.0, "12": 2.0, "13": 2.0, "14": 2.0,
+                "37": 315.0, "38": 115.0, "48": 105.0, "55": 95_000.0, "70": 3.65,
+                "263": 250.0, "265": 225.0, "479": 625_000.0, "482": 180.0, "552": 41.0, "564": 550.0, "600": 5.0
+            }
+        },
+        {
+            "type_id": 596, "group_id": 237, "category_id": 6, "name": "Impairor",
+            "mass": 1_240_000.0, "volume": 27_400.0, "capacity": 120.0, "radius": 35.0,
+            "base_price": 1.0, "published": True,
+            "default_attributes": {
+                "4": 1_240_000.0, "9": 250.0, "11": 35.0, "12": 2.0, "13": 2.0, "14": 2.0,
+                "37": 295.0, "38": 120.0, "48": 95.0, "55": 100_000.0, "70": 3.7,
+                "263": 200.0, "265": 275.0, "479": 625_000.0, "482": 210.0, "552": 42.0, "564": 540.0, "600": 5.0
+            }
+        },
+        {
+            "type_id": 601, "group_id": 237, "category_id": 6, "name": "Ibis",
+            "mass": 1_197_000.0, "volume": 27_600.0, "capacity": 125.0, "radius": 35.0,
+            "base_price": 1.0, "published": True,
+            "default_attributes": {
+                "4": 1_197_000.0, "9": 220.0, "11": 28.0, "12": 2.0, "13": 2.0, "14": 2.0,
+                "37": 280.0, "38": 125.0, "48": 120.0, "55": 95_000.0, "70": 3.8,
+                "263": 280.0, "265": 200.0, "479": 625_000.0, "482": 195.0, "552": 44.0, "564": 520.0, "600": 5.0
+            }
+        },
+        {
+            "type_id": 606, "group_id": 237, "category_id": 6, "name": "Velator",
+            "mass": 1_175_000.0, "volume": 28_100.0, "capacity": 135.0, "radius": 36.0,
+            "base_price": 1.0, "published": True,
+            "default_attributes": {
+                "4": 1_175_000.0, "9": 265.0, "11": 32.0, "12": 2.0, "13": 2.0, "14": 2.0,
+                "37": 300.0, "38": 135.0, "48": 110.0, "55": 95_000.0, "70": 3.7,
+                "263": 225.0, "265": 240.0, "283": 10.0, "479": 625_000.0, "482": 190.0, "552": 43.0, "564": 540.0, "600": 5.0, "1271": 10.0
             }
         },
         {
@@ -264,10 +320,10 @@ def build_canonical_sde_seed() -> dict:
         # Modules (Category 7)
         {
             "type_id": 438, "group_id": 46, "category_id": 7, "name": "1MN Afterburner II",
-            "mass": 500_000.0, "volume": 5.0, "capacity": 0.0, "radius": 1.0,
+            "mass": 1.0, "volume": 5.0, "capacity": 0.0, "radius": 1.0,
             "base_price": 500_000.0, "published": True,
             "default_attributes": {
-                "4": 500_000.0, "6": 20.0, "20": 135.0, "30": 15.0, "50": 25.0, "73": 7500.0, "1196": 1.4
+                "4": 1.0, "6": 20.0, "20": 135.0, "30": 15.0, "50": 25.0, "73": 7500.0, "796": 500_000.0, "1196": 1.4
             }
         },
         {
@@ -328,7 +384,7 @@ def build_canonical_sde_seed() -> dict:
             "base_price": 4_000_000.0, "published": True,
             "default_attributes": {"30": 6.0, "50": 18.0, "51": 8000.0, "54": 25_000.0}
         },
-        # Minerals, Ores & Charges (Categories 4, 8, 25)
+        # Minerals, Ores, Charges, Injectors, Quantum Cores & Clone Soldier Tags
         {"type_id": 34, "group_id": 18, "category_id": 4, "name": "Tritanium", "mass": 1.0, "volume": 0.01, "capacity": 0.0, "radius": 1.0, "base_price": 5.0, "published": True, "default_attributes": {}},
         {"type_id": 35, "group_id": 18, "category_id": 4, "name": "Pyerite", "mass": 1.0, "volume": 0.01, "capacity": 0.0, "radius": 1.0, "base_price": 12.0, "published": True, "default_attributes": {}},
         {"type_id": 36, "group_id": 18, "category_id": 4, "name": "Mexallon", "mass": 1.0, "volume": 0.01, "capacity": 0.0, "radius": 1.0, "base_price": 75.0, "published": True, "default_attributes": {}},
@@ -345,6 +401,12 @@ def build_canonical_sde_seed() -> dict:
             "mass": 1.0, "volume": 0.0025, "capacity": 0.0, "radius": 1.0, "base_price": 800.0, "published": True,
             "default_attributes": {"116": 2.0, "117": 2.0, "118": 10.0}
         },
+        {"type_id": 40520, "group_id": 1739, "category_id": 5, "name": "Large Skill Injector", "mass": 0.1, "volume": 0.01, "capacity": 0.0, "radius": 1.0, "base_price": 850_000_000.0, "published": True, "default_attributes": {}},
+        {"type_id": 56201, "group_id": 4088, "category_id": 17, "name": "Astrahus Upwell Quantum Core", "mass": 5000.0, "volume": 100.0, "capacity": 0.0, "radius": 1.0, "base_price": 600_000_000.0, "published": True, "default_attributes": {}},
+        {"type_id": 35661, "group_id": 1206, "category_id": 17, "name": "Clone Soldier Trainer Tag", "mass": 0.1, "volume": 0.01, "capacity": 0.0, "radius": 1.0, "base_price": 5_000_000.0, "published": True, "default_attributes": {}},
+        {"type_id": 35662, "group_id": 1206, "category_id": 17, "name": "Clone Soldier Recruiter Tag", "mass": 0.1, "volume": 0.01, "capacity": 0.0, "radius": 1.0, "base_price": 15_000_000.0, "published": True, "default_attributes": {}},
+        {"type_id": 35663, "group_id": 1206, "category_id": 17, "name": "Clone Soldier Transporter Tag", "mass": 0.1, "volume": 0.01, "capacity": 0.0, "radius": 1.0, "base_price": 25_000_000.0, "published": True, "default_attributes": {}},
+        {"type_id": 35664, "group_id": 1206, "category_id": 17, "name": "Clone Soldier Negotiator Tag", "mass": 0.1, "volume": 0.01, "capacity": 0.0, "radius": 1.0, "base_price": 45_000_000.0, "published": True, "default_attributes": {}},
         # Skills (Category 16)
         {"type_id": 3327, "group_id": 257, "category_id": 16, "name": "Spaceship Command", "mass": 0.0, "volume": 0.01, "capacity": 0.0, "radius": 1.0, "base_price": 20_000.0, "published": True, "default_attributes": {"275": 1.0}},
         {"type_id": 3328, "group_id": 257, "category_id": 16, "name": "Minmatar Frigate", "mass": 0.0, "volume": 0.01, "capacity": 0.0, "radius": 1.0, "base_price": 40_000.0, "published": True, "default_attributes": {"275": 2.0}},
@@ -362,7 +424,7 @@ def build_canonical_sde_seed() -> dict:
         {"type_id": 687, "group_id": 105, "category_id": 9, "name": "Rifter Blueprint", "mass": 0.0, "volume": 0.01, "capacity": 0.0, "radius": 1.0, "base_price": 2_500_000.0, "published": True, "default_attributes": {}},
         # Mutaplasmids & Abyssal Dynamic Items
         {"type_id": 47702, "group_id": 1979, "category_id": 5, "name": "Decayed 1MN Afterburner Mutaplasmid", "mass": 0.1, "volume": 1.0, "capacity": 0.0, "radius": 1.0, "base_price": 100_000.0, "published": True, "default_attributes": {}},
-        {"type_id": 47740, "group_id": 46, "category_id": 7, "name": "Abyssal 1MN Afterburner", "mass": 500_000.0, "volume": 5.0, "capacity": 0.0, "radius": 1.0, "base_price": 1_500_000.0, "published": True, "default_attributes": {"4": 500_000.0, "6": 20.0, "20": 135.0, "30": 15.0, "50": 25.0, "73": 7500.0}},
+        {"type_id": 47740, "group_id": 46, "category_id": 7, "name": "Abyssal 1MN Afterburner", "mass": 1.0, "volume": 5.0, "capacity": 0.0, "radius": 1.0, "base_price": 1_500_000.0, "published": True, "default_attributes": {"4": 1.0, "6": 20.0, "20": 135.0, "30": 15.0, "50": 25.0, "73": 7500.0, "796": 500_000.0}},
         # Structures & Deployables (Category 65 & 22)
         {"type_id": 35832, "group_id": 1657, "category_id": 65, "name": "Astrahus", "mass": 500_000_000.0, "volume": 8000.0, "capacity": 100_000.0, "radius": 10_000.0, "base_price": 800_000_000.0, "published": True, "default_attributes": {"9": 1_800_000.0, "263": 1_800_000.0, "265": 1_800_000.0}},
         {"type_id": 33474, "group_id": 1250, "category_id": 22, "name": "Mobile Tractor Unit", "mass": 5000.0, "volume": 100.0, "capacity": 27_000.0, "radius": 25.0, "base_price": 8_000_000.0, "published": True, "default_attributes": {"9": 25_000.0, "263": 25_000.0}},
@@ -642,19 +704,66 @@ def build_canonical_sde_seed() -> dict:
 
     static_sqlite_count = 0
     fsdbinary_count = 0
+    pickle_binary_count = 0
     if isinstance(static_meta, list):
-        static_sqlite_count = sum(1 for e in static_meta if str(e.get("archive_path", "")).endswith(".static"))
-        fsdbinary_count = sum(1 for e in static_meta if str(e.get("archive_path", "")).endswith(".fsdbinary"))
+        static_sqlite_count = sum(
+            1 for e in static_meta
+            if e.get("format") == "SQLite3" or str(e.get("res_path", "")).endswith(".static")
+        )
+        fsdbinary_count = sum(
+            1 for e in static_meta
+            if e.get("format") == "FSD Binary" or str(e.get("res_path", "")).endswith(".fsdbinary")
+        )
+        pickle_binary_count = sum(
+            1 for e in static_meta
+            if e.get("format") == "Pickle/Binary" or str(e.get("res_path", "")).endswith(".pickle")
+        )
     elif isinstance(static_meta, dict):
         static_sqlite_count = len(static_meta.get("static_sqlite_databases", {}))
         fsdbinary_count = len(static_meta.get("fsdbinary_archives", {}))
+
+    # Optional live SharedCache SQLite3 (.static) ingestion when local EVE installation is present
+    shared_cache = Path(os.path.expanduser("~/Library/Application Support/CCP/EVE/SharedCache/ResFiles"))
+    if shared_cache.is_dir() and isinstance(static_meta, list):
+        import sqlite3
+        existing_type_ids = {t["type_id"] for t in types}
+        for entry in static_meta:
+            if str(entry.get("res_path", "")).endswith("types.static"):
+                db_file = shared_cache / str(entry.get("cdn_relative_path", ""))
+                if db_file.is_file():
+                    try:
+                        conn = sqlite3.connect(f"file:{db_file}?mode=ro", uri=True)
+                        cur = conn.cursor()
+                        for row in cur.execute("SELECT typeID, data FROM types LIMIT 500"):
+                            tid = int(row[0])
+                            if tid not in existing_type_ids:
+                                payload = json.loads(row[1]) if isinstance(row[1], str) else {}
+                                existing_type_ids.add(tid)
+                                types.append({
+                                    "type_id": tid,
+                                    "group_id": int(payload.get("groupID", 0)),
+                                    "category_id": int(payload.get("categoryID", 0)),
+                                    "name": str(payload.get("typeNameID", f"Type_{tid}")),
+                                    "mass": float(payload.get("mass", 1.0)),
+                                    "volume": float(payload.get("volume", 1.0)),
+                                    "capacity": float(payload.get("capacity", 0.0)),
+                                    "radius": float(payload.get("radius", 1.0)),
+                                    "base_price": float(payload.get("basePrice", 0.0)),
+                                    "published": bool(payload.get("published", False)),
+                                    "default_attributes": {},
+                                })
+                        conn.close()
+                    except Exception:
+                        pass
 
     return {
         "schema_version": "V24.01-EvoMu-M1",
         "v24_staticdata_summary": {
             "static_sqlite_count": static_sqlite_count,
             "fsdbinary_count": fsdbinary_count,
-            "dogma_vm_operands": len(dogma_meta.get("vm_operands", {})) if isinstance(dogma_meta, dict) else 0,
+            "pickle_binary_count": pickle_binary_count,
+            "dogma_vm_operands": len(dogma_meta.get("operands", [])) if isinstance(dogma_meta, dict) else 0,
+            "dogma_effects_count": int(dogma_meta.get("effects_count", 0)) if isinstance(dogma_meta, dict) else 0,
         },
         "attributes": attributes,
         "effects": effects,

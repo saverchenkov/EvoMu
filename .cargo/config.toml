@@ -1,4 +1,0 @@
-[build]
-rustc = "/opt/homebrew/bin/rustc"
-rustc-wrapper = "/Users/sergeya/ai/EvoMu/tools/cargo-santa/rustc_wrapper.py"
-rustdoc = "/Users/sergeya/ai/EvoMu/tools/cargo-santa/rustdoc_wrapper.py"

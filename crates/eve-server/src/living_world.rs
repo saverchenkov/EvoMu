@@ -114,8 +114,13 @@ impl LivingWorldDirector {
     }
 
     pub fn list_convoys(&self) -> Vec<LivingWorldConvoy> {
-        let mut list: Vec<LivingWorldConvoy> =
-            self.convoys.read().unwrap().values().cloned().collect();
+        let mut list: Vec<LivingWorldConvoy> = self
+            .convoys
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .cloned()
+            .collect();
         list.sort_by_key(|c| c.convoy_id);
         list
     }
@@ -127,7 +132,7 @@ impl LivingWorldDirector {
         systems: &SystemRegistry,
     ) -> usize {
         let to_spawn: Vec<LivingWorldConvoy> = {
-            let mut guard = self.convoys.write().unwrap();
+            let mut guard = self.convoys.write().unwrap_or_else(|e| e.into_inner());
             let mut out = Vec::new();
             for c in guard.values_mut() {
                 if c.current_system_id == solar_system_id && !c.destroyed {
@@ -170,7 +175,7 @@ impl LivingWorldDirector {
         db: &WorldRepository,
     ) -> Result<(i64, IskCents), String> {
         let convoy = {
-            let mut guard = self.convoys.write().unwrap();
+            let mut guard = self.convoys.write().unwrap_or_else(|e| e.into_inner());
             let c = guard
                 .get_mut(&convoy_id)
                 .ok_or_else(|| format!("Convoy {convoy_id} not found"))?;

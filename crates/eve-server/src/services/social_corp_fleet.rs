@@ -114,11 +114,33 @@ pub fn handle(
                 .and_then(|a| a.as_str())
                 .unwrap_or("EvoMu Industrial Corp");
             let ticker = args.get(1).and_then(|a| a.as_str()).unwrap_or("EVOMU");
-            let tax_rate = args.get(2).and_then(|a| a.as_f64()).unwrap_or(0.10);
+            let tax_rate = args
+                .get(2)
+                .and_then(|a| a.as_f64())
+                .unwrap_or(0.10)
+                .clamp(0.0, 1.0);
+            let reg_fee = IskCents::from_isk(1_599_800);
 
-            let corp_id = ctx.db.with_mut_snapshot(|snap| {
+            let res = ctx.db.with_mut_snapshot(|snap| {
+                let Some(ch) = snap.characters.get_mut(&char_id) else {
+                    return Err(BridgeRpcError {
+                        code: "CharacterNotFound".into(),
+                        message: format!("Character {char_id} not found"),
+                    });
+                };
+                if ch.balance.0 < reg_fee.0 {
+                    return Err(BridgeRpcError {
+                        code: "InsufficientFunds".into(),
+                        message: "Not enough ISK to pay corporation registration fee (1,599,800 ISK)".into(),
+                    });
+                }
+                ch.balance = IskCents(ch.balance.0 - reg_fee.0);
+
                 snap.next_entity_id += 1;
                 let cid = 98_000_000 + snap.next_entity_id;
+                if let Some(ch_mut) = snap.characters.get_mut(&char_id) {
+                    ch_mut.corporation_id = cid;
+                }
                 snap.corporations.insert(
                     cid,
                     CorporationRecord {
@@ -128,22 +150,25 @@ pub fn handle(
                         ceo_id: char_id,
                         alliance_id: None,
                         tax_rate,
-                        master_wallet: IskCents::from_isk(100_000_000),
+                        master_wallet: IskCents(0),
                         members: HashSet::from([char_id]),
                     },
                 );
-                if let Some(ch) = snap.characters.get_mut(&char_id) {
-                    ch.corporation_id = cid;
-                }
-                cid
+                Ok(cid)
             });
 
-            session.corporation_id = Some(corp_id);
-            Some(Ok(PyRep::keyval([
-                ("corporationID", PyRep::Integer(corp_id)),
-                ("name", PyRep::String(name.to_string())),
-                ("ticker", PyRep::String(ticker.to_string())),
-            ])))
+            match res {
+                Ok(corp_id) => {
+                    session.corporation_id = Some(corp_id);
+                    session.corp_role = u64::MAX;
+                    Some(Ok(PyRep::keyval([
+                        ("corporationID", PyRep::Integer(corp_id)),
+                        ("name", PyRep::String(name.to_string())),
+                        ("ticker", PyRep::String(ticker.to_string())),
+                    ])))
+                }
+                Err(e) => Some(Err(e)),
+            }
         }
 
         ("corporation_projects", "CreateProject") => {
@@ -155,15 +180,37 @@ pub fn handle(
                 .first()
                 .and_then(|a| a.as_str())
                 .unwrap_or("Deliver Tritanium");
-            let target_qty = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1_000) as u64;
+            let target_qty_raw = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1_000);
             let isk_per_unit = args.get(2).and_then(|a| a.as_f64()).unwrap_or(10.0);
+            if target_qty_raw <= 0 || !isk_per_unit.is_finite() || isk_per_unit < 0.0 {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidProjectParameters".into(),
+                    message: "Project requires target_quantity > 0 and finite isk_per_unit >= 0".into(),
+                }));
+            }
+            let target_qty = target_qty_raw as u64;
             let corp_id = session.corporation_id.unwrap_or(1_000_125);
 
-            let pid = ctx.db.with_mut_snapshot(|snap| {
+            let res = ctx.db.with_mut_snapshot(|snap| {
+                let per_u = IskCents::from_f64_isk(isk_per_unit);
+                let escrow = IskCents(per_u.0.saturating_mul(target_qty as i64));
+
+                let Some(ch) = snap.characters.get_mut(&char_id) else {
+                    return Err(BridgeRpcError {
+                        code: "CharacterNotFound".into(),
+                        message: format!("Character {char_id} not found"),
+                    });
+                };
+                if ch.balance.0 < escrow.0 {
+                    return Err(BridgeRpcError {
+                        code: "InsufficientFunds".into(),
+                        message: "Not enough ISK to fund corporation project escrow".into(),
+                    });
+                }
+                ch.balance = IskCents(ch.balance.0 - escrow.0);
+
                 snap.next_entity_id += 1;
                 let id = snap.next_entity_id;
-                let per_u = IskCents::from_f64_isk(isk_per_unit);
-                let escrow = IskCents(per_u.0 * (target_qty as i64));
                 snap.corp_projects.insert(
                     id,
                     CorpProjectRecord {
@@ -176,13 +223,16 @@ pub fn handle(
                         escrow_remaining: escrow,
                     },
                 );
-                let _ = char_id;
-                id
+                Ok(id)
             });
-            Some(Ok(PyRep::keyval([
-                ("projectID", PyRep::Integer(pid)),
-                ("targetQuantity", PyRep::Integer(target_qty as i64)),
-            ])))
+
+            match res {
+                Ok(pid) => Some(Ok(PyRep::keyval([
+                    ("projectID", PyRep::Integer(pid)),
+                    ("targetQuantity", PyRep::Integer(target_qty as i64)),
+                ]))),
+                Err(e) => Some(Err(e)),
+            }
         }
 
         ("corporation_projects", "ContributeToProject") => {
@@ -191,43 +241,96 @@ pub fn handle(
                 Err(e) => return Some(Err(e)),
             };
             let pid = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let qty = args.get(1).and_then(|a| a.as_i64()).unwrap_or(100) as u64;
+            let qty_raw = args.get(1).and_then(|a| a.as_i64()).unwrap_or(100);
+            if qty_raw <= 0 {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidContributionQuantity".into(),
+                    message: "Contribution quantity must be > 0".into(),
+                }));
+            }
+            let qty = qty_raw as u64;
 
-            let (payout_isk, completed) = ctx.db.with_mut_snapshot(|snap| {
-                let Some(proj) = snap.corp_projects.get_mut(&pid) else {
-                    return (0.0, false);
+            let res = ctx.db.with_mut_snapshot(|snap| {
+                let Some(proj) = snap.corp_projects.get(&pid).cloned() else {
+                    return Err(BridgeRpcError {
+                        code: "ProjectNotFound".into(),
+                        message: format!("Corporation project {pid} does not exist"),
+                    });
                 };
-                let accepted = qty.min(proj.target_quantity.saturating_sub(proj.current_quantity));
-                proj.current_quantity += accepted;
-                let reward = IskCents(proj.isk_per_unit.0 * (accepted as i64));
-                proj.escrow_remaining = IskCents((proj.escrow_remaining.0 - reward.0).max(0));
-                let done = proj.current_quantity >= proj.target_quantity;
+                let needed = proj.target_quantity.saturating_sub(proj.current_quantity);
+                let accepted = qty.min(needed);
+                if accepted == 0 {
+                    return Err(BridgeRpcError {
+                        code: "ProjectAlreadyCompleted".into(),
+                        message: format!("Corporation project {pid} is already completed"),
+                    });
+                }
+
+                // Require and consume `accepted` units of Veldspar (1230), Compressed Veldspar (62516), or Tritanium (34)
+                let contrib_item_id = snap
+                    .items
+                    .values()
+                    .find(|i| {
+                        i.owner_id == char_id
+                            && matches!(i.type_id, 1230 | 62516 | 34)
+                            && (i.quantity as u64) >= accepted
+                    })
+                    .map(|i| i.item_id);
+                let Some(iid) = contrib_item_id else {
+                    return Err(BridgeRpcError {
+                        code: "InsufficientContributionItems".into(),
+                        message: format!(
+                            "Character {char_id} does not have {accepted} units of ore/mineral to contribute"
+                        ),
+                    });
+                };
+
+                if let Some(item) = snap.items.get_mut(&iid) {
+                    if (item.quantity as u64) > accepted {
+                        item.quantity -= accepted as i32;
+                        item.version += 1;
+                    } else {
+                        snap.items.remove(&iid);
+                    }
+                }
+
+                let reward = IskCents(proj.isk_per_unit.0.saturating_mul(accepted as i64));
+                let mut done = false;
+                if let Some(proj_mut) = snap.corp_projects.get_mut(&pid) {
+                    proj_mut.current_quantity += accepted;
+                    proj_mut.escrow_remaining =
+                        IskCents((proj_mut.escrow_remaining.0 - reward.0).max(0));
+                    done = proj_mut.current_quantity >= proj_mut.target_quantity;
+                }
                 if let Some(ch) = snap.characters.get_mut(&char_id) {
                     ch.balance = IskCents(ch.balance.0 + reward.0);
                 }
-                (reward.to_wire_f64(), done)
+                Ok((reward.to_wire_f64(), done))
             });
 
-            Some(Ok(PyRep::keyval([
-                ("projectID", PyRep::Integer(pid)),
-                ("payoutISK", PyRep::Real(payout_isk)),
-                ("completed", PyRep::Bool(completed)),
-            ])))
+            match res {
+                Ok((payout_isk, completed)) => Some(Ok(PyRep::keyval([
+                    ("projectID", PyRep::Integer(pid)),
+                    ("payoutISK", PyRep::Real(payout_isk)),
+                    ("completed", PyRep::Bool(completed)),
+                ]))),
+                Err(e) => Some(Err(e)),
+            }
         }
 
-        ("LSC", _)
-        | ("chatx", _)
-        | ("notificationSvc", _)
-        | ("notificationMgr", _)
-        | ("calendarMgr", _)
-        | ("calendarProxy", _)
-        | ("fleetProxy", _)
-        | ("allianceRegistry", _)
-        | ("petitioner", _)
-        | ("voiceMgr", _)
-        | ("addressbook", _)
-        | ("contactMgr", _)
-        | ("overviewPresetMgr", _) => Some(Ok(PyRep::Bool(true))),
+        ("LSC", "GetChannels")
+        | ("chatx", "GetChannels")
+        | ("notificationSvc", "GetNotifications")
+        | ("calendarMgr", "GetEventList")
+        | ("allianceRegistry", "GetAlliance")
+        | ("addressbook", "GetBookmarks")
+        | ("overviewPresetMgr", "GetOverviewPresets") => {
+            let _ = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            Some(Ok(PyRep::List(vec![])))
+        }
 
         _ => None,
     }

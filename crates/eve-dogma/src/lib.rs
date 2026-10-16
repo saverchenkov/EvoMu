@@ -245,21 +245,34 @@ impl DogmaExpressionNode {
     /// Evaluates a Dogma expression node against a ship/module attribute state.
     pub fn evaluate(&self, item: &DogmaItemState, sde: &SdeRegistry) -> f64 {
         match self.opcode {
-            DogmaVmOpcode::DefInt | DogmaVmOpcode::DefFloat | DogmaVmOpcode::DefBool => {
-                self.value_f64.unwrap_or(0.0)
-            }
+            DogmaVmOpcode::DefInt
+            | DogmaVmOpcode::DefFloat
+            | DogmaVmOpcode::DefBool
+            | DogmaVmOpcode::DefType
+            | DogmaVmOpcode::DefGroup
+            | DogmaVmOpcode::DefAssociation
+            | DogmaVmOpcode::DefOperator
+            | DogmaVmOpcode::DefEnvid
+            | DogmaVmOpcode::DefString => self.value_f64.unwrap_or(0.0),
+            DogmaVmOpcode::GetType => item.type_id as f64,
             DogmaVmOpcode::DefAttribute | DogmaVmOpcode::GetAttr | DogmaVmOpcode::Att => self
                 .attribute_id
                 .map(|attr_id| item.get_attribute(attr_id, sde))
-                .unwrap_or(0.0),
+                .unwrap_or_else(|| {
+                    self.arg2
+                        .as_ref()
+                        .and_then(|n| n.attribute_id)
+                        .map(|attr_id| item.get_attribute(attr_id, sde))
+                        .unwrap_or(0.0)
+                }),
             DogmaVmOpcode::Add | DogmaVmOpcode::Inc => {
                 let a = self.arg1.as_ref().map(|n| n.evaluate(item, sde)).unwrap_or(0.0);
-                let b = self.arg2.as_ref().map(|n| n.evaluate(item, sde)).unwrap_or(0.0);
+                let b = self.arg2.as_ref().map(|n| n.evaluate(item, sde)).unwrap_or(1.0);
                 a + b
             }
             DogmaVmOpcode::Sub | DogmaVmOpcode::Minus | DogmaVmOpcode::Dec => {
                 let a = self.arg1.as_ref().map(|n| n.evaluate(item, sde)).unwrap_or(0.0);
-                let b = self.arg2.as_ref().map(|n| n.evaluate(item, sde)).unwrap_or(0.0);
+                let b = self.arg2.as_ref().map(|n| n.evaluate(item, sde)).unwrap_or(1.0);
                 a - b
             }
             DogmaVmOpcode::Mul => {
@@ -292,11 +305,98 @@ impl DogmaExpressionNode {
                 let b = self.arg2.as_ref().map(|n| n.evaluate(item, sde)).unwrap_or(0.0);
                 if (a - b).abs() < 1e-9 { 1.0 } else { 0.0 }
             }
+            DogmaVmOpcode::If => {
+                let cond = self.arg1.as_ref().map(|n| n.evaluate(item, sde)).unwrap_or(0.0);
+                if cond != 0.0 {
+                    self.arg2.as_ref().map(|n| n.evaluate(item, sde)).unwrap_or(1.0)
+                } else {
+                    0.0
+                }
+            }
+            DogmaVmOpcode::Eval | DogmaVmOpcode::Eff | DogmaVmOpcode::Efct | DogmaVmOpcode::Set => {
+                self.arg2
+                    .as_ref()
+                    .or(self.arg1.as_ref())
+                    .map(|n| n.evaluate(item, sde))
+                    .unwrap_or_else(|| self.value_f64.unwrap_or(1.0))
+            }
             DogmaVmOpcode::Combine | DogmaVmOpcode::Splice => {
                 let _ = self.arg1.as_ref().map(|n| n.evaluate(item, sde));
                 self.arg2.as_ref().map(|n| n.evaluate(item, sde)).unwrap_or(1.0)
             }
+            DogmaVmOpcode::SkillCheck | DogmaVmOpcode::VerifyTargetGroup | DogmaVmOpcode::ToolTargetSkills => {
+                1.0
+            }
+            DogmaVmOpcode::UserError => 0.0,
             _ => self.value_f64.unwrap_or(1.0),
+        }
+    }
+
+    /// Executes a modifier-applying or modifier-removing Dogma VM expression tree against `target`.
+    pub fn execute_on_target(
+        &self,
+        source_item_id: i64,
+        source: &DogmaItemState,
+        target: &mut DogmaItemState,
+        sde: &SdeRegistry,
+    ) {
+        match self.opcode {
+            DogmaVmOpcode::Combine | DogmaVmOpcode::Splice => {
+                if let Some(a1) = &self.arg1 {
+                    a1.execute_on_target(source_item_id, source, target, sde);
+                }
+                if let Some(a2) = &self.arg2 {
+                    a2.execute_on_target(source_item_id, source, target, sde);
+                }
+            }
+            DogmaVmOpcode::If => {
+                let cond = self.arg1.as_ref().map(|n| n.evaluate(source, sde)).unwrap_or(0.0);
+                if cond != 0.0 {
+                    if let Some(a2) = &self.arg2 {
+                        a2.execute_on_target(source_item_id, source, target, sde);
+                    }
+                }
+            }
+            DogmaVmOpcode::AddItmMod
+            | DogmaVmOpcode::AddLocMod
+            | DogmaVmOpcode::AddLocGrpMod
+            | DogmaVmOpcode::AddLocSrqMod
+            | DogmaVmOpcode::AddOwnSrqMod
+            | DogmaVmOpcode::AddGangGrpMod
+            | DogmaVmOpcode::AddGangItmMod
+            | DogmaVmOpcode::AddGangOwnSrqMod
+            | DogmaVmOpcode::AddGangSrqMod => {
+                let op = self.operator.unwrap_or(ModifierOperator::PostPercent);
+                let target_attr = self
+                    .attribute_id
+                    .or_else(|| self.arg1.as_ref().and_then(|n| n.attribute_id))
+                    .unwrap_or(attr_ids::MAX_VELOCITY);
+                let val = self
+                    .arg2
+                    .as_ref()
+                    .map(|n| n.evaluate(source, sde))
+                    .or(self.value_f64)
+                    .unwrap_or(0.0);
+                target.add_modifier(AttributeModifier {
+                    source_item_id,
+                    target_attribute_id: target_attr,
+                    operator: op,
+                    value: val,
+                    stacking_penalized: true,
+                });
+            }
+            DogmaVmOpcode::RmItmMod
+            | DogmaVmOpcode::RmLocMod
+            | DogmaVmOpcode::RmLocGrpMod
+            | DogmaVmOpcode::RmLocSrqMod
+            | DogmaVmOpcode::RmOwnSrqMod
+            | DogmaVmOpcode::RmGangGrpMod
+            | DogmaVmOpcode::RmGangItmMod
+            | DogmaVmOpcode::RmGangOwnSrqMod
+            | DogmaVmOpcode::RmGangSrqMod => {
+                target.remove_modifiers_from_source(source_item_id);
+            }
+            _ => {}
         }
     }
 }
@@ -370,6 +470,9 @@ pub struct DogmaItemState {
     pub type_id: TypeId,
     pub base_attributes: HashMap<AttributeId, f64>,
     pub modifiers: Vec<AttributeModifier>,
+    /// Optional trained skill levels keyed by `source_item_id` for `SpecialSkillRelationship` (`dgmAssSpecialSkillRelationship`).
+    #[serde(default)]
+    pub skill_levels: HashMap<i64, u8>,
 }
 
 impl DogmaItemState {
@@ -385,7 +488,12 @@ impl DogmaItemState {
             type_id,
             base_attributes,
             modifiers: Vec::new(),
+            skill_levels: HashMap::new(),
         }
+    }
+
+    pub fn set_skill_level(&mut self, source_item_id: i64, level: u8) {
+        self.skill_levels.insert(source_item_id, level.min(5));
     }
 
     pub fn add_modifier(&mut self, modifier: AttributeModifier) {
@@ -470,8 +578,15 @@ impl DogmaItemState {
                 ModifierOperator::PostMul => (Some(m.value - 1.0), false),
                 ModifierOperator::PostDiv if m.value != 0.0 => (Some((1.0 / m.value) - 1.0), false),
                 ModifierOperator::PostPercent => (Some(m.value / 100.0), false),
-                ModifierOperator::PostPercentUnNerfed
-                | ModifierOperator::SpecialSkillRelationship => (Some(m.value / 100.0), true),
+                ModifierOperator::PostPercentUnNerfed => (Some(m.value / 100.0), true),
+                ModifierOperator::SpecialSkillRelationship => {
+                    let lvl = self
+                        .skill_levels
+                        .get(&m.source_item_id)
+                        .copied()
+                        .unwrap_or(1) as f64;
+                    (Some((m.value * lvl) / 100.0), true)
+                }
                 _ => (None, false),
             };
             if let Some(d) = delta_opt {
@@ -533,6 +648,84 @@ impl ShipFittingEngine {
         }
     }
 
+    fn apply_online_modifiers_for_module(
+        &mut self,
+        module_item_id: i64,
+        module_type_id: TypeId,
+        sde: &SdeRegistry,
+    ) {
+        let Some(mod_type) = sde.types.get(&module_type_id) else {
+            return;
+        };
+        let cpu_need = mod_type
+            .default_attributes
+            .get(&attr_ids::CPU)
+            .copied()
+            .unwrap_or(0.0);
+        let pg_need = mod_type
+            .default_attributes
+            .get(&attr_ids::POWER)
+            .copied()
+            .unwrap_or(0.0);
+        let cal_need = mod_type
+            .default_attributes
+            .get(&attr_ids::UPGRADE_COST)
+            .copied()
+            .unwrap_or(0.0);
+
+        if cpu_need > 0.0 {
+            self.ship.add_modifier(AttributeModifier {
+                source_item_id: module_item_id,
+                target_attribute_id: attr_ids::CPU_LOAD,
+                operator: ModifierOperator::ModAdd,
+                value: cpu_need,
+                stacking_penalized: false,
+            });
+        }
+        if pg_need > 0.0 {
+            self.ship.add_modifier(AttributeModifier {
+                source_item_id: module_item_id,
+                target_attribute_id: attr_ids::POWER_LOAD,
+                operator: ModifierOperator::ModAdd,
+                value: pg_need,
+                stacking_penalized: false,
+            });
+        }
+        if cal_need > 0.0 {
+            self.ship.add_modifier(AttributeModifier {
+                source_item_id: module_item_id,
+                target_attribute_id: attr_ids::UPGRADE_CAPACITY,
+                operator: ModifierOperator::ModSub,
+                value: cal_need,
+                stacking_penalized: false,
+            });
+        }
+
+        // Apply passive velocity/shield bonus if present (e.g. Overdrive Injector or Rig)
+        if let Some(&speed_bonus) = mod_type.default_attributes.get(&attr_ids::SPEED_FACTOR) {
+            if mod_type.group_id == 762 {
+                self.ship.add_modifier(AttributeModifier {
+                    source_item_id: module_item_id,
+                    target_attribute_id: attr_ids::MAX_VELOCITY,
+                    operator: ModifierOperator::PostPercent,
+                    value: speed_bonus,
+                    stacking_penalized: true,
+                });
+            }
+        }
+        if let Some(&shield_bonus) = mod_type.default_attributes.get(&attr_ids::SHIELD_BONUS) {
+            if mod_type.group_id == 774 {
+                self.ship.add_modifier(AttributeModifier {
+                    source_item_id: module_item_id,
+                    target_attribute_id: attr_ids::SHIELD_CAPACITY,
+                    operator: ModifierOperator::PostPercent,
+                    value: shield_bonus,
+                    stacking_penalized: true,
+                });
+            }
+        }
+    }
+
     /// Fits and brings a module online, validating CPU, Powergrid, or Rig Calibration capacity.
     pub fn fit_and_online_module(
         &mut self,
@@ -545,6 +738,12 @@ impl ShipFittingEngine {
             .types
             .get(&module_type_id)
             .ok_or_else(|| format!("Unknown module type {module_type_id}"))?;
+
+        // Prevent duplicate online modifiers if already fitted
+        if self.modules.contains_key(&module_item_id) {
+            self.ship.remove_modifiers_from_source(module_item_id);
+            self.modules.remove(&module_item_id);
+        }
 
         let cpu_need = mod_type
             .default_attributes
@@ -582,59 +781,7 @@ impl ShipFittingEngine {
             ));
         }
 
-        // Apply CPU/Powergrid load modifiers
-        if cpu_need > 0.0 {
-            self.ship.add_modifier(AttributeModifier {
-                source_item_id: module_item_id,
-                target_attribute_id: attr_ids::CPU_LOAD,
-                operator: ModifierOperator::ModAdd,
-                value: cpu_need,
-                stacking_penalized: false,
-            });
-        }
-        if pg_need > 0.0 {
-            self.ship.add_modifier(AttributeModifier {
-                source_item_id: module_item_id,
-                target_attribute_id: attr_ids::POWER_LOAD,
-                operator: ModifierOperator::ModAdd,
-                value: pg_need,
-                stacking_penalized: false,
-            });
-        }
-        if cal_need > 0.0 {
-            self.ship.add_modifier(AttributeModifier {
-                source_item_id: module_item_id,
-                target_attribute_id: attr_ids::UPGRADE_CAPACITY,
-                operator: ModifierOperator::ModSub,
-                value: cal_need,
-                stacking_penalized: false,
-            });
-        }
-
-        // Apply passive velocity/shield bonus if present (e.g. Overdrive Injector or Rig)
-        if let Some(&speed_bonus) = mod_type.default_attributes.get(&attr_ids::SPEED_FACTOR) {
-            // Passive modules (group 762 Overdrive) apply on Online; active prop mods apply on Activate
-            if mod_type.group_id == 762 {
-                self.ship.add_modifier(AttributeModifier {
-                    source_item_id: module_item_id,
-                    target_attribute_id: attr_ids::MAX_VELOCITY,
-                    operator: ModifierOperator::PostPercent,
-                    value: speed_bonus,
-                    stacking_penalized: true,
-                });
-            }
-        }
-        if let Some(&shield_bonus) = mod_type.default_attributes.get(&attr_ids::SHIELD_BONUS) {
-            if mod_type.group_id == 774 {
-                self.ship.add_modifier(AttributeModifier {
-                    source_item_id: module_item_id,
-                    target_attribute_id: attr_ids::SHIELD_CAPACITY,
-                    operator: ModifierOperator::PostPercent,
-                    value: shield_bonus,
-                    stacking_penalized: true,
-                });
-            }
-        }
+        self.apply_online_modifiers_for_module(module_item_id, module_type_id, sde);
 
         self.modules.insert(
             module_item_id,
@@ -652,34 +799,62 @@ impl ShipFittingEngine {
         Ok(())
     }
 
-    /// Activates or overloads an online module (e.g. 1MN Afterburner II), applying its active modifiers.
+    /// Deactivates an active/overloaded module back to `ModuleState::Online`, removing its active-only modifiers.
+    pub fn deactivate_module(
+        &mut self,
+        module_item_id: i64,
+        sde: &SdeRegistry,
+    ) -> Result<(), String> {
+        let mod_type_id = {
+            let mod_entry = self
+                .modules
+                .get_mut(&module_item_id)
+                .ok_or_else(|| format!("Module {module_item_id} is not fitted"))?;
+            if mod_entry.state == ModuleState::Offline {
+                return Err("Module is offline".into());
+            }
+            mod_entry.state = ModuleState::Online;
+            mod_entry.type_id
+        };
+        self.ship.remove_modifiers_from_source(module_item_id);
+        self.apply_online_modifiers_for_module(module_item_id, mod_type_id, sde);
+        Ok(())
+    }
+
+    /// Activates or overloads an online module (e.g. 1MN Afterburner II), applying its active modifiers
+    /// idempotently without stacking duplicates if called repeatedly.
     pub fn activate_module(
         &mut self,
         module_item_id: i64,
         overload: bool,
         sde: &SdeRegistry,
     ) -> Result<(), String> {
-        let mod_entry = self
-            .modules
-            .get_mut(&module_item_id)
-            .ok_or_else(|| format!("Module {module_item_id} is not fitted"))?;
-        if mod_entry.state == ModuleState::Offline {
-            return Err("Cannot activate an offline module".into());
-        }
-        if mod_entry.damage_hp >= mod_entry.max_hp {
-            return Err("Module is burned out (100% heat damage)".into());
-        }
-
-        let mod_type_id = mod_entry.type_id;
-        mod_entry.state = if overload {
-            ModuleState::Overloaded
-        } else {
-            ModuleState::Active
+        let mod_type_id = {
+            let mod_entry = self
+                .modules
+                .get_mut(&module_item_id)
+                .ok_or_else(|| format!("Module {module_item_id} is not fitted"))?;
+            if mod_entry.state == ModuleState::Offline {
+                return Err("Cannot activate an offline module".into());
+            }
+            if mod_entry.damage_hp >= mod_entry.max_hp {
+                return Err("Module is burned out (100% heat damage)".into());
+            }
+            mod_entry.state = if overload {
+                ModuleState::Overloaded
+            } else {
+                ModuleState::Active
+            };
+            mod_entry.type_id
         };
+
+        // Reset to clean online modifiers first so repeated Activate calls never stack duplicate active modifiers
+        self.ship.remove_modifiers_from_source(module_item_id);
+        self.apply_online_modifiers_for_module(module_item_id, mod_type_id, sde);
 
         if let Some(mod_type) = sde.types.get(&mod_type_id) {
             if mod_type.group_id == 46 {
-                // Propulsion module (Afterburner / MWD): adds mass and speedFactor bonus
+                // Propulsion module (Afterburner / MWD): adds massAddition (796) and speedFactor (20) bonus
                 let speed_factor = mod_type
                     .default_attributes
                     .get(&attr_ids::SPEED_FACTOR)
@@ -688,7 +863,8 @@ impl ShipFittingEngine {
                     * if overload { 1.5 } else { 1.0 };
                 let mass_add = mod_type
                     .default_attributes
-                    .get(&attr_ids::MASS)
+                    .get(&attr_ids::MASS_ADDITION)
+                    .or_else(|| mod_type.default_attributes.get(&attr_ids::MASS))
                     .copied()
                     .unwrap_or(500_000.0);
                 self.ship.add_modifier(AttributeModifier {

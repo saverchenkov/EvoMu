@@ -430,6 +430,39 @@ pub struct SystemDynamicState {
     pub wormhole_remaining_mass_kg: f64,
 }
 
+mod tuple_map_serde {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::collections::HashMap;
+    use std::hash::Hash;
+
+    pub fn serialize<S, K1, K2, V>(
+        map: &HashMap<(K1, K2), V>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+        K1: Serialize + Copy,
+        K2: Serialize + Copy,
+        V: Serialize,
+    {
+        let entries: Vec<((K1, K2), &V)> = map.iter().map(|(&(k1, k2), v)| ((k1, k2), v)).collect();
+        entries.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D, K1, K2, V>(
+        deserializer: D,
+    ) -> Result<HashMap<(K1, K2), V>, D::Error>
+    where
+        D: Deserializer<'de>,
+        K1: Deserialize<'de> + Eq + Hash,
+        K2: Deserialize<'de> + Eq + Hash,
+        V: Deserialize<'de>,
+    {
+        let entries: Vec<((K1, K2), V)> = Vec::deserialize(deserializer)?;
+        Ok(entries.into_iter().collect())
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct WorldStateSnapshot {
     pub next_entity_id: i64,
@@ -445,7 +478,9 @@ pub struct WorldStateSnapshot {
     pub wallet_journal: Vec<WalletJournalEntry>,
     pub contracts: HashMap<i64, ContractRecord>,
     pub industry_jobs: HashMap<i64, IndustryJobRecord>,
+    #[serde(with = "tuple_map_serde")]
     pub planetary_colonies: HashMap<(i64, i64), PlanetaryColonyRecord>,
+    #[serde(with = "tuple_map_serde")]
     pub active_missions: HashMap<(i64, u32), ActiveMissionRecord>,
     pub mission_tally: HashMap<i64, u32>,
     pub npe_progress: HashMap<i64, NpeProgressRecord>,
@@ -594,19 +629,24 @@ impl WorldRepository {
             },
         );
 
-        // Seed starter modules, minerals, blueprint, and mutaplasmid for Aura Capsuleer (90_000_001)
+        // Seed starter modules, minerals, blueprint, mutaplasmid, skill injector, structure, quantum core, and tags
         let starter_items = [
-            (100_000_003, 438, 1, true),     // 1MN Afterburner II
-            (100_000_004, 1248, 2, true),    // Overdrive Injector System II
-            (100_000_005, 2889, 1, true),    // 200mm AutoCannon II
-            (100_000_006, 448, 1, true),     // Warp Scrambler II
-            (100_000_007, 687, 1, true),     // Rifter Blueprint
+            (100_000_003, 438, 1, true),      // 1MN Afterburner II
+            (100_000_004, 1248, 2, true),     // Overdrive Injector System II
+            (100_000_005, 2889, 1, true),     // 200mm AutoCannon II
+            (100_000_006, 448, 1, true),      // Warp Scrambler II
+            (100_000_007, 687, 1, true),      // Rifter Blueprint
             (100_000_008, 34, 100_000, false), // Tritanium
             (100_000_009, 35, 50_000, false),  // Pyerite
             (100_000_010, 36, 20_000, false),  // Mexallon
             (100_000_011, 37, 5_000, false),   // Isogen
             (100_000_012, 1230, 10_000, false), // Veldspar
-            (100_000_013, 47702, 5, false),  // Decayed 1MN Afterburner Mutaplasmid
+            (100_000_013, 47702, 5, false),   // Decayed 1MN Afterburner Mutaplasmid
+            (100_000_014, 40520, 2, false),   // Large Skill Injector
+            (100_000_015, 35832, 1, false),   // Astrahus
+            (100_000_016, 56201, 1, false),   // Astrahus Upwell Quantum Core
+            (100_000_017, 35664, 5, false),   // Clone Soldier Negotiator Tag
+            (100_000_018, 1230, 5_000, false), // Reserve Veldspar stack for Corp Projects
         ];
         for (id, tid, qty, single) in starter_items {
             items.insert(
@@ -780,7 +820,7 @@ impl WorldRepository {
 
     /// Saves the complete transactional world state to a JSON snapshot file (`M1` durable persistence).
     pub fn save_snapshot_to_file(&self, path: impl AsRef<Path>) -> Result<(), String> {
-        let guard = self.inner.read().unwrap();
+        let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
         let json = serde_json::to_string_pretty(&*guard).map_err(|e| e.to_string())?;
         std::fs::write(path, json).map_err(|e| e.to_string())
     }
@@ -789,7 +829,7 @@ impl WorldRepository {
     pub fn load_snapshot_from_file(&self, path: impl AsRef<Path>) -> Result<(), String> {
         let json = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
         let snap: WorldStateSnapshot = serde_json::from_str(&json).map_err(|e| e.to_string())?;
-        *self.inner.write().unwrap() = snap;
+        *self.inner.write().unwrap_or_else(|e| e.into_inner()) = snap;
         Ok(())
     }
 
@@ -797,7 +837,7 @@ impl WorldRepository {
     where
         F: FnOnce(&WorldStateSnapshot) -> R,
     {
-        let guard = self.inner.read().unwrap();
+        let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
         f(&guard)
     }
 
@@ -805,7 +845,7 @@ impl WorldRepository {
     where
         F: FnOnce(&mut WorldStateSnapshot) -> R,
     {
-        let mut guard = self.inner.write().unwrap();
+        let mut guard = self.inner.write().unwrap_or_else(|e| e.into_inner());
         f(&mut guard)
     }
 
@@ -814,7 +854,7 @@ impl WorldRepository {
         username: &str,
         password_token: &str,
     ) -> Result<AccountRecord, DbError> {
-        let guard = self.inner.read().unwrap();
+        let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
         let acc = guard
             .accounts
             .get(username)
@@ -826,7 +866,7 @@ impl WorldRepository {
     }
 
     pub fn get_characters_for_user(&self, user_id: u64) -> Vec<CharacterRecord> {
-        let guard = self.inner.read().unwrap();
+        let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
         let mut chars: Vec<CharacterRecord> = guard
             .characters
             .values()
@@ -838,7 +878,7 @@ impl WorldRepository {
     }
 
     pub fn get_character(&self, character_id: i64) -> Result<CharacterRecord, DbError> {
-        let guard = self.inner.read().unwrap();
+        let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
         guard
             .characters
             .get(&character_id)
@@ -851,7 +891,7 @@ impl WorldRepository {
         user_id: u64,
         character_id: i64,
     ) -> Result<CharacterRecord, DbError> {
-        let guard = self.inner.read().unwrap();
+        let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
         let ch = guard
             .characters
             .get(&character_id)
@@ -865,7 +905,7 @@ impl WorldRepository {
         Ok(ch.clone())
     }
 
-    /// Creates a new character for `user_id` with starting ship, skills, and home station (`E2E-01`).
+    /// Creates a new character for `user_id` with racial Corvette, starter skills, and home station (`E2E-01`).
     pub fn create_character(
         &self,
         user_id: u64,
@@ -881,7 +921,35 @@ impl WorldRepository {
                 "Character name must be at least 3 characters".into(),
             ));
         }
-        let mut guard = self.inner.write().unwrap();
+
+        // Validate lineage against SDE when IDs are present in the registry
+        let race = sde
+            .races
+            .get(&race_id)
+            .ok_or_else(|| DbError::ValidationError(format!("Unknown race_id {race_id}")))?;
+        if let Some(bl) = sde.bloodlines.get(&bloodline_id) {
+            if bl.race_id != race_id {
+                return Err(DbError::ValidationError(format!(
+                    "Bloodline {bloodline_id} does not belong to race {race_id}"
+                )));
+            }
+        }
+        if let Some(anc) = sde.ancestries.get(&ancestry_id) {
+            if sde.bloodlines.contains_key(&bloodline_id) && anc.bloodline_id != bloodline_id {
+                return Err(DbError::ValidationError(format!(
+                    "Ancestry {ancestry_id} does not belong to bloodline {bloodline_id}"
+                )));
+            }
+        }
+        if let Some(sch) = sde.schools.get(&school_id) {
+            if sch.race_id != race_id {
+                return Err(DbError::ValidationError(format!(
+                    "School {school_id} does not belong to race {race_id}"
+                )));
+            }
+        }
+
+        let mut guard = self.inner.write().unwrap_or_else(|e| e.into_inner());
         if guard
             .characters
             .values()
@@ -897,13 +965,17 @@ impl WorldRepository {
         guard.next_entity_id += 1;
         let ship_id = guard.next_entity_id;
 
-        let school = sde.schools.get(&school_id);
+        let school = sde
+            .schools
+            .get(&school_id)
+            .or_else(|| sde.schools.values().find(|s| s.race_id == race_id));
         let station_id = school.map(|s| s.station_id).unwrap_or(60_003_760);
         let sys_id = school.map(|s| s.solar_system_id).unwrap_or(30_000_142);
         let corp_id = school.map(|s| s.corporation_id).unwrap_or(1_000_125);
         let sys = sde.solar_systems.get(&sys_id);
         let const_id = sys.map(|s| s.constellation_id).unwrap_or(20_000_020);
         let reg_id = sys.map(|s| s.region_id).unwrap_or(10_000_002);
+        let corvette_type_id = race.corvette_type_id;
 
         let rec = CharacterRecord {
             character_id: char_id,
@@ -940,7 +1012,7 @@ impl WorldRepository {
             ship_id,
             InventoryItemRecord {
                 item_id: ship_id,
-                type_id: 587,
+                type_id: corvette_type_id,
                 owner_id: char_id,
                 location_id: station_id,
                 flag: InventoryFlag::Hangar,
@@ -967,7 +1039,7 @@ impl WorldRepository {
     }
 
     pub fn get_items_for_character(&self, character_id: i64) -> Vec<InventoryItemRecord> {
-        let guard = self.inner.read().unwrap();
+        let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
         let mut items: Vec<InventoryItemRecord> = guard
             .items
             .values()
@@ -989,7 +1061,7 @@ impl WorldRepository {
         expected_version: Option<u64>,
         idempotency_key: Option<&str>,
     ) -> Result<InventoryItemRecord, DbError> {
-        let mut guard = self.inner.write().unwrap();
+        let mut guard = self.inner.write().unwrap_or_else(|e| e.into_inner());
 
         let ch = guard
             .characters
@@ -1059,7 +1131,7 @@ impl WorldRepository {
         user_id: u64,
         character_id: i64,
     ) -> Result<(i64, CharacterRecord, InventoryItemRecord), DbError> {
-        let mut guard = self.inner.write().unwrap();
+        let mut guard = self.inner.write().unwrap_or_else(|e| e.into_inner());
 
         let (station_id, active_ship_id, solar_system_id) = {
             let ch = guard
@@ -1115,7 +1187,7 @@ impl WorldRepository {
         dock_location_id: i64,
         is_structure: bool,
     ) -> Result<CharacterRecord, DbError> {
-        let mut guard = self.inner.write().unwrap();
+        let mut guard = self.inner.write().unwrap_or_else(|e| e.into_inner());
         let active_ship_id = {
             let ch = guard
                 .characters
@@ -1142,7 +1214,7 @@ impl WorldRepository {
 
     /// Compensating transaction to restore docked station state if solar-system actor spawn fails.
     pub fn rollback_undock(&self, character_id: i64, station_id: i64, ship_id: i64) {
-        let mut guard = self.inner.write().unwrap();
+        let mut guard = self.inner.write().unwrap_or_else(|e| e.into_inner());
         if let Some(ch) = guard.characters.get_mut(&character_id) {
             ch.station_id = Some(station_id);
             ch.version += 1;
@@ -1162,7 +1234,7 @@ impl WorldRepository {
         new_solar_system_id: SolarSystemId,
         sde: &SdeRegistry,
     ) -> Result<CharacterRecord, DbError> {
-        let mut guard = self.inner.write().unwrap();
+        let mut guard = self.inner.write().unwrap_or_else(|e| e.into_inner());
         let (const_id, reg_id) = sde
             .solar_systems
             .get(&new_solar_system_id)
@@ -1275,8 +1347,40 @@ mod tests {
         let sde = SdeRegistry::with_canonical_seed();
         let repo = WorldRepository::with_demo_seed();
         let created = repo
-            .create_character(1, "Snapshot Pilot", 1, 1, 1, 10, &sde)
+            .create_character(1, "Snapshot Pilot", 1, 1, 1, 11, &sde)
             .unwrap();
+        // Verify Caldari pilot spawns in Ibis (601), not hardcoded Rifter (587)
+        let created_items = repo.get_items_for_character(created.character_id);
+        assert_eq!(created_items[0].type_id, 601);
+
+        // Populate tuple-keyed maps (planetary_colonies & active_missions) and idempotency keys
+        repo.with_mut_snapshot(|snap| {
+            snap.planetary_colonies.insert(
+                (created.character_id, 40009082),
+                PlanetaryColonyRecord {
+                    planet_id: 40009082,
+                    owner_id: created.character_id,
+                    solar_system_id: 30000142,
+                    command_center_level: 1,
+                    pins_count: 2,
+                    extracted_commodities: HashMap::from([(2393, 500)]),
+                },
+            );
+            snap.active_missions.insert(
+                (created.character_id, 1001),
+                ActiveMissionRecord {
+                    mission_id: 1001,
+                    character_id: created.character_id,
+                    agent_id: 3018924,
+                    state: "Accepted".to_string(),
+                    current_room_id: 1,
+                    npcs_remaining: 3,
+                },
+            );
+            snap.committed_idempotency_keys
+                .insert((created.character_id, "idem-1".to_string()));
+        });
+
         let snap_path = std::env::temp_dir().join("evomu_test_snapshot.json");
         repo.save_snapshot_to_file(&snap_path).unwrap();
 
@@ -1286,6 +1390,14 @@ mod tests {
             .select_character_for_user(1, created.character_id)
             .unwrap();
         assert_eq!(loaded.name, "Snapshot Pilot");
+        let has_colony = repo2.with_snapshot(|snap| {
+            snap.planetary_colonies
+                .contains_key(&(created.character_id, 40009082))
+                && snap
+                    .active_missions
+                    .contains_key(&(created.character_id, 1001))
+        });
+        assert!(has_colony);
         let _ = std::fs::remove_file(&snap_path);
     }
 }

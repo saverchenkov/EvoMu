@@ -25,7 +25,7 @@ pub fn handle(
             PyRep::Dict(vec![]),
         ]))),
 
-        ("machoNet", "GetTime") | ("clock_sync", _) => {
+        ("machoNet", "GetTime") | ("clock_sync", "synchronize") => {
             Some(Ok(PyRep::Integer(133_500_000_000_000_000)))
         }
 
@@ -59,6 +59,10 @@ pub fn handle(
             session.constellation_id = None;
             session.region_id = None;
             session.ship_id = None;
+            session.race_id = None;
+            session.corp_role = 0;
+            session.fleet_id = None;
+            session.war_faction_id = None;
 
             Some(Ok(PyRep::keyval([
                 ("userID", PyRep::Integer(acc.user_id as i64)),
@@ -67,6 +71,10 @@ pub fn handle(
         }
 
         ("objectCaching", "GetCachableObject") | ("objectCaching", "GetCachedObject") => {
+            let _ = match ServerContext::require_auth(session) {
+                Ok(u) => u,
+                Err(e) => return Some(Err(e)),
+            };
             Some(Ok(PyRep::keyval([
                 ("objectID", args.first().cloned().unwrap_or(PyRep::None)),
                 ("version", PyRep::Integer(1)),
@@ -77,12 +85,22 @@ pub fn handle(
         ("config", "GetMultiOwnersEx")
         | ("config", "GetMultiLocationsEx")
         | ("config", "GetMultiAllianceShortNamesEx")
-        | ("config", "GetMultiCorpTickerNamesEx") => Some(Ok(PyRep::Tuple(vec![
-            PyRep::List(vec![]),
-            PyRep::List(vec![]),
-        ]))),
+        | ("config", "GetMultiCorpTickerNamesEx") => {
+            let _ = match ServerContext::require_auth(session) {
+                Ok(u) => u,
+                Err(e) => return Some(Err(e)),
+            };
+            Some(Ok(PyRep::Tuple(vec![
+                PyRep::List(vec![]),
+                PyRep::List(vec![]),
+            ])))
+        }
 
         ("config", "GetMap") | ("config", "GetMapObjects") => {
+            let _ = match ServerContext::require_auth(session) {
+                Ok(u) => u,
+                Err(e) => return Some(Err(e)),
+            };
             let rows = ctx
                 .sde
                 .solar_systems
@@ -105,6 +123,10 @@ pub fn handle(
         ("publicGatewaySvc", "SendRequest")
         | ("publicGatewaySvc", "PublishEvent")
         | ("publicGatewaySvc", "CallQuasar") => {
+            let _ = match ServerContext::require_auth(session) {
+                Ok(u) => u,
+                Err(e) => return Some(Err(e)),
+            };
             let domain = args
                 .first()
                 .and_then(|a| a.as_str())
@@ -121,33 +143,55 @@ pub fn handle(
             ])))
         }
 
-        ("alert", _)
-        | ("clientStatsMgr", _)
-        | ("crestConnectionService", _)
-        | ("email_verification_manager", _)
-        | ("geolocation", _)
-        | ("google_analytics", _)
-        | ("gpu_analytics", _)
-        | ("hardware_survey", _)
-        | ("infobubble", _)
-        | ("infoGatheringMgr", _)
-        | ("journey_tracker", _)
-        | ("languageSvc", _)
-        | ("localizationServer", _)
-        | ("macho", _)
-        | ("moniker", _)
-        | ("omega_upgrade", _)
-        | ("onlineStatus", _)
-        | ("optional_upgrade", _)
-        | ("pathFinderSvc", _)
-        | ("performance_benchmark", _)
-        | ("photoUploadSvc", _)
-        | ("sessionMgr", _)
-        | ("slash", _)
-        | ("ui_highlighting", _)
-        | ("userSvc", _)
-        | ("viewState", _)
-        | ("zsystem", _) => Some(Ok(PyRep::Bool(true))),
+        ("alert", "BeanCount") | ("alert", "SendClientStackTraceAlert") => {
+            let _ = match ServerContext::require_auth(session) {
+                Ok(u) => u,
+                Err(e) => return Some(Err(e)),
+            };
+            Some(Ok(PyRep::None))
+        }
+
+        ("clientStatsMgr", "SubmitStats") | ("infoGatheringMgr", "LogInfoEventsFromClient") => {
+            let _ = match ServerContext::require_auth(session) {
+                Ok(u) => u,
+                Err(e) => return Some(Err(e)),
+            };
+            Some(Ok(PyRep::Bool(true)))
+        }
+
+        ("sessionMgr", "PerformSessionChange") | ("sessionMgr", "GetSessionStatistics") => {
+            let _ = match ServerContext::require_auth(session) {
+                Ok(u) => u,
+                Err(e) => return Some(Err(e)),
+            };
+            Some(Ok(PyRep::keyval([
+                ("sessionID", PyRep::Integer(session.session_id as i64)),
+                ("solarSystemID", session.solar_system_id.map(|s| PyRep::Integer(s as i64)).unwrap_or(PyRep::None)),
+            ])))
+        }
+
+        ("onlineStatus", "GetOnlineStatus") | ("userSvc", "GetRedeemTokens") => {
+            let _ = match ServerContext::require_auth(session) {
+                Ok(u) => u,
+                Err(e) => return Some(Err(e)),
+            };
+            Some(Ok(PyRep::List(vec![])))
+        }
+
+        ("slash", "SlashCmd") => {
+            let _ = match ServerContext::require_auth(session) {
+                Ok(u) => u,
+                Err(e) => return Some(Err(e)),
+            };
+            if (session.role & 0x02) == 0 {
+                return Some(Err(BridgeRpcError {
+                    code: "InsufficientRole".into(),
+                    message: "slash.SlashCmd requires GM/Admin role bit 0x02".into(),
+                }));
+            }
+            let cmd = args.first().and_then(|a| a.as_str()).unwrap_or("");
+            Some(Ok(PyRep::String(format!("Executed GM command: {cmd}"))))
+        }
 
         _ => None,
     }

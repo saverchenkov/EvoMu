@@ -132,16 +132,78 @@ pub async fn handle(
             ])))
         }
 
-        ("stationSvc", "Dock") | ("structureDocking", "Dock") => {
+        ("stationSvc", "Dock") | ("structureDocking", "Dock") | ("beyonce", "CmdDock") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
             let dock_id = args.first().and_then(|a| a.as_i64()).unwrap_or(60_003_760);
             let is_structure = service == "structureDocking" || dock_id >= 1_000_000_000_000;
+            let Some(sys_id) = session.solar_system_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "NoSolarSystem".into(),
+                    message: "Session has no active solarSystemID".into(),
+                }));
+            };
 
-            if let (Some(sys_id), Some(ship_id)) = (session.solar_system_id, session.ship_id) {
+            let target_pos = if is_structure {
+                let st_opt = ctx
+                    .db
+                    .with_snapshot(|snap| snap.structures.get(&dock_id).cloned());
+                let Some(st) = st_opt else {
+                    return Some(Err(BridgeRpcError {
+                        code: "StructureNotFound".into(),
+                        message: format!("Structure {dock_id} does not exist"),
+                    }));
+                };
+                if st.solar_system_id != sys_id {
+                    return Some(Err(BridgeRpcError {
+                        code: "DockTargetWrongSystem".into(),
+                        message: format!(
+                            "Structure {dock_id} is in system {}, but pilot is in {sys_id}",
+                            st.solar_system_id
+                        ),
+                    }));
+                }
+                DVec3::from_array(st.position)
+            } else {
+                let st_opt = ctx
+                    .sde
+                    .solar_systems
+                    .get(&sys_id)
+                    .and_then(|sys| sys.stations.iter().find(|s| s.station_id == dock_id))
+                    .cloned();
+                let Some(st) = st_opt else {
+                    return Some(Err(BridgeRpcError {
+                        code: "DockTargetWrongSystem".into(),
+                        message: format!(
+                            "Station {dock_id} does not exist in current solar system {sys_id}"
+                        ),
+                    }));
+                };
+                st.position
+            };
+
+            if let Some(ship_id) = session.ship_id {
                 let handle = ctx.systems.get_or_spawn(sys_id);
+                if let Ok(Some((_, ball))) = handle.get_ball_snapshot(ship_id).await {
+                    if matches!(ball.mode, MovementMode::Warp { .. }) {
+                        return Some(Err(BridgeRpcError {
+                            code: "ShipInWarp".into(),
+                            message: "Cannot dock while ship is still in warp".into(),
+                        }));
+                    }
+                    let dist = ball.position.distance(target_pos);
+                    if dist > 2_500.0 {
+                        return Some(Err(BridgeRpcError {
+                            code: "OutsideDockingPerimeter".into(),
+                            message: format!(
+                                "Ship is {:.1} m from docking perimeter (must be <= 2500 m)",
+                                dist
+                            ),
+                        }));
+                    }
+                }
                 let _ = handle.remove_ball(ship_id).await;
             }
 
@@ -166,8 +228,8 @@ pub async fn handle(
             }
         }
 
-        ("structureDeployment", "AnchorStructure") => {
-            let (_, _char_id) = match ServerContext::require_character(session) {
+        ("structureDeployment", "Anchor") | ("structureDeployment", "AnchorStructure") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
@@ -179,7 +241,39 @@ pub async fn handle(
             let sys_id = session.solar_system_id.unwrap_or(30_000_144);
             let corp_id = session.corporation_id.unwrap_or(1_000_125);
 
-            let structure_id = ctx.db.with_mut_snapshot(|snap| {
+            let res = ctx.db.with_mut_snapshot(|snap| {
+                // Verify and consume 1 structure item (`type_id`) and 1 Upwell Quantum Core (`56201`) owned by `char_id`
+                let struct_item_id = snap
+                    .items
+                    .values()
+                    .find(|i| i.owner_id == char_id && i.type_id == type_id && i.quantity >= 1)
+                    .map(|i| i.item_id);
+                let core_item_id = snap
+                    .items
+                    .values()
+                    .find(|i| i.owner_id == char_id && i.type_id == 56201 && i.quantity >= 1)
+                    .map(|i| i.item_id);
+
+                let (Some(sid), Some(cid)) = (struct_item_id, core_item_id) else {
+                    return Err(BridgeRpcError {
+                        code: "MissingStructureOrCore".into(),
+                        message: format!(
+                            "Anchoring requires owning structure type {type_id} and Upwell Quantum Core (56201)"
+                        ),
+                    });
+                };
+
+                for consume_id in [sid, cid] {
+                    if let Some(item) = snap.items.get_mut(&consume_id) {
+                        if item.quantity > 1 {
+                            item.quantity -= 1;
+                            item.version += 1;
+                        } else {
+                            snap.items.remove(&consume_id);
+                        }
+                    }
+                }
+
                 snap.next_entity_id += 1;
                 let id = 1_000_000_000_000 + snap.next_entity_id;
                 snap.structures.insert(
@@ -196,52 +290,93 @@ pub async fn handle(
                         fuel_blocks: 1_000,
                     },
                 );
-                id
+                Ok(id)
             });
 
-            Some(Ok(PyRep::keyval([
-                ("structureID", PyRep::Integer(structure_id)),
-                ("state", PyRep::String("ShieldVulnerable".into())),
-                ("quantumCoreInstalled", PyRep::Bool(true)),
-            ])))
+            match res {
+                Ok(structure_id) => Some(Ok(PyRep::keyval([
+                    ("structureID", PyRep::Integer(structure_id)),
+                    ("state", PyRep::String("ShieldVulnerable".into())),
+                    ("quantumCoreInstalled", PyRep::Bool(true)),
+                ]))),
+                Err(e) => Some(Err(e)),
+            }
         }
 
         ("structureControl", "AttackStructure") | ("structureService", "DamageStructure") => {
+            let _ = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             let structure_id = args
                 .first()
                 .and_then(|a| a.as_i64())
                 .unwrap_or(1_000_200_000_001);
-            let incoming_dmg = args.get(1).and_then(|a| a.as_f64()).unwrap_or(25_000.0);
+            let incoming_dmg = args
+                .get(1)
+                .and_then(|a| a.as_f64())
+                .unwrap_or(25_000.0)
+                .max(0.0);
             let clamped = clamp_upwell_structure_damage(incoming_dmg, 5_000.0, 1.0);
+            let caller_sys = session.solar_system_id.unwrap_or(0);
 
-            ctx.db.with_mut_snapshot(|snap| {
-                if let Some(st) = snap.structures.get_mut(&structure_id) {
-                    st.state = "ArmorReinforced".into();
+            let res = ctx.db.with_mut_snapshot(|snap| {
+                let Some(st) = snap.structures.get_mut(&structure_id) else {
+                    return Err(BridgeRpcError {
+                        code: "StructureNotFound".into(),
+                        message: format!("Structure {structure_id} does not exist"),
+                    });
+                };
+                if st.solar_system_id != caller_sys {
+                    return Err(BridgeRpcError {
+                        code: "StructureWrongSystem".into(),
+                        message: format!(
+                            "Structure {structure_id} is in system {}, but caller is in {caller_sys}",
+                            st.solar_system_id
+                        ),
+                    });
                 }
+                st.state = "ArmorReinforced".into();
+                Ok(())
             });
 
-            Some(Ok(PyRep::keyval([
-                ("structureID", PyRep::Integer(structure_id)),
-                ("appliedDamage", PyRep::Real(clamped)),
-                ("state", PyRep::String("ArmorReinforced".into())),
-            ])))
+            match res {
+                Ok(()) => Some(Ok(PyRep::keyval([
+                    ("structureID", PyRep::Integer(structure_id)),
+                    ("appliedDamage", PyRep::Real(clamped)),
+                    ("state", PyRep::String("ArmorReinforced".into())),
+                ]))),
+                Err(e) => Some(Err(e)),
+            }
         }
 
-        ("structureControl", _)
-        | ("structureGuests", _)
-        | ("structureSettings", _)
-        | ("structureBrowser", _)
-        | ("structureJumpBridgeMgr", _)
-        | ("structureHangarViewMgr", _)
-        | ("structureProximityTracker", _)
-        | ("structureService", _)
-        | ("structure_Paintwork", _)
-        | ("structure", _)
-        | ("posMgr", _)
-        | ("starbase", _)
-        | ("jumpbeaconsvc", _)
-        | ("cynoMgr", _)
-        | ("shipCasterLauncherMgr", _) => Some(Ok(PyRep::Bool(true))),
+        ("structureBrowser", "GetStructures")
+        | ("structureSettings", "GetCharacterStructures")
+        | ("structureGuests", "GetGuests")
+        | ("posMgr", "GetControlTowerFuelRequirements") => {
+            let _ = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let rows = ctx.db.with_snapshot(|snap| {
+                snap.structures
+                    .values()
+                    .map(|st| {
+                        vec![
+                            PyRep::Integer(st.structure_id),
+                            PyRep::Integer(st.type_id as i64),
+                            PyRep::Integer(st.solar_system_id as i64),
+                            PyRep::String(st.name.clone()),
+                            PyRep::String(st.state.clone()),
+                        ]
+                    })
+                    .collect()
+            });
+            Some(Ok(PyRep::rowset(
+                vec!["structureID", "typeID", "solarSystemID", "name", "state"],
+                rows,
+            )))
+        }
 
         _ => None,
     }

@@ -18,6 +18,10 @@ pub async fn handle(
     match (service, method) {
         // Living World NPC Ecology & Supply-Chain Convoy Interdiction (`E2E-17`)
         ("livingWorld", "ListConvoys") => {
+            let _ = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             let rows = ctx
                 .living_world
                 .list_convoys()
@@ -49,6 +53,10 @@ pub async fn handle(
         }
 
         ("livingWorld", "MaterializeSystemLOD2") => {
+            let _ = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             let sys_id = args
                 .first()
                 .and_then(|a| a.as_i64())
@@ -85,6 +93,10 @@ pub async fn handle(
         }
 
         ("skinrMgr", "SequenceSkinDesign") | ("cosmeticsSvc", "ApplySkin") => {
+            let _ = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             let ship_type_id = args.first().and_then(|a| a.as_i64()).unwrap_or(587);
             let design_name = args
                 .get(1)
@@ -97,22 +109,18 @@ pub async fn handle(
             ])))
         }
 
-        ("cosmeticsSvc", _)
-        | ("cosmeticsLicenseMgr", _)
-        | ("shipSkinSvc", _)
-        | ("skinrMgr", _)
-        | ("nanocoatingMgr", _)
-        | ("paragonMgr", _)
-        | ("raffles", _)
-        | ("eventMgr", _)
-        | ("rewardMgr", _)
-        | ("nes_intro", _)
-        | ("kiringMgr", _)
-        | ("RWManager", _)
-        | ("encodedItems", _)
-        | ("survey", _)
-        | ("i2", _)
-        | ("eject", _) => Some(Ok(PyRep::Bool(true))),
+        ("cosmeticsSvc", "GetAvailableSkins")
+        | ("cosmeticsLicenseMgr", "GetOwnedLicenses")
+        | ("shipSkinSvc", "GetSkins")
+        | ("paragonMgr", "GetMissions")
+        | ("eventMgr", "GetActiveEvents")
+        | ("rewardMgr", "GetRewards") => {
+            let _ = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            Some(Ok(PyRep::List(vec![])))
+        }
 
         _ => None,
     }
