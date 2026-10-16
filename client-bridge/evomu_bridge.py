@@ -467,4 +467,3 @@ if __name__ == "__main__":
             _run_live_demo()
         except Exception as exc:
             print("[INFO] Live server not reachable on 127.0.0.1:26001 (%s); self-tests succeeded." % exc)
-
