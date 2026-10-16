@@ -887,7 +887,7 @@ impl ShipFittingEngine {
     }
 }
 
-/// Thermodynamics Formulas (`#29`–`#34` from `docs/index/wiki_mechanics_catalog.json`):
+/// Thermodynamics formulas (`#29`–`#34`):
 /// Rack heat generation, dissipation, slot-distance attenuation $e^{-d}$, and nanite repair paste cost.
 pub mod thermodynamics {
     /// Computes rack heat level after `dt_sec` given active heat generation rate and dissipation rate (`#29`–`#30`).

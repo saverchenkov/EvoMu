@@ -49,11 +49,33 @@ pub struct IskCents(pub i64);
 
 impl IskCents {
     pub const fn from_isk(whole_isk: i64) -> Self {
-        Self(whole_isk * 100)
+        Self(whole_isk.saturating_mul(100))
     }
 
     pub fn from_f64_isk(isk: f64) -> Self {
-        Self((isk * 100.0).round() as i64)
+        if !isk.is_finite() {
+            return Self(0);
+        }
+        let scaled = (isk * 100.0).round();
+        if scaled >= (i64::MAX / 2) as f64 {
+            Self(i64::MAX / 2)
+        } else if scaled <= (i64::MIN / 2) as f64 {
+            Self(i64::MIN / 2)
+        } else {
+            Self(scaled as i64)
+        }
+    }
+
+    pub fn checked_add(self, rhs: Self) -> Option<Self> {
+        self.0.checked_add(rhs.0).map(Self)
+    }
+
+    pub fn checked_sub(self, rhs: Self) -> Option<Self> {
+        self.0.checked_sub(rhs.0).map(Self)
+    }
+
+    pub fn checked_mul_qty(self, qty: i64) -> Option<Self> {
+        self.0.checked_mul(qty).map(Self)
     }
 
     pub fn to_wire_f64(self) -> f64 {
@@ -81,9 +103,10 @@ pub enum InventoryFlag {
     HiSlot1 = 28,
     HiSlot2 = 29,
     HiSlot3 = 30,
-    /// `invFlags`: 56 = Capsule, 57 = Pilot.
+    /// `invFlags`: 56 = Capsule, 57 = Pilot, 62 = Locked.
     Capsule = 56,
     Pilot = 57,
+    Locked = 62,
     DroneBay = 87,
     Booster = 88,
     Implant = 89,
@@ -115,6 +138,7 @@ impl InventoryFlag {
             30 => Self::HiSlot3,
             56 => Self::Capsule,
             57 => Self::Pilot,
+            62 => Self::Locked,
             87 => Self::DroneBay,
             88 => Self::Booster,
             89 => Self::Implant,
@@ -420,6 +444,10 @@ pub struct SystemDynamicState {
     pub dbs_multiplier: f64,
     pub ess_main_bank: IskCents,
     pub ess_reserve_bank: IskCents,
+    #[serde(default)]
+    pub ess_linked_character_id: Option<i64>,
+    #[serde(default)]
+    pub ess_link_started_tick: Option<u64>,
     pub sov_alliance_id: Option<i64>,
     pub military_index: u8,
     pub industrial_index: u8,
@@ -499,6 +527,7 @@ pub struct WorldStateSnapshot {
 /// Encapsulated transactional world repository.
 pub struct WorldRepository {
     inner: RwLock<WorldStateSnapshot>,
+    snapshot_path: Option<std::path::PathBuf>,
 }
 
 impl Default for WorldRepository {
@@ -554,7 +583,7 @@ impl WorldRepository {
                 race_id: 2,
                 bloodline_id: 3,
                 ancestry_id: 13,
-                school_id: 17,
+                school_id: 20, // Republic Military School (Minmatar)
                 neural: NeuralAttributes::default(),
                 skill_points: 15_000_000.0,
                 free_skill_points: 50_000.0,
@@ -586,7 +615,7 @@ impl WorldRepository {
                 race_id: 1,
                 bloodline_id: 1,
                 ancestry_id: 1,
-                school_id: 11,
+                school_id: 17, // Science and Trade Institute (Caldari)
                 neural: NeuralAttributes::default(),
                 skill_points: 4_500_000.0,
                 free_skill_points: 0.0,
@@ -647,6 +676,7 @@ impl WorldRepository {
             (100_000_016, 56201, 1, false),   // Astrahus Upwell Quantum Core
             (100_000_017, 35664, 5, false),   // Clone Soldier Negotiator Tag
             (100_000_018, 1230, 5_000, false), // Reserve Veldspar stack for Corp Projects
+            (100_000_019, 47763, 5, false),   // Calm Exotic Filament
         ];
         for (id, tid, qty, single) in starter_items {
             items.insert(
@@ -713,6 +743,8 @@ impl WorldRepository {
                     dbs_multiplier: 1.35,
                     ess_main_bank: IskCents::from_isk(10_000_000),
                     ess_reserve_bank: IskCents::from_isk(25_000_000),
+                    ess_linked_character_id: None,
+                    ess_link_started_tick: None,
                     sov_alliance_id: None,
                     military_index: 2,
                     industrial_index: 2,
@@ -785,7 +817,12 @@ impl WorldRepository {
             ]),
         );
 
-        Self {
+        let snapshot_path = std::env::var("EVOMU_SNAPSHOT_PATH")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .map(std::path::PathBuf::from);
+
+        let repo = Self {
             inner: RwLock::new(WorldStateSnapshot {
                 next_entity_id: 200_000_000,
                 accounts,
@@ -815,7 +852,17 @@ impl WorldRepository {
                 system_states,
                 committed_idempotency_keys: HashSet::new(),
             }),
+            snapshot_path: snapshot_path.clone(),
+        };
+
+        if let Some(ref p) = snapshot_path {
+            if p.exists() {
+                let _ = repo.load_snapshot_from_file(p);
+            } else {
+                let _ = repo.save_snapshot_to_file(p);
+            }
         }
+        repo
     }
 
     /// Saves the complete transactional world state to a JSON snapshot file (`M1` durable persistence).
@@ -841,12 +888,22 @@ impl WorldRepository {
         f(&guard)
     }
 
+    /// Atomically applies `f` to a staged clone of the snapshot and commits only if `f` completes
+    /// without panicking, preventing partial state corruption on unwind.
     pub fn with_mut_snapshot<F, R>(&self, f: F) -> R
     where
         F: FnOnce(&mut WorldStateSnapshot) -> R,
     {
         let mut guard = self.inner.write().unwrap_or_else(|e| e.into_inner());
-        f(&mut guard)
+        let mut staged = guard.clone();
+        let out = f(&mut staged);
+        *guard = staged;
+        if let Some(ref p) = self.snapshot_path {
+            if let Ok(json) = serde_json::to_string_pretty(&*guard) {
+                let _ = std::fs::write(p, json);
+            }
+        }
+        out
     }
 
     pub fn authenticate(
@@ -922,31 +979,37 @@ impl WorldRepository {
             ));
         }
 
-        // Validate lineage against SDE when IDs are present in the registry
+        // Strictly validate race, bloodline, ancestry, and school lineage against SDE
         let race = sde
             .races
             .get(&race_id)
             .ok_or_else(|| DbError::ValidationError(format!("Unknown race_id {race_id}")))?;
-        if let Some(bl) = sde.bloodlines.get(&bloodline_id) {
-            if bl.race_id != race_id {
-                return Err(DbError::ValidationError(format!(
-                    "Bloodline {bloodline_id} does not belong to race {race_id}"
-                )));
-            }
+        let bl = sde
+            .bloodlines
+            .get(&bloodline_id)
+            .ok_or_else(|| DbError::ValidationError(format!("Unknown bloodline_id {bloodline_id}")))?;
+        if bl.race_id != race_id {
+            return Err(DbError::ValidationError(format!(
+                "Bloodline {bloodline_id} does not belong to race {race_id}"
+            )));
         }
-        if let Some(anc) = sde.ancestries.get(&ancestry_id) {
-            if sde.bloodlines.contains_key(&bloodline_id) && anc.bloodline_id != bloodline_id {
-                return Err(DbError::ValidationError(format!(
-                    "Ancestry {ancestry_id} does not belong to bloodline {bloodline_id}"
-                )));
-            }
+        let anc = sde
+            .ancestries
+            .get(&ancestry_id)
+            .ok_or_else(|| DbError::ValidationError(format!("Unknown ancestry_id {ancestry_id}")))?;
+        if anc.bloodline_id != bloodline_id {
+            return Err(DbError::ValidationError(format!(
+                "Ancestry {ancestry_id} does not belong to bloodline {bloodline_id}"
+            )));
         }
-        if let Some(sch) = sde.schools.get(&school_id) {
-            if sch.race_id != race_id {
-                return Err(DbError::ValidationError(format!(
-                    "School {school_id} does not belong to race {race_id}"
-                )));
-            }
+        let school = sde
+            .schools
+            .get(&school_id)
+            .ok_or_else(|| DbError::ValidationError(format!("Unknown school_id {school_id}")))?;
+        if school.race_id != race_id {
+            return Err(DbError::ValidationError(format!(
+                "School {school_id} does not belong to race {race_id}"
+            )));
         }
 
         let mut guard = self.inner.write().unwrap_or_else(|e| e.into_inner());
@@ -965,13 +1028,9 @@ impl WorldRepository {
         guard.next_entity_id += 1;
         let ship_id = guard.next_entity_id;
 
-        let school = sde
-            .schools
-            .get(&school_id)
-            .or_else(|| sde.schools.values().find(|s| s.race_id == race_id));
-        let station_id = school.map(|s| s.station_id).unwrap_or(60_003_760);
-        let sys_id = school.map(|s| s.solar_system_id).unwrap_or(30_000_142);
-        let corp_id = school.map(|s| s.corporation_id).unwrap_or(1_000_125);
+        let station_id = school.station_id;
+        let sys_id = school.solar_system_id;
+        let corp_id = school.corporation_id;
         let sys = sde.solar_systems.get(&sys_id);
         let const_id = sys.map(|s| s.constellation_id).unwrap_or(20_000_020);
         let reg_id = sys.map(|s| s.region_id).unwrap_or(10_000_002);

@@ -22,7 +22,11 @@ pub fn handle(
     _kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
-        ("charUnboundMgr", "GetCharactersToSelect") => {
+        ("charUnboundMgr", "GetCharactersToSelect")
+        | ("charUnboundMgr", "GetCharacterInfo")
+        | ("charUnboundMgr", "GetCharacterLockType")
+        | ("charUnboundMgr", "GetCharOmegaDowngradeStatus")
+        | ("charUnboundMgr", "CancelCharacterDeletePrepare") => {
             let user_id = match ServerContext::require_auth(session) {
                 Ok(u) => u,
                 Err(e) => return Some(Err(e)),
@@ -58,6 +62,10 @@ pub fn handle(
         }
 
         ("charUnboundMgr", "ValidateNameEx") => {
+            let _ = match ServerContext::require_auth(session) {
+                Ok(u) => u,
+                Err(e) => return Some(Err(e)),
+            };
             let name = args.first().and_then(|a| a.as_str()).unwrap_or("");
             let valid = name.trim().len() >= 3
                 && ctx.db.with_snapshot(|s| {
@@ -80,7 +88,7 @@ pub fn handle(
             let race_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(2) as u32;
             let bloodline_id = args.get(2).and_then(|a| a.as_i64()).unwrap_or(3) as u32;
             let ancestry_id = args.get(3).and_then(|a| a.as_i64()).unwrap_or(13) as u32;
-            let school_id = args.get(4).and_then(|a| a.as_i64()).unwrap_or(17) as u32;
+            let school_id = args.get(4).and_then(|a| a.as_i64()).unwrap_or(20) as u32;
 
             let res = ctx.db.create_character(
                 user_id,
@@ -134,13 +142,17 @@ pub fn handle(
             session.ship_id = Some(c.active_ship_id);
             session.race_id = Some(c.race_id);
 
-            Some(Ok(PyRep::Bool(true)))
+            Some(Ok(PyRep::keyval([
+                ("characterID", PyRep::Integer(c.character_id)),
+                ("corporationID", PyRep::Integer(c.corporation_id)),
+                ("shipID", PyRep::Integer(c.active_ship_id)),
+                ("solarSystemID", PyRep::Integer(c.solar_system_id as i64)),
+            ])))
         }
 
         ("skillMgr2", "GetSkills")
         | ("skillMgr2", "GetSkillQueue")
-        | ("skillMgr", "GetSkills")
-        | ("online_character_skill_training", "GetSkills") => {
+        | ("skillMgr2", "GetMySkillHandler") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -167,10 +179,7 @@ pub fn handle(
             )))
         }
 
-        ("skillMgr2", "SaveSkillQueue")
-        | ("skillMgr2", "AddToEndOfSkillQueue")
-        | ("skillMgr", "AddToEndOfSkillQueue")
-        | ("skillQueue", "AddSkillToQueue") => {
+        ("skillMgr2", "SaveSkillQueue") | ("skillMgr2", "AddToEndOfSkillQueue") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -239,9 +248,7 @@ pub fn handle(
             }
         }
 
-        ("skillMgr2", "ApplyFreeSkillPoints")
-        | ("skillMgr", "ApplyFreeSkillPoints")
-        | ("skillMgr", "CompleteSkillQueue") => {
+        ("skillMgr2", "ApplyFreeSkillPoints") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -317,11 +324,20 @@ pub fn handle(
 
         ("skillMgr2", "InjectSkillPoints")
         | ("alphaInjectorMgr", "UseAlphaInjector")
-        | ("skillMgr", "InjectSkillInjector") => {
+        | ("alphaInjectorMgr", "GetNextAvailableInjection")
+        | ("nonDiminishingInjectionMgr", "GetAvailableNonDiminishingInjections") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            if method == "GetNextAvailableInjection"
+                || method == "GetAvailableNonDiminishingInjections"
+            {
+                return Some(Ok(PyRep::keyval([
+                    ("characterID", PyRep::Integer(char_id)),
+                    ("canInjectNow", PyRep::Bool(true)),
+                ])));
+            }
             let res = ctx.db.with_mut_snapshot(|snap| {
                 // Locate an owned Large Skill Injector (type_id 40520) with quantity >= 1
                 let injector_item_id = snap
@@ -363,9 +379,12 @@ pub fn handle(
         }
 
         ("jumpCloneSvc", "InstallCloneInStation")
+        | ("jumpCloneSvc", "AcceptShipCloneInstallation")
+        | ("jumpCloneSvc", "CancelShipCloneInstallation")
         | ("jumpCloneSvc", "GetCloneState")
+        | ("jumpCloneSvc", "GetNumClonesInPilotsStructure")
         | ("jumpCloneSvc", "CloneJump")
-        | ("cloneJump", "InstallCloneInStation") => {
+        | ("jumpCloneSvc", "DestroyInstalledClone") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -398,10 +417,11 @@ pub fn handle(
             ])))
         }
 
-        ("standing", "GetStandingTransactions")
-        | ("standing", "GetCharStandings")
-        | ("standing", "GetCorpStandings")
-        | ("standing", "GetStandings") => {
+        ("standingMgr", "GetStandingTransactions")
+        | ("standingMgr", "GetCharStandings")
+        | ("standingMgr", "GetCorpStandings")
+        | ("standingMgr", "GetNPCNPCStandings")
+        | ("standingMgr", "GetStandingCompositions") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -422,9 +442,7 @@ pub fn handle(
             Some(Ok(PyRep::rowset(vec!["fromID", "standing"], rows)))
         }
 
-        ("crimewatch", "ApplyTagsForSecStatus")
-        | ("securityOfficeSvc", "ApplyTagsForSecStatus")
-        | ("cloneSecurityTagMgr", "RepairSecurityStatus") => {
+        ("crimewatch", "ApplyTagsForSecStatus") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -432,7 +450,8 @@ pub fn handle(
             if session.station_id.is_none() {
                 return Some(Err(BridgeRpcError {
                     code: "NotDockedInStation".into(),
-                    message: "Security status tag turn-in requires being docked at a CONCORD station".into(),
+                    message: "Security status tag turn-in requires being docked at a CONCORD station"
+                        .into(),
                 }));
             }
             let tags_requested = args.first().and_then(|a| a.as_i64()).unwrap_or(1).max(1) as u32;
@@ -483,7 +502,10 @@ pub fn handle(
         }
 
         ("LPSvc", "GetLPForCharacterCorp")
-        | ("loyaltyPointsWalletSvc", "GetCharacterLPBalances") => {
+        | ("LPSvc", "GetAllMyCharacterWalletLPBalances")
+        | ("LPSvc", "GetAllMyCorporationWalletLPBalances")
+        | ("LPSvc", "ExchangeConcordLP")
+        | ("LPStoreMgr", "GetAvailableOffersFromCorp") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -511,32 +533,57 @@ pub fn handle(
         | ("charMgr", "GetPublicInfo3")
         | ("charMgr", "GetCharacterDescription")
         | ("charMgr", "GetHomeStation")
-        | ("home_station", "get_home_station") => {
+        | ("home_station", "get_home_station")
+        | ("home_station", "set_home_station")
+        | ("home_station", "get_home_station_candidates")
+        | ("paperDollServer", "GetPaperDollData")
+        | ("paperDollServer", "GetMyPaperDollData") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
             let target_id = args.first().and_then(|a| a.as_i64()).unwrap_or(char_id);
             let _ = apply_standing_increase(0.0, 0.0);
-            if let Ok(ch) = ctx.db.get_character(target_id) {
-                Some(Ok(PyRep::keyval([
+            match ctx.db.get_character(target_id) {
+                Ok(ch) => Some(Ok(PyRep::keyval([
                     ("characterID", PyRep::Integer(ch.character_id)),
                     ("characterName", PyRep::String(ch.name)),
                     ("corporationID", PyRep::Integer(ch.corporation_id)),
                     ("homeStationID", PyRep::Integer(ch.home_station_id)),
                     ("raceID", PyRep::Integer(ch.race_id as i64)),
-                ])))
-            } else {
-                Some(Ok(PyRep::None))
+                ]))),
+                Err(e) => Some(Err(BridgeRpcError {
+                    code: "CharacterNotFound".into(),
+                    message: e.to_string(),
+                })),
             }
         }
 
-        ("certificateMgr", "GetMyCertificates") | ("paperDollServer", "GetPaperDollData") => {
-            let _ = match ServerContext::require_character(session) {
+        ("certificateMgr", "GetMyCertificates") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            Some(Ok(PyRep::List(vec![])))
+            let rows = ctx.db.with_snapshot(|snap| {
+                snap.skills
+                    .get(&char_id)
+                    .map(|m| {
+                        m.values()
+                            .filter(|s| s.level >= 4)
+                            .map(|s| {
+                                vec![
+                                    PyRep::Integer(s.type_id as i64),
+                                    PyRep::Integer(s.level as i64),
+                                ]
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            });
+            Some(Ok(PyRep::rowset(
+                vec!["certificateID", "grade"],
+                rows,
+            )))
         }
 
         _ => None,

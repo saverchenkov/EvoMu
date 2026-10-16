@@ -424,6 +424,7 @@ impl Ballpark {
         if dt <= 0.0 || !dt.is_finite() {
             return Vec::new();
         }
+        let dt = dt.min(60.0);
         self.current_tick += 1;
 
         let positions: BTreeMap<BallId, (DVec3, f64)> = self
@@ -584,7 +585,7 @@ pub mod combat {
     /// Resolves a turret shot given `chance_to_hit` and deterministic uniform roll `u in [0.0, 1.0)` (`#48`–`#49`).
     /// - If `u >= chance_to_hit`: Miss (`0.0` multiplier).
     /// - If `u < 0.01`: Wrecking Shot (`3.0` multiplier).
-    /// - Otherwise: Normal hit with quality $Q = 0.4995 + u \in [0.5095, 1.4995)$.
+    /// - Otherwise: Normal hit with quality $Q = 0.49 + u \in [0.50, 1.49)$.
     pub fn resolve_turret_shot(
         base_damage: DamageVector,
         chance_to_hit: f64,
@@ -596,7 +597,7 @@ pub mod combat {
         if roll_u < 0.01 {
             return (base_damage.scaled(3.0), true);
         }
-        let q = (0.4995 + roll_u).clamp(0.4995, 1.4995);
+        let q = (0.49 + roll_u).clamp(0.49, 1.49);
         (base_damage.scaled(q), false)
     }
 

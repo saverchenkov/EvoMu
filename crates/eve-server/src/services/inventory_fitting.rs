@@ -5,7 +5,6 @@
 use crate::formulas::{abyssal_attribute_roll, compute_insurance_quote};
 use crate::router::{BoundObjectEntry, ServerContext};
 use eve_db::{InventoryFlag, IskCents, SavedFittingRecord};
-use eve_dogma::ShipFittingEngine;
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::{attr_ids, AttributeId, TypeId};
@@ -21,7 +20,9 @@ pub fn handle(
     kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
-        ("invbroker", "ListItems") | ("invbroker", "List") => {
+        ("invbroker", "ListItems")
+        | ("invbroker", "List")
+        | ("invbroker", "GetContainerContents") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -55,7 +56,10 @@ pub fn handle(
             )))
         }
 
-        ("invbroker", "MoveItem") | ("invbroker", "Add") => {
+        ("invbroker", "MoveItem")
+        | ("invbroker", "Add")
+        | ("invbroker", "DeliverToCorpHangar")
+        | ("invbroker", "DeliverToCorpMember") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -91,12 +95,18 @@ pub fn handle(
                 expected_version,
                 idem_key,
             ) {
-                Ok(updated) => Some(Ok(PyRep::keyval([
-                    ("itemID", PyRep::Integer(updated.item_id)),
-                    ("locationID", PyRep::Integer(updated.location_id)),
-                    ("flagID", PyRep::Integer(updated.flag as i64)),
-                    ("version", PyRep::Integer(updated.version as i64)),
-                ]))),
+                Ok(updated) => {
+                    if let Some(ship_id) = session.ship_id {
+                        ctx.invalidate_ship_fitting(ship_id);
+                    }
+                    ctx.invalidate_ship_fitting(new_loc);
+                    Some(Ok(PyRep::keyval([
+                        ("itemID", PyRep::Integer(updated.item_id)),
+                        ("locationID", PyRep::Integer(updated.location_id)),
+                        ("flagID", PyRep::Integer(updated.flag as i64)),
+                        ("version", PyRep::Integer(updated.version as i64)),
+                    ])))
+                }
                 Err(e) => Some(Err(BridgeRpcError {
                     code: "InventoryMoveFailed".into(),
                     message: e.to_string(),
@@ -108,7 +118,8 @@ pub fn handle(
         | ("dogmaIM", "GetAllInfo")
         | ("dogmaIM", "CharGetInfo")
         | ("dogmaIM", "ShipGetInfo")
-        | ("dogmaIM", "ItemGetInfo") => {
+        | ("dogmaIM", "ItemGetInfo")
+        | ("dogmaIM", "GetRequiredSkillLevels") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -123,25 +134,10 @@ pub fn handle(
                 }));
             };
 
-            let items = ctx.db.get_items_for_character(char_id);
-            let Some(ship_item) = items.iter().find(|i| i.item_id == ship_id) else {
-                return Some(Err(BridgeRpcError {
-                    code: "ShipNotFound".into(),
-                    message: format!("Ship item {ship_id} not found for character {char_id}"),
-                }));
+            let fit = match ctx.get_or_rebuild_ship_fitting(char_id, ship_id) {
+                Ok(f) => f,
+                Err(e) => return Some(Err(e)),
             };
-
-            let mut fit = ShipFittingEngine::from_sde(ship_id, ship_item.type_id, &ctx.sde);
-            for item in &items {
-                if item.location_id == ship_id && (item.flag as u16) >= 11 {
-                    let _ = fit.fit_and_online_module(
-                        item.item_id,
-                        item.type_id,
-                        item.flag as u16,
-                        &ctx.sde,
-                    );
-                }
-            }
 
             let base_attrs = fit.ship.base_attributes.clone();
             let mut entries = Vec::with_capacity(base_attrs.len() + 2);
@@ -157,6 +153,7 @@ pub fn handle(
                 PyRep::Integer(attr_ids::POWER_LOAD as i64),
                 PyRep::Real(fit.ship.get_attribute(attr_ids::POWER_LOAD, &ctx.sde)),
             ));
+            ctx.store_ship_fitting(ship_id, fit);
 
             if method == "GetAllInfo" || method == "ShipGetInfo" || method == "CharGetInfo" {
                 Some(Ok(PyRep::keyval([
@@ -172,7 +169,10 @@ pub fn handle(
         ("dogmaIM", "Activate")
         | ("dogmaIM", "Overload")
         | ("dogmaIM", "Deactivate")
-        | ("dogmaIM", "SetModuleOnline") => {
+        | ("dogmaIM", "SetModuleOnline")
+        | ("dogmaIM", "LoadAmmo")
+        | ("dogmaIM", "LinkWeapons")
+        | ("dogmaIM", "LinkAllWeapons") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -185,38 +185,28 @@ pub fn handle(
                 }));
             };
             let items = ctx.db.get_items_for_character(char_id);
-            let Some(ship_item) = items.iter().find(|i| i.item_id == ship_id) else {
-                return Some(Err(BridgeRpcError {
-                    code: "ShipNotFound".into(),
-                    message: format!("Active ship {ship_id} not found for character {char_id}"),
-                }));
-            };
-            let Some(mod_item) = items.iter().find(|i| i.item_id == module_id && i.owner_id == char_id) else {
+            let Some(mod_item) = items
+                .iter()
+                .find(|i| i.item_id == module_id && i.owner_id == char_id)
+            else {
                 return Some(Err(BridgeRpcError {
                     code: "ModuleNotFound".into(),
                     message: format!("Module {module_id} not owned by character {char_id}"),
                 }));
             };
+            if mod_item.location_id != ship_id || (mod_item.flag as u16) < 11 {
+                return Some(Err(BridgeRpcError {
+                    code: "ModuleNotFitted".into(),
+                    message: format!(
+                        "Module {module_id} must be fitted to active ship {ship_id} before activation"
+                    ),
+                }));
+            }
 
-            let mut fit = ShipFittingEngine::from_sde(ship_id, ship_item.type_id, &ctx.sde);
-            for item in &items {
-                if item.location_id == ship_id && (item.flag as u16) >= 11 {
-                    let _ = fit.fit_and_online_module(
-                        item.item_id,
-                        item.type_id,
-                        item.flag as u16,
-                        &ctx.sde,
-                    );
-                }
-            }
-            if !fit.modules.contains_key(&module_id) {
-                let _ = fit.fit_and_online_module(
-                    mod_item.item_id,
-                    mod_item.type_id,
-                    (mod_item.flag as u16).max(19),
-                    &ctx.sde,
-                );
-            }
+            let mut fit = match ctx.get_or_rebuild_ship_fitting(char_id, ship_id) {
+                Ok(f) => f,
+                Err(e) => return Some(Err(e)),
+            };
 
             if method == "Deactivate" {
                 if let Err(e) = fit.deactivate_module(module_id, &ctx.sde) {
@@ -235,6 +225,8 @@ pub fn handle(
             }
 
             let max_vel = fit.ship.get_attribute(attr_ids::MAX_VELOCITY, &ctx.sde);
+            ctx.store_ship_fitting(ship_id, fit);
+
             Some(Ok(PyRep::keyval([
                 ("moduleID", PyRep::Integer(module_id)),
                 ("overloaded", PyRep::Bool(method == "Overload")),
@@ -242,7 +234,7 @@ pub fn handle(
             ])))
         }
 
-        ("fittingSvc", "SaveFitting") | ("corpFittingMgr", "SaveFitting") => {
+        ("charFittingMgr", "SaveFitting") | ("corpFittingMgr", "SaveFitting") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -262,7 +254,7 @@ pub fn handle(
                         owner_id: char_id,
                         name: name.to_string(),
                         ship_type_id,
-                        description: "Saved via fittingSvc".into(),
+                        description: "Saved via charFittingMgr".into(),
                         items: vec![(438, InventoryFlag::MedSlot0, 1)],
                     },
                 );
@@ -271,9 +263,9 @@ pub fn handle(
             Some(Ok(PyRep::Integer(fid)))
         }
 
-        ("fittingSvc", "GetFittings")
-        | ("fittingSvc", "GetFittingMgr")
-        | ("corpFittingMgr", "GetFittings") => {
+        ("charFittingMgr", "GetFittings")
+        | ("corpFittingMgr", "GetFittings")
+        | ("corpFittingMgr", "GetCommunityFittings") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -297,7 +289,7 @@ pub fn handle(
             )))
         }
 
-        ("fittingSvc", "DeleteFitting") | ("corpFittingMgr", "DeleteFitting") => {
+        ("charFittingMgr", "DeleteFitting") | ("corpFittingMgr", "DeleteFitting") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -319,7 +311,11 @@ pub fn handle(
             Some(Ok(PyRep::Bool(deleted)))
         }
 
-        ("insuranceSvc", "InsureShip") | ("insuranceSvc", "GetContractForShip") => {
+        ("insuranceSvc", "InsureShip")
+        | ("insuranceSvc", "GetContractForShip")
+        | ("insuranceSvc", "GetContracts")
+        | ("insuranceSvc", "GetInsurancePrice")
+        | ("insuranceSvc", "GetInsurancePrices") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -363,13 +359,11 @@ pub fn handle(
                         message: format!("Character {char_id} not found"),
                     });
                 };
-                if ch.balance.0 < cost_cents.0 {
-                    return Err(BridgeRpcError {
-                        code: "InsufficientFunds".into(),
-                        message: "Not enough ISK to insure ship".into(),
-                    });
-                }
-                ch.balance = IskCents(ch.balance.0 - cost_cents.0);
+                let new_bal = ch.balance.checked_sub(cost_cents).ok_or_else(|| BridgeRpcError {
+                    code: "InsufficientFunds".into(),
+                    message: "Not enough ISK to insure ship".into(),
+                })?;
+                ch.balance = new_bal;
                 if let Some(ship_mut) = snap.items.get_mut(&ship_id) {
                     ship_mut.insured_payout_isk = payout;
                 }
@@ -386,7 +380,9 @@ pub fn handle(
             }
         }
 
-        ("dynamicItemSvc", "MutateItem") | ("mutaplasmidMgr", "ApplyMutaplasmid") => {
+        ("dynamicItemService", "MutateItem")
+        | ("dynamicItemService", "CreateDynamicItem")
+        | ("dynamicItemService", "GetDynamicItemInfo") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -510,26 +506,51 @@ pub fn handle(
                 }));
             }
             let item_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            ctx.db.with_mut_snapshot(|snap| {
-                if let Some(item) = snap.items.get_mut(&item_id) {
-                    if item.owner_id == char_id {
-                        item.singleton = false;
-                        item.version += 1;
-                    }
+            let res = ctx.db.with_mut_snapshot(|snap| {
+                let Some(item) = snap.items.get_mut(&item_id) else {
+                    return Err(BridgeRpcError {
+                        code: "ItemNotFound".into(),
+                        message: format!("Item {item_id} not found"),
+                    });
+                };
+                if item.owner_id != char_id {
+                    return Err(BridgeRpcError {
+                        code: "OwnershipViolation".into(),
+                        message: format!("Item {item_id} is not owned by character {char_id}"),
+                    });
                 }
+                item.singleton = false;
+                item.version += 1;
+                Ok(item.version)
             });
-            Some(Ok(PyRep::Bool(true)))
+            match res {
+                Ok(ver) => Some(Ok(PyRep::keyval([
+                    ("itemID", PyRep::Integer(item_id)),
+                    ("singleton", PyRep::Bool(false)),
+                    ("version", PyRep::Integer(ver as i64)),
+                ]))),
+                Err(e) => Some(Err(e)),
+            }
         }
 
         ("repairSvc", "RepairItems")
         | ("repairSvc", "GetRepairQuote")
         | ("repairSvc", "RepairAll")
-        | ("repairSvc", "DamageModules") => {
-            let _ = match ServerContext::require_character(session) {
+        | ("repairSvc", "DamageModules")
+        | ("repairSvc", "SetSessionCheck")
+        | ("ship", "AssembleShip")
+        | ("ship", "Board") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            Some(Ok(PyRep::Bool(true)))
+            let ship_id = session.ship_id.unwrap_or(100_000_001);
+            Some(Ok(PyRep::keyval([
+                ("characterID", PyRep::Integer(char_id)),
+                ("shipID", PyRep::Integer(ship_id)),
+                ("repairCostISK", PyRep::Real(0.0)),
+                ("repaired", PyRep::Bool(true)),
+            ])))
         }
 
         _ => None,

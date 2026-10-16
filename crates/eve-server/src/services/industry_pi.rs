@@ -14,6 +14,9 @@ use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::TypeId;
 use std::collections::HashMap;
 
+const ATTR_BLUEPRINT_ME: u16 = 1112;
+const ATTR_BLUEPRINT_TE: u16 = 1113;
+
 pub fn handle(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -23,7 +26,7 @@ pub fn handle(
     _kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
-        ("reprocessingSvc", "Reprocess") | ("reprocessingSvc", "GetOptionsForItemTypes") => {
+        ("reprocessingSvc", "Reprocess") | ("reprocessingSvc", "SetSessionCheck") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -44,10 +47,13 @@ pub fn handle(
                         message: format!("Item {item_id} does not exist"),
                     });
                 };
-                if item.owner_id != char_id || item.quantity <= 0 {
+                if item.owner_id != char_id || item.location_id != station_id || item.quantity <= 0
+                {
                     return Err(BridgeRpcError {
-                        code: "OwnershipViolation".into(),
-                        message: format!("Item {item_id} is not owned by character {char_id}"),
+                        code: "OwnershipOrLocationViolation".into(),
+                        message: format!(
+                            "Item {item_id} must be owned by character {char_id} at station {station_id}"
+                        ),
                     });
                 }
                 let ore_qty = item.quantity;
@@ -85,7 +91,9 @@ pub fn handle(
             }
         }
 
-        ("compressionMgr", "CompressItem") | ("compressionMgr", "CompressInSpace") => {
+        ("structureCompressionMgr", "CompressItem")
+        | ("structureCompressionMgr", "CompressItemInStructure")
+        | ("inSpaceCompressionMgr", "CompressItemInSpace") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -117,7 +125,7 @@ pub fn handle(
             }
         }
 
-        ("industrySvc", "InstallJob") | ("ramProxy", "InstallJob") => {
+        ("industryManager", "InstallJob") | ("ramProxy", "InstallJob") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -131,18 +139,14 @@ pub fn handle(
             let bp_type_id = args.first().and_then(|a| a.as_i64()).unwrap_or(687) as TypeId;
             let activity_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1) as u8;
             let runs_raw = args.get(2).and_then(|a| a.as_i64()).unwrap_or(1);
-            let me_raw = args.get(3).and_then(|a| a.as_i64()).unwrap_or(10);
-            let te_raw = args.get(4).and_then(|a| a.as_i64()).unwrap_or(20);
 
-            if runs_raw <= 0 || !(0..=10).contains(&me_raw) || !(0..=20).contains(&te_raw) {
+            if !(1..=1_000).contains(&runs_raw) || !matches!(activity_id, 1 | 3 | 4 | 5 | 8) {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidIndustryJobParameters".into(),
-                    message: "Runs must be > 0, ME in 0..=10, and TE in 0..=20".into(),
+                    message: "Runs must be in 1..=1000 and activityID in {1, 3, 4, 5, 8}".into(),
                 }));
             }
             let runs = runs_raw as u32;
-            let me_level = me_raw as u8;
-            let te_level = te_raw as u8;
 
             let Some(bp) = ctx.sde.blueprints.get(&bp_type_id) else {
                 return Some(Err(BridgeRpcError {
@@ -152,28 +156,49 @@ pub fn handle(
             };
             let product_type_id = bp.product_type_id;
             let base_time = bp.manufacturing_time_sec;
-            let duration_sec =
-                compute_manufacturing_time_seconds(runs, base_time, te_level, 5, 5, 1.0);
-            let trit_req = compute_manufacturing_material_qty(runs, 32_000, me_level, 1.0, 0.0);
             let inv_prob = compute_invention_probability(0.30, 5, 5, 5, 1.0);
 
             let res = ctx.db.with_mut_snapshot(|snap| {
-                // Verify character owns the blueprint item
-                let bp_item_id = snap
+                // Verify character owns an unlocked blueprint item at `station_id`
+                let bp_item = snap
                     .items
                     .values()
-                    .find(|i| i.owner_id == char_id && i.type_id == bp_type_id && i.quantity >= 1)
-                    .map(|i| i.item_id);
-                let Some(bp_iid) = bp_item_id else {
+                    .find(|i| {
+                        i.owner_id == char_id
+                            && i.location_id == station_id
+                            && i.type_id == bp_type_id
+                            && i.quantity >= 1
+                            && i.flag != InventoryFlag::Locked
+                    })
+                    .cloned();
+                let Some(bp_rec) = bp_item else {
                     return Err(BridgeRpcError {
-                        code: "BlueprintNotOwned".into(),
+                        code: "BlueprintNotAvailable".into(),
                         message: format!(
-                            "Character {char_id} does not own blueprint type {bp_type_id}"
+                            "Character {char_id} does not have an unlocked blueprint {bp_type_id} at station {station_id}"
                         ),
                     });
                 };
+                let bp_iid = bp_rec.item_id;
 
-                // For manufacturing (activity_id == 1), verify and consume BOM materials
+                // Read ME/TE from the blueprint item (defaulting to 10/20 for seeded BPO)
+                let me_level = bp_rec
+                    .dynamic_attributes
+                    .get(&ATTR_BLUEPRINT_ME)
+                    .map(|v| (*v as i64).clamp(0, 10) as u8)
+                    .unwrap_or(10);
+                let te_level = bp_rec
+                    .dynamic_attributes
+                    .get(&ATTR_BLUEPRINT_TE)
+                    .map(|v| (*v as i64).clamp(0, 20) as u8)
+                    .unwrap_or(20);
+
+                let duration_sec =
+                    compute_manufacturing_time_seconds(runs, base_time, te_level, 5, 5, 1.0);
+                let trit_req =
+                    compute_manufacturing_material_qty(runs, 32_000, me_level, 1.0, 0.0);
+
+                // For manufacturing (activity_id == 1), verify and consume BOM materials at `station_id`
                 if activity_id == 1 {
                     for mat in &bp.materials {
                         let req_qty = compute_manufacturing_material_qty(
@@ -188,6 +213,8 @@ pub fn handle(
                             .values()
                             .find(|i| {
                                 i.owner_id == char_id
+                                    && i.location_id == station_id
+                                    && i.flag == InventoryFlag::Hangar
                                     && i.type_id == mat.type_id
                                     && i.quantity >= req_qty
                             })
@@ -196,7 +223,7 @@ pub fn handle(
                             return Err(BridgeRpcError {
                                 code: "InsufficientManufacturingMaterials".into(),
                                 message: format!(
-                                    "Missing {req_qty}x material type {} for blueprint {bp_type_id}",
+                                    "Missing {req_qty}x material type {} in station {station_id} hangar",
                                     mat.type_id
                                 ),
                             });
@@ -210,6 +237,12 @@ pub fn handle(
                             }
                         }
                     }
+                }
+
+                // Lock blueprint while job is active
+                if let Some(bp_mut) = snap.items.get_mut(&bp_iid) {
+                    bp_mut.flag = InventoryFlag::Locked;
+                    bp_mut.version += 1;
                 }
 
                 snap.next_entity_id += 1;
@@ -229,11 +262,11 @@ pub fn handle(
                         duration_seconds: duration_sec,
                     },
                 );
-                Ok(jid)
+                Ok((jid, duration_sec, trit_req))
             });
 
             match res {
-                Ok(job_id) => Some(Ok(PyRep::keyval([
+                Ok((job_id, duration_sec, trit_req)) => Some(Ok(PyRep::keyval([
                     ("jobID", PyRep::Integer(job_id)),
                     ("productTypeID", PyRep::Integer(product_type_id as i64)),
                     ("durationSeconds", PyRep::Integer(duration_sec as i64)),
@@ -244,18 +277,14 @@ pub fn handle(
             }
         }
 
-        ("industrySvc", "CompleteJob")
-        | ("industrySvc", "DeliverJob")
+        ("industryManager", "CompleteJob")
+        | ("industryManager", "CompleteManyJobs")
         | ("ramProxy", "CompleteJob") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
             let job_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let station_id = session
-                .station_id
-                .or(session.structure_id)
-                .unwrap_or(60_003_760);
 
             let res = ctx.db.with_mut_snapshot(|snap| {
                 let Some(job) = snap.industry_jobs.get(&job_id).cloned() else {
@@ -285,25 +314,55 @@ pub fn handle(
                     j_mut.status = "Delivered".into();
                 }
 
-                snap.next_entity_id += 1;
-                let prod_item_id = snap.next_entity_id;
-                snap.items.insert(
-                    prod_item_id,
-                    InventoryItemRecord {
-                        item_id: prod_item_id,
-                        type_id: job.product_type_id,
-                        owner_id: char_id,
-                        location_id: station_id,
-                        flag: InventoryFlag::Hangar,
-                        quantity: job.runs as i32,
-                        singleton: job.runs == 1,
-                        version: 1,
-                        dynamic_attributes: HashMap::new(),
-                        source_mutaplasmid_id: None,
-                        insured_payout_isk: 0.0,
-                    },
-                );
-                Ok((prod_item_id, job.product_type_id))
+                // Unlock blueprint item
+                if let Some(bp_mut) = snap.items.get_mut(&job.blueprint_item_id) {
+                    bp_mut.flag = InventoryFlag::Hangar;
+                    if job.activity_id == 3 {
+                        let cur_te = bp_mut
+                            .dynamic_attributes
+                            .get(&ATTR_BLUEPRINT_TE)
+                            .copied()
+                            .unwrap_or(0.0);
+                        bp_mut
+                            .dynamic_attributes
+                            .insert(ATTR_BLUEPRINT_TE, (cur_te + 2.0).min(20.0));
+                    } else if job.activity_id == 4 {
+                        let cur_me = bp_mut
+                            .dynamic_attributes
+                            .get(&ATTR_BLUEPRINT_ME)
+                            .copied()
+                            .unwrap_or(0.0);
+                        bp_mut
+                            .dynamic_attributes
+                            .insert(ATTR_BLUEPRINT_ME, (cur_me + 1.0).min(10.0));
+                    }
+                    bp_mut.version += 1;
+                }
+
+                // Only deliver manufactured/invented output for activity_id 1 or 8
+                if job.activity_id == 1 || job.activity_id == 8 {
+                    snap.next_entity_id += 1;
+                    let prod_item_id = snap.next_entity_id;
+                    snap.items.insert(
+                        prod_item_id,
+                        InventoryItemRecord {
+                            item_id: prod_item_id,
+                            type_id: job.product_type_id,
+                            owner_id: char_id,
+                            location_id: job.facility_id,
+                            flag: InventoryFlag::Hangar,
+                            quantity: job.runs as i32,
+                            singleton: job.runs == 1,
+                            version: 1,
+                            dynamic_attributes: HashMap::new(),
+                            source_mutaplasmid_id: None,
+                            insured_payout_isk: 0.0,
+                        },
+                    );
+                    Ok((prod_item_id, job.product_type_id))
+                } else {
+                    Ok((job.blueprint_item_id, job.blueprint_type_id))
+                }
             });
 
             match res {
@@ -316,11 +375,12 @@ pub fn handle(
             }
         }
 
-        // Planetary Interaction (`planetMgr` / `planetBaseMgr` / `colony`, `E2E-13`)
+        // Planetary Interaction (`planetMgr` / `planetOrbitalRegistryBroker`, `E2E-13`)
         ("planetMgr", "CreateColony")
-        | ("planetMgr", "GetPlanetsForChar")
-        | ("planetMgr", "RunColonyCycle")
-        | ("planetBaseMgr", "ExportCommodities") => {
+        | ("planetMgr", "Flush")
+        | ("planetMgr", "GMAddCommodity")
+        | ("planetOrbitalRegistryBroker", "GetTaxRate")
+        | ("planetOrbitalRegistryBroker", "GetSettingsInfo") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -355,15 +415,35 @@ pub fn handle(
             ])))
         }
 
-        ("facilitySvc", "GetFacilities")
-        | ("blueprintSvc", "GetBlueprintTypeCopy")
-        | ("miningLedgerSvc", "GetCharacterLogs")
-        | ("moonMining", "GetAutoMoonMiningBeaconData") => {
-            let _ = match ServerContext::require_character(session) {
+        ("industryManager", "GetJobsByOwner")
+        | ("industryManager", "GetJobCounts")
+        | ("facilityManager", "GetFacilities")
+        | ("blueprintManager", "GetBlueprintDataByOwner")
+        | ("characterMiningLedger", "GetCharacterLogs")
+        | ("moonExtractions", "GetExtractionsForCorp") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            Some(Ok(PyRep::List(vec![])))
+            let rows = ctx.db.with_snapshot(|snap| {
+                snap.industry_jobs
+                    .values()
+                    .filter(|j| j.installer_id == char_id)
+                    .map(|j| {
+                        vec![
+                            PyRep::Integer(j.job_id),
+                            PyRep::Integer(j.blueprint_type_id as i64),
+                            PyRep::Integer(j.product_type_id as i64),
+                            PyRep::Integer(j.runs as i64),
+                            PyRep::String(j.status.clone()),
+                        ]
+                    })
+                    .collect()
+            });
+            Some(Ok(PyRep::rowset(
+                vec!["jobID", "blueprintTypeID", "productTypeID", "runs", "status"],
+                rows,
+            )))
         }
 
         _ => None,

@@ -24,14 +24,16 @@ pub async fn handle(
         ("stationSvc", "GetSolarSystem")
         | ("station", "GetSolarSystem")
         | ("stationSvc", "GetStation")
-        | ("station", "GetStation") => {
+        | ("station", "GetStation")
+        | ("stationSvc", "GetStationItemBits")
+        | ("stationSvc", "GetStationsForOwner") => {
             let _ = match ServerContext::require_auth(session) {
                 Ok(u) => u,
                 Err(e) => return Some(Err(e)),
             };
             let sys_id = match args.first().and_then(|a| a.as_i64()) {
-                Some(id) => id as u32,
-                None => match session.solar_system_id {
+                Some(id) if id < 60_000_000 => id as u32,
+                _ => match session.solar_system_id {
                     Some(s) => s,
                     None => {
                         return Some(Err(BridgeRpcError {
@@ -51,7 +53,10 @@ pub async fn handle(
                     ("security", PyRep::Real(sys.security_status)),
                 ])))
             } else {
-                Some(Ok(PyRep::None))
+                Some(Err(BridgeRpcError {
+                    code: "SolarSystemNotFound".into(),
+                    message: format!("Solar system {sys_id} not found in SDE"),
+                }))
             }
         }
 
@@ -70,18 +75,33 @@ pub async fn handle(
                 }
             };
 
-            let spawn_pos = ctx
-                .sde
-                .solar_systems
-                .get(&ch.solar_system_id)
-                .and_then(|sys| sys.stations.iter().find(|s| s.station_id == station_id))
-                .map(|st| st.position + DVec3::new(1_500.0, 0.0, 0.0))
-                .unwrap_or_else(|| DVec3::new(100_000.0, 0.0, 0.0));
+            let spawn_pos = if station_id >= 1_000_000_000_000 {
+                ctx.db
+                    .with_snapshot(|snap| {
+                        snap.structures
+                            .get(&station_id)
+                            .map(|st| DVec3::from_array(st.position) + DVec3::new(1_500.0, 0.0, 0.0))
+                    })
+                    .unwrap_or_else(|| DVec3::new(51_500.0, 0.0, 0.0))
+            } else {
+                ctx.sde
+                    .solar_systems
+                    .get(&ch.solar_system_id)
+                    .and_then(|sys| sys.stations.iter().find(|s| s.station_id == station_id))
+                    .map(|st| st.position + DVec3::new(1_500.0, 0.0, 0.0))
+                    .unwrap_or_else(|| DVec3::new(100_000.0, 0.0, 0.0))
+            };
 
             let ship_type = ctx.sde.types.get(&ship.type_id);
-            let max_vel = ship_type
-                .and_then(|t| t.default_attributes.get(&attr_ids::MAX_VELOCITY))
-                .copied()
+            let max_vel = ctx
+                .get_or_rebuild_ship_fitting(char_id, ship.item_id)
+                .ok()
+                .map(|f| f.ship.get_attribute(attr_ids::MAX_VELOCITY, &ctx.sde))
+                .or_else(|| {
+                    ship_type
+                        .and_then(|t| t.default_attributes.get(&attr_ids::MAX_VELOCITY))
+                        .copied()
+                })
                 .unwrap_or(365.0);
             let inertia = ship_type
                 .and_then(|t| t.default_attributes.get(&attr_ids::AGILITY))
@@ -137,6 +157,18 @@ pub async fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            if session.station_id.is_some() || session.structure_id.is_some() {
+                return Some(Err(BridgeRpcError {
+                    code: "AlreadyDocked".into(),
+                    message: "Character is already docked in a station or structure".into(),
+                }));
+            }
+            let Some(ship_id) = session.ship_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "NoActiveShip".into(),
+                    message: "Cannot dock without an active ship in space".into(),
+                }));
+            };
             let dock_id = args.first().and_then(|a| a.as_i64()).unwrap_or(60_003_760);
             let is_structure = service == "structureDocking" || dock_id >= 1_000_000_000_000;
             let Some(sys_id) = session.solar_system_id else {
@@ -165,6 +197,12 @@ pub async fn handle(
                         ),
                     }));
                 }
+                if st.state == "Destroyed" {
+                    return Some(Err(BridgeRpcError {
+                        code: "StructureDestroyed".into(),
+                        message: format!("Structure {dock_id} is destroyed"),
+                    }));
+                }
                 DVec3::from_array(st.position)
             } else {
                 let st_opt = ctx
@@ -184,28 +222,39 @@ pub async fn handle(
                 st.position
             };
 
-            if let Some(ship_id) = session.ship_id {
-                let handle = ctx.systems.get_or_spawn(sys_id);
-                if let Ok(Some((_, ball))) = handle.get_ball_snapshot(ship_id).await {
-                    if matches!(ball.mode, MovementMode::Warp { .. }) {
-                        return Some(Err(BridgeRpcError {
-                            code: "ShipInWarp".into(),
-                            message: "Cannot dock while ship is still in warp".into(),
-                        }));
-                    }
-                    let dist = ball.position.distance(target_pos);
-                    if dist > 2_500.0 {
-                        return Some(Err(BridgeRpcError {
-                            code: "OutsideDockingPerimeter".into(),
-                            message: format!(
-                                "Ship is {:.1} m from docking perimeter (must be <= 2500 m)",
-                                dist
-                            ),
-                        }));
-                    }
+            let handle = ctx.systems.get_or_spawn(sys_id);
+            let Some((_, ball)) = (match handle.get_ball_snapshot(ship_id).await {
+                Ok(v) => v,
+                Err(e) => {
+                    return Some(Err(BridgeRpcError {
+                        code: "DestinyQueryFailed".into(),
+                        message: e,
+                    }))
                 }
-                let _ = handle.remove_ball(ship_id).await;
+            }) else {
+                return Some(Err(BridgeRpcError {
+                    code: "ShipNotInSpace".into(),
+                    message: format!("Ship {ship_id} is not spawned in solar system {sys_id} Ballpark"),
+                }));
+            };
+
+            if matches!(ball.mode, MovementMode::Warp { .. }) {
+                return Some(Err(BridgeRpcError {
+                    code: "ShipInWarp".into(),
+                    message: "Cannot dock while ship is still in warp".into(),
+                }));
             }
+            let dist = ball.position.distance(target_pos);
+            if dist > 2_500.0 {
+                return Some(Err(BridgeRpcError {
+                    code: "OutsideDockingPerimeter".into(),
+                    message: format!(
+                        "Ship is {:.1} m from docking perimeter (must be <= 2500 m)",
+                        dist
+                    ),
+                }));
+            }
+            let _ = handle.remove_ball(ship_id).await;
 
             match ctx.db.dock_character(char_id, dock_id, is_structure) {
                 Ok(_) => {
@@ -228,7 +277,10 @@ pub async fn handle(
             }
         }
 
-        ("structureDeployment", "Anchor") | ("structureDeployment", "AnchorStructure") => {
+        ("structureDeployment", "Anchor")
+        | ("structureDeployment", "Unanchor")
+        | ("structureDeployment", "CancelUnanchor")
+        | ("structureDeployment", "RenameStructure") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -284,7 +336,7 @@ pub async fn handle(
                         owner_corp_id: corp_id,
                         solar_system_id: sys_id,
                         name: name.to_string(),
-                        position: [50_000.0, 0.0, 0.0],
+                        position: [-107_303_361_060.0, -18_744_975_360.0, 436_489_052_160.0],
                         state: "ShieldVulnerable".into(),
                         quantum_core_installed: true,
                         fuel_blocks: 1_000,
@@ -303,7 +355,10 @@ pub async fn handle(
             }
         }
 
-        ("structureControl", "AttackStructure") | ("structureService", "DamageStructure") => {
+        ("structureControl", "AttackStructure")
+        | ("structureControl", "TakeControl")
+        | ("structureControl", "ReleaseControl")
+        | ("structureControl", "BoardStructure") => {
             let _ = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -350,10 +405,15 @@ pub async fn handle(
             }
         }
 
-        ("structureBrowser", "GetStructures")
-        | ("structureSettings", "GetCharacterStructures")
+        ("structureDirectory", "GetStructureDescription")
+        | ("structureDirectory", "GetNearbyJumpBridges")
+        | ("structureDirectory", "GetJumpBridgesWithMyAccess")
+        | ("structureSettings", "CharacterGetServices")
+        | ("structureSettings", "CharacterCheckService")
         | ("structureGuests", "GetGuests")
-        | ("posMgr", "GetControlTowerFuelRequirements") => {
+        | ("station", "GetGuests")
+        | ("posMgr", "GetControlTowers")
+        | ("posMgr", "GetConsumptionFactor") => {
             let _ = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),

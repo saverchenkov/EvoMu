@@ -169,7 +169,9 @@ pub async fn handle(
             }
         }
 
-        ("beyonce", "GetBallSnapshot") | ("beyonce", "GetFormations") => {
+        ("beyonce", "GetBallSnapshot")
+        | ("beyonce", "GetFormations")
+        | ("beyonce", "GetCynoJammerState") => {
             let _ = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -196,7 +198,10 @@ pub async fn handle(
                     ("vy", PyRep::Real(ball.velocity.y)),
                     ("vz", PyRep::Real(ball.velocity.z)),
                 ]))),
-                Ok(None) => Some(Ok(PyRep::None)),
+                Ok(None) => Some(Err(BridgeRpcError {
+                    code: "BallNotFound".into(),
+                    message: format!("Ball {ship_id} is not present in system {sys_id}"),
+                })),
                 Err(e) => Some(Err(BridgeRpcError {
                     code: "DestinyQueryFailed".into(),
                     message: e,
@@ -207,16 +212,27 @@ pub async fn handle(
         // Stargate Jump, Cyno Jump, Wormhole Traversal, and Abyssal Filament Transition
         ("beyonce", "CmdStargateJump")
         | ("beyonce", "StargateJump")
-        | ("jumpbeaconsvc", "JumpToBeacon")
+        | ("structureCynoBeaconMgr", "CmdJumpToStructureBeacon")
         | ("wormholeMgr", "WormholeJump")
+        | ("wormholeMgr", "GetWormholePolarization")
         | ("abyssalMgr", "ActivateFilament")
+        | ("abyssalMgr", "AbyssalEntranceDeployment")
+        | ("abyssalMgr", "AbyssalGateActivation")
         | ("voidSpaceMgr", "ActivateFilament")
+        | ("voidSpaceMgr", "VoidSpacePlayerJump")
         | ("pvpFilamentMgr", "ActivateFilament")
-        | ("randomJumpMgr", "ActivateFilament") => {
+        | ("randomJumpMgr", "ActivateFilament")
+        | ("randomJumpMgr", "ActivateRandomJumpFilament") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            if method == "GetWormholePolarization" {
+                return Some(Ok(PyRep::keyval([
+                    ("polarized", PyRep::Bool(false)),
+                    ("cooldownSeconds", PyRep::Integer(300)),
+                ])));
+            }
             if session.station_id.is_some() || session.structure_id.is_some() {
                 return Some(Err(BridgeRpcError {
                     code: "ShipDocked".into(),
@@ -298,34 +314,120 @@ pub async fn handle(
                     }
                     jump.to_solar_system_id
                 } else if service == "wormholeMgr" {
-                    let target = args
-                        .first()
-                        .and_then(|a| a.as_i64())
-                        .map(|v| v as u32)
-                        .unwrap_or(31_000_005);
-                    if !ctx.sde.solar_systems.contains_key(&target) {
+                    // Require proximity (<= 2,500 m) to wormhole ball 750_000_001 in current system
+                    let Some((_, wh_ball)) = (match old_handle.get_ball_snapshot(750_000_001).await
+                    {
+                        Ok(v) => v,
+                        Err(e) => {
+                            return Some(Err(BridgeRpcError {
+                                code: "DestinyQueryFailed".into(),
+                                message: e,
+                            }))
+                        }
+                    }) else {
                         return Some(Err(BridgeRpcError {
-                            code: "UnknownSolarSystem".into(),
-                            message: format!("Target wormhole system {target} does not exist"),
+                            code: "WormholeNotPresent".into(),
+                            message: format!("No wormhole present in solar system {old_sys}"),
+                        }));
+                    };
+                    let dist = current_ball.position.distance(wh_ball.position);
+                    if dist > 2_500.0 {
+                        return Some(Err(BridgeRpcError {
+                            code: "OutsideWormholeJumpRange".into(),
+                            message: format!(
+                                "Ship is {:.1} m from wormhole (must be <= 2500 m)",
+                                dist
+                            ),
                         }));
                     }
-                    target
-                } else if service == "abyssalMgr" || service == "voidSpaceMgr" {
-                    32_000_001
+                    // Server-determined wormhole link: K-space <-> J105934 (31_000_005)
+                    if old_sys == 31_000_005 {
+                        30_000_142
+                    } else {
+                        31_000_005
+                    }
+                } else if service == "abyssalMgr"
+                    || service == "voidSpaceMgr"
+                    || service == "pvpFilamentMgr"
+                    || service == "randomJumpMgr"
+                {
+                    // Require and consume 1 owned filament item (type_id 47763)
+                    let consumed = ctx.db.with_mut_snapshot(|snap| {
+                        let fil_id = snap
+                            .items
+                            .values()
+                            .find(|i| {
+                                i.owner_id == char_id && i.type_id == 47763 && i.quantity >= 1
+                            })
+                            .map(|i| i.item_id);
+                        let Some(iid) = fil_id else {
+                            return Err(BridgeRpcError {
+                                code: "FilamentNotOwned".into(),
+                                message:
+                                    "Activating a filament requires owning a filament item (47763)"
+                                        .into(),
+                            });
+                        };
+                        if let Some(item) = snap.items.get_mut(&iid) {
+                            if item.quantity > 1 {
+                                item.quantity -= 1;
+                                item.version += 1;
+                            } else {
+                                snap.items.remove(&iid);
+                            }
+                        }
+                        Ok(())
+                    });
+                    if let Err(e) = consumed {
+                        return Some(Err(e));
+                    }
+                    if service == "abyssalMgr" || service == "voidSpaceMgr" {
+                        32_000_001
+                    } else {
+                        30_002_813
+                    }
                 } else {
+                    // structureCynoBeaconMgr: require an online structure in target system
                     let target = args
                         .first()
                         .and_then(|a| a.as_i64())
                         .map(|v| v as u32)
                         .unwrap_or(30_000_144);
-                    if !ctx.sde.solar_systems.contains_key(&target) {
+                    let has_beacon = ctx.db.with_snapshot(|snap| {
+                        snap.structures
+                            .values()
+                            .any(|st| st.solar_system_id == target && st.state != "Destroyed")
+                    });
+                    if !has_beacon {
                         return Some(Err(BridgeRpcError {
-                            code: "UnknownSolarSystem".into(),
-                            message: format!("Target system {target} does not exist"),
+                            code: "CynoBeaconNotFound".into(),
+                            message: format!(
+                                "No active structure cyno beacon in solar system {target}"
+                            ),
                         }));
                     }
                     target
                 };
+
+            let ship_mass = current_ball.mass;
+            if service == "wormholeMgr" {
+                let mass_check = ctx.db.with_mut_snapshot(|snap| {
+                    if let Some(st) = snap.system_states.get_mut(&dest_sys_id) {
+                        if st.wormhole_remaining_mass_kg < ship_mass {
+                            return Err(BridgeRpcError {
+                                code: "WormholeMassCollapsed".into(),
+                                message: "Wormhole lacks remaining mass capacity for this ship"
+                                    .into(),
+                            });
+                        }
+                        st.wormhole_remaining_mass_kg -= ship_mass;
+                    }
+                    Ok(())
+                });
+                if let Err(e) = mass_check {
+                    return Some(Err(e));
+                }
+            }
 
             let existing_ball = old_handle.remove_ball(ship_id).await;
 
@@ -348,7 +450,9 @@ pub async fn handle(
                 .values()
                 .find(|j| j.from_solar_system_id == dest_sys_id && j.to_solar_system_id == old_sys)
                 .map(|j| j.position + DVec3::new(1_500.0, 0.0, 0.0))
-                .unwrap_or_else(|| DVec3::new(15_000.0, 0.0, 0.0));
+                .unwrap_or_else(|| {
+                    DVec3::new(-107_303_361_060.0, -18_744_975_360.0, 436_489_052_160.0)
+                });
 
             let new_handle = ctx.systems.get_or_spawn(dest_sys_id);
             let mut new_ball = existing_ball.unwrap_or(current_ball);
@@ -356,18 +460,7 @@ pub async fn handle(
             new_ball.velocity = DVec3::ZERO;
             new_ball.speed_fraction = 0.0;
             new_ball.mode = MovementMode::Stop;
-            let ship_mass = new_ball.mass;
             let _ = new_handle.spawn_ball(new_ball).await;
-
-            // Update wormhole mass if jumping through wormhole
-            if service == "wormholeMgr" {
-                ctx.db.with_mut_snapshot(|snap| {
-                    if let Some(st) = snap.system_states.get_mut(&dest_sys_id) {
-                        st.wormhole_remaining_mass_kg =
-                            (st.wormhole_remaining_mass_kg - ship_mass).max(0.0);
-                    }
-                });
-            }
 
             session.solar_system_id = Some(updated_ch.solar_system_id);
             session.constellation_id = Some(updated_ch.constellation_id);
@@ -389,10 +482,10 @@ pub async fn handle(
             ])))
         }
 
-        // Probe Scanning (`scanSvc`) & Directional Scanner (`directionalScanner`)
-        ("scanSvc", "RequestScans")
-        | ("scanSvc", "GetSystemStatistics")
-        | ("sensorSuite", "ScanSignatures") => {
+        // Probe Scanning (`scanMgr`)
+        ("scanMgr", "RequestScans")
+        | ("scanMgr", "GetSystemScanMgr")
+        | ("scanMgr", "SignalTrackerRegister") => {
             let _ = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -408,7 +501,7 @@ pub async fn handle(
             ])))
         }
 
-        ("directionalScanner", "DirectionalScan") | ("scanSvc", "ConeScan") => {
+        ("scanMgr", "ConeScan") | ("scanMgr", "DirectionalScan") => {
             let _ = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -428,12 +521,29 @@ pub async fn handle(
             Some(Ok(PyRep::List(matches)))
         }
 
-        ("map", "GetSolarSystemPseudoSecurities") | ("map", "GetStuckSystems") => {
+        ("map", "GetSolarSystemPseudoSecurities")
+        | ("map", "GetCurrentSovData")
+        | ("map", "GetBeaconCount")
+        | ("map", "GetDeadspaceComplexMap") => {
             let _ = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            Some(Ok(PyRep::List(vec![])))
+            let rows = ctx
+                .sde
+                .solar_systems
+                .values()
+                .map(|s| {
+                    vec![
+                        PyRep::Integer(s.solar_system_id as i64),
+                        PyRep::Real(s.security_status),
+                    ]
+                })
+                .collect();
+            Some(Ok(PyRep::rowset(
+                vec!["solarSystemID", "security"],
+                rows,
+            )))
         }
 
         _ => None,

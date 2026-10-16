@@ -1,5 +1,6 @@
+# -*- coding: utf-8 -*-
 """
-evomu_bridge.py — Client-side Python ServiceManager (`sm`) & `michelle` Transport Bridge.
+evomu_bridge.py -- Client-side Python ServiceManager (`sm`) & `michelle` Transport Bridge.
 
 Fixes & Hardening:
 1. Full frame demultiplexer: Separates asynchronous `ServerEvent` notifications from

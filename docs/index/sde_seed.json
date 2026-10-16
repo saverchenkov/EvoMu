@@ -3,6 +3,26 @@
     {
       "ancestry_id": 1,
       "bloodline_id": 1,
+      "name": "Merchandisers"
+    },
+    {
+      "ancestry_id": 2,
+      "bloodline_id": 1,
+      "name": "Scientists"
+    },
+    {
+      "ancestry_id": 3,
+      "bloodline_id": 1,
+      "name": "Tube Child"
+    },
+    {
+      "ancestry_id": 4,
+      "bloodline_id": 2,
+      "name": "Entrepreneurs"
+    },
+    {
+      "ancestry_id": 11,
+      "bloodline_id": 1,
       "name": "Scientists"
     },
     {
@@ -11,14 +31,34 @@
       "name": "Tinkers"
     },
     {
+      "ancestry_id": 14,
+      "bloodline_id": 3,
+      "name": "Traders"
+    },
+    {
+      "ancestry_id": 15,
+      "bloodline_id": 4,
+      "name": "Workers"
+    },
+    {
       "ancestry_id": 25,
       "bloodline_id": 5,
       "name": "Liberal Holders"
     },
     {
+      "ancestry_id": 26,
+      "bloodline_id": 5,
+      "name": "Wealthy Commoners"
+    },
+    {
       "ancestry_id": 31,
       "bloodline_id": 7,
       "name": "Activists"
+    },
+    {
+      "ancestry_id": 32,
+      "bloodline_id": 7,
+      "name": "Immigrants"
     }
   ],
   "attributes": [
@@ -507,9 +547,33 @@
       "race_id": 1
     },
     {
+      "bloodline_id": 2,
+      "corporation_id": 1000006,
+      "name": "Civire",
+      "race_id": 1
+    },
+    {
+      "bloodline_id": 11,
+      "corporation_id": 1000006,
+      "name": "Achura",
+      "race_id": 1
+    },
+    {
       "bloodline_id": 3,
       "corporation_id": 1000125,
       "name": "Sebiestor",
+      "race_id": 2
+    },
+    {
+      "bloodline_id": 4,
+      "corporation_id": 1000125,
+      "name": "Brutor",
+      "race_id": 2
+    },
+    {
+      "bloodline_id": 14,
+      "corporation_id": 1000125,
+      "name": "Vherokior",
       "race_id": 2
     },
     {
@@ -519,9 +583,33 @@
       "race_id": 4
     },
     {
+      "bloodline_id": 6,
+      "corporation_id": 1000077,
+      "name": "Ni-Kunni",
+      "race_id": 4
+    },
+    {
+      "bloodline_id": 13,
+      "corporation_id": 1000077,
+      "name": "Khanid",
+      "race_id": 4
+    },
+    {
       "bloodline_id": 7,
       "corporation_id": 1000115,
       "name": "Gallente",
+      "race_id": 8
+    },
+    {
+      "bloodline_id": 8,
+      "corporation_id": 1000115,
+      "name": "Intaki",
+      "race_id": 8
+    },
+    {
+      "bloodline_id": 12,
+      "corporation_id": 1000115,
+      "name": "Jin-Mei",
       "race_id": 8
     }
   ],
@@ -2826,6 +2914,17 @@
       ],
       "stargate_id": 50001251,
       "to_solar_system_id": 30000144
+    },
+    {
+      "destination_stargate_id": 50001251,
+      "from_solar_system_id": 30000144,
+      "position": [
+        86000000000.0,
+        12000000000.0,
+        -141000000000.0
+      ],
+      "stargate_id": 50001873,
+      "to_solar_system_id": 30002813
     }
   ],
   "missions": [
@@ -2915,36 +3014,100 @@
   "schema_version": "V24.01-EvoMu-M1",
   "schools": [
     {
+      "corporation_id": 1000165,
+      "name": "Hedion University",
+      "race_id": 4,
+      "school_id": 11,
+      "solar_system_id": 30002187,
+      "station_id": 60008494
+    },
+    {
+      "corporation_id": 1000166,
+      "name": "Imperial Academy",
+      "race_id": 4,
+      "school_id": 12,
+      "solar_system_id": 30002187,
+      "station_id": 60008494
+    },
+    {
+      "corporation_id": 1000167,
+      "name": "Royal Amarr Institute",
+      "race_id": 4,
+      "school_id": 13,
+      "solar_system_id": 30002187,
+      "station_id": 60008494
+    },
+    {
+      "corporation_id": 1000115,
+      "name": "University of Caille",
+      "race_id": 8,
+      "school_id": 14,
+      "solar_system_id": 30002659,
+      "station_id": 60011866
+    },
+    {
+      "corporation_id": 1000168,
+      "name": "Federal Navy Academy",
+      "race_id": 8,
+      "school_id": 15,
+      "solar_system_id": 30002659,
+      "station_id": 60011866
+    },
+    {
+      "corporation_id": 1000169,
+      "name": "Center for Advanced Studies",
+      "race_id": 8,
+      "school_id": 16,
+      "solar_system_id": 30002659,
+      "station_id": 60011866
+    },
+    {
       "corporation_id": 1000044,
+      "name": "Science and Trade Institute",
+      "race_id": 1,
+      "school_id": 17,
+      "solar_system_id": 30000142,
+      "station_id": 60003760
+    },
+    {
+      "corporation_id": 1000045,
+      "name": "State War Academy",
+      "race_id": 1,
+      "school_id": 18,
+      "solar_system_id": 30000142,
+      "station_id": 60003760
+    },
+    {
+      "corporation_id": 1000046,
       "name": "School of Applied Knowledge",
       "race_id": 1,
-      "school_id": 11,
+      "school_id": 19,
       "solar_system_id": 30000142,
       "station_id": 60003760
     },
     {
       "corporation_id": 1000170,
-      "name": "Republic University",
+      "name": "Republic Military School",
       "race_id": 2,
-      "school_id": 17,
+      "school_id": 20,
       "solar_system_id": 30002510,
       "station_id": 60004588
     },
     {
-      "corporation_id": 1000165,
-      "name": "Hedion University",
-      "race_id": 4,
-      "school_id": 19,
-      "solar_system_id": 30002187,
-      "station_id": 60008494
+      "corporation_id": 1000171,
+      "name": "Republic University",
+      "race_id": 2,
+      "school_id": 21,
+      "solar_system_id": 30002510,
+      "station_id": 60004588
     },
     {
-      "corporation_id": 1000168,
-      "name": "University of Caille",
-      "race_id": 8,
-      "school_id": 21,
-      "solar_system_id": 30002659,
-      "station_id": 60011866
+      "corporation_id": 1000172,
+      "name": "Pator Tech School",
+      "race_id": 2,
+      "school_id": 22,
+      "solar_system_id": 30002510,
+      "station_id": 60004588
     }
   ],
   "solar_systems": [

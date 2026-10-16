@@ -1,6 +1,6 @@
 //! `services` — Modular 12-Domain RPC & Quasar Service Handlers (`M1`–`M8`).
 //!
-//! Organizes all 216 cataloged `machoNet` RPC services (`193` V24.01 active + `23` Crucible legacy-only)
+//! Organizes all 216 cataloged `machoNet` RPC services (`193` V24.01 active + `23` legacy-only)
 //! and all 135 Quasar Protobuf domains (`69` `eve_public.*` + `66` `eve.*` internal) into 12 cohesive
 //! domain modules matching `PLAN.md` §3.12 and `docs/spec/01..05`.
 

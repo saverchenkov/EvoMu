@@ -19,7 +19,9 @@ pub fn handle(
     _kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
-        ("bookmark", "BookmarkLocation") | ("bookmarkMgr", "BookmarkLocation") => {
+        ("bookmark", "BookmarkLocation")
+        | ("accessGroupBookmarkMgr", "BookmarkStaticLocation")
+        | ("accessGroupBookmarkMgr", "AddFolder") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -53,7 +55,7 @@ pub fn handle(
             ])))
         }
 
-        ("mailMgr", "SendMail") => {
+        ("mailMgr", "SendMail") | ("mailMgr", "CreateLabel") | ("mailMgr", "AssignLabels") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -76,7 +78,11 @@ pub fn handle(
             Some(Ok(PyRep::Integer(mid)))
         }
 
-        ("fleetMgr", "CreateFleet") | ("fleetObjectHandler", "CreateFleet") => {
+        ("fleetMgr", "CreateFleet")
+        | ("fleetObjectHandler", "CreateFleet")
+        | ("fleetObjectHandler", "CreateWing")
+        | ("fleetObjectHandler", "CreateSquad")
+        | ("fleetProxy", "AddFleetFinderAdvert") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -98,6 +104,7 @@ pub fn handle(
                 );
                 id
             });
+            session.fleet_id = Some(fid);
             Some(Ok(PyRep::keyval([
                 ("fleetID", PyRep::Integer(fid)),
                 ("bossID", PyRep::Integer(char_id)),
@@ -128,13 +135,12 @@ pub fn handle(
                         message: format!("Character {char_id} not found"),
                     });
                 };
-                if ch.balance.0 < reg_fee.0 {
-                    return Err(BridgeRpcError {
-                        code: "InsufficientFunds".into(),
-                        message: "Not enough ISK to pay corporation registration fee (1,599,800 ISK)".into(),
-                    });
-                }
-                ch.balance = IskCents(ch.balance.0 - reg_fee.0);
+                let new_bal = ch.balance.checked_sub(reg_fee).ok_or_else(|| BridgeRpcError {
+                    code: "InsufficientFunds".into(),
+                    message: "Not enough ISK to pay corporation registration fee (1,599,800 ISK)"
+                        .into(),
+                })?;
+                ch.balance = new_bal;
 
                 snap.next_entity_id += 1;
                 let cid = 98_000_000 + snap.next_entity_id;
@@ -171,7 +177,7 @@ pub fn handle(
             }
         }
 
-        ("corporation_projects", "CreateProject") => {
+        ("corporationSvc", "CreateProject") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -185,7 +191,8 @@ pub fn handle(
             if target_qty_raw <= 0 || !isk_per_unit.is_finite() || isk_per_unit < 0.0 {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidProjectParameters".into(),
-                    message: "Project requires target_quantity > 0 and finite isk_per_unit >= 0".into(),
+                    message: "Project requires target_quantity > 0 and finite isk_per_unit >= 0"
+                        .into(),
                 }));
             }
             let target_qty = target_qty_raw as u64;
@@ -193,7 +200,14 @@ pub fn handle(
 
             let res = ctx.db.with_mut_snapshot(|snap| {
                 let per_u = IskCents::from_f64_isk(isk_per_unit);
-                let escrow = IskCents(per_u.0.saturating_mul(target_qty as i64));
+                let escrow =
+                    per_u
+                        .checked_mul_qty(target_qty_raw)
+                        .ok_or_else(|| BridgeRpcError {
+                            code: "ProjectEscrowOverflow".into(),
+                            message: "Corporation project total escrow overflows 64-bit ISK cents"
+                                .into(),
+                        })?;
 
                 let Some(ch) = snap.characters.get_mut(&char_id) else {
                     return Err(BridgeRpcError {
@@ -201,13 +215,11 @@ pub fn handle(
                         message: format!("Character {char_id} not found"),
                     });
                 };
-                if ch.balance.0 < escrow.0 {
-                    return Err(BridgeRpcError {
-                        code: "InsufficientFunds".into(),
-                        message: "Not enough ISK to fund corporation project escrow".into(),
-                    });
-                }
-                ch.balance = IskCents(ch.balance.0 - escrow.0);
+                let new_bal = ch.balance.checked_sub(escrow).ok_or_else(|| BridgeRpcError {
+                    code: "InsufficientFunds".into(),
+                    message: "Not enough ISK to fund corporation project escrow".into(),
+                })?;
+                ch.balance = new_bal;
 
                 snap.next_entity_id += 1;
                 let id = snap.next_entity_id;
@@ -235,7 +247,7 @@ pub fn handle(
             }
         }
 
-        ("corporation_projects", "ContributeToProject") => {
+        ("corporationSvc", "ContributeToProject") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -294,16 +306,21 @@ pub fn handle(
                     }
                 }
 
-                let reward = IskCents(proj.isk_per_unit.0.saturating_mul(accepted as i64));
+                let reward = proj
+                    .isk_per_unit
+                    .checked_mul_qty(accepted as i64)
+                    .unwrap_or(IskCents(0));
                 let mut done = false;
                 if let Some(proj_mut) = snap.corp_projects.get_mut(&pid) {
                     proj_mut.current_quantity += accepted;
-                    proj_mut.escrow_remaining =
-                        IskCents((proj_mut.escrow_remaining.0 - reward.0).max(0));
+                    proj_mut.escrow_remaining = proj_mut
+                        .escrow_remaining
+                        .checked_sub(reward)
+                        .unwrap_or(IskCents(0));
                     done = proj_mut.current_quantity >= proj_mut.target_quantity;
                 }
                 if let Some(ch) = snap.characters.get_mut(&char_id) {
-                    ch.balance = IskCents(ch.balance.0 + reward.0);
+                    ch.balance = ch.balance.checked_add(reward).unwrap_or(ch.balance);
                 }
                 Ok((reward.to_wire_f64(), done))
             });
@@ -319,17 +336,34 @@ pub fn handle(
         }
 
         ("LSC", "GetChannels")
-        | ("chatx", "GetChannels")
-        | ("notificationSvc", "GetNotifications")
-        | ("calendarMgr", "GetEventList")
+        | ("XmppChatMgr", "CreatePlayerOwnedChannel")
+        | ("notificationMgr", "GetAllNotifications")
+        | ("notificationMgr", "GetUnprocessed")
+        | ("calendarMgr", "CreatePersonalEvent")
         | ("allianceRegistry", "GetAlliance")
-        | ("addressbook", "GetBookmarks")
-        | ("overviewPresetMgr", "GetOverviewPresets") => {
-            let _ = match ServerContext::require_character(session) {
+        | ("corporationSvc", "GetCorpInfo")
+        | ("overviewPresetMgr", "GetStoredPreset") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            Some(Ok(PyRep::List(vec![])))
+            let rows = ctx.db.with_snapshot(|snap| {
+                snap.bookmarks
+                    .values()
+                    .filter(|b| b.owner_id == char_id)
+                    .map(|b| {
+                        vec![
+                            PyRep::Integer(b.bookmark_id),
+                            PyRep::String(b.label.clone()),
+                            PyRep::Integer(b.solar_system_id as i64),
+                        ]
+                    })
+                    .collect()
+            });
+            Some(Ok(PyRep::rowset(
+                vec!["bookmarkID", "label", "solarSystemID"],
+                rows,
+            )))
         }
 
         _ => None,

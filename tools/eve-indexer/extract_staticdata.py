@@ -446,21 +446,45 @@ def build_canonical_sde_seed() -> dict:
     ]
     bloodlines = [
         {"bloodline_id": 1, "race_id": 1, "name": "Deteis", "corporation_id": 1000006},
+        {"bloodline_id": 2, "race_id": 1, "name": "Civire", "corporation_id": 1000006},
+        {"bloodline_id": 11, "race_id": 1, "name": "Achura", "corporation_id": 1000006},
         {"bloodline_id": 3, "race_id": 2, "name": "Sebiestor", "corporation_id": 1000125},
+        {"bloodline_id": 4, "race_id": 2, "name": "Brutor", "corporation_id": 1000125},
+        {"bloodline_id": 14, "race_id": 2, "name": "Vherokior", "corporation_id": 1000125},
         {"bloodline_id": 5, "race_id": 4, "name": "Amarr", "corporation_id": 1000077},
+        {"bloodline_id": 6, "race_id": 4, "name": "Ni-Kunni", "corporation_id": 1000077},
+        {"bloodline_id": 13, "race_id": 4, "name": "Khanid", "corporation_id": 1000077},
         {"bloodline_id": 7, "race_id": 8, "name": "Gallente", "corporation_id": 1000115},
+        {"bloodline_id": 8, "race_id": 8, "name": "Intaki", "corporation_id": 1000115},
+        {"bloodline_id": 12, "race_id": 8, "name": "Jin-Mei", "corporation_id": 1000115},
     ]
     ancestries = [
-        {"ancestry_id": 1, "bloodline_id": 1, "name": "Scientists"},
+        {"ancestry_id": 1, "bloodline_id": 1, "name": "Merchandisers"},
+        {"ancestry_id": 2, "bloodline_id": 1, "name": "Scientists"},
+        {"ancestry_id": 3, "bloodline_id": 1, "name": "Tube Child"},
+        {"ancestry_id": 4, "bloodline_id": 2, "name": "Entrepreneurs"},
+        {"ancestry_id": 11, "bloodline_id": 1, "name": "Scientists"},
         {"ancestry_id": 13, "bloodline_id": 3, "name": "Tinkers"},
+        {"ancestry_id": 14, "bloodline_id": 3, "name": "Traders"},
+        {"ancestry_id": 15, "bloodline_id": 4, "name": "Workers"},
         {"ancestry_id": 25, "bloodline_id": 5, "name": "Liberal Holders"},
+        {"ancestry_id": 26, "bloodline_id": 5, "name": "Wealthy Commoners"},
         {"ancestry_id": 31, "bloodline_id": 7, "name": "Activists"},
+        {"ancestry_id": 32, "bloodline_id": 7, "name": "Immigrants"},
     ]
     schools = [
-        {"school_id": 11, "race_id": 1, "corporation_id": 1000044, "station_id": 60003760, "solar_system_id": 30000142, "name": "School of Applied Knowledge"},
-        {"school_id": 17, "race_id": 2, "corporation_id": 1000170, "station_id": 60004588, "solar_system_id": 30002510, "name": "Republic University"},
-        {"school_id": 19, "race_id": 4, "corporation_id": 1000165, "station_id": 60008494, "solar_system_id": 30002187, "name": "Hedion University"},
-        {"school_id": 21, "race_id": 8, "corporation_id": 1000168, "station_id": 60011866, "solar_system_id": 30002659, "name": "University of Caille"},
+        {"school_id": 11, "race_id": 4, "corporation_id": 1000165, "station_id": 60008494, "solar_system_id": 30002187, "name": "Hedion University"},
+        {"school_id": 12, "race_id": 4, "corporation_id": 1000166, "station_id": 60008494, "solar_system_id": 30002187, "name": "Imperial Academy"},
+        {"school_id": 13, "race_id": 4, "corporation_id": 1000167, "station_id": 60008494, "solar_system_id": 30002187, "name": "Royal Amarr Institute"},
+        {"school_id": 14, "race_id": 8, "corporation_id": 1000115, "station_id": 60011866, "solar_system_id": 30002659, "name": "University of Caille"},
+        {"school_id": 15, "race_id": 8, "corporation_id": 1000168, "station_id": 60011866, "solar_system_id": 30002659, "name": "Federal Navy Academy"},
+        {"school_id": 16, "race_id": 8, "corporation_id": 1000169, "station_id": 60011866, "solar_system_id": 30002659, "name": "Center for Advanced Studies"},
+        {"school_id": 17, "race_id": 1, "corporation_id": 1000044, "station_id": 60003760, "solar_system_id": 30000142, "name": "Science and Trade Institute"},
+        {"school_id": 18, "race_id": 1, "corporation_id": 1000045, "station_id": 60003760, "solar_system_id": 30000142, "name": "State War Academy"},
+        {"school_id": 19, "race_id": 1, "corporation_id": 1000046, "station_id": 60003760, "solar_system_id": 30000142, "name": "School of Applied Knowledge"},
+        {"school_id": 20, "race_id": 2, "corporation_id": 1000170, "station_id": 60004588, "solar_system_id": 30002510, "name": "Republic Military School"},
+        {"school_id": 21, "race_id": 2, "corporation_id": 1000171, "station_id": 60004588, "solar_system_id": 30002510, "name": "Republic University"},
+        {"school_id": 22, "race_id": 2, "corporation_id": 1000172, "station_id": 60004588, "solar_system_id": 30002510, "name": "Pator Tech School"},
     ]
 
     # 5. Solar Systems, Jumps & Content
@@ -547,6 +571,7 @@ def build_canonical_sde_seed() -> dict:
         {"stargate_id": 50001249, "from_solar_system_id": 30000144, "to_solar_system_id": 30000142, "destination_stargate_id": 50001248, "position": [84_000_000_000.0, 12_000_000_000.0, -139_000_000_000.0]},
         {"stargate_id": 50001250, "from_solar_system_id": 30000144, "to_solar_system_id": 30002813, "destination_stargate_id": 50001251, "position": [86_000_000_000.0, 12_000_000_000.0, -141_000_000_000.0]},
         {"stargate_id": 50001251, "from_solar_system_id": 30002813, "to_solar_system_id": 30000144, "destination_stargate_id": 50001250, "position": [10_000_000_000.0, 0.0, 10_000_000_000.0]},
+        {"stargate_id": 50001873, "from_solar_system_id": 30000144, "to_solar_system_id": 30002813, "destination_stargate_id": 50001251, "position": [86_000_000_000.0, 12_000_000_000.0, -141_000_000_000.0]},
     ]
 
     # 6. Clone Grades, Blueprints, Dbuffs, Fighter Abilities, Wrecks, Compressible, Dynamic Items, Space Components
@@ -721,40 +746,6 @@ def build_canonical_sde_seed() -> dict:
     elif isinstance(static_meta, dict):
         static_sqlite_count = len(static_meta.get("static_sqlite_databases", {}))
         fsdbinary_count = len(static_meta.get("fsdbinary_archives", {}))
-
-    # Optional live SharedCache SQLite3 (.static) ingestion when local EVE installation is present
-    shared_cache = Path(os.path.expanduser("~/Library/Application Support/CCP/EVE/SharedCache/ResFiles"))
-    if shared_cache.is_dir() and isinstance(static_meta, list):
-        import sqlite3
-        existing_type_ids = {t["type_id"] for t in types}
-        for entry in static_meta:
-            if str(entry.get("res_path", "")).endswith("types.static"):
-                db_file = shared_cache / str(entry.get("cdn_relative_path", ""))
-                if db_file.is_file():
-                    try:
-                        conn = sqlite3.connect(f"file:{db_file}?mode=ro", uri=True)
-                        cur = conn.cursor()
-                        for row in cur.execute("SELECT typeID, data FROM types LIMIT 500"):
-                            tid = int(row[0])
-                            if tid not in existing_type_ids:
-                                payload = json.loads(row[1]) if isinstance(row[1], str) else {}
-                                existing_type_ids.add(tid)
-                                types.append({
-                                    "type_id": tid,
-                                    "group_id": int(payload.get("groupID", 0)),
-                                    "category_id": int(payload.get("categoryID", 0)),
-                                    "name": str(payload.get("typeNameID", f"Type_{tid}")),
-                                    "mass": float(payload.get("mass", 1.0)),
-                                    "volume": float(payload.get("volume", 1.0)),
-                                    "capacity": float(payload.get("capacity", 0.0)),
-                                    "radius": float(payload.get("radius", 1.0)),
-                                    "base_price": float(payload.get("basePrice", 0.0)),
-                                    "published": bool(payload.get("published", False)),
-                                    "default_attributes": {},
-                                })
-                        conn.close()
-                    except Exception:
-                        pass
 
     return {
         "schema_version": "V24.01-EvoMu-M1",

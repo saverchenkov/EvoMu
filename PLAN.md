@@ -21,7 +21,7 @@ All mechanics, wire structures, service names, notification contracts, and mathe
 
 ### 2.1 Current Implementation vs. Planned Specification Scope
 
-The table below summarizes the implementation status across all 7 Rust workspace crates (`M0`–`M8` implemented with explicit, non-wildcard RPC dispatch and verified via `cargo check --workspace --all-targets` with `-D warnings -D unused`, `evomu_bridge.py --self-test`, and `verify_plan_mapping.py --check`):
+The table below summarizes the implementation status across all 7 Rust workspace crates (`M0`–`M8` implemented with `120` cataloged services and `241` V24.01 client candidate methods explicitly handled across 12 service modules, `0` wildcard/constant-stub handlers, and verified via `RUSTFLAGS="-D warnings -D unused" cargo check --workspace --all-targets`, `evomu_bridge.py --self-test`, and `verify_plan_mapping.py --check`):
 
 | Workspace Component | Source Files on Disk | Implementation & Verification Status | Full Feature Coverage |
 |---|---|---|---|

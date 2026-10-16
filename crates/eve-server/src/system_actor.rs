@@ -2,8 +2,9 @@
 
 #![forbid(unsafe_code)]
 
-use eve_destiny::{Ball, BallId, Ballpark, DestinyEvent, MovementMode};
+use eve_destiny::{Ball, BallId, Ballpark, CombatState, DamageVector, DestinyEvent, MovementMode};
 use eve_sde::SolarSystemId;
+use glam::DVec3;
 use std::collections::HashMap;
 use std::sync::RwLock;
 use std::time::Duration;
@@ -37,6 +38,11 @@ pub enum SystemCommand {
     GetBallSnapshot {
         ball_id: BallId,
         reply: oneshot::Sender<Option<(u64, Ball)>>,
+    },
+    ApplyDamage {
+        ball_id: BallId,
+        damage: DamageVector,
+        reply: oneshot::Sender<Option<(f64, bool, Ball)>>,
     },
     StepManual {
         dt: f64,
@@ -106,6 +112,24 @@ impl SystemHandle {
             .map_err(|_| "Solar system reply dropped".to_string())
     }
 
+    pub async fn apply_damage(
+        &self,
+        ball_id: BallId,
+        damage: DamageVector,
+    ) -> Result<Option<(f64, bool, Ball)>, String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SystemCommand::ApplyDamage {
+                ball_id,
+                damage,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| "Solar system actor stopped".to_string())?;
+        rx.await
+            .map_err(|_| "Solar system reply dropped".to_string())
+    }
+
     pub async fn step_manual(&self, dt: f64) -> Result<TickBroadcast, String> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
@@ -134,7 +158,7 @@ impl SystemRegistry {
         }
     }
 
-    /// Spawns or retrieves a running 1 Hz Solar System Actor for `solar_system_id`.
+    /// Spawns or retrieves a running Solar System Actor for `solar_system_id`.
     pub fn get_or_spawn(&self, solar_system_id: SolarSystemId) -> SystemHandle {
         if let Some(existing) = self
             .systems
@@ -156,19 +180,86 @@ impl SystemRegistry {
 
         tokio::spawn(async move {
             let mut ballpark = Ballpark::new(solar_system_id);
+            let grid_origin = DVec3::new(-107_303_361_060.0, -18_744_975_360.0, 436_489_052_160.0);
+            // Seed belt/anomaly pirate NPC balls (700_000_001..=700_000_020), wormhole ball (750_000_001), and ESS beacon (750_000_002)
+            for idx in 1..=20i64 {
+                let npc_id = 700_000_000 + idx;
+                ballpark.add_ball(Ball {
+                    id: npc_id,
+                    type_id: 11001, // Guristas Pithi Invader
+                    position: grid_origin + DVec3::new(800.0 + (idx as f64) * 50.0, 0.0, 0.0),
+                    velocity: DVec3::ZERO,
+                    max_velocity: 310.0,
+                    inertia: 2.5,
+                    mass: 1_000_000.0,
+                    radius: 35.0,
+                    speed_fraction: 0.0,
+                    mode: MovementMode::Stop,
+                });
+                ballpark.combat_states.insert(
+                    npc_id,
+                    CombatState {
+                        shield_hp: 50.0,
+                        max_shield_hp: 50.0,
+                        armor_hp: 50.0,
+                        max_armor_hp: 50.0,
+                        structure_hp: 50.0,
+                        max_structure_hp: 50.0,
+                        ..CombatState::default()
+                    },
+                );
+            }
+            ballpark.add_ball(Ball {
+                id: 750_000_001,
+                type_id: 26272, // Wormhole K162
+                position: grid_origin + DVec3::new(500.0, 0.0, 0.0),
+                velocity: DVec3::ZERO,
+                max_velocity: 0.0,
+                inertia: 1.0,
+                mass: 1_000_000_000.0,
+                radius: 1500.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Rigid,
+            });
+            ballpark.add_ball(Ball {
+                id: 750_000_002,
+                type_id: 35832, // Encounter Surveillance System (ESS) Beacon
+                position: grid_origin + DVec3::new(300.0, 0.0, 0.0),
+                velocity: DVec3::ZERO,
+                max_velocity: 0.0,
+                inertia: 1.0,
+                mass: 100_000_000.0,
+                radius: 500.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Rigid,
+            });
+            let _ = ballpark.step(0.001); // Clear initial spawn events
+
             let mut ticker = tokio::time::interval(Duration::from_secs(1));
             ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+            let mut lod_counter: u64 = 0;
 
             loop {
                 tokio::select! {
                     biased;
                     _ = ticker.tick() => {
-                        let events = ballpark.step(1.0);
-                        let _ = event_tx_actor.send(TickBroadcast {
-                            solar_system_id,
-                            tick: ballpark.current_tick,
-                            events,
-                        });
+                        lod_counter = lod_counter.wrapping_add(1);
+                        let has_player_balls = ballpark.balls.keys().any(|&id| id < 700_000_000);
+                        let (should_step, dt) = if has_player_balls {
+                            (true, 1.0) // Tier 2 Active Grid: 1.0 Hz
+                        } else if !ballpark.balls.is_empty() {
+                            (lod_counter.is_multiple_of(5), 5.0) // Tier 1 System Presence: 0.2 Hz
+                        } else {
+                            (lod_counter.is_multiple_of(30), 30.0) // Tier 0 Empty Macro: 1/30 Hz
+                        };
+                        if should_step {
+                            let events = ballpark.step(dt);
+                            let _ = event_tx_actor.send(TickBroadcast {
+                                solar_system_id,
+                                tick: ballpark.current_tick,
+                                events,
+                            });
+                        }
                     }
                     cmd_opt = cmd_rx.recv() => {
                         let Some(cmd) = cmd_opt else {
@@ -177,13 +268,9 @@ impl SystemRegistry {
                         match cmd {
                             SystemCommand::SpawnBall { ball, reply } => {
                                 let ball_id = ball.id;
-                                if ballpark.add_ball(ball) {
-                                    let _ = reply.send(Ok(ballpark.current_tick));
-                                } else {
-                                    let _ = reply.send(Err(format!(
-                                        "Ball {ball_id} is already spawned in solar system {solar_system_id}"
-                                    )));
-                                }
+                                ballpark.balls.remove(&ball_id);
+                                ballpark.add_ball(ball);
+                                let _ = reply.send(Ok(ballpark.current_tick));
                             }
                             SystemCommand::RemoveBall { ball_id, reply } => {
                                 let removed = ballpark.remove_ball(ball_id);
@@ -200,6 +287,18 @@ impl SystemRegistry {
                             SystemCommand::GetBallSnapshot { ball_id, reply } => {
                                 let res = ballpark.balls.get(&ball_id).cloned().map(|b| (ballpark.current_tick, b));
                                 let _ = reply.send(res);
+                            }
+                            SystemCommand::ApplyDamage { ball_id, damage, reply } => {
+                                if let Some(ball_snap) = ballpark.balls.get(&ball_id).cloned() {
+                                    let cs = ballpark.combat_states.entry(ball_id).or_default();
+                                    let (applied, destroyed) = cs.apply_damage(damage);
+                                    if destroyed {
+                                        let _ = ballpark.remove_ball(ball_id);
+                                    }
+                                    let _ = reply.send(Some((applied, destroyed, ball_snap)));
+                                } else {
+                                    let _ = reply.send(None);
+                                }
                             }
                             SystemCommand::StepManual { dt, reply } => {
                                 let events = ballpark.step(dt);

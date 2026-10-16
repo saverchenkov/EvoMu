@@ -22,7 +22,9 @@ pub fn handle(
     _kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
-        ("account", "GetCashBalance") | ("wallet", "GetBalance") | ("walletSvc", "GetBalance") => {
+        ("account", "GetCashBalance")
+        | ("account", "GetWalletDivisionsInfo")
+        | ("vaultManager", "get_account_balance") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -35,7 +37,7 @@ pub fn handle(
             Some(Ok(PyRep::Real(bal)))
         }
 
-        ("account", "GetJournal") | ("wallet", "GetJournal") => {
+        ("account", "GetJournal") | ("account", "GetTransactions") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -61,7 +63,10 @@ pub fn handle(
             )))
         }
 
-        ("marketProxy", "GetOrders") | ("market", "GetOrders") => {
+        ("marketProxy", "GetOrders")
+        | ("marketProxy", "GetCharOrders")
+        | ("marketProxy", "GetCorporationOrders")
+        | ("marketProxy", "GetHistoryForManyTypeIDs") => {
             let _ = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -96,7 +101,7 @@ pub fn handle(
             )))
         }
 
-        ("marketProxy", "PlaceCharOrder") | ("market", "PlaceOrder") => {
+        ("marketProxy", "PlaceCharOrder") | ("marketProxy", "BuyMultipleItems") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -108,15 +113,21 @@ pub fn handle(
                 .unwrap_or(60_003_760);
             let type_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(34) as TypeId;
             let price_isk = args.get(2).and_then(|a| a.as_f64()).unwrap_or(10.0);
-            let quantity = args.get(3).and_then(|a| a.as_i64()).unwrap_or(100) as i32;
+            let quantity = args.get(3).and_then(|a| a.as_i64()).unwrap_or(100);
             let is_bid = args.get(4).and_then(|a| a.as_bool()).unwrap_or(true);
 
-            if !price_isk.is_finite() || price_isk <= 0.0 || quantity <= 0 {
+            if !price_isk.is_finite()
+                || price_isk <= 0.0
+                || quantity <= 0
+                || quantity > (i32::MAX as i64)
+            {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidMarketOrder".into(),
-                    message: "Market order requires finite price > 0 and quantity > 0".into(),
+                    message: "Market order requires finite price > 0 and valid positive quantity"
+                        .into(),
                 }));
             }
+            let quantity_i32 = quantity as i32;
 
             let region_id = session.region_id.unwrap_or(10_000_002);
             let station_in_region = ctx.sde.solar_systems.values().any(|sys| {
@@ -133,7 +144,13 @@ pub fn handle(
             let broker_rate = compute_broker_fee_rate(4, 2.0, 2.0);
             let tax_rate = compute_sales_tax_rate(4);
             let order_price = IskCents::from_f64_isk(price_isk);
-            let gross_isk = price_isk * (quantity as f64);
+            let Some(max_order_cost) = order_price.checked_mul_qty(quantity) else {
+                return Some(Err(BridgeRpcError {
+                    code: "MarketOrderOverflow".into(),
+                    message: "Order total cost overflows 64-bit ISK cents".into(),
+                }));
+            };
+            let gross_isk = max_order_cost.to_wire_f64();
             let broker_fee = IskCents::from_f64_isk(gross_isk * broker_rate);
             let sales_tax = if is_bid {
                 IskCents(0)
@@ -142,7 +159,7 @@ pub fn handle(
             };
 
             let res = ctx.db.with_mut_snapshot(|snap| {
-                // 1. If sell order (`!is_bid`), verify and deduct `quantity` of `type_id` from seller's hangar at `station_id`
+                // 1. If sell order (`!is_bid`), verify and deduct `quantity_i32` of `type_id` from seller's hangar at `station_id`
                 if !is_bid {
                     let sell_item_id = snap
                         .items
@@ -152,20 +169,20 @@ pub fn handle(
                                 && i.location_id == station_id
                                 && i.flag == InventoryFlag::Hangar
                                 && i.type_id == type_id
-                                && i.quantity >= quantity
+                                && i.quantity >= quantity_i32
                         })
                         .map(|i| i.item_id);
                     let Some(iid) = sell_item_id else {
                         return Err(BridgeRpcError {
                             code: "InsufficientInventoryForSellOrder".into(),
                             message: format!(
-                                "Seller does not have {quantity}x type {type_id} in station {station_id} hangar"
+                                "Seller does not have {quantity_i32}x type {type_id} in station {station_id} hangar"
                             ),
                         });
                     };
                     if let Some(item) = snap.items.get_mut(&iid) {
-                        if item.quantity > quantity {
-                            item.quantity -= quantity;
+                        if item.quantity > quantity_i32 {
+                            item.quantity -= quantity_i32;
                             item.version += 1;
                         } else {
                             snap.items.remove(&iid);
@@ -189,39 +206,41 @@ pub fn handle(
                     .collect();
 
                 if is_bid {
-                    // Best (lowest) ask first, then lowest order_id (FIFO)
                     candidate_ids.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
                 } else {
-                    // Best (highest) bid first, then lowest order_id (FIFO)
                     candidate_ids.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
                 }
 
-                // Pre-check caller balance for worst-case debit
-                let max_order_cost = IskCents(order_price.0 * (quantity as i64));
+                // Pre-check caller balance for worst-case debit using checked arithmetic
+                let required_upfront = if is_bid {
+                    max_order_cost
+                        .checked_add(broker_fee)
+                        .ok_or_else(|| BridgeRpcError {
+                            code: "MarketOrderOverflow".into(),
+                            message: "Order cost + broker fee overflow".into(),
+                        })?
+                } else {
+                    broker_fee
+                };
+
                 let caller_balance = snap
                     .characters
                     .get(&char_id)
-                    .map(|c| c.balance.0)
-                    .unwrap_or(0);
-                if is_bid && caller_balance < max_order_cost.0 + broker_fee.0 {
+                    .map(|c| c.balance)
+                    .unwrap_or(IskCents(0));
+                if caller_balance.checked_sub(required_upfront).is_none() {
                     return Err(BridgeRpcError {
                         code: "InsufficientFunds".into(),
-                        message: "Not enough ISK for buy order and broker fee".into(),
-                    });
-                }
-                if !is_bid && caller_balance < broker_fee.0 {
-                    return Err(BridgeRpcError {
-                        code: "InsufficientFunds".into(),
-                        message: "Not enough ISK to pay sell order broker fee".into(),
+                        message: "Not enough ISK for market order and broker fee".into(),
                     });
                 }
 
                 // Debit broker fee upfront
                 if let Some(ch) = snap.characters.get_mut(&char_id) {
-                    ch.balance = IskCents(ch.balance.0 - broker_fee.0);
+                    ch.balance = ch.balance.checked_sub(broker_fee).unwrap_or(IskCents(0));
                 }
 
-                let mut remaining_qty = quantity;
+                let mut remaining_qty = quantity_i32;
                 let mut first_matched_oid = None;
 
                 for (oid, _) in candidate_ids {
@@ -235,14 +254,17 @@ pub fn handle(
                     if fill_qty <= 0 {
                         continue;
                     }
-                    let fill_gross = IskCents(resting.price.0 * (fill_qty as i64));
-                    let fill_tax =
-                        IskCents(((fill_gross.0 as f64) * tax_rate).round() as i64);
+                    let Some(fill_gross) = resting.price.checked_mul_qty(fill_qty as i64) else {
+                        continue;
+                    };
+                    let fill_tax = IskCents::from_f64_isk(fill_gross.to_wire_f64() * tax_rate);
 
                     if is_bid {
-                        // Caller is buying from resting sell order (`resting`)
                         if let Some(buyer) = snap.characters.get_mut(&char_id) {
-                            buyer.balance = IskCents(buyer.balance.0 - fill_gross.0);
+                            buyer.balance = buyer
+                                .balance
+                                .checked_sub(fill_gross)
+                                .unwrap_or(IskCents(0));
                             let bal_after = buyer.balance;
                             snap.next_entity_id += 1;
                             let jid = snap.next_entity_id;
@@ -257,11 +279,15 @@ pub fn handle(
                         }
                         if !resting.is_npc {
                             if let Some(seller) = snap.characters.get_mut(&resting.owner_id) {
-                                let seller_net = (fill_gross.0 - fill_tax.0).max(0);
-                                seller.balance = IskCents(seller.balance.0 + seller_net);
+                                let seller_net = fill_gross
+                                    .checked_sub(fill_tax)
+                                    .unwrap_or(IskCents(0));
+                                seller.balance = seller
+                                    .balance
+                                    .checked_add(seller_net)
+                                    .unwrap_or(seller.balance);
                             }
                         }
-                        // Deliver items to buyer
                         snap.next_entity_id += 1;
                         let new_item_id = snap.next_entity_id;
                         snap.items.insert(
@@ -281,10 +307,13 @@ pub fn handle(
                             },
                         );
                     } else {
-                        // Caller is selling into resting buy order (`resting` already escrowed funds)
-                        let seller_net = (fill_gross.0 - fill_tax.0).max(0);
+                        let seller_net =
+                            fill_gross.checked_sub(fill_tax).unwrap_or(IskCents(0));
                         if let Some(seller) = snap.characters.get_mut(&char_id) {
-                            seller.balance = IskCents(seller.balance.0 + seller_net);
+                            seller.balance = seller
+                                .balance
+                                .checked_add(seller_net)
+                                .unwrap_or(seller.balance);
                             let bal_after = seller.balance;
                             snap.next_entity_id += 1;
                             let jid = snap.next_entity_id;
@@ -292,7 +321,7 @@ pub fn handle(
                                 entry_id: jid,
                                 character_id: char_id,
                                 entry_type: "MarketSell".into(),
-                                amount: IskCents(seller_net),
+                                amount: seller_net,
                                 balance_after: bal_after,
                                 reason: format!("Sold {fill_qty}x type {type_id}"),
                             });
@@ -322,7 +351,8 @@ pub fn handle(
                     if let Some(o_mut) = snap.market_orders.get_mut(&oid) {
                         o_mut.vol_remaining -= fill_qty;
                         if o_mut.is_bid {
-                            o_mut.escrow = IskCents((o_mut.escrow.0 - fill_gross.0).max(0));
+                            o_mut.escrow =
+                                o_mut.escrow.checked_sub(fill_gross).unwrap_or(IskCents(0));
                         }
                     }
                     remaining_qty -= fill_qty;
@@ -335,11 +365,12 @@ pub fn handle(
                     return Ok((first_matched_oid.unwrap_or(0), true));
                 }
 
-                // Place unfilled remainder as a resting order on the book
                 let escrow = if is_bid {
-                    let esc = IskCents(order_price.0 * (remaining_qty as i64));
+                    let esc = order_price
+                        .checked_mul_qty(remaining_qty as i64)
+                        .unwrap_or(IskCents(0));
                     if let Some(buyer) = snap.characters.get_mut(&char_id) {
-                        buyer.balance = IskCents(buyer.balance.0 - esc.0);
+                        buyer.balance = buyer.balance.checked_sub(esc).unwrap_or(IskCents(0));
                     }
                     esc
                 } else {
@@ -358,7 +389,7 @@ pub fn handle(
                         type_id,
                         is_bid,
                         price: order_price,
-                        vol_entered: quantity,
+                        vol_entered: quantity_i32,
                         vol_remaining: remaining_qty,
                         min_volume: 1,
                         is_npc: false,
@@ -379,8 +410,8 @@ pub fn handle(
             }
         }
 
-        // Contracts (`contractMgr` / `contractProxy`): ItemExchange, Auction, Courier (`E2E-15`)
-        ("contractMgr", "CreateContract") | ("contractProxy", "CreateContract") => {
+        // Contracts (`contractProxy`): ItemExchange, Auction, Courier (`E2E-15`)
+        ("contractProxy", "CreateContract") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -393,6 +424,7 @@ pub fn handle(
             let end_station_id = args.get(2).and_then(|a| a.as_i64()).unwrap_or(60_003_766);
             let reward_isk = args.get(3).and_then(|a| a.as_f64()).unwrap_or(500_000.0);
             let collateral_isk = args.get(4).and_then(|a| a.as_f64()).unwrap_or(2_000_000.0);
+            let item_id_opt = args.get(5).and_then(|a| a.as_i64());
 
             if !reward_isk.is_finite()
                 || reward_isk < 0.0
@@ -415,16 +447,36 @@ pub fn handle(
                         message: format!("Character {char_id} not found"),
                     });
                 };
-                if ch.balance.0 < reward.0 {
-                    return Err(BridgeRpcError {
-                        code: "InsufficientFunds".into(),
-                        message: "Not enough ISK to escrow contract reward".into(),
-                    });
-                }
-                ch.balance = IskCents(ch.balance.0 - reward.0);
+                let new_bal = ch.balance.checked_sub(reward).ok_or_else(|| BridgeRpcError {
+                    code: "InsufficientFunds".into(),
+                    message: "Not enough ISK to escrow contract reward".into(),
+                })?;
+                ch.balance = new_bal;
 
                 snap.next_entity_id += 1;
                 let id = snap.next_entity_id;
+                let mut escrowed_items = Vec::new();
+                if let Some(iid) = item_id_opt {
+                    let Some(item) = snap.items.get_mut(&iid) else {
+                        return Err(BridgeRpcError {
+                            code: "ContractItemNotFound".into(),
+                            message: format!("Contract item {iid} not found"),
+                        });
+                    };
+                    if item.owner_id != char_id || item.location_id != start_station_id {
+                        return Err(BridgeRpcError {
+                            code: "ContractItemOwnershipOrLocationInvalid".into(),
+                            message: format!(
+                                "Item {iid} must be owned by issuer at station {start_station_id}"
+                            ),
+                        });
+                    }
+                    item.location_id = id;
+                    item.flag = InventoryFlag::Locked;
+                    item.version += 1;
+                    escrowed_items.push(iid);
+                }
+
                 snap.contracts.insert(
                     id,
                     ContractRecord {
@@ -438,7 +490,7 @@ pub fn handle(
                         price: IskCents(0),
                         reward,
                         collateral,
-                        item_ids: Vec::new(),
+                        item_ids: escrowed_items,
                     },
                 );
                 Ok(id)
@@ -453,7 +505,7 @@ pub fn handle(
             }
         }
 
-        ("contractMgr", "AcceptContract") | ("contractProxy", "AcceptContract") => {
+        ("contractProxy", "AcceptContract") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -469,26 +521,37 @@ pub fn handle(
                 if c.status != "Outstanding" {
                     return Err(BridgeRpcError {
                         code: "InvalidContractState".into(),
-                        message: format!("Contract {cid} is in state '{}', not Outstanding", c.status),
+                        message: format!(
+                            "Contract {cid} is in state '{}', not Outstanding",
+                            c.status
+                        ),
                     });
                 }
-                let required_isk = IskCents(c.collateral.0 + c.price.0);
+                let required_isk =
+                    c.collateral.checked_add(c.price).ok_or_else(|| BridgeRpcError {
+                        code: "ContractOverflow".into(),
+                        message: "Collateral + price overflow".into(),
+                    })?;
                 let Some(ch) = snap.characters.get_mut(&char_id) else {
                     return Err(BridgeRpcError {
                         code: "CharacterNotFound".into(),
                         message: format!("Character {char_id} not found"),
                     });
                 };
-                if ch.balance.0 < required_isk.0 {
-                    return Err(BridgeRpcError {
-                        code: "InsufficientFunds".into(),
-                        message: "Not enough ISK to cover contract collateral and price".into(),
-                    });
-                }
-                ch.balance = IskCents(ch.balance.0 - required_isk.0);
+                let new_bal =
+                    ch.balance
+                        .checked_sub(required_isk)
+                        .ok_or_else(|| BridgeRpcError {
+                            code: "InsufficientFunds".into(),
+                            message: "Not enough ISK to cover contract collateral and price".into(),
+                        })?;
+                ch.balance = new_bal;
                 if c.price.0 > 0 {
                     if let Some(issuer) = snap.characters.get_mut(&c.issuer_id) {
-                        issuer.balance = IskCents(issuer.balance.0 + c.price.0);
+                        issuer.balance = issuer
+                            .balance
+                            .checked_add(c.price)
+                            .unwrap_or(issuer.balance);
                     }
                 }
                 if let Some(c_mut) = snap.contracts.get_mut(&cid) {
@@ -506,12 +569,13 @@ pub fn handle(
             }
         }
 
-        ("contractMgr", "CompleteContract") | ("contractProxy", "CompleteContract") => {
+        ("contractProxy", "CompleteContract") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
             let cid = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let caller_station = session.station_id.or(session.structure_id);
             let res = ctx.db.with_mut_snapshot(|snap| {
                 let Some(c) = snap.contracts.get(&cid).cloned() else {
                     return Err(BridgeRpcError {
@@ -522,7 +586,10 @@ pub fn handle(
                 if c.status != "InProgress" {
                     return Err(BridgeRpcError {
                         code: "InvalidContractState".into(),
-                        message: format!("Contract {cid} is in state '{}', not InProgress", c.status),
+                        message: format!(
+                            "Contract {cid} is in state '{}', not InProgress",
+                            c.status
+                        ),
                     });
                 }
                 if c.acceptor_id != Some(char_id) {
@@ -531,12 +598,32 @@ pub fn handle(
                         message: format!("Contract {cid} is not accepted by character {char_id}"),
                     });
                 }
+                if c.contract_type == "Courier" && caller_station != Some(c.end_station_id) {
+                    return Err(BridgeRpcError {
+                        code: "CourierNotAtDestinationStation".into(),
+                        message: format!(
+                            "Completing Courier contract {cid} requires being docked at destination station {}",
+                            c.end_station_id
+                        ),
+                    });
+                }
+                for iid in &c.item_ids {
+                    if let Some(item) = snap.items.get_mut(iid) {
+                        item.owner_id = c.issuer_id;
+                        item.location_id = c.end_station_id;
+                        item.flag = InventoryFlag::Hangar;
+                        item.version += 1;
+                    }
+                }
                 if let Some(c_mut) = snap.contracts.get_mut(&cid) {
                     c_mut.status = "Completed".into();
                 }
-                let total_return = IskCents(c.collateral.0 + c.reward.0);
+                let total_return = c
+                    .collateral
+                    .checked_add(c.reward)
+                    .unwrap_or(c.collateral);
                 if let Some(ch) = snap.characters.get_mut(&char_id) {
-                    ch.balance = IskCents(ch.balance.0 + total_return.0);
+                    ch.balance = ch.balance.checked_add(total_return).unwrap_or(ch.balance);
                 }
                 Ok(total_return.to_wire_f64())
             });
@@ -550,17 +637,36 @@ pub fn handle(
             }
         }
 
-        ("contractMgr", "GetInitVals")
+        ("contractProxy", "GetContractListForOwner")
+        | ("contractProxy", "GetMyCurrentContractList")
         | ("contractProxy", "GetMyExpiredContractList")
+        | ("contractProxy", "SearchContracts")
         | ("trademgr", "InitiateTrade")
-        | ("raffleSvc", "GetActiveTickets")
-        | ("storeManager", "GetCatalog")
-        | ("multiBuy", "BuyMultiple") => {
-            let _ = match ServerContext::require_character(session) {
+        | ("raffleProxy", "FilteredGrab")
+        | ("storeManager", "get_offers") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            Some(Ok(PyRep::List(vec![])))
+            let rows = ctx.db.with_snapshot(|snap| {
+                snap.contracts
+                    .values()
+                    .filter(|c| c.issuer_id == char_id || c.acceptor_id == Some(char_id))
+                    .map(|c| {
+                        vec![
+                            PyRep::Integer(c.contract_id),
+                            PyRep::String(c.contract_type.clone()),
+                            PyRep::String(c.status.clone()),
+                            PyRep::Real(c.reward.to_wire_f64()),
+                            PyRep::Real(c.collateral.to_wire_f64()),
+                        ]
+                    })
+                    .collect()
+            });
+            Some(Ok(PyRep::rowset(
+                vec!["contractID", "type", "status", "reward", "collateral"],
+                rows,
+            )))
         }
 
         _ => None,

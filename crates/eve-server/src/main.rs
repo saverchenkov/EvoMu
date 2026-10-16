@@ -86,13 +86,15 @@ async fn main() -> Result<()> {
 }
 
 /// Reads a length-prefixed frame with strict `MAX_FRAME_SIZE` validation BEFORE allocating memory.
-/// Waiting for the first byte of a new frame has no idle timeout so connected clients are not dropped
-/// when quiet; once the first header byte arrives, the remaining header and body must complete within `IO_TIMEOUT`.
+/// Waiting for the first byte of a new frame has a 5-minute idle timeout (`IDLE_CONNECTION_TIMEOUT`)
+/// so abandoned sockets cannot hold a connection slot indefinitely; once the first header byte arrives,
+/// the remaining header and body must complete within `IO_TIMEOUT`.
 async fn read_bounded_frame<R: tokio::io::AsyncRead + Unpin>(
     stream: &mut R,
 ) -> Result<Option<Vec<u8>>> {
+    const IDLE_CONNECTION_TIMEOUT: Duration = Duration::from_secs(300);
     let mut len_buf = [0u8; 4];
-    match stream.read_exact(&mut len_buf[..1]).await {
+    match timeout(IDLE_CONNECTION_TIMEOUT, stream.read_exact(&mut len_buf[..1])).await? {
         Ok(_) => {}
         Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
         Err(e) => return Err(e.into()),
@@ -412,13 +414,19 @@ fn extract_macho_call_req(
     };
 
     if let PyRep::Tuple(call_items) = inner_call {
-        if let Some(m) = call_items.first().and_then(|v| v.as_str()) {
+        // Support both 4-tuple `(remoteObject, method, args, kwargs)` and 3-tuple `(method, args, kwargs)`
+        let offset = if call_items.first().and_then(|v| v.as_str()).is_some() {
+            0
+        } else {
+            1
+        };
+        if let Some(m) = call_items.get(offset).and_then(|v| v.as_str()) {
             method = m.to_owned();
         }
-        if let Some(PyRep::Tuple(a) | PyRep::List(a)) = call_items.get(1) {
+        if let Some(PyRep::Tuple(a) | PyRep::List(a)) = call_items.get(offset + 1) {
             args = a.clone();
         }
-        if let Some(PyRep::Dict(entries)) = call_items.get(2) {
+        if let Some(PyRep::Dict(entries)) = call_items.get(offset + 2) {
             for (k, v) in entries {
                 if let Some(ks) = k.as_str() {
                     kwargs.insert(ks.to_owned(), v.clone());

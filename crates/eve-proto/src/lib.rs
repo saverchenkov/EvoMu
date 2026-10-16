@@ -3,8 +3,8 @@
 //! Supports both:
 //! 1. **Bridge Mode (`BridgeEnvelope`)**: Clean MessagePack/JSON RPC & Event framing for
 //!    clients running the `evomu_bridge.py` transport shim.
-//! 2. **Legacy `eveMarshal` Mode (`PyRep`)**: Conformant binary encoder/decoder matching
-//!    `EVEMarshalOpcodes.h` and `EVEUnmarshal.cpp` (`0x01..0x2F` opcodes, `zlib` streams,
+//! 2. **Legacy `eveMarshal` Mode (`PyRep`)**: Conformant binary encoder/decoder for the
+//!    marshal wire format (`0x01..0x2F` opcodes, `zlib` streams,
 //!    trailing `save_count` storage-index map, and node-budget decompression bomb protection).
 
 #![forbid(unsafe_code)]
@@ -471,7 +471,7 @@ pub const MARSHAL_STRING_TABLE: &[&str] = &[
     "agent.StorylineMissionDetails",
 ];
 
-/// Exact wire opcodes from `evemu_Crucible/src/eve-common/marshal/EVEMarshalOpcodes.h`.
+/// Exact marshal wire opcodes.
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MarshalOpcode {
@@ -1352,6 +1352,17 @@ pub mod marshal {
         Some(out)
     }
 
+    fn dbtype_bit_width(dbtype: i64) -> usize {
+        match dbtype {
+            20 | 21 | 64 | 5 | 6 => 64, // I8, UI8, FILETIME, R8, CY
+            3 | 19 | 4 => 32,           // I4, UI4, R4
+            2 | 18 => 16,               // I2, UI2
+            16 | 17 => 8,               // I1, UI1
+            11 => 1,                    // BOOL
+            _ => 0,                     // Variable-length / object column
+        }
+    }
+
     fn unpack_packed_row_columns(header: &PyRep, raw_rle: &[u8]) -> Vec<(String, PyRep)> {
         // Extract (col_name, dbtype_code) pairs from a blue.DBRowDescriptor ObjectEx or Tuple header
         let col_defs: Option<Vec<(String, i64)>> = match header {
@@ -1369,12 +1380,12 @@ pub mod marshal {
         let mut expected_bytes = 0usize;
         let mut bool_count = 0usize;
         for (_, dbtype) in &defs {
-            match *dbtype {
-                20 | 64 | 5 | 6 => expected_bytes += 8, // I8, FILETIME, R8, CY
-                3 | 19 | 4 => expected_bytes += 4,      // I4, UI4, R4
-                2 | 18 => expected_bytes += 2,          // I2, UI2
-                16 | 17 => expected_bytes += 1,         // I1, UI1
-                11 => bool_count += 1,                  // BOOL (1 bit)
+            match dbtype_bit_width(*dbtype) {
+                64 => expected_bytes += 8,
+                32 => expected_bytes += 4,
+                16 => expected_bytes += 2,
+                8 => expected_bytes += 1,
+                1 => bool_count += 1,
                 _ => {}
             }
         }
@@ -1386,12 +1397,21 @@ pub mod marshal {
             return Vec::new();
         };
 
-        // Per EVEUnmarshal.cpp: columns are packed widest-first (64-bit, 32-bit, 16-bit, 8-bit, 1-bit)
+        // Per EVEUnmarshal.cpp: fixed columns are packed widest-first (64-bit, 32-bit, 16-bit, 8-bit, 1-bit)
+        let mut indexed_defs: Vec<(usize, &(String, i64))> = defs.iter().enumerate().collect();
+        indexed_defs.sort_by(|(idx_a, (_, dt_a)), (idx_b, (_, dt_b))| {
+            dbtype_bit_width(*dt_b)
+                .cmp(&dbtype_bit_width(*dt_a))
+                .then_with(|| idx_a.cmp(idx_b))
+        });
+
         let mut offset = 0usize;
-        let mut out = Vec::with_capacity(defs.len());
-        for (name, dbtype) in &defs {
+        let mut bool_bit_idx = 0usize;
+        let mut decoded_by_idx: Vec<(usize, String, PyRep)> = Vec::with_capacity(defs.len());
+
+        for (orig_idx, (name, dbtype)) in indexed_defs {
             let val = match *dbtype {
-                20 | 64 if offset + 8 <= unpacked.len() => {
+                20 | 21 | 64 | 6 if offset + 8 <= unpacked.len() => {
                     let v = i64::from_le_bytes(unpacked[offset..offset + 8].try_into().unwrap());
                     offset += 8;
                     PyRep::Integer(v)
@@ -1401,26 +1421,61 @@ pub mod marshal {
                     offset += 8;
                     PyRep::Real(v)
                 }
-                3 | 19 if offset + 4 <= unpacked.len() => {
+                3 if offset + 4 <= unpacked.len() => {
                     let v = i32::from_le_bytes(unpacked[offset..offset + 4].try_into().unwrap()) as i64;
                     offset += 4;
                     PyRep::Integer(v)
                 }
-                2 | 18 if offset + 2 <= unpacked.len() => {
+                19 if offset + 4 <= unpacked.len() => {
+                    let v = u32::from_le_bytes(unpacked[offset..offset + 4].try_into().unwrap()) as i64;
+                    offset += 4;
+                    PyRep::Integer(v)
+                }
+                4 if offset + 4 <= unpacked.len() => {
+                    let v = f32::from_le_bytes(unpacked[offset..offset + 4].try_into().unwrap()) as f64;
+                    offset += 4;
+                    PyRep::Real(v)
+                }
+                2 if offset + 2 <= unpacked.len() => {
                     let v = i16::from_le_bytes([unpacked[offset], unpacked[offset + 1]]) as i64;
                     offset += 2;
                     PyRep::Integer(v)
                 }
-                16 | 17 if offset < unpacked.len() => {
+                18 if offset + 2 <= unpacked.len() => {
+                    let v = u16::from_le_bytes([unpacked[offset], unpacked[offset + 1]]) as i64;
+                    offset += 2;
+                    PyRep::Integer(v)
+                }
+                16 if offset < unpacked.len() => {
+                    let v = (unpacked[offset] as i8) as i64;
+                    offset += 1;
+                    PyRep::Integer(v)
+                }
+                17 if offset < unpacked.len() => {
                     let v = unpacked[offset] as i64;
                     offset += 1;
                     PyRep::Integer(v)
                 }
+                11 => {
+                    let byte_idx = offset + (bool_bit_idx / 8);
+                    let bit_mask = 1u8 << (bool_bit_idx % 8);
+                    bool_bit_idx += 1;
+                    if byte_idx < unpacked.len() {
+                        PyRep::Bool((unpacked[byte_idx] & bit_mask) != 0)
+                    } else {
+                        PyRep::Bool(false)
+                    }
+                }
                 _ => PyRep::None,
             };
-            out.push((name.clone(), val));
+            decoded_by_idx.push((orig_idx, name.clone(), val));
         }
-        out
+
+        decoded_by_idx.sort_by_key(|(idx, _, _)| *idx);
+        decoded_by_idx
+            .into_iter()
+            .map(|(_, name, val)| (name, val))
+            .collect()
     }
 
     fn extract_dbrow_col_defs(rep: &PyRep) -> Option<Vec<(String, i64)>> {

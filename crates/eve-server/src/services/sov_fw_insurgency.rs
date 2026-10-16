@@ -17,8 +17,8 @@ pub fn handle(
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
         ("facWarMgr", "EnlistMe")
-        | ("fwCharacterEnlistmentMgr", "RequestEnlistment")
-        | ("fwEnlistmentMgr", "Enlist") => {
+        | ("fwCharacterEnlistmentMgr", "CreateMyDirectEnlistment")
+        | ("fwCharacterEnlistmentMgr", "GetMyEnlistment") => {
             let (_, _char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -31,7 +31,9 @@ pub fn handle(
             ])))
         }
 
-        ("facWarMgr", "CaptureComplex") | ("insurgencyMgr", "AdvanceCorruption") => {
+        ("facWarMgr", "CaptureComplex")
+        | ("fwVictoryPointMgr", "GetLocalVictoryPointState")
+        | ("insurgencySolarsystem", "GetLocalCampaignClientSnapshot") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -79,9 +81,9 @@ pub fn handle(
         }
 
         ("sovMgr", "ClaimSovereignty")
-        | ("devIndexMgr", "UpgradeDevelopmentIndex")
-        | ("orbitalSkyhookMgr", "AnchorSkyhook")
-        | ("mercenaryDenMgr", "DeployMercenaryDen") => {
+        | ("sovMgr", "AcquireSkyhooks")
+        | ("sovMgr", "DestroySkyhooks")
+        | ("colonyResourcesMgr", "GetMyCorporationSkyhooks") => {
             let (_, _char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -95,6 +97,8 @@ pub fn handle(
                         dbs_multiplier: 1.35,
                         ess_main_bank: eve_db::IskCents(0),
                         ess_reserve_bank: eve_db::IskCents(0),
+                        ess_linked_character_id: None,
+                        ess_link_started_tick: None,
                         sov_alliance_id: Some(alliance_id),
                         military_index: 3,
                         industrial_index: 3,
@@ -120,17 +124,43 @@ pub fn handle(
             ])))
         }
 
-        ("sovMgr", "GetSystemSovereigntyInfo")
-        | ("devIndexMgr", "GetDevelopmentIndicesForSystem")
-        | ("facWarMgr", "GetFactionalWarStatus")
-        | ("pirateInsurgencySvc", "GetInsurgencyState")
-        | ("orbitalSkyhookMgr", "GetSkyhookState")
-        | ("mercenaryDenMgr", "GetMercenaryDens") => {
+        ("sovMgr", "GetSovStructuresInfoForLocalSolarSystem")
+        | ("sovMgr", "GetSovStructuresInfoForSolarSystem")
+        | ("sovMgr", "GetInfrastructureHubInfo")
+        | ("devIndexManager", "GetAllDevelopmentIndices")
+        | ("fwWarzoneSolarsystem", "GetLocalOccupationState")
+        | ("fwWarzoneSolarsystem", "GetAllWarzones")
+        | ("insurgencySolarsystem", "GetAllVisibleCampaigns")
+        | ("dynamicResourceCacheMgr", "GetESSSystemDetails")
+        | ("dynamicResourceCacheMgr", "GetDynamicResourceSettings") => {
             let _ = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            Some(Ok(PyRep::List(vec![])))
+            let rows = ctx.db.with_snapshot(|snap| {
+                snap.system_states
+                    .values()
+                    .map(|st| {
+                        vec![
+                            PyRep::Integer(st.solar_system_id as i64),
+                            PyRep::Real(st.dbs_multiplier),
+                            PyRep::Integer(st.military_index as i64),
+                            PyRep::Integer(st.industrial_index as i64),
+                            PyRep::Real(st.fw_contested_pct),
+                        ]
+                    })
+                    .collect()
+            });
+            Some(Ok(PyRep::rowset(
+                vec![
+                    "solarSystemID",
+                    "dbsMultiplier",
+                    "militaryIndex",
+                    "industrialIndex",
+                    "fwContestedPct",
+                ],
+                rows,
+            )))
         }
 
         _ => None,

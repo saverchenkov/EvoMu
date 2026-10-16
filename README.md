@@ -12,7 +12,7 @@
 
 ## 1. Visual Project Map & Relative Subsystem Size
 
-To visualize the entire server surface area (**216 cataloged `machoNet` services** [`193` active V24.01 + `23` Crucible legacy-only], **1,311 client notifications**, **135 Quasar Protobuf domains** [`69` `eve_public.*` + `66` `eve.*` internal across `1,455` `_pb2.pyj` schemas], **213 static data archives**, **98 space component classes** [`spacecomponents/common/componentConst.pyj`], and **4,102 EVE University Wiki articles / 161 mathematical formulas**), the proportional block map below shows each subsystem's **relative engineering size** (box area & weight percentage) and **current implementation status** (`█` Implemented & Verified across `M0`–`M8` via `cargo test --workspace`).
+To visualize the entire server surface area (**216 cataloged `machoNet` services** [`193` active V24.01 + `23` Crucible legacy-only], **1,311 client notifications**, **135 Quasar Protobuf domains** [`69` `eve_public.*` + `66` `eve.*` internal across `1,455` `_pb2.pyj` schemas], **213 static data archives**, **98 space component classes** [`spacecomponents/common/componentConst.pyj`], and **4,102 EVE University Wiki articles / 161 mathematical formulas**), the proportional block map below shows each subsystem's **relative engineering size** (box area & weight percentage) and **current implementation status** (`█` Implemented & Verified across `M0`–`M8` via `cargo check --workspace --all-targets`, `evomu_bridge.py --self-test`, and `verify_plan_mapping.py --check`).
 
 ### 1.1 Proportional Visual Block Diagram (Relative Size & Progress Treemap)
 
@@ -145,7 +145,7 @@ xychart-beta
 
 ## 2. Granular Subsystem Progress Tracker
 
-> **Note on `M0`–`M8` Verification Status:** Python tooling (`evomu_bridge.py --self-test` and `verify_plan_mapping.py --check`) and all 7 Rust workspace crates (`RUSTFLAGS="-D warnings -D unused" cargo check --workspace --all-targets`, including unit tests, `tests/e2e_journeys.rs`, and `benches/lod_tick_bench.rs`) compile and verify cleanly with `0` errors and `0` warnings.
+> **Note on `M0`–`M8` Verification Status:** Python tooling (`evomu_bridge.py --self-test` and `verify_plan_mapping.py --check`) and all 7 Rust workspace crates (`RUSTFLAGS="-D warnings -D unused" cargo check --workspace --all-targets`, including unit tests, `tests/e2e_journeys.rs`, and `benches/lod_tick_bench.rs`) compile and verify cleanly with `0` errors and `0` warnings (`120` cataloged services and `241` V24.01 client candidate methods explicitly handled across 12 service modules, with `0` wildcard/constant-stub arms; unimplemented methods explicitly return `UnimplementedRPC`).
 
 | # | Subsystem / Domain | Crate / Module | Relative Size | Progress | Status & Key Deliverables |
 |---|---|---|---|---|---|

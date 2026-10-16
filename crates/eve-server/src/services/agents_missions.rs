@@ -24,14 +24,27 @@ pub fn handle(
                 Err(e) => return Some(Err(e)),
             };
             let mission_id = args.first().and_then(|a| a.as_i64()).unwrap_or(1001) as u32;
-            let tmpl = ctx.sde.missions.get(&mission_id).cloned();
-            let agent_id = tmpl.as_ref().map(|m| m.agent_id).unwrap_or(3_018_924);
-            let title = tmpl
-                .as_ref()
-                .map(|m| m.title.clone())
-                .unwrap_or_else(|| "Stop the Thief".into());
+            let Some(tmpl) = ctx.sde.missions.get(&mission_id).cloned() else {
+                return Some(Err(BridgeRpcError {
+                    code: "UnknownMission".into(),
+                    message: format!("Mission {mission_id} does not exist in SDE"),
+                }));
+            };
+            let agent_id = tmpl.agent_id;
+            let title = tmpl.title.clone();
 
-            ctx.db.with_mut_snapshot(|snap| {
+            let res = ctx.db.with_mut_snapshot(|snap| {
+                if let Some(existing) = snap.active_missions.get(&(char_id, mission_id)) {
+                    if existing.state == "Offered" || existing.state == "Accepted" {
+                        return Err(BridgeRpcError {
+                            code: "MissionAlreadyActive".into(),
+                            message: format!(
+                                "Mission {mission_id} is already in state '{}' for character {char_id}",
+                                existing.state
+                            ),
+                        });
+                    }
+                }
                 snap.active_missions.insert(
                     (char_id, mission_id),
                     ActiveMissionRecord {
@@ -40,17 +53,21 @@ pub fn handle(
                         agent_id,
                         state: "Offered".into(),
                         current_room_id: 1,
-                        npcs_remaining: 3,
+                        npcs_remaining: 1,
                     },
                 );
+                Ok(())
             });
 
-            Some(Ok(PyRep::keyval([
-                ("missionID", PyRep::Integer(mission_id as i64)),
-                ("agentID", PyRep::Integer(agent_id)),
-                ("title", PyRep::String(title)),
-                ("state", PyRep::String("Offered".into())),
-            ])))
+            match res {
+                Ok(()) => Some(Ok(PyRep::keyval([
+                    ("missionID", PyRep::Integer(mission_id as i64)),
+                    ("agentID", PyRep::Integer(agent_id)),
+                    ("title", PyRep::String(title)),
+                    ("state", PyRep::String("Offered".into())),
+                ]))),
+                Err(e) => Some(Err(e)),
+            }
         }
 
         ("agentMgr", "AcceptMission") | ("missionMgr", "AcceptMission") => {
@@ -63,13 +80,18 @@ pub fn handle(
                 let Some(m) = snap.active_missions.get_mut(&(char_id, mission_id)) else {
                     return Err(BridgeRpcError {
                         code: "MissionNotOffered".into(),
-                        message: format!("Mission {mission_id} has not been offered to character {char_id}"),
+                        message: format!(
+                            "Mission {mission_id} has not been offered to character {char_id}"
+                        ),
                     });
                 };
                 if m.state != "Offered" {
                     return Err(BridgeRpcError {
                         code: "InvalidMissionState".into(),
-                        message: format!("Mission {mission_id} is in state '{}', not Offered", m.state),
+                        message: format!(
+                            "Mission {mission_id} is in state '{}', not Offered",
+                            m.state
+                        ),
                     });
                 }
                 m.state = "Accepted".into();
@@ -86,28 +108,47 @@ pub fn handle(
             }
         }
 
-        ("dungeon", "ClearRoomAndActivateGate")
-        | ("dungeonExplorationMgr", "ClearRoomAndActivateGate") => {
+        ("keeper", "ActivateAccelerationGate")
+        | ("keeper", "GetCurrentDungeonForCharacter") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            if session.station_id.is_some() || session.structure_id.is_some() {
+                return Some(Err(BridgeRpcError {
+                    code: "ShipDocked".into(),
+                    message: "Cannot activate dungeon acceleration gate while docked".into(),
+                }));
+            }
             let mission_id = args.first().and_then(|a| a.as_i64()).unwrap_or(1001) as u32;
             let res = ctx.db.with_mut_snapshot(|snap| {
                 let Some(m) = snap.active_missions.get_mut(&(char_id, mission_id)) else {
                     return Err(BridgeRpcError {
                         code: "MissionNotActive".into(),
-                        message: format!("Mission {mission_id} is not active for character {char_id}"),
+                        message: format!(
+                            "Mission {mission_id} is not active for character {char_id}"
+                        ),
                     });
                 };
                 if m.state != "Accepted" {
                     return Err(BridgeRpcError {
                         code: "InvalidMissionState".into(),
-                        message: format!("Mission {mission_id} is in state '{}', not Accepted", m.state),
+                        message: format!(
+                            "Mission {mission_id} is in state '{}', not Accepted",
+                            m.state
+                        ),
+                    });
+                }
+                if m.npcs_remaining > 0 {
+                    return Err(BridgeRpcError {
+                        code: "RoomNpcsRemaining".into(),
+                        message: format!(
+                            "Cannot activate acceleration gate while {} room NPC(s) remain",
+                            m.npcs_remaining
+                        ),
                     });
                 }
                 m.current_room_id += 1;
-                m.npcs_remaining = 0;
                 Ok(m.current_room_id)
             });
             match res {
@@ -126,14 +167,16 @@ pub fn handle(
                 Err(e) => return Some(Err(e)),
             };
             let mission_id = args.first().and_then(|a| a.as_i64()).unwrap_or(1001) as u32;
-            let tmpl = ctx.sde.missions.get(&mission_id).cloned();
-            let base_isk = tmpl
-                .as_ref()
-                .map(|m| m.isk_reward + m.time_bonus_isk)
-                .unwrap_or(270_000);
-            let base_lp = tmpl.as_ref().map(|m| m.lp_reward).unwrap_or(180);
-            let standing_pct = tmpl.as_ref().map(|m| m.standing_gain_pct).unwrap_or(1.25);
-            let corp_id = tmpl.as_ref().map(|m| m.corporation_id).unwrap_or(1_000_035);
+            let Some(tmpl) = ctx.sde.missions.get(&mission_id).cloned() else {
+                return Some(Err(BridgeRpcError {
+                    code: "UnknownMission".into(),
+                    message: format!("Mission {mission_id} does not exist in SDE"),
+                }));
+            };
+            let base_isk = tmpl.isk_reward + tmpl.time_bonus_isk;
+            let base_lp = tmpl.lp_reward;
+            let standing_pct = tmpl.standing_gain_pct;
+            let corp_id = tmpl.corporation_id;
 
             let (isk_reward, lp_reward) =
                 compute_mission_reward_with_skills(base_isk, base_lp, 4, 4, 1);
@@ -142,7 +185,9 @@ pub fn handle(
                 let Some(m) = snap.active_missions.get_mut(&(char_id, mission_id)) else {
                     return Err(BridgeRpcError {
                         code: "MissionNotActive".into(),
-                        message: format!("Mission {mission_id} is not active for character {char_id}"),
+                        message: format!(
+                            "Mission {mission_id} is not active for character {char_id}"
+                        ),
                     });
                 };
                 if m.state != "Accepted" || m.npcs_remaining > 0 {
@@ -158,7 +203,8 @@ pub fn handle(
 
                 let mut new_st = 2.0;
                 if let Some(ch) = snap.characters.get_mut(&char_id) {
-                    ch.balance = IskCents(ch.balance.0 + IskCents::from_isk(isk_reward).0);
+                    let reward_cents = IskCents::from_isk(isk_reward);
+                    ch.balance = ch.balance.checked_add(reward_cents).unwrap_or(ch.balance);
                     *ch.loyalty_points.entry(corp_id).or_insert(0) += lp_reward;
                     let cur_st = ch.standings.get(&corp_id).copied().unwrap_or(0.0);
                     new_st = apply_standing_increase(cur_st, standing_pct);
@@ -197,8 +243,13 @@ pub fn handle(
             }
         }
 
-        // AIR NPE Node Graph `473` & AIR Career Program (`air_npe` / `careerPortal` / `goalMgr`, `E2E-16`)
-        ("air_npe", "AdvanceNode") | ("air_npe", "CompleteCurrentNode") => {
+        // AIR NPE Node Graph `473` & AIR Career Program (`air_npe` / `seasonManager` / `milestoneMgr`, `E2E-16`)
+        ("air_npe", "AdvanceNode")
+        | ("air_npe", "CompleteCurrentNode")
+        | ("air_npe", "get_air_npe_state")
+        | ("air_npe", "is_air_npe_enabled")
+        | ("air_npe", "skip_air_npe")
+        | ("operationsManager", "complete_category_for_character") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -220,6 +271,8 @@ pub fn handle(
                 if npe.current_node_id >= 4 {
                     npe.completed = true;
                 }
+                *npe.career_goal_progress.entry(1).or_insert(0) += 4;
+                *npe.career_goal_progress.entry(2).or_insert(0) += 4;
                 (npe.current_node_id, npe.completed)
             });
             Some(Ok(PyRep::keyval([
@@ -229,7 +282,11 @@ pub fn handle(
             ])))
         }
 
-        ("careerPortal", "RecordGoalProgress") | ("goalMgr", "ClaimGoalReward") => {
+        ("seasonManager", "ClaimGoalReward")
+        | ("seasonManager", "claim_goal_reward")
+        | ("seasonManager", "claim_challenge_rewards")
+        | ("seasonManager", "RecordGoalProgress")
+        | ("milestoneMgr", "ClaimRewards") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -241,7 +298,31 @@ pub fn handle(
                     message: format!("Career goal {goal_id} does not exist in SDE"),
                 }));
             };
+            if method == "RecordGoalProgress" {
+                let delta = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1).max(1) as u64;
+                let prog = ctx.db.with_mut_snapshot(|snap| {
+                    let npe = snap.npe_progress.entry(char_id).or_insert_with(|| {
+                        eve_db::NpeProgressRecord {
+                            character_id: char_id,
+                            node_graph_id: 473,
+                            current_node_id: 1,
+                            completed: false,
+                            career_goal_progress: Default::default(),
+                            claimed_goals: Default::default(),
+                        }
+                    });
+                    let p = npe.career_goal_progress.entry(goal_id).or_insert(0);
+                    *p = p.saturating_add(delta);
+                    *p
+                });
+                return Some(Ok(PyRep::keyval([
+                    ("goalID", PyRep::Integer(goal_id as i64)),
+                    ("currentProgress", PyRep::Integer(prog as i64)),
+                ])));
+            }
+
             let sp_reward = goal_def.sp_reward as f64;
+            let target_prog = goal_def.target_progress as u64;
 
             let res = ctx.db.with_mut_snapshot(|snap| {
                 let npe = snap.npe_progress.entry(char_id).or_insert_with(|| {
@@ -254,6 +335,15 @@ pub fn handle(
                         claimed_goals: Default::default(),
                     }
                 });
+                let cur_prog = npe.career_goal_progress.get(&goal_id).copied().unwrap_or(0);
+                if cur_prog < target_prog {
+                    return Err(BridgeRpcError {
+                        code: "GoalProgressIncomplete".into(),
+                        message: format!(
+                            "Career goal {goal_id} requires progress {target_prog}, current is {cur_prog}"
+                        ),
+                    });
+                }
                 if !npe.claimed_goals.insert(goal_id) {
                     return Err(BridgeRpcError {
                         code: "GoalAlreadyClaimed".into(),
@@ -282,15 +372,40 @@ pub fn handle(
         }
 
         ("agentMgr", "GetAgents")
-        | ("taleMgr", "GetTemplates")
-        | ("incursionSvc", "GetActiveIncursions")
-        | ("tutorialSvc", "GetTutorials")
-        | ("dailyGoals", "GetDailyGoals") => {
-            let _ = match ServerContext::require_character(session) {
+        | ("agentMgr", "GetMyJournalDetails")
+        | ("agentMgr", "GetMyEpicArcStatus")
+        | ("epicArcStatus", "AgentHasEpicMissionsForCharacter")
+        | ("missionTrackerMgr", "GetAllMissionObjectives")
+        | ("tutorialSvc", "GetTutorials") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            Some(Ok(PyRep::List(vec![])))
+            let rows = ctx.db.with_snapshot(|snap| {
+                snap.active_missions
+                    .values()
+                    .filter(|m| m.character_id == char_id)
+                    .map(|m| {
+                        vec![
+                            PyRep::Integer(m.mission_id as i64),
+                            PyRep::Integer(m.agent_id),
+                            PyRep::String(m.state.clone()),
+                            PyRep::Integer(m.current_room_id as i64),
+                            PyRep::Integer(m.npcs_remaining as i64),
+                        ]
+                    })
+                    .collect()
+            });
+            Some(Ok(PyRep::rowset(
+                vec![
+                    "missionID",
+                    "agentID",
+                    "state",
+                    "currentRoomID",
+                    "npcsRemaining",
+                ],
+                rows,
+            )))
         }
 
         _ => None,

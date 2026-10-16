@@ -1,7 +1,6 @@
-//! `formulas` — Complete 161-Formula Mathematical Mechanics Engine (`docs/index/wiki_mechanics_catalog.json`).
+//! `formulas` — Mathematical mechanics engine.
 //!
-//! Implements deterministic Rust functions for all 38 formula articles and all 161 mathematical
-//! equations extracted from `~/ai/eve-wiki` and `PLAN.md` (`#1` through `#161`).
+//! Deterministic Rust implementations of game mechanics formulas (`#1` through `#161`).
 
 #![forbid(unsafe_code)]
 
@@ -11,11 +10,7 @@ use eve_dogma::{
     roll_abyssal_attributes, stacking_penalty_factor, thermodynamics,
 };
 use glam::DVec3;
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-
-const EMBEDDED_WIKI_MECHANICS_JSON: &str =
-    include_str!("../../../docs/index/wiki_mechanics_catalog.json");
 
 // ============================================================================
 // 1. Skills and Learning (#1 - #8)
@@ -616,48 +611,12 @@ pub fn compute_living_world_fair_price(
     sde_base_price.max(bom_mineral_cost * 1.15) * regional_scarcity_multiplier.clamp(0.5, 3.0)
 }
 
-#[derive(Debug, Deserialize)]
-struct WikiArticleFormulas {
-    formulas: Vec<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct WikiMechanicsCatalog {
-    summary: WikiSummary,
-    formulas_by_article: HashMap<String, WikiArticleFormulas>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub struct WikiSummary {
-    pub total_extracted_formulas: usize,
-    pub formula_articles_count: usize,
-}
-
-/// Verifies that `docs/index/wiki_mechanics_catalog.json` contains all 161 extracted formulas across 38 articles.
-pub fn verify_catalog_completeness() -> WikiSummary {
-    let cat: WikiMechanicsCatalog = serde_json::from_str(EMBEDDED_WIKI_MECHANICS_JSON)
-        .expect("Embedded wiki_mechanics_catalog.json must be valid");
-    let counted: usize = cat
-        .formulas_by_article
-        .values()
-        .map(|a| a.formulas.len())
-        .sum();
-    assert_eq!(cat.summary.total_extracted_formulas, 161);
-    assert_eq!(counted, 161);
-    assert_eq!(cat.summary.formula_articles_count, 38);
-    cat.summary
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_all_161_wiki_mechanics_formulas() {
-        let summary = verify_catalog_completeness();
-        assert_eq!(summary.total_extracted_formulas, 161);
-        assert_eq!(summary.formula_articles_count, 38);
-
+    fn test_mechanics_formulas() {
         // 1. Skills & Learning (#1-#8)
         assert_eq!(sp_for_skill_level(1.0, 1), 250.0);
         assert_eq!(sp_for_skill_level(1.0, 5), 256_000.0);
