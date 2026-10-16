@@ -65,7 +65,7 @@ pub async fn handle(
                 .unwrap_or(30_000_142);
             let count = ctx
                 .living_world
-                .materialize_system_lod2(sys_id, &ctx.systems)
+                .materialize_system_lod2(sys_id, &ctx.systems, &ctx.sde)
                 .await;
             Some(Ok(PyRep::Integer(count as i64)))
         }
@@ -146,7 +146,7 @@ pub async fn handle(
                         dist
                     ),
                 }));
-            }
+            };
 
             let _ = sys_handle.remove_ball(convoy_id).await;
             match ctx
@@ -165,28 +165,27 @@ pub async fn handle(
             }
         }
 
-        ("shipCosmeticsMgr", "ApplySkinToShip")
-        | ("shipCosmeticsMgr", "ActivateSkinLicense")
-        | ("shipCosmeticsMgr", "GetLicencedSkins")
-        | ("shipCosmeticsMgr", "GetFirstPartySkinData")
-        | ("shipCosmeticsMgr", "GetEnabledCosmetics")
-        | ("rewardMgr", "GetDelayedRewardsByGroupIDs")
-        | ("rewardMgr", "GetRewardLPLogs")
-        | ("seasonalLoginCampaignManager", "get_active_campaign")
-        | ("seasonalLoginCampaignManager", "claim_reward") => {
-            let _ = match ServerContext::require_character(session) {
+        ("shipCosmeticsMgr", "ApplySkinToShip") | ("shipCosmeticsMgr", "GetLicencedSkins") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let ship_type_id = args.first().and_then(|a| a.as_i64()).unwrap_or(587);
+            let ship_type_id = args.first().and_then(|a| a.as_i64()).unwrap_or(587) as u32;
             let design_name = args
                 .get(1)
                 .and_then(|a| a.as_str())
                 .unwrap_or("Crimson Valkyrie SKIN");
+            let valid_ship = ctx.sde.types.contains_key(&ship_type_id);
+            let active_ship = ctx
+                .db
+                .get_character(char_id)
+                .map(|c| c.active_ship_id)
+                .unwrap_or(0);
             Some(Ok(PyRep::keyval([
-                ("shipTypeID", PyRep::Integer(ship_type_id)),
+                ("shipID", PyRep::Integer(active_ship)),
+                ("shipTypeID", PyRep::Integer(ship_type_id as i64)),
                 ("designName", PyRep::String(design_name.to_string())),
-                ("sequenced", PyRep::Bool(true)),
+                ("sequenced", PyRep::Bool(valid_ship)),
             ])))
         }
 

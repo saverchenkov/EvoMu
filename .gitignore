@@ -21,3 +21,6 @@ venv/
 *.swp
 .DS_Store
 Thumbs.db
+
+# Independent review gate state (local; must not affect tree fingerprints)
+/.evomu-reviews/

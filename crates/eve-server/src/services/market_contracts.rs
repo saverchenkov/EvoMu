@@ -22,9 +22,7 @@ pub fn handle(
     _kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
-        ("account", "GetCashBalance")
-        | ("account", "GetWalletDivisionsInfo")
-        | ("vaultManager", "get_account_balance") => {
+        ("account", "GetCashBalance") | ("vaultManager", "get_account_balance") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -63,10 +61,7 @@ pub fn handle(
             )))
         }
 
-        ("marketProxy", "GetOrders")
-        | ("marketProxy", "GetCharOrders")
-        | ("marketProxy", "GetCorporationOrders")
-        | ("marketProxy", "GetHistoryForManyTypeIDs") => {
+        ("marketProxy", "GetOrders") | ("marketProxy", "GetCharOrders") => {
             let _ = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -158,8 +153,32 @@ pub fn handle(
                 IskCents::from_f64_isk(gross_isk * tax_rate)
             };
 
-            let res = ctx.db.with_mut_snapshot(|snap| {
-                // 1. If sell order (`!is_bid`), verify and deduct `quantity_i32` of `type_id` from seller's hangar at `station_id`
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
+                // 1. Pre-check caller balance for worst-case debit using checked arithmetic
+                let required_upfront = if is_bid {
+                    max_order_cost
+                        .checked_add(broker_fee)
+                        .ok_or_else(|| BridgeRpcError {
+                            code: "MarketOrderOverflow".into(),
+                            message: "Order cost + broker fee overflow".into(),
+                        })?
+                } else {
+                    broker_fee
+                };
+
+                let caller_balance = snap
+                    .characters
+                    .get(&char_id)
+                    .map(|c| c.balance)
+                    .unwrap_or(IskCents(0));
+                if caller_balance.checked_sub(required_upfront).is_none() {
+                    return Err(BridgeRpcError {
+                        code: "InsufficientFunds".into(),
+                        message: "Not enough ISK for market order and broker fee".into(),
+                    });
+                }
+
+                // 2. If sell order (`!is_bid`), verify and deduct `quantity_i32` of `type_id` from seller's hangar at `station_id`
                 if !is_bid {
                     let sell_item_id = snap
                         .items
@@ -190,7 +209,7 @@ pub fn handle(
                     }
                 }
 
-                // 2. Collect matching opposite orders sorted by best price-time priority
+                // 3. Collect matching opposite orders sorted by best price-time priority
                 let mut candidate_ids: Vec<(i64, i64)> = snap
                     .market_orders
                     .values()
@@ -209,30 +228,6 @@ pub fn handle(
                     candidate_ids.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
                 } else {
                     candidate_ids.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-                }
-
-                // Pre-check caller balance for worst-case debit using checked arithmetic
-                let required_upfront = if is_bid {
-                    max_order_cost
-                        .checked_add(broker_fee)
-                        .ok_or_else(|| BridgeRpcError {
-                            code: "MarketOrderOverflow".into(),
-                            message: "Order cost + broker fee overflow".into(),
-                        })?
-                } else {
-                    broker_fee
-                };
-
-                let caller_balance = snap
-                    .characters
-                    .get(&char_id)
-                    .map(|c| c.balance)
-                    .unwrap_or(IskCents(0));
-                if caller_balance.checked_sub(required_upfront).is_none() {
-                    return Err(BridgeRpcError {
-                        code: "InsufficientFunds".into(),
-                        message: "Not enough ISK for market order and broker fee".into(),
-                    });
                 }
 
                 // Debit broker fee upfront
@@ -438,7 +433,7 @@ pub fn handle(
                 }));
             }
 
-            let res = ctx.db.with_mut_snapshot(|snap| {
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let reward = IskCents::from_f64_isk(reward_isk);
                 let collateral = IskCents::from_f64_isk(collateral_isk);
                 let Some(ch) = snap.characters.get_mut(&char_id) else {
@@ -511,7 +506,7 @@ pub fn handle(
                 Err(e) => return Some(Err(e)),
             };
             let cid = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let res = ctx.db.with_mut_snapshot(|snap| {
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(c) = snap.contracts.get(&cid).cloned() else {
                     return Err(BridgeRpcError {
                         code: "ContractNotFound".into(),
@@ -576,7 +571,7 @@ pub fn handle(
             };
             let cid = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
             let caller_station = session.station_id.or(session.structure_id);
-            let res = ctx.db.with_mut_snapshot(|snap| {
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(c) = snap.contracts.get(&cid).cloned() else {
                     return Err(BridgeRpcError {
                         code: "ContractNotFound".into(),
@@ -638,12 +633,7 @@ pub fn handle(
         }
 
         ("contractProxy", "GetContractListForOwner")
-        | ("contractProxy", "GetMyCurrentContractList")
-        | ("contractProxy", "GetMyExpiredContractList")
-        | ("contractProxy", "SearchContracts")
-        | ("trademgr", "InitiateTrade")
-        | ("raffleProxy", "FilteredGrab")
-        | ("storeManager", "get_offers") => {
+        | ("contractProxy", "GetMyCurrentContractList") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),

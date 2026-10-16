@@ -21,12 +21,7 @@ pub async fn handle(
     _kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
-        ("stationSvc", "GetSolarSystem")
-        | ("station", "GetSolarSystem")
-        | ("stationSvc", "GetStation")
-        | ("station", "GetStation")
-        | ("stationSvc", "GetStationItemBits")
-        | ("stationSvc", "GetStationsForOwner") => {
+        ("stationSvc", "GetSolarSystem") | ("station", "GetSolarSystem") => {
             let _ = match ServerContext::require_auth(session) {
                 Ok(u) => u,
                 Err(e) => return Some(Err(e)),
@@ -56,6 +51,36 @@ pub async fn handle(
                 Some(Err(BridgeRpcError {
                     code: "SolarSystemNotFound".into(),
                     message: format!("Solar system {sys_id} not found in SDE"),
+                }))
+            }
+        }
+
+        ("stationSvc", "GetStation") | ("station", "GetStation") => {
+            let _ = match ServerContext::require_auth(session) {
+                Ok(u) => u,
+                Err(e) => return Some(Err(e)),
+            };
+            let station_id = args
+                .first()
+                .and_then(|a| a.as_i64())
+                .or(session.station_id)
+                .unwrap_or(60_003_760);
+            let found = ctx.sde.solar_systems.values().find_map(|sys| {
+                sys.stations
+                    .iter()
+                    .find(|st| st.station_id == station_id)
+                    .map(|st| (sys.solar_system_id, st.clone()))
+            });
+            if let Some((sys_id, st)) = found {
+                Some(Ok(PyRep::keyval([
+                    ("stationID", PyRep::Integer(st.station_id)),
+                    ("stationName", PyRep::String(st.name)),
+                    ("solarSystemID", PyRep::Integer(sys_id as i64)),
+                ])))
+            } else {
+                Some(Err(BridgeRpcError {
+                    code: "StationNotFound".into(),
+                    message: format!("Station {station_id} not found in SDE"),
                 }))
             }
         }
@@ -152,7 +177,7 @@ pub async fn handle(
             ])))
         }
 
-        ("stationSvc", "Dock") | ("structureDocking", "Dock") | ("beyonce", "CmdDock") => {
+        ("stationSvc", "Dock") | ("structureDocking", "Dock") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -277,10 +302,7 @@ pub async fn handle(
             }
         }
 
-        ("structureDeployment", "Anchor")
-        | ("structureDeployment", "Unanchor")
-        | ("structureDeployment", "CancelUnanchor")
-        | ("structureDeployment", "RenameStructure") => {
+        ("structureDeployment", "Anchor") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -293,7 +315,20 @@ pub async fn handle(
             let sys_id = session.solar_system_id.unwrap_or(30_000_144);
             let corp_id = session.corporation_id.unwrap_or(1_000_125);
 
-            let res = ctx.db.with_mut_snapshot(|snap| {
+            let anchor_pos = if let Some(ship_id) = session.ship_id {
+                let handle = ctx.systems.get_or_spawn(sys_id);
+                handle
+                    .get_ball_snapshot(ship_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|(_, b)| b.position.to_array())
+                    .unwrap_or([50_000.0, 0.0, 0.0])
+            } else {
+                [50_000.0, 0.0, 0.0]
+            };
+
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
                 // Verify and consume 1 structure item (`type_id`) and 1 Upwell Quantum Core (`56201`) owned by `char_id`
                 let struct_item_id = snap
                     .items
@@ -336,7 +371,7 @@ pub async fn handle(
                         owner_corp_id: corp_id,
                         solar_system_id: sys_id,
                         name: name.to_string(),
-                        position: [-107_303_361_060.0, -18_744_975_360.0, 436_489_052_160.0],
+                        position: anchor_pos,
                         state: "ShieldVulnerable".into(),
                         quantum_core_installed: true,
                         fuel_blocks: 1_000,
@@ -355,10 +390,7 @@ pub async fn handle(
             }
         }
 
-        ("structureControl", "AttackStructure")
-        | ("structureControl", "TakeControl")
-        | ("structureControl", "ReleaseControl")
-        | ("structureControl", "BoardStructure") => {
+        ("structureControl", "AttackStructure") => {
             let _ = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -375,7 +407,7 @@ pub async fn handle(
             let clamped = clamp_upwell_structure_damage(incoming_dmg, 5_000.0, 1.0);
             let caller_sys = session.solar_system_id.unwrap_or(0);
 
-            let res = ctx.db.with_mut_snapshot(|snap| {
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(st) = snap.structures.get_mut(&structure_id) else {
                     return Err(BridgeRpcError {
                         code: "StructureNotFound".into(),
@@ -406,14 +438,7 @@ pub async fn handle(
         }
 
         ("structureDirectory", "GetStructureDescription")
-        | ("structureDirectory", "GetNearbyJumpBridges")
-        | ("structureDirectory", "GetJumpBridgesWithMyAccess")
-        | ("structureSettings", "CharacterGetServices")
-        | ("structureSettings", "CharacterCheckService")
-        | ("structureGuests", "GetGuests")
-        | ("station", "GetGuests")
-        | ("posMgr", "GetControlTowers")
-        | ("posMgr", "GetConsumptionFactor") => {
+        | ("structureSettings", "CharacterGetServices") => {
             let _ = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),

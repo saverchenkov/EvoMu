@@ -2872,15 +2872,26 @@
   ],
   "jumps": [
     {
-      "destination_stargate_id": 50001249,
+      "destination_stargate_id": 50001873,
       "from_solar_system_id": 30000142,
       "position": [
-        -107000000000.0,
-        -18000000000.0,
-        435000000000.0
+        -161369743360.0,
+        -30690549760.0,
+        -1107962183680.0
       ],
       "stargate_id": 50001248,
       "to_solar_system_id": 30000144
+    },
+    {
+      "destination_stargate_id": 50001248,
+      "from_solar_system_id": 30000144,
+      "position": [
+        84000000000.0,
+        12000000000.0,
+        -139000000000.0
+      ],
+      "stargate_id": 50001873,
+      "to_solar_system_id": 30000142
     },
     {
       "destination_stargate_id": 50001248,
@@ -2914,17 +2925,6 @@
       ],
       "stargate_id": 50001251,
       "to_solar_system_id": 30000144
-    },
-    {
-      "destination_stargate_id": 50001251,
-      "from_solar_system_id": 30000144,
-      "position": [
-        86000000000.0,
-        12000000000.0,
-        -141000000000.0
-      ],
-      "stargate_id": 50001873,
-      "to_solar_system_id": 30002813
     }
   ],
   "missions": [
@@ -2942,13 +2942,208 @@
       "title": "Stop the Thief"
     },
     {
+      "agent_id": 3018924,
+      "corporation_id": 1000035,
+      "dungeon_id": 5001,
+      "isk_reward": 150000,
+      "level": 1,
+      "lp_reward": 180,
+      "mission_id": 1002,
+      "mission_type": "Encounter",
+      "standing_gain_pct": 1.25,
+      "time_bonus_isk": 120000,
+      "title": "Worlds Collide"
+    },
+    {
+      "agent_id": 3018924,
+      "corporation_id": 1000035,
+      "dungeon_id": 5001,
+      "isk_reward": 150000,
+      "level": 1,
+      "lp_reward": 180,
+      "mission_id": 1003,
+      "mission_type": "Encounter",
+      "standing_gain_pct": 1.25,
+      "time_bonus_isk": 120000,
+      "title": "The Blockade"
+    },
+    {
+      "agent_id": 3018924,
+      "corporation_id": 1000035,
+      "dungeon_id": 5001,
+      "isk_reward": 150000,
+      "level": 1,
+      "lp_reward": 180,
+      "mission_id": 1004,
+      "mission_type": "Encounter",
+      "standing_gain_pct": 1.25,
+      "time_bonus_isk": 120000,
+      "title": "Damsel in Distress"
+    },
+    {
+      "agent_id": 3018924,
+      "corporation_id": 1000035,
+      "dungeon_id": 5001,
+      "isk_reward": 150000,
+      "level": 1,
+      "lp_reward": 180,
+      "mission_id": 1005,
+      "mission_type": "Encounter",
+      "standing_gain_pct": 1.25,
+      "time_bonus_isk": 120000,
+      "title": "Gone Berserk"
+    },
+    {
+      "agent_id": 3018924,
+      "corporation_id": 1000035,
+      "dungeon_id": 5001,
+      "isk_reward": 150000,
+      "level": 1,
+      "lp_reward": 180,
+      "mission_id": 1006,
+      "mission_type": "Encounter",
+      "standing_gain_pct": 1.25,
+      "time_bonus_isk": 120000,
+      "title": "Recon (1 of 3)"
+    },
+    {
+      "agent_id": 3018924,
+      "corporation_id": 1000035,
+      "dungeon_id": 5001,
+      "isk_reward": 150000,
+      "level": 1,
+      "lp_reward": 180,
+      "mission_id": 1007,
+      "mission_type": "Encounter",
+      "standing_gain_pct": 1.25,
+      "time_bonus_isk": 120000,
+      "title": "Recon (2 of 3)"
+    },
+    {
+      "agent_id": 3018924,
+      "corporation_id": 1000035,
+      "dungeon_id": 5001,
+      "isk_reward": 150000,
+      "level": 1,
+      "lp_reward": 180,
+      "mission_id": 1008,
+      "mission_type": "Encounter",
+      "standing_gain_pct": 1.25,
+      "time_bonus_isk": 120000,
+      "title": "Recon (3 of 3)"
+    },
+    {
+      "agent_id": 3018924,
+      "corporation_id": 1000035,
+      "dungeon_id": 5001,
+      "isk_reward": 150000,
+      "level": 1,
+      "lp_reward": 180,
+      "mission_id": 1009,
+      "mission_type": "Encounter",
+      "standing_gain_pct": 1.25,
+      "time_bonus_isk": 120000,
+      "title": "Vengeance"
+    },
+    {
+      "agent_id": 3018924,
+      "corporation_id": 1000035,
+      "dungeon_id": 5001,
+      "isk_reward": 150000,
+      "level": 1,
+      "lp_reward": 180,
+      "mission_id": 1010,
+      "mission_type": "Encounter",
+      "standing_gain_pct": 1.25,
+      "time_bonus_isk": 120000,
+      "title": "Silence the Informant"
+    },
+    {
+      "agent_id": 3018924,
+      "corporation_id": 1000035,
+      "dungeon_id": 5001,
+      "isk_reward": 150000,
+      "level": 1,
+      "lp_reward": 180,
+      "mission_id": 1011,
+      "mission_type": "Encounter",
+      "standing_gain_pct": 1.25,
+      "time_bonus_isk": 120000,
+      "title": "Unauthorized Military Presence"
+    },
+    {
+      "agent_id": 3018924,
+      "corporation_id": 1000035,
+      "dungeon_id": 5001,
+      "isk_reward": 150000,
+      "level": 1,
+      "lp_reward": 180,
+      "mission_id": 1012,
+      "mission_type": "Encounter",
+      "standing_gain_pct": 1.25,
+      "time_bonus_isk": 120000,
+      "title": "Pirate Invasion"
+    },
+    {
+      "agent_id": 3018924,
+      "corporation_id": 1000035,
+      "dungeon_id": 5001,
+      "isk_reward": 150000,
+      "level": 1,
+      "lp_reward": 180,
+      "mission_id": 1013,
+      "mission_type": "Encounter",
+      "standing_gain_pct": 1.25,
+      "time_bonus_isk": 120000,
+      "title": "Attack of the Drones"
+    },
+    {
+      "agent_id": 3018924,
+      "corporation_id": 1000035,
+      "dungeon_id": 5001,
+      "isk_reward": 150000,
+      "level": 1,
+      "lp_reward": 180,
+      "mission_id": 1014,
+      "mission_type": "Encounter",
+      "standing_gain_pct": 1.25,
+      "time_bonus_isk": 120000,
+      "title": "Smuggler Interception"
+    },
+    {
+      "agent_id": 3018924,
+      "corporation_id": 1000035,
+      "dungeon_id": 5001,
+      "isk_reward": 150000,
+      "level": 1,
+      "lp_reward": 180,
+      "mission_id": 1015,
+      "mission_type": "Encounter",
+      "standing_gain_pct": 1.25,
+      "time_bonus_isk": 120000,
+      "title": "Duo of Death"
+    },
+    {
+      "agent_id": 3018924,
+      "corporation_id": 1000035,
+      "dungeon_id": 5001,
+      "isk_reward": 150000,
+      "level": 1,
+      "lp_reward": 180,
+      "mission_id": 1016,
+      "mission_type": "Encounter",
+      "standing_gain_pct": 1.25,
+      "time_bonus_isk": 120000,
+      "title": "The Guristas Spies"
+    },
+    {
       "agent_id": 3018925,
       "corporation_id": 1000035,
       "dungeon_id": 0,
       "isk_reward": 750000,
       "level": 2,
       "lp_reward": 800,
-      "mission_id": 1002,
+      "mission_id": 2001,
       "mission_type": "StorylineCourier",
       "standing_gain_pct": 4.5,
       "time_bonus_isk": 500000,

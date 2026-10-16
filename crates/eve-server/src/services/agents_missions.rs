@@ -5,11 +5,13 @@
 use crate::formulas::{apply_standing_increase, compute_mission_reward_with_skills};
 use crate::router::ServerContext;
 use eve_db::{ActiveMissionRecord, IskCents};
+use eve_destiny::{Ball, CombatState, MovementMode};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
+use glam::DVec3;
 use std::collections::HashMap;
 
-pub fn handle(
+pub async fn handle(
     ctx: &ServerContext,
     session: &mut SessionState,
     service: &str,
@@ -32,12 +34,13 @@ pub fn handle(
             };
             let agent_id = tmpl.agent_id;
             let title = tmpl.title.clone();
+            let sys_id = session.solar_system_id.unwrap_or(30_000_142);
 
-            let res = ctx.db.with_mut_snapshot(|snap| {
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
                 if let Some(existing) = snap.active_missions.get(&(char_id, mission_id)) {
-                    if existing.state == "Offered" || existing.state == "Accepted" {
+                    if matches!(existing.state.as_str(), "Offered" | "Accepted" | "Completed") {
                         return Err(BridgeRpcError {
-                            code: "MissionAlreadyActive".into(),
+                            code: "MissionAlreadyActiveOrCompleted".into(),
                             message: format!(
                                 "Mission {mission_id} is already in state '{}' for character {char_id}",
                                 existing.state
@@ -51,6 +54,7 @@ pub fn handle(
                         mission_id,
                         character_id: char_id,
                         agent_id,
+                        solar_system_id: sys_id,
                         state: "Offered".into(),
                         current_room_id: 1,
                         npcs_remaining: 1,
@@ -76,7 +80,8 @@ pub fn handle(
                 Err(e) => return Some(Err(e)),
             };
             let mission_id = args.first().and_then(|a| a.as_i64()).unwrap_or(1001) as u32;
-            let res = ctx.db.with_mut_snapshot(|snap| {
+            let sys_id = session.solar_system_id.unwrap_or(30_000_142);
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(m) = snap.active_missions.get_mut(&(char_id, mission_id)) else {
                     return Err(BridgeRpcError {
                         code: "MissionNotOffered".into(),
@@ -95,21 +100,70 @@ pub fn handle(
                     });
                 }
                 m.state = "Accepted".into();
+                m.solar_system_id = sys_id;
                 Ok(())
             });
-            match res {
-                Ok(()) => Some(Ok(PyRep::keyval([
-                    ("missionID", PyRep::Integer(mission_id as i64)),
-                    ("state", PyRep::String("Accepted".into())),
-                    ("dungeonID", PyRep::Integer(5001)),
-                    ("currentRoomID", PyRep::Integer(1)),
-                ]))),
-                Err(e) => Some(Err(e)),
+            if let Err(e) = res {
+                return Some(Err(e));
             }
+
+            // Materialize mission pocket pirate NPC ball (`700_000_000 + offset`) in current solar system's Ballpark
+            let npc_offset = (mission_id.saturating_sub(1000)).max(1) as i64;
+            let npc_id = 700_000_000 + npc_offset;
+            let handle = ctx.systems.get_or_spawn(sys_id);
+            let origin = if let Some(ship_id) = session.ship_id {
+                handle
+                    .get_ball_snapshot(ship_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|(_, b)| b.position)
+                    .unwrap_or_else(|| {
+                        ctx.sde
+                            .solar_systems
+                            .get(&sys_id)
+                            .and_then(|s| s.stations.first().map(|st| st.position + DVec3::new(1_500.0, 0.0, 0.0)))
+                            .unwrap_or(DVec3::ZERO)
+                    })
+            } else {
+                DVec3::ZERO
+            };
+            let _ = handle
+                .spawn_ball_with_combat(
+                    Ball {
+                        id: npc_id,
+                        type_id: 11001, // Guristas Pithi Invader
+                        position: origin + DVec3::new(800.0 + (npc_offset as f64) * 50.0, 0.0, 0.0),
+                        velocity: DVec3::ZERO,
+                        max_velocity: 310.0,
+                        inertia: 2.5,
+                        mass: 1_000_000.0,
+                        radius: 35.0,
+                        speed_fraction: 0.0,
+                        mode: MovementMode::Stop,
+                    },
+                    CombatState {
+                        shield_hp: 50.0,
+                        max_shield_hp: 50.0,
+                        armor_hp: 50.0,
+                        max_armor_hp: 50.0,
+                        structure_hp: 50.0,
+                        max_structure_hp: 50.0,
+                        ..CombatState::default()
+                    },
+                )
+                .await;
+
+            Some(Ok(PyRep::keyval([
+                ("missionID", PyRep::Integer(mission_id as i64)),
+                ("state", PyRep::String("Accepted".into())),
+                ("dungeonID", PyRep::Integer(5001)),
+                ("currentRoomID", PyRep::Integer(1)),
+                ("spawnedNpcBallID", PyRep::Integer(npc_id)),
+            ])))
         }
 
-        ("keeper", "ActivateAccelerationGate")
-        | ("keeper", "GetCurrentDungeonForCharacter") => {
+        ("keeper", "ActivateAccelerationGate") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -121,7 +175,7 @@ pub fn handle(
                 }));
             }
             let mission_id = args.first().and_then(|a| a.as_i64()).unwrap_or(1001) as u32;
-            let res = ctx.db.with_mut_snapshot(|snap| {
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(m) = snap.active_missions.get_mut(&(char_id, mission_id)) else {
                     return Err(BridgeRpcError {
                         code: "MissionNotActive".into(),
@@ -177,11 +231,12 @@ pub fn handle(
             let base_lp = tmpl.lp_reward;
             let standing_pct = tmpl.standing_gain_pct;
             let corp_id = tmpl.corporation_id;
+            let sys_id = session.solar_system_id.unwrap_or(30_000_142);
 
             let (isk_reward, lp_reward) =
                 compute_mission_reward_with_skills(base_isk, base_lp, 4, 4, 1);
 
-            let res = ctx.db.with_mut_snapshot(|snap| {
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(m) = snap.active_missions.get_mut(&(char_id, mission_id)) else {
                     return Err(BridgeRpcError {
                         code: "MissionNotActive".into(),
@@ -216,11 +271,12 @@ pub fn handle(
                 let storyline = t % 16 == 0;
                 if storyline {
                     snap.active_missions.insert(
-                        (char_id, 1002),
+                        (char_id, 2001),
                         ActiveMissionRecord {
-                            mission_id: 1002,
+                            mission_id: 2001,
                             character_id: char_id,
                             agent_id: 3_018_925,
+                            solar_system_id: sys_id,
                             state: "Offered".into(),
                             current_room_id: 1,
                             npcs_remaining: 0,
@@ -243,13 +299,8 @@ pub fn handle(
             }
         }
 
-        // AIR NPE Node Graph `473` & AIR Career Program (`air_npe` / `seasonManager` / `milestoneMgr`, `E2E-16`)
-        ("air_npe", "AdvanceNode")
-        | ("air_npe", "CompleteCurrentNode")
-        | ("air_npe", "get_air_npe_state")
-        | ("air_npe", "is_air_npe_enabled")
-        | ("air_npe", "skip_air_npe")
-        | ("operationsManager", "complete_category_for_character") => {
+        // AIR NPE Node Graph `473` & AIR Career Program (`air_npe` / `seasonManager`, `E2E-16`)
+        ("air_npe", "AdvanceNode") | ("air_npe", "CompleteCurrentNode") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -282,11 +333,60 @@ pub fn handle(
             ])))
         }
 
-        ("seasonManager", "ClaimGoalReward")
-        | ("seasonManager", "claim_goal_reward")
-        | ("seasonManager", "claim_challenge_rewards")
-        | ("seasonManager", "RecordGoalProgress")
-        | ("milestoneMgr", "ClaimRewards") => {
+        ("air_npe", "get_air_npe_state") | ("air_npe", "is_air_npe_enabled") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let (curr_node, completed) = ctx.db.with_snapshot(|snap| {
+                snap.npe_progress
+                    .get(&char_id)
+                    .map(|n| (n.current_node_id, n.completed))
+                    .unwrap_or((1, false))
+            });
+            Some(Ok(PyRep::keyval([
+                ("nodeGraphID", PyRep::Integer(473)),
+                ("currentNodeID", PyRep::Integer(curr_node as i64)),
+                ("completed", PyRep::Bool(completed)),
+                ("enabled", PyRep::Bool(true)),
+            ])))
+        }
+
+        ("seasonManager", "RecordGoalProgress") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let goal_id = args.first().and_then(|a| a.as_i64()).unwrap_or(1) as u32;
+            if !ctx.sde.career_goals.contains_key(&goal_id) {
+                return Some(Err(BridgeRpcError {
+                    code: "UnknownCareerGoal".into(),
+                    message: format!("Career goal {goal_id} does not exist in SDE"),
+                }));
+            }
+            let delta = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1).max(1) as u64;
+            let prog = ctx.db.with_mut_snapshot(|snap| {
+                let npe = snap.npe_progress.entry(char_id).or_insert_with(|| {
+                    eve_db::NpeProgressRecord {
+                        character_id: char_id,
+                        node_graph_id: 473,
+                        current_node_id: 1,
+                        completed: false,
+                        career_goal_progress: Default::default(),
+                        claimed_goals: Default::default(),
+                    }
+                });
+                let p = npe.career_goal_progress.entry(goal_id).or_insert(0);
+                *p = p.saturating_add(delta);
+                *p
+            });
+            Some(Ok(PyRep::keyval([
+                ("goalID", PyRep::Integer(goal_id as i64)),
+                ("currentProgress", PyRep::Integer(prog as i64)),
+            ])))
+        }
+
+        ("seasonManager", "ClaimGoalReward") | ("seasonManager", "claim_goal_reward") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -298,33 +398,10 @@ pub fn handle(
                     message: format!("Career goal {goal_id} does not exist in SDE"),
                 }));
             };
-            if method == "RecordGoalProgress" {
-                let delta = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1).max(1) as u64;
-                let prog = ctx.db.with_mut_snapshot(|snap| {
-                    let npe = snap.npe_progress.entry(char_id).or_insert_with(|| {
-                        eve_db::NpeProgressRecord {
-                            character_id: char_id,
-                            node_graph_id: 473,
-                            current_node_id: 1,
-                            completed: false,
-                            career_goal_progress: Default::default(),
-                            claimed_goals: Default::default(),
-                        }
-                    });
-                    let p = npe.career_goal_progress.entry(goal_id).or_insert(0);
-                    *p = p.saturating_add(delta);
-                    *p
-                });
-                return Some(Ok(PyRep::keyval([
-                    ("goalID", PyRep::Integer(goal_id as i64)),
-                    ("currentProgress", PyRep::Integer(prog as i64)),
-                ])));
-            }
-
             let sp_reward = goal_def.sp_reward as f64;
             let target_prog = goal_def.target_progress as u64;
 
-            let res = ctx.db.with_mut_snapshot(|snap| {
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let npe = snap.npe_progress.entry(char_id).or_insert_with(|| {
                     eve_db::NpeProgressRecord {
                         character_id: char_id,
@@ -371,12 +448,7 @@ pub fn handle(
             }
         }
 
-        ("agentMgr", "GetAgents")
-        | ("agentMgr", "GetMyJournalDetails")
-        | ("agentMgr", "GetMyEpicArcStatus")
-        | ("epicArcStatus", "AgentHasEpicMissionsForCharacter")
-        | ("missionTrackerMgr", "GetAllMissionObjectives")
-        | ("tutorialSvc", "GetTutorials") => {
+        ("agentMgr", "GetAgents") | ("agentMgr", "GetMyJournalDetails") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),

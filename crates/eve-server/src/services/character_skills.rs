@@ -3,8 +3,8 @@
 #![forbid(unsafe_code)]
 
 use crate::formulas::{
-    apply_security_tag_repair, apply_standing_increase, clone_jump_cooldown_seconds,
-    skill_injector_sp_yield, skill_training_time_seconds, sp_for_skill_level,
+    apply_security_tag_repair, clone_jump_cooldown_seconds, skill_injector_sp_yield,
+    skill_training_time_seconds, sp_for_skill_level,
 };
 use crate::router::ServerContext;
 use eve_db::{JumpCloneRecord, SkillQueueEntry, TrainedSkillRecord};
@@ -22,11 +22,7 @@ pub fn handle(
     _kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
-        ("charUnboundMgr", "GetCharactersToSelect")
-        | ("charUnboundMgr", "GetCharacterInfo")
-        | ("charUnboundMgr", "GetCharacterLockType")
-        | ("charUnboundMgr", "GetCharOmegaDowngradeStatus")
-        | ("charUnboundMgr", "CancelCharacterDeletePrepare") => {
+        ("charUnboundMgr", "GetCharactersToSelect") | ("charUnboundMgr", "GetCharacterInfo") => {
             let user_id = match ServerContext::require_auth(session) {
                 Ok(u) => u,
                 Err(e) => return Some(Err(e)),
@@ -150,9 +146,7 @@ pub fn handle(
             ])))
         }
 
-        ("skillMgr2", "GetSkills")
-        | ("skillMgr2", "GetSkillQueue")
-        | ("skillMgr2", "GetMySkillHandler") => {
+        ("skillMgr2", "GetSkills") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -179,6 +173,41 @@ pub fn handle(
             )))
         }
 
+        ("skillMgr2", "GetSkillQueue") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let rows = ctx.db.with_snapshot(|snap| {
+                snap.skill_queues
+                    .get(&char_id)
+                    .map(|q| {
+                        q.iter()
+                            .map(|e| {
+                                vec![
+                                    PyRep::Integer(e.type_id as i64),
+                                    PyRep::Integer(e.target_level as i64),
+                                    PyRep::Real(e.start_sp),
+                                    PyRep::Real(e.end_sp),
+                                    PyRep::Real(e.duration_seconds),
+                                ]
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            });
+            Some(Ok(PyRep::rowset(
+                vec![
+                    "trainingTypeID",
+                    "trainingToLevel",
+                    "trainingStartSP",
+                    "trainingDestinationSP",
+                    "durationSeconds",
+                ],
+                rows,
+            )))
+        }
+
         ("skillMgr2", "SaveSkillQueue") | ("skillMgr2", "AddToEndOfSkillQueue") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
@@ -196,7 +225,7 @@ pub fn handle(
                 .unwrap_or(1.0);
             let end_sp = sp_for_skill_level(rank, target_level);
 
-            let res = ctx.db.with_mut_snapshot(|snap| {
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(ch) = snap.characters.get(&char_id).cloned() else {
                     return Err(BridgeRpcError {
                         code: "CharacterNotFound".into(),
@@ -253,7 +282,7 @@ pub fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let res = ctx.db.with_mut_snapshot(|snap| {
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let available_free_sp = snap
                     .characters
                     .get(&char_id)
@@ -322,23 +351,12 @@ pub fn handle(
             }
         }
 
-        ("skillMgr2", "InjectSkillPoints")
-        | ("alphaInjectorMgr", "UseAlphaInjector")
-        | ("alphaInjectorMgr", "GetNextAvailableInjection")
-        | ("nonDiminishingInjectionMgr", "GetAvailableNonDiminishingInjections") => {
+        ("skillMgr2", "InjectSkillPoints") | ("alphaInjectorMgr", "UseAlphaInjector") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            if method == "GetNextAvailableInjection"
-                || method == "GetAvailableNonDiminishingInjections"
-            {
-                return Some(Ok(PyRep::keyval([
-                    ("characterID", PyRep::Integer(char_id)),
-                    ("canInjectNow", PyRep::Bool(true)),
-                ])));
-            }
-            let res = ctx.db.with_mut_snapshot(|snap| {
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
                 // Locate an owned Large Skill Injector (type_id 40520) with quantity >= 1
                 let injector_item_id = snap
                     .items
@@ -378,13 +396,7 @@ pub fn handle(
             }
         }
 
-        ("jumpCloneSvc", "InstallCloneInStation")
-        | ("jumpCloneSvc", "AcceptShipCloneInstallation")
-        | ("jumpCloneSvc", "CancelShipCloneInstallation")
-        | ("jumpCloneSvc", "GetCloneState")
-        | ("jumpCloneSvc", "GetNumClonesInPilotsStructure")
-        | ("jumpCloneSvc", "CloneJump")
-        | ("jumpCloneSvc", "DestroyInstalledClone") => {
+        ("jumpCloneSvc", "InstallCloneInStation") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -417,11 +429,97 @@ pub fn handle(
             ])))
         }
 
-        ("standingMgr", "GetStandingTransactions")
-        | ("standingMgr", "GetCharStandings")
-        | ("standingMgr", "GetCorpStandings")
-        | ("standingMgr", "GetNPCNPCStandings")
-        | ("standingMgr", "GetStandingCompositions") => {
+        ("jumpCloneSvc", "GetCloneState") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let rows = ctx.db.with_snapshot(|snap| {
+                snap.jump_clones
+                    .get(&char_id)
+                    .map(|clones| {
+                        clones
+                            .iter()
+                            .map(|c| {
+                                vec![
+                                    PyRep::Integer(c.jump_clone_id),
+                                    PyRep::Integer(c.location_id),
+                                ]
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            });
+            Some(Ok(PyRep::rowset(vec!["jumpCloneID", "locationID"], rows)))
+        }
+
+        ("jumpCloneSvc", "CloneJump") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let target_jc_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let clones = snap.jump_clones.entry(char_id).or_default();
+                let Some(jc) = clones
+                    .iter()
+                    .find(|c| target_jc_id == 0 || c.jump_clone_id == target_jc_id)
+                    .cloned()
+                else {
+                    return Err(BridgeRpcError {
+                        code: "JumpCloneNotFound".into(),
+                        message: format!("Jump clone {target_jc_id} not found"),
+                    });
+                };
+                if let Some(ch) = snap.characters.get_mut(&char_id) {
+                    if jc.location_id >= 1_000_000_000_000 {
+                        ch.structure_id = Some(jc.location_id);
+                        ch.station_id = None;
+                    } else {
+                        ch.station_id = Some(jc.location_id);
+                        ch.structure_id = None;
+                    }
+                }
+                Ok(jc)
+            });
+            match res {
+                Ok(jc) => {
+                    if jc.location_id >= 1_000_000_000_000 {
+                        session.structure_id = Some(jc.location_id);
+                        session.station_id = None;
+                    } else {
+                        session.station_id = Some(jc.location_id);
+                        session.structure_id = None;
+                    }
+                    Some(Ok(PyRep::keyval([
+                        ("jumpCloneID", PyRep::Integer(jc.jump_clone_id)),
+                        ("locationID", PyRep::Integer(jc.location_id)),
+                        (
+                            "cooldownSeconds",
+                            PyRep::Integer(clone_jump_cooldown_seconds(4) as i64),
+                        ),
+                    ])))
+                }
+                Err(e) => Some(Err(e)),
+            }
+        }
+
+        ("jumpCloneSvc", "DestroyInstalledClone") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let jc_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let removed = ctx.db.with_mut_snapshot(|snap| {
+                let clones = snap.jump_clones.entry(char_id).or_default();
+                let before = clones.len();
+                clones.retain(|c| c.jump_clone_id != jc_id);
+                clones.len() < before
+            });
+            Some(Ok(PyRep::Bool(removed)))
+        }
+
+        ("standingMgr", "GetCharStandings") | ("standingMgr", "GetStandingTransactions") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -450,12 +548,13 @@ pub fn handle(
             if session.station_id.is_none() {
                 return Some(Err(BridgeRpcError {
                     code: "NotDockedInStation".into(),
-                    message: "Security status tag turn-in requires being docked at a CONCORD station"
-                        .into(),
+                    message:
+                        "Security status tag turn-in requires being docked at a CONCORD station"
+                            .into(),
                 }));
             }
             let tags_requested = args.first().and_then(|a| a.as_i64()).unwrap_or(1).max(1) as u32;
-            let res = ctx.db.with_mut_snapshot(|snap| {
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
                 // Find owned Clone Soldier Tag stack (35661..=35664) with sufficient quantity
                 let tag_item_id = snap
                     .items
@@ -502,10 +601,7 @@ pub fn handle(
         }
 
         ("LPSvc", "GetLPForCharacterCorp")
-        | ("LPSvc", "GetAllMyCharacterWalletLPBalances")
-        | ("LPSvc", "GetAllMyCorporationWalletLPBalances")
-        | ("LPSvc", "ExchangeConcordLP")
-        | ("LPStoreMgr", "GetAvailableOffersFromCorp") => {
+        | ("LPSvc", "GetAllMyCharacterWalletLPBalances") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -529,21 +625,12 @@ pub fn handle(
             )))
         }
 
-        ("charMgr", "GetPublicInfo")
-        | ("charMgr", "GetPublicInfo3")
-        | ("charMgr", "GetCharacterDescription")
-        | ("charMgr", "GetHomeStation")
-        | ("home_station", "get_home_station")
-        | ("home_station", "set_home_station")
-        | ("home_station", "get_home_station_candidates")
-        | ("paperDollServer", "GetPaperDollData")
-        | ("paperDollServer", "GetMyPaperDollData") => {
+        ("charMgr", "GetPublicInfo") | ("charMgr", "GetPublicInfo3") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
             let target_id = args.first().and_then(|a| a.as_i64()).unwrap_or(char_id);
-            let _ = apply_standing_increase(0.0, 0.0);
             match ctx.db.get_character(target_id) {
                 Ok(ch) => Some(Ok(PyRep::keyval([
                     ("characterID", PyRep::Integer(ch.character_id)),
@@ -556,6 +643,57 @@ pub fn handle(
                     code: "CharacterNotFound".into(),
                     message: e.to_string(),
                 })),
+            }
+        }
+
+        ("home_station", "get_home_station") | ("charMgr", "GetHomeStation") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            match ctx.db.get_character(char_id) {
+                Ok(ch) => Some(Ok(PyRep::Integer(ch.home_station_id))),
+                Err(e) => Some(Err(BridgeRpcError {
+                    code: "CharacterNotFound".into(),
+                    message: e.to_string(),
+                })),
+            }
+        }
+
+        ("home_station", "set_home_station") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let new_home_id = args
+                .first()
+                .and_then(|a| a.as_i64())
+                .or(session.station_id)
+                .unwrap_or(60_003_760);
+            let exists_in_sde = ctx
+                .sde
+                .solar_systems
+                .values()
+                .any(|s| s.stations.iter().any(|st| st.station_id == new_home_id));
+            if !exists_in_sde {
+                return Some(Err(BridgeRpcError {
+                    code: "StationNotFound".into(),
+                    message: format!("Station {new_home_id} does not exist in SDE"),
+                }));
+            }
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let Some(ch) = snap.characters.get_mut(&char_id) else {
+                    return Err(BridgeRpcError {
+                        code: "CharacterNotFound".into(),
+                        message: format!("Character {char_id} not found"),
+                    });
+                };
+                ch.home_station_id = new_home_id;
+                Ok(ch.home_station_id)
+            });
+            match res {
+                Ok(hid) => Some(Ok(PyRep::Integer(hid))),
+                Err(e) => Some(Err(e)),
             }
         }
 

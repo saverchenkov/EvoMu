@@ -567,11 +567,11 @@ def build_canonical_sde_seed() -> dict:
     ]
 
     jumps = [
-        {"stargate_id": 50001248, "from_solar_system_id": 30000142, "to_solar_system_id": 30000144, "destination_stargate_id": 50001249, "position": [-107_000_000_000.0, -18_000_000_000.0, 435_000_000_000.0]},
+        {"stargate_id": 50001248, "from_solar_system_id": 30000142, "to_solar_system_id": 30000144, "destination_stargate_id": 50001873, "position": [-161_369_743_360.0, -30_690_549_760.0, -1_107_962_183_680.0]},
+        {"stargate_id": 50001873, "from_solar_system_id": 30000144, "to_solar_system_id": 30000142, "destination_stargate_id": 50001248, "position": [84_000_000_000.0, 12_000_000_000.0, -139_000_000_000.0]},
         {"stargate_id": 50001249, "from_solar_system_id": 30000144, "to_solar_system_id": 30000142, "destination_stargate_id": 50001248, "position": [84_000_000_000.0, 12_000_000_000.0, -139_000_000_000.0]},
         {"stargate_id": 50001250, "from_solar_system_id": 30000144, "to_solar_system_id": 30002813, "destination_stargate_id": 50001251, "position": [86_000_000_000.0, 12_000_000_000.0, -141_000_000_000.0]},
         {"stargate_id": 50001251, "from_solar_system_id": 30002813, "to_solar_system_id": 30000144, "destination_stargate_id": 50001250, "position": [10_000_000_000.0, 0.0, 10_000_000_000.0]},
-        {"stargate_id": 50001873, "from_solar_system_id": 30000144, "to_solar_system_id": 30002813, "destination_stargate_id": 50001251, "position": [86_000_000_000.0, 12_000_000_000.0, -141_000_000_000.0]},
     ]
 
     # 6. Clone Grades, Blueprints, Dbuffs, Fighter Abilities, Wrecks, Compressible, Dynamic Items, Space Components
@@ -644,10 +644,28 @@ def build_canonical_sde_seed() -> dict:
         "85230": ["mercenaryDen", "infomorphGeneration"],
     }
 
+    mission_titles = [
+        (1001, "Stop the Thief"),
+        (1002, "Worlds Collide"),
+        (1003, "The Blockade"),
+        (1004, "Damsel in Distress"),
+        (1005, "Gone Berserk"),
+        (1006, "Recon (1 of 3)"),
+        (1007, "Recon (2 of 3)"),
+        (1008, "Recon (3 of 3)"),
+        (1009, "Vengeance"),
+        (1010, "Silence the Informant"),
+        (1011, "Unauthorized Military Presence"),
+        (1012, "Pirate Invasion"),
+        (1013, "Attack of the Drones"),
+        (1014, "Smuggler Interception"),
+        (1015, "Duo of Death"),
+        (1016, "The Guristas Spies"),
+    ]
     missions = [
         {
-            "mission_id": 1001,
-            "title": "Stop the Thief",
+            "mission_id": mid,
+            "title": title,
             "level": 1,
             "mission_type": "Encounter",
             "agent_id": 3018924,
@@ -657,9 +675,11 @@ def build_canonical_sde_seed() -> dict:
             "lp_reward": 180,
             "standing_gain_pct": 1.25,
             "dungeon_id": 5001,
-        },
+        }
+        for mid, title in mission_titles
+    ] + [
         {
-            "mission_id": 1002,
+            "mission_id": 2001,
             "title": "Materials for War Preparation",
             "level": 2,
             "mission_type": "StorylineCourier",
@@ -670,7 +690,7 @@ def build_canonical_sde_seed() -> dict:
             "lp_reward": 800,
             "standing_gain_pct": 4.5,
             "dungeon_id": 0,
-        },
+        }
     ]
 
     dungeons = [

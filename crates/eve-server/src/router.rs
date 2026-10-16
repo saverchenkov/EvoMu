@@ -293,24 +293,10 @@ impl ServerContext {
             None
         };
 
-        let raw_service = bound_entry
+        let effective_service = bound_entry
             .as_ref()
             .map(|b| b.service.as_str())
             .unwrap_or(service);
-
-        let effective_service = match raw_service {
-            "auth" => "authentication",
-            "fittingSvc" => "charFittingMgr",
-            "dynamicItemSvc" | "mutaplasmidMgr" => "dynamicItemService",
-            "scanSvc" | "directionalScanner" | "sensorSuite" => "scanMgr",
-            "contractMgr" => "contractProxy",
-            "compressionMgr" => "structureCompressionMgr",
-            "industrySvc" => "industryManager",
-            "goalMgr" | "careerPortal" => "seasonManager",
-            "corporation_projects" => "corporationSvc",
-            "livingWorld" => "taleMgr",
-            other => other,
-        };
 
         // Handle Quasar Protobuf Public Gateway (`publicGatewaySvc`) across all 135 cataloged Quasar domains
         if effective_service == "publicGatewaySvc" {
@@ -482,7 +468,9 @@ impl ServerContext {
             method,
             args,
             kwargs,
-        ) {
+        )
+        .await
+        {
             return res;
         }
         if let Some(res) = services::social_corp_fleet::handle(
@@ -1071,12 +1059,13 @@ mod tests {
             .unwrap();
         let mut storyline_triggered = false;
         for i in 1..=16i64 {
+            let mid = 1000 + i;
             ctx.dispatch_rpc(
                 &mut session,
                 "agentMgr",
                 None,
                 "RequestMission",
-                &[PyRep::Integer(1001)],
+                &[PyRep::Integer(mid)],
                 &empty,
                 None,
             )
@@ -1087,7 +1076,7 @@ mod tests {
                 "agentMgr",
                 None,
                 "AcceptMission",
-                &[PyRep::Integer(1001)],
+                &[PyRep::Integer(mid)],
                 &empty,
                 None,
             )
@@ -1109,7 +1098,7 @@ mod tests {
                 "keeper",
                 None,
                 "ActivateAccelerationGate",
-                &[PyRep::Integer(1001)],
+                &[PyRep::Integer(mid)],
                 &empty,
                 None,
             )
@@ -1121,7 +1110,7 @@ mod tests {
                     "agentMgr",
                     None,
                     "CompleteMission",
-                    &[PyRep::Integer(1001)],
+                    &[PyRep::Integer(mid)],
                     &empty,
                     None,
                 )
@@ -1191,7 +1180,7 @@ mod tests {
             .await
             .unwrap();
 
-        // E2E-11: Probe Scanning, Wormhole Jump (within 500m of K162 ball 750_000_001), & Abyssal Filament Transition (consuming 47763)
+        // E2E-11: Probe Scanning (spawns K162 ball 750_000_001), Wormhole Jump, & Abyssal Filament Transition
         let scan_res = ctx
             .dispatch_rpc(
                 &mut session,
@@ -1232,7 +1221,37 @@ mod tests {
         .await
         .unwrap();
 
-        // E2E-12: CrimeWatch Illegal High-Sec Attack (automatic via FireWeapon on capsuleer 90_000_002 in Jita 1.0), CONCORD Response, & Kill Right Activation
+        // E2E-12: CrimeWatch Illegal High-Sec Attack (with rival capsuleer 90_000_002 undocked on grid in Jita 1.0), CONCORD Response, & Kill Right Activation
+        let mut sess2 = SessionState::new(200);
+        ctx.dispatch_rpc(
+            &mut sess2,
+            "authentication",
+            None,
+            "Login",
+            &[
+                PyRep::String("other".into()),
+                PyRep::String("other-secret".into()),
+            ],
+            &empty,
+            None,
+        )
+        .await
+        .unwrap();
+        ctx.dispatch_rpc(
+            &mut sess2,
+            "charUnboundMgr",
+            None,
+            "SelectCharacterID",
+            &[PyRep::Integer(90_000_002)],
+            &empty,
+            None,
+        )
+        .await
+        .unwrap();
+        ctx.dispatch_rpc(&mut sess2, "stationSvc", None, "Undock", &[], &empty, None)
+            .await
+            .unwrap();
+
         let cw_res = ctx
             .dispatch_rpc(
                 &mut session,
@@ -1250,7 +1269,7 @@ mod tests {
         };
         let kr_id = cw_kv.get("killRightID").unwrap().as_i64().unwrap();
         ctx.dispatch_rpc(
-            &mut session,
+            &mut sess2,
             "killRightMgr",
             None,
             "ActivateKillRight",
@@ -1261,7 +1280,34 @@ mod tests {
         .await
         .unwrap();
 
-        // Respawn ship ball in space and test Abyssal Filament consumption (`abyssalMgr.ActivateFilament`)
+        // Respawn 90_000_001 ship ball in space, verify legal kill right engagement by sess2, then test Abyssal Filament consumption (`abyssalMgr.ActivateFilament`)
+        let _ = ctx.db.dock_character(90_000_001, 60_003_760, false);
+        session.station_id = Some(60_003_760);
+        ctx.dispatch_rpc(&mut session, "stationSvc", None, "Undock", &[], &empty, None)
+            .await
+            .unwrap();
+        let legal_res = ctx
+            .dispatch_rpc(
+                &mut sess2,
+                "dogmaIM",
+                None,
+                "FireWeapon",
+                &[
+                    PyRep::Integer(90_000_001),
+                    PyRep::String("EntropicDisintegrator".into()),
+                    PyRep::Integer(10),
+                ],
+                &empty,
+                None,
+            )
+            .await
+            .unwrap();
+        let PyRep::KeyVal(lkv) = legal_res else {
+            panic!("Expected legal kill KeyVal");
+        };
+        assert_eq!(lkv.get("legalEngagement"), Some(&PyRep::Bool(true)));
+        assert_eq!(lkv.get("destroyed"), Some(&PyRep::Bool(true)));
+
         let _ = ctx.db.dock_character(90_000_001, 60_003_760, false);
         session.station_id = Some(60_003_760);
         ctx.dispatch_rpc(&mut session, "stationSvc", None, "Undock", &[], &empty, None)

@@ -19,9 +19,7 @@ pub fn handle(
     _kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
-        ("bookmark", "BookmarkLocation")
-        | ("accessGroupBookmarkMgr", "BookmarkStaticLocation")
-        | ("accessGroupBookmarkMgr", "AddFolder") => {
+        ("bookmark", "BookmarkLocation") | ("accessGroupBookmarkMgr", "BookmarkStaticLocation") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -55,7 +53,31 @@ pub fn handle(
             ])))
         }
 
-        ("mailMgr", "SendMail") | ("mailMgr", "CreateLabel") | ("mailMgr", "AssignLabels") => {
+        ("bookmark", "GetBookmarks") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let rows = ctx.db.with_snapshot(|snap| {
+                snap.bookmarks
+                    .values()
+                    .filter(|b| b.owner_id == char_id)
+                    .map(|b| {
+                        vec![
+                            PyRep::Integer(b.bookmark_id),
+                            PyRep::String(b.label.clone()),
+                            PyRep::Integer(b.solar_system_id as i64),
+                        ]
+                    })
+                    .collect()
+            });
+            Some(Ok(PyRep::rowset(
+                vec!["bookmarkID", "label", "solarSystemID"],
+                rows,
+            )))
+        }
+
+        ("mailMgr", "SendMail") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -78,11 +100,7 @@ pub fn handle(
             Some(Ok(PyRep::Integer(mid)))
         }
 
-        ("fleetMgr", "CreateFleet")
-        | ("fleetObjectHandler", "CreateFleet")
-        | ("fleetObjectHandler", "CreateWing")
-        | ("fleetObjectHandler", "CreateSquad")
-        | ("fleetProxy", "AddFleetFinderAdvert") => {
+        ("fleetMgr", "CreateFleet") | ("fleetObjectHandler", "CreateFleet") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -128,7 +146,7 @@ pub fn handle(
                 .clamp(0.0, 1.0);
             let reg_fee = IskCents::from_isk(1_599_800);
 
-            let res = ctx.db.with_mut_snapshot(|snap| {
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(ch) = snap.characters.get_mut(&char_id) else {
                     return Err(BridgeRpcError {
                         code: "CharacterNotFound".into(),
@@ -198,7 +216,7 @@ pub fn handle(
             let target_qty = target_qty_raw as u64;
             let corp_id = session.corporation_id.unwrap_or(1_000_125);
 
-            let res = ctx.db.with_mut_snapshot(|snap| {
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let per_u = IskCents::from_f64_isk(isk_per_unit);
                 let escrow =
                     per_u
@@ -262,7 +280,7 @@ pub fn handle(
             }
             let qty = qty_raw as u64;
 
-            let res = ctx.db.with_mut_snapshot(|snap| {
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(proj) = snap.corp_projects.get(&pid).cloned() else {
                     return Err(BridgeRpcError {
                         code: "ProjectNotFound".into(),
@@ -335,35 +353,34 @@ pub fn handle(
             }
         }
 
-        ("LSC", "GetChannels")
-        | ("XmppChatMgr", "CreatePlayerOwnedChannel")
-        | ("notificationMgr", "GetAllNotifications")
-        | ("notificationMgr", "GetUnprocessed")
-        | ("calendarMgr", "CreatePersonalEvent")
-        | ("allianceRegistry", "GetAlliance")
-        | ("corporationSvc", "GetCorpInfo")
-        | ("overviewPresetMgr", "GetStoredPreset") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
+        ("corporationSvc", "GetCorpInfo") => {
+            let _ = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let rows = ctx.db.with_snapshot(|snap| {
-                snap.bookmarks
-                    .values()
-                    .filter(|b| b.owner_id == char_id)
-                    .map(|b| {
-                        vec![
-                            PyRep::Integer(b.bookmark_id),
-                            PyRep::String(b.label.clone()),
-                            PyRep::Integer(b.solar_system_id as i64),
-                        ]
-                    })
-                    .collect()
-            });
-            Some(Ok(PyRep::rowset(
-                vec!["bookmarkID", "label", "solarSystemID"],
-                rows,
-            )))
+            let corp_id = args
+                .first()
+                .and_then(|a| a.as_i64())
+                .or(session.corporation_id)
+                .unwrap_or(1_000_125);
+            let corp_opt = ctx
+                .db
+                .with_snapshot(|snap| snap.corporations.get(&corp_id).cloned());
+            if let Some(corp) = corp_opt {
+                Some(Ok(PyRep::keyval([
+                    ("corporationID", PyRep::Integer(corp.corporation_id)),
+                    ("corporationName", PyRep::String(corp.name)),
+                    ("ticker", PyRep::String(corp.ticker)),
+                    ("ceoID", PyRep::Integer(corp.ceo_id)),
+                    ("taxRate", PyRep::Real(corp.tax_rate)),
+                ])))
+            } else {
+                Some(Ok(PyRep::keyval([
+                    ("corporationID", PyRep::Integer(corp_id)),
+                    ("corporationName", PyRep::String("NPC Corporation".into())),
+                    ("ticker", PyRep::String("NPC".into())),
+                ])))
+            }
         }
 
         _ => None,

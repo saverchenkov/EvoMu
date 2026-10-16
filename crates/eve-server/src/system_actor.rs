@@ -4,7 +4,6 @@
 
 use eve_destiny::{Ball, BallId, Ballpark, CombatState, DamageVector, DestinyEvent, MovementMode};
 use eve_sde::SolarSystemId;
-use glam::DVec3;
 use std::collections::HashMap;
 use std::sync::RwLock;
 use std::time::Duration;
@@ -24,6 +23,11 @@ pub struct TickBroadcast {
 pub enum SystemCommand {
     SpawnBall {
         ball: Ball,
+        reply: oneshot::Sender<Result<u64, String>>,
+    },
+    SpawnBallWithCombat {
+        ball: Ball,
+        combat_state: CombatState,
         reply: oneshot::Sender<Result<u64, String>>,
     },
     RemoveBall {
@@ -66,6 +70,24 @@ impl SystemHandle {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
             .send(SystemCommand::SpawnBall { ball, reply: tx })
+            .await
+            .map_err(|_| "Solar system actor stopped".to_string())?;
+        rx.await
+            .map_err(|_| "Solar system reply dropped".to_string())?
+    }
+
+    pub async fn spawn_ball_with_combat(
+        &self,
+        ball: Ball,
+        combat_state: CombatState,
+    ) -> Result<u64, String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SystemCommand::SpawnBallWithCombat {
+                ball,
+                combat_state,
+                reply: tx,
+            })
             .await
             .map_err(|_| "Solar system actor stopped".to_string())?;
         rx.await
@@ -159,6 +181,8 @@ impl SystemRegistry {
     }
 
     /// Spawns or retrieves a running Solar System Actor for `solar_system_id`.
+    /// Empty solar systems start with an empty `Ballpark` and hibernate (`LOD 0`) with zero timer
+    /// wakes until balls are spawned on grid.
     pub fn get_or_spawn(&self, solar_system_id: SolarSystemId) -> SystemHandle {
         if let Some(existing) = self
             .systems
@@ -180,61 +204,6 @@ impl SystemRegistry {
 
         tokio::spawn(async move {
             let mut ballpark = Ballpark::new(solar_system_id);
-            let grid_origin = DVec3::new(-107_303_361_060.0, -18_744_975_360.0, 436_489_052_160.0);
-            // Seed belt/anomaly pirate NPC balls (700_000_001..=700_000_020), wormhole ball (750_000_001), and ESS beacon (750_000_002)
-            for idx in 1..=20i64 {
-                let npc_id = 700_000_000 + idx;
-                ballpark.add_ball(Ball {
-                    id: npc_id,
-                    type_id: 11001, // Guristas Pithi Invader
-                    position: grid_origin + DVec3::new(800.0 + (idx as f64) * 50.0, 0.0, 0.0),
-                    velocity: DVec3::ZERO,
-                    max_velocity: 310.0,
-                    inertia: 2.5,
-                    mass: 1_000_000.0,
-                    radius: 35.0,
-                    speed_fraction: 0.0,
-                    mode: MovementMode::Stop,
-                });
-                ballpark.combat_states.insert(
-                    npc_id,
-                    CombatState {
-                        shield_hp: 50.0,
-                        max_shield_hp: 50.0,
-                        armor_hp: 50.0,
-                        max_armor_hp: 50.0,
-                        structure_hp: 50.0,
-                        max_structure_hp: 50.0,
-                        ..CombatState::default()
-                    },
-                );
-            }
-            ballpark.add_ball(Ball {
-                id: 750_000_001,
-                type_id: 26272, // Wormhole K162
-                position: grid_origin + DVec3::new(500.0, 0.0, 0.0),
-                velocity: DVec3::ZERO,
-                max_velocity: 0.0,
-                inertia: 1.0,
-                mass: 1_000_000_000.0,
-                radius: 1500.0,
-                speed_fraction: 0.0,
-                mode: MovementMode::Rigid,
-            });
-            ballpark.add_ball(Ball {
-                id: 750_000_002,
-                type_id: 35832, // Encounter Surveillance System (ESS) Beacon
-                position: grid_origin + DVec3::new(300.0, 0.0, 0.0),
-                velocity: DVec3::ZERO,
-                max_velocity: 0.0,
-                inertia: 1.0,
-                mass: 100_000_000.0,
-                radius: 500.0,
-                speed_fraction: 0.0,
-                mode: MovementMode::Rigid,
-            });
-            let _ = ballpark.step(0.001); // Clear initial spawn events
-
             let mut ticker = tokio::time::interval(Duration::from_secs(1));
             ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
             let mut lod_counter: u64 = 0;
@@ -242,15 +211,13 @@ impl SystemRegistry {
             loop {
                 tokio::select! {
                     biased;
-                    _ = ticker.tick() => {
+                    _ = ticker.tick(), if !ballpark.balls.is_empty() => {
                         lod_counter = lod_counter.wrapping_add(1);
                         let has_player_balls = ballpark.balls.keys().any(|&id| id < 700_000_000);
                         let (should_step, dt) = if has_player_balls {
                             (true, 1.0) // Tier 2 Active Grid: 1.0 Hz
-                        } else if !ballpark.balls.is_empty() {
-                            (lod_counter.is_multiple_of(5), 5.0) // Tier 1 System Presence: 0.2 Hz
                         } else {
-                            (lod_counter.is_multiple_of(30), 30.0) // Tier 0 Empty Macro: 1/30 Hz
+                            (lod_counter.is_multiple_of(5), 5.0) // Tier 1 System Presence: 0.2 Hz
                         };
                         if should_step {
                             let events = ballpark.step(dt);
@@ -270,6 +237,17 @@ impl SystemRegistry {
                                 let ball_id = ball.id;
                                 ballpark.balls.remove(&ball_id);
                                 ballpark.add_ball(ball);
+                                let _ = reply.send(Ok(ballpark.current_tick));
+                            }
+                            SystemCommand::SpawnBallWithCombat {
+                                ball,
+                                combat_state,
+                                reply,
+                            } => {
+                                let ball_id = ball.id;
+                                ballpark.balls.remove(&ball_id);
+                                ballpark.add_ball(ball);
+                                ballpark.combat_states.insert(ball_id, combat_state);
                                 let _ = reply.send(Ok(ballpark.current_tick));
                             }
                             SystemCommand::RemoveBall { ball_id, reply } => {

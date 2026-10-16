@@ -337,6 +337,8 @@ pub struct ActiveMissionRecord {
     pub mission_id: u32,
     pub character_id: i64,
     pub agent_id: i64,
+    #[serde(default)]
+    pub solar_system_id: SolarSystemId,
     pub state: String, // "Offered", "Accepted", "Completed"
     pub current_room_id: u32,
     pub npcs_remaining: u32,
@@ -865,11 +867,17 @@ impl WorldRepository {
         repo
     }
 
-    /// Saves the complete transactional world state to a JSON snapshot file (`M1` durable persistence).
+    /// Saves the complete transactional world state to a JSON snapshot file (`M1` durable persistence)
+    /// using an atomic temp-file write + rename outside the lock.
     pub fn save_snapshot_to_file(&self, path: impl AsRef<Path>) -> Result<(), String> {
-        let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
-        let json = serde_json::to_string_pretty(&*guard).map_err(|e| e.to_string())?;
-        std::fs::write(path, json).map_err(|e| e.to_string())
+        let json = {
+            let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
+            serde_json::to_string_pretty(&*guard).map_err(|e| e.to_string())?
+        };
+        let target = path.as_ref();
+        let tmp_path = target.with_extension("json.tmp");
+        std::fs::write(&tmp_path, json).map_err(|e| e.to_string())?;
+        std::fs::rename(&tmp_path, target).map_err(|e| e.to_string())
     }
 
     /// Restores the transactional world state from a JSON snapshot file.
@@ -888,22 +896,44 @@ impl WorldRepository {
         f(&guard)
     }
 
-    /// Atomically applies `f` to a staged clone of the snapshot and commits only if `f` completes
-    /// without panicking, preventing partial state corruption on unwind.
+    /// Mutates the snapshot in-place for infallible operations and flushes atomically outside the write lock.
     pub fn with_mut_snapshot<F, R>(&self, f: F) -> R
     where
         F: FnOnce(&mut WorldStateSnapshot) -> R,
     {
-        let mut guard = self.inner.write().unwrap_or_else(|e| e.into_inner());
-        let mut staged = guard.clone();
-        let out = f(&mut staged);
-        *guard = staged;
+        let out = {
+            let mut guard = self.inner.write().unwrap_or_else(|e| e.into_inner());
+            f(&mut guard)
+        };
         if let Some(ref p) = self.snapshot_path {
-            if let Ok(json) = serde_json::to_string_pretty(&*guard) {
-                let _ = std::fs::write(p, json);
-            }
+            let _ = self.save_snapshot_to_file(p);
         }
         out
+    }
+
+    /// Transactionally applies a fallible closure `f` to a staged snapshot and commits ONLY when
+    /// `f` returns `Ok(val)`. On `Err(err)`, all staged mutations are discarded.
+    pub fn try_with_mut_snapshot<F, T, E>(&self, f: F) -> Result<T, E>
+    where
+        F: FnOnce(&mut WorldStateSnapshot) -> Result<T, E>,
+    {
+        let res = {
+            let mut guard = self.inner.write().unwrap_or_else(|e| e.into_inner());
+            let mut staged = guard.clone();
+            match f(&mut staged) {
+                Ok(val) => {
+                    *guard = staged;
+                    Ok(val)
+                }
+                Err(err) => Err(err),
+            }
+        };
+        if res.is_ok() {
+            if let Some(ref p) = self.snapshot_path {
+                let _ = self.save_snapshot_to_file(p);
+            }
+        }
+        res
     }
 
     pub fn authenticate(
@@ -1431,6 +1461,7 @@ mod tests {
                     mission_id: 1001,
                     character_id: created.character_id,
                     agent_id: 3018924,
+                    solar_system_id: 30000142,
                     state: "Accepted".to_string(),
                     current_room_id: 1,
                     npcs_remaining: 3,
@@ -1439,6 +1470,14 @@ mod tests {
             snap.committed_idempotency_keys
                 .insert((created.character_id, "idem-1".to_string()));
         });
+
+        // Verify try_with_mut_snapshot discards mutations when closure returns Err
+        let err_res: Result<(), &str> = repo.try_with_mut_snapshot(|snap| {
+            snap.items.clear();
+            Err("simulated failure")
+        });
+        assert!(err_res.is_err());
+        assert!(!repo.get_items_for_character(created.character_id).is_empty());
 
         let snap_path = std::env::temp_dir().join("evomu_test_snapshot.json");
         repo.save_snapshot_to_file(&snap_path).unwrap();

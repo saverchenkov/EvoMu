@@ -25,10 +25,7 @@ pub async fn handle(
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
         // Turret / Missile / Vorton / Entropic / Breacher Combat Engagement & CrimeWatch 2.0 Enforcement
-        ("dogmaIM", "FireWeapon")
-        | ("beyonce", "CmdAttackTarget")
-        | ("superWeaponMgr", "ActivateSinglePointTargetedModule")
-        | ("superWeaponMgr", "ActivateSlashModule") => {
+        ("dogmaIM", "FireWeapon") | ("beyonce", "CmdAttackTarget") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -77,11 +74,55 @@ pub async fn handle(
                 .unwrap_or("ProjectileTurret");
             let spool_cycles = args.get(2).and_then(|a| a.as_i64()).unwrap_or(1).max(1) as u32;
 
-            // Check if target_id is another player capsuleer (CrimeWatch 2.0 legal vs illegal aggression)
-            let is_player_target = ctx
-                .db
-                .with_snapshot(|snap| snap.characters.contains_key(&target_id));
-            if is_player_target {
+            // Resolve whether `target_id` is a player character ID or a player's active ship ID
+            let player_target_info = ctx.db.with_snapshot(|snap| {
+                if let Some(ch) = snap.characters.get(&target_id) {
+                    Some((ch.character_id, ch.active_ship_id))
+                } else {
+                    snap.characters
+                        .values()
+                        .find(|c| c.active_ship_id == target_id)
+                        .map(|c| (c.character_id, c.active_ship_id))
+                }
+            });
+            let target_ball_id = player_target_info
+                .map(|(_, s_id)| s_id)
+                .unwrap_or(target_id);
+
+            // Require target ball (NPC or player's active ship) to exist in the current solar system's Ballpark
+            let Some((_, target_ball)) = (match sys_handle.get_ball_snapshot(target_ball_id).await {
+                Ok(v) => v,
+                Err(e) => {
+                    return Some(Err(BridgeRpcError {
+                        code: "DestinyQueryFailed".into(),
+                        message: e,
+                    }))
+                }
+            }) else {
+                return Some(Err(BridgeRpcError {
+                    code: "TargetNotInSpace".into(),
+                    message: format!(
+                        "Target {target_id} (ball {target_ball_id}) is not present in space in system {sys_id}"
+                    ),
+                }));
+            };
+
+            let dist = attacker_ball.position.distance(target_ball.position);
+            let optimal_range = 20_000.0;
+            let falloff_range = 10_000.0;
+            if dist > optimal_range + 3.0 * falloff_range {
+                return Some(Err(BridgeRpcError {
+                    code: "TargetOutOfRange".into(),
+                    message: format!(
+                        "Target {target_id} is {:.1} m away (exceeds weapon range {:.1} m)",
+                        dist,
+                        optimal_range + 3.0 * falloff_range
+                    ),
+                }));
+            }
+
+            // If target is another player capsuleer, evaluate CrimeWatch 2.0 legality in current system
+            if let Some((victim_char_id, _)) = player_target_info {
                 let sec = ctx
                     .sde
                     .solar_systems
@@ -91,7 +132,7 @@ pub async fn handle(
                 let has_active_suspect = ctx.db.with_snapshot(|snap| {
                     snap.kill_rights
                         .values()
-                        .any(|kr| kr.target_id == target_id && kr.is_active_suspect)
+                        .any(|kr| kr.target_id == victim_char_id && kr.is_active_suspect)
                 });
                 if sec >= 0.5 && !has_active_suspect {
                     // Illegal High-Sec Attack -> Criminal Flag -> CONCORD Response -> Kill Right (`E2E-12`)
@@ -120,7 +161,7 @@ pub async fn handle(
                             krid,
                             KillRightRecord {
                                 kill_right_id: krid,
-                                owner_id: target_id,
+                                owner_id: victim_char_id,
                                 target_id: char_id,
                                 activation_fee: IskCents::from_isk(1_000_000),
                                 is_active_suspect: false,
@@ -130,71 +171,13 @@ pub async fn handle(
                     });
                     return Some(Ok(PyRep::keyval([
                         ("criminalCharacterID", PyRep::Integer(char_id)),
-                        ("victimCharacterID", PyRep::Integer(target_id)),
+                        ("victimCharacterID", PyRep::Integer(victim_char_id)),
                         ("concordResponseSeconds", PyRep::Real(concord_delay)),
                         ("concordKillmailID", PyRep::Integer(kill_id)),
                         ("killRightID", PyRep::Integer(kr_id)),
                         ("criminalTimerSeconds", PyRep::Integer(900)),
                     ])));
-                } else {
-                    // Legal engagement against Suspect / LowSec / NullSec capsuleer
-                    let kid = ctx.db.with_mut_snapshot(|snap| {
-                        for kr in snap.kill_rights.values_mut() {
-                            if kr.target_id == target_id && kr.is_active_suspect {
-                                kr.is_active_suspect = false;
-                            }
-                        }
-                        snap.next_entity_id += 1;
-                        let id = snap.next_entity_id;
-                        snap.killmails.insert(
-                            id,
-                            KillmailRecord {
-                                kill_id: id,
-                                victim_character_id: target_id,
-                                attacker_character_id: char_id,
-                                solar_system_id: sys_id,
-                                ship_type_id: 587,
-                                total_value_isk: 230_000.0,
-                            },
-                        );
-                        id
-                    });
-                    return Some(Ok(PyRep::keyval([
-                        ("targetID", PyRep::Integer(target_id)),
-                        ("killID", PyRep::Integer(kid)),
-                        ("legalEngagement", PyRep::Bool(true)),
-                    ])));
                 }
-            }
-
-            // Require target ball to exist in the current solar system's Ballpark
-            let Some((_, target_ball)) = (match sys_handle.get_ball_snapshot(target_id).await {
-                Ok(v) => v,
-                Err(e) => {
-                    return Some(Err(BridgeRpcError {
-                        code: "DestinyQueryFailed".into(),
-                        message: e,
-                    }))
-                }
-            }) else {
-                return Some(Err(BridgeRpcError {
-                    code: "TargetNotInSpace".into(),
-                    message: format!("Target ball {target_id} is not present in system {sys_id}"),
-                }));
-            };
-
-            let dist = attacker_ball.position.distance(target_ball.position);
-            let optimal_range = 20_000.0;
-            let falloff_range = 10_000.0;
-            if dist > optimal_range + 3.0 * falloff_range {
-                return Some(Err(BridgeRpcError {
-                    code: "TargetOutOfRange".into(),
-                    message: format!(
-                        "Target {target_id} is {:.1} m away (exceeds weapon range {:.1} m)",
-                        dist,
-                        optimal_range + 3.0 * falloff_range
-                    ),
-                }));
             }
 
             let p_hit = turret_chance_to_hit(
@@ -220,15 +203,15 @@ pub async fn handle(
                 }
                 "VortonProjector" => {
                     let hits = vorton_chain_targets(
-                        target_id,
+                        target_ball_id,
                         target_ball.position,
                         &[
                             (
-                                target_id + 1,
+                                target_ball_id + 1,
                                 target_ball.position + DVec3::new(1000.0, 0.0, 0.0),
                             ),
                             (
-                                target_id + 2,
+                                target_ball_id + 2,
                                 target_ball.position + DVec3::new(2000.0, 0.0, 0.0),
                             ),
                         ],
@@ -247,7 +230,7 @@ pub async fn handle(
             };
 
             let Some((applied_dmg, destroyed, _)) =
-                (match sys_handle.apply_damage(target_id, scaled_dmg).await {
+                (match sys_handle.apply_damage(target_ball_id, scaled_dmg).await {
                     Ok(v) => v,
                     Err(e) => {
                         return Some(Err(BridgeRpcError {
@@ -259,9 +242,45 @@ pub async fn handle(
             else {
                 return Some(Err(BridgeRpcError {
                     code: "TargetNotInSpace".into(),
-                    message: format!("Target ball {target_id} no longer exists"),
+                    message: format!("Target ball {target_ball_id} no longer exists"),
                 }));
             };
+
+            // Handle legal player target engagement
+            if let Some((victim_char_id, _)) = player_target_info {
+                let kill_id = if destroyed {
+                    ctx.db.with_mut_snapshot(|snap| {
+                        for kr in snap.kill_rights.values_mut() {
+                            if kr.target_id == victim_char_id && kr.is_active_suspect {
+                                kr.is_active_suspect = false;
+                            }
+                        }
+                        snap.next_entity_id += 1;
+                        let id = snap.next_entity_id;
+                        snap.killmails.insert(
+                            id,
+                            KillmailRecord {
+                                kill_id: id,
+                                victim_character_id: victim_char_id,
+                                attacker_character_id: char_id,
+                                solar_system_id: sys_id,
+                                ship_type_id: target_ball.type_id,
+                                total_value_isk: 230_000.0,
+                            },
+                        );
+                        id
+                    })
+                } else {
+                    0
+                };
+                return Some(Ok(PyRep::keyval([
+                    ("targetID", PyRep::Integer(victim_char_id)),
+                    ("appliedDamage", PyRep::Real(applied_dmg)),
+                    ("destroyed", PyRep::Bool(destroyed)),
+                    ("killID", PyRep::Integer(kill_id)),
+                    ("legalEngagement", PyRep::Bool(true)),
+                ])));
+            }
 
             if !destroyed {
                 return Some(Ok(PyRep::keyval([
@@ -272,7 +291,7 @@ pub async fn handle(
                 ])));
             }
 
-            // Target ball was destroyed in Ballpark: credit DBS/ESS bounty, spawn wreck, and update mission/career progress
+            // Target NPC ball was destroyed in Ballpark: credit DBS/ESS bounty, spawn wreck, and update mission/career progress
             let dbs_mult = ctx
                 .db
                 .with_snapshot(|s| s.system_states.get(&sys_id).map(|st| st.dbs_multiplier))
@@ -280,7 +299,7 @@ pub async fn handle(
             let (pilot_isk, _tax, main_ess, reserve_ess) =
                 compute_dbs_and_ess_bounty_split(100_000.0, dbs_mult, 0.10);
 
-            let res = ctx.db.with_mut_snapshot(|snap| {
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let pilot_cents = IskCents::from_f64_isk(pilot_isk);
                 let main_cents = IskCents::from_f64_isk(main_ess);
                 let reserve_cents = IskCents::from_f64_isk(reserve_ess);
@@ -299,9 +318,13 @@ pub async fn handle(
                         .unwrap_or(st.ess_reserve_bank);
                 }
 
-                // Decrement npcs_remaining on any active ("Accepted") mission for this character
+                // Decrement npcs_remaining only on active ("Accepted") missions in the SAME solar_system_id
                 for ((m_char_id, _), m) in snap.active_missions.iter_mut() {
-                    if *m_char_id == char_id && m.state == "Accepted" && m.npcs_remaining > 0 {
+                    if *m_char_id == char_id
+                        && m.state == "Accepted"
+                        && m.solar_system_id == sys_id
+                        && m.npcs_remaining > 0
+                    {
                         m.npcs_remaining -= 1;
                     }
                 }
@@ -352,7 +375,7 @@ pub async fn handle(
                         total_value_isk: 100_000.0,
                     },
                 );
-                Ok((kid, wreck_id))
+                Ok::<(i64, i64), BridgeRpcError>((kid, wreck_id))
             });
 
             match res {
@@ -376,7 +399,7 @@ pub async fn handle(
                 Err(e) => return Some(Err(e)),
             };
             let kr_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let res = ctx.db.with_mut_snapshot(|snap| {
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(kr) = snap.kill_rights.get(&kr_id).cloned() else {
                     return Err(BridgeRpcError {
                         code: "KillRightNotFound".into(),
@@ -421,10 +444,7 @@ pub async fn handle(
             }
         }
 
-        ("essMgr", "AttemptLinkToMainBank")
-        | ("essMgr", "AttemptLinkToReserveBank")
-        | ("essMgr", "GetDataForClientSolarSystem")
-        | ("essMgr", "GetMainBankTheftsForClientSolarSystem") => {
+        ("essMgr", "AttemptLinkToMainBank") | ("essMgr", "AttemptLinkToReserveBank") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -487,7 +507,7 @@ pub async fn handle(
                 }));
             }
 
-            let res = ctx.db.with_mut_snapshot(|snap| {
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(st) = snap.system_states.get_mut(&sys_id) else {
                     return Err(BridgeRpcError {
                         code: "SystemStateNotFound".into(),
@@ -546,24 +566,28 @@ pub async fn handle(
             }
         }
 
-        ("fighterMgr", "CmdActivateAbilitySlots")
-        | ("fighterMgr", "ExecuteMovementCommandOnFighters")
-        | ("fighterMgr", "GetFightersForShip") => {
+        ("fighterMgr", "CmdActivateAbilitySlots") | ("fighterMgr", "GetFightersForShip") => {
             let _ = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let dmg = compute_fighter_squadron_damage(50.0, 9, 4.5);
+            let ability_id = args.first().and_then(|a| a.as_i64()).unwrap_or(1) as u32;
+            let cooldown = ctx
+                .sde
+                .fighter_abilities
+                .get(&ability_id)
+                .map(|a| a.cooldown_sec)
+                .unwrap_or(4.5)
+                .max(1.0);
+            let dmg = compute_fighter_squadron_damage(50.0, 9, cooldown);
             Some(Ok(PyRep::keyval([
+                ("abilityID", PyRep::Integer(ability_id as i64)),
                 ("squadronSize", PyRep::Integer(9)),
                 ("volleyDamage", PyRep::Real(dmg)),
             ])))
         }
 
-        ("crimewatch", "GetClientStates")
-        | ("crimewatch", "GetMySecurityStatus")
-        | ("crimewatch", "GetCharacterSecurityStatus")
-        | ("crimewatch", "GetSecurityStatusTransactions") => {
+        ("crimewatch", "GetMySecurityStatus") | ("crimewatch", "GetCharacterSecurityStatus") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -579,13 +603,7 @@ pub async fn handle(
             ])))
         }
 
-        ("warStatisticMgr", "GetKillMail")
-        | ("warStatisticMgr", "GetKills")
-        | ("warStatisticMgr", "GetBaseInfo")
-        | ("warsInfoMgr", "GetWarsByOwnerID")
-        | ("warsInfoMgr", "GetPublicWarInfo")
-        | ("bountyProxy", "GetBounties")
-        | ("bountyProxy", "GetBountiesAndKillRights") => {
+        ("warStatisticMgr", "GetKillMail") | ("warStatisticMgr", "GetKills") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),

@@ -130,6 +130,7 @@ impl LivingWorldDirector {
         &self,
         solar_system_id: SolarSystemId,
         systems: &SystemRegistry,
+        sde: &eve_sde::SdeRegistry,
     ) -> usize {
         let to_spawn: Vec<LivingWorldConvoy> = {
             let mut guard = self.convoys.write().unwrap_or_else(|e| e.into_inner());
@@ -143,8 +144,14 @@ impl LivingWorldDirector {
             out
         };
 
+        let station_pos = sde
+            .solar_systems
+            .get(&solar_system_id)
+            .and_then(|sys| sys.stations.first().map(|st| st.position))
+            .unwrap_or(DVec3::ZERO);
+        let grid_origin = station_pos + DVec3::new(1_500.0, 0.0, 0.0);
+
         let handle = systems.get_or_spawn(solar_system_id);
-        let grid_origin = DVec3::new(-107_303_361_060.0, -18_744_975_360.0, 436_489_052_160.0);
         let mut count = 0;
         for c in to_spawn {
             let ball = Ball {
@@ -201,42 +208,39 @@ impl LivingWorldDirector {
             c.clone()
         };
 
-        let res = db
-            .with_mut_snapshot(|snap| -> Result<(i64, IskCents), String> {
-                snap.next_entity_id += 1;
-                let loot_item_id = snap.next_entity_id;
-                snap.items.insert(
-                    loot_item_id,
-                    InventoryItemRecord {
-                        item_id: loot_item_id,
-                        type_id: convoy.cargo_type_id,
-                        owner_id: attacker_char_id,
-                        location_id: convoy.destination_station_id,
-                        flag: InventoryFlag::Hangar,
-                        quantity: convoy.cargo_quantity,
-                        singleton: false,
-                        version: 1,
-                        dynamic_attributes: HashMap::new(),
-                        source_mutaplasmid_id: None,
-                        insured_payout_isk: 0.0,
-                    },
-                );
+        db.try_with_mut_snapshot(|snap| -> Result<(i64, IskCents), String> {
+            snap.next_entity_id += 1;
+            let loot_item_id = snap.next_entity_id;
+            snap.items.insert(
+                loot_item_id,
+                InventoryItemRecord {
+                    item_id: loot_item_id,
+                    type_id: convoy.cargo_type_id,
+                    owner_id: attacker_char_id,
+                    location_id: convoy.destination_station_id,
+                    flag: InventoryFlag::Hangar,
+                    quantity: convoy.cargo_quantity,
+                    singleton: false,
+                    version: 1,
+                    dynamic_attributes: HashMap::new(),
+                    source_mutaplasmid_id: None,
+                    insured_payout_isk: 0.0,
+                },
+            );
 
-                // Spike destination station ask orders for `cargo_type_id` by +15% (supply shock)
-                let mut new_ask_price = IskCents::from_isk(6);
-                for order in snap.market_orders.values_mut() {
-                    if !order.is_bid
-                        && order.station_id == convoy.destination_station_id
-                        && order.type_id == convoy.cargo_type_id
-                    {
-                        let spiked = ((order.price.0 as f64) * 1.15).ceil();
-                        order.price = IskCents(spiked.clamp(1.0, i64::MAX as f64) as i64);
-                        new_ask_price = order.price;
-                    }
+            // Spike destination station ask orders for `cargo_type_id` by +15% (supply shock)
+            let mut new_ask_price = IskCents::from_isk(6);
+            for order in snap.market_orders.values_mut() {
+                if !order.is_bid
+                    && order.station_id == convoy.destination_station_id
+                    && order.type_id == convoy.cargo_type_id
+                {
+                    let spiked = ((order.price.0 as f64) * 1.15).ceil();
+                    order.price = IskCents(spiked.clamp(1.0, i64::MAX as f64) as i64);
+                    new_ask_price = order.price;
                 }
-                Ok((loot_item_id, new_ask_price))
-            })?;
-
-        Ok(res)
+            }
+            Ok((loot_item_id, new_ask_price))
+        })
     }
 }

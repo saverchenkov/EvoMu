@@ -16,9 +16,7 @@ pub fn handle(
     _kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
-        ("facWarMgr", "EnlistMe")
-        | ("fwCharacterEnlistmentMgr", "CreateMyDirectEnlistment")
-        | ("fwCharacterEnlistmentMgr", "GetMyEnlistment") => {
+        ("facWarMgr", "EnlistMe") | ("fwCharacterEnlistmentMgr", "CreateMyDirectEnlistment") => {
             let (_, _char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -31,9 +29,7 @@ pub fn handle(
             ])))
         }
 
-        ("facWarMgr", "CaptureComplex")
-        | ("fwVictoryPointMgr", "GetLocalVictoryPointState")
-        | ("insurgencySolarsystem", "GetLocalCampaignClientSnapshot") => {
+        ("facWarMgr", "CaptureComplex") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -46,7 +42,7 @@ pub fn handle(
             }
             let sys_id = session.solar_system_id.unwrap_or(30_002_813);
             let lp_payout = 15_000i64;
-            let res = ctx.db.with_mut_snapshot(|snap| {
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
                 if let Some(st) = snap.system_states.get_mut(&sys_id) {
                     if st.fw_contested_pct >= 100.0 {
                         return Err(BridgeRpcError {
@@ -80,10 +76,7 @@ pub fn handle(
             }
         }
 
-        ("sovMgr", "ClaimSovereignty")
-        | ("sovMgr", "AcquireSkyhooks")
-        | ("sovMgr", "DestroySkyhooks")
-        | ("colonyResourcesMgr", "GetMyCorporationSkyhooks") => {
+        ("sovMgr", "ClaimSovereignty") | ("sovMgr", "AcquireSkyhooks") => {
             let (_, _char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -125,14 +118,7 @@ pub fn handle(
         }
 
         ("sovMgr", "GetSovStructuresInfoForLocalSolarSystem")
-        | ("sovMgr", "GetSovStructuresInfoForSolarSystem")
-        | ("sovMgr", "GetInfrastructureHubInfo")
-        | ("devIndexManager", "GetAllDevelopmentIndices")
-        | ("fwWarzoneSolarsystem", "GetLocalOccupationState")
-        | ("fwWarzoneSolarsystem", "GetAllWarzones")
-        | ("insurgencySolarsystem", "GetAllVisibleCampaigns")
-        | ("dynamicResourceCacheMgr", "GetESSSystemDetails")
-        | ("dynamicResourceCacheMgr", "GetDynamicResourceSettings") => {
+        | ("devIndexManager", "GetAllDevelopmentIndices") => {
             let _ = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),

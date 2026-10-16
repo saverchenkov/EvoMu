@@ -26,7 +26,7 @@ pub fn handle(
     _kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
-        ("reprocessingSvc", "Reprocess") | ("reprocessingSvc", "SetSessionCheck") => {
+        ("reprocessingSvc", "Reprocess") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -40,7 +40,7 @@ pub fn handle(
             let item_id = args.first().and_then(|a| a.as_i64()).unwrap_or(100_000_012);
             let yield_rate = compute_reprocessing_yield_rate(0.50, 5, 5, 5, 0.0);
 
-            let res = ctx.db.with_mut_snapshot(|snap| {
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(item) = snap.items.get(&item_id).cloned() else {
                     return Err(BridgeRpcError {
                         code: "ItemNotFound".into(),
@@ -92,7 +92,6 @@ pub fn handle(
         }
 
         ("structureCompressionMgr", "CompressItem")
-        | ("structureCompressionMgr", "CompressItemInStructure")
         | ("inSpaceCompressionMgr", "CompressItemInSpace") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
@@ -158,7 +157,7 @@ pub fn handle(
             let base_time = bp.manufacturing_time_sec;
             let inv_prob = compute_invention_probability(0.30, 5, 5, 5, 1.0);
 
-            let res = ctx.db.with_mut_snapshot(|snap| {
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
                 // Verify character owns an unlocked blueprint item at `station_id`
                 let bp_item = snap
                     .items
@@ -277,16 +276,14 @@ pub fn handle(
             }
         }
 
-        ("industryManager", "CompleteJob")
-        | ("industryManager", "CompleteManyJobs")
-        | ("ramProxy", "CompleteJob") => {
+        ("industryManager", "CompleteJob") | ("ramProxy", "CompleteJob") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
             let job_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
 
-            let res = ctx.db.with_mut_snapshot(|snap| {
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(job) = snap.industry_jobs.get(&job_id).cloned() else {
                     return Err(BridgeRpcError {
                         code: "JobNotFound".into(),
@@ -375,12 +372,8 @@ pub fn handle(
             }
         }
 
-        // Planetary Interaction (`planetMgr` / `planetOrbitalRegistryBroker`, `E2E-13`)
-        ("planetMgr", "CreateColony")
-        | ("planetMgr", "Flush")
-        | ("planetMgr", "GMAddCommodity")
-        | ("planetOrbitalRegistryBroker", "GetTaxRate")
-        | ("planetOrbitalRegistryBroker", "GetSettingsInfo") => {
+        // Planetary Interaction (`planetMgr`, `E2E-13`)
+        ("planetMgr", "CreateColony") | ("planetMgr", "Flush") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -415,12 +408,7 @@ pub fn handle(
             ])))
         }
 
-        ("industryManager", "GetJobsByOwner")
-        | ("industryManager", "GetJobCounts")
-        | ("facilityManager", "GetFacilities")
-        | ("blueprintManager", "GetBlueprintDataByOwner")
-        | ("characterMiningLedger", "GetCharacterLogs")
-        | ("moonExtractions", "GetExtractionsForCorp") => {
+        ("industryManager", "GetJobsByOwner") | ("industryManager", "GetJobCounts") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
