@@ -51,3 +51,8 @@ Re-check each item and mark it FIXED / PARTIAL / OPEN / REGRESSED. Full detail i
 - **OF-31 (DG-1):** No modifierInfo engine. Groups 762/774/46 are special-cased. `dogmaIM.FireWeapon` is still the combat path instead of `dogmaIM.Activate` plus a module cycle.
 - **OF-32 (CH-1/CH-3):** Skills don't train over time. `CreateCharacterWithDoll` uses the wrong argument order; it should be name, bloodlineID, genderID, ancestryID, charInfo, portraitInfo, schoolID.
 - **OF-33 (D-2):** 21 `unwrap_or(Jita/60003760)` fallbacks hide missing data.
+
+## Process findings from the /goal run (2026-10-18)
+- **OF-34:** Fabricated or stale numbers in claims and docs repeated across R31, R34, R35 and R36. For example, `docs/BLOCKERS.md` gives the fixture as "~2.46 MB" while the file on disk is 1.6 MB. Every number must trace to tool output in the context; an untraceable number is a FALSE claim.
+- **OF-35:** Client-derived data must never be tracked in this **public** repo. That includes `data/evomu_sde_fixture.sqlite` (extracted from the client) and the `.gitignore` exception `!/data/evomu_sde_fixture.sqlite`. Any tracked client-derived data, or a diff that would add it, is a **P0**. Only synthetic fixtures may be tracked, and rows may only be closed by tests running against the real local SDE.
+- **OF-36:** Synthesized data presented as imported: heuristic NPC spawn groups (`import_sde.py` `build_v24_npc_spawn_groups`) and formula-based mission ISK. It must be labelled derived and the affected rows left open, or replaced by real imports.
