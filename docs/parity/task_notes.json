@@ -125,15 +125,15 @@
  },
  "ESI-2": {
   "assessment": "PARTIAL",
-  "note": "OpenAPI HTTP/1.1 router, validator, OAuth2 Bearer guards, ETag/304, X-Pages, 420 rate-limiting, and 24 tag sample routes implemented; 7 tags return 501 pending ESI-5..ESI-7."
+  "note": "OpenAPI HTTP/1.1 router, validator, OAuth2 Bearer guards, ETag/304, X-Pages, 420 rate-limiting, and 63 live routes implemented; remaining routes return 501 pending ESI-3..ESI-7."
  },
  "ESI-3": {
-  "assessment": "NOT STARTED",
-  "note": ""
+  "assessment": "PARTIAL",
+  "note": "Universe hierarchy/celestials/stargates/structures/names/ids, Status, Meta, Routes, Search, Insurance, Sovereignty, Wars, Dogma, and Killmails implemented; FW/Incursions return 501."
  },
  "ESI-4": {
-  "assessment": "NOT STARTED",
-  "note": ""
+  "assessment": "PARTIAL",
+  "note": "Character affiliation/portrait/standings/fatigue/blueprints, Clones/implants, Skills/attributes/queue, Location/online/ship, Fittings, Assets, Wallet, Loyalty, and Mail CRUD implemented."
  },
  "ESI-5": {
   "assessment": "NOT STARTED",

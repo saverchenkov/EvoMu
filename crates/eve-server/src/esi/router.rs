@@ -27,7 +27,6 @@ pub struct EsiRouter {
     pub error_limit_window_secs: u64,
     error_windows: RwLock<HashMap<String, ErrorLimitWindow>>,
     request_seq: AtomicU64,
-    pub autopilot_waypoints: RwLock<HashMap<i64, Vec<i64>>>,
 }
 
 impl EsiRouter {
@@ -50,18 +49,7 @@ impl EsiRouter {
             error_limit_window_secs: error_limit_window_secs.max(1),
             error_windows: RwLock::new(HashMap::new()),
             request_seq: AtomicU64::new(1),
-            autopilot_waypoints: RwLock::new(HashMap::new()),
         }
-    }
-
-    /// Returns the recorded autopilot waypoint queue for `character_id` (`POST /ui/autopilot/waypoint`).
-    pub fn get_autopilot_waypoints(&self, character_id: i64) -> Vec<i64> {
-        self.autopilot_waypoints
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&character_id)
-            .cloned()
-            .unwrap_or_default()
     }
 
     fn client_bucket_key(req: &EsiHttpRequest) -> String {
@@ -584,7 +572,7 @@ impl EsiRouter {
             &query_params,
             verified_claims.as_ref(),
             page,
-            &self.autopilot_waypoints,
+            &req.body,
         );
 
         if exec.status_code >= 400 {
@@ -769,11 +757,13 @@ fn percent_decode(input: &str) -> String {
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let (Some(hi), Some(lo)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
-                out.push((hi << 4) | lo);
-                i += 3;
-                continue;
+        if bytes[i] == b'%' {
+            if let (Some(&b1), Some(&b2)) = (bytes.get(i + 1), bytes.get(i + 2)) {
+                if let (Some(hi), Some(lo)) = (hex_val(b1), hex_val(b2)) {
+                    out.push((hi << 4) | lo);
+                    i += 3;
+                    continue;
+                }
             }
         } else if bytes[i] == b'+' {
             out.push(b' ');

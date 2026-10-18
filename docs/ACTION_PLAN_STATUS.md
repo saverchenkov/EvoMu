@@ -4,14 +4,14 @@
 
 The canonical plan is `.agents/skills/evomu-adversarial-review/references/action_plan.md`. This file is regenerated from the latest pre-flight parity run, so it can't go stale or be overstated.
 
-**Parity: 33 / 5781 ledger rows closed (0.57%)**, 0 NA, 17 tagged tests, 46 passing tests. Flagged fake by the gap auditor: 0.
+**Parity: 105 / 5781 ledger rows closed (1.82%)**, 0 NA, 20 tagged tests, 49 passing tests. Flagged fake by the gap auditor: 0.
 
 | Category | Total | DONE | NA | Open |
 |---|---|---|---|---|
 | destiny | 52 | 0 | 0 | 52 |
 | effect | 1 | 0 | 0 | 1 |
-| esi | 197 | 14 | 0 | 183 |
-| feat | 1184 | 11 | 0 | 1173 |
+| esi | 197 | 61 | 0 | 136 |
+| feat | 1184 | 36 | 0 | 1148 |
 | journey | 29 | 0 | 0 | 29 |
 | notify | 1311 | 0 | 0 | 1311 |
 | plan | 109 | 8 | 0 | 101 |
@@ -180,9 +180,9 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 | Task | Title | Ledger | Features | Tests | Assessment | Note | Last commit |
 |---|---|---|---|---|---|---|---|
 | ESI-1 | SSO / OAuth2 server emulating login.eveonline.com. Covers the authorization code… | MISSING | 0/0 | — | NOT STARTED | — | — |
-| ESI-2 | ESI HTTP framework. OpenAPI-conformant routing, including compatibility-date/ver… | MISSING | 0/0 | — | PARTIAL | OpenAPI HTTP/1.1 router, validator, OAuth2 Bearer guards, ETag/304, X-Pages, 420 rate-limiting, and 24 tag sample routes implemented; 7 tags return 501 pending ESI-5..ESI-7. | — |
-| ESI-3 | Universe, Status, Meta, Routes, Search, Incursions, Insurance, Sovereignty, Wars… | MISSING | 0/0 | — | NOT STARTED | — | — |
-| ESI-4 | Character, Clones, Skills, Location, Fittings, Assets, Wallet, Loyalty, Calendar… | MISSING | 0/0 | — | NOT STARTED | — | — |
+| ESI-2 | ESI HTTP framework. OpenAPI-conformant routing, including compatibility-date/ver… | MISSING | 0/0 | — | PARTIAL | OpenAPI HTTP/1.1 router, validator, OAuth2 Bearer guards, ETag/304, X-Pages, 420 rate-limiting, and 63 live routes implemented; remaining routes return 501 pending ESI-3..ESI-7. | 7f22911 2026-10-18 |
+| ESI-3 | Universe, Status, Meta, Routes, Search, Incursions, Insurance, Sovereignty, Wars… | MISSING | 0/0 | — | PARTIAL | Universe hierarchy/celestials/stargates/structures/names/ids, Status, Meta, Routes, Search, Insurance, Sovereignty, Wars, Dogma, and Killmails implemented; FW/Incursions return 501. | — |
+| ESI-4 | Character, Clones, Skills, Location, Fittings, Assets, Wallet, Loyalty, Calendar… | MISSING | 0/0 | — | PARTIAL | Character affiliation/portrait/standings/fatigue/blueprints, Clones/implants, Skills/attributes/queue, Location/online/ship, Fittings, Assets, Wallet, Loyalty, and Mail CRUD implemented. | — |
 | ESI-5 | Corporation, Alliance. | MISSING | 0/0 | — | NOT STARTED | — | — |
 | ESI-6 | Market, Contracts, Industry, Planetary Interaction. | MISSING | 0/0 | — | NOT STARTED | — | — |
 | ESI-7 | Fleets and User Interface (open window, set waypoint, autopilot). These POST end… | MISSING | 0/0 | — | NOT STARTED | — | — |

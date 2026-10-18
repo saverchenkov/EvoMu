@@ -1,15 +1,15 @@
-//! `esi::sample_routes` — Real SDE- and `WorldRepository`-backed ESI route handlers across all 31
-//! OpenAPI tags (`ESI-2`).
+//! `esi::sample_routes` — Real SDE- and `WorldRepository`-backed ESI route dispatcher across all 31
+//! OpenAPI tags (`ESI-2`, `ESI-3`, `ESI-4`).
 //!
 //! Dispatches matched OpenAPI operations against live `ServerContext` state (`ctx.sde` and `ctx.db`),
 //! returning typed payloads, cache TTLs, and pagination metadata (`X-Pages`), or `501 Not Implemented`
-//! for operations scheduled for `ESI-3`..`ESI-7`.
+//! for operations whose backing tables are scheduled for later tasks.
 
 use crate::router::ServerContext;
 use eve_db::{InventoryFlag, SsoTokenClaims};
+use rusqlite::{Connection, OpenFlags};
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::sync::RwLock;
 
 /// Outcome of dispatching a single ESI OpenAPI operation.
 #[derive(Debug, Clone)]
@@ -26,6 +26,15 @@ impl RouteExecutionResult {
             status_code: 200,
             body: Some(body),
             max_age_secs,
+            total_pages: None,
+        }
+    }
+
+    pub fn created_json(body: Value) -> Self {
+        Self {
+            status_code: 201,
+            body: Some(body),
+            max_age_secs: 0,
             total_pages: None,
         }
     }
@@ -60,6 +69,18 @@ impl RouteExecutionResult {
             total_pages: None,
         }
     }
+}
+
+impl eve_db::FromWalError for RouteExecutionResult {
+    fn from_wal_error(err: String) -> Self {
+        Self::error(500, format!("Durable persistence failure: {err}"))
+    }
+}
+
+/// Opens the on-disk SQLite SDE database (`ctx.sde.db_path`) read-only for celestials/stargates/dogma queries.
+pub(crate) fn open_sde_sqlite(ctx: &ServerContext) -> Option<Connection> {
+    let path = ctx.sde.db_path.as_ref()?;
+    Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).ok()
 }
 
 /// Paginates a slice of items (`1`-indexed `page`, `page_size` items per page).
@@ -134,7 +155,7 @@ pub fn civil_from_unix(unix_secs: u64) -> (i32, u32, u32, u32, u32, u32) {
     (year, m, d, hour, min, sec)
 }
 
-fn asset_location_flag_str(flag: InventoryFlag) -> Option<&'static str> {
+pub(crate) fn asset_location_flag_str(flag: InventoryFlag) -> Option<&'static str> {
     match flag {
         InventoryFlag::Hangar => Some("Hangar"),
         InventoryFlag::Cargo => Some("Cargo"),
@@ -179,7 +200,7 @@ fn asset_location_flag_str(flag: InventoryFlag) -> Option<&'static str> {
     }
 }
 
-fn fitting_flag_str(flag: InventoryFlag) -> &'static str {
+pub(crate) fn fitting_flag_str(flag: InventoryFlag) -> &'static str {
     match flag {
         InventoryFlag::Cargo => "Cargo",
         InventoryFlag::DroneBay => "DroneBay",
@@ -216,7 +237,44 @@ fn fitting_flag_str(flag: InventoryFlag) -> &'static str {
     }
 }
 
-fn compute_killmail_hash(
+pub(crate) fn parse_fitting_flag(flag_str: &str) -> Option<InventoryFlag> {
+    match flag_str {
+        "Cargo" => Some(InventoryFlag::Cargo),
+        "DroneBay" => Some(InventoryFlag::DroneBay),
+        "FighterBay" => Some(InventoryFlag::FighterBay),
+        "LoSlot0" => Some(InventoryFlag::LoSlot0),
+        "LoSlot1" => Some(InventoryFlag::LoSlot1),
+        "LoSlot2" => Some(InventoryFlag::LoSlot2),
+        "LoSlot3" => Some(InventoryFlag::LoSlot3),
+        "LoSlot4" => Some(InventoryFlag::LoSlot4),
+        "LoSlot5" => Some(InventoryFlag::LoSlot5),
+        "LoSlot6" => Some(InventoryFlag::LoSlot6),
+        "LoSlot7" => Some(InventoryFlag::LoSlot7),
+        "MedSlot0" => Some(InventoryFlag::MedSlot0),
+        "MedSlot1" => Some(InventoryFlag::MedSlot1),
+        "MedSlot2" => Some(InventoryFlag::MedSlot2),
+        "MedSlot3" => Some(InventoryFlag::MedSlot3),
+        "MedSlot4" => Some(InventoryFlag::MedSlot4),
+        "MedSlot5" => Some(InventoryFlag::MedSlot5),
+        "MedSlot6" => Some(InventoryFlag::MedSlot6),
+        "MedSlot7" => Some(InventoryFlag::MedSlot7),
+        "HiSlot0" => Some(InventoryFlag::HiSlot0),
+        "HiSlot1" => Some(InventoryFlag::HiSlot1),
+        "HiSlot2" => Some(InventoryFlag::HiSlot2),
+        "HiSlot3" => Some(InventoryFlag::HiSlot3),
+        "HiSlot4" => Some(InventoryFlag::HiSlot4),
+        "HiSlot5" => Some(InventoryFlag::HiSlot5),
+        "HiSlot6" => Some(InventoryFlag::HiSlot6),
+        "HiSlot7" => Some(InventoryFlag::HiSlot7),
+        "RigSlot0" => Some(InventoryFlag::RigSlot0),
+        "RigSlot1" => Some(InventoryFlag::RigSlot1),
+        "RigSlot2" => Some(InventoryFlag::RigSlot2),
+        "SubSystemSlot0" => Some(InventoryFlag::SubSystemSlot0),
+        _ => None,
+    }
+}
+
+pub(crate) fn compute_killmail_hash(
     kill_id: i64,
     victim_id: i64,
     attacker_id: i64,
@@ -234,7 +292,7 @@ fn compute_killmail_hash(
     format!("{h1:016x}{h2:016x}{:08x}", (h1 ^ h2) as u32)
 }
 
-/// Returns `true` if `(method, path_pattern)` is implemented in `ESI-2` (returns `2xx` on valid input).
+/// Returns `true` if `(method, path_pattern)` is fully implemented (`2xx` on valid input).
 pub fn is_operation_implemented(method: &str, path_pattern: &str) -> bool {
     matches!(
         (method, path_pattern),
@@ -242,43 +300,80 @@ pub fn is_operation_implemented(method: &str, path_pattern: &str) -> bool {
             | ("GET", "/meta/compatibility-dates")
             | ("GET", "/alliances")
             | ("GET", "/corporations/npccorps")
+            | ("POST", "/characters/affiliation")
+            | ("GET", "/characters/{character_id}/portrait")
             | ("GET", "/characters/{character_id}/standings")
+            | ("GET", "/characters/{character_id}/fatigue")
+            | ("GET", "/characters/{character_id}/blueprints")
             | ("GET", "/characters/{character_id}/wallet")
+            | ("GET", "/corporations/{corporation_id}/wallets")
             | ("GET", "/characters/{character_id}/location")
+            | ("GET", "/characters/{character_id}/online")
+            | ("GET", "/characters/{character_id}/ship")
             | ("GET", "/characters/{character_id}/skills")
             | ("GET", "/characters/{character_id}/attributes")
+            | ("GET", "/characters/{character_id}/skillqueue")
             | ("GET", "/characters/{character_id}/assets")
+            | ("POST", "/characters/{character_id}/assets/locations")
+            | ("POST", "/characters/{character_id}/assets/names")
+            | ("GET", "/corporations/{corporation_id}/assets")
+            | ("POST", "/corporations/{corporation_id}/assets/locations")
+            | ("POST", "/corporations/{corporation_id}/assets/names")
             | ("GET", "/characters/{character_id}/clones")
+            | ("GET", "/characters/{character_id}/implants")
             | ("GET", "/dogma/attributes")
+            | ("GET", "/dogma/attributes/{attribute_id}")
             | ("GET", "/dogma/effects")
+            | ("GET", "/dogma/effects/{effect_id}")
+            | ("GET", "/dogma/dynamic/items/{type_id}/{item_id}")
             | ("GET", "/characters/{character_id}/fittings")
-            | ("GET", "/characters/{character_id}/fleet")
+            | ("POST", "/characters/{character_id}/fittings")
+            | ("DELETE", "/characters/{character_id}/fittings/{fitting_id}")
             | ("GET", "/insurance/prices")
             | ("GET", "/characters/{character_id}/killmails/recent")
+            | ("GET", "/corporations/{corporation_id}/killmails/recent")
             | ("GET", "/characters/{character_id}/loyalty/points")
             | ("GET", "/characters/{character_id}/mail")
+            | ("POST", "/characters/{character_id}/mail")
+            | ("GET", "/characters/{character_id}/mail/{mail_id}")
+            | ("DELETE", "/characters/{character_id}/mail/{mail_id}")
             | ("GET", "/markets/groups")
             | ("GET", "/universe/schematics/{schematic_id}")
             | ("GET", "/route/{origin}/{destination}")
             | ("GET", "/characters/{character_id}/search")
             | ("GET", "/sovereignty/map")
+            | ("GET", "/sovereignty/structures")
             | ("GET", "/universe/categories")
             | ("GET", "/universe/categories/{category_id}")
             | ("GET", "/universe/groups")
             | ("GET", "/universe/groups/{group_id}")
             | ("GET", "/universe/types")
+            | ("GET", "/universe/types/{type_id}")
             | ("GET", "/universe/regions")
             | ("GET", "/universe/regions/{region_id}")
             | ("GET", "/universe/constellations")
             | ("GET", "/universe/constellations/{constellation_id}")
             | ("GET", "/universe/systems")
             | ("GET", "/universe/systems/{system_id}")
+            | ("GET", "/universe/planets/{planet_id}")
+            | ("GET", "/universe/moons/{moon_id}")
+            | ("GET", "/universe/asteroid_belts/{asteroid_belt_id}")
+            | ("GET", "/universe/stargates/{stargate_id}")
+            | ("GET", "/universe/structures")
+            | ("GET", "/universe/structures/{structure_id}")
+            | ("GET", "/universe/factions")
+            | ("GET", "/universe/bloodlines")
+            | ("GET", "/universe/ancestries")
+            | ("POST", "/universe/names")
+            | ("POST", "/universe/ids")
             | ("GET", "/wars")
+            | ("GET", "/wars/{war_id}")
+            | ("GET", "/wars/{war_id}/killmails")
     )
 }
 
 /// Dispatches a validated OpenAPI operation against `ServerContext` and returns its execution result.
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 pub fn dispatch_operation(
     ctx: &ServerContext,
     started_at_unix: u64,
@@ -288,17 +383,31 @@ pub fn dispatch_operation(
     query_params: &HashMap<String, String>,
     claims: Option<&SsoTokenClaims>,
     page: usize,
-    autopilot_waypoints: &RwLock<HashMap<i64, Vec<i64>>>,
+    req_body: &[u8],
 ) -> RouteExecutionResult {
+    if let Some(res) = super::character_routes::dispatch_character_routes(
+        ctx,
+        method,
+        path_pattern,
+        path_params,
+        query_params,
+        claims,
+        page,
+        req_body,
+    ) {
+        return res;
+    }
+
     match (method, path_pattern) {
         // 1. Status tag
         ("GET", "/status") => {
-            let online_players = ctx.db.with_snapshot(|snap| {
-                snap.accounts
-                    .values()
-                    .filter(|acc| ctx.db.get_online_session(acc.user_id).is_some())
-                    .count()
-            });
+            let user_ids: Vec<u64> = ctx
+                .db
+                .with_snapshot(|snap| snap.accounts.values().map(|acc| acc.user_id).collect());
+            let online_players = user_ids
+                .into_iter()
+                .filter(|&uid| ctx.db.get_online_session(uid).is_some())
+                .count();
             RouteExecutionResult::ok_json(
                 json!({
                     "players": online_players as i64,
@@ -334,295 +443,7 @@ pub fn dispatch_operation(
             RouteExecutionResult::ok_json(json!(ids), 3600)
         }
 
-        // 5. Character tag
-        ("GET", "/characters/{character_id}/standings") => {
-            let char_id = match parse_path_i64(path_params, "character_id") {
-                Ok(v) => v,
-                Err(e) => return e,
-            };
-            ctx.db.with_snapshot(|snap| {
-                let Some(ch) = snap.characters.get(&char_id) else {
-                    return RouteExecutionResult::error(
-                        404,
-                        format!("Character {char_id} not found"),
-                    );
-                };
-                let mut entries: Vec<_> = ch.standings.iter().collect();
-                entries.sort_by_key(|(&id, _)| id);
-                let mut out = Vec::new();
-                for (&from_id, &standing) in entries {
-                    let from_type = if u32::try_from(from_id)
-                        .map(|fid| ctx.sde.factions.contains_key(&fid))
-                        .unwrap_or(false)
-                    {
-                        "faction"
-                    } else if ctx.sde.npc_corporations.contains_key(&from_id) {
-                        "npc_corp"
-                    } else if ctx.sde.agents.contains_key(&from_id) {
-                        "agent"
-                    } else {
-                        continue;
-                    };
-                    out.push(json!({
-                        "from_id": from_id,
-                        "from_type": from_type,
-                        "standing": standing,
-                    }));
-                }
-                RouteExecutionResult::ok_json(json!(out), 3600)
-            })
-        }
-
-        // 6. Wallet tag
-        ("GET", "/characters/{character_id}/wallet") => {
-            let char_id = match parse_path_i64(path_params, "character_id") {
-                Ok(v) => v,
-                Err(e) => return e,
-            };
-            ctx.db.with_snapshot(|snap| {
-                let Some(ch) = snap.characters.get(&char_id) else {
-                    return RouteExecutionResult::error(
-                        404,
-                        format!("Character {char_id} not found"),
-                    );
-                };
-                RouteExecutionResult::ok_json(json!(ch.balance.to_wire_f64()), 120)
-            })
-        }
-
-        // 7. Location tag
-        ("GET", "/characters/{character_id}/location") => {
-            let char_id = match parse_path_i64(path_params, "character_id") {
-                Ok(v) => v,
-                Err(e) => return e,
-            };
-            ctx.db.with_snapshot(|snap| {
-                let Some(ch) = snap.characters.get(&char_id) else {
-                    return RouteExecutionResult::error(
-                        404,
-                        format!("Character {char_id} not found"),
-                    );
-                };
-                let mut obj = json!({
-                    "solar_system_id": ch.solar_system_id as i64,
-                });
-                if let Some(sid) = ch.station_id {
-                    obj["station_id"] = json!(sid);
-                }
-                if let Some(stid) = ch.structure_id {
-                    obj["structure_id"] = json!(stid);
-                }
-                RouteExecutionResult::ok_json(obj, 5)
-            })
-        }
-
-        // 8. Skills tag
-        ("GET", "/characters/{character_id}/skills") => {
-            let char_id = match parse_path_i64(path_params, "character_id") {
-                Ok(v) => v,
-                Err(e) => return e,
-            };
-            ctx.db.with_snapshot(|snap| {
-                let Some(ch) = snap.characters.get(&char_id) else {
-                    return RouteExecutionResult::error(
-                        404,
-                        format!("Character {char_id} not found"),
-                    );
-                };
-                let mut skills_vec = Vec::new();
-                if let Some(skill_map) = snap.skills.get(&char_id) {
-                    let mut sorted: Vec<_> = skill_map.values().collect();
-                    sorted.sort_by_key(|s| s.type_id);
-                    for s in sorted {
-                        skills_vec.push(json!({
-                            "skill_id": s.type_id as i64,
-                            "trained_skill_level": s.level as i64,
-                            "active_skill_level": s.level as i64,
-                            "skillpoints_in_skill": s.skill_points.round() as i64,
-                        }));
-                    }
-                }
-                RouteExecutionResult::ok_json(
-                    json!({
-                        "skills": skills_vec,
-                        "total_sp": ch.skill_points.round() as i64,
-                        "unallocated_sp": ch.free_skill_points.round() as i64,
-                    }),
-                    120,
-                )
-            })
-        }
-        ("GET", "/characters/{character_id}/attributes") => {
-            let char_id = match parse_path_i64(path_params, "character_id") {
-                Ok(v) => v,
-                Err(e) => return e,
-            };
-            ctx.db.with_snapshot(|snap| {
-                let Some(ch) = snap.characters.get(&char_id) else {
-                    return RouteExecutionResult::error(
-                        404,
-                        format!("Character {char_id} not found"),
-                    );
-                };
-                RouteExecutionResult::ok_json(
-                    json!({
-                        "charisma": ch.neural.charisma as i64,
-                        "intelligence": ch.neural.intelligence as i64,
-                        "memory": ch.neural.memory as i64,
-                        "perception": ch.neural.perception as i64,
-                        "willpower": ch.neural.willpower as i64,
-                        "bonus_remaps": ch.neural.bonus_remaps as i64,
-                    }),
-                    120,
-                )
-            })
-        }
-
-        // 9. Assets tag
-        ("GET", "/characters/{character_id}/assets") => {
-            let char_id = match parse_path_i64(path_params, "character_id") {
-                Ok(v) => v,
-                Err(e) => return e,
-            };
-            ctx.db.with_snapshot(|snap| {
-                if !snap.characters.contains_key(&char_id) {
-                    return RouteExecutionResult::error(
-                        404,
-                        format!("Character {char_id} not found"),
-                    );
-                }
-                let mut items: Vec<_> = snap
-                    .items
-                    .values()
-                    .filter(|i| i.owner_id == char_id && i.quantity > 0)
-                    .collect();
-                items.sort_by_key(|i| i.item_id);
-
-                let rows: Vec<Value> = items
-                    .into_iter()
-                    .filter_map(|item| {
-                        let flag_str = asset_location_flag_str(item.flag)?;
-                        let loc_type = if (60_000_000..64_000_000).contains(&item.location_id) {
-                            "station"
-                        } else if (30_000_000..33_000_000).contains(&item.location_id) {
-                            "solar_system"
-                        } else if snap.items.contains_key(&item.location_id) {
-                            "item"
-                        } else {
-                            "other"
-                        };
-                        let mut obj = json!({
-                            "item_id": item.item_id,
-                            "type_id": item.type_id as i64,
-                            "quantity": item.quantity as i64,
-                            "location_id": item.location_id,
-                            "location_type": loc_type,
-                            "location_flag": flag_str,
-                            "is_singleton": item.singleton,
-                        });
-                        if item.is_blueprint_copy {
-                            obj["is_blueprint_copy"] = json!(true);
-                        }
-                        Some(obj)
-                    })
-                    .collect();
-
-                match paginate_slice(&rows, page, 1000) {
-                    Ok((page_rows, total_pages)) => {
-                        RouteExecutionResult::ok_paginated(json!(page_rows), 3600, total_pages)
-                    }
-                    Err(e) => e,
-                }
-            })
-        }
-
-        // 10. Calendar tag
-        ("GET", "/characters/{character_id}/calendar") => {
-            let char_id = match parse_path_i64(path_params, "character_id") {
-                Ok(v) => v,
-                Err(e) => return e,
-            };
-            let exists = ctx
-                .db
-                .with_snapshot(|snap| snap.characters.contains_key(&char_id));
-            if !exists {
-                return RouteExecutionResult::error(404, format!("Character {char_id} not found"));
-            }
-            RouteExecutionResult::error(
-                501,
-                "Character calendar event table is not yet active (ESI-7)",
-            )
-        }
-
-        // 11. Clones tag
-        ("GET", "/characters/{character_id}/clones") => {
-            let char_id = match parse_path_i64(path_params, "character_id") {
-                Ok(v) => v,
-                Err(e) => return e,
-            };
-            ctx.db.with_snapshot(|snap| {
-                let Some(ch) = snap.characters.get(&char_id) else {
-                    return RouteExecutionResult::error(
-                        404,
-                        format!("Character {char_id} not found"),
-                    );
-                };
-                let mut jump_clones = Vec::new();
-                if let Some(clones) = snap.jump_clones.get(&char_id) {
-                    for jc in clones {
-                        let loc_type = if (60_000_000..64_000_000).contains(&jc.location_id) {
-                            "station"
-                        } else {
-                            "structure"
-                        };
-                        let implants: Vec<i64> = jc.implants.iter().map(|&t| t as i64).collect();
-                        jump_clones.push(json!({
-                            "jump_clone_id": jc.jump_clone_id,
-                            "location_id": jc.location_id,
-                            "location_type": loc_type,
-                            "implants": implants,
-                        }));
-                    }
-                }
-                let home_loc_type = if (60_000_000..64_000_000).contains(&ch.home_station_id) {
-                    "station"
-                } else {
-                    "structure"
-                };
-                let mut obj = json!({
-                    "home_location": {
-                        "location_id": ch.home_station_id,
-                        "location_type": home_loc_type,
-                    },
-                    "jump_clones": jump_clones,
-                });
-                if ch.last_clone_jump_unix > 0 {
-                    obj["last_clone_jump_date"] =
-                        json!(format_iso8601_utc(ch.last_clone_jump_unix));
-                }
-                RouteExecutionResult::ok_json(obj, 120)
-            })
-        }
-
-        // 12. Contacts tag
-        ("GET", "/characters/{character_id}/contacts") => {
-            let char_id = match parse_path_i64(path_params, "character_id") {
-                Ok(v) => v,
-                Err(e) => return e,
-            };
-            let exists = ctx
-                .db
-                .with_snapshot(|snap| snap.characters.contains_key(&char_id));
-            if !exists {
-                return RouteExecutionResult::error(404, format!("Character {char_id} not found"));
-            }
-            RouteExecutionResult::error(
-                501,
-                "Character contacts table is not yet active (ESI-6)",
-            )
-        }
-
-        // 13. Contracts tag
+        // 5. Contracts tag (ESI-6)
         ("GET", "/characters/{character_id}/contracts/{contract_id}/items") => {
             let char_id = match parse_path_i64(path_params, "character_id") {
                 Ok(v) => v,
@@ -653,76 +474,213 @@ pub fn dispatch_operation(
                 }
                 RouteExecutionResult::error(
                     501,
-                    "Per-line contract item inclusion records are not yet active (ESI-5)",
+                    "Per-line contract item inclusion records are not yet active (ESI-6)",
                 )
             })
         }
 
-        // 14. Dogma tag
+        // 6. Dogma tag (ESI-3)
         ("GET", "/dogma/attributes") => {
             let mut ids: Vec<i64> = ctx.sde.attributes.keys().map(|&id| id as i64).collect();
             ids.sort_unstable();
             RouteExecutionResult::ok_json(json!(ids), 3600)
+        }
+        ("GET", "/dogma/attributes/{attribute_id}") => {
+            let aid = match parse_path_i64(path_params, "attribute_id") {
+                Ok(v) => v,
+                Err(e) => return e,
+            };
+            let Ok(aid_u16) = u16::try_from(aid) else {
+                return RouteExecutionResult::error(
+                    404,
+                    format!("Dogma attribute {aid} not found"),
+                );
+            };
+            let Some(attr) = ctx.sde.attributes.get(&aid_u16) else {
+                return RouteExecutionResult::error(
+                    404,
+                    format!("Dogma attribute {aid} not found"),
+                );
+            };
+            let published = open_sde_sqlite(ctx)
+                .and_then(|conn| {
+                    conn.query_row(
+                        "SELECT published FROM sde_dogma_attributes WHERE attribute_id = ?1",
+                        [aid],
+                        |r| r.get::<_, i64>(0),
+                    )
+                    .ok()
+                })
+                .map(|v| v != 0)
+                .unwrap_or(true);
+            RouteExecutionResult::ok_json(
+                json!({
+                    "attribute_id": attr.attribute_id as i64,
+                    "name": attr.name,
+                    "default_value": attr.default_value,
+                    "high_is_good": attr.high_is_good,
+                    "stackable": attr.stackable,
+                    "published": published,
+                }),
+                3600,
+            )
         }
         ("GET", "/dogma/effects") => {
             let mut ids: Vec<i64> = ctx.sde.effects.keys().map(|&id| id as i64).collect();
             ids.sort_unstable();
             RouteExecutionResult::ok_json(json!(ids), 3600)
         }
-
-        // 15. Faction Warfare tag
-        ("GET", "/fw/wars") => RouteExecutionResult::error(
-            501,
-            "Faction warfare war table is not yet active (ESI-6)",
-        ),
-
-        // 16. Fittings tag
-        ("GET", "/characters/{character_id}/fittings") => {
-            let char_id = match parse_path_i64(path_params, "character_id") {
+        ("GET", "/dogma/effects/{effect_id}") => {
+            let eid = match parse_path_i64(path_params, "effect_id") {
                 Ok(v) => v,
                 Err(e) => return e,
             };
+            let Ok(eid_u16) = u16::try_from(eid) else {
+                return RouteExecutionResult::error(404, format!("Dogma effect {eid} not found"));
+            };
+            let Some(eff) = ctx.sde.effects.get(&eid_u16) else {
+                return RouteExecutionResult::error(404, format!("Dogma effect {eid} not found"));
+            };
+            let modifiers: Vec<Value> = eff
+                .modifiers
+                .iter()
+                .map(|m| {
+                    json!({
+                        "domain": m.domain,
+                        "func": m.func,
+                        "modified_attribute_id": m.modified_attribute_id as i64,
+                        "modifying_attribute_id": m.modifying_attribute_id as i64,
+                        "operator": m.operator as i64,
+                    })
+                })
+                .collect();
+            let mut obj = json!({
+                "effect_id": eff.effect_id as i64,
+                "name": eff.name,
+                "effect_category": eff.effect_category as i64,
+                "is_offensive": eff.is_offensive,
+                "is_assistance": eff.is_assistance,
+                "modifiers": modifiers,
+            });
+            if let Some(conn) = open_sde_sqlite(ctx) {
+                if let Ok((warp_safe, disallow_repeat, elec_chance, range_chance, published)) = conn
+                    .query_row(
+                        "SELECT is_warp_safe, disallow_auto_repeat, electronic_chance, range_chance, published FROM sde_dogma_effects WHERE effect_id = ?1",
+                        [eid],
+                        |r| {
+                            Ok((
+                                r.get::<_, i64>(0)? != 0,
+                                r.get::<_, i64>(1)? != 0,
+                                r.get::<_, i64>(2)? != 0,
+                                r.get::<_, i64>(3)? != 0,
+                                r.get::<_, i64>(4)? != 0,
+                            ))
+                        },
+                    )
+                {
+                    obj["is_warp_safe"] = json!(warp_safe);
+                    obj["disallow_auto_repeat"] = json!(disallow_repeat);
+                    obj["electronic_chance"] = json!(elec_chance);
+                    obj["range_chance"] = json!(range_chance);
+                    obj["published"] = json!(published);
+                }
+            }
+            RouteExecutionResult::ok_json(obj, 3600)
+        }
+        ("GET", "/dogma/dynamic/items/{type_id}/{item_id}") => {
+            let tid = match parse_path_i64(path_params, "type_id") {
+                Ok(v) => v,
+                Err(e) => return e,
+            };
+            let iid = match parse_path_i64(path_params, "item_id") {
+                Ok(v) => v,
+                Err(e) => return e,
+            };
+            let Ok(tid_u32) = u32::try_from(tid) else {
+                return RouteExecutionResult::error(404, format!("Dynamic item {iid} not found"));
+            };
             ctx.db.with_snapshot(|snap| {
-                if !snap.characters.contains_key(&char_id) {
+                let Some(item) = snap.items.get(&iid) else {
                     return RouteExecutionResult::error(
                         404,
-                        format!("Character {char_id} not found"),
+                        format!("Dynamic item {iid} not found"),
+                    );
+                };
+                if item.type_id != tid_u32 {
+                    return RouteExecutionResult::error(
+                        404,
+                        format!("Item {iid} does not match type_id {tid}"),
                     );
                 }
-                let mut fits: Vec<_> = snap
-                    .saved_fittings
-                    .values()
-                    .filter(|f| f.owner_id == char_id)
-                    .collect();
-                fits.sort_by_key(|f| f.fitting_id);
-                let out: Vec<Value> = fits
+                let Some(muta_id) = item.source_mutaplasmid_id else {
+                    return RouteExecutionResult::error(
+                        404,
+                        format!("Item {iid} is not a mutated dynamic item"),
+                    );
+                };
+                let source_type_id = ctx
+                    .sde
+                    .dynamic_item_attributes
+                    .get(&muta_id)
+                    .and_then(|m| m.applicable_type_ids.first().copied())
+                    .unwrap_or(item.type_id) as i64;
+                let mut merged_attrs: HashMap<u16, f64> = ctx
+                    .sde
+                    .types
+                    .get(&item.type_id)
+                    .map(|t| t.default_attributes.clone())
+                    .unwrap_or_default();
+                for (&k, &v) in &item.dynamic_attributes {
+                    merged_attrs.insert(k, v);
+                }
+                let mut attr_keys: Vec<_> = merged_attrs.keys().copied().collect();
+                attr_keys.sort_unstable();
+                let dogma_attributes: Vec<Value> = attr_keys
                     .into_iter()
-                    .map(|f| {
-                        let items: Vec<Value> = f
-                            .items
-                            .iter()
-                            .map(|(tid, flag, qty)| {
-                                json!({
-                                    "type_id": *tid as i64,
-                                    "flag": fitting_flag_str(*flag),
-                                    "quantity": *qty as i64,
-                                })
-                            })
-                            .collect();
+                    .map(|aid| {
                         json!({
-                            "fitting_id": f.fitting_id,
-                            "name": f.name,
-                            "description": f.description,
-                            "ship_type_id": f.ship_type_id as i64,
-                            "items": items,
+                            "attribute_id": aid as i64,
+                            "value": merged_attrs[&aid],
                         })
                     })
                     .collect();
-                RouteExecutionResult::ok_json(json!(out), 300)
+                let mut eff_ids = ctx
+                    .sde
+                    .types
+                    .get(&item.type_id)
+                    .map(|t| t.effect_ids.clone())
+                    .unwrap_or_default();
+                eff_ids.sort_unstable();
+                eff_ids.dedup();
+                let dogma_effects: Vec<Value> = eff_ids
+                    .into_iter()
+                    .map(|eid| {
+                        json!({
+                            "effect_id": eid as i64,
+                            "is_default": false,
+                        })
+                    })
+                    .collect();
+                RouteExecutionResult::ok_json(
+                    json!({
+                        "created_by": item.owner_id,
+                        "mutator_type_id": muta_id as i64,
+                        "source_type_id": source_type_id,
+                        "dogma_attributes": dogma_attributes,
+                        "dogma_effects": dogma_effects,
+                    }),
+                    3600,
+                )
             })
         }
 
-        // 17. Fleets tag
+        // 7. Faction Warfare tag (ESI-3)
+        ("GET", "/fw/wars") => RouteExecutionResult::error(
+            501,
+            "Faction warfare war table is not yet active (ESI-3)",
+        ),
+
+        // 8. Fleets tag (ESI-7)
         ("GET", "/characters/{character_id}/fleet") => {
             let char_id = match parse_path_i64(path_params, "character_id") {
                 Ok(v) => v,
@@ -748,7 +706,7 @@ pub fn dispatch_operation(
                 if f.boss_id != char_id {
                     return RouteExecutionResult::error(
                         501,
-                        "Per-member fleet wing/squad hierarchy is not yet active (ESI-6)",
+                        "Per-member fleet wing/squad hierarchy is not yet active (ESI-7)",
                     );
                 }
                 RouteExecutionResult::ok_json(
@@ -764,23 +722,20 @@ pub fn dispatch_operation(
             })
         }
 
-        // 18. Incursions tag
+        // 9. Incursions tag (ESI-3)
         ("GET", "/incursions") => RouteExecutionResult::error(
             501,
-            "Active incursion table is not yet active (ESI-5)",
+            "Active incursion table is not yet active (ESI-3)",
         ),
 
-        // 19. Industry tag
+        // 10. Industry tag (ESI-6)
         ("GET", "/industry/facilities") => RouteExecutionResult::error(
             501,
-            "Industry facility service table is not yet active (ESI-5)",
+            "Industry facility service table is not yet active (ESI-6)",
         ),
 
-        // 20. Insurance tag
+        // 11. Insurance tag (ESI-3)
         ("GET", "/insurance/prices") => {
-            // Six wiki insurance tiers (Basic 5%/50%, Standard 10%/60%, Bronze 15%/70%,
-            // Silver 20%/80%, Gold 25%/90%, Platinum 30%/100%; eve-wiki/articles/Insurance.md:83-88),
-            // with ship reference value derived from SDE `base_price`.
             let mut ship_types: Vec<_> = ctx
                 .sde
                 .types
@@ -808,7 +763,7 @@ pub fn dispatch_operation(
             RouteExecutionResult::ok_json(json!(out), 3600)
         }
 
-        // 21. Killmails tag
+        // 12. Killmails tag (ESI-3)
         ("GET", "/characters/{character_id}/killmails/recent") => {
             let char_id = match parse_path_i64(path_params, "character_id") {
                 Ok(v) => v,
@@ -851,90 +806,65 @@ pub fn dispatch_operation(
                 }
             })
         }
-
-        // 22. Loyalty tag
-        ("GET", "/characters/{character_id}/loyalty/points") => {
-            let char_id = match parse_path_i64(path_params, "character_id") {
+        ("GET", "/corporations/{corporation_id}/killmails/recent") => {
+            let corp_id = match parse_path_i64(path_params, "corporation_id") {
                 Ok(v) => v,
                 Err(e) => return e,
             };
             ctx.db.with_snapshot(|snap| {
-                let Some(ch) = snap.characters.get(&char_id) else {
+                if !snap.corporations.contains_key(&corp_id) {
                     return RouteExecutionResult::error(
                         404,
-                        format!("Character {char_id} not found"),
-                    );
-                };
-                let mut lps: Vec<_> = ch.loyalty_points.iter().collect();
-                lps.sort_by_key(|(&cid, _)| cid);
-                let out: Vec<Value> = lps
-                    .into_iter()
-                    .map(|(&corp_id, &pts)| {
-                        json!({
-                            "corporation_id": corp_id,
-                            "loyalty_points": pts,
-                        })
-                    })
-                    .collect();
-                RouteExecutionResult::ok_json(json!(out), 3600)
-            })
-        }
-
-        // 23. Mail tag
-        ("GET", "/characters/{character_id}/mail") => {
-            let char_id = match parse_path_i64(path_params, "character_id") {
-                Ok(v) => v,
-                Err(e) => return e,
-            };
-            ctx.db.with_snapshot(|snap| {
-                if !snap.characters.contains_key(&char_id) {
-                    return RouteExecutionResult::error(
-                        404,
-                        format!("Character {char_id} not found"),
+                        format!("Corporation {corp_id} not found"),
                     );
                 }
-                let mut mails: Vec<_> = snap
-                    .mails
-                    .iter()
-                    .filter(|m| m.recipient_id == char_id || m.sender_id == char_id)
+                let mut kms: Vec<_> = snap
+                    .killmails
+                    .values()
+                    .filter(|k| {
+                        let v_corp = snap
+                            .characters
+                            .get(&k.victim_character_id)
+                            .map(|c| c.corporation_id);
+                        let a_corp = snap
+                            .characters
+                            .get(&k.attacker_character_id)
+                            .map(|c| c.corporation_id);
+                        v_corp == Some(corp_id) || a_corp == Some(corp_id)
+                    })
                     .collect();
-                mails.sort_by_key(|m| std::cmp::Reverse(m.message_id));
-                let out: Vec<Value> = mails
+                kms.sort_by_key(|k| std::cmp::Reverse(k.kill_id));
+                let rows: Vec<Value> = kms
                     .into_iter()
-                    .take(50)
-                    .map(|m| {
-                        let recipient_type = if snap.alliances.contains_key(&m.recipient_id) {
-                            "alliance"
-                        } else if snap.corporations.contains_key(&m.recipient_id)
-                            || ctx.sde.npc_corporations.contains_key(&m.recipient_id)
-                        {
-                            "corporation"
-                        } else {
-                            "character"
-                        };
+                    .map(|k| {
                         json!({
-                            "mail_id": m.message_id,
-                            "from": m.sender_id,
-                            "subject": m.subject,
-                            "recipients": [{
-                                "recipient_id": m.recipient_id,
-                                "recipient_type": recipient_type,
-                            }],
+                            "killmail_id": k.kill_id,
+                            "killmail_hash": compute_killmail_hash(
+                                k.kill_id,
+                                k.victim_character_id,
+                                k.attacker_character_id,
+                                k.ship_type_id,
+                            ),
                         })
                     })
                     .collect();
-                RouteExecutionResult::ok_json(json!(out), 30)
+                match paginate_slice(&rows, page, 1000) {
+                    Ok((page_rows, total_pages)) => {
+                        RouteExecutionResult::ok_paginated(json!(page_rows), 300, total_pages)
+                    }
+                    Err(e) => e,
+                }
             })
         }
 
-        // 24. Market tag
+        // 13. Market tag (ESI-6)
         ("GET", "/markets/groups") => {
             let mut ids: Vec<i64> = ctx.sde.market_groups.keys().map(|&id| id as i64).collect();
             ids.sort_unstable();
             RouteExecutionResult::ok_json(json!(ids), 3600)
         }
 
-        // 25. Planetary Interaction tag
+        // 14. Planetary Interaction tag (ESI-6)
         ("GET", "/universe/schematics/{schematic_id}") => {
             let schematic_id = match parse_path_i64(path_params, "schematic_id") {
                 Ok(v) => v,
@@ -961,7 +891,138 @@ pub fn dispatch_operation(
             )
         }
 
-        // 26..31. Routes, Search, Sovereignty, Universe, User Interface, and Wars tags
+        // 15. Wars tag (ESI-3)
+        ("GET", "/wars") => {
+            let max_war_id = if let Some(raw_max) = query_params.get("max_war_id") {
+                match raw_max.parse::<i64>() {
+                    Ok(v) if v > 0 => Some(v),
+                    _ => {
+                        return RouteExecutionResult::error(
+                            400,
+                            format!("Invalid max_war_id '{raw_max}' (expected positive integer)"),
+                        );
+                    }
+                }
+            } else {
+                None
+            };
+            let mut war_ids: Vec<i64> = ctx.db.with_snapshot(|snap| {
+                snap.wars
+                    .keys()
+                    .copied()
+                    .filter(|&wid| max_war_id.is_none_or(|m| wid < m))
+                    .collect()
+            });
+            war_ids.sort_by(|a, b| b.cmp(a));
+            war_ids.truncate(2000);
+            RouteExecutionResult::ok_json(json!(war_ids), 3600)
+        }
+        ("GET", "/wars/{war_id}") => {
+            let war_id = match parse_path_i64(path_params, "war_id") {
+                Ok(v) => v,
+                Err(e) => return e,
+            };
+            ctx.db.with_snapshot(|snap| {
+                let Some(w) = snap.wars.get(&war_id) else {
+                    return RouteExecutionResult::error(404, format!("War {war_id} not found"));
+                };
+                let mut aggr_ships_killed = 0i64;
+                let mut aggr_isk_destroyed = 0.0f64;
+                let mut def_ships_killed = 0i64;
+                let mut def_isk_destroyed = 0.0f64;
+                for km in snap.killmails.values() {
+                    let v_corp = snap
+                        .characters
+                        .get(&km.victim_character_id)
+                        .map(|c| c.corporation_id);
+                    let a_corp = snap
+                        .characters
+                        .get(&km.attacker_character_id)
+                        .map(|c| c.corporation_id);
+                    if a_corp == Some(w.aggressor_corp_id) && v_corp == Some(w.defender_corp_id) {
+                        aggr_ships_killed += 1;
+                        aggr_isk_destroyed += km.total_value_isk;
+                    } else if a_corp == Some(w.defender_corp_id)
+                        && v_corp == Some(w.aggressor_corp_id)
+                    {
+                        def_ships_killed += 1;
+                        def_isk_destroyed += km.total_value_isk;
+                    }
+                }
+                let declared_str = format_iso8601_utc(w.started_unix);
+                RouteExecutionResult::ok_json(
+                    json!({
+                        "id": w.war_id,
+                        "declared": declared_str,
+                        "started": declared_str,
+                        "mutual": w.mutual,
+                        "open_for_allies": !w.mutual && w.active,
+                        "aggressor": {
+                            "corporation_id": w.aggressor_corp_id,
+                            "ships_killed": aggr_ships_killed,
+                            "isk_destroyed": aggr_isk_destroyed,
+                        },
+                        "defender": {
+                            "corporation_id": w.defender_corp_id,
+                            "ships_killed": def_ships_killed,
+                            "isk_destroyed": def_isk_destroyed,
+                        },
+                    }),
+                    3600,
+                )
+            })
+        }
+        ("GET", "/wars/{war_id}/killmails") => {
+            let war_id = match parse_path_i64(path_params, "war_id") {
+                Ok(v) => v,
+                Err(e) => return e,
+            };
+            ctx.db.with_snapshot(|snap| {
+                let Some(w) = snap.wars.get(&war_id) else {
+                    return RouteExecutionResult::error(404, format!("War {war_id} not found"));
+                };
+                let mut kms: Vec<_> = snap
+                    .killmails
+                    .values()
+                    .filter(|km| {
+                        let v_corp = snap
+                            .characters
+                            .get(&km.victim_character_id)
+                            .map(|c| c.corporation_id);
+                        let a_corp = snap
+                            .characters
+                            .get(&km.attacker_character_id)
+                            .map(|c| c.corporation_id);
+                        (a_corp == Some(w.aggressor_corp_id) && v_corp == Some(w.defender_corp_id))
+                            || (a_corp == Some(w.defender_corp_id)
+                                && v_corp == Some(w.aggressor_corp_id))
+                    })
+                    .collect();
+                kms.sort_by_key(|k| std::cmp::Reverse(k.kill_id));
+                let rows: Vec<Value> = kms
+                    .into_iter()
+                    .map(|k| {
+                        json!({
+                            "killmail_id": k.kill_id,
+                            "killmail_hash": compute_killmail_hash(
+                                k.kill_id,
+                                k.victim_character_id,
+                                k.attacker_character_id,
+                                k.ship_type_id,
+                            ),
+                        })
+                    })
+                    .collect();
+                match paginate_slice(&rows, page, 1000) {
+                    Ok((page_rows, total_pages)) => {
+                        RouteExecutionResult::ok_paginated(json!(page_rows), 3600, total_pages)
+                    }
+                    Err(e) => e,
+                }
+            })
+        }
+
+        // Delegate Universe, Routes, Search, Sovereignty, and User Interface tags
         _ => super::universe_routes::dispatch_universe_and_nav(
             ctx,
             method,
@@ -970,7 +1031,7 @@ pub fn dispatch_operation(
             query_params,
             claims,
             page,
-            autopilot_waypoints,
+            req_body,
         ),
     }
 }
