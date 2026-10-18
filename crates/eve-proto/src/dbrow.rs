@@ -291,6 +291,82 @@ impl DBRowDescriptor {
         ])
     }
 
+    /// Canonical notification descriptor (`NotificationMgrService.cpp:66-90`).
+    pub fn notification_header() -> Self {
+        Self::new([
+            ("notificationID", DbColumnType::I4),
+            ("typeID", DbColumnType::I4),
+            ("senderID", DbColumnType::I4),
+            ("receiverID", DbColumnType::I4),
+            ("processed", DbColumnType::Bool),
+            ("created", DbColumnType::FileTime),
+            ("data", DbColumnType::WStr),
+            ("deleted", DbColumnType::Bool),
+        ])
+    }
+
+    /// Canonical inventory type descriptor (`ConfigDB::GetMultiInvTypesEx`).
+    pub fn inv_type_header() -> Self {
+        Self::new([
+            ("typeID", DbColumnType::I4),
+            ("groupID", DbColumnType::I4),
+            ("typeName", DbColumnType::WStr),
+            ("description", DbColumnType::WStr),
+            ("graphicID", DbColumnType::I4),
+            ("radius", DbColumnType::R8),
+            ("mass", DbColumnType::R8),
+            ("volume", DbColumnType::R8),
+            ("capacity", DbColumnType::R8),
+            ("portionSize", DbColumnType::I4),
+            ("raceID", DbColumnType::I4),
+            ("basePrice", DbColumnType::R8),
+            ("published", DbColumnType::Bool),
+            ("marketGroupID", DbColumnType::I4),
+            ("chanceOfDuplicating", DbColumnType::R8),
+        ])
+    }
+
+    /// Canonical corporation ticker & logo descriptor (`ConfigDB::GetMultiCorpTickerNamesEx`).
+    pub fn corp_ticker_header() -> Self {
+        Self::new([
+            ("corporationID", DbColumnType::I4),
+            ("tickerName", DbColumnType::WStr),
+            ("shape1", DbColumnType::I4),
+            ("shape2", DbColumnType::I4),
+            ("shape3", DbColumnType::I4),
+            ("color1", DbColumnType::R8),
+            ("color2", DbColumnType::R8),
+            ("color3", DbColumnType::R8),
+        ])
+    }
+
+    /// Canonical graphic descriptor (`ConfigDB::GetMultiGraphicsEx`).
+    pub fn graphic_header() -> Self {
+        Self::new([
+            ("graphicID", DbColumnType::I4),
+            ("url3D", DbColumnType::WStr),
+            ("urlWeb", DbColumnType::WStr),
+            ("icon", DbColumnType::WStr),
+            ("urlSound", DbColumnType::WStr),
+            ("explosionID", DbColumnType::I4),
+        ])
+    }
+
+    /// Canonical map object descriptor (`ConfigDB::GetMapObjects`).
+    pub fn map_objects_header() -> Self {
+        Self::new([
+            ("groupID", DbColumnType::I4),
+            ("typeID", DbColumnType::I4),
+            ("itemID", DbColumnType::I8),
+            ("itemName", DbColumnType::WStr),
+            ("locationID", DbColumnType::I8),
+            ("orbitID", DbColumnType::I8),
+            ("x", DbColumnType::R8),
+            ("y", DbColumnType::R8),
+            ("z", DbColumnType::R8),
+        ])
+    }
+
     /// Builds a packed `blue.DBRow` (`PyRep::DBRow`) from positional column values.
     pub fn build_dbrow(&self, values: Vec<PyRep>) -> PyRep {
         let mut columns = Vec::with_capacity(self.columns.len());
@@ -480,8 +556,8 @@ pub fn decode_rle(rle_bytes: &[u8], expected_len: usize) -> Option<Vec<u8>> {
                 out_ix += 1;
             }
         } else {
-            while count < 0 && in_ix < rle_bytes.len() {
-                if out_ix >= out.len() {
+            while count < 0 {
+                if in_ix >= rle_bytes.len() || out_ix >= out.len() {
                     return None;
                 }
                 out[out_ix] = rle_bytes[in_ix];
@@ -700,11 +776,20 @@ pub fn pack_packed_row_columns_from_defs(
 /// Unpacks fixed-width columns, boolean bits, and null bits from a `PyPackedRow` RLE byte slice
 /// matching `UnmarshalStream::LoadPackedRow` (`EVEUnmarshal.cpp:506-680`).
 pub fn unpack_packed_row_columns(header: &PyRep, raw_rle: &[u8]) -> Vec<(String, PyRep)> {
+    try_unpack_packed_row_columns(header, raw_rle).unwrap_or_default()
+}
+
+/// Fallible version of [`unpack_packed_row_columns`] that returns [`crate::ProtoError::InvalidPackedRowRle`]
+/// when the RLE stream is corrupt or overflows the expected column byte length.
+pub fn try_unpack_packed_row_columns(
+    header: &PyRep,
+    raw_rle: &[u8],
+) -> Result<Vec<(String, PyRep)>, crate::ProtoError> {
     let Some(defs) = extract_dbrow_header_col_defs(header) else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     if defs.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
     let mut byte_data_bit_len = 0usize;
@@ -725,10 +810,10 @@ pub fn unpack_packed_row_columns(header: &PyRep, raw_rle: &[u8]) -> Vec<(String,
 
     let expected_bytes = (byte_data_bit_len >> 3) + ((bool_bit_len + nulls_bit_len) >> 3) + 1;
     if expected_bytes > MAX_COLLECTION_LEN {
-        return Vec::new();
+        return Err(crate::ProtoError::CollectionTooLarge(expected_bytes));
     }
     let Some(unpacked) = decode_rle(raw_rle, expected_bytes) else {
-        return Vec::new();
+        return Err(crate::ProtoError::InvalidPackedRowRle);
     };
 
     // Per EVEUnmarshal.cpp: columns are iterated in widest-first order (64, 32, 16, 8, 1, 0)
@@ -819,8 +904,8 @@ pub fn unpack_packed_row_columns(header: &PyRep, raw_rle: &[u8]) -> Vec<(String,
     }
 
     decoded_by_idx.sort_by_key(|(idx, _, _)| *idx);
-    decoded_by_idx
+    Ok(decoded_by_idx
         .into_iter()
         .map(|(_, name, val)| (name, val))
-        .collect()
+        .collect())
 }

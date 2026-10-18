@@ -4,7 +4,7 @@
 
 use crate::dbrow::{
     dbtype_bit_width, extract_dbrow_col_defs, extract_dbrow_header_col_defs,
-    pack_packed_row_columns, unpack_packed_row_columns,
+    pack_packed_row_columns,
 };
 use crate::{
     MarshalOpcode, ProtoError, PyRep, MARSHAL_HEADER_BYTE, MARSHAL_STRING_TABLE,
@@ -561,14 +561,8 @@ fn decode_inner(
             }
             let raw_rle = input[..rle_len].to_vec();
             *input = &input[rle_len..];
-            let mut columns = unpack_packed_row_columns(&header, &raw_rle);
+            let mut columns = crate::dbrow::try_unpack_packed_row_columns(&header, &raw_rle)?;
             if let Some(defs) = extract_dbrow_header_col_defs(&header) {
-                if columns.is_empty() && !defs.is_empty() {
-                    columns = defs
-                        .iter()
-                        .map(|(n, _)| (n.clone(), PyRep::None))
-                        .collect();
-                }
                 for (idx, (col_name, dbtype)) in defs.iter().enumerate() {
                     if dbtype_bit_width(*dbtype) == 0 {
                         let val = decode_inner(

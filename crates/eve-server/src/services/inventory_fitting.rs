@@ -93,35 +93,20 @@ pub async fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let Some(container_id) = args.first().and_then(|a| a.as_i64()) else {
+            let Some(container_id) = args
+                .first()
+                .and_then(|a| a.as_i64())
+                .or_else(|| bound_entry.map(|b| b.object_id))
+            else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "GetContainerContents requires containerID".into(),
                 }));
             };
-            let res = ctx.db.with_snapshot(|snap| {
-                let Some(container) = snap.items.get(&container_id) else {
-                    return Err(BridgeRpcError {
-                        code: "ItemNotFound".into(),
-                        message: format!("Container item {container_id} not found"),
-                    });
-                };
-                let is_in_space = ctx.sde.solar_systems.contains_key(&(container.location_id as u32));
-                if container.owner_id != char_id && !is_in_space {
-                    return Err(BridgeRpcError {
-                        code: "CantDoThatWithSomeoneElsesStuff".into(),
-                        message: format!("Container {container_id} is not owned by character {char_id}"),
-                    });
-                }
-                let rows = snap
-                    .items
-                    .values()
-                    .filter(|i| i.location_id == container_id)
-                    .map(|i| item_to_packed_cells(ctx, i))
-                    .collect();
-                Ok(DBRowDescriptor::inv_item_header().build_crowset(rows))
-            });
-            Some(res)
+            Some(
+                ctx.get_container_contents(session, bound_entry, char_id, container_id)
+                    .await,
+            )
         }
 
         ("invbroker", "MoveItem") | ("invbroker", "Add") => {

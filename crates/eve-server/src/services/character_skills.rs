@@ -204,6 +204,19 @@ pub fn handle(
             };
 
             ctx.release_session_bindings(session.session_id);
+            if ctx
+                .db
+                .get_online_session(user_id)
+                .is_some_and(|os| os.session_id == session.session_id)
+            {
+                let _ = ctx.db.acquire_online_lock(
+                    user_id,
+                    session.session_id,
+                    Some(c.character_id),
+                    false,
+                    ctx.now_unix(),
+                );
+            }
             session.character_id = Some(c.character_id);
             session.corporation_id = Some(c.corporation_id);
             session.alliance_id = c.alliance_id;

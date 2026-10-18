@@ -373,4 +373,25 @@ fn test_p2_canonical_row_containers_golden_roundtrip() {
     let packed_tuple_decoded = marshal::decode(&packed_tuple_bytes).unwrap();
     assert_eq!(packed_tuple_decoded, packed_tuple);
     assert_eq!(marshal::encode(&packed_tuple_decoded), packed_tuple_bytes);
+
+    // 7. Corrupt RLE buffers (zero-run overflow or truncated literal run) must fail decode with InvalidPackedRowRle
+    let valid_row = desc.build_dbrow(vec![
+        PyRep::Integer(1),
+        PyRep::Integer(34),
+        PyRep::Real(5.0),
+        PyRep::Bool(false),
+        PyRep::String("Test".into()),
+    ]);
+    let mut corrupt_wire = marshal::encode(&valid_row);
+    // Replace the RLE length and bytes with a 1-byte literal run nibble (0x01 => 7 literal bytes expected, 0 provided)
+    let hdr_wire = marshal::encode(&desc.to_pyrep());
+    let mut forged = vec![MARSHAL_HEADER_BYTE, 0, 0, 0, 0, MarshalOpcode::PyPackedRow as u8];
+    forged.extend_from_slice(&hdr_wire[5..]);
+    forged.push(1); // rle_len = 1
+    forged.push(0x81); // low nibble = 1 (-7 literal bytes expected, but stream ends)
+    assert_eq!(
+        marshal::decode(&forged),
+        Err(ProtoError::InvalidPackedRowRle)
+    );
+    let _ = &mut corrupt_wire;
 }

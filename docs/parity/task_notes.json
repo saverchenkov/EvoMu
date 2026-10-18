@@ -221,23 +221,23 @@
  },
  "P-1": {
   "assessment": "DONE",
-  "note": "PyPackedRow RLE encoder/decoder with boolean bit-packing, null-bit tracking, and trailing 0-bit STR/WSTR/BYTES column marshaling/unmarshaling (OF-21)"
+  "note": "PyPackedRow RLE codec with boolean bit-packing, null-bit tracking, trailing 0-bit STR/WSTR/BYTES columns, and corrupt RLE error propagation (OF-21)"
  },
  "P-2": {
   "assessment": "PARTIAL",
-  "note": "DBRowDescriptor, blue.DBRow, dbutil.CRowset, dbutil.CIndexedRowset, util.Rowset, util.IndexRowset, and PackedRowList builders/encoders implemented and wired into invbroker, charUnboundMgr, and marketProxy; awaiting T-4 client golden captures and full E-2/CH-1 DB schema columns"
+  "note": "DBRowDescriptor, blue.DBRow, CRowset, CIndexedRowset, Rowset, IndexRowset, and PackedRowList wired into invbroker, charUnboundMgr, marketProxy, config, and notificationMgr"
  },
  "P-3": {
-  "assessment": "NOT STARTED",
-  "note": ""
+  "assessment": "PARTIAL",
+  "note": "objectCaching RPCs, CachedObject/CachedMethodCallResult envelopes, IEEE CRC32 versioning, and util.CachedObject hints implemented; full service-wide cache wrapping pending"
  },
  "P-4": {
-  "assessment": "NOT STARTED",
-  "note": ""
+  "assessment": "PARTIAL",
+  "note": "config service bulk entity/location/station/ticker/type/unit/map/landmark RPCs implemented with SDE+DB containers; GetMultiGraphicsEx and GetCelestialStatistic return UnimplementedRPC until SDE tables are imported"
  },
  "P-5": {
-  "assessment": "NOT STARTED",
-  "note": ""
+  "assessment": "PARTIAL",
+  "note": "ServerContext::notify multi-cast router with binary MachoPacket(Notification) frames, OnAccountChange/OnItemChange/OnSkillTrained, and notificationMgr RPCs implemented"
  },
  "P-6": {
   "assessment": "NOT STARTED",

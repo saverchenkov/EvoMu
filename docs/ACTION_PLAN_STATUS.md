@@ -4,17 +4,17 @@
 
 The canonical plan is `.agents/skills/evomu-adversarial-review/references/action_plan.md`. This file is regenerated from the latest pre-flight parity run, so it can't go stale or be overstated.
 
-**Parity: 10 / 5870 ledger rows closed (0.17%)**, 0 NA, 16 tagged tests, 48 passing tests. Flagged fake by the gap auditor: 7.
+**Parity: 17 / 5781 ledger rows closed (0.29%)**, 0 NA, 16 tagged tests, 50 passing tests. Flagged fake by the gap auditor: 0.
 
 | Category | Total | DONE | NA | Open |
 |---|---|---|---|---|
 | destiny | 52 | 0 | 0 | 52 |
 | effect | 1 | 0 | 0 | 1 |
 | esi | 197 | 0 | 0 | 197 |
-| feat | 1273 | 0 | 0 | 1273 |
+| feat | 1184 | 5 | 0 | 1179 |
 | journey | 29 | 0 | 0 | 29 |
 | notify | 1311 | 0 | 0 | 1311 |
-| plan | 109 | 8 | 0 | 101 |
+| plan | 109 | 10 | 0 | 99 |
 | quasar | 1455 | 0 | 0 | 1455 |
 | rpc | 1230 | 1 | 0 | 1229 |
 | sde | 213 | 1 | 0 | 212 |
@@ -31,20 +31,20 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 | S-4 | Jump clone remote dock / no cooldown | BLOCKED_BY_FEATURES | 0/3 | test_phase_0_s4_split_shared_handlers_and_jump_clones | PARTIAL | — | — |
 | S-5 | Fixtures in production (gate-arrival NPC, global 20 rats, K162, ESS banks) | DONE | 0/0 | test_phase_0_s5_no_unconditional_demo_spawns_on_empty_world | DONE | — | — |
 | S-6 | Client-driven wormhole/probe spawn | DONE | 0/0 | test_phase_0_s6_request_scans_unimplemented_rpc | DONE | — | — |
-| S-7 | Remote mutations (AttackStructure, ClaimSovereignty, CaptureComplex, PI writers) | FLAGGED_FAKE | 0/0 | test_phase_0_s7_no_hardcoded_fallbacks_and_in_space_range_checks | PARTIAL | — | — |
+| S-7 | Remote mutations (AttackStructure, ClaimSovereignty, CaptureComplex, PI writers) | DONE | 0/0 | test_phase_0_s7_no_hardcoded_fallbacks_and_in_space_range_checks | PARTIAL | — | — |
 | S-8 | Remaining with_mut_snapshot mutators (52 call sites) | DONE | 0/0 | test_phase_0_s8_transactional_snapshot_mutation_and_no_early_return_err | DONE | — | — |
-| S-9 | GM role | MISSING | 0/2 | — | PARTIAL | — | — |
-| S-10 | Docs honesty | FLAGGED_FAKE | 0/0 | test_phase_0_s10_doc_reconciliation_and_labels | PARTIAL | — | — |
+| S-9 | GM role | MISSING | 1/2 | — | PARTIAL | — | — |
+| S-10 | Docs honesty | DONE | 0/0 | test_phase_0_s10_doc_reconciliation_and_labels | PARTIAL | — | — |
 | S-11 | Seed lineage data (duplicate ancestry, shifted IDs) | DONE | 0/0 | test_phase_1_d1_to_d5_sde_sqlite_persistence_auth_sso_and_config, test_real_sde_sqlite_open_and_counts | DONE | — | af425cc 2026-10-18 |
 
 ## Phase 1: Data and persistence foundation (blocks almost everything)
 
 | Task | Title | Ledger | Features | Tests | Assessment | Note | Last commit |
 |---|---|---|---|---|---|---|---|
-| D-1 | Real SDE importer | MISSING | 0/3 | — | PARTIAL | — | af425cc 2026-10-18 |
+| D-1 | Real SDE importer | MISSING | 1/3 | — | PARTIAL | — | af425cc 2026-10-18 |
 | D-2 | eve-sde loads at runtime | DONE | 0/0 | test_phase_1_d1_to_d5_sde_sqlite_persistence_auth_sso_and_config, test_real_sde_sqlite_open_and_counts | DONE | — | — |
 | D-3 | Durable world DB | MISSING | 0/1 | — | PARTIAL | — | — |
-| D-4 | Accounts | MISSING | 0/5 | — | PARTIAL | — | — |
+| D-4 | Accounts | MISSING | 3/5 | — | PARTIAL | — | — |
 | D-5 | Config file | MISSING | 0/1 | — | PARTIAL | — | af425cc 2026-10-18 |
 
 ## Phase T: Test and acceptance infrastructure (start right after D-1/D-2; needed to close any ledger row)
@@ -63,11 +63,11 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 
 | Task | Title | Ledger | Features | Tests | Assessment | Note | Last commit |
 |---|---|---|---|---|---|---|---|
-| P-1 | PyPackedRow trailing object columns | DONE | 0/0 | test_p1_p2_wire_row_encoders_and_service_crowsets, test_p1_packed_row_in_tuple_does_not_corrupt_subsequent_elements_of_2 | DONE | PyPackedRow RLE encoder/decoder with boolean bit-packing, null-bit tracking, and trailing 0-bit STR/WSTR/BYTES column marshaling/unmarshaling (OF-21) | — |
-| P-2 | DBRow / CRowset / CIndexedRowset / PackedRowList encoders | MISSING | 0/1 | — | PARTIAL | DBRowDescriptor, blue.DBRow, dbutil.CRowset, dbutil.CIndexedRowset, util.Rowset, util.IndexRowset, and PackedRowList builders/encoders implemented and wired into invbroker, charUnboundMgr, and marketP | — |
-| P-3 | Object cache / CachedMethodCallResult | MISSING | 0/1 | — | NOT STARTED | — | — |
-| P-4 | config service | MISSING | 0/1 | — | NOT STARTED | — | — |
-| P-5 | Notifications | MISSING | 0/5 | — | NOT STARTED | — | — |
+| P-1 | PyPackedRow trailing object columns | DONE | 0/0 | test_p1_p2_wire_row_encoders_and_service_crowsets, test_p1_packed_row_in_tuple_does_not_corrupt_subsequent_elements_of_2 | DONE | PyPackedRow RLE codec with boolean bit-packing, null-bit tracking, trailing 0-bit STR/WSTR/BYTES columns, and corrupt RLE error propagation (OF-21) | 28cffa5 2026-10-18 |
+| P-2 | DBRow / CRowset / CIndexedRowset / PackedRowList encoders | MISSING | 0/1 | — | PARTIAL | DBRowDescriptor, blue.DBRow, CRowset, CIndexedRowset, Rowset, IndexRowset, and PackedRowList wired into invbroker, charUnboundMgr, marketProxy, config, and notificationMgr | 28cffa5 2026-10-18 |
+| P-3 | Object cache / CachedMethodCallResult | MISSING | 0/1 | — | PARTIAL | objectCaching RPCs, CachedObject/CachedMethodCallResult envelopes, IEEE CRC32 versioning, and util.CachedObject hints implemented; full service-wide cache wrapping pending | — |
+| P-4 | config service | MISSING | 0/1 | — | PARTIAL | config service bulk entity/location/station/ticker/type/unit/map/landmark RPCs implemented with SDE+DB containers; GetMultiGraphicsEx and GetCelestialStatistic return UnimplementedRPC until SDE tables | — |
+| P-5 | Notifications | MISSING | 0/5 | — | PARTIAL | ServerContext::notify multi-cast router with binary MachoPacket(Notification) frames, OnAccountChange/OnItemChange/OnSkillTrained, and notificationMgr RPCs implemented | — |
 | P-6 | Native handshake | MISSING | 0/1 | — | NOT STARTED | — | — |
 | P-7 | Destiny binary stream | MISSING | 0/2 | — | PARTIAL | — | — |
 
@@ -77,19 +77,19 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 |---|---|---|---|---|---|---|---|
 | SP-1 | Celestials and gates as balls | MISSING | 0/1 | — | NOT STARTED | — | — |
 | SP-2 | Bubbles / grid interest | MISSING | 0/5 | — | PARTIAL | — | — |
-| SP-3 | Beyonce command set | MISSING | 0/15 | — | PARTIAL | — | — |
-| SP-4 | Stargate jump polish | MISSING | 0/6 | — | PARTIAL | — | — |
+| SP-3 | Beyonce command set | MISSING | 0/13 | — | PARTIAL | — | — |
+| SP-4 | Stargate jump polish | MISSING | 0/3 | — | PARTIAL | — | — |
 | SP-5 | Dock / undock | MISSING | 0/4 | — | PARTIAL | — | — |
 
 ## Phase 4: Dogma and fitting
 
 | Task | Title | Ledger | Features | Tests | Assessment | Note | Last commit |
 |---|---|---|---|---|---|---|---|
-| DG-1 | Modifier engine over V24 modifierInfo | MISSING | 0/21 | — | PARTIAL | — | — |
+| DG-1 | Modifier engine over V24 modifierInfo | MISSING | 0/20 | — | PARTIAL | — | — |
 | DG-2 | Fit validation | MISSING | 0/6 | — | PARTIAL | — | — |
 | DG-3 | Online/offline | MISSING | 0/1 | — | PARTIAL | — | — |
 | DG-4 | Module cycle engine | MISSING | 0/21 | — | PARTIAL | — | — |
-| DG-5 | Targeting | MISSING | 0/13 | — | NOT STARTED | — | — |
+| DG-5 | Targeting | MISSING | 0/12 | — | NOT STARTED | — | — |
 | DG-6 | Ammo and grouping | MISSING | 0/4 | — | PARTIAL | — | — |
 
 ## Phase 5: Combat and PvE loop
@@ -99,11 +99,11 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 | C-1 | Turret and missile damage from attributes | MISSING | 0/15 | — | PARTIAL | — | — |
 | C-2 | HP from dogma; damage notifications | MISSING | 0/4 | — | PARTIAL | — | — |
 | C-3 | Death pipeline | MISSING | 0/12 | — | PARTIAL | — | — |
-| C-4 | NPC spawns and AI | MISSING | 0/22 | — | PARTIAL | — | — |
+| C-4 | NPC spawns and AI | MISSING | 0/17 | — | PARTIAL | — | — |
 | C-5 | Asteroid belts and mining | MISSING | 0/0 | — | NOT STARTED | — | — |
 | C-6 | Reprocessing (real) | MISSING | 0/0 | — | PARTIAL | — | — |
 | C-7 | Salvage, tractor, drones | MISSING | 0/17 | — | NOT STARTED | — | — |
-| C-8 | CrimeWatch and CONCORD | MISSING | 0/40 | — | PARTIAL | — | — |
+| C-8 | CrimeWatch and CONCORD | MISSING | 0/29 | — | PARTIAL | — | — |
 
 ## Phase 5M: Full mining system
 
@@ -145,7 +145,7 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 | E-1 | Fee inputs | MISSING | 0/4 | — | PARTIAL | — | — |
 | E-2 | Order lifecycle | MISSING | 0/17 | — | PARTIAL | — | — |
 | E-3 | Contracts | MISSING | 0/11 | — | PARTIAL | — | — |
-| E-4 | Industry | MISSING | 0/27 | — | PARTIAL | — | — |
+| E-4 | Industry | MISSING | 0/26 | — | PARTIAL | — | — |
 | E-5 | Agents and missions | MISSING | 0/25 | — | PARTIAL | — | — |
 | E-6 | PI basics | MISSING | 0/18 | — | PARTIAL | — | — |
 
@@ -158,7 +158,7 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 | SO-3 | Corporations and alliances | MISSING | 0/41 | — | PARTIAL | — | — |
 | SO-4 | Bookmarks | MISSING | 0/9 | — | PARTIAL | — | — |
 | SO-5 | Exploration | MISSING | 0/22 | — | NOT STARTED | — | — |
-| SO-6 | Wormholes | MISSING | 0/7 | — | PARTIAL | — | — |
+| SO-6 | Wormholes | MISSING | 0/5 | — | PARTIAL | — | — |
 | SO-7 | Chat | MISSING | 0/8 | — | NOT STARTED | — | — |
 
 ## Phase Q: Quasar / public-gateway backend services (all of them)

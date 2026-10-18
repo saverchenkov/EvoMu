@@ -36,6 +36,16 @@ pub struct ServerContext {
     pub cataloged_services: HashSet<String>,
     pub quasar_domains: HashSet<String>,
     pub bound_objects: RwLock<HashMap<u64, BoundObjectEntry>>,
+    pub object_cache: RwLock<HashMap<String, crate::router::cache_notifications::CachedObjectRecord>>,
+    pub object_cache_timestamps: RwLock<HashMap<String, i64>>,
+    pub notification_records: RwLock<Vec<crate::router::cache_notifications::NotificationRecord>>,
+    pub pending_notifications:
+        RwLock<HashMap<i64, Vec<crate::router::cache_notifications::PendingMachoNotification>>>,
+    pub notify_tx: tokio::sync::broadcast::Sender<(
+        i64,
+        crate::router::cache_notifications::PendingMachoNotification,
+    )>,
+    pub map_landmarks: RwLock<Vec<(i64, String, f64, f64, f64)>>,
     pub ship_fittings: RwLock<HashMap<i64, ShipFittingEngine>>,
     pub weapon_cycle_state: RwLock<HashMap<i64, (Option<u64>, u32)>>,
     pub fighter_cooldown_state: RwLock<HashMap<(i64, u32), u64>>,
@@ -64,6 +74,7 @@ impl ServerContext {
         let quasar_map: HashMap<String, serde_json::Value> =
             serde_json::from_str(EMBEDDED_QUASAR_CATALOG_JSON).unwrap_or_default();
         let quasar_domains: HashSet<String> = quasar_map.into_keys().collect();
+        let (notify_tx, _) = tokio::sync::broadcast::channel(256);
 
         Self {
             sde,
@@ -73,6 +84,12 @@ impl ServerContext {
             cataloged_services,
             quasar_domains,
             bound_objects: RwLock::new(HashMap::new()),
+            object_cache: RwLock::new(HashMap::new()),
+            object_cache_timestamps: RwLock::new(HashMap::new()),
+            notification_records: RwLock::new(Vec::new()),
+            pending_notifications: RwLock::new(HashMap::new()),
+            notify_tx,
+            map_landmarks: RwLock::new(Vec::new()),
             ship_fittings: RwLock::new(HashMap::new()),
             weapon_cycle_state: RwLock::new(HashMap::new()),
             fighter_cooldown_state: RwLock::new(HashMap::new()),

@@ -110,10 +110,43 @@ def from_pyrep_json(node):
     val = node.get("val")
     if tag == "None":
         return None
-    if tag in ("Bool", "Integer", "Real", "String", "AsciiString"):
+    if tag in ("Bool", "Integer", "Real", "String", "AsciiString", "Token"):
         return val
-    if tag in ("Buffer", "Picked"):
+    if tag in ("Buffer", "Bytes", "Picked"):
         return bytes(bytearray(val))
+    if tag in ("SubStream", "SubStruct"):
+        return from_pyrep_json(val)
+    if tag == "ChecksumedStream":
+        if isinstance(val, dict) and "body" in val:
+            return from_pyrep_json(val["body"])
+        return from_pyrep_json(val)
+    if tag == "Object":
+        type_name = val.get("type_name") if isinstance(val, dict) else None
+        args_py = from_pyrep_json(val.get("args")) if isinstance(val, dict) else None
+        if (
+            type_name == "objectCaching.CachedMethodCallResult"
+            and isinstance(args_py, tuple)
+            and len(args_py) >= 2
+        ):
+            return args_py[1]
+        if (
+            type_name == "objectCaching.CachedObject"
+            and isinstance(args_py, tuple)
+            and len(args_py) >= 7
+        ):
+            return LocalKeyVal(
+                {
+                    "type_name": type_name,
+                    "objectVersion": args_py[0],
+                    "version": args_py[1],
+                    "nodeID": args_py[2],
+                    "shared": args_py[3],
+                    "lret": args_py[4],
+                    "compressed": args_py[5],
+                    "objectID": args_py[6],
+                }
+            )
+        return LocalKeyVal({"type_name": type_name, "args": args_py})
     if tag == "Tuple":
         return tuple(from_pyrep_json(x) for x in val)
     if tag == "List":
@@ -132,7 +165,20 @@ def from_pyrep_json(node):
     if tag == "ObjectEx":
         list_items = [from_pyrep_json(x) for x in val.get("list", [])]
         dict_items = {from_pyrep_json(k): from_pyrep_json(v) for k, v in val.get("dict", [])}
-        if dict_items and not list_items:
+        hdr = val.get("header")
+        hdr_py = from_pyrep_json(hdr) if hdr is not None else None
+        is_indexed = (
+            isinstance(hdr_py, tuple)
+            and len(hdr_py) > 0
+            and isinstance(hdr_py[0], tuple)
+            and len(hdr_py[0]) > 0
+            and hdr_py[0][0] == "dbutil.CIndexedRowset"
+        ) or (
+            isinstance(hdr_py, tuple)
+            and len(hdr_py) > 0
+            and hdr_py[0] == "dbutil.CIndexedRowset"
+        )
+        if is_indexed or (dict_items and not list_items):
             return dict_items
         return list_items
     if tag == "Rowset":

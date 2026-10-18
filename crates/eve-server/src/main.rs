@@ -197,6 +197,7 @@ async fn handle_bridge_client(stream: TcpStream, ctx: Arc<ServerContext>) -> Res
     // New sessions start strictly unauthenticated (`user_id: None`, `role: 0`)
     let mut session = SessionState::new(session_id);
     let mut sys_rx = ctx.systems.get_or_spawn(30000142).subscribe();
+    let mut notify_rx = ctx.notify_tx.subscribe();
 
     let (mut reader, mut writer) = stream.into_split();
     let (frame_tx, mut frame_rx) = tokio::sync::mpsc::channel::<Result<Vec<u8>>>(16);
@@ -277,6 +278,30 @@ async fn handle_bridge_client(stream: TcpStream, ctx: Arc<ServerContext>) -> Res
                             let sess_bytes = serde_json::to_vec(&session_event)?;
                             write_bounded_frame(&mut writer, &sess_bytes).await?;
                         }
+                        if let Some(cid) = session.character_id {
+                            for notif in ctx.drain_notifications_for_char(cid) {
+                                let evt = BridgeEnvelope::ServerEvent {
+                                    tick: 0,
+                                    event: notif.event,
+                                    args: notif.args,
+                                };
+                                let evt_bytes = serde_json::to_vec(&evt)?;
+                                write_bounded_frame(&mut writer, &evt_bytes).await?;
+                            }
+                        }
+                    }
+                }
+                Ok((target_cid, _)) = notify_rx.recv() => {
+                    if session.character_id == Some(target_cid) {
+                        for notif in ctx.drain_notifications_for_char(target_cid) {
+                            let evt = BridgeEnvelope::ServerEvent {
+                                tick: 0,
+                                event: notif.event,
+                                args: notif.args,
+                            };
+                            let evt_bytes = serde_json::to_vec(&evt)?;
+                            write_bounded_frame(&mut writer, &evt_bytes).await?;
+                        }
                     }
                 }
                 Ok(tick_msg) = sys_rx.recv() => {
@@ -302,6 +327,9 @@ async fn handle_bridge_client(stream: TcpStream, ctx: Arc<ServerContext>) -> Res
     .await;
 
     reader_task.abort();
+    if let Some(cid) = session.character_id {
+        let _ = ctx.drain_notifications_for_char(cid);
+    }
     if let Some(uid) = session.user_id {
         ctx.db.release_online_lock(uid, session.session_id);
     }
@@ -310,135 +338,179 @@ async fn handle_bridge_client(stream: TcpStream, ctx: Arc<ServerContext>) -> Res
 }
 
 /// Handles legacy `machoNet` connections on port 26000, performing the `VersionExchange`
-/// handshake and routing `MachoPacket` (`CallReq`, `PingReq`) frames to `ServerContext::dispatch_rpc`.
-async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>) -> Result<()> {
+/// handshake and routing `MachoPacket` (`CallReq`, `PingReq`, `Notification`) frames.
+async fn handle_macho_client(stream: TcpStream, ctx: Arc<ServerContext>) -> Result<()> {
     let session_id = NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed);
     let mut session = SessionState::new(session_id);
+    let mut notify_rx = ctx.notify_tx.subscribe();
+    let (mut reader, mut writer) = stream.into_split();
     let ver = VersionExchange::default().to_pyrep();
     let encoded = marshal::encode(&ver);
-    write_bounded_frame(&mut stream, &encoded).await?;
+    write_bounded_frame(&mut writer, &encoded).await?;
 
-    let res: Result<()> = async {
-        while let Some(frame) = read_bounded_frame(&mut stream).await? {
-            let decoded = marshal::decode(&frame)?;
-
-            if let Some(pkt) = MachoPacket::from_pyrep(&decoded) {
-                match pkt.packet_type {
-                    MachoPacketType::PingReq => {
-                        let rsp = MachoPacket {
-                            packet_type: MachoPacketType::PingRsp,
-                            source: pkt.destination,
-                            destination: pkt.source,
-                            user_id: session.user_id,
-                            payload: pkt.payload,
-                            named_payload: HashMap::new(),
-                        };
-                        write_bounded_frame(&mut stream, &marshal::encode(&rsp.to_pyrep())).await?;
-                    }
-                    MachoPacketType::CallReq => {
-                        let service = match &pkt.destination {
-                            MachoAddress::Node { service, .. }
-                            | MachoAddress::Any { service, .. }
-                            | MachoAddress::Client { service, .. } => {
-                                service.clone().unwrap_or_else(|| "machoNet".into())
-                            }
-                            MachoAddress::Broadcast { broadcast_id, .. } => broadcast_id.clone(),
-                        };
-
-                        let (bound_id, method, call_args, call_kwargs) =
-                            extract_macho_call_req(&pkt.payload);
-                        let prev_session = session.clone();
-                        let rpc_res = ctx
-                            .dispatch_rpc(
-                                &mut session,
-                                &service,
-                                bound_id,
-                                &method,
-                                &call_args,
-                                &call_kwargs,
-                                Some("machoNet:26000"),
-                            )
-                            .await;
-
-                        let rsp_pkt = match rpc_res {
-                            Ok(val) => MachoPacket {
-                                packet_type: MachoPacketType::CallRsp,
-                                source: pkt.destination.clone(),
-                                destination: pkt.source.clone(),
-                                user_id: session.user_id,
-                                payload: PyRep::Tuple(vec![PyRep::SubStream(Box::new(val))]),
-                                named_payload: HashMap::new(),
-                            },
-                            Err(err) => MachoPacket {
-                                packet_type: MachoPacketType::ErrorResponse,
-                                source: pkt.destination.clone(),
-                                destination: pkt.source.clone(),
-                                user_id: session.user_id,
-                                payload: PyRep::Tuple(vec![
-                                    PyRep::Integer(MachoPacketType::CallReq as i64),
-                                    PyRep::Integer(1),
-                                    PyRep::Tuple(vec![PyRep::SubStream(Box::new(PyRep::keyval(
-                                        [
-                                            ("code", PyRep::String(err.code)),
-                                            ("message", PyRep::String(err.message)),
-                                        ],
-                                    )))]),
-                                ]),
-                                named_payload: HashMap::new(),
-                            },
-                        };
-                        write_bounded_frame(&mut stream, &marshal::encode(&rsp_pkt.to_pyrep()))
-                            .await?;
-
-                        if let Some(sess_change_payload) =
-                            prev_session.to_session_change_pyrep(&session, vec![888444])
-                        {
-                            let sess_pkt = MachoPacket {
-                                packet_type: MachoPacketType::SessionChangeNotification,
-                                source: MachoAddress::Node {
-                                    node_id: 888444,
-                                    service: None,
-                                    call_id: 0,
-                                },
-                                destination: MachoAddress::Client {
-                                    client_id: session.session_id,
-                                    call_id: 0,
-                                    service: None,
-                                },
-                                user_id: session.user_id,
-                                payload: sess_change_payload,
-                                named_payload: HashMap::new(),
-                            };
-                            write_bounded_frame(
-                                &mut stream,
-                                &marshal::encode(&sess_pkt.to_pyrep()),
-                            )
-                            .await?;
-                        }
-                    }
-                    _ => {
-                        let ack = PyRep::None;
-                        write_bounded_frame(&mut stream, &marshal::encode(&ack)).await?;
+    let (frame_tx, mut frame_rx) = tokio::sync::mpsc::channel::<Result<Vec<u8>>>(16);
+    let reader_task = tokio::spawn(async move {
+        loop {
+            match read_bounded_frame(&mut reader).await {
+                Ok(Some(payload)) => {
+                    if frame_tx.send(Ok(payload)).await.is_err() {
+                        break;
                     }
                 }
-                continue;
+                Ok(None) => break,
+                Err(e) => {
+                    let _ = frame_tx.send(Err(e)).await;
+                    break;
+                }
             }
+        }
+    });
 
-            // Handle low-level VersionExchangeClient / VIPKey / QueueCheck handshake frames
-            let reply = match &decoded {
-                PyRep::Tuple(items) if items.len() == 6 => PyRep::Object {
-                    type_name: "macho.AuthenticationReq".into(),
-                    args: Box::new(PyRep::Tuple(vec![PyRep::ascii_bytes("ok")])),
-                },
-                _ => PyRep::None,
-            };
-            let reply_bytes = marshal::encode(&reply);
-            write_bounded_frame(&mut stream, &reply_bytes).await?;
+    let res: Result<()> = async {
+        loop {
+            tokio::select! {
+                frame_opt = frame_rx.recv() => {
+                    let Some(frame_res) = frame_opt else {
+                        break;
+                    };
+                    let frame = frame_res?;
+                    let decoded = marshal::decode(&frame)?;
+
+                    if let Some(pkt) = MachoPacket::from_pyrep(&decoded) {
+                        match pkt.packet_type {
+                            MachoPacketType::PingReq => {
+                                let rsp = MachoPacket {
+                                    packet_type: MachoPacketType::PingRsp,
+                                    source: pkt.destination,
+                                    destination: pkt.source,
+                                    user_id: session.user_id,
+                                    payload: pkt.payload,
+                                    named_payload: HashMap::new(),
+                                };
+                                write_bounded_frame(&mut writer, &marshal::encode(&rsp.to_pyrep())).await?;
+                            }
+                            MachoPacketType::CallReq => {
+                                let service = match &pkt.destination {
+                                    MachoAddress::Node { service, .. }
+                                    | MachoAddress::Any { service, .. }
+                                    | MachoAddress::Client { service, .. } => {
+                                        service.clone().unwrap_or_else(|| "machoNet".into())
+                                    }
+                                    MachoAddress::Broadcast { broadcast_id, .. } => broadcast_id.clone(),
+                                };
+
+                                let (bound_id, method, call_args, call_kwargs) =
+                                    extract_macho_call_req(&pkt.payload);
+                                let prev_session = session.clone();
+                                let rpc_res = ctx
+                                    .dispatch_rpc(
+                                        &mut session,
+                                        &service,
+                                        bound_id,
+                                        &method,
+                                        &call_args,
+                                        &call_kwargs,
+                                        Some("machoNet:26000"),
+                                    )
+                                    .await;
+
+                                let rsp_pkt = match rpc_res {
+                                    Ok(val) => MachoPacket {
+                                        packet_type: MachoPacketType::CallRsp,
+                                        source: pkt.destination.clone(),
+                                        destination: pkt.source.clone(),
+                                        user_id: session.user_id,
+                                        payload: PyRep::Tuple(vec![PyRep::SubStream(Box::new(val))]),
+                                        named_payload: HashMap::new(),
+                                    },
+                                    Err(err) => MachoPacket {
+                                        packet_type: MachoPacketType::ErrorResponse,
+                                        source: pkt.destination.clone(),
+                                        destination: pkt.source.clone(),
+                                        user_id: session.user_id,
+                                        payload: PyRep::Tuple(vec![
+                                            PyRep::Integer(MachoPacketType::CallReq as i64),
+                                            PyRep::Integer(1),
+                                            PyRep::Tuple(vec![PyRep::SubStream(Box::new(PyRep::keyval(
+                                                [
+                                                    ("code", PyRep::String(err.code)),
+                                                    ("message", PyRep::String(err.message)),
+                                                ],
+                                            )))]),
+                                        ]),
+                                        named_payload: HashMap::new(),
+                                    },
+                                };
+                                write_bounded_frame(&mut writer, &marshal::encode(&rsp_pkt.to_pyrep()))
+                                    .await?;
+
+                                if let Some(sess_change_payload) =
+                                    prev_session.to_session_change_pyrep(&session, vec![888444])
+                                {
+                                    let sess_pkt = MachoPacket {
+                                        packet_type: MachoPacketType::SessionChangeNotification,
+                                        source: MachoAddress::Node {
+                                            node_id: 888444,
+                                            service: None,
+                                            call_id: 0,
+                                        },
+                                        destination: MachoAddress::Client {
+                                            client_id: session.session_id,
+                                            call_id: 0,
+                                            service: None,
+                                        },
+                                        user_id: session.user_id,
+                                        payload: sess_change_payload,
+                                        named_payload: HashMap::new(),
+                                    };
+                                    write_bounded_frame(
+                                        &mut writer,
+                                        &marshal::encode(&sess_pkt.to_pyrep()),
+                                    )
+                                    .await?;
+                                }
+                                if let Some(cid) = session.character_id {
+                                    for notif in ctx.drain_notifications_for_char(cid) {
+                                        write_bounded_frame(&mut writer, &notif.marshaled_packet).await?;
+                                    }
+                                }
+                            }
+                            _ => {
+                                let ack = PyRep::None;
+                                write_bounded_frame(&mut writer, &marshal::encode(&ack)).await?;
+                            }
+                        }
+                        continue;
+                    }
+
+                    // Handle low-level VersionExchangeClient / VIPKey / QueueCheck handshake frames
+                    let reply = match &decoded {
+                        PyRep::Tuple(items) if items.len() == 6 => PyRep::Object {
+                            type_name: "macho.AuthenticationReq".into(),
+                            args: Box::new(PyRep::Tuple(vec![PyRep::ascii_bytes("ok")])),
+                        },
+                        _ => PyRep::None,
+                    };
+                    let reply_bytes = marshal::encode(&reply);
+                    write_bounded_frame(&mut writer, &reply_bytes).await?;
+                }
+                Ok((target_cid, _)) = notify_rx.recv() => {
+                    if session.character_id == Some(target_cid) {
+                        for notif in ctx.drain_notifications_for_char(target_cid) {
+                            write_bounded_frame(&mut writer, &notif.marshaled_packet).await?;
+                        }
+                    }
+                }
+            }
         }
         Ok(())
     }
     .await;
 
+    reader_task.abort();
+    if let Some(cid) = session.character_id {
+        let _ = ctx.drain_notifications_for_char(cid);
+    }
     if let Some(uid) = session.user_id {
         ctx.db.release_online_lock(uid, session.session_id);
     }

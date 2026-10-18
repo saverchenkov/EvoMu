@@ -15,7 +15,7 @@ pub mod marshal;
 pub use dbrow::{
     dbtype_bit_width, decode_rle, encode_rle, extract_dbrow_col_defs,
     extract_dbrow_header_col_defs, pack_packed_row_columns, pack_packed_row_columns_from_defs,
-    unpack_packed_row_columns, DBRowDescriptor, DbColumnType,
+    try_unpack_packed_row_columns, unpack_packed_row_columns, DBRowDescriptor, DbColumnType,
 };
 
 use serde::{Deserialize, Serialize};
@@ -51,6 +51,8 @@ pub enum ProtoError {
     UnsupportedOpcode(u8),
     #[error("Invalid saved stream reference index: {0}")]
     InvalidSaveReference(usize),
+    #[error("Invalid or corrupt PyPackedRow RLE buffer")]
+    InvalidPackedRowRle,
     #[error("Zlib decompression failed: {0}")]
     ZlibError(String),
     #[error("Invalid UTF-8 string in stream: {0}")]
