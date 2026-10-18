@@ -53,6 +53,27 @@ def write(path, text):
         f.write(text)
 
 
+def extract_verdict(env):
+    """Return the structured verdict dict from an agy JSON envelope, salvaging it from the raw
+    response text when the stream ended in ERROR or structured_output is missing."""
+    so = env.get("structured_output") or {}
+    if so.get("verdict"):
+        return so
+    resp = env.get("response") or ""
+    candidates = re.findall(r"```(?:json)?\s*(\{.*?\})\s*```", resp, re.S)
+    m = re.search(r"\{.*\}", resp, re.S)
+    if m:
+        candidates.append(m.group(0))
+    for c in candidates:
+        try:
+            obj = json.loads(c, strict=False)  # tolerate raw newlines/tabs inside strings
+        except Exception:  # noqa: BLE001
+            continue
+        if isinstance(obj, dict) and obj.get("verdict") in EXIT:
+            return obj
+    return {}
+
+
 def pick_base(root, state, explicit):
     if explicit:
         return explicit
@@ -135,6 +156,12 @@ def build_prompt(ctx_dir, has_claims):
           "by the schema; put the full human-readable report in `report_markdown`.\n"
         + "- IMPORTANT (headless mode): any message that contains text without a tool call ends your session. "
           "Work silently: call tools back-to-back with no narration, and emit text only once, as the final JSON.\n"
+        + "- IMPORTANT: shell/terminal commands are auto-denied in this headless session, and a denied command "
+          "ends your turn with no output. Do NOT run commands (no cargo, git, grep, python). Use only file "
+          "view/list/search tools. The diff, test output, metrics and tool outputs are already pre-computed in "
+          "the context directory.\n"
+        + "- Ignore any Stop-hook message asking you to run the `evomu-adversarial-review` skill; that hook is for "
+          "the coding agent, not for you.\n"
     )
 
 
@@ -245,39 +272,55 @@ def main():
 
     print("[review] launching headless reviewer (this can take a while)...")
     max_rounds = int(os.environ.get("EVOMU_REVIEW_MAX_ROUNDS", "8"))
+    max_errors = int(os.environ.get("EVOMU_REVIEW_MAX_STREAM_ERRORS", "2"))
     base_flags = cmd[3:]  # everything after `agy -p <prompt>`
+    # The reviewer runs inside the same workspace, so it loads .agents/hooks.json. Without this, the
+    # coding-agent Stop hook fires inside the reviewer session, forces "continue", burns the per-tree
+    # loop guard, and interrupts the reviewer's stream.
+    reviewer_env = dict(os.environ, EVOMU_REVIEW_HOOK="off", EVOMU_REVIEWER="1")
+    lock = os.path.join(sdir, "review_in_progress.json")
+    write(lock, json.dumps({"pid": os.getpid(), "tree": tree_before, "ts": ts}))
     verdict, so, conv, env, p = "ERROR", {}, "", {}, None
-    for rnd in range(1, max_rounds + 1):
-        if rnd == 1:
-            run_cmd = cmd
-        else:
-            run_cmd = ["agy", "-p", CONTINUE_PROMPT, "--conversation", conv] + base_flags
-            print("[review] round %d: resuming conversation %s (no final verdict yet)" % (rnd, conv))
-        p = subprocess.run(run_cmd, cwd=root, capture_output=True, text=True)
-        write(os.path.join(run_dir, "agy_stdout_r%d.json" % rnd), p.stdout)
-        write(os.path.join(run_dir, "agy_stderr_r%d.txt" % rnd), p.stderr)
-        try:
-            env = json.loads(p.stdout.strip().splitlines()[-1]) if p.stdout.strip() else {}
-        except Exception:  # noqa: BLE001
-            env = {}
-        conv = env.get("conversation_id") or conv
-        if env.get("status") != "SUCCESS":
-            so = {"summary": "Reviewer run failed: %s" % (env.get("error") or p.stderr[-2000:] or "no output"),
-                  "report_markdown": "agy exit code %d. stderr tail:\n\n```\n%s\n```" % (p.returncode, p.stderr[-4000:])}
-            verdict = "ERROR"
-            break
-        so = env.get("structured_output") or {}
-        if not so.get("verdict") and env.get("response"):
-            m = re.search(r"\{.*\}", env["response"], re.S)
+    errors = 0
+    try:
+        for rnd in range(1, max_rounds + 1):
+            if rnd == 1:
+                run_cmd = cmd
+            else:
+                run_cmd = ["agy", "-p", CONTINUE_PROMPT, "--conversation", conv] + base_flags
+                print("[review] round %d: resuming conversation %s (no final verdict yet)" % (rnd, conv))
+            p = subprocess.run(run_cmd, cwd=root, capture_output=True, text=True, env=reviewer_env)
+            write(os.path.join(run_dir, "agy_stdout_r%d.json" % rnd), p.stdout)
+            write(os.path.join(run_dir, "agy_stderr_r%d.txt" % rnd), p.stderr)
             try:
-                so = json.loads(m.group(0)) if m else {}
+                env = json.loads(p.stdout.strip().splitlines()[-1], strict=False) if p.stdout.strip() else {}
             except Exception:  # noqa: BLE001
-                so = {}
-        if so.get("verdict") in EXIT:
-            verdict = so["verdict"]
-            break
-        if not conv:
-            break
+                env = {}
+            conv = env.get("conversation_id") or conv
+            so = extract_verdict(env)
+            if so.get("verdict") in EXIT:
+                verdict = so["verdict"]
+                if env.get("status") != "SUCCESS":
+                    so["summary"] = ("(Verdict salvaged from a reviewer stream that ended with status %s: %s) "
+                                     % (env.get("status"), env.get("error"))) + so.get("summary", "")
+                break
+            if env.get("status") != "SUCCESS":
+                errors += 1
+                so = {"summary": "Reviewer run failed: %s" % (env.get("error") or p.stderr[-2000:] or "no output"),
+                      "report_markdown": "agy exit code %d. stderr tail:\n\n```\n%s\n```"
+                                         % (p.returncode, p.stderr[-4000:])}
+                if conv and errors <= max_errors:
+                    print("[review] round %d: reviewer stream error (%s); resuming" % (rnd, env.get("error")))
+                    continue
+                verdict = "ERROR"
+                break
+            if not conv:
+                break
+    finally:
+        try:
+            os.remove(lock)
+        except OSError:
+            pass
     if verdict == "ERROR" and not so.get("summary"):
         so = {"summary": "Reviewer did not return a verdict after %d rounds." % max_rounds,
               "report_markdown": (env.get("response") or "")[-4000:]}

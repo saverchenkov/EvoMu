@@ -37,7 +37,7 @@ def main():
         payload = json.load(sys.stdin)
     except Exception:  # noqa: BLE001
         payload = {}
-    if os.environ.get("EVOMU_REVIEW_HOOK", "").lower() == "off":
+    if os.environ.get("EVOMU_REVIEW_HOOK", "").lower() == "off" or os.environ.get("EVOMU_REVIEWER") == "1":
         emit({"decision": "allow"})
     if payload.get("fullyIdle") is False or payload.get("terminationReason") == "error":
         emit({"decision": "allow"})
@@ -49,6 +49,18 @@ def main():
         emit({"decision": "allow"})
 
     sdir = rl.state_dir(root)
+    # A review is running (this Stop most likely comes from the headless reviewer session, which
+    # loads the same workspace hooks). Allow it and don't count toward the loop guard.
+    lock_path = os.path.join(sdir, "review_in_progress.json")
+    if os.path.exists(lock_path):
+        try:
+            pid = int(json.load(open(lock_path)).get("pid", 0))
+            if pid <= 0:
+                raise ValueError("bad pid")
+            os.kill(pid, 0)
+            emit({"decision": "allow"})
+        except (OSError, ValueError, TypeError):
+            pass  # stale lock: orchestrator died
     hook_state_path = os.path.join(sdir, "stop_hook.json")
     hs = {}
     if os.path.exists(hook_state_path):
