@@ -142,6 +142,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--claims", help="draft claims file to lint")
     ap.add_argument("--no-tests", action="store_true", help="reuse the last pre-flight test output")
+    ap.add_argument("--no-status", action="store_true", help="don't regenerate docs/ACTION_PLAN_STATUS.md")
     ap.add_argument("--test-timeout", type=int, default=7200)
     a = ap.parse_args()
 
@@ -172,6 +173,10 @@ def main():
     sh([sys.executable, PARITY_STATUS, "--tests", tests_txt, "--attest-dir", attest,
         "--out", os.path.join(pdir, "parity.json"), "--md", os.path.join(pdir, "parity.md")], root, timeout=900)
     par = json.load(open(os.path.join(pdir, "parity.json")))
+    if not a.no_status:
+        _, st_out = sh([sys.executable, os.path.join(HERE, "parity", "status_table.py"), "--parity",
+                        os.path.join(pdir, "parity.json")], root, timeout=600)
+        print(st_out.strip())
     summ, prow = par["summary"], par["rows"]
     rows = ledger_rows()
 

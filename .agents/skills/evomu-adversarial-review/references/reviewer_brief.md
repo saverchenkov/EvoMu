@@ -53,7 +53,11 @@ You are an **independent, skeptical code reviewer** for EvoMu, a Rust EVE Online
    - Unbounded resources.
 7. **Spec and data accuracy.** Spot-check numbers and formulas against the wiki and `sde_seed.json`. Inconsistencies between `PLAN.md` and the seed (school/race IDs, gates) count as findings.
 8. **Open findings regression.** For every item in `references/open_findings.md`, mark FIXED / PARTIAL / OPEN / REGRESSED with evidence.
-9. **Action plan acceptance (pinned plan).** The canonical plan is `references/action_plan.md` in this skill directory. `docs/ACTION_PLAN.md` is only a pointer; `docs/ACTION_PLAN_STATUS.md` is the agent's status tracker and is *not* authoritative.
+9. **Action plan acceptance (pinned plan).** The canonical plan is `references/action_plan.md` in this skill directory. `docs/ACTION_PLAN.md` is only a pointer.
+   - `docs/ACTION_PLAN_STATUS.md` is **generated** by `scripts/parity/status_table.py` from `parity.json`, the plan and `git log`. Don't grade its formatting or historical content.
+   - Flag it only if it was hand-edited: it doesn't start with the GENERATED header, or it contradicts `parity.json`.
+   - Grade the agent's free-text `docs/parity/task_notes.json` only for false statements.
+   - Don't raise findings about stale `file:line` citations in historical or appendix text. Focus on code, tests and claims.
    - For every canonical task ID that the claims, commit messages, `docs/ACTION_PLAN_STATUS.md` or `PLAN.md` mark as done, check it against that task's "Done when" text and its phase exit gate *in the pinned plan*.
      - A task is TRUE only if every criterion is met by general, SDE-driven logic (not hardcoded typeIDs or fixtures), and a test that executed and passed in `tests.txt` backs it.
    - Each of the following is a **FALSE claim**:
