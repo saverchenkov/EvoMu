@@ -4,20 +4,20 @@
 
 The canonical plan is `.agents/skills/evomu-adversarial-review/references/action_plan.md`. This file is regenerated from the latest pre-flight parity run, so it can't go stale or be overstated.
 
-**Parity: 28 / 5870 ledger rows closed (0.48%)**, 0 NA, 19 tagged tests, 53 passing tests. Flagged fake by the gap auditor: 7.
+**Parity: 44 / 5923 ledger rows closed (0.74%)**, 0 NA, 24 tagged tests, 58 passing tests. Flagged fake by the gap auditor: 11.
 
 | Category | Total | DONE | NA | Open |
 |---|---|---|---|---|
 | destiny | 52 | 7 | 0 | 45 |
 | effect | 1 | 0 | 0 | 1 |
-| esi | 197 | 0 | 0 | 197 |
-| feat | 1273 | 4 | 0 | 1269 |
+| esi | 197 | 14 | 0 | 183 |
+| feat | 1326 | 10 | 0 | 1316 |
 | journey | 29 | 0 | 0 | 29 |
 | notify | 1311 | 1 | 0 | 1310 |
-| plan | 109 | 9 | 0 | 100 |
+| plan | 109 | 8 | 0 | 101 |
 | quasar | 1455 | 0 | 0 | 1455 |
 | rpc | 1230 | 2 | 0 | 1228 |
-| sde | 213 | 5 | 0 | 208 |
+| sde | 213 | 2 | 0 | 211 |
 
 Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = mapped `feat:` rows closed/total; **Assessment** = the agent's own judgement from `docs/parity/task_notes.json` (DONE is accepted only when the ledger row is DONE).
 
@@ -26,7 +26,7 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 | Task | Title | Ledger | Features | Tests | Assessment | Note | Last commit |
 |---|---|---|---|---|---|---|---|
 | S-1 | Reprocessing mints Tritanium from anything | DONE | 0/0 | test_phase_0_s1_reprocessing_sde_materials_and_remainders, test_real_sde_sqlite_open_and_counts | DONE | — | 4a35438 2026-10-18 |
-| S-2 | fighterMgr remote damage | BLOCKED_BY_FEATURES | 0/6 | test_phase_0_s2_fighter_mgr_unimplemented_rpc | PARTIAL | — | — |
+| S-2 | fighterMgr remote damage | BLOCKED_BY_FEATURES | 0/9 | test_phase_0_s2_fighter_mgr_unimplemented_rpc | PARTIAL | — | — |
 | S-3 | CmdJumpToStructureBeacon teleport | BLOCKED_BY_FEATURES | 0/1 | test_phase_0_s3_cyno_jump_unimplemented_rpc | PARTIAL | — | — |
 | S-4 | Jump clone remote dock / no cooldown | BLOCKED_BY_FEATURES | 0/3 | test_phase_0_s4_split_shared_handlers_and_jump_clones | PARTIAL | — | — |
 | S-5 | Fixtures in production (gate-arrival NPC, global 20 rats, K162, ESS banks) | DONE | 0/0 | test_phase_0_s5_no_unconditional_demo_spawns_on_empty_world | DONE | — | — |
@@ -42,7 +42,7 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 | Task | Title | Ledger | Features | Tests | Assessment | Note | Last commit |
 |---|---|---|---|---|---|---|---|
 | D-1 | Real SDE importer | MISSING | 0/3 | — | PARTIAL | — | af425cc 2026-10-18 |
-| D-2 | eve-sde loads at runtime | DONE | 0/0 | test_phase_1_d1_to_d5_sde_sqlite_persistence_auth_sso_and_config, test_real_sde_sqlite_open_and_counts | DONE | — | — |
+| D-2 | eve-sde loads at runtime | FLAGGED_FAKE | 0/0 | test_phase_1_d1_to_d5_sde_sqlite_persistence_auth_sso_and_config, test_real_sde_sqlite_open_and_counts | PARTIAL (claimed DONE, ledger FLAGGED_FAKE) | — | — |
 | D-3 | Durable world DB | MISSING | 0/1 | — | PARTIAL | — | — |
 | D-4 | Accounts | MISSING | 0/5 | — | PARTIAL | — | — |
 | D-5 | Config file | MISSING | 0/1 | — | PARTIAL | — | af425cc 2026-10-18 |
@@ -69,15 +69,15 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 | P-4 | config service | MISSING | 0/1 | — | NOT STARTED | — | — |
 | P-5 | Notifications | MISSING | 0/5 | — | NOT STARTED | — | — |
 | P-6 | Native handshake | MISSING | 0/1 | — | NOT STARTED | — | — |
-| P-7 | Destiny binary stream | DONE | 2/2 | test_binary_add_balls_roundtrip_all_13_modes, test_do_destiny_update_and_set_state_marshal_roundtrip, test_p7_destiny_bi | DONE | Binary AddBalls/AddBalls2/SetState encoder and decoder matching DestinyStructs.h byte layouts, SlimItemMeta from SDE/DB, and DoDestinyUpdate notification push on space actions and ticks. | — |
+| P-7 | Destiny binary stream | DONE | 2/2 | test_binary_add_balls_roundtrip_all_13_modes, test_do_destiny_update_and_set_state_marshal_roundtrip, test_p7_destiny_bi | DONE | Binary AddBalls/AddBalls2/SetState encoder and decoder matching DestinyStructs.h byte layouts, SlimItemMeta from SDE/DB, and DoDestinyUpdate notification push on space actions and ticks. | 9c4bbed 2026-10-18 |
 
 ## Phase 3: Space simulation
 
 | Task | Title | Ledger | Features | Tests | Assessment | Note | Last commit |
 |---|---|---|---|---|---|---|---|
-| SP-1 | Celestials and gates as balls | DONE | 1/1 | test_p7_destiny_binary_stream_undock_movement_and_stargate_jump, test_sp1_jita_and_perimeter_celestials_gates_belts_stat | DONE | SystemActor populates real SDE stars, planets, moons, asteroid belts, stargates, and stations as static Rigid balls in Ballpark and includes them in SetState. | — |
-| SP-2 | Bubbles / grid interest | BLOCKED_BY_FEATURES | 1/5 | test_sp2_spatial_bubbles_10000km_isolation_and_inter_bubble_warp, test_spatial_bubbles_10000km_isolation_and_warp_transi | PARTIAL | Shared fixed-boundary spatial grid bubbles with non-overlapping grid walls, dynamic expansion/contraction, transitive visibility, and AddBalls2/RemoveBalls grid transitions. | — |
-| SP-3 | Beyonce command set | MISSING | 0/15 | — | PARTIAL | — | — |
+| SP-1 | Celestials and gates as balls | DONE | 1/1 | test_p7_destiny_binary_stream_undock_movement_and_stargate_jump, test_sp1_jita_and_perimeter_celestials_gates_belts_stat | DONE | SystemActor populates real SDE stars, planets, moons, asteroid belts, stargates, and stations as static Rigid balls in Ballpark and includes them in SetState. | 9c4bbed 2026-10-18 |
+| SP-2 | Bubbles / grid interest | BLOCKED_BY_FEATURES | 1/5 | test_sp2_spatial_bubbles_10000km_isolation_and_inter_bubble_warp, test_spatial_bubbles_10000km_isolation_and_warp_transi | PARTIAL | Shared fixed-boundary spatial grid bubbles with non-overlapping grid walls, dynamic expansion/contraction, transitive visibility, and AddBalls2/RemoveBalls grid transitions. | 9c4bbed 2026-10-18 |
+| SP-3 | Beyonce command set | MISSING | 0/17 | — | PARTIAL | — | — |
 | SP-4 | Stargate jump polish | MISSING | 0/6 | — | PARTIAL | — | — |
 | SP-5 | Dock / undock | MISSING | 0/4 | — | PARTIAL | — | — |
 
@@ -85,25 +85,25 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 
 | Task | Title | Ledger | Features | Tests | Assessment | Note | Last commit |
 |---|---|---|---|---|---|---|---|
-| DG-1 | Modifier engine over V24 modifierInfo | MISSING | 0/21 | — | PARTIAL | — | — |
+| DG-1 | Modifier engine over V24 modifierInfo | MISSING | 0/22 | — | PARTIAL | — | — |
 | DG-2 | Fit validation | MISSING | 0/6 | — | PARTIAL | — | — |
 | DG-3 | Online/offline | MISSING | 0/1 | — | PARTIAL | — | — |
-| DG-4 | Module cycle engine | MISSING | 0/21 | — | PARTIAL | — | — |
-| DG-5 | Targeting | MISSING | 0/13 | — | NOT STARTED | — | — |
-| DG-6 | Ammo and grouping | MISSING | 0/4 | — | PARTIAL | — | — |
+| DG-4 | Module cycle engine | MISSING | 0/26 | — | PARTIAL | — | — |
+| DG-5 | Targeting | MISSING | 0/14 | — | NOT STARTED | — | — |
+| DG-6 | Ammo and grouping | MISSING | 0/5 | — | PARTIAL | — | — |
 
 ## Phase 5: Combat and PvE loop
 
 | Task | Title | Ledger | Features | Tests | Assessment | Note | Last commit |
 |---|---|---|---|---|---|---|---|
-| C-1 | Turret and missile damage from attributes | MISSING | 0/15 | — | PARTIAL | — | — |
+| C-1 | Turret and missile damage from attributes | MISSING | 0/17 | — | PARTIAL | — | — |
 | C-2 | HP from dogma; damage notifications | MISSING | 0/4 | — | PARTIAL | — | — |
-| C-3 | Death pipeline | MISSING | 0/12 | — | PARTIAL | — | — |
+| C-3 | Death pipeline | MISSING | 0/14 | — | PARTIAL | — | — |
 | C-4 | NPC spawns and AI | MISSING | 0/22 | — | PARTIAL | — | — |
 | C-5 | Asteroid belts and mining | MISSING | 0/0 | — | NOT STARTED | — | — |
 | C-6 | Reprocessing (real) | MISSING | 0/0 | — | PARTIAL | — | — |
-| C-7 | Salvage, tractor, drones | MISSING | 0/17 | — | NOT STARTED | — | — |
-| C-8 | CrimeWatch and CONCORD | MISSING | 0/40 | — | PARTIAL | — | — |
+| C-7 | Salvage, tractor, drones | MISSING | 0/20 | — | NOT STARTED | — | — |
+| C-8 | CrimeWatch and CONCORD | MISSING | 0/42 | — | PARTIAL | — | — |
 
 ## Phase 5M: Full mining system
 
@@ -143,11 +143,11 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 | Task | Title | Ledger | Features | Tests | Assessment | Note | Last commit |
 |---|---|---|---|---|---|---|---|
 | E-1 | Fee inputs | MISSING | 0/4 | — | PARTIAL | — | — |
-| E-2 | Order lifecycle | MISSING | 0/17 | — | PARTIAL | — | — |
-| E-3 | Contracts | MISSING | 0/11 | — | PARTIAL | — | — |
-| E-4 | Industry | MISSING | 0/27 | — | PARTIAL | — | — |
+| E-2 | Order lifecycle | MISSING | 0/20 | — | PARTIAL | — | — |
+| E-3 | Contracts | MISSING | 0/13 | — | PARTIAL | — | — |
+| E-4 | Industry | MISSING | 0/31 | — | PARTIAL | — | — |
 | E-5 | Agents and missions | MISSING | 0/25 | — | PARTIAL | — | — |
-| E-6 | PI basics | MISSING | 0/18 | — | PARTIAL | — | — |
+| E-6 | PI basics | MISSING | 0/21 | — | PARTIAL | — | — |
 
 ## Phase 8: Social and exploration
 
@@ -180,7 +180,7 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 | Task | Title | Ledger | Features | Tests | Assessment | Note | Last commit |
 |---|---|---|---|---|---|---|---|
 | ESI-1 | SSO / OAuth2 server emulating login.eveonline.com. Covers the authorization code… | MISSING | 0/0 | — | NOT STARTED | — | — |
-| ESI-2 | ESI HTTP framework. OpenAPI-conformant routing, including compatibility-date/ver… | MISSING | 0/0 | — | NOT STARTED | — | — |
+| ESI-2 | ESI HTTP framework. OpenAPI-conformant routing, including compatibility-date/ver… | MISSING | 0/0 | — | PARTIAL | OpenAPI HTTP router, schema validator, OAuth bearer guards, ETag and conditional caching, pagination, rate limiting, and sample routes across tags implemented; remaining tags pending. | — |
 | ESI-3 | Universe, Status, Meta, Routes, Search, Incursions, Insurance, Sovereignty, Wars… | MISSING | 0/0 | — | NOT STARTED | — | — |
 | ESI-4 | Character, Clones, Skills, Location, Fittings, Assets, Wallet, Loyalty, Calendar… | MISSING | 0/0 | — | NOT STARTED | — | — |
 | ESI-5 | Corporation, Alliance. | MISSING | 0/0 | — | NOT STARTED | — | — |

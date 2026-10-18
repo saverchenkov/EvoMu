@@ -65,6 +65,7 @@ async fn main() -> Result<()> {
         TcpListener::bind((cfg.bind_address.as_str(), cfg.bridge_port)).await?;
     let macho_listener =
         TcpListener::bind((cfg.bind_address.as_str(), cfg.macho_port)).await?;
+    let esi_router = Arc::new(eve_server::esi::EsiRouter::new(Arc::clone(&ctx)));
     let esi_listener = if cfg.feature_flags.enable_esi_http {
         let l = TcpListener::bind((cfg.bind_address.as_str(), cfg.esi_port)).await?;
         info!(
@@ -118,21 +119,22 @@ async fn main() -> Result<()> {
                     }
                 });
             }
-            Ok((mut stream, addr)) = async {
+            Ok((stream, addr)) = async {
                 match &esi_listener {
                     Some(l) => l.accept().await,
                     None => std::future::pending().await,
                 }
             } => {
+                let Ok(permit) = Arc::clone(&conn_limiter).try_acquire_owned() else {
+                    warn!(%addr, "Connection limit reached; rejecting ESI HTTP connection");
+                    continue;
+                };
+                let router_clone = Arc::clone(&esi_router);
                 tokio::spawn(async move {
-                    let body = b"{\"status\":\"esi_listener_active\",\"esi_phase\":\"pending\"}\n";
-                    let header = format!(
-                        "HTTP/1.1 501 Not Implemented\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                        body.len()
-                    );
-                    let _ = stream.write_all(header.as_bytes()).await;
-                    let _ = stream.write_all(body).await;
-                    info!(%addr, "Served ESI listener status response");
+                    let _permit = permit;
+                    if let Err(e) = eve_server::esi::handle_esi_http_connection(stream, router_clone).await {
+                        error!(%addr, error = %e, "ESI HTTP connection closed with error");
+                    }
                 });
             }
         }

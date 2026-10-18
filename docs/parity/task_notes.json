@@ -124,8 +124,8 @@
   "note": ""
  },
  "ESI-2": {
-  "assessment": "NOT STARTED",
-  "note": ""
+  "assessment": "PARTIAL",
+  "note": "OpenAPI HTTP router, schema validator, OAuth bearer guards, ETag and conditional caching, pagination, rate limiting, and sample routes across tags implemented; remaining tags pending."
  },
  "ESI-3": {
   "assessment": "NOT STARTED",
