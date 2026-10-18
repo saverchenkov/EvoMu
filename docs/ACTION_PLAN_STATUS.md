@@ -4,14 +4,14 @@
 
 The canonical plan is `.agents/skills/evomu-adversarial-review/references/action_plan.md`. This file is regenerated from the latest pre-flight parity run, so it can't go stale or be overstated.
 
-**Parity: 44 / 5923 ledger rows closed (0.74%)**, 0 NA, 24 tagged tests, 58 passing tests. Flagged fake by the gap auditor: 11.
+**Parity: 45 / 5923 ledger rows closed (0.76%)**, 0 NA, 25 tagged tests, 65 passing tests. Flagged fake by the gap auditor: 11.
 
 | Category | Total | DONE | NA | Open |
 |---|---|---|---|---|
 | destiny | 52 | 7 | 0 | 45 |
 | effect | 1 | 0 | 0 | 1 |
 | esi | 197 | 14 | 0 | 183 |
-| feat | 1326 | 10 | 0 | 1316 |
+| feat | 1326 | 11 | 0 | 1315 |
 | journey | 29 | 0 | 0 | 29 |
 | notify | 1311 | 1 | 0 | 1310 |
 | plan | 109 | 8 | 0 | 101 |
@@ -42,7 +42,7 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 | Task | Title | Ledger | Features | Tests | Assessment | Note | Last commit |
 |---|---|---|---|---|---|---|---|
 | D-1 | Real SDE importer | MISSING | 0/3 | — | PARTIAL | — | af425cc 2026-10-18 |
-| D-2 | eve-sde loads at runtime | FLAGGED_FAKE | 0/0 | test_phase_1_d1_to_d5_sde_sqlite_persistence_auth_sso_and_config, test_real_sde_sqlite_open_and_counts | PARTIAL (claimed DONE, ledger FLAGGED_FAKE) | — | — |
+| D-2 | eve-sde loads at runtime | FLAGGED_FAKE | 0/0 | test_phase_1_d1_to_d5_sde_sqlite_persistence_auth_sso_and_config, test_real_sde_sqlite_open_and_counts | PARTIAL | SDE SQLite loader and indexed tables in place; station index map and full station columns pending. | — |
 | D-3 | Durable world DB | MISSING | 0/1 | — | PARTIAL | — | — |
 | D-4 | Accounts | MISSING | 0/5 | — | PARTIAL | — | — |
 | D-5 | Config file | MISSING | 0/1 | — | PARTIAL | — | af425cc 2026-10-18 |
@@ -165,8 +165,8 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 
 | Task | Title | Ledger | Features | Tests | Assessment | Note | Last commit |
 |---|---|---|---|---|---|---|---|
-| Q-1 | Protobuf extraction and codegen. Extract the serialized FileDescriptorProtos emb… | MISSING | 0/0 | — | NOT STARTED | — | — |
-| Q-2 | Gateway transport. Implement the public-gateway request/response/notice framing … | MISSING | 0/0 | — | PARTIAL | — | — |
+| Q-1 | Protobuf extraction and codegen. Extract the serialized FileDescriptorProtos emb… | MISSING | 0/0 | — | PARTIAL | Quasar FileDescriptorProto extractor, descriptor registry, dynamic protobuf wire codec, and Rust codegen in place; proptest and golden client verification pending. | — |
+| Q-2 | Gateway transport. Implement the public-gateway request/response/notice framing … | MISSING | 0/0 | — | PARTIAL | PublicGatewayRouter, envelope framing, tenancy auth, bounded idempotency cache, NoticeRoutingCache, and scoped Notice fan-out in place; golden client verification pending. | — |
 | Q-3 | Identity, accounts and entitlements: auth, login, user, entitlement, omega, memb… | MISSING | 0/0 | — | NOT STARTED | — | — |
 | Q-4 | Character and progression: character, skill, implant, clone-related, career, ach… | MISSING | 0/0 | — | NOT STARTED | — | — |
 | Q-5 | Social and organization: corporation, corporationgoal, freelance, alliance, cont… | MISSING | 0/0 | — | NOT STARTED | — | — |
@@ -180,7 +180,7 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 | Task | Title | Ledger | Features | Tests | Assessment | Note | Last commit |
 |---|---|---|---|---|---|---|---|
 | ESI-1 | SSO / OAuth2 server emulating login.eveonline.com. Covers the authorization code… | MISSING | 0/0 | — | NOT STARTED | — | — |
-| ESI-2 | ESI HTTP framework. OpenAPI-conformant routing, including compatibility-date/ver… | MISSING | 0/0 | — | PARTIAL | OpenAPI HTTP router, schema validator, OAuth bearer guards, ETag and conditional caching, pagination, rate limiting, and sample routes across tags implemented; remaining tags pending. | — |
+| ESI-2 | ESI HTTP framework. OpenAPI-conformant routing, including compatibility-date/ver… | MISSING | 0/0 | — | PARTIAL | OpenAPI HTTP router, schema validator, OAuth bearer guards, ETag and conditional caching, pagination, rate limiting, and sample routes across tags implemented; remaining tags pending. | 1bfd80c 2026-10-18 |
 | ESI-3 | Universe, Status, Meta, Routes, Search, Incursions, Insurance, Sovereignty, Wars… | MISSING | 0/0 | — | NOT STARTED | — | — |
 | ESI-4 | Character, Clones, Skills, Location, Fittings, Assets, Wallet, Loyalty, Calendar… | MISSING | 0/0 | — | NOT STARTED | — | — |
 | ESI-5 | Corporation, Alliance. | MISSING | 0/0 | — | NOT STARTED | — | — |

@@ -56,8 +56,8 @@
   "note": ""
  },
  "D-2": {
-  "assessment": "DONE",
-  "note": ""
+  "assessment": "PARTIAL",
+  "note": "SDE SQLite loader and indexed tables in place; station index map and full station columns pending."
  },
  "D-3": {
   "assessment": "PARTIAL",
@@ -248,12 +248,12 @@
   "note": "Binary AddBalls/AddBalls2/SetState encoder and decoder matching DestinyStructs.h byte layouts, SlimItemMeta from SDE/DB, and DoDestinyUpdate notification push on space actions and ticks."
  },
  "Q-1": {
-  "assessment": "NOT STARTED",
-  "note": ""
+  "assessment": "PARTIAL",
+  "note": "Quasar FileDescriptorProto extractor, descriptor registry, dynamic protobuf wire codec, and Rust codegen in place; proptest and golden client verification pending."
  },
  "Q-2": {
   "assessment": "PARTIAL",
-  "note": ""
+  "note": "PublicGatewayRouter, envelope framing, tenancy auth, bounded idempotency cache, NoticeRoutingCache, and scoped Notice fan-out in place; golden client verification pending."
  },
  "Q-3": {
   "assessment": "NOT STARTED",

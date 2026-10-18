@@ -199,6 +199,7 @@ dependencies = [
  "bytes",
  "flate2",
  "rmp-serde",
+ "rusqlite",
  "serde",
  "serde_json",
  "thiserror",

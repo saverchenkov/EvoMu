@@ -11,3 +11,4 @@ serde_json.workspace = true
 rmp-serde.workspace = true
 thiserror.workspace = true
 flate2.workspace = true
+rusqlite.workspace = true
