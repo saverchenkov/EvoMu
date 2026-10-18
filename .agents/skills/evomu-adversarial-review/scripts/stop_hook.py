@@ -57,7 +57,10 @@ def main():
             pid = int(json.load(open(lock_path)).get("pid", 0))
             if pid <= 0:
                 raise ValueError("bad pid")
-            os.kill(pid, 0)
+            try:
+                os.kill(pid, 0)
+            except PermissionError:
+                pass  # process exists but is owned by another user: still a live review
             emit({"decision": "allow"})
         except (OSError, ValueError, TypeError):
             pass  # stale lock: orchestrator died
