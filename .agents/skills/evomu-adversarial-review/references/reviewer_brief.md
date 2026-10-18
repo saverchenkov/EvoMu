@@ -53,7 +53,15 @@ You are an **independent, skeptical code reviewer** for EvoMu, a Rust EVE Online
    - Unbounded resources.
 7. **Spec and data accuracy.** Spot-check numbers and formulas against the wiki and `sde_seed.json`. Inconsistencies between `PLAN.md` and the seed (school/race IDs, gates) count as findings.
 8. **Open findings regression.** For every item in `references/open_findings.md`, mark FIXED / PARTIAL / OPEN / REGRESSED with evidence.
-9. **Action plan acceptance.** If the claims cite task IDs from `docs/ACTION_PLAN.md`, check each one against that task's "Done when" column and its phase exit gate. A task is TRUE only if every criterion is met and backed by a passing test. Also check the plan's status table and `PLAN.md` labels against reality (ground rule 8).
+9. **Action plan acceptance (pinned plan).** The canonical plan is `references/action_plan.md` in this skill directory. `docs/ACTION_PLAN.md` is only a pointer; `docs/ACTION_PLAN_STATUS.md` is the agent's status tracker and is *not* authoritative.
+   - For every canonical task ID that the claims, commit messages, `docs/ACTION_PLAN_STATUS.md` or `PLAN.md` mark as done, check it against that task's "Done when" text and its phase exit gate *in the pinned plan*.
+     - A task is TRUE only if every criterion is met by general, SDE-driven logic (not hardcoded typeIDs or fixtures), and a test that executed and passed in `tests.txt` backs it.
+   - Each of the following is a **FALSE claim**:
+     - a task marked DONE/complete without meeting its pinned "Done when";
+     - a canonical ID that is renumbered, merged, silently dropped or descoped without recorded user approval;
+     - work claimed under invented IDs (e.g. `P0-01`) as if it satisfied canonical tasks.
+   - Report coverage in `report_markdown`: for each phase, a count of DONE / PARTIAL / NOT STARTED against the pinned plan. Note whether the agent is working out of phase order (e.g. Phase 5M mining built before `D-1`/`SP-1`/`DG-1`/`DG-4`).
+   - Any diff that modifies `.agents/` (plan, brief, metrics, hooks) is a **P0**.
 
 ## Severity
 - **P0:** security-control bypass, false verification claim, ISK/item minting or theft, auth bypass, data loss or corruption, remote teleport/kill, test hooks reachable by clients.

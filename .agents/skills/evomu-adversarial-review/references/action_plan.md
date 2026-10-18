@@ -1,0 +1,343 @@
+# EvoMu action plan: close the Crucible-parity gaps
+
+**Audience:** the EvoMu coding agent.
+**Status baseline:** commit `479e633` (27/27 tests pass). The feature-gap pass of 2026-10-17 found 4 of 60 tasks done or mostly done, 28 partial and 27 not started. The full mining system was added as Phase 5M (MN-01 … MN-18).
+**This is the canonical plan.** Its pinned copy lives at `.agents/skills/evomu-adversarial-review/references/action_plan.md`. Don't rewrite, renumber or drop tasks. Track status in `docs/ACTION_PLAN_STATUS.md`. Descoping a task requires the user's approval.
+**Sources:**
+- Crucible comparison (`crucible_vs_evomu.md`, summarized below).
+- Review findings (`.agents/skills/evomu-adversarial-review/references/open_findings.md` and `.evomu-reviews/latest.md`).
+- Reference implementation: `~/ai/evemu_Crucible`.
+
+---
+
+## 0. Ground rules (apply to every task)
+1. **Review gate.** Each workstream ends with the `evomu-adversarial-review` skill (see `AGENTS.md`). A phase is done only when its exit gate is met **and** the review verdict is `PASS` or `PASS_WITH_ISSUES` with no P0.
+2. **Use Crucible as a reference only.** Crucible is LGPL; EvoMu is MIT. Read Crucible to understand algorithms, state machines and data needs, then **re-implement in Rust**. Never copy code, comments or SQL verbatim. Cite the Crucible file you used in the PR or commit message.
+3. **Target V24, not 2011.** Crucible speaks the Nov-2011 client (7.31 / build 360229). Method names, argument layouts and result shapes must match the **V24 client call sites** in `docs/index/rpc_service_catalog.json` and the client bytecode. Don't trust Crucible's packet shapes.
+4. **Unhandled beats wrong.** Every client method either implements its real semantics or returns `UnimplementedRPC`. That rules out:
+   - shared bodies for unrelated methods;
+   - echo or constant replies;
+   - query methods (`Get*`) that mutate state;
+   - client-supplied trust (destinations, damage, skill levels, positions, mission IDs).
+5. **Transactions.** Every mutating handler uses `WorldRepository::try_with_mut_snapshot` and returns `Err` before *or* after mutating. Never mutate and then return `Err` inside `with_mut_snapshot`.
+6. **No fixtures in production paths.** Test NPCs, wormholes, ESS banks, hub balances and similar live in test setup or seed data with real positions. They never belong in `SystemActor::spawn`, jump handlers, or `with_demo_seed()` used by `main`.
+7. **Tests prove behaviour.**
+   - Every task adds tests under `crates/<crate>/tests/` or `crates/eve-server/tests/<area>.rs` that would fail without the change.
+   - Tests use real SDE data once Phase 1 lands.
+   - `cargo test --workspace` must actually run. `cargo check` is not verification.
+8. **Docs reflect reality.** Don't use "Implemented & Verified" in `PLAN.md`/`README.md` unless the feature has a passing test **and** a non-FAIL review. Use the labels `Not started`, `In progress`, `Implemented (review: <verdict>, <date>)`.
+9. **Small, reviewable increments.** Aim for one workstream (a few task IDs) per commit series, each followed by a review run. Put task IDs in commit messages and in the claims file you pass to the reviewer.
+
+---
+
+## Phase 0: Stabilize (close the current FAIL)
+**Goal:** a clean `PASS_WITH_ISSUES` baseline before adding features.
+
+| ID | Task | Done when |
+|---|---|---|
+| S-1 | **Reprocessing mints Tritanium from anything** (`industry_pi.rs:41-62`) | Only types with SDE `typeMaterials` can be reprocessed. Output = materials × batch × yield. Tritanium input is rejected. Test: reprocessing Tritanium errors; reprocessing Veldspar yields the SDE material list. |
+| S-2 | **fighterMgr remote damage** (`combat_crimewatch.rs:640-678`) | Return `UnimplementedRPC` until Phase 5 fighters land. Test: the call errors, and no ball HP changes. |
+| S-3 | **CmdJumpToStructureBeacon teleport** (`space_destiny.rs:658-709`) | `UnimplementedRPC` until capital jumps exist (cyno, LY range, fuel, ACL). |
+| S-4 | **Jump clone remote dock / no cooldown** (`character_skills.rs:404-505`) | Install requires being docked at a station/structure with a clone bay. CloneJump requires being docked, enforces the cooldown, changes system/station/ship correctly, and swaps implants. Otherwise `UnimplementedRPC`. Separate handlers for each `jumpCloneSvc` method. |
+| S-5 | **Fixtures in production** (gate-arrival NPC, global 20 rats, K162, ESS banks) | Removed from `system_actor.rs`, `space_destiny.rs` and seeded ESS balances. Tests create their own NPCs through a test-only helper. |
+| S-6 | **Client-driven wormhole/probe spawn** (`space_destiny.rs:736-768`) | `RequestScans` returns `UnimplementedRPC` until Phase 8 signatures. |
+| S-7 | **Remote mutations** (`AttackStructure`, `ClaimSovereignty`, `CaptureComplex`, PI writers) | Proximity, ownership and state-machine checks, or `UnimplementedRPC`. Every PI read method is read-only. |
+| S-8 | **Remaining with_mut_snapshot mutators** (52 call sites) | Every handler that can return `Err` uses `try_with_mut_snapshot`. CI grep check: no `return Err` inside a `with_mut_snapshot` closure. |
+| S-9 | **GM role** (`auth_cache.rs:233`, demo accounts role 0x03) | Use CCP role constants (`ROLE_GML`/`ROLE_ADMIN` etc. from the client consts). Demo/player accounts get no GM role. Admin accounts come from config. |
+| S-10 | **Docs honesty** (`PLAN.md:24-139`, README) | Status labels follow rule 8, and the "generated from .static SQLite" claim is removed until Phase 1. |
+| S-11 | **Seed lineage data** (duplicate ancestry, shifted IDs) | Fixed by Phase 1 (D-1). Until then, test-only data is clearly labeled. |
+
+**Exit gate:** review `PASS` or `PASS_WITH_ISSUES`, no P0, `cargo test --workspace` green.
+
+---
+
+## Phase 1: Data and persistence foundation (blocks almost everything)
+**Crucible reference:** `src/eve-server/StaticDataMgr.cpp:139-2190` lists the SDE tables a server needs. `sql/base/*.sql.gz` is the reference persistent schema (284 tables). Reference only.
+
+| ID | Task | Done when |
+|---|---|---|
+| D-1 | **Real SDE importer** (`tools/eve-indexer/extract_staticdata.py` → new `tools/sde-import`) | Reads the client's `.static` SQLite3 archives with their **actual schemas** (inspect them with `sqlite3 .schema`), and CCP's public SDE export for data that only exists in `.fsdbinary`. Produces a versioned on-disk SDE database (SQLite) with types, groups, categories, dogma attributes/effects/`modifierInfo`, type materials, blueprints, all solar systems/constellations/regions, celestials (stars, planets, moons, belts), stargates with positions and destinations, stations, NPC corps/factions, agents, schools/races/bloodlines/ancestries, wormhole types and NPC spawn groups. The importer prints per-table counts. No hand-written literals. |
+| D-2 | **eve-sde loads at runtime** | `SdeRegistry::open(path)` replaces `include_str!` seeding. Startup fails clearly if the DB is missing. Tests prove ≥5,000 solar systems, correct gate pairs for Jita↔Perimeter, and correct school→race/corp mapping. |
+| D-3 | **Durable world DB** | SQLite via `rusqlite` or `sqlx` with migrations for accounts, characters, skills, queue, items, orders, journal, contracts, jobs, missions, standings, mail, fleets, corps, bookmarks and structures. `WorldRepository` writes through transactionally per request; no whole-world clone. Test: restart the server and the state survives. Concurrent writes from two sessions don't lose updates. |
+| D-4 | **Accounts** | Salted password hashes (argon2), bans, an online lock, account creation through admin config. Remove plaintext demo secrets from production builds. |
+| D-5 | **Config file** | `evomu.toml`: ports, bind address, DB paths, admin accounts, feature flags. |
+
+**Exit gate:** all existing tests pass against the real SDE (fix tests that relied on fake coordinates or IDs), and the review is non-FAIL.
+
+---
+
+## Phase 2: Wire protocol
+**Crucible reference:**
+- `eve-common/marshal/EVEUnmarshal.cpp:506-680` (PackedRow decode)
+- `EVEMarshal.cpp:306-470` and `EVEDBUtils.cpp:316-475` (row encoders)
+- `cache/CachedObjectMgr.cpp:105-560` and `packets/ObjectCaching.xmlp:53-95` (object cache)
+- `config/ConfigService.cpp`
+- `EntityList.cpp:140-777` (broadcast)
+- `network/EVESession.cpp:50-200` and `Client.cpp:2360-2519` (handshake)
+
+| ID | Task | Done when |
+|---|---|---|
+| P-1 | **PyPackedRow trailing object columns** | Decode STR/WSTR/BYTES columns marshaled after the RLE blob. Round-trip test with mixed fixed and object columns, plus a test that the following stream elements still decode. |
+| P-2 | **DBRow / CRowset / CIndexedRowset / PackedRowList encoders** | Build them from typed rows with a DBRowDescriptor. Golden tests decode them back. Use them in at least `invbroker.List`, `GetCharactersToSelect` and `marketProxy` order lists, matching V24 client expectations. |
+| P-3 | **Object cache / CachedMethodCallResult** | Version and timestamp per cached object. `objectCaching.GetCachableObject` returns real cached payloads. Methods the V24 client calls through the cache wrapper return `CachedMethodCallResult`. |
+| P-4 | **config service** | `GetMultiOwnersEx/LocationsEx/StationEx/InvTypesEx/AllianceShortNames/CorpTickerNames` return only the requested IDs, from the SDE plus the world DB, in V24 shapes. |
+| P-5 | **Notifications** | Generic `notify(char/corp/system/all, event, payload)` over the macho transport (`OnRemoteMessage`, `OnItemChange`, `OnAccountChange`, `OnSkillTrained`…), sent as marshaled packets, not JSON. |
+| P-6 | **Native handshake** | Implement the state machine with Crucible's shape (version → queue/command → crypto → challenge → ack → initial session), adapted to the V24 launcher/SSO token login as evidenced in the client bytecode. Never accept unauthenticated `AuthenticationReq('ok')`. Test: wrong credentials are rejected; correct ones produce a session-init notification. |
+| P-7 | **Destiny binary stream** | `SetState`/`AddBalls2`/`DoDestinyUpdate` sent as marshaled Destiny packets (the existing `wire::encode_add_balls`), not JSON strings. |
+
+**Exit gate:** protocol golden tests pass; the bridge and native modes share one encoder; the review is non-FAIL.
+
+---
+
+## Phase 3: Space simulation
+**Crucible reference:**
+- `system/SystemManager.cpp:380,1308,1395` (statics, SetState)
+- `system/BubbleManager.*`
+- `system/DestinyManager.cpp:702-1810,2327-2427` (movement, warp, dock)
+- `ship/BeyonceService.cpp:156,188,354,405,583,688,782`
+
+| ID | Task | Done when |
+|---|---|---|
+| SP-1 | **Celestials and gates as balls** | Each SystemActor loads stars, planets, moons, belts, gates and stations from the SDE with real positions. SetState on entering a system lists them. |
+| SP-2 | **Bubbles / grid interest** | Ball visibility and destiny updates are scoped per bubble (V24 grid sizes), using `balls_in_bubble`. Test: two ships 10,000 km apart don't receive each other's updates. |
+| SP-3 | **Beyonce command set** | `CmdAlignTo`, `CmdSetSpeedFraction`, `CmdWarpToStuff(("item"\|"bookmark"\|"char", id), minRange)` resolves targets server-side. Add warp capacitor cost, minimum warp distance, warp-scramble rejection (strength vs stabilizers) and `UpdateStateRequest`. Approach, orbit and keep-at-range each get their own handler. |
+| SP-4 | **Stargate jump polish** | Arrival at the destination gate's real position, the session-change notification, the gate cloak, and **no jump fatigue on stargates**. |
+| SP-5 | **Dock / undock** | Dock range measured from the station's docking perimeter (radius-aware), a dock delay, and undock along the station's undock vector. |
+
+**Exit gate:** wire-level test: undock → align → warp to gate → jump → warp to station → dock, using real SDE positions and no hardcoded coordinates. Review non-FAIL.
+
+---
+
+## Phase 4: Dogma and fitting
+**Crucible reference:**
+- `effects/EffectsDataMgr.cpp:239-297`, `effects/EffectsProcessor.cpp:30,277` (effect application; concepts only, since V24 uses `modifierInfo`)
+- `ship/Ship.cpp:737-798` (fit checks)
+- `ship/modules/GenericModule.cpp:90-152` (online)
+- `ship/modules/ActiveModule.cpp:324-1053` (cycles)
+- `system/TargetManager.cpp`
+
+| ID | Task | Done when |
+|---|---|---|
+| DG-1 | **Modifier engine over V24 `modifierInfo`** | Domains (ship, char, item, target, other), funcs (ItemModifier, LocationGroupModifier, LocationRequiredSkillModifier, OwnerRequiredSkillModifier, …), operators and stacking. Applies skills, implants, ship, modules, charges and rigs. Remove the hardcoded group-762/774/46 code. Test: a Rifter with skills and 2 overdrives matches published attribute values. |
+| DG-2 | **Fit validation** | Moving an item into a slot flag checks the slot type, hardpoints, rig size/calibration, `maxGroupFitted` and CPU/PG for online. Over-fit is rejected. |
+| DG-3 | **Online/offline** | `SetModuleOnline`/`TakeModuleOffline` are real, persisted and notify `OnModuleAttributeChanges`. |
+| DG-4 | **Module cycle engine** | `dogmaIM.Activate(itemID, effectName, target, repeat)` / `Deactivate`. Includes cycle timers in the SystemActor tick, capacitor need, charge consumption, auto-repeat, and deactivation on warp, dock or out of range. Emits `OnGodmaShipEffect`. |
+| DG-5 | **Targeting** | `AddTarget`/`RemoveTarget`/`ClearTargets` with lock time from scan resolution and signature, max targets and max range. Targeted effects require a lock. |
+| DG-6 | **Ammo and grouping** | `LoadAmmo`/`UnloadAmmo`/reload timers, and real `LinkWeapons` groups. |
+
+**Exit gate:** fit → online → lock → activate a propulsion module and a turret through `dogmaIM`, with attributes from the SDE. Review non-FAIL. **Delete `dogmaIM.FireWeapon`** (it isn't a client method).
+
+---
+
+## Phase 5: Combat and PvE loop
+**Crucible reference:**
+- `ship/modules/TurretFormulas.cpp`, `TurretModule.cpp:55`
+- `ship/Missile.cpp`
+- `system/Damage.cpp:99,364-634`
+- `npc/SpawnMgr.cpp`, `npc/NPCAI.cpp:268-347`, `system/BeltMgr.*`
+- `ship/modules/MiningLaser.cpp:170,362`, `Prospector.cpp`
+- `station/ReprocessingService.cpp:162-287`
+- `npc/DroneAI.cpp`
+
+| ID | Task | Done when |
+|---|---|---|
+| C-1 | **Turret and missile damage from attributes** | Hit chance and damage from fitted module, charge, skills and target signature/velocity. Missiles are entities with flight time and explosion math. Resists come from target dogma. |
+| C-2 | **HP from dogma; damage notifications** | `CombatState` is initialized from ship attributes and persisted. Emits `OnDamageStateChange`. |
+| C-3 | **Death pipeline** | Wreck ball (SDE wreck type), loot drop by fitted/cargo survival rules, pod ejection with session change, insurance payout, killmail. A PvP kill requires actual destruction. |
+| C-4 | **NPC spawns and AI** | Belt/gate spawns from SDE spawn groups with respawn timers. AI: idle → chase → engage, with weapons, orbit range and reps. Bounty from the NPC type's bounty attribute. Remove the flat 100k. |
+| C-5 | **Asteroid belts and mining** | *Superseded by **Phase 5M** (MN-01 … MN-18).* Phase 5's exit gate only needs MN-01 to MN-07 and MN-12. |
+| C-6 | **Reprocessing (real)** | *Superseded by **MN-12** (reprocessing) and MN-11 (compression).* |
+| C-7 | **Salvage, tractor, drones** | Salvager roll → salvage items. Tractor beam pulls the wreck. Drone launch/recall/engage with bandwidth limits. (Mining drones are MN-09.) |
+| C-8 | **CrimeWatch and CONCORD** | Real CONCORD ships spawn after the security-based delay and destroy the criminal through C-3. Remove the instant ball deletion. |
+
+**Exit gate:** integration test: undock in a belt system → lock a spawned NPC → kill it with a turret → bounty paid → loot the wreck → mine ore → dock → reprocess. All from SDE data. Review non-FAIL.
+
+---
+
+## Phase 5M: Full mining system
+**Goal:** the complete V24 mining loop. Find a belt or site → mine ore, ice or gas with lasers, harvesters or drones → fill the ore hold → compress → haul → reprocess into minerals with the correct yields. Moon mining and the ledgers sit on top, with NPCs and economy hooks.
+
+**Depends on:**
+- D-1/D-2: real SDE.
+- SP-1/SP-2: celestials, belts, bubbles.
+- DG-1: modifier engine.
+- DG-4: module cycle engine.
+- DG-5: targeting.
+- P-5: notifications.
+- C-4: NPC spawns (for MN-17).
+
+Don't start MN-04 or later until those land. Mining is a module-cycle feature, not a one-off RPC.
+
+**Crucible reference** (re-implement; Crucible is LGPL):
+- `system/BeltMgr.*` (belt spawning, ore by security, ice distribution)
+- `ship/modules/MiningLaser.cpp:170,362` (`ProcessCycle`, `AddOreAndDeactivate`)
+- `ship/modules/ActiveModule.cpp:746` (survey scanner)
+- `station/ReprocessingService.cpp:162-287` (recoverables, efficiency, tax)
+- `npc/DroneAI.cpp` (mining drones)
+
+**V24 contracts** (from `docs/index/rpc_service_catalog.json` and `client_notifications.json`; confirm the argument layouts in the client bytecode):
+- Mining runs through `dogmaIM.Activate` / `Deactivate` on the laser, harvester or drone.
+- Services:
+  - `miningScanMgr.perform_scan`
+  - `characterMiningLedger.GetCharacterLogs`
+  - `corpMiningLedger.GetObserverLedger` / `GetObserversWithMiningEvents`
+  - `inSpaceCompressionMgr.CompressItemInSpace`
+  - `structureCompressionMgr.CompressItemInStructure` / `DecompressGasInStructure` / `GetMyGasDecompressionEfficiency`
+  - `moonExtractions.*` (StartNewExtraction, CancelExtraction, FractureChunkWithStructure, GetExtractionsForCorp, GetMoonResourcesForStructure, GetExtractionAndEventIDFromStructureID)
+  - `autoMoonMining.RequestMiningDetails` / `RequestMiningCycleOutput`
+  - `reprocessingSvc` bound object (find the V24 method names in `eve/client/script/ui/station/reprocessing*`)
+- Notifications: `OnOreMined`, `OnOreMinedByOther`, `OnMiningLaserFiredLocal`, `OnMiningLaserFiredFailedLocal`, `OnAsteroidRevealed`, `OnAsteroidTerminated`, `OnWarpToAsteroidBelt`, `OnReprocessingMaterialsChanged`, `OnMoonExtractionUpdate`, `OnMoonScanComplete`, `OnNewMoonProbe`, `OnRemoveMoonProbe`, `OnMiningLedgerGraphSettingChanged`.
+
+### A. Data
+| ID | Task | Done when |
+|---|---|---|
+| MN-01 | **Mining static data in the SDE importer** | The real SDE (D-1) provides the following. No hand-written ore tables remain in Rust. Tests: Veldspar → Tritanium only; Scordite → Tritanium + Pyerite; an ice type yields its isotope and fuel materials; ore variant yields differ from the base ore.<ul><li>All asteroid ore types with their variants, moon ores (R4–R64), ice, gas (Mykoserocin/Cytoserocin/Fullerite), and Prismaticite if V24 has it.</li><li>For each: `typeMaterials` (with portionSize), volume, compressed counterpart (`compressibletypes`), and group/category.</li><li>Ore distribution by security band, region and system.</li><li>Asteroid belts and ice belts as celestials with positions.</li><li>Mining modules (lasers, strip miners, modulated, ice harvesters, gas harvesters), crystals (with volatility and damage), mining drones, MLUs, rigs, implants, and ships with ore/ice/gas holds. Each has dogma attributes: `miningAmount`, `duration`, `maxRange`, crystal and residue attributes, and specialized hold capacities.</li></ul> |
+
+### B. Space content
+| ID | Task | Done when |
+|---|---|---|
+| MN-02 | **Asteroid belts as balls** | Each system's belts come from SDE celestials (SP-1). Asteroids spawn per belt using the security/region ore distribution, with quantity and radius scaled from the ore amount. They appear in SetState for the bubble. `OnWarpToAsteroidBelt` and warp-to-belt work. Test: Jita belts contain only high-sec ores, and a 0.0 system has null-sec ores. |
+| MN-03 | **Depletion and respawn** | Each asteroid's remaining quantity is persisted. It shrinks as it's mined, and `OnAsteroidTerminated` fires plus the ball is removed at 0. Belts regenerate on the downtime/maintenance tick (configurable), not instantly. Test: mining an asteroid to 0 removes it, and it stays gone until the respawn tick. |
+
+### C. Mining cycle engine
+| ID | Task | Done when |
+|---|---|---|
+| MN-04 | **Mining laser / strip miner cycle** | `dogmaIM.Activate` on a fitted mining module checks the requirements. On each cycle completion it moves ore into the hold and repeats. Test: a Venture with Miner I mines N cycles of Veldspar with the exact SDE-derived m³, and stops and deactivates when the hold is full or the rock is depleted.<ul><li>**Requirements:** an online module, a locked target that is an asteroid of a minable group, range ≤ `maxRange`, enough capacitor, and not cloaked or warping.</li><li>**Yield per cycle:** effective `miningAmount` (m³) after modifiers (skills, ship bonuses, MLUs, rigs, implants, crystals, command bursts) ÷ ore volume, clamped by the asteroid's remaining quantity and the free hold space.</li><li>**Partial cycles:** a partial final cycle on depletion, and deactivation when the hold is full or the asteroid is gone.</li><li>**Interruptions:** cycles stop on warp, dock, out-of-range or lost lock.</li><li>**Notifications:** `OnOreMined` / `OnMiningLaserFiredLocal`, with failures reported through `OnMiningLaserFiredFailedLocal`.</li></ul> |
+| MN-05 | **Holds and inventory** | Ore goes to the ore/ice/gas hold flag (`specialMaterialBay`/`oreHold`) first, then cargo if allowed. Volume and capacity are enforced for every add, and partial stacks merge. Test: a full ore hold overflows to cargo only for ships that allow it, and capacity is never exceeded. |
+| MN-06 | **Crystals and residue** | Mining crystals are loaded as charges (DG-6) and apply ore-type-specific bonuses. Crystal damage follows volatility (`Crystal_damage.md` formula), and the crystal breaks at 0 HP. Residue/waste is a chance and multiplier per cycle for the modules and crystals that have it: wasted ore is removed from the asteroid but not delivered. Tests: crystal HP decreases per cycle; residue removes extra asteroid quantity; a T1 laser without residue attributes never wastes. |
+| MN-07 | **Skills and bonuses applied through the dogma engine** | Mining, Astrogeology, Mining Barge/Exhumers, ice/gas harvesting skills and ore-specific processing skills are applied through DG-1 `modifierInfo`, as are ship role bonuses, MLUs, rigs, implants (e.g. Michi's) and mining command bursts (Mining Foreman links: yield, cycle time, range). No hardcoded multipliers. Test: yield with Mining V + Astrogeology V + a Retriever + 2 MLU IIs matches the published value within 0.1%. |
+| MN-08 | **Ice and gas harvesting** | The ice harvester cycle yields 1 unit of ice per cycle (ice volume), and the cycle time comes from attributes. Gas cloud harvesters work on gas site clouds (signature sites, MN-15). Both use the same cycle engine and holds. Test: an ice harvester produces 1 ice block per cycle into the ice hold; gas harvesting depletes the cloud. |
+| MN-09 | **Mining drones** | Mining and excavator drones launch (bandwidth/bay), are ordered to mine the target asteroid, run their cycles, and deliver ore to the ship's ore hold when they return or on each cycle per V24 behaviour. They respect the drone control range. Test: two Mining Drone Is mine into the ore hold and stop when it's full. |
+| MN-10 | **Survey scanner** | `miningScanMgr.perform_scan` returns the real remaining quantity of every asteroid in range of the fitted survey scanner (range from attributes). `OnAsteroidRevealed` behaves per V24. Test: the scan results match the asteroid quantities after mining. |
+
+### D. Processing
+| ID | Task | Done when |
+|---|---|---|
+| MN-11 | **Compression (all compressible types)** | In-space: `inSpaceCompressionMgr.CompressItemInSpace` requires being in a fleet within range of an Industrial Command Ship or Rorqual with an active compressor module/burst, and the ore in the caller's hold. In structures: requires a Standup Compressor service. Ratio and portion size come from the SDE (`compressibletypes` + portionSize), leftovers stay uncompressed, and gas decompression applies its efficiency. Remove the 2-ore table. Test: compressing 1,234 Veldspar yields the SDE-correct compressed quantity plus a remainder. |
+| MN-12 | **Reprocessing (real)** | Recoverables come from SDE `typeMaterials` per portionSize; partial batches are returned. **Yield** = base facility yield (NPC station, or Upwell structure with refinery rigs/Tatara/security modifier) × (1 + Reprocessing skill) × (1 + Reprocessing Efficiency) × (1 + the ore-specific processing skill) × implant bonus.<br>**Tax** comes from station standings (NPC) or the structure owner's setting, and is journaled. The real V24 quote/info methods are implemented, plus `OnReprocessingMaterialsChanged`. Only types with `typeMaterials` can be reprocessed. Tests: Veldspar/Scordite/Pyroxeres yields at given skills and standings match the published calculator values; tax is charged and journaled; a non-reprocessable item is rejected. |
+
+### E. Moons, structures and ledgers
+| ID | Task | Done when |
+|---|---|---|
+| MN-13 | **Moon mining (Athanor/Tatara + Standup Moon Drill)** | Moon composition data comes from the SDE or a survey (moon probes / `OnMoonScanComplete`). `moonExtractions.StartNewExtraction` schedules a chunk and `CancelExtraction` cancels it. When it arrives, `FractureChunkWithStructure` (or auto-fracture) spawns a moon-ore asteroid field (MN-02 rules) that lasts the V24 duration, with jackpot chances. Corp ACL permissions apply. `OnMoonExtractionUpdate` fires. Test: start → fast-forward the clock → fracture → field present with the moon's ore mix → mined ore is logged to the corp ledger. |
+| MN-14 | **Metenox Moon Drill (automated)** | `autoMoonMining.RequestMiningDetails` / `RequestMiningCycleOutput`. Hourly output into the structure's output bay at Metenox efficiency (40%), consuming fuel blocks and Magmatic Gas, and stopping when out of fuel. Test: 24 simulated hours produce the expected quantities and consume the fuel. |
+| MN-15 | **Mining sites** | Ore anomalies (cosmic anomalies with special ore asteroids), ice belts/anomalies (respawn timers) and gas signatures (scan-dependent, SO-5). Each site has a lifetime and despawns, and every site uses MN-02/MN-03 asteroid rules. Test: an ore anomaly spawns with the correct ore set and despawns after it's cleared or expires. |
+| MN-16 | **Mining ledgers** | Each cycle writes ledger entries (character, type, quantity, system, date). `characterMiningLedger.GetCharacterLogs` returns the caller's entries. For corp structures (moon fields), `corpMiningLedger.GetObserversWithMiningEvents` / `GetObserverLedger` returns entries per observer with corp ACL. Data is retained for the V24 window. Test: mining 3 cycles produces 3 aggregated ledger rows. Corp ledger access is denied to outsiders. |
+
+### F. World and economy hooks
+| ID | Task | Done when |
+|---|---|---|
+| MN-17 | **NPC interaction** | Belt rats spawn near belts (C-4) and target miners. Living-world `MiningOp` fleets actually mine belt asteroids through MN-04 rules, haul ore, and can be attacked. Their ore feeds the regional market (replacing the static `MiningOp` label). Test: an NPC mining op depletes asteroid quantity over ticks. |
+| MN-18 | **Missions, goals and market** | Mining agent missions: mine X of an ore at a pocket asteroid field spawned for that mission (E-5 rules), and deliver it. Daily goal / career "mine N units" progress comes from ledger events (never from client-supplied counts). Ore, mineral and compressed-ore market seeding uses SDE types. Test: a mining mission completes only after the required quantity is delivered. |
+
+**Exit gate (all items require public RPCs and the real SDE; no direct `snap` writes, no hand-made `CombatState`, no fixtures in production):**
+1. `tests/mining_loop.rs::venture_mines_compresses_reprocesses`:
+   1. Undock in a high-sec belt system and warp to a belt.
+   2. Lock a Veldspar asteroid, activate Miner I, and run cycles until the ore hold is full.
+   3. Check the exact quantities and that the asteroid quantity decreased.
+   4. Check the ledger rows.
+   5. Compress at a structure, dock, and reprocess.
+   6. Check the mineral output and tax against the formula.
+2. `tests/mining_loop.rs::ice_and_gas_harvesting`.
+3. `tests/mining_loop.rs::mining_drones_fill_ore_hold`.
+4. `tests/mining_loop.rs::moon_extraction_to_ledger`.
+5. `tests/mining_loop.rs::belt_depletion_and_respawn_tick`.
+6. Review non-FAIL, with every MN task ID's "Done when" checked by the reviewer.
+
+---
+
+## Phase 6: Character progression and GM tooling
+**Crucible reference:**
+- `character/Character.cpp:1000-1166` (SkillQueueLoop)
+- `character/SkillMgrService.cpp:67-237`
+- `character/CharUnboundMgrService.cpp:142-322`
+- `admin/GMCommands.cpp`, `SystemCommands.cpp`, `debug_commands.cpp`, `CommandDispatcher.cpp`
+
+| ID | Task | Done when |
+|---|---|---|
+| CH-1 | **Skill queue time engine** | The queue advances in real time using each skill's own primary/secondary attributes. Completes levels, writes history, notifies `OnSkillTrained`/`OnMultipleSkillsTrained`. Handles Alpha caps by the delta. |
+| CH-2 | **skillMgr2 / skill handler semantics** | `SaveNewQueue`/`SaveSkillQueue` replaces the full list. Separate `GetSkillQueue`, `GetEndOfTraining` and `GetSkillHistory`. `InjectSkillIntoBrain` checks prerequisites and consumes the book. Neural remap with cooldown. `ApplyFreeSkillPoints(typeID, points)` honours its arguments. |
+| CH-3 | **Character creation** | Correct V24 `CreateCharacterWithDoll` argument mapping. Real starter skills from the SDE/career tables. Doll/portrait stored. Corvette by race. |
+| CH-4 | **Character info** | Separate real handlers for public info, bio, home station, notes, contacts and labels. |
+| CH-5 | **GM command dispatcher** | Parse `/cmd args`, check a per-command role, execute, and audit-log. Priority commands: `/giveskill(s)`, `/giveisk`, `/createitem`, `/tr`, `/heal`, `/spawn`, `/unspawn`, `/setattr`, `/getattr`, `/fit`, `/kill`, `/location`, `/online`. Each has a test proving its state change. |
+
+**Exit gate:** a queue trains across a simulated clock and notifications fire. GM commands work only for GM roles. Review non-FAIL.
+
+---
+
+## Phase 7: Economy, industry and missions
+**Crucible reference:**
+- `market/MarketProxyService.cpp:326-335,640-719`, `market/MarketMgr.cpp:99-200,416-625`
+- `contract/ContractProxy.cpp:509-770`
+- `manufacturing/RamMethods.cpp:349-406`, `RamProxyService.cpp:340,617-643`
+- `agents/AgentBound.cpp:72-390`, `agents/Agent.cpp:119,566-700`
+- `planet/Colony.cpp:360-1507`, `planet/CustomsOffice.cpp`
+
+| ID | Task | Done when |
+|---|---|---|
+| E-1 | **Fee inputs** | Broker fee and sales tax use the character's actual Broker Relations, Advanced Broker Relations and Accounting levels, and real faction/corp standings. Fees are journaled. |
+| E-2 | **Order lifecycle** | `ModifyCharOrder`, `CancelCharOrder` (escrow refunded, items returned), expiry, partial-fill journal entries for both parties, and market history built from transactions. Real V24 method names (`PlaceBuyOrder`, `PlaceMultiSellOrder`, …). |
+| E-3 | **Contracts** | Item exchange: price paid, items transferred to the acceptor, requested items. Courier: items travel in a courier package, completion requires delivery at the destination, expiry or failure pays collateral to the issuer. Auction bids if they're in V24 scope. |
+| E-4 | **Industry** | Install cost (system cost index × EIV), completion only after `endTime`, output = portionSize × runs, ME/TE from the **blueprint item**, copying produces BPCs, invention consumes datacores plus a T1 BPC and rolls probability for a T2 BPC. Blueprint locked during the job. |
+| E-5 | **Agents and missions** | Agent state machine (offer, accept, decline, defer, quit, complete) with a standing gate (effective standing with Connections/Diplomacy). Mission content spawns its own dungeon/NPCs; only those kills count. Courier missions need delivery. Rewards use real skills. Standing propagates to agent, corp and faction (Social). Re-requesting a completed mission respects the cooldown. |
+| E-6 | **PI basics** | Pins, links, routes, extraction/factory cycles over time, and launch/export tax charged through the POCO. |
+
+**Exit gate:** buy → modify → cancel; manufacture with a time gate; courier contract that requires delivery; a mission that requires killing its own spawned NPCs. Review non-FAIL.
+
+---
+
+## Phase 8: Social and exploration
+**Crucible reference:**
+- `mail/MailMgrService.cpp`
+- `fleet/FleetService.cpp` (FleetBound)
+- `corporation/CorpRegistryBound.cpp:421-1490`
+- `alliance/*`
+- `system/BookmarkService.cpp`
+- `exploration/AnomalyMgr.cpp`, `Scan.cpp:100-790`, `WormholeMgr.cpp`
+- `dungeon/DungeonMgr.cpp`
+- `chat/LSCService.cpp` (concepts only)
+
+| ID | Task | Done when |
+|---|---|---|
+| SO-1 | **EVE mail** | Recipient lists, headers, body, sync, read state, labels, trash. Mailing lists after that. |
+| SO-2 | **Fleets** | Invite, accept, leave, kick, wings/squads, roles, MOTD, broadcasts. Fleet warp is new work; Crucible has none. |
+| SO-3 | **Corporations and alliances** | Members, roles, titles, divisions, applications, leaving the old corp on create, ticker uniqueness, alliance create/join. |
+| SO-4 | **Bookmarks** | Create, list, folders, delete, copy and warp-to-bookmark (via SP-3), with V24 shared folders. |
+| SO-5 | **Exploration** | Anomaly/signature generation per system with timers. Probes as entities. Multi-probe certainty/deviation math. D-scan cone over real balls. Dungeon spawning with acceleration gates. |
+| SO-6 | **Wormholes** | Per-type destinations, mass and lifetime with collapse; jumping deducts mass from that wormhole. |
+| SO-7 | **Chat** | Design spike: V24 uses XMPP, so evaluate embedding or bridging an XMPP server. Local, corp and fleet channels follow membership. |
+
+**Exit gate:** mail round trip between two characters, fleet formation with a broadcast, probe a spawned signature and enter its dungeon. Review non-FAIL.
+
+---
+
+## Out of scope / obsolete in V24
+POS towers and reactions at POS (use Upwell refineries) · medical clone grades · LSC protocol (use XMPP) · XML API server · live updates · the pre-2013 certificate system · 2010 factional warfare.
+
+## Gaps Crucible can't help with (design from the V24 client and wiki)
+Fleet warp · jump clone rules · invention details · implants · notification center · CONCORD spawning · wormhole lifetime · PI depletion · Quasar/`publicGatewaySvc` real protobuf handling · Upwell structure services · Alpha/Omega and injector edge cases.
+
+---
+
+## Workflow per task (agent checklist)
+1. Read the Crucible reference listed for the task, plus the V24 client call sites (`docs/index/rpc_service_catalog.json`) for exact method names and arguments.
+2. Write failing tests first (wire-level where the task touches the protocol).
+3. Implement in Rust, re-implementing rather than copying. Keep handlers one per method. Use `try_with_mut_snapshot`.
+4. Run `cargo test --workspace`. It must actually execute.
+5. Write `/tmp/evomu_claims.md`: task IDs plus exact claims.
+6. Run `/usr/bin/python3 .agents/skills/evomu-adversarial-review/scripts/run_review.py --claims-file /tmp/evomu_claims.md`.
+7. Fix until there is no P0 and no FALSE claim. Update `docs/ACTION_PLAN_STATUS.md` (task ID → status, test names, review run) and the `PLAN.md` labels honestly. Never edit this plan. Commit with the task IDs.
+
+## Status snapshot (maintained by the reviewer/user; live per-task status is in `docs/ACTION_PLAN_STATUS.md`)
+| Phase | Status | Last review | Notes |
+|---|---|---|---|
+| 0 Stabilize | Not started | 20261016-153045 FAIL | |
+| 1 Data/persistence | Not started | | |
+| 2 Protocol | Not started | | |
+| 3 Space | Not started | | |
+| 4 Dogma | Not started | | |
+| 5 Combat/PvE | Partial (C-1..C-3 partial) | | |
+| 5M Mining | Not started (only 2-ore compression and a 4-ore Tritanium reprocess table exist) | | |
+| 6 Character/GM | Not started | | |
+| 7 Economy/missions | Not started | | |
+| 8 Social/exploration | Not started | | |

@@ -41,3 +41,13 @@ Re-check each item and mark it FIXED / PARTIAL / OPEN / REGRESSED. Full detail i
 - **OF-23:** `extract_staticdata.py` "live SQLite ingestion" is `LIMIT 500`, uses a guessed schema, and swallows exceptions. The seed has 62 types and 9 systems.
 - **OF-24:** DB is in-memory unless `EVOMU_SNAPSHOT_PATH` is set. Auth uses plaintext demo accounts.
 - **OF-25:** `router.rs` `warn!(?args, ?kwargs)` logs the full args of unhandled RPCs, unauthenticated ones included. Idle TCP sockets hold connection-semaphore permits forever.
+
+## Feature gaps at `479e633` (from the feature-gap pass; track against the pinned plan's task IDs)
+- **OF-26 (MN-02/03/04):** There is no mining. No asteroid belts or asteroid balls exist, and there is no mining laser cycle that moves ore into the ore hold. `Miner I` (483) is seeded but never used.
+- **OF-27 (MN-11/12):** Compression covers only 2 ores (`industry_pi.rs:153-230`). Reprocessing is a 4-ore table that outputs only Tritanium (`industry_pi.rs:67-131`), with no SDE `typeMaterials`, skills, standings, tax or batch size.
+- **OF-28 (MN-10/16):** There are no `miningScanMgr`, `characterMiningLedger` or `corpMiningLedger` handlers, and no `OnOreMined` / `OnMiningLaserFiredLocal` / `OnAsteroidTerminated` notifications.
+- **OF-29 (P-6):** Fake handshake: any 6-tuple gets `AuthenticationReq("ok")`.
+- **OF-30 (P-7):** The destiny stream is JSON, not the binary destiny format.
+- **OF-31 (DG-1):** No modifierInfo engine. Groups 762/774/46 are special-cased. `dogmaIM.FireWeapon` is still the combat path instead of `dogmaIM.Activate` plus a module cycle.
+- **OF-32 (CH-1/CH-3):** Skills don't train over time. `CreateCharacterWithDoll` uses the wrong argument order; it should be name, bloodlineID, genderID, ancestryID, charInfo, portraitInfo, schoolID.
+- **OF-33 (D-2):** 21 `unwrap_or(Jita/60003760)` fallbacks hide missing data.
