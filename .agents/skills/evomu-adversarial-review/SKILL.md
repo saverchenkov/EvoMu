@@ -60,7 +60,7 @@ Per-change reviews check **precision** (is what you claim true?). Completeness i
   - curated mechanics (`feat:*`), plan tasks and real-client journeys.
 - **Parity status.** Every review run computes `scripts/parity/parity_status.py` after the tests and stores the result in the run's `context/parity.md`/`parity.json`. The report's "Parity" section shows the percentage and the first open rows per category.
   - A row is closed only when a test tagged `// parity: <row id>` passed in that run and the implementation check passes, or when it's an auditor-accepted NA in `docs/parity/triage.json`.
-- **Gap audit (recall).** Run it with `run_review.py --mode gap-audit`. It's also chained automatically every `EVOMU_GAP_AUDIT_EVERY` (default 5) claims reviews. The auditor:
+- **Gap audit (recall).** Run it with `run_review.py --mode gap-audit`. It's also chained automatically after a claims review that returns PASS or PASS_WITH_ISSUES, once at least `EVOMU_GAP_AUDIT_EVERY` (default 5) claims reviews have run since the last audit. It never runs after a FAIL. The auditor:
   - finds mechanics missing from the ledger and appends them as new rows;
   - rejects weak NA triage;
   - flags fake DONE rows, which stay open until a later audit clears them.

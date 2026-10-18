@@ -465,6 +465,10 @@ def main():
         code = (GAP_EXIT if mode == "gap-audit" else EXIT).get(verdict, 3)
         if mode == a.mode:
             rc = code
+        if mode == "claims" and verdict not in ("PASS", "PASS_WITH_ISSUES") and len(modes) > 1:
+            print("[review] claims verdict %s: skipping the chained gap audit (it only runs on a committable "
+                  "tree; fix the findings and re-run)." % verdict)
+            break
     if a.dry_run:
         print("[review] dry run: context in %s" % ctx)
         return 0

@@ -1,0 +1,683 @@
+{
+ "rows": [
+  {
+   "acceptance": "An insurgency spawns around a low-sec FW frontline system with 4 starting systems; a 48h Forecasting phase announces FOB location and systems, spawns no insurgency sites and keeps the FOB invulnerable; the Active phase lasts at most 7 days; a 48h wind-down follows. insurgencySolarsystem.GetAllVisibleCampaigns/GetLocalCampaignClientSnapshot report the current phase and timers.",
+   "domain": "fw",
+   "id": "feat:fw.insurgency-lifecycle",
+   "plan_task": null,
+   "sources": [
+    "wiki:Insurgency",
+    "client:eve/client/script/ui/services/insurgencyCampaignSvc.pyj"
+   ],
+   "title": "Insurgency phases (forecast / active / wind-down)",
+   "why_missing": "feat:pve.insurgency only covers corruption/suppression read-out and feat:fw.fw-pirate is a single line; the phase machine, with its V24.01 timings (48h forecast, 7-day max), has no testable row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261017-214922"
+  },
+  {
+   "acceptance": "The pirate FOB spawns in the insurgency hub system and is dockable only by the pirate militia. It becomes attackable only once the Empire side reaches its suppression goal, and uses a single 3h (\u00b11h jitter) armor reinforcement timer. Destroying it raises Suppression by one level (max 5) in every affected system and ends the insurgency as an Empire win.",
+   "domain": "fw",
+   "id": "feat:fw.insurgency-fob",
+   "plan_task": null,
+   "sources": [
+    "wiki:Insurgency",
+    "wiki:Forward_Operating_Base"
+   ],
+   "title": "Pirate Forward Operating Base",
+   "why_missing": "No ledger row mentions the FOB structure, its vulnerability gate or its reinforcement timer; pirate-strongholds is a different Quasar package.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261017-214922"
+  },
+  {
+   "acceptance": "Win target = 5 fully suppressed/corrupted systems + the side's Ambition modifier (0..+5, only one side positive). A win adds +1 to the winner's modifier; an underdog win reduces the leader's modifier by 1. A pirate win gives temporary control of the FOB system, and that system's infrastructure hub becomes vulnerable 24h + 1 downtime after surrender. A side that misses its goal produces a tie with no bonus.",
+   "domain": "fw",
+   "id": "feat:fw.insurgency-ambition-victory",
+   "plan_task": null,
+   "sources": [
+    "wiki:Insurgency",
+    "wiki:Ambition_modifier"
+   ],
+   "title": "Insurgency victory conditions and Ambition modifier",
+   "why_missing": "Victory resolution and the persistent ambition counter are absent from every fw/pve row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261017-214922"
+  },
+  {
+   "acceptance": "When a system reaches Corruption level 3, an adjacent system with security 0.0\u20130.8 joins the insurgency and starts spawning sites. If no adjacent system is valid, a random valid system adjacent to the insurgency is chosen.",
+   "domain": "fw",
+   "id": "feat:fw.insurgency-spread",
+   "plan_task": null,
+   "sources": [
+    "wiki:Insurgency",
+    "wiki:Corruption_and_Suppression"
+   ],
+   "title": "Insurgency spread to adjacent systems",
+   "why_missing": "No row defines insurgency area growth; it was changed to level 3 in V24.01.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261017-214922"
+  },
+  {
+   "acceptance": "Each Corruption and Suppression stage (1\u20135) applies that stage's published system effects: security posture changes via securityMgr.get_modified_systems, plus the stage-gated site spawns and NPC behaviour. Effects are removed when the stage drops.",
+   "domain": "fw",
+   "id": "feat:fw.corruption-suppression-effects",
+   "plan_task": null,
+   "sources": [
+    "wiki:Corruption_and_Suppression",
+    "client:security/client/securitySvc.pyj"
+   ],
+   "title": "Per-stage corruption/suppression system effects",
+   "why_missing": "feat:pve.insurgency only requires that levels are returned and change; feat:crimewatch.security-bands only reads modified systems. The stage\u2192effect table is untested.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261017-214922"
+  },
+  {
+   "acceptance": "At insurgency end, contributors on the winning side are paid ISK+LP scaled by personal corruption/suppression contribution: maximum at 45% personal contribution, capped at 1,500,000 LP, with a 1.0x multiplier for winners and 0.4x for losers. Ties pay no bonus.",
+   "domain": "fw",
+   "id": "feat:fw.insurgency-contribution-payout",
+   "plan_task": null,
+   "sources": [
+    "wiki:Insurgency"
+   ],
+   "title": "Insurgency contribution payouts",
+   "why_missing": "No reward row exists for insurgency outcomes; fw-lp covers complexes/kills only.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261017-214922"
+  },
+  {
+   "acceptance": "Small/Medium/Moderate/Large ADV raid complexes spawn in insurgency systems with these properties:\n- per-size ship restrictions;\n- capture timers of 10 or 15 minutes;\n- per-site corruption/suppression contribution of 0.25/0.5/1.5/1%;\n- Moderate sites grant a battlecruiser bonus;\n- Large ADV is static with a 40-min respawn.\nMordu's Legion NPCs defend for pirates and pirate NPCs for empires.",
+   "domain": "pve",
+   "id": "feat:pve.insurgency-outpost-raid",
+   "plan_task": null,
+   "sources": [
+    "wiki:Insurgency"
+   ],
+   "title": "Insurgency Corporate Outpost Raid complexes",
+   "why_missing": "Insurgency site types are not listed anywhere in the ledger.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261017-214922"
+  },
+  {
+   "acceptance": "An ORE Rorqual NPC is tackled by pirate NPCs. Pirate militia complete the site when the ransom is paid; Empire militia complete it when the pirates are killed and the Rorqual warps off. The Rorqual can be destroyed and looted, which forfeits the LP but keeps the corruption. The LP payout is shared by up to 5 players.",
+   "domain": "pve",
+   "id": "feat:pve.insurgency-mining-ambush",
+   "plan_task": null,
+   "sources": [
+    "wiki:Insurgency"
+   ],
+   "title": "Insurgency Mining Op Ambush",
+   "why_missing": "Not covered by any pve/fw row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261017-214922"
+  },
+  {
+   "acceptance": "dungeonInstanceCacheMgr.GetPirateInsurgencyIceHeistInstances lists heists. Spawn rules: only at corruption 3\u20134, with a 4h respawn that persists across downtime.\n\nIn the site:\n- tanker NPCs spawn at the refinery and are web-immune;\n- each side escorts them to its own scoring zone;\n- the first side to 10 tankers wins 150,000 LP;\n- pirates near the Upwell Thunderchild guards are destroyed.",
+   "domain": "pve",
+   "id": "feat:pve.insurgency-ice-heist",
+   "plan_task": null,
+   "sources": [
+    "wiki:Insurgency"
+   ],
+   "title": "Ice Refinery Heist",
+   "why_missing": "The client calls a dedicated RPC for this content, but no feat row describes its gameplay.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261017-214922"
+  },
+  {
+   "acceptance": "At corruption/suppression thresholds, roaming named NPCs drop special loot. Pirates hand it in at Laundering Facilities in the FOB system; Empire militia hand it in at Counter-Insurgency Outposts in the War HQ systems (Mehatoor/Onnamon/Intaki/Amo). Each hand-in returns reward crates.",
+   "domain": "pve",
+   "id": "feat:pve.insurgency-laundering",
+   "plan_task": null,
+   "sources": [
+    "wiki:Insurgency"
+   ],
+   "title": "Pirate Laundering Facilities / Counter-Insurgency Outposts",
+   "why_missing": "No row covers the item turn-in exchange or War HQ outposts.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261017-214922"
+  },
+  {
+   "acceptance": "FW battlefields spawn per warzone rules, with a 4h respawn persisted across downtime. Completing a battlefield objective pays 150,000 LP to the winning militia and applies its victory-point and advantage effect.",
+   "domain": "fw",
+   "id": "feat:fw.battlefield-gameplay",
+   "plan_task": null,
+   "sources": [
+    "wiki:Faction_warfare",
+    "wiki:Insurgency",
+    "client:eve/client/script/ui/services/fwWarzoneSvc.pyj"
+   ],
+   "title": "FW battlefield site gameplay",
+   "why_missing": "feat:fw.fw-site-dungeons only requires listing battlefield instances; the site's gameplay, payout and respawn are not covered.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261017-214922"
+  },
+  {
+   "acceptance": "When a FW system reaches 100% contested (or after a pirate insurgency surrender), its infrastructure hub becomes vulnerable. Destroying it flips occupancy to the attacking militia and updates frontline/command/rearguard status. The hub regenerates if left alone.",
+   "domain": "fw",
+   "id": "feat:fw.infrastructure-hub",
+   "plan_task": null,
+   "sources": [
+    "wiki:Faction_warfare",
+    "wiki:Insurgency"
+   ],
+   "title": "FW infrastructure hub capture",
+   "why_missing": "feat:fw.system-capture says 'becomes vulnerable' but does not specify the IHub structure that must be destroyed.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261017-214922"
+  },
+  {
+   "acceptance": "Incursions spawn in eligible constellations, with staging/vanguard/assault/HQ system roles assigned. After the mothership dies, the incursion withdraws on a timer and a new one spawns per cadence. map.GetSystemsInIncursions and GetIncursionGlobalReport reflect live state.",
+   "domain": "pve",
+   "id": "feat:pve.incursion-spawn-lifecycle",
+   "plan_task": null,
+   "sources": [
+    "wiki:Incursions",
+    "wiki:Anatomy_of_Incursions",
+    "client:eve/client/script/ui/shared/incursionSvc.pyj"
+   ],
+   "title": "Incursion spawn and withdrawal lifecycle",
+   "why_missing": "feat:pve.incursion-system packs constellations, influence, four site classes and payouts into one line, the same failure mode as the old single 'mining' row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261017-214922"
+  },
+  {
+   "acceptance": "Influence starts at 100%. Each completed site reduces it by the site-class amount, and it regenerates over time while sites are not run. Low influence unlocks the mothership site.",
+   "domain": "pve",
+   "id": "feat:pve.incursion-influence",
+   "plan_task": null,
+   "sources": [
+    "wiki:Anatomy_of_Incursions"
+   ],
+   "title": "Incursion influence meter",
+   "why_missing": "Influence dynamics are hidden in feat:pve.incursion-system.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261017-214922"
+  },
+  {
+   "acceptance": "While an incursion is active, the constellation applies the Sansha system effects (resistance/damage penalties, bounty and LP reductions) via system-wide dbuffs. Their magnitude scales with influence, and they are removed on withdrawal.",
+   "domain": "pve",
+   "id": "feat:pve.incursion-system-effects",
+   "plan_task": null,
+   "sources": [
+    "wiki:Incursions",
+    "wiki:Anatomy_of_Incursions"
+   ],
+   "title": "Incursion constellation effects",
+   "why_missing": "feat:dogma.system-wide-effects lists wormholes/Pochven/storms but not incursions; no incursion row requires these effects.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261017-214922"
+  },
+  {
+   "acceptance": "corpRegistry.PayoutDividend pays ISK from a corp wallet division either per share to shareholders or equally to members. Both sides are journaled, and the call fails with insufficient funds or without the required role.",
+   "domain": "corporation",
+   "id": "feat:corporation.dividends",
+   "plan_task": null,
+   "sources": [
+    "client:eve/client/script/ui/services/corporation/base_corporation.pyj",
+    "wiki:Corporation_logistics"
+   ],
+   "title": "Pay dividends",
+   "why_missing": "feat:corporation.corp-shares only says 'shares owned; votes weighted'. The client calls PayoutDividend and no row covers it.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261017-214922"
+  },
+  {
+   "acceptance": "MoveCompanyShares and MovePrivateShares transfer shares between the corporation and characters/corps. GetShareholders, GetSharesByShareholder and GetMemberIDsWithMoreThanAvgShares reflect the new distribution, which is then used for vote weighting.",
+   "domain": "corporation",
+   "id": "feat:corporation.share-transfer",
+   "plan_task": null,
+   "sources": [
+    "client:eve/client/script/ui/services/corporation/voting.pyj"
+   ],
+   "title": "Share transfers",
+   "why_missing": "No row describes moving shares; corp-shares is coarse.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261017-214922"
+  },
+  {
+   "acceptance": "SetCorpWelcomeMail stores the template (role-gated) and GetCorpWelcomeMail returns it. The mail is delivered automatically to each new member on joining.",
+   "domain": "corporation",
+   "id": "feat:corporation.welcome-mail",
+   "plan_task": null,
+   "sources": [
+    "client:eve/client/script/ui/services/corporation/base_corporation.pyj"
+   ],
+   "title": "Corporation welcome mail",
+   "why_missing": "Mailing-list welcome mail is covered, but the corp-level welcome mail RPCs have no feat row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261017-214922"
+  },
+  {
+   "acceptance": "RegisterNewCorpMailRestrictionSettings toggles the restriction and DoesCorpRestrictCorpMails reports it. When it is on, only authorised role holders can send mail to the whole corporation; other members get the live UserError.",
+   "domain": "corporation",
+   "id": "feat:corporation.corp-mail-restriction",
+   "plan_task": null,
+   "sources": [
+    "client:eve/client/script/ui/services/corporation/base_corporation.pyj"
+   ],
+   "title": "Corp-wide mail restriction",
+   "why_missing": "feat:social.mail-corp-alliance does not include the restriction setting.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261017-214922"
+  },
+  {
+   "acceptance": "RegisterNewAcceptStructureSettings and DoesMyCorpAcceptStructures persist whether the corp accepts Upwell structure ownership transfers. Transfers to a corp that refuses them are rejected.",
+   "domain": "corporation",
+   "id": "feat:corporation.accept-structures-setting",
+   "plan_task": null,
+   "sources": [
+    "client:eve/client/script/ui/services/corporation/base_corporation.pyj"
+   ],
+   "title": "Accept structure transfers setting",
+   "why_missing": "Not part of feat:corporation.corp-structure-ownership acceptance; the RPC pair has no behaviour row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261017-214922"
+  },
+  {
+   "acceptance": "SetStructureReinforceDefault stores the corp default reinforce hour (role-gated) and GetStructureReinforceDefault returns it. Newly onlined corp structures adopt it.",
+   "domain": "corporation",
+   "id": "feat:corporation.structure-reinforce-default",
+   "plan_task": null,
+   "sources": [
+    "client:eve/client/script/ui/services/corporation/base_corporation.pyj",
+    "client:eve/client/script/ui/structure/structureBrowser/reinforcementTimeWnd.pyj"
+   ],
+   "title": "Corp default reinforcement hour",
+   "why_missing": "feat:structures.vulnerability-schedule covers only per-structure changes.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261017-214922"
+  },
+  {
+   "acceptance": "Kicks that cannot run immediately (for example, the member is in space or has pending role removals) are queued and executed when the live-server conditions are met. GetPendingAutoKicks lists them, and the queued member is removed and notified on execution.",
+   "domain": "corporation",
+   "id": "feat:corporation.pending-auto-kick",
+   "plan_task": null,
+   "sources": [
+    "client:eve/client/script/ui/services/corporation/base_corporation.pyj",
+    "wiki:Managing_corporation_members"
+   ],
+   "title": "Deferred (auto) kicks",
+   "why_missing": "feat:corporation.kick-member only covers immediate kicks and CanBeKickedOut.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261017-214922"
+  },
+  {
+   "acceptance": "ResignFromCEO removes the CEO, and the corp enters a CEO-vacant state until a successor is chosen through the CEO vote case. GetNumberOfPotentialCEOs and voteManager.CanRunForCEO gate candidacy.",
+   "domain": "corporation",
+   "id": "feat:corporation.ceo-resign",
+   "plan_task": null,
+   "sources": [
+    "client:eve/client/script/ui/services/corporation/voting.pyj"
+   ],
+   "title": "CEO resignation",
+   "why_missing": "feat:corporation.ceo-change covers assignment and votes, but not the resignation path.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261017-214922"
+  },
+  {
+   "acceptance": "SetTakesFleetWarp, SetAcceptsRegroupValue and SetAcceptsConduitJumpsValue persist per member and appear in member info. Fleet warps, regroup actions and Pochven conduit group jumps skip members who have opted out.",
+   "domain": "fleet",
+   "id": "feat:fleet.member-movement-optins",
+   "plan_task": null,
+   "sources": [
+    "client:eve/client/script/parklife/fleetSvc.pyj",
+    "wiki:Pochven"
+   ],
+   "title": "Fleet warp / regroup / conduit opt-ins",
+   "why_missing": "Three fleetObjectHandler RPCs change who is moved by fleet commands; fleet-warp-cmd ignores opt-outs and no row covers regroup or conduit opt-in.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261017-214922"
+  },
+  {
+   "acceptance": "fleetObjectHandler.LoadFleetSetup applies a saved setup atomically: wing/squad structure and names, MOTD, free-move/auto-join options and max size. It is boss-only, and members receive the change notifications.",
+   "domain": "fleet",
+   "id": "feat:fleet.fleet-setups",
+   "plan_task": null,
+   "sources": [
+    "client:eve/client/script/parklife/fleetSvc.pyj",
+    "wiki:Fleet_interface"
+   ],
+   "title": "Load fleet setup",
+   "why_missing": "No row covers fleet setup loading.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261017-214922"
+  },
+  {
+   "acceptance": "MakeLeader transfers fleet boss to another member. When the boss leaves or disconnects, boss passes automatically per V24 rules, and all members are notified.",
+   "domain": "fleet",
+   "id": "feat:fleet.boss-handover",
+   "plan_task": null,
+   "sources": [
+    "client:eve/client/script/parklife/fleetSvc.pyj",
+    "wiki:Fleet_interface"
+   ],
+   "title": "Fleet boss hand-over",
+   "why_missing": "Boss transfer is not in roles-positions or leave-kick acceptance.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261017-214922"
+  },
+  {
+   "acceptance": "Ships colliding with other ships, structures or celestial hulls exchange momentum according to mass and velocity: no interpenetration, bumped ships are knocked off alignment and velocity, and the destiny updates are broadcast to observers. This is SDE-mass driven.",
+   "domain": "navigation",
+   "id": "feat:navigation.collision-bumping",
+   "plan_task": null,
+   "sources": [
+    "crucible:src/eve-server/system/DestinyManager.h",
+    "wiki:Manual_piloting"
+   ],
+   "title": "Ball collisions (bumping)",
+   "why_missing": "No navigation row covers collision physics, although bumping is a core tactic (gate/structure bumping, anti-warp bumping).",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261017-214922"
+  },
+  {
+   "acceptance": "Warping to a celestial lands at its warp-in point; warping to a station or stargate lands at its docking or jump perimeter. Warps to targets closer than 150 km are refused with the live error. The requested 0\u2013100 km offset is applied relative to the landing point.",
+   "domain": "navigation",
+   "id": "feat:navigation.warp-landing-points",
+   "plan_task": null,
+   "sources": [
+    "wiki:Warp_mechanics",
+    "wiki:Warp"
+   ],
+   "title": "Warp-in points and minimum warp distance",
+   "why_missing": "feat:navigation.warp-to covers phases and distance only; landing geometry and the minimum distance are untested.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261017-214922"
+  },
+  {
+   "acceptance": "Supercarriers and titans are refused docking at NPC stations with the live UserError. Other capitals follow the V24 station docking rules.",
+   "domain": "navigation",
+   "id": "feat:navigation.npc-station-supercap-docking",
+   "plan_task": null,
+   "sources": [
+    "wiki:Capital_ships",
+    "wiki:Station_Geometry"
+   ],
+   "title": "Supercapital NPC station docking refusal",
+   "why_missing": "feat:navigation.dock-station covers only range and timers, and dock-structure only Upwell size rules.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261017-214922"
+  },
+  {
+   "acceptance": "Ships enter gated pockets by acceleration gate and land at the gate destination; warping directly into later gated rooms is impossible. MicroWarpdrive activation is refused in pockets whose dungeon or room data disallows it, and this is data-driven.",
+   "domain": "pve",
+   "id": "feat:pve.deadspace-pocket-rules",
+   "plan_task": null,
+   "sources": [
+    "wiki:Deadspace",
+    "wiki:Acceleration_gate"
+   ],
+   "title": "Deadspace pocket restrictions",
+   "why_missing": "feat:navigation.acceleration-gates covers only gate activation and ship size; in-pocket movement restrictions are untested.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261017-214922"
+  },
+  {
+   "acceptance": "A Remote Sensor Booster raises the target's scan resolution and lock range according to its script. A Remote Tracking Computer raises the target's turret optimal, falloff and tracking according to its script. Both are stacking-penalised, respect optimal/falloff, end on deactivation, and propagate logistics aggression flags.",
+   "domain": "modules",
+   "id": "feat:modules.remote-sensor-booster-rtc",
+   "plan_task": null,
+   "sources": [
+    "wiki:Remote_assistance",
+    "wiki:Electronic_warfare",
+    "wiki:Scripts"
+   ],
+   "title": "Remote sensor boosters & remote tracking computers",
+   "why_missing": "Only local ECCM/sensor boosters and TC/TE are rows; remote-assistance EWAR modules are absent.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261017-214922"
+  },
+  {
+   "acceptance": "An ARSB consumes cap booster charges instead of capacitor while loaded. An ARAR gives its repair bonus with nanite paste loaded. Both reload in 60 s and fall back to their unloaded behaviour.",
+   "domain": "modules",
+   "id": "feat:modules.ancillary-remote-repairers",
+   "plan_task": null,
+   "sources": [
+    "wiki:Remote_assistance",
+    "wiki:Logistics"
+   ],
+   "title": "Ancillary remote shield boosters / armor repairers",
+   "why_missing": "The remote-shield/remote-armor rows ignore the charge-driven ancillary variants; only local ASB/AAR are covered.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261017-214922"
+  },
+  {
+   "acceptance": "Each cycle, every ship locking the user has a chance to lose its lock, based on its sensor strength versus the module strength (SDE attributes). The module's own self-penalties apply.",
+   "domain": "modules",
+   "id": "feat:modules.target-spectrum-breaker",
+   "plan_task": null,
+   "sources": [
+    "wiki:Electronic_Countermeasures",
+    "wiki:Electronic_warfare"
+   ],
+   "title": "Target Spectrum Breaker",
+   "why_missing": "No row covers this ECM-like defensive module group.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261017-214922"
+  },
+  {
+   "acceptance": "Activation grants the module's hull resistance bonus for its duration. The module then takes its burnout or damage per SDE attributes and respects its activation restrictions.",
+   "domain": "modules",
+   "id": "feat:modules.capital-emergency-hull-energizer",
+   "plan_task": null,
+   "sources": [
+    "wiki:Capital_Ship_Modules"
+   ],
+   "title": "Capital Emergency Hull Energizer",
+   "why_missing": "The capital defensive one-shot module is not covered by damage-control or hull-repairer rows.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261017-214922"
+  },
+  {
+   "acceptance": "While online, the module grants its additional locked-target slots and automatically locks eligible hostile targets per its attributes; the locks obey normal lock-time rules.",
+   "domain": "modules",
+   "id": "feat:modules.automated-targeting-system",
+   "plan_task": null,
+   "sources": [
+    "wiki:Targeting"
+   ],
+   "title": "Automated targeting system",
+   "why_missing": "There is no row for the auto-targeting module group; targeting-lock covers only manual locks.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261017-214922"
+  },
+  {
+   "acceptance": "marketProxy.GetMarketOrderHistory returns the character's fulfilled, expired and cancelled orders with state, final volume, price and timestamps, within the live retention window.",
+   "domain": "market",
+   "id": "feat:market.order-history",
+   "plan_task": null,
+   "sources": [
+    "client:eve/client/script/ui/services/marketsvc.pyj",
+    "wiki:Trading"
+   ],
+   "title": "Personal market order history",
+   "why_missing": "char-orders covers only active orders; the order history RPC has no behaviour row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261017-214922"
+  },
+  {
+   "acceptance": "planetMgr.UserAbandonPlanet removes the command center, all pins, links and routes, destroys stored commodities, frees the colony slot and stops the simulation.",
+   "domain": "pi",
+   "id": "feat:pi.abandon-colony",
+   "plan_task": null,
+   "sources": [
+    "wiki:Colony_management",
+    "crucible:src/eve-server/planet"
+   ],
+   "title": "Abandon planetary colony",
+   "why_missing": "PI rows cover building and simulation but not colony teardown.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261017-214922"
+  },
+  {
+   "acceptance": "NPC item traders exchange input items (and ISK, where specified) for output items exactly per itemtraderrecipes.fsdbinary, at the recipe's locations, consuming inputs atomically.",
+   "domain": "wallet",
+   "id": "feat:wallet.item-trader",
+   "plan_task": null,
+   "sources": [
+    "client:res:/staticdata/itemtraderrecipes.fsdbinary",
+    "quasar:vendors"
+   ],
+   "title": "NPC item trader recipes",
+   "why_missing": "The static recipe table ships with the client, but only the coarse feat:quasar.vendors row exists; there is no behaviour row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261017-214922"
+  },
+  {
+   "acceptance": "map.GetSolarSystemVisits returns the character's per-system visit count and last-visit time, updated on every system entry.",
+   "domain": "ui",
+   "id": "feat:ui.map-visited-systems",
+   "plan_task": null,
+   "sources": [
+    "client:eve/client/script/ui/shared/mapView/mapViewData.pyj"
+   ],
+   "title": "Personal system visit history",
+   "why_missing": "ui.map-stats covers global jumps/kills, not per-character visits.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261017-214922"
+  },
+  {
+   "acceptance": "Vanguard, Assault and Headquarters sites spawn only in systems with the matching role. Each has its fleet-size scaling, NPC waves and completion condition, and completion pays only fleet members on grid.",
+   "domain": "pve",
+   "id": "feat:pve.incursion-site-classes",
+   "plan_task": null,
+   "sources": [
+    "wiki:Incursions",
+    "wiki:Roles_in_Incursions"
+   ],
+   "title": "Incursion site classes",
+   "why_missing": "Site-class behaviour is buried inside feat:pve.incursion-system.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261017-214922"
+  },
+  {
+   "acceptance": "Each militia's War HQ system (Mehatoor, Onnamon, Intaki, Amo) is identified by fwWarzoneSolarsystem.GetHQSystemIDs and hosts the HQ-only services (counter-insurgency outposts, militia facilities).",
+   "domain": "fw",
+   "id": "feat:fw.war-hq-systems",
+   "plan_task": null,
+   "sources": [
+    "wiki:Insurgency",
+    "client:eve/client/script/ui/services/fwWarzoneSvc.pyj"
+   ],
+   "title": "Militia War HQ systems",
+   "why_missing": "GetHQSystemIDs is called by the client but no row specifies HQ semantics.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261017-214922"
+  },
+  {
+   "acceptance": "corpRegistry.UpdateDivisionNames renames the hangar and wallet divisions (Director only). The names persist and appear in hangars, wallets and ESI divisions.",
+   "domain": "corporation",
+   "id": "feat:corporation.corp-division-names",
+   "plan_task": null,
+   "sources": [
+    "client:eve/client/script/ui/services/corporation/base_corporation.pyj",
+    "wiki:Corporation_logistics"
+   ],
+   "title": "Division renaming",
+   "why_missing": "corp-hangars mentions names but has no write path or role check; wallet.corp-divisions is read-only.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261017-214922"
+  },
+  {
+   "acceptance": "ApplyToJoinFleet creates a pending request visible via GetJoinRequests to the boss and commanders, who can accept it (placing the member) or reject it with RejectJoinRequest. The applicant is notified either way.",
+   "domain": "fleet",
+   "id": "feat:fleet.join-requests",
+   "plan_task": null,
+   "sources": [
+    "client:eve/client/script/parklife/fleetSvc.pyj",
+    "wiki:Public_fleets"
+   ],
+   "title": "Fleet join requests",
+   "why_missing": "feat:fleet.fleet-advert lists the RPC but not the request review flow.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261017-214922"
+  }
+ ],
+ "rejected_triage": [],
+ "fake_done": []
+}
