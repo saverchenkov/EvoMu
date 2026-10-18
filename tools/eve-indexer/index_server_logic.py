@@ -648,15 +648,29 @@ def scan_v24_code_ccp(code_ccp_path):
 
 
 def scan_evomu_router(router_rs_path):
-    """Extracts currently implemented `(service, method)` pairs from `crates/eve-server/src/router.rs`."""
+    """Extracts currently implemented `(service, method)` pairs from `crates/eve-server/src/router/`."""
     implemented = collections.defaultdict(set)
-    if not os.path.isfile(router_rs_path):
-        return implemented
-    with open(router_rs_path, "r", encoding="utf-8") as f:
-        content = f.read()
-    for svc, method in re.findall(r'\(\s*"([^"]+)"\s*,\s*"([^"]+)"\s*\)', content):
-        canonical_svc = "authentication" if svc == "auth" else svc
-        implemented[canonical_svc].add(method)
+    contents = []
+    if os.path.isdir(router_rs_path):
+        router_dir = router_rs_path
+    elif os.path.isfile(router_rs_path):
+        with open(router_rs_path, "r", encoding="utf-8") as f:
+            contents.append(f.read())
+        router_dir = os.path.join(os.path.dirname(router_rs_path), "router")
+    else:
+        router_dir = os.path.join(os.path.dirname(router_rs_path), "router")
+    if os.path.isdir(router_dir):
+        for root, _, files in os.walk(router_dir):
+            if "tests" in os.path.split(root)[1]:
+                continue
+            for file in files:
+                if file.endswith(".rs"):
+                    with open(os.path.join(root, file), "r", encoding="utf-8") as f:
+                        contents.append(f.read())
+    for content in contents:
+        for svc, method in re.findall(r'\(\s*"([^"]+)"\s*,\s*"([^"]+)"\s*\)', content):
+            canonical_svc = "authentication" if svc == "auth" else svc
+            implemented[canonical_svc].add(method)
     return implemented
 
 
@@ -793,7 +807,7 @@ def main():
     out_dir = os.path.join(args.evomu_root, "docs", "index")
     os.makedirs(out_dir, exist_ok=True)
 
-    router_path = os.path.join(args.evomu_root, "crates", "eve-server", "src", "router.rs")
+    router_path = os.path.join(args.evomu_root, "crates", "eve-server", "src", "router")
     evomu_impl = scan_evomu_router(router_path)
     crucible_svcs = scan_crucible_services(args.crucible) if args.crucible else {}
     v24_svcs, notify_events, pb_domains = scan_v24_code_ccp(args.code_ccp) if args.code_ccp else ({}, {}, {})

@@ -1,0 +1,437 @@
+//! Table change tracking and FNV-1a row fingerprinting.
+
+use crate::types::*;
+use eve_sde::{SolarSystemId, TypeId};
+use std::collections::{HashMap, HashSet};
+
+/// Fast zero-allocation FNV-1a 64-bit hasher for row-level dirty detection.
+pub(crate) struct FnvHasher(pub(crate) u64);
+
+impl FnvHasher {
+    const OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0100_0000_01b3;
+
+    #[inline]
+    pub(crate) fn new() -> Self {
+        Self(Self::OFFSET_BASIS)
+    }
+
+    #[inline]
+    pub(crate) fn write_bytes(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.0 ^= b as u64;
+            self.0 = self.0.wrapping_mul(Self::PRIME);
+        }
+    }
+
+    #[inline]
+    pub(crate) fn write_u64(&mut self, v: u64) {
+        self.write_bytes(&v.to_le_bytes());
+    }
+
+    #[inline]
+    pub(crate) fn write_i64(&mut self, v: i64) {
+        self.write_bytes(&v.to_le_bytes());
+    }
+
+    #[inline]
+    pub(crate) fn write_u32(&mut self, v: u32) {
+        self.write_bytes(&v.to_le_bytes());
+    }
+
+    #[inline]
+    pub(crate) fn write_i32(&mut self, v: i32) {
+        self.write_bytes(&v.to_le_bytes());
+    }
+
+    #[inline]
+    pub(crate) fn write_u8(&mut self, v: u8) {
+        self.write_bytes(&[v]);
+    }
+
+    #[inline]
+    pub(crate) fn write_bool(&mut self, v: bool) {
+        self.write_u8(u8::from(v));
+    }
+
+    #[inline]
+    pub(crate) fn write_f64(&mut self, v: f64) {
+        self.write_u64(v.to_bits());
+    }
+
+    #[inline]
+    pub(crate) fn write_str(&mut self, s: &str) {
+        self.write_u64(s.len() as u64);
+        self.write_bytes(s.as_bytes());
+    }
+
+    #[inline]
+    pub(crate) fn finish(self) -> u64 {
+        self.0
+    }
+}
+
+pub(crate) fn fp_account(a: &AccountRecord) -> u64 {
+    let mut h = FnvHasher::new();
+    h.write_u64(a.user_id);
+    h.write_str(&a.username);
+    h.write_str(&a.password_token);
+    h.write_u64(a.role);
+    h.write_u64(a.banned_until_unix.unwrap_or(0));
+    if let Some(ref r) = a.ban_reason {
+        h.write_str(r);
+    }
+    h.finish()
+}
+
+pub(crate) fn fp_character(c: &CharacterRecord) -> u64 {
+    let mut h = FnvHasher::new();
+    h.write_i64(c.character_id);
+    h.write_u64(c.user_id);
+    h.write_str(&c.name);
+    h.write_u32(c.race_id);
+    h.write_u32(c.bloodline_id);
+    h.write_u32(c.ancestry_id);
+    h.write_u32(c.school_id);
+    h.write_i64(c.corporation_id);
+    h.write_i64(c.alliance_id.unwrap_or(-1));
+    h.write_i64(c.war_faction_id.unwrap_or(-1));
+    h.write_i64(c.station_id.unwrap_or(-1));
+    h.write_i64(c.structure_id.unwrap_or(-1));
+    h.write_u32(c.solar_system_id);
+    h.write_u32(c.constellation_id);
+    h.write_u32(c.region_id);
+    h.write_i64(c.active_ship_id);
+    h.write_i64(c.balance.0);
+    h.write_i64(c.plex_balance);
+    h.write_f64(c.security_status);
+    h.write_u32(c.clone_grade);
+    h.write_i64(c.home_station_id);
+    h.write_u8(c.neural.charisma);
+    h.write_u8(c.neural.intelligence);
+    h.write_u8(c.neural.memory);
+    h.write_u8(c.neural.perception);
+    h.write_u8(c.neural.willpower);
+    h.write_u8(c.neural.bonus_remaps);
+    h.write_f64(c.skill_points);
+    h.write_f64(c.free_skill_points);
+    h.write_u64(c.last_clone_jump_unix);
+    h.write_f64(c.jump_fatigue_minutes);
+    h.write_u64(c.jump_cooldown_until_unix);
+    h.write_u64(c.version);
+    h.write_u64(c.system_epoch);
+    let mut lp_xor = 0u64;
+    for (&k, &v) in &c.loyalty_points {
+        let mut eh = FnvHasher::new();
+        eh.write_i64(k);
+        eh.write_i64(v);
+        lp_xor ^= eh.finish();
+    }
+    h.write_u64(lp_xor);
+    let mut st_xor = 0u64;
+    for (&k, &v) in &c.standings {
+        let mut eh = FnvHasher::new();
+        eh.write_i64(k);
+        eh.write_f64(v);
+        st_xor ^= eh.finish();
+    }
+    h.write_u64(st_xor);
+    h.finish()
+}
+
+pub(crate) fn fp_item(i: &InventoryItemRecord) -> u64 {
+    let mut h = FnvHasher::new();
+    h.write_i64(i.item_id);
+    h.write_u32(i.type_id);
+    h.write_i64(i.owner_id);
+    h.write_i64(i.location_id);
+    h.write_u32(i.flag as u32);
+    h.write_i32(i.quantity);
+    h.write_bool(i.singleton);
+    h.write_u64(i.version);
+    h.write_u32(i.source_mutaplasmid_id.unwrap_or(0));
+    h.write_f64(i.insured_payout_isk);
+    h.write_bool(i.is_blueprint_copy);
+    h.write_i32(i.blueprint_runs_remaining.unwrap_or(-1));
+    let mut dyn_xor = 0u64;
+    for (&k, &v) in &i.dynamic_attributes {
+        let mut eh = FnvHasher::new();
+        eh.write_u32(k as u32);
+        eh.write_f64(v);
+        dyn_xor ^= eh.finish();
+    }
+    h.write_u64(dyn_xor);
+    h.finish()
+}
+
+pub(crate) fn fp_market_order(o: &MarketOrderRecord) -> u64 {
+    let mut h = FnvHasher::new();
+    h.write_i64(o.order_id);
+    h.write_i64(o.owner_id);
+    h.write_i64(o.station_id);
+    h.write_u32(o.region_id);
+    h.write_u32(o.type_id);
+    h.write_bool(o.is_bid);
+    h.write_i64(o.price.0);
+    h.write_i32(o.vol_entered);
+    h.write_i32(o.vol_remaining);
+    h.write_i32(o.min_volume);
+    h.write_bool(o.is_npc);
+    h.write_i64(o.escrow.0);
+    h.finish()
+}
+
+pub(crate) fn fp_contract(c: &ContractRecord) -> u64 {
+    let mut h = FnvHasher::new();
+    h.write_i64(c.contract_id);
+    h.write_i64(c.issuer_id);
+    h.write_i64(c.acceptor_id.unwrap_or(-1));
+    h.write_str(&c.contract_type);
+    h.write_str(&c.status);
+    h.write_i64(c.start_station_id);
+    h.write_i64(c.end_station_id);
+    h.write_i64(c.price.0);
+    h.write_i64(c.reward.0);
+    h.write_i64(c.collateral.0);
+    h.write_u64(c.expiration_unix);
+    for &id in &c.item_ids {
+        h.write_i64(id);
+    }
+    h.finish()
+}
+
+pub(crate) fn fp_system_state(s: &SystemDynamicState) -> u64 {
+    let mut h = FnvHasher::new();
+    h.write_u32(s.solar_system_id);
+    h.write_f64(s.dbs_multiplier);
+    h.write_i64(s.ess_main_bank.0);
+    h.write_i64(s.ess_reserve_bank.0);
+    h.write_i64(s.ess_linked_character_id.unwrap_or(-1));
+    h.write_u64(s.ess_link_started_tick.unwrap_or(0));
+    h.write_i64(s.sov_alliance_id.unwrap_or(-1));
+    h.write_u8(s.military_index);
+    h.write_u8(s.industrial_index);
+    h.write_u8(s.strategic_index);
+    h.write_f64(s.fw_contested_pct);
+    h.write_u8(s.insurgency_corruption_stage);
+    h.write_u8(s.insurgency_suppression_stage);
+    h.write_f64(s.wormhole_remaining_mass_kg);
+    h.write_u32(s.wormhole_destination_system_id.unwrap_or(0));
+    if let Some(p) = s.signature_position {
+        h.write_f64(p[0]);
+        h.write_f64(p[1]);
+        h.write_f64(p[2]);
+    }
+    if let Some(p) = s.fw_complex_position {
+        h.write_f64(p[0]);
+        h.write_f64(p[1]);
+        h.write_f64(p[2]);
+    }
+    h.write_u64(s.fw_capture_seconds_elapsed);
+    h.write_u64(s.fw_capture_duration_seconds);
+    h.write_u64(s.last_fw_capture_tick);
+    h.write_u64(s.last_sov_claim_tick);
+    h.finish()
+}
+
+pub(crate) fn fp_structure(s: &UpwellStructureRecord) -> u64 {
+    let mut h = FnvHasher::new();
+    h.write_i64(s.structure_id);
+    h.write_u32(s.type_id);
+    h.write_i64(s.owner_corp_id);
+    h.write_u32(s.solar_system_id);
+    h.write_str(&s.name);
+    h.write_f64(s.position[0]);
+    h.write_f64(s.position[1]);
+    h.write_f64(s.position[2]);
+    h.write_str(&s.state);
+    h.write_bool(s.quantum_core_installed);
+    h.write_u32(s.fuel_blocks);
+    h.write_f64(s.shield_hp);
+    h.write_f64(s.armor_hp);
+    h.write_f64(s.hull_hp);
+    h.write_u64(s.reinforced_until_unix);
+    h.write_u64(s.last_damage_tick);
+    h.write_u64(s.last_damage_unix);
+    h.finish()
+}
+
+pub(crate) fn fp_wallet_journal_slice(entries: &[WalletJournalEntry]) -> u64 {
+    let mut h = FnvHasher::new();
+    h.write_u64(entries.len() as u64);
+    for e in entries {
+        h.write_i64(e.entry_id);
+        h.write_i64(e.character_id);
+        h.write_str(&e.entry_type);
+        h.write_i64(e.amount.0);
+        h.write_i64(e.balance_after.0);
+        h.write_str(&e.reason);
+    }
+    h.finish()
+}
+
+pub(crate) fn fp_mails_slice(entries: &[MailRecord]) -> u64 {
+    let mut h = FnvHasher::new();
+    h.write_u64(entries.len() as u64);
+    for m in entries {
+        h.write_i64(m.message_id);
+        h.write_i64(m.sender_id);
+        h.write_i64(m.recipient_id);
+        h.write_str(&m.subject);
+        h.write_str(&m.body);
+    }
+    h.finish()
+}
+
+pub(crate) fn fp_json<T: serde::Serialize>(val: &T) -> u64 {
+    let mut h = FnvHasher::new();
+    if let Ok(s) = serde_json::to_string(val) {
+        h.write_str(&s);
+    }
+    h.finish()
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct TableFingerprints {
+    pub next_entity_id: i64,
+    pub wal_seq: u64,
+    pub markets_seeded: bool,
+    pub accounts: HashMap<String, u64>,
+    pub characters: HashMap<i64, u64>,
+    pub skills: HashMap<i64, HashMap<TypeId, u64>>,
+    pub skill_queues: HashMap<i64, u64>,
+    pub jump_clones: HashMap<i64, u64>,
+    pub active_implants: HashMap<i64, u64>,
+    pub items: HashMap<i64, u64>,
+    pub saved_fittings: HashMap<i64, u64>,
+    pub market_orders: HashMap<i64, u64>,
+    pub wallet_journal_len: usize,
+    pub wallet_journal_hash: u64,
+    pub contracts: HashMap<i64, u64>,
+    pub industry_jobs: HashMap<i64, u64>,
+    pub planetary_colonies: HashMap<(i64, i64), u64>,
+    pub active_missions: HashMap<(i64, u32), u64>,
+    pub mission_tally: HashMap<i64, u32>,
+    pub standing_transactions: HashMap<i64, u64>,
+    pub npe_progress: HashMap<i64, u64>,
+    pub bookmarks: HashMap<i64, u64>,
+    pub mails_len: usize,
+    pub mails_hash: u64,
+    pub fleets: HashMap<i64, u64>,
+    pub corporations: HashMap<i64, u64>,
+    pub alliances: HashMap<i64, u64>,
+    pub wars: HashMap<i64, u64>,
+    pub corp_projects: HashMap<i64, u64>,
+    pub killmails: HashMap<i64, u64>,
+    pub kill_rights: HashMap<i64, u64>,
+    pub structures: HashMap<i64, u64>,
+    pub system_states: HashMap<SolarSystemId, u64>,
+    pub committed_idempotency_keys: HashSet<(i64, String)>,
+    pub licensed_skins: HashMap<i64, u64>,
+    pub applied_ship_skins: HashMap<i64, u32>,
+}
+
+/// Synchronizes only modified/inserted/deleted rows from `snap` into `tx` and updates `fp`,
+/// returning a `WorldStateWalDelta` for optional legacy `.json.wal` mirroring.
+
+pub fn compute_fingerprints(snap: &WorldStateSnapshot) -> TableFingerprints {
+    let mut fp = TableFingerprints {
+        next_entity_id: snap.next_entity_id,
+        wal_seq: snap.wal_seq,
+        markets_seeded: snap.markets_seeded,
+        wallet_journal_len: snap.wallet_journal.len(),
+        wallet_journal_hash: fp_wallet_journal_slice(&snap.wallet_journal),
+        mails_len: snap.mails.len(),
+        mails_hash: fp_mails_slice(&snap.mails),
+        committed_idempotency_keys: snap.committed_idempotency_keys.clone(),
+        mission_tally: snap.mission_tally.clone(),
+        applied_ship_skins: snap.applied_ship_skins.clone(),
+        ..Default::default()
+    };
+    for (k, v) in &snap.accounts {
+        fp.accounts.insert(k.clone(), fp_account(v));
+    }
+    for (&k, v) in &snap.characters {
+        fp.characters.insert(k, fp_character(v));
+    }
+    for (&cid, sk_map) in &snap.skills {
+        let m = fp.skills.entry(cid).or_default();
+        for (&tid, sk) in sk_map {
+            let mut h = FnvHasher::new();
+            h.write_u32(sk.type_id);
+            h.write_u8(sk.level);
+            h.write_f64(sk.skill_points);
+            m.insert(tid, h.finish());
+        }
+    }
+    for (&cid, q) in &snap.skill_queues {
+        fp.skill_queues.insert(cid, fp_json(q));
+    }
+    for (&cid, jc) in &snap.jump_clones {
+        fp.jump_clones.insert(cid, fp_json(jc));
+    }
+    for (&cid, imp) in &snap.active_implants {
+        fp.active_implants.insert(cid, fp_json(imp));
+    }
+    for (&id, item) in &snap.items {
+        fp.items.insert(id, fp_item(item));
+    }
+    for (&id, fit) in &snap.saved_fittings {
+        fp.saved_fittings.insert(id, fp_json(fit));
+    }
+    for (&id, ord) in &snap.market_orders {
+        fp.market_orders.insert(id, fp_market_order(ord));
+    }
+    for (&id, c) in &snap.contracts {
+        fp.contracts.insert(id, fp_contract(c));
+    }
+    for (&id, j) in &snap.industry_jobs {
+        fp.industry_jobs.insert(id, fp_json(j));
+    }
+    for (&k, col) in &snap.planetary_colonies {
+        fp.planetary_colonies.insert(k, fp_json(col));
+    }
+    for (&k, m) in &snap.active_missions {
+        fp.active_missions.insert(k, fp_json(m));
+    }
+    for (&cid, list) in &snap.standing_transactions {
+        fp.standing_transactions.insert(cid, fp_json(list));
+    }
+    for (&cid, npe) in &snap.npe_progress {
+        fp.npe_progress.insert(cid, fp_json(npe));
+    }
+    for (&bid, bm) in &snap.bookmarks {
+        fp.bookmarks.insert(bid, fp_json(bm));
+    }
+    for (&fid, fl) in &snap.fleets {
+        fp.fleets.insert(fid, fp_json(fl));
+    }
+    for (&cid, corp) in &snap.corporations {
+        fp.corporations.insert(cid, fp_json(corp));
+    }
+    for (&aid, al) in &snap.alliances {
+        fp.alliances.insert(aid, fp_json(al));
+    }
+    for (&wid, w) in &snap.wars {
+        fp.wars.insert(wid, fp_json(w));
+    }
+    for (&pid, p) in &snap.corp_projects {
+        fp.corp_projects.insert(pid, fp_json(p));
+    }
+    for (&kid, km) in &snap.killmails {
+        fp.killmails.insert(kid, fp_json(km));
+    }
+    for (&krid, kr) in &snap.kill_rights {
+        fp.kill_rights.insert(krid, fp_json(kr));
+    }
+    for (&stid, st) in &snap.structures {
+        fp.structures.insert(stid, fp_structure(st));
+    }
+    for (&sys_id, st) in &snap.system_states {
+        fp.system_states.insert(sys_id, fp_system_state(st));
+    }
+    for (&cid, skins) in &snap.licensed_skins {
+        fp.licensed_skins.insert(cid, fp_json(skins));
+    }
+    fp
+}

@@ -5,7 +5,7 @@
 > - **Live EVE Client:** V24.01 Tranquility (`build 3619879`, `/Applications/eve-online.app`, `code.ccp` with 12,794 `.pyj` modules + `resfileindex.txt` with 213 `res:/staticdata/` & `res:/localizationfsd/` archives)
 > - **Legacy Emulator Reference:** `EvEmu-Project/evemu_Crucible` (105 C++ service/bound classes, 874 registered RPC methods)
 > - **EVE University Wiki Knowledge Base (`~/ai/eve-wiki`):** 4,102 articles, 161 LaTeX mathematical formulas across 38 mechanics domains, 449 ship specification pages, and 1,900+ PvE missions/complexes/anomalies/incursions
-> - **Current EvoMu Implementation:** `crates/eve-server/src/router.rs` + `crates/eve-*`
+> - **Current EvoMu Implementation:** `crates/eve-server/src/router/` + `crates/eve-*`
 
 ---
 
@@ -13,7 +13,7 @@
 
 | Catalog File | Scope & Contents | Indexed Count |
 |---|---|---|
-| [`rpc_service_catalog.json`](./rpc_service_catalog.json) | Unified index of all `machoNet` Remote Services & Bound Monikers across V24.01 Client (`RemoteSvc`/`ProxySvc`/`ConnectToRemoteService`/`Moniker`), `evemu_Crucible` (`this->Add`), and `EvoMu` (`router.rs`) | **216 services** (`193` V24.01 active + `23` Crucible legacy-only) |
+| [`rpc_service_catalog.json`](./rpc_service_catalog.json) | Unified index of all `machoNet` Remote Services & Bound Monikers across V24.01 Client (`RemoteSvc`/`ProxySvc`/`ConnectToRemoteService`/`Moniker`), `evemu_Crucible` (`this->Add`), and `EvoMu` (`router/`) | **216 services** (`193` V24.01 active + `23` Crucible legacy-only) |
 | [`crucible_comparison.json`](./crucible_comparison.json) | Partition of services into `both_v24_and_crucible` (`64`), `v24_only_new_services` (`129`), and `crucible_legacy_only_services` (`23`) | **64 shared / 129 V24-only / 23 legacy** |
 | [`client_notifications.json`](./client_notifications.json) | Every client-subscribed `__notifyevents__` (`On*`, `DoDestinyUpdate`, `ProcessSessionChange`, etc.) mapped to listening `.pyj` modules | **1,311 events** |
 | [`quasar_protobuf_catalog.json`](./quasar_protobuf_catalog.json) | Modern V24.01 `publicGatewaySvc` (Quasar gRPC/Protobuf bus) message definitions under `eveProto/generated/` | **135 domains (`69` `eve_public.*` + `66` `eve.*` internal) / 1,455 `_pb2.pyj` files** |
