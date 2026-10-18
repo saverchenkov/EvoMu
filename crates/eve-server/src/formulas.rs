@@ -345,32 +345,41 @@ pub fn breacher_pod_tick_damage(flat_dps: f64, pct_max_hp: f64, target_total_max
     flat_dps.min(pct_max_hp * target_total_max_hp)
 }
 
-/// #53: Vorton Projector chain targets (up to 4 bounces within `arc_range_m`):
+/// #53: Vorton Projector arc targets (up to 9 additional targets within `arc_range_m` of `primary_pos`, with no secondary hopping):
 pub fn vorton_chain_targets(
     primary_id: i64,
     primary_pos: DVec3,
     candidates: &[(i64, DVec3)],
     arc_range_m: f64,
 ) -> Vec<i64> {
+    vorton_arc_targets_with_cap(primary_id, primary_pos, candidates, arc_range_m, 9)
+}
+
+pub fn vorton_arc_targets_with_cap(
+    primary_id: i64,
+    primary_pos: DVec3,
+    candidates: &[(i64, DVec3)],
+    arc_range_m: f64,
+    max_additional_targets: usize,
+) -> Vec<i64> {
     let mut hit = vec![primary_id];
-    let mut curr_pos = primary_pos;
-    for _ in 0..3 {
-        let mut best: Option<(i64, f64, DVec3)> = None;
-        for &(cid, cpos) in candidates {
-            if hit.contains(&cid) {
-                continue;
-            }
-            let d = (cpos - curr_pos).length();
-            if d <= arc_range_m && best.map_or(true, |(_, bd, _)| d < bd) {
-                best = Some((cid, d, cpos));
-            }
+    let mut in_arc: Vec<(i64, f64)> = Vec::new();
+    for &(cid, cpos) in candidates {
+        if cid == primary_id || in_arc.iter().any(|&(id, _)| id == cid) {
+            continue;
         }
-        if let Some((next_id, _, next_pos)) = best {
-            hit.push(next_id);
-            curr_pos = next_pos;
-        } else {
-            break;
+        let d = (cpos - primary_pos).length();
+        if d <= arc_range_m {
+            in_arc.push((cid, d));
         }
+    }
+    in_arc.sort_by(|a, b| {
+        a.1.partial_cmp(&b.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.0.cmp(&b.0))
+    });
+    for (cid, _) in in_arc.into_iter().take(max_additional_targets.min(9)) {
+        hit.push(cid);
     }
     hit
 }
@@ -647,10 +656,13 @@ mod tests {
         let vorton = vorton_chain_targets(
             1,
             DVec3::ZERO,
-            &[(2, DVec3::new(1000.0, 0.0, 0.0)), (3, DVec3::new(2000.0, 0.0, 0.0))],
-            5000.0,
+            &[
+                (2, DVec3::new(8_000.0, 0.0, 0.0)),  // 8 km from primary (<= 10 km -> hit)
+                (3, DVec3::new(12_000.0, 0.0, 0.0)), // 12 km from primary (> 10 km, even though 4 km from #2 -> NOT hit, no hopping)
+            ],
+            10_000.0,
         );
-        assert_eq!(vorton, vec![1, 2, 3]);
+        assert_eq!(vorton, vec![1, 2]);
         assert!((compute_ecm_jam_chance(5.0, 10.0, 10_000.0, 20_000.0, 20_000.0) - 0.5).abs() < 1e-6);
         assert_eq!(compute_fighter_squadron_damage(50.0, 9, 2.0), 900.0);
 

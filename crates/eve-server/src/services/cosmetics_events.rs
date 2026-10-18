@@ -3,8 +3,10 @@
 #![forbid(unsafe_code)]
 
 use crate::router::ServerContext;
+use eve_destiny::{Ball, CombatState, MovementMode};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
+use glam::DVec3;
 use std::collections::HashMap;
 
 pub async fn handle(
@@ -17,55 +19,54 @@ pub async fn handle(
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
         // Living World NPC Ecology & Supply-Chain Convoy Interdiction (`taleMgr` / `E2E-17`)
-        ("taleMgr", "ListConvoys") | ("taleMgr", "GetGlobalWorldEventTales") => {
+        ("taleMgr", "MaterializeSystemLOD2") => {
             let _ = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let rows = ctx
-                .living_world
-                .list_convoys()
-                .into_iter()
-                .map(|c| {
-                    vec![
-                        PyRep::Integer(c.convoy_id),
-                        PyRep::Integer(c.current_system_id as i64),
-                        PyRep::Integer(c.destination_station_id),
-                        PyRep::Integer(c.cargo_type_id as i64),
-                        PyRep::Integer(c.cargo_quantity as i64),
-                        PyRep::Integer(c.lod_level as i64),
-                        PyRep::Bool(c.destroyed),
-                    ]
-                })
-                .collect();
-            Some(Ok(PyRep::rowset(
-                vec![
-                    "convoyID",
-                    "solarSystemID",
-                    "destinationStationID",
-                    "cargoTypeID",
-                    "cargoQuantity",
-                    "lodLevel",
-                    "destroyed",
-                ],
-                rows,
-            )))
-        }
-
-        ("taleMgr", "MaterializeSystemLOD2") | ("taleMgr", "get_active_tales_by_template") => {
-            let _ = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
+            let Some(session_sys_id) = session.solar_system_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "UnknownSolarSystem".into(),
+                    message: "Session has no active solar system".into(),
+                }));
             };
-            let sys_id = args
-                .first()
-                .and_then(|a| a.as_i64())
-                .map(|v| v as u32)
-                .or(session.solar_system_id)
-                .unwrap_or(30_000_142);
+            if let Some(arg_sys) = args.first().and_then(|a| a.as_i64()) {
+                let Ok(req_sys_id) = u32::try_from(arg_sys) else {
+                    return Some(Err(BridgeRpcError {
+                        code: "UnknownSolarSystem".into(),
+                        message: format!("Invalid solar system ID {arg_sys}"),
+                    }));
+                };
+                if !ctx.sde.solar_systems.contains_key(&req_sys_id) {
+                    return Some(Err(BridgeRpcError {
+                        code: "UnknownSolarSystem".into(),
+                        message: format!("Solar system {req_sys_id} does not exist in SDE"),
+                    }));
+                }
+                if req_sys_id != session_sys_id {
+                    return Some(Err(BridgeRpcError {
+                        code: "CannotMaterializeRemoteSystem".into(),
+                        message: format!(
+                            "Cannot materialize LOD 2 in remote solar system {req_sys_id} while in system {session_sys_id}"
+                        ),
+                    }));
+                }
+            }
+            if !ctx.sde.solar_systems.contains_key(&session_sys_id) {
+                return Some(Err(BridgeRpcError {
+                    code: "UnknownSolarSystem".into(),
+                    message: format!("Solar system {session_sys_id} does not exist in SDE"),
+                }));
+            }
+            if (session.role & 0x02) == 0 {
+                return Some(Err(BridgeRpcError {
+                    code: "InsufficientRole".into(),
+                    message: "taleMgr.MaterializeSystemLOD2 requires GM role (0x02); normal players trigger LOD 2 automatically on system entry or undock".into(),
+                }));
+            }
             let count = ctx
                 .living_world
-                .materialize_system_lod2(sys_id, &ctx.systems, &ctx.sde)
+                .materialize_system_lod2(session_sys_id, &ctx.systems, &ctx.sde)
                 .await;
             Some(Ok(PyRep::Integer(count as i64)))
         }
@@ -75,6 +76,12 @@ pub async fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            if (session.role & 0x02) == 0 {
+                return Some(Err(BridgeRpcError {
+                    code: "InsufficientRole".into(),
+                    message: "taleMgr.InterdictConvoy requires GM role (0x02); normal players must destroy convoys in space via dogmaIM.FireWeapon or fighterMgr.CmdActivateAbilitySlots".into(),
+                }));
+            }
             if session.station_id.is_some() || session.structure_id.is_some() {
                 return Some(Err(BridgeRpcError {
                     code: "ShipDocked".into(),
@@ -146,18 +153,46 @@ pub async fn handle(
                         dist
                     ),
                 }));
-            };
+            }
 
             let _ = sys_handle.remove_ball(convoy_id).await;
             match ctx
                 .living_world
                 .interdict_convoy(convoy_id, char_id, &ctx.db)
             {
-                Ok((loot_item_id, spiked_ask)) => Some(Ok(PyRep::keyval([
-                    ("convoyID", PyRep::Integer(convoy_id)),
-                    ("lootItemID", PyRep::Integer(loot_item_id)),
-                    ("newDestinationAskISK", PyRep::Real(spiked_ask.to_wire_f64())),
-                ]))),
+                Ok((wreck_item_id, loot_item_id, spiked_ask)) => {
+                    let _ = sys_handle
+                        .spawn_ball_with_combat(
+                            Ball {
+                                id: wreck_item_id,
+                                type_id: 26557,
+                                position: convoy_ball.position,
+                                velocity: DVec3::ZERO,
+                                max_velocity: 0.0,
+                                inertia: 1.0,
+                                mass: 10_000.0,
+                                radius: 50.0,
+                                speed_fraction: 0.0,
+                                mode: MovementMode::Stop,
+                            },
+                            CombatState {
+                                shield_hp: 0.0,
+                                max_shield_hp: 0.0,
+                                armor_hp: 0.0,
+                                max_armor_hp: 0.0,
+                                structure_hp: 500.0,
+                                max_structure_hp: 500.0,
+                                ..CombatState::default()
+                            },
+                        )
+                        .await;
+                    Some(Ok(PyRep::keyval([
+                        ("convoyID", PyRep::Integer(convoy_id)),
+                        ("wreckItemID", PyRep::Integer(wreck_item_id)),
+                        ("lootItemID", PyRep::Integer(loot_item_id)),
+                        ("newDestinationAskISK", PyRep::Real(spiked_ask.to_wire_f64())),
+                    ])))
+                }
                 Err(e) => Some(Err(BridgeRpcError {
                     code: "InterdictionFailed".into(),
                     message: e,
@@ -165,28 +200,226 @@ pub async fn handle(
             }
         }
 
-        ("shipCosmeticsMgr", "ApplySkinToShip") | ("shipCosmeticsMgr", "GetLicencedSkins") => {
+        ("shipCosmeticsMgr", "GiveSkin") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let ship_type_id = args.first().and_then(|a| a.as_i64()).unwrap_or(587) as u32;
-            let design_name = args
-                .get(1)
-                .and_then(|a| a.as_str())
-                .unwrap_or("Crimson Valkyrie SKIN");
-            let valid_ship = ctx.sde.types.contains_key(&ship_type_id);
-            let active_ship = ctx
-                .db
-                .get_character(char_id)
-                .map(|c| c.active_ship_id)
-                .unwrap_or(0);
+            if (session.role & 0x02) == 0 {
+                return Some(Err(BridgeRpcError {
+                    code: "InsufficientRole".into(),
+                    message: "shipCosmeticsMgr.GiveSkin requires GM role (0x02)".into(),
+                }));
+            }
+            let raw_skin = args.first().and_then(|a| a.as_i64()).unwrap_or(55001);
+            let Ok(skin_id) = u32::try_from(raw_skin) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidSkinLicenseType".into(),
+                    message: format!("Invalid SKIN ID {raw_skin}"),
+                }));
+            };
+            let _ = ctx.db.try_with_mut_snapshot(|snap| {
+                let list = snap.licensed_skins.entry(char_id).or_default();
+                if !list.contains(&skin_id) {
+                    list.push(skin_id);
+                }
+                Ok::<_, std::convert::Infallible>(())
+            });
             Some(Ok(PyRep::keyval([
-                ("shipID", PyRep::Integer(active_ship)),
-                ("shipTypeID", PyRep::Integer(ship_type_id as i64)),
-                ("designName", PyRep::String(design_name.to_string())),
-                ("sequenced", PyRep::Bool(valid_ship)),
+                ("characterID", PyRep::Integer(char_id)),
+                ("skinID", PyRep::Integer(skin_id as i64)),
+                ("licensed", PyRep::Bool(true)),
             ])))
+        }
+
+        ("shipCosmeticsMgr", "ActivateSkinLicense") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let raw_skin_id = args.first().and_then(|a| a.as_i64()).unwrap_or(55001);
+            let Ok(requested_skin_id) = u32::try_from(raw_skin_id) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidSkinLicenseType".into(),
+                    message: format!("Invalid SKIN license typeID {raw_skin_id}"),
+                }));
+            };
+            let Some(skin_type) = ctx.sde.types.get(&requested_skin_id) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidSkinLicenseType".into(),
+                    message: format!("Type {requested_skin_id} not found in SDE"),
+                }));
+            };
+            if skin_type.category_id != 91 {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidSkinLicenseType".into(),
+                    message: format!(
+                        "Type {requested_skin_id} (category {}) is not a Permanent SKIN license (category 91)",
+                        skin_type.category_id
+                    ),
+                }));
+            }
+            let current_dock = session.station_id.or(session.structure_id);
+            let current_ship = session.ship_id;
+
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let license_item_id = snap
+                    .items
+                    .values()
+                    .find(|i| {
+                        i.type_id == requested_skin_id
+                            && i.quantity >= 1
+                            && snap.is_item_consumable_by(i, char_id, current_dock, current_ship)
+                    })
+                    .map(|i| i.item_id);
+                let Some(item_id) = license_item_id else {
+                    return Err(BridgeRpcError {
+                        code: "SkinLicenseItemNotFound".into(),
+                        message: format!(
+                            "Character {char_id} does not own SKIN license item (typeID {requested_skin_id}) at current station/structure or active ship"
+                        ),
+                    });
+                };
+
+                if let Some(item) = snap.items.get_mut(&item_id) {
+                    if item.quantity > 1 {
+                        item.quantity -= 1;
+                        item.version += 1;
+                    } else {
+                        snap.items.remove(&item_id);
+                    }
+                }
+
+                let list = snap.licensed_skins.entry(char_id).or_default();
+                if !list.contains(&requested_skin_id) {
+                    list.push(requested_skin_id);
+                }
+                Ok(requested_skin_id)
+            });
+
+            match res {
+                Ok(skin_id) => Some(Ok(PyRep::keyval([
+                    ("characterID", PyRep::Integer(char_id)),
+                    ("skinID", PyRep::Integer(skin_id as i64)),
+                    ("skinHashID", PyRep::Integer(skin_id as i64)),
+                    ("licensed", PyRep::Bool(true)),
+                ]))),
+                Err(e) => Some(Err(e)),
+            }
+        }
+
+        ("shipCosmeticsMgr", "ApplySkinToShip") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let raw_ship_type = args.first().and_then(|a| a.as_i64()).unwrap_or(587);
+            let Ok(ship_type_id) = u32::try_from(raw_ship_type) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidShipTypeForSkin".into(),
+                    message: format!("Invalid ship typeID {raw_ship_type}"),
+                }));
+            };
+            if !ctx
+                .sde
+                .types
+                .get(&ship_type_id)
+                .map(|t| t.category_id == 6)
+                .unwrap_or(false)
+            {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidShipTypeForSkin".into(),
+                    message: format!("Type {ship_type_id} is not a valid ship type in SDE"),
+                }));
+            }
+
+            // Resolve requested SKIN strictly to an SDE category 91 SKIN type_id
+            let (target_skin_id, design_name) = match args.get(1) {
+                Some(PyRep::Integer(id)) => {
+                    let Ok(sid) = u32::try_from(*id) else {
+                        return Some(Err(BridgeRpcError {
+                            code: "SkinNotLicensed".into(),
+                            message: format!("Invalid SKIN ID {id}"),
+                        }));
+                    };
+                    let Some(st) = ctx.sde.types.get(&sid).filter(|t| t.category_id == 91) else {
+                        return Some(Err(BridgeRpcError {
+                            code: "SkinNotLicensed".into(),
+                            message: format!("SKIN ID {sid} is not a valid SDE SKIN"),
+                        }));
+                    };
+                    (sid, st.name.clone())
+                }
+                Some(PyRep::String(name)) => {
+                    let found = ctx
+                        .sde
+                        .types
+                        .values()
+                        .find(|t| t.category_id == 91 && t.name.eq_ignore_ascii_case(name));
+                    let Some(st) = found else {
+                        return Some(Err(BridgeRpcError {
+                            code: "SkinNotLicensed".into(),
+                            message: format!(
+                                "Character {char_id} has not activated a license for SKIN '{name}'"
+                            ),
+                        }));
+                    };
+                    (st.type_id, st.name.clone())
+                }
+                _ => (55001_u32, "Rifter Krusual SKIN".to_string()),
+            };
+
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let active_ship = snap
+                    .characters
+                    .get(&char_id)
+                    .map(|c| c.active_ship_id)
+                    .unwrap_or(0);
+                let ship_item = snap.items.get(&active_ship).ok_or_else(|| BridgeRpcError {
+                    code: "ShipNotFound".into(),
+                    message: format!("Active ship {active_ship} not found"),
+                })?;
+                if ship_item.owner_id != char_id {
+                    return Err(BridgeRpcError {
+                        code: "OwnershipViolation".into(),
+                        message: format!("Ship {active_ship} is not owned by character {char_id}"),
+                    });
+                }
+                if ship_item.type_id != ship_type_id {
+                    return Err(BridgeRpcError {
+                        code: "ShipTypeMismatch".into(),
+                        message: format!(
+                            "Active ship {active_ship} has type {}, cannot apply skin for type {ship_type_id}",
+                            ship_item.type_id
+                        ),
+                    });
+                }
+                let is_licensed = snap
+                    .licensed_skins
+                    .get(&char_id)
+                    .map(|list| list.contains(&target_skin_id))
+                    .unwrap_or(false);
+                if !is_licensed {
+                    return Err(BridgeRpcError {
+                        code: "SkinNotLicensed".into(),
+                        message: format!(
+                            "Character {char_id} has not activated a license for SKIN '{design_name}' ({target_skin_id})"
+                        ),
+                    });
+                }
+                snap.applied_ship_skins.insert(active_ship, target_skin_id);
+                Ok((active_ship, target_skin_id))
+            });
+            match res {
+                Ok((active_ship, skin_id)) => Some(Ok(PyRep::keyval([
+                    ("shipID", PyRep::Integer(active_ship)),
+                    ("shipTypeID", PyRep::Integer(ship_type_id as i64)),
+                    ("skinID", PyRep::Integer(skin_id as i64)),
+                    ("designName", PyRep::String(design_name)),
+                    ("sequenced", PyRep::Bool(true)),
+                ]))),
+                Err(e) => Some(Err(e)),
+            }
         }
 
         _ => None,

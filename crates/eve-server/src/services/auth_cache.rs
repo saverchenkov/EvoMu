@@ -7,21 +7,8 @@ use eve_db::IskCents;
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use std::collections::HashMap;
-use std::time::{SystemTime, UNIX_EPOCH};
-
 const V24_01_VERSION: f64 = 24.01;
 const V24_01_BUILD: i64 = 3_619_879;
-const WIN32_FILETIME_EPOCH_DIFF_TICKS: i64 = 116_444_736_000_000_000;
-
-fn current_blueos_filetime_ticks() -> i64 {
-    let dur = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    let unix_ticks = (dur.as_secs() as i64)
-        .saturating_mul(10_000_000)
-        .saturating_add((dur.subsec_nanos() / 100) as i64);
-    WIN32_FILETIME_EPOCH_DIFF_TICKS.saturating_add(unix_ticks)
-}
 
 pub fn handle(
     ctx: &ServerContext,
@@ -33,20 +20,15 @@ pub fn handle(
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
         ("machoNet", "GetInitVals") | ("machoNet", "GetServiceInfo") => {
-            let service_entries = vec![
-                (
-                    PyRep::String("stationSvc".into()),
-                    PyRep::String("station".into()),
-                ),
-                (
-                    PyRep::String("charUnboundMgr".into()),
-                    PyRep::String("character".into()),
-                ),
-                (
-                    PyRep::String("dogmaIM".into()),
-                    PyRep::String("dogma".into()),
-                ),
-            ];
+            let mut sorted_svcs: Vec<&String> = ctx.cataloged_services.iter().collect();
+            sorted_svcs.sort();
+            let service_entries: Vec<(PyRep, PyRep)> = sorted_svcs
+                .into_iter()
+                .map(|svc| (PyRep::String(svc.clone()), PyRep::String("sol".into())))
+                .collect();
+            if method == "GetServiceInfo" {
+                return Some(Ok(PyRep::Dict(service_entries)));
+            }
             let cluster_info = vec![(
                 PyRep::String("catalogedServices".into()),
                 PyRep::Integer(ctx.cataloged_services.len() as i64),
@@ -58,16 +40,15 @@ pub fn handle(
         }
 
         ("machoNet", "GetTime") => {
-            let sde_systems = ctx.sde.solar_systems.len() as i64;
-            let ticks = current_blueos_filetime_ticks().saturating_add(sde_systems);
+            let ticks = ctx.now_blueos_filetime_ticks();
             Some(Ok(PyRep::Integer(ticks)))
         }
 
         ("cache", "GetServerVersionAndBuild") => {
-            let ticks = current_blueos_filetime_ticks();
+            let ticks = ctx.now_blueos_filetime_ticks();
             Some(Ok(PyRep::keyval([
                 ("version", PyRep::Real(V24_01_VERSION)),
-                ("build", PyRep::Integer(V24_01_BUILD as i64)),
+                ("build", PyRep::Integer(V24_01_BUILD)),
                 ("sdeTypes", PyRep::Integer(ctx.sde.types.len() as i64)),
                 ("timestamp", PyRep::Integer(ticks)),
             ])))
@@ -126,133 +107,36 @@ pub fn handle(
             Some(Ok(PyRep::keyval([("loggedOut", PyRep::Bool(true))])))
         }
 
-        ("objectCaching", "GetCachableObject") | ("objectCaching", "GetCachedObject") => {
-            let _ = match ServerContext::require_auth(session) {
-                Ok(u) => u,
-                Err(e) => return Some(Err(e)),
-            };
-            let db_version = ctx.db.with_snapshot(|s| s.next_entity_id);
-            Some(Ok(PyRep::keyval([
-                ("objectID", args.first().cloned().unwrap_or(PyRep::None)),
-                ("version", PyRep::Integer(db_version)),
-                ("nodeID", PyRep::Integer(888444)),
-            ])))
-        }
-
-        ("config", "GetMultiOwnersEx") => {
-            let _ = match ServerContext::require_auth(session) {
-                Ok(u) => u,
-                Err(e) => return Some(Err(e)),
-            };
-            let filter_ids: Vec<i64> = match args.first() {
-                Some(PyRep::List(items)) | Some(PyRep::Tuple(items)) => {
-                    items.iter().filter_map(|v| v.as_i64()).collect()
-                }
-                Some(PyRep::Integer(id)) => vec![*id],
-                _ => Vec::new(),
-            };
-            let rows = ctx.db.with_snapshot(|snap| {
-                snap.characters
-                    .values()
-                    .filter(|c| filter_ids.is_empty() || filter_ids.contains(&c.character_id))
-                    .map(|c| {
-                        vec![
-                            PyRep::Integer(c.character_id),
-                            PyRep::String(c.name.clone()),
-                            PyRep::Integer(c.corporation_id),
-                        ]
-                    })
-                    .collect()
-            });
-            Some(Ok(PyRep::rowset(
-                vec!["ownerID", "ownerName", "corporationID"],
-                rows,
-            )))
-        }
-
-        ("config", "GetMap") | ("config", "GetMapObjects") => {
-            let _ = match ServerContext::require_auth(session) {
-                Ok(u) => u,
-                Err(e) => return Some(Err(e)),
-            };
-            let rows = ctx
-                .sde
-                .solar_systems
-                .values()
-                .map(|s| {
-                    vec![
-                        PyRep::Integer(s.solar_system_id as i64),
-                        PyRep::String(s.name.clone()),
-                        PyRep::Real(s.security_status),
-                    ]
-                })
-                .collect();
-            Some(Ok(PyRep::rowset(
-                vec!["solarSystemID", "solarSystemName", "security"],
-                rows,
-            )))
-        }
-
-        ("sessionMgr", "PerformSessionChange") | ("sessionMgr", "RemoveSessionsFromServer") => {
-            let _ = match ServerContext::require_auth(session) {
-                Ok(u) => u,
-                Err(e) => return Some(Err(e)),
-            };
-            if method == "RemoveSessionsFromServer" {
-                ctx.release_session_bindings(session.session_id);
-            }
-            Some(Ok(PyRep::keyval([
-                ("sessionID", PyRep::Integer(session.session_id as i64)),
-                (
-                    "solarSystemID",
-                    session
-                        .solar_system_id
-                        .map(|s| PyRep::Integer(s as i64))
-                        .unwrap_or(PyRep::None),
-                ),
-            ])))
-        }
-
-        ("onlineStatus", "GetInitialState") | ("onlineStatus", "GetOnlineStatus") => {
-            let uid = match ServerContext::require_auth(session) {
-                Ok(u) => u,
-                Err(e) => return Some(Err(e)),
-            };
-            let target_char = args
-                .first()
-                .and_then(|a| a.as_i64())
-                .or(session.character_id)
-                .unwrap_or(0);
-            let exists = ctx
-                .db
-                .with_snapshot(|snap| snap.characters.contains_key(&target_char));
-            Some(Ok(PyRep::keyval([
-                ("userID", PyRep::Integer(uid as i64)),
-                ("characterID", PyRep::Integer(target_char)),
-                ("online", PyRep::Bool(exists)),
-            ])))
-        }
-
         ("subscriptionMgr", "GetCloneGrade") | ("loginRewardFacilities", "get_my_clone_grade") => {
             let uid = match ServerContext::require_auth(session) {
                 Ok(u) => u,
                 Err(e) => return Some(Err(e)),
             };
-            let clone_grade = session
+            let clone_grade_u8 = session
                 .character_id
                 .and_then(|cid| ctx.db.get_character(cid).ok())
-                .map(|c| c.clone_grade as i64)
-                .unwrap_or(2);
+                .map(|c| c.clone_grade)
+                .unwrap_or(1);
+            if method == "get_my_clone_grade" {
+                return Some(Ok(PyRep::Integer(clone_grade_u8 as i64)));
+            }
+            let (max_sp, speed_mult) = ctx
+                .sde
+                .clone_grades
+                .get(&clone_grade_u8)
+                .map(|g| (g.max_skill_points, g.training_speed_multiplier))
+                .unwrap_or((5_000_000, 0.5));
             Some(Ok(PyRep::keyval([
                 ("userID", PyRep::Integer(uid as i64)),
-                ("cloneGrade", PyRep::Integer(clone_grade)),
-                ("subscriptionDaysRemaining", PyRep::Integer(30)),
+                ("cloneGrade", PyRep::Integer(clone_grade_u8 as i64)),
+                ("maxSkillPoints", PyRep::Integer(max_sp as i64)),
+                ("trainingSpeedMultiplier", PyRep::Real(speed_mult)),
             ])))
         }
 
         ("slash", "SlashCmd") => {
-            let _ = match ServerContext::require_auth(session) {
-                Ok(u) => u,
+            let (_, cid) = match ServerContext::require_character(session) {
+                Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
             if (session.role & 0x02) == 0 {
@@ -261,22 +145,45 @@ pub fn handle(
                     message: "slash.SlashCmd requires GM/Admin role bit 0x02".into(),
                 }));
             }
-            let cmd = args.first().and_then(|a| a.as_str()).unwrap_or("");
+            let cmd = args.first().and_then(|a| a.as_str()).unwrap_or("").trim();
             if let Some(rest) = cmd.strip_prefix("/giveisk ") {
-                let amount = rest.trim().parse::<i64>().unwrap_or(0).max(0);
-                if let Some(cid) = session.character_id {
-                    ctx.db.with_mut_snapshot(|snap| {
-                        if let Some(ch) = snap.characters.get_mut(&cid) {
-                            let add = IskCents::from_isk(amount);
-                            ch.balance = ch.balance.checked_add(add).unwrap_or(ch.balance);
-                        }
-                    });
+                let Ok(amount) = rest.trim().parse::<i64>() else {
+                    return Some(Err(BridgeRpcError {
+                        code: "InvalidSlashArgument".into(),
+                        message: "Usage: /giveisk <positive_integer_amount>".into(),
+                    }));
+                };
+                if amount <= 0 {
+                    return Some(Err(BridgeRpcError {
+                        code: "InvalidSlashArgument".into(),
+                        message: "Amount for /giveisk must be positive".into(),
+                    }));
                 }
+                let new_bal = ctx.db.try_with_mut_snapshot(|snap| {
+                    let ch = snap.characters.get_mut(&cid).ok_or_else(|| BridgeRpcError {
+                        code: "CharacterNotFound".into(),
+                        message: format!("Character {cid} not found"),
+                    })?;
+                    let add = IskCents::from_isk(amount);
+                    ch.balance = ch.balance.checked_add(add).ok_or_else(|| BridgeRpcError {
+                        code: "BalanceOverflow".into(),
+                        message: "Adding ISK would overflow balance".into(),
+                    })?;
+                    Ok(ch.balance.to_wire_f64())
+                });
+                match new_bal {
+                    Ok(bal) => Some(Ok(PyRep::keyval([
+                        ("command", PyRep::String(cmd.to_string())),
+                        ("newBalanceISK", PyRep::Real(bal)),
+                    ]))),
+                    Err(e) => Some(Err(e)),
+                }
+            } else {
+                Some(Err(BridgeRpcError {
+                    code: "UnknownSlashCommand".into(),
+                    message: format!("Unknown or unsupported slash command '{cmd}'"),
+                }))
             }
-            let total_chars = ctx.db.with_snapshot(|s| s.characters.len());
-            Some(Ok(PyRep::String(format!(
-                "Executed GM command '{cmd}' (characters={total_chars})"
-            ))))
         }
 
         _ => None,

@@ -33,7 +33,14 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let ctx = Arc::new(ServerContext::new());
+    let ctx = Arc::new(ServerContext::new_production());
+    if let Ok(admin_token) = std::env::var("EVOMU_ADMIN_TOKEN") {
+        if !admin_token.trim().is_empty() {
+            ctx.db
+                .provision_gm_account("admin", admin_token.trim(), 90_000_003, "ISD Polaris");
+            info!("Provisioned GM account 'admin' via EVOMU_ADMIN_TOKEN");
+        }
+    }
     let conn_limiter = Arc::new(Semaphore::new(MAX_CONCURRENT_CONNECTIONS));
 
     // Pre-spawn Jita (30000142) solar system actor inside the ServerContext registry
@@ -468,7 +475,7 @@ mod tests {
         let mut b_stream = TcpStream::connect(bridge_addr).await?;
         let auth_req = BridgeEnvelope::RpcRequest {
             req_id: 1,
-            service: "auth".into(),
+            service: "authentication".into(),
             bound_id: None,
             method: "Login".into(),
             args: vec![
@@ -520,8 +527,11 @@ mod tests {
             },
             user_id: None,
             payload: PyRep::Tuple(vec![PyRep::SubStream(Box::new(PyRep::Tuple(vec![
-                PyRep::String("Ping".into()),
-                PyRep::Tuple(vec![]),
+                PyRep::String("Login".into()),
+                PyRep::Tuple(vec![
+                    PyRep::String("demo".into()),
+                    PyRep::String("demo-secret".into()),
+                ]),
                 PyRep::Dict(vec![]),
             ])))]),
             named_payload: HashMap::new(),
@@ -531,6 +541,17 @@ mod tests {
         let call_rsp_pyrep = marshal::decode(&call_rsp_frame)?;
         let parsed_rsp = MachoPacket::from_pyrep(&call_rsp_pyrep).expect("MachoPacket CallRsp");
         assert_eq!(parsed_rsp.packet_type, MachoPacketType::CallRsp);
+
+        let sess_notif_frame = read_bounded_frame(&mut m_stream)
+            .await?
+            .expect("session change notification");
+        let sess_notif_pyrep = marshal::decode(&sess_notif_frame)?;
+        let parsed_notif =
+            MachoPacket::from_pyrep(&sess_notif_pyrep).expect("MachoPacket SessionChange");
+        assert_eq!(
+            parsed_notif.packet_type,
+            MachoPacketType::SessionChangeNotification
+        );
         drop(m_stream);
 
         let _ = bridge_task.await;

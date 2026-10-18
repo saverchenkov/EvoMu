@@ -757,12 +757,29 @@ pub mod marshal {
                 encode_inner(&PyRep::Tuple(vec![cols, row_list]), out);
             }
             PyRep::DBRow {
-                header, raw_rle, ..
+                header,
+                columns,
+                raw_rle,
             } => {
                 out.push(MarshalOpcode::PyPackedRow as u8);
                 encode_inner(header, out);
                 write_size_ex(out, raw_rle.len());
                 out.extend_from_slice(raw_rle);
+                if let Some(defs) = extract_dbrow_header_col_defs(header) {
+                    for (idx, (col_name, dbtype)) in defs.iter().enumerate() {
+                        if dbtype_bit_width(*dbtype) == 0 {
+                            let val = columns
+                                .get(idx)
+                                .filter(|(n, _)| n == col_name)
+                                .map(|(_, v)| v)
+                                .or_else(|| {
+                                    columns.iter().find(|(n, _)| n == col_name).map(|(_, v)| v)
+                                })
+                                .unwrap_or(&PyRep::None);
+                            encode_inner(val, out);
+                        }
+                    }
+                }
             }
             PyRep::Picked(b) => {
                 out.push(MarshalOpcode::PyPicked as u8);
@@ -1080,7 +1097,29 @@ pub mod marshal {
                 }
                 let raw_rle = input[..rle_len].to_vec();
                 *input = &input[rle_len..];
-                let columns = unpack_packed_row_columns(&header, &raw_rle);
+                let mut columns = unpack_packed_row_columns(&header, &raw_rle);
+                if let Some(defs) = extract_dbrow_header_col_defs(&header) {
+                    if columns.is_empty() && !defs.is_empty() {
+                        columns = defs
+                            .iter()
+                            .map(|(n, _)| (n.clone(), PyRep::None))
+                            .collect();
+                    }
+                    for (idx, (col_name, dbtype)) in defs.iter().enumerate() {
+                        if dbtype_bit_width(*dbtype) == 0 {
+                            let val = decode_inner(
+                                input,
+                                save_map,
+                                depth + 1,
+                                saved_slots,
+                                remaining_budget,
+                            )?;
+                            if let Some(slot) = columns.get_mut(idx) {
+                                *slot = (col_name.clone(), val);
+                            }
+                        }
+                    }
+                }
                 PyRep::DBRow {
                     header: Box::new(header),
                     columns,
@@ -1363,17 +1402,19 @@ pub mod marshal {
         }
     }
 
-    fn unpack_packed_row_columns(header: &PyRep, raw_rle: &[u8]) -> Vec<(String, PyRep)> {
-        // Extract (col_name, dbtype_code) pairs from a blue.DBRowDescriptor ObjectEx or Tuple header
-        let col_defs: Option<Vec<(String, i64)>> = match header {
+    fn extract_dbrow_header_col_defs(header: &PyRep) -> Option<Vec<(String, i64)>> {
+        match header {
             PyRep::ObjectEx { header: h, .. } => match h.as_ref() {
                 PyRep::Tuple(items) => items.get(1).and_then(extract_dbrow_col_defs),
                 _ => None,
             },
             PyRep::Tuple(items) => items.get(1).and_then(extract_dbrow_col_defs),
             _ => None,
-        };
-        let Some(defs) = col_defs else {
+        }
+    }
+
+    fn unpack_packed_row_columns(header: &PyRep, raw_rle: &[u8]) -> Vec<(String, PyRep)> {
+        let Some(defs) = extract_dbrow_header_col_defs(header) else {
             return Vec::new();
         };
 

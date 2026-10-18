@@ -81,6 +81,7 @@ pub mod attr_ids {
     pub const SKILL_TIME_CONSTANT: AttributeId = 275;
     pub const DRONE_CAPACITY: AttributeId = 283;
     pub const SHIELD_RECHARGE_RATE: AttributeId = 479;
+    pub const ENTITY_KILL_BOUNTY: AttributeId = 481;
     pub const CAPACITOR_CAPACITY: AttributeId = 482;
     pub const SIGNATURE_RADIUS: AttributeId = 552;
     pub const SCAN_RESOLUTION: AttributeId = 564;
@@ -93,6 +94,19 @@ pub mod attr_ids {
     pub const HEAT_DAMAGE: AttributeId = 1196;
     pub const HEAT_GENERATION_MULTIPLIER: AttributeId = 1211;
     pub const DRONE_BANDWIDTH: AttributeId = 1271;
+    pub const CHARGE_SIZE: AttributeId = 128;
+    pub const REQUIRED_SKILL_1: AttributeId = 182;
+    pub const REQUIRED_SKILL_2: AttributeId = 183;
+    pub const REQUIRED_SKILL_3: AttributeId = 184;
+    pub const REQUIRED_SKILL_1_LEVEL: AttributeId = 277;
+    pub const REQUIRED_SKILL_2_LEVEL: AttributeId = 278;
+    pub const REQUIRED_SKILL_3_LEVEL: AttributeId = 279;
+    pub const CAN_FIT_SHIP_GROUP_01: AttributeId = 1298;
+    pub const CAN_FIT_SHIP_GROUP_02: AttributeId = 1299;
+    pub const CAN_FIT_SHIP_GROUP_03: AttributeId = 1300;
+    pub const CAN_FIT_SHIP_TYPE_1: AttributeId = 1302;
+    pub const CAN_FIT_SHIP_TYPE_2: AttributeId = 1303;
+    pub const RIG_SIZE: AttributeId = 1547;
 }
 
 /// Static definition of an item type (`invTypes` / `types.static`).
@@ -108,6 +122,8 @@ pub struct InvType {
     pub radius: f64,
     pub base_price: f64,
     pub published: bool,
+    #[serde(default)]
+    pub effect_ids: Vec<EffectId>,
     pub default_attributes: HashMap<AttributeId, f64>,
 }
 
@@ -184,6 +200,10 @@ pub struct SolarSystem {
     pub name: String,
     pub security_status: f64,
     pub radius: f64,
+    #[serde(default)]
+    pub galactic_pos_ly: [f64; 3],
+    #[serde(default)]
+    pub planet_ids: Vec<i64>,
     pub stations: Vec<StationInfo>,
 }
 
@@ -193,6 +213,10 @@ pub struct StationInfo {
     pub station_type_id: TypeId,
     pub name: String,
     pub position: DVec3,
+    #[serde(default)]
+    pub owner_corporation_id: i64,
+    #[serde(default)]
+    pub owner_faction_id: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -493,10 +517,13 @@ mod tests {
     #[test]
     fn test_canonical_sde_seed_lookup() {
         let sde = SdeRegistry::with_canonical_seed();
-        assert!(sde.types.len() >= 45);
-        assert!(sde.attributes.len() >= 60);
-        assert!(sde.solar_systems.len() >= 9);
-        assert!(sde.jumps.len() >= 4);
+        assert_eq!(sde.types.len(), 95);
+        assert_eq!(sde.attributes.len(), 94);
+        assert_eq!(sde.effects.len(), 253);
+        assert_eq!(sde.solar_systems.len(), 22);
+        assert_eq!(sde.jumps.len(), 6);
+        assert_eq!(sde.blueprints.len(), 2);
+        assert_eq!(sde.missions.len(), 17);
 
         let rifter = sde.types.get(&587).expect("Rifter type 587 must exist");
         assert_eq!(rifter.name, "Rifter");
@@ -518,5 +545,46 @@ mod tests {
         assert!(sde.dynamic_item_attributes.contains_key(&47702));
         assert!(sde.node_graphs.contains_key(&473));
         assert!(sde.space_components_by_type.contains_key(&32882));
+        assert!(sde.space_components_by_type.contains_key(&35840));
+        let beacon = sde
+            .types
+            .get(&35840)
+            .expect("Pharolux Cyno Beacon 35840 must exist");
+        assert_eq!(beacon.category_id, 65);
+        let pithi = sde
+            .types
+            .get(&11001)
+            .expect("Guristas Pithi Invader 11001 must exist");
+        assert_eq!(
+            pithi.default_attributes.get(&attr_ids::ENTITY_KILL_BOUNTY),
+            Some(&100_000.0)
+        );
+        let horkkisen = sde
+            .solar_systems
+            .get(&30002741)
+            .expect("Horkkisen 30002741 must exist");
+        assert_eq!(horkkisen.name, "Horkkisen");
+
+        // Verify all 12 schools reference K-space solar systems (< 30_005_500) and their station_id is present in that system
+        assert_eq!(sde.schools.len(), 12);
+        for school in sde.schools.values() {
+            assert!(
+                (30_000_001..30_005_500).contains(&school.solar_system_id),
+                "School {} has out-of-range solar_system_id {}",
+                school.school_id,
+                school.solar_system_id
+            );
+            let sys = sde
+                .solar_systems
+                .get(&school.solar_system_id)
+                .expect("School solar system must exist in SDE");
+            assert!(
+                sys.stations.iter().any(|st| st.station_id == school.station_id),
+                "School {} station {} missing from solar system {}",
+                school.school_id,
+                school.station_id,
+                school.solar_system_id
+            );
+        }
     }
 }

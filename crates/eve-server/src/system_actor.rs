@@ -43,6 +43,9 @@ pub enum SystemCommand {
         ball_id: BallId,
         reply: oneshot::Sender<Option<(u64, Ball)>>,
     },
+    ListBalls {
+        reply: oneshot::Sender<Vec<Ball>>,
+    },
     ApplyDamage {
         ball_id: BallId,
         damage: DamageVector,
@@ -128,6 +131,16 @@ impl SystemHandle {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
             .send(SystemCommand::GetBallSnapshot { ball_id, reply: tx })
+            .await
+            .map_err(|_| "Solar system actor stopped".to_string())?;
+        rx.await
+            .map_err(|_| "Solar system reply dropped".to_string())
+    }
+
+    pub async fn list_balls(&self) -> Result<Vec<Ball>, String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SystemCommand::ListBalls { reply: tx })
             .await
             .map_err(|_| "Solar system actor stopped".to_string())?;
         rx.await
@@ -265,6 +278,10 @@ impl SystemRegistry {
                             SystemCommand::GetBallSnapshot { ball_id, reply } => {
                                 let res = ballpark.balls.get(&ball_id).cloned().map(|b| (ballpark.current_tick, b));
                                 let _ = reply.send(res);
+                            }
+                            SystemCommand::ListBalls { reply } => {
+                                let balls: Vec<Ball> = ballpark.balls.values().cloned().collect();
+                                let _ = reply.send(balls);
                             }
                             SystemCommand::ApplyDamage { ball_id, damage, reply } => {
                                 if let Some(ball_snap) = ballpark.balls.get(&ball_id).cloned() {

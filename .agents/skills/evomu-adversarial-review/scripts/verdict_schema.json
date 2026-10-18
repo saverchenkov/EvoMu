@@ -1,0 +1,51 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["verdict", "summary", "blocking_findings", "claims_assessment", "open_findings_status", "report_markdown"],
+  "properties": {
+    "verdict": {"type": "string", "enum": ["PASS", "PASS_WITH_ISSUES", "FAIL"]},
+    "summary": {"type": "string"},
+    "blocking_findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "severity", "title", "evidence", "fix"],
+        "properties": {
+          "id": {"type": "string"},
+          "severity": {"type": "string", "enum": ["P0", "P1"]},
+          "title": {"type": "string"},
+          "evidence": {"type": "string"},
+          "fix": {"type": "string"}
+        }
+      }
+    },
+    "claims_assessment": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["claim", "status", "evidence"],
+        "properties": {
+          "claim": {"type": "string"},
+          "status": {"type": "string", "enum": ["TRUE", "PARTIAL", "FALSE", "UNVERIFIABLE"]},
+          "evidence": {"type": "string"}
+        }
+      }
+    },
+    "open_findings_status": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "status", "evidence"],
+        "properties": {
+          "id": {"type": "string"},
+          "status": {"type": "string", "enum": ["FIXED", "PARTIAL", "OPEN", "REGRESSED"]},
+          "evidence": {"type": "string"}
+        }
+      }
+    },
+    "report_markdown": {"type": "string"}
+  }
+}

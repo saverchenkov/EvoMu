@@ -40,9 +40,12 @@ pub fn compute_bom_cost(product_type_id: TypeId, sde: &SdeRegistry) -> f64 {
     0.0
 }
 
-/// Seeds Dual-Anchor market orders across all major trade hubs into `db`.
+/// Seeds Dual-Anchor market orders across all major trade hubs into `db` idempotently once
+/// per world (`snap.markets_seeded`).
 pub fn seed_dual_anchor_markets(db: &WorldRepository, sde: &SdeRegistry) -> usize {
-    let mut inserted = 0usize;
+    if db.with_snapshot(|snap| snap.markets_seeded) {
+        return 0;
+    }
     let mut type_ids: Vec<TypeId> = sde
         .types
         .values()
@@ -51,7 +54,17 @@ pub fn seed_dual_anchor_markets(db: &WorldRepository, sde: &SdeRegistry) -> usiz
         .collect();
     type_ids.sort_unstable();
 
-    db.with_mut_snapshot(|snap| {
+    db.try_with_mut_snapshot::<_, usize, String>(|snap| {
+        if snap.markets_seeded {
+            return Err("already_seeded".to_string());
+        }
+        snap.markets_seeded = true;
+        let mut inserted = 0usize;
+        let mut existing: std::collections::HashSet<(i64, i64, TypeId, bool)> = snap
+            .market_orders
+            .values()
+            .map(|o| (o.owner_id, o.station_id, o.type_id, o.is_bid))
+            .collect();
         for &(station_id, region_id, hub_mult) in TRADE_HUB_STATIONS {
             for &type_id in &type_ids {
                 let Some(inv_type) = sde.types.get(&type_id) else {
@@ -69,28 +82,30 @@ pub fn seed_dual_anchor_markets(db: &WorldRepository, sde: &SdeRegistry) -> usiz
                 };
                 let bid_isk = (fair_isk * 0.94).max(0.5);
 
-                snap.next_entity_id += 1;
-                let ask_id = snap.next_entity_id;
-                snap.market_orders.insert(
-                    ask_id,
-                    MarketOrderRecord {
-                        order_id: ask_id,
-                        owner_id: 1_000_035,
-                        station_id,
-                        region_id,
-                        type_id,
-                        is_bid: false,
-                        price: IskCents::from_f64_isk(ask_isk),
-                        vol_entered: 1_000,
-                        vol_remaining: 1_000,
-                        min_volume: 1,
-                        is_npc: is_npc_seeded,
-                        escrow: IskCents(0),
-                    },
-                );
-                inserted += 1;
+                if existing.insert((1_000_035, station_id, type_id, false)) {
+                    snap.next_entity_id += 1;
+                    let ask_id = snap.next_entity_id;
+                    snap.market_orders.insert(
+                        ask_id,
+                        MarketOrderRecord {
+                            order_id: ask_id,
+                            owner_id: 1_000_035,
+                            station_id,
+                            region_id,
+                            type_id,
+                            is_bid: false,
+                            price: IskCents::from_f64_isk(ask_isk),
+                            vol_entered: 1_000,
+                            vol_remaining: 1_000,
+                            min_volume: 1,
+                            is_npc: is_npc_seeded,
+                            escrow: IskCents(0),
+                        },
+                    );
+                    inserted += 1;
+                }
 
-                if !is_npc_seeded {
+                if !is_npc_seeded && existing.insert((1_000_125, station_id, type_id, true)) {
                     snap.next_entity_id += 1;
                     let bid_id = snap.next_entity_id;
                     let escrow = IskCents::from_f64_isk(bid_isk * 500.0);
@@ -115,7 +130,7 @@ pub fn seed_dual_anchor_markets(db: &WorldRepository, sde: &SdeRegistry) -> usiz
                 }
             }
         }
-    });
-
-    inserted
+        Ok(inserted)
+    })
+    .unwrap_or(0)
 }

@@ -1,0 +1,12 @@
+{
+  "evomu-review-gate": {
+    "enabled": true,
+    "Stop": [
+      {
+        "type": "command",
+        "command": "/usr/bin/python3 ./skills/evomu-adversarial-review/scripts/stop_hook.py",
+        "timeout": 60
+      }
+    ]
+  }
+}

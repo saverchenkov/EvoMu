@@ -35,7 +35,7 @@ This document provides complete context and a ready-to-use prompt for an autonom
 5. **[`crates/eve-destiny`](../crates/eve-destiny/src/lib.rs):**
    - 1.0 Hz `Ballpark` physics engine with all 13 `DSTBALL_*` modes (`0..=12`), exponential sub-warp kinematics ($\tau = \frac{I \cdot M}{10^6}$), velocity-plane orbit tangents, 4-phase analytical warp integrator (`Aligning`, `Accelerating`, `Cruising`, `Decelerating`, `Stop`), spatial bubble partitioning (`balls_in_bubble`), binary `AddBalls` wire encoder, $2,000\text{ m}$ proximity decloak, turret/missile/Breacher/Entropic combat solver, and CONCORD response timing.
 6. **[`crates/eve-db`](../crates/eve-db/src/lib.rs):**
-   - Transactional repository with durable JSON snapshot persistence (`save_snapshot_to_file`/`load_snapshot_from_file`), fixed-point `IskAmount(i64)` (`10,000` sub-units per `1.0000 ISK`), `InventoryFlag`, optimistic concurrency (`expected_version`), `(character_id, idempotency_key)` scoping, atomic `undock_character` + `rollback_undock`, and complete `M1`–`M8` domain tables.
+   - Transactional repository with durable JSON snapshot persistence (`save_snapshot_to_file`/`load_snapshot_from_file`), fixed-point `IskCents(i64)` (`10,000` sub-units per `1.0000 ISK`), `InventoryFlag`, optimistic concurrency (`expected_version`), `(character_id, idempotency_key)` scoping, atomic `undock_character` + `rollback_undock`, and complete `M1`–`M8` domain tables.
 7. **[`crates/eve-server`](../crates/eve-server/src/main.rs):**
    - Async TCP server listening on port `26001` (Python Client Bridge) and port `26000` (native `machoNet`), per-system 1 Hz actor tasks ([`system_actor.rs`](../crates/eve-server/src/system_actor.rs)), 161-formula engine ([`formulas.rs`](../crates/eve-server/src/formulas.rs)), Dual-Anchor Market Seeder ([`world_seeder.rs`](../crates/eve-server/src/world_seeder.rs)), 3-Tier LOD Living World Ecology ([`living_world.rs`](../crates/eve-server/src/living_world.rs)), all 12 domain service modules ([`services/`](../crates/eve-server/src/services/mod.rs)), authenticated RPC & Quasar router ([`router.rs`](../crates/eve-server/src/router.rs)), integration tests ([`tests/e2e_journeys.rs`](../crates/eve-server/tests/e2e_journeys.rs)), and LOD benchmarks ([`benches/lod_tick_bench.rs`](../crates/eve-server/benches/lod_tick_bench.rs)).
 8. **[`client-bridge/evomu_bridge.py`](../client-bridge/evomu_bridge.py):**
@@ -50,7 +50,7 @@ This document provides complete context and a ready-to-use prompt for an autonom
 ```bash
 /usr/bin/python3 tools/eve-indexer/verify_plan_mapping.py --check
 /usr/bin/python3 client-bridge/evomu_bridge.py --self-test
-RUSTFLAGS="-D warnings -D unused" /opt/homebrew/bin/cargo check --workspace --all-targets
+RUSTFLAGS="-D warnings -D unused" cargo test --workspace --no-fail-fast
 ```
 
 

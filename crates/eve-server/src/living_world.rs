@@ -125,7 +125,7 @@ impl LivingWorldDirector {
         list
     }
 
-    /// Promotes all active convoys in `solar_system_id` to `LOD 2` (full tactical grid `Ball`s).
+    /// Promotes all active (`lod_level < 2`, non-destroyed) convoys in `solar_system_id` to `LOD 2` (full tactical grid `Ball`s).
     pub async fn materialize_system_lod2(
         &self,
         solar_system_id: SolarSystemId,
@@ -136,13 +136,16 @@ impl LivingWorldDirector {
             let mut guard = self.convoys.write().unwrap_or_else(|e| e.into_inner());
             let mut out = Vec::new();
             for c in guard.values_mut() {
-                if c.current_system_id == solar_system_id && !c.destroyed {
+                if c.current_system_id == solar_system_id && !c.destroyed && c.lod_level < 2 {
                     c.lod_level = 2;
                     out.push(c.clone());
                 }
             }
             out
         };
+        if to_spawn.is_empty() {
+            return 0;
+        }
 
         let station_pos = sde
             .solar_systems
@@ -157,21 +160,43 @@ impl LivingWorldDirector {
             let ball = Ball {
                 id: c.convoy_id,
                 type_id: c.ship_type_id,
-                position: grid_origin + DVec3::new(1_500.0, 200.0, 0.0),
-                velocity: DVec3::new(150.0, 0.0, 0.0),
+                position: grid_origin + DVec3::new(1_500.0, 0.0, 0.0),
+                velocity: DVec3::ZERO,
                 max_velocity: 300.0,
                 inertia: 3.5,
                 mass: 1_200_000.0,
                 radius: 40.0,
-                speed_fraction: 0.5,
-                mode: MovementMode::GotoDirection {
-                    direction: DVec3::X,
-                },
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
             };
-            let _ = handle.spawn_ball(ball).await;
+            let _ = handle
+                .spawn_ball_with_combat(
+                    ball,
+                    eve_destiny::CombatState {
+                        shield_hp: 50.0,
+                        max_shield_hp: 50.0,
+                        armor_hp: 50.0,
+                        max_armor_hp: 50.0,
+                        structure_hp: 50.0,
+                        max_structure_hp: 50.0,
+                        ..eve_destiny::CombatState::default()
+                    },
+                )
+                .await;
             count += 1;
         }
         count
+    }
+
+    pub fn mark_convoy_destroyed(&self, convoy_id: i64) {
+        if let Some(c) = self
+            .convoys
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_mut(&convoy_id)
+        {
+            c.destroyed = true;
+        }
     }
 
     pub fn get_convoy(&self, convoy_id: i64) -> Option<LivingWorldConvoy> {
@@ -182,14 +207,15 @@ impl LivingWorldDirector {
             .cloned()
     }
 
-    /// Interdicts and destroys a Living World convoy (`E2E-17`), dropping its physical cargo into the
-    /// attacker's hangar/wreck and increasing destination station ask prices by `+15%` due to supply loss.
+    /// Interdicts and destroys a Living World convoy (`E2E-17`), dropping its physical cargo into a
+    /// space wreck (`type_id: 26557`) in `convoy.current_system_id` and increasing NPC destination
+    /// station ask prices by `+15%` due to supply loss.
     pub fn interdict_convoy(
         &self,
         convoy_id: i64,
         attacker_char_id: i64,
         db: &WorldRepository,
-    ) -> Result<(i64, IskCents), String> {
+    ) -> Result<(i64, i64, IskCents), String> {
         let convoy = {
             let mut guard = self.convoys.write().unwrap_or_else(|e| e.into_inner());
             let c = guard
@@ -208,7 +234,28 @@ impl LivingWorldDirector {
             c.clone()
         };
 
-        db.try_with_mut_snapshot(|snap| -> Result<(i64, IskCents), String> {
+        db.try_with_mut_snapshot(|snap| -> Result<(i64, i64, IskCents), String> {
+            snap.next_entity_id += 1;
+            let wreck_item_id = snap.next_entity_id;
+            snap.items.insert(
+                wreck_item_id,
+                InventoryItemRecord {
+                    item_id: wreck_item_id,
+                    type_id: 26557,
+                    owner_id: attacker_char_id,
+                    location_id: convoy.current_system_id as i64,
+                    flag: InventoryFlag::None,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    dynamic_attributes: HashMap::new(),
+                    source_mutaplasmid_id: None,
+                    insured_payout_isk: 0.0,
+                    is_blueprint_copy: false,
+                    blueprint_runs_remaining: None,
+                },
+            );
+
             snap.next_entity_id += 1;
             let loot_item_id = snap.next_entity_id;
             snap.items.insert(
@@ -217,21 +264,24 @@ impl LivingWorldDirector {
                     item_id: loot_item_id,
                     type_id: convoy.cargo_type_id,
                     owner_id: attacker_char_id,
-                    location_id: convoy.destination_station_id,
-                    flag: InventoryFlag::Hangar,
+                    location_id: wreck_item_id,
+                    flag: InventoryFlag::Cargo,
                     quantity: convoy.cargo_quantity,
                     singleton: false,
                     version: 1,
                     dynamic_attributes: HashMap::new(),
                     source_mutaplasmid_id: None,
                     insured_payout_isk: 0.0,
+                    is_blueprint_copy: false,
+                    blueprint_runs_remaining: None,
                 },
             );
 
-            // Spike destination station ask orders for `cargo_type_id` by +15% (supply shock)
+            // Spike NPC destination station ask orders for `cargo_type_id` by +15% (supply shock)
             let mut new_ask_price = IskCents::from_isk(6);
             for order in snap.market_orders.values_mut() {
                 if !order.is_bid
+                    && order.is_npc
                     && order.station_id == convoy.destination_station_id
                     && order.type_id == convoy.cargo_type_id
                 {
@@ -240,7 +290,7 @@ impl LivingWorldDirector {
                     new_ask_price = order.price;
                 }
             }
-            Ok((loot_item_id, new_ask_price))
+            Ok((wreck_item_id, loot_item_id, new_ask_price))
         })
     }
 }

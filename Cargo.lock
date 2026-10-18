@@ -70,6 +70,7 @@ dependencies = [
 name = "eve-db"
 version = "0.1.0"
 dependencies = [
+ "eve-proto",
  "eve-sde",
  "serde",
  "serde_json",

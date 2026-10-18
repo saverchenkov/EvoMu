@@ -4,13 +4,14 @@
 
 use crate::router::ServerContext;
 use eve_db::{
-    BookmarkRecord, CorpProjectRecord, CorporationRecord, FleetRecord, IskCents, MailRecord,
+    AllianceRecord, BookmarkRecord, CorpProjectRecord, CorporationRecord, FleetRecord, IskCents,
+    MailRecord, WarRecord,
 };
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use std::collections::{HashMap, HashSet};
 
-pub fn handle(
+pub async fn handle(
     ctx: &ServerContext,
     session: &mut SessionState,
     service: &str,
@@ -24,13 +25,65 @@ pub fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let label = args.first().and_then(|a| a.as_str()).unwrap_or("Safe Spot");
-            let x = args.get(1).and_then(|a| a.as_f64()).unwrap_or(10_000.0);
-            let y = args.get(2).and_then(|a| a.as_f64()).unwrap_or(20_000.0);
-            let z = args.get(3).and_then(|a| a.as_f64()).unwrap_or(30_000.0);
+            let label = args
+                .first()
+                .and_then(|a| a.as_str())
+                .unwrap_or("Safe Spot")
+                .trim();
+            if label.is_empty() || label.chars().count() > 100 {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidBookmarkLabel".into(),
+                    message: "Bookmark label must be 1..=100 non-whitespace characters".into(),
+                }));
+            }
             let sys_id = session.solar_system_id.unwrap_or(30_000_142);
 
-            let bm_id = ctx.db.with_mut_snapshot(|snap| {
+            // Derive bookmark coordinates strictly from the pilot's docked station/structure or server-side ship ball (never client args)
+            let (x, y, z) = if let Some(st_id) = session.station_id {
+                ctx.sde
+                    .solar_systems
+                    .get(&sys_id)
+                    .and_then(|s| s.stations.iter().find(|st| st.station_id == st_id))
+                    .map(|st| (st.position.x, st.position.y, st.position.z))
+                    .unwrap_or((0.0, 0.0, 0.0))
+            } else if let Some(struct_id) = session.structure_id {
+                ctx.db
+                    .with_snapshot(|snap| {
+                        snap.structures
+                            .get(&struct_id)
+                            .map(|s| (s.position[0], s.position[1], s.position[2]))
+                    })
+                    .unwrap_or((0.0, 0.0, 0.0))
+            } else if let Some(ship_id) = session.ship_id {
+                let handle = ctx.systems.get_or_spawn(sys_id);
+                if let Ok(Some((_, ball))) = handle.get_ball_snapshot(ship_id).await {
+                    (ball.position.x, ball.position.y, ball.position.z)
+                } else {
+                    return Some(Err(BridgeRpcError {
+                        code: "ShipNotInSpace".into(),
+                        message: "Cannot bookmark in-space position when ship ball is absent"
+                            .into(),
+                    }));
+                }
+            } else {
+                return Some(Err(BridgeRpcError {
+                    code: "NoActiveShip".into(),
+                    message: "Session has no active ship".into(),
+                }));
+            };
+
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let count = snap
+                    .bookmarks
+                    .values()
+                    .filter(|b| b.owner_id == char_id)
+                    .count();
+                if count >= 500 {
+                    return Err(BridgeRpcError {
+                        code: "MaxBookmarksReached".into(),
+                        message: "Character has reached the maximum of 500 personal bookmarks".into(),
+                    });
+                }
                 snap.next_entity_id += 1;
                 let id = snap.next_entity_id;
                 snap.bookmarks.insert(
@@ -45,12 +98,15 @@ pub fn handle(
                         z,
                     },
                 );
-                id
+                Ok(id)
             });
-            Some(Ok(PyRep::keyval([
-                ("bookmarkID", PyRep::Integer(bm_id)),
-                ("label", PyRep::String(label.to_string())),
-            ])))
+            match res {
+                Ok(bm_id) => Some(Ok(PyRep::keyval([
+                    ("bookmarkID", PyRep::Integer(bm_id)),
+                    ("label", PyRep::String(label.to_string())),
+                ]))),
+                Err(e) => Some(Err(e)),
+            }
         }
 
         ("bookmark", "GetBookmarks") => {
@@ -85,7 +141,13 @@ pub fn handle(
             let recipient_id = args.first().and_then(|a| a.as_i64()).unwrap_or(90_000_002);
             let subject = args.get(1).and_then(|a| a.as_str()).unwrap_or("o7");
             let body = args.get(2).and_then(|a| a.as_str()).unwrap_or("Fly safe!");
-            let mid = ctx.db.with_mut_snapshot(|snap| {
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
+                if snap.mails.len() >= 1_000 {
+                    return Err(BridgeRpcError {
+                        code: "MailQuotaExceeded".into(),
+                        message: "Server mail spool limit (1,000 messages) reached".into(),
+                    });
+                }
                 snap.next_entity_id += 1;
                 let id = snap.next_entity_id;
                 snap.mails.push(MailRecord {
@@ -95,9 +157,12 @@ pub fn handle(
                     subject: subject.to_string(),
                     body: body.to_string(),
                 });
-                id
+                Ok(id)
             });
-            Some(Ok(PyRep::Integer(mid)))
+            match res {
+                Ok(mid) => Some(Ok(PyRep::Integer(mid))),
+                Err(e) => Some(Err(e)),
+            }
         }
 
         ("fleetMgr", "CreateFleet") | ("fleetObjectHandler", "CreateFleet") => {
@@ -105,23 +170,26 @@ pub fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let fid = ctx.db.with_mut_snapshot(|snap| {
-                snap.next_entity_id += 1;
-                let id = snap.next_entity_id;
-                snap.fleets.insert(
-                    id,
-                    FleetRecord {
-                        fleet_id: id,
-                        boss_id: char_id,
-                        members: vec![char_id],
-                        wings: vec![1],
-                        squads: vec![1],
-                        free_move: true,
-                        is_registered: true,
-                    },
-                );
-                id
-            });
+            let fid = ctx
+                .db
+                .try_with_mut_snapshot(|snap| {
+                    snap.next_entity_id += 1;
+                    let id = snap.next_entity_id;
+                    snap.fleets.insert(
+                        id,
+                        FleetRecord {
+                            fleet_id: id,
+                            boss_id: char_id,
+                            members: vec![char_id],
+                            wings: vec![1],
+                            squads: vec![1],
+                            free_move: true,
+                            is_registered: true,
+                        },
+                    );
+                    Ok::<_, std::convert::Infallible>(id)
+                })
+                .unwrap();
             session.fleet_id = Some(fid);
             Some(Ok(PyRep::keyval([
                 ("fleetID", PyRep::Integer(fid)),
@@ -164,6 +232,7 @@ pub fn handle(
                 let cid = 98_000_000 + snap.next_entity_id;
                 if let Some(ch_mut) = snap.characters.get_mut(&char_id) {
                     ch_mut.corporation_id = cid;
+                    ch_mut.alliance_id = None;
                 }
                 snap.corporations.insert(
                     cid,
@@ -184,15 +253,266 @@ pub fn handle(
             match res {
                 Ok(corp_id) => {
                     session.corporation_id = Some(corp_id);
+                    session.alliance_id = None;
                     session.corp_role = u64::MAX;
                     Some(Ok(PyRep::keyval([
                         ("corporationID", PyRep::Integer(corp_id)),
+                        ("allianceID", PyRep::None),
                         ("name", PyRep::String(name.to_string())),
                         ("ticker", PyRep::String(ticker.to_string())),
                     ])))
                 }
                 Err(e) => Some(Err(e)),
             }
+        }
+
+        ("allianceRegistry", "CreateAlliance") | ("corpRegistry", "CreateAlliance") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let name = args
+                .first()
+                .and_then(|a| a.as_str())
+                .unwrap_or("EvoMu Sovereign Coalition");
+            let short_name = args.get(1).and_then(|a| a.as_str()).unwrap_or("EVOSC");
+            let alliance_fee = IskCents::from_isk(10_000_000);
+
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let corp_id = snap
+                    .characters
+                    .get(&char_id)
+                    .map(|c| c.corporation_id)
+                    .or(session.corporation_id)
+                    .unwrap_or(0);
+                if corp_id < 2_000_000 {
+                    return Err(BridgeRpcError {
+                        code: "NpcCorporationCannotFormAlliance".into(),
+                        message: "Only player-founded corporations can form an alliance".into(),
+                    });
+                }
+                let Some(corp) = snap.corporations.get(&corp_id) else {
+                    return Err(BridgeRpcError {
+                        code: "CorporationNotFound".into(),
+                        message: format!("Corporation {corp_id} not found"),
+                    });
+                };
+                if corp.ceo_id != char_id {
+                    return Err(BridgeRpcError {
+                        code: "CeoRoleRequired".into(),
+                        message: "Only the corporation CEO can form an alliance".into(),
+                    });
+                }
+                if corp.alliance_id.is_some() {
+                    return Err(BridgeRpcError {
+                        code: "AlreadyInAlliance".into(),
+                        message: "Corporation is already a member of an alliance".into(),
+                    });
+                }
+                let Some(ch) = snap.characters.get_mut(&char_id) else {
+                    return Err(BridgeRpcError {
+                        code: "CharacterNotFound".into(),
+                        message: format!("Character {char_id} not found"),
+                    });
+                };
+                let new_bal =
+                    ch.balance
+                        .checked_sub(alliance_fee)
+                        .ok_or_else(|| BridgeRpcError {
+                            code: "InsufficientFunds".into(),
+                            message: "Not enough ISK to pay alliance registration fee".into(),
+                        })?;
+                ch.balance = new_bal;
+
+                snap.next_entity_id += 1;
+                let aid = 99_000_000 + snap.next_entity_id;
+                let member_ids: Vec<i64> = snap
+                    .corporations
+                    .get(&corp_id)
+                    .map(|c| c.members.iter().copied().collect())
+                    .unwrap_or_else(|| vec![char_id]);
+                if let Some(corp_mut) = snap.corporations.get_mut(&corp_id) {
+                    corp_mut.alliance_id = Some(aid);
+                }
+                for mid in member_ids {
+                    if let Some(c_mut) = snap.characters.get_mut(&mid) {
+                        c_mut.alliance_id = Some(aid);
+                    }
+                }
+                snap.alliances.insert(
+                    aid,
+                    AllianceRecord {
+                        alliance_id: aid,
+                        name: name.to_string(),
+                        short_name: short_name.to_string(),
+                        executor_corp_id: corp_id,
+                        member_corp_ids: HashSet::from([corp_id]),
+                    },
+                );
+                Ok((aid, corp_id))
+            });
+
+            match res {
+                Ok((alliance_id, corp_id)) => {
+                    session.alliance_id = Some(alliance_id);
+                    Some(Ok(PyRep::keyval([
+                        ("allianceID", PyRep::Integer(alliance_id)),
+                        ("executorCorpID", PyRep::Integer(corp_id)),
+                        ("allianceName", PyRep::String(name.to_string())),
+                        ("shortName", PyRep::String(short_name.to_string())),
+                    ])))
+                }
+                Err(e) => Some(Err(e)),
+            }
+        }
+
+        ("allianceRegistry", "GetAlliance") => {
+            let _ = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let aid = args
+                .first()
+                .and_then(|a| a.as_i64())
+                .or(session.alliance_id)
+                .unwrap_or(0);
+            let alliance_opt = ctx
+                .db
+                .with_snapshot(|snap| snap.alliances.get(&aid).cloned());
+            let Some(al) = alliance_opt else {
+                return Some(Err(BridgeRpcError {
+                    code: "AllianceNotFound".into(),
+                    message: format!("Alliance {aid} does not exist"),
+                }));
+            };
+            Some(Ok(PyRep::keyval([
+                ("allianceID", PyRep::Integer(al.alliance_id)),
+                ("allianceName", PyRep::String(al.name)),
+                ("shortName", PyRep::String(al.short_name)),
+                ("executorCorpID", PyRep::Integer(al.executor_corp_id)),
+            ])))
+        }
+
+        ("warRegistry", "DeclareWarAgainst") | ("corpRegistry", "DeclareWarAgainst") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let defender_corp_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let war_fee = IskCents::from_isk(10_000_000);
+            let now_unix = ctx.now_unix();
+
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let aggressor_corp_id = snap
+                    .characters
+                    .get(&char_id)
+                    .map(|c| c.corporation_id)
+                    .or(session.corporation_id)
+                    .unwrap_or(0);
+                if aggressor_corp_id < 2_000_000 {
+                    return Err(BridgeRpcError {
+                        code: "NpcCorporationCannotDeclareWar".into(),
+                        message: "NPC corporations cannot declare war".into(),
+                    });
+                }
+                if defender_corp_id < 2_000_000 || !snap.corporations.contains_key(&defender_corp_id) {
+                    return Err(BridgeRpcError {
+                        code: "InvalidWarTarget".into(),
+                        message: format!(
+                            "Target corporation {defender_corp_id} is not a valid player corporation"
+                        ),
+                    });
+                }
+                if aggressor_corp_id == defender_corp_id {
+                    return Err(BridgeRpcError {
+                        code: "CannotDeclareWarOnSelf".into(),
+                        message: "Cannot declare war against your own corporation".into(),
+                    });
+                }
+                let Some(agg_corp) = snap.corporations.get(&aggressor_corp_id) else {
+                    return Err(BridgeRpcError {
+                        code: "CorporationNotFound".into(),
+                        message: format!("Corporation {aggressor_corp_id} not found"),
+                    });
+                };
+                if agg_corp.ceo_id != char_id {
+                    return Err(BridgeRpcError {
+                        code: "CeoRoleRequired".into(),
+                        message: "Only the corporation CEO can declare war".into(),
+                    });
+                }
+                let Some(ch) = snap.characters.get_mut(&char_id) else {
+                    return Err(BridgeRpcError {
+                        code: "CharacterNotFound".into(),
+                        message: format!("Character {char_id} not found"),
+                    });
+                };
+                let new_bal = ch.balance.checked_sub(war_fee).ok_or_else(|| BridgeRpcError {
+                    code: "InsufficientFunds".into(),
+                    message: "Not enough ISK to pay CONCORD war declaration fee (10,000,000 ISK)"
+                        .into(),
+                })?;
+                ch.balance = new_bal;
+
+                snap.next_entity_id += 1;
+                let war_id = snap.next_entity_id;
+                snap.wars.insert(
+                    war_id,
+                    WarRecord {
+                        war_id,
+                        aggressor_corp_id,
+                        defender_corp_id,
+                        mutual: false,
+                        started_unix: now_unix,
+                        active: true,
+                    },
+                );
+                Ok((war_id, aggressor_corp_id))
+            });
+
+            match res {
+                Ok((war_id, aggressor_corp_id)) => Some(Ok(PyRep::keyval([
+                    ("warID", PyRep::Integer(war_id)),
+                    ("aggressorCorpID", PyRep::Integer(aggressor_corp_id)),
+                    ("defenderCorpID", PyRep::Integer(defender_corp_id)),
+                    ("active", PyRep::Bool(true)),
+                ]))),
+                Err(e) => Some(Err(e)),
+            }
+        }
+
+        ("warRegistry", "GetWars") => {
+            let _ = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let corp_id = args
+                .first()
+                .and_then(|a| a.as_i64())
+                .or(session.corporation_id)
+                .unwrap_or(0);
+            let rows = ctx.db.with_snapshot(|snap| {
+                snap.wars
+                    .values()
+                    .filter(|w| {
+                        corp_id == 0
+                            || w.aggressor_corp_id == corp_id
+                            || w.defender_corp_id == corp_id
+                    })
+                    .map(|w| {
+                        vec![
+                            PyRep::Integer(w.war_id),
+                            PyRep::Integer(w.aggressor_corp_id),
+                            PyRep::Integer(w.defender_corp_id),
+                            PyRep::Bool(w.active),
+                        ]
+                    })
+                    .collect()
+            });
+            Some(Ok(PyRep::rowset(
+                vec!["warID", "aggressorCorpID", "defenderCorpID", "active"],
+                rows,
+            )))
         }
 
         ("corporationSvc", "CreateProject") => {
@@ -214,7 +534,6 @@ pub fn handle(
                 }));
             }
             let target_qty = target_qty_raw as u64;
-            let corp_id = session.corporation_id.unwrap_or(1_000_125);
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let per_u = IskCents::from_f64_isk(isk_per_unit);
@@ -233,6 +552,7 @@ pub fn handle(
                         message: format!("Character {char_id} not found"),
                     });
                 };
+                let corp_id = session.corporation_id.unwrap_or(ch.corporation_id);
                 let new_bal = ch.balance.checked_sub(escrow).ok_or_else(|| BridgeRpcError {
                     code: "InsufficientFunds".into(),
                     message: "Not enough ISK to fund corporation project escrow".into(),
@@ -287,6 +607,21 @@ pub fn handle(
                         message: format!("Corporation project {pid} does not exist"),
                     });
                 };
+                let char_corp_id = snap
+                    .characters
+                    .get(&char_id)
+                    .map(|c| c.corporation_id)
+                    .or(session.corporation_id)
+                    .unwrap_or(1_000_125);
+                if proj.corporation_id != char_corp_id {
+                    return Err(BridgeRpcError {
+                        code: "NotInProjectCorporation".into(),
+                        message: format!(
+                            "Character {char_id} (corp {char_corp_id}) is not a member of project corporation {}",
+                            proj.corporation_id
+                        ),
+                    });
+                }
                 let needed = proj.target_quantity.saturating_sub(proj.current_quantity);
                 let accepted = qty.min(needed);
                 if accepted == 0 {
@@ -296,14 +631,16 @@ pub fn handle(
                     });
                 }
 
-                // Require and consume `accepted` units of Veldspar (1230), Compressed Veldspar (62516), or Tritanium (34)
+                // Require and consume `accepted` units of unlocked, reachable Veldspar (1230), Compressed Veldspar (62516), or Tritanium (34)
+                let current_dock = session.station_id.or(session.structure_id);
+                let current_ship = session.ship_id;
                 let contrib_item_id = snap
                     .items
                     .values()
                     .find(|i| {
-                        i.owner_id == char_id
-                            && matches!(i.type_id, 1230 | 62516 | 34)
+                        matches!(i.type_id, 1230 | 62516 | 34)
                             && (i.quantity as u64) >= accepted
+                            && snap.is_item_consumable_by(i, char_id, current_dock, current_ship)
                     })
                     .map(|i| i.item_id);
                 let Some(iid) = contrib_item_id else {
@@ -350,36 +687,6 @@ pub fn handle(
                     ("completed", PyRep::Bool(completed)),
                 ]))),
                 Err(e) => Some(Err(e)),
-            }
-        }
-
-        ("corporationSvc", "GetCorpInfo") => {
-            let _ = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let corp_id = args
-                .first()
-                .and_then(|a| a.as_i64())
-                .or(session.corporation_id)
-                .unwrap_or(1_000_125);
-            let corp_opt = ctx
-                .db
-                .with_snapshot(|snap| snap.corporations.get(&corp_id).cloned());
-            if let Some(corp) = corp_opt {
-                Some(Ok(PyRep::keyval([
-                    ("corporationID", PyRep::Integer(corp.corporation_id)),
-                    ("corporationName", PyRep::String(corp.name)),
-                    ("ticker", PyRep::String(corp.ticker)),
-                    ("ceoID", PyRep::Integer(corp.ceo_id)),
-                    ("taxRate", PyRep::Real(corp.tax_rate)),
-                ])))
-            } else {
-                Some(Ok(PyRep::keyval([
-                    ("corporationID", PyRep::Integer(corp_id)),
-                    ("corporationName", PyRep::String("NPC Corporation".into())),
-                    ("ticker", PyRep::String("NPC".into())),
-                ])))
             }
         }
 

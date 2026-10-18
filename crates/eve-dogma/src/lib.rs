@@ -366,6 +366,46 @@ impl DogmaExpressionNode {
             | DogmaVmOpcode::AddGangItmMod
             | DogmaVmOpcode::AddGangOwnSrqMod
             | DogmaVmOpcode::AddGangSrqMod => {
+                // Enforce group or skill-requirement filter when specified in arg1
+                if matches!(
+                    self.opcode,
+                    DogmaVmOpcode::AddLocGrpMod | DogmaVmOpcode::AddGangGrpMod
+                ) {
+                    if let Some(filter_node) = &self.arg1 {
+                        if filter_node.opcode == DogmaVmOpcode::DefGroup {
+                            if let Some(req_grp) = filter_node.value_f64 {
+                                let actual_grp = sde
+                                    .types
+                                    .get(&target.type_id)
+                                    .map(|t| t.group_id)
+                                    .unwrap_or(0);
+                                if actual_grp != 0 && actual_grp != req_grp as u32 {
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
+                if matches!(
+                    self.opcode,
+                    DogmaVmOpcode::AddLocSrqMod
+                        | DogmaVmOpcode::AddOwnSrqMod
+                        | DogmaVmOpcode::AddGangSrqMod
+                        | DogmaVmOpcode::AddGangOwnSrqMod
+                ) {
+                    if let Some(filter_node) = &self.arg1 {
+                        if filter_node.opcode == DogmaVmOpcode::DefType {
+                            if let Some(req_skill) = filter_node.value_f64 {
+                                if !target.skill_levels.is_empty()
+                                    && !target.skill_levels.contains_key(&(req_skill as i64))
+                                {
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
+
                 let op = self.operator.unwrap_or(ModifierOperator::PostPercent);
                 let target_attr = self
                     .attribute_id
@@ -377,12 +417,21 @@ impl DogmaExpressionNode {
                     .map(|n| n.evaluate(source, sde))
                     .or(self.value_f64)
                     .unwrap_or(0.0);
+                let stacking_penalized = !matches!(
+                    op,
+                    ModifierOperator::ModAdd
+                        | ModifierOperator::ModSub
+                        | ModifierOperator::PreAssign
+                        | ModifierOperator::PostAssign
+                        | ModifierOperator::PostPercentUnNerfed
+                        | ModifierOperator::SpecialSkillRelationship
+                );
                 target.add_modifier(AttributeModifier {
                     source_item_id,
                     target_attribute_id: target_attr,
                     operator: op,
                     value: val,
-                    stacking_penalized: true,
+                    stacking_penalized,
                 });
             }
             DogmaVmOpcode::RmItmMod
@@ -637,6 +686,9 @@ pub struct ShipFittingEngine {
     pub modules: HashMap<i64, FittedModule>,
     /// Heat rack state `[High, Medium, Low]` in `[0.0, 1.0]`.
     pub rack_heat: [f64; 3],
+    /// Character trained skill levels (`skill_type_id -> trained_level`) enforced during fitting.
+    #[serde(default)]
+    pub character_skills: HashMap<TypeId, u8>,
 }
 
 impl ShipFittingEngine {
@@ -645,7 +697,17 @@ impl ShipFittingEngine {
             ship: DogmaItemState::from_sde(ship_item_id, ship_type_id, sde),
             modules: HashMap::new(),
             rack_heat: [0.0, 0.0, 0.0],
+            character_skills: HashMap::new(),
         }
+    }
+
+    pub fn set_character_skills(&mut self, skills: HashMap<TypeId, u8>) {
+        self.character_skills = skills;
+    }
+
+    pub fn with_character_skills(mut self, skills: HashMap<TypeId, u8>) -> Self {
+        self.character_skills = skills;
+        self
     }
 
     fn apply_online_modifiers_for_module(
@@ -657,76 +719,107 @@ impl ShipFittingEngine {
         let Some(mod_type) = sde.types.get(&module_type_id) else {
             return;
         };
-        let cpu_need = mod_type
-            .default_attributes
-            .get(&attr_ids::CPU)
-            .copied()
-            .unwrap_or(0.0);
-        let pg_need = mod_type
-            .default_attributes
-            .get(&attr_ids::POWER)
-            .copied()
-            .unwrap_or(0.0);
-        let cal_need = mod_type
-            .default_attributes
-            .get(&attr_ids::UPGRADE_COST)
-            .copied()
-            .unwrap_or(0.0);
+        let mod_state = DogmaItemState::from_sde(module_item_id, module_type_id, sde);
+        let cpu_need = mod_state.get_attribute(attr_ids::CPU, sde);
+        let pg_need = mod_state.get_attribute(attr_ids::POWER, sde);
+        let cal_need = mod_state.get_attribute(attr_ids::UPGRADE_COST, sde);
 
         if cpu_need > 0.0 {
-            self.ship.add_modifier(AttributeModifier {
-                source_item_id: module_item_id,
-                target_attribute_id: attr_ids::CPU_LOAD,
-                operator: ModifierOperator::ModAdd,
-                value: cpu_need,
-                stacking_penalized: false,
-            });
+            let expr = DogmaExpressionNode {
+                opcode: DogmaVmOpcode::AddItmMod,
+                value_f64: None,
+                attribute_id: Some(attr_ids::CPU_LOAD),
+                operator: Some(ModifierOperator::ModAdd),
+                arg1: None,
+                arg2: Some(Box::new(DogmaExpressionNode {
+                    opcode: DogmaVmOpcode::GetAttr,
+                    value_f64: None,
+                    attribute_id: Some(attr_ids::CPU),
+                    operator: None,
+                    arg1: None,
+                    arg2: None,
+                })),
+            };
+            expr.execute_on_target(module_item_id, &mod_state, &mut self.ship, sde);
         }
         if pg_need > 0.0 {
-            self.ship.add_modifier(AttributeModifier {
-                source_item_id: module_item_id,
-                target_attribute_id: attr_ids::POWER_LOAD,
-                operator: ModifierOperator::ModAdd,
-                value: pg_need,
-                stacking_penalized: false,
-            });
+            let expr = DogmaExpressionNode {
+                opcode: DogmaVmOpcode::AddItmMod,
+                value_f64: None,
+                attribute_id: Some(attr_ids::POWER_LOAD),
+                operator: Some(ModifierOperator::ModAdd),
+                arg1: None,
+                arg2: Some(Box::new(DogmaExpressionNode {
+                    opcode: DogmaVmOpcode::GetAttr,
+                    value_f64: None,
+                    attribute_id: Some(attr_ids::POWER),
+                    operator: None,
+                    arg1: None,
+                    arg2: None,
+                })),
+            };
+            expr.execute_on_target(module_item_id, &mod_state, &mut self.ship, sde);
         }
         if cal_need > 0.0 {
-            self.ship.add_modifier(AttributeModifier {
-                source_item_id: module_item_id,
-                target_attribute_id: attr_ids::UPGRADE_CAPACITY,
-                operator: ModifierOperator::ModSub,
-                value: cal_need,
-                stacking_penalized: false,
-            });
+            let expr = DogmaExpressionNode {
+                opcode: DogmaVmOpcode::AddItmMod,
+                value_f64: None,
+                attribute_id: Some(attr_ids::UPGRADE_CAPACITY),
+                operator: Some(ModifierOperator::ModSub),
+                arg1: None,
+                arg2: Some(Box::new(DogmaExpressionNode {
+                    opcode: DogmaVmOpcode::GetAttr,
+                    value_f64: None,
+                    attribute_id: Some(attr_ids::UPGRADE_COST),
+                    operator: None,
+                    arg1: None,
+                    arg2: None,
+                })),
+            };
+            expr.execute_on_target(module_item_id, &mod_state, &mut self.ship, sde);
         }
 
-        // Apply passive velocity/shield bonus if present (e.g. Overdrive Injector or Rig)
-        if let Some(&speed_bonus) = mod_type.default_attributes.get(&attr_ids::SPEED_FACTOR) {
-            if mod_type.group_id == 762 {
-                self.ship.add_modifier(AttributeModifier {
-                    source_item_id: module_item_id,
-                    target_attribute_id: attr_ids::MAX_VELOCITY,
-                    operator: ModifierOperator::PostPercent,
-                    value: speed_bonus,
-                    stacking_penalized: true,
-                });
-            }
+        // Apply passive velocity/shield bonus via DogmaExpressionNode VM if present (Overdrive Injector or Rig)
+        if mod_type.default_attributes.contains_key(&attr_ids::SPEED_FACTOR) && mod_type.group_id == 762 {
+            let expr = DogmaExpressionNode {
+                opcode: DogmaVmOpcode::AddItmMod,
+                value_f64: None,
+                attribute_id: Some(attr_ids::MAX_VELOCITY),
+                operator: Some(ModifierOperator::PostPercent),
+                arg1: None,
+                arg2: Some(Box::new(DogmaExpressionNode {
+                    opcode: DogmaVmOpcode::GetAttr,
+                    value_f64: None,
+                    attribute_id: Some(attr_ids::SPEED_FACTOR),
+                    operator: None,
+                    arg1: None,
+                    arg2: None,
+                })),
+            };
+            expr.execute_on_target(module_item_id, &mod_state, &mut self.ship, sde);
         }
-        if let Some(&shield_bonus) = mod_type.default_attributes.get(&attr_ids::SHIELD_BONUS) {
-            if mod_type.group_id == 774 {
-                self.ship.add_modifier(AttributeModifier {
-                    source_item_id: module_item_id,
-                    target_attribute_id: attr_ids::SHIELD_CAPACITY,
-                    operator: ModifierOperator::PostPercent,
-                    value: shield_bonus,
-                    stacking_penalized: true,
-                });
-            }
+        if mod_type.default_attributes.contains_key(&attr_ids::SHIELD_BONUS) && mod_type.group_id == 774 {
+            let expr = DogmaExpressionNode {
+                opcode: DogmaVmOpcode::AddItmMod,
+                value_f64: None,
+                attribute_id: Some(attr_ids::SHIELD_CAPACITY),
+                operator: Some(ModifierOperator::PostPercent),
+                arg1: None,
+                arg2: Some(Box::new(DogmaExpressionNode {
+                    opcode: DogmaVmOpcode::GetAttr,
+                    value_f64: None,
+                    attribute_id: Some(attr_ids::SHIELD_BONUS),
+                    operator: None,
+                    arg1: None,
+                    arg2: None,
+                })),
+            };
+            expr.execute_on_target(module_item_id, &mod_state, &mut self.ship, sde);
         }
     }
 
-    /// Fits and brings a module online, validating CPU, Powergrid, or Rig Calibration capacity.
+    /// Fits and brings a module online, validating slot effects, hull slot counts, turret/launcher
+    /// hardpoints, hull/group restrictions, rig/charge size classes, character skills, and CPU/PG/Calibration.
     pub fn fit_and_online_module(
         &mut self,
         module_item_id: i64,
@@ -738,6 +831,212 @@ impl ShipFittingEngine {
             .types
             .get(&module_type_id)
             .ok_or_else(|| format!("Unknown module type {module_type_id}"))?;
+        let hull_type = sde
+            .types
+            .get(&self.ship.type_id)
+            .ok_or_else(|| format!("Unknown ship hull type {}", self.ship.type_id))?;
+
+        if mod_type.category_id != 7 && mod_type.category_id != 32 {
+            return Err(format!(
+                "Item {} (type {}, category {}) is not a fittable module or subsystem",
+                mod_type.name, module_type_id, mod_type.category_id
+            ));
+        }
+        if mod_type.effect_ids.is_empty() {
+            return Err(format!(
+                "Module {} (type {}) has no fitting slot effect_ids defined",
+                mod_type.name, module_type_id
+            ));
+        }
+
+        if self
+            .modules
+            .values()
+            .any(|m| m.flag_id == flag_id && m.item_id != module_item_id)
+        {
+            return Err(format!("Fitting slot {flag_id} is already occupied"));
+        }
+
+        // Unconditionally validate module slot-type effect against target flag range
+        let (req_eff, eff_name) = match flag_id {
+            11..=18 => (11_u16, "loPower"),
+            19..=26 => (13_u16, "medPower"),
+            27..=34 => (12_u16, "hiPower"),
+            92..=94 => (2663_u16, "rigSlot"),
+            125..=132 => (3772_u16, "subSystem"),
+            _ => return Err(format!("Invalid fitting slot flag {flag_id}")),
+        };
+        if !mod_type.effect_ids.contains(&req_eff) {
+            return Err(format!(
+                "Module {} (type {}) lacks required slot effect {} ({eff_name}) for flag {flag_id}",
+                mod_type.name, module_type_id, req_eff
+            ));
+        }
+
+        // Unconditionally validate slot index against ship low/med/high/rig/subsystem slot capacity on the hull
+        let (slot_idx, max_slots) = match flag_id {
+            11..=18 => (
+                flag_id - 11,
+                self.ship.get_attribute(attr_ids::LOW_SLOTS, sde).max(0.0) as u16,
+            ),
+            19..=26 => (
+                flag_id - 19,
+                self.ship.get_attribute(attr_ids::MED_SLOTS, sde).max(0.0) as u16,
+            ),
+            27..=34 => (
+                flag_id - 27,
+                self.ship.get_attribute(attr_ids::HI_SLOTS, sde).max(0.0) as u16,
+            ),
+            92..=94 => (
+                flag_id - 92,
+                self.ship.get_attribute(attr_ids::RIG_SLOTS, sde).max(0.0) as u16,
+            ),
+            125..=132 => (
+                flag_id - 125,
+                if hull_type.group_id == 963 { 4 } else { 0 },
+            ),
+            _ => unreachable!(),
+        };
+        if slot_idx >= max_slots {
+            return Err(format!(
+                "Slot flag {flag_id} (index {slot_idx}) exceeds hull slot capacity ({max_slots}) on {}",
+                hull_type.name
+            ));
+        }
+
+        // Unconditionally validate turret (effect 42) and launcher (effect 40) hardpoint limits on the ship hull
+        if mod_type.effect_ids.contains(&42) {
+            let max_turrets = self
+                .ship
+                .get_attribute(attr_ids::TURRET_SLOTS_LEFT, sde)
+                .max(0.0) as usize;
+            let fitted_turrets = self
+                .modules
+                .values()
+                .filter(|m| {
+                    m.item_id != module_item_id
+                        && sde
+                            .types
+                            .get(&m.type_id)
+                            .map(|t| t.effect_ids.contains(&42))
+                            .unwrap_or(false)
+                })
+                .count();
+            if fitted_turrets >= max_turrets {
+                return Err(format!(
+                    "Insufficient turret hardpoints on {}: {fitted_turrets} fitted, hull limit is {max_turrets}",
+                    hull_type.name
+                ));
+            }
+        }
+        if mod_type.effect_ids.contains(&40) {
+            let max_launchers = self
+                .ship
+                .get_attribute(attr_ids::LAUNCHER_SLOTS_LEFT, sde)
+                .max(0.0) as usize;
+            let fitted_launchers = self
+                .modules
+                .values()
+                .filter(|m| {
+                    m.item_id != module_item_id
+                        && sde
+                            .types
+                            .get(&m.type_id)
+                            .map(|t| t.effect_ids.contains(&40))
+                            .unwrap_or(false)
+                })
+                .count();
+            if fitted_launchers >= max_launchers {
+                return Err(format!(
+                    "Insufficient launcher hardpoints on {}: {fitted_launchers} fitted, hull limit is {max_launchers}",
+                    hull_type.name
+                ));
+            }
+        }
+
+        // Validate hull group/type restrictions (canFitShipGroup01..03, canFitShipType1..2)
+        let allowed_groups: Vec<u32> = [
+            attr_ids::CAN_FIT_SHIP_GROUP_01,
+            attr_ids::CAN_FIT_SHIP_GROUP_02,
+            attr_ids::CAN_FIT_SHIP_GROUP_03,
+        ]
+        .into_iter()
+        .filter_map(|aid| mod_type.default_attributes.get(&aid).copied())
+        .filter(|&v| v > 0.0)
+        .map(|v| v as u32)
+        .collect();
+        let allowed_types: Vec<TypeId> = [
+            attr_ids::CAN_FIT_SHIP_TYPE_1,
+            attr_ids::CAN_FIT_SHIP_TYPE_2,
+        ]
+        .into_iter()
+        .filter_map(|aid| mod_type.default_attributes.get(&aid).copied())
+        .filter(|&v| v > 0.0)
+        .map(|v| v as TypeId)
+        .collect();
+        if (!allowed_groups.is_empty() || !allowed_types.is_empty())
+            && !allowed_groups.contains(&hull_type.group_id)
+            && !allowed_types.contains(&self.ship.type_id)
+        {
+            return Err(format!(
+                "Module {} (type {}) cannot be fitted to hull {} (type {}, group {}): restricted to groups {:?} or types {:?}",
+                mod_type.name,
+                module_type_id,
+                hull_type.name,
+                self.ship.type_id,
+                hull_type.group_id,
+                allowed_groups,
+                allowed_types
+            ));
+        }
+
+        // Validate rigSize (1547) on rigs against hull rigSize
+        let hull_rig_size = self.ship.get_attribute(attr_ids::RIG_SIZE, sde).max(0.0) as u32;
+        if mod_type.effect_ids.contains(&2663)
+            || mod_type.default_attributes.contains_key(&attr_ids::RIG_SIZE)
+        {
+            let mod_rig_size = mod_type
+                .default_attributes
+                .get(&attr_ids::RIG_SIZE)
+                .copied()
+                .unwrap_or(0.0) as u32;
+            if mod_rig_size == 0 || mod_rig_size != hull_rig_size {
+                return Err(format!(
+                    "Rig size mismatch for {}: module rigSize {mod_rig_size} != hull rigSize {hull_rig_size} on {}",
+                    mod_type.name, hull_type.name
+                ));
+            }
+        }
+
+        // Validate required character skills (requiredSkill1..3 and requiredSkill1..3Level)
+        for (skill_attr, level_attr) in [
+            (attr_ids::REQUIRED_SKILL_1, attr_ids::REQUIRED_SKILL_1_LEVEL),
+            (attr_ids::REQUIRED_SKILL_2, attr_ids::REQUIRED_SKILL_2_LEVEL),
+            (attr_ids::REQUIRED_SKILL_3, attr_ids::REQUIRED_SKILL_3_LEVEL),
+        ] {
+            if let Some(&req_skill_f) = mod_type.default_attributes.get(&skill_attr) {
+                let req_skill_id = req_skill_f as TypeId;
+                if req_skill_id > 0 {
+                    let req_level = mod_type
+                        .default_attributes
+                        .get(&level_attr)
+                        .copied()
+                        .unwrap_or(1.0)
+                        .max(1.0) as u8;
+                    let trained_level = self
+                        .character_skills
+                        .get(&req_skill_id)
+                        .copied()
+                        .unwrap_or(0);
+                    if trained_level < req_level {
+                        return Err(format!(
+                            "Missing required skill {req_skill_id} level {req_level} (trained: {trained_level}) for module {} (type {})",
+                            mod_type.name, module_type_id
+                        ));
+                    }
+                }
+            }
+        }
 
         // Prevent duplicate online modifiers if already fitted
         if self.modules.contains_key(&module_item_id) {
@@ -854,33 +1153,68 @@ impl ShipFittingEngine {
 
         if let Some(mod_type) = sde.types.get(&mod_type_id) {
             if mod_type.group_id == 46 {
-                // Propulsion module (Afterburner / MWD): adds massAddition (796) and speedFactor (20) bonus
-                let speed_factor = mod_type
+                // Propulsion module (Afterburner / MWD): execute DogmaExpressionNode VM for effect 67 (moduleBonusAfterburner)
+                let mod_state = DogmaItemState::from_sde(module_item_id, mod_type_id, sde);
+                let overload_mult = if overload { 1.5 } else { 1.0 };
+                let mass_attr_id = if mod_type
                     .default_attributes
-                    .get(&attr_ids::SPEED_FACTOR)
-                    .copied()
-                    .unwrap_or(100.0)
-                    * if overload { 1.5 } else { 1.0 };
-                let mass_add = mod_type
-                    .default_attributes
-                    .get(&attr_ids::MASS_ADDITION)
-                    .or_else(|| mod_type.default_attributes.get(&attr_ids::MASS))
-                    .copied()
-                    .unwrap_or(500_000.0);
-                self.ship.add_modifier(AttributeModifier {
-                    source_item_id: module_item_id,
-                    target_attribute_id: attr_ids::MASS,
-                    operator: ModifierOperator::ModAdd,
-                    value: mass_add,
-                    stacking_penalized: false,
-                });
-                self.ship.add_modifier(AttributeModifier {
-                    source_item_id: module_item_id,
-                    target_attribute_id: attr_ids::MAX_VELOCITY,
-                    operator: ModifierOperator::PostPercent,
-                    value: speed_factor,
-                    stacking_penalized: true,
-                });
+                    .contains_key(&attr_ids::MASS_ADDITION)
+                {
+                    attr_ids::MASS_ADDITION
+                } else {
+                    attr_ids::MASS
+                };
+                let expr = DogmaExpressionNode {
+                    opcode: DogmaVmOpcode::Combine,
+                    value_f64: None,
+                    attribute_id: None,
+                    operator: None,
+                    arg1: Some(Box::new(DogmaExpressionNode {
+                        opcode: DogmaVmOpcode::AddItmMod,
+                        value_f64: None,
+                        attribute_id: Some(attr_ids::MASS),
+                        operator: Some(ModifierOperator::ModAdd),
+                        arg1: None,
+                        arg2: Some(Box::new(DogmaExpressionNode {
+                            opcode: DogmaVmOpcode::GetAttr,
+                            value_f64: None,
+                            attribute_id: Some(mass_attr_id),
+                            operator: None,
+                            arg1: None,
+                            arg2: None,
+                        })),
+                    })),
+                    arg2: Some(Box::new(DogmaExpressionNode {
+                        opcode: DogmaVmOpcode::AddItmMod,
+                        value_f64: None,
+                        attribute_id: Some(attr_ids::MAX_VELOCITY),
+                        operator: Some(ModifierOperator::PostPercent),
+                        arg1: None,
+                        arg2: Some(Box::new(DogmaExpressionNode {
+                            opcode: DogmaVmOpcode::Mul,
+                            value_f64: None,
+                            attribute_id: None,
+                            operator: None,
+                            arg1: Some(Box::new(DogmaExpressionNode {
+                                opcode: DogmaVmOpcode::GetAttr,
+                                value_f64: None,
+                                attribute_id: Some(attr_ids::SPEED_FACTOR),
+                                operator: None,
+                                arg1: None,
+                                arg2: None,
+                            })),
+                            arg2: Some(Box::new(DogmaExpressionNode {
+                                opcode: DogmaVmOpcode::DefFloat,
+                                value_f64: Some(overload_mult),
+                                attribute_id: None,
+                                operator: None,
+                                arg1: None,
+                                arg2: None,
+                            })),
+                        })),
+                    })),
+                };
+                expr.execute_on_target(module_item_id, &mod_state, &mut self.ship, sde);
             }
         }
         Ok(())
@@ -1063,6 +1397,20 @@ mod tests {
     fn test_ship_fitting_thermodynamics_boosters_and_abyssal_roll() {
         let sde = SdeRegistry::with_canonical_seed();
         let mut fit = ShipFittingEngine::from_sde(1001, 587, &sde);
+
+        // Fitting without trained skills must fail
+        assert!(fit.fit_and_online_module(5001, 438, 19, &sde).is_err());
+
+        fit.set_character_skills(HashMap::from([
+            (3449, 4), // Navigation IV
+            (3452, 4), // Acceleration Control IV
+            (3300, 5), // Gunnery V
+            (3302, 5), // Small Projectile Turret V
+            (33094, 5), // Medium Precursor Weapon V
+        ]));
+
+        // Heavy Entropic Disintegrator II (47936) is restricted to Triglavian cruisers/HACs and must be rejected on Rifter (587)
+        assert!(fit.fit_and_online_module(5099, 47936, 27, &sde).is_err());
 
         // Fit 1MN Afterburner II (type 438) and Overdrive Injector II (type 1248)
         fit.fit_and_online_module(5001, 438, 19, &sde).unwrap();

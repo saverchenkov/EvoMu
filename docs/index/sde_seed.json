@@ -2,23 +2,53 @@
   "ancestries": [
     {
       "ancestry_id": 1,
-      "bloodline_id": 1,
-      "name": "Merchandisers"
+      "bloodline_id": 5,
+      "name": "Liberal Holders"
     },
     {
       "ancestry_id": 2,
-      "bloodline_id": 1,
-      "name": "Scientists"
+      "bloodline_id": 5,
+      "name": "Wealthy Commoners"
     },
     {
       "ancestry_id": 3,
-      "bloodline_id": 1,
-      "name": "Tube Child"
+      "bloodline_id": 5,
+      "name": "Religious Reclaimers"
     },
     {
       "ancestry_id": 4,
+      "bloodline_id": 6,
+      "name": "Free Merchants"
+    },
+    {
+      "ancestry_id": 5,
+      "bloodline_id": 6,
+      "name": "Border Runners"
+    },
+    {
+      "ancestry_id": 6,
+      "bloodline_id": 6,
+      "name": "Navy Veterans"
+    },
+    {
+      "ancestry_id": 7,
       "bloodline_id": 2,
       "name": "Entrepreneurs"
+    },
+    {
+      "ancestry_id": 8,
+      "bloodline_id": 2,
+      "name": "Mercs"
+    },
+    {
+      "ancestry_id": 9,
+      "bloodline_id": 2,
+      "name": "Dissenters"
+    },
+    {
+      "ancestry_id": 10,
+      "bloodline_id": 1,
+      "name": "Merchandisers"
     },
     {
       "ancestry_id": 11,
@@ -26,39 +56,129 @@
       "name": "Scientists"
     },
     {
+      "ancestry_id": 12,
+      "bloodline_id": 1,
+      "name": "Tube Child"
+    },
+    {
       "ancestry_id": 13,
-      "bloodline_id": 3,
-      "name": "Tinkers"
-    },
-    {
-      "ancestry_id": 14,
-      "bloodline_id": 3,
-      "name": "Traders"
-    },
-    {
-      "ancestry_id": 15,
-      "bloodline_id": 4,
-      "name": "Workers"
-    },
-    {
-      "ancestry_id": 25,
-      "bloodline_id": 5,
-      "name": "Liberal Holders"
-    },
-    {
-      "ancestry_id": 26,
-      "bloodline_id": 5,
-      "name": "Wealthy Commoners"
-    },
-    {
-      "ancestry_id": 31,
       "bloodline_id": 7,
       "name": "Activists"
     },
     {
-      "ancestry_id": 32,
+      "ancestry_id": 14,
+      "bloodline_id": 7,
+      "name": "Miners"
+    },
+    {
+      "ancestry_id": 15,
       "bloodline_id": 7,
       "name": "Immigrants"
+    },
+    {
+      "ancestry_id": 16,
+      "bloodline_id": 8,
+      "name": "Artists"
+    },
+    {
+      "ancestry_id": 17,
+      "bloodline_id": 8,
+      "name": "Diplomats"
+    },
+    {
+      "ancestry_id": 18,
+      "bloodline_id": 8,
+      "name": "Reborn"
+    },
+    {
+      "ancestry_id": 19,
+      "bloodline_id": 3,
+      "name": "Tinkerers"
+    },
+    {
+      "ancestry_id": 20,
+      "bloodline_id": 3,
+      "name": "Traders"
+    },
+    {
+      "ancestry_id": 21,
+      "bloodline_id": 3,
+      "name": "Rebels"
+    },
+    {
+      "ancestry_id": 22,
+      "bloodline_id": 4,
+      "name": "Workers"
+    },
+    {
+      "ancestry_id": 23,
+      "bloodline_id": 4,
+      "name": "Tribal Traditionalists"
+    },
+    {
+      "ancestry_id": 24,
+      "bloodline_id": 4,
+      "name": "Slave Child"
+    },
+    {
+      "ancestry_id": 31,
+      "bloodline_id": 11,
+      "name": "Inventors"
+    },
+    {
+      "ancestry_id": 32,
+      "bloodline_id": 11,
+      "name": "Monks"
+    },
+    {
+      "ancestry_id": 33,
+      "bloodline_id": 11,
+      "name": "Stargazers"
+    },
+    {
+      "ancestry_id": 34,
+      "bloodline_id": 12,
+      "name": "Sang Do Caste"
+    },
+    {
+      "ancestry_id": 35,
+      "bloodline_id": 12,
+      "name": "Saan Go Caste"
+    },
+    {
+      "ancestry_id": 36,
+      "bloodline_id": 12,
+      "name": "Jing Ko Caste"
+    },
+    {
+      "ancestry_id": 37,
+      "bloodline_id": 13,
+      "name": "Cyber Knights"
+    },
+    {
+      "ancestry_id": 38,
+      "bloodline_id": 13,
+      "name": "Unionists"
+    },
+    {
+      "ancestry_id": 39,
+      "bloodline_id": 13,
+      "name": "Zealots"
+    },
+    {
+      "ancestry_id": 40,
+      "bloodline_id": 14,
+      "name": "Drifters"
+    },
+    {
+      "ancestry_id": 41,
+      "bloodline_id": 14,
+      "name": "Mystics"
+    },
+    {
+      "ancestry_id": 42,
+      "bloodline_id": 14,
+      "name": "Retailers"
     }
   ],
   "attributes": [
@@ -455,6 +575,13 @@
       "stackable": true
     },
     {
+      "attribute_id": 481,
+      "default_value": 0.0,
+      "high_is_good": true,
+      "name": "entityKillBounty",
+      "stackable": true
+    },
+    {
       "attribute_id": 482,
       "default_value": 0.0,
       "high_is_good": true,
@@ -536,6 +663,181 @@
       "default_value": 0.0,
       "high_is_good": true,
       "name": "droneBandwidth",
+      "stackable": true
+    },
+    {
+      "attribute_id": 128,
+      "default_value": 0.0,
+      "high_is_good": true,
+      "name": "chargeSize",
+      "stackable": true
+    },
+    {
+      "attribute_id": 137,
+      "default_value": 0.0,
+      "high_is_good": true,
+      "name": "launcherGroup",
+      "stackable": true
+    },
+    {
+      "attribute_id": 182,
+      "default_value": 0.0,
+      "high_is_good": true,
+      "name": "requiredSkill1",
+      "stackable": true
+    },
+    {
+      "attribute_id": 183,
+      "default_value": 0.0,
+      "high_is_good": true,
+      "name": "requiredSkill2",
+      "stackable": true
+    },
+    {
+      "attribute_id": 184,
+      "default_value": 0.0,
+      "high_is_good": true,
+      "name": "requiredSkill3",
+      "stackable": true
+    },
+    {
+      "attribute_id": 277,
+      "default_value": 0.0,
+      "high_is_good": true,
+      "name": "requiredSkill1Level",
+      "stackable": true
+    },
+    {
+      "attribute_id": 278,
+      "default_value": 0.0,
+      "high_is_good": true,
+      "name": "requiredSkill2Level",
+      "stackable": true
+    },
+    {
+      "attribute_id": 279,
+      "default_value": 0.0,
+      "high_is_good": true,
+      "name": "requiredSkill3Level",
+      "stackable": true
+    },
+    {
+      "attribute_id": 281,
+      "default_value": 0.0,
+      "high_is_good": true,
+      "name": "explosionDelay",
+      "stackable": true
+    },
+    {
+      "attribute_id": 604,
+      "default_value": 0.0,
+      "high_is_good": true,
+      "name": "chargeGroup1",
+      "stackable": true
+    },
+    {
+      "attribute_id": 653,
+      "default_value": 0.0,
+      "high_is_good": true,
+      "name": "aoeVelocity",
+      "stackable": true
+    },
+    {
+      "attribute_id": 654,
+      "default_value": 0.0,
+      "high_is_good": false,
+      "name": "aoeCloudSize",
+      "stackable": true
+    },
+    {
+      "attribute_id": 1298,
+      "default_value": 0.0,
+      "high_is_good": true,
+      "name": "canFitShipGroup01",
+      "stackable": true
+    },
+    {
+      "attribute_id": 1299,
+      "default_value": 0.0,
+      "high_is_good": true,
+      "name": "canFitShipGroup02",
+      "stackable": true
+    },
+    {
+      "attribute_id": 1300,
+      "default_value": 0.0,
+      "high_is_good": true,
+      "name": "canFitShipGroup03",
+      "stackable": true
+    },
+    {
+      "attribute_id": 1302,
+      "default_value": 0.0,
+      "high_is_good": true,
+      "name": "canFitShipType1",
+      "stackable": true
+    },
+    {
+      "attribute_id": 1303,
+      "default_value": 0.0,
+      "high_is_good": true,
+      "name": "canFitShipType2",
+      "stackable": true
+    },
+    {
+      "attribute_id": 1353,
+      "default_value": 1.0,
+      "high_is_good": false,
+      "name": "aoeDamageReductionFactor",
+      "stackable": true
+    },
+    {
+      "attribute_id": 1547,
+      "default_value": 0.0,
+      "high_is_good": true,
+      "name": "rigSize",
+      "stackable": true
+    },
+    {
+      "attribute_id": 866,
+      "default_value": 4247.0,
+      "high_is_good": true,
+      "name": "jumpDriveConsumptionType",
+      "stackable": true
+    },
+    {
+      "attribute_id": 867,
+      "default_value": 0.0,
+      "high_is_good": true,
+      "name": "jumpDriveRange",
+      "stackable": true
+    },
+    {
+      "attribute_id": 868,
+      "default_value": 50.0,
+      "high_is_good": false,
+      "name": "jumpDriveConsumptionAmount",
+      "stackable": true
+    },
+    {
+      "attribute_id": 2055,
+      "default_value": 0.0,
+      "high_is_good": true,
+      "name": "fighterCapacity",
+      "stackable": true
+    },
+    {
+      "attribute_id": 2215,
+      "default_value": 0.0,
+      "high_is_good": true,
+      "name": "fighterSquadronMaxSize",
+      "stackable": true
+    },
+    {
+      "attribute_id": 2216,
+      "default_value": 0.0,
+      "high_is_good": true,
+      "name": "fighterTubes",
       "stackable": true
     }
   ],
@@ -642,6 +944,31 @@
       "product_type_id": 587,
       "research_me_time_sec": 2100,
       "research_te_time_sec": 2100
+    },
+    {
+      "blueprint_type_id": 11372,
+      "copy_time_sec": 9600,
+      "invention_base_probability": 0.0,
+      "invention_time_sec": 0,
+      "manufacturing_time_sec": 12000,
+      "materials": [
+        {
+          "quantity": 1,
+          "type_id": 587
+        },
+        {
+          "quantity": 12000,
+          "type_id": 34
+        },
+        {
+          "quantity": 400,
+          "type_id": 38
+        }
+      ],
+      "product_quantity": 1,
+      "product_type_id": 11371,
+      "research_me_time_sec": 4200,
+      "research_te_time_sec": 4200
     }
   ],
   "career_goals": [
@@ -735,7 +1062,7 @@
           "room_id": 1,
           "spawn_groups": [
             {
-              "bounty_isk": 15000,
+              "bounty_isk": 100000,
               "count": 3,
               "npc_type_id": 11001
             }
@@ -746,7 +1073,7 @@
           "room_id": 2,
           "spawn_groups": [
             {
-              "bounty_isk": 20000,
+              "bounty_isk": 100000,
               "count": 4,
               "npc_type_id": 11001
             }
@@ -894,6 +1221,30 @@
       "name": "rigSlot"
     },
     {
+      "effect_category": 0,
+      "effect_id": 40,
+      "is_assistance": false,
+      "is_offensive": false,
+      "modifiers": [],
+      "name": "launcherFitted"
+    },
+    {
+      "effect_category": 0,
+      "effect_id": 42,
+      "is_assistance": false,
+      "is_offensive": false,
+      "modifiers": [],
+      "name": "turretFitted"
+    },
+    {
+      "effect_category": 0,
+      "effect_id": 3772,
+      "is_assistance": false,
+      "is_offensive": false,
+      "modifiers": [],
+      "name": "subSystem"
+    },
+    {
       "effect_category": 1,
       "effect_id": 4,
       "is_assistance": false,
@@ -1028,22 +1379,6 @@
       "is_offensive": false,
       "modifiers": [],
       "name": "empWave"
-    },
-    {
-      "effect_category": 0,
-      "effect_id": 40,
-      "is_assistance": false,
-      "is_offensive": false,
-      "modifiers": [],
-      "name": "launcherFitted"
-    },
-    {
-      "effect_category": 0,
-      "effect_id": 42,
-      "is_assistance": false,
-      "is_offensive": false,
-      "modifiers": [],
-      "name": "turretFitted"
     },
     {
       "effect_category": 2,
@@ -2894,14 +3229,25 @@
       "to_solar_system_id": 30000142
     },
     {
-      "destination_stargate_id": 50001248,
-      "from_solar_system_id": 30000144,
+      "destination_stargate_id": 50001252,
+      "from_solar_system_id": 30000142,
       "position": [
-        84000000000.0,
-        12000000000.0,
-        -139000000000.0
+        -125400000000.0,
+        14200000000.0,
+        310800000000.0
       ],
       "stargate_id": 50001249,
+      "to_solar_system_id": 30000141
+    },
+    {
+      "destination_stargate_id": 50001249,
+      "from_solar_system_id": 30000141,
+      "position": [
+        64000000000.0,
+        -14000000000.0,
+        179000000000.0
+      ],
+      "stargate_id": 50001252,
       "to_solar_system_id": 30000142
     },
     {
@@ -2945,195 +3291,195 @@
       "agent_id": 3018924,
       "corporation_id": 1000035,
       "dungeon_id": 5001,
-      "isk_reward": 150000,
+      "isk_reward": 160000,
       "level": 1,
-      "lp_reward": 180,
+      "lp_reward": 192,
       "mission_id": 1002,
       "mission_type": "Encounter",
-      "standing_gain_pct": 1.25,
-      "time_bonus_isk": 120000,
+      "standing_gain_pct": 1.3,
+      "time_bonus_isk": 125000,
       "title": "Worlds Collide"
     },
     {
       "agent_id": 3018924,
       "corporation_id": 1000035,
       "dungeon_id": 5001,
-      "isk_reward": 150000,
+      "isk_reward": 170000,
       "level": 1,
-      "lp_reward": 180,
+      "lp_reward": 204,
       "mission_id": 1003,
       "mission_type": "Encounter",
-      "standing_gain_pct": 1.25,
-      "time_bonus_isk": 120000,
+      "standing_gain_pct": 1.35,
+      "time_bonus_isk": 130000,
       "title": "The Blockade"
     },
     {
       "agent_id": 3018924,
       "corporation_id": 1000035,
       "dungeon_id": 5001,
-      "isk_reward": 150000,
+      "isk_reward": 180000,
       "level": 1,
-      "lp_reward": 180,
+      "lp_reward": 216,
       "mission_id": 1004,
       "mission_type": "Encounter",
-      "standing_gain_pct": 1.25,
-      "time_bonus_isk": 120000,
+      "standing_gain_pct": 1.4,
+      "time_bonus_isk": 135000,
       "title": "Damsel in Distress"
     },
     {
       "agent_id": 3018924,
       "corporation_id": 1000035,
       "dungeon_id": 5001,
-      "isk_reward": 150000,
+      "isk_reward": 190000,
       "level": 1,
-      "lp_reward": 180,
+      "lp_reward": 228,
       "mission_id": 1005,
       "mission_type": "Encounter",
-      "standing_gain_pct": 1.25,
-      "time_bonus_isk": 120000,
+      "standing_gain_pct": 1.45,
+      "time_bonus_isk": 140000,
       "title": "Gone Berserk"
     },
     {
       "agent_id": 3018924,
       "corporation_id": 1000035,
       "dungeon_id": 5001,
-      "isk_reward": 150000,
+      "isk_reward": 200000,
       "level": 1,
-      "lp_reward": 180,
+      "lp_reward": 240,
       "mission_id": 1006,
       "mission_type": "Encounter",
-      "standing_gain_pct": 1.25,
-      "time_bonus_isk": 120000,
+      "standing_gain_pct": 1.5,
+      "time_bonus_isk": 145000,
       "title": "Recon (1 of 3)"
     },
     {
       "agent_id": 3018924,
       "corporation_id": 1000035,
       "dungeon_id": 5001,
-      "isk_reward": 150000,
-      "level": 1,
-      "lp_reward": 180,
+      "isk_reward": 210000,
+      "level": 2,
+      "lp_reward": 252,
       "mission_id": 1007,
       "mission_type": "Encounter",
-      "standing_gain_pct": 1.25,
-      "time_bonus_isk": 120000,
+      "standing_gain_pct": 1.55,
+      "time_bonus_isk": 150000,
       "title": "Recon (2 of 3)"
     },
     {
       "agent_id": 3018924,
       "corporation_id": 1000035,
       "dungeon_id": 5001,
-      "isk_reward": 150000,
-      "level": 1,
-      "lp_reward": 180,
+      "isk_reward": 220000,
+      "level": 2,
+      "lp_reward": 264,
       "mission_id": 1008,
       "mission_type": "Encounter",
-      "standing_gain_pct": 1.25,
-      "time_bonus_isk": 120000,
+      "standing_gain_pct": 1.6,
+      "time_bonus_isk": 155000,
       "title": "Recon (3 of 3)"
     },
     {
       "agent_id": 3018924,
       "corporation_id": 1000035,
       "dungeon_id": 5001,
-      "isk_reward": 150000,
-      "level": 1,
-      "lp_reward": 180,
+      "isk_reward": 230000,
+      "level": 2,
+      "lp_reward": 276,
       "mission_id": 1009,
       "mission_type": "Encounter",
-      "standing_gain_pct": 1.25,
-      "time_bonus_isk": 120000,
+      "standing_gain_pct": 1.65,
+      "time_bonus_isk": 160000,
       "title": "Vengeance"
     },
     {
       "agent_id": 3018924,
       "corporation_id": 1000035,
       "dungeon_id": 5001,
-      "isk_reward": 150000,
-      "level": 1,
-      "lp_reward": 180,
+      "isk_reward": 240000,
+      "level": 2,
+      "lp_reward": 288,
       "mission_id": 1010,
       "mission_type": "Encounter",
-      "standing_gain_pct": 1.25,
-      "time_bonus_isk": 120000,
+      "standing_gain_pct": 1.7,
+      "time_bonus_isk": 165000,
       "title": "Silence the Informant"
     },
     {
       "agent_id": 3018924,
       "corporation_id": 1000035,
       "dungeon_id": 5001,
-      "isk_reward": 150000,
-      "level": 1,
-      "lp_reward": 180,
+      "isk_reward": 250000,
+      "level": 2,
+      "lp_reward": 300,
       "mission_id": 1011,
       "mission_type": "Encounter",
-      "standing_gain_pct": 1.25,
-      "time_bonus_isk": 120000,
+      "standing_gain_pct": 1.75,
+      "time_bonus_isk": 170000,
       "title": "Unauthorized Military Presence"
     },
     {
       "agent_id": 3018924,
       "corporation_id": 1000035,
       "dungeon_id": 5001,
-      "isk_reward": 150000,
-      "level": 1,
-      "lp_reward": 180,
+      "isk_reward": 260000,
+      "level": 2,
+      "lp_reward": 312,
       "mission_id": 1012,
       "mission_type": "Encounter",
-      "standing_gain_pct": 1.25,
-      "time_bonus_isk": 120000,
+      "standing_gain_pct": 1.8,
+      "time_bonus_isk": 175000,
       "title": "Pirate Invasion"
     },
     {
       "agent_id": 3018924,
       "corporation_id": 1000035,
       "dungeon_id": 5001,
-      "isk_reward": 150000,
-      "level": 1,
-      "lp_reward": 180,
+      "isk_reward": 270000,
+      "level": 3,
+      "lp_reward": 324,
       "mission_id": 1013,
       "mission_type": "Encounter",
-      "standing_gain_pct": 1.25,
-      "time_bonus_isk": 120000,
+      "standing_gain_pct": 1.85,
+      "time_bonus_isk": 180000,
       "title": "Attack of the Drones"
     },
     {
       "agent_id": 3018924,
       "corporation_id": 1000035,
       "dungeon_id": 5001,
-      "isk_reward": 150000,
-      "level": 1,
-      "lp_reward": 180,
+      "isk_reward": 280000,
+      "level": 3,
+      "lp_reward": 336,
       "mission_id": 1014,
       "mission_type": "Encounter",
-      "standing_gain_pct": 1.25,
-      "time_bonus_isk": 120000,
+      "standing_gain_pct": 1.9,
+      "time_bonus_isk": 185000,
       "title": "Smuggler Interception"
     },
     {
       "agent_id": 3018924,
       "corporation_id": 1000035,
       "dungeon_id": 5001,
-      "isk_reward": 150000,
-      "level": 1,
-      "lp_reward": 180,
+      "isk_reward": 290000,
+      "level": 3,
+      "lp_reward": 348,
       "mission_id": 1015,
       "mission_type": "Encounter",
-      "standing_gain_pct": 1.25,
-      "time_bonus_isk": 120000,
+      "standing_gain_pct": 1.95,
+      "time_bonus_isk": 190000,
       "title": "Duo of Death"
     },
     {
       "agent_id": 3018924,
       "corporation_id": 1000035,
       "dungeon_id": 5001,
-      "isk_reward": 150000,
-      "level": 1,
-      "lp_reward": 180,
+      "isk_reward": 300000,
+      "level": 3,
+      "lp_reward": 360,
       "mission_id": 1016,
       "mission_type": "Encounter",
-      "standing_gain_pct": 1.25,
-      "time_bonus_isk": 120000,
+      "standing_gain_pct": 2.0,
+      "time_bonus_isk": 195000,
       "title": "The Guristas Spies"
     },
     {
@@ -3209,113 +3555,130 @@
   "schema_version": "V24.01-EvoMu-M1",
   "schools": [
     {
-      "corporation_id": 1000165,
-      "name": "Hedion University",
-      "race_id": 4,
-      "school_id": 11,
-      "solar_system_id": 30002187,
-      "station_id": 60008494
-    },
-    {
       "corporation_id": 1000166,
       "name": "Imperial Academy",
       "race_id": 4,
-      "school_id": 12,
-      "solar_system_id": 30002187,
-      "station_id": 60008494
+      "school_id": 11,
+      "solar_system_id": 30003489,
+      "station_id": 60014629
     },
     {
-      "corporation_id": 1000167,
+      "corporation_id": 1000165,
+      "name": "Hedion University",
+      "race_id": 4,
+      "school_id": 12,
+      "solar_system_id": 30005042,
+      "station_id": 60014599
+    },
+    {
+      "corporation_id": 1000077,
       "name": "Royal Amarr Institute",
       "race_id": 4,
       "school_id": 13,
-      "solar_system_id": 30002187,
-      "station_id": 60008494
-    },
-    {
-      "corporation_id": 1000115,
-      "name": "University of Caille",
-      "race_id": 8,
-      "school_id": 14,
-      "solar_system_id": 30002659,
-      "station_id": 60011866
-    },
-    {
-      "corporation_id": 1000168,
-      "name": "Federal Navy Academy",
-      "race_id": 8,
-      "school_id": 15,
-      "solar_system_id": 30002659,
-      "station_id": 60011866
-    },
-    {
-      "corporation_id": 1000169,
-      "name": "Center for Advanced Studies",
-      "race_id": 8,
-      "school_id": 16,
-      "solar_system_id": 30002659,
-      "station_id": 60011866
-    },
-    {
-      "corporation_id": 1000044,
-      "name": "Science and Trade Institute",
-      "race_id": 1,
-      "school_id": 17,
-      "solar_system_id": 30000142,
-      "station_id": 60003760
-    },
-    {
-      "corporation_id": 1000045,
-      "name": "State War Academy",
-      "race_id": 1,
-      "school_id": 18,
-      "solar_system_id": 30000142,
-      "station_id": 60003760
-    },
-    {
-      "corporation_id": 1000046,
-      "name": "School of Applied Knowledge",
-      "race_id": 1,
-      "school_id": 19,
-      "solar_system_id": 30000142,
-      "station_id": 60003760
+      "solar_system_id": 30001672,
+      "station_id": 60007702
     },
     {
       "corporation_id": 1000170,
       "name": "Republic Military School",
       "race_id": 2,
-      "school_id": 20,
-      "solar_system_id": 30002510,
-      "station_id": 60004588
+      "school_id": 14,
+      "solar_system_id": 30002547,
+      "station_id": 60014749
     },
     {
       "corporation_id": 1000171,
       "name": "Republic University",
       "race_id": 2,
-      "school_id": 21,
-      "solar_system_id": 30002510,
-      "station_id": 60004588
+      "school_id": 15,
+      "solar_system_id": 30002505,
+      "station_id": 60014779
     },
     {
       "corporation_id": 1000172,
       "name": "Pator Tech School",
       "race_id": 2,
+      "school_id": 16,
+      "solar_system_id": 30003410,
+      "station_id": 60014809
+    },
+    {
+      "corporation_id": 1000167,
+      "name": "State War Academy",
+      "race_id": 1,
+      "school_id": 17,
+      "solar_system_id": 30000141,
+      "station_id": 60014659
+    },
+    {
+      "corporation_id": 1000045,
+      "name": "Science and Trade Institute",
+      "race_id": 1,
+      "school_id": 18,
+      "solar_system_id": 30001392,
+      "station_id": 60004450
+    },
+    {
+      "corporation_id": 1000044,
+      "name": "School of Applied Knowledge",
+      "race_id": 1,
+      "school_id": 19,
+      "solar_system_id": 30001407,
+      "station_id": 60004420
+    },
+    {
+      "corporation_id": 1000168,
+      "name": "Federal Navy Academy",
+      "race_id": 8,
+      "school_id": 20,
+      "solar_system_id": 30004971,
+      "station_id": 60014689
+    },
+    {
+      "corporation_id": 1000115,
+      "name": "University of Caille",
+      "race_id": 8,
+      "school_id": 21,
+      "solar_system_id": 30002715,
+      "station_id": 60011566
+    },
+    {
+      "corporation_id": 1000169,
+      "name": "Center for Advanced Studies",
+      "race_id": 8,
       "school_id": 22,
-      "solar_system_id": 30002510,
-      "station_id": 60004588
+      "solar_system_id": 30005305,
+      "station_id": 60014719
     }
   ],
   "solar_systems": [
     {
       "constellation_id": 20000020,
+      "galactic_pos_ly": [
+        -13.642,
+        6.422,
+        12.417
+      ],
       "name": "Jita",
-      "radius": 4389000000000.0,
+      "planet_ids": [
+        40009076,
+        40009077,
+        40009079,
+        40009082,
+        40009114,
+        40009131,
+        40009142,
+        40009151
+      ],
+      "radius": 3592000000000.0,
       "region_id": 10000002,
       "security_status": 0.9459,
       "solar_system_id": 30000142,
       "stations": [
         {
           "name": "Jita IV - Moon 4 - Caldari Navy Assembly Plant",
+          "owner_corporation_id": 1000035,
+          "owner_faction_id": 500001,
           "position": [
             -107303362560.0,
             -18744975360.0,
@@ -3328,7 +3691,390 @@
     },
     {
       "constellation_id": 20000020,
+      "galactic_pos_ly": [
+        -14.384,
+        7.13,
+        9.427
+      ],
+      "name": "Kisogo",
+      "planet_ids": [
+        40009050,
+        40009055,
+        40009060
+      ],
+      "radius": 1389000000000.0,
+      "region_id": 10000002,
+      "security_status": 1.0,
+      "solar_system_id": 30000141,
+      "stations": [
+        {
+          "name": "Kisogo VII - State War Academy",
+          "owner_corporation_id": 1000167,
+          "owner_faction_id": 500001,
+          "position": [
+            983458160640.0,
+            -119222476800.0,
+            -1157778677760.0
+          ],
+          "station_id": 60014659,
+          "station_type_id": 1529
+        }
+      ]
+    },
+    {
+      "constellation_id": 20000204,
+      "galactic_pos_ly": [
+        -15.379,
+        10.739,
+        14.548
+      ],
+      "name": "Amsen",
+      "planet_ids": [
+        40088101,
+        40088105
+      ],
+      "radius": 762400000000.0,
+      "region_id": 10000016,
+      "security_status": 1.0,
+      "solar_system_id": 30001392,
+      "stations": [
+        {
+          "name": "Amsen VI - Moon 1 - Science and Trade Institute School",
+          "owner_corporation_id": 1000045,
+          "owner_faction_id": 500001,
+          "position": [
+            273625620480.0,
+            -12937666560.0,
+            -50608005120.0
+          ],
+          "station_id": 60004450,
+          "station_type_id": 1529
+        }
+      ]
+    },
+    {
+      "constellation_id": 20000206,
+      "galactic_pos_ly": [
+        -18.372,
+        10.05,
+        12.937
+      ],
+      "name": "Todaki",
+      "planet_ids": [
+        40089010,
+        40089015
+      ],
+      "radius": 2228000000000.0,
+      "region_id": 10000016,
+      "security_status": 1.0,
+      "solar_system_id": 30001407,
+      "stations": [
+        {
+          "name": "Todaki VI - Moon 1 - School of Applied Knowledge",
+          "owner_corporation_id": 1000044,
+          "owner_faction_id": 500001,
+          "position": [
+            1337258188800.0,
+            62467399680.0,
+            -415036661760.0
+          ],
+          "station_id": 60004420,
+          "station_type_id": 1529
+        }
+      ]
+    },
+    {
+      "constellation_id": 20000247,
+      "galactic_pos_ly": [
+        -23.267,
+        7.165,
+        -13.959
+      ],
+      "name": "Emrayur",
+      "planet_ids": [
+        40106101,
+        40106105
+      ],
+      "radius": 1318000000000.0,
+      "region_id": 10000020,
+      "security_status": 1.0,
+      "solar_system_id": 30001672,
+      "stations": [
+        {
+          "name": "Emrayur III - Moon 1 - Royal Amarr Institute School",
+          "owner_corporation_id": 1000077,
+          "owner_faction_id": 500003,
+          "position": [
+            -99593379840.0,
+            16226181120.0,
+            -119367229440.0
+          ],
+          "station_id": 60007702,
+          "station_type_id": 1931
+        }
+      ]
+    },
+    {
+      "constellation_id": 20000367,
+      "galactic_pos_ly": [
+        -9.179,
+        3.964,
+        0.322
+      ],
+      "name": "Hulm",
+      "planet_ids": [
+        40159201,
+        40159205
+      ],
+      "radius": 781800000000.0,
+      "region_id": 10000030,
+      "security_status": 1.0,
+      "solar_system_id": 30002505,
+      "stations": [
+        {
+          "name": "Hulm VIII - Moon 2 - Republic University",
+          "owner_corporation_id": 1000171,
+          "owner_faction_id": 500002,
+          "position": [
+            422725263360.0,
+            33719377920.0,
+            -1301532303360.0
+          ],
+          "station_id": 60014779,
+          "station_type_id": 2500
+        }
+      ]
+    },
+    {
+      "constellation_id": 20000373,
+      "galactic_pos_ly": [
+        -9.021,
+        1.982,
+        4.802
+      ],
+      "name": "Ammold",
+      "planet_ids": [
+        40161801,
+        40161805
+      ],
+      "radius": 2559000000000.0,
+      "region_id": 10000030,
+      "security_status": 1.0,
+      "solar_system_id": 30002547,
+      "stations": [
+        {
+          "name": "Ammold V - Republic Military School",
+          "owner_corporation_id": 1000170,
+          "owner_faction_id": 500002,
+          "position": [
+            -26953850880.0,
+            1041408000.0,
+            -326680289280.0
+          ],
+          "station_id": 60014749,
+          "station_type_id": 2500
+        }
+      ]
+    },
+    {
+      "constellation_id": 20000397,
+      "galactic_pos_ly": [
+        -17.566,
+        4.701,
+        2.851
+      ],
+      "name": "Bourynes",
+      "planet_ids": [
+        40172501,
+        40172505
+      ],
+      "radius": 1003000000000.0,
+      "region_id": 10000032,
+      "security_status": 1.0,
+      "solar_system_id": 30002715,
+      "stations": [
+        {
+          "name": "Bourynes VII - Moon 2 - University of Caille",
+          "owner_corporation_id": 1000115,
+          "owner_faction_id": 500004,
+          "position": [
+            1064538808320.0,
+            175499304960.0,
+            -716995092480.0
+          ],
+          "station_id": 60011566,
+          "station_type_id": 57
+        }
+      ]
+    },
+    {
+      "constellation_id": 20000497,
+      "galactic_pos_ly": [
+        -6.405,
+        4.505,
+        3.415
+      ],
+      "name": "Ryddinjorn",
+      "planet_ids": [
+        40216201,
+        40216205
+      ],
+      "radius": 1333000000000.0,
+      "region_id": 10000042,
+      "security_status": 1.0,
+      "solar_system_id": 30003410,
+      "stations": [
+        {
+          "name": "Ryddinjorn VI - Moon 2 - Pator Tech School",
+          "owner_corporation_id": 1000172,
+          "owner_faction_id": 500002,
+          "position": [
+            444369346560.0,
+            1833984000.0,
+            1093726986240.0
+          ],
+          "station_id": 60014809,
+          "station_type_id": 2500
+        }
+      ]
+    },
+    {
+      "constellation_id": 20000509,
+      "galactic_pos_ly": [
+        -19.065,
+        6.343,
+        -5.792
+      ],
+      "name": "Chaven",
+      "planet_ids": [
+        40221101,
+        40221105
+      ],
+      "radius": 1738000000000.0,
+      "region_id": 10000043,
+      "security_status": 1.0,
+      "solar_system_id": 30003489,
+      "stations": [
+        {
+          "name": "Chaven VIII - Moon 1 - Imperial Academy",
+          "owner_corporation_id": 1000166,
+          "owner_faction_id": 500003,
+          "position": [
+            -2316436316160.0,
+            119356661760.0,
+            -926632304640.0
+          ],
+          "station_id": 60014629,
+          "station_type_id": 1931
+        }
+      ]
+    },
+    {
+      "constellation_id": 20000727,
+      "galactic_pos_ly": [
+        -22.479,
+        5.513,
+        3.015
+      ],
+      "name": "Duripant",
+      "planet_ids": [
+        40314201,
+        40314205
+      ],
+      "radius": 725300000000.0,
+      "region_id": 10000064,
+      "security_status": 1.0,
+      "solar_system_id": 30004971,
+      "stations": [
+        {
+          "name": "Duripant VII - Moon 6 - Federal Navy Academy",
+          "owner_corporation_id": 1000168,
+          "owner_faction_id": 500004,
+          "position": [
+            -373473239040.0,
+            42729922560.0,
+            -1415498342400.0
+          ],
+          "station_id": 60014689,
+          "station_type_id": 57
+        }
+      ]
+    },
+    {
+      "constellation_id": 20000737,
+      "galactic_pos_ly": [
+        -27.619,
+        5.357,
+        -11.098
+      ],
+      "name": "Sehmy",
+      "planet_ids": [
+        40318801,
+        40318805
+      ],
+      "radius": 1048000000000.0,
+      "region_id": 10000065,
+      "security_status": 1.0,
+      "solar_system_id": 30005042,
+      "stations": [
+        {
+          "name": "Sehmy VIII - Moon 2 - Hedion University",
+          "owner_corporation_id": 1000165,
+          "owner_faction_id": 500003,
+          "position": [
+            502645432320.0,
+            45862379520.0,
+            1989488025600.0
+          ],
+          "station_id": 60014599,
+          "station_type_id": 1931
+        }
+      ]
+    },
+    {
+      "constellation_id": 20000776,
+      "galactic_pos_ly": [
+        -27.342,
+        5.11,
+        3.704
+      ],
+      "name": "Cistuvaert",
+      "planet_ids": [
+        40335101,
+        40335105
+      ],
+      "radius": 3226000000000.0,
+      "region_id": 10000068,
+      "security_status": 1.0,
+      "solar_system_id": 30005305,
+      "stations": [
+        {
+          "name": "Cistuvaert V - Moon 12 - Center for Advanced Studies School",
+          "owner_corporation_id": 1000169,
+          "owner_faction_id": 500004,
+          "position": [
+            -740232929280.0,
+            68913438720.0,
+            -1058469765120.0
+          ],
+          "station_id": 60014719,
+          "station_type_id": 57
+        }
+      ]
+    },
+    {
+      "constellation_id": 20000020,
+      "galactic_pos_ly": [
+        -15.143,
+        6.862,
+        11.012
+      ],
       "name": "Perimeter",
+      "planet_ids": [
+        40009210,
+        40009215,
+        40009220
+      ],
       "radius": 3200000000000.0,
       "region_id": 10000002,
       "security_status": 0.9493,
@@ -3336,6 +4082,8 @@
       "stations": [
         {
           "name": "Perimeter II - Moon 1 - Caldari Constructions Warehouse",
+          "owner_corporation_id": 1000026,
+          "owner_faction_id": 500001,
           "position": [
             85000000000.0,
             12000000000.0,
@@ -3348,7 +4096,17 @@
     },
     {
       "constellation_id": 20000322,
+      "galactic_pos_ly": [
+        -21.642,
+        4.253,
+        -6.091
+      ],
       "name": "Amarr",
+      "planet_ids": [
+        40138801,
+        40138805,
+        40138810
+      ],
       "radius": 5100000000000.0,
       "region_id": 10000043,
       "security_status": 1.0,
@@ -3356,6 +4114,8 @@
       "stations": [
         {
           "name": "Amarr VIII (Oris) - Emperor Family Academy",
+          "owner_corporation_id": 1000084,
+          "owner_faction_id": 500003,
           "position": [
             -210000000000.0,
             42000000000.0,
@@ -3368,7 +4128,17 @@
     },
     {
       "constellation_id": 20000389,
+      "galactic_pos_ly": [
+        -19.831,
+        5.628,
+        2.927
+      ],
       "name": "Dodixie",
+      "planet_ids": [
+        40168901,
+        40168905,
+        40168910
+      ],
       "radius": 4000000000000.0,
       "region_id": 10000032,
       "security_status": 0.8736,
@@ -3376,6 +4146,8 @@
       "stations": [
         {
           "name": "Dodixie IX - Moon 20 - Federation Navy Assembly Plant",
+          "owner_corporation_id": 1000120,
+          "owner_faction_id": 500004,
           "position": [
             110000000000.0,
             -35000000000.0,
@@ -3388,7 +4160,17 @@
     },
     {
       "constellation_id": 20000368,
+      "galactic_pos_ly": [
+        -10.477,
+        4.263,
+        -0.303
+      ],
       "name": "Rens",
+      "planet_ids": [
+        40159501,
+        40159505,
+        40159510
+      ],
       "radius": 3800000000000.0,
       "region_id": 10000030,
       "security_status": 0.8981,
@@ -3396,6 +4178,8 @@
       "stations": [
         {
           "name": "Rens VI - Moon 8 - Brutor Tribe Treasury",
+          "owner_corporation_id": 1000049,
+          "owner_faction_id": 500002,
           "position": [
             -95000000000.0,
             15000000000.0,
@@ -3408,7 +4192,17 @@
     },
     {
       "constellation_id": 20000413,
+      "galactic_pos_ly": [
+        -20.473,
+        8.187,
+        11.911
+      ],
       "name": "Tama",
+      "planet_ids": [
+        40178401,
+        40178405,
+        40178410
+      ],
       "radius": 2900000000000.0,
       "region_id": 10000033,
       "security_status": 0.281,
@@ -3416,8 +4210,35 @@
       "stations": []
     },
     {
+      "constellation_id": 20000401,
+      "galactic_pos_ly": [
+        -13.535,
+        11.157,
+        16.175
+      ],
+      "name": "Horkkisen",
+      "planet_ids": [
+        40174101,
+        40174105
+      ],
+      "radius": 2500000000000.0,
+      "region_id": 10000033,
+      "security_status": 0.4384,
+      "solar_system_id": 30002741,
+      "stations": []
+    },
+    {
       "constellation_id": 20000426,
+      "galactic_pos_ly": [
+        -26.182,
+        7.646,
+        30.12
+      ],
       "name": "VFK-IV",
+      "planet_ids": [
+        40184101,
+        40184105
+      ],
       "radius": 4500000000000.0,
       "region_id": 10000035,
       "security_status": -0.45,
@@ -3426,7 +4247,16 @@
     },
     {
       "constellation_id": 21000001,
+      "galactic_pos_ly": [
+        0.0,
+        0.0,
+        0.0
+      ],
       "name": "J105934",
+      "planet_ids": [
+        40400001,
+        40400005
+      ],
       "radius": 3100000000000.0,
       "region_id": 11000001,
       "security_status": -1.0,
@@ -3435,7 +4265,13 @@
     },
     {
       "constellation_id": 22000001,
+      "galactic_pos_ly": [
+        0.0,
+        0.0,
+        0.0
+      ],
       "name": "Abyssal Deadspace",
+      "planet_ids": [],
       "radius": 1000000000.0,
       "region_id": 12000001,
       "security_status": -1.0,
@@ -3460,6 +4296,13 @@
       "docking",
       "quantumCore",
       "structureControl"
+    ],
+    "35840": [
+      "tether",
+      "reinforce",
+      "quantumCore",
+      "structureControl",
+      "cynoBeacon"
     ],
     "81140": [
       "skyhook",
@@ -3489,6 +4332,7 @@
         "12": 4.0,
         "13": 3.0,
         "14": 3.0,
+        "1547": 1.0,
         "192": 4.0,
         "209": 9.0,
         "263": 450.0,
@@ -3528,10 +4372,15 @@
       "capacity": 115.0,
       "category_id": 6,
       "default_attributes": {
+        "101": 2.0,
+        "102": 2.0,
         "11": 30.0,
+        "1132": 400.0,
+        "1137": 3.0,
         "12": 2.0,
         "13": 2.0,
         "14": 2.0,
+        "1547": 1.0,
         "263": 250.0,
         "265": 225.0,
         "37": 315.0,
@@ -3560,10 +4409,15 @@
       "capacity": 120.0,
       "category_id": 6,
       "default_attributes": {
+        "101": 2.0,
+        "102": 2.0,
         "11": 35.0,
+        "1132": 400.0,
+        "1137": 3.0,
         "12": 2.0,
         "13": 2.0,
         "14": 2.0,
+        "1547": 1.0,
         "263": 200.0,
         "265": 275.0,
         "37": 295.0,
@@ -3592,10 +4446,15 @@
       "capacity": 125.0,
       "category_id": 6,
       "default_attributes": {
+        "101": 2.0,
+        "102": 2.0,
         "11": 28.0,
+        "1132": 400.0,
+        "1137": 3.0,
         "12": 2.0,
         "13": 2.0,
         "14": 2.0,
+        "1547": 1.0,
         "263": 280.0,
         "265": 200.0,
         "37": 280.0,
@@ -3624,11 +4483,16 @@
       "capacity": 135.0,
       "category_id": 6,
       "default_attributes": {
+        "101": 2.0,
+        "102": 2.0,
         "11": 32.0,
+        "1132": 400.0,
+        "1137": 3.0,
         "12": 2.0,
         "1271": 10.0,
         "13": 2.0,
         "14": 2.0,
+        "1547": 1.0,
         "263": 225.0,
         "265": 240.0,
         "283": 10.0,
@@ -3658,10 +4522,15 @@
       "capacity": 135.0,
       "category_id": 6,
       "default_attributes": {
+        "101": 2.0,
+        "102": 4.0,
         "11": 60.0,
+        "1132": 400.0,
+        "1137": 3.0,
         "12": 5.0,
         "13": 2.0,
         "14": 4.0,
+        "1547": 1.0,
         "263": 350.0,
         "265": 650.0,
         "37": 325.0,
@@ -3690,10 +4559,15 @@
       "capacity": 145.0,
       "category_id": 6,
       "default_attributes": {
+        "101": 3.0,
+        "102": 3.0,
         "11": 43.0,
+        "1132": 400.0,
+        "1137": 3.0,
         "12": 3.0,
         "13": 4.0,
         "14": 3.0,
+        "1547": 1.0,
         "263": 650.0,
         "265": 350.0,
         "37": 310.0,
@@ -3722,11 +4596,16 @@
       "capacity": 140.0,
       "category_id": 6,
       "default_attributes": {
+        "101": 1.0,
+        "102": 3.0,
         "11": 48.0,
+        "1132": 400.0,
+        "1137": 3.0,
         "12": 4.0,
         "1271": 5.0,
         "13": 3.0,
         "14": 3.0,
+        "1547": 1.0,
         "263": 400.0,
         "265": 500.0,
         "283": 5.0,
@@ -3756,13 +4635,17 @@
       "capacity": 5000.0,
       "category_id": 6,
       "default_attributes": {
+        "101": 2.0,
         "102": 2.0,
         "105": -2.0,
         "11": 35.0,
+        "1132": 400.0,
+        "1137": 3.0,
         "12": 1.0,
         "1271": 10.0,
         "13": 3.0,
         "14": 3.0,
+        "1547": 1.0,
         "263": 550.0,
         "265": 350.0,
         "283": 10.0,
@@ -3789,20 +4672,32 @@
     },
     {
       "base_price": 210000000.0,
-      "capacity": 690.0,
+      "capacity": 830.0,
       "category_id": 6,
       "default_attributes": {
         "101": 6.0,
-        "11": 10500.0,
+        "102": 4.0,
+        "11": 11000.0,
+        "1132": 400.0,
+        "1137": 3.0,
         "12": 5.0,
         "1271": 50.0,
         "13": 7.0,
         "14": 7.0,
-        "263": 8500.0,
-        "265": 6000.0,
+        "1547": 3.0,
+        "263": 7700.0,
+        "265": 6380.0,
+        "267": 0.5,
+        "268": 0.9,
+        "269": 0.75,
+        "270": 0.55,
+        "271": 1.0,
+        "272": 0.5,
+        "273": 0.6,
+        "274": 0.8,
         "283": 75.0,
         "37": 115.0,
-        "38": 690.0,
+        "38": 830.0,
         "4": 99300000.0,
         "479": 2500000.0,
         "48": 750.0,
@@ -3812,7 +4707,7 @@
         "564": 115.0,
         "600": 3.0,
         "70": 0.125,
-        "9": 6600.0
+        "9": 7040.0
       },
       "group_id": 27,
       "mass": 99300000.0,
@@ -3820,13 +4715,63 @@
       "published": true,
       "radius": 320.0,
       "type_id": 638,
-      "volume": 486000.0
+      "volume": 470000.0
+    },
+    {
+      "base_price": 3500000000.0,
+      "capacity": 2500.0,
+      "category_id": 6,
+      "default_attributes": {
+        "101": 0.0,
+        "102": 0.0,
+        "11": 650000.0,
+        "1132": 400.0,
+        "1137": 3.0,
+        "12": 7.0,
+        "13": 4.0,
+        "14": 5.0,
+        "1547": 4.0,
+        "2055": 15000.0,
+        "2216": 3.0,
+        "263": 80000.0,
+        "265": 140000.0,
+        "37": 85.0,
+        "38": 2500.0,
+        "4": 1025000000.0,
+        "479": 5000000.0,
+        "48": 850.0,
+        "482": 65000.0,
+        "55": 2500000.0,
+        "552": 2950.0,
+        "564": 75.0,
+        "600": 1.5,
+        "70": 0.04,
+        "866": 4247.0,
+        "867": 7.0,
+        "868": 50.0,
+        "9": 95000.0
+      },
+      "group_id": 547,
+      "mass": 1025000000.0,
+      "name": "Archon",
+      "published": true,
+      "radius": 1500.0,
+      "type_id": 24483,
+      "volume": 16250000.0
     },
     {
       "base_price": 1.0,
       "capacity": 0.0,
       "category_id": 6,
       "default_attributes": {
+        "101": 0.0,
+        "102": 0.0,
+        "1132": 0.0,
+        "1137": 0.0,
+        "12": 0.0,
+        "13": 0.0,
+        "14": 0.0,
+        "1547": 0.0,
         "263": 250.0,
         "265": 250.0,
         "37": 210.0,
@@ -3851,7 +4796,11 @@
       "category_id": 7,
       "default_attributes": {
         "1196": 1.4,
+        "182": 3449.0,
+        "183": 3452.0,
         "20": 135.0,
+        "277": 3.0,
+        "278": 1.0,
         "30": 15.0,
         "4": 1.0,
         "50": 25.0,
@@ -3859,6 +4808,11 @@
         "73": 7500.0,
         "796": 500000.0
       },
+      "effect_ids": [
+        13,
+        16,
+        67
+      ],
       "group_id": 46,
       "mass": 1.0,
       "name": "1MN Afterburner II",
@@ -3872,10 +4826,17 @@
       "capacity": 0.0,
       "category_id": 7,
       "default_attributes": {
+        "182": 3449.0,
         "20": 12.5,
+        "277": 3.0,
         "30": 1.0,
         "50": 15.0
       },
+      "effect_ids": [
+        11,
+        16,
+        1851
+      ],
       "group_id": 762,
       "mass": 1.0,
       "name": "Overdrive Injector System II",
@@ -3889,22 +4850,90 @@
       "capacity": 5.0,
       "category_id": 7,
       "default_attributes": {
-        "1196": 1.2,
-        "158": 8400.0,
-        "160": 240.0,
-        "30": 5.0,
-        "50": 10.0,
+        "1196": 0.02,
+        "128": 1.0,
+        "158": 4800.0,
+        "160": 0.315,
+        "182": 3302.0,
+        "183": 3300.0,
+        "277": 4.0,
+        "278": 2.0,
+        "30": 4.0,
+        "50": 9.0,
         "51": 3125.0,
-        "54": 1500.0,
-        "64": 2.4
+        "54": 1200.0,
+        "604": 83.0,
+        "64": 3.465
       },
+      "effect_ids": [
+        12,
+        16,
+        34,
+        42
+      ],
       "group_id": 55,
-      "mass": 1.0,
+      "mass": 15.0,
       "name": "200mm AutoCannon II",
       "published": true,
-      "radius": 1.0,
+      "radius": 20.0,
       "type_id": 2889,
       "volume": 5.0
+    },
+    {
+      "base_price": 750000.0,
+      "capacity": 1.29,
+      "category_id": 7,
+      "default_attributes": {
+        "182": 3319.0,
+        "183": 3321.0,
+        "277": 3.0,
+        "278": 4.0,
+        "30": 9.0,
+        "50": 28.0,
+        "51": 12000.0,
+        "604": 384.0
+      },
+      "effect_ids": [
+        12,
+        16,
+        40
+      ],
+      "group_id": 509,
+      "mass": 1.0,
+      "name": "Light Missile Launcher II",
+      "published": true,
+      "radius": 1.0,
+      "type_id": 2410,
+      "volume": 5.0
+    },
+    {
+      "base_price": 2200000.0,
+      "capacity": 15.0,
+      "category_id": 7,
+      "default_attributes": {
+        "182": 3319.0,
+        "183": 3325.0,
+        "184": 20212.0,
+        "277": 5.0,
+        "278": 5.0,
+        "279": 1.0,
+        "30": 1375.0,
+        "50": 66.0,
+        "51": 10500.0,
+        "604": 89.0
+      },
+      "effect_ids": [
+        12,
+        16,
+        40
+      ],
+      "group_id": 508,
+      "mass": 1.0,
+      "name": "Torpedo Launcher II",
+      "published": true,
+      "radius": 1.0,
+      "type_id": 2420,
+      "volume": 20.0
     },
     {
       "base_price": 800000.0,
@@ -3912,12 +4941,19 @@
       "category_id": 7,
       "default_attributes": {
         "105": 2.0,
+        "182": 3449.0,
+        "277": 2.0,
         "30": 1.0,
         "50": 30.0,
         "54": 9000.0,
         "6": 6.0,
         "73": 5000.0
       },
+      "effect_ids": [
+        13,
+        16,
+        39
+      ],
       "group_id": 52,
       "mass": 1.0,
       "name": "Warp Scrambler II",
@@ -3931,9 +4967,15 @@
       "capacity": 0.0,
       "category_id": 7,
       "default_attributes": {
+        "182": 3327.0,
+        "277": 1.0,
         "30": 1.0,
         "50": 30.0
       },
+      "effect_ids": [
+        11,
+        16
+      ],
       "group_id": 60,
       "mass": 1.0,
       "name": "Damage Control II",
@@ -3948,8 +4990,12 @@
       "category_id": 7,
       "default_attributes": {
         "1153": 50.0,
+        "1547": 1.0,
         "68": 15.0
       },
+      "effect_ids": [
+        2663
+      ],
       "group_id": 774,
       "mass": 1.0,
       "name": "Small Core Defense Field Extender I",
@@ -3963,12 +5009,19 @@
       "capacity": 0.0,
       "category_id": 7,
       "default_attributes": {
+        "182": 3380.0,
+        "277": 1.0,
         "30": 2.0,
         "50": 30.0,
         "54": 10000.0,
         "6": 10.0,
         "73": 60000.0
       },
+      "effect_ids": [
+        12,
+        16,
+        42
+      ],
       "group_id": 54,
       "mass": 1.0,
       "name": "Miner I",
@@ -3982,13 +5035,23 @@
       "capacity": 5.0,
       "category_id": 7,
       "default_attributes": {
-        "114": 40.0,
-        "117": 40.0,
+        "128": 1.0,
+        "1353": 0.4,
+        "2104": 9.0,
         "30": 8.0,
         "50": 20.0,
-        "51": 5000.0,
-        "54": 18000.0
+        "51": 6000.0,
+        "54": 22460.0,
+        "604": 4061.0,
+        "64": 1.0,
+        "653": 190.0,
+        "654": 43.0
       },
+      "effect_ids": [
+        12,
+        16,
+        42
+      ],
       "group_id": 4060,
       "mass": 1.0,
       "name": "Small Vorton Projector I",
@@ -4002,14 +5065,26 @@
       "capacity": 10.0,
       "category_id": 7,
       "default_attributes": {
-        "116": 65.0,
-        "118": 85.0,
+        "128": 2.0,
+        "1302": 47270.0,
+        "1303": 49711.0,
+        "160": 180.0,
+        "182": 3300.0,
+        "183": 33094.0,
+        "277": 4.0,
+        "278": 5.0,
         "30": 900.0,
         "50": 55.0,
         "51": 3500.0,
         "54": 48000.0,
+        "604": 1987.0,
         "64": 2.8
       },
+      "effect_ids": [
+        12,
+        16,
+        42
+      ],
       "group_id": 1986,
       "mass": 1.0,
       "name": "Heavy Entropic Disintegrator II",
@@ -4020,14 +5095,20 @@
     },
     {
       "base_price": 4000000.0,
-      "capacity": 5.0,
+      "capacity": 10.0,
       "category_id": 7,
       "default_attributes": {
         "30": 6.0,
         "50": 18.0,
-        "51": 8000.0,
-        "54": 25000.0
+        "51": 24000.0,
+        "54": 4000.0,
+        "604": 4501.0
       },
+      "effect_ids": [
+        12,
+        16,
+        40
+      ],
       "group_id": 4500,
       "mass": 1.0,
       "name": "Small Breacher Pod Launcher I",
@@ -4128,6 +5209,19 @@
       "volume": 0.01
     },
     {
+      "base_price": 20000.0,
+      "capacity": 0.0,
+      "category_id": 4,
+      "default_attributes": {},
+      "group_id": 1136,
+      "mass": 1.0,
+      "name": "Helium Fuel Block",
+      "published": true,
+      "radius": 1.0,
+      "type_id": 4247,
+      "volume": 5.0
+    },
+    {
       "base_price": 15.0,
       "capacity": 0.0,
       "category_id": 25,
@@ -4184,17 +5278,126 @@
       "capacity": 0.0,
       "category_id": 8,
       "default_attributes": {
-        "116": 2.0,
-        "117": 2.0,
-        "118": 10.0
+        "117": 2.3,
+        "118": 11.5,
+        "128": 1.0,
+        "137": 55.0,
+        "182": 3302.0,
+        "277": 1.0
       },
       "group_id": 83,
-      "mass": 1.0,
+      "mass": 0.01,
       "name": "Republic Fleet Phased Plasma S",
       "published": true,
       "radius": 1.0,
       "type_id": 22989,
       "volume": 0.0025
+    },
+    {
+      "base_price": 50.0,
+      "capacity": 0.0,
+      "category_id": 8,
+      "default_attributes": {
+        "118": 83.0,
+        "1353": 0.604,
+        "137": 509.0,
+        "182": 3321.0,
+        "183": 3319.0,
+        "277": 1.0,
+        "278": 1.0,
+        "281": 5000.0,
+        "37": 3750.0,
+        "653": 170.0,
+        "654": 40.0
+      },
+      "group_id": 384,
+      "mass": 70.0,
+      "name": "Inferno Light Missile",
+      "published": true,
+      "radius": 300.0,
+      "type_id": 211,
+      "volume": 0.015
+    },
+    {
+      "base_price": 500.0,
+      "capacity": 0.0,
+      "category_id": 8,
+      "default_attributes": {
+        "118": 450.0,
+        "1353": 0.944,
+        "137": 508.0,
+        "182": 3325.0,
+        "183": 3319.0,
+        "277": 1.0,
+        "278": 1.0,
+        "281": 6000.0,
+        "37": 1500.0,
+        "653": 78.0,
+        "654": 405.0
+      },
+      "group_id": 89,
+      "mass": 1500.0,
+      "name": "Inferno Torpedo",
+      "published": true,
+      "radius": 300.0,
+      "type_id": 2510,
+      "volume": 0.05
+    },
+    {
+      "base_price": 500.0,
+      "capacity": 0.0,
+      "category_id": 8,
+      "default_attributes": {
+        "114": 116.0,
+        "117": 17.0,
+        "128": 1.0,
+        "137": 4060.0
+      },
+      "group_id": 4061,
+      "mass": 1.0,
+      "name": "GalvaSurge Condenser Pack S",
+      "published": true,
+      "radius": 1.0,
+      "type_id": 54807,
+      "volume": 0.01
+    },
+    {
+      "base_price": 600.0,
+      "capacity": 0.0,
+      "category_id": 8,
+      "default_attributes": {
+        "116": 129.0,
+        "118": 180.0,
+        "128": 2.0,
+        "137": 1986.0,
+        "182": 33094.0,
+        "277": 1.0
+      },
+      "group_id": 1987,
+      "mass": 1.0,
+      "name": "Baryon Exotic Plasma M",
+      "published": true,
+      "radius": 1.0,
+      "type_id": 47910,
+      "volume": 0.02
+    },
+    {
+      "base_price": 1500.0,
+      "capacity": 0.0,
+      "category_id": 8,
+      "default_attributes": {
+        "116": 200.0,
+        "137": 4500.0,
+        "281": 2000.0,
+        "37": 2000.0
+      },
+      "group_id": 4501,
+      "mass": 100.0,
+      "name": "SCARAB Breacher Pod S",
+      "published": true,
+      "radius": 50.0,
+      "type_id": 84015,
+      "volume": 0.25
     },
     {
       "base_price": 850000000.0,
@@ -4207,6 +5410,19 @@
       "published": true,
       "radius": 1.0,
       "type_id": 40520,
+      "volume": 0.01
+    },
+    {
+      "base_price": 10000000.0,
+      "capacity": 0.0,
+      "category_id": 91,
+      "default_attributes": {},
+      "group_id": 1950,
+      "mass": 0.1,
+      "name": "Rifter Crimson Valkyrie SKIN (Permanent)",
+      "published": true,
+      "radius": 1.0,
+      "type_id": 55001,
       "volume": 0.01
     },
     {
@@ -4294,14 +5510,16 @@
       "capacity": 0.0,
       "category_id": 16,
       "default_attributes": {
-        "275": 2.0
+        "182": 3327.0,
+        "275": 2.0,
+        "277": 1.0
       },
       "group_id": 257,
       "mass": 0.0,
       "name": "Minmatar Frigate",
       "published": true,
       "radius": 1.0,
-      "type_id": 3328,
+      "type_id": 3329,
       "volume": 0.01
     },
     {
@@ -4324,7 +5542,9 @@
       "capacity": 0.0,
       "category_id": 16,
       "default_attributes": {
-        "275": 4.0
+        "182": 3449.0,
+        "275": 4.0,
+        "277": 3.0
       },
       "group_id": 275,
       "mass": 0.0,
@@ -4354,7 +5574,9 @@
       "capacity": 0.0,
       "category_id": 16,
       "default_attributes": {
-        "275": 1.0
+        "182": 3300.0,
+        "275": 1.0,
+        "277": 1.0
       },
       "group_id": 255,
       "mass": 0.0,
@@ -4362,6 +5584,104 @@
       "published": true,
       "radius": 1.0,
       "type_id": 3302,
+      "volume": 0.01
+    },
+    {
+      "base_price": 20000.0,
+      "capacity": 0.0,
+      "category_id": 16,
+      "default_attributes": {
+        "275": 1.0
+      },
+      "group_id": 256,
+      "mass": 0.0,
+      "name": "Missile Launcher Operation",
+      "published": true,
+      "radius": 1.0,
+      "type_id": 3319,
+      "volume": 0.01
+    },
+    {
+      "base_price": 40000.0,
+      "capacity": 0.0,
+      "category_id": 16,
+      "default_attributes": {
+        "182": 3319.0,
+        "275": 2.0,
+        "277": 1.0
+      },
+      "group_id": 256,
+      "mass": 0.0,
+      "name": "Light Missiles",
+      "published": true,
+      "radius": 1.0,
+      "type_id": 3321,
+      "volume": 0.01
+    },
+    {
+      "base_price": 150000.0,
+      "capacity": 0.0,
+      "category_id": 16,
+      "default_attributes": {
+        "182": 3319.0,
+        "275": 4.0,
+        "277": 4.0
+      },
+      "group_id": 256,
+      "mass": 0.0,
+      "name": "Torpedoes",
+      "published": true,
+      "radius": 1.0,
+      "type_id": 3325,
+      "volume": 0.01
+    },
+    {
+      "base_price": 600000.0,
+      "capacity": 0.0,
+      "category_id": 16,
+      "default_attributes": {
+        "182": 3325.0,
+        "275": 8.0,
+        "277": 5.0
+      },
+      "group_id": 256,
+      "mass": 0.0,
+      "name": "Torpedo Specialization",
+      "published": true,
+      "radius": 1.0,
+      "type_id": 20212,
+      "volume": 0.01
+    },
+    {
+      "base_price": 2000000.0,
+      "capacity": 0.0,
+      "category_id": 16,
+      "default_attributes": {
+        "182": 3300.0,
+        "275": 5.0,
+        "277": 2.0
+      },
+      "group_id": 255,
+      "mass": 0.0,
+      "name": "Medium Precursor Weapon",
+      "published": true,
+      "radius": 1.0,
+      "type_id": 33094,
+      "volume": 0.01
+    },
+    {
+      "base_price": 250000.0,
+      "capacity": 0.0,
+      "category_id": 16,
+      "default_attributes": {
+        "275": 4.0
+      },
+      "group_id": 268,
+      "mass": 0.0,
+      "name": "Command Center Upgrades",
+      "published": true,
+      "radius": 1.0,
+      "type_id": 2505,
       "volume": 0.01
     },
     {
@@ -4395,6 +5715,55 @@
       "volume": 0.01
     },
     {
+      "base_price": 120000.0,
+      "capacity": 0.0,
+      "category_id": 16,
+      "default_attributes": {
+        "275": 2.0
+      },
+      "group_id": 278,
+      "mass": 0.0,
+      "name": "Negotiation",
+      "published": true,
+      "radius": 1.0,
+      "type_id": 3356,
+      "volume": 0.01
+    },
+    {
+      "base_price": 200000.0,
+      "capacity": 0.0,
+      "category_id": 16,
+      "default_attributes": {
+        "182": 3380.0,
+        "275": 3.0,
+        "277": 3.0
+      },
+      "group_id": 268,
+      "mass": 0.0,
+      "name": "Advanced Industry",
+      "published": true,
+      "radius": 1.0,
+      "type_id": 3388,
+      "volume": 0.01
+    },
+    {
+      "base_price": 150000.0,
+      "capacity": 0.0,
+      "category_id": 16,
+      "default_attributes": {
+        "182": 3385.0,
+        "275": 3.0,
+        "277": 5.0
+      },
+      "group_id": 268,
+      "mass": 0.0,
+      "name": "Reprocessing Efficiency",
+      "published": true,
+      "radius": 1.0,
+      "type_id": 3389,
+      "volume": 0.01
+    },
+    {
       "base_price": 20000.0,
       "capacity": 0.0,
       "category_id": 16,
@@ -4414,7 +5783,9 @@
       "capacity": 0.0,
       "category_id": 16,
       "default_attributes": {
-        "275": 2.0
+        "182": 3443.0,
+        "275": 2.0,
+        "277": 2.0
       },
       "group_id": 274,
       "mass": 0.0,
@@ -4425,11 +5796,58 @@
       "volume": 0.01
     },
     {
+      "base_price": 160000.0,
+      "capacity": 0.0,
+      "category_id": 16,
+      "default_attributes": {
+        "275": 2.0
+      },
+      "group_id": 273,
+      "mass": 0.0,
+      "name": "Security Connections",
+      "published": true,
+      "radius": 1.0,
+      "type_id": 3893,
+      "volume": 0.01
+    },
+    {
+      "base_price": 500000.0,
+      "capacity": 0.0,
+      "category_id": 16,
+      "default_attributes": {
+        "275": 5.0
+      },
+      "group_id": 270,
+      "mass": 0.0,
+      "name": "Minmatar Starship Engineering",
+      "published": true,
+      "radius": 1.0,
+      "type_id": 11448,
+      "volume": 0.01
+    },
+    {
+      "base_price": 500000.0,
+      "capacity": 0.0,
+      "category_id": 16,
+      "default_attributes": {
+        "275": 5.0
+      },
+      "group_id": 270,
+      "mass": 0.0,
+      "name": "Mechanical Engineering",
+      "published": true,
+      "radius": 1.0,
+      "type_id": 11452,
+      "volume": 0.01
+    },
+    {
       "base_price": 5000000.0,
       "capacity": 0.0,
       "category_id": 16,
       "default_attributes": {
-        "275": 3.0
+        "182": 3443.0,
+        "275": 3.0,
+        "277": 4.0
       },
       "group_id": 274,
       "mass": 0.0,
@@ -4437,6 +5855,36 @@
       "published": true,
       "radius": 1.0,
       "type_id": 16622,
+      "volume": 0.01
+    },
+    {
+      "base_price": 1500000.0,
+      "capacity": 0.0,
+      "category_id": 16,
+      "default_attributes": {
+        "275": 4.0
+      },
+      "group_id": 270,
+      "mass": 0.0,
+      "name": "Minmatar Encryption Methods",
+      "published": true,
+      "radius": 1.0,
+      "type_id": 21791,
+      "volume": 0.01
+    },
+    {
+      "base_price": 50000.0,
+      "capacity": 0.0,
+      "category_id": 16,
+      "default_attributes": {
+        "275": 1.0
+      },
+      "group_id": 272,
+      "mass": 0.0,
+      "name": "Infomorph Psychology",
+      "published": true,
+      "radius": 1.0,
+      "type_id": 24242,
       "volume": 0.01
     },
     {
@@ -4455,6 +5903,114 @@
       "volume": 0.01
     },
     {
+      "base_price": 5000000.0,
+      "capacity": 0.0,
+      "category_id": 16,
+      "default_attributes": {
+        "182": 24242.0,
+        "275": 2.0,
+        "277": 1.0
+      },
+      "group_id": 272,
+      "mass": 0.0,
+      "name": "Infomorph Synchronizing",
+      "published": true,
+      "radius": 1.0,
+      "type_id": 33407,
+      "volume": 0.01
+    },
+    {
+      "base_price": 100000.0,
+      "capacity": 0.0,
+      "category_id": 17,
+      "default_attributes": {},
+      "group_id": 333,
+      "mass": 1.0,
+      "name": "Datacore - Minmatar Starship Engineering",
+      "published": true,
+      "radius": 1.0,
+      "type_id": 20172,
+      "volume": 0.1
+    },
+    {
+      "base_price": 100000.0,
+      "capacity": 0.0,
+      "category_id": 17,
+      "default_attributes": {},
+      "group_id": 333,
+      "mass": 1.0,
+      "name": "Datacore - Mechanical Engineering",
+      "published": true,
+      "radius": 1.0,
+      "type_id": 20424,
+      "volume": 0.1
+    },
+    {
+      "base_price": 400.0,
+      "capacity": 0.0,
+      "category_id": 43,
+      "default_attributes": {},
+      "group_id": 1042,
+      "mass": 1.0,
+      "name": "Water",
+      "published": true,
+      "radius": 1.0,
+      "type_id": 3645,
+      "volume": 0.38
+    },
+    {
+      "base_price": 1200000.0,
+      "capacity": 0.0,
+      "category_id": 87,
+      "default_attributes": {
+        "2215": 9.0,
+        "263": 600.0,
+        "37": 1250.0,
+        "9": 450.0
+      },
+      "group_id": 1652,
+      "mass": 20000.0,
+      "name": "Templar I",
+      "published": true,
+      "radius": 18.0,
+      "type_id": 23055,
+      "volume": 1000.0
+    },
+    {
+      "base_price": 24000000.0,
+      "capacity": 140.0,
+      "category_id": 6,
+      "default_attributes": {
+        "101": 1.0,
+        "102": 4.0,
+        "11": 52.0,
+        "1132": 400.0,
+        "1137": 2.0,
+        "12": 5.0,
+        "13": 2.0,
+        "14": 4.0,
+        "1547": 1.0,
+        "263": 500.0,
+        "265": 800.0,
+        "37": 370.0,
+        "38": 140.0,
+        "4": 1250000.0,
+        "48": 160.0,
+        "482": 350.0,
+        "552": 33.0,
+        "600": 5.0,
+        "70": 3.2,
+        "9": 650.0
+      },
+      "group_id": 324,
+      "mass": 1250000.0,
+      "name": "Wolf",
+      "published": true,
+      "radius": 35.0,
+      "type_id": 11371,
+      "volume": 27200.0
+    },
+    {
       "base_price": 2500000.0,
       "capacity": 0.0,
       "category_id": 9,
@@ -4465,6 +6021,19 @@
       "published": true,
       "radius": 1.0,
       "type_id": 687,
+      "volume": 0.01
+    },
+    {
+      "base_price": 25000000.0,
+      "capacity": 0.0,
+      "category_id": 9,
+      "default_attributes": {},
+      "group_id": 105,
+      "mass": 0.0,
+      "name": "Wolf Blueprint",
+      "published": false,
+      "radius": 1.0,
+      "type_id": 11372,
       "volume": 0.01
     },
     {
@@ -4485,7 +6054,11 @@
       "capacity": 0.0,
       "category_id": 7,
       "default_attributes": {
+        "182": 3449.0,
+        "183": 3452.0,
         "20": 135.0,
+        "277": 3.0,
+        "278": 1.0,
         "30": 15.0,
         "4": 1.0,
         "50": 25.0,
@@ -4493,10 +6066,15 @@
         "73": 7500.0,
         "796": 500000.0
       },
+      "effect_ids": [
+        13,
+        16,
+        67
+      ],
       "group_id": 46,
       "mass": 1.0,
       "name": "Abyssal 1MN Afterburner",
-      "published": true,
+      "published": false,
       "radius": 1.0,
       "type_id": 47740,
       "volume": 5.0
@@ -4517,6 +6095,23 @@
       "radius": 10000.0,
       "type_id": 35832,
       "volume": 8000.0
+    },
+    {
+      "base_price": 500000000.0,
+      "capacity": 25000.0,
+      "category_id": 65,
+      "default_attributes": {
+        "263": 500000.0,
+        "265": 500000.0,
+        "9": 500000.0
+      },
+      "group_id": 2016,
+      "mass": 15000000.0,
+      "name": "Pharolux Cyno Beacon",
+      "published": true,
+      "radius": 1500.0,
+      "type_id": 35840,
+      "volume": 4000.0
     },
     {
       "base_price": 8000000.0,
@@ -4584,11 +6179,12 @@
       "capacity": 100.0,
       "category_id": 11,
       "default_attributes": {
-        "263": 300.0,
-        "265": 150.0,
+        "263": 50.0,
+        "265": 50.0,
         "37": 310.0,
+        "481": 100000.0,
         "552": 38.0,
-        "9": 200.0
+        "9": 50.0
       },
       "group_id": 555,
       "mass": 1000000.0,
@@ -4616,6 +6212,21 @@
       "radius": 150.0,
       "type_id": 11003,
       "volume": 150000.0
+    },
+    {
+      "base_price": 0.0,
+      "capacity": 1000.0,
+      "category_id": 2,
+      "default_attributes": {
+        "9": 100.0
+      },
+      "group_id": 649,
+      "mass": 100.0,
+      "name": "Courier Plastic Wrap",
+      "published": false,
+      "radius": 5.0,
+      "type_id": 24445,
+      "volume": 10.0
     },
     {
       "base_price": 0.0,
