@@ -126,7 +126,7 @@ pub async fn handle(
             let is_weapon_group = |group_id: u32| -> bool {
                 matches!(
                     group_id,
-                    53 | 55 | 74 | 506..=511 | 1986 | 4060 | 4500 | 4805
+                    53 | 55 | 74 | 506..=511 | 1986 | 4060 | 4500 | 4805 | 4807
                 )
             };
             let mut online_weapons: Vec<&eve_dogma::FittedModule> = fit
@@ -222,7 +222,7 @@ pub async fn handle(
                 506..=511 => "MissileLauncher",
                 1986 => "EntropicDisintegrator",
                 4060 => "VortonProjector",
-                4500 | 4805 => "BreacherPod",
+                4500 | 4805 | 4807 => "BreacherPod",
                 _ => "ProjectileTurret",
             };
             let dmg_mult = weapon_type

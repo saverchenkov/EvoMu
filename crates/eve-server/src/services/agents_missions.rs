@@ -24,6 +24,226 @@ fn parse_mission_id(args: &[PyRep]) -> Result<u32, BridgeRpcError> {
     })
 }
 
+fn is_storyline_template(tmpl: &eve_sde::MissionTemplate) -> bool {
+    tmpl.content_template
+        .as_deref()
+        .map(|ct| ct.contains("Storyline"))
+        .unwrap_or(false)
+}
+
+fn is_storyline_agent_type(agent_type_id: u32) -> bool {
+    // EVE agentType enum (EVE_Agent.h:48-49): 6 = GenericStoryLine, 7 = StoryLine (3 = Tutorial)
+    matches!(agent_type_id, 6 | 7)
+}
+
+fn is_unsupported_direct_agent_type(agent_type_id: u32) -> bool {
+    // EVE agentType enum (EVE_Agent.h:53): 11 = Aura, 12 = CareerAgent (divisions 25..=29)
+    matches!(agent_type_id, 11 | 12)
+}
+
+fn mission_matches_agent_pool(
+    tmpl: &eve_sde::MissionTemplate,
+    agent: &eve_sde::AgentInfo,
+) -> bool {
+    if is_storyline_template(tmpl) {
+        return false;
+    }
+    let ct = tmpl.content_template.as_deref().unwrap_or_default();
+    match agent.agent_type_id {
+        // EVE_Agent.h:52: EpicArc = 10
+        10 => ct.contains("EpicArc"),
+        // EVE_Agent.h:47: Research = 4
+        4 => ct.contains("Research"),
+        // Heraldry (Paragon) = 13
+        13 => ct.contains("Heraldry") || ct.contains("BasicKill"),
+        // Aura = 11, Career = 12 have no standard missions.fsdbinary pool
+        11 | 12 => false,
+        _ => match agent.division_id {
+            // EVE_Agent.h:126, 137-139: RnD = 18, DistributionNew = 22, MiningNew = 23, SecurityNew = 24
+            18 => ct.contains("Research"),
+            22 => ct.contains("BasicCourier") || ct.contains("BasicTrade"),
+            23 => ct.contains("BasicMining"),
+            24 => ct.contains("BasicKill"),
+            37 => ct.contains("Heraldry") || ct.contains("BasicKill"),
+            _ => false,
+        },
+    }
+}
+
+fn resolve_agent_and_corp_for_system(
+    ctx: &ServerContext,
+    char_id: i64,
+    sys_id: u32,
+    station_id: Option<i64>,
+    is_storyline: bool,
+) -> (i64, i64) {
+    let preferred_station = station_id.or_else(|| {
+        ctx.db
+            .get_character(char_id)
+            .ok()
+            .map(|ch| ch.home_station_id)
+    });
+    let cur_sys = ctx.sde.solar_systems.get(&sys_id);
+    let cur_constellation = cur_sys.map(|s| s.constellation_id);
+    let cur_region = cur_sys.map(|s| s.region_id);
+    let primary_corp = cur_sys
+        .and_then(|s| {
+            preferred_station
+                .and_then(|sid| s.stations.iter().find(|st| st.station_id == sid))
+                .or_else(|| s.stations.first())
+        })
+        .map(|st| st.owner_corporation_id)
+        .or_else(|| ctx.sde.npc_corporations.keys().copied().min())
+        .unwrap_or(0);
+
+    let agent = if is_storyline {
+        ctx.sde
+            .agents
+            .values()
+            .filter(|a| a.solar_system_id == Some(sys_id) && is_storyline_agent_type(a.agent_type_id))
+            .min_by_key(|a| a.agent_id)
+            .or_else(|| {
+                ctx.sde
+                    .agents
+                    .values()
+                    .filter(|a| {
+                        a.corporation_id == primary_corp && is_storyline_agent_type(a.agent_type_id)
+                    })
+                    .min_by_key(|a| a.agent_id)
+            })
+            .or_else(|| {
+                ctx.sde
+                    .agents
+                    .values()
+                    .filter(|a| {
+                        is_storyline_agent_type(a.agent_type_id)
+                            && a.solar_system_id
+                                .and_then(|s| ctx.sde.solar_systems.get(&s))
+                                .map(|s| s.constellation_id)
+                                == cur_constellation
+                    })
+                    .min_by_key(|a| a.agent_id)
+            })
+            .or_else(|| {
+                ctx.sde
+                    .agents
+                    .values()
+                    .filter(|a| {
+                        is_storyline_agent_type(a.agent_type_id)
+                            && a.solar_system_id
+                                .and_then(|s| ctx.sde.solar_systems.get(&s))
+                                .map(|s| s.region_id)
+                                == cur_region
+                    })
+                    .min_by_key(|a| a.agent_id)
+            })
+    } else {
+        // Non-storyline default agent resolution strictly requires co-location in `sys_id`
+        let is_eligible_regular = |a: &eve_sde::AgentInfo| -> bool {
+            !is_storyline_agent_type(a.agent_type_id)
+                && !is_unsupported_direct_agent_type(a.agent_type_id)
+        };
+        station_id
+            .and_then(|sid| {
+                ctx.sde
+                    .agents
+                    .values()
+                    .filter(|a| {
+                        a.solar_system_id == Some(sys_id)
+                            && a.station_id == Some(sid)
+                            && is_eligible_regular(a)
+                    })
+                    .min_by_key(|a| (a.level, a.agent_id))
+            })
+            .or_else(|| {
+                ctx.sde
+                    .agents
+                    .values()
+                    .filter(|a| {
+                        a.solar_system_id == Some(sys_id)
+                            && a.corporation_id == primary_corp
+                            && is_eligible_regular(a)
+                    })
+                    .min_by_key(|a| (a.level, a.agent_id))
+            })
+            .or_else(|| {
+                ctx.sde
+                    .agents
+                    .values()
+                    .filter(|a| a.solar_system_id == Some(sys_id) && is_eligible_regular(a))
+                    .min_by_key(|a| (a.level, a.agent_id))
+            })
+    };
+
+    match agent {
+        Some(a) => (a.agent_id, a.corporation_id),
+        None => (0, primary_corp),
+    }
+}
+
+fn resolve_mission_npc_type(ctx: &ServerContext) -> u32 {
+    let is_l1_frigate_rat = |inv: &eve_sde::InvType| -> bool {
+        if !inv
+            .default_attributes
+            .contains_key(&eve_sde::attr_ids::ENTITY_KILL_BOUNTY)
+            || inv.radius < 25.0
+        {
+            return false;
+        }
+        let shield = inv
+            .default_attributes
+            .get(&eve_sde::attr_ids::SHIELD_CAPACITY)
+            .copied()
+            .unwrap_or(0.0);
+        let armor = inv
+            .default_attributes
+            .get(&eve_sde::attr_ids::ARMOR_HP)
+            .copied()
+            .unwrap_or(0.0);
+        let hull = inv
+            .default_attributes
+            .get(&eve_sde::attr_ids::HP_STRUCT)
+            .copied()
+            .unwrap_or(0.0);
+        let total_hp = shield + armor + hull;
+        (50.0..=450.0).contains(&total_hp)
+    };
+
+    let mut group_ids: Vec<u32> = ctx
+        .sde
+        .npc_spawn_groups
+        .values()
+        .filter(|sg| sg.ship_class == 1)
+        .map(|sg| sg.group_id)
+        .collect();
+    group_ids.sort_unstable();
+    for gid in group_ids {
+        if let Some(sg) = ctx.sde.npc_spawn_groups.get(&gid) {
+            for &tid in &sg.npc_type_ids {
+                if let Some(inv) = ctx.sde.types.get(&tid) {
+                    if is_l1_frigate_rat(inv) {
+                        return tid;
+                    }
+                }
+            }
+        }
+    }
+    ctx.sde
+        .types
+        .values()
+        .filter(|t| t.category_id == 11 && is_l1_frigate_rat(t))
+        .map(|t| t.type_id)
+        .min()
+        .unwrap_or(0)
+}
+
+fn resolve_career_goal_def(ctx: &ServerContext, goal_id: u32) -> Option<(u64, f64)> {
+    ctx.sde
+        .career_goals
+        .get(&goal_id)
+        .map(|g| (g.target_progress, g.sp_reward as f64))
+}
+
 pub async fn handle(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -44,41 +264,152 @@ pub async fn handle(
                     message: "Session has no active solar system".into(),
                 }));
             };
-            let mission_id = match parse_mission_id(args) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
+            let explicit_agent = args.first().is_some();
+            let agent_id = if let Some(first_arg) = args.first() {
+                let Some(aid) = first_arg.as_i64() else {
+                    return Some(Err(BridgeRpcError {
+                        code: "InvalidAgentId".into(),
+                        message: "Optional RequestMission argument must be an integer agent_id".into(),
+                    }));
+                };
+                aid
+            } else {
+                resolve_agent_and_corp_for_system(
+                    ctx,
+                    char_id,
+                    sys_id,
+                    session.station_id,
+                    false,
+                )
+                .0
             };
-            let Some(tmpl) = ctx.sde.missions.get(&mission_id).cloned() else {
+
+            let Some(agent_info) = ctx.sde.agents.get(&agent_id) else {
                 return Some(Err(BridgeRpcError {
-                    code: "UnknownMission".into(),
-                    message: format!("Mission {mission_id} does not exist in SDE"),
+                    code: "UnknownAgent".into(),
+                    message: format!(
+                        "Agent {agent_id} does not exist in SDE (client cannot supply mission_id to RequestMission)"
+                    ),
                 }));
             };
-            let agent_id = tmpl.agent_id;
-            let title = tmpl.title.clone();
-            let is_storyline = tmpl.mission_type.starts_with("Storyline") || mission_id == 2001;
+            let station_has_local_agents = session.station_id.is_some_and(|sid| {
+                ctx.sde.agents.values().any(|a| {
+                    a.solar_system_id == Some(sys_id)
+                        && a.station_id == Some(sid)
+                        && !is_storyline_agent_type(a.agent_type_id)
+                        && !is_unsupported_direct_agent_type(a.agent_type_id)
+                })
+            });
+            if agent_info.solar_system_id != Some(sys_id)
+                || (session.station_id.is_some()
+                    && (explicit_agent || station_has_local_agents)
+                    && agent_info.station_id.is_some()
+                    && agent_info.station_id != session.station_id)
+            {
+                return Some(Err(BridgeRpcError {
+                    code: "AgentNotCoLocated".into(),
+                    message: format!(
+                        "Agent {agent_id} is in system {:?} / station {:?}, not character's current location (system {sys_id}, station {:?})",
+                        agent_info.solar_system_id, agent_info.station_id, session.station_id
+                    ),
+                }));
+            }
+            if is_storyline_agent_type(agent_info.agent_type_id) {
+                return Some(Err(BridgeRpcError {
+                    code: "StorylineAgentRequiresReferral".into(),
+                    message: format!(
+                        "Storyline agent {agent_id} (agentType {}) cannot be requested directly without a 16-mission referral",
+                        agent_info.agent_type_id
+                    ),
+                }));
+            }
+            if is_unsupported_direct_agent_type(agent_info.agent_type_id) {
+                return Some(Err(BridgeRpcError {
+                    code: "UnimplementedRPC".into(),
+                    message: format!(
+                        "Agent {agent_id} (agentType {}) uses Aura/Career node-graph missions which are not yet implemented",
+                        agent_info.agent_type_id
+                    ),
+                }));
+            }
+            if agent_info.level > 1 {
+                let required_standing = ((agent_info.level as f64) - 1.0) * 2.0 - 1.0;
+                let faction_id = ctx
+                    .sde
+                    .npc_corporations
+                    .get(&agent_info.corporation_id)
+                    .and_then(|c| c.faction_id)
+                    .map(|fid| fid as i64);
+                let effective_standing = ctx.db.with_snapshot(|snap| {
+                    snap.characters
+                        .get(&char_id)
+                        .map(|ch| {
+                            let agent_st = ch.standings.get(&agent_id).copied();
+                            let corp_st = ch.standings.get(&agent_info.corporation_id).copied();
+                            let fac_st = faction_id.and_then(|fid| ch.standings.get(&fid).copied());
+                            [agent_st, corp_st, fac_st]
+                                .into_iter()
+                                .flatten()
+                                .fold(0.0_f64, f64::max)
+                        })
+                        .unwrap_or(0.0)
+                });
+                if effective_standing < required_standing {
+                    return Some(Err(BridgeRpcError {
+                        code: "InsufficientAgentStanding".into(),
+                        message: format!(
+                            "Agent {agent_id} (level {}) requires agent/corporation/faction standing >= {required_standing:.1}, character has {effective_standing:.2}",
+                            agent_info.level
+                        ),
+                    }));
+                }
+            }
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {
-                if is_storyline {
-                    let tally = snap.mission_tally.get(&char_id).copied().unwrap_or(0);
-                    if tally < 16 {
-                        return Err(BridgeRpcError {
-                            code: "StorylineMissionLocked".into(),
-                            message: format!(
-                                "Storyline mission {mission_id} requires completing 16 regular missions first (current tally: {tally})"
-                            ),
-                        });
-                    }
+                if let Some(existing_active) = snap.active_missions.values().find(|m| {
+                    m.character_id == char_id
+                        && m.agent_id == agent_id
+                        && m.state == "Offered"
+                }) {
+                    let mid = existing_active.mission_id;
+                    let title = ctx
+                        .sde
+                        .missions
+                        .get(&mid)
+                        .map(|t| t.title.clone())
+                        .unwrap_or_default();
+                    return Ok((mid, title));
                 }
-                if let Some(existing) = snap.active_missions.get(&(char_id, mission_id)) {
+                let next_tmpl = ctx
+                    .sde
+                    .missions
+                    .values()
+                    .filter(|m| {
+                        mission_matches_agent_pool(m, agent_info)
+                            && m.has_standing_rewards
+                            && !snap.active_missions.contains_key(&(char_id, m.mission_id))
+                    })
+                    .min_by_key(|m| m.mission_id)
+                    .or_else(|| {
+                        ctx.sde
+                            .missions
+                            .values()
+                            .filter(|m| {
+                                mission_matches_agent_pool(m, agent_info)
+                                    && !snap.active_missions.contains_key(&(char_id, m.mission_id))
+                            })
+                            .min_by_key(|m| m.mission_id)
+                    });
+                let Some(tmpl) = next_tmpl else {
                     return Err(BridgeRpcError {
-                        code: "MissionAlreadyActiveOrCompleted".into(),
+                        code: "NoMissionsAvailable".into(),
                         message: format!(
-                            "Mission {mission_id} is already in state '{}' for character {char_id}",
-                            existing.state
+                            "No unoffered missions remaining in SDE pool for agent {agent_id} and character {char_id}"
                         ),
                     });
-                }
+                };
+                let mission_id = tmpl.mission_id;
+                let title = tmpl.title.clone();
                 snap.active_missions.insert(
                     (char_id, mission_id),
                     ActiveMissionRecord {
@@ -88,15 +419,15 @@ pub async fn handle(
                         solar_system_id: sys_id,
                         state: "Offered".into(),
                         current_room_id: 1,
-                        npcs_remaining: if is_storyline { 0 } else { 1 },
+                        npcs_remaining: 1,
                         spawned_npc_ball_ids: Vec::new(),
                     },
                 );
-                Ok(())
+                Ok((mission_id, title))
             });
 
             match res {
-                Ok(()) => Some(Ok(PyRep::keyval([
+                Ok((mission_id, title)) => Some(Ok(PyRep::keyval([
                     ("missionID", PyRep::Integer(mission_id as i64)),
                     ("agentID", PyRep::Integer(agent_id)),
                     ("title", PyRep::String(title)),
@@ -121,6 +452,27 @@ pub async fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            let npc_type_id = resolve_mission_npc_type(ctx);
+            let Some(npc_inv) = ctx.sde.types.get(&npc_type_id) else {
+                return Some(Err(BridgeRpcError {
+                    code: "MissingNpcSdeType".into(),
+                    message: format!("Mission NPC type {npc_type_id} missing from SDE"),
+                }));
+            };
+            let Some(&max_velocity) = npc_inv
+                .default_attributes
+                .get(&eve_sde::attr_ids::MAX_VELOCITY)
+            else {
+                return Some(Err(BridgeRpcError {
+                    code: "MissingNpcSdeAttributes".into(),
+                    message: format!(
+                        "Mission NPC type {npc_type_id} missing maxVelocity attribute in SDE"
+                    ),
+                }));
+            };
+            let mass = npc_inv.mass.max(1.0);
+            let radius = npc_inv.radius.max(1.0);
+
             let handle = ctx.systems.get_or_spawn(sys_id);
             let existing_accepted = ctx.db.with_snapshot(|snap| {
                 snap.active_missions
@@ -196,7 +548,6 @@ pub async fn handle(
             };
 
             if let Some(npc_id) = npc_id_opt {
-                // Materialize mission pocket pirate NPC ball (`npc_id`) in current solar system's Ballpark
                 let origin = if let Some(ship_id) = session.ship_id {
                     handle
                         .get_ball_snapshot(ship_id)
@@ -223,17 +574,17 @@ pub async fn handle(
                     .spawn_ball_with_combat(
                         Ball {
                             id: npc_id,
-                            type_id: 11001, // Guristas Pithi Invader
+                            type_id: npc_type_id,
                             position: origin + DVec3::new(800.0 + pocket_offset, 0.0, 0.0),
                             velocity: DVec3::ZERO,
-                            max_velocity: 310.0,
+                            max_velocity,
                             inertia: 2.5,
-                            mass: 1_000_000.0,
-                            radius: 35.0,
+                            mass,
+                            radius,
                             speed_fraction: 0.0,
                             mode: MovementMode::Stop,
                         },
-                        ctx.build_type_combat_state(11001),
+                        ctx.build_type_combat_state(npc_type_id),
                     )
                     .await;
             }
@@ -241,7 +592,7 @@ pub async fn handle(
             Some(Ok(PyRep::keyval([
                 ("missionID", PyRep::Integer(mission_id as i64)),
                 ("state", PyRep::String("Accepted".into())),
-                ("dungeonID", PyRep::Integer(5001)),
+                ("dungeonID", PyRep::None),
                 ("currentRoomID", PyRep::Integer(1)),
                 (
                     "spawnedNpcBallID",
@@ -279,6 +630,7 @@ pub async fn handle(
                 }
                 let was_accepted = m.state == "Accepted";
                 let sys_id = m.solar_system_id;
+                let agent_id = m.agent_id;
                 m.state = if was_accepted {
                     "Quit".into()
                 } else {
@@ -286,30 +638,42 @@ pub async fn handle(
                 };
                 m.npcs_remaining = 0;
                 let ball_ids = std::mem::take(&mut m.spawned_npc_ball_ids);
-                if was_accepted {
-                    if let Some(def) = ctx.sde.missions.get(&mission_id) {
-                        let corp_id = def.corporation_id;
-                        let mut actual_delta = None;
-                        if let Some(ch) = snap.characters.get_mut(&char_id) {
-                            let cur = ch.standings.get(&corp_id).copied().unwrap_or(0.0);
-                            let next = (cur - 0.1).max(-10.0);
-                            ch.standings.insert(corp_id, next);
-                            actual_delta = Some(if cur - 0.1 >= -10.0 { -0.1 } else { -10.0 - cur });
-                        }
-                        if let Some(delta) = actual_delta {
-                            snap.next_entity_id += 1;
-                            let ev_id = snap.next_entity_id;
-                            snap.standing_transactions
-                                .entry(char_id)
-                                .or_default()
-                                .push(StandingTransactionRecord {
-                                    event_id: ev_id,
-                                    from_id: corp_id,
-                                    to_id: char_id,
-                                    modification: delta,
-                                    event_type_id: 83,
-                                });
-                        }
+                if was_accepted && ctx.sde.missions.contains_key(&mission_id) {
+                    let corp_id = ctx
+                        .sde
+                        .agents
+                        .get(&agent_id)
+                        .map(|a| a.corporation_id)
+                        .unwrap_or_else(|| {
+                            resolve_agent_and_corp_for_system(
+                                ctx,
+                                char_id,
+                                sys_id,
+                                session.station_id,
+                                false,
+                            )
+                            .1
+                        });
+                    let mut actual_delta = None;
+                    if let Some(ch) = snap.characters.get_mut(&char_id) {
+                        let cur = ch.standings.get(&corp_id).copied().unwrap_or(0.0);
+                        let next = (cur - 0.1).max(-10.0);
+                        ch.standings.insert(corp_id, next);
+                        actual_delta = Some(if cur - 0.1 >= -10.0 { -0.1 } else { -10.0 - cur });
+                    }
+                    if let Some(delta) = actual_delta {
+                        snap.next_entity_id += 1;
+                        let ev_id = snap.next_entity_id;
+                        snap.standing_transactions
+                            .entry(char_id)
+                            .or_default()
+                            .push(StandingTransactionRecord {
+                                event_id: ev_id,
+                                from_id: corp_id,
+                                to_id: char_id,
+                                modification: delta,
+                                event_type_id: 83,
+                            });
                     }
                 }
                 Ok((sys_id, ball_ids, m.state.clone()))
@@ -401,18 +765,24 @@ pub async fn handle(
                     message: format!("Mission {mission_id} does not exist in SDE"),
                 }));
             };
-            let base_isk = tmpl.isk_reward + tmpl.time_bonus_isk;
-            let base_lp = tmpl.lp_reward;
-            let standing_pct = tmpl.standing_gain_pct;
-            let corp_id = tmpl.corporation_id;
             let Some(sys_id) = session.solar_system_id else {
                 return Some(Err(BridgeRpcError {
                     code: "NoSolarSystem".into(),
                     message: "Session has no active solar system".into(),
                 }));
             };
-
-            let (neg_lvl, sec_conn_lvl) = ctx.db.with_snapshot(|snap| {
+            let is_storyline = is_storyline_template(&tmpl);
+            let (active_agent_id, is_alpha, neg_lvl, sec_conn_lvl) = ctx.db.with_snapshot(|snap| {
+                let aid = snap
+                    .active_missions
+                    .get(&(char_id, mission_id))
+                    .map(|m| m.agent_id)
+                    .unwrap_or(0);
+                let alpha = snap
+                    .characters
+                    .get(&char_id)
+                    .map(|c| c.clone_grade <= 1)
+                    .unwrap_or(false);
                 let sk = snap.skills.get(&char_id);
                 let neg = sk
                     .and_then(|m| m.get(&3356))
@@ -422,8 +792,34 @@ pub async fn handle(
                     .and_then(|m| m.get(&3893))
                     .map(|s| s.level)
                     .unwrap_or(0);
-                (neg, sec)
+                (aid, alpha, neg, sec)
             });
+            let agent_level = ctx
+                .sde
+                .agents
+                .get(&active_agent_id)
+                .map(|a| a.level.max(1) as f64)
+                .unwrap_or(1.0);
+            let storyline_mult = if is_storyline { 3.0 } else { 1.0 };
+            let base_isk = 0_i64;
+            let base_lp = if is_alpha && tmpl.lp_alpha > 0 {
+                tmpl.lp_alpha
+            } else {
+                tmpl.lp_omega
+            };
+            // Derived standing gain formula (missions.fsdbinary stores only boolean has_standing_rewards; full E-5 standing table is open)
+            let standing_pct = if tmpl.has_standing_rewards {
+                1.5 * agent_level * storyline_mult
+            } else {
+                0.0
+            };
+            let (storyline_agent_id, _) = resolve_agent_and_corp_for_system(
+                ctx,
+                char_id,
+                sys_id,
+                session.station_id,
+                true,
+            );
             let (isk_reward, lp_reward) =
                 compute_mission_reward_with_skills(base_isk, base_lp, neg_lvl, sec_conn_lvl, 1);
 
@@ -445,14 +841,31 @@ pub async fn handle(
                         ),
                     });
                 }
+                let agent_id = m.agent_id;
                 m.state = "Completed".into();
+                let corp_id = ctx
+                    .sde
+                    .agents
+                    .get(&agent_id)
+                    .map(|a| a.corporation_id)
+                    .unwrap_or_else(|| {
+                        resolve_agent_and_corp_for_system(
+                            ctx,
+                            char_id,
+                            sys_id,
+                            session.station_id,
+                            is_storyline,
+                        )
+                        .1
+                    });
 
                 let mut new_st = 2.0;
                 let mut actual_delta = None;
                 if let Some(ch) = snap.characters.get_mut(&char_id) {
                     let reward_cents = IskCents::from_isk(isk_reward);
                     ch.balance = ch.balance.checked_add(reward_cents).unwrap_or(ch.balance);
-                    *ch.loyalty_points.entry(corp_id).or_insert(0) += lp_reward;
+                    let lp_entry = ch.loyalty_points.entry(corp_id).or_insert(0);
+                    *lp_entry = lp_entry.saturating_add(lp_reward.max(0));
                     let cur_st = ch.standings.get(&corp_id).copied().unwrap_or(0.0);
                     new_st = apply_standing_increase(cur_st, standing_pct);
                     ch.standings.insert(corp_id, new_st);
@@ -472,24 +885,42 @@ pub async fn handle(
                             event_type_id: 85,
                         });
                 }
-                let count = snap.mission_tally.entry(char_id).or_insert(0);
-                *count += 1;
-                let t = *count;
-                let storyline = t % 16 == 0;
+                let (t, storyline) = if !is_storyline && tmpl.has_standing_rewards {
+                    let count = snap.mission_tally.entry(char_id).or_insert(0);
+                    *count += 1;
+                    let t = *count;
+                    (t, t % 16 == 0)
+                } else {
+                    let t = snap.mission_tally.get(&char_id).copied().unwrap_or(0);
+                    (t, false)
+                };
                 if storyline {
-                    snap.active_missions.insert(
-                        (char_id, 2001),
-                        ActiveMissionRecord {
-                            mission_id: 2001,
-                            character_id: char_id,
-                            agent_id: 3_018_925,
-                            solar_system_id: sys_id,
-                            state: "Offered".into(),
-                            current_room_id: 1,
-                            npcs_remaining: 0,
-                            spawned_npc_ball_ids: Vec::new(),
-                        },
-                    );
+                    if let Some(storyline_mission_id) = ctx
+                        .sde
+                        .missions
+                        .values()
+                        .filter(|sm| {
+                            is_storyline_template(sm)
+                                && !snap
+                                    .active_missions
+                                    .contains_key(&(char_id, sm.mission_id))
+                        })
+                        .map(|sm| sm.mission_id)
+                        .min()
+                    {
+                        snap.active_missions
+                            .entry((char_id, storyline_mission_id))
+                            .or_insert(ActiveMissionRecord {
+                                mission_id: storyline_mission_id,
+                                character_id: char_id,
+                                agent_id: storyline_agent_id,
+                                solar_system_id: sys_id,
+                                state: "Offered".into(),
+                                current_room_id: 1,
+                                npcs_remaining: 0,
+                                spawned_npc_ball_ids: Vec::new(),
+                            });
+                    }
                 }
                 Ok((new_st, t, storyline))
             });
@@ -583,11 +1014,19 @@ pub async fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let goal_id = args.first().and_then(|a| a.as_i64()).unwrap_or(1) as u32;
-            if !ctx.sde.career_goals.contains_key(&goal_id) {
+            let raw_goal_id = args.first().and_then(|a| a.as_i64()).unwrap_or(1);
+            let Ok(goal_id) = u32::try_from(raw_goal_id) else {
                 return Some(Err(BridgeRpcError {
-                    code: "UnknownCareerGoal".into(),
-                    message: format!("Career goal {goal_id} does not exist in SDE"),
+                    code: "InvalidGoalId".into(),
+                    message: format!("goal_id {raw_goal_id} is out of valid u32 range"),
+                }));
+            };
+            if resolve_career_goal_def(ctx, goal_id).is_none() {
+                return Some(Err(BridgeRpcError {
+                    code: "UnimplementedRPC".into(),
+                    message: format!(
+                        "Career goal {goal_id} is not present in V24.01 goals.fsdbinary"
+                    ),
                 }));
             }
             let prog = ctx.db.with_snapshot(|snap| {
@@ -607,15 +1046,21 @@ pub async fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let goal_id = args.first().and_then(|a| a.as_i64()).unwrap_or(1) as u32;
-            let Some(goal_def) = ctx.sde.career_goals.get(&goal_id) else {
+            let raw_goal_id = args.first().and_then(|a| a.as_i64()).unwrap_or(1);
+            let Ok(goal_id) = u32::try_from(raw_goal_id) else {
                 return Some(Err(BridgeRpcError {
-                    code: "UnknownCareerGoal".into(),
-                    message: format!("Career goal {goal_id} does not exist in SDE"),
+                    code: "InvalidGoalId".into(),
+                    message: format!("goal_id {raw_goal_id} is out of valid u32 range"),
                 }));
             };
-            let sp_reward = goal_def.sp_reward as f64;
-            let target_prog = goal_def.target_progress as u64;
+            let Some((target_prog, sp_reward)) = resolve_career_goal_def(ctx, goal_id) else {
+                return Some(Err(BridgeRpcError {
+                    code: "UnimplementedRPC".into(),
+                    message: format!(
+                        "Career goal {goal_id} is not present in V24.01 goals.fsdbinary"
+                    ),
+                }));
+            };
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let npe = snap.npe_progress.entry(char_id).or_insert_with(|| {

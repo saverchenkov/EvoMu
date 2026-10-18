@@ -1,8 +1,9 @@
 //! `eve-server` — Main entry point for the `EvoMu` EVE Online server emulator.
 //!
 //! Exposes:
-//! - TCP Port `26001`: Modern MessagePack/JSON Client Bridge listener (`evomu_bridge.py`).
+//! - TCP Port `26002`: Modern MessagePack/JSON Client Bridge listener (`evomu_bridge.py`).
 //! - TCP Port `26000`: Legacy `eveMarshal` / `machoNet` handshake & packet listener.
+//! - TCP Port `26004`: ESI / SSO HTTP listener (when `feature_flags.enable_esi_http` is enabled).
 
 #![forbid(unsafe_code)]
 
@@ -33,7 +34,9 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let ctx = Arc::new(ServerContext::new_production());
+    let cfg = eve_server::config::ServerConfig::load_default_or_env()
+        .map_err(|e| anyhow::anyhow!(e))?;
+    let ctx = Arc::new(ServerContext::from_config(&cfg).map_err(|e| anyhow::anyhow!(e))?);
     if let Ok(admin_token) = std::env::var("EVOMU_ADMIN_TOKEN") {
         if !admin_token.trim().is_empty() {
             ctx.db
@@ -49,14 +52,41 @@ async fn main() -> Result<()> {
     info!(
         loaded_types = ctx.sde.types.len(),
         loaded_systems = ctx.sde.solar_systems.len(),
+        sde_path = %cfg.sde_path,
+        world_db_path = %cfg.world_db_path,
+        esi_port = cfg.esi_port,
+        enable_quasar_gateway = cfg.feature_flags.enable_quasar_gateway,
+        enable_esi_http = cfg.feature_flags.enable_esi_http,
+        enable_living_world = cfg.feature_flags.enable_living_world,
         "Initialized EvoMu Simulation Core & SDE Registry"
     );
 
-    let bridge_listener = TcpListener::bind("127.0.0.1:26001").await?;
-    let macho_listener = TcpListener::bind("127.0.0.1:26000").await?;
+    let bridge_listener =
+        TcpListener::bind((cfg.bind_address.as_str(), cfg.bridge_port)).await?;
+    let macho_listener =
+        TcpListener::bind((cfg.bind_address.as_str(), cfg.macho_port)).await?;
+    let esi_listener = if cfg.feature_flags.enable_esi_http {
+        let l = TcpListener::bind((cfg.bind_address.as_str(), cfg.esi_port)).await?;
+        info!(
+            bind_address = %cfg.bind_address,
+            esi_port = cfg.esi_port,
+            "Listening on ESI / SSO HTTP TCP"
+        );
+        Some(l)
+    } else {
+        None
+    };
 
-    info!("Listening on 127.0.0.1:26001 (Python Client Bridge - JSON/MessagePack)");
-    info!("Listening on 127.0.0.1:26000 (Legacy machoNet / eveMarshal TCP)");
+    info!(
+        bind_address = %cfg.bind_address,
+        bridge_port = cfg.bridge_port,
+        "Listening on Python Client Bridge (JSON/MessagePack)"
+    );
+    info!(
+        bind_address = %cfg.bind_address,
+        macho_port = cfg.macho_port,
+        "Listening on Legacy machoNet / eveMarshal TCP"
+    );
 
     loop {
         tokio::select! {
@@ -86,6 +116,23 @@ async fn main() -> Result<()> {
                     if let Err(e) = handle_macho_client(stream, ctx_clone).await {
                         error!(%addr, error = %e, "machoNet connection closed with error");
                     }
+                });
+            }
+            Ok((mut stream, addr)) = async {
+                match &esi_listener {
+                    Some(l) => l.accept().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                tokio::spawn(async move {
+                    let body = b"{\"status\":\"esi_listener_active\",\"esi_phase\":\"pending\"}\n";
+                    let header = format!(
+                        "HTTP/1.1 501 Not Implemented\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = stream.write_all(header.as_bytes()).await;
+                    let _ = stream.write_all(body).await;
+                    info!(%addr, "Served ESI listener status response");
                 });
             }
         }
@@ -255,6 +302,9 @@ async fn handle_bridge_client(stream: TcpStream, ctx: Arc<ServerContext>) -> Res
     .await;
 
     reader_task.abort();
+    if let Some(uid) = session.user_id {
+        ctx.db.release_online_lock(uid, session.session_id);
+    }
     ctx.release_session_bindings(session.session_id);
     res
 }
@@ -389,6 +439,9 @@ async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>) -> 
     }
     .await;
 
+    if let Some(uid) = session.user_id {
+        ctx.db.release_online_lock(uid, session.session_id);
+    }
     ctx.release_session_bindings(session.session_id);
     res
 }

@@ -2,6 +2,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod config;
 pub mod formulas;
 pub mod living_world;
 pub mod router;

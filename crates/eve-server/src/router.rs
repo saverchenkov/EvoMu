@@ -30,6 +30,7 @@ const EMBEDDED_QUASAR_CATALOG_JSON: &str =
 pub struct BoundObjectEntry {
     pub bound_id: u64,
     pub session_id: u64,
+    pub user_id: u64,
     pub character_id: i64,
     pub service: String,
     pub object_id: i64,
@@ -49,6 +50,8 @@ pub struct ServerContext {
     pub scanned_signatures: RwLock<HashSet<(i64, u32, i64)>>,
     pub virtual_clock_offset_sec: AtomicU64,
     pub invention_roll_override: RwLock<Option<f64>>,
+    pub feature_flags: crate::config::FeatureFlagsConfig,
+    pub esi_port: u16,
 }
 
 impl Default for ServerContext {
@@ -58,9 +61,8 @@ impl Default for ServerContext {
 }
 
 impl ServerContext {
-    /// Initializes a `ServerContext` with the provided `WorldRepository` and seeds the NPC regional markets.
-    pub fn with_repository(db: Arc<WorldRepository>) -> Self {
-        let sde = Arc::new(SdeRegistry::with_canonical_seed());
+    /// Initializes a `ServerContext` with the provided `WorldRepository` and `SdeRegistry`, and seeds NPC regional markets.
+    pub fn with_sde_and_repository(sde: Arc<SdeRegistry>, db: Arc<WorldRepository>) -> Self {
         let _ = world_seeder::seed_dual_anchor_markets(&db, &sde);
 
         let catalog_map: HashMap<String, serde_json::Value> =
@@ -85,7 +87,45 @@ impl ServerContext {
             scanned_signatures: RwLock::new(HashSet::new()),
             virtual_clock_offset_sec: AtomicU64::new(0),
             invention_roll_override: RwLock::new(None),
+            feature_flags: crate::config::FeatureFlagsConfig::default(),
+            esi_port: 26_004,
         }
+    }
+
+    /// Initializes a `ServerContext` with the provided `WorldRepository` and seeds the NPC regional markets.
+    pub fn with_repository(db: Arc<WorldRepository>) -> Self {
+        let sde = Arc::new(SdeRegistry::with_canonical_seed());
+        Self::with_sde_and_repository(sde, db)
+    }
+
+    /// Initializes a `ServerContext` from a [`crate::config::ServerConfig`] (`D-5`).
+    pub fn from_config(cfg: &crate::config::ServerConfig) -> Result<Self, String> {
+        let sde = Arc::new(SdeRegistry::open(&cfg.sde_path).map_err(|e| e.to_string())?);
+        let db = Arc::new(WorldRepository::new_empty_with_snapshot_path(Some(
+            std::path::PathBuf::from(&cfg.world_db_path),
+        ))?);
+        for player in &cfg.player_accounts {
+            if !player.username.trim().is_empty() && !player.password_token.trim().is_empty() {
+                db.provision_player_account(player.username.trim(), player.password_token.trim());
+            }
+        }
+        for admin in &cfg.admin_accounts {
+            if !admin.username.trim().is_empty() && !admin.password_token.trim().is_empty() {
+                db.provision_gm_account(
+                    admin.username.trim(),
+                    admin.password_token.trim(),
+                    admin.character_id,
+                    admin.character_name.trim(),
+                );
+            }
+        }
+        let mut ctx = Self::with_sde_and_repository(sde, db);
+        ctx.feature_flags = cfg.feature_flags.clone();
+        ctx.esi_port = cfg.esi_port;
+        if cfg.feature_flags.seed_demo {
+            ctx.seed_demo_world_fixtures();
+        }
+        Ok(ctx)
     }
 
     /// Explicitly seeds demo convoys (`800_000_001..=800_000_003`), nullsec ESS bank balances (`10M`/`25M` ISK),
@@ -117,19 +157,11 @@ impl ServerContext {
         });
     }
 
-    /// Initializes the production server context (`R22-P1-5`): starts with an empty account/character table
-    /// (`WorldRepository::new_empty()`) unless `EVOMU_ENABLE_DEMO_SEED=1`, `--demo-seed`, or `--seed-demo` is explicitly set,
-    /// and provisions operator-supplied player accounts from `EVOMU_ACCOUNTS` (`user:secret,...`).
+    /// Initializes the production server context (`R22-P1-5`, `D-4`): always starts with an empty
+    /// account/character table (`WorldRepository::new_empty()`) without demo secrets, and provisions
+    /// operator-supplied player and admin accounts from `EVOMU_ACCOUNTS` / `EVOMU_GM_ACCOUNT`.
     pub fn new_production() -> Self {
-        let enable_demo = std::env::var("EVOMU_ENABLE_DEMO_SEED")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false)
-            || std::env::args().any(|a| a == "--demo-seed" || a == "--seed-demo");
-        let db = if enable_demo {
-            Arc::new(WorldRepository::with_demo_seed())
-        } else {
-            Arc::new(WorldRepository::new_empty())
-        };
+        let db = Arc::new(WorldRepository::new_empty());
         if let Ok(accounts_spec) = std::env::var("EVOMU_ACCOUNTS") {
             for entry in accounts_spec.split(',') {
                 if let Some((user, pass)) = entry.trim().split_once(':') {
@@ -141,22 +173,32 @@ impl ServerContext {
                 }
             }
         }
-        let ctx = Self::with_repository(db);
-        if enable_demo {
-            ctx.seed_demo_world_fixtures();
+        if let Ok(gm_spec) = std::env::var("EVOMU_GM_ACCOUNT") {
+            if let Some((user, pass)) = gm_spec.trim().split_once(':') {
+                let u = user.trim();
+                let p = pass.trim();
+                if !u.is_empty() && !p.is_empty() {
+                    db.provision_gm_account(u, p, 90_000_003, "ISD Polaris");
+                }
+            }
         }
-        ctx
+        Self::with_repository(db)
     }
 
     pub fn new() -> Self {
-        let disable_demo = std::env::var("EVOMU_DISABLE_DEMO_SEED")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
-        let db = if disable_demo {
-            Arc::new(WorldRepository::new_empty())
-        } else {
-            Arc::new(WorldRepository::with_demo_seed())
+        #[cfg(any(test, feature = "demo-seed"))]
+        let db = {
+            let disable_demo = std::env::var("EVOMU_DISABLE_DEMO_SEED")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
+            if disable_demo {
+                Arc::new(WorldRepository::new_empty())
+            } else {
+                Arc::new(WorldRepository::with_demo_seed())
+            }
         };
+        #[cfg(not(any(test, feature = "demo-seed")))]
+        let db = Arc::new(WorldRepository::new_empty());
         Self::with_repository(db)
     }
 
@@ -349,17 +391,17 @@ impl ServerContext {
         if charge_type.category_id != 8 {
             return false;
         }
-        let req_charge_group = weapon_type
-            .default_attributes
-            .get(&604)
-            .map(|g| *g as u32)
-            .unwrap_or(0);
-        let group_ok = (req_charge_group > 0 && charge_type.group_id == req_charge_group)
-            || charge_type
+        let group_ok = [604_u16, 605, 606, 609, 610].iter().any(|attr_id| {
+            weapon_type
                 .default_attributes
-                .get(&137)
-                .map(|lg| *lg as u32 == weapon_type.group_id)
-                .unwrap_or(false);
+                .get(attr_id)
+                .map(|g| (*g as u32) == charge_type.group_id)
+                .unwrap_or(false)
+        }) || charge_type
+            .default_attributes
+            .get(&137)
+            .map(|lg| *lg as u32 == weapon_type.group_id)
+            .unwrap_or(false);
         let size_ok = match (
             weapon_type.default_attributes.get(&128).copied(),
             charge_type.default_attributes.get(&128).copied(),
@@ -780,13 +822,22 @@ impl ServerContext {
             .retain(|_, v| v.session_id != session_id);
     }
 
-    /// Binds a stateful remote object scoped to `(session_id, character_id)`.
+    /// Releases all bound objects associated with `user_id` (called on ban, kick, or session displacement).
+    pub fn release_user_bindings(&self, user_id: u64) {
+        self.bound_objects
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|_, v| v.user_id != user_id);
+    }
+
+    /// Binds a stateful remote object scoped to `(session_id, user_id, character_id)`.
     pub fn bind_object(
         &self,
         session: &SessionState,
         service: &str,
         object_id: i64,
     ) -> Result<u64, BridgeRpcError> {
+        let user_id = Self::require_auth(session)?;
         let char_id = session.character_id.ok_or_else(|| BridgeRpcError {
             code: "CharacterNotSelected".into(),
             message: "Cannot bind object before selecting a character".into(),
@@ -834,6 +885,7 @@ impl ServerContext {
                 BoundObjectEntry {
                     bound_id,
                     session_id: session.session_id,
+                    user_id,
                     character_id: char_id,
                     service: service.to_string(),
                     object_id,
@@ -842,7 +894,7 @@ impl ServerContext {
         Ok(bound_id)
     }
 
-    /// Verifies that `bound_id` exists and belongs to the caller's `(session_id, character_id)`.
+    /// Verifies that `bound_id` exists and belongs to the caller's `(session_id, user_id, character_id)`.
     pub fn verify_bound_object(
         &self,
         session: &SessionState,
@@ -860,6 +912,7 @@ impl ServerContext {
             })?;
 
         if entry.session_id != session.session_id
+            || Some(entry.user_id) != session.user_id
             || Some(entry.character_id) != session.character_id
         {
             return Err(BridgeRpcError {
@@ -929,6 +982,43 @@ impl ServerContext {
             "Dispatching RPC call"
         );
 
+        // Enforce session revocation (ban, kick, or multi-login displacement) on EVERY call
+        // except un-bound authentication.Login/Logout/Ping (`R35-P1-3`, `R36-P1-3`).
+        let is_exempt_auth_call = bound_id.is_none()
+            && service == "authentication"
+            && matches!(method, "Login" | "Logout" | "Ping");
+        let is_multi_login_blocker_call =
+            bound_id.is_none() && service == "multiLoginBlocker" && method == "Login";
+        if !is_exempt_auth_call {
+            if let Some(uid) = session.user_id {
+                if let Some((code, msg)) =
+                    self.db
+                        .check_session_revoked(uid, session.session_id, self.now_unix())
+                {
+                    self.release_session_bindings(session.session_id);
+                    if code == "MultiLoginBlocked" {
+                        if !is_multi_login_blocker_call {
+                            return Err(BridgeRpcError { code, message: msg });
+                        }
+                    } else {
+                        let _ = self.db.release_online_lock(uid, session.session_id);
+                        session.user_id = None;
+                        session.role = 0;
+                        session.character_id = None;
+                        session.corporation_id = None;
+                        session.alliance_id = None;
+                        session.station_id = None;
+                        session.structure_id = None;
+                        session.solar_system_id = None;
+                        session.constellation_id = None;
+                        session.region_id = None;
+                        session.ship_id = None;
+                        return Err(BridgeRpcError { code, message: msg });
+                    }
+                }
+            }
+        }
+
         // Synchronize active character's ship/station/structure/solar-system state from DB
         if let Some(cid) = session.character_id {
             if let Ok(ch) = self.db.get_character(cid) {
@@ -952,8 +1042,47 @@ impl ServerContext {
             .map(|b| b.service.as_str())
             .unwrap_or(service);
 
+        if effective_service == "taleMgr" && !self.feature_flags.enable_living_world {
+            return Err(BridgeRpcError {
+                code: "FeatureDisabled".into(),
+                message: "Living World Director (taleMgr) is disabled in evomu.toml feature_flags"
+                    .into(),
+            });
+        }
+
+        // Central GM/QA role gate across all GM, slash, and QA/developer RPC surfaces (`S-9`, `D-4`).
+        let is_gm_or_qa_surface = matches!(
+            effective_service,
+            "slash" | "publicQaToolsServer" | "devToolsProvider"
+        ) || (effective_service == "taleMgr" && method == "MaterializeSystemLOD2")
+            || (effective_service == "keeper" && method == "GetLevelEditor")
+            || method.starts_with("GM_")
+            || method.starts_with("QA_")
+            || method.starts_with("qa_")
+            || method.ends_with("QA");
+        if is_gm_or_qa_surface {
+            let _ = Self::require_auth(session)?;
+            if !session.has_gm_role()
+                && (session.role & eve_machonet::service_roles::ROLE_QA) == 0
+            {
+                return Err(BridgeRpcError {
+                    code: "InsufficientRole".into(),
+                    message: format!(
+                        "{effective_service}.{method} requires a V24.01 GM/QA/Admin service role bitmask"
+                    ),
+                });
+            }
+        }
+
         // Validate Quasar Protobuf Public Gateway (`publicGatewaySvc`) domains and return explicit UnimplementedRPC
         if effective_service == "publicGatewaySvc" {
+            if !self.feature_flags.enable_quasar_gateway {
+                return Err(BridgeRpcError {
+                    code: "FeatureDisabled".into(),
+                    message:
+                        "Quasar publicGatewaySvc is disabled in evomu.toml feature_flags".into(),
+                });
+            }
             let _ = Self::require_character(session)?;
             if matches!(method, "SendRequest" | "PublishEvent" | "CallQuasar") {
                 let domain = args
@@ -1264,7 +1393,7 @@ mod tests {
             let extra_items = [
                 (
                     100_000_013,
-                    47702,
+                    47746,
                     60_003_760,
                     InventoryFlag::Hangar,
                     10,
@@ -1368,7 +1497,7 @@ mod tests {
                 ),
                 (
                     100_000_027,
-                    55001,
+                    34748,
                     60_003_760,
                     InventoryFlag::Hangar,
                     1,
@@ -1434,7 +1563,7 @@ mod tests {
                 ),
                 (
                     100_000_040,
-                    22989,
+                    21924,
                     100_000_001,
                     InventoryFlag::HiSlot0,
                     2_000,
@@ -1442,7 +1571,7 @@ mod tests {
                 ),
                 (
                     100_000_041,
-                    22989,
+                    21924,
                     100_000_029,
                     InventoryFlag::HiSlot0,
                     2_000,
@@ -1473,7 +1602,7 @@ mod tests {
                 100_000_042,
                 InventoryItemRecord {
                     item_id: 100_000_042,
-                    type_id: 22989,
+                    type_id: 21924,
                     owner_id: 90_000_002,
                     location_id: 100_000_002,
                     flag: InventoryFlag::HiSlot0,
@@ -1490,10 +1619,12 @@ mod tests {
             let char_skills = snap.skills.entry(90_000_001).or_default();
             for (skill_id, level, sp) in [
                 (3388, 4, 45_255.0),
+                (11445, 4, 226_275.0),
                 (11448, 4, 226_275.0),
                 (11452, 4, 226_275.0),
                 (21791, 4, 226_275.0),
                 (24242, 4, 45_255.0),
+                (33399, 4, 90_510.0),
                 (33407, 4, 90_510.0),
                 (21611, 2, 12_699.0),
             ] {
@@ -1752,7 +1883,7 @@ mod tests {
         .unwrap();
         assert_eq!(session.ship_id, Some(100_000_001));
 
-        // Research ME (activity 4, 10 runs) and TE (activity 3, 10 runs) on Rifter BPO (100_000_007),
+        // Research ME (activity 4, 10 runs) and TE (activity 3, 10 runs) on Rifter BPO (100_000_007, type 691),
         // copy 2 BPCs (activity 5), and test both failed and successful T2 Invention (activity 8) rolls
         for (act, runs) in [(4_i64, 10_i64), (3_i64, 10_i64), (5_i64, 1_i64), (5_i64, 1_i64)] {
             let jr = ctx
@@ -1762,7 +1893,7 @@ mod tests {
                     None,
                     "InstallJob",
                     &[
-                        PyRep::Integer(687),
+                        PyRep::Integer(691),
                         PyRep::Integer(act),
                         PyRep::Integer(runs),
                     ],
@@ -1797,7 +1928,7 @@ mod tests {
                 None,
                 "InstallJob",
                 &[
-                    PyRep::Integer(687),
+                    PyRep::Integer(691),
                     PyRep::Integer(8),
                     PyRep::Integer(1),
                 ],
@@ -1823,7 +1954,7 @@ mod tests {
             )
             .await;
         assert_eq!(too_early.unwrap_err().code, "JobNotYetComplete");
-        ctx.advance_virtual_clock(40_000);
+        ctx.advance_virtual_clock(65_000);
         ctx.set_invention_roll_override(Some(0.95));
         let inv_failed = ctx
             .dispatch_rpc(
@@ -1846,7 +1977,7 @@ mod tests {
                 None,
                 "InstallJob",
                 &[
-                    PyRep::Integer(687),
+                    PyRep::Integer(691),
                     PyRep::Integer(8),
                     PyRep::Integer(1),
                 ],
@@ -1859,7 +1990,7 @@ mod tests {
             panic!("Expected invention job 2 KeyVal");
         };
         let inv_job_id_2 = ijkv2.get("jobID").unwrap().as_i64().unwrap();
-        ctx.advance_virtual_clock(40_000);
+        ctx.advance_virtual_clock(70_000);
         ctx.set_invention_roll_override(Some(0.10));
         let inv_done = ctx
             .dispatch_rpc(
@@ -1880,7 +2011,7 @@ mod tests {
         assert_eq!(
             idkv.get("productTypeID"),
             Some(&PyRep::Integer(11372)),
-            "Invention of Rifter Blueprint (687) must yield Wolf Blueprint (11372)"
+            "Invention of Rifter Blueprint (691) must yield Wolf Blueprint (11372)"
         );
     }
 
@@ -2078,7 +2209,7 @@ mod tests {
             "dynamicItemService",
             None,
             "CreateDynamicItem",
-            &[PyRep::Integer(47702), PyRep::Integer(100_000_003)],
+            &[PyRep::Integer(47746), PyRep::Integer(100_000_003)],
             &empty,
             None,
         )
@@ -2096,7 +2227,7 @@ mod tests {
         .await
         .unwrap();
 
-        // E2E-04 & E2E-05: Undock, Sub-Warp Flight, Intra-System Warp to Stargate 50001248, & Jump to Perimeter
+        // E2E-04 & E2E-05: Undock, Sub-Warp Flight, Intra-System Warp to Stargate 50001249, Jump to Perimeter (30000144), & Travel to Low-Sec Tama (30002813)
         let undock = ctx
             .dispatch_rpc(&mut session, "stationSvc", None, "Undock", &[], &empty, None)
             .await
@@ -2104,80 +2235,59 @@ mod tests {
         let PyRep::KeyVal(ukv) = undock else {
             panic!("Expected KeyVal");
         };
-        let b_id = ukv.get("beyonceBoundID").unwrap().as_i64().unwrap() as u64;
-        ctx.dispatch_rpc(
-            &mut session,
-            "beyonce",
-            Some(b_id),
-            "CmdWarpToPoint",
-            &[
-                PyRep::Real(-161_369_743_360.0),
-                PyRep::Real(-30_690_549_760.0),
-                PyRep::Real(-1_107_962_183_680.0),
-            ],
-            &empty,
-            None,
-        )
-        .await
-        .unwrap();
+        let mut cur_b_id = ukv.get("beyonceBoundID").unwrap().as_i64().unwrap() as u64;
         let jita_handle = ctx.systems.get_or_spawn(30_000_142);
-        for _ in 0..30 {
-            let _ = jita_handle.step_manual(1.0).await.unwrap();
-        }
-        let jump_res = ctx
-            .dispatch_rpc(
-                &mut session,
-                "beyonce",
-                Some(b_id),
-                "CmdStargateJump",
-                &[PyRep::Integer(50001248)],
-                &empty,
-                None,
-            )
-            .await
-            .unwrap();
-        let PyRep::KeyVal(jkv) = jump_res else {
-            panic!("Expected jump KeyVal");
-        };
-        assert_eq!(jkv.get("solarSystemID"), Some(&PyRep::Integer(30_000_144)));
-        let perim_b_id = jkv.get("beyonceBoundID").unwrap().as_i64().unwrap() as u64;
-        let perim_handle = ctx.systems.get_or_spawn(30_000_144);
 
-        // Warp to Perimeter -> Tama stargate 50001250 and jump to Low-Sec Tama (30002813)
-        ctx.dispatch_rpc(
-            &mut session,
-            "beyonce",
-            Some(perim_b_id),
-            "CmdWarpToPoint",
-            &[
-                PyRep::Real(86_000_000_000.0),
-                PyRep::Real(12_000_000_000.0),
-                PyRep::Real(-141_000_000_000.0),
-            ],
-            &empty,
-            None,
-        )
-        .await
-        .unwrap();
-        for _ in 0..30 {
-            let _ = perim_handle.step_manual(1.0).await.unwrap();
-        }
-        let jump_tama = ctx
-            .dispatch_rpc(
+        // Travel Jita (30000142) -> Perimeter (30000144) -> Niyabainen (30000143) -> Tunttaras (30001379) -> Nourvukaiken (30001376) -> Tama (30002813)
+        for (from_sys, gate_id, expected_to_sys) in [
+            (30_000_142_u32, 50_001_249_i64, 30_000_144_u32),
+            (30_000_144_u32, 50_002_186_i64, 30_000_143_u32),
+            (30_000_143_u32, 50_013_923_i64, 30_001_379_u32),
+            (30_001_379_u32, 50_001_709_i64, 30_001_376_u32),
+            (30_001_376_u32, 50_014_001_i64, 30_002_813_u32),
+        ] {
+            let gate_pos = ctx.sde.jumps[&gate_id].position;
+            ctx.dispatch_rpc(
                 &mut session,
                 "beyonce",
-                Some(perim_b_id),
-                "CmdStargateJump",
-                &[PyRep::Integer(50001250)],
+                Some(cur_b_id),
+                "CmdWarpToPoint",
+                &[
+                    PyRep::Real(gate_pos.x),
+                    PyRep::Real(gate_pos.y),
+                    PyRep::Real(gate_pos.z),
+                ],
                 &empty,
                 None,
             )
             .await
             .unwrap();
-        let PyRep::KeyVal(tama_kv) = jump_tama else {
-            panic!("Expected Tama jump KeyVal");
-        };
-        let tama_b_id = tama_kv.get("beyonceBoundID").unwrap().as_i64().unwrap() as u64;
+            let sys_h = ctx.systems.get_or_spawn(from_sys);
+            for _ in 0..30 {
+                let _ = sys_h.step_manual(1.0).await.unwrap();
+            }
+            let jump_res = ctx
+                .dispatch_rpc(
+                    &mut session,
+                    "beyonce",
+                    Some(cur_b_id),
+                    "CmdStargateJump",
+                    &[PyRep::Integer(gate_id)],
+                    &empty,
+                    None,
+                )
+                .await
+                .unwrap();
+            let PyRep::KeyVal(jkv) = jump_res else {
+                panic!("Expected jump KeyVal");
+            };
+            assert_eq!(
+                jkv.get("solarSystemID"),
+                Some(&PyRep::Integer(expected_to_sys as i64))
+            );
+            cur_b_id = jkv.get("beyonceBoundID").unwrap().as_i64().unwrap() as u64;
+        }
+        let tama_b_id = cur_b_id;
         let tama_handle = ctx.systems.get_or_spawn(30_002_813);
 
         // E2E-11: S-6 verifies scanMgr.RequestScans returns UnimplementedRPC; spawn K162 ball 750_000_001 in Tama (30002813), ConeScan, Warp to Wormhole, & Wormhole Jump into J105934 (31000005)
@@ -2279,7 +2389,7 @@ mod tests {
             .spawn_ball_with_combat(
                 eve_destiny::Ball {
                     id: 700_000_001,
-                    type_id: 11001,
+                    type_id: 16997,
                     position: ship_in_hed.position + glam::DVec3::new(900.0, 0.0, 0.0),
                     velocity: glam::DVec3::ZERO,
                     max_velocity: 310.0,
@@ -2352,7 +2462,7 @@ mod tests {
         .await
         .unwrap();
 
-        // Jump wormhole from VFK-IV (30002904) -> Tama (30002813) -> stargate 50001251 -> Perimeter (50001873) -> Jita (30000142)
+        // Jump wormhole from VFK-IV (30002904) -> Tama (30002813), then stargate route back to Jita (30000142)
         let jb_tama = ctx
             .dispatch_rpc(
                 &mut session,
@@ -2368,75 +2478,55 @@ mod tests {
         let PyRep::KeyVal(jb_tama_kv) = jb_tama else {
             panic!("Expected jb_tama KeyVal");
         };
-        let tama_b2 = jb_tama_kv.get("beyonceBoundID").unwrap().as_i64().unwrap() as u64;
-        ctx.dispatch_rpc(
-            &mut session,
-            "beyonce",
-            Some(tama_b2),
-            "CmdWarpToPoint",
-            &[
-                PyRep::Real(10_000_000_000.0),
-                PyRep::Real(0.0),
-                PyRep::Real(10_000_000_000.0),
-            ],
-            &empty,
-            None,
-        )
-        .await
-        .unwrap();
-        for _ in 0..30 {
-            let _ = tama_handle.step_manual(1.0).await.unwrap();
-        }
-        let jb_perim = ctx
-            .dispatch_rpc(
+        let mut ret_b_id = jb_tama_kv.get("beyonceBoundID").unwrap().as_i64().unwrap() as u64;
+        for (from_sys, gate_id, expected_to_sys) in [
+            (30_002_813_u32, 50_014_002_i64, 30_001_376_u32),
+            (30_001_376_u32, 50_000_805_i64, 30_001_379_u32),
+            (30_001_379_u32, 50_013_925_i64, 30_000_138_u32),
+            (30_000_138_u32, 50_013_927_i64, 30_000_142_u32),
+        ] {
+            let gate_pos = ctx.sde.jumps[&gate_id].position;
+            ctx.dispatch_rpc(
                 &mut session,
                 "beyonce",
-                Some(tama_b2),
-                "CmdStargateJump",
-                &[PyRep::Integer(50001251)],
+                Some(ret_b_id),
+                "CmdWarpToPoint",
+                &[
+                    PyRep::Real(gate_pos.x),
+                    PyRep::Real(gate_pos.y),
+                    PyRep::Real(gate_pos.z),
+                ],
                 &empty,
                 None,
             )
             .await
             .unwrap();
-        let PyRep::KeyVal(jb_perim_kv) = jb_perim else {
-            panic!("Expected jb_perim KeyVal");
-        };
-        let perim_b2 = jb_perim_kv.get("beyonceBoundID").unwrap().as_i64().unwrap() as u64;
-        ctx.dispatch_rpc(
-            &mut session,
-            "beyonce",
-            Some(perim_b2),
-            "CmdWarpToPoint",
-            &[
-                PyRep::Real(84_000_000_000.0),
-                PyRep::Real(12_000_000_000.0),
-                PyRep::Real(-139_000_000_000.0),
-            ],
-            &empty,
-            None,
-        )
-        .await
-        .unwrap();
-        for _ in 0..30 {
-            let _ = perim_handle.step_manual(1.0).await.unwrap();
+            let sys_h = ctx.systems.get_or_spawn(from_sys);
+            for _ in 0..30 {
+                let _ = sys_h.step_manual(1.0).await.unwrap();
+            }
+            let jb_res = ctx
+                .dispatch_rpc(
+                    &mut session,
+                    "beyonce",
+                    Some(ret_b_id),
+                    "CmdStargateJump",
+                    &[PyRep::Integer(gate_id)],
+                    &empty,
+                    None,
+                )
+                .await
+                .unwrap();
+            let PyRep::KeyVal(jb_kv) = jb_res else {
+                panic!("Expected return jump KeyVal");
+            };
+            assert_eq!(
+                jb_kv.get("solarSystemID"),
+                Some(&PyRep::Integer(expected_to_sys as i64))
+            );
+            ret_b_id = jb_kv.get("beyonceBoundID").unwrap().as_i64().unwrap() as u64;
         }
-        let jump_back = ctx
-            .dispatch_rpc(
-                &mut session,
-                "beyonce",
-                Some(perim_b2),
-                "CmdStargateJump",
-                &[PyRep::Integer(50001873)],
-                &empty,
-                None,
-            )
-            .await
-            .unwrap();
-        let PyRep::KeyVal(jb_kv) = jump_back else {
-            panic!("Expected jump_back KeyVal");
-        };
-        let jita_b_id = jb_kv.get("beyonceBoundID").unwrap().as_i64().unwrap() as u64;
+        let jita_b_id = ret_b_id;
 
         // Warp to Jita 4-4 station (60_003_760) at [-107303362560.0, -18744975360.0, 436489052160.0] and dock
         ctx.dispatch_rpc(
@@ -2510,7 +2600,7 @@ mod tests {
             "reprocessingSvc",
             None,
             "Reprocess",
-            &[PyRep::Integer(100_000_012)],
+            &[PyRep::Integer(100_000_018)],
             &empty,
             None,
         )
@@ -2523,7 +2613,7 @@ mod tests {
                 None,
                 "InstallJob",
                 &[
-                    PyRep::Integer(687),
+                    PyRep::Integer(691),
                     PyRep::Integer(1),
                     PyRep::Integer(1),
                 ],
@@ -2570,19 +2660,23 @@ mod tests {
         .await
         .unwrap();
         let mut storyline_triggered = false;
-        for i in 1..=16i64 {
-            let mid = 1000 + i;
-            ctx.dispatch_rpc(
-                &mut session,
-                "agentMgr",
-                None,
-                "RequestMission",
-                &[PyRep::Integer(mid)],
-                &empty,
-                None,
-            )
-            .await
-            .unwrap();
+        for _ in 1..=16i64 {
+            let req_m = ctx
+                .dispatch_rpc(
+                    &mut session,
+                    "agentMgr",
+                    None,
+                    "RequestMission",
+                    &[],
+                    &empty,
+                    None,
+                )
+                .await
+                .unwrap();
+            let PyRep::KeyVal(req_mkv) = req_m else {
+                panic!("Expected RequestMission KeyVal");
+            };
+            let mid = req_mkv.get("missionID").unwrap().as_i64().unwrap();
             let acc_m = ctx
                 .dispatch_rpc(
                     &mut session,
@@ -3267,17 +3361,18 @@ mod tests {
             .await
             .unwrap();
         }
-        ctx.dispatch_rpc(
-            &mut session,
-            "seasonManager",
-            None,
-            "claim_goal_reward",
-            &[PyRep::Integer(1)],
-            &empty,
-            None,
-        )
-        .await
-        .unwrap();
+        let goal_res = ctx
+            .dispatch_rpc(
+                &mut session,
+                "seasonManager",
+                None,
+                "claim_goal_reward",
+                &[PyRep::Integer(1)],
+                &empty,
+                None,
+            )
+            .await;
+        assert_eq!(goal_res.unwrap_err().code, "UnimplementedRPC");
 
         // Verify unimplemented methods on cataloged services strictly return UnimplementedRPC (no catch-all stub)
         assert_eq!(ctx.cataloged_services.len(), 216);

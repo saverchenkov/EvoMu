@@ -1,0 +1,27 @@
+# EvoMu Server Configuration (D-5)
+# Copy or customize this file, or set EVOMU_CONFIG_PATH to an alternate path.
+
+bind_address = "127.0.0.1"
+macho_port = 26000
+bridge_port = 26002
+esi_port = 26004
+
+sde_path = "data/evomu_sde.sqlite"
+world_db_path = "data/evomu_world.sqlite"
+
+[feature_flags]
+enable_quasar_gateway = true
+enable_esi_http = true
+enable_living_world = true
+seed_demo = false
+
+# Example operator-provisioned accounts (passwords are hashed at rest with Argon2id):
+# [[admin_accounts]]
+# username = "gm_admin"
+# password_token = "replace-with-strong-secret"
+# character_id = 90000003
+# character_name = "ISD Polaris"
+#
+# [[player_accounts]]
+# username = "pilot1"
+# password_token = "replace-with-strong-secret"

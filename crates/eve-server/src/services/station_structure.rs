@@ -176,10 +176,12 @@ pub async fn handle(
                     }));
                 }
             };
-            let _ = ctx
-                .living_world
-                .materialize_system_lod2(ch.solar_system_id, &ctx.systems, &ctx.sde)
-                .await;
+            if ctx.feature_flags.enable_living_world {
+                let _ = ctx
+                    .living_world
+                    .materialize_system_lod2(ch.solar_system_id, &ctx.systems, &ctx.sde)
+                    .await;
+            }
 
             session.station_id = None;
             session.structure_id = None;
@@ -684,7 +686,7 @@ pub async fn handle(
                             .map(|t| {
                                 matches!(
                                     t.group_id,
-                                    53 | 55 | 74 | 506..=511 | 1986 | 4060 | 4500 | 4805
+                                    53 | 55 | 74 | 506..=511 | 1986 | 4060 | 4500 | 4805 | 4807
                                 )
                             })
                             .unwrap_or(false)

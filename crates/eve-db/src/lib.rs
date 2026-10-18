@@ -8,6 +8,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod sqlite_store;
+
 use eve_sde::{AttributeId, SdeRegistry, SolarSystemId, TypeId};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -21,6 +23,13 @@ const MAX_IDEMPOTENCY_KEYS: usize = 4_096;
 pub enum DbError {
     #[error("Invalid credentials")]
     InvalidCredentials,
+    #[error("Account banned until {until_unix}: {reason}")]
+    AccountBanned { until_unix: u64, reason: String },
+    #[error("Account {user_id} already has an active online session ({active_session_id})")]
+    AlreadyLoggedIn {
+        user_id: u64,
+        active_session_id: u64,
+    },
     #[error("Character {0} not found")]
     CharacterNotFound(i64),
     #[error("Character {0} is already undocked in space")]
@@ -241,6 +250,89 @@ pub struct AccountRecord {
     pub username: String,
     pub password_token: String,
     pub role: u64,
+    #[serde(default)]
+    pub banned_until_unix: Option<u64>,
+    #[serde(default)]
+    pub ban_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OnlineSessionRecord {
+    pub user_id: u64,
+    pub username: String,
+    pub session_id: u64,
+    pub character_id: Option<i64>,
+    pub connected_at_unix: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PkceAuthCode {
+    pub code: String,
+    pub user_id: u64,
+    pub character_id: i64,
+    pub client_id: String,
+    pub redirect_uri: String,
+    pub scopes: Vec<String>,
+    pub code_challenge: String,
+    pub code_challenge_method: String,
+    pub expires_at_unix: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SsoTokenBundle {
+    pub access_token: String,
+    pub token_type: String,
+    pub expires_in: u64,
+    pub refresh_token: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SsoTokenClaims {
+    pub sub: String,
+    pub name: String,
+    pub owner: String,
+    pub user_id: u64,
+    pub character_id: i64,
+    pub scp: Vec<String>,
+    pub iss: String,
+    pub aud: Vec<String>,
+    pub iat: u64,
+    pub exp: u64,
+    pub jti: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SsoRefreshTokenRecord {
+    pub refresh_token: String,
+    pub user_id: u64,
+    pub character_id: i64,
+    pub client_id: String,
+    pub scopes: Vec<String>,
+    pub expires_at_unix: u64,
+    pub revoked: bool,
+}
+
+#[derive(Debug, Clone)]
+struct AuthRuntimeState {
+    online_sessions: HashMap<u64, OnlineSessionRecord>,
+    kicked_users: HashMap<u64, (u64, String)>,
+    displaced_sessions: HashMap<u64, String>,
+    pkce_codes: HashMap<String, PkceAuthCode>,
+    refresh_tokens: HashMap<String, SsoRefreshTokenRecord>,
+    jwt_signing_secret: [u8; 32],
+}
+
+impl AuthRuntimeState {
+    fn new(jwt_signing_secret: [u8; 32]) -> Self {
+        Self {
+            online_sessions: HashMap::new(),
+            kicked_users: HashMap::new(),
+            displaced_sessions: HashMap::new(),
+            pkce_codes: HashMap::new(),
+            refresh_tokens: HashMap::new(),
+            jwt_signing_secret,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -949,35 +1041,121 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
+fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
+    let mut key_block = [0u8; 64];
+    if key.len() > 64 {
+        let hashed = sha256_bytes(key);
+        key_block[..32].copy_from_slice(&hashed);
+    } else {
+        key_block[..key.len()].copy_from_slice(key);
+    }
+    let mut ipad = [0x36u8; 64];
+    let mut opad = [0x5cu8; 64];
+    for i in 0..64 {
+        ipad[i] ^= key_block[i];
+        opad[i] ^= key_block[i];
+    }
+    let mut inner_in = Vec::with_capacity(64 + message.len());
+    inner_in.extend_from_slice(&ipad);
+    inner_in.extend_from_slice(message);
+    let inner_hash = sha256_bytes(&inner_in);
+
+    let mut outer_in = Vec::with_capacity(64 + 32);
+    outer_in.extend_from_slice(&opad);
+    outer_in.extend_from_slice(&inner_hash);
+    sha256_bytes(&outer_in)
+}
+
+const B64URL_ALPHABET: &[u8; 64] =
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+pub fn base64url_encode_no_pad(data: &[u8]) -> String {
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = chunk.get(1).copied().unwrap_or(0) as u32;
+        let b2 = chunk.get(2).copied().unwrap_or(0) as u32;
+        let triple = (b0 << 16) | (b1 << 8) | b2;
+        out.push(B64URL_ALPHABET[((triple >> 18) & 0x3f) as usize] as char);
+        out.push(B64URL_ALPHABET[((triple >> 12) & 0x3f) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(B64URL_ALPHABET[((triple >> 6) & 0x3f) as usize] as char);
+        }
+        if chunk.len() > 2 {
+            out.push(B64URL_ALPHABET[(triple & 0x3f) as usize] as char);
+        }
+    }
+    out
+}
+
+pub fn base64url_decode_no_pad(input: &str) -> Result<Vec<u8>, String> {
+    let trimmed = input.trim_end_matches('=');
+    let mut vals = Vec::with_capacity(trimmed.len());
+    for b in trimmed.bytes() {
+        let v = match b {
+            b'A'..=b'Z' => b - b'A',
+            b'a'..=b'z' => b - b'a' + 26,
+            b'0'..=b'9' => b - b'0' + 52,
+            b'-' | b'+' => 62,
+            b'_' | b'/' => 63,
+            _ => return Err("Invalid base64url character".into()),
+        };
+        vals.push(v as u32);
+    }
+    let mut out = Vec::with_capacity((vals.len() * 3) / 4);
+    for chunk in vals.chunks(4) {
+        match chunk.len() {
+            4 => {
+                let n = (chunk[0] << 18) | (chunk[1] << 12) | (chunk[2] << 6) | chunk[3];
+                out.push(((n >> 16) & 0xff) as u8);
+                out.push(((n >> 8) & 0xff) as u8);
+                out.push((n & 0xff) as u8);
+            }
+            3 => {
+                let n = (chunk[0] << 18) | (chunk[1] << 12) | (chunk[2] << 6);
+                out.push(((n >> 16) & 0xff) as u8);
+                out.push(((n >> 8) & 0xff) as u8);
+            }
+            2 => {
+                let n = (chunk[0] << 18) | (chunk[1] << 12);
+                out.push(((n >> 16) & 0xff) as u8);
+            }
+            _ => return Err("Invalid base64url length".into()),
+        }
+    }
+    Ok(out)
+}
+
 /// Incremental Write-Ahead Log (WAL) delta record for hot-path mutations (`OF-06` / `OF-23` / `R21-P1-5`).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-struct WorldStateWalDelta {
+pub(crate) struct WorldStateWalDelta {
     #[serde(default)]
-    seq: u64,
-    next_entity_id: i64,
+    pub(crate) seq: u64,
+    pub(crate) next_entity_id: i64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    upserted_characters: Vec<CharacterRecord>,
+    pub(crate) upserted_characters: Vec<CharacterRecord>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    upserted_items: Vec<InventoryItemRecord>,
+    pub(crate) upserted_items: Vec<InventoryItemRecord>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    removed_items: Vec<i64>,
+    pub(crate) removed_items: Vec<i64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    upserted_market_orders: Vec<MarketOrderRecord>,
+    pub(crate) upserted_market_orders: Vec<MarketOrderRecord>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    removed_market_orders: Vec<i64>,
+    pub(crate) removed_market_orders: Vec<i64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    appended_wallet_journal: Vec<WalletJournalEntry>,
+    pub(crate) appended_wallet_journal: Vec<WalletJournalEntry>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    upserted_contracts: Vec<ContractRecord>,
+    pub(crate) upserted_contracts: Vec<ContractRecord>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    upserted_system_states: Vec<SystemDynamicState>,
+    pub(crate) upserted_system_states: Vec<SystemDynamicState>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    added_idempotency_keys: Vec<(i64, String)>,
+    pub(crate) added_idempotency_keys: Vec<(i64, String)>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    full_snapshot: Option<WorldStateSnapshot>,
+    pub(crate) full_snapshot: Option<WorldStateSnapshot>,
 }
 
 impl WorldStateWalDelta {
+    #[cfg(test)]
     fn from_diff(old: &WorldStateSnapshot, new: &WorldStateSnapshot) -> Self {
         let cold_equal = old.markets_seeded == new.markets_seeded
             && old.accounts == new.accounts
@@ -1112,9 +1290,13 @@ impl WorldStateWalDelta {
     }
 }
 
-/// Encapsulated transactional world repository.
+/// Encapsulated transactional world repository backed by SQLite (`D-3`, `D-4`).
 pub struct WorldRepository {
     inner: RwLock<WorldStateSnapshot>,
+    sqlite_conn: std::sync::Mutex<rusqlite::Connection>,
+    sqlite_fp: std::sync::Mutex<sqlite_store::TableFingerprints>,
+    sqlite_path: Option<std::path::PathBuf>,
+    auth_runtime: RwLock<AuthRuntimeState>,
     wal_lock: std::sync::Mutex<()>,
     snapshot_path: Option<std::path::PathBuf>,
     pending_wal_records: std::sync::atomic::AtomicUsize,
@@ -1134,7 +1316,7 @@ impl Drop for WorldRepository {
 
 impl Default for WorldRepository {
     fn default() -> Self {
-        Self::with_demo_seed()
+        Self::new_empty()
     }
 }
 
@@ -1163,26 +1345,32 @@ pub mod service_roles {
 }
 
 impl WorldRepository {
-    /// Generates a 16-byte random per-account salt encoded as 32 lowercase hex characters from OS CSPRNG (`/dev/urandom`).
-    fn generate_random_salt_hex() -> String {
-        static SALT_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-        let mut salt_bytes = [0u8; 16];
-        let mut filled = false;
-        if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
-            use std::io::Read as _;
-            if f.read_exact(&mut salt_bytes).is_ok() {
-                filled = true;
+    /// Generates a 32-byte (256-bit) cryptographically random secret from OS CSPRNG (`/dev/urandom`),
+    /// or from `EVOMU_SSO_JWT_SECRET` when explicitly configured with at least 32 bytes (`R34-P0-1`).
+    fn generate_random_secret_32() -> [u8; 32] {
+        if let Ok(env_secret) = std::env::var("EVOMU_SSO_JWT_SECRET") {
+            let trimmed = env_secret.trim();
+            if trimmed.len() >= 32 {
+                return sha256_bytes(trimmed.as_bytes());
             }
         }
-        if !filled {
-            let seq = SALT_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            let nanos = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0);
-            let fallback = sha256_bytes(format!("evomu-salt-fallback:{nanos}:{seq}").as_bytes());
-            salt_bytes.copy_from_slice(&fallback[..16]);
-        }
+        use std::io::Read as _;
+        let mut secret = [0u8; 32];
+        let mut f = std::fs::File::open("/dev/urandom")
+            .expect("OS CSPRNG (/dev/urandom) must be available to initialize JWT signing secret");
+        f.read_exact(&mut secret)
+            .expect("OS CSPRNG (/dev/urandom) must yield 32 random bytes for JWT signing secret");
+        secret
+    }
+
+    /// Generates a 16-byte random per-account salt encoded as 32 lowercase hex characters from OS CSPRNG (`/dev/urandom`).
+    fn generate_random_salt_hex() -> String {
+        use std::io::Read as _;
+        let mut salt_bytes = [0u8; 16];
+        let mut f = std::fs::File::open("/dev/urandom")
+            .expect("OS CSPRNG (/dev/urandom) must be available to generate password salt");
+        f.read_exact(&mut salt_bytes)
+            .expect("OS CSPRNG (/dev/urandom) must yield 16 random bytes for password salt");
         let mut hex = String::with_capacity(32);
         for b in salt_bytes {
             use std::fmt::Write as _;
@@ -1191,9 +1379,51 @@ impl WorldRepository {
         hex
     }
 
-    /// Computes a salted 256-round SHA-256 credential digest (`sha256$v1$<salt_hex>$<digest_hex>`)
-    /// from an explicit per-account salt and raw client password token without any pass-the-hash bypass (`R21-P1-3`).
+    /// Computes a salted Argon2id (`v=19, m=19456, t=2, p=1` OWASP minimum) credential digest
+    /// (`$argon2id$v=19$m=19456,t=2,p=1$<salt_hex>$<digest_hex>`) from an explicit per-account
+    /// salt and raw client password token without any pass-the-hash bypass (`D-4`, `R21-P1-3`).
     pub fn hash_password_with_salt(
+        username: &str,
+        salt_hex: &str,
+        raw_password_token: &str,
+    ) -> String {
+        Self::hash_password_with_params(username, salt_hex, raw_password_token, 19_456, 2, 1)
+    }
+
+    fn hash_password_with_params(
+        username: &str,
+        salt_hex: &str,
+        raw_password_token: &str,
+        m_cost: u32,
+        t_cost: u32,
+        p_cost: u32,
+    ) -> String {
+        use argon2::{Algorithm, Argon2, Params, Version};
+        let params =
+            Params::new(m_cost, t_cost, p_cost, Some(32)).expect("valid Argon2id parameters");
+        let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+        let salt_material = format!("evomu-auth-argon2id:{username}:{salt_hex}");
+        let mut digest = [0u8; 32];
+        argon2
+            .hash_password_into(
+                raw_password_token.as_bytes(),
+                salt_material.as_bytes(),
+                &mut digest,
+            )
+            .expect("Argon2id hash_password_into succeeds");
+        use std::fmt::Write as _;
+        let mut out = String::with_capacity(34 + salt_hex.len() + 64);
+        let _ = write!(
+            &mut out,
+            "$argon2id$v=19$m={m_cost},t={t_cost},p={p_cost}${salt_hex}$"
+        );
+        for byte in digest {
+            let _ = write!(&mut out, "{byte:02x}");
+        }
+        out
+    }
+
+    fn hash_password_with_salt_sha256_legacy(
         username: &str,
         salt_hex: &str,
         raw_password_token: &str,
@@ -1225,13 +1455,14 @@ impl WorldRepository {
         hex
     }
 
-    /// Derives a newly salted iterative SHA-256 credential digest (`sha256$v1$<salt_hex>$<digest_hex>`)
-    /// using a fresh 16-byte random per-account salt (`OF-24`, `R21-P1-3`).
+    /// Derives a newly salted Argon2id credential digest (`$argon2id$v=19$m=19456,t=2,p=1$<salt_hex>$<digest_hex>`)
+    /// using a fresh 16-byte random per-account salt (`D-4`, `OF-24`, `R21-P1-3`).
     pub fn hash_password_token(username: &str, raw_password_token: &str) -> String {
         let salt_hex = Self::generate_random_salt_hex();
         Self::hash_password_with_salt(username, &salt_hex, raw_password_token)
     }
 
+    #[cfg(any(test, feature = "demo-seed"))]
     pub fn with_demo_seed() -> Self {
         let mut accounts = HashMap::new();
         accounts.insert(
@@ -1241,6 +1472,8 @@ impl WorldRepository {
                 username: "demo".to_string(),
                 password_token: Self::hash_password_token("demo", "demo-secret"),
                 role: service_roles::ROLE_PLAYER_DEFAULT,
+                banned_until_unix: None,
+                ban_reason: None,
             },
         );
         accounts.insert(
@@ -1250,6 +1483,8 @@ impl WorldRepository {
                 username: "other".to_string(),
                 password_token: Self::hash_password_token("other", "other-secret"),
                 role: service_roles::ROLE_PLAYER_DEFAULT,
+                banned_until_unix: None,
+                ban_reason: None,
             },
         );
 
@@ -1405,8 +1640,8 @@ impl WorldRepository {
         // Seed only starter frigate modules, basic minerals/ore, and an unresearched Rifter BPO (IDs 100_000_003..=100_000_012)
         let starter_items = [
             (100_000_003, 438, 1, true),        // 1MN Afterburner II
-            (100_000_004, 1248, 2, true),       // Overdrive Injector System II
-            (100_000_007, 687, 1, true),        // Rifter Blueprint (unresearched BPO ME0/TE0)
+            (100_000_004, 1236, 2, true),       // Overdrive Injector System II
+            (100_000_007, 691, 1, true),        // Rifter Blueprint (unresearched BPO ME0/TE0)
             (100_000_008, 34, 100_000, false),  // Tritanium
             (100_000_009, 35, 50_000, false),   // Pyerite
             (100_000_010, 36, 20_000, false),   // Mexallon
@@ -1530,8 +1765,16 @@ impl WorldRepository {
                 3302,
                 TrainedSkillRecord {
                     type_id: 3302, // Small Projectile Turret
-                    level: 4,
-                    skill_points: 45_255.0,
+                    level: 5,
+                    skill_points: 256_000.0,
+                },
+            ),
+            (
+                11084,
+                TrainedSkillRecord {
+                    type_id: 11084, // Small Autocannon Specialization
+                    level: 1,
+                    skill_points: 750.0,
                 },
             ),
             (
@@ -1559,6 +1802,14 @@ impl WorldRepository {
                 },
             ),
             (
+                3394,
+                TrainedSkillRecord {
+                    type_id: 3394, // Hull Upgrades
+                    level: 2,
+                    skill_points: 2_829.0,
+                },
+            ),
+            (
                 3443,
                 TrainedSkillRecord {
                     type_id: 3443, // Trade
@@ -1578,6 +1829,14 @@ impl WorldRepository {
                 3449,
                 TrainedSkillRecord {
                     type_id: 3449, // Navigation
+                    level: 4,
+                    skill_points: 45_255.0,
+                },
+            ),
+            (
+                3450,
+                TrainedSkillRecord {
+                    type_id: 3450, // Afterburner
                     level: 4,
                     skill_points: 45_255.0,
                 },
@@ -1607,43 +1866,58 @@ impl WorldRepository {
             .filter(|s| !s.trim().is_empty())
             .map(std::path::PathBuf::from);
 
+        let initial_snap = WorldStateSnapshot {
+            next_entity_id: 200_000_000,
+            wal_seq: 0,
+            markets_seeded: false,
+            accounts,
+            characters,
+            skills,
+            skill_queues: HashMap::new(),
+            jump_clones: HashMap::new(),
+            active_implants: HashMap::new(),
+            items,
+            saved_fittings: HashMap::new(),
+            market_orders,
+            wallet_journal: Vec::new(),
+            contracts: HashMap::new(),
+            industry_jobs: HashMap::new(),
+            planetary_colonies: HashMap::new(),
+            active_missions: HashMap::new(),
+            mission_tally: HashMap::new(),
+            standing_transactions: HashMap::new(),
+            npe_progress,
+            bookmarks: HashMap::new(),
+            mails: Vec::new(),
+            fleets: HashMap::new(),
+            corporations: HashMap::new(),
+            alliances: HashMap::new(),
+            wars: HashMap::new(),
+            corp_projects: HashMap::new(),
+            killmails: HashMap::new(),
+            kill_rights: HashMap::new(),
+            structures: HashMap::new(),
+            system_states,
+            committed_idempotency_keys: HashSet::new(),
+            licensed_skins: HashMap::new(),
+            applied_ship_skins: HashMap::new(),
+        };
+        let mut conn = rusqlite::Connection::open_in_memory()
+            .expect("open in-memory SQLite connection for WorldRepository");
+        sqlite_store::apply_migrations(&conn)
+            .expect("apply SQLite migrations for WorldRepository");
+        let fp = sqlite_store::replace_sqlite_from_snapshot(&mut conn, &initial_snap)
+            .expect("initialize SQLite from demo snapshot");
+        let jwt_secret =
+            sqlite_store::load_or_init_jwt_secret(&conn, Self::generate_random_secret_32)
+                .expect("initialize per-deployment JWT signing secret");
+
         let mut repo = Self {
-            inner: RwLock::new(WorldStateSnapshot {
-                next_entity_id: 200_000_000,
-                wal_seq: 0,
-                markets_seeded: false,
-                accounts,
-                characters,
-                skills,
-                skill_queues: HashMap::new(),
-                jump_clones: HashMap::new(),
-                active_implants: HashMap::new(),
-                items,
-                saved_fittings: HashMap::new(),
-                market_orders,
-                wallet_journal: Vec::new(),
-                contracts: HashMap::new(),
-                industry_jobs: HashMap::new(),
-                planetary_colonies: HashMap::new(),
-                active_missions: HashMap::new(),
-                mission_tally: HashMap::new(),
-                standing_transactions: HashMap::new(),
-                npe_progress,
-                bookmarks: HashMap::new(),
-                mails: Vec::new(),
-                fleets: HashMap::new(),
-                corporations: HashMap::new(),
-                alliances: HashMap::new(),
-                wars: HashMap::new(),
-                corp_projects: HashMap::new(),
-                killmails: HashMap::new(),
-                kill_rights: HashMap::new(),
-                structures: HashMap::new(),
-                system_states,
-                committed_idempotency_keys: HashSet::new(),
-                licensed_skins: HashMap::new(),
-                applied_ship_skins: HashMap::new(),
-            }),
+            inner: RwLock::new(initial_snap),
+            sqlite_conn: std::sync::Mutex::new(conn),
+            sqlite_fp: std::sync::Mutex::new(fp),
+            sqlite_path: None,
+            auth_runtime: RwLock::new(AuthRuntimeState::new(jwt_secret)),
             wal_lock: std::sync::Mutex::new(()),
             snapshot_path: None,
             pending_wal_records: std::sync::atomic::AtomicUsize::new(0),
@@ -1668,64 +1942,127 @@ impl WorldRepository {
         path.with_extension("json.wal")
     }
 
+    fn is_sqlite_extension(path: &Path) -> bool {
+        matches!(
+            path.extension().and_then(|e| e.to_str()),
+            Some("sqlite" | "sqlite3" | "db")
+        )
+    }
+
+    /// Opens or initializes a durable relational SQLite world database at `path`, applies schema
+    /// migrations (`schema_migrations`), and loads the persisted world state (`D-3`).
+    pub fn open_sqlite(path: impl AsRef<Path>) -> Result<Self, String> {
+        let target = path.as_ref();
+        if let Some(parent) = target.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+        }
+        let conn = rusqlite::Connection::open(target).map_err(|e| e.to_string())?;
+        sqlite_store::apply_migrations(&conn)?;
+        let (snap, fp) = sqlite_store::load_snapshot_from_sqlite(&conn)?;
+        let jwt_secret =
+            sqlite_store::load_or_init_jwt_secret(&conn, Self::generate_random_secret_32)?;
+        Ok(Self {
+            inner: RwLock::new(snap),
+            sqlite_conn: std::sync::Mutex::new(conn),
+            sqlite_fp: std::sync::Mutex::new(fp),
+            sqlite_path: Some(target.to_path_buf()),
+            auth_runtime: RwLock::new(AuthRuntimeState::new(jwt_secret)),
+            wal_lock: std::sync::Mutex::new(()),
+            snapshot_path: None,
+            pending_wal_records: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            wal_fault_mode: std::sync::atomic::AtomicU8::new(0),
+        })
+    }
+
+    /// Returns the file path of the backing SQLite database if opened via [`Self::open_sqlite`].
+    pub fn sqlite_path(&self) -> Option<&Path> {
+        self.sqlite_path.as_deref()
+    }
+
     /// Creates a production `WorldRepository` with an empty account, character, and player item table
-    /// prior to loading `EVOMU_SNAPSHOT_PATH` (`R22-P1-5`, `R23-P0-1`, `R24-P1-1`).
+    /// prior to loading `EVOMU_DB_PATH` or `EVOMU_SNAPSHOT_PATH` (`R22-P1-5`, `R23-P0-1`, `R24-P1-1`, `D-3`).
     pub fn new_empty() -> Self {
-        let snapshot_path = std::env::var("EVOMU_SNAPSHOT_PATH")
+        let db_or_snapshot_path = std::env::var("EVOMU_DB_PATH")
             .ok()
             .filter(|s| !s.trim().is_empty())
+            .or_else(|| {
+                std::env::var("EVOMU_SNAPSHOT_PATH")
+                    .ok()
+                    .filter(|s| !s.trim().is_empty())
+            })
             .map(std::path::PathBuf::from);
-        Self::new_empty_with_snapshot_path(snapshot_path)
-            .expect("Failed to load or initialize persisted WorldRepository snapshot")
+        Self::new_empty_with_snapshot_path(db_or_snapshot_path)
+            .expect("Failed to load or initialize persisted WorldRepository database")
     }
 
     /// Creates a production `WorldRepository` with an empty player state, then loads `snapshot_path`
     /// if it already exists on disk without clearing any loaded accounts, characters, skills, or items.
-    /// Returns `Err` if loading or initializing the snapshot fails, refusing to start with an empty
-    /// world over an unreadable save (`R23-P0-1`, `R24-P1-1`, `S-5`).
+    /// When `snapshot_path` has a `.sqlite`/`.sqlite3`/`.db` extension, opens the relational SQLite
+    /// store directly via [`Self::open_sqlite`] (`D-3`).
+    /// Returns `Err` if loading or initializing fails, refusing to start with an empty world over an
+    /// unreadable save (`R23-P0-1`, `R24-P1-1`, `S-5`, `D-3`).
     pub fn new_empty_with_snapshot_path(
         snapshot_path: Option<std::path::PathBuf>,
     ) -> Result<Self, String> {
+        if let Some(ref p) = snapshot_path {
+            if Self::is_sqlite_extension(p) {
+                return Self::open_sqlite(p);
+            }
+        }
+
         let market_orders = HashMap::new();
         let system_states = HashMap::new();
+        let initial_snap = WorldStateSnapshot {
+            next_entity_id: 200_000_000,
+            wal_seq: 0,
+            markets_seeded: false,
+            accounts: HashMap::new(),
+            characters: HashMap::new(),
+            skills: HashMap::new(),
+            skill_queues: HashMap::new(),
+            jump_clones: HashMap::new(),
+            active_implants: HashMap::new(),
+            items: HashMap::new(),
+            saved_fittings: HashMap::new(),
+            market_orders,
+            wallet_journal: Vec::new(),
+            contracts: HashMap::new(),
+            industry_jobs: HashMap::new(),
+            planetary_colonies: HashMap::new(),
+            active_missions: HashMap::new(),
+            mission_tally: HashMap::new(),
+            standing_transactions: HashMap::new(),
+            npe_progress: HashMap::new(),
+            bookmarks: HashMap::new(),
+            mails: Vec::new(),
+            fleets: HashMap::new(),
+            corporations: HashMap::new(),
+            alliances: HashMap::new(),
+            wars: HashMap::new(),
+            corp_projects: HashMap::new(),
+            killmails: HashMap::new(),
+            kill_rights: HashMap::new(),
+            structures: HashMap::new(),
+            system_states,
+            committed_idempotency_keys: HashSet::new(),
+            licensed_skins: HashMap::new(),
+            applied_ship_skins: HashMap::new(),
+        };
+        let mut conn = rusqlite::Connection::open_in_memory().map_err(|e| e.to_string())?;
+        sqlite_store::apply_migrations(&conn)?;
+        let fp = sqlite_store::replace_sqlite_from_snapshot(&mut conn, &initial_snap)?;
+        let jwt_secret =
+            sqlite_store::load_or_init_jwt_secret(&conn, Self::generate_random_secret_32)?;
 
         let mut repo = Self {
-            inner: RwLock::new(WorldStateSnapshot {
-                next_entity_id: 200_000_000,
-                wal_seq: 0,
-                markets_seeded: false,
-                accounts: HashMap::new(),
-                characters: HashMap::new(),
-                skills: HashMap::new(),
-                skill_queues: HashMap::new(),
-                jump_clones: HashMap::new(),
-                active_implants: HashMap::new(),
-                items: HashMap::new(),
-                saved_fittings: HashMap::new(),
-                market_orders,
-                wallet_journal: Vec::new(),
-                contracts: HashMap::new(),
-                industry_jobs: HashMap::new(),
-                planetary_colonies: HashMap::new(),
-                active_missions: HashMap::new(),
-                mission_tally: HashMap::new(),
-                standing_transactions: HashMap::new(),
-                npe_progress: HashMap::new(),
-                bookmarks: HashMap::new(),
-                mails: Vec::new(),
-                fleets: HashMap::new(),
-                corporations: HashMap::new(),
-                alliances: HashMap::new(),
-                wars: HashMap::new(),
-                corp_projects: HashMap::new(),
-                killmails: HashMap::new(),
-                kill_rights: HashMap::new(),
-                structures: HashMap::new(),
-                system_states,
-                committed_idempotency_keys: HashSet::new(),
-                licensed_skins: HashMap::new(),
-                applied_ship_skins: HashMap::new(),
-            }),
+            inner: RwLock::new(initial_snap),
+            sqlite_conn: std::sync::Mutex::new(conn),
+            sqlite_fp: std::sync::Mutex::new(fp),
+            sqlite_path: None,
+            auth_runtime: RwLock::new(AuthRuntimeState::new(jwt_secret)),
             wal_lock: std::sync::Mutex::new(()),
             snapshot_path: None,
             pending_wal_records: std::sync::atomic::AtomicUsize::new(0),
@@ -1769,6 +2106,8 @@ impl WorldRepository {
                     username: username.to_string(),
                     password_token: hashed_token,
                     role: service_roles::ROLE_PLAYER_DEFAULT,
+                    banned_until_unix: None,
+                    ban_reason: None,
                 },
             );
             Ok::<u64, std::convert::Infallible>(user_id)
@@ -1811,6 +2150,8 @@ impl WorldRepository {
                         username: username.to_string(),
                         password_token: hashed_token,
                         role: service_roles::ROLE_GM_DEFAULT,
+                        banned_until_unix: None,
+                        ban_reason: None,
                     },
                 );
                 uid
@@ -2003,6 +2344,8 @@ impl WorldRepository {
     pub fn load_snapshot_from_file(&self, path: impl AsRef<Path>) -> Result<(), String> {
         use std::io::Write as _;
         let mut guard = self.inner.write().unwrap_or_else(|e| e.into_inner());
+        let mut conn = self.sqlite_conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut fp = self.sqlite_fp.lock().unwrap_or_else(|e| e.into_inner());
         let _wal_guard = self.wal_lock.lock().unwrap_or_else(|e| e.into_inner());
         let target = path.as_ref();
         let json = std::fs::read_to_string(target).map_err(|e| e.to_string())?;
@@ -2066,6 +2409,7 @@ impl WorldRepository {
             self.pending_wal_records
                 .store(valid_count, std::sync::atomic::Ordering::SeqCst);
         }
+        *fp = sqlite_store::replace_sqlite_from_snapshot(&mut conn, &snap)?;
         *guard = snap;
         Ok(())
     }
@@ -2089,29 +2433,84 @@ impl WorldRepository {
         }
     }
 
-    /// Transactionally applies a fallible closure `f` to a staged snapshot and commits ONLY when
-    /// `f` returns `Ok(val)` AND any configured `.json.wal` durability write succeeds (`R21-P1-5`, `R24-P1-1`).
+    /// Transactionally applies a fallible closure `f` in-place (with zero whole-world `WorldStateSnapshot`
+    /// cloning) and commits dirty rows inside an immediate `rusqlite::Transaction` ONLY when `f` returns
+    /// `Ok(val)` AND durable persistence succeeds, rolling back in-memory state from the committed SQLite
+    /// tables on any error (`D-3`, `R21-P1-5`, `R24-P1-1`).
     pub fn try_with_mut_snapshot<F, T, E>(&self, f: F) -> Result<T, E>
     where
         F: FnOnce(&mut WorldStateSnapshot) -> Result<T, E>,
         E: FromWalError,
     {
         let mut guard = self.inner.write().unwrap_or_else(|e| e.into_inner());
-        let mut staged = guard.clone();
-        match f(&mut staged) {
+        let mut conn = self.sqlite_conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut fp = self.sqlite_fp.lock().unwrap_or_else(|e| e.into_inner());
+        match f(&mut guard) {
             Ok(val) => {
-                staged.wal_seq = guard.wal_seq.saturating_add(1);
-                if let Some(ref p) = self.snapshot_path {
-                    let _wal_guard = self.wal_lock.lock().unwrap_or_else(|e| e.into_inner());
-                    let delta = WorldStateWalDelta::from_diff(&guard, &staged);
-                    self.append_wal_delta_locked(p, &staged, &delta)
-                        .map_err(E::from_wal_error)?;
+                guard.wal_seq = guard.wal_seq.saturating_add(1);
+                let need_wal_delta = self.snapshot_path.is_some();
+                let mut staged_fp = fp.clone();
+                let persist_res = (|| -> Result<(), String> {
+                    let tx = conn
+                        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                        .map_err(|e| e.to_string())?;
+                    let delta = sqlite_store::sync_dirty_to_sqlite(
+                        &tx,
+                        &guard,
+                        &mut staged_fp,
+                        need_wal_delta,
+                    )?;
+                    if let Some(ref p) = self.snapshot_path {
+                        let _wal_guard = self.wal_lock.lock().unwrap_or_else(|e| e.into_inner());
+                        self.append_wal_delta_locked(p, &guard, &delta)?;
+                    }
+                    tx.commit().map_err(|e| e.to_string())?;
+                    Ok(())
+                })();
+                match persist_res {
+                    Ok(()) => {
+                        *fp = staged_fp;
+                        Ok(val)
+                    }
+                    Err(persist_err) => {
+                        sqlite_store::rollback_dirty_from_sqlite(&conn, &mut guard, &fp)
+                            .expect("Fatal: failed to roll back dirty state from SQLite after persist error");
+                        Err(E::from_wal_error(persist_err))
+                    }
                 }
-                *guard = staged;
-                Ok(val)
             }
-            Err(err) => Err(err),
+            Err(err) => {
+                sqlite_store::rollback_dirty_from_sqlite(&conn, &mut guard, &fp)
+                    .expect("Fatal: failed to roll back dirty state from SQLite after transaction error");
+                Err(err)
+            }
         }
+    }
+
+    fn current_unix_secs() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(1_700_000_000)
+    }
+
+    /// Configures and persists an explicit per-deployment SSO JWT HS256 signing secret, requiring
+    /// at least 32 bytes (256 bits) of key material (`R34-P0-1`, `D-4`).
+    pub fn set_jwt_signing_secret(&self, raw_secret: &[u8]) -> Result<(), String> {
+        if raw_secret.len() < 32 {
+            return Err(format!(
+                "SSO JWT signing secret must be at least 32 bytes, got {}",
+                raw_secret.len()
+            ));
+        }
+        let key = sha256_bytes(raw_secret);
+        {
+            let conn = self.sqlite_conn.lock().unwrap_or_else(|e| e.into_inner());
+            sqlite_store::save_jwt_secret(&conn, &key)?;
+        }
+        let mut rt = self.auth_runtime.write().unwrap_or_else(|e| e.into_inner());
+        rt.jwt_signing_secret = key;
+        Ok(())
     }
 
     pub fn authenticate(
@@ -2119,24 +2518,597 @@ impl WorldRepository {
         username: &str,
         password_token: &str,
     ) -> Result<AccountRecord, DbError> {
+        self.authenticate_at(username, password_token, Self::current_unix_secs())
+    }
+
+    /// Authenticates `username` against `password_token` (or a signed SSO JWT access token) at
+    /// `now_unix`, enforcing account ban checks and constant-time Argon2id verification (`D-4`).
+    pub fn authenticate_at(
+        &self,
+        username: &str,
+        password_token: &str,
+        now_unix: u64,
+    ) -> Result<AccountRecord, DbError> {
+        // Support signed OAuth2/PKCE SSO JWT access token authentication
+        if password_token.matches('.').count() == 2 {
+            if let Ok(claims) = self.verify_sso_access_token(password_token, now_unix) {
+                if !claims
+                    .aud
+                    .iter()
+                    .any(|a| matches!(a.as_str(), "evomu-launcher" | "eveLauncherTQ"))
+                {
+                    return Err(DbError::InvalidCredentials);
+                }
+                let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
+                let acc = if username.is_empty() || username == "__sso__" {
+                    guard.accounts.values().find(|a| a.user_id == claims.user_id)
+                } else {
+                    guard.accounts.get(username).filter(|a| a.user_id == claims.user_id)
+                }
+                .ok_or(DbError::InvalidCredentials)?;
+                if let Some(until) = acc.banned_until_unix {
+                    if now_unix < until {
+                        return Err(DbError::AccountBanned {
+                            until_unix: until,
+                            reason: acc.ban_reason.clone().unwrap_or_default(),
+                        });
+                    }
+                }
+                return Ok(acc.clone());
+            }
+        }
+
         let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
         let acc = guard
             .accounts
             .get(username)
             .ok_or(DbError::InvalidCredentials)?;
-        let Some(rest) = acc.password_token.strip_prefix("sha256$v1$") else {
+        if let Some(until) = acc.banned_until_unix {
+            if now_unix < until {
+                return Err(DbError::AccountBanned {
+                    until_unix: until,
+                    reason: acc.ban_reason.clone().unwrap_or_default(),
+                });
+            }
+        }
+        let candidate_hash = if let Some(rest) = acc.password_token.strip_prefix("$argon2id$v=19$")
+        {
+            let Some((params_part, tail)) = rest.split_once('$') else {
+                return Err(DbError::InvalidCredentials);
+            };
+            let Some((salt_hex, _digest_hex)) = tail.split_once('$') else {
+                return Err(DbError::InvalidCredentials);
+            };
+            let mut m_cost = 19_456u32;
+            let mut t_cost = 2u32;
+            let mut p_cost = 1u32;
+            for kv in params_part.split(',') {
+                if let Some(v) = kv.strip_prefix("m=") {
+                    m_cost = v.parse().map_err(|_| DbError::InvalidCredentials)?;
+                } else if let Some(v) = kv.strip_prefix("t=") {
+                    t_cost = v.parse().map_err(|_| DbError::InvalidCredentials)?;
+                } else if let Some(v) = kv.strip_prefix("p=") {
+                    p_cost = v.parse().map_err(|_| DbError::InvalidCredentials)?;
+                }
+            }
+            Self::hash_password_with_params(&acc.username, salt_hex, password_token, m_cost, t_cost, p_cost)
+        } else if let Some(rest) = acc.password_token.strip_prefix("sha256$v1$") {
+            let Some((salt_hex, _digest_hex)) = rest.split_once('$') else {
+                return Err(DbError::InvalidCredentials);
+            };
+            Self::hash_password_with_salt_sha256_legacy(&acc.username, salt_hex, password_token)
+        } else {
             return Err(DbError::InvalidCredentials);
         };
-        let Some((salt_hex, _digest_hex)) = rest.split_once('$') else {
-            return Err(DbError::InvalidCredentials);
-        };
-        // Always hash the client-supplied password token with the account's stored salt (never accept the digest itself or plaintext)
-        let candidate_hash =
-            Self::hash_password_with_salt(&acc.username, salt_hex, password_token);
         if !constant_time_eq(acc.password_token.as_bytes(), candidate_hash.as_bytes()) {
             return Err(DbError::InvalidCredentials);
         }
         Ok(acc.clone())
+    }
+
+    /// Bans an account by `username` until `banned_until_unix` with `reason`, persists the ban to
+    /// SQLite, revokes all SSO refresh tokens for the user, and kicks any active online session (`D-4`).
+    /// Refuses to ban accounts holding `ROLE_ADMIN`.
+    pub fn ban_account(
+        &self,
+        username: &str,
+        banned_until_unix: u64,
+        reason: &str,
+    ) -> Result<u64, DbError> {
+        let user_id = self.try_with_mut_snapshot(|snap| {
+            let acc = snap
+                .accounts
+                .get_mut(username)
+                .ok_or_else(|| DbError::ValidationError(format!("Unknown account '{username}'")))?;
+            if (acc.role & service_roles::ROLE_ADMIN) != 0 {
+                return Err(DbError::ValidationError(format!(
+                    "Cannot ban administrator account '{username}'"
+                )));
+            }
+            acc.banned_until_unix = Some(banned_until_unix);
+            acc.ban_reason = Some(reason.to_string());
+            Ok(acc.user_id)
+        })?;
+        let _ = self.kick_user(user_id, reason, Self::current_unix_secs());
+        Ok(user_id)
+    }
+
+    /// Lifts any active ban on `username` and persists the update to SQLite (`D-4`).
+    pub fn unban_account(&self, username: &str) -> Result<u64, DbError> {
+        let user_id = self.try_with_mut_snapshot(|snap| {
+            let acc = snap
+                .accounts
+                .get_mut(username)
+                .ok_or_else(|| DbError::ValidationError(format!("Unknown account '{username}'")))?;
+            acc.banned_until_unix = None;
+            acc.ban_reason = None;
+            Ok(acc.user_id)
+        })?;
+        let mut rt = self.auth_runtime.write().unwrap_or_else(|e| e.into_inner());
+        rt.kicked_users.remove(&user_id);
+        Ok(user_id)
+    }
+
+    /// Clears prior kick/displacement revocation markers ONLY when `authentication.Login` succeeds
+    /// with verified credentials (`R36-P1-3`).
+    pub fn clear_revocation_on_fresh_login(&self, user_id: u64, session_id: u64) {
+        let mut rt = self.auth_runtime.write().unwrap_or_else(|e| e.into_inner());
+        rt.kicked_users.remove(&user_id);
+        rt.displaced_sessions.remove(&session_id);
+    }
+
+    /// Acquires the single-active-session online lock for `user_id` (`D-4`, `multiLoginBlocker`).
+    /// Returns `Err(DbError::AlreadyLoggedIn)` if a different `session_id` already holds the lock
+    /// and `allow_displace` is `false`. When `allow_displace` is `true`, displaces and returns the
+    /// previous `OnlineSessionRecord`. Refuses if `user_id` is currently kicked or `session_id` has
+    /// been displaced (`R36-P1-3`).
+    pub fn acquire_online_lock(
+        &self,
+        user_id: u64,
+        session_id: u64,
+        character_id: Option<i64>,
+        allow_displace: bool,
+        now_unix: u64,
+    ) -> Result<Option<OnlineSessionRecord>, DbError> {
+        let username = {
+            let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
+            let acc = guard
+                .accounts
+                .values()
+                .find(|a| a.user_id == user_id)
+                .ok_or(DbError::InvalidCredentials)?;
+            if let Some(until) = acc.banned_until_unix {
+                if now_unix < until {
+                    return Err(DbError::AccountBanned {
+                        until_unix: until,
+                        reason: acc.ban_reason.clone().unwrap_or_default(),
+                    });
+                }
+            }
+            acc.username.clone()
+        };
+        let mut rt = self.auth_runtime.write().unwrap_or_else(|e| e.into_inner());
+        if let Some(reason) = rt.displaced_sessions.get(&session_id) {
+            return Err(DbError::ValidationError(format!(
+                "Session kicked: {reason}"
+            )));
+        }
+        if let Some((_, reason)) = rt.kicked_users.get(&user_id) {
+            return Err(DbError::ValidationError(format!(
+                "Session kicked by GM: {reason}"
+            )));
+        }
+        if let Some(existing) = rt.online_sessions.get(&user_id) {
+            if existing.session_id != session_id && !allow_displace {
+                return Err(DbError::AlreadyLoggedIn {
+                    user_id,
+                    active_session_id: existing.session_id,
+                });
+            }
+        }
+        let displaced = rt
+            .online_sessions
+            .insert(
+                user_id,
+                OnlineSessionRecord {
+                    user_id,
+                    username,
+                    session_id,
+                    character_id,
+                    connected_at_unix: now_unix,
+                },
+            )
+            .filter(|prev| prev.session_id != session_id);
+        if let Some(ref prev) = displaced {
+            rt.displaced_sessions.insert(
+                prev.session_id,
+                "Displaced by concurrent login on same account".to_string(),
+            );
+        }
+        Ok(displaced)
+    }
+
+    /// Releases the active online session lock for `user_id` if held by `session_id` (or unconditionally when `session_id == 0`).
+    pub fn release_online_lock(&self, user_id: u64, session_id: u64) -> bool {
+        let mut rt = self.auth_runtime.write().unwrap_or_else(|e| e.into_inner());
+        rt.displaced_sessions.remove(&session_id);
+        if let Some(existing) = rt.online_sessions.get(&user_id) {
+            if session_id == 0 || existing.session_id == session_id {
+                rt.online_sessions.remove(&user_id);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Returns the currently active online session for `user_id`, if any (`D-4`).
+    pub fn get_online_session(&self, user_id: u64) -> Option<OnlineSessionRecord> {
+        let rt = self.auth_runtime.read().unwrap_or_else(|e| e.into_inner());
+        rt.online_sessions.get(&user_id).cloned()
+    }
+
+    /// Looks up `user_id` for `username` (`D-4`).
+    pub fn find_user_id_by_username(&self, username: &str) -> Option<u64> {
+        let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
+        guard.accounts.get(username).map(|a| a.user_id)
+    }
+
+    /// Checks whether an active session (`user_id`, `session_id`) has been banned, kicked, displaced,
+    /// or blocked by an existing online lock held by another session (`D-4`, `R34-P1-4`).
+    pub fn check_session_revoked(
+        &self,
+        user_id: u64,
+        session_id: u64,
+        now_unix: u64,
+    ) -> Option<(String, String)> {
+        {
+            let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
+            if let Some(acc) = guard.accounts.values().find(|a| a.user_id == user_id) {
+                if let Some(until) = acc.banned_until_unix {
+                    if now_unix < until {
+                        return Some((
+                            "AccountBanned".to_string(),
+                            format!(
+                                "Account is banned until unix timestamp {until}: {}",
+                                acc.ban_reason.clone().unwrap_or_default()
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+        let rt = self.auth_runtime.read().unwrap_or_else(|e| e.into_inner());
+        if let Some(reason) = rt.displaced_sessions.get(&session_id) {
+            return Some(("SessionKicked".to_string(), reason.clone()));
+        }
+        if let Some((_, reason)) = rt.kicked_users.get(&user_id) {
+            return Some(("SessionKicked".to_string(), reason.clone()));
+        }
+        if let Some(active) = rt.online_sessions.get(&user_id) {
+            if active.session_id != session_id {
+                return Some((
+                    "MultiLoginBlocked".to_string(),
+                    format!(
+                        "Account user_id={user_id} is locked by active session {}; call multiLoginBlocker.Login to displace",
+                        active.session_id
+                    ),
+                ));
+            }
+        }
+        None
+    }
+
+    /// Kicks `user_id` from any active online session, records the kick timestamp/reason, and revokes
+    /// all active SSO refresh tokens for `user_id` (`D-4`). Refuses to kick accounts with `ROLE_ADMIN`.
+    pub fn kick_user(
+        &self,
+        user_id: u64,
+        reason: &str,
+        now_unix: u64,
+    ) -> Option<OnlineSessionRecord> {
+        {
+            let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
+            if let Some(acc) = guard.accounts.values().find(|a| a.user_id == user_id) {
+                if (acc.role & service_roles::ROLE_ADMIN) != 0 {
+                    return None;
+                }
+            }
+        }
+        let mut rt = self.auth_runtime.write().unwrap_or_else(|e| e.into_inner());
+        rt.kicked_users
+            .insert(user_id, (now_unix, reason.to_string()));
+        for rec in rt.refresh_tokens.values_mut() {
+            if rec.user_id == user_id {
+                rec.revoked = true;
+            }
+        }
+        let removed = rt.online_sessions.remove(&user_id);
+        if let Some(ref prev) = removed {
+            rt.displaced_sessions
+                .insert(prev.session_id, reason.to_string());
+        }
+        removed
+    }
+
+    /// Returns the kick reason if `user_id` was kicked and has not yet re-authenticated.
+    pub fn kicked_reason(&self, user_id: u64) -> Option<String> {
+        let rt = self.auth_runtime.read().unwrap_or_else(|e| e.into_inner());
+        rt.kicked_users.get(&user_id).map(|(_, r)| r.clone())
+    }
+
+    /// Issues an OAuth2 PKCE authorization code (`S256`) for `username` and `character_id` (`D-4`, `ESI-1`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn authorize_pkce(
+        &self,
+        username: &str,
+        password_token: &str,
+        character_id: i64,
+        client_id: &str,
+        redirect_uri: &str,
+        scopes: Vec<String>,
+        code_challenge: &str,
+        code_challenge_method: &str,
+        now_unix: u64,
+    ) -> Result<String, DbError> {
+        if code_challenge_method != "S256" || code_challenge.trim().is_empty() {
+            return Err(DbError::ValidationError(
+                "PKCE requires S256 code_challenge_method and non-empty code_challenge".into(),
+            ));
+        }
+        let acc = self.authenticate_at(username, password_token, now_unix)?;
+        let _ch = self.select_character_for_user(acc.user_id, character_id)?;
+        let code = format!("evomu_pkce_{}", Self::generate_random_salt_hex());
+        let mut rt = self.auth_runtime.write().unwrap_or_else(|e| e.into_inner());
+        rt.pkce_codes.insert(
+            code.clone(),
+            PkceAuthCode {
+                code: code.clone(),
+                user_id: acc.user_id,
+                character_id,
+                client_id: client_id.to_string(),
+                redirect_uri: redirect_uri.to_string(),
+                scopes,
+                code_challenge: code_challenge.to_string(),
+                code_challenge_method: code_challenge_method.to_string(),
+                expires_at_unix: now_unix.saturating_add(300),
+            },
+        );
+        Ok(code)
+    }
+
+    fn mint_sso_tokens_locked(
+        &self,
+        rt: &mut AuthRuntimeState,
+        user_id: u64,
+        character_id: i64,
+        char_name: &str,
+        client_id: &str,
+        scopes: Vec<String>,
+        now_unix: u64,
+    ) -> SsoTokenBundle {
+        let header_b64 = base64url_encode_no_pad(br#"{"alg":"HS256","typ":"JWT"}"#);
+        let jti = Self::generate_random_salt_hex();
+        let owner_hash = base64url_encode_no_pad(
+            &sha256_bytes(format!("evomu-owner:{user_id}:{character_id}").as_bytes())[..16],
+        );
+        let claims = SsoTokenClaims {
+            sub: format!("CHARACTER:EVE:{character_id}"),
+            name: char_name.to_string(),
+            owner: owner_hash,
+            user_id,
+            character_id,
+            scp: scopes.clone(),
+            iss: "https://login.eveonline.com".to_string(),
+            aud: vec![client_id.to_string(), "EVE Online".to_string()],
+            iat: now_unix,
+            exp: now_unix.saturating_add(1_200),
+            jti,
+        };
+        let payload_json = serde_json::to_vec(&claims).expect("serialize SsoTokenClaims");
+        let payload_b64 = base64url_encode_no_pad(&payload_json);
+        let signing_input = format!("{header_b64}.{payload_b64}");
+        let sig = hmac_sha256(&rt.jwt_signing_secret, signing_input.as_bytes());
+        let sig_b64 = base64url_encode_no_pad(&sig);
+        let access_token = format!("{signing_input}.{sig_b64}");
+
+        let refresh_token = format!("evomu_rt_{}", Self::generate_random_salt_hex());
+        rt.refresh_tokens.insert(
+            refresh_token.clone(),
+            SsoRefreshTokenRecord {
+                refresh_token: refresh_token.clone(),
+                user_id,
+                character_id,
+                client_id: client_id.to_string(),
+                scopes,
+                expires_at_unix: now_unix.saturating_add(86_400 * 30),
+                revoked: false,
+            },
+        );
+        SsoTokenBundle {
+            access_token,
+            token_type: "Bearer".to_string(),
+            expires_in: 1_200,
+            refresh_token,
+        }
+    }
+
+    /// Exchanges a single-use OAuth2 PKCE authorization code and `code_verifier` for a signed HS256
+    /// JWT `access_token` and rotatable `refresh_token` (`D-4`, `ESI-1`).
+    pub fn exchange_pkce_code(
+        &self,
+        code: &str,
+        client_id: &str,
+        code_verifier: &str,
+        now_unix: u64,
+    ) -> Result<SsoTokenBundle, DbError> {
+        let pkce = {
+            let mut rt = self.auth_runtime.write().unwrap_or_else(|e| e.into_inner());
+            rt.pkce_codes
+                .remove(code)
+                .ok_or(DbError::InvalidCredentials)?
+        };
+        if now_unix > pkce.expires_at_unix || pkce.client_id != client_id {
+            return Err(DbError::InvalidCredentials);
+        }
+        let verifier_digest = sha256_bytes(code_verifier.as_bytes());
+        let computed_challenge = base64url_encode_no_pad(&verifier_digest);
+        if !constant_time_eq(
+            computed_challenge.as_bytes(),
+            pkce.code_challenge.as_bytes(),
+        ) {
+            return Err(DbError::InvalidCredentials);
+        }
+        {
+            let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
+            let acc = guard
+                .accounts
+                .values()
+                .find(|a| a.user_id == pkce.user_id)
+                .ok_or(DbError::InvalidCredentials)?;
+            if let Some(until) = acc.banned_until_unix {
+                if now_unix < until {
+                    return Err(DbError::AccountBanned {
+                        until_unix: until,
+                        reason: acc.ban_reason.clone().unwrap_or_default(),
+                    });
+                }
+            }
+        }
+        let ch = self.select_character_for_user(pkce.user_id, pkce.character_id)?;
+        let mut rt = self.auth_runtime.write().unwrap_or_else(|e| e.into_inner());
+        Ok(self.mint_sso_tokens_locked(
+            &mut rt,
+            pkce.user_id,
+            pkce.character_id,
+            &ch.name,
+            &pkce.client_id,
+            pkce.scopes,
+            now_unix,
+        ))
+    }
+
+    /// Rotates an active SSO `refresh_token` and issues a fresh JWT `access_token` + `refresh_token` (`D-4`, `ESI-1`).
+    pub fn refresh_sso_token(
+        &self,
+        refresh_token: &str,
+        client_id: &str,
+        now_unix: u64,
+    ) -> Result<SsoTokenBundle, DbError> {
+        let rec = {
+            let mut rt = self.auth_runtime.write().unwrap_or_else(|e| e.into_inner());
+            let r = rt
+                .refresh_tokens
+                .get_mut(refresh_token)
+                .ok_or(DbError::InvalidCredentials)?;
+            if r.revoked || now_unix > r.expires_at_unix || r.client_id != client_id {
+                return Err(DbError::InvalidCredentials);
+            }
+            r.revoked = true;
+            r.clone()
+        };
+        {
+            let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
+            let acc = guard
+                .accounts
+                .values()
+                .find(|a| a.user_id == rec.user_id)
+                .ok_or(DbError::InvalidCredentials)?;
+            if let Some(until) = acc.banned_until_unix {
+                if now_unix < until {
+                    return Err(DbError::AccountBanned {
+                        until_unix: until,
+                        reason: acc.ban_reason.clone().unwrap_or_default(),
+                    });
+                }
+            }
+        }
+        let ch = self.select_character_for_user(rec.user_id, rec.character_id)?;
+        let mut rt = self.auth_runtime.write().unwrap_or_else(|e| e.into_inner());
+        Ok(self.mint_sso_tokens_locked(
+            &mut rt,
+            rec.user_id,
+            rec.character_id,
+            &ch.name,
+            &rec.client_id,
+            rec.scopes,
+            now_unix,
+        ))
+    }
+
+    /// Verifies a signed HS256 JWT `access_token`, checking header algorithm, signature integrity,
+    /// `iat <= now_unix < exp`, kick revocation, and account ban status (`D-4`, `ESI-1`, `R34-P0-1`).
+    pub fn verify_sso_access_token(
+        &self,
+        token: &str,
+        now_unix: u64,
+    ) -> Result<SsoTokenClaims, DbError> {
+        let mut parts = token.splitn(3, '.');
+        let (Some(header_b64), Some(payload_b64), Some(sig_b64)) =
+            (parts.next(), parts.next(), parts.next())
+        else {
+            return Err(DbError::InvalidCredentials);
+        };
+        if sig_b64.is_empty() {
+            return Err(DbError::InvalidCredentials);
+        }
+        let header_bytes =
+            base64url_decode_no_pad(header_b64).map_err(|_| DbError::InvalidCredentials)?;
+        let header_json: serde_json::Value =
+            serde_json::from_slice(&header_bytes).map_err(|_| DbError::InvalidCredentials)?;
+        if header_json.get("alg").and_then(|v| v.as_str()) != Some("HS256") {
+            return Err(DbError::InvalidCredentials);
+        }
+        let signing_input = format!("{header_b64}.{payload_b64}");
+        let claims: SsoTokenClaims = {
+            let rt = self.auth_runtime.read().unwrap_or_else(|e| e.into_inner());
+            let expected_sig = hmac_sha256(&rt.jwt_signing_secret, signing_input.as_bytes());
+            let expected_sig_b64 = base64url_encode_no_pad(&expected_sig);
+            if !constant_time_eq(sig_b64.as_bytes(), expected_sig_b64.as_bytes()) {
+                return Err(DbError::InvalidCredentials);
+            }
+            let payload_bytes =
+                base64url_decode_no_pad(payload_b64).map_err(|_| DbError::InvalidCredentials)?;
+            let parsed: SsoTokenClaims =
+                serde_json::from_slice(&payload_bytes).map_err(|_| DbError::InvalidCredentials)?;
+            if parsed.iat > now_unix
+                || now_unix >= parsed.exp
+                || parsed.iss != "https://login.eveonline.com"
+                || !parsed.aud.iter().any(|a| a == "EVE Online")
+            {
+                return Err(DbError::InvalidCredentials);
+            }
+            if let Some((kicked_at, _)) = rt.kicked_users.get(&parsed.user_id) {
+                if *kicked_at >= parsed.iat {
+                    return Err(DbError::InvalidCredentials);
+                }
+            }
+            parsed
+        };
+        let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
+        let acc = guard
+            .accounts
+            .values()
+            .find(|a| a.user_id == claims.user_id)
+            .ok_or(DbError::InvalidCredentials)?;
+        if let Some(until) = acc.banned_until_unix {
+            if now_unix < until {
+                return Err(DbError::AccountBanned {
+                    until_unix: until,
+                    reason: acc.ban_reason.clone().unwrap_or_default(),
+                });
+            }
+        }
+        Ok(claims)
+    }
+
+    /// Revokes an SSO refresh token (`D-4`, `ESI-1`).
+    pub fn revoke_sso_refresh_token(&self, refresh_token: &str) -> bool {
+        let mut rt = self.auth_runtime.write().unwrap_or_else(|e| e.into_inner());
+        if let Some(rec) = rt.refresh_tokens.get_mut(refresh_token) {
+            rec.revoked = true;
+            return true;
+        }
+        false
     }
 
     pub fn get_characters_for_user(&self, user_id: u64) -> Vec<CharacterRecord> {
@@ -2184,7 +3156,7 @@ impl WorldRepository {
         Ok(ch.clone())
     }
 
-    /// Creates a new character for `user_id` with racial Corvette, starter skills, and home station (`E2E-01`).
+    /// Creates a new character for `user_id` with its racial Corvette, NPE progress, and school starting station (`E2E-01`).
     pub fn create_character(
         &self,
         user_id: u64,
@@ -2832,10 +3804,12 @@ mod tests {
         let stored_demo_digest = repo.with_snapshot(|snap| {
             let demo_acc = &snap.accounts["demo"];
             let other_acc = &snap.accounts["other"];
-            assert!(demo_acc.password_token.starts_with("sha256$v1$"));
+            assert!(demo_acc
+                .password_token
+                .starts_with("$argon2id$v=19$m=19456,t=2,p=1$"));
             assert_ne!(demo_acc.password_token, "demo-secret");
-            let demo_salt = demo_acc.password_token.split('$').nth(2).unwrap();
-            let other_salt = other_acc.password_token.split('$').nth(2).unwrap();
+            let demo_salt = demo_acc.password_token.split('$').nth(4).unwrap();
+            let other_salt = other_acc.password_token.split('$').nth(4).unwrap();
             assert_eq!(demo_salt.len(), 32);
             assert_ne!(demo_salt, other_salt);
             demo_acc.password_token.clone()
@@ -2854,11 +3828,11 @@ mod tests {
         let created = repo
             .create_character(1, "Snapshot Pilot", 1, 1, 11, 17, &sde)
             .unwrap();
-        // Verify Caldari pilot spawns in Ibis (601) at State War Academy in Kisogo (30000141)
+        // Verify Caldari pilot spawns in Ibis (601) at State War Academy starting station in Kisogo (30000141)
         let created_items = repo.get_items_for_character(created.character_id);
         assert_eq!(created_items[0].type_id, 601);
         assert_eq!(created.solar_system_id, 30_000_141);
-        assert_eq!(created.station_id, Some(60_014_659));
+        assert_eq!(created.station_id, Some(60_015_157));
 
         // Verify IskCents rejects negative debits and insufficient funds
         assert_eq!(IskCents::from_isk(100).checked_sub(IskCents::from_isk(150)), None);
@@ -3139,5 +4113,471 @@ mod tests {
         let _ = std::fs::remove_file(&prod_wal_path);
         let _ = std::fs::remove_file(&snap_path);
         let _ = std::fs::remove_file(WorldRepository::wal_path_for(&snap_path));
+    }
+
+    #[test]
+    fn test_d3_sqlite_relational_world_db_and_concurrent_sessions() {
+        use std::sync::Arc;
+        let sde = SdeRegistry::with_canonical_seed();
+        let pid = std::process::id();
+        let sqlite_path =
+            std::env::temp_dir().join(format!("evomu_test_d3_world_{pid}.sqlite"));
+        let _ = std::fs::remove_file(&sqlite_path);
+
+        let repo = Arc::new(
+            WorldRepository::open_sqlite(&sqlite_path).expect("open_sqlite must succeed"),
+        );
+        assert_eq!(repo.sqlite_path(), Some(sqlite_path.as_path()));
+
+        // Verify PRAGMA journal_mode = wal and PRAGMA foreign_keys = 1 are active
+        {
+            let conn = rusqlite::Connection::open(&sqlite_path).unwrap();
+            let journal_mode: String = conn
+                .query_row("PRAGMA journal_mode;", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(journal_mode.to_ascii_lowercase(), "wal");
+        }
+
+        let u1 = repo.provision_player_account("pilot_one", "pass_one_123");
+        let u2 = repo.provision_player_account("pilot_two", "pass_two_456");
+        let c1 = repo
+            .create_character(u1, "Sqlite Alpha", 1, 1, 11, 17, &sde)
+            .unwrap();
+        let c2 = repo
+            .create_character(u2, "Sqlite Bravo", 2, 3, 19, 14, &sde)
+            .unwrap();
+
+        // Populate all relational domain tables (skills, queue, orders, journal, contracts, jobs,
+        // missions, standings, mail, fleets, corps, bookmarks, structures)
+        repo.with_mut_snapshot(|snap| {
+            snap.skills.entry(c1.character_id).or_default().insert(
+                3300,
+                TrainedSkillRecord {
+                    type_id: 3300,
+                    level: 5,
+                    skill_points: 256_000.0,
+                },
+            );
+            snap.skill_queues.insert(
+                c1.character_id,
+                vec![SkillQueueEntry {
+                    type_id: 3302,
+                    target_level: 4,
+                    start_sp: 8_000.0,
+                    end_sp: 45_255.0,
+                    duration_seconds: 1200.0,
+                }],
+            );
+            snap.market_orders.insert(
+                800_001,
+                MarketOrderRecord {
+                    order_id: 800_001,
+                    owner_id: c1.character_id,
+                    station_id: 60_003_760,
+                    region_id: 10_000_002,
+                    type_id: 34,
+                    is_bid: true,
+                    price: IskCents::from_isk(6),
+                    vol_entered: 1_000,
+                    vol_remaining: 1_000,
+                    min_volume: 1,
+                    is_npc: false,
+                    escrow: IskCents::from_isk(6_000),
+                },
+            );
+            snap.wallet_journal.push(WalletJournalEntry {
+                entry_id: 900_001,
+                character_id: c1.character_id,
+                entry_type: "market_escrow".to_string(),
+                amount: IskCents::from_isk(-6_000),
+                balance_after: IskCents::from_isk(4_000),
+                reason: "Market order escrow".to_string(),
+            });
+            snap.contracts.insert(
+                910_001,
+                ContractRecord {
+                    contract_id: 910_001,
+                    issuer_id: c1.character_id,
+                    acceptor_id: None,
+                    contract_type: "ItemExchange".to_string(),
+                    status: "Outstanding".to_string(),
+                    price: IskCents::from_isk(100_000),
+                    reward: IskCents(0),
+                    collateral: IskCents(0),
+                    start_station_id: 60_003_760,
+                    end_station_id: 60_003_760,
+                    item_ids: vec![],
+                    expiration_unix: 2_000_000_000,
+                },
+            );
+            snap.industry_jobs.insert(
+                920_001,
+                IndustryJobRecord {
+                    job_id: 920_001,
+                    installer_id: c1.character_id,
+                    facility_id: 60_003_760,
+                    activity_id: 1,
+                    blueprint_item_id: 100_000_007,
+                    blueprint_type_id: 691,
+                    product_type_id: 587,
+                    runs: 1,
+                    status: "Active".to_string(),
+                    duration_seconds: 3600,
+                    start_unix: 1_700_000_000,
+                },
+            );
+            snap.active_missions.insert(
+                (c1.character_id, 501),
+                ActiveMissionRecord {
+                    mission_id: 501,
+                    character_id: c1.character_id,
+                    agent_id: 3018924,
+                    solar_system_id: 30_000_142,
+                    state: "Accepted".to_string(),
+                    current_room_id: 0,
+                    npcs_remaining: 2,
+                    spawned_npc_ball_ids: vec![],
+                },
+            );
+            snap.standing_transactions.insert(
+                c1.character_id,
+                vec![StandingTransactionRecord {
+                    event_id: 1,
+                    from_id: 1_000_035,
+                    to_id: c1.character_id,
+                    modification: 0.25,
+                    event_type_id: 33,
+                }],
+            );
+            snap.mails.push(MailRecord {
+                message_id: 930_001,
+                sender_id: c1.character_id,
+                recipient_id: c2.character_id,
+                subject: "Hello".to_string(),
+                body: "World".to_string(),
+            });
+            snap.fleets.insert(
+                940_001,
+                FleetRecord {
+                    fleet_id: 940_001,
+                    boss_id: c1.character_id,
+                    members: vec![c1.character_id],
+                    wings: vec![],
+                    squads: vec![],
+                    free_move: true,
+                    is_registered: true,
+                },
+            );
+            snap.corporations.insert(
+                950_001,
+                CorporationRecord {
+                    corporation_id: 950_001,
+                    name: "Sqlite Corp".to_string(),
+                    ticker: "SQLT".to_string(),
+                    ceo_id: c1.character_id,
+                    alliance_id: None,
+                    tax_rate: 0.05,
+                    master_wallet: IskCents::from_isk(1_000_000),
+                    members: HashSet::from([c1.character_id]),
+                },
+            );
+            snap.bookmarks.insert(
+                960_001,
+                BookmarkRecord {
+                    bookmark_id: 960_001,
+                    owner_id: c1.character_id,
+                    label: "Jita Undock".to_string(),
+                    solar_system_id: 30_000_142,
+                    x: 100.0,
+                    y: 200.0,
+                    z: 300.0,
+                },
+            );
+            snap.structures.insert(
+                970_001,
+                UpwellStructureRecord {
+                    structure_id: 970_001,
+                    type_id: 35832,
+                    owner_corp_id: 950_001,
+                    solar_system_id: 30_000_142,
+                    name: "Jita - Astrahus".to_string(),
+                    position: [1_000.0, 2_000.0, 3_000.0],
+                    state: "ShieldVulnerable".to_string(),
+                    quantum_core_installed: true,
+                    fuel_blocks: 500,
+                    shield_hp: 1.0,
+                    armor_hp: 1.0,
+                    hull_hp: 1.0,
+                    reinforced_until_unix: 0,
+                    last_damage_tick: 0,
+                    last_damage_unix: 0,
+                },
+            );
+        });
+
+        // Verify selective dirty-row rollback on try_with_mut_snapshot Err restores in-memory state cleanly
+        let abort_res: Result<(), DbError> = repo.try_with_mut_snapshot(|snap| {
+            if let Some(ch) = snap.characters.get_mut(&c1.character_id) {
+                ch.balance = IskCents::from_isk(999_999_999);
+            }
+            snap.market_orders.remove(&800_001);
+            Err(DbError::InvalidCredentials)
+        });
+        assert_eq!(abort_res, Err(DbError::InvalidCredentials));
+        assert_eq!(
+            repo.get_character(c1.character_id).unwrap().balance,
+            IskCents::from_isk(5_000)
+        );
+        assert!(repo.with_snapshot(|s| s.market_orders.contains_key(&800_001)));
+
+        // Concurrent writes from two sessions must not lose updates
+        let r1 = Arc::clone(&repo);
+        let r2 = Arc::clone(&repo);
+        let c1_id = c1.character_id;
+        let c2_id = c2.character_id;
+        let t1 = std::thread::spawn(move || {
+            for _ in 0..25 {
+                r1.with_mut_snapshot(|snap| {
+                    if let Some(ch) = snap.characters.get_mut(&c1_id) {
+                        ch.balance = ch.balance.checked_add(IskCents::from_isk(1_000)).unwrap();
+                    }
+                });
+            }
+        });
+        let t2 = std::thread::spawn(move || {
+            for _ in 0..25 {
+                r2.with_mut_snapshot(|snap| {
+                    if let Some(ch) = snap.characters.get_mut(&c2_id) {
+                        ch.balance = ch.balance.checked_add(IskCents::from_isk(2_000)).unwrap();
+                    }
+                });
+            }
+        });
+        t1.join().unwrap();
+        t2.join().unwrap();
+        drop(repo);
+
+        // Restart server from the SQLite database file and verify all state survived
+        let restarted =
+            WorldRepository::open_sqlite(&sqlite_path).expect("reopen SQLite world DB");
+        let c1_after = restarted.get_character(c1_id).unwrap();
+        let c2_after = restarted.get_character(c2_id).unwrap();
+        assert_eq!(c1_after.balance, IskCents::from_isk(5_000 + 25_000));
+        assert_eq!(c2_after.balance, IskCents::from_isk(5_000 + 50_000));
+
+        restarted.with_snapshot(|snap| {
+            assert_eq!(snap.skills[&c1_id][&3300].level, 5);
+            assert_eq!(snap.skill_queues[&c1_id].len(), 1);
+            assert!(snap.market_orders.contains_key(&800_001));
+            assert_eq!(snap.wallet_journal.len(), 1);
+            assert!(snap.contracts.contains_key(&910_001));
+            assert!(snap.industry_jobs.contains_key(&920_001));
+            assert!(snap.active_missions.contains_key(&(c1_id, 501)));
+            assert_eq!(snap.standing_transactions[&c1_id].len(), 1);
+            assert_eq!(snap.mails.len(), 1);
+            assert!(snap.fleets.contains_key(&940_001));
+            assert!(snap.corporations.contains_key(&950_001));
+            assert!(snap.bookmarks.contains_key(&960_001));
+            assert!(snap.structures.contains_key(&970_001));
+        });
+
+        let _ = std::fs::remove_file(&sqlite_path);
+        let _ = std::fs::remove_file(sqlite_path.with_extension("sqlite-wal"));
+        let _ = std::fs::remove_file(sqlite_path.with_extension("sqlite-shm"));
+    }
+
+    #[test]
+    fn test_d4_argon2id_bans_online_lock_and_oauth2_pkce_sso() {
+        let sde = SdeRegistry::with_canonical_seed();
+        let pid = std::process::id();
+        let sqlite_path =
+            std::env::temp_dir().join(format!("evomu_test_d4_auth_{pid}.sqlite"));
+        let _ = std::fs::remove_file(&sqlite_path);
+
+        let repo = WorldRepository::open_sqlite(&sqlite_path).unwrap();
+        let uid = repo.provision_player_account("capsuleer_auth", "S3cretP@ss!");
+        let ch = repo
+            .create_character(uid, "SSO Capsuleer", 1, 1, 11, 17, &sde)
+            .unwrap();
+        repo.provision_gm_account("gm_root", "gm_secret_123", 90_999_001, "ISD Root");
+
+        // 1. Single active session lock (multiLoginBlocker) + check_session_revoked enforcement
+        assert!(repo
+            .acquire_online_lock(uid, 101, Some(ch.character_id), false, 1_700_000_000)
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            repo.acquire_online_lock(uid, 202, Some(ch.character_id), false, 1_700_000_005),
+            Err(DbError::AlreadyLoggedIn {
+                user_id: uid,
+                active_session_id: 101,
+            })
+        );
+        // Active session 101 passes check_session_revoked; unlocked session 202 is blocked with MultiLoginBlocked (R34-P1-3)
+        assert_eq!(repo.check_session_revoked(uid, 101, 1_700_000_006), None);
+        let revoked_202 = repo.check_session_revoked(uid, 202, 1_700_000_006).unwrap();
+        assert_eq!(revoked_202.0, "MultiLoginBlocked");
+        // Re-acquiring with the same session_id is idempotent
+        assert!(repo
+            .acquire_online_lock(uid, 101, Some(ch.character_id), false, 1_700_000_010)
+            .unwrap()
+            .is_none());
+
+        // 2. OAuth2 PKCE + signed JWT SSO token flow
+        let code_verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+        let code_challenge = base64url_encode_no_pad(&sha256_bytes(code_verifier.as_bytes()));
+        let code = repo
+            .authorize_pkce(
+                "capsuleer_auth",
+                "S3cretP@ss!",
+                ch.character_id,
+                "eveLauncherTQ",
+                "https://login.eveonline.com/launcher",
+                vec![
+                    "esi-skills.read_skills.v1".to_string(),
+                    "esi-wallet.read_character_wallet.v1".to_string(),
+                ],
+                &code_challenge,
+                "S256",
+                1_700_000_100,
+            )
+            .unwrap();
+
+        // Wrong verifier must fail and consume the single-use code
+        assert_eq!(
+            repo.exchange_pkce_code(&code, "eveLauncherTQ", "wrong-verifier", 1_700_000_105),
+            Err(DbError::InvalidCredentials)
+        );
+        // Re-issue and exchange with valid verifier
+        let code2 = repo
+            .authorize_pkce(
+                "capsuleer_auth",
+                "S3cretP@ss!",
+                ch.character_id,
+                "eveLauncherTQ",
+                "https://login.eveonline.com/launcher",
+                vec!["esi-skills.read_skills.v1".to_string()],
+                &code_challenge,
+                "S256",
+                1_700_000_110,
+            )
+            .unwrap();
+        let bundle = repo
+            .exchange_pkce_code(&code2, "eveLauncherTQ", code_verifier, 1_700_000_115)
+            .unwrap();
+        assert_eq!(bundle.token_type, "Bearer");
+        assert_eq!(bundle.expires_in, 1_200);
+
+        let claims = repo
+            .verify_sso_access_token(&bundle.access_token, 1_700_000_200)
+            .unwrap();
+        assert_eq!(claims.character_id, ch.character_id);
+        assert_eq!(claims.user_id, uid);
+        assert_eq!(claims.sub, format!("CHARACTER:EVE:{}", ch.character_id));
+
+        // R34-P1-4: Forged JWT signed with old hardcoded secret or wrong secret must be rejected
+        let forged_header = base64url_encode_no_pad(br#"{"alg":"HS256","typ":"JWT"}"#);
+        let forged_payload = base64url_encode_no_pad(
+            serde_json::to_string(&claims).unwrap().as_bytes(),
+        );
+        let forged_signing_input = format!("{forged_header}.{forged_payload}");
+        let forged_sig = base64url_encode_no_pad(&hmac_sha256(
+            b"evomu-sso-hs256-signing-key-v24-01-local-default",
+            forged_signing_input.as_bytes(),
+        ));
+        let forged_jwt = format!("{forged_signing_input}.{forged_sig}");
+        assert_eq!(
+            repo.verify_sso_access_token(&forged_jwt, 1_700_000_200),
+            Err(DbError::InvalidCredentials)
+        );
+        assert_eq!(
+            repo.authenticate_at("capsuleer_auth", &forged_jwt, 1_700_000_200),
+            Err(DbError::InvalidCredentials)
+        );
+
+        // JWT with alg:none or future iat (> now_unix) must be rejected
+        let none_header = base64url_encode_no_pad(br#"{"alg":"none","typ":"JWT"}"#);
+        let none_input = format!("{none_header}.{forged_payload}");
+        let none_sig = base64url_encode_no_pad(&hmac_sha256(
+            &repo.auth_runtime.read().unwrap().jwt_signing_secret,
+            none_input.as_bytes(),
+        ));
+        let none_jwt = format!("{none_input}.{none_sig}");
+        assert_eq!(
+            repo.verify_sso_access_token(&none_jwt, 1_700_000_200),
+            Err(DbError::InvalidCredentials)
+        );
+        assert_eq!(
+            repo.verify_sso_access_token(&bundle.access_token, 1_700_000_050),
+            Err(DbError::InvalidCredentials),
+            "JWT with iat in the future must be rejected"
+        );
+        assert_eq!(
+            repo.verify_sso_access_token(&bundle.access_token, 1_700_001_315),
+            Err(DbError::InvalidCredentials),
+            "Expired JWT (now_unix == exp) must be rejected"
+        );
+        assert_eq!(
+            repo.authenticate_at("capsuleer_auth", &bundle.access_token, 1_700_002_000),
+            Err(DbError::InvalidCredentials),
+            "Expired JWT (now_unix > exp) must be rejected by authenticate_at"
+        );
+
+        // Login with signed SSO JWT token works directly via authenticate_at
+        let sso_acc = repo
+            .authenticate_at("capsuleer_auth", &bundle.access_token, 1_700_000_200)
+            .unwrap();
+        assert_eq!(sso_acc.user_id, uid);
+
+        // Refresh token rotation
+        let rotated = repo
+            .refresh_sso_token(&bundle.refresh_token, "eveLauncherTQ", 1_700_000_300)
+            .unwrap();
+        // Old refresh token is now revoked
+        assert_eq!(
+            repo.refresh_sso_token(&bundle.refresh_token, "eveLauncherTQ", 1_700_000_301),
+            Err(DbError::InvalidCredentials)
+        );
+
+        // 3. Kick user invalidates active session and revokes prior JWT/refresh tokens
+        let kicked_sess = repo
+            .kick_user(uid, "GM kick test", 1_700_000_400)
+            .expect("session 101 was active");
+        assert_eq!(kicked_sess.session_id, 101);
+        assert!(repo.get_online_session(uid).is_none());
+        assert_eq!(
+            repo.verify_sso_access_token(&rotated.access_token, 1_700_000_405),
+            Err(DbError::InvalidCredentials)
+        );
+
+        // 4. ROLE_ADMIN accounts cannot be banned or kicked (role hierarchy check)
+        assert!(matches!(
+            repo.ban_account("gm_root", 1_700_086_400, "mutiny"),
+            Err(DbError::ValidationError(_))
+        ));
+        let gm_uid = repo.with_snapshot(|s| s.accounts["gm_root"].user_id);
+        repo.acquire_online_lock(gm_uid, 505, Some(90_999_001), true, 1_700_000_410)
+            .unwrap();
+        assert!(repo.kick_user(gm_uid, "try kick gm", 1_700_000_420).is_none());
+        assert!(repo.get_online_session(gm_uid).is_some());
+
+        // 5. Account ban persists to SQLite and blocks login until unbanned or expired
+        repo.ban_account("capsuleer_auth", 1_700_086_400, "EULA violation")
+            .unwrap();
+        assert_eq!(
+            repo.authenticate_at("capsuleer_auth", "S3cretP@ss!", 1_700_001_000),
+            Err(DbError::AccountBanned {
+                until_unix: 1_700_086_400,
+                reason: "EULA violation".to_string(),
+            })
+        );
+        repo.unban_account("capsuleer_auth").unwrap();
+        assert!(repo
+            .authenticate_at("capsuleer_auth", "S3cretP@ss!", 1_700_001_000)
+            .is_ok());
+
+        let _ = std::fs::remove_file(&sqlite_path);
+        let _ = std::fs::remove_file(sqlite_path.with_extension("sqlite-wal"));
+        let _ = std::fs::remove_file(sqlite_path.with_extension("sqlite-shm"));
     }
 }

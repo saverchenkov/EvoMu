@@ -104,12 +104,12 @@ impl LivingWorldDirector {
             LivingWorldConvoy {
                 convoy_id: 800_000_003,
                 archetype: NpcArchetype::PirateRoamer,
-                ship_type_id: 11001, // Guristas Pithi Invader
+                ship_type_id: 16997, // Guristas Pithi Invader
                 origin_system_id: 30_002_813,
                 current_system_id: 30_002_813,
                 destination_system_id: 30_000_144,
                 destination_station_id: 60_003_766,
-                cargo_type_id: 22989,
+                cargo_type_id: 21924,
                 cargo_quantity: 200,
                 lod_level: 1,
                 destroyed: false,
@@ -157,16 +157,21 @@ impl LivingWorldDirector {
             return 0;
         }
 
-        let station_pos = sde
-            .solar_systems
-            .get(&solar_system_id)
-            .and_then(|sys| sys.stations.first().map(|st| st.position))
-            .unwrap_or(DVec3::ZERO);
-        let grid_origin = station_pos + DVec3::new(1_500.0, 0.0, 0.0);
-
         let handle = systems.get_or_spawn(solar_system_id);
         let mut count = 0;
         for c in to_spawn {
+            let station_pos = sde
+                .solar_systems
+                .get(&solar_system_id)
+                .and_then(|sys| {
+                    sys.stations
+                        .iter()
+                        .find(|st| st.station_id == c.destination_station_id)
+                        .or_else(|| sys.stations.first())
+                        .map(|st| st.position)
+                })
+                .unwrap_or(DVec3::ZERO);
+            let grid_origin = station_pos + DVec3::new(1_500.0, 0.0, 0.0);
             let ball = Ball {
                 id: c.convoy_id,
                 type_id: c.ship_type_id,

@@ -64,19 +64,37 @@ pub fn handle(
         ("authentication", "Login") => {
             let username = args.first().and_then(|a| a.as_str()).unwrap_or("");
             let token = args.get(1).and_then(|a| a.as_str()).unwrap_or("");
-            let res = ctx
-                .db
-                .authenticate(username, token)
-                .map_err(|e| BridgeRpcError {
-                    code: "AuthenticationFailed".into(),
-                    message: e.to_string(),
-                });
+            let now_unix = ctx.now_unix();
+            let res =
+                ctx.db
+                    .authenticate_at(username, token, now_unix)
+                    .map_err(|e| BridgeRpcError {
+                        code: match e {
+                            eve_db::DbError::AccountBanned { .. } => "AccountBanned".into(),
+                            _ => "AuthenticationFailed".into(),
+                        },
+                        message: e.to_string(),
+                    });
             let acc = match res {
                 Ok(a) => a,
                 Err(e) => return Some(Err(e)),
             };
 
+            if let Some(prev_uid) = session.user_id {
+                ctx.db.release_online_lock(prev_uid, session.session_id);
+            }
             ctx.release_session_bindings(session.session_id);
+            ctx.db
+                .clear_revocation_on_fresh_login(acc.user_id, session.session_id);
+            if ctx.db.get_online_session(acc.user_id).is_none() {
+                let _ = ctx.db.acquire_online_lock(
+                    acc.user_id,
+                    session.session_id,
+                    None,
+                    false,
+                    now_unix,
+                );
+            }
             session.user_id = Some(acc.user_id);
             session.role = acc.role;
             session.character_id = None;
@@ -100,8 +118,12 @@ pub fn handle(
         }
 
         ("authentication", "Logout") => {
+            if let Some(uid) = session.user_id {
+                ctx.db.release_online_lock(uid, session.session_id);
+            }
             ctx.release_session_bindings(session.session_id);
             session.user_id = None;
+            session.role = 0;
             session.character_id = None;
             session.corporation_id = None;
             session.alliance_id = None;
@@ -114,27 +136,69 @@ pub fn handle(
             Some(Ok(PyRep::keyval([("loggedOut", PyRep::Bool(true))])))
         }
 
+        ("multiLoginBlocker", "Login") => {
+            let uid = match ServerContext::require_auth(session) {
+                Ok(u) => u,
+                Err(e) => return Some(Err(e)),
+            };
+            let allow_displace = args.first().and_then(|a| a.as_bool()).unwrap_or(false);
+            match ctx.db.acquire_online_lock(
+                uid,
+                session.session_id,
+                session.character_id,
+                allow_displace,
+                ctx.now_unix(),
+            ) {
+                Ok(displaced) => {
+                    if let Some(ref d) = displaced {
+                        ctx.release_session_bindings(d.session_id);
+                    }
+                    Some(Ok(PyRep::keyval([
+                        ("userID", PyRep::Integer(uid as i64)),
+                        ("sessionID", PyRep::Integer(session.session_id as i64)),
+                        (
+                            "displacedSessionID",
+                            displaced
+                                .map(|d| PyRep::Integer(d.session_id as i64))
+                                .unwrap_or(PyRep::None),
+                        ),
+                    ])))
+                }
+                Err(e) => {
+                    let code = match e {
+                        eve_db::DbError::AccountBanned { .. } => "AccountBanned",
+                        eve_db::DbError::ValidationError(_) => "SessionKicked",
+                        _ => "AlreadyLoggedIn",
+                    };
+                    Some(Err(BridgeRpcError {
+                        code: code.into(),
+                        message: e.to_string(),
+                    }))
+                }
+            }
+        }
+
         ("subscriptionMgr", "GetCloneGrade") => {
             let uid = match ServerContext::require_auth(session) {
                 Ok(u) => u,
                 Err(e) => return Some(Err(e)),
             };
-            let clone_grade_u8 = session
+            let (clone_grade_u8, race_id) = session
                 .character_id
                 .and_then(|cid| ctx.db.get_character(cid).ok())
-                .map(|c| c.clone_grade)
-                .unwrap_or(1);
-            let (max_sp, speed_mult) = ctx
+                .map(|c| (c.clone_grade, c.race_id))
+                .unwrap_or((1, 1));
+            let skill_caps_count = ctx
                 .sde
                 .clone_grades
-                .get(&clone_grade_u8)
-                .map(|g| (g.max_skill_points, g.training_speed_multiplier))
-                .unwrap_or((5_000_000, 0.5));
+                .get(&race_id)
+                .or_else(|| ctx.sde.clone_grades.get(&(clone_grade_u8 as u32)))
+                .map(|g| g.alpha_skill_caps.len())
+                .unwrap_or(0);
             Some(Ok(PyRep::keyval([
                 ("userID", PyRep::Integer(uid as i64)),
                 ("cloneGrade", PyRep::Integer(clone_grade_u8 as i64)),
-                ("maxSkillPoints", PyRep::Integer(max_sp as i64)),
-                ("trainingSpeedMultiplier", PyRep::Real(speed_mult)),
+                ("alphaSkillCapsCount", PyRep::Integer(skill_caps_count as i64)),
             ])))
         }
 
@@ -195,6 +259,120 @@ pub fn handle(
                     ]))),
                     Err(e) => Some(Err(e)),
                 }
+            } else if let Some(rest) = cmd.strip_prefix("/ban ") {
+                let mut parts = rest.trim().splitn(3, ' ');
+                let Some(username) = parts.next().map(str::trim).filter(|s| !s.is_empty()) else {
+                    return Some(Err(BridgeRpcError {
+                        code: "InvalidSlashArgument".into(),
+                        message: "Usage: /ban <username> <duration_seconds> [reason]".into(),
+                    }));
+                };
+                let Some(dur_str) = parts.next().map(str::trim) else {
+                    return Some(Err(BridgeRpcError {
+                        code: "InvalidSlashArgument".into(),
+                        message: "Usage: /ban <username> <duration_seconds> [reason]".into(),
+                    }));
+                };
+                let Ok(duration_secs) = dur_str.parse::<u64>() else {
+                    return Some(Err(BridgeRpcError {
+                        code: "InvalidSlashArgument".into(),
+                        message: "Duration for /ban must be a positive integer in seconds".into(),
+                    }));
+                };
+                if duration_secs == 0 {
+                    return Some(Err(BridgeRpcError {
+                        code: "InvalidSlashArgument".into(),
+                        message: "Duration for /ban must be greater than zero".into(),
+                    }));
+                }
+                let reason = parts
+                    .next()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("Banned by GM");
+                let until_unix = ctx.now_unix().saturating_add(duration_secs);
+                match ctx.db.ban_account(username, until_unix, reason) {
+                    Ok(uid) => {
+                        ctx.release_user_bindings(uid);
+                        Some(Ok(PyRep::keyval([
+                            ("command", PyRep::String(cmd.to_string())),
+                            ("username", PyRep::String(username.to_string())),
+                            ("userID", PyRep::Integer(uid as i64)),
+                            ("bannedUntilUnix", PyRep::Integer(until_unix as i64)),
+                            ("reason", PyRep::String(reason.to_string())),
+                        ])))
+                    }
+                    Err(e) => Some(Err(BridgeRpcError {
+                        code: "BanFailed".into(),
+                        message: e.to_string(),
+                    })),
+                }
+            } else if let Some(rest) = cmd.strip_prefix("/unban ") {
+                let username = rest.trim();
+                if username.is_empty() {
+                    return Some(Err(BridgeRpcError {
+                        code: "InvalidSlashArgument".into(),
+                        message: "Usage: /unban <username>".into(),
+                    }));
+                }
+                match ctx.db.unban_account(username) {
+                    Ok(uid) => Some(Ok(PyRep::keyval([
+                        ("command", PyRep::String(cmd.to_string())),
+                        ("username", PyRep::String(username.to_string())),
+                        ("userID", PyRep::Integer(uid as i64)),
+                        ("unbanned", PyRep::Bool(true)),
+                    ]))),
+                    Err(e) => Some(Err(BridgeRpcError {
+                        code: "UnbanFailed".into(),
+                        message: e.to_string(),
+                    })),
+                }
+            } else if let Some(rest) = cmd.strip_prefix("/kick ") {
+                let mut parts = rest.trim().splitn(2, ' ');
+                let Some(username) = parts.next().map(str::trim).filter(|s| !s.is_empty()) else {
+                    return Some(Err(BridgeRpcError {
+                        code: "InvalidSlashArgument".into(),
+                        message: "Usage: /kick <username> [reason]".into(),
+                    }));
+                };
+                let reason = parts
+                    .next()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("Kicked by GM");
+                let Some((uid, is_admin)) = ctx.db.with_snapshot(|s| {
+                    s.accounts.get(username).map(|a| {
+                        (
+                            a.user_id,
+                            (a.role & eve_db::service_roles::ROLE_ADMIN) != 0,
+                        )
+                    })
+                }) else {
+                    return Some(Err(BridgeRpcError {
+                        code: "UnknownAccount".into(),
+                        message: format!("Unknown account '{username}'"),
+                    }));
+                };
+                if is_admin {
+                    return Some(Err(BridgeRpcError {
+                        code: "KickFailed".into(),
+                        message: format!("Cannot kick administrator account '{username}'"),
+                    }));
+                }
+                let kicked_sess = ctx.db.kick_user(uid, reason, ctx.now_unix());
+                ctx.release_user_bindings(uid);
+                Some(Ok(PyRep::keyval([
+                    ("command", PyRep::String(cmd.to_string())),
+                    ("username", PyRep::String(username.to_string())),
+                    ("userID", PyRep::Integer(uid as i64)),
+                    (
+                        "kickedSessionID",
+                        kicked_sess
+                            .map(|s| PyRep::Integer(s.session_id as i64))
+                            .unwrap_or(PyRep::None),
+                    ),
+                    ("reason", PyRep::String(reason.to_string())),
+                ])))
             } else {
                 Some(Err(BridgeRpcError {
                     code: "UnknownSlashCommand".into(),

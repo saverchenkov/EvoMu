@@ -191,21 +191,22 @@ async fn test_e2e_01_to_18_integration_journeys() {
     };
     let jita_bound = ukv.get("beyonceBoundID").unwrap().as_i64().unwrap() as u64;
 
+    let jita_to_perim_pos = ctx.sde.jumps[&50_001_249].position;
     ctx.dispatch_rpc(
         &mut sess,
         "beyonce",
         Some(jita_bound),
         "CmdWarpToPoint",
         &[
-            PyRep::Real(-161_369_743_360.0),
-            PyRep::Real(-30_690_549_760.0),
-            PyRep::Real(-1_107_962_183_680.0),
+            PyRep::Real(jita_to_perim_pos.x),
+            PyRep::Real(jita_to_perim_pos.y),
+            PyRep::Real(jita_to_perim_pos.z),
         ],
         &kw,
         None,
     )
     .await
-    .expect("CmdWarpToPoint to stargate 50001248");
+    .expect("CmdWarpToPoint to stargate 50001249");
 
     let jita_handle = ctx.systems.get_or_spawn(30_000_142);
     for _ in 0..30 {
@@ -218,7 +219,7 @@ async fn test_e2e_01_to_18_integration_journeys() {
             "beyonce",
             Some(jita_bound),
             "CmdStargateJump",
-            &[PyRep::Integer(50001248)],
+            &[PyRep::Integer(50_001_249)],
             &kw,
             None,
         )
@@ -229,7 +230,7 @@ async fn test_e2e_01_to_18_integration_journeys() {
     };
     assert_eq!(jkv.get("solarSystemID"), Some(&PyRep::Integer(30_000_144)));
     assert_eq!(sess.solar_system_id, Some(30_000_144));
-    let perim_bound = jkv.get("beyonceBoundID").unwrap().as_i64().unwrap() as u64;
+    let mut cur_bound = jkv.get("beyonceBoundID").unwrap().as_i64().unwrap() as u64;
 
     // Verify ESS link is rejected in High-Sec Perimeter (30000144)
     let hs_ess_err = ctx
@@ -245,42 +246,53 @@ async fn test_e2e_01_to_18_integration_journeys() {
         .await;
     assert_eq!(hs_ess_err.unwrap_err().code, "EssOnlyInNullSec");
 
-    // Warp to Perimeter -> Tama stargate 50001250 and jump to Low-Sec Tama (30002813)
-    let perim_handle = ctx.systems.get_or_spawn(30_000_144);
-    ctx.dispatch_rpc(
-        &mut sess,
-        "beyonce",
-        Some(perim_bound),
-        "CmdWarpToPoint",
-        &[
-            PyRep::Real(86_000_000_000.0),
-            PyRep::Real(12_000_000_000.0),
-            PyRep::Real(-141_000_000_000.0),
-        ],
-        &kw,
-        None,
-    )
-    .await
-    .expect("Warp to gate 50001250");
-    for _ in 0..30 {
-        let _ = perim_handle.step_manual(1.0).await.unwrap();
+    // Travel Perimeter (50002185) -> Jita (50013928) -> Ikuchi (50013926) -> Tunttaras (50001709) -> Nourvukaiken (50014001) -> Low-Sec Tama (30002813)
+    for gate_id in [50_002_185_i64, 50_013_928, 50_013_926, 50_001_709, 50_014_001] {
+        let cur_sys = sess.solar_system_id.unwrap();
+        let gate_pos = ctx.sde.jumps[&gate_id].position;
+        let sys_h = ctx.systems.get_or_spawn(cur_sys);
+        let warp_res = ctx
+            .dispatch_rpc(
+                &mut sess,
+                "beyonce",
+                Some(cur_bound),
+                "CmdWarpToPoint",
+                &[
+                    PyRep::Real(gate_pos.x),
+                    PyRep::Real(gate_pos.y),
+                    PyRep::Real(gate_pos.z),
+                ],
+                &kw,
+                None,
+            )
+            .await;
+        match warp_res {
+            Ok(_) => {
+                for _ in 0..35 {
+                    let _ = sys_h.step_manual(1.0).await.unwrap();
+                }
+            }
+            Err(e) if e.code == "WarpDistanceTooShort" => {}
+            Err(e) => panic!("Warp to stargate {gate_id}: {e:?}"),
+        }
+        let j_res = ctx
+            .dispatch_rpc(
+                &mut sess,
+                "beyonce",
+                Some(cur_bound),
+                "CmdStargateJump",
+                &[PyRep::Integer(gate_id)],
+                &kw,
+                None,
+            )
+            .await
+            .expect("Jump stargate");
+        let PyRep::KeyVal(j_kv) = j_res else {
+            panic!("Expected jump KeyVal");
+        };
+        cur_bound = j_kv.get("beyonceBoundID").unwrap().as_i64().unwrap() as u64;
     }
-    let jump_tama = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "beyonce",
-            Some(perim_bound),
-            "CmdStargateJump",
-            &[PyRep::Integer(50001250)],
-            &kw,
-            None,
-        )
-        .await
-        .expect("Jump to Tama (30002813)");
-    let PyRep::KeyVal(tama_kv) = jump_tama else {
-        panic!("Expected Tama jump KeyVal");
-    };
-    let tama_bound = tama_kv.get("beyonceBoundID").unwrap().as_i64().unwrap() as u64;
+    let tama_bound = cur_bound;
     let tama_handle = ctx.systems.get_or_spawn(30_002_813);
 
     // E2E-11 in Low-Sec Tama (30002813): S-6 verifies RequestScans returns UnimplementedRPC; spawn K162 (750_000_001) -> ConeScan -> Warp -> Jump to J105934 (31000005) -> Jump to Null-Sec VFK-IV (30002904)
@@ -385,7 +397,7 @@ async fn test_e2e_01_to_18_integration_journeys() {
         .spawn_ball_with_combat(
             eve_destiny::Ball {
                 id: 700_000_001,
-                type_id: 11001,
+                type_id: 16997,
                 position: ship_in_hed.position + glam::DVec3::new(900.0, 0.0, 0.0),
                 velocity: glam::DVec3::ZERO,
                 max_velocity: 310.0,
@@ -421,14 +433,14 @@ async fn test_e2e_01_to_18_integration_journeys() {
         })
         .await;
     let _ = hed_handle.step_manual(1.0).await.unwrap();
-    // R18-P1-1: Seed 5,000 Republic Fleet Phased Plasma S (type_id 22989) in ship Cargo (100_000_001);
+    // R18-P1-1: Seed 5,000 Republic Fleet Phased Plasma S (type_id 21924) in ship Cargo (100_000_001);
     // FireWeapon MUST still reject with NoAmmoLoaded while ammo is only in Cargo and not loaded into HiSlot0 (flag 27)
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(
             100_000_040,
             InventoryItemRecord {
                 item_id: 100_000_040,
-                type_id: 22989,
+                type_id: 21924,
                 owner_id: 90_000_001,
                 location_id: 100_000_001,
                 flag: InventoryFlag::Cargo,
@@ -456,7 +468,7 @@ async fn test_e2e_01_to_18_integration_journeys() {
         .await;
     assert_eq!(unl_err.unwrap_err().code, "NoAmmoLoaded");
 
-    // Load ammo into HiSlot0 (flag 27) via dogmaIM.LoadAmmo (clip capacity = 5.0 / 0.0025 = 2,000 rounds)
+    // Load ammo into HiSlot0 (flag 27) via dogmaIM.LoadAmmo (clip capacity = 0.3 / 0.0025 = 120 rounds)
     let load_res = ctx
         .dispatch_rpc(
             &mut sess,
@@ -476,8 +488,8 @@ async fn test_e2e_01_to_18_integration_journeys() {
     let PyRep::KeyVal(lkv) = load_res else {
         panic!("Expected LoadAmmo KeyVal");
     };
-    assert_eq!(lkv.get("totalLoaded"), Some(&PyRep::Integer(2_000)));
-    assert_eq!(ctx.db.get_item(100_000_040).unwrap().quantity, 3_000);
+    assert_eq!(lkv.get("totalLoaded"), Some(&PyRep::Integer(120)));
+    assert_eq!(ctx.db.get_item(100_000_040).unwrap().quantity, 4_880);
 
     // R-P0-01: Non-combatant balls (such as structure ball 750_000_002) cannot be damaged or award bounties via FireWeapon
     let non_npc_err = ctx
@@ -530,11 +542,11 @@ async fn test_e2e_01_to_18_integration_journeys() {
     let remaining_clip = ctx.db.with_snapshot(|s| {
         s.items
             .values()
-            .find(|i| i.location_id == 100_000_001 && i.flag == InventoryFlag::HiSlot0 && i.type_id == 22989)
+            .find(|i| i.location_id == 100_000_001 && i.flag == InventoryFlag::HiSlot0 && i.type_id == 21924)
             .map(|i| i.quantity)
             .unwrap_or(0)
     });
-    assert_eq!(remaining_clip, 2_000 - shots_fired);
+    assert_eq!(remaining_clip, 120 - shots_fired);
 
     let ess_start = ctx
         .dispatch_rpc(
@@ -579,7 +591,7 @@ async fn test_e2e_01_to_18_integration_journeys() {
     );
     assert!(ess_done_kv.get("stolenISK").unwrap().as_f64().unwrap() > 0.0);
 
-    // Jump back VFK-IV (30002904) -> Tama (30002813) via wormhole, then stargates (50001251 -> Perimeter 50001873 -> Jita 30000142) -> Dock at Jita 4-4 (60003760)
+    // Jump back VFK-IV (30002904) -> Tama (30002813) via wormhole, then stargates (50014002 -> 50000805 -> 50013925 -> 50013927 -> Jita 30000142) -> Dock at Jita 4-4 (60003760)
     let jb_tama = ctx
         .dispatch_rpc(
             &mut sess,
@@ -595,75 +607,47 @@ async fn test_e2e_01_to_18_integration_journeys() {
     let PyRep::KeyVal(jb_tama_kv) = jb_tama else {
         panic!("Expected jb_tama KeyVal");
     };
-    let tama_b2 = jb_tama_kv.get("beyonceBoundID").unwrap().as_i64().unwrap() as u64;
-    ctx.dispatch_rpc(
-        &mut sess,
-        "beyonce",
-        Some(tama_b2),
-        "CmdWarpToPoint",
-        &[
-            PyRep::Real(10_000_000_000.0),
-            PyRep::Real(0.0),
-            PyRep::Real(10_000_000_000.0),
-        ],
-        &kw,
-        None,
-    )
-    .await
-    .expect("Warp to gate 50001251 in Tama");
-    for _ in 0..30 {
-        let _ = tama_handle.step_manual(1.0).await.unwrap();
-    }
-    let jb_perim = ctx
-        .dispatch_rpc(
+    let mut ret_bound = jb_tama_kv.get("beyonceBoundID").unwrap().as_i64().unwrap() as u64;
+    for gate_id in [50_014_002_i64, 50_000_805, 50_013_925, 50_013_927] {
+        let cur_sys = sess.solar_system_id.unwrap();
+        let gate_pos = ctx.sde.jumps[&gate_id].position;
+        let sys_h = ctx.systems.get_or_spawn(cur_sys);
+        ctx.dispatch_rpc(
             &mut sess,
             "beyonce",
-            Some(tama_b2),
-            "CmdStargateJump",
-            &[PyRep::Integer(50001251)],
+            Some(ret_bound),
+            "CmdWarpToPoint",
+            &[
+                PyRep::Real(gate_pos.x),
+                PyRep::Real(gate_pos.y),
+                PyRep::Real(gate_pos.z),
+            ],
             &kw,
             None,
         )
         .await
-        .expect("Jump Tama -> Perimeter");
-    let PyRep::KeyVal(jb_perim_kv) = jb_perim else {
-        panic!("Expected jb_perim KeyVal");
-    };
-    let perim_b2 = jb_perim_kv.get("beyonceBoundID").unwrap().as_i64().unwrap() as u64;
-    ctx.dispatch_rpc(
-        &mut sess,
-        "beyonce",
-        Some(perim_b2),
-        "CmdWarpToPoint",
-        &[
-            PyRep::Real(84_000_000_000.0),
-            PyRep::Real(12_000_000_000.0),
-            PyRep::Real(-139_000_000_000.0),
-        ],
-        &kw,
-        None,
-    )
-    .await
-    .expect("Warp to gate 50001873 in Perimeter");
-    for _ in 0..30 {
-        let _ = perim_handle.step_manual(1.0).await.unwrap();
+        .expect("Warp to return stargate");
+        for _ in 0..30 {
+            let _ = sys_h.step_manual(1.0).await.unwrap();
+        }
+        let jb_res = ctx
+            .dispatch_rpc(
+                &mut sess,
+                "beyonce",
+                Some(ret_bound),
+                "CmdStargateJump",
+                &[PyRep::Integer(gate_id)],
+                &kw,
+                None,
+            )
+            .await
+            .expect("Jump return stargate");
+        let PyRep::KeyVal(jb_kv) = jb_res else {
+            panic!("Expected return jump KeyVal");
+        };
+        ret_bound = jb_kv.get("beyonceBoundID").unwrap().as_i64().unwrap() as u64;
     }
-    let jump_back = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "beyonce",
-            Some(perim_b2),
-            "CmdStargateJump",
-            &[PyRep::Integer(50001873)],
-            &kw,
-            None,
-        )
-        .await
-        .expect("CmdStargateJump back to Jita");
-    let PyRep::KeyVal(jb_kv) = jump_back else {
-        panic!("Expected jump_back KeyVal");
-    };
-    let jita_bound_2 = jb_kv.get("beyonceBoundID").unwrap().as_i64().unwrap() as u64;
+    let jita_bound_2 = ret_bound;
 
     ctx.dispatch_rpc(
         &mut sess,
@@ -790,7 +774,7 @@ async fn test_blocking_findings_b01_to_b15_regressions() {
             ),
             (
                 100_000_027,
-                55001,
+                34748,
                 60_003_760,
                 InventoryFlag::Hangar,
                 1,
@@ -907,7 +891,7 @@ async fn test_blocking_findings_b01_to_b15_regressions() {
             "shipCosmeticsMgr",
             None,
             "ApplySkinToShip",
-            &[PyRep::Integer(587), PyRep::Integer(55001)],
+            &[PyRep::Integer(587), PyRep::Integer(34748)],
             &kw,
             None,
         )
@@ -919,7 +903,7 @@ async fn test_blocking_findings_b01_to_b15_regressions() {
         "shipCosmeticsMgr",
         None,
         "ActivateSkinLicense",
-        &[PyRep::Integer(55001)],
+        &[PyRep::Integer(34748)],
         &kw,
         None,
     )
@@ -931,7 +915,7 @@ async fn test_blocking_findings_b01_to_b15_regressions() {
             "shipCosmeticsMgr",
             None,
             "ActivateSkinLicense",
-            &[PyRep::Integer(55001)],
+            &[PyRep::Integer(34748)],
             &kw,
             None,
         )
@@ -945,14 +929,14 @@ async fn test_blocking_findings_b01_to_b15_regressions() {
         "shipCosmeticsMgr",
         None,
         "ApplySkinToShip",
-        &[PyRep::Integer(587), PyRep::Integer(55001)],
+        &[PyRep::Integer(587), PyRep::Integer(34748)],
         &kw,
         None,
     )
     .await
     .expect("ApplySkinToShip after license activation");
 
-    // B-04: Installing T2 Invention (activity 8) before copying any BPC from BPO 687 must fail with InventionRequiresBPC
+    // B-04: Installing T2 Invention (activity 8) before copying any BPC from BPO 691 must fail with InventionRequiresBPC
     let bpo_inv_err = ctx
         .dispatch_rpc(
             &mut sess,
@@ -960,7 +944,7 @@ async fn test_blocking_findings_b01_to_b15_regressions() {
             None,
             "InstallJob",
             &[
-                PyRep::Integer(687),
+                PyRep::Integer(691),
                 PyRep::Integer(8),
                 PyRep::Integer(1),
             ],
@@ -970,7 +954,7 @@ async fn test_blocking_findings_b01_to_b15_regressions() {
         .await;
     assert_eq!(bpo_inv_err.unwrap_err().code, "InventionRequiresBPC");
 
-    // Copy Rifter BPO (687) twice (producing 2 BPCs with is_blueprint_copy=true), then test deterministic invention failure and success via server-side override
+    // Copy Rifter BPO (691) twice (producing 2 BPCs with is_blueprint_copy=true), then test deterministic invention failure and success via server-side override
     let copy1 = ctx
         .dispatch_rpc(
             &mut sess,
@@ -978,7 +962,7 @@ async fn test_blocking_findings_b01_to_b15_regressions() {
             None,
             "InstallJob",
             &[
-                PyRep::Integer(687),
+                PyRep::Integer(691),
                 PyRep::Integer(5),
                 PyRep::Integer(1),
             ],
@@ -1011,7 +995,7 @@ async fn test_blocking_findings_b01_to_b15_regressions() {
             None,
             "InstallJob",
             &[
-                PyRep::Integer(687),
+                PyRep::Integer(691),
                 PyRep::Integer(5),
                 PyRep::Integer(1),
             ],
@@ -1045,7 +1029,7 @@ async fn test_blocking_findings_b01_to_b15_regressions() {
             None,
             "InstallJob",
             &[
-                PyRep::Integer(687),
+                PyRep::Integer(691),
                 PyRep::Integer(8),
                 PyRep::Integer(1),
             ],
@@ -1058,7 +1042,7 @@ async fn test_blocking_findings_b01_to_b15_regressions() {
         panic!("Expected inv1 KeyVal");
     };
     let inv1_job_id = inv1_kv.get("jobID").unwrap().as_i64().unwrap() as u64;
-    ctx.advance_virtual_clock(40_000);
+    ctx.advance_virtual_clock(70_000);
     ctx.set_invention_roll_override(Some(0.95));
     let inv1_fail = ctx
         .dispatch_rpc(
@@ -1081,7 +1065,7 @@ async fn test_blocking_findings_b01_to_b15_regressions() {
             None,
             "InstallJob",
             &[
-                PyRep::Integer(687),
+                PyRep::Integer(691),
                 PyRep::Integer(8),
                 PyRep::Integer(1),
             ],
@@ -1094,7 +1078,7 @@ async fn test_blocking_findings_b01_to_b15_regressions() {
         panic!("Expected inv2 KeyVal");
     };
     let inv2_job_id = inv2_kv.get("jobID").unwrap().as_i64().unwrap() as u64;
-    ctx.advance_virtual_clock(40_000);
+    ctx.advance_virtual_clock(70_000);
     ctx.set_invention_roll_override(Some(0.10));
     let inv2_ok = ctx
         .dispatch_rpc(
@@ -1152,9 +1136,11 @@ async fn test_blocking_findings_b01_to_b15_regressions() {
         sess_ref: &mut SessionState,
         kw_ref: &HashMap<String, PyRep>,
         gate_id: i64,
-        pos: [f64; 3],
+        _pos: [f64; 3],
     ) {
         let sys_id = sess_ref.solar_system_id.unwrap();
+        let gate_pos = ctx_ref.sde.jumps[&gate_id].position;
+        let pos = [gate_pos.x, gate_pos.y, gate_pos.z];
         let bound = ctx_ref
             .bind_object(sess_ref, "beyonce", sys_id as i64)
             .expect("bind beyonce");
@@ -1228,29 +1214,30 @@ async fn test_blocking_findings_b01_to_b15_regressions() {
             .expect("CmdStargateJump");
     }
 
-    // Undock in Rifter (100_000_001), travel Jita (50001248) -> Perimeter (50001250) -> Tama (30002813) to anchor & fuel Tama Cyno Citadel
+    // Undock in Rifter (100_000_001), travel Jita -> Ikuchi -> Tunttaras -> Nourvukaiken -> Tama (30002813) to anchor & fuel Tama Cyno Citadel
     ctx.dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None)
         .await
         .expect("Undock Rifter");
-    warp_and_jump_gate(
-        &ctx,
-        &mut sess,
-        &kw,
-        50001248,
-        [-161_369_743_360.0, -30_690_549_760.0, -1_107_962_183_680.0],
-    )
-    .await;
-    warp_and_jump_gate(
-        &ctx,
-        &mut sess,
-        &kw,
-        50001250,
-        [86_000_000_000.0, 12_000_000_000.0, -141_000_000_000.0],
-    )
-    .await;
+    for gate_id in [50_013_928_i64, 50_013_926, 50_001_709, 50_014_001] {
+        warp_and_jump_gate(&ctx, &mut sess, &kw, gate_id, [0.0, 0.0, 0.0]).await;
+    }
     assert_eq!(sess.solar_system_id, Some(30002813));
 
-    // R2-P0-01: MaterializeSystemLOD2 rejects remote solar system arguments with CannotMaterializeRemoteSystem
+    // R36-P1-1 & R2-P0-01: MaterializeSystemLOD2 rejects non-GMs with InsufficientRole, and rejects remote solar system arguments from GMs with CannotMaterializeRemoteSystem
+    let non_gm_mat_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "taleMgr",
+            None,
+            "MaterializeSystemLOD2",
+            &[PyRep::Integer(30_000_142)],
+            &kw,
+            None,
+        )
+        .await;
+    assert_eq!(non_gm_mat_err.unwrap_err().code, "InsufficientRole");
+    let saved_role = sess.role;
+    sess.role |= eve_machonet::service_roles::ROLE_GMH;
     let remote_mat_err = ctx
         .dispatch_rpc(
             &mut sess,
@@ -1262,6 +1249,7 @@ async fn test_blocking_findings_b01_to_b15_regressions() {
             None,
         )
         .await;
+    sess.role = saved_role;
     assert_eq!(
         remote_mat_err.unwrap_err().code,
         "CannotMaterializeRemoteSystem"
@@ -1423,23 +1411,10 @@ async fn test_blocking_findings_b01_to_b15_regressions() {
     .await
     .expect("Undock from Tama Cyno Citadel");
 
-    // Return Rifter to Jita (60003760) via stargates 50001251 -> 50001873
-    warp_and_jump_gate(
-        &ctx,
-        &mut sess,
-        &kw,
-        50001251,
-        [10_000_000_000.0, 0.0, 10_000_000_000.0],
-    )
-    .await;
-    warp_and_jump_gate(
-        &ctx,
-        &mut sess,
-        &kw,
-        50001873,
-        [84_000_000_000.0, 12_000_000_000.0, -139_000_000_000.0],
-    )
-    .await;
+    // Return Rifter to Jita (60003760) via stargates 50014002 -> 50000805 -> 50013925 -> 50013927
+    for gate_id in [50_014_002_i64, 50_000_805, 50_013_925, 50_013_927] {
+        warp_and_jump_gate(&ctx, &mut sess, &kw, gate_id, [0.0, 0.0, 0.0]).await;
+    }
     let jita_bound = ctx.bind_object(&mut sess, "beyonce", 30_000_142).unwrap();
     ctx.dispatch_rpc(
         &mut sess,
@@ -1473,7 +1448,6 @@ async fn test_blocking_findings_b01_to_b15_regressions() {
     .expect("Dock Rifter at Jita");
 
     // S-9: MaterializeSystemLOD2 rejects non-GM roles (including legacy 0x02) and requires 64-bit V24.01 serviceConst GM role bitmask
-    // parity: plan:S-9
     assert_eq!(
         ctx.living_world
             .get_convoy(800_000_001)
@@ -1691,23 +1665,10 @@ async fn test_blocking_findings_b01_to_b15_regressions() {
     ctx.dispatch_rpc(&mut sess2, "stationSvc", None, "Undock", &[], &kw, None)
         .await
         .expect("Undock 90_000_002");
-    // Travel via stargates Jita (50001248) -> Perimeter (50001250) -> Tama (30002813)
-    warp_and_jump_gate(
-        &ctx,
-        &mut sess2,
-        &kw,
-        50001248,
-        [-161_369_743_360.0, -30_690_549_760.0, -1_107_962_183_680.0],
-    )
-    .await;
-    warp_and_jump_gate(
-        &ctx,
-        &mut sess2,
-        &kw,
-        50001250,
-        [86_000_000_000.0, 12_000_000_000.0, -141_000_000_000.0],
-    )
-    .await;
+    // Travel via stargates Jita -> Ikuchi -> Tunttaras -> Nourvukaiken -> Tama (30002813)
+    for gate_id in [50_013_928_i64, 50_013_926, 50_001_709, 50_014_001] {
+        warp_and_jump_gate(&ctx, &mut sess2, &kw, gate_id, [0.0, 0.0, 0.0]).await;
+    }
     assert_eq!(sess2.solar_system_id, Some(30002813));
     let corp_hsc = ctx
         .dispatch_rpc(
@@ -1755,7 +1716,7 @@ async fn test_blocking_findings_b01_to_b15_regressions() {
         let _ = tama_handle.step_manual(1.0).await.unwrap();
     }
 
-    // R8-P1-3, R9-P1-2 & R18-P1-1: Seed Republic Fleet Phased Plasma S (22989: 2.3 kinetic + 11.5 thermal = 13.8 base damage) in Rifter 100_000_002 Cargo,
+    // R8-P1-3, R9-P1-2 & R18-P1-1: Seed Republic Fleet Phased Plasma S (21924: 2.3 kinetic + 11.5 thermal = 13.8 base damage) in Rifter 100_000_002 Cargo,
     // verify AttackStructure rejects with NoAmmoLoaded while ammo is only in Cargo, load into HiSlot0 (flag 27) via dogmaIM.LoadAmmo,
     // and verify a single frigate weapon cycle (200mm AutoCannon II 2889: 13.8 * 3.465 = 47.817 volley / 3.125s = 15.30144 DPS) deals strictly one volley and consumes 1 round
     ctx.db.with_mut_snapshot(|snap| {
@@ -1763,7 +1724,7 @@ async fn test_blocking_findings_b01_to_b15_regressions() {
             100_000_940,
             eve_db::InventoryItemRecord {
                 item_id: 100_000_940,
-                type_id: 22989,
+                type_id: 21924,
                 owner_id: 90_000_002,
                 location_id: 100_000_002,
                 flag: eve_db::InventoryFlag::Cargo,
@@ -1804,7 +1765,7 @@ async fn test_blocking_findings_b01_to_b15_regressions() {
         None,
     )
     .await
-    .expect("LoadAmmo 22989 into Rifter 100_000_002 HiSlot0");
+    .expect("LoadAmmo 21924 into Rifter 100_000_002 HiSlot0");
     let frigate_poke = ctx
         .dispatch_rpc(
             &mut sess2,
@@ -1825,12 +1786,24 @@ async fn test_blocking_findings_b01_to_b15_regressions() {
         Some("ShieldVulnerable")
     );
     let poke_shield_hp = poke_kv.get("shieldHP").and_then(|v| v.as_f64()).unwrap();
-    assert!((poke_shield_hp - 1_799_952.183).abs() < 1e-4);
-    assert_eq!(ctx.db.get_item(100_000_940).unwrap().quantity, 1_999);
+    assert!((poke_shield_hp - 3_599_952.183).abs() < 1e-4);
+    assert_eq!(ctx.db.get_item(100_000_940).unwrap().quantity, 1_880);
+    let loaded_after_poke = ctx.db.with_snapshot(|s| {
+        s.items
+            .values()
+            .find(|i| {
+                i.location_id == 100_000_002
+                    && i.flag == eve_db::InventoryFlag::HiSlot0
+                    && i.type_id == 21924
+            })
+            .map(|i| i.quantity)
+            .unwrap_or(0)
+    });
+    assert_eq!(loaded_after_poke, 119);
 
     // R12-P1-1 / R13-P0-1 / R16-P1-1 / R17-P1-1 / R18-P1-1: Dock at tama_struct_id, board a Raven battleship (type_id 638: 11,000 MW PG, 750 tf CPU, 7 high slots, 6 launcher hardpoints),
     // fit 6x Torpedo Launcher II (type_id 2420: 1,375 MW PG, 66 tf CPU, 10.5s cycle, 15.0 m3 capacity) loaded with Inferno Torpedo (type_id 2510: 0.05 m3 -> 300 torpedoes per launcher, 450.0 thermal damage each -> 2,700.0 volley / 257.14 DPS total)
-    // via invbroker.MoveItem & dogmaIM.LoadAmmo into HiSlot0..=HiSlot5 (flags 27..=32), undock, and cycle 667 volleys (667 * 2,700 = 1,800,900 >= 1,799,952.183) to strip the remaining shield HP
+    // via invbroker.MoveItem & dogmaIM.LoadAmmo into HiSlot0..=HiSlot5 (flags 27..=32), undock, and cycle 1,334 volleys (1,334 * 2,700 = 3,601,800 >= 3,599,952.183) to strip the remaining shield HP
     ctx.dispatch_rpc(
         &mut sess2,
         "structureDocking",
@@ -1861,13 +1834,13 @@ async fn test_blocking_findings_b01_to_b15_regressions() {
                 blueprint_runs_remaining: None,
             },
         );
-        // Seed 1 Heavy Entropic Disintegrator II (47936) to verify Raven (638) rejects Triglavian cruiser weapons,
+        // Seed 1 Heavy Entropic Disintegrator II (47918) to verify Raven (638) rejects Triglavian cruiser weapons,
         // plus 6 canonical Torpedo Launcher II (2420) for 90_000_002
         snap.items.insert(
             100_000_959,
             eve_db::InventoryItemRecord {
                 item_id: 100_000_959,
-                type_id: 47936, // Heavy Entropic Disintegrator II (restricted to Cruiser/HAC)
+                type_id: 47918, // Heavy Entropic Disintegrator II (restricted to Cruiser/HAC)
                 owner_id: 90_000_002,
                 location_id: tama_struct_id as i64,
                 flag: eve_db::InventoryFlag::Hangar,
@@ -1883,7 +1856,7 @@ async fn test_blocking_findings_b01_to_b15_regressions() {
         );
         if let Some(ch2) = snap.characters.get_mut(&90_000_002) {
             ch2.clone_grade = 2; // Omega clone so Torpedo Specialization IV can be queued and trained
-            ch2.free_skill_points = 1_642_039.0; // 256,000 (3319 V) + 1,024,000 (3325 V) + 362,039 (20212 IV)
+            ch2.free_skill_points = 1_682_039.0; // 256,000 (3319 V) + 16,000 (3321 III) + 24,000 (3324 III) + 1,024,000 (3325 V) + 362,039 (20212 IV)
         }
         for idx in 0..6_i64 {
             let mod_id = 100_000_951 + idx;
@@ -1907,7 +1880,13 @@ async fn test_blocking_findings_b01_to_b15_regressions() {
             );
         }
     });
-    for (sk_id, target_lvl) in [(3319_i64, 5_i64), (3325_i64, 5_i64), (20212_i64, 4_i64)] {
+    for (sk_id, target_lvl) in [
+        (3319_i64, 5_i64),
+        (3321_i64, 3_i64),
+        (3324_i64, 3_i64),
+        (3325_i64, 5_i64),
+        (20213_i64, 4_i64),
+    ] {
         ctx.dispatch_rpc(
             &mut sess2,
             "skillMgr2",
@@ -1935,7 +1914,7 @@ async fn test_blocking_findings_b01_to_b15_regressions() {
         let skills = snap.skills.get(&90_000_002).expect("90_000_002 skills");
         assert_eq!(skills.get(&3319).map(|s| s.level), Some(5));
         assert_eq!(skills.get(&3325).map(|s| s.level), Some(5));
-        assert_eq!(skills.get(&20212).map(|s| s.level), Some(4));
+        assert_eq!(skills.get(&20213).map(|s| s.level), Some(4));
         assert_eq!(
             snap.skill_queues.get(&90_000_002).map(|q| q.len()),
             Some(0)
@@ -2017,7 +1996,7 @@ async fn test_blocking_findings_b01_to_b15_regressions() {
     .expect("Stop Raven on grid at tama_struct_id");
 
     // R17-P1-1: Verify unloaded Torpedo Launcher II (2420) cannot fire without torpedo charges
-    for _ in 0..11 {
+    for _ in 0..15 {
         let _ = tama_handle.step_manual(1.0).await.unwrap();
     }
     let unloaded_atk = ctx
@@ -2093,12 +2072,12 @@ async fn test_blocking_findings_b01_to_b15_regressions() {
     let PyRep::KeyVal(lt_kv) = load_torps else {
         panic!("Expected LoadAmmo KeyVal");
     };
-    assert_eq!(lt_kv.get("totalLoaded"), Some(&PyRep::Integer(1_800)));
-    assert_eq!(ctx.db.get_item(100_000_960).unwrap().quantity, 18_200);
+    assert_eq!(lt_kv.get("totalLoaded"), Some(&PyRep::Integer(240)));
+    assert_eq!(ctx.db.get_item(100_000_960).unwrap().quantity, 19_760);
 
     let mut atk1_state = String::new();
-    for volley_idx in 0..670 {
-        for _ in 0..11 {
+    for volley_idx in 0..1340 {
+        for _ in 0..15 {
             let _ = tama_handle.step_manual(1.0).await.unwrap();
         }
         let atk1 = match ctx
@@ -2157,7 +2136,7 @@ async fn test_blocking_findings_b01_to_b15_regressions() {
                         .map(|i| i.quantity)
                         .unwrap_or(0)
                 });
-                assert_eq!(slot_qty, 299);
+                assert_eq!(slot_qty, 39);
             }
         }
         let PyRep::KeyVal(atk1_kv) = atk1 else {
@@ -2176,7 +2155,7 @@ async fn test_blocking_findings_b01_to_b15_regressions() {
 
     // Structure remains invulnerable even after 901s because ArmorReinforced timer is 24h (86,400s)
     ctx.advance_virtual_clock(901);
-    for _ in 0..11 {
+    for _ in 0..15 {
         let _ = tama_handle.step_manual(1.0).await.unwrap();
     }
     let invuln_err = ctx
@@ -2196,7 +2175,7 @@ async fn test_blocking_findings_b01_to_b15_regressions() {
     ctx.advance_virtual_clock(86_400);
     let mut atk2_state = String::new();
     for _ in 0..670 {
-        for _ in 0..11 {
+        for _ in 0..15 {
             let _ = tama_handle.step_manual(1.0).await.unwrap();
         }
         let atk2 = match ctx
@@ -2256,12 +2235,12 @@ async fn test_blocking_findings_b01_to_b15_regressions() {
     }
     assert_eq!(atk2_state, "HullReinforced");
 
-    // Advance past the 48h (172,800s) HullReinforced timer and cycle 1,334 volleys (1,334 * 2,700 = 3,601,800 >= 3,600,000) to destroy Hull
+    // Advance past the 48h (172,800s) HullReinforced timer and cycle 667 volleys (667 * 2,700 = 1,800,900 >= 1,800,000) to destroy Hull
     ctx.advance_virtual_clock(172_800 + 1);
     let mut atk3_state = String::new();
     let mut dropped_core = 0_i64;
-    for _ in 0..1340 {
-        for _ in 0..11 {
+    for _ in 0..670 {
+        for _ in 0..15 {
             let _ = tama_handle.step_manual(1.0).await.unwrap();
         }
         let atk3 = match ctx
@@ -2365,7 +2344,7 @@ async fn test_blocking_findings_b01_to_b15_regressions() {
     )
     .await
     .expect("Warp sess2 to Tama FW complex beacon");
-    for _ in 0..40 {
+    for _ in 0..60 {
         let _ = tama_handle.step_manual(1.0).await.unwrap();
     }
 
@@ -2779,7 +2758,7 @@ async fn test_review_r6_np0_np1_regressions() {
             100_000_941,
             eve_db::InventoryItemRecord {
                 item_id: 100_000_941,
-                type_id: 22989,
+                type_id: 21924,
                 owner_id: 90_000_001,
                 location_id: 100_000_001,
                 flag: eve_db::InventoryFlag::Cargo,
@@ -2945,7 +2924,7 @@ async fn test_review_r8_regressions() {
             "dynamicItemService",
             None,
             "CreateDynamicItem",
-            &[PyRep::Integer(47702), PyRep::Integer(100_000_003)],
+            &[PyRep::Integer(47746), PyRep::Integer(100_000_003)],
             &kw,
             None,
         )
@@ -3007,7 +2986,7 @@ async fn test_review_r8_regressions() {
             None,
             "InstallJob",
             &[
-                PyRep::Integer(687),
+                PyRep::Integer(691),
                 PyRep::Integer(4), // ME research on BPO 100_000_007
                 PyRep::Integer(1),
             ],
@@ -3196,7 +3175,7 @@ async fn test_review_r8_regressions() {
     assert_eq!(forfeited_item.flag, InventoryFlag::Cargo);
 
     // 4. R8-P1-4 & R9-P1-3: Accepting missions allocates unique NPC ball IDs per character and mission instance;
-    // s1 accepting 1001 & 1002 and s2 accepting 1001 produce 3 distinct NPC balls that never collide.
+    // s1 accepting 909 & 910 and s2 accepting 909 produce 3 distinct NPC balls that never collide.
     let PyRep::KeyVal(u1_kv) = ctx
         .dispatch_rpc(&mut s1, "stationSvc", None, "Undock", &[], &kw, None)
         .await
@@ -3219,19 +3198,26 @@ async fn test_review_r8_regressions() {
     ctx.dispatch_rpc(&mut s2, "beyonce", Some(s2_b_id), "CmdStop", &[], &kw, None)
         .await
         .unwrap();
+    let mut s1_mids = Vec::new();
     let mut s1_npcs = Vec::new();
-    for mid in [1001_i64, 1002_i64] {
-        ctx.dispatch_rpc(
-            &mut s1,
-            "agentMgr",
-            None,
-            "RequestMission",
-            &[PyRep::Integer(mid)],
-            &kw,
-            None,
-        )
-        .await
-        .unwrap();
+    for _ in 0..2 {
+        let rm = ctx
+            .dispatch_rpc(
+                &mut s1,
+                "agentMgr",
+                None,
+                "RequestMission",
+                &[],
+                &kw,
+                None,
+            )
+            .await
+            .unwrap();
+        let PyRep::KeyVal(rm_kv) = rm else {
+            panic!("Expected rm_kv");
+        };
+        let mid = rm_kv.get("missionID").unwrap().as_i64().unwrap();
+        s1_mids.push(mid);
         let am = ctx
             .dispatch_rpc(
                 &mut s1,
@@ -3249,24 +3235,30 @@ async fn test_review_r8_regressions() {
         };
         s1_npcs.push(am_kv.get("spawnedNpcBallID").unwrap().as_i64().unwrap());
     }
-    ctx.dispatch_rpc(
-        &mut s2,
-        "agentMgr",
-        None,
-        "RequestMission",
-        &[PyRep::Integer(1001)],
-        &kw,
-        None,
-    )
-    .await
-    .unwrap();
+    assert_ne!(s1_mids[0], s1_mids[1]);
+    let rm_s2 = ctx
+        .dispatch_rpc(
+            &mut s2,
+            "agentMgr",
+            None,
+            "RequestMission",
+            &[],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap();
+    let PyRep::KeyVal(rms2_kv) = rm_s2 else {
+        panic!("Expected rms2_kv");
+    };
+    let s2_mid_1 = rms2_kv.get("missionID").unwrap().as_i64().unwrap();
     let am_s2 = ctx
         .dispatch_rpc(
             &mut s2,
             "agentMgr",
             None,
             "AcceptMission",
-            &[PyRep::Integer(1001)],
+            &[PyRep::Integer(s2_mid_1)],
             &kw,
             None,
         )
@@ -3285,7 +3277,7 @@ async fn test_review_r8_regressions() {
             100_000_942,
             eve_db::InventoryItemRecord {
                 item_id: 100_000_942,
-                type_id: 22989,
+                type_id: 21924,
                 owner_id: 90_000_001,
                 location_id: 100_000_001,
                 flag: InventoryFlag::Cargo,
@@ -3303,7 +3295,7 @@ async fn test_review_r8_regressions() {
             100_000_943,
             eve_db::InventoryItemRecord {
                 item_id: 100_000_943,
-                type_id: 22989,
+                type_id: 21924,
                 owner_id: 90_000_002,
                 location_id: 100_000_002,
                 flag: InventoryFlag::Cargo,
@@ -3405,7 +3397,7 @@ async fn test_review_r8_regressions() {
             "keeper",
             None,
             "ActivateAccelerationGate",
-            &[PyRep::Integer(1002)],
+            &[PyRep::Integer(s1_mids[1])],
             &kw,
             None,
         )
@@ -3417,7 +3409,7 @@ async fn test_review_r8_regressions() {
             "agentMgr",
             None,
             "CompleteMission",
-            &[PyRep::Integer(1002)],
+            &[PyRep::Integer(s1_mids[1])],
             &kw,
             None,
         )
@@ -3455,7 +3447,7 @@ async fn test_review_r8_regressions() {
         "keeper",
         None,
         "ActivateAccelerationGate",
-        &[PyRep::Integer(1002)],
+        &[PyRep::Integer(s1_mids[1])],
         &kw,
         None,
     )
@@ -3466,14 +3458,14 @@ async fn test_review_r8_regressions() {
         "agentMgr",
         None,
         "CompleteMission",
-        &[PyRep::Integer(1002)],
+        &[PyRep::Integer(s1_mids[1])],
         &kw,
         None,
     )
     .await
     .unwrap();
 
-    // s2's mission 1001 NPC is still alive and independent; s2 destroys it and completes mission 1001
+    // s2's mission NPC is still alive and independent; s2 destroys it and completes s2_mid_1
     let mut fws2_destroyed = false;
     for shot in 0..10 {
         if shot > 0 {
@@ -3507,7 +3499,7 @@ async fn test_review_r8_regressions() {
         "keeper",
         None,
         "ActivateAccelerationGate",
-        &[PyRep::Integer(1001)],
+        &[PyRep::Integer(s2_mid_1)],
         &kw,
         None,
     )
@@ -3518,7 +3510,7 @@ async fn test_review_r8_regressions() {
         "agentMgr",
         None,
         "CompleteMission",
-        &[PyRep::Integer(1001)],
+        &[PyRep::Integer(s2_mid_1)],
         &kw,
         None,
     )
@@ -3526,24 +3518,29 @@ async fn test_review_r8_regressions() {
     .unwrap();
 
     // Mission abandon/decline via RemoveOfferFromJournal despawns the pocket NPC and clears the journal entry
-    ctx.dispatch_rpc(
-        &mut s1,
-        "agentMgr",
-        None,
-        "RequestMission",
-        &[PyRep::Integer(1003)],
-        &kw,
-        None,
-    )
-    .await
-    .unwrap();
+    let rm_1003 = ctx
+        .dispatch_rpc(
+            &mut s1,
+            "agentMgr",
+            None,
+            "RequestMission",
+            &[],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap();
+    let PyRep::KeyVal(rm1003_kv) = rm_1003 else {
+        panic!("Expected rm1003_kv");
+    };
+    let s1_mid_3 = rm1003_kv.get("missionID").unwrap().as_i64().unwrap();
     let am_1003 = ctx
         .dispatch_rpc(
             &mut s1,
             "agentMgr",
             None,
             "AcceptMission",
-            &[PyRep::Integer(1003)],
+            &[PyRep::Integer(s1_mid_3)],
             &kw,
             None,
         )
@@ -3559,7 +3556,7 @@ async fn test_review_r8_regressions() {
         "agentMgr",
         None,
         "RemoveOfferFromJournal",
-        &[PyRep::Integer(1003)],
+        &[PyRep::Integer(s1_mid_3)],
         &kw,
         None,
     )
@@ -3567,14 +3564,14 @@ async fn test_review_r8_regressions() {
     .unwrap();
     assert!(jita_handle.get_ball_snapshot(npc_1003).await.unwrap().is_none());
 
-    // N1 & N2: Cannot abandon an already completed (1002) or already quit (1003) mission, and cannot re-request either to farm rewards/bounties
+    // N1, N2 & R36-P1-7: Cannot abandon an already completed or already quit mission, cannot re-accept either, and client cannot supply mission_id to RequestMission
     let quit_completed = ctx
         .dispatch_rpc(
             &mut s1,
             "agentMgr",
             None,
             "RemoveOfferFromJournal",
-            &[PyRep::Integer(1002)],
+            &[PyRep::Integer(s1_mids[1])],
             &kw,
             None,
         )
@@ -3586,41 +3583,41 @@ async fn test_review_r8_regressions() {
             "agentMgr",
             None,
             "RemoveOfferFromJournal",
-            &[PyRep::Integer(1003)],
+            &[PyRep::Integer(s1_mid_3)],
             &kw,
             None,
         )
         .await;
     assert_eq!(quit_already_quit.unwrap_err().code, "MissionNotActive");
-    let rereq_completed = ctx
+    let reaccept_completed = ctx
         .dispatch_rpc(
             &mut s1,
             "agentMgr",
             None,
-            "RequestMission",
-            &[PyRep::Integer(1002)],
+            "AcceptMission",
+            &[PyRep::Integer(s1_mids[1])],
             &kw,
             None,
         )
         .await;
     assert_eq!(
-        rereq_completed.unwrap_err().code,
-        "MissionAlreadyActiveOrCompleted"
+        reaccept_completed.unwrap_err().code,
+        "InvalidMissionState"
     );
-    let rereq_quit = ctx
+    let client_supplied_mid = ctx
         .dispatch_rpc(
             &mut s1,
             "agentMgr",
             None,
             "RequestMission",
-            &[PyRep::Integer(1003)],
+            &[PyRep::Integer(s1_mids[1])],
             &kw,
             None,
         )
         .await;
     assert_eq!(
-        rereq_quit.unwrap_err().code,
-        "MissionAlreadyActiveOrCompleted"
+        client_supplied_mid.unwrap_err().code,
+        "UnknownAgent"
     );
 
     // N4: Cannot fit a module into a ship slot while in space (`CannotFitInSpace`)
@@ -3703,12 +3700,12 @@ async fn test_review_r8_regressions() {
             "beyonce",
             Some(s1_bound),
             "CmdWarpToStuff",
-            &[PyRep::String("item".into()), PyRep::Integer(50_001_248)],
+            &[PyRep::String("item".into()), PyRep::Integer(50_001_249)],
             &kw,
             None,
         )
         .await;
-    assert!(warp_stuff_ok.is_ok(), "CmdWarpToStuff to stargate 50001248");
+    assert!(warp_stuff_ok.is_ok(), "CmdWarpToStuff to stargate 50001249");
     let warp_stuff_bad = ctx
         .dispatch_rpc(
             &mut s1,
@@ -3722,16 +3719,16 @@ async fn test_review_r8_regressions() {
         .await;
     assert_eq!(warp_stuff_bad.unwrap_err().code, "InvalidWarpDestination");
 
-    // R12-P1-1: Fabricated type 3520 is absent from SDE, and T2 BPO (11372) / rolled Abyssal (47740) are not sold on NPC market
-    assert!(!ctx.sde.types.contains_key(&3520));
-    let (orders_11372, orders_47740) = ctx.db.with_snapshot(|snap| {
+    // R12-P1-1: Real SDE type 3520 (Heavy Pulse Laser II) has no fabricated capital damage (114..=118), and T2 BPO (11372) / rolled Abyssal (47749) are not sold on NPC market
+    assert!(!ctx.sde.types[&3520].default_attributes.contains_key(&114));
+    let (orders_11372, orders_47749) = ctx.db.with_snapshot(|snap| {
         (
             snap.market_orders.values().filter(|o| o.type_id == 11372).count(),
-            snap.market_orders.values().filter(|o| o.type_id == 47740).count(),
+            snap.market_orders.values().filter(|o| o.type_id == 47749).count(),
         )
     });
     assert_eq!(orders_11372, 0);
-    assert_eq!(orders_47740, 0);
+    assert_eq!(orders_47749, 0);
 
     // R12-P1-2: Dock s2 at Jita 4-4 and verify slot-type mismatch and turret hardpoint overflow are rejected
     ctx.db
@@ -3747,6 +3744,17 @@ async fn test_review_r8_regressions() {
             PyRep::String("other".into()),
             PyRep::String("other-secret".into()),
         ],
+        &kw,
+        None,
+    )
+    .await
+    .unwrap();
+    ctx.dispatch_rpc(
+        &mut s2,
+        "multiLoginBlocker",
+        None,
+        "Login",
+        &[PyRep::Bool(true)],
         &kw,
         None,
     )
@@ -3882,7 +3890,7 @@ async fn test_review_r8_regressions() {
             100_009_911,
             eve_db::InventoryItemRecord {
                 item_id: 100_009_911,
-                type_id: 1248, // Overdrive Injector System II fitted on spare Rifter 100_009_910
+                type_id: 1236, // Overdrive Injector System II fitted on spare Rifter 100_009_910
                 owner_id: 90_000_002,
                 location_id: 100_009_910,
                 flag: eve_db::InventoryFlag::LoSlot0,
@@ -3957,7 +3965,7 @@ async fn test_review_r8_regressions() {
     // R13-P1-1: Missing skill prerequisites reject module fitting (`FittingValidationFailed`)
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(sk) = snap.skills.get_mut(&90_000_002) {
-            sk.remove(&3452); // Remove Acceleration Control IV (required for 1MN Afterburner II 438)
+            sk.remove(&3450); // Remove Afterburner IV (required for 1MN Afterburner II 438)
         }
     });
     ctx.invalidate_ship_fitting(100_000_002);
@@ -3978,14 +3986,14 @@ async fn test_review_r8_regressions() {
         .await;
     assert_eq!(missing_skill_fit.unwrap_err().code, "FittingValidationFailed");
 
-    // Restore Acceleration Control IV (3452: 4) and verify 1MN Afterburner II (438) fits into MedSlot0 (19)
+    // Restore Afterburner IV (3450: 4) and verify 1MN Afterburner II (438) fits into MedSlot0 (19)
     ctx.db.with_mut_snapshot(|snap| {
         snap.skills.entry(90_000_002).or_default().insert(
-            3452,
+            3450,
             eve_db::TrainedSkillRecord {
-                type_id: 3452,
+                type_id: 3450,
                 level: 4,
-                skill_points: 181_020.0,
+                skill_points: 45_255.0,
             },
         );
     });
@@ -4004,7 +4012,7 @@ async fn test_review_r8_regressions() {
         None,
     )
     .await
-    .expect("Fit 1MN Afterburner II after training Acceleration Control IV");
+    .expect("Fit 1MN Afterburner II after training Afterburner IV");
 
     // R13-P1-2: Applying a mutaplasmid to a multi-unit stack (quantity 5) decrements the stack to 4 and creates a new singleton Abyssal item
     ctx.db.with_mut_snapshot(|snap| {
@@ -4030,7 +4038,7 @@ async fn test_review_r8_regressions() {
             100_009_921,
             eve_db::InventoryItemRecord {
                 item_id: 100_009_921,
-                type_id: 47702, // Decayed 1MN Afterburner Mutaplasmid
+                type_id: 47746, // Decayed 1MN Afterburner Mutaplasmid
                 owner_id: 90_000_002,
                 location_id: 60_003_760,
                 flag: eve_db::InventoryFlag::Hangar,
@@ -4051,7 +4059,7 @@ async fn test_review_r8_regressions() {
             "dynamicItemService",
             None,
             "CreateDynamicItem",
-            &[PyRep::Integer(47702), PyRep::Integer(100_009_920)],
+            &[PyRep::Integer(47746), PyRep::Integer(100_009_920)],
             &kw,
             None,
         )
@@ -4067,16 +4075,16 @@ async fn test_review_r8_regressions() {
     assert_eq!(orig_stack.quantity, 4);
     assert!(!orig_stack.singleton);
     let split_abyssal = ctx.db.get_item(split_abyssal_id).unwrap();
-    assert_eq!(split_abyssal.type_id, 47740);
+    assert_eq!(split_abyssal.type_id, 47749);
     assert_eq!(split_abyssal.quantity, 1);
     assert!(split_abyssal.singleton);
-    // R22-P1-4: Verify rolled Abyssal attributes lie within [min_mult * base, max_mult * base] for mutaplasmid 47702 on type 438
+    // R22-P1-4: Verify rolled Abyssal attributes lie within [min_mult * base, max_mult * base] for mutaplasmid 47746 on type 438
     let base_438 = &ctx.sde.types.get(&438).unwrap().default_attributes;
     for (attr_id, min_m, max_m) in [
         (6_u16, 0.85, 1.20),
-        (20_u16, 0.90, 1.15),
-        (30_u16, 0.85, 1.25),
-        (50_u16, 0.80, 1.30),
+        (20_u16, 0.95, 1.10),
+        (30_u16, 0.95, 1.25),
+        (50_u16, 0.95, 1.25),
     ] {
         let base_val = base_438[&attr_id];
         let rolled_val = split_abyssal.dynamic_attributes[&attr_id];
@@ -4100,7 +4108,7 @@ async fn test_review_r8_regressions() {
                 PyRep::Integer(587),
                 PyRep::String("Should fail".into()),
                 PyRep::List(vec![PyRep::Tuple(vec![
-                    PyRep::Integer(47936),
+                    PyRep::Integer(47918),
                     PyRep::Integer(27),
                     PyRep::Integer(1),
                 ])]),
@@ -4133,7 +4141,7 @@ async fn test_review_r8_regressions() {
                         PyRep::Integer(1),
                     ]),
                     PyRep::Tuple(vec![
-                        PyRep::Integer(1248),
+                        PyRep::Integer(1236),
                         PyRep::Integer(11),
                         PyRep::Integer(1),
                     ]),
@@ -4159,7 +4167,7 @@ async fn test_review_r8_regressions() {
         vec![
             (2889, InventoryFlag::HiSlot0, 1),
             (438, InventoryFlag::MedSlot0, 1),
-            (1248, InventoryFlag::LoSlot0, 1),
+            (1236, InventoryFlag::LoSlot0, 1),
         ]
     );
 
@@ -4200,17 +4208,17 @@ async fn test_review_r8_regressions() {
         "ShipNotBoardable"
     );
 
-    // R14-P1-2 / R17-P1-1 / R18-P1-2: Weapon modules (2889, 2410, 2420, 54800, 47936, 84010) have no fabricated damage (114, 116, 117, 118) attributes,
-    // and missile launchers/charges (2410, 2420, 211, 2510) have no fabricated chargeSize (128) attribute
+    // R14-P1-2 / R17-P1-1 / R18-P1-2: Weapon modules (2889, 2404, 2410, 2420, 54739, 47918, 85084) have no fabricated damage (114, 116, 117, 118) attributes,
+    // and missile launchers/charges (2404, 2410, 2420, 211, 2510) have no fabricated chargeSize (128) attribute
     let torp_attrs = &ctx.sde.types.get(&2420).unwrap().default_attributes;
-    let lml_attrs = &ctx.sde.types.get(&2410).unwrap().default_attributes;
+    let lml_attrs = &ctx.sde.types.get(&2404).unwrap().default_attributes;
     for attr_id in 1298..=1301 {
         assert!(
             !torp_attrs.contains_key(&attr_id),
             "Torpedo Launcher II (2420) must not have fabricated canFitShipGroup attr {attr_id}"
         );
     }
-    for weapon_type_id in [2889_u32, 2410, 2420, 54800, 47936, 84010] {
+    for weapon_type_id in [2889_u32, 2404, 2410, 2420, 54739, 47918, 85084] {
         let w_attrs = &ctx.sde.types.get(&weapon_type_id).unwrap().default_attributes;
         for attr_id in [114_u16, 116, 117, 118] {
             assert!(
@@ -4219,16 +4227,17 @@ async fn test_review_r8_regressions() {
             );
         }
     }
-    for missile_type_id in [2410_u32, 2420, 211, 2510] {
+    for missile_type_id in [2404_u32, 2410, 2420, 211, 2510] {
         let m_attrs = &ctx.sde.types.get(&missile_type_id).unwrap().default_attributes;
         assert!(
             !m_attrs.contains_key(&128),
             "Missile launcher/charge {missile_type_id} must not have chargeSize (128)"
         );
     }
-    assert_eq!(torp_attrs.get(&51).copied(), Some(10500.0));
-    assert_eq!(torp_attrs.get(&604).copied(), Some(89.0));
-    assert_eq!(lml_attrs.get(&51).copied(), Some(12000.0));
+    assert_eq!(torp_attrs.get(&51).copied(), Some(14400.0));
+    assert_eq!(torp_attrs.get(&604).copied(), Some(657.0));
+    assert_eq!(torp_attrs.get(&606).copied(), Some(89.0));
+    assert_eq!(lml_attrs.get(&51).copied(), Some(12800.0));
     assert_eq!(lml_attrs.get(&604).copied(), Some(384.0));
     let inferno_torp_attrs = &ctx.sde.types.get(&2510).unwrap().default_attributes;
     assert_eq!(inferno_torp_attrs.get(&118).copied(), Some(450.0));
@@ -4240,19 +4249,19 @@ async fn test_review_r8_regressions() {
     assert_eq!(inferno_lml_attrs.get(&653).copied(), Some(170.0));
     assert_eq!(inferno_lml_attrs.get(&654).copied(), Some(40.0));
     assert_eq!(inferno_lml_attrs.get(&1353).copied(), Some(0.604));
-    let rf_pp_attrs = &ctx.sde.types.get(&22989).unwrap().default_attributes;
+    let rf_pp_attrs = &ctx.sde.types.get(&21924).unwrap().default_attributes;
     assert_eq!(rf_pp_attrs.get(&117).copied(), Some(2.3));
     assert_eq!(rf_pp_attrs.get(&118).copied(), Some(11.5));
     assert_eq!(rf_pp_attrs.get(&128).copied(), Some(1.0));
     assert_eq!(rf_pp_attrs.get(&137).copied(), Some(55.0));
-    let vorton_attrs = &ctx.sde.types.get(&54800).unwrap().default_attributes;
-    let breacher_attrs = &ctx.sde.types.get(&84010).unwrap().default_attributes;
-    assert!(!vorton_attrs.contains_key(&1298) && !vorton_attrs.contains_key(&1302));
-    assert!(!breacher_attrs.contains_key(&1298) && !breacher_attrs.contains_key(&1302));
+    let vorton_attrs = &ctx.sde.types.get(&54739).unwrap().default_attributes;
+    let breacher_attrs = &ctx.sde.types.get(&85084).unwrap().default_attributes;
+    assert!(!vorton_attrs.contains_key(&1298));
+    assert!(!breacher_attrs.contains_key(&1298));
     assert_eq!(vorton_attrs.get(&51).copied(), Some(6000.0));
-    assert_eq!(vorton_attrs.get(&54).copied(), Some(22460.0));
+    assert_eq!(vorton_attrs.get(&54).copied(), Some(22464.0));
     assert_eq!(vorton_attrs.get(&64).copied(), Some(1.0));
-    assert_eq!(vorton_attrs.get(&604).copied(), Some(4061.0));
+    assert_eq!(vorton_attrs.get(&604).copied(), Some(4062.0));
     assert_eq!(vorton_attrs.get(&653).copied(), Some(190.0));
     assert_eq!(vorton_attrs.get(&654).copied(), Some(43.0));
     assert_eq!(vorton_attrs.get(&1353).copied(), Some(0.40));
@@ -4295,7 +4304,7 @@ async fn test_review_r8_regressions() {
         .await;
     assert_eq!(incomp_load.unwrap_err().code, "IncompatibleAmmo");
 
-    // R14-P1-1: SaveSkillQueue rejects skills with unmet prerequisites (Torpedo Specialization 20212 requires Torpedoes 3325 V)
+    // R14-P1-1: SaveSkillQueue rejects skills with unmet prerequisites (Torpedo Specialization 20213 requires Torpedoes 3325 V)
     ctx.db.with_mut_snapshot(|snap| {
         snap.skills.entry(90_000_002).or_default().remove(&3325);
     });
@@ -4306,7 +4315,7 @@ async fn test_review_r8_regressions() {
             None,
             "SaveSkillQueue",
             &[PyRep::List(vec![PyRep::Tuple(vec![
-                PyRep::Integer(20212),
+                PyRep::Integer(20213),
                 PyRep::Integer(1),
             ])])],
             &kw,
@@ -4513,15 +4522,15 @@ async fn test_review_r8_regressions() {
     // 100,000.00 ISK - 10,000.00 ISK escrow - 161.00 ISK broker fee = 89,839.00 ISK (8_983_900 cents)
     assert_eq!(bal_after_bid, 8_983_900);
 
-    // R19-P1-1 & R22-P1-1: Vorton Projector (Small Vorton Projector I 54800 loaded with GalvaSurge Condenser Pack S 54807)
+    // R19-P1-1 & R22-P1-1: Vorton Projector (Small Vorton Projector I 54739 loaded with GalvaSurge Condenser Pack S 54769)
     // uses missile_damage_factor (explosion radius 654 = 43.0m, explosion velocity 653 = 190.0 m/s, DRF 1353 = 0.40),
-    // never rolls turret wrecking hits, and arcs up to 9 additional targets (2104 = 9.0) strictly within 10,000m of the primary target with no secondary hopping
+    // never rolls turret wrecking hits, and arcs up to 9 additional targets (3037 = 10.0) strictly within 10,000m of the primary target with no secondary hopping
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(
             100_009_950,
             eve_db::InventoryItemRecord {
                 item_id: 100_009_950,
-                type_id: 587, // Spare Rifter frigate hull
+                type_id: 54731, // Skybreaker EDENCOM frigate hull
                 owner_id: 90_000_002,
                 location_id: 60_003_760,
                 flag: InventoryFlag::Hangar,
@@ -4539,7 +4548,7 @@ async fn test_review_r8_regressions() {
             100_009_951,
             eve_db::InventoryItemRecord {
                 item_id: 100_009_951,
-                type_id: 54800, // Small Vorton Projector I
+                type_id: 54739, // Small Vorton Projector I
                 owner_id: 90_000_002,
                 location_id: 60_003_760,
                 flag: InventoryFlag::Hangar,
@@ -4557,7 +4566,7 @@ async fn test_review_r8_regressions() {
             100_009_952,
             eve_db::InventoryItemRecord {
                 item_id: 100_009_952,
-                type_id: 54807, // GalvaSurge Condenser Pack S (116 EM + 17 Kin = 133 base damage)
+                type_id: 54769, // GalvaSurge Condenser Pack S (116 EM + 17 Kin = 133 base damage)
                 owner_id: 90_000_002,
                 location_id: 100_009_950,
                 flag: InventoryFlag::Cargo,
@@ -4571,6 +4580,17 @@ async fn test_review_r8_regressions() {
                 blueprint_runs_remaining: None,
             },
         );
+        // Ensure EDENCOM Frigate (55031), Vorton Projector Operation (55033), and Small Vorton Projector (55034) are trained to level 1 on 90_000_002
+        for sk_tid in [55031_u32, 55033, 55034] {
+            snap.skills.entry(90_000_002).or_default().insert(
+                sk_tid,
+                eve_db::TrainedSkillRecord {
+                    type_id: sk_tid,
+                    level: 1,
+                    skill_points: 1000.0,
+                },
+            );
+        }
     });
     ctx.dispatch_rpc(
         &mut s2,
@@ -4633,7 +4653,7 @@ async fn test_review_r8_regressions() {
             .spawn_ball_with_combat(
                 eve_destiny::Ball {
                     id: bid,
-                    type_id: 11001,
+                    type_id: 16997,
                     position: sky_ball.position + glam::DVec3::new(offset_x, 0.0, 0.0),
                     velocity: glam::DVec3::new(380.0, 0.0, 0.0),
                     max_velocity: 400.0,
@@ -4787,7 +4807,7 @@ async fn test_review_r8_regressions() {
     .expect("Dock s2 back at Jita 4-4");
 
     ctx.db.with_mut_snapshot(|snap| {
-        // Ensure 100_009_911 (type 1248 Overdrive Injector System II) in Jita 4-4 hangar is assembled (singleton = true) and empty
+        // Ensure 100_009_911 (type 1236 Overdrive Injector System II) in Jita 4-4 hangar is assembled (singleton = true) and empty
         if let Some(m) = snap.items.get_mut(&100_009_911) {
             m.location_id = 60_003_760;
             m.flag = InventoryFlag::Hangar;
@@ -4802,7 +4822,7 @@ async fn test_review_r8_regressions() {
             "PlaceCharOrder",
             &[
                 PyRep::Integer(60_003_760),
-                PyRep::Integer(1248),
+                PyRep::Integer(1236),
                 PyRep::Real(250_000.0),
                 PyRep::Integer(1),
                 PyRep::Bool(false),
@@ -4816,6 +4836,7 @@ async fn test_review_r8_regressions() {
     // 100_000_002 (type 587 Rifter) is in Jita 4-4 hangar and contains fitted modules (100_009_901..903)
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.remove(&100_009_910);
+        snap.items.remove(&100_009_950);
     });
     let sell_with_contents = ctx
         .dispatch_rpc(
@@ -4839,7 +4860,7 @@ async fn test_review_r8_regressions() {
         "CannotSellItemWithContents"
     );
 
-    // R22-P1-2: Place a resting player bid order for 2x Overdrive Injector System II (1248) at 500,000.00 ISK (50_000_000 cents, above the 329,000.00 ISK NPC bid),
+    // R22-P1-2: Place a resting player bid order for 2x Overdrive Injector System II (1236) at 500,000.00 ISK (50_000_000 cents, above the 329,000.00 ISK NPC bid),
     // repackage 100_009_911 into a 2-unit stack, and verify PlaceCharOrder sell fills charge exact integer ppm salesTaxISK for Accounting level 0 (75,000 ppm = 37,500.00 ISK) and level 4 (42,000 ppm = 21,000.00 ISK)
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(m) = snap.items.get_mut(&100_009_911) {
@@ -4859,7 +4880,7 @@ async fn test_review_r8_regressions() {
                 owner_id: 90_000_001,
                 station_id: 60_003_760,
                 region_id: 10_000_002,
-                type_id: 1248,
+                type_id: 1236,
                 price: eve_db::IskCents(50_000_000), // 500,000.00 ISK per unit
                 vol_entered: 2,
                 vol_remaining: 2,
@@ -4878,7 +4899,7 @@ async fn test_review_r8_regressions() {
             "PlaceCharOrder",
             &[
                 PyRep::Integer(60_003_760),
-                PyRep::Integer(1248),
+                PyRep::Integer(1236),
                 PyRep::Real(500_000.0),
                 PyRep::Integer(1),
                 PyRep::Bool(false),
@@ -4887,7 +4908,7 @@ async fn test_review_r8_regressions() {
             None,
         )
         .await
-        .expect("Sell 1x 1248 at Accounting level 0");
+        .expect("Sell 1x 1236 at Accounting level 0");
     let PyRep::KeyVal(sa0_kv) = sell_acct_0 else {
         panic!("Expected KeyVal from PlaceCharOrder sell at Accounting 0");
     };
@@ -4917,7 +4938,7 @@ async fn test_review_r8_regressions() {
             "PlaceCharOrder",
             &[
                 PyRep::Integer(60_003_760),
-                PyRep::Integer(1248),
+                PyRep::Integer(1236),
                 PyRep::Real(500_000.0),
                 PyRep::Integer(1),
                 PyRep::Bool(false),
@@ -4926,7 +4947,7 @@ async fn test_review_r8_regressions() {
             None,
         )
         .await
-        .expect("Sell 1x 1248 at Accounting level 4");
+        .expect("Sell 1x 1236 at Accounting level 4");
     let PyRep::KeyVal(sa4_kv) = sell_acct_4 else {
         panic!("Expected KeyVal from PlaceCharOrder sell at Accounting 4");
     };
@@ -4951,7 +4972,7 @@ async fn test_review_r8_regressions() {
             "standingMgr",
             None,
             "GetStandingTransactions",
-            &[PyRep::Integer(1_000_035)],
+            &[PyRep::Integer(1_000_419)],
             &kw,
             None,
         )
@@ -4959,31 +4980,43 @@ async fn test_review_r8_regressions() {
         .expect("GetStandingTransactions initial for s2");
     let init_rows = extract_rowset_rows(&st_tx_initial);
     assert_eq!(init_rows.len(), 1);
-    assert_eq!(init_rows[0][3], PyRep::Real(0.125));
+    assert_eq!(init_rows[0][3], PyRep::Real(0.15));
     assert_eq!(init_rows[0][4], PyRep::Integer(85));
 
-    ctx.dispatch_rpc(
-        &mut s2,
-        "agentMgr",
-        None,
-        "RequestMission",
-        &[PyRep::Integer(1002)],
-        &kw,
-        None,
-    )
-    .await
-    .expect("RequestMission 1002 for s2 decline");
+    // Co-locate s2 (90_000_002) with Caldari Navy (1_000_035) L1 agent 3_012_018 at Maurasi IV - Moon 4 (30_000_144 / 60_003_754)
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_002) {
+            ch.solar_system_id = 30_000_144;
+            ch.station_id = Some(60_003_754);
+        }
+    });
+    let rm_decline = ctx
+        .dispatch_rpc(
+            &mut s2,
+            "agentMgr",
+            None,
+            "RequestMission",
+            &[PyRep::Integer(3_012_018)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("RequestMission for s2 decline");
+    let PyRep::KeyVal(rm_dec_kv) = rm_decline else {
+        panic!("Expected rm_dec_kv");
+    };
+    let s2_dec_mid = rm_dec_kv.get("missionID").unwrap().as_i64().unwrap();
     ctx.dispatch_rpc(
         &mut s2,
         "agentMgr",
         None,
         "RemoveOfferFromJournal",
-        &[PyRep::Integer(1002)],
+        &[PyRep::Integer(s2_dec_mid)],
         &kw,
         None,
     )
     .await
-    .expect("RemoveOfferFromJournal 1002 for s2 decline");
+    .expect("RemoveOfferFromJournal for s2 decline");
     let st_tx_after_decline = ctx
         .dispatch_rpc(
             &mut s2,
@@ -4996,41 +5029,46 @@ async fn test_review_r8_regressions() {
         )
         .await
         .expect("GetStandingTransactions after decline");
-    assert_eq!(extract_rowset_rows(&st_tx_after_decline).len(), 1);
+    assert_eq!(extract_rowset_rows(&st_tx_after_decline).len(), 0);
 
-    ctx.dispatch_rpc(
-        &mut s2,
-        "agentMgr",
-        None,
-        "RequestMission",
-        &[PyRep::Integer(1003)],
-        &kw,
-        None,
-    )
-    .await
-    .expect("RequestMission 1003 for s2 quit");
+    let rm_quit = ctx
+        .dispatch_rpc(
+            &mut s2,
+            "agentMgr",
+            None,
+            "RequestMission",
+            &[],
+            &kw,
+            None,
+        )
+        .await
+        .expect("RequestMission for s2 quit");
+    let PyRep::KeyVal(rm_quit_kv) = rm_quit else {
+        panic!("Expected rm_quit_kv");
+    };
+    let s2_quit_mid = rm_quit_kv.get("missionID").unwrap().as_i64().unwrap();
     ctx.dispatch_rpc(
         &mut s2,
         "agentMgr",
         None,
         "AcceptMission",
-        &[PyRep::Integer(1003)],
+        &[PyRep::Integer(s2_quit_mid)],
         &kw,
         None,
     )
     .await
-    .expect("AcceptMission 1003 for s2 quit");
+    .expect("AcceptMission for s2 quit");
     ctx.dispatch_rpc(
         &mut s2,
         "agentMgr",
         None,
         "QuitMission",
-        &[PyRep::Integer(1003)],
+        &[PyRep::Integer(s2_quit_mid)],
         &kw,
         None,
     )
     .await
-    .expect("QuitMission 1003 for s2");
+    .expect("QuitMission for s2");
     let st_tx_after_quit = ctx
         .dispatch_rpc(
             &mut s2,
@@ -5044,9 +5082,9 @@ async fn test_review_r8_regressions() {
         .await
         .expect("GetStandingTransactions after quit");
     let quit_rows = extract_rowset_rows(&st_tx_after_quit);
-    assert_eq!(quit_rows.len(), 2);
-    assert_eq!(quit_rows[1][3], PyRep::Real(-0.1));
-    assert_eq!(quit_rows[1][4], PyRep::Integer(83));
+    assert_eq!(quit_rows.len(), 1);
+    assert_eq!(quit_rows[0][3], PyRep::Real(-0.1));
+    assert_eq!(quit_rows[0][4], PyRep::Integer(83));
 
     // R23-P1-2: jumpCloneSvc.GetPriceForClone matches flat 900,000 ISK charged by InstallCloneInStation
     let jc_quote = ctx
@@ -5118,7 +5156,7 @@ async fn test_phase_0_s1_reprocessing_sde_materials_and_remainders() {
     .await
     .expect("SelectCharacterID");
 
-    // 1. Non-reprocessable items (Tritanium 100_000_011 type 34, and skillbook 100_000_004 type 3327)
+    // 1. Non-reprocessable items (Tritanium 100_000_011 type 34, and Rifter Blueprint 100_000_007 type 691)
     // must return ItemNotReprocessable and remain untouched.
     let trit_err = ctx
         .dispatch_rpc(
@@ -5134,19 +5172,19 @@ async fn test_phase_0_s1_reprocessing_sde_materials_and_remainders() {
     assert_eq!(trit_err.unwrap_err().code, "ItemNotReprocessable");
     assert_eq!(ctx.db.get_item(100_000_011).map(|i| i.quantity), Some(5_000));
 
-    let skill_err = ctx
+    let bp_err = ctx
         .dispatch_rpc(
             &mut sess,
             "reprocessingSvc",
             None,
             "Reprocess",
-            &[PyRep::Integer(100_000_004)],
+            &[PyRep::Integer(100_000_007)],
             &kw,
             None,
         )
         .await;
-    assert_eq!(skill_err.unwrap_err().code, "ItemNotReprocessable");
-    assert!(ctx.db.get_item(100_000_004).is_some());
+    assert_eq!(bp_err.unwrap_err().code, "ItemNotReprocessable");
+    assert!(ctx.db.get_item(100_000_007).is_some());
 
     // 2. Active ship (100_000_001) and assembled (singleton = true) ships in hangar must be rejected.
     let active_ship_err = ctx
@@ -5620,7 +5658,7 @@ async fn test_phase_0_s4_split_shared_handlers_and_jump_clones() {
 
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&90_000_001) {
-            ch.station_id = Some(60_003_766);
+            ch.station_id = Some(60_000_361); // Jita IV - Moon 6 - Ytiri Storage (operation_id 26, no clone bay)
         }
     });
     let no_bay_err = ctx
@@ -5677,10 +5715,10 @@ async fn test_phase_0_s4_split_shared_handlers_and_jump_clones() {
         }
     });
 
-    // Attempting CloneJump while docked at no-bay station 60003766 must reject so no clone is left at a bay-less station
+    // Attempting CloneJump while docked at no-bay station 60000361 must reject so no clone is left at a bay-less station
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&90_000_001) {
-            ch.station_id = Some(60_003_766);
+            ch.station_id = Some(60_000_361);
         }
     });
     let jump_from_no_bay = ctx
@@ -6075,7 +6113,7 @@ async fn test_phase_0_s7_no_hardcoded_fallbacks_and_in_space_range_checks() {
     let null_sys = ctx.systems.get_or_spawn(30_002_904);
     let ship_pos = ship_ball.position;
     null_sys
-        .spawn_ball_with_combat(ship_ball, eve_destiny::CombatState::default())
+        .spawn_ball_with_combat(ship_ball.clone(), eve_destiny::CombatState::default())
         .await
         .expect("spawn ship in null-sec");
     let skyhook_no_alliance = ctx
@@ -6126,6 +6164,7 @@ async fn test_phase_0_s7_no_hardcoded_fallbacks_and_in_space_range_checks() {
     );
 
     // Seed an online friendly structure 100 km away (> 50 km max proximity) -> OutsideSovStructureProximity
+    // and an enemy structure 100 km away (> 50 km max attack range) -> StructureOutOfRange
     ctx.db.with_mut_snapshot(|snap| {
         snap.structures.insert(
             1_040_000_000_099,
@@ -6147,6 +6186,50 @@ async fn test_phase_0_s7_no_hardcoded_fallbacks_and_in_space_range_checks() {
                 last_damage_unix: 0,
             },
         );
+        snap.structures.insert(
+            1_040_000_000_098,
+            eve_db::UpwellStructureRecord {
+                structure_id: 1_040_000_000_098,
+                type_id: 35832,
+                owner_corp_id: 98_000_002,
+                solar_system_id: 30_002_904,
+                name: "Far Enemy Astrahus".into(),
+                position: [ship_pos.x + 100_000.0, ship_pos.y, ship_pos.z],
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 100,
+                shield_hp: 5_000.0,
+                armor_hp: 5_000.0,
+                hull_hp: 5_000.0,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+            },
+        );
+        // Ensure 100_000_001 has a fitted weapon (2889 in HiSlot0) and loaded ammo (185 in HiSlot0)
+        if let Some(w) = snap.items.get_mut(&100_000_005) {
+            w.location_id = 100_000_001;
+            w.flag = eve_db::InventoryFlag::HiSlot0;
+            w.singleton = true;
+        }
+        snap.items.insert(
+            100_907_185,
+            eve_db::InventoryItemRecord {
+                item_id: 100_907_185,
+                type_id: 185, // Phased Plasma S
+                owner_id: 90_000_001,
+                location_id: 100_000_001,
+                flag: eve_db::InventoryFlag::HiSlot0,
+                quantity: 100,
+                singleton: false,
+                version: 1,
+                dynamic_attributes: HashMap::new(),
+                source_mutaplasmid_id: None,
+                insured_payout_isk: 0.0,
+                is_blueprint_copy: false,
+                blueprint_runs_remaining: None,
+            },
+        );
     });
     let skyhook_far_struct = ctx
         .dispatch_rpc(
@@ -6162,6 +6245,82 @@ async fn test_phase_0_s7_no_hardcoded_fallbacks_and_in_space_range_checks() {
     assert_eq!(
         skyhook_far_struct.unwrap_err().code,
         "OutsideSovStructureProximity"
+    );
+
+    let attack_far_struct = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "structureControl",
+            None,
+            "AttackStructure",
+            &[PyRep::Integer(1_040_000_000_098)],
+            &kw,
+            None,
+        )
+        .await;
+    assert_eq!(
+        attack_far_struct.unwrap_err().code,
+        "StructureOutOfRange"
+    );
+
+    // Move ship into low-sec warzone 30002537 (Amamake) 100 km from FW complex beacon -> OutsideComplexCaptureRadius
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.solar_system_id = 30_002_537;
+            ch.station_id = None;
+            ch.war_faction_id = Some(500_001);
+        }
+        if let Some(ship) = snap.items.get_mut(&100_000_001) {
+            ship.location_id = 30_002_537;
+        }
+        let st = snap
+            .system_states
+            .entry(30_002_537)
+            .or_insert_with(|| eve_db::SystemDynamicState {
+                solar_system_id: 30_002_537,
+                dbs_multiplier: 1.0,
+                ess_main_bank: eve_db::IskCents(0),
+                ess_reserve_bank: eve_db::IskCents(0),
+                ess_linked_character_id: None,
+                ess_link_started_tick: None,
+                sov_alliance_id: None,
+                military_index: 0,
+                industrial_index: 0,
+                strategic_index: 0,
+                fw_contested_pct: 10.0,
+                insurgency_corruption_stage: 1,
+                insurgency_suppression_stage: 0,
+                wormhole_remaining_mass_kg: 0.0,
+                wormhole_destination_system_id: None,
+                signature_position: None,
+                fw_complex_position: Some([ship_pos.x + 100_000.0, ship_pos.y, ship_pos.z]),
+                fw_capture_seconds_elapsed: 60,
+                fw_capture_duration_seconds: 600,
+                last_fw_capture_tick: 0,
+                last_sov_claim_tick: 0,
+            });
+        st.fw_complex_position = Some([ship_pos.x + 100_000.0, ship_pos.y, ship_pos.z]);
+    });
+    sess.solar_system_id = Some(30_002_537);
+    let fw_sys = ctx.systems.get_or_spawn(30_002_537);
+    fw_sys
+        .spawn_ball_with_combat(ship_ball, eve_destiny::CombatState::default())
+        .await
+        .expect("spawn ship in Amamake");
+    let fw_far_beacon = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "facWarMgr",
+            None,
+            "CaptureComplex",
+            &[],
+            &kw,
+            None,
+        )
+        .await;
+    assert_eq!(
+        fw_far_beacon.unwrap_err().code,
+        "OutsideComplexCaptureRadius"
     );
 }
 
@@ -6236,7 +6395,7 @@ async fn test_phase_0_s8_transactional_snapshot_mutation_and_no_early_return_err
 
 #[tokio::test]
 async fn test_phase_0_s9_service_roles_bitmask_and_production_account_seed() {
-    // parity: plan:S-9
+    // parity: feat:account.account-roles
     let prod_ctx = ServerContext::new_production();
     let kw = HashMap::new();
     let mut prod_sess = SessionState::new(9090);
@@ -6301,18 +6460,29 @@ async fn test_phase_0_s9_service_roles_bitmask_and_production_account_seed() {
     .await
     .expect("SelectCharacterID");
 
-    let slash_denied = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "slash",
-            None,
-            "SlashCmd",
-            &[PyRep::String("/giveisk 100".into())],
-            &kw,
-            None,
-        )
-        .await;
-    assert_eq!(slash_denied.unwrap_err().code, "InsufficientRole");
+    for (svc, mth) in [
+        ("slash", "SlashCmd"),
+        ("publicQaToolsServer", "Command"),
+        ("devToolsProvider", "GetDevTools"),
+        ("keeper", "GetLevelEditor"),
+    ] {
+        let denied = ctx
+            .dispatch_rpc(
+                &mut sess,
+                svc,
+                None,
+                mth,
+                &[PyRep::String("/giveisk 100".into())],
+                &kw,
+                None,
+            )
+            .await;
+        assert_eq!(
+            denied.unwrap_err().code,
+            "InsufficientRole",
+            "Non-GM/QA session must be rejected by central role gate on {svc}.{mth}"
+        );
+    }
 
     sess.role |= eve_machonet::service_roles::ROLE_GML;
     assert!(sess.has_gm_role());
@@ -6341,10 +6511,23 @@ async fn test_phase_0_s10_doc_reconciliation_and_labels() {
         .unwrap();
     let plan_md = std::fs::read_to_string(root.join("PLAN.md")).expect("read PLAN.md");
     let readme_md = std::fs::read_to_string(root.join("README.md")).expect("read README.md");
+    let blockers_md =
+        std::fs::read_to_string(root.join("docs/BLOCKERS.md")).expect("read docs/BLOCKERS.md");
+    let status_md = std::fs::read_to_string(root.join("docs/ACTION_PLAN_STATUS.md"))
+        .expect("read docs/ACTION_PLAN_STATUS.md");
 
     assert!(
-        !plan_md.contains("Partial Vertical Slice") && !readme_md.contains("Partial Vertical Slice"),
-        "S-10: PLAN.md and README.md must use Rule 8 status labels instead of 'Partial Vertical Slice'"
+        !plan_md.contains("Partial Vertical Slice")
+            && !readme_md.contains("Partial Vertical Slice")
+            && !plan_md.contains("**Completed")
+            && !readme_md.contains("**Completed")
+            && !plan_md.contains("Completed (`D-")
+            && !readme_md.contains("Completed (`D-")
+            && !plan_md.contains("Implemented & e2e-tested")
+            && !readme_md.contains("Implemented & e2e-tested")
+            && !plan_md.contains("evomu_sde_fixture.sqlite")
+            && !readme_md.contains("evomu_sde_fixture.sqlite"),
+        "S-10: PLAN.md and README.md must use Rule 8 status labels (In progress / Not started / Implemented (review: ...)) and must not reference evomu_sde_fixture.sqlite"
     );
     assert!(
         !plan_md.contains("generated from .static SQLite")
@@ -6352,13 +6535,829 @@ async fn test_phase_0_s10_doc_reconciliation_and_labels() {
         "S-10: PLAN.md must not claim sde_seed.json is generated from .static SQLite prior to D-1"
     );
     assert!(
-        plan_md.contains("71/579") && readme_md.contains("71/579"),
-        "S-10: PLAN.md and README.md must report reconciled 71/579 client candidate method count"
+        plan_md.contains("72/580") && readme_md.contains("72/580"),
+        "S-10: PLAN.md and README.md must report reconciled 72/580 client candidate method count"
     );
     assert!(
-        plan_md.contains("`157` `(service, method)` handlers across `117` match arms")
-            && readme_md.contains("`157` `(service, method)` handlers across `117` match arms"),
-        "S-10: PLAN.md and README.md must report reconciled 157 handlers across 117 match arms"
+        plan_md.contains("`158` `(service, method)` handlers across `118` match arms")
+            && readme_md.contains("`158` `(service, method)` handlers across `118` match arms"),
+        "S-10: PLAN.md and README.md must report reconciled 158 handlers across 118 match arms"
     );
+    // R35-P1-2: Ensure PLAN.md, README.md, docs/BLOCKERS.md, and docs/ACTION_PLAN_STATUS.md match data/sde_import_manifest.json
+    for doc in [&plan_md, &readme_md, &blockers_md, &status_md] {
+        assert!(
+            !doc.contains("`1,532`")
+                && !doc.contains("`3,200`")
+                && !doc.contains("`3,789`")
+                && !doc.contains("`12,840`")
+                && !doc.contains("`297` NPC")
+                && !doc.contains("`113` regions")
+                && !doc.contains("`1,175` constellations"),
+            "R35-P1-2: Docs must not contain stale pre-regeneration SDE counts"
+        );
+    }
 }
+
+#[tokio::test]
+async fn test_phase_1_d1_to_d5_sde_sqlite_persistence_auth_sso_and_config() {
+    // parity: plan:S-11, plan:D-2
+    // parity: feat:serverops.static-data, feat:account.multi-login-block, feat:account.account-bans, feat:admin.gm-ban
+    use eve_server::config::ServerConfig;
+    use std::path::Path;
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap();
+    let sde_path = eve_sde::SdeRegistry::default_db_path();
+    assert!(
+        sde_path.exists(),
+        "D-1/D-2: local data/evomu_sde.sqlite must exist on disk (built via tools/sde-import)"
+    );
+    let real_sde =
+        eve_sde::SdeRegistry::open(&sde_path).expect("open local data/evomu_sde.sqlite");
+    assert_eq!(real_sde.resources.len(), 213);
+    assert!(real_sde.solar_systems.contains_key(&30_000_142));
+
+    let ctx = ServerContext::new();
+    let kw = HashMap::new();
+
+    // 1. D-1 & D-2: 213-resource SDE loaded at runtime from SQLite
+    assert_eq!(ctx.sde.resources.len(), 213);
+    assert!(!ctx.sde.types.is_empty());
+    assert!(!ctx.sde.solar_systems.is_empty());
+    assert_eq!(ctx.sde.market_groups.len(), 2114);
+    assert!(ctx.sde.market_groups.contains_key(&4));
+    assert_eq!(ctx.sde.npc_spawn_groups.len(), 392);
+    assert!(
+        !ctx.sde.variations_of(587).is_empty(),
+        "D-2: SdeRegistry::variations_of(587) must return Rifter hull variations in O(1)"
+    );
+
+    // Authenticate session 1 as "demo"
+    let mut sess1 = SessionState::new(10_101);
+    ctx.dispatch_rpc(
+        &mut sess1,
+        "authentication",
+        None,
+        "Login",
+        &[
+            PyRep::String("demo".into()),
+            PyRep::String("demo-secret".into()),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Login sess1");
+    ctx.dispatch_rpc(
+        &mut sess1,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(90_000_001)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("SelectCharacterID sess1");
+
+    // Verify config.GetInvTypesEx returns UnimplementedRPC until Phase 2 P-4
+    let unimpl_cfg = ctx
+        .dispatch_rpc(
+            &mut sess1,
+            "config",
+            None,
+            "GetInvTypesEx",
+            &[PyRep::Integer(587)],
+            &kw,
+            None,
+        )
+        .await;
+    assert!(
+        unimpl_cfg.is_err(),
+        "R37-P1-3: config.GetInvTypesEx must return UnimplementedRPC until Phase 2 P-4"
+    );
+
+    // Verify R37-P1-2 / R38-P1-2 / R38-P1-3: RequestMission enforces co-location, storyline referral (types 6/7),
+    // level standing gate, agent division pool matching, and !is_storyline && has_standing_rewards tally gate
+    let remote_err = ctx
+        .dispatch_rpc(
+            &mut sess1,
+            "agentMgr",
+            None,
+            "RequestMission",
+            &[PyRep::Integer(3_012_018)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("RequestMission for remote Maurasi agent from Jita must fail");
+    assert_eq!(remote_err.code, "AgentNotCoLocated");
+
+    // Storyline agents (agentType 7 = 3_009_966, agentType 6 = 3_017_107) must be rejected even when co-located
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.solar_system_id = 30_004_969;
+            ch.station_id = Some(60_011_920);
+        }
+    });
+    let storyline_t7_err = ctx
+        .dispatch_rpc(
+            &mut sess1,
+            "agentMgr",
+            None,
+            "RequestMission",
+            &[PyRep::Integer(3_009_966)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Storyline agent (type 7) must be rejected without referral");
+    assert_eq!(storyline_t7_err.code, "StorylineAgentRequiresReferral");
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.solar_system_id = 30_003_041;
+            ch.station_id = Some(60_002_647);
+        }
+    });
+    let storyline_t6_err = ctx
+        .dispatch_rpc(
+            &mut sess1,
+            "agentMgr",
+            None,
+            "RequestMission",
+            &[PyRep::Integer(3_017_107)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Generic storyline agent (type 6) must be rejected without referral");
+    assert_eq!(storyline_t6_err.code, "StorylineAgentRequiresReferral");
+
+    // Level 2 agent (3_016_842 in Maurasi 30_000_144 / station 60_003_754) requires corp standing >= 1.0
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.solar_system_id = 30_000_144;
+            ch.station_id = Some(60_003_754);
+            ch.standings.clear();
+        }
+    });
+    let l2_standing_err = ctx
+        .dispatch_rpc(
+            &mut sess1,
+            "agentMgr",
+            None,
+            "RequestMission",
+            &[PyRep::Integer(3_016_842)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Level 2 agent with 0.0 corp standing must fail with InsufficientAgentStanding");
+    assert_eq!(l2_standing_err.code, "InsufficientAgentStanding");
+
+    // Default (no-arg) RequestMission in Maurasi (60_003_754) selects co-located L1 Security agent 3_012_018
+    // and draws a BasicKillMission from that agent's division pool
+    let maurasi_offer = ctx
+        .dispatch_rpc(&mut sess1, "agentMgr", None, "RequestMission", &[], &kw, None)
+        .await
+        .expect("Default RequestMission in Maurasi must select co-located L1 agent");
+    let PyRep::KeyVal(maurasi_kv) = maurasi_offer else {
+        panic!("Expected KeyVal from RequestMission");
+    };
+    assert_eq!(maurasi_kv.get("agentID"), Some(&PyRep::Integer(3_012_018)));
+    let offered_mid = maurasi_kv.get("missionID").unwrap().as_i64().unwrap() as u32;
+    let offered_tmpl = ctx.sde.missions.get(&offered_mid).expect("offered mission in SDE");
+    assert!(
+        offered_tmpl
+            .content_template
+            .as_deref()
+            .unwrap_or_default()
+            .contains("BasicKill"),
+        "Security division 24 agent must offer BasicKillMission from its pool"
+    );
+
+    // R39-P1-2: Real Epic Arc agent (Sister Alitura 3_019_356, agentType 10 in Arnon 30_005_001 / station 60_012_607)
+    // offers an EpicArc mission template, while Aura agent (3_019_486, agentType 11 in 30_001_672 / 60_007_702) returns UnimplementedRPC
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.solar_system_id = 30_005_001;
+            ch.station_id = Some(60_012_607);
+        }
+    });
+    let epic_arc_offer = ctx
+        .dispatch_rpc(
+            &mut sess1,
+            "agentMgr",
+            None,
+            "RequestMission",
+            &[PyRep::Integer(3_019_356)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("Epic Arc agent 3_019_356 (type 10) must offer an EpicArc mission");
+    let PyRep::KeyVal(epic_kv) = epic_arc_offer else {
+        panic!("Expected KeyVal from Epic Arc RequestMission");
+    };
+    let epic_mid = epic_kv.get("missionID").unwrap().as_i64().unwrap() as u32;
+    let epic_tmpl = ctx.sde.missions.get(&epic_mid).expect("EpicArc mission in SDE");
+    assert!(
+        epic_tmpl
+            .content_template
+            .as_deref()
+            .unwrap_or_default()
+            .contains("EpicArc"),
+        "Epic Arc agent (type 10) must draw from EpicArc mission pool"
+    );
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.solar_system_id = 30_001_672;
+            ch.station_id = Some(60_007_702);
+        }
+    });
+    let aura_err = ctx
+        .dispatch_rpc(
+            &mut sess1,
+            "agentMgr",
+            None,
+            "RequestMission",
+            &[PyRep::Integer(3_019_486)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Aura agent (type 11) must return UnimplementedRPC");
+    assert_eq!(aura_err.code, "UnimplementedRPC");
+
+    // Restore sess1 (90_000_001) to Jita 4-4 and verify CompleteMission tally gate (!is_storyline && has_standing_rewards)
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.solar_system_id = 30_000_142;
+            ch.station_id = Some(60_003_760);
+        }
+    });
+    let no_standing_mid = *ctx
+        .sde
+        .missions
+        .values()
+        .find(|m| !m.has_standing_rewards)
+        .map(|m| &m.mission_id)
+        .expect("SDE mission with has_standing_rewards == false");
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.active_missions.insert(
+            (90_000_001, no_standing_mid),
+            eve_db::ActiveMissionRecord {
+                mission_id: no_standing_mid,
+                character_id: 90_000_001,
+                agent_id: 3_020_034,
+                solar_system_id: 30_000_142,
+                state: "Accepted".into(),
+                current_room_id: 1,
+                npcs_remaining: 0,
+                spawned_npc_ball_ids: Vec::new(),
+            },
+        );
+    });
+    let comp_no_st = ctx
+        .dispatch_rpc(
+            &mut sess1,
+            "agentMgr",
+            None,
+            "CompleteMission",
+            &[PyRep::Integer(no_standing_mid as i64)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("CompleteMission for non-standing mission");
+    let PyRep::KeyVal(comp_no_st_kv) = comp_no_st else {
+        panic!("Expected KeyVal from CompleteMission");
+    };
+    assert_eq!(
+        comp_no_st_kv.get("missionTally"),
+        Some(&PyRep::Integer(0)),
+        "R37-P1-1 / R38-P1-3: Mission without standing rewards must not increment storyline mission_tally"
+    );
+
+    // Bind an invbroker object on sess1 to test R35-P1-3 bound-object revocation enforcement
+    let bind_rsp1 = ctx
+        .dispatch_rpc(
+            &mut sess1,
+            "invbroker",
+            None,
+            "MachoBindObject",
+            &[PyRep::Integer(60_003_760), PyRep::None],
+            &kw,
+            None,
+        )
+        .await
+        .expect("MachoBindObject invbroker on sess1");
+    let bound_id_sess1 = match bind_rsp1 {
+        PyRep::Tuple(t) => t[0].as_i64().expect("bound_id i64") as u64,
+        other => panic!("Expected Tuple from MachoBindObject, got {other:?}"),
+    };
+
+    // 2. D-4: Online session lock enforcement (`R34-P1-4`, `R35-P1-3`):
+    // Second concurrent session (`sess2`) logging into "demo" cannot call game RPCs or bound-object RPCs until it displaces `sess1` via `multiLoginBlocker.Login(true)`.
+    let mut sess2 = SessionState::new(10_102);
+    ctx.dispatch_rpc(
+        &mut sess2,
+        "authentication",
+        None,
+        "Login",
+        &[
+            PyRep::String("demo".into()),
+            PyRep::String("demo-secret".into()),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Login sess2");
+
+    let premature_rpc = ctx
+        .dispatch_rpc(
+            &mut sess2,
+            "charUnboundMgr",
+            None,
+            "SelectCharacterID",
+            &[PyRep::Integer(90_000_001)],
+            &kw,
+            None,
+        )
+        .await;
+    assert_eq!(
+        premature_rpc.unwrap_err().code,
+        "MultiLoginBlocked",
+        "R34-P1-4: Second session without online lock must be rejected with MultiLoginBlocked on game RPCs"
+    );
+    assert_eq!(sess2.user_id, Some(1));
+
+    let dup_blocked = ctx
+        .dispatch_rpc(
+            &mut sess2,
+            "multiLoginBlocker",
+            None,
+            "Login",
+            &[PyRep::Bool(false)],
+            &kw,
+            None,
+        )
+        .await;
+    assert_eq!(
+        dup_blocked.unwrap_err().code,
+        "AlreadyLoggedIn",
+        "multiLoginBlocker.Login(false) must reject a second concurrent session on the same account"
+    );
+
+    ctx.dispatch_rpc(
+        &mut sess2,
+        "multiLoginBlocker",
+        None,
+        "Login",
+        &[PyRep::Bool(true)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("multiLoginBlocker.Login(true) must displace the prior session");
+
+    // R35-P1-3: Displaced sess1 must NOT be able to bypass revocation via a previously bound object
+    // even if the client spoofs service="authentication" with bound_id=Some(bound_id_sess1)
+    let sess1_bound_bypass = ctx
+        .dispatch_rpc(
+            &mut sess1,
+            "authentication",
+            Some(bound_id_sess1),
+            "List",
+            &[],
+            &kw,
+            None,
+        )
+        .await;
+    assert_eq!(
+        sess1_bound_bypass.unwrap_err().code,
+        "SessionKicked",
+        "R35-P1-3: Displaced session must be rejected with SessionKicked on bound-object calls"
+    );
+    assert!(sess1.user_id.is_none());
+
+    // 3. D-4: Admin /kick, /ban, and /unban slash commands + live session revocation + ROLE_ADMIN ban hierarchy
+    ctx.db
+        .provision_gm_account("gm_d4", "gm-d4-secret", 90_000_003, "ISD Polaris");
+    let mut gm_sess = SessionState::new(10_103);
+    ctx.dispatch_rpc(
+        &mut gm_sess,
+        "authentication",
+        None,
+        "Login",
+        &[
+            PyRep::String("gm_d4".into()),
+            PyRep::String("gm-d4-secret".into()),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Login gm_sess");
+    ctx.dispatch_rpc(
+        &mut gm_sess,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(90_000_003)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("SelectCharacterID gm_sess");
+
+    // Verify /ban and /kick refuse to target a ROLE_ADMIN account
+    let ban_admin_err = ctx
+        .dispatch_rpc(
+            &mut gm_sess,
+            "slash",
+            None,
+            "SlashCmd",
+            &[PyRep::String("/ban gm_d4 3600 Self ban attempt".into())],
+            &kw,
+            None,
+        )
+        .await;
+    assert_eq!(ban_admin_err.unwrap_err().code, "BanFailed");
+    let kick_admin_err = ctx
+        .dispatch_rpc(
+            &mut gm_sess,
+            "slash",
+            None,
+            "SlashCmd",
+            &[PyRep::String("/kick gm_d4 Self kick attempt".into())],
+            &kw,
+            None,
+        )
+        .await;
+    assert!(matches!(
+        kick_admin_err.unwrap_err().code.as_str(),
+        "KickRefusedAdmin" | "KickFailed"
+    ));
+
+    // Select character on sess2 so it is active in-game, bind invbroker, then kick "demo" via GM slash command
+    ctx.dispatch_rpc(
+        &mut sess2,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(90_000_001)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("SelectCharacterID sess2");
+
+    let bind_rsp2 = ctx
+        .dispatch_rpc(
+            &mut sess2,
+            "invbroker",
+            None,
+            "MachoBindObject",
+            &[PyRep::Integer(60_003_760), PyRep::None],
+            &kw,
+            None,
+        )
+        .await
+        .expect("MachoBindObject invbroker on sess2");
+    let bound_id_sess2 = match bind_rsp2 {
+        PyRep::Tuple(t) => t[0].as_i64().expect("bound_id i64") as u64,
+        other => panic!("Expected Tuple from MachoBindObject, got {other:?}"),
+    };
+
+    ctx.dispatch_rpc(
+        &mut gm_sess,
+        "slash",
+        None,
+        "SlashCmd",
+        &[PyRep::String("/kick demo Market bot check".into())],
+        &kw,
+        None,
+    )
+    .await
+    .expect("/kick demo");
+
+    // R36-P1-3: Kicked sess2 must NOT be able to bypass revocation via multiLoginBlocker.Login(true)
+    // and must fail both multiLoginBlocker.Login and bound-object calls with SessionKicked / Unauthorized
+    let sess2_mlb_after_kick = ctx
+        .dispatch_rpc(
+            &mut sess2,
+            "multiLoginBlocker",
+            None,
+            "Login",
+            &[PyRep::Bool(true)],
+            &kw,
+            None,
+        )
+        .await;
+    assert_eq!(
+        sess2_mlb_after_kick.unwrap_err().code,
+        "SessionKicked",
+        "R36-P1-3: Kicked session calling multiLoginBlocker.Login(true) must be rejected with SessionKicked"
+    );
+    assert!(
+        sess2.user_id.is_none(),
+        "R36-P1-3: Kicked session must have user_id cleared on first post-kick RPC"
+    );
+    assert!(
+        ctx.db.get_online_session(1).is_none(),
+        "R36-P1-3: Kicked session must not re-acquire the online lock via multiLoginBlocker.Login"
+    );
+    let sess2_bound_after_kick = ctx
+        .dispatch_rpc(
+            &mut sess2,
+            "authentication",
+            Some(bound_id_sess2),
+            "List",
+            &[],
+            &kw,
+            None,
+        )
+        .await;
+    assert_eq!(
+        sess2_bound_after_kick.unwrap_err().code,
+        "InvalidBoundObject",
+        "Kicked session's bound objects must be purged on kick cleanup"
+    );
+    let sess2_unbound_after_kick = ctx
+        .dispatch_rpc(
+            &mut sess2,
+            "charUnboundMgr",
+            None,
+            "GetCharactersToSelect",
+            &[],
+            &kw,
+            None,
+        )
+        .await;
+    assert_eq!(sess2_unbound_after_kick.unwrap_err().code, "Unauthorized");
+
+    // Ban "demo" for 3600 seconds via GM /ban command
+    ctx.dispatch_rpc(
+        &mut gm_sess,
+        "slash",
+        None,
+        "SlashCmd",
+        &[PyRep::String("/ban demo 3600 Automated botting violation".into())],
+        &kw,
+        None,
+    )
+    .await
+    .expect("/ban demo 3600");
+
+    let banned_err = ctx
+        .dispatch_rpc(
+            &mut sess2,
+            "authentication",
+            None,
+            "Login",
+            &[
+                PyRep::String("demo".into()),
+                PyRep::String("demo-secret".into()),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Banned account login must fail");
+    assert_eq!(banned_err.code, "AccountBanned");
+    assert!(
+        banned_err.message.contains("Automated botting violation")
+            && banned_err.message.contains("until"),
+        "AccountBanned error message must include ban reason and expiry timestamp: {}",
+        banned_err.message
+    );
+
+    // Unban "demo" via GM /unban command and verify login via OAuth2 PKCE SSO JWT access token
+    ctx.dispatch_rpc(
+        &mut gm_sess,
+        "slash",
+        None,
+        "SlashCmd",
+        &[PyRep::String("/unban demo".into())],
+        &kw,
+        None,
+    )
+    .await
+    .expect("/unban demo");
+
+    let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    let challenge = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
+    let now_unix = ctx.now_unix();
+    let code = ctx
+        .db
+        .authorize_pkce(
+            "demo",
+            "demo-secret",
+            90_000_001,
+            "evomu-launcher",
+            "https://localhost/callback",
+            vec!["esi-wallet.read_character_wallet.v1".into()],
+            challenge,
+            "S256",
+            now_unix,
+        )
+        .expect("authorize_pkce");
+    let token_bundle = ctx
+        .db
+        .exchange_pkce_code(&code, "evomu-launcher", verifier, now_unix + 1)
+        .expect("exchange_pkce_code");
+    assert!(
+        matches!(
+            ctx.db
+                .verify_sso_access_token(&token_bundle.access_token, now_unix + 1 + token_bundle.expires_in),
+            Err(eve_db::DbError::InvalidCredentials)
+        ),
+        "Expired SSO JWT must be rejected at now_unix >= exp"
+    );
+
+    // R34-P0-1: Verify forged JWT (e.g. signed with another deployment's key or tampered payload) is strictly rejected
+    let other_ctx = ServerContext::new();
+    let other_code = other_ctx
+        .db
+        .authorize_pkce(
+            "demo",
+            "demo-secret",
+            90_000_001,
+            "evomu-launcher",
+            "https://localhost/callback",
+            vec!["esi-wallet.read_character_wallet.v1".into()],
+            challenge,
+            "S256",
+            now_unix,
+        )
+        .expect("authorize_pkce on other_ctx");
+    let other_bundle = other_ctx
+        .db
+        .exchange_pkce_code(&other_code, "evomu-launcher", verifier, now_unix + 1)
+        .expect("exchange_pkce_code on other_ctx");
+    let forged_login = ctx
+        .dispatch_rpc(
+            &mut sess2,
+            "authentication",
+            None,
+            "Login",
+            &[
+                PyRep::String("__sso__".into()),
+                PyRep::String(other_bundle.access_token),
+            ],
+            &kw,
+            None,
+        )
+        .await;
+    assert_eq!(
+        forged_login.unwrap_err().code,
+        "AuthenticationFailed",
+        "R34-P0-1: SSO JWT signed by a different deployment key must be rejected"
+    );
+
+    ctx.dispatch_rpc(
+        &mut sess2,
+        "authentication",
+        None,
+        "Login",
+        &[
+            PyRep::String("__sso__".into()),
+            PyRep::String(token_bundle.access_token.clone()),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Login via OAuth2/PKCE SSO JWT token");
+    assert_eq!(sess2.user_id, Some(1));
+
+    // 4. D-3 & D-5: Load tracked evomu.toml and custom TOML config backed by durable SQLite world DB
+    let tracked_cfg =
+        ServerConfig::load_from_toml(root.join("evomu.toml")).expect("load tracked evomu.toml");
+    assert_eq!(tracked_cfg.macho_port, 26_000);
+    assert!(!tracked_cfg.feature_flags.seed_demo);
+
+    let tmp_db = std::env::temp_dir().join(format!("evomu_d5_test_{}.sqlite", std::process::id()));
+    let _ = std::fs::remove_file(&tmp_db);
+    let custom_toml = format!(
+        r#"
+bind_address = "127.0.0.1"
+macho_port = 26100
+bridge_port = 26102
+esi_port = 26104
+sde_path = "{}"
+world_db_path = "{}"
+
+[feature_flags]
+enable_quasar_gateway = false
+enable_esi_http = true
+enable_living_world = false
+seed_demo = false
+
+[[player_accounts]]
+username = "capsuleer_toml"
+password_token = "toml-pass-123"
+
+[[admin_accounts]]
+username = "admin_toml"
+password_token = "admin-pass-456"
+character_id = 90000099
+character_name = "ISD Config"
+"#,
+        sde_path.display(),
+        tmp_db.display()
+    );
+    let parsed_cfg = ServerConfig::from_toml_str(&custom_toml).expect("parse custom evomu.toml");
+    let persisted_sso_token = {
+        let cfg_ctx = ServerContext::from_config(&parsed_cfg).expect("ServerContext::from_config");
+        let acc = cfg_ctx
+            .db
+            .authenticate("capsuleer_toml", "toml-pass-123")
+            .expect("authenticate provisioned TOML player account");
+        assert!(
+            acc.password_token
+                .starts_with("$argon2id$v=19$m=19456,t=2,p=1$"),
+            "D-4: Provisioned account must use Argon2id m=19456,t=2,p=1 hash"
+        );
+        // Verify feature_flags.enable_quasar_gateway = false and enable_living_world = false are enforced
+        let mut flag_sess = SessionState::new(10_200);
+        let q_disabled = cfg_ctx
+            .dispatch_rpc(
+                &mut flag_sess,
+                "publicGatewaySvc",
+                None,
+                "SendRequest",
+                &[],
+                &kw,
+                None,
+            )
+            .await;
+        assert_eq!(q_disabled.unwrap_err().code, "FeatureDisabled");
+        let lw_disabled = cfg_ctx
+            .dispatch_rpc(
+                &mut flag_sess,
+                "taleMgr",
+                None,
+                "MaterializeSystemLOD2",
+                &[],
+                &kw,
+                None,
+            )
+            .await;
+        assert_eq!(lw_disabled.unwrap_err().code, "FeatureDisabled");
+
+        let p_code = cfg_ctx
+            .db
+            .authorize_pkce(
+                "admin_toml",
+                "admin-pass-456",
+                90_000_099,
+                "evomu-launcher",
+                "https://localhost/callback",
+                vec!["esi-wallet.read_character_wallet.v1".into()],
+                challenge,
+                "S256",
+                now_unix,
+            )
+            .expect("authorize_pkce on cfg_ctx");
+        cfg_ctx
+            .db
+            .exchange_pkce_code(&p_code, "evomu-launcher", verifier, now_unix + 1)
+            .expect("exchange_pkce_code on cfg_ctx")
+            .access_token
+    };
+    // Reopen SQLite world DB WITHOUT player_accounts/admin_accounts in config so nothing is re-provisioned on startup,
+    // proving accounts AND the CSPRNG JWT signing secret survived restart in SQLite
+    {
+        let mut reopen_cfg = parsed_cfg.clone();
+        reopen_cfg.player_accounts.clear();
+        reopen_cfg.admin_accounts.clear();
+        let reopened_ctx =
+            ServerContext::from_config(&reopen_cfg).expect("Reopen ServerContext::from_config");
+        assert!(reopened_ctx
+            .db
+            .authenticate("capsuleer_toml", "toml-pass-123")
+            .is_ok());
+        assert!(reopened_ctx
+            .db
+            .authenticate("admin_toml", "admin-pass-456")
+            .is_ok());
+        assert!(
+            reopened_ctx
+                .db
+                .verify_sso_access_token(&persisted_sso_token, now_unix + 2)
+                .is_ok(),
+            "Persisted CSPRNG JWT secret in SQLite auth_secrets must verify SSO tokens across restart"
+        );
+    }
+    let _ = std::fs::remove_file(&tmp_db);
+}
+
 

@@ -620,7 +620,17 @@ pub fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let Some(station_id) = session.station_id else {
+            if session.station_id.is_none() {
+                return Some(Err(BridgeRpcError {
+                    code: "MustBeDocked".into(),
+                    message: "InstallCloneInStation requires being docked at an NPC station".into(),
+                }));
+            }
+            let Some(station_id) = ctx
+                .db
+                .with_snapshot(|snap| snap.characters.get(&char_id).and_then(|c| c.station_id))
+                .or(session.station_id)
+            else {
                 return Some(Err(BridgeRpcError {
                     code: "MustBeDocked".into(),
                     message: "InstallCloneInStation requires being docked at an NPC station".into(),
@@ -648,10 +658,10 @@ pub fn handle(
                 }));
             }
             let res = ctx.db.try_with_mut_snapshot(|snap| {
-                // Read Infomorph Psychology (24242) and Infomorph Synchronizing (33407) from character's trained skills
-                let psych_level = snap
-                    .skills
-                    .get(&char_id)
+                // Read Infomorph Psychology (24242), Advanced Infomorph Psychology (33407), Elite Infomorph Psychology (73910),
+                // and Infomorph Synchronizing (33399) from character's trained skills
+                let skill_map = snap.skills.get(&char_id);
+                let psych_level = skill_map
                     .and_then(|m| m.get(&24242))
                     .map(|s| s.level)
                     .unwrap_or(0);
@@ -661,10 +671,19 @@ pub fn handle(
                         message: "Installing a jump clone requires Infomorph Psychology level 1 or higher".into(),
                     });
                 }
-                let sync_level = snap
-                    .skills
-                    .get(&char_id)
+                let adv_psych_level = skill_map
                     .and_then(|m| m.get(&33407))
+                    .map(|s| s.level)
+                    .unwrap_or(0);
+                let elite_psych_level = skill_map
+                    .and_then(|m| m.get(&73910))
+                    .map(|s| s.level)
+                    .unwrap_or(0);
+                let max_clones = (psych_level as usize)
+                    .saturating_add(adv_psych_level as usize)
+                    .saturating_add(elite_psych_level as usize);
+                let sync_level = skill_map
+                    .and_then(|m| m.get(&33399))
                     .map(|s| s.level)
                     .unwrap_or(0);
 
@@ -677,11 +696,11 @@ pub fn handle(
                         ),
                     });
                 }
-                if clones.len() >= psych_level as usize {
+                if clones.len() >= max_clones {
                     return Err(BridgeRpcError {
                         code: "MaxJumpClonesReached".into(),
                         message: format!(
-                            "Character has reached the maximum of {psych_level} installed jump clones for Infomorph Psychology level {psych_level}"
+                            "Character has reached the maximum of {max_clones} installed jump clones"
                         ),
                     });
                 }
@@ -752,9 +771,8 @@ pub fn handle(
                     });
                 }
 
-                let psych_level = snap
-                    .skills
-                    .get(&char_id)
+                let skill_map = snap.skills.get(&char_id);
+                let psych_level = skill_map
                     .and_then(|m| m.get(&24242))
                     .map(|s| s.level)
                     .unwrap_or(0);
@@ -764,10 +782,19 @@ pub fn handle(
                         message: "Installing a jump clone requires Infomorph Psychology level 1 or higher".into(),
                     });
                 }
-                let sync_level = snap
-                    .skills
-                    .get(&char_id)
+                let adv_psych_level = skill_map
                     .and_then(|m| m.get(&33407))
+                    .map(|s| s.level)
+                    .unwrap_or(0);
+                let elite_psych_level = skill_map
+                    .and_then(|m| m.get(&73910))
+                    .map(|s| s.level)
+                    .unwrap_or(0);
+                let max_clones = (psych_level as usize)
+                    .saturating_add(adv_psych_level as usize)
+                    .saturating_add(elite_psych_level as usize);
+                let sync_level = skill_map
+                    .and_then(|m| m.get(&33399))
                     .map(|s| s.level)
                     .unwrap_or(0);
 
@@ -780,11 +807,11 @@ pub fn handle(
                         ),
                     });
                 }
-                if clones.len() >= psych_level as usize {
+                if clones.len() >= max_clones {
                     return Err(BridgeRpcError {
                         code: "MaxJumpClonesReached".into(),
                         message: format!(
-                            "Character has reached the maximum of {psych_level} installed jump clones for Infomorph Psychology level {psych_level}"
+                            "Character has reached the maximum of {max_clones} installed jump clones"
                         ),
                     });
                 }
@@ -921,7 +948,21 @@ pub fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let Some(departure_loc_id) = session.station_id.or(session.structure_id) else {
+            if session.station_id.is_none() && session.structure_id.is_none() {
+                return Some(Err(BridgeRpcError {
+                    code: "MustBeDocked".into(),
+                    message: "Clone jump requires being docked at a station or structure".into(),
+                }));
+            }
+            let Some(departure_loc_id) = ctx
+                .db
+                .with_snapshot(|snap| {
+                    snap.characters
+                        .get(&char_id)
+                        .and_then(|c| c.station_id.or(c.structure_id))
+                })
+                .or_else(|| session.station_id.or(session.structure_id))
+            else {
                 return Some(Err(BridgeRpcError {
                     code: "MustBeDocked".into(),
                     message: "Clone jump requires being docked at a station or structure".into(),
@@ -956,7 +997,7 @@ pub fn handle(
                 let sync_level = snap
                     .skills
                     .get(&char_id)
-                    .and_then(|m| m.get(&33407))
+                    .and_then(|m| m.get(&33399))
                     .map(|s| s.level)
                     .unwrap_or(0);
                 let full_cooldown_sec = clone_jump_cooldown_seconds(sync_level);
@@ -1004,7 +1045,7 @@ pub fn handle(
                     });
                 }
 
-                // Resolve destination solar_system_id, constellation_id, and region_id without fallback
+                // Resolve destination solar_system_id, constellation_id, and region_id and verify destination clone bay
                 let (dest_sys_id, dest_const_id, dest_reg_id) = if dest_loc_id >= 1_000_000_000_000 {
                     let Some(st) = snap.structures.get(&dest_loc_id) else {
                         return Err(BridgeRpcError {
@@ -1014,6 +1055,14 @@ pub fn handle(
                             ),
                         });
                     };
+                    if !st.quantum_core_installed || st.fuel_blocks == 0 {
+                        return Err(BridgeRpcError {
+                            code: "StructureHasNoCloneBay".into(),
+                            message: format!(
+                                "Destination structure {dest_loc_id} does not have an online Standup Cloning Center service"
+                            ),
+                        });
+                    }
                     let sys_id = st.solar_system_id;
                     let Some(sys) = ctx.sde.solar_systems.get(&sys_id) else {
                         return Err(BridgeRpcError {
@@ -1025,11 +1074,16 @@ pub fn handle(
                     };
                     (sys_id, sys.constellation_id, sys.region_id)
                 } else {
-                    let Some(sys) = ctx
+                    let Some((sys, dest_station)) = ctx
                         .sde
                         .solar_systems
                         .values()
-                        .find(|sys| sys.stations.iter().any(|st| st.station_id == dest_loc_id))
+                        .find_map(|sys| {
+                            sys.stations
+                                .iter()
+                                .find(|st| st.station_id == dest_loc_id)
+                                .map(|st| (sys, st))
+                        })
                     else {
                         return Err(BridgeRpcError {
                             code: "CloneDestinationNotFound".into(),
@@ -1038,6 +1092,14 @@ pub fn handle(
                             ),
                         });
                     };
+                    if !dest_station.has_clone_bay {
+                        return Err(BridgeRpcError {
+                            code: "StationHasNoCloneBay".into(),
+                            message: format!(
+                                "Destination station {dest_loc_id} does not have an active clone bay"
+                            ),
+                        });
+                    }
                     (sys.solar_system_id, sys.constellation_id, sys.region_id)
                 };
 

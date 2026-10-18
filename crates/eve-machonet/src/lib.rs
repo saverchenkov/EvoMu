@@ -604,7 +604,6 @@ mod tests {
         assert_eq!(addr, addr_decoded);
     }
 
-    // parity: plan:S-9
     #[test]
     fn test_session_starts_unauthenticated_and_computes_diffs() {
         let mut s1 = SessionState::new(7);

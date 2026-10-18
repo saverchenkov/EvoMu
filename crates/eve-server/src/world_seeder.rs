@@ -9,7 +9,7 @@
 
 use crate::formulas::compute_living_world_fair_price;
 use eve_db::{IskCents, MarketOrderRecord, WorldRepository};
-use eve_sde::{SdeRegistry, TypeId};
+use eve_sde::{GroupId, SdeRegistry, TypeId};
 
 pub const TRADE_HUB_STATIONS: &[(i64, u32, f64)] = &[
     (60_003_760, 10_000_002, 1.00), // Jita 4-4 (The Forge)
@@ -25,13 +25,13 @@ pub fn compute_bom_cost(product_type_id: TypeId, sde: &SdeRegistry) -> f64 {
             let total_mat_cost: f64 = bp
                 .materials
                 .iter()
-                .map(|m| {
+                .map(|mat| {
                     let mat_price = sde
                         .types
-                        .get(&m.type_id)
+                        .get(&mat.type_id)
                         .map(|t| t.base_price)
                         .unwrap_or(5.0);
-                    (m.quantity as f64) * mat_price
+                    (mat.quantity as f64) * mat_price
                 })
                 .sum();
             return total_mat_cost / (bp.product_quantity.max(1) as f64);
@@ -40,19 +40,52 @@ pub fn compute_bom_cost(product_type_id: TypeId, sde: &SdeRegistry) -> f64 {
     0.0
 }
 
+/// Derives the baseline T1 and NPC-seeded market catalog dynamically from [`SdeRegistry`].
+fn select_seeded_market_types(sde: &SdeRegistry) -> Vec<TypeId> {
+    let mut by_group: std::collections::BTreeMap<GroupId, Vec<TypeId>> =
+        std::collections::BTreeMap::new();
+    for t in sde.types.values() {
+        if !t.published || t.base_price <= 0.0 || t.market_group_id.is_none() {
+            continue;
+        }
+        let tech_level = t.default_attributes.get(&422).copied().unwrap_or(1.0);
+        let meta_group = t.default_attributes.get(&1692).copied().unwrap_or(1.0);
+        if tech_level > 1.0 || meta_group > 1.0 {
+            continue;
+        }
+        if t.category_id == 9 {
+            if let Some(bp) = sde.blueprints.get(&t.type_id) {
+                let prod_tl = sde
+                    .types
+                    .get(&bp.product_type_id)
+                    .and_then(|pt| pt.default_attributes.get(&422).copied())
+                    .unwrap_or(1.0);
+                if prod_tl >= 2.0 {
+                    continue;
+                }
+            }
+        }
+        by_group.entry(t.group_id).or_default().push(t.type_id);
+    }
+
+    let mut type_ids = Vec::new();
+    for (group_id, mut tids) in by_group {
+        tids.sort_unstable();
+        let cap = if group_id == 18 { tids.len() } else { 1 };
+        type_ids.extend(tids.into_iter().take(cap));
+    }
+    type_ids.sort_unstable();
+    type_ids.dedup();
+    type_ids
+}
+
 /// Seeds Dual-Anchor market orders across all major trade hubs into `db` idempotently once
 /// per world (`snap.markets_seeded`).
 pub fn seed_dual_anchor_markets(db: &WorldRepository, sde: &SdeRegistry) -> usize {
     if db.with_snapshot(|snap| snap.markets_seeded) {
         return 0;
     }
-    let mut type_ids: Vec<TypeId> = sde
-        .types
-        .values()
-        .filter(|t| t.published && t.base_price > 0.0)
-        .map(|t| t.type_id)
-        .collect();
-    type_ids.sort_unstable();
+    let type_ids = select_seeded_market_types(sde);
 
     db.try_with_mut_snapshot::<_, usize, String>(|snap| {
         if snap.markets_seeded {

@@ -24,3 +24,7 @@ Thumbs.db
 
 # Independent review gate state (local; must not affect tree fingerprints)
 /.evomu-reviews/*
+
+# Generated runtime/SDE SQLite databases (rebuilt locally via tools/sde-import; never committed)
+/data/*.sqlite*
+

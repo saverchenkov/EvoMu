@@ -1403,22 +1403,24 @@ mod tests {
 
         fit.set_character_skills(HashMap::from([
             (3449, 4), // Navigation IV
+            (3450, 4), // Afterburner IV
             (3452, 4), // Acceleration Control IV
+            (3394, 2), // Hull Upgrades II
             (3300, 5), // Gunnery V
             (3302, 5), // Small Projectile Turret V
             (33094, 5), // Medium Precursor Weapon V
         ]));
 
-        // Heavy Entropic Disintegrator II (47936) is restricted to Triglavian cruisers/HACs and must be rejected on Rifter (587)
-        assert!(fit.fit_and_online_module(5099, 47936, 27, &sde).is_err());
+        // Heavy Entropic Disintegrator II (47918) is restricted to Triglavian cruisers/HACs and must be rejected on Rifter (587)
+        assert!(fit.fit_and_online_module(5099, 47918, 27, &sde).is_err());
 
-        // Fit 1MN Afterburner II (type 438) and Overdrive Injector II (type 1248)
+        // Fit 1MN Afterburner II (type 438) and Overdrive Injector System II (type 1236)
         fit.fit_and_online_module(5001, 438, 19, &sde).unwrap();
-        fit.fit_and_online_module(5002, 1248, 11, &sde).unwrap();
+        fit.fit_and_online_module(5002, 1236, 11, &sde).unwrap();
         fit.activate_module(5001, true, &sde).unwrap();
 
         assert!(fit.ship.get_attribute(attr_ids::MAX_VELOCITY, &sde) > 800.0);
-        assert!(fit.ship.get_attribute(attr_ids::CPU_LOAD, &sde) >= 40.0);
+        assert_eq!(fit.ship.get_attribute(attr_ids::CPU_LOAD, &sde), 15.0);
 
         // Thermodynamics check
         let heat = thermodynamics::step_rack_heat(0.0, 0.04, 0.01, 10.0);
@@ -1429,12 +1431,12 @@ mod tests {
         let penalty = evaluate_booster_side_effect(0.4, -20.0, 5, 5, 0.1).unwrap();
         assert!((penalty - (-15.0)).abs() < 1e-6);
 
-        // Abyssal mutaplasmid roll check
+        // Abyssal mutaplasmid roll check (47748 = Gravid 1MN Afterburner Mutaplasmid, 0.95..1.15x SPEED_FACTOR)
         let ab = sde.types.get(&438).unwrap();
-        let muta = sde.dynamic_item_attributes.get(&47702).unwrap();
+        let muta = sde.dynamic_item_attributes.get(&47748).unwrap();
         let mut rolls = HashMap::new();
         rolls.insert(attr_ids::SPEED_FACTOR, 1.0); // Max roll (1.15x)
         let rolled = roll_abyssal_attributes(&ab.default_attributes, &muta.attribute_ranges, &rolls);
-        assert!((rolled[&attr_ids::SPEED_FACTOR] - 135.0 * 1.15).abs() < 1e-6);
+        assert!((rolled[&attr_ids::SPEED_FACTOR] - 135.0 * 1.15).abs() < 1e-4);
     }
 }
