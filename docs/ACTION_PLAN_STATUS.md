@@ -1,15 +1,236 @@
 > [!IMPORTANT]
-> **This file tracks status only; it is not the plan.** The canonical plan is [`.agents/skills/evomu-adversarial-review/references/action_plan.md`](../.agents/skills/evomu-adversarial-review/references/action_plan.md) (Phases 0–8 plus 5M, with task IDs `S-*`, `D-*`, `P-*`, `SP-*`, `DG-*`, `C-*`, `MN-*`, `CH-*`, `E-*`, `SO-*`).
-> - Re-key this file to those canonical IDs: one row per ID, giving status, commit and the proving test.
-> - The `P0-*`…`P4-*` sections below are historical vertical-slice work from rounds 1–27. They don't count as completion of any canonical task unless that task's own "Done when" criteria are met.
+> **This file tracks status only; it is not the plan.** The canonical plan is [`.agents/skills/evomu-adversarial-review/references/action_plan.md`](../.agents/skills/evomu-adversarial-review/references/action_plan.md) (Phases `0`, `1`, `T`, `2`, `3`, `4`, `5`, `5M`, `6`, `7`, `8`, `Q`, `ESI`, `Z`, with task IDs `S-*`, `D-*`, `T-*`, `P-*`, `SP-*`, `DG-*`, `C-*`, `MN-*`, `CH-*`, `E-*`, `SO-*`, `Q-*`, `ESI-*`, `Z-*`).
+> - Every canonical task ID in the pinned plan has exactly one row below (`ID | Status | Evidence (file:line) | Proving test | Commit`).
+> - A task is marked `DONE` only when every "Done when" criterion in the pinned plan is met by general, SDE-driven logic (no hardcoded typeIDs, fixture NPCs, demo values, or client-trusted inputs) and a named test executed and passed. Anything less is `PARTIAL` or `NOT STARTED`.
+> - Historical `P0-*`…`P4-*` vertical-slice rows from rounds 1–27 are preserved verbatim in the [Historical Appendix](#historical-appendix-rounds-127-vertical-slice-tracker) and do not count toward canonical task completion.
 
-# EvoMu Action Plan — Remediation & Verification Roadmap (`Phase 0`–`Phase 4`)
+# EvoMu Canonical Action Plan Status Tracker
 
-This document tracks the concrete engineering tasks, exit gates, and verification status across **`Phase 0` through `Phase 4`**, including all findings from adversarial reviews `.evomu-reviews/20261016-192920/report.md` through `.evomu-reviews/20261017-101149/report.md`.
+**Baseline audited:** commit `479e633` (27/27 workspace tests executing and passing; `0 / 5,781` parity ledger rows closed — `5,738` pinned rows in `ledger.json` + `43` rows in `auditor_rows.json` from gap audit `20261017-214922`; `// parity:` tags land in `T-1`).
+**Summary across all 109 canonical tasks (`Phases 0–8`, `5M`, `T`, `Q`, `ESI`, `Z`):** `0 DONE` / `48 PARTIAL` / `61 NOT STARTED` (across the 78 tasks in `Phases 0–8` + `5M`: `0 DONE` / `45 PARTIAL` / `33 NOT STARTED`).
 
 ---
 
-## Phase 0 — Tooling, Static Data Seed & Wire Foundation (`M0`–`M1`)
+## Phase 0: Stabilize (`S-1`…`S-11`)
+
+| ID | Status | Evidence (file:line) | Proving test | Commit |
+| :--- | :--- | :--- | :--- | :--- |
+| `S-1` | `PARTIAL` | `crates/eve-server/src/services/industry_pi.rs:68-138` rejects Tritanium (`34`) with `ItemNotReprocessable`, but uses a hardcoded 4-ore match (`1230`, `28432`, `1228`, `28429`) outputting only Tritanium (`34`) instead of SDE `typeMaterials`. | `crates/eve-server/src/router.rs:1643-1656` (`router::tests::test_authentication_and_ownership_enforcement` — partial: Tritanium rejection only) | `479e633` |
+| `S-2` | `NOT STARTED` | `crates/eve-server/src/services/combat_crimewatch.rs:1410-1962` still executes custom `fighterMgr.CmdActivateAbilitySlots` damage instead of returning `UnimplementedRPC`. | — | — |
+| `S-3` | `NOT STARTED` | `crates/eve-server/src/services/space_destiny.rs:917-1217` still executes `CmdJumpToStructureBeacon` teleportation instead of returning `UnimplementedRPC`. | — | — |
+| `S-4` | `PARTIAL` | `crates/eve-server/src/services/character_skills.rs:607-958` enforces docked state, cooldown, and system/station/capsule transitions on `CloneJump` (`lines 756-935`), but shares match arms (`InstallCloneInStation \| InstallCloneInStructure` at `607-608`, `GetCloneState \| GetStationCloneState \| GetPriceForClone` at `695-697`), does not check for a station/structure clone bay service, and does not swap `active_implants`. | `crates/eve-server/tests/e2e_journeys.rs:1475-1505` (`test_blocking_findings_b01_to_b15_regressions` — partial) | `479e633` |
+| `S-5` | `PARTIAL` | `crates/eve-server/src/system_actor.rs:218-243` removed the global 20 rats and gate-arrival NPC spawns, and `crates/eve-db/src/lib.rs:1306-1411` cleaned `with_demo_seed()`, but `crates/eve-db/src/lib.rs:1451-1500, 1721-1771` still seeds fixture ESS bank balances (`10M`/`25M` ISK) and wormhole/signature coordinates, `crates/eve-server/src/services/station_structure.rs:166-169` auto-spawns Living World convoy balls on undock (`crates/eve-server/src/living_world.rs:129-189`), and `crates/eve-server/src/services/space_destiny.rs:735-749` spawns K162 ball `750_000_001`. | `crates/eve-server/tests/e2e_journeys.rs:661-674` (`test_blocking_findings_b01_to_b15_regressions` — partial: demo seed check only) | `479e633` |
+| `S-6` | `NOT STARTED` | `crates/eve-server/src/services/space_destiny.rs:1219-1304` (`scanMgr.RequestScans`) still spawns wormhole ball `750_000_001` instead of returning `UnimplementedRPC`. | — | — |
+| `S-7` | `PARTIAL` | `crates/eve-server/src/services/station_structure.rs:621-980` (`AttackStructure`), `crates/eve-server/src/services/sov_fw_insurgency.rs:49-208` (`CaptureComplex`), and `crates/eve-server/src/services/industry_pi.rs:801-1042` (`CreateColony`, `Flush`) check system/range/ownership, but `AcquireSkyhooks` (`crates/eve-server/src/services/sov_fw_insurgency.rs:222-355`) lacks an in-space proximity check to a skyhook/planet ball. | `crates/eve-server/tests/e2e_journeys.rs:1827-1900, 2520-2575` (`test_blocking_findings_b01_to_b15_regressions`, `test_review_r6_np0_np1_regressions` — partial) | `479e633` |
+| `S-8` | `PARTIAL` | `crates/eve-db/src/lib.rs:2173-2202` (`WorldRepository::try_with_mut_snapshot`) wraps fallible repository mutations across `crates/eve-db` and `crates/eve-server/src/services/*.rs`, while `with_mut_snapshot` (`lines 2163-2171`) still commits whatever its closure returns; awaits an automated CI grep check enforcing zero `return Err` inside `with_mut_snapshot` closures. | `crates/eve-db/src/lib.rs:2981-2987` (`tests::test_durable_snapshot_persistence_and_domain_mutations`) | `479e633` |
+| `S-9` | `PARTIAL` | `crates/eve-db/src/lib.rs:1219, 1228` assigns standard player role `0x01` to demo accounts and `crates/eve-server/src/router.rs:94-116` (`new_production`) starts with zero demo accounts, but GM checks in `crates/eve-server/src/services/auth_cache.rs:142` and `crates/eve-server/src/services/cosmetics_events.rs:34, 88` still test magic bit `0x02` instead of CCP's 64-bit `ROLE_GML`/`ROLE_ADMIN` constants. | `crates/eve-server/src/router.rs:1570-1640` (`router::tests::test_authentication_and_ownership_enforcement` — partial) | `479e633` |
+| `S-10` | `PARTIAL` | `PLAN.md:28-35` uses `"**Partial Vertical Slice Implemented & Verified:**"`, `PLAN.md:110, 118, 128, 138, 146, 153, 160, 167, 174` uses `"(PARTIAL VERTICAL SLICE — IN-PROCESS RPC TESTS PASSING)"`, and `README.md:153-170` uses `"PARTIAL VERTICAL SLICE — IN-PROCESS RPC TESTS PASSING"` instead of Rule 8 labels (`Not started`, `In progress`, `Implemented (review: <verdict>, <date>)`); `PLAN.md:120` still claims `extract_staticdata.py` loads `systems.static`, `jumps.static`, `solarsystemcontent.static`, and `.fsdbinary` files directly. | — | `479e633` |
+| `S-11` | `PARTIAL` | `crates/eve-db/src/lib.rs:1239-1300` fixed `with_demo_seed()` starter character school/corp/race/bloodline mappings (`1_000_170` school `14` Minmatar, `1_000_045` school `18` Caldari), but `docs/index/sde_seed.json` (`tools/eve-indexer/extract_staticdata.py:368-1241`) remains a 95-type hand-curated seed until `D-1`. | `crates/eve-db/src/lib.rs:2935-2960` (`tests::test_durable_snapshot_persistence_and_domain_mutations` — partial) | `479e633` |
+
+---
+
+## Phase 1: Data and Persistence Foundation (`D-1`…`D-5`)
+
+| ID | Status | Evidence (file:line) | Proving test | Commit |
+| :--- | :--- | :--- | :--- | :--- |
+| `D-1` | `NOT STARTED` | `tools/eve-indexer/extract_staticdata.py:368-1241` emits a hand-curated 95-type `docs/index/sde_seed.json`; the `sde-import` tool reading real `.static` SQLite3 schemas and CCP SDE exports does not exist yet (`OF-23`). | — | — |
+| `D-2` | `NOT STARTED` | `crates/eve-sde/src/lib.rs:22` (`EMBEDDED_SDE_SEED_JSON = include_str!("../../../docs/index/sde_seed.json")`), `lines 409-503` (`SdeRegistry::from_json_str`), and `lines 507-510` (`SdeRegistry::with_canonical_seed`) embed 22 solar systems and 95 types at compile time; `SdeRegistry::open(path)` does not exist yet, and 21 `unwrap_or(30_000_142)` / `unwrap_or(60_003_760)` fallbacks remain across `crates/eve-server/src/` (`OF-33`). | — | — |
+| `D-3` | `PARTIAL` | `crates/eve-db/src/lib.rs:1964-2202` persists JSON snapshots and `.json.wal` deltas, but still clones the full in-memory `WorldStateSnapshot` on every write (`lib.rs:2181`) rather than using SQLite (`rusqlite`/`sqlx`) with per-request SQL transactions (`OF-06`, `OF-24`). | `crates/eve-db/src/lib.rs:2898-3220` (`tests::test_durable_snapshot_persistence_and_domain_mutations` — partial: JSON/WAL only) | `479e633` |
+| `D-4` | `PARTIAL` | `crates/eve-db/src/lib.rs:1172-1210` hashes passwords with per-account random-salted iterative SHA-256 (`sha256$v1$<salt>$<digest>`) and `ServerContext::new_production()` (`crates/eve-server/src/router.rs:94-116`) starts without demo accounts, but does not yet use `argon2`, account bans, or an online session lock (`OF-24`). | `crates/eve-server/src/router.rs:1510-1615` (`router::tests::test_authentication_and_ownership_enforcement` — partial) | `479e633` |
+| `D-5` | `NOT STARTED` | `crates/eve-server/src/main.rs:28-75` reads environment variables only; no `evomu.toml` config file loader exists yet. | — | — |
+
+---
+
+## Phase T: Test and Acceptance Infrastructure (`T-1`…`T-7`)
+
+| ID | Status | Evidence (file:line) | Proving test | Commit |
+| :--- | :--- | :--- | :--- | :--- |
+| `T-1` | `NOT STARTED` | No `eve-testkit` crate with `attest(&[row_ids])`, no `// parity: <row id>` test tags in `crates/`, and no `docs/parity/triage.json` exist yet. | — | — |
+| `T-2` | `NOT STARTED` | `crates/eve-sde/src/lib.rs:514-561` tests only the 95-type embedded seed; no data-driven sweeps attesting `sde:*` or all 2,854 `effect:*` rows exist yet. | — | — |
+| `T-3` | `NOT STARTED` | No `proptest` suites (`>= 10k` cases) or `cargo fuzz` targets exist in the workspace yet. | — | — |
+| `T-4` | `NOT STARTED` | `client-bridge/evomu_bridge.py` has `--self-test`, but no client-captured golden fixtures round-tripping marshal, destiny, and Quasar payloads against the client's codecs exist yet. | — | — |
+| `T-5` | `NOT STARTED` | `cargo-llvm-cov` and `cargo-mutants` (`--in-diff` `>= 85%`) are not yet integrated into the workspace test workflow. | — | — |
+| `T-6` | `NOT STARTED` | `tools/client-harness/run_journeys` does not exist yet. | — | — |
+| `T-7` | `NOT STARTED` | Server handlers call `SystemTime::now()` directly; no injectable server clock or time-acceleration engine exists yet. | — | — |
+
+---
+
+## Phase 2: Wire Protocol (`P-1`…`P-7`)
+
+| ID | Status | Evidence (file:line) | Proving test | Commit |
+| :--- | :--- | :--- | :--- | :--- |
+| `P-1` | `PARTIAL` | `crates/eve-proto/src/lib.rs:764-783, 1091-1126, 1352-1403` encodes (`768-782`) and decodes (`1108-1121`) trailing zero-width (`dbtype_bit_width == 0` at `1394-1402`, covering `STR`/`WSTR`/`BYTES`) object columns after the zero-compressed RLE blob, but `crates/eve-proto/src/lib.rs:1658-1792` lacks a unit test round-tripping `PyPackedRow` with mixed fixed/object columns and verifying that following stream elements still decode (`OF-21`). | — | `479e633` |
+| `P-2` | `PARTIAL` | `crates/eve-proto/src/lib.rs:108-145` defines `PyRep::rowset` (`util.Rowset`) and `PackedRow`, but lacks typed `DBRow` / `CRowset` / `CIndexedRowset` / `PackedRowList` encoders from `DBRowDescriptor` in `invbroker.List`, `GetCharactersToSelect`, and `marketProxy`. | `crates/eve-proto/src/lib.rs:1719-1748` (`tests::test_keyval_rowset_and_objectex_roundtrip` — partial) | `479e633` |
+| `P-3` | `NOT STARTED` | `crates/eve-server/src/services/auth_cache.rs:21-190` does not implement `objectCaching.GetCachableObject` or `CachedMethodCallResult` wrappers (`objectCaching` returns `UnimplementedRPC`). | — | — |
+| `P-4` | `NOT STARTED` | `crates/eve-server/src/services/auth_cache.rs:21-190` does not implement `config.GetMultiOwnersEx/LocationsEx/StationEx/InvTypesEx/AllianceShortNamesEx/CorpTickerNamesEx` (`config` returns `UnimplementedRPC`). | — | — |
+| `P-5` | `NOT STARTED` | No generic `notify(char/corp/system/all, event, payload)` marshaled `machoNet` notification router exists (`crates/eve-server/src/main.rs:215-255` streams JSON strings). | — | — |
+| `P-6` | `NOT STARTED` | `crates/eve-server/src/main.rs:264-390` (`handle_macho_client`) replies `AuthenticationReq("ok")` to any 6-tuple on TCP `26000` instead of running the native `machoNet` handshake state machine (`OF-20`, `OF-29`). | — | — |
+| `P-7` | `PARTIAL` | `crates/eve-destiny/src/lib.rs:654-995` (`pub mod wire`) implements `encode_add_balls` and `encode_destiny_updates`, but `crates/eve-server/src/main.rs:215-255` still sends JSON strings for destiny tick updates (`OF-30`). | — | `479e633` |
+
+---
+
+## Phase 3: Space Simulation (`SP-1`…`SP-5`)
+
+| ID | Status | Evidence (file:line) | Proving test | Commit |
+| :--- | :--- | :--- | :--- | :--- |
+| `SP-1` | `NOT STARTED` | `crates/eve-server/src/system_actor.rs:218-223` initializes an empty `Ballpark`; stars, planets, moons, belts, gates, and stations from the SDE are not loaded as balls or listed in `SetState`. | — | — |
+| `SP-2` | `PARTIAL` | `crates/eve-destiny/src/lib.rs:519-531` defines `balls_in_bubble`, but `crates/eve-server/src/system_actor.rs:250-322` does not scope visibility or destiny updates per bubble grid. | `crates/eve-destiny/src/lib.rs:1072-1117` (`tests::test_turret_wrecking_shot_missile_and_proximity_decloak` — partial: unit level only) | `479e633` |
+| `SP-3` | `PARTIAL` | `crates/eve-server/src/services/space_destiny.rs:118-420` implements `CmdWarpToPoint`, `CmdWarpToStuff`, `150 km` min warp distance, and warp scramble checks, but `CmdAlignTo`, `CmdSetSpeedFraction`, `UpdateStateRequest`, warp capacitor cost, and separate handlers for `CmdFollowBall`, `CmdOrbit`, and `CmdKeepAtRange` (currently combined at `space_destiny.rs:86-116`) are incomplete. | `crates/eve-server/tests/e2e_journeys.rs:3766-3795` (`test_review_r8_regressions` — partial) | `479e633` |
+| `SP-4` | `PARTIAL` | `crates/eve-server/src/services/space_destiny.rs:462-593` (`CmdStargateJump`) checks `2,500 m` gate range and spawns at `dest_gate_pos + 1500m`, but erroneously computes jump fatigue on stargate jumps (`line 585`) and lacks a post-jump gate cloak. | `crates/eve-server/tests/e2e_journeys.rs:215-228` (`test_e2e_01_to_18_integration_journeys` — partial) | `479e633` |
+| `SP-5` | `PARTIAL` | `crates/eve-server/src/services/station_structure.rs:88-305` (`Undock`/`Dock`) checks `2,500 m` center-to-center distance when in space (`OF-12`), but lacks station radius-aware docking perimeter, dock delay, and undock vector alignment. | `crates/eve-server/tests/e2e_journeys.rs:1380-1410` (`test_blocking_findings_b01_to_b15_regressions` — partial) | `479e633` |
+
+---
+
+## Phase 4: Dogma and Fitting (`DG-1`…`DG-6`)
+
+| ID | Status | Evidence (file:line) | Proving test | Commit |
+| :--- | :--- | :--- | :--- | :--- |
+| `DG-1` | `PARTIAL` | `crates/eve-dogma/src/lib.rs:684-1221` implements the 6-operator stacking-penalized modifier pipeline, but uses hardcoded group rules (`lines 783-818` for groups `762` and `774`, and `line 1155` for group `46`) instead of evaluating V24 `modifierInfo` expressions from the SDE (`OF-18`, `OF-31`). | `crates/eve-dogma/src/lib.rs:1367-1395` (`tests::test_rifter_velocity_with_overdrives_and_skills` — partial) | `479e633` |
+| `DG-2` | `PARTIAL` | `crates/eve-dogma/src/lib.rs:823-1099` (`fit_and_online_module`) and `crates/eve-server/src/services/inventory_fitting.rs:145-259` enforce slot-type effects (`861-874`), hull slot counts (`876-905`, with subsystem slots hardcoded by group `963` at `896`), turret/launcher hardpoints (`907-955`), `canFitShipGroup`/`Type` (`957-991`), `rigSize` (`993-1009`), skill prerequisites (`1011-1039`), and CPU/PG/Calibration limits (`1047-1081`, though `cal_avail` at `1067` checks against full `UPGRADE_CAPACITY` rather than subtracting already-used calibration), and do not yet enforce `maxGroupFitted`/`maxGroupOnline`/`maxGroupActive` (`1544`, `978`, `763`) or separate fit from online (`DG-3`). | `crates/eve-dogma/src/lib.rs:1397-1439` (`tests::test_ship_fitting_thermodynamics_boosters_and_abyssal_roll`), `crates/eve-server/tests/e2e_journeys.rs:3860-3925` (`test_review_r8_regressions` — partial) | `479e633` |
+| `DG-3` | `PARTIAL` | `crates/eve-dogma/src/lib.rs:823-1099` (`fit_and_online_module`) models `ModuleState::Online` vs `Offline` in memory, but `crates/eve-server/src/services/inventory_fitting.rs` does not expose `SetModuleOnline` / `TakeModuleOffline`, persist module online state in `InventoryItemRecord`, or emit `OnModuleAttributeChanges`. | — | `479e633` |
+| `DG-4` | `PARTIAL` | `crates/eve-server/src/services/inventory_fitting.rs:424-506` handles `dogmaIM.Activate` / `Overload` / `Deactivate` as a synchronous in-memory state toggle on `ShipFittingEngine`, without cycle timers in `SystemActor`, capacitor/charge consumption per cycle, auto-repeat, warp/dock/range deactivation, or `OnGodmaShipEffect` (`combat_crimewatch.rs` still uses `dogmaIM.FireWeapon`, `OF-31`). | `crates/eve-server/tests/e2e_journeys.rs:166-180` (`test_e2e_01_to_18_integration_journeys` — partial: static Overload toggle only) | `479e633` |
+| `DG-5` | `NOT STARTED` | No `AddTarget` / `RemoveTarget` / `ClearTargets` target lock manager with scan-resolution lock time, max targets, or max range exists. | — | — |
+| `DG-6` | `PARTIAL` | `crates/eve-server/src/router.rs:312-596` and `crates/eve-server/src/services/inventory_fitting.rs:308-422` implement `dogmaIM.LoadAmmo` with group/size/clip-capacity validation and stack splitting, but `UnloadAmmo`, reload timers, and persistent `LinkWeapons` weapon groups are not implemented. | `crates/eve-server/tests/e2e_journeys.rs:2140-2235` (`test_blocking_findings_b01_to_b15_regressions` — partial) | `479e633` |
+
+---
+
+## Phase 5: Combat and PvE Loop (`C-1`…`C-8`)
+
+| ID | Status | Evidence (file:line) | Proving test | Commit |
+| :--- | :--- | :--- | :--- | :--- |
+| `C-1` | `PARTIAL` | `crates/eve-server/src/services/combat_crimewatch.rs:340-715` computes turret hit chance (`turret_chance_to_hit`) and missile damage (`missile_damage_factor`) from fitted weapon + loaded charge attributes and target signature/velocity/resists, but runs synchronously inside `dogmaIM.FireWeapon` rather than `DG-4` module cycles, and missiles are instantaneous rather than in-flight entities (`OF-31`). | `crates/eve-server/tests/e2e_journeys.rs:4640-4795` (`test_review_r8_regressions` — partial) | `479e633` |
+| `C-2` | `PARTIAL` | `crates/eve-server/src/router.rs:600-740` (`build_ship_combat_state`) initializes `CombatState` from ship Dogma attributes and 12 resonances, but `CombatState` HP damage is not persisted to `WorldRepository` and `OnDamageStateChange` is not emitted as a marshaled notification. | `crates/eve-server/tests/e2e_journeys.rs:1880-1900` (`test_blocking_findings_b01_to_b15_regressions` — partial) | `479e633` |
+| `C-3` | `PARTIAL` | `crates/eve-server/src/services/combat_crimewatch.rs:755-975` spawns wreck ball `26557`, deletes the destroyed hull, ejects a capsule (`670`), and records a `KillmailRecord` only upon actual destruction (`OF-07`), but uses hardcoded wreck type `26557`, does not roll player fitted/cargo loot survival into the wreck, and does not credit `insured_payout_isk`. | `crates/eve-server/src/router.rs:2705-2800` (`router::tests::test_all_18_e2e_journeys_and_catalog_coverage` — partial) | `479e633` |
+| `C-4` | `PARTIAL` | `crates/eve-server/src/services/combat_crimewatch.rs:1015-1035` reads NPC bounty from SDE attribute `481` (`entityKillBounty`), but there is no SDE belt/gate NPC spawn manager with respawn timers or `idle → chase → engage` NPC AI loop in `system_actor.rs`. | `crates/eve-server/tests/e2e_journeys.rs:455-492` (`test_e2e_01_to_18_integration_journeys` — partial) | `479e633` |
+| `C-5` | `NOT STARTED` | Superseded by Phase 5M (`MN-01`…`MN-18`); no asteroid belts or mining cycles exist yet (`OF-26`). | — | — |
+| `C-6` | `PARTIAL` | Superseded by `MN-11` and `MN-12`; `crates/eve-server/src/services/industry_pi.rs:31-235` has only a 2-ore `sde.compressible_types` compression handler (with hardcoded portion `100` at `lines 187, 193, 195`) and a 4-ore Tritanium-only reprocessing handler (`OF-27`). | `crates/eve-server/src/router.rs:2440-2460` (`router::tests::test_all_18_e2e_journeys_and_catalog_coverage` — partial) | `479e633` |
+| `C-7` | `NOT STARTED` | Salvager modules, tractor beams, and combat/utility drone launch/recall/engage (`DroneAI`) are not implemented. | — | — |
+| `C-8` | `PARTIAL` | `crates/eve-server/src/services/combat_crimewatch.rs:515-584` and `1060-1130` compute `concord_response_delay_sec(sys_sec)` and destroy the criminal's ship in high-sec, but delete the ship immediately inside the RPC call instead of spawning CONCORD NPC ships in `Ballpark` after the delay timer. | `crates/eve-server/src/router.rs:2705-2745` (`router::tests::test_all_18_e2e_journeys_and_catalog_coverage` — partial) | `479e633` |
+
+---
+
+## Phase 5M: Full Mining System (`MN-01`…`MN-18`)
+
+| ID | Status | Evidence (file:line) | Proving test | Commit |
+| :--- | :--- | :--- | :--- | :--- |
+| `MN-01` | `NOT STARTED` | `docs/index/sde_seed.json` seeds only 4 ore types (`1230`, `28432`, `1228`, `28429`) and `Miner I` (`483`) without `typeMaterials`, full `compressibletypes`, ice/gas/moon ores, crystals, or belt celestials (`OF-26`, `OF-27`). | — | — |
+| `MN-02` | `NOT STARTED` | No asteroid belt balls or asteroid balls exist in `crates/eve-server/src/system_actor.rs` (`OF-26`). | — | — |
+| `MN-03` | `NOT STARTED` | No persistent asteroid quantities, depletion removal, `OnAsteroidTerminated` notification, or downtime belt respawn exist (`OF-26`, `OF-28`). | — | — |
+| `MN-04` | `NOT STARTED` | No `dogmaIM.Activate` mining laser / strip miner cycle moving ore into holds or emitting `OnOreMined` / `OnMiningLaserFiredLocal` exists (`OF-26`, `OF-28`). | — | — |
+| `MN-05` | `NOT STARTED` | No specialized ore/ice/gas hold (`specialMaterialBay`/`oreHold`) routing or overflow logic exists (`OF-26`). | — | — |
+| `MN-06` | `NOT STARTED` | Mining crystals, crystal volatility damage, and mining residue/waste are not implemented (`OF-26`). | — | — |
+| `MN-07` | `NOT STARTED` | Mining skills (`Mining`, `Astrogeology`, `Mining Barge`, `Exhumers`), MLUs, rigs, implants, and Mining Foreman bursts are not wired through `DG-1` `modifierInfo` (`OF-26`, `OF-31`). | — | — |
+| `MN-08` | `NOT STARTED` | Ice harvesters and gas cloud harvesters are not implemented (`OF-26`). | — | — |
+| `MN-09` | `NOT STARTED` | Mining drones and excavator drones are not implemented (`OF-26`). | — | — |
+| `MN-10` | `NOT STARTED` | `miningScanMgr.perform_scan` returns `UnimplementedRPC` (`OF-28`). | — | — |
+| `MN-11` | `PARTIAL` | `crates/eve-server/src/services/industry_pi.rs:153-235` looks up `ctx.sde.compressible_types` (`line 189`, which only has `1230 -> 28432` and `1228 -> 28429` in `sde_seed.json`) with a hardcoded portion of `100` (`lines 187, 193, 195`) on a shared match arm (`structureCompressionMgr \| inSpaceCompressionMgr`), without fleet/compressor range checks, Standup Compressor service checks, or gas decompression (`OF-27`). | `crates/eve-server/src/router.rs:2440-2450` (`router::tests::test_all_18_e2e_journeys_and_catalog_coverage` — partial) | `479e633` |
+| `MN-12` | `PARTIAL` | `crates/eve-server/src/services/industry_pi.rs:31-147` reprocesses only a 4-ore hardcoded table (`1230`, `28432`, `1228`, `28429`) into Tritanium (`34`) and retains the batch remainder (`lines 106-115`), without SDE `typeMaterials`, station/structure tax journaling, or `OnReprocessingMaterialsChanged` (`OF-27`). | `crates/eve-server/src/router.rs:1643-1656, 2450-2460` (`router::tests::test_authentication_and_ownership_enforcement`, `router::tests::test_all_18_e2e_journeys_and_catalog_coverage` — partial) | `479e633` |
+| `MN-13` | `NOT STARTED` | `moonExtractions.*` returns `UnimplementedRPC`; no Athanor/Tatara moon drill extraction, chunk arrival, or moon field fracture exists (`OF-26`). | — | — |
+| `MN-14` | `NOT STARTED` | `autoMoonMining.RequestMiningDetails` / `RequestMiningCycleOutput` returns `UnimplementedRPC`; no Metenox Moon Drill simulation exists (`OF-26`). | — | — |
+| `MN-15` | `NOT STARTED` | No ore anomalies, ice belt respawn timers, or gas signature clouds exist (`OF-26`). | — | — |
+| `MN-16` | `NOT STARTED` | `characterMiningLedger.GetCharacterLogs` and `corpMiningLedger.GetObserverLedger` / `GetObserversWithMiningEvents` return `UnimplementedRPC` (`OF-28`). | — | — |
+| `MN-17` | `NOT STARTED` | Belt rats targeting miners and Living World `MiningOp` fleets physically mining belt asteroids do not exist (`crates/eve-server/src/living_world.rs:129-295` only labels static convoys). | — | — |
+| `MN-18` | `NOT STARTED` | Mining agent missions with pocket asteroid fields, ledger-driven daily goal progress, and SDE ore/mineral/compressed-ore market seeding are not implemented (`OF-26`). | — | — |
+
+---
+
+## Phase 6: Character Progression and GM Tooling (`CH-1`…`CH-5`)
+
+| ID | Status | Evidence (file:line) | Proving test | Commit |
+| :--- | :--- | :--- | :--- | :--- |
+| `CH-1` | `NOT STARTED` | Skills do not advance over time in a real-time queue loop and `OnSkillTrained` / `OnMultipleSkillsTrained` are not emitted (`OF-32`). | — | — |
+| `CH-2` | `PARTIAL` | `crates/eve-server/src/services/character_skills.rs:269-605` implements `SaveSkillQueue`, `GetSkillQueue`, `InjectSkillPoints`, and `ApplyFreeSkillPoints`, but `SaveSkillQueue` appends a single `(skill_id, level)` instead of replacing the full list, `GetEndOfTraining`/`GetSkillHistory`/`InjectSkillIntoBrain`/neural remap are missing, and `ApplyFreeSkillPoints` ignores `(typeID, points)` args (`character_skills.rs:450-554`). | `crates/eve-server/tests/e2e_journeys.rs:4370-4460` (`test_review_r8_regressions` — partial) | `479e633` |
+| `CH-3` | `PARTIAL` | `crates/eve-db/src/lib.rs:2269-2360` (`create_character`) seeds race-specific corvettes (`588`/`596`/`601`/`606`) and starter school stations, but `crates/eve-server/src/services/character_skills.rs:126-162` (`CreateCharacterWithDoll`) parses `(name, race_id, bloodline_id, ancestry_id, school_id)` instead of V24 `(name, bloodlineID, genderID, ancestryID, charInfo, portraitInfo, schoolID)` (`OF-32`). | `crates/eve-db/src/lib.rs:2935-2960` (`tests::test_durable_snapshot_persistence_and_domain_mutations` — partial) | `479e633` |
+| `CH-4` | `PARTIAL` | `crates/eve-server/src/services/character_skills.rs:33-107, 1082-1139` implements `GetCharactersToSelect`/`GetCharacterInfo` and `home_station.set_home_station`, but separate handlers for public info, bio, notes, contacts, and labels are missing. | `crates/eve-server/tests/e2e_journeys.rs:1447-1474` (`test_blocking_findings_b01_to_b15_regressions` — partial) | `479e633` |
+| `CH-5` | `PARTIAL` | `crates/eve-server/src/services/auth_cache.rs:137-187` (`slash.SlashCmd`) checks role `0x02` and executes `/giveisk`, but lacks `/createitem`, `/giveskill(s)`, `/tr`, `/heal`, `/spawn`, `/unspawn`, `/setattr`, `/getattr`, `/fit`, `/kill`, `/location`, `/online`, per-command role masks, and audit logging. | `crates/eve-server/src/router.rs:1570-1640` (`router::tests::test_authentication_and_ownership_enforcement` — partial) | `479e633` |
+
+---
+
+## Phase 7: Economy, Industry and Missions (`E-1`…`E-6`)
+
+| ID | Status | Evidence (file:line) | Proving test | Commit |
+| :--- | :--- | :--- | :--- | :--- |
+| `E-1` | `PARTIAL` | `crates/eve-server/src/services/market_contracts.rs:159-550` computes broker fee and sales tax from the character's trained `Broker Relations` (`3446`), `Accounting` (`16622`), and station `owner_faction_id`/`owner_corporation_id` standings and journals them (`OF-14`), but `Advanced Broker Relations` is not applied. | `crates/eve-server/tests/e2e_journeys.rs:4909-5007` (`test_review_r8_regressions` — partial) | `479e633` |
+| `E-2` | `PARTIAL` | `crates/eve-server/src/services/market_contracts.rs:72-820` implements `GetOrders`, `GetCharOrders`, `PlaceCharOrder`, and `BuyMultipleItems` with partial fills and journal entries, but `ModifyCharOrder`, `CancelCharOrder` (with escrow/item refund), order expiry, market history from transactions, and V24 `PlaceBuyOrder`/`PlaceMultiSellOrder` are not implemented. | `crates/eve-server/tests/e2e_journeys.rs:4461-4540` (`test_review_r8_regressions` — partial) | `479e633` |
+| `E-3` | `PARTIAL` | `crates/eve-server/src/services/market_contracts.rs:825-1465` implements `ItemExchange` and `Courier` contract creation, acceptance, courier plastic wrap (`24445`), destination delivery check, and expiry/failure collateral payout (`OF-10`), but lacks `requested_items` on `ItemExchange` and auction bids. | `crates/eve-server/tests/e2e_journeys.rs:2605-2795` (`test_review_r6_np0_np1_regressions` — partial) | `479e633` |
+| `E-4` | `PARTIAL` | `crates/eve-server/src/services/industry_pi.rs:242-795` enforces blueprint locking, BPO/BPC rules, ME/TE from the blueprint item, `end_unix` completion time, copying (`activity 5`), and T2 invention (`activity 8`) consuming datacores + T1 BPC (`OF-09`), but hardcodes invention output to `11372` (`lines 285-289`) and lacks system cost index × EIV install fee and `portionSize * runs` output scaling from full SDE. | `crates/eve-server/tests/e2e_journeys.rs:905-1065` (`test_blocking_findings_b01_to_b15_regressions` — partial) | `479e633` |
+| `E-5` | `PARTIAL` | `crates/eve-server/src/services/agents_missions.rs:15-520` implements mission offer/accept/decline/quit/complete, standing gates with `Connections`/`Diplomacy`, per-mission spawned NPCs, courier delivery checks, and skill-scaled rewards (`OF-08`), but lacks `DeferMission`, agent/corp/faction standing propagation with `Social`, and mission replay cooldowns (terminal missions currently block re-requesting forever). | `crates/eve-server/tests/e2e_journeys.rs:3290-3690, 5008-5117` (`test_review_r8_regressions` — partial) | `479e633` |
+| `E-6` | `PARTIAL` | `crates/eve-server/src/services/industry_pi.rs:801-1042` implements `CreateColony` (checking `planet_ids` and `Interplanetary Consolidation` `2495`) and `Flush` (charging POCO export tax), but lacks pin/link/route graphs and extraction/factory cycles over time. | `crates/eve-server/tests/e2e_journeys.rs:4797-4826` (`test_review_r8_regressions` — partial) | `479e633` |
+
+---
+
+## Phase 8: Social and Exploration (`SO-1`…`SO-7`)
+
+| ID | Status | Evidence (file:line) | Proving test | Commit |
+| :--- | :--- | :--- | :--- | :--- |
+| `SO-1` | `PARTIAL` | `crates/eve-server/src/services/social_corp_fleet.rs:136-166` implements basic single-recipient `SendMail`, but lacks recipient lists, headers/body fetch, sync, read state, labels, trash, and mailing lists. | `crates/eve-server/src/router.rs:2675-2682` (`router::tests::test_all_18_e2e_journeys_and_catalog_coverage` — partial) | `479e633` |
+| `SO-2` | `PARTIAL` | `crates/eve-server/src/services/social_corp_fleet.rs:168-198` implements `CreateFleet`, but lacks invite/accept handshake, leave, kick, wings/squads, roles, MOTD, broadcasts, and fleet warp. | `crates/eve-server/src/router.rs:2652-2664` (`router::tests::test_all_18_e2e_journeys_and_catalog_coverage` — partial) | `479e633` |
+| `SO-3` | `PARTIAL` | `crates/eve-server/src/services/social_corp_fleet.rs:200-394` implements `CreateCorporation`, `CreateAlliance`, and `GetAlliance`, but lacks member applications/join/leave, roles/titles/divisions, ticker uniqueness checks, and alliance join. | `crates/eve-server/tests/e2e_journeys.rs:1780-1820` (`test_blocking_findings_b01_to_b15_regressions` — partial) | `479e633` |
+| `SO-4` | `PARTIAL` | `crates/eve-server/src/services/social_corp_fleet.rs:23-134` implements `BookmarkLocation` and `GetBookmarks` with warp-to-bookmark in `crates/eve-server/src/services/space_destiny.rs:174-260`, but lacks folders, delete, copy, and V24 shared folders. | `crates/eve-server/src/router.rs:2665-2674` (`router::tests::test_all_18_e2e_journeys_and_catalog_coverage` — partial) | `479e633` |
+| `SO-5` | `NOT STARTED` | No per-system anomaly/signature generator with timers, probe entities, multi-probe trilateration math, D-scan cone over balls, or dungeon pocket acceleration gates exist (`scanMgr.RequestScans` at `crates/eve-server/src/services/space_destiny.rs:1219-1304` is a fixture stub). | — | — |
+| `SO-6` | `PARTIAL` | `crates/eve-server/src/services/space_destiny.rs:595-765` deducts ship mass from `wormhole_remaining_mass_kg` on jump, but uses a single per-system `SystemDynamicState` field and hardcoded `750_000_001` (`26272`) instead of per-wormhole entities with SDE wormhole types, destinations, mass limits, and lifetimes (`OF-11`). | `crates/eve-server/tests/e2e_journeys.rs:320-340` (`test_e2e_01_to_18_integration_journeys` — partial) | `479e633` |
+| `SO-7` | `NOT STARTED` | No XMPP server/bridge or Local/Corp/Fleet chat channel membership synchronization exists. | — | — |
+
+---
+
+## Phase Q: Quasar / Public-Gateway Backend Services (`Q-1`…`Q-9`)
+
+| ID | Status | Evidence (file:line) | Proving test | Commit |
+| :--- | :--- | :--- | :--- | :--- |
+| `Q-1` | `NOT STARTED` | No extraction of the 1,455 `FileDescriptorProto` schemas from `code.ccp` or `prost` Rust codegen exists yet. | — | — |
+| `Q-2` | `PARTIAL` | `crates/eve-server/src/services/cosmetics_events.rs:20-310` dispatches a small set of `publicGatewaySvc` methods via PyRep/JSON vertical-slice handlers, without real Quasar protobuf request/response/notice framing, idempotency keys, or multi-client notice fan-out. | `crates/eve-server/tests/e2e_journeys.rs:1800-1826` (`test_blocking_findings_b01_to_b15_regressions` — partial) | `479e633` |
+| `Q-3` | `NOT STARTED` | All `quasar:` ledger rows in `auth`, `login`, `user`, `entitlement`, `omega`, `membership`, `payment`, `plex`, `store`, `vendors`, `fulfillment`, `isk`, `legal`, `pii`, `device`, `cdn`, `localization` are open (`cosmetics_events.rs:145-225` has only non-protobuf vertical-slice stubs). | — | — |
+| `Q-4` | `NOT STARTED` | All `quasar:` ledger rows in `character`, `skill`, `implant`, `clone`, `career`, `achievement`, `academy`, `goal`, `dailygoal`, `seasonalevent`, `battlepass`, `campaign`, `opportunity`, `narrative`, `tale`, `communitytrack` are open (`cosmetics_events.rs:227-305` has only non-protobuf vertical-slice stubs). | — | — |
+| `Q-5` | `NOT STARTED` | All `quasar:` ledger rows in `corporation`, `corporationgoal`, `freelance`, `alliance`, `contact`, `standing`, `mail`, `chat`, `notification`, `calendar`, `fleet`, `medal`, `presence`, `search`, `bookmark`, `tag`, `war`, `duel`, `securitystatus` are open. | — | — |
+| `Q-6` | `NOT STARTED` | All `quasar:` ledger rows in `market`, `contract`, `industry`, `blueprint`, `asset`, `assetholding`, `inventory`, `container`, `accounting`, `loyaltypoints`, `planet`, `planetinteraction`, `ore`, `moon`, `asteroidbelt` are open. | — | — |
+| `Q-7` | `NOT STARTED` | All `quasar:` ledger rows in `ship`, `module`, `fighter`, `dogma`, `effect`, `capacitor`, `space`, `spacecomponent`, `bubble`, `solarsystem`, `constellation`, `region`, `universe`, `star`, `stargate`, `station`, `structure`, `starbase`, `wormhole`, `deadspace`, `dungeon`, `npc`, `pirate`, `piratestronghold`, `dynamicbountysystem`, `killmail`, `pvp`, `probe`, `vanguard`, `starterspace` are open. | — | — |
+| `Q-8` | `NOT STARTED` | All `quasar:` ledger rows in `sovereignty`, `factionwarfare`, `faction`, `operation`, `tournament`, `raffle`, `contextualoffer`, `csat`, `projectdiscovery`, `thirdpartyapi` are open. | — | — |
+| `Q-9` | `NOT STARTED` | All `quasar:` ledger rows in `cosmetic`, `color`, `graphics`, `app`, `client`, `eve`, `eve_public_root`, `quasar`, `monolith`, `network`, `id`, `idempotency`, `math`, `nodegraph`, `ui`, `debug`, `botdetection`, `legacy` are open (`cosmetics_events.rs:25-143` has only non-protobuf vertical-slice stubs). | — | — |
+
+---
+
+## Phase ESI: EVE Swagger Interface and SSO (`ESI-1`…`ESI-7`)
+
+| ID | Status | Evidence (file:line) | Proving test | Commit |
+| :--- | :--- | :--- | :--- | :--- |
+| `ESI-1` | `NOT STARTED` | No `login.eveonline.com` OAuth2 / PKCE / JWKS / launcher-token server exists yet. | — | — |
+| `ESI-2` | `NOT STARTED` | No OpenAPI-conformant ESI HTTP framework (`ETag`, `X-Pages`, bearer/scope validation, schema validation) exists yet. | — | — |
+| `ESI-3` | `NOT STARTED` | All `esi:` ledger rows in Universe, Status, Meta, Routes, Search, Incursions, Insurance, Sovereignty, Wars, Faction Warfare, Dogma, and Killmails are open. | — | — |
+| `ESI-4` | `NOT STARTED` | All `esi:` ledger rows in Character, Clones, Skills, Location, Fittings, Assets, Wallet, Loyalty, Calendar, Contacts, and Mail are open. | — | — |
+| `ESI-5` | `NOT STARTED` | All `esi:` ledger rows in Corporation and Alliance are open. | — | — |
+| `ESI-6` | `NOT STARTED` | All `esi:` ledger rows in Market, Contracts, Industry, and Planetary Interaction are open. | — | — |
+| `ESI-7` | `NOT STARTED` | All `esi:` ledger rows in Fleets and User Interface are open. | — | — |
+
+---
+
+## Phase Z: Ledger Closure and Final Acceptance (`Z-1`…`Z-8`)
+
+| ID | Status | Evidence (file:line) | Proving test | Commit |
+| :--- | :--- | :--- | :--- | :--- |
+| `Z-1` | `PARTIAL` | `0 / 1,230` `rpc:` ledger rows are closed (`0` tagged tests; ~74 client methods have partial vertical-slice handlers in `crates/eve-server/src/services/*.rs`). | — | `479e633` |
+| `Z-2` | `NOT STARTED` | `0` `notify:` ledger rows are closed or triaged NA. | — | — |
+| `Z-3` | `PARTIAL` | `crates/eve-destiny/src/lib.rs:654-995` encodes `AddBalls2` and destiny actions in unit tests, but `0` `destiny:` / `ballmode:` ledger rows are closed on the binary stream. | — | `479e633` |
+| `Z-4` | `NOT STARTED` | `0` `sde:` and `effect:*` ledger rows are attested against the real SDE. | — | — |
+| `Z-5` | `NOT STARTED` | `0` `feat:` ledger rows have passing `// parity:` tags yet. | — | — |
+| `Z-6` | `NOT STARTED` | `0` `journey:` ledger rows pass on the real V24 client via `tools/client-harness/run_journeys`. | — | — |
+| `Z-7` | `NOT STARTED` | Workspace line coverage (`>= 90%`) and per-crate mutation score (`>= 85%`) are not yet met in `final_gate.py`. | — | — |
+| `Z-8` | `NOT STARTED` | `.evomu-reviews/final_gate.json` does not yet exist with `"passed": true`. | — | — |
+
+---
+
+## Phase Gate Log
+
+| Phase | DONE / PARTIAL / NOT STARTED | Review Run ID & Verdict | Tests Added / Executed | Notes |
+| :--- | :--- | :--- | :--- | :--- |
+| **Step 1 Baseline Audit** | `0 DONE` / `48 PARTIAL` / `61 NOT STARTED` (109 total tasks; `0 / 45 / 33` across `Phases 0–8` + `5M`) | Pending Step 1 review | 27 existing workspace tests (`479e633`) | Re-keyed `docs/ACTION_PLAN_STATUS.md` to all 109 canonical task IDs (`Phases 0, 1, T, 2, 3, 4, 5, 5M, 6, 7, 8, Q, ESI, Z`); moved old `P0-*`…`P4-*` rows verbatim to Historical Appendix. |
+
+---
+
+## Historical Appendix (Rounds 1–27 Vertical-Slice Tracker)
+
+> The `P0-*`…`P4-*` tables below are moved verbatim from the pre-canonical `docs/ACTION_PLAN_STATUS.md` (`479e633`) for historical traceability only and do not count toward any canonical task ID above.
+
+### Phase 0 — Tooling, Static Data Seed & Wire Foundation (`M0`–`M1`)
 
 | ID | Task | Primary Files (`file:line`) | Done when | Status |
 | :--- | :--- | :--- | :--- | :--- |
@@ -20,7 +241,7 @@ This document tracks the concrete engineering tasks, exit gates, and verificatio
 
 ---
 
-## Phase 1 — Transactional Persistence, Dogma Engine & 1 Hz Destiny Ballpark (`M2`–`M4`)
+### Phase 1 — Transactional Persistence, Dogma Engine & 1 Hz Destiny Ballpark (`M2`–`M4`)
 
 | ID | Task | Primary Files (`file:line`) | Done when | Status |
 | :--- | :--- | :--- | :--- | :--- |
@@ -32,7 +253,7 @@ This document tracks the concrete engineering tasks, exit gates, and verificatio
 
 ---
 
-## Phase 2 — Combat, CrimeWatch 2.0, Market, Industry & Planetary Interaction (`M5`–`M6`)
+### Phase 2 — Combat, CrimeWatch 2.0, Market, Industry & Planetary Interaction (`M5`–`M6`)
 
 | ID | Task | Primary Files (`file:line`) | Done when | Status |
 | :--- | :--- | :--- | :--- | :--- |
@@ -43,7 +264,7 @@ This document tracks the concrete engineering tasks, exit gates, and verificatio
 
 ---
 
-## Phase 3 — Structures, Capital Jump Drives, Sovereignty, FW, NPE & Living World (`M7`–`M8`)
+### Phase 3 — Structures, Capital Jump Drives, Sovereignty, FW, NPE & Living World (`M7`–`M8`)
 
 | ID | Task | Primary Files (`file:line`) | Done when | Status |
 | :--- | :--- | :--- | :--- | :--- |
@@ -55,7 +276,7 @@ This document tracks the concrete engineering tasks, exit gates, and verificatio
 
 ---
 
-## Phase 4 — Truthful Documentation, Catalog Bijection & Adversarial Review Gate (`M8`)
+### Phase 4 — Truthful Documentation, Catalog Bijection & Adversarial Review Gate (`M8`)
 
 | ID | Task | Primary Files (`file:line`) | Done when | Status |
 | :--- | :--- | :--- | :--- | :--- |
@@ -67,7 +288,7 @@ This document tracks the concrete engineering tasks, exit gates, and verificatio
 
 ---
 
-## Overall Status Table
+### Overall Status Table
 
 | Phase | Scope | Verification Command | Exit Gate Status |
 | :--- | :--- | :--- | :--- |
