@@ -87,7 +87,7 @@ def main():
     env["EVOMU_PARITY_ATTEST_DIR"] = attest
     rc, out = sh([cargo, "test", "--workspace", "--no-fail-fast"], root, env=env, timeout=4 * 3600)
     open(os.path.join(out_dir, "tests.txt"), "w").write(out)
-    failed = sum(int(m) for m in re.findall(r"(\d+) failed", out))
+    failed = sum(int(m) for m in re.findall(r"test result: \w+\. \d+ passed; (\d+) failed", out))
     prc, pout = sh([sys.executable, os.path.join(HERE, "parity", "parity_status.py"), "--tests",
                     os.path.join(out_dir, "tests.txt"), "--attest-dir", attest, "--out",
                     os.path.join(out_dir, "parity.json"), "--md", os.path.join(out_dir, "parity.md"),

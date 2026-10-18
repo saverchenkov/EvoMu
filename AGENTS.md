@@ -55,6 +55,27 @@
 - Never bypass macOS Santa or other permission systems.
 - evemu_Crucible is LGPL: re-implement its logic, never copy it.
 
+## Pre-flight before every review (mandatory)
+- Before `run_review.py`, run:
+  `/usr/bin/python3 .agents/skills/evomu-adversarial-review/scripts/preflight.py --claims /tmp/evomu_claims.md`
+  It takes about a minute, against about ten for a review.
+  - It runs the tests and the parity check.
+  - It prints authoritative numbers and a claims template (`.evomu-reviews/preflight/claims_template.md`).
+  - It lints your claims for untraceable numbers, bad `path:line` references, quotes that don't exist in the repo, and ledger rows that aren't closed.
+- **Copy numbers from the template; don't type them.**
+- **Don't start a review until pre-flight prints `OK`.** Every lint problem must be fixed or explicitly explained in the claims. For example, a row you mention as still open, or a number about removed code that you cite with its commit hash.
+- Pre-flight also lists the rows newly closed since the last review, with their acceptance text. Re-check that every clause is really tested before claiming them.
+
+## Code layout: split the monoliths (one-time, right after Phase 1 commits)
+- The biggest drag on your throughput is re-reading a few huge files in 800-line windows: `crates/eve-server/tests/e2e_journeys.rs`, `crates/eve-db/src/lib.rs`, `crates/eve-server/src/router.rs`.
+- In a **separate, behaviour-neutral change** (task tag `S-REFACTOR`, no ledger rows):
+  - split tests into per-area files under `crates/eve-server/tests/` (`auth.rs`, `character.rs`, `inventory_fitting.rs`, `space.rs`, `combat.rs`, `market.rs`, `industry.rs`, `missions.rs`, `social.rs`, `structures.rs`, …) with shared helpers in `tests/common/mod.rs`;
+  - split `eve-db/src/lib.rs` into domain modules (`accounts`, `characters`, `inventory`, `market`, `industry`, `missions`, `corp`, `persistence`, …);
+  - split `router.rs` into dispatch, binding/monikers, and session handling.
+- Keep every test function name and every `// parity:` tag unchanged. Aim for files under about 1,500 lines.
+- Claims for that review: the passed-test count and the parity numbers are identical before and after (paste both pre-flight outputs), and the change has no behaviour edits.
+- From then on, keep new code in this layout.
+
 ## Increment size and WIP
 - **Review one canonical task (or a few tightly coupled ones) at a time**, not a whole phase. Smaller diffs review faster and fail more narrowly.
 - **To avoid losing work while a review is failing**, you may commit to a local `wip/<task-id>` branch without a review.

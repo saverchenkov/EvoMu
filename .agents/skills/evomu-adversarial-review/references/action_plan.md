@@ -418,7 +418,7 @@ Fleet warp · jump clone rules · invention details · implants · notification 
 3. Write failing tests first (wire-level where the task touches the protocol), tagged `// parity: <row id>`.
 4. Implement in Rust, re-implementing rather than copying. Keep handlers one per method. Use `try_with_mut_snapshot`. Use real SDE data only.
 5. Run `cargo test --workspace` (it must actually execute) and `cargo mutants --in-diff` on your diff (≥85% caught).
-6. Write `/tmp/evomu_claims.md`: task IDs, the ledger rows you claim closed, and exact claims.
+6. Write `/tmp/evomu_claims.md`: task IDs, the ledger rows you claim closed, and exact claims. Run `scripts/preflight.py --claims /tmp/evomu_claims.md` until it prints `OK`, pasting numbers from its template.
 7. Run `/usr/bin/python3 .agents/skills/evomu-adversarial-review/scripts/run_review.py --claims-file /tmp/evomu_claims.md`. Every few runs it also chains a gap audit that may append ledger rows. Those rows are now in scope.
 8. Fix until there is no P0 and no FALSE claim. Update `docs/ACTION_PLAN_STATUS.md` (task ID → status, ledger rows, test names, review run) and the `PLAN.md` labels honestly. Never edit this plan or the ledger. Commit with the task IDs.
 9. Go back to step 1. When `parity.md` shows 100%, run `scripts/final_gate.py`, fix what it reports, and repeat until it passes.

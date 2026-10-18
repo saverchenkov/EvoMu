@@ -28,6 +28,7 @@ Run the review **before** any of the following:
 - Ending a turn in which files in the repo changed. A `Stop` hook ([../../hooks.json](../../hooks.json)) enforces this one automatically.
 
 ## Steps
+0. **Pre-flight (mandatory, about 1 minute).** Run `/usr/bin/python3 .agents/skills/evomu-adversarial-review/scripts/preflight.py --claims /tmp/evomu_claims.md` and fix everything it reports until it prints `OK`. Copy numbers from `.evomu-reviews/preflight/claims_template.md`; never type them.
 1. **Write your claims** to a temporary file outside the repo, e.g. `/tmp/evomu_claims.md`. Copy what you intend to tell the user: every fix, feature, metric and verification statement, verbatim, one bullet each. Don't soften or omit anything; the reviewer checks each one.
 2. **Run the orchestrator** from the repo root, and give it time. It runs `cargo test` and then a long Opus review:
    ```bash
