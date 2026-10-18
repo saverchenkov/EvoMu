@@ -11,3 +11,6 @@ thiserror.workspace = true
 glam.workspace = true
 rusqlite.workspace = true
 
+[dev-dependencies]
+eve-testkit = { path = "../eve-testkit" }
+

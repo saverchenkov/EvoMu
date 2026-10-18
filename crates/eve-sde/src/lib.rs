@@ -2046,5 +2046,17 @@ mod tests {
         assert_eq!(tc["sde_dungeons"].as_u64(), Some(5516));
         assert_eq!(tc["sde_missions"].as_u64(), Some(2892));
         assert_eq!(tc["sde_node_graphs"].as_u64(), Some(584));
+
+        // Provenance verification: verify md5, byte_size, and record_count in sde_resources
+        let types_res = sde
+            .resources
+            .get("res:/staticdata/types.fsdbinary")
+            .expect("types.fsdbinary must be indexed in sde_resources");
+        assert_eq!(types_res.md5, "c0ee9c292aa113737029c9ec63503233");
+        assert_eq!(types_res.byte_size, 9_169_272);
+        assert_eq!(types_res.record_count, 53_288);
+
+        // Parity runtime attestation (T-1)
+        eve_testkit::attest(&["sde:res:/staticdata/types.fsdbinary"]);
     }
 }

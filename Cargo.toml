@@ -8,6 +8,7 @@ members = [
     "crates/eve-destiny",
     "crates/eve-db",
     "crates/eve-server",
+    "crates/eve-testkit",
 ]
 
 [workspace.package]

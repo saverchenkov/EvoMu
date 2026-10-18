@@ -12,30 +12,30 @@
 
 ## 1. Visual Project Map & Relative Subsystem Size
 
-To visualize the entire server surface area (**216 cataloged `machoNet` services** [`193` active V24.01 + `23` Crucible legacy-only], **1,311 client notifications**, **135 Quasar Protobuf domains** [`69` `eve_public.*` + `66` `eve.*` internal across `1,455` `_pb2.pyj` schemas], **213 static data archives**, **98 space component classes** [`spacecomponents/common/componentConst.pyj`], and **4,102 EVE University Wiki articles / 161 mathematical formulas**), the proportional block map below shows each subsystem's **relative engineering size** (box area & weight percentage) and **current implementation status** (tracked in [`docs/ACTION_PLAN_STATUS.md`](./docs/ACTION_PLAN_STATUS.md); `72/580` V24.01 client candidate methods across the `67` explicit cataloged services and `72/1,230` [`5.9%`] across all `216` cataloged services [`40/216` cataloged services with `>=1` exact V24.01 client candidate method plus `27` additional cataloged services handled via custom/bridge/Crucible method names = `67/216` cataloged services with explicit arms, `149/216` returning `UnimplementedRPC`, `158` `(service, method)` handlers across `118` match arms: `78` single-method + `40` two-method arms], verified via `cargo test --workspace`, `evomu_bridge.py --self-test`, and `verify_plan_mapping.py --check`).
+To visualize the entire server surface area (**216 cataloged `machoNet` services** [`193` active V24.01 + `23` Crucible legacy-only], **1,311 client notifications**, **135 Quasar Protobuf domains** [`69` `eve_public.*` + `66` `eve.*` internal across `1,455` `_pb2.pyj` schemas], **213 static data archives**, **98 space component classes** [`spacecomponents/common/componentConst.pyj`], and **4,102 EVE University Wiki articles / 161 mathematical formulas**), the proportional block map below shows each subsystem's **relative engineering size** (box area & weight percentage) and **current implementation status** (tracked in [`docs/ACTION_PLAN_STATUS.md`](./docs/ACTION_PLAN_STATUS.md); `72/580` V24.01 client candidate methods across the `67` explicit cataloged services [`40/216` cataloged services with `>=1` exact V24.01 client candidate method plus `27` additional cataloged services handled via custom/bridge/Crucible method names = `67/216` cataloged services with explicit arms, `149/216` returning `UnimplementedRPC`, `158` `(service, method)` handlers across `118` match arms: `78` single-method + `40` two-method arms; authoritative parity is tracked in `docs/parity/` and preflight reports], verified via `cargo test --workspace`, `evomu_bridge.py --self-test`, and `verify_plan_mapping.py --check`).
 
 ### 1.1 Proportional Visual Block Diagram (Relative Size & Progress Treemap)
 
 ```text
 +======================================================================================================================+
-|                                     EVOMU SERVER ARCHITECTURE & PROGRESS MAP                                         |
-|    Total Surface: 216 machoNet Services (72/1230 Client Methods; 67 Explicit / 149 UnimplementedRPC) | 135 Quasar    |
+|                                     EVOMU SERVER ARCHITECTURE & SUBSYSTEM MAP                                        |
+|    Total Surface: 216 machoNet Services (72/580 Client Methods; 67 Explicit / 149 UnimplementedRPC) | 135 Quasar    |
 +======================================================================================================================+
 |                                                          |                                                           |
-|  [CORE ENGINE: 14% of Total Scope]                       |  [SPACE, DESTINY & COMBAT: 24% of Total Scope]            |
+|  [CORE ENGINE]                                           |  [SPACE, DESTINY & COMBAT]                                |
 |  +----------------------------------------------------+  |  +-----------------------------------------------------+  |
 |  | 1. Wire Protocol & Dual-Bus (eve-proto/machonet)   |  |  | 9. Destiny 1 Hz Kinematics & Bubbles (eve-destiny)  |  |
-|  |    [████████████████░░░░] M0 Slice ( Weight: 5% )  |  |  |    [██████████████░░░░░░] M1/M7 Slice ( Weight: 6% )|  |
+|  |    Status: In progress                             |  |  |    Status: In progress                              |  |
 |  |    - eveMarshal 0x01-0x2C, 195-str table, RLE      |  |  |    - Sub-warp align, 4-phase warp, 250km bubbles    |  |
 |  |    - Session diffs, MachoPacket, PublicGatewayShim |  |  |    - Binary AddBalls, SystemActor 1 Hz tick         |  |
 |  +----------------------------------------------------+  |  +-----------------------------------------------------+  |
 |  | 2. Auth, Bootstrap, Cache & Slash GM               |  |  | 11. Combat, Weapons, Drones, Fighters & CrimeWatch  |  |
-|  |    [████████████░░░░░░░░] M1 Slice ( Weight: 3% )  |  |  |    [████████████░░░░░░░░] M2/M7 Slice ( Weight: 10%)|  |
+|  |    Status: In progress                             |  |  |    Status: In progress                              |  |
 |  |    - Login, GetInitVals, MachoBindObject (+piggy)  |  |  |    - Turret/Missile/Spool/Vorton/Breacher Pod math  |  |
 |  |    - objectCaching, role-gated /slash GM commands  |  |  |    - Shield/Armor/Hull, Wrecks, Pods, CrimeWatch    |  |
 |  +----------------------------------------------------+  |  +-----------------------------------------------------+  |
 |  | 6. Dogma Attribute & Effect VM (eve-dogma)         |  |  | 10. Space Components ECS (98 Component Classes)     |  |
-|  |    [████████████████░░░░] M0/M2 Slice ( Weight: 6%)|  |  |    [██████████░░░░░░░░░░] M2/M6 Slice ( Weight: 8% )|  |
+|  |    Status: In progress                             |  |  |    Status: In progress                              |  |
 |  |    - 5-stage (-1..9) stacking pipeline, Cap/Shield |  |  |    - Deploy, Scoop, MTU, Mobile Depot, ESS, Skyhook |  |
 |  |    - dgmExpressions VM, Boosters, 3-Rack Heat      |  |  |    - Cataloged 98 classes + vertical-slice handlers |  |
 |  +----------------------------------------------------+  |  +-----------------------------------------------------+  |
@@ -45,34 +45,34 @@ To visualize the entire server surface area (**216 cataloged `machoNet` services
 |  [CHARACTER, SKILLS, SHIPS & INVENTORY: 20% of Scope]    |  [PVE, MISSIONS, DUNGEONS & AI: 16% of Total Scope]       |
 |  +----------------------------------------------------+  |  +-----------------------------------------------------+  |
 |  | 3. Races, Bloodlines, Schools & Char Creation      |  |  | 14. Agents, Missions, Dungeons, Incursions & Arcs   |  |
-|  |    [██████████████░░░░░░] M1 Slice ( Weight: 4% )  |  |  |    [██████████░░░░░░░░░░] M4 Slice ( Weight: 11% )  |  |
+|  |    Status: In progress                             |  |  |    Status: In progress                              |  |
 |  |    - Char select, CreateCharacterWithDoll          |  |  |    - 17-Mission Seed, 16th-Mission Storyline, Gates |  |
 |  |    - 4 Empires, 12 Bloodlines, 36 Ancestries, 12 Sc|  |  |    - NPE NodeGraph 473, Career Goals, Tale/Homefront|  |
 |  +----------------------------------------------------+  |  +-----------------------------------------------------+  |
 |  | 4. Skills, Clone Grades (Alpha/Omega) & Masteries  |  |  | 15. NPC AI, Behavior Trees & Dynamic Bounties       |  |
-|  |    [████████████░░░░░░░░] M2 Slice ( Weight: 5% )  |  |  |    [████████████░░░░░░░░] M7/M8 Slice ( Weight: 5% )|  |
+|  |    Status: In progress                             |  |  |    Status: In progress                              |  |
 |  |    - SP Rank curve, Queue, clonegrades Alpha cap   |  |  |    - 3-Tier LOD Ecology, Hauler Convoys, DBS/ESS    |  |
 |  |    - Free SP, Injectors, Jump Clones (19-24h/1-5)  |  |  +-----------------------------------------------------+  |
 |  +----------------------------------------------------+  |                                                           |
 |  | 5. Ships, Fitting, Subsystems, Capitals & SKINR    |  +-----------------------------------------------------------+
-|  |    [████████████░░░░░░░░] M2/M8 Slice ( Weight: 6%)|  |                                                           |
+|  |    Status: In progress                             |  |                                                           |
 |  |    - CPU/PG/Calibration, Saved Fittings, Insurance |  |  [ECONOMY, MARKETS & INDUSTRY: 14% of Total Scope]        |
 |  |    - T3 Stances, Mutaplasmids, SKINR licensing     |  |  +-----------------------------------------------------+  |
 |  +----------------------------------------------------+  |  | 12. Markets, Wallet, Contracts, Trade & Raffles     |  |
-|  | 7. Inventory, Hangars, Repackage & Asset Safety    |  |  |    [██████████████░░░░░░] M3 Slice ( Weight: 7% )   |  |
-|  |    [██████████████░░░░░░] M1/M3 Slice ( Weight: 5%)|  |  |    - IskCents fixed-point, Regional order book     |  |
+|  | 7. Inventory, Hangars, Repackage & Asset Safety    |  |  |    Status: In progress                              |  |
+|  |    Status: In progress                              |  |  |    - IskCents fixed-point, Regional order book     |  |
 |  |    - List, Transactional MoveItem/Add, Stack/Split |  |  |    - Broker/Relist/Tax, Contracts, Direct Trade, LP |  |
 |  +----------------------------------------------------+  |  +-----------------------------------------------------+  |
 |                                                          |  | 13. Industry, Blueprints, Reactions, Reprocess & PI |  |
-+----------------------------------------------------------+  |    [████████████░░░░░░░░] M3 Slice ( Weight: 7% )   |  |
++----------------------------------------------------------+  |    Status: In progress                              |  |
 |  [WORLD, STRUCTURES, SOCIAL & SOV: 12% of Total Scope]   |  |    - Manufacturing (EIV/SCI/ME/TE), Invention (Wolf)|  |
 |  +-------------------------+--------------------------+  |  |    - Ore Reprocessing, Compression, PI (1h flush)   |  |
 |  | 8. Stations, Upwell     | 16-18. Social, LSC,      |  |  +-----------------------------------------------------+  |
 |  |    Structures & Zarzakh |    Corps, Sov, Insurgency|  |                                                           |
-|  |    [██████████░░░░] M6  |    Scanning & Wormholes  |  |  [STATIC DATA & INDEXING PIPELINE: 100% Indexed]          |
-|  |    ( Weight: 4% )       |    [██████████░░░░] M5-M8|  |  +-----------------------------------------------------+  |
-|  |    - Station Undock/Dock|    ( Weight: 8% )        |  |  | tools/eve-indexer & docs/index/                     |  |
-|  |    - Upwell 3-Stage Rein|    - LSC, Fleets, Corps  |  |  |    [████████████████████] 100% (Catalogs Generated) |  |
+|  |    Status: In progress  |    Scanning & Wormholes  |  |  [STATIC DATA & INDEXING PIPELINE: In Progress]           |
+|  |                         |    Status: In progress   |  |  +-----------------------------------------------------+  |
+|  |    - Station Undock/Dock|                          |  |  | tools/eve-indexer & docs/index/                     |  |
+|  |    - Upwell 3-Stage Rein|    - LSC, Fleets, Corps  |  |  |    Status: In progress                              |  |
 |  |    - Asset Safety       |    - FW/Sov, WH/Scan     |  |  |    - 216 Services (193 V24), 1311 Events, 135 Quasar|  |
 |  +-------------------------+--------------------------+  |  |    - 213 SDE Archives, 4102 Wiki Articles, 161 Math |  |
 +======================================================================================================================+
@@ -130,26 +130,25 @@ flowchart TB
 
 ---
 
-### 1.3 Relative Size vs. Current Vertical-Slice Coverage by Domain
+### 1.3 Relative Engineering Scope Breakdown by Domain
 
 ```mermaid
 xychart-beta
-    title "Relative Engineering Scope (% of Server Surface) vs. Verified M0-M8 Vertical-Slice Coverage (%)"
+    title "Relative Engineering Scope (% of Server Surface Breakdown)"
     x-axis ["1.Proto", "2.Auth", "3.Char", "4.Skills", "5.Ships", "6.Dogma", "7.Inv", "8.Station", "9.Destiny", "10.ECS", "11.Combat", "12.Market", "13.Indy", "14.Missions", "15.AI", "16.Social", "17.Corp/Sov", "18.Scan/WH"]
-    y-axis "Percentage (%)" 0 --> 100
+    y-axis "Relative Scope Weight (%)" 0 --> 15
     bar [5, 3, 4, 5, 6, 6, 5, 4, 6, 8, 10, 7, 7, 11, 5, 3, 3, 2]
-    line [25, 15, 20, 15, 15, 20, 20, 15, 20, 10, 15, 20, 15, 10, 15, 10, 10, 15]
 ```
 
 ---
 
 ## 2. Granular Subsystem Progress Tracker
 
-> **Note on Verification Status:** Python tooling (`evomu_bridge.py --self-test` and `verify_plan_mapping.py --check`) and all 7 Rust workspace crates (`cargo test --workspace`) compile and pass all tests with `0` errors and `0` warnings. Across all `216` cataloged `machoNet` services (`1,230` cataloged client candidate methods total; `580` client candidate methods across the `67` explicit services), `40/216` cataloged services handle `72/580` V24.01 client candidate methods (`72/1,230` = `5.9%` across all `216` cataloged services) by exact name, `27` additional cataloged services are handled via custom/bridge/Crucible method names (`67/216` cataloged services with explicit handlers; `149/216` services return `UnimplementedRPC`), and `158` `(service, method)` pairs are handled across `118` match arms (`78` single-method + `40` two-method arms), plus a `publicGatewaySvc` handler validating character authentication and the `135` cataloged Quasar domain namespaces before returning `UnimplementedRPC`. Authoritative task-level status is tracked in [`docs/ACTION_PLAN_STATUS.md`](./docs/ACTION_PLAN_STATUS.md).
+> **Note on Verification Status:** Python tooling (`evomu_bridge.py --self-test` and `verify_plan_mapping.py --check`) and all 8 Rust workspace crates (`cargo test --workspace`) compile and pass all tests with `0` errors and `0` warnings. Across all `216` cataloged `machoNet` services (`1,230` cataloged client candidate methods total; `580` client candidate methods across the `67` explicit services), `40/216` cataloged services handle `72/580` V24.01 client candidate methods by exact name, `27` additional cataloged services are handled via custom/bridge/Crucible method names (`67/216` cataloged services with explicit handlers; `149/216` services return `UnimplementedRPC`), and `158` `(service, method)` pairs are handled across `118` match arms (`78` single-method + `40` two-method arms), plus a `publicGatewaySvc` handler validating character authentication and the `135` cataloged Quasar domain namespaces before returning `UnimplementedRPC`. Authoritative task-level status is tracked in [`docs/ACTION_PLAN_STATUS.md`](./docs/ACTION_PLAN_STATUS.md) and parity status reports.
 
 | # | Subsystem / Domain | Crate / Module | Relative Size | Progress | Status & Key Deliverables |
 |---|---|---|---|---|---|
-| **0** | **Server Logic & Wiki Mechanics Indexer** | [`tools/eve-indexer`](./tools/eve-indexer/index_server_logic.py), [`docs/index/`](./docs/index/PARITY_MATRIX.md) | **Tooling** | `100%` | Indexed 216 services (`193` V24.01 + `23` legacy-only), 1,311 `__notifyevents__`, 135 Quasar domains (`69` `eve_public.*` + `66` `eve.*` internal across `1,455` `_pb2.pyj` files), 213 staticdata files, 2,854 Crucible Dogma effects (`1,343` attr & `305` effect constants), 39 Destiny XMLP packets (`13` `DSTBALL_*` modes, `39` V24.01 actions), 4,102 wiki articles, 161 formulas |
+| **0** | **Server Logic & Wiki Mechanics Indexer** | [`tools/eve-indexer`](./tools/eve-indexer/index_server_logic.py), [`docs/index/`](./docs/index/PARITY_MATRIX.md) | **Tooling** | `Generated` | Indexed 216 services (`193` V24.01 + `23` legacy-only), 1,311 `__notifyevents__`, 135 Quasar domains (`69` `eve_public.*` + `66` `eve.*` internal across `1,455` `_pb2.pyj` files), 213 staticdata files, 2,854 Crucible Dogma effects (`1,343` attr & `305` effect constants), 39 Destiny XMLP packets (`13` `DSTBALL_*` modes, `39` V24.01 actions), 4,102 wiki articles, 161 formulas |
 | **1** | **Wire Protocol & Dual-Bus Transport** | [`crates/eve-proto`](./crates/eve-proto/src/lib.rs), [`crates/eve-machonet`](./crates/eve-machonet/src/lib.rs), [`evomu_bridge.py`](./client-bridge/evomu_bridge.py) | **5%** (~1,200 LOC) | `In progress` (`M0`) | `eveMarshal` `0x01`–`0x2C`, 195-string table, `PyPackedRow` RLE, `IndexRowset`, `TupleSet`, `DBRow`, `SessionState::compute_diff`, `PublicGatewayShim`, live dual TCP listeners (`26000`/`26001`) |
 | **2** | **Auth, Bootstrap, Caching & Slash GM** | [`services/auth_cache.rs`](./crates/eve-server/src/services/auth_cache.rs), [`config.rs`](./crates/eve-server/src/config.rs) | **3%** (~800 LOC) | `In progress` (`M1`) | `authentication.Login` (Argon2id + OAuth2/PKCE SSO JWT + ban enforcement, `D-4`), `multiLoginBlocker.Login`, `GetInitVals`, piggybacked `MachoBindObject`, `evomu.toml` config (`D-5`), role-gated `/slash` GM commands (`/giveisk`, `/ban`, `/unban`, `/kick`), Quasar `publicGatewaySvc` domain validation returning `UnimplementedRPC` |
 | **3** | **Races, Bloodlines, Schools & Char Creation** | [`crates/eve-sde`](./crates/eve-sde/src/lib.rs), [`services/character_skills.rs`](./crates/eve-server/src/services/character_skills.rs) | **4%** (~1,000 LOC) | `In progress` (`M1`) | Full 213-resource SDE SQLite loader (`data/evomu_sde.sqlite`, `D-1`, `D-2`), `GetCharactersToSelect`, `SelectCharacterID`, `CreateCharacterWithDoll`, all 4 Empires + `18` SDE bloodlines (`12` playable), `43` ancestries, `23` SDE schools (`12` starter), starter Corvettes |
@@ -178,7 +177,7 @@ How do we **provably verify** that `EvoMu` behaves identically to what the EVE O
 ```mermaid
 flowchart TB
     T5["Tier 5: Real V24.01 Client E2E Automation<br/>(Native /thinclient=HEADLESS|HEADED + svc.noddiTestRunner + UITree Inspector)"]
-    T4["Tier 4: 18 Multi-Actor Stateful E2E Journeys (E2E-01 .. E2E-18)<br/>(Simplified Vertical-Slice In-Process RPC Journeys in e2e_journeys.rs + Live TCP 26001 & 26000 Listener Tests in main.rs)"]
+    T4["Tier 4: 18 Multi-Actor Stateful E2E Journeys (E2E-01 .. E2E-18)<br/>(Simplified Vertical-Slice In-Process RPC Journeys in tests/ + Live TCP 26001 & 26000 Listener Tests in main.rs)"]
     T3["Tier 3: Headless V24.01 Client Service Harness<br/>(Executes real .pyj client controllers from code.ccp against EvoMu via evomu_bridge.py)"]
     T2["Tier 2: Automated Bytecode Return-Schema Conformance<br/>(Verifies every Rust PyRep return value against client .pyj attribute destructuring in code.ccp)"]
     T1["Tier 1: Deterministic Math & State-Machine Unit Tests<br/>(161 Wiki Formulas: Dogma stacking, Capacitor ODE, 4-Phase Warp, Turret/Missile/Vorton/Breacher, ME/TE, Marshal Roundtrips)"]
@@ -192,8 +191,8 @@ flowchart TB
    - Statically extracts every attribute (`LOAD_ATTR`) and key (`BINARY_SUBSCR`) the V24.01 client reads on the return value of each `RemoteSvc` call in `code.ccp` and asserts that every `EvoMu` RPC handler returns a `KeyVal` / `Rowset` / `IndexRowset` containing those exact columns.
 3. **Tier 3 — Headless Client `.pyj` Controller Harness (`client-bridge/`):**
    - Runs real client service/controller logic from `code.ccp` (with mocked `blue`/`trinity` rendering layers and `evomu_bridge.py` hooked into `sm.RemoteSvc` and `publicGatewaySvc`) directly against `eve-server`.
-4. **Tier 4 — 18 Mandatory End-to-End Stateful Player Journeys (`E2E-01` .. `E2E-18`, detailed in [`PLAN.md §5.1`](./PLAN.md#51-target-specification-for-the-18-end-to-end-e2e-stateful-journey-tests-crateseve-servertestse2e_journeysrs--client-bridge)):**
-   - Every milestone is gated by focused subsystem unit/contract tests plus simplified vertical-slice subsets of the 18 multi-step stateful journeys (executed in-process via `ServerContext::dispatch_rpc` in `e2e_journeys.rs`, alongside live TCP `26001` JSON-Bridge and `26000` `MachoNet` wire listener tests in `main.rs`; full target features such as Auction contracts, HyperNet raffles, Loot Fairy, insurance payouts, drones/MTU, and 39-trigger dungeons remain open):
+4. **Tier 4 — 18 Mandatory End-to-End Stateful Player Journeys (`E2E-01` .. `E2E-18`, detailed in [`PLAN.md §5.1`](./PLAN.md#51-target-specification-for-the-18-end-to-end-e2e-stateful-journey-tests-crateseve-servertests--client-bridge)):**
+   - Every milestone is gated by focused subsystem unit/contract tests plus simplified vertical-slice subsets of the 18 multi-step stateful journeys (executed in-process via `ServerContext::dispatch_rpc` in `tests/`, alongside live TCP `26001` JSON-Bridge and `26000` `MachoNet` wire listener tests in `main.rs`; full target features such as Auction contracts, HyperNet raffles, Loot Fairy, insurance payouts, drones/MTU, and 39-trigger dungeons remain open):
      - **`E2E-01`:** Account Bootstrap, Character Creation (all 4 Empires) & Racial Seeding
      - **`E2E-02`:** Skill Training Queue, Alpha/Omega Clone Grades (`clonegrades.static`), Injectors & Remap
      - **`E2E-03`:** Hangar Inventory, Ship Boarding, Fitting, CPU/PG, T3 Subsystems/Modes & Mutaplasmids
@@ -257,7 +256,8 @@ evomu/
 │   ├── eve-dogma/                         # Dogma 5-stage (-1..9) modifier pipeline, stacking & recharge curves
 │   ├── eve-destiny/                       # 1 Hz Ballpark kinematics, 4-phase warp, grid bubbles & AddBalls
 │   ├── eve-db/                            # Transactional repository, IskCents, optimistic concurrency
-│   └── eve-server/                        # Async TCP server (26000 & 26001), router & 1 Hz SystemActors
+│   ├── eve-server/                        # Async TCP server (26000 & 26001), router & 1 Hz SystemActors
+│   └── eve-testkit/                       # Parity attestation framework & test verification utilities
 └── client-bridge/
     └── evomu_bridge.py                    # Client-side ServiceManager & Quasar PublicGateway bridge
 ```

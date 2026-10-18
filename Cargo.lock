@@ -206,6 +206,7 @@ dependencies = [
 name = "eve-sde"
 version = "0.1.0"
 dependencies = [
+ "eve-testkit",
  "glam",
  "rusqlite",
  "serde",
@@ -234,6 +235,14 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "eve-testkit"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

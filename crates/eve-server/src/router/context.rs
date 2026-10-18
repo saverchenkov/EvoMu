@@ -272,7 +272,12 @@ impl ServerContext {
     }
 
     pub fn now_blueos_filetime_ticks(&self) -> i64 {
-        ((self.now_unix() as i64) + 11_644_473_600) * 10_000_000
+        let (secs, nanos) = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| (d.as_secs(), d.subsec_nanos()))
+            .unwrap_or((1_760_000_000, 0));
+        let total_secs = secs.saturating_add(self.virtual_clock_offset_sec.load(Ordering::Relaxed));
+        ((total_secs as i64) + 11_644_473_600) * 10_000_000 + ((nanos as i64) / 100)
     }
 
     pub fn invalidate_ship_fitting(&self, ship_id: i64) {

@@ -129,3 +129,49 @@ async fn test_phase_0_s10_doc_reconciliation_and_labels() {
         );
     }
 }
+
+#[tokio::test]
+async fn test_phase_t_t1_machonet_get_time_rpc_parity() {
+    // parity: rpc:machoNet.GetTime, plan:T-1
+    use eve_machonet::SessionState;
+    use eve_proto::PyRep;
+    use eve_server::router::ServerContext;
+    use std::collections::HashMap;
+
+    let ctx = ServerContext::new();
+    let kw = HashMap::new();
+    let mut sess = SessionState::new(101);
+
+    // Initial time query before advancing clock
+    let res = ctx
+        .dispatch_rpc(&mut sess, "machoNet", None, "GetTime", &[], &kw, None)
+        .await
+        .expect("machoNet.GetTime must succeed");
+
+    let PyRep::Integer(t1) = res else {
+        panic!("machoNet.GetTime must return PyRep::Integer, got {res:?}");
+    };
+
+    // Live server BlueOS FILETIME ticks are 100ns units since 1601-01-01.
+    // In year 2026, ticks exceed 1.34e17 (133_000_000_000_000_000) and are below year 2045 (140_000_000_000_000_000).
+    assert!(
+        t1 > 133_000_000_000_000_000 && t1 < 140_000_000_000_000_000,
+        "GetTime ticks must fall within V24 client operational range [1.33e17, 1.40e17], got {t1}"
+    );
+
+    // Advance virtual clock by 60 seconds (60 * 10,000,000 = 600,000,000 ticks)
+    ctx.advance_virtual_clock(60);
+    let res2 = ctx
+        .dispatch_rpc(&mut sess, "machoNet", None, "GetTime", &[], &kw, None)
+        .await
+        .expect("machoNet.GetTime after clock advance");
+
+    let PyRep::Integer(t2) = res2 else {
+        panic!("machoNet.GetTime must return PyRep::Integer, got {res2:?}");
+    };
+
+    assert!(
+        t2 >= t1 + 600_000_000 && t2 < t1 + 700_000_000,
+        "GetTime ticks must advance by ~60s in 100ns ticks (t1={t1}, t2={t2})"
+    );
+}

@@ -1,0 +1,438 @@
+{
+ "C-1": {
+  "assessment": "PARTIAL",
+  "note": ""
+ },
+ "C-2": {
+  "assessment": "PARTIAL",
+  "note": ""
+ },
+ "C-3": {
+  "assessment": "PARTIAL",
+  "note": ""
+ },
+ "C-4": {
+  "assessment": "PARTIAL",
+  "note": ""
+ },
+ "C-5": {
+  "assessment": "NOT STARTED",
+  "note": ""
+ },
+ "C-6": {
+  "assessment": "PARTIAL",
+  "note": ""
+ },
+ "C-7": {
+  "assessment": "NOT STARTED",
+  "note": ""
+ },
+ "C-8": {
+  "assessment": "PARTIAL",
+  "note": ""
+ },
+ "CH-1": {
+  "assessment": "NOT STARTED",
+  "note": ""
+ },
+ "CH-2": {
+  "assessment": "PARTIAL",
+  "note": ""
+ },
+ "CH-3": {
+  "assessment": "PARTIAL",
+  "note": ""
+ },
+ "CH-4": {
+  "assessment": "PARTIAL",
+  "note": ""
+ },
+ "CH-5": {
+  "assessment": "PARTIAL",
+  "note": ""
+ },
+ "D-1": {
+  "assessment": "PARTIAL",
+  "note": ""
+ },
+ "D-2": {
+  "assessment": "DONE",
+  "note": ""
+ },
+ "D-3": {
+  "assessment": "PARTIAL",
+  "note": ""
+ },
+ "D-4": {
+  "assessment": "PARTIAL",
+  "note": ""
+ },
+ "D-5": {
+  "assessment": "PARTIAL",
+  "note": ""
+ },
+ "DG-1": {
+  "assessment": "PARTIAL",
+  "note": ""
+ },
+ "DG-2": {
+  "assessment": "PARTIAL",
+  "note": ""
+ },
+ "DG-3": {
+  "assessment": "PARTIAL",
+  "note": ""
+ },
+ "DG-4": {
+  "assessment": "PARTIAL",
+  "note": ""
+ },
+ "DG-5": {
+  "assessment": "NOT STARTED",
+  "note": ""
+ },
+ "DG-6": {
+  "assessment": "PARTIAL",
+  "note": ""
+ },
+ "E-1": {
+  "assessment": "PARTIAL",
+  "note": ""
+ },
+ "E-2": {
+  "assessment": "PARTIAL",
+  "note": ""
+ },
+ "E-3": {
+  "assessment": "PARTIAL",
+  "note": ""
+ },
+ "E-4": {
+  "assessment": "PARTIAL",
+  "note": ""
+ },
+ "E-5": {
+  "assessment": "PARTIAL",
+  "note": ""
+ },
+ "E-6": {
+  "assessment": "PARTIAL",
+  "note": ""
+ },
+ "ESI-1": {
+  "assessment": "NOT STARTED",
+  "note": ""
+ },
+ "ESI-2": {
+  "assessment": "NOT STARTED",
+  "note": ""
+ },
+ "ESI-3": {
+  "assessment": "NOT STARTED",
+  "note": ""
+ },
+ "ESI-4": {
+  "assessment": "NOT STARTED",
+  "note": ""
+ },
+ "ESI-5": {
+  "assessment": "NOT STARTED",
+  "note": ""
+ },
+ "ESI-6": {
+  "assessment": "NOT STARTED",
+  "note": ""
+ },
+ "ESI-7": {
+  "assessment": "NOT STARTED",
+  "note": ""
+ },
+ "MN-01": {
+  "assessment": "PARTIAL",
+  "note": ""
+ },
+ "MN-02": {
+  "assessment": "NOT STARTED",
+  "note": ""
+ },
+ "MN-03": {
+  "assessment": "NOT STARTED",
+  "note": ""
+ },
+ "MN-04": {
+  "assessment": "NOT STARTED",
+  "note": ""
+ },
+ "MN-05": {
+  "assessment": "NOT STARTED",
+  "note": ""
+ },
+ "MN-06": {
+  "assessment": "NOT STARTED",
+  "note": ""
+ },
+ "MN-07": {
+  "assessment": "NOT STARTED",
+  "note": ""
+ },
+ "MN-08": {
+  "assessment": "NOT STARTED",
+  "note": ""
+ },
+ "MN-09": {
+  "assessment": "NOT STARTED",
+  "note": ""
+ },
+ "MN-10": {
+  "assessment": "NOT STARTED",
+  "note": ""
+ },
+ "MN-11": {
+  "assessment": "PARTIAL",
+  "note": ""
+ },
+ "MN-12": {
+  "assessment": "PARTIAL",
+  "note": ""
+ },
+ "MN-13": {
+  "assessment": "NOT STARTED",
+  "note": ""
+ },
+ "MN-14": {
+  "assessment": "NOT STARTED",
+  "note": ""
+ },
+ "MN-15": {
+  "assessment": "NOT STARTED",
+  "note": ""
+ },
+ "MN-16": {
+  "assessment": "NOT STARTED",
+  "note": ""
+ },
+ "MN-17": {
+  "assessment": "NOT STARTED",
+  "note": ""
+ },
+ "MN-18": {
+  "assessment": "NOT STARTED",
+  "note": ""
+ },
+ "P-1": {
+  "assessment": "PARTIAL",
+  "note": ""
+ },
+ "P-2": {
+  "assessment": "PARTIAL",
+  "note": ""
+ },
+ "P-3": {
+  "assessment": "NOT STARTED",
+  "note": ""
+ },
+ "P-4": {
+  "assessment": "NOT STARTED",
+  "note": ""
+ },
+ "P-5": {
+  "assessment": "NOT STARTED",
+  "note": ""
+ },
+ "P-6": {
+  "assessment": "NOT STARTED",
+  "note": ""
+ },
+ "P-7": {
+  "assessment": "PARTIAL",
+  "note": ""
+ },
+ "Q-1": {
+  "assessment": "NOT STARTED",
+  "note": ""
+ },
+ "Q-2": {
+  "assessment": "PARTIAL",
+  "note": ""
+ },
+ "Q-3": {
+  "assessment": "NOT STARTED",
+  "note": ""
+ },
+ "Q-4": {
+  "assessment": "NOT STARTED",
+  "note": ""
+ },
+ "Q-5": {
+  "assessment": "NOT STARTED",
+  "note": ""
+ },
+ "Q-6": {
+  "assessment": "NOT STARTED",
+  "note": ""
+ },
+ "Q-7": {
+  "assessment": "NOT STARTED",
+  "note": ""
+ },
+ "Q-8": {
+  "assessment": "NOT STARTED",
+  "note": ""
+ },
+ "Q-9": {
+  "assessment": "NOT STARTED",
+  "note": ""
+ },
+ "S-1": {
+  "assessment": "DONE",
+  "note": ""
+ },
+ "S-10": {
+  "assessment": "PARTIAL",
+  "note": ""
+ },
+ "S-11": {
+  "assessment": "DONE",
+  "note": ""
+ },
+ "S-2": {
+  "assessment": "PARTIAL",
+  "note": ""
+ },
+ "S-3": {
+  "assessment": "PARTIAL",
+  "note": ""
+ },
+ "S-4": {
+  "assessment": "PARTIAL",
+  "note": ""
+ },
+ "S-5": {
+  "assessment": "DONE",
+  "note": ""
+ },
+ "S-6": {
+  "assessment": "DONE",
+  "note": ""
+ },
+ "S-7": {
+  "assessment": "PARTIAL",
+  "note": ""
+ },
+ "S-8": {
+  "assessment": "DONE",
+  "note": ""
+ },
+ "S-9": {
+  "assessment": "PARTIAL",
+  "note": ""
+ },
+ "SO-1": {
+  "assessment": "PARTIAL",
+  "note": ""
+ },
+ "SO-2": {
+  "assessment": "PARTIAL",
+  "note": ""
+ },
+ "SO-3": {
+  "assessment": "PARTIAL",
+  "note": ""
+ },
+ "SO-4": {
+  "assessment": "PARTIAL",
+  "note": ""
+ },
+ "SO-5": {
+  "assessment": "NOT STARTED",
+  "note": ""
+ },
+ "SO-6": {
+  "assessment": "PARTIAL",
+  "note": ""
+ },
+ "SO-7": {
+  "assessment": "NOT STARTED",
+  "note": ""
+ },
+ "SP-1": {
+  "assessment": "NOT STARTED",
+  "note": ""
+ },
+ "SP-2": {
+  "assessment": "PARTIAL",
+  "note": ""
+ },
+ "SP-3": {
+  "assessment": "PARTIAL",
+  "note": ""
+ },
+ "SP-4": {
+  "assessment": "PARTIAL",
+  "note": ""
+ },
+ "SP-5": {
+  "assessment": "PARTIAL",
+  "note": ""
+ },
+ "T-1": {
+  "assessment": "DONE",
+  "note": "Implemented eve-testkit JSONL attestation crate, parity tag documentation, and machoNet.GetTime RPC test."
+ },
+ "T-2": {
+  "assessment": "NOT STARTED",
+  "note": ""
+ },
+ "T-3": {
+  "assessment": "NOT STARTED",
+  "note": ""
+ },
+ "T-4": {
+  "assessment": "NOT STARTED",
+  "note": ""
+ },
+ "T-5": {
+  "assessment": "NOT STARTED",
+  "note": ""
+ },
+ "T-6": {
+  "assessment": "NOT STARTED",
+  "note": ""
+ },
+ "T-7": {
+  "assessment": "PARTIAL",
+  "note": "Virtual clock offset helper present; full injectable clock and time acceleration pending."
+ },
+ "Z-1": {
+  "assessment": "PARTIAL",
+  "note": ""
+ },
+ "Z-2": {
+  "assessment": "NOT STARTED",
+  "note": ""
+ },
+ "Z-3": {
+  "assessment": "PARTIAL",
+  "note": ""
+ },
+ "Z-4": {
+  "assessment": "PARTIAL",
+  "note": "Initial staticdata resource attested via eve-testkit; full SDE and effect sweeps pending."
+ },
+ "Z-5": {
+  "assessment": "PARTIAL",
+  "note": ""
+ },
+ "Z-6": {
+  "assessment": "NOT STARTED",
+  "note": ""
+ },
+ "Z-7": {
+  "assessment": "NOT STARTED",
+  "note": ""
+ },
+ "Z-8": {
+  "assessment": "NOT STARTED",
+  "note": ""
+ }
+}
