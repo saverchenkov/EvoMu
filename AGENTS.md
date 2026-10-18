@@ -76,6 +76,25 @@
 - Claims for that review: the passed-test count and the parity numbers are identical before and after (paste both pre-flight outputs), and the change has no behaviour edits.
 - From then on, keep new code in this layout.
 
+## Parallel delegation (subagents)
+- **Never let two agents edit the same working tree.** Any edit while a review runs makes that review INVALID, and concurrent edits clobber each other. Every subagent that writes code gets an **isolated workspace**: a `branch`/`share` workspace, or a `git worktree add ../EvoMu-<track> -b track/<track>`. Read-only research subagents may share the main tree.
+- **When to start.** Parallel tracks begin only after Phase 1 is committed and the `S-REFACTOR` monolith split is committed, because that split touches nearly every file. Until then, work serially.
+- **Tracks that can run in parallel once the refactor lands** (one subagent each; the orchestrator keeps the canonical status file):
+  - T-1/T-3/T-5 (test kit, proptest/fuzz, coverage and mutants);
+  - T-2 (SDE sweeps);
+  - P-1…P-5 (wire codec, object cache, config service, notifications);
+  - P-6/ESI-1 (native handshake plus SSO/launcher tokens);
+  - P-7/SP-1/SP-2 (binary destiny, celestials, bubbles);
+  - Q-1/Q-2 (protobuf extraction plus gateway);
+  - ESI-2 (HTTP framework).
+  - Later phases split by domain (mining, market, industry, PI, corp, sov/FW, structures, each Quasar family, each ESI tag group), following the plan's dependencies.
+- **Every track follows the same gate in its own worktree:** pre-flight, `run_review.py`, and a non-FAIL verdict, before its branch is merged.
+  - Each worktree has its own `.evomu-reviews/` state, Stop hook and review history.
+  - Share the static data with `EVOMU_SDE_PATH=/Users/sergeya/ai/EvoMu/data/evomu_sde.sqlite`.
+- **Merging into `main`** is done by the orchestrator, one track at a time: rebase or merge the reviewed branch, run pre-flight on `main`, then run a claims review of the merged tree. Never push or merge an unreviewed tree.
+- **Subagents must get `AGENTS.md` and the plan as context** and obey every rule here. No subagent may modify `.agents/`, disable hooks or bypass Santa. Delegation doesn't relax any rule.
+- **Subagent reports to you are claims, not facts.** Verify them with pre-flight and the review before recording anything in `docs/ACTION_PLAN_STATUS.md`.
+
 ## Increment size and WIP
 - **Review one canonical task (or a few tightly coupled ones) at a time**, not a whole phase. Smaller diffs review faster and fail more narrowly.
 - **To avoid losing work while a review is failing**, you may commit to a local `wip/<task-id>` branch without a review.
