@@ -4,19 +4,19 @@
 
 The canonical plan is `.agents/skills/evomu-adversarial-review/references/action_plan.md`. This file is regenerated from the latest pre-flight parity run, so it can't go stale or be overstated.
 
-**Parity: 13 / 5870 ledger rows closed (0.22%)**, 0 NA, 13 tagged tests, 47 passing tests. Flagged fake by the gap auditor: 7.
+**Parity: 28 / 5870 ledger rows closed (0.48%)**, 0 NA, 19 tagged tests, 53 passing tests. Flagged fake by the gap auditor: 7.
 
 | Category | Total | DONE | NA | Open |
 |---|---|---|---|---|
-| destiny | 52 | 0 | 0 | 52 |
+| destiny | 52 | 7 | 0 | 45 |
 | effect | 1 | 0 | 0 | 1 |
 | esi | 197 | 0 | 0 | 197 |
-| feat | 1273 | 0 | 0 | 1273 |
+| feat | 1273 | 4 | 0 | 1269 |
 | journey | 29 | 0 | 0 | 29 |
-| notify | 1311 | 0 | 0 | 1311 |
-| plan | 109 | 7 | 0 | 102 |
+| notify | 1311 | 1 | 0 | 1310 |
+| plan | 109 | 9 | 0 | 100 |
 | quasar | 1455 | 0 | 0 | 1455 |
-| rpc | 1230 | 1 | 0 | 1229 |
+| rpc | 1230 | 2 | 0 | 1228 |
 | sde | 213 | 5 | 0 | 208 |
 
 Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = mapped `feat:` rows closed/total; **Assessment** = the agent's own judgement from `docs/parity/task_notes.json` (DONE is accepted only when the ledger row is DONE).
@@ -52,7 +52,7 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 | Task | Title | Ledger | Features | Tests | Assessment | Note | Last commit |
 |---|---|---|---|---|---|---|---|
 | T-1 | Parity tagging and attestation. Write a small test-support crate (e.g. eve-testk… | DONE | 0/0 | test_phase_t_t1_machonet_get_time_rpc_parity | DONE | Implemented eve-testkit JSONL attestation crate, parity tag documentation, and machoNet.GetTime RPC test. | 617cd70 2026-10-18 |
-| T-2 | Data-driven sweeps over the real static data. For every client static-data file,… | MISSING | 0/0 | — | PARTIAL | Implemented Dogma modifierInfo evaluator and effect sweep plus SDE domain and SQLite static resource sweeps; remaining FSD binary loaders and expression-only effects pending. | — |
+| T-2 | Data-driven sweeps over the real static data. For every client static-data file,… | MISSING | 0/0 | — | PARTIAL | Implemented Dogma modifierInfo evaluator and effect sweep plus SDE domain and SQLite static resource sweeps; remaining FSD binary loaders and expression-only effects pending. | 2ae78ec 2026-10-18 |
 | T-3 | Property and fuzz tests. Use proptest round-trips for every marshal opcode, Pack… | MISSING | 0/0 | — | NOT STARTED | — | — |
 | T-4 | Golden wire tests against the client's own codecs. Through the in-client bridge,… | MISSING | 0/0 | — | NOT STARTED | — | — |
 | T-5 | Coverage and mutation tooling. Install cargo-llvm-cov and cargo-mutants. Run car… | MISSING | 0/0 | — | NOT STARTED | — | — |
@@ -69,14 +69,14 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 | P-4 | config service | MISSING | 0/1 | — | NOT STARTED | — | — |
 | P-5 | Notifications | MISSING | 0/5 | — | NOT STARTED | — | — |
 | P-6 | Native handshake | MISSING | 0/1 | — | NOT STARTED | — | — |
-| P-7 | Destiny binary stream | MISSING | 0/2 | — | PARTIAL | — | — |
+| P-7 | Destiny binary stream | DONE | 2/2 | test_binary_add_balls_roundtrip_all_13_modes, test_do_destiny_update_and_set_state_marshal_roundtrip, test_p7_destiny_bi | DONE | Binary AddBalls/AddBalls2/SetState encoder and decoder matching DestinyStructs.h byte layouts, SlimItemMeta from SDE/DB, and DoDestinyUpdate notification push on space actions and ticks. | — |
 
 ## Phase 3: Space simulation
 
 | Task | Title | Ledger | Features | Tests | Assessment | Note | Last commit |
 |---|---|---|---|---|---|---|---|
-| SP-1 | Celestials and gates as balls | MISSING | 0/1 | — | NOT STARTED | — | — |
-| SP-2 | Bubbles / grid interest | MISSING | 0/5 | — | PARTIAL | — | — |
+| SP-1 | Celestials and gates as balls | DONE | 1/1 | test_p7_destiny_binary_stream_undock_movement_and_stargate_jump, test_sp1_jita_and_perimeter_celestials_gates_belts_stat | DONE | SystemActor populates real SDE stars, planets, moons, asteroid belts, stargates, and stations as static Rigid balls in Ballpark and includes them in SetState. | — |
+| SP-2 | Bubbles / grid interest | BLOCKED_BY_FEATURES | 1/5 | test_sp2_spatial_bubbles_10000km_isolation_and_inter_bubble_warp, test_spatial_bubbles_10000km_isolation_and_warp_transi | PARTIAL | Shared fixed-boundary spatial grid bubbles with non-overlapping grid walls, dynamic expansion/contraction, transitive visibility, and AddBalls2/RemoveBalls grid transitions. | — |
 | SP-3 | Beyonce command set | MISSING | 0/15 | — | PARTIAL | — | — |
 | SP-4 | Stargate jump polish | MISSING | 0/6 | — | PARTIAL | — | — |
 | SP-5 | Dock / undock | MISSING | 0/4 | — | PARTIAL | — | — |

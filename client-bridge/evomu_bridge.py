@@ -110,9 +110,9 @@ def from_pyrep_json(node):
     val = node.get("val")
     if tag == "None":
         return None
-    if tag in ("Bool", "Integer", "Real", "String", "AsciiString"):
+    if tag in ("Bool", "Integer", "Real", "String", "AsciiString", "Token"):
         return val
-    if tag in ("Buffer", "Picked"):
+    if tag in ("Buffer", "Bytes", "Picked"):
         return bytes(bytearray(val))
     if tag == "Tuple":
         return tuple(from_pyrep_json(x) for x in val)
@@ -122,6 +122,12 @@ def from_pyrep_json(node):
         return {from_pyrep_json(k): from_pyrep_json(v) for k, v in val}
     if tag in ("KeyVal", "DBRow"):
         return LocalKeyVal({k: from_pyrep_json(v) for k, v in val.items()})
+    if tag == "Object":
+        args_obj = from_pyrep_json(val.get("args"))
+        if isinstance(args_obj, LocalKeyVal):
+            args_obj["__klass__"] = val.get("type_name")
+            return args_obj
+        return LocalKeyVal({"__klass__": val.get("type_name"), "args": args_obj})
     if tag == "Rowset":
         cols = val["columns"]
         rows = [[from_pyrep_json(cell) for cell in row] for row in val["rows"]]

@@ -165,8 +165,12 @@ pub async fn handle(
             };
 
             let combat_state = ctx.build_ship_combat_state(char_id, ship.item_id, ship.type_id);
+            let slim_meta = ctx.build_ship_slim_meta(char_id, ship.type_id);
             let sys_handle = ctx.systems.get_or_spawn(ch.solar_system_id);
-            let tick = match sys_handle.spawn_ball_with_combat(ball, combat_state).await {
+            let tick = match sys_handle
+                .spawn_ball_with_meta(ball, combat_state, slim_meta)
+                .await
+            {
                 Ok(t) => t,
                 Err(e) => {
                     ctx.db.rollback_undock(char_id, station_id, ship.item_id);
@@ -182,6 +186,7 @@ pub async fn handle(
                     .materialize_system_lod2(ch.solar_system_id, &ctx.systems, &ctx.sde)
                     .await;
             }
+            let _ = sys_handle.push_set_state(ship.item_id).await;
 
             session.station_id = None;
             session.structure_id = None;

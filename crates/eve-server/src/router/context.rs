@@ -65,10 +65,11 @@ impl ServerContext {
             serde_json::from_str(EMBEDDED_QUASAR_CATALOG_JSON).unwrap_or_default();
         let quasar_domains: HashSet<String> = quasar_map.into_keys().collect();
 
+        let systems = Arc::new(SystemRegistry::with_sde(sde.clone()));
         Self {
             sde,
             db,
-            systems: Arc::new(SystemRegistry::new()),
+            systems,
             living_world: Arc::new(LivingWorldDirector::new()),
             cataloged_services,
             quasar_domains,
@@ -810,5 +811,36 @@ impl ServerContext {
             };
         }
         eve_destiny::CombatState::default()
+    }
+
+    /// Builds a [`eve_destiny::SlimItemMeta`] for a player ship from SDE type metadata and the character's DB record (`P-7`).
+    pub fn build_ship_slim_meta(&self, char_id: i64, type_id: u32) -> eve_destiny::SlimItemMeta {
+        let (group_id, category_id) = self
+            .sde
+            .types
+            .get(&type_id)
+            .map(|t| (t.group_id, t.category_id))
+            .unwrap_or((25, 6));
+        let (corp_id, alliance_id, security_status) = self
+            .db
+            .get_character(char_id)
+            .map(|ch| {
+                (
+                    ch.corporation_id,
+                    ch.alliance_id.unwrap_or(0),
+                    ch.security_status,
+                )
+            })
+            .unwrap_or((1_000_009, 0, 0.0));
+        eve_destiny::SlimItemMeta {
+            group_id,
+            category_id,
+            owner_id: char_id,
+            char_id: Some(char_id),
+            corp_id,
+            alliance_id,
+            security_status,
+            is_cloaked: false,
+        }
     }
 }

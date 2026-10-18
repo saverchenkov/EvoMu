@@ -244,8 +244,8 @@
   "note": ""
  },
  "P-7": {
-  "assessment": "PARTIAL",
-  "note": ""
+  "assessment": "DONE",
+  "note": "Binary AddBalls/AddBalls2/SetState encoder and decoder matching DestinyStructs.h byte layouts, SlimItemMeta from SDE/DB, and DoDestinyUpdate notification push on space actions and ticks."
  },
  "Q-1": {
   "assessment": "NOT STARTED",
@@ -356,12 +356,12 @@
   "note": ""
  },
  "SP-1": {
-  "assessment": "NOT STARTED",
-  "note": ""
+  "assessment": "DONE",
+  "note": "SystemActor populates real SDE stars, planets, moons, asteroid belts, stargates, and stations as static Rigid balls in Ballpark and includes them in SetState."
  },
  "SP-2": {
   "assessment": "PARTIAL",
-  "note": ""
+  "note": "Shared fixed-boundary spatial grid bubbles with non-overlapping grid walls, dynamic expansion/contraction, transitive visibility, and AddBalls2/RemoveBalls grid transitions."
  },
  "SP-3": {
   "assessment": "PARTIAL",

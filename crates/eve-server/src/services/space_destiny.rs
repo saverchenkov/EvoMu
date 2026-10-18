@@ -83,6 +83,38 @@ pub async fn handle(
             }
         }
 
+        ("beyonce", "CmdSetSpeedFraction") => {
+            let _ = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let sys_id = match ServerContext::require_bound_system(bound_entry, "beyonce") {
+                Ok(s) => s,
+                Err(e) => return Some(Err(e)),
+            };
+            let Some(ship_id) = session.ship_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "NoActiveShip".into(),
+                    message: "Session has no active ship".into(),
+                }));
+            };
+            let fraction = args.first().and_then(|a| a.as_f64()).unwrap_or(1.0);
+            if !fraction.is_finite() {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidSpeedFraction".into(),
+                    message: "Speed fraction must be a finite number".into(),
+                }));
+            }
+            let handle = ctx.systems.get_or_spawn(sys_id);
+            match handle.set_speed_fraction(ship_id, fraction).await {
+                Ok(tick) => Some(Ok(PyRep::Integer(tick as i64))),
+                Err(e) => Some(Err(BridgeRpcError {
+                    code: "DestinyCommandFailed".into(),
+                    message: e,
+                })),
+            }
+        }
+
         ("beyonce", "CmdOrbit") | ("beyonce", "CmdFollowBall") => {
             let _ = match ServerContext::require_character(session) {
                 Ok(v) => v,
@@ -186,6 +218,15 @@ pub async fn handle(
                     })
                 {
                     is_valid_anchor = true;
+                }
+                if !is_valid_anchor {
+                    let cels = ctx.sde.celestials_in_system(sys_id);
+                    if cels
+                        .iter()
+                        .any(|c| c.position.distance(dest_pos) <= 100_000.0)
+                    {
+                        is_valid_anchor = true;
+                    }
                 }
             }
             let has_scanned_sig = ctx.has_scanned_signature(char_id, sys_id, 750_000_001);
@@ -357,6 +398,14 @@ pub async fn handle(
                             .map(|j| j.position);
                     }
                     if resolved_pos.is_none() {
+                        resolved_pos = ctx
+                            .sde
+                            .celestials_in_system(sys_id)
+                            .into_iter()
+                            .find(|c| c.celestial_id == target_id)
+                            .map(|c| c.position);
+                    }
+                    if resolved_pos.is_none() {
                         let has_scanned = ctx.has_scanned_signature(char_id, sys_id, target_id);
                         resolved_pos = ctx.db.with_snapshot(|snap| {
                             if let Some(st) = snap.structures.get(&target_id) {
@@ -416,6 +465,101 @@ pub async fn handle(
                 Ok(tick) => Some(Ok(PyRep::Integer(tick as i64))),
                 Err(e) => Some(Err(BridgeRpcError {
                     code: "DestinyCommandFailed".into(),
+                    message: e,
+                })),
+            }
+        }
+
+        // parity: plan:P-7, plan:SP-1, plan:SP-2
+        // parity: feat:navigation.destiny-updates, feat:navigation.celestials-balls, feat:navigation.bubbles-grid
+        // parity: rpc:beyonce.AdminGetBubbleID
+        // parity: destiny:AddBalls2, destiny:RemoveBalls, destiny:RemoveBall
+        // parity: destiny:GotoDirection, destiny:FollowBall, destiny:Orbit, destiny:Stop
+        // parity: notify:DoDestinyUpdate
+        ("beyonce", "UpdateStateRequest") => {
+            let _ = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let sys_id = match ServerContext::require_bound_system(bound_entry, "beyonce") {
+                Ok(s) => s,
+                Err(e) => return Some(Err(e)),
+            };
+            if session.station_id.is_some() || session.structure_id.is_some() {
+                return Some(Ok(PyRep::None));
+            }
+            let Some(ship_id) = session.ship_id else {
+                return Some(Ok(PyRep::None));
+            };
+            let handle = ctx.systems.get_or_spawn(sys_id);
+            let Some((_, ship_ball)) = (match handle.get_ball_snapshot(ship_id).await {
+                Ok(v) => v,
+                Err(e) => {
+                    return Some(Err(BridgeRpcError {
+                        code: "DestinyQueryFailed".into(),
+                        message: e,
+                    }))
+                }
+            }) else {
+                return Some(Ok(PyRep::None));
+            };
+            if matches!(ship_ball.mode, MovementMode::Warp { .. }) {
+                return Some(Ok(PyRep::None));
+            }
+            match handle.push_set_state(ship_id).await {
+                Ok(_tick) => Some(Ok(PyRep::None)),
+                Err(e) => Some(Err(BridgeRpcError {
+                    code: "DestinyQueryFailed".into(),
+                    message: e,
+                })),
+            }
+        }
+
+        ("beyonce", "AdminGetBubbleID") => {
+            let _ = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            if !session.has_gm_role() {
+                return Some(Err(BridgeRpcError {
+                    code: "InsufficientRoles".into(),
+                    message: "beyonce.AdminGetBubbleID requires a GM or Admin role".into(),
+                }));
+            }
+            let sys_id = match ServerContext::require_bound_system(bound_entry, "beyonce") {
+                Ok(s) => s,
+                Err(e) => return Some(Err(e)),
+            };
+            let Some(ship_id) = session.ship_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "NoActiveShip".into(),
+                    message: "Session has no active ship".into(),
+                }));
+            };
+            let target_ball_id = args
+                .first()
+                .and_then(|a| a.as_i64())
+                .unwrap_or(ship_id);
+            let handle = ctx.systems.get_or_spawn(sys_id);
+            if target_ball_id != ship_id {
+                let visible = handle.list_balls_in_bubble(ship_id).await.unwrap_or_default();
+                if !visible.iter().any(|b| b.id == target_ball_id) {
+                    return Some(Err(BridgeRpcError {
+                        code: "BallNotVisible".into(),
+                        message: format!(
+                            "Ball {target_ball_id} is not visible in caller ship {ship_id}'s grid bubble"
+                        ),
+                    }));
+                }
+            }
+            match handle.get_bubble_id_for_ball(target_ball_id).await {
+                Ok(Some(bid)) => Some(Ok(PyRep::Integer(bid as i64))),
+                Ok(None) => Some(Err(BridgeRpcError {
+                    code: "BallNotFound".into(),
+                    message: format!("Ball {target_ball_id} is not present in system {sys_id}"),
+                })),
+                Err(e) => Some(Err(BridgeRpcError {
+                    code: "DestinyQueryFailed".into(),
                     message: e,
                 })),
             }
@@ -566,11 +710,15 @@ pub async fn handle(
             new_ball.speed_fraction = 0.0;
             new_ball.mode = MovementMode::Stop;
             let combat_state = ctx.build_ship_combat_state(char_id, ship_id, new_ball.type_id);
-            let _ = new_handle.spawn_ball_with_combat(new_ball, combat_state).await;
+            let slim_meta = ctx.build_ship_slim_meta(char_id, new_ball.type_id);
+            let _ = new_handle
+                .spawn_ball_with_meta(new_ball, combat_state, slim_meta)
+                .await;
             let _ = ctx
                 .living_world
                 .materialize_system_lod2(dest_sys_id, &ctx.systems, &ctx.sde)
                 .await;
+            let _ = new_handle.push_set_state(ship_id).await;
 
             session.solar_system_id = Some(updated_ch.solar_system_id);
             session.constellation_id = Some(updated_ch.constellation_id);
