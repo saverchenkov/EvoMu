@@ -3,9 +3,9 @@
 #![forbid(unsafe_code)]
 
 use crate::formulas::{
-    breacher_pod_tick_damage, compute_dbs_and_ess_bounty_split, compute_fighter_squadron_damage,
-    concord_response_delay_sec, entropic_spool_multiplier, missile_damage_factor,
-    turret_chance_to_hit, turret_shot_damage, vorton_arc_targets_with_cap,
+    breacher_pod_tick_damage, compute_dbs_and_ess_bounty_split, concord_response_delay_sec,
+    entropic_spool_multiplier, missile_damage_factor, turret_chance_to_hit, turret_shot_damage,
+    vorton_arc_targets_with_cap,
 };
 use crate::router::ServerContext;
 use eve_db::{InventoryFlag, InventoryItemRecord, IskCents, KillRightRecord, KillmailRecord};
@@ -75,14 +75,24 @@ pub async fn handle(
                     message: "Session has no active ship".into(),
                 }));
             };
-            let target_id = args.first().and_then(|a| a.as_i64()).unwrap_or(700_000_001);
+            let Some(target_id) = args.first().and_then(|a| a.as_i64()) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidTarget".into(),
+                    message: "FireWeapon requires an explicit integer targetID".into(),
+                }));
+            };
             if target_id <= 0 || target_id == char_id || target_id == ship_id {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidTarget".into(),
                     message: "Invalid or self combat target".into(),
                 }));
             }
-            let sys_id = session.solar_system_id.unwrap_or(30_000_142);
+            let Some(sys_id) = session.solar_system_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "NoSolarSystem".into(),
+                    message: "Session has no active solar system".into(),
+                }));
+            };
             let sys_handle = ctx.systems.get_or_spawn(sys_id);
 
             // Require the attacker's ship ball to exist in the current solar system's Ballpark
@@ -1245,7 +1255,12 @@ pub async fn handle(
                     message: "Session has no active ship".into(),
                 }));
             };
-            let sys_id = session.solar_system_id.unwrap_or(30_000_142);
+            let Some(sys_id) = session.solar_system_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "NoSolarSystem".into(),
+                    message: "Session has no active solar system".into(),
+                }));
+            };
             let sys_sec = ctx
                 .sde
                 .solar_systems
@@ -1279,7 +1294,12 @@ pub async fn handle(
                 }));
             };
 
-            let ess_ball_id = args.first().and_then(|a| a.as_i64()).unwrap_or(750_000_002);
+            let Some(ess_ball_id) = args.first().and_then(|a| a.as_i64()) else {
+                return Some(Err(BridgeRpcError {
+                    code: "EssBeaconNotPresent".into(),
+                    message: "ESS link requires an explicit integer essBallID".into(),
+                }));
+            };
             let Some((_, ess_ball)) = (match sys_handle.get_ball_snapshot(ess_ball_id).await {
                 Ok(v) => v,
                 Err(e) => {
@@ -1383,7 +1403,12 @@ pub async fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let ship_id = session.ship_id.unwrap_or(100_000_001);
+            let Some(ship_id) = args.first().and_then(|a| a.as_i64()).or(session.ship_id) else {
+                return Some(Err(BridgeRpcError {
+                    code: "NoActiveShip".into(),
+                    message: "Session has no active ship".into(),
+                }));
+            };
             let rows = ctx.db.with_snapshot(|snap| {
                 snap.items
                     .values()
@@ -1405,682 +1430,6 @@ pub async fn handle(
                 vec!["itemID", "typeID", "squadronSize"],
                 rows,
             )))
-        }
-
-        ("fighterMgr", "CmdActivateAbilitySlots") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            if session.station_id.is_some() || session.structure_id.is_some() {
-                return Some(Err(BridgeRpcError {
-                    code: "ShipDocked".into(),
-                    message: "Cannot activate fighter abilities while docked".into(),
-                }));
-            }
-            let Some(ship_id) = session.ship_id else {
-                return Some(Err(BridgeRpcError {
-                    code: "NoActiveShip".into(),
-                    message: "Session has no active ship".into(),
-                }));
-            };
-            let raw_ability_id = args.first().and_then(|a| a.as_i64()).unwrap_or(1);
-            let Ok(ability_id) = u32::try_from(raw_ability_id) else {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidFighterAbilityID".into(),
-                    message: format!("Invalid fighter ability ID {raw_ability_id}"),
-                }));
-            };
-            let Some(ability) = ctx.sde.fighter_abilities.get(&ability_id) else {
-                return Some(Err(BridgeRpcError {
-                    code: "UnknownFighterAbility".into(),
-                    message: format!("Fighter ability {ability_id} not found in SDE"),
-                }));
-            };
-
-            let sys_id = session.solar_system_id.unwrap_or(30_000_142);
-            let sys_handle = ctx.systems.get_or_spawn(sys_id);
-            let Some((current_tick, attacker_ball)) =
-                (match sys_handle.get_ball_snapshot(ship_id).await {
-                    Ok(v) => v,
-                    Err(e) => {
-                        return Some(Err(BridgeRpcError {
-                            code: "DestinyQueryFailed".into(),
-                            message: e,
-                        }))
-                    }
-                })
-            else {
-                return Some(Err(BridgeRpcError {
-                    code: "ShipNotInSpace".into(),
-                    message: format!("Active ship {ship_id} is not in space"),
-                }));
-            };
-
-            // Require active ship to have fighter tubes (attributeFighterTubes 2216 > 0) in SDE
-            let fighter_tubes = ctx
-                .sde
-                .types
-                .get(&attacker_ball.type_id)
-                .and_then(|t| t.default_attributes.get(&2216))
-                .copied()
-                .unwrap_or(0.0);
-            if fighter_tubes <= 0.0 {
-                return Some(Err(BridgeRpcError {
-                    code: "ShipHasNoFighterTubes".into(),
-                    message: format!(
-                        "Ship type {} has no fighter launch tubes (attributeFighterTubes 2216)",
-                        attacker_ball.type_id
-                    ),
-                }));
-            }
-
-            // Require an owned fighter squadron item in FighterBay on the active ship with valid SDE fighterSquadronMaxSize (2215)
-            let squadron_item = ctx.db.with_snapshot(|snap| {
-                snap.items
-                    .values()
-                    .find(|i| {
-                        i.owner_id == char_id
-                            && i.location_id == ship_id
-                            && i.flag == InventoryFlag::FighterBay
-                            && i.quantity > 0
-                    })
-                    .map(|i| (i.type_id, i.quantity.clamp(1, 12) as u32))
-            });
-            let Some((fighter_type_id, sq_size)) = squadron_item else {
-                return Some(Err(BridgeRpcError {
-                    code: "NoFighterSquadron".into(),
-                    message: format!(
-                        "Active ship {ship_id} has no fighter squadron in FighterBay"
-                    ),
-                }));
-            };
-            let max_sq_size = ctx
-                .sde
-                .types
-                .get(&fighter_type_id)
-                .and_then(|t| t.default_attributes.get(&2215))
-                .copied()
-                .unwrap_or(0.0);
-            if max_sq_size <= 0.0 {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidFighterType".into(),
-                    message: format!(
-                        "Item type {fighter_type_id} is not a valid fighter squadron in SDE"
-                    ),
-                }));
-            };
-
-            let cooldown = ability.cooldown_sec.max(1.0);
-            {
-                let cd_guard = ctx
-                    .fighter_cooldown_state
-                    .read()
-                    .unwrap_or_else(|e| e.into_inner());
-                if let Some(&ready_at) = cd_guard.get(&(ship_id, ability_id)) {
-                    if current_tick < ready_at {
-                        return Some(Err(BridgeRpcError {
-                            code: "FighterAbilityOnCooldown".into(),
-                            message: format!(
-                                "Fighter ability {ability_id} on ship {ship_id} is on cooldown until tick {ready_at}"
-                            ),
-                        }));
-                    }
-                }
-            }
-
-            let dmg = compute_fighter_squadron_damage(
-                50.0 * ability.damage_multiplier.max(1.0),
-                sq_size.min(max_sq_size as u32),
-                cooldown,
-            );
-            if let Some(target_id) = args.get(1).and_then(|a| a.as_i64()) {
-                if target_id <= 0 || target_id == char_id || target_id == ship_id {
-                    return Some(Err(BridgeRpcError {
-                        code: "InvalidTarget".into(),
-                        message: "Invalid or self fighter target".into(),
-                    }));
-                }
-                let player_target_info = ctx.db.with_snapshot(|snap| {
-                    if let Some(ch) = snap.characters.get(&target_id) {
-                        Some((ch.character_id, ch.active_ship_id))
-                    } else {
-                        snap.characters
-                            .values()
-                            .find(|c| c.active_ship_id == target_id)
-                            .map(|c| (c.character_id, c.active_ship_id))
-                    }
-                });
-                let target_ball_id = player_target_info
-                    .map(|(_, s_id)| s_id)
-                    .unwrap_or(target_id);
-                let Some((_, target_ball)) =
-                    (match sys_handle.get_ball_snapshot(target_ball_id).await {
-                        Ok(v) => v,
-                        Err(e) => {
-                            return Some(Err(BridgeRpcError {
-                                code: "DestinyQueryFailed".into(),
-                                message: e,
-                            }))
-                        }
-                    })
-                else {
-                    return Some(Err(BridgeRpcError {
-                        code: "TargetNotInSpace".into(),
-                        message: format!(
-                            "Fighter target ball {target_ball_id} is not present in system {sys_id}"
-                        ),
-                    }));
-                };
-                let dist = attacker_ball.position.distance(target_ball.position);
-                if dist > 25_000.0 {
-                    return Some(Err(BridgeRpcError {
-                        code: "TargetOutOfRange".into(),
-                        message: format!(
-                            "Fighter target {target_ball_id} is {:.1} m away (exceeds 25 km fighter control range)",
-                            dist
-                        ),
-                    }));
-                }
-
-                let active_convoy_opt = ctx
-                    .living_world
-                    .get_convoy(target_ball_id)
-                    .filter(|c| !c.destroyed);
-                let sys_sec = ctx
-                    .sde
-                    .solar_systems
-                    .get(&sys_id)
-                    .map(|s| s.security_status)
-                    .unwrap_or(1.0);
-                let now_unix = ctx.now_unix();
-                let attacker_ship_val = ctx
-                    .sde
-                    .types
-                    .get(&attacker_ball.type_id)
-                    .map(|t| t.base_price)
-                    .unwrap_or(3_500_000_000.0);
-                let target_ship_val = ctx
-                    .sde
-                    .types
-                    .get(&target_ball.type_id)
-                    .map(|t| t.base_price)
-                    .unwrap_or(230_000.0);
-                let mut has_legal_engagement = false;
-                if let Some((victim_char_id, _)) = player_target_info {
-                    has_legal_engagement = ctx.db.with_snapshot(|snap| {
-                        is_legal_war_or_suspect_target(snap, char_id, victim_char_id, now_unix)
-                    });
-                    if sys_sec >= 0.45 && !has_legal_engagement {
-                        let concord_delay = concord_response_delay_sec(sys_sec);
-                        let _ = sys_handle.remove_ball(ship_id).await;
-                        ctx.invalidate_ship_fitting(ship_id);
-                        let (kill_id, kr_id) = ctx
-                            .db
-                            .try_with_mut_snapshot(|snap| {
-                                if let Some(att) = snap.characters.get_mut(&char_id) {
-                                    att.security_status = (att.security_status - 0.5).max(-10.0);
-                                }
-                                snap.next_entity_id += 1;
-                                let kid = snap.next_entity_id;
-                                snap.killmails.insert(
-                                    kid,
-                                    KillmailRecord {
-                                        kill_id: kid,
-                                        victim_character_id: char_id,
-                                        attacker_character_id: 1_000_125, // CONCORD
-                                        solar_system_id: sys_id,
-                                        ship_type_id: attacker_ball.type_id,
-                                        total_value_isk: attacker_ship_val,
-                                    },
-                                );
-                                snap.next_entity_id += 1;
-                                let krid = snap.next_entity_id;
-                                snap.kill_rights.insert(
-                                    krid,
-                                    KillRightRecord {
-                                        kill_right_id: krid,
-                                        owner_id: victim_char_id,
-                                        target_id: char_id,
-                                        activation_fee: IskCents::from_isk(1_000_000),
-                                        is_active_suspect: false,
-                                    },
-                                );
-                                Ok::<_, std::convert::Infallible>((kid, krid))
-                            })
-                            .unwrap();
-                        if let Ok((respawned_ch, capsule)) =
-                            ctx.db.respawn_character_at_home_station(char_id, ship_id, &ctx.sde)
-                        {
-                            session.ship_id = Some(capsule.item_id);
-                            session.station_id = respawned_ch.station_id;
-                            session.structure_id = None;
-                            session.solar_system_id = Some(respawned_ch.solar_system_id);
-                            session.constellation_id = Some(respawned_ch.constellation_id);
-                            session.region_id = Some(respawned_ch.region_id);
-                        }
-                        return Some(Ok(PyRep::keyval([
-                            ("criminalCharacterID", PyRep::Integer(char_id)),
-                            ("victimCharacterID", PyRep::Integer(victim_char_id)),
-                            ("concordResponseSeconds", PyRep::Real(concord_delay)),
-                            ("concordKillmailID", PyRep::Integer(kill_id)),
-                            ("killRightID", PyRep::Integer(kr_id)),
-                            ("criminalTimerSeconds", PyRep::Integer(900)),
-                        ])));
-                    }
-                }
-
-                let npc_base_bounty = if player_target_info.is_none() && active_convoy_opt.is_none() {
-                    let Some(t) = ctx.sde.types.get(&target_ball.type_id) else {
-                        return Some(Err(BridgeRpcError {
-                            code: "TargetInvulnerable".into(),
-                            message: format!(
-                                "Fighter target ball {target_ball_id} (type {}) is invulnerable",
-                                target_ball.type_id
-                            ),
-                        }));
-                    };
-                    let bounty = t
-                        .default_attributes
-                        .get(&eve_sde::attr_ids::ENTITY_KILL_BOUNTY)
-                        .copied()
-                        .unwrap_or(0.0);
-                    if t.category_id != 11 || bounty <= 0.0 {
-                        return Some(Err(BridgeRpcError {
-                            code: "TargetInvulnerable".into(),
-                            message: format!(
-                                "Fighter target ball {target_ball_id} (type {}) is invulnerable",
-                                target_ball.type_id
-                            ),
-                        }));
-                    };
-                    let belongs_to_other_mission = ctx.db.with_snapshot(|snap| {
-                        snap.active_missions.iter().any(|((m_char_id, _), m)| {
-                            *m_char_id != char_id
-                                && m.state == "Accepted"
-                                && m.spawned_npc_ball_ids.contains(&target_ball_id)
-                        })
-                    });
-                    if belongs_to_other_mission {
-                        return Some(Err(BridgeRpcError {
-                            code: "MissionPocketInstanceRestricted".into(),
-                            message: format!(
-                                "Target NPC {target_ball_id} is inside another pilot's instanced mission pocket"
-                            ),
-                        }));
-                    }
-                    bounty
-                } else {
-                    0.0
-                };
-
-                {
-                    let mut cd_guard = ctx
-                        .fighter_cooldown_state
-                        .write()
-                        .unwrap_or_else(|e| e.into_inner());
-                    cd_guard.insert(
-                        (ship_id, ability_id),
-                        current_tick.saturating_add(cooldown.ceil() as u64),
-                    );
-                }
-
-                let Some((applied_dmg, destroyed, _)) = (match sys_handle
-                    .apply_damage(
-                        target_ball_id,
-                        DamageVector {
-                            em: dmg * 0.25,
-                            thermal: dmg * 0.25,
-                            kinetic: dmg * 0.25,
-                            explosive: dmg * 0.25,
-                        },
-                    )
-                    .await
-                {
-                    Ok(v) => v,
-                    Err(e) => {
-                        return Some(Err(BridgeRpcError {
-                            code: "CombatApplicationFailed".into(),
-                            message: e,
-                        }))
-                    }
-                }) else {
-                    return Some(Err(BridgeRpcError {
-                        code: "TargetNotInSpace".into(),
-                        message: format!("Fighter target ball {target_ball_id} no longer exists"),
-                    }));
-                };
-
-                if active_convoy_opt.is_some() && destroyed {
-                    let (wreck_item_id, loot_item_id, spiked_ask) = match ctx
-                        .living_world
-                        .interdict_convoy(target_ball_id, char_id, &ctx.db)
-                    {
-                        Ok(v) => v,
-                        Err(e) => {
-                            return Some(Err(BridgeRpcError {
-                                code: "InterdictionFailed".into(),
-                                message: e,
-                            }))
-                        }
-                    };
-                    let _ = sys_handle
-                        .spawn_ball_with_combat(
-                            eve_destiny::Ball {
-                                id: wreck_item_id,
-                                type_id: 26557,
-                                position: target_ball.position,
-                                velocity: DVec3::ZERO,
-                                max_velocity: 0.0,
-                                inertia: 1.0,
-                                mass: 10_000.0,
-                                radius: 50.0,
-                                speed_fraction: 0.0,
-                                mode: eve_destiny::MovementMode::Stop,
-                            },
-                            eve_destiny::CombatState {
-                                shield_hp: 0.0,
-                                max_shield_hp: 0.0,
-                                armor_hp: 0.0,
-                                max_armor_hp: 0.0,
-                                structure_hp: 500.0,
-                                max_structure_hp: 500.0,
-                                ..eve_destiny::CombatState::default()
-                            },
-                        )
-                        .await;
-                    return Some(Ok(PyRep::keyval([
-                        ("abilityID", PyRep::Integer(ability_id as i64)),
-                        ("squadronSize", PyRep::Integer(sq_size as i64)),
-                        ("volleyDamage", PyRep::Real(dmg)),
-                        ("appliedDamage", PyRep::Real(applied_dmg)),
-                        ("destroyed", PyRep::Bool(true)),
-                        ("convoyID", PyRep::Integer(target_ball_id)),
-                        ("wreckItemID", PyRep::Integer(wreck_item_id)),
-                        ("lootItemID", PyRep::Integer(loot_item_id)),
-                        ("newDestinationAskISK", PyRep::Real(spiked_ask.to_wire_f64())),
-                    ])));
-                }
-
-                if let Some((victim_char_id, victim_ship_id)) = player_target_info {
-                    let is_lowsec_unprovoked =
-                        sys_sec > 0.0 && sys_sec < 0.45 && !has_legal_engagement;
-                    let is_pod_target = target_ball.type_id == 670;
-                    if destroyed {
-                        ctx.invalidate_ship_fitting(victim_ship_id);
-                    }
-                    let (kill_id, ejected_capsule_id) = ctx
-                        .db
-                        .try_with_mut_snapshot(|snap| {
-                            if is_lowsec_unprovoked {
-                                let sec_penalty = if is_pod_target { 1.5 } else { 0.2 };
-                                if let Some(att) = snap.characters.get_mut(&char_id) {
-                                    att.security_status =
-                                        (att.security_status - sec_penalty).max(-10.0);
-                                }
-                                if let Some(existing_kr) = snap.kill_rights.values_mut().find(|kr| {
-                                    kr.owner_id == victim_char_id && kr.target_id == char_id
-                                }) {
-                                    existing_kr.is_active_suspect = true;
-                                } else {
-                                    snap.next_entity_id += 1;
-                                    let krid = snap.next_entity_id;
-                                    snap.kill_rights.insert(
-                                        krid,
-                                        KillRightRecord {
-                                            kill_right_id: krid,
-                                            owner_id: victim_char_id,
-                                            target_id: char_id,
-                                            activation_fee: IskCents::from_isk(1_000_000),
-                                            is_active_suspect: true,
-                                        },
-                                    );
-                                }
-                            }
-                            if destroyed {
-                                for kr in snap.kill_rights.values_mut() {
-                                    if kr.target_id == victim_char_id && kr.is_active_suspect {
-                                        kr.is_active_suspect = false;
-                                    }
-                                }
-                                snap.next_entity_id += 1;
-                                let id = snap.next_entity_id;
-                                snap.killmails.insert(
-                                    id,
-                                    KillmailRecord {
-                                        kill_id: id,
-                                        victim_character_id: victim_char_id,
-                                        attacker_character_id: char_id,
-                                        solar_system_id: sys_id,
-                                        ship_type_id: target_ball.type_id,
-                                        total_value_isk: target_ship_val,
-                                    },
-                                );
-                                let mut cap_id = 0;
-                                if !is_pod_target {
-                                    let mut to_remove =
-                                        std::collections::HashSet::from([victim_ship_id]);
-                                    loop {
-                                        let mut added = false;
-                                        for (&iid, item) in &snap.items {
-                                            if !to_remove.contains(&iid)
-                                                && to_remove.contains(&item.location_id)
-                                            {
-                                                to_remove.insert(iid);
-                                                added = true;
-                                            }
-                                        }
-                                        if !added {
-                                            break;
-                                        }
-                                    }
-                                    snap.items.retain(|iid, _| !to_remove.contains(iid));
-                                    snap.next_entity_id += 1;
-                                    let cid = snap.next_entity_id;
-                                    snap.items.insert(
-                                        cid,
-                                        InventoryItemRecord {
-                                            item_id: cid,
-                                            type_id: 670,
-                                            owner_id: victim_char_id,
-                                            location_id: sys_id as i64,
-                                            flag: InventoryFlag::None,
-                                            quantity: 1,
-                                            singleton: true,
-                                            version: 1,
-                                            dynamic_attributes: HashMap::new(),
-                                            source_mutaplasmid_id: None,
-                                            insured_payout_isk: 0.0,
-                                            is_blueprint_copy: false,
-                                            blueprint_runs_remaining: None,
-                                        },
-                                    );
-                                    cap_id = cid;
-                                    if let Some(vic) = snap.characters.get_mut(&victim_char_id) {
-                                        vic.active_ship_id = cap_id;
-                                        vic.version += 1;
-                                        vic.system_epoch += 1;
-                                    }
-                                }
-                                Ok::<_, std::convert::Infallible>((id, cap_id))
-                            } else {
-                                Ok::<_, std::convert::Infallible>((0, 0))
-                            }
-                        })
-                        .unwrap();
-                    if destroyed {
-                        if is_pod_target {
-                            let _ = ctx.db.respawn_character_at_home_station(
-                                victim_char_id,
-                                victim_ship_id,
-                                &ctx.sde,
-                            );
-                        } else if ejected_capsule_id > 0 {
-                            let _ = sys_handle
-                                .spawn_ball_with_combat(
-                                    eve_destiny::Ball {
-                                        id: ejected_capsule_id,
-                                        type_id: 670,
-                                        position: target_ball.position,
-                                        velocity: DVec3::ZERO,
-                                        max_velocity: 335.0,
-                                        inertia: 0.25,
-                                        mass: 16_000.0,
-                                        radius: 15.0,
-                                        speed_fraction: 0.0,
-                                        mode: eve_destiny::MovementMode::Stop,
-                                    },
-                                    ctx.build_type_combat_state(670),
-                                )
-                                .await;
-                        }
-                    }
-                    return Some(Ok(PyRep::keyval([
-                        ("abilityID", PyRep::Integer(ability_id as i64)),
-                        ("squadronSize", PyRep::Integer(sq_size as i64)),
-                        ("volleyDamage", PyRep::Real(dmg)),
-                        ("appliedDamage", PyRep::Real(applied_dmg)),
-                        ("destroyed", PyRep::Bool(destroyed)),
-                        ("killID", PyRep::Integer(kill_id)),
-                    ])));
-                }
-
-                let mut bounty_payout_isk = 0.0;
-                if destroyed {
-                    let is_kspace_nullsec = sys_sec <= 0.0 && sys_id < 31_000_000;
-                    let dbs_mult = ctx
-                        .db
-                        .with_snapshot(|s| s.system_states.get(&sys_id).map(|st| st.dbs_multiplier))
-                        .unwrap_or(1.35);
-                    let (pilot_isk, main_ess, reserve_ess) = if is_kspace_nullsec {
-                        let (p, _tax, m, r) =
-                            compute_dbs_and_ess_bounty_split(npc_base_bounty, dbs_mult, 0.10);
-                        (p, m, r)
-                    } else {
-                        (npc_base_bounty * (1.0 - 0.10), 0.0, 0.0)
-                    };
-                    bounty_payout_isk = pilot_isk;
-                    let _ = ctx.db.try_with_mut_snapshot(|snap| {
-                        let pilot_cents = IskCents::from_f64_isk(pilot_isk);
-                        let main_cents = IskCents::from_f64_isk(main_ess);
-                        let reserve_cents = IskCents::from_f64_isk(reserve_ess);
-                        if let Some(ch) = snap.characters.get_mut(&char_id) {
-                            ch.balance = ch.balance.checked_add(pilot_cents).unwrap_or(ch.balance);
-                        }
-                        if is_kspace_nullsec {
-                            if let Some(st) = snap.system_states.get_mut(&sys_id) {
-                                st.ess_main_bank = st
-                                    .ess_main_bank
-                                    .checked_add(main_cents)
-                                    .unwrap_or(st.ess_main_bank);
-                                st.ess_reserve_bank = st
-                                    .ess_reserve_bank
-                                    .checked_add(reserve_cents)
-                                    .unwrap_or(st.ess_reserve_bank);
-                            }
-                        }
-                        for ((m_char_id, _), m) in snap.active_missions.iter_mut() {
-                            if *m_char_id == char_id
-                                && m.state == "Accepted"
-                                && m.solar_system_id == sys_id
-                                && m.npcs_remaining > 0
-                            {
-                                if let Some(pos) = m
-                                    .spawned_npc_ball_ids
-                                    .iter()
-                                    .position(|&bid| bid == target_id)
-                                {
-                                    m.spawned_npc_ball_ids.remove(pos);
-                                    m.npcs_remaining -= 1;
-                                }
-                            }
-                        }
-                        let npe = snap.npe_progress.entry(char_id).or_insert_with(|| {
-                            eve_db::NpeProgressRecord {
-                                character_id: char_id,
-                                node_graph_id: 473,
-                                current_node_id: 1,
-                                completed: false,
-                                career_goal_progress: Default::default(),
-                                claimed_goals: Default::default(),
-                            }
-                        });
-                        *npe.career_goal_progress.entry(1).or_insert(0) += 1;
-                        let mut empty_sys_wrecks: Vec<i64> = snap
-                            .items
-                            .values()
-                            .filter(|i| {
-                                i.type_id == 26557
-                                    && i.location_id == sys_id as i64
-                                    && !snap.items.values().any(|child| child.location_id == i.item_id)
-                            })
-                            .map(|i| i.item_id)
-                            .collect();
-                        empty_sys_wrecks.sort_unstable();
-                        while empty_sys_wrecks.len() >= 64 {
-                            let oldest = empty_sys_wrecks.remove(0);
-                            snap.items.remove(&oldest);
-                        }
-                        snap.next_entity_id += 1;
-                        let wreck_id = snap.next_entity_id;
-                        snap.items.insert(
-                            wreck_id,
-                            InventoryItemRecord {
-                                item_id: wreck_id,
-                                type_id: 26557,
-                                owner_id: char_id,
-                                location_id: sys_id as i64,
-                                flag: InventoryFlag::Cargo,
-                                quantity: 1,
-                                singleton: true,
-                                version: 1,
-                                dynamic_attributes: HashMap::new(),
-                                source_mutaplasmid_id: None,
-                                insured_payout_isk: 0.0,
-                                is_blueprint_copy: false,
-                                blueprint_runs_remaining: None,
-                            },
-                        );
-                        snap.next_entity_id += 1;
-                        let kid = snap.next_entity_id;
-                        snap.killmails.insert(
-                            kid,
-                            KillmailRecord {
-                                kill_id: kid,
-                                victim_character_id: target_ball_id,
-                                attacker_character_id: char_id,
-                                solar_system_id: sys_id,
-                                ship_type_id: target_ball.type_id,
-                                total_value_isk: npc_base_bounty,
-                            },
-                        );
-                        Ok::<_, std::convert::Infallible>(())
-                    });
-                }
-                return Some(Ok(PyRep::keyval([
-                    ("abilityID", PyRep::Integer(ability_id as i64)),
-                    ("squadronSize", PyRep::Integer(sq_size as i64)),
-                    ("volleyDamage", PyRep::Real(dmg)),
-                    ("appliedDamage", PyRep::Real(applied_dmg)),
-                    ("destroyed", PyRep::Bool(destroyed)),
-                    ("bountyPayoutISK", PyRep::Real(bounty_payout_isk)),
-                ])));
-            }
-            {
-                let mut cd_guard = ctx
-                    .fighter_cooldown_state
-                    .write()
-                    .unwrap_or_else(|e| e.into_inner());
-                cd_guard.insert(
-                    (ship_id, ability_id),
-                    current_tick.saturating_add(cooldown.ceil() as u64),
-                );
-            }
-            Some(Ok(PyRep::keyval([
-                ("abilityID", PyRep::Integer(ability_id as i64)),
-                ("squadronSize", PyRep::Integer(sq_size as i64)),
-                ("volleyDamage", PyRep::Real(dmg)),
-            ])))
         }
 
         _ => None,

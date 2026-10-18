@@ -548,6 +548,37 @@ impl SessionState {
             PyRep::List(nodes_of_interest.into_iter().map(PyRep::Integer).collect()),
         ]))
     }
+
+    pub fn has_gm_role(&self) -> bool {
+        (self.role & service_roles::ROLE_GM_MASK) != 0
+    }
+}
+
+/// Canonical CCP 64-bit account/session role constants from V24.01 `carbon/common/script/sys/serviceConst.pyj` (`S-9`).
+pub mod service_roles {
+    pub const ROLE_ANY: u64 = 0x0;
+    pub const ROLE_IGB: u64 = 0x0000_0000_8000_0000;
+    pub const ROLE_SPAWN: u64 = 0x0000_0002_0000_0000;
+    pub const ROLE_GMS: u64 = 0x0000_0040_0000_0000;
+    pub const ROLE_PROGRAMMER: u64 = 0x0008_0000_0000_0000;
+    pub const ROLE_QA: u64 = 0x0010_0000_0000_0000;
+    pub const ROLE_GMH: u64 = 0x0020_0000_0000_0000;
+    pub const ROLE_GML: u64 = 0x0040_0000_0000_0000;
+    pub const ROLE_CONTENT: u64 = 0x0080_0000_0000_0000;
+    pub const ROLE_ADMIN: u64 = 0x0100_0000_0000_0000;
+    pub const ROLE_VIPLOGIN: u64 = 0x0200_0000_0000_0000;
+    pub const ROLE_ROLEADMIN: u64 = 0x0400_0000_0000_0000;
+    pub const ROLE_NEWBIE: u64 = 0x0800_0000_0000_0000;
+    pub const ROLE_SERVICE: u64 = 0x1000_0000_0000_0000;
+    pub const ROLE_PLAYER: u64 = 0x2000_0000_0000_0000;
+    pub const ROLE_LOGIN: u64 = 0x4000_0000_0000_0000;
+
+    /// Standard player account role mask (`ROLE_PLAYER | ROLE_LOGIN`), containing zero GM/admin bits.
+    pub const ROLE_PLAYER_DEFAULT: u64 = ROLE_PLAYER | ROLE_LOGIN;
+    /// Mask of elevated GM / Admin role bits (`ROLE_GML | ROLE_GMH | ROLE_GMS | ROLE_ADMIN`).
+    pub const ROLE_GM_MASK: u64 = ROLE_GML | ROLE_GMH | ROLE_GMS | ROLE_ADMIN;
+    /// Default provisioned GM account role mask.
+    pub const ROLE_GM_DEFAULT: u64 = ROLE_PLAYER_DEFAULT | ROLE_GM_MASK;
 }
 
 #[cfg(test)]
@@ -573,12 +604,14 @@ mod tests {
         assert_eq!(addr, addr_decoded);
     }
 
+    // parity: plan:S-9
     #[test]
     fn test_session_starts_unauthenticated_and_computes_diffs() {
-        let s1 = SessionState::new(7);
+        let mut s1 = SessionState::new(7);
         assert!(!s1.is_authenticated());
         assert_eq!(s1.user_id, None);
         assert_eq!(s1.role, 0);
+        assert!(!s1.has_gm_role());
 
         let mut s2 = s1.clone();
         s2.user_id = Some(1001);
@@ -598,5 +631,16 @@ mod tests {
         let undock_diff = s2.compute_diff(&s3);
         assert!(undock_diff.contains_key("stationid"));
         assert!(undock_diff.contains_key("solarsystemid"));
+
+        // Verify CCP 64-bit role constants from serviceConst.pyj
+        assert_eq!(service_roles::ROLE_PLAYER_DEFAULT & service_roles::ROLE_GM_MASK, 0);
+        assert_eq!(service_roles::ROLE_GML, 0x0040_0000_0000_0000);
+        assert_eq!(service_roles::ROLE_GMH, 0x0020_0000_0000_0000);
+        assert_eq!(service_roles::ROLE_CONTENT, 0x0080_0000_0000_0000);
+        assert_eq!(service_roles::ROLE_ADMIN, 0x0100_0000_0000_0000);
+        s1.role = service_roles::ROLE_PLAYER_DEFAULT;
+        assert!(!s1.has_gm_role());
+        s1.role |= service_roles::ROLE_GML;
+        assert!(s1.has_gm_role());
     }
 }

@@ -73,11 +73,19 @@ pub async fn handle(
                     message: "MoveItem requires itemID".into(),
                 }));
             };
-            let new_loc = args
+            let Some(new_loc) = args
                 .get(1)
                 .and_then(|a| a.as_i64())
                 .or_else(|| bound_entry.map(|b| b.object_id))
-                .unwrap_or_else(|| session.ship_id.unwrap_or(60_003_760));
+                .or(session.ship_id)
+                .or(session.station_id)
+                .or(session.structure_id)
+            else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidLocation".into(),
+                    message: "MoveItem requires a target locationID, bound inventory, or active ship/station".into(),
+                }));
+            };
             let raw_flag_opt = args
                 .get(2)
                 .and_then(|a| a.as_i64())
@@ -514,7 +522,13 @@ pub async fn handle(
                 .first()
                 .and_then(|a| a.as_str())
                 .unwrap_or("Rifter Combat Fit");
-            let ship_type_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(587) as TypeId;
+            let Some(raw_ship_type) = args.get(1).and_then(|a| a.as_i64()) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidShipType".into(),
+                    message: "SaveFitting requires shipTypeID".into(),
+                }));
+            };
+            let ship_type_id = raw_ship_type as TypeId;
 
             let is_valid_hull = ctx
                 .sde
@@ -767,11 +781,12 @@ pub async fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let ship_id = args
-                .first()
-                .and_then(|a| a.as_i64())
-                .or(session.ship_id)
-                .unwrap_or(100_000_001);
+            let Some(ship_id) = args.first().and_then(|a| a.as_i64()).or(session.ship_id) else {
+                return Some(Err(BridgeRpcError {
+                    code: "NoActiveShip".into(),
+                    message: "InsureShip requires shipID argument or active ship in session".into(),
+                }));
+            };
             let level_fraction = args
                 .get(1)
                 .and_then(|a| a.as_f64())
@@ -832,18 +847,25 @@ pub async fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let ship_id = args
-                .first()
-                .and_then(|a| a.as_i64())
-                .or(session.ship_id)
-                .unwrap_or(100_000_001);
+            let Some(ship_id) = args.first().and_then(|a| a.as_i64()).or(session.ship_id) else {
+                return Some(Err(BridgeRpcError {
+                    code: "NoActiveShip".into(),
+                    message: "GetInsurancePrice requires shipID argument or active ship in session"
+                        .into(),
+                }));
+            };
             let info = ctx.db.with_snapshot(|snap| {
                 snap.items
                     .get(&ship_id)
                     .filter(|i| i.owner_id == char_id)
                     .map(|i| (i.type_id, i.insured_payout_isk))
             });
-            let (type_id, current_payout) = info.unwrap_or((587, 0.0));
+            let Some((type_id, current_payout)) = info else {
+                return Some(Err(BridgeRpcError {
+                    code: "ShipNotFound".into(),
+                    message: format!("Ship {ship_id} not found or not owned by character {char_id}"),
+                }));
+            };
             let base_price = ctx
                 .sde
                 .types
@@ -864,9 +886,19 @@ pub async fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let mutaplasmid_type_id =
-                args.first().and_then(|a| a.as_i64()).unwrap_or(47702) as TypeId;
-            let target_item_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(100_000_003);
+            let Some(raw_muta) = args.first().and_then(|a| a.as_i64()) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidMutaplasmid".into(),
+                    message: "CreateDynamicItem requires mutaplasmid typeID".into(),
+                }));
+            };
+            let mutaplasmid_type_id = raw_muta as TypeId;
+            let Some(target_item_id) = args.get(1).and_then(|a| a.as_i64()) else {
+                return Some(Err(BridgeRpcError {
+                    code: "TargetItemNotFound".into(),
+                    message: "CreateDynamicItem requires target itemID".into(),
+                }));
+            };
 
             let Some(muta_def) = ctx.sde.dynamic_item_attributes.get(&mutaplasmid_type_id) else {
                 return Some(Err(BridgeRpcError {
@@ -1042,7 +1074,12 @@ pub async fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let item_id = args.first().and_then(|a| a.as_i64()).unwrap_or(100_000_003);
+            let Some(item_id) = args.first().and_then(|a| a.as_i64()) else {
+                return Some(Err(BridgeRpcError {
+                    code: "ItemNotFound".into(),
+                    message: "GetDynamicItemInfo requires itemID".into(),
+                }));
+            };
             let res = ctx.db.with_snapshot(|snap| snap.items.get(&item_id).cloned());
             match res {
                 Some(item) => {
@@ -1210,11 +1247,13 @@ pub async fn handle(
                     message: "Assembling a ship requires being docked".into(),
                 }));
             };
-            let item_id = args
-                .first()
-                .and_then(|a| a.as_i64())
-                .or(session.ship_id)
-                .unwrap_or(100_000_001);
+            let Some(item_id) = args.first().and_then(|a| a.as_i64()).or(session.ship_id) else {
+                return Some(Err(BridgeRpcError {
+                    code: "ItemNotFound".into(),
+                    message: "AssembleShip requires itemID argument or active ship in session"
+                        .into(),
+                }));
+            };
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(item) = snap.items.get(&item_id).cloned() else {
                     return Err(BridgeRpcError {
@@ -1296,11 +1335,13 @@ pub async fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let target_ship_id = args
-                .first()
-                .and_then(|a| a.as_i64())
-                .or(session.ship_id)
-                .unwrap_or(100_000_001);
+            let Some(target_ship_id) = args.first().and_then(|a| a.as_i64()).or(session.ship_id) else {
+                return Some(Err(BridgeRpcError {
+                    code: "ShipNotFound".into(),
+                    message: "Board requires target shipID argument or active ship in session"
+                        .into(),
+                }));
+            };
 
             if session.station_id.is_none() && session.structure_id.is_none() {
                 let Some(sys_id) = session.solar_system_id else {
@@ -1421,7 +1462,12 @@ pub async fn handle(
                     message: "Repairing ship and modules requires being docked".into(),
                 }));
             }
-            let ship_id = session.ship_id.unwrap_or(100_000_001);
+            let Some(ship_id) = session.ship_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "NoActiveShip".into(),
+                    message: "Session has no active ship".into(),
+                }));
+            };
             let mut fit = match ctx.get_or_rebuild_ship_fitting(char_id, ship_id) {
                 Ok(f) => f,
                 Err(e) => return Some(Err(e)),

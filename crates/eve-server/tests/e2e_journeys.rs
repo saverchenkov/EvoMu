@@ -12,6 +12,7 @@ async fn test_e2e_01_to_18_integration_journeys() {
     use eve_db::{InventoryFlag, InventoryItemRecord};
 
     let ctx = ServerContext::new();
+    ctx.seed_demo_world_fixtures();
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(
             100_000_014,
@@ -282,8 +283,9 @@ async fn test_e2e_01_to_18_integration_journeys() {
     let tama_bound = tama_kv.get("beyonceBoundID").unwrap().as_i64().unwrap() as u64;
     let tama_handle = ctx.systems.get_or_spawn(30_002_813);
 
-    // E2E-11 in Low-Sec Tama (30002813): Scan exploration wormhole -> Warp to K162 (750_000_001) -> Jump to J105934 (31000005) -> Jump to Null-Sec VFK-IV (30002904)
-    let scan_res = ctx
+    // E2E-11 in Low-Sec Tama (30002813): S-6 verifies RequestScans returns UnimplementedRPC; spawn K162 (750_000_001) -> ConeScan -> Warp -> Jump to J105934 (31000005) -> Jump to Null-Sec VFK-IV (30002904)
+    // parity: plan:S-6
+    let req_scans_err = ctx
         .dispatch_rpc(
             &mut sess,
             "scanMgr",
@@ -293,12 +295,34 @@ async fn test_e2e_01_to_18_integration_journeys() {
             &kw,
             None,
         )
-        .await
-        .expect("RequestScans in Tama");
-    let PyRep::KeyVal(skv) = scan_res else {
-        panic!("Expected scan KeyVal");
-    };
-    assert_eq!(skv.get("warpable"), Some(&PyRep::Bool(true)));
+        .await;
+    assert_eq!(req_scans_err.unwrap_err().code, "UnimplementedRPC");
+    let _ = tama_handle
+        .spawn_ball(eve_destiny::Ball {
+            id: 750_000_001,
+            type_id: 26272,
+            position: glam::DVec3::new(15_000.0, 0.0, 0.0),
+            velocity: glam::DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 1.0,
+            mass: 1_000_000_000.0,
+            radius: 1500.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Rigid,
+        })
+        .await;
+    ctx.mark_signature_scanned(90_000_001, 30_002_813, 750_000_001);
+    ctx.dispatch_rpc(
+        &mut sess,
+        "scanMgr",
+        None,
+        "ConeScan",
+        &[PyRep::Real(360.0), PyRep::Real(14.4 * 149_597_870_700.0)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("ConeScan in Tama");
     ctx.dispatch_rpc(
         &mut sess,
         "beyonce",
@@ -318,7 +342,15 @@ async fn test_e2e_01_to_18_integration_journeys() {
         let _ = tama_handle.step_manual(1.0).await.unwrap();
     }
     let wh_in = ctx
-        .dispatch_rpc(&mut sess, "wormholeMgr", None, "WormholeJump", &[], &kw, None)
+        .dispatch_rpc(
+            &mut sess,
+            "wormholeMgr",
+            None,
+            "WormholeJump",
+            &[PyRep::Integer(750_000_001)],
+            &kw,
+            None,
+        )
         .await
         .expect("WormholeJump into J105934");
     let PyRep::KeyVal(wh_in_kv) = wh_in else {
@@ -326,7 +358,15 @@ async fn test_e2e_01_to_18_integration_journeys() {
     };
     assert_eq!(wh_in_kv.get("solarSystemID"), Some(&PyRep::Integer(31_000_005)));
     let wh_vfk = ctx
-        .dispatch_rpc(&mut sess, "wormholeMgr", None, "WormholeJump", &[], &kw, None)
+        .dispatch_rpc(
+            &mut sess,
+            "wormholeMgr",
+            None,
+            "WormholeJump",
+            &[PyRep::Integer(750_000_001)],
+            &kw,
+            None,
+        )
         .await
         .expect("WormholeJump into VFK-IV (30002904)");
     let PyRep::KeyVal(wh_vfk_kv) = wh_vfk else {
@@ -502,7 +542,7 @@ async fn test_e2e_01_to_18_integration_journeys() {
             "essMgr",
             None,
             "AttemptLinkToMainBank",
-            &[],
+            &[PyRep::Integer(750_000_002)],
             &kw,
             None,
         )
@@ -524,7 +564,7 @@ async fn test_e2e_01_to_18_integration_journeys() {
             "essMgr",
             None,
             "AttemptLinkToMainBank",
-            &[],
+            &[PyRep::Integer(750_000_002)],
             &kw,
             None,
         )
@@ -541,7 +581,15 @@ async fn test_e2e_01_to_18_integration_journeys() {
 
     // Jump back VFK-IV (30002904) -> Tama (30002813) via wormhole, then stargates (50001251 -> Perimeter 50001873 -> Jita 30000142) -> Dock at Jita 4-4 (60003760)
     let jb_tama = ctx
-        .dispatch_rpc(&mut sess, "wormholeMgr", None, "WormholeJump", &[], &kw, None)
+        .dispatch_rpc(
+            &mut sess,
+            "wormholeMgr",
+            None,
+            "WormholeJump",
+            &[PyRep::Integer(750_000_001)],
+            &kw,
+            None,
+        )
         .await
         .expect("WormholeJump VFK-IV -> Tama");
     let PyRep::KeyVal(jb_tama_kv) = jb_tama else {
@@ -655,6 +703,7 @@ async fn test_blocking_findings_b01_to_b15_regressions() {
     use eve_db::{InventoryFlag, InventoryItemRecord, TrainedSkillRecord};
 
     let ctx = ServerContext::new();
+    ctx.seed_demo_world_fixtures();
     let mut sess = SessionState::new(1);
     let kw = HashMap::new();
 
@@ -1332,7 +1381,9 @@ async fn test_blocking_findings_b01_to_b15_regressions() {
     )
     .await
     .expect("Dock at Tama Cyno Citadel");
-    let clone_tama = ctx
+    // S-4: InstallCloneInStation rejects when docked in a structure; InstallCloneInStructure succeeds
+    // parity: plan:S-4
+    let wrong_clone_rpc = ctx
         .dispatch_rpc(
             &mut sess,
             "jumpCloneSvc",
@@ -1342,8 +1393,20 @@ async fn test_blocking_findings_b01_to_b15_regressions() {
             &kw,
             None,
         )
+        .await;
+    assert_eq!(wrong_clone_rpc.unwrap_err().code, "MustBeDocked");
+    let clone_tama = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "jumpCloneSvc",
+            None,
+            "InstallCloneInStructure",
+            &[],
+            &kw,
+            None,
+        )
         .await
-        .expect("InstallCloneInStation at Tama Cyno Citadel");
+        .expect("InstallCloneInStructure at Tama Cyno Citadel");
     let PyRep::KeyVal(ct_kv) = clone_tama else {
         panic!("Expected clone_tama KeyVal");
     };
@@ -1409,7 +1472,8 @@ async fn test_blocking_findings_b01_to_b15_regressions() {
     .await
     .expect("Dock Rifter at Jita");
 
-    // N-P1-8 & R2-P0-01: Convoy 800_000_001 was automatically promoted to LOD 2 on system entry/undock; MaterializeSystemLOD2 requires GM role (0x02) and returns 0 when already at LOD 2
+    // S-9: MaterializeSystemLOD2 rejects non-GM roles (including legacy 0x02) and requires 64-bit V24.01 serviceConst GM role bitmask
+    // parity: plan:S-9
     assert_eq!(
         ctx.living_world
             .get_convoy(800_000_001)
@@ -1429,6 +1493,19 @@ async fn test_blocking_findings_b01_to_b15_regressions() {
         .await;
     assert_eq!(non_gm_mat.unwrap_err().code, "InsufficientRole");
     sess.role |= 0x02;
+    let legacy_bit_mat = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "taleMgr",
+            None,
+            "MaterializeSystemLOD2",
+            &[PyRep::Integer(30_000_142)],
+            &kw,
+            None,
+        )
+        .await;
+    assert_eq!(legacy_bit_mat.unwrap_err().code, "InsufficientRole");
+    sess.role = eve_machonet::service_roles::ROLE_PLAYER_DEFAULT | eve_machonet::service_roles::ROLE_GML;
     let mat_second = ctx
         .dispatch_rpc(
             &mut sess,
@@ -1442,7 +1519,7 @@ async fn test_blocking_findings_b01_to_b15_regressions() {
         .await
         .expect("GM MaterializeSystemLOD2");
     assert_eq!(mat_second.as_i64(), Some(0));
-    sess.role = 0;
+    sess.role = eve_machonet::service_roles::ROLE_PLAYER_DEFAULT;
 
     // N-P1-5: home_station.set_home_station rejects remote station (60008494 while docked at 60003760) with MustBeDockedAtTargetStation
     let remote_home_err = ctx
@@ -1503,7 +1580,7 @@ async fn test_blocking_findings_b01_to_b15_regressions() {
     assert_eq!(sess.station_id, Some(60003760));
     assert_eq!(sess.solar_system_id, Some(30000142));
 
-    // Board Archon Carrier (100_000_024, type_id = 24483), undock, test fighterMgr NPC destruction & bounty payout, and verify LY jump range & security restrictions
+    // Board Archon Carrier (100_000_024, type_id = 24483), undock, and verify S-2 & S-3 return UnimplementedRPC
     ctx.dispatch_rpc(
         &mut sess,
         "ship",
@@ -1531,37 +1608,8 @@ async fn test_blocking_findings_b01_to_b15_regressions() {
     )
     .await
     .expect("GetFightersForShip from Archon");
-    let (_, archon_ball) = jita_handle
-        .get_ball_snapshot(100_000_024)
-        .await
-        .unwrap()
-        .unwrap();
-    let _ = jita_handle
-        .spawn_ball_with_combat(
-            eve_destiny::Ball {
-                id: 700_000_077,
-                type_id: 11001,
-                position: archon_ball.position + glam::DVec3::new(2_000.0, 0.0, 0.0),
-                velocity: glam::DVec3::ZERO,
-                max_velocity: 310.0,
-                inertia: 2.5,
-                mass: 1_000_000.0,
-                radius: 35.0,
-                speed_fraction: 0.0,
-                mode: eve_destiny::MovementMode::Stop,
-            },
-            eve_destiny::CombatState {
-                shield_hp: 50.0,
-                max_shield_hp: 50.0,
-                armor_hp: 50.0,
-                max_armor_hp: 50.0,
-                structure_hp: 50.0,
-                max_structure_hp: 50.0,
-                ..eve_destiny::CombatState::default()
-            },
-        )
-        .await;
-    let ftr_res = ctx
+    // parity: plan:S-2
+    let ftr_err = ctx
         .dispatch_rpc(
             &mut sess,
             "fighterMgr",
@@ -1571,16 +1619,11 @@ async fn test_blocking_findings_b01_to_b15_regressions() {
             &kw,
             None,
         )
-        .await
-        .expect("CmdActivateAbilitySlots from Archon against NPC 700_000_077");
-    let PyRep::KeyVal(ftr_kv) = ftr_res else {
-        panic!("Expected fighter ability KeyVal");
-    };
-    assert_eq!(ftr_kv.get("destroyed"), Some(&PyRep::Bool(true)));
-    assert_eq!(ftr_kv.get("bountyPayoutISK"), Some(&PyRep::Real(90_000.0)));
+        .await;
+    assert_eq!(ftr_err.unwrap_err().code, "UnimplementedRPC");
 
-    // R-P1-07 & AP-06: Jumping out of high-sec Jita (30000142, sec 0.95) is rejected with CannotJumpFromHighSec
-    let from_hs_jump_err = ctx
+    // parity: plan:S-3
+    let cyno_err = ctx
         .dispatch_rpc(
             &mut sess,
             "structureCynoBeaconMgr",
@@ -1591,100 +1634,14 @@ async fn test_blocking_findings_b01_to_b15_regressions() {
             None,
         )
         .await;
-    assert_eq!(from_hs_jump_err.unwrap_err().code, "CannotJumpFromHighSec");
+    assert_eq!(cyno_err.unwrap_err().code, "UnimplementedRPC");
 
-    // Move Archon Carrier (100_000_024) into genuine low-sec Horkkisen (30002741, sec 0.4384, 8.668 LY from Tama 30002813)
+    // Move Archon Carrier (100_000_024) into low-sec Tama (30002813) for subsequent tests
     let _ = jita_handle.remove_ball(100_000_024).await;
     ctx.db
-        .set_character_solar_system(90_000_001, 30_002_741, &ctx.sde)
-        .expect("Move Archon to Horkkisen");
-    sess.solar_system_id = Some(30_002_741);
-    let hork_handle = ctx.systems.get_or_spawn(30_002_741);
-    let _ = hork_handle
-        .spawn_ball(eve_destiny::Ball {
-            id: 100_000_024,
-            type_id: 24483,
-            position: glam::DVec3::ZERO,
-            velocity: glam::DVec3::ZERO,
-            max_velocity: 85.0,
-            inertia: 0.05,
-            mass: 1_125_000_000.0,
-            radius: 1_500.0,
-            speed_fraction: 0.0,
-            mode: eve_destiny::MovementMode::Stop,
-        })
-        .await;
-
-    // B-08: Jumping to high-sec Perimeter (30000144, sec 0.95) is rejected with CannotJumpToHighSec
-    let hs_jump_err = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "structureCynoBeaconMgr",
-            None,
-            "CmdJumpToStructureBeacon",
-            &[PyRep::Integer(30000144)],
-            &kw,
-            None,
-        )
-        .await;
-    assert_eq!(hs_jump_err.unwrap_err().code, "CannotJumpToHighSec");
-
-    // B-08: Jumping from Horkkisen (30002741) to VFK-IV (30002904, 15.86 LY away > 9.8 LY JDC II range) is rejected with JumpTargetOutOfRange
-    let oor_jump_err = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "structureCynoBeaconMgr",
-            None,
-            "CmdJumpToStructureBeacon",
-            &[PyRep::Integer(30002904)],
-            &kw,
-            None,
-        )
-        .await;
-    assert_eq!(oor_jump_err.unwrap_err().code, "JumpTargetOutOfRange");
-
-    // B-08 & R-P1-07: Jumping from low-sec Horkkisen (30002741) to fueled Pharolux Cyno Beacon (35840) in low-sec Tama (30002813, 8.668 LY <= 9.8 LY JDC II range) succeeds and scales fuel (62 blocks) and jump fatigue
-    let jump_cyno = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "structureCynoBeaconMgr",
-            None,
-            "CmdJumpToStructureBeacon",
-            &[PyRep::Integer(30002813)],
-            &kw,
-            None,
-        )
-        .await
-        .expect("CmdJumpToStructureBeacon");
-    let PyRep::KeyVal(jc_kv) = jump_cyno else {
-        panic!("Expected jump_cyno KeyVal");
-    };
-    assert!(
-        jc_kv
-            .get("jumpCooldownMinutes")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0)
-            > 6.5
-    );
-    assert_eq!(sess.solar_system_id, Some(30002813));
-    assert_eq!(
-        ctx.db.get_item(100_000_025).map(|i| i.quantity),
-        Some(500 - 62)
-    );
-
-    // Immediate second jump fails due to jump fatigue cooldown
-    let cooldown_err = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "structureCynoBeaconMgr",
-            None,
-            "CmdJumpToStructureBeacon",
-            &[PyRep::Integer(30002904)],
-            &kw,
-            None,
-        )
-        .await;
-    assert_eq!(cooldown_err.unwrap_err().code, "JumpDriveOnCooldown");
+        .set_character_solar_system(90_000_001, 30_002_813, &ctx.sde)
+        .expect("Move Archon to Tama");
+    sess.solar_system_id = Some(30_002_813);
 
     // Spawn second player (90_000_002 on account "other"), jump to Tama, create hostile corp, and siege structure across all 3 phases
     let mut sess2 = SessionState::new(2);
@@ -1734,19 +1691,6 @@ async fn test_blocking_findings_b01_to_b15_regressions() {
     ctx.dispatch_rpc(&mut sess2, "stationSvc", None, "Undock", &[], &kw, None)
         .await
         .expect("Undock 90_000_002");
-    // Verify non-capital Rifter (100_000_002) is rejected by CmdJumpToStructureBeacon in high-sec and low-sec
-    let non_cap_hs_jump = ctx
-        .dispatch_rpc(
-            &mut sess2,
-            "structureCynoBeaconMgr",
-            None,
-            "CmdJumpToStructureBeacon",
-            &[PyRep::Integer(30002813)],
-            &kw,
-            None,
-        )
-        .await;
-    assert_eq!(non_cap_hs_jump.unwrap_err().code, "CannotJumpFromHighSec");
     // Travel via stargates Jita (50001248) -> Perimeter (50001250) -> Tama (30002813)
     warp_and_jump_gate(
         &ctx,
@@ -1765,18 +1709,6 @@ async fn test_blocking_findings_b01_to_b15_regressions() {
     )
     .await;
     assert_eq!(sess2.solar_system_id, Some(30002813));
-    let non_cap_jump = ctx
-        .dispatch_rpc(
-            &mut sess2,
-            "structureCynoBeaconMgr",
-            None,
-            "CmdJumpToStructureBeacon",
-            &[PyRep::Integer(30002741)],
-            &kw,
-            None,
-        )
-        .await;
-    assert_eq!(non_cap_jump.unwrap_err().code, "ShipNotJumpCapable");
     let corp_hsc = ctx
         .dispatch_rpc(
             &mut sess2,
@@ -2825,6 +2757,7 @@ async fn test_review_r6_np0_np1_regressions() {
             },
         );
     });
+    ctx.seed_demo_world_fixtures();
     ctx.dispatch_rpc(&mut s1, "stationSvc", None, "Undock", &[], &kw, None)
         .await
         .unwrap();
@@ -5149,5 +5082,1283 @@ async fn test_review_r8_regressions() {
         .await
         .expect_err("get_active_tales_by_template must return UnimplementedRPC");
     assert_eq!(tale_err_2.code, "UnimplementedRPC");
+}
+
+#[tokio::test]
+async fn test_phase_0_s1_reprocessing_sde_materials_and_remainders() {
+    // parity: plan:S-1
+    use eve_db::{InventoryFlag, InventoryItemRecord};
+
+    let ctx = ServerContext::new();
+    let kw = HashMap::new();
+    let mut sess = SessionState::new(901);
+    ctx.dispatch_rpc(
+        &mut sess,
+        "authentication",
+        None,
+        "Login",
+        &[
+            PyRep::String("demo".into()),
+            PyRep::String("demo-secret".into()),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Login");
+    ctx.dispatch_rpc(
+        &mut sess,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(90_000_001)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("SelectCharacterID");
+
+    // 1. Non-reprocessable items (Tritanium 100_000_011 type 34, and skillbook 100_000_004 type 3327)
+    // must return ItemNotReprocessable and remain untouched.
+    let trit_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "reprocessingSvc",
+            None,
+            "Reprocess",
+            &[PyRep::Integer(100_000_011)],
+            &kw,
+            None,
+        )
+        .await;
+    assert_eq!(trit_err.unwrap_err().code, "ItemNotReprocessable");
+    assert_eq!(ctx.db.get_item(100_000_011).map(|i| i.quantity), Some(5_000));
+
+    let skill_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "reprocessingSvc",
+            None,
+            "Reprocess",
+            &[PyRep::Integer(100_000_004)],
+            &kw,
+            None,
+        )
+        .await;
+    assert_eq!(skill_err.unwrap_err().code, "ItemNotReprocessable");
+    assert!(ctx.db.get_item(100_000_004).is_some());
+
+    // 2. Active ship (100_000_001) and assembled (singleton = true) ships in hangar must be rejected.
+    let active_ship_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "reprocessingSvc",
+            None,
+            "Reprocess",
+            &[PyRep::Integer(100_000_001)],
+            &kw,
+            None,
+        )
+        .await;
+    assert_eq!(
+        active_ship_err.unwrap_err().code,
+        "CannotReprocessActiveShip"
+    );
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            100_990_000,
+            InventoryItemRecord {
+                item_id: 100_990_000,
+                type_id: 587, // Rifter (has SDE type_materials, but singleton = true means assembled)
+                owner_id: 90_000_001,
+                location_id: 60_003_760,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                dynamic_attributes: HashMap::new(),
+                source_mutaplasmid_id: None,
+                insured_payout_isk: 0.0,
+                is_blueprint_copy: false,
+                blueprint_runs_remaining: None,
+            },
+        );
+    });
+    let assembled_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "reprocessingSvc",
+            None,
+            "Reprocess",
+            &[PyRep::Integer(100_990_000)],
+            &kw,
+            None,
+        )
+        .await;
+    assert_eq!(assembled_err.unwrap_err().code, "ItemMustBeRepackaged");
+    assert!(ctx.db.get_item(100_990_000).is_some());
+
+    // 3. Reprocess 10,000 Veldspar (100_000_012, type 1230, portionSize = 100, 34 -> 400 per batch).
+    // With 0 skills, base_rate = 0.50 and Caldari Navy standing 2.0 -> station_tax_rate = 0.035 -> net_yield_rate = 0.4825 -> 100 * 400 * 0.4825 = 19,300 Tritanium.
+    let reproc_veld = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "reprocessingSvc",
+            None,
+            "Reprocess",
+            &[PyRep::Integer(100_000_012)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("Reprocess 10,000 Veldspar");
+    let PyRep::KeyVal(veld_kv) = reproc_veld else {
+        panic!("Expected KeyVal from Veldspar Reprocess");
+    };
+    assert_eq!(
+        veld_kv.get("tritaniumQuantity").and_then(|v| v.as_i64()),
+        Some(19_300),
+        "S-1: 10,000 Veldspar at 0.50 facility yield and 3.5% standing-adjusted station tax must yield 19,300 Tritanium"
+    );
+    assert!(
+        ctx.db.get_item(100_000_012).is_none(),
+        "S-1: Exact multiple of portionSize (10,000 Veldspar) must consume entire stack"
+    );
+
+    // 4. Reprocess 250 Plagioclase (100_990_001, type 18, portionSize = 100, 34 -> 175, 36 -> 70):
+    // consumes 200 units (2 batches), leaves 50 remainder in stack, and outputs floor(2*175*0.4825)=168 Tritanium + floor(2*70*0.4825)=67 Mexallon.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            100_990_001,
+            InventoryItemRecord {
+                item_id: 100_990_001,
+                type_id: 18,
+                owner_id: 90_000_001,
+                location_id: 60_003_760,
+                flag: InventoryFlag::Hangar,
+                quantity: 250,
+                singleton: false,
+                version: 1,
+                dynamic_attributes: HashMap::new(),
+                source_mutaplasmid_id: None,
+                insured_payout_isk: 0.0,
+                is_blueprint_copy: false,
+                blueprint_runs_remaining: None,
+            },
+        );
+    });
+    let reproc_plag = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "reprocessingSvc",
+            None,
+            "Reprocess",
+            &[PyRep::Integer(100_990_001)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("Reprocess 250 Plagioclase");
+    let PyRep::KeyVal(rp_kv) = reproc_plag else {
+        panic!("Expected KeyVal from Reprocess");
+    };
+    assert_eq!(
+        ctx.db.get_item(100_990_001).map(|i| i.quantity),
+        Some(50),
+        "S-1: 50 un-reprocessed Plagioclase units (< portionSize 100) must remain in stack"
+    );
+    assert_eq!(
+        rp_kv.get("tritaniumQuantity").and_then(|v| v.as_i64()),
+        Some(168)
+    );
+    let Some(PyRep::List(outputs)) = rp_kv.get("outputs") else {
+        panic!("Expected outputs list from Reprocess");
+    };
+    assert_eq!(outputs.len(), 2);
+    let mexallon_qty = ctx.db.with_snapshot(|snap| {
+        snap.items
+            .values()
+            .filter(|i| {
+                i.owner_id == 90_000_001
+                    && i.location_id == 60_003_760
+                    && i.type_id == 36
+                    && i.item_id != 100_000_010
+            })
+            .map(|i| i.quantity as i64)
+            .sum::<i64>()
+    });
+    assert_eq!(
+        mexallon_qty, 67,
+        "S-1: Reprocessing 200 Plagioclase at 0.4825 net yield must deposit 67 Mexallon (36)"
+    );
+}
+
+#[tokio::test]
+async fn test_phase_0_s2_fighter_mgr_unimplemented_rpc() {
+    // parity: plan:S-2
+    let ctx = ServerContext::new();
+    let kw = HashMap::new();
+    let mut sess = SessionState::new(902);
+    ctx.dispatch_rpc(
+        &mut sess,
+        "authentication",
+        None,
+        "Login",
+        &[
+            PyRep::String("demo".into()),
+            PyRep::String("demo-secret".into()),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Login");
+    ctx.dispatch_rpc(
+        &mut sess,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(90_000_001)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("SelectCharacterID");
+    ctx.dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None)
+        .await
+        .expect("Undock");
+
+    let sys = ctx.systems.get_or_spawn(30_000_142);
+    let (_, ball_before) = sys
+        .get_ball_snapshot(100_000_001)
+        .await
+        .expect("get_ball_snapshot")
+        .expect("ship ball 100_000_001");
+    assert_eq!(ball_before.id, 100_000_001);
+
+    let s2_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "fighterMgr",
+            None,
+            "CmdActivateAbilitySlots",
+            &[PyRep::Integer(100_000_001), PyRep::Integer(0)],
+            &kw,
+            None,
+        )
+        .await;
+    assert_eq!(s2_err.unwrap_err().code, "UnimplementedRPC");
+
+    let (_, ball_after) = sys
+        .get_ball_snapshot(100_000_001)
+        .await
+        .expect("get_ball_snapshot")
+        .expect("ship ball 100_000_001 must remain intact in ballpark");
+    assert_eq!(ball_after.id, 100_000_001);
+}
+
+#[tokio::test]
+async fn test_phase_0_s3_cyno_jump_unimplemented_rpc() {
+    // parity: plan:S-3
+    let ctx = ServerContext::new();
+    let kw = HashMap::new();
+    let mut sess = SessionState::new(903);
+    ctx.dispatch_rpc(
+        &mut sess,
+        "authentication",
+        None,
+        "Login",
+        &[
+            PyRep::String("demo".into()),
+            PyRep::String("demo-secret".into()),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Login");
+    ctx.dispatch_rpc(
+        &mut sess,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(90_000_001)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("SelectCharacterID");
+
+    let s3_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "structureCynoBeaconMgr",
+            None,
+            "CmdJumpToStructureBeacon",
+            &[PyRep::Integer(30_002_187), PyRep::Integer(1_040_000_000_001)],
+            &kw,
+            None,
+        )
+        .await;
+    assert_eq!(s3_err.unwrap_err().code, "UnimplementedRPC");
+    assert_eq!(sess.solar_system_id, Some(30_000_142));
+    assert_eq!(
+        ctx.db
+            .get_character(90_000_001)
+            .ok()
+            .map(|c| (c.solar_system_id, c.station_id)),
+        Some((30_000_142, Some(60_003_760)))
+    );
+}
+
+#[tokio::test]
+async fn test_phase_0_s4_split_shared_handlers_and_jump_clones() {
+    // parity: plan:S-4
+    let ctx = ServerContext::new();
+    let kw = HashMap::new();
+    let mut sess = SessionState::new(904);
+    ctx.dispatch_rpc(
+        &mut sess,
+        "authentication",
+        None,
+        "Login",
+        &[
+            PyRep::String("demo".into()),
+            PyRep::String("demo-secret".into()),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Login");
+
+    // 1. charUnboundMgr: GetCharactersToSelect vs GetCharacterInfo(char_id)
+    let chars_list = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "charUnboundMgr",
+            None,
+            "GetCharactersToSelect",
+            &[],
+            &kw,
+            None,
+        )
+        .await
+        .expect("GetCharactersToSelect");
+    assert!(matches!(chars_list, PyRep::Rowset { .. }));
+    let char_info_missing_arg = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "charUnboundMgr",
+            None,
+            "GetCharacterInfo",
+            &[],
+            &kw,
+            None,
+        )
+        .await;
+    assert_eq!(
+        char_info_missing_arg.unwrap_err().code,
+        "CharacterNotSelected"
+    );
+    let char_info = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "charUnboundMgr",
+            None,
+            "GetCharacterInfo",
+            &[PyRep::Integer(90_000_001)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("GetCharacterInfo(90_000_001)");
+    assert!(matches!(char_info, PyRep::KeyVal(_)));
+
+    ctx.dispatch_rpc(
+        &mut sess,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(90_000_001)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("SelectCharacterID");
+
+    // 2. standingMgr: GetCharStandings vs GetStandingTransactions
+    let standings_rs = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "standingMgr",
+            None,
+            "GetCharStandings",
+            &[],
+            &kw,
+            None,
+        )
+        .await
+        .expect("GetCharStandings");
+    let PyRep::Rowset {
+        columns: st_hdr, ..
+    } = standings_rs
+    else {
+        panic!("Expected Rowset from GetCharStandings");
+    };
+    assert_eq!(st_hdr, vec!["fromID", "standing"]);
+
+    let st_tx_rs = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "standingMgr",
+            None,
+            "GetStandingTransactions",
+            &[],
+            &kw,
+            None,
+        )
+        .await
+        .expect("GetStandingTransactions");
+    let PyRep::Rowset {
+        columns: tx_hdr, ..
+    } = st_tx_rs
+    else {
+        panic!("Expected Rowset from GetStandingTransactions");
+    };
+    assert_eq!(
+        tx_hdr,
+        vec![
+            "eventID",
+            "fromID",
+            "toID",
+            "modification",
+            "eventTypeID"
+        ]
+    );
+
+    // 3. machoNet: GetInitVals vs GetServiceInfo
+    let init_vals = ctx
+        .dispatch_rpc(&mut sess, "machoNet", None, "GetInitVals", &[], &kw, None)
+        .await
+        .expect("GetInitVals");
+    assert!(matches!(init_vals, PyRep::Tuple(_)));
+    let svc_info = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "machoNet",
+            None,
+            "GetServiceInfo",
+            &[],
+            &kw,
+            None,
+        )
+        .await
+        .expect("GetServiceInfo");
+    assert!(matches!(svc_info, PyRep::Dict(_)));
+
+    // 4. subscriptionMgr / loginRewardFacilities: GetCloneGrade vs get_my_clone_grade
+    let clone_grade_kv = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "subscriptionMgr",
+            None,
+            "GetCloneGrade",
+            &[],
+            &kw,
+            None,
+        )
+        .await
+        .expect("GetCloneGrade");
+    assert!(matches!(clone_grade_kv, PyRep::KeyVal(_)));
+    let clone_grade_int = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "loginRewardFacilities",
+            None,
+            "get_my_clone_grade",
+            &[],
+            &kw,
+            None,
+        )
+        .await
+        .expect("get_my_clone_grade");
+    assert_eq!(clone_grade_int, PyRep::Integer(2));
+
+    // 5. jumpCloneSvc: GetPriceForClone, InstallCloneInStation (station clone bay check),
+    // InstallCloneInStructure, GetCloneState vs GetStationCloneState, CloneJump (implant swap + departure bay check + cooldown)
+    let price_resp = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "jumpCloneSvc",
+            None,
+            "GetPriceForClone",
+            &[],
+            &kw,
+            None,
+        )
+        .await
+        .expect("GetPriceForClone");
+    assert_eq!(price_resp, PyRep::Real(900_000.0));
+
+    let struct_not_docked = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "jumpCloneSvc",
+            None,
+            "InstallCloneInStructure",
+            &[],
+            &kw,
+            None,
+        )
+        .await;
+    assert_eq!(
+        struct_not_docked.unwrap_err().code,
+        "MustBeDocked"
+    );
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.station_id = Some(60_003_766);
+        }
+    });
+    let no_bay_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "jumpCloneSvc",
+            None,
+            "InstallCloneInStation",
+            &[],
+            &kw,
+            None,
+        )
+        .await;
+    assert_eq!(no_bay_err.unwrap_err().code, "StationHasNoCloneBay");
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.station_id = Some(60_003_760);
+        }
+        snap.skills.entry(90_000_001).or_default().insert(
+            24242,
+            eve_db::TrainedSkillRecord {
+                type_id: 24242,
+                level: 1,
+                skill_points: 250.0,
+            },
+        );
+    });
+
+    let jc_install = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "jumpCloneSvc",
+            None,
+            "InstallCloneInStation",
+            &[],
+            &kw,
+            None,
+        )
+        .await
+        .expect("InstallCloneInStation at 60003760");
+    let PyRep::KeyVal(jc_kv) = jc_install else {
+        panic!("Expected KeyVal from InstallCloneInStation");
+    };
+    let jc_id = jc_kv.get("jumpCloneID").unwrap().as_i64().unwrap();
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.active_implants.insert(90_000_001, vec![9899]);
+        if let Some(clones) = snap.jump_clones.get_mut(&90_000_001) {
+            if let Some(c) = clones.iter_mut().find(|c| c.jump_clone_id == jc_id) {
+                c.location_id = 60_008_494;
+                c.implants = vec![9941];
+            }
+        }
+    });
+
+    // Attempting CloneJump while docked at no-bay station 60003766 must reject so no clone is left at a bay-less station
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.station_id = Some(60_003_766);
+        }
+    });
+    let jump_from_no_bay = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "jumpCloneSvc",
+            None,
+            "CloneJump",
+            &[PyRep::Integer(jc_id)],
+            &kw,
+            None,
+        )
+        .await;
+    assert_eq!(jump_from_no_bay.unwrap_err().code, "StationHasNoCloneBay");
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.station_id = Some(60_003_760);
+        }
+    });
+    let state_all = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "jumpCloneSvc",
+            None,
+            "GetCloneState",
+            &[],
+            &kw,
+            None,
+        )
+        .await
+        .expect("GetCloneState");
+    let PyRep::Rowset { rows: all_rows, .. } = state_all else {
+        panic!("Expected Rowset from GetCloneState");
+    };
+    assert_eq!(all_rows.len(), 1);
+    let state_station = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "jumpCloneSvc",
+            None,
+            "GetStationCloneState",
+            &[],
+            &kw,
+            None,
+        )
+        .await
+        .expect("GetStationCloneState");
+    let PyRep::Rowset {
+        rows: station_rows, ..
+    } = state_station
+    else {
+        panic!("Expected Rowset from GetStationCloneState");
+    };
+    assert_eq!(station_rows.len(), 0);
+
+    let jump_swap = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "jumpCloneSvc",
+            None,
+            "CloneJump",
+            &[PyRep::Integer(jc_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("CloneJump implant swap");
+    let PyRep::KeyVal(js_kv) = jump_swap else {
+        panic!("Expected KeyVal from CloneJump");
+    };
+    assert_eq!(
+        js_kv.get("activeImplants"),
+        Some(&PyRep::List(vec![PyRep::Integer(9941)]))
+    );
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.active_implants.get(&90_000_001), Some(&vec![9941]));
+        let left_behind = snap.jump_clones[&90_000_001]
+            .iter()
+            .find(|c| c.jump_clone_id == jc_id)
+            .unwrap();
+        assert_eq!(left_behind.location_id, 60_003_760);
+        assert_eq!(left_behind.implants, vec![9899]);
+        let ch = &snap.characters[&90_000_001];
+        assert_eq!(ch.station_id, Some(60_008_494));
+        assert_eq!(ch.solar_system_id, 30_002_187);
+    });
+
+    let cooldown_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "jumpCloneSvc",
+            None,
+            "CloneJump",
+            &[PyRep::Integer(jc_id)],
+            &kw,
+            None,
+        )
+        .await;
+    assert_eq!(cooldown_err.unwrap_err().code, "CloneJumpCooldownActive");
+}
+
+#[tokio::test]
+async fn test_phase_0_s5_no_unconditional_demo_spawns_on_empty_world() {
+    // parity: plan:S-5
+    use eve_db::{IskCents, WorldRepository};
+
+    let empty_repo = WorldRepository::new_empty();
+    empty_repo.with_snapshot(|snap| {
+        assert!(snap.market_orders.is_empty());
+        assert!(snap.system_states.is_empty());
+    });
+
+    let ctx = ServerContext::new();
+    assert!(
+        ctx.living_world.list_convoys().is_empty(),
+        "S-5: Fresh ServerContext must not spawn demo convoys 800_000_001..003 by default"
+    );
+    ctx.db.with_snapshot(|snap| {
+        for (sys_id, st) in &snap.system_states {
+            assert_eq!(st.ess_main_bank, IskCents(0), "S-5: System {sys_id} ess_main_bank must start at 0");
+            assert_eq!(st.ess_reserve_bank, IskCents(0), "S-5: System {sys_id} ess_reserve_bank must start at 0");
+            assert_eq!(st.wormhole_destination_system_id, None, "S-5: System {sys_id} wormhole destination must be None without fixture seed");
+            assert_eq!(st.signature_position, None, "S-5: System {sys_id} signature_position must be None without fixture seed");
+            assert_eq!(st.fw_complex_position, None, "S-5: System {sys_id} fw_complex_position must be None without fixture seed");
+        }
+    });
+    let sys = ctx.systems.get_or_spawn(30_000_142);
+    let balls = sys.list_balls().await.expect("list_balls");
+    assert!(
+        balls.is_empty(),
+        "S-5: Fresh SystemActor ballpark must contain 0 hardcoded NPC balls"
+    );
+}
+
+#[tokio::test]
+async fn test_phase_0_s6_request_scans_unimplemented_rpc() {
+    // parity: plan:S-6
+    let ctx = ServerContext::new();
+    let kw = HashMap::new();
+    let mut sess = SessionState::new(906);
+    ctx.dispatch_rpc(
+        &mut sess,
+        "authentication",
+        None,
+        "Login",
+        &[
+            PyRep::String("demo".into()),
+            PyRep::String("demo-secret".into()),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Login");
+    ctx.dispatch_rpc(
+        &mut sess,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(90_000_001)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("SelectCharacterID");
+
+    let s6_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "scanMgr",
+            None,
+            "RequestScans",
+            &[],
+            &kw,
+            None,
+        )
+        .await;
+    assert_eq!(s6_err.unwrap_err().code, "UnimplementedRPC");
+
+    let sys = ctx.systems.get_or_spawn(30_000_142);
+    let balls = sys.list_balls().await.expect("list_balls");
+    assert!(
+        !balls.iter().any(|b| b.id == 750_000_001),
+        "S-6: RequestScans must not spawn hardcoded wormhole ball 750_000_001"
+    );
+}
+
+#[tokio::test]
+async fn test_phase_0_s7_no_hardcoded_fallbacks_and_in_space_range_checks() {
+    // parity: plan:S-7
+    let ctx = ServerContext::new();
+    let kw = HashMap::new();
+    let mut sess = SessionState::new(907);
+    ctx.dispatch_rpc(
+        &mut sess,
+        "authentication",
+        None,
+        "Login",
+        &[
+            PyRep::String("demo".into()),
+            PyRep::String("demo-secret".into()),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Login");
+    ctx.dispatch_rpc(
+        &mut sess,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(90_000_001)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("SelectCharacterID");
+
+    // 1. Missing arguments reject instead of falling back to Rifter/Jita/Tritanium
+    let missing_skin = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "shipCosmeticsMgr",
+            None,
+            "ApplySkinToShip",
+            &[],
+            &kw,
+            None,
+        )
+        .await;
+    assert_eq!(missing_skin.unwrap_err().code, "InvalidShipTypeForSkin");
+    let missing_mail = ctx
+        .dispatch_rpc(&mut sess, "mailMgr", None, "SendMail", &[], &kw, None)
+        .await;
+    assert_eq!(missing_mail.unwrap_err().code, "InvalidRecipient");
+
+    // 2. PI: GetPlanetInfo and GetMyColonies are read-only, GetPlanetResourceInfo returns UnimplementedRPC,
+    // and CreateColony rejects a planet not in the character's current system.
+    let planet_info = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "planetMgr",
+            None,
+            "GetPlanetInfo",
+            &[PyRep::Integer(40_009_077)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("GetPlanetInfo");
+    assert!(matches!(planet_info, PyRep::KeyVal(_)));
+    let my_colonies = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "planetMgr",
+            None,
+            "GetMyColonies",
+            &[],
+            &kw,
+            None,
+        )
+        .await
+        .expect("GetMyColonies");
+    assert!(matches!(my_colonies, PyRep::Rowset { .. }));
+    ctx.db.with_snapshot(|snap| {
+        assert!(
+            snap.planetary_colonies.is_empty(),
+            "S-7: GetPlanetInfo and GetMyColonies must be read-only and never auto-create a colony"
+        );
+    });
+    let res_info_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "planetMgr",
+            None,
+            "GetPlanetResourceInfo",
+            &[PyRep::Integer(40_009_077)],
+            &kw,
+            None,
+        )
+        .await;
+    assert_eq!(res_info_err.unwrap_err().code, "UnimplementedRPC");
+    let wrong_sys_planet = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "planetMgr",
+            None,
+            "CreateColony",
+            &[PyRep::Integer(99_999_999)],
+            &kw,
+            None,
+        )
+        .await;
+    assert_eq!(
+        wrong_sys_planet.unwrap_err().code,
+        "InvalidPlanetID"
+    );
+
+    // 3. AttackStructure, AcquireSkyhooks, and CaptureComplex enforce in-space and proximity/system checks
+    let attack_docked = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "structureControl",
+            None,
+            "AttackStructure",
+            &[PyRep::Integer(1_040_000_000_001)],
+            &kw,
+            None,
+        )
+        .await;
+    assert_eq!(attack_docked.unwrap_err().code, "ShipDocked");
+
+    let skyhook_docked = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "sovMgr",
+            None,
+            "AcquireSkyhooks",
+            &[],
+            &kw,
+            None,
+        )
+        .await;
+    assert_eq!(skyhook_docked.unwrap_err().code, "ShipDocked");
+
+    let fw_docked = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "facWarMgr",
+            None,
+            "CaptureComplex",
+            &[],
+            &kw,
+            None,
+        )
+        .await;
+    assert_eq!(fw_docked.unwrap_err().code, "ShipDocked");
+
+    ctx.dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None)
+        .await
+        .expect("Undock in Jita");
+
+    let fw_highsec = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "facWarMgr",
+            None,
+            "CaptureComplex",
+            &[],
+            &kw,
+            None,
+        )
+        .await;
+    assert_eq!(
+        fw_highsec.unwrap_err().code,
+        "NotLowSecWarzoneSystem"
+    );
+
+    let skyhook_highsec = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "sovMgr",
+            None,
+            "AcquireSkyhooks",
+            &[],
+            &kw,
+            None,
+        )
+        .await;
+    assert_eq!(skyhook_highsec.unwrap_err().code, "NotNullSecSystem");
+
+    // Move ship into K-space null-sec 30002904 (copied ball from Jita undock) without a friendly structure within 50 km -> OutsideSovStructureProximity
+    let jita_sys = ctx.systems.get_or_spawn(30_000_142);
+    let (_, ship_ball) = jita_sys
+        .get_ball_snapshot(100_000_001)
+        .await
+        .expect("get_ball_snapshot")
+        .expect("ship ball in Jita");
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.solar_system_id = 30_002_904;
+            ch.station_id = None;
+        }
+        if let Some(ship) = snap.items.get_mut(&100_000_001) {
+            ship.location_id = 30_002_904;
+        }
+    });
+    sess.solar_system_id = Some(30_002_904);
+    sess.station_id = None;
+    let null_sys = ctx.systems.get_or_spawn(30_002_904);
+    let ship_pos = ship_ball.position;
+    null_sys
+        .spawn_ball_with_combat(ship_ball, eve_destiny::CombatState::default())
+        .await
+        .expect("spawn ship in null-sec");
+    let skyhook_no_alliance = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "sovMgr",
+            None,
+            "AcquireSkyhooks",
+            &[],
+            &kw,
+            None,
+        )
+        .await;
+    assert_eq!(skyhook_no_alliance.unwrap_err().code, "NotInAlliance");
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.corporation_id = 98_000_001;
+            ch.alliance_id = Some(99_000_001);
+        }
+        snap.alliances.insert(
+            99_000_001,
+            eve_db::AllianceRecord {
+                alliance_id: 99_000_001,
+                name: "Test Sov Alliance".into(),
+                short_name: "TSOV".into(),
+                executor_corp_id: 98_000_001,
+                member_corp_ids: std::collections::HashSet::from([98_000_001]),
+            },
+        );
+    });
+    sess.corporation_id = Some(98_000_001);
+    sess.alliance_id = Some(99_000_001);
+    let skyhook_no_struct = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "sovMgr",
+            None,
+            "AcquireSkyhooks",
+            &[],
+            &kw,
+            None,
+        )
+        .await;
+    assert_eq!(
+        skyhook_no_struct.unwrap_err().code,
+        "NoFriendlySovStructureInSystem"
+    );
+
+    // Seed an online friendly structure 100 km away (> 50 km max proximity) -> OutsideSovStructureProximity
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(
+            1_040_000_000_099,
+            eve_db::UpwellStructureRecord {
+                structure_id: 1_040_000_000_099,
+                type_id: 35832,
+                owner_corp_id: 98_000_001,
+                solar_system_id: 30_002_904,
+                name: "Far Sov Hub".into(),
+                position: [ship_pos.x + 100_000.0, ship_pos.y, ship_pos.z],
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 100,
+                shield_hp: 5_000.0,
+                armor_hp: 5_000.0,
+                hull_hp: 5_000.0,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+            },
+        );
+    });
+    let skyhook_far_struct = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "sovMgr",
+            None,
+            "AcquireSkyhooks",
+            &[],
+            &kw,
+            None,
+        )
+        .await;
+    assert_eq!(
+        skyhook_far_struct.unwrap_err().code,
+        "OutsideSovStructureProximity"
+    );
+}
+
+#[tokio::test]
+async fn test_phase_0_s8_transactional_snapshot_mutation_and_no_early_return_err() {
+    // parity: plan:S-8
+    use std::path::Path;
+
+    fn collect_rs_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    collect_rs_files(&path, out);
+                } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                    out.push(path);
+                }
+            }
+        }
+    }
+
+    let workspace_crates = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    let mut rs_files = Vec::new();
+    collect_rs_files(workspace_crates, &mut rs_files);
+    assert!(!rs_files.is_empty());
+
+    for file in rs_files {
+        let src = std::fs::read_to_string(&file).expect("read .rs file");
+        let mut search_from = 0;
+        while let Some(rel_idx) = src[search_from..].find(".with_mut_snapshot(") {
+            let call_start = search_from + rel_idx;
+            let open_paren = call_start + ".with_mut_snapshot".len();
+            let bytes = src.as_bytes();
+            let mut depth = 0i32;
+            let mut close_paren = None;
+            for (i, &b) in bytes[open_paren..].iter().enumerate() {
+                if b == b'(' {
+                    depth += 1;
+                } else if b == b')' {
+                    depth -= 1;
+                    if depth == 0 {
+                        close_paren = Some(open_paren + i);
+                        break;
+                    }
+                }
+            }
+            let end = close_paren.unwrap_or(src.len());
+            let closure_body = &src[open_paren..=end];
+            assert!(
+                !closure_body.contains("return Err("),
+                "S-8 violation in {}: .with_mut_snapshot(...) closure contains `return Err(...)`; use .try_with_mut_snapshot(...) instead",
+                file.display()
+            );
+            search_from = end;
+        }
+    }
+
+    // Verify try_with_mut_snapshot rolls back mutations when Err is returned mid-closure
+    let repo = eve_db::WorldRepository::with_demo_seed();
+    let initial_qty = repo.get_item(100_000_011).unwrap().quantity;
+    let res: Result<(), String> = repo.try_with_mut_snapshot(|snap| {
+        snap.items.get_mut(&100_000_011).unwrap().quantity = 0;
+        Err("simulated failure after partial mutation".to_string())
+    });
+    assert!(res.is_err());
+    assert_eq!(
+        repo.get_item(100_000_011).unwrap().quantity,
+        initial_qty,
+        "S-8: try_with_mut_snapshot must roll back partial mutations when closure returns Err"
+    );
+}
+
+#[tokio::test]
+async fn test_phase_0_s9_service_roles_bitmask_and_production_account_seed() {
+    // parity: plan:S-9
+    let prod_ctx = ServerContext::new_production();
+    let kw = HashMap::new();
+    let mut prod_sess = SessionState::new(9090);
+    let prod_login = prod_ctx
+        .dispatch_rpc(
+            &mut prod_sess,
+            "authentication",
+            None,
+            "Login",
+            &[
+                PyRep::String("demo".into()),
+                PyRep::String("demo-secret".into()),
+            ],
+            &kw,
+            None,
+        )
+        .await;
+    assert!(
+        prod_login.is_err(),
+        "S-9: ServerContext::new_production() must not seed demo accounts"
+    );
+
+    let ctx = ServerContext::new();
+    let mut sess = SessionState::new(909);
+    ctx.dispatch_rpc(
+        &mut sess,
+        "authentication",
+        None,
+        "Login",
+        &[
+            PyRep::String("demo".into()),
+            PyRep::String("demo-secret".into()),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Login");
+    assert_eq!(
+        sess.role,
+        eve_machonet::service_roles::ROLE_PLAYER_DEFAULT,
+        "S-9: Player login must assign 64-bit ROLE_PLAYER | ROLE_LOGIN"
+    );
+    assert!(!sess.has_gm_role());
+
+    // Verify ROLE_CONTENT (1 << 4) does not grant GM access
+    sess.role |= eve_machonet::service_roles::ROLE_CONTENT;
+    assert!(
+        !sess.has_gm_role(),
+        "S-9: ROLE_CONTENT (1 << 4) must not be treated as a GM role"
+    );
+
+    ctx.dispatch_rpc(
+        &mut sess,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(90_000_001)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("SelectCharacterID");
+
+    let slash_denied = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "slash",
+            None,
+            "SlashCmd",
+            &[PyRep::String("/giveisk 100".into())],
+            &kw,
+            None,
+        )
+        .await;
+    assert_eq!(slash_denied.unwrap_err().code, "InsufficientRole");
+
+    sess.role |= eve_machonet::service_roles::ROLE_GML;
+    assert!(sess.has_gm_role());
+    ctx.dispatch_rpc(
+        &mut sess,
+        "slash",
+        None,
+        "SlashCmd",
+        &[PyRep::String("/giveisk 100".into())],
+        &kw,
+        None,
+    )
+    .await
+    .expect("S-9: Session with 64-bit ROLE_GML must pass GM check");
+}
+
+#[tokio::test]
+async fn test_phase_0_s10_doc_reconciliation_and_labels() {
+    // parity: plan:S-10
+    use std::path::Path;
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap();
+    let plan_md = std::fs::read_to_string(root.join("PLAN.md")).expect("read PLAN.md");
+    let readme_md = std::fs::read_to_string(root.join("README.md")).expect("read README.md");
+
+    assert!(
+        !plan_md.contains("Partial Vertical Slice") && !readme_md.contains("Partial Vertical Slice"),
+        "S-10: PLAN.md and README.md must use Rule 8 status labels instead of 'Partial Vertical Slice'"
+    );
+    assert!(
+        !plan_md.contains("generated from .static SQLite")
+            && !plan_md.contains("loads systems.static"),
+        "S-10: PLAN.md must not claim sde_seed.json is generated from .static SQLite prior to D-1"
+    );
+    assert!(
+        plan_md.contains("71/579") && readme_md.contains("71/579"),
+        "S-10: PLAN.md and README.md must report reconciled 71/579 client candidate method count"
+    );
+    assert!(
+        plan_md.contains("`157` `(service, method)` handlers across `117` match arms")
+            && readme_md.contains("`157` `(service, method)` handlers across `117` match arms"),
+        "S-10: PLAN.md and README.md must report reconciled 157 handlers across 117 match arms"
+    );
 }
 

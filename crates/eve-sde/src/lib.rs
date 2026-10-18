@@ -86,6 +86,7 @@ pub mod attr_ids {
     pub const SIGNATURE_RADIUS: AttributeId = 552;
     pub const SCAN_RESOLUTION: AttributeId = 564;
     pub const WARP_SPEED_MULTIPLIER: AttributeId = 600;
+    pub const REPROCESSING_SKILL_TYPE: AttributeId = 790;
     pub const MASS_ADDITION: AttributeId = 796;
     pub const UPGRADE_CAPACITY: AttributeId = 1132;
     pub const RIG_SLOTS: AttributeId = 1137;
@@ -109,6 +110,14 @@ pub mod attr_ids {
     pub const RIG_SIZE: AttributeId = 1547;
 }
 
+const fn default_portion_size() -> u64 {
+    1
+}
+
+const fn default_has_clone_bay() -> bool {
+    true
+}
+
 /// Static definition of an item type (`invTypes` / `types.static`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InvType {
@@ -122,9 +131,18 @@ pub struct InvType {
     pub radius: f64,
     pub base_price: f64,
     pub published: bool,
+    #[serde(default = "default_portion_size")]
+    pub portion_size: u64,
     #[serde(default)]
     pub effect_ids: Vec<EffectId>,
     pub default_attributes: HashMap<AttributeId, f64>,
+}
+
+/// Static definition of a material output row from `res:/staticdata/typematerials.fsdbinary`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TypeMaterialEntry {
+    pub material_type_id: TypeId,
+    pub quantity: u64,
 }
 
 /// Static definition of a Dogma attribute (`dgmAttributeTypes`).
@@ -217,6 +235,8 @@ pub struct StationInfo {
     pub owner_corporation_id: i64,
     #[serde(default)]
     pub owner_faction_id: i64,
+    #[serde(default = "default_has_clone_bay")]
+    pub has_clone_bay: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -368,6 +388,8 @@ struct SdeSeedFile {
     fighter_abilities: Vec<FighterAbilityInfo>,
     wrecks: HashMap<TypeId, TypeId>,
     compressible_types: HashMap<TypeId, TypeId>,
+    #[serde(default)]
+    type_materials: HashMap<TypeId, Vec<TypeMaterialEntry>>,
     dynamic_item_attributes: Vec<MutaplasmidInfo>,
     space_components_by_type: HashMap<TypeId, Vec<String>>,
     missions: Vec<MissionTemplate>,
@@ -395,6 +417,8 @@ pub struct SdeRegistry {
     pub fighter_abilities: HashMap<u32, FighterAbilityInfo>,
     pub wrecks: HashMap<TypeId, TypeId>,
     pub compressible_types: HashMap<TypeId, TypeId>,
+    #[serde(default)]
+    pub type_materials: HashMap<TypeId, Vec<TypeMaterialEntry>>,
     pub dynamic_item_attributes: HashMap<TypeId, MutaplasmidInfo>,
     pub space_components_by_type: HashMap<TypeId, Vec<String>>,
     pub missions: HashMap<u32, MissionTemplate>,
@@ -468,6 +492,7 @@ impl SdeRegistry {
                 .collect(),
             wrecks: parsed.wrecks,
             compressible_types: parsed.compressible_types,
+            type_materials: parsed.type_materials,
             dynamic_item_attributes: parsed
                 .dynamic_item_attributes
                 .into_iter()
@@ -515,10 +540,11 @@ mod tests {
     use super::*;
 
     #[test]
+    // parity: plan:S-1
     fn test_canonical_sde_seed_lookup() {
         let sde = SdeRegistry::with_canonical_seed();
-        assert_eq!(sde.types.len(), 95);
-        assert_eq!(sde.attributes.len(), 94);
+        assert_eq!(sde.types.len(), 100);
+        assert_eq!(sde.attributes.len(), 95);
         assert_eq!(sde.effects.len(), 253);
         assert_eq!(sde.solar_systems.len(), 22);
         assert_eq!(sde.jumps.len(), 6);
@@ -531,6 +557,37 @@ mod tests {
             rifter.default_attributes.get(&attr_ids::MAX_VELOCITY),
             Some(&365.0)
         );
+        assert_eq!(rifter.portion_size, 1);
+        assert_eq!(
+            sde.type_materials.get(&587),
+            Some(&vec![
+                TypeMaterialEntry {
+                    material_type_id: 34,
+                    quantity: 13333
+                },
+                TypeMaterialEntry {
+                    material_type_id: 35,
+                    quantity: 3333
+                },
+                TypeMaterialEntry {
+                    material_type_id: 36,
+                    quantity: 1333
+                },
+            ])
+        );
+        assert_eq!(
+            sde.type_materials.get(&18),
+            Some(&vec![
+                TypeMaterialEntry {
+                    material_type_id: 34,
+                    quantity: 175
+                },
+                TypeMaterialEntry {
+                    material_type_id: 36,
+                    quantity: 70
+                },
+            ])
+        );
 
         let jita = sde
             .solar_systems
@@ -538,6 +595,13 @@ mod tests {
             .expect("Jita 30000142 must exist");
         assert_eq!(jita.name, "Jita");
         assert_eq!(jita.stations[0].station_id, 60003760);
+        assert!(jita.stations[0].has_clone_bay);
+
+        let perimeter = sde
+            .solar_systems
+            .get(&30000144)
+            .expect("Perimeter 30000144 must exist");
+        assert!(!perimeter.stations[0].has_clone_bay);
 
         // Verify blueprints, compressible types, mutaplasmids, node graphs, and space components
         assert!(sde.blueprints.contains_key(&687));

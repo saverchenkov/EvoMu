@@ -12,7 +12,12 @@ use glam::DVec3;
 use std::collections::HashMap;
 
 fn parse_mission_id(args: &[PyRep]) -> Result<u32, BridgeRpcError> {
-    let raw = args.first().and_then(|a| a.as_i64()).unwrap_or(1001);
+    let Some(raw) = args.first().and_then(|a| a.as_i64()) else {
+        return Err(BridgeRpcError {
+            code: "InvalidMissionId".into(),
+            message: "mission_id argument is required".into(),
+        });
+    };
     u32::try_from(raw).map_err(|_| BridgeRpcError {
         code: "InvalidMissionId".into(),
         message: format!("mission_id {raw} is out of valid u32 range"),
@@ -33,6 +38,12 @@ pub async fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            let Some(sys_id) = session.solar_system_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "NoSolarSystem".into(),
+                    message: "Session has no active solar system".into(),
+                }));
+            };
             let mission_id = match parse_mission_id(args) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -46,7 +57,6 @@ pub async fn handle(
             let agent_id = tmpl.agent_id;
             let title = tmpl.title.clone();
             let is_storyline = tmpl.mission_type.starts_with("Storyline") || mission_id == 2001;
-            let sys_id = session.solar_system_id.unwrap_or(30_000_142);
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 if is_storyline {
@@ -101,11 +111,16 @@ pub async fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            let Some(sys_id) = session.solar_system_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "NoSolarSystem".into(),
+                    message: "Session has no active solar system".into(),
+                }));
+            };
             let mission_id = match parse_mission_id(args) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let sys_id = session.solar_system_id.unwrap_or(30_000_142);
             let handle = ctx.systems.get_or_spawn(sys_id);
             let existing_accepted = ctx.db.with_snapshot(|snap| {
                 snap.active_missions
@@ -272,32 +287,29 @@ pub async fn handle(
                 m.npcs_remaining = 0;
                 let ball_ids = std::mem::take(&mut m.spawned_npc_ball_ids);
                 if was_accepted {
-                    let corp_id = ctx
-                        .sde
-                        .missions
-                        .get(&mission_id)
-                        .map(|def| def.corporation_id)
-                        .unwrap_or(1_000_035);
-                    let mut actual_delta = None;
-                    if let Some(ch) = snap.characters.get_mut(&char_id) {
-                        let cur = ch.standings.get(&corp_id).copied().unwrap_or(0.0);
-                        let next = (cur - 0.1).max(-10.0);
-                        ch.standings.insert(corp_id, next);
-                        actual_delta = Some(if cur - 0.1 >= -10.0 { -0.1 } else { -10.0 - cur });
-                    }
-                    if let Some(delta) = actual_delta {
-                        snap.next_entity_id += 1;
-                        let ev_id = snap.next_entity_id;
-                        snap.standing_transactions
-                            .entry(char_id)
-                            .or_default()
-                            .push(StandingTransactionRecord {
-                                event_id: ev_id,
-                                from_id: corp_id,
-                                to_id: char_id,
-                                modification: delta,
-                                event_type_id: 83,
-                            });
+                    if let Some(def) = ctx.sde.missions.get(&mission_id) {
+                        let corp_id = def.corporation_id;
+                        let mut actual_delta = None;
+                        if let Some(ch) = snap.characters.get_mut(&char_id) {
+                            let cur = ch.standings.get(&corp_id).copied().unwrap_or(0.0);
+                            let next = (cur - 0.1).max(-10.0);
+                            ch.standings.insert(corp_id, next);
+                            actual_delta = Some(if cur - 0.1 >= -10.0 { -0.1 } else { -10.0 - cur });
+                        }
+                        if let Some(delta) = actual_delta {
+                            snap.next_entity_id += 1;
+                            let ev_id = snap.next_entity_id;
+                            snap.standing_transactions
+                                .entry(char_id)
+                                .or_default()
+                                .push(StandingTransactionRecord {
+                                    event_id: ev_id,
+                                    from_id: corp_id,
+                                    to_id: char_id,
+                                    modification: delta,
+                                    event_type_id: 83,
+                                });
+                        }
                     }
                 }
                 Ok((sys_id, ball_ids, m.state.clone()))
@@ -393,7 +405,12 @@ pub async fn handle(
             let base_lp = tmpl.lp_reward;
             let standing_pct = tmpl.standing_gain_pct;
             let corp_id = tmpl.corporation_id;
-            let sys_id = session.solar_system_id.unwrap_or(30_000_142);
+            let Some(sys_id) = session.solar_system_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "NoSolarSystem".into(),
+                    message: "Session has no active solar system".into(),
+                }));
+            };
 
             let (neg_lvl, sec_conn_lvl) = ctx.db.with_snapshot(|snap| {
                 let sk = snap.skills.get(&char_id);

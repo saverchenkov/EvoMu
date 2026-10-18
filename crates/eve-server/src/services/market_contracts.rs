@@ -74,8 +74,19 @@ pub fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let region_id = session.region_id.unwrap_or(10_000_002);
-            let type_id = args.first().and_then(|a| a.as_i64()).unwrap_or(34) as TypeId;
+            let Some(region_id) = session.region_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "NoRegion".into(),
+                    message: "Session has no active region".into(),
+                }));
+            };
+            let Some(raw_type_id) = args.first().and_then(|a| a.as_i64()) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidMarketOrder".into(),
+                    message: "GetOrders requires typeID".into(),
+                }));
+            };
+            let type_id = raw_type_id as TypeId;
             let rows = ctx.db.with_snapshot(|snap| {
                 snap.market_orders
                     .values()
@@ -168,13 +179,25 @@ pub fn handle(
                         .into(),
                 }));
             };
+            let Some(region_id) = session.region_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "NoRegion".into(),
+                    message: "Session has no active region".into(),
+                }));
+            };
             let station_id = args
                 .first()
                 .and_then(|a| a.as_i64())
                 .unwrap_or(docked_station_id);
-            let type_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(34) as TypeId;
-            let price_isk = args.get(2).and_then(|a| a.as_f64()).unwrap_or(10.0);
-            let quantity = args.get(3).and_then(|a| a.as_i64()).unwrap_or(100);
+            let Some(raw_type_id) = args.get(1).and_then(|a| a.as_i64()) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidMarketOrder".into(),
+                    message: "PlaceCharOrder requires typeID".into(),
+                }));
+            };
+            let type_id = raw_type_id as TypeId;
+            let price_isk = args.get(2).and_then(|a| a.as_f64()).unwrap_or(0.0);
+            let quantity = args.get(3).and_then(|a| a.as_i64()).unwrap_or(0);
             let is_bid = args.get(4).and_then(|a| a.as_bool()).unwrap_or(true);
 
             if !price_isk.is_finite()
@@ -189,8 +212,6 @@ pub fn handle(
                 }));
             }
             let quantity_i32 = quantity as i32;
-
-            let region_id = session.region_id.unwrap_or(10_000_002);
             let station_info = ctx.sde.solar_systems.values().find_map(|sys| {
                 if sys.region_id == region_id {
                     sys.stations.iter().find(|st| st.station_id == station_id)
@@ -839,17 +860,31 @@ pub fn handle(
                     ),
                 }));
             }
-            let start_station_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(60_003_760);
-            let end_station_id = args
-                .get(2)
+            let Some(start_station_id) = args
+                .get(1)
                 .and_then(|a| a.as_i64())
-                .unwrap_or(if contract_type == "Courier" {
-                    60_003_766
-                } else {
-                    start_station_id
-                });
-            let reward_isk = args.get(3).and_then(|a| a.as_f64()).unwrap_or(500_000.0);
-            let collateral_isk = args.get(4).and_then(|a| a.as_f64()).unwrap_or(2_000_000.0);
+                .or(session.station_id)
+                .or(session.structure_id)
+            else {
+                return Some(Err(BridgeRpcError {
+                    code: "MustBeDockedAtStartStation".into(),
+                    message: "Caller must be docked at start_station_id to create a contract"
+                        .into(),
+                }));
+            };
+            let end_station_id = match args.get(2).and_then(|a| a.as_i64()) {
+                Some(eid) => eid,
+                None if contract_type == "ItemExchange" => start_station_id,
+                None => {
+                    return Some(Err(BridgeRpcError {
+                        code: "InvalidContractDestination".into(),
+                        message: "Courier contracts require an explicit destination stationID"
+                            .into(),
+                    }));
+                }
+            };
+            let reward_isk = args.get(3).and_then(|a| a.as_f64()).unwrap_or(0.0);
+            let collateral_isk = args.get(4).and_then(|a| a.as_f64()).unwrap_or(0.0);
             let item_id_opt = args.get(5).and_then(|a| a.as_i64());
 
             if session.station_id.or(session.structure_id) != Some(start_station_id) {

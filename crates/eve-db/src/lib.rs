@@ -1138,6 +1138,30 @@ impl Default for WorldRepository {
     }
 }
 
+/// Exact 64-bit account and session role bitmasks from `carbon/common/script/sys/serviceConst.pyj` in V24.01 `code.ccp` (`S-9`).
+pub mod service_roles {
+    /// `ROLE_GMS` (`1 << 38` = `274877906944`)
+    pub const ROLE_GMS: u64 = 0x0000_0040_0000_0000;
+    /// `ROLE_GMH` (`1 << 53` = `9007199254740992`)
+    pub const ROLE_GMH: u64 = 0x0020_0000_0000_0000;
+    /// `ROLE_GML` (`1 << 54` = `18014398509481984`)
+    pub const ROLE_GML: u64 = 0x0040_0000_0000_0000;
+    /// `ROLE_CONTENT` (`1 << 55` = `36028797018963968`)
+    pub const ROLE_CONTENT: u64 = 0x0080_0000_0000_0000;
+    /// `ROLE_ADMIN` (`1 << 56` = `72057594037927936`)
+    pub const ROLE_ADMIN: u64 = 0x0100_0000_0000_0000;
+    /// `ROLE_PLAYER` (`1 << 61` = `2305843009213693952`)
+    pub const ROLE_PLAYER: u64 = 0x2000_0000_0000_0000;
+    /// `ROLE_LOGIN` (`1 << 62` = `4611686018427387904`)
+    pub const ROLE_LOGIN: u64 = 0x4000_0000_0000_0000;
+    /// Default role mask for standard player accounts (`0` GM bits).
+    pub const ROLE_PLAYER_DEFAULT: u64 = ROLE_PLAYER | ROLE_LOGIN;
+    /// Combined GM / admin authorization bitmask (`ROLE_GML | ROLE_GMH | ROLE_GMS | ROLE_ADMIN`).
+    pub const ROLE_GM_MASK: u64 = ROLE_GML | ROLE_GMH | ROLE_GMS | ROLE_ADMIN;
+    /// Default role mask for provisioned GM / admin accounts.
+    pub const ROLE_GM_DEFAULT: u64 = ROLE_PLAYER_DEFAULT | ROLE_GM_MASK;
+}
+
 impl WorldRepository {
     /// Generates a 16-byte random per-account salt encoded as 32 lowercase hex characters from OS CSPRNG (`/dev/urandom`).
     fn generate_random_salt_hex() -> String {
@@ -1216,7 +1240,7 @@ impl WorldRepository {
                 user_id: 1,
                 username: "demo".to_string(),
                 password_token: Self::hash_password_token("demo", "demo-secret"),
-                role: 0x0000_0000_0000_0001, // standard player role
+                role: service_roles::ROLE_PLAYER_DEFAULT,
             },
         );
         accounts.insert(
@@ -1225,7 +1249,7 @@ impl WorldRepository {
                 user_id: 2,
                 username: "other".to_string(),
                 password_token: Self::hash_password_token("other", "other-secret"),
-                role: 0x0000_0000_0000_0001, // standard player role
+                role: service_roles::ROLE_PLAYER_DEFAULT,
             },
         );
 
@@ -1451,48 +1475,28 @@ impl WorldRepository {
         for sys_id in [
             30_000_142, 30_000_144, 30_002_813, 30_002_904, 31_000_005,
         ] {
-            let is_nullsec = sys_id == 30_002_904;
-            let (wh_dest, sig_pos) = match sys_id {
-                30_002_813 => (Some(31_000_005), Some([15_000.0, 0.0, 0.0])),
-                31_000_005 => (Some(30_002_904), Some([10_500.0, 0.0, 0.0])),
-                30_002_904 => (Some(30_002_813), Some([12_000.0, 0.0, 0.0])),
-                _ => (None, None),
-            };
-            let (fw_pos, fw_dur) = if sys_id == 30_002_813 {
-                (Some([250_000.0, 0.0, -150_000.0]), 600)
-            } else {
-                (None, 0)
-            };
             system_states.insert(
                 sys_id,
                 SystemDynamicState {
                     solar_system_id: sys_id,
                     dbs_multiplier: 1.35,
-                    ess_main_bank: if is_nullsec {
-                        IskCents::from_isk(10_000_000)
-                    } else {
-                        IskCents(0)
-                    },
-                    ess_reserve_bank: if is_nullsec {
-                        IskCents::from_isk(25_000_000)
-                    } else {
-                        IskCents(0)
-                    },
+                    ess_main_bank: IskCents(0),
+                    ess_reserve_bank: IskCents(0),
                     ess_linked_character_id: None,
                     ess_link_started_tick: None,
                     sov_alliance_id: None,
                     military_index: 2,
                     industrial_index: 2,
                     strategic_index: 3,
-                    fw_contested_pct: 45.0,
+                    fw_contested_pct: 0.0,
                     insurgency_corruption_stage: 2,
                     insurgency_suppression_stage: 1,
-                    wormhole_remaining_mass_kg: 2_000_000_000.0,
-                    wormhole_destination_system_id: wh_dest,
-                    signature_position: sig_pos,
-                    fw_complex_position: fw_pos,
-                    fw_capture_seconds_elapsed: 270, // 45% of 600s Novice complex
-                    fw_capture_duration_seconds: fw_dur,
+                    wormhole_remaining_mass_kg: 0.0,
+                    wormhole_destination_system_id: None,
+                    signature_position: None,
+                    fw_complex_position: None,
+                    fw_capture_seconds_elapsed: 0,
+                    fw_capture_duration_seconds: 0,
                     last_fw_capture_tick: 0,
                     last_sov_claim_tick: 0,
                 },
@@ -1678,97 +1682,12 @@ impl WorldRepository {
     /// Creates a production `WorldRepository` with an empty player state, then loads `snapshot_path`
     /// if it already exists on disk without clearing any loaded accounts, characters, skills, or items.
     /// Returns `Err` if loading or initializing the snapshot fails, refusing to start with an empty
-    /// world over an unreadable save (`R23-P0-1`, `R24-P1-1`).
+    /// world over an unreadable save (`R23-P0-1`, `R24-P1-1`, `S-5`).
     pub fn new_empty_with_snapshot_path(
         snapshot_path: Option<std::path::PathBuf>,
     ) -> Result<Self, String> {
-        let mut market_orders = HashMap::new();
-        market_orders.insert(
-            700_000_001,
-            MarketOrderRecord {
-                order_id: 700_000_001,
-                owner_id: 1_000_035,
-                station_id: 60_003_760,
-                region_id: 10_000_002,
-                type_id: 34,
-                is_bid: false,
-                price: IskCents::from_isk(5),
-                vol_entered: 1_000_000,
-                vol_remaining: 1_000_000,
-                min_volume: 1,
-                is_npc: true,
-                escrow: IskCents(0),
-            },
-        );
-        market_orders.insert(
-            700_000_002,
-            MarketOrderRecord {
-                order_id: 700_000_002,
-                owner_id: 1_000_035,
-                station_id: 60_003_760,
-                region_id: 10_000_002,
-                type_id: 438,
-                is_bid: false,
-                price: IskCents::from_isk(550_000),
-                vol_entered: 500,
-                vol_remaining: 500,
-                min_volume: 1,
-                is_npc: true,
-                escrow: IskCents(0),
-            },
-        );
-
-        let mut system_states = HashMap::new();
-        for sys_id in [
-            30_000_142, 30_000_144, 30_002_813, 30_002_904, 31_000_005,
-        ] {
-            let is_nullsec = sys_id == 30_002_904;
-            let (wh_dest, sig_pos) = match sys_id {
-                30_002_813 => (Some(31_000_005), Some([15_000.0, 0.0, 0.0])),
-                31_000_005 => (Some(30_002_904), Some([10_500.0, 0.0, 0.0])),
-                30_002_904 => (Some(30_002_813), Some([12_000.0, 0.0, 0.0])),
-                _ => (None, None),
-            };
-            let (fw_pos, fw_dur) = if sys_id == 30_002_813 {
-                (Some([250_000.0, 0.0, -150_000.0]), 600)
-            } else {
-                (None, 0)
-            };
-            system_states.insert(
-                sys_id,
-                SystemDynamicState {
-                    solar_system_id: sys_id,
-                    dbs_multiplier: 1.35,
-                    ess_main_bank: if is_nullsec {
-                        IskCents::from_isk(10_000_000)
-                    } else {
-                        IskCents(0)
-                    },
-                    ess_reserve_bank: if is_nullsec {
-                        IskCents::from_isk(25_000_000)
-                    } else {
-                        IskCents(0)
-                    },
-                    ess_linked_character_id: None,
-                    ess_link_started_tick: None,
-                    sov_alliance_id: None,
-                    military_index: 2,
-                    industrial_index: 2,
-                    strategic_index: 3,
-                    fw_contested_pct: 45.0,
-                    insurgency_corruption_stage: 2,
-                    insurgency_suppression_stage: 1,
-                    wormhole_remaining_mass_kg: 2_000_000_000.0,
-                    wormhole_destination_system_id: wh_dest,
-                    signature_position: sig_pos,
-                    fw_complex_position: fw_pos,
-                    fw_capture_seconds_elapsed: 270,
-                    fw_capture_duration_seconds: fw_dur,
-                    last_fw_capture_tick: 0,
-                    last_sov_claim_tick: 0,
-                },
-            );
-        }
+        let market_orders = HashMap::new();
+        let system_states = HashMap::new();
 
         let mut repo = Self {
             inner: RwLock::new(WorldStateSnapshot {
@@ -1825,7 +1744,7 @@ impl WorldRepository {
         Ok(repo)
     }
 
-    /// Explicitly and idempotently provisions a standard player account (`role = 0x01`) with an operator-supplied password token (`R22-P1-5`, `R23-P1-4`).
+    /// Explicitly and idempotently provisions a standard player account (`role = ROLE_PLAYER_DEFAULT`, `0` GM bits) with an operator-supplied password token (`R22-P1-5`, `R23-P1-4`, `S-9`).
     pub fn provision_player_account(&self, username: &str, password_token: &str) -> u64 {
         if let Ok(existing) = self.authenticate(username, password_token) {
             return existing.user_id;
@@ -1849,7 +1768,7 @@ impl WorldRepository {
                     user_id,
                     username: username.to_string(),
                     password_token: hashed_token,
-                    role: 0x0000_0000_0000_0001,
+                    role: service_roles::ROLE_PLAYER_DEFAULT,
                 },
             );
             Ok::<u64, std::convert::Infallible>(user_id)
@@ -1857,7 +1776,7 @@ impl WorldRepository {
         .unwrap()
     }
 
-    /// Explicitly and idempotently provisions a GM / administrator account (`role = 0x03`) outside of the default player seed (`R23-P1-4`).
+    /// Explicitly and idempotently provisions a GM / administrator account (`role = ROLE_GM_DEFAULT`) outside of the default player seed (`R23-P1-4`, `S-9`).
     pub fn provision_gm_account(
         &self,
         username: &str,
@@ -1874,7 +1793,7 @@ impl WorldRepository {
         let _ = self.try_with_mut_snapshot(|snap| {
             let user_id = if let Some(existing) = snap.accounts.get_mut(username) {
                 existing.password_token = hashed_token;
-                existing.role |= 0x0000_0000_0000_0003;
+                existing.role |= service_roles::ROLE_GM_DEFAULT;
                 existing.user_id
             } else {
                 let uid = snap
@@ -1891,7 +1810,7 @@ impl WorldRepository {
                         user_id: uid,
                         username: username.to_string(),
                         password_token: hashed_token,
-                        role: 0x0000_0000_0000_0003,
+                        role: service_roles::ROLE_GM_DEFAULT,
                     },
                 );
                 uid

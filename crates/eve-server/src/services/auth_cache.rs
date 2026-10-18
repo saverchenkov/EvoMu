@@ -19,16 +19,13 @@ pub fn handle(
     _kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
-        ("machoNet", "GetInitVals") | ("machoNet", "GetServiceInfo") => {
+        ("machoNet", "GetInitVals") => {
             let mut sorted_svcs: Vec<&String> = ctx.cataloged_services.iter().collect();
             sorted_svcs.sort();
             let service_entries: Vec<(PyRep, PyRep)> = sorted_svcs
                 .into_iter()
                 .map(|svc| (PyRep::String(svc.clone()), PyRep::String("sol".into())))
                 .collect();
-            if method == "GetServiceInfo" {
-                return Some(Ok(PyRep::Dict(service_entries)));
-            }
             let cluster_info = vec![(
                 PyRep::String("catalogedServices".into()),
                 PyRep::Integer(ctx.cataloged_services.len() as i64),
@@ -37,6 +34,16 @@ pub fn handle(
                 PyRep::Dict(service_entries),
                 PyRep::Dict(cluster_info),
             ])))
+        }
+
+        ("machoNet", "GetServiceInfo") => {
+            let mut sorted_svcs: Vec<&String> = ctx.cataloged_services.iter().collect();
+            sorted_svcs.sort();
+            let service_entries: Vec<(PyRep, PyRep)> = sorted_svcs
+                .into_iter()
+                .map(|svc| (PyRep::String(svc.clone()), PyRep::String("sol".into())))
+                .collect();
+            Some(Ok(PyRep::Dict(service_entries)))
         }
 
         ("machoNet", "GetTime") => {
@@ -107,7 +114,7 @@ pub fn handle(
             Some(Ok(PyRep::keyval([("loggedOut", PyRep::Bool(true))])))
         }
 
-        ("subscriptionMgr", "GetCloneGrade") | ("loginRewardFacilities", "get_my_clone_grade") => {
+        ("subscriptionMgr", "GetCloneGrade") => {
             let uid = match ServerContext::require_auth(session) {
                 Ok(u) => u,
                 Err(e) => return Some(Err(e)),
@@ -117,9 +124,6 @@ pub fn handle(
                 .and_then(|cid| ctx.db.get_character(cid).ok())
                 .map(|c| c.clone_grade)
                 .unwrap_or(1);
-            if method == "get_my_clone_grade" {
-                return Some(Ok(PyRep::Integer(clone_grade_u8 as i64)));
-            }
             let (max_sp, speed_mult) = ctx
                 .sde
                 .clone_grades
@@ -134,15 +138,28 @@ pub fn handle(
             ])))
         }
 
+        ("loginRewardFacilities", "get_my_clone_grade") => {
+            let _ = match ServerContext::require_auth(session) {
+                Ok(u) => u,
+                Err(e) => return Some(Err(e)),
+            };
+            let clone_grade_u8 = session
+                .character_id
+                .and_then(|cid| ctx.db.get_character(cid).ok())
+                .map(|c| c.clone_grade)
+                .unwrap_or(1);
+            Some(Ok(PyRep::Integer(clone_grade_u8 as i64)))
+        }
+
         ("slash", "SlashCmd") => {
             let (_, cid) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            if (session.role & 0x02) == 0 {
+            if !session.has_gm_role() {
                 return Some(Err(BridgeRpcError {
                     code: "InsufficientRole".into(),
-                    message: "slash.SlashCmd requires GM/Admin role bit 0x02".into(),
+                    message: "slash.SlashCmd requires GM/Admin role (ROLE_GMS/ROLE_GML/ROLE_GMH/ROLE_ADMIN)".into(),
                 }));
             }
             let cmd = args.first().and_then(|a| a.as_str()).unwrap_or("").trim();

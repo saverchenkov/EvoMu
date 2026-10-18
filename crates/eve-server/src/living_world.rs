@@ -49,13 +49,21 @@ pub struct LivingWorldDirector {
 
 impl Default for LivingWorldDirector {
     fn default() -> Self {
-        Self::new_seeded()
+        Self::new()
     }
 }
 
 impl LivingWorldDirector {
-    pub fn new_seeded() -> Self {
-        let mut convoys = HashMap::new();
+    /// Initializes an empty `LivingWorldDirector` with `0` pre-seeded convoys (`S-5`).
+    pub fn new() -> Self {
+        Self {
+            convoys: RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Explicitly seeds demo convoys `800_000_001..=800_000_003` for tests or `--seed-demo` (`S-5`).
+    pub fn seed_default_convoys(&self) {
+        let mut convoys = self.convoys.write().unwrap_or_else(|e| e.into_inner());
         // Convoy 800_000_001: Hauler Convoy carrying 50,000 Tritanium from Perimeter (30000144) to Jita 4-4 (60003760)
         convoys.insert(
             800_000_001,
@@ -107,10 +115,12 @@ impl LivingWorldDirector {
                 destroyed: false,
             },
         );
+    }
 
-        Self {
-            convoys: RwLock::new(convoys),
-        }
+    pub fn new_seeded() -> Self {
+        let dir = Self::new();
+        dir.seed_default_convoys();
+        dir
     }
 
     pub fn list_convoys(&self) -> Vec<LivingWorldConvoy> {

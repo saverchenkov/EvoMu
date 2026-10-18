@@ -36,7 +36,12 @@ pub async fn handle(
                     message: "Bookmark label must be 1..=100 non-whitespace characters".into(),
                 }));
             }
-            let sys_id = session.solar_system_id.unwrap_or(30_000_142);
+            let Some(sys_id) = session.solar_system_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "NoSolarSystem".into(),
+                    message: "Session has no active solar system".into(),
+                }));
+            };
 
             // Derive bookmark coordinates strictly from the pilot's docked station/structure or server-side ship ball (never client args)
             let (x, y, z) = if let Some(st_id) = session.station_id {
@@ -138,7 +143,12 @@ pub async fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let recipient_id = args.first().and_then(|a| a.as_i64()).unwrap_or(90_000_002);
+            let Some(recipient_id) = args.first().and_then(|a| a.as_i64()) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidRecipient".into(),
+                    message: "SendMail requires recipientID".into(),
+                }));
+            };
             let subject = args.get(1).and_then(|a| a.as_str()).unwrap_or("o7");
             let body = args.get(2).and_then(|a| a.as_str()).unwrap_or("Fly safe!");
             let res = ctx.db.try_with_mut_snapshot(|snap| {
@@ -612,7 +622,7 @@ pub async fn handle(
                     .get(&char_id)
                     .map(|c| c.corporation_id)
                     .or(session.corporation_id)
-                    .unwrap_or(1_000_125);
+                    .unwrap_or(0);
                 if proj.corporation_id != char_corp_id {
                     return Err(BridgeRpcError {
                         code: "NotInProjectCorporation".into(),

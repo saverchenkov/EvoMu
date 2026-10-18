@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-extract_staticdata.py — V24.01 Static Data Seed Generator (Milestone M1).
+extract_staticdata.py — Hand-Curated Test-Only Static Data Seed Generator (Pending Phase 1 D-1).
 
-Reads summary metadata from `docs/index/staticdata_catalog.json` and
-`docs/index/dogma_effects.json` and emits hand-curated static data literals
-(`92` types, `94` attributes, `253` effects, `22` solar systems, `6` jumps,
-`2` blueprints, `17` missions) to `docs/index/sde_seed.json`, which is loaded
-by `crates/eve-sde` for deterministic data-driven mechanics across M1..M8.
+NOTE (S-11): All tables in this script are hand-curated test-only seed literals
+(`100` types, `95` attributes, `253` effects, `8` `type_materials` entries,
+`12` bloodlines, `36` ancestries, `12` schools, `22` solar systems, `6` jumps,
+`2` blueprints, `17` missions) emitted to `docs/index/sde_seed.json` for unit and
+integration tests until Phase 1 (`D-1` real SDE importer) replaces it.
 """
 
 import json
@@ -126,6 +126,7 @@ def build_canonical_sde_seed() -> dict:
         {"attribute_id": 2055, "name": "fighterCapacity", "default_value": 0.0, "high_is_good": True, "stackable": True},
         {"attribute_id": 2215, "name": "fighterSquadronMaxSize", "default_value": 0.0, "high_is_good": True, "stackable": True},
         {"attribute_id": 2216, "name": "fighterTubes", "default_value": 0.0, "high_is_good": True, "stackable": True},
+        {"attribute_id": 790, "name": "reprocessingSkillType", "default_value": 0.0, "high_is_good": True, "stackable": True},
     ]
 
     # 2. Canonical Dogma Effects (dgmEffects) + 250 indexed effects from dogma_effects.json
@@ -536,10 +537,11 @@ def build_canonical_sde_seed() -> dict:
         {"type_id": 39, "group_id": 18, "category_id": 4, "name": "Zydrine", "mass": 1.0, "volume": 0.01, "capacity": 0.0, "radius": 1.0, "base_price": 1200.0, "published": True, "default_attributes": {}},
         {"type_id": 40, "group_id": 18, "category_id": 4, "name": "Megacyte", "mass": 1.0, "volume": 0.01, "capacity": 0.0, "radius": 1.0, "base_price": 2400.0, "published": True, "default_attributes": {}},
         {"type_id": 4247, "group_id": 1136, "category_id": 4, "name": "Helium Fuel Block", "mass": 1.0, "volume": 5.0, "capacity": 0.0, "radius": 1.0, "base_price": 20_000.0, "published": True, "default_attributes": {}},
-        {"type_id": 1230, "group_id": 462, "category_id": 25, "name": "Veldspar", "mass": 1.0, "volume": 0.1, "capacity": 0.0, "radius": 1.0, "base_price": 15.0, "published": True, "default_attributes": {}},
-        {"type_id": 28432, "group_id": 462, "category_id": 25, "name": "Compressed Veldspar", "mass": 1.0, "volume": 0.001, "capacity": 0.0, "radius": 1.0, "base_price": 1500.0, "published": True, "default_attributes": {}},
-        {"type_id": 1228, "group_id": 460, "category_id": 25, "name": "Scordite", "mass": 1.0, "volume": 0.15, "capacity": 0.0, "radius": 1.0, "base_price": 22.0, "published": True, "default_attributes": {}},
-        {"type_id": 28429, "group_id": 460, "category_id": 25, "name": "Compressed Scordite", "mass": 1.0, "volume": 0.0015, "capacity": 0.0, "radius": 1.0, "base_price": 2200.0, "published": True, "default_attributes": {}},
+        {"type_id": 1230, "group_id": 462, "category_id": 25, "name": "Veldspar", "portion_size": 100, "mass": 1.0, "volume": 0.1, "capacity": 0.0, "radius": 1.0, "base_price": 15.0, "published": True, "default_attributes": {"790": 12195.0}},
+        {"type_id": 28432, "group_id": 462, "category_id": 25, "name": "Compressed Veldspar", "portion_size": 1, "mass": 1.0, "volume": 0.001, "capacity": 0.0, "radius": 1.0, "base_price": 1500.0, "published": True, "default_attributes": {"790": 12195.0}},
+        {"type_id": 1228, "group_id": 460, "category_id": 25, "name": "Scordite", "portion_size": 100, "mass": 1.0, "volume": 0.15, "capacity": 0.0, "radius": 1.0, "base_price": 22.0, "published": True, "default_attributes": {"790": 12193.0}},
+        {"type_id": 28429, "group_id": 460, "category_id": 25, "name": "Compressed Scordite", "portion_size": 1, "mass": 1.0, "volume": 0.0015, "capacity": 0.0, "radius": 1.0, "base_price": 2200.0, "published": True, "default_attributes": {"790": 12193.0}},
+        {"type_id": 18, "group_id": 458, "category_id": 25, "name": "Plagioclase", "portion_size": 100, "mass": 1.0, "volume": 0.35, "capacity": 0.0, "radius": 1.0, "base_price": 30.0, "published": True, "default_attributes": {"790": 12191.0}},
         {
             "type_id": 22989, "group_id": 83, "category_id": 8, "name": "Republic Fleet Phased Plasma S",
             "mass": 0.01, "volume": 0.0025, "capacity": 0.0, "radius": 1.0, "base_price": 800.0, "published": True,
@@ -603,6 +605,10 @@ def build_canonical_sde_seed() -> dict:
         {"type_id": 3356, "group_id": 278, "category_id": 16, "name": "Negotiation", "mass": 0.0, "volume": 0.01, "capacity": 0.0, "radius": 1.0, "base_price": 120_000.0, "published": True, "default_attributes": {"275": 2.0}},
         {"type_id": 3388, "group_id": 268, "category_id": 16, "name": "Advanced Industry", "mass": 0.0, "volume": 0.01, "capacity": 0.0, "radius": 1.0, "base_price": 200_000.0, "published": True, "default_attributes": {"275": 3.0, "182": 3380.0, "277": 3.0}},
         {"type_id": 3389, "group_id": 268, "category_id": 16, "name": "Reprocessing Efficiency", "mass": 0.0, "volume": 0.01, "capacity": 0.0, "radius": 1.0, "base_price": 150_000.0, "published": True, "default_attributes": {"275": 3.0, "182": 3385.0, "277": 5.0}},
+        {"type_id": 12191, "group_id": 1218, "category_id": 16, "name": "Plagioclase Processing", "mass": 0.0, "volume": 0.01, "capacity": 0.0, "radius": 1.0, "base_price": 50_000.0, "published": True, "default_attributes": {"275": 1.0, "182": 3385.0, "277": 4.0}},
+        {"type_id": 12193, "group_id": 1218, "category_id": 16, "name": "Scordite Processing", "mass": 0.0, "volume": 0.01, "capacity": 0.0, "radius": 1.0, "base_price": 50_000.0, "published": True, "default_attributes": {"275": 1.0, "182": 3385.0, "277": 4.0}},
+        {"type_id": 12195, "group_id": 1218, "category_id": 16, "name": "Veldspar Processing", "mass": 0.0, "volume": 0.01, "capacity": 0.0, "radius": 1.0, "base_price": 50_000.0, "published": True, "default_attributes": {"275": 1.0, "182": 3385.0, "277": 4.0}},
+        {"type_id": 12196, "group_id": 1218, "category_id": 16, "name": "Scrapmetal Processing", "mass": 0.0, "volume": 0.01, "capacity": 0.0, "radius": 1.0, "base_price": 150_000.0, "published": True, "default_attributes": {"275": 5.0, "182": 3389.0, "277": 5.0}},
         {"type_id": 3443, "group_id": 274, "category_id": 16, "name": "Trade", "mass": 0.0, "volume": 0.01, "capacity": 0.0, "radius": 1.0, "base_price": 20_000.0, "published": True, "default_attributes": {"275": 1.0}},
         {"type_id": 3446, "group_id": 274, "category_id": 16, "name": "Broker Relations", "mass": 0.0, "volume": 0.01, "capacity": 0.0, "radius": 1.0, "base_price": 100_000.0, "published": True, "default_attributes": {"275": 2.0, "182": 3443.0, "277": 2.0}},
         {"type_id": 3893, "group_id": 273, "category_id": 16, "name": "Security Connections", "mass": 0.0, "volume": 0.01, "capacity": 0.0, "radius": 1.0, "base_price": 160_000.0, "published": True, "default_attributes": {"275": 2.0}},
@@ -906,7 +912,8 @@ def build_canonical_sde_seed() -> dict:
                     "station_id": 60003766, "station_type_id": 1529,
                     "name": "Perimeter II - Moon 1 - Caldari Constructions Warehouse",
                     "position": [85_000_000_000.0, 12_000_000_000.0, -140_000_000_000.0],
-                    "owner_corporation_id": 1000026, "owner_faction_id": 500001
+                    "owner_corporation_id": 1000026, "owner_faction_id": 500001,
+                    "has_clone_bay": False
                 }
             ]
         },
@@ -998,7 +1005,7 @@ def build_canonical_sde_seed() -> dict:
         {"stargate_id": 50001251, "from_solar_system_id": 30002813, "to_solar_system_id": 30000144, "destination_stargate_id": 50001250, "position": [10_000_000_000.0, 0.0, 10_000_000_000.0]},
     ]
 
-    # 6. Clone Grades, Blueprints, Dbuffs, Fighter Abilities, Wrecks, Compressible, Dynamic Items, Space Components
+    # 6. Clone Grades, Blueprints, Dbuffs, Fighter Abilities, Wrecks, Compressible, Type Materials, Dynamic Items, Space Components
     clone_grades = [
         {"grade_id": 1, "name": "Alpha", "max_skill_points": 5_000_000, "training_speed_multiplier": 0.5},
         {"grade_id": 2, "name": "Omega", "max_skill_points": 999_999_999, "training_speed_multiplier": 1.0},
@@ -1060,6 +1067,43 @@ def build_canonical_sde_seed() -> dict:
     compressible_types = {
         "1230": 28432,  # Veldspar -> Compressed Veldspar
         "1228": 28429,  # Scordite -> Compressed Scordite
+    }
+
+    # Hand-curated test-only type_materials seed data (pending Phase 1 D-1 real SDE importer)
+    type_materials = {
+        "18": [
+            {"material_type_id": 34, "quantity": 175},
+            {"material_type_id": 36, "quantity": 70},
+        ],
+        "438": [
+            {"material_type_id": 34, "quantity": 135},
+            {"material_type_id": 35, "quantity": 46},
+            {"material_type_id": 36, "quantity": 28},
+        ],
+        "483": [
+            {"material_type_id": 34, "quantity": 1324},
+            {"material_type_id": 35, "quantity": 481},
+            {"material_type_id": 36, "quantity": 119},
+        ],
+        "587": [
+            {"material_type_id": 34, "quantity": 13333},
+            {"material_type_id": 35, "quantity": 3333},
+            {"material_type_id": 36, "quantity": 1333},
+        ],
+        "1228": [
+            {"material_type_id": 34, "quantity": 150},
+            {"material_type_id": 35, "quantity": 110},
+        ],
+        "1230": [
+            {"material_type_id": 34, "quantity": 400},
+        ],
+        "28429": [
+            {"material_type_id": 34, "quantity": 150},
+            {"material_type_id": 35, "quantity": 110},
+        ],
+        "28432": [
+            {"material_type_id": 34, "quantity": 400},
+        ],
     }
 
     dynamic_item_attributes = [
@@ -1214,7 +1258,7 @@ def build_canonical_sde_seed() -> dict:
             "static_sqlite_count": static_sqlite_count,
             "fsdbinary_count": fsdbinary_count,
             "pickle_binary_count": pickle_binary_count,
-            "dogma_vm_operands": len(dogma_meta.get("operands", [])) if isinstance(dogma_meta, dict) else 0,
+            "dogma_vm_operands": len(dogma_meta.get("operands", [])) if isinstance(dogma_meta.get("operands"), list) else 0,
             "dogma_effects_count": int(dogma_meta.get("effects_count", 0)) if isinstance(dogma_meta, dict) else 0,
         },
         "attributes": attributes,
@@ -1232,6 +1276,7 @@ def build_canonical_sde_seed() -> dict:
         "fighter_abilities": fighter_abilities,
         "wrecks": wrecks,
         "compressible_types": compressible_types,
+        "type_materials": type_materials,
         "dynamic_item_attributes": dynamic_item_attributes,
         "space_components_by_type": space_components_by_type,
         "missions": missions,

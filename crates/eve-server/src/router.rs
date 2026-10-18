@@ -75,7 +75,7 @@ impl ServerContext {
             sde,
             db,
             systems: Arc::new(SystemRegistry::new()),
-            living_world: Arc::new(LivingWorldDirector::new_seeded()),
+            living_world: Arc::new(LivingWorldDirector::new()),
             cataloged_services,
             quasar_domains,
             bound_objects: RwLock::new(HashMap::new()),
@@ -88,14 +88,43 @@ impl ServerContext {
         }
     }
 
+    /// Explicitly seeds demo convoys (`800_000_001..=800_000_003`), nullsec ESS bank balances (`10M`/`25M` ISK),
+    /// and demo wormhole/FW-complex fixtures when `--seed-demo` or a test fixture explicitly requests them (`S-5`).
+    pub fn seed_demo_world_fixtures(&self) {
+        self.living_world.seed_default_convoys();
+        self.db.with_mut_snapshot(|snap| {
+            if let Some(st) = snap.system_states.get_mut(&30_002_813) {
+                st.wormhole_remaining_mass_kg = 2_000_000_000.0;
+                st.wormhole_destination_system_id = Some(31_000_005);
+                st.signature_position = Some([15_000.0, 0.0, 0.0]);
+                st.fw_complex_position = Some([250_000.0, 0.0, -150_000.0]);
+                st.fw_contested_pct = 45.0;
+                st.fw_capture_seconds_elapsed = 270;
+                st.fw_capture_duration_seconds = 600;
+            }
+            if let Some(st) = snap.system_states.get_mut(&31_000_005) {
+                st.wormhole_remaining_mass_kg = 2_000_000_000.0;
+                st.wormhole_destination_system_id = Some(30_002_904);
+                st.signature_position = Some([10_500.0, 0.0, 0.0]);
+            }
+            if let Some(st) = snap.system_states.get_mut(&30_002_904) {
+                st.ess_main_bank = eve_db::IskCents::from_isk(10_000_000);
+                st.ess_reserve_bank = eve_db::IskCents::from_isk(25_000_000);
+                st.wormhole_remaining_mass_kg = 2_000_000_000.0;
+                st.wormhole_destination_system_id = Some(30_002_813);
+                st.signature_position = Some([12_000.0, 0.0, 0.0]);
+            }
+        });
+    }
+
     /// Initializes the production server context (`R22-P1-5`): starts with an empty account/character table
-    /// (`WorldRepository::new_empty()`) unless `EVOMU_ENABLE_DEMO_SEED=1` or `--demo-seed` is explicitly set,
+    /// (`WorldRepository::new_empty()`) unless `EVOMU_ENABLE_DEMO_SEED=1`, `--demo-seed`, or `--seed-demo` is explicitly set,
     /// and provisions operator-supplied player accounts from `EVOMU_ACCOUNTS` (`user:secret,...`).
     pub fn new_production() -> Self {
         let enable_demo = std::env::var("EVOMU_ENABLE_DEMO_SEED")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false)
-            || std::env::args().any(|a| a == "--demo-seed");
+            || std::env::args().any(|a| a == "--demo-seed" || a == "--seed-demo");
         let db = if enable_demo {
             Arc::new(WorldRepository::with_demo_seed())
         } else {
@@ -112,7 +141,11 @@ impl ServerContext {
                 }
             }
         }
-        Self::with_repository(db)
+        let ctx = Self::with_repository(db);
+        if enable_demo {
+            ctx.seed_demo_world_fixtures();
+        }
+        ctx
     }
 
     pub fn new() -> Self {
@@ -1923,6 +1956,7 @@ mod tests {
     #[tokio::test]
     async fn test_all_18_e2e_journeys_and_catalog_coverage() {
         let ctx = ServerContext::new();
+        ctx.seed_demo_world_fixtures();
         let mut session = SessionState::new(100);
         let empty = HashMap::new();
 
@@ -2146,8 +2180,8 @@ mod tests {
         let tama_b_id = tama_kv.get("beyonceBoundID").unwrap().as_i64().unwrap() as u64;
         let tama_handle = ctx.systems.get_or_spawn(30_002_813);
 
-        // E2E-11: Probe Scanning in Low-Sec Tama (30002813, spawns K162 ball 750_000_001), Warp to Wormhole, & Wormhole Jump into J105934 (31000005)
-        let scan_res = ctx
+        // E2E-11: S-6 verifies scanMgr.RequestScans returns UnimplementedRPC; spawn K162 ball 750_000_001 in Tama (30002813), ConeScan, Warp to Wormhole, & Wormhole Jump into J105934 (31000005)
+        let req_scans_err = ctx
             .dispatch_rpc(
                 &mut session,
                 "scanMgr",
@@ -2157,12 +2191,34 @@ mod tests {
                 &empty,
                 None,
             )
-            .await
-            .unwrap();
-        let PyRep::KeyVal(skv) = scan_res else {
-            panic!("Expected scan KeyVal");
-        };
-        assert_eq!(skv.get("warpable"), Some(&PyRep::Bool(true)));
+            .await;
+        assert_eq!(req_scans_err.unwrap_err().code, "UnimplementedRPC");
+        let _ = tama_handle
+            .spawn_ball(eve_destiny::Ball {
+                id: 750_000_001,
+                type_id: 26272,
+                position: glam::DVec3::new(15_000.0, 0.0, 0.0),
+                velocity: glam::DVec3::ZERO,
+                max_velocity: 0.0,
+                inertia: 1.0,
+                mass: 1_000_000_000.0,
+                radius: 1500.0,
+                speed_fraction: 0.0,
+                mode: eve_destiny::MovementMode::Rigid,
+            })
+            .await;
+        ctx.mark_signature_scanned(90_000_001, 30_002_813, 750_000_001);
+        ctx.dispatch_rpc(
+            &mut session,
+            "scanMgr",
+            None,
+            "ConeScan",
+            &[PyRep::Real(360.0), PyRep::Real(14.4 * 149_597_870_700.0)],
+            &empty,
+            None,
+        )
+        .await
+        .unwrap();
         ctx.dispatch_rpc(
             &mut session,
             "beyonce",
@@ -2186,7 +2242,7 @@ mod tests {
             "wormholeMgr",
             None,
             "WormholeJump",
-            &[],
+            &[PyRep::Integer(750_000_001)],
             &empty,
             None,
         )
@@ -2201,7 +2257,7 @@ mod tests {
                 "wormholeMgr",
                 None,
                 "WormholeJump",
-                &[],
+                &[PyRep::Integer(750_000_001)],
                 &empty,
                 None,
             )
@@ -2275,7 +2331,7 @@ mod tests {
             "essMgr",
             None,
             "AttemptLinkToMainBank",
-            &[],
+            &[PyRep::Integer(750_000_002)],
             &empty,
             None,
         )
@@ -2289,7 +2345,7 @@ mod tests {
             "essMgr",
             None,
             "AttemptLinkToMainBank",
-            &[],
+            &[PyRep::Integer(750_000_002)],
             &empty,
             None,
         )
@@ -2303,7 +2359,7 @@ mod tests {
                 "wormholeMgr",
                 None,
                 "WormholeJump",
-                &[],
+                &[PyRep::Integer(750_000_001)],
                 &empty,
                 None,
             )
@@ -2674,9 +2730,21 @@ mod tests {
         )
         .await
         .unwrap();
-        ctx.dispatch_rpc(&mut session, "mailMgr", None, "SendMail", &[], &empty, None)
-            .await
-            .unwrap();
+        ctx.dispatch_rpc(
+            &mut session,
+            "mailMgr",
+            None,
+            "SendMail",
+            &[
+                PyRep::Integer(90_000_002),
+                PyRep::String("o7".into()),
+                PyRep::String("Fly safe!".into()),
+            ],
+            &empty,
+            None,
+        )
+        .await
+        .unwrap();
 
         // E2E-12: CrimeWatch Illegal High-Sec Attack (with rival capsuleer 90_000_002 undocked on grid in Jita 1.0), CONCORD Response, & Kill Right Activation
         let mut sess2 = SessionState::new(200);

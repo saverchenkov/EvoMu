@@ -58,10 +58,10 @@ pub async fn handle(
                     message: format!("Solar system {session_sys_id} does not exist in SDE"),
                 }));
             }
-            if (session.role & 0x02) == 0 {
+            if !session.has_gm_role() {
                 return Some(Err(BridgeRpcError {
                     code: "InsufficientRole".into(),
-                    message: "taleMgr.MaterializeSystemLOD2 requires GM role (0x02); normal players trigger LOD 2 automatically on system entry or undock".into(),
+                    message: "taleMgr.MaterializeSystemLOD2 requires GM role; normal players trigger LOD 2 automatically on system entry or undock".into(),
                 }));
             }
             let count = ctx
@@ -76,10 +76,10 @@ pub async fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            if (session.role & 0x02) == 0 {
+            if !session.has_gm_role() {
                 return Some(Err(BridgeRpcError {
                     code: "InsufficientRole".into(),
-                    message: "taleMgr.InterdictConvoy requires GM role (0x02); normal players must destroy convoys in space via dogmaIM.FireWeapon or fighterMgr.CmdActivateAbilitySlots".into(),
+                    message: "taleMgr.InterdictConvoy requires GM role; normal players must destroy convoys in space via combat".into(),
                 }));
             }
             if session.station_id.is_some() || session.structure_id.is_some() {
@@ -94,7 +94,12 @@ pub async fn handle(
                     message: "Session has no active ship".into(),
                 }));
             };
-            let convoy_id = args.first().and_then(|a| a.as_i64()).unwrap_or(800_000_001);
+            let Some(convoy_id) = args.first().and_then(|a| a.as_i64()) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidArgument".into(),
+                    message: "InterdictConvoy requires convoyID".into(),
+                }));
+            };
             let Some(convoy) = ctx.living_world.get_convoy(convoy_id) else {
                 return Some(Err(BridgeRpcError {
                     code: "ConvoyNotFound".into(),
@@ -205,13 +210,18 @@ pub async fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            if (session.role & 0x02) == 0 {
+            if !session.has_gm_role() {
                 return Some(Err(BridgeRpcError {
                     code: "InsufficientRole".into(),
-                    message: "shipCosmeticsMgr.GiveSkin requires GM role (0x02)".into(),
+                    message: "shipCosmeticsMgr.GiveSkin requires GM role".into(),
                 }));
             }
-            let raw_skin = args.first().and_then(|a| a.as_i64()).unwrap_or(55001);
+            let Some(raw_skin) = args.first().and_then(|a| a.as_i64()) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidSkinLicenseType".into(),
+                    message: "GiveSkin requires skinID".into(),
+                }));
+            };
             let Ok(skin_id) = u32::try_from(raw_skin) else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidSkinLicenseType".into(),
@@ -237,7 +247,12 @@ pub async fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let raw_skin_id = args.first().and_then(|a| a.as_i64()).unwrap_or(55001);
+            let Some(raw_skin_id) = args.first().and_then(|a| a.as_i64()) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidSkinLicenseType".into(),
+                    message: "ActivateSkinLicense requires skin license typeID".into(),
+                }));
+            };
             let Ok(requested_skin_id) = u32::try_from(raw_skin_id) else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidSkinLicenseType".into(),
@@ -313,7 +328,12 @@ pub async fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let raw_ship_type = args.first().and_then(|a| a.as_i64()).unwrap_or(587);
+            let Some(raw_ship_type) = args.first().and_then(|a| a.as_i64()) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidShipTypeForSkin".into(),
+                    message: "ApplySkinToShip requires shipTypeID".into(),
+                }));
+            };
             let Ok(ship_type_id) = u32::try_from(raw_ship_type) else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidShipTypeForSkin".into(),
@@ -366,7 +386,12 @@ pub async fn handle(
                     };
                     (st.type_id, st.name.clone())
                 }
-                _ => (55001_u32, "Rifter Krusual SKIN".to_string()),
+                _ => {
+                    return Some(Err(BridgeRpcError {
+                        code: "SkinNotLicensed".into(),
+                        message: "ApplySkinToShip requires a valid SKIN ID or design name".into(),
+                    }));
+                }
             };
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {

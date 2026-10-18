@@ -60,11 +60,17 @@ pub async fn handle(
                 Ok(u) => u,
                 Err(e) => return Some(Err(e)),
             };
-            let station_id = args
+            let Some(station_id) = args
                 .first()
                 .and_then(|a| a.as_i64())
                 .or(session.station_id)
-                .unwrap_or(60_003_760);
+            else {
+                return Some(Err(BridgeRpcError {
+                    code: "MissingStationId".into(),
+                    message: "GetStation requires a stationID argument or active session stationID"
+                        .into(),
+                }));
+            };
             let found = ctx.sde.solar_systems.values().find_map(|sys| {
                 sys.stations
                     .iter()
@@ -118,23 +124,30 @@ pub async fn handle(
             };
 
             ctx.invalidate_ship_fitting(ship.item_id);
-            let ship_type = ctx.sde.types.get(&ship.type_id);
+            let Some(ship_type) = ctx.sde.types.get(&ship.type_id) else {
+                return Some(Err(BridgeRpcError {
+                    code: "UnknownShipType".into(),
+                    message: format!("Active ship type {} not found in SDE", ship.type_id),
+                }));
+            };
             let max_vel = ctx
                 .get_or_rebuild_ship_fitting(char_id, ship.item_id)
                 .ok()
                 .map(|f| f.ship.get_attribute(attr_ids::MAX_VELOCITY, &ctx.sde))
                 .or_else(|| {
                     ship_type
-                        .and_then(|t| t.default_attributes.get(&attr_ids::MAX_VELOCITY))
+                        .default_attributes
+                        .get(&attr_ids::MAX_VELOCITY)
                         .copied()
                 })
-                .unwrap_or(365.0);
+                .unwrap_or(0.0);
             let inertia = ship_type
-                .and_then(|t| t.default_attributes.get(&attr_ids::AGILITY))
+                .default_attributes
+                .get(&attr_ids::AGILITY)
                 .copied()
-                .unwrap_or(3.45);
-            let mass = ship_type.map(|t| t.mass).unwrap_or(1_067_000.0);
-            let radius = ship_type.map(|t| t.radius).unwrap_or(37.0);
+                .unwrap_or(1.0);
+            let mass = ship_type.mass;
+            let radius = ship_type.radius;
 
             let ball = Ball {
                 id: ship.item_id,
@@ -200,7 +213,12 @@ pub async fn handle(
                     message: "Cannot dock without an active ship in space".into(),
                 }));
             };
-            let dock_id = args.first().and_then(|a| a.as_i64()).unwrap_or(60_003_760);
+            let Some(dock_id) = args.first().and_then(|a| a.as_i64()) else {
+                return Some(Err(BridgeRpcError {
+                    code: "MissingLocationId".into(),
+                    message: "Dock requires an explicit station or structure ID argument".into(),
+                }));
+            };
             let is_structure = service == "structureDocking" || dock_id >= 1_000_000_000_000;
             let Some(sys_id) = session.solar_system_id else {
                 return Some(Err(BridgeRpcError {
@@ -349,7 +367,12 @@ pub async fn handle(
                 .get(1)
                 .and_then(|a| a.as_str())
                 .unwrap_or("Astrahus Citadel");
-            let sys_id = session.solar_system_id.unwrap_or(30_000_144);
+            let Some(sys_id) = session.solar_system_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "NoSolarSystem".into(),
+                    message: "Session has no active solarSystemID".into(),
+                }));
+            };
             let sys_sec = ctx
                 .sde
                 .solar_systems
@@ -413,7 +436,7 @@ pub async fn handle(
                     .get(&char_id)
                     .map(|c| c.corporation_id)
                     .or(session.corporation_id)
-                    .unwrap_or(1_000_170);
+                    .unwrap_or(0);
                 if corp_id < 98_000_000 || !snap.corporations.contains_key(&corp_id) {
                     return Err(BridgeRpcError {
                         code: "NpcCorpCannotAnchorStructure".into(),
@@ -635,10 +658,12 @@ pub async fn handle(
                     message: "Session has no active ship".into(),
                 }));
             };
-            let structure_id = args
-                .first()
-                .and_then(|a| a.as_i64())
-                .unwrap_or(1_000_200_000_001);
+            let Some(structure_id) = args.first().and_then(|a| a.as_i64()) else {
+                return Some(Err(BridgeRpcError {
+                    code: "MissingStructureId".into(),
+                    message: "AttackStructure requires an explicit structureID argument".into(),
+                }));
+            };
             let caller_sys = session.solar_system_id.unwrap_or(0);
 
             // Derive siege DPS strictly from the attacker's ShipFittingEngine-validated online high-slot weapons (never raw flags or target HP)

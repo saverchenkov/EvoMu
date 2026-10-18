@@ -39,7 +39,12 @@ pub fn handle(
                     message: "Reprocessing requires being docked at a station or structure".into(),
                 }));
             };
-            let item_id = args.first().and_then(|a| a.as_i64()).unwrap_or(100_000_012);
+            let Some(item_id) = args.first().and_then(|a| a.as_i64()) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidArgument".into(),
+                    message: "Reprocess requires an explicit integer itemID".into(),
+                }));
+            };
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(item) = snap.items.get(&item_id).cloned() else {
@@ -57,30 +62,57 @@ pub fn handle(
                         ),
                     });
                 }
-                if item.flag == InventoryFlag::Locked {
+                let active_ship_id = snap
+                    .characters
+                    .get(&char_id)
+                    .map(|c| c.active_ship_id)
+                    .or(session.ship_id);
+                if active_ship_id == Some(item_id) {
+                    return Err(BridgeRpcError {
+                        code: "CannotReprocessActiveShip".into(),
+                        message: format!(
+                            "Item {item_id} is your currently active ship and cannot be reprocessed"
+                        ),
+                    });
+                }
+                let Some(inv_type) = ctx.sde.types.get(&item.type_id) else {
+                    return Err(BridgeRpcError {
+                        code: "ItemNotReprocessable".into(),
+                        message: format!("Unknown item type {}", item.type_id),
+                    });
+                };
+                let Some(materials) = ctx
+                    .sde
+                    .type_materials
+                    .get(&item.type_id)
+                    .filter(|m| !m.is_empty())
+                else {
+                    return Err(BridgeRpcError {
+                        code: "ItemNotReprocessable".into(),
+                        message: format!(
+                            "Item type {} ({}) has no SDE typeMaterials and cannot be reprocessed",
+                            item.type_id, inv_type.name
+                        ),
+                    });
+                };
+                if item.singleton || snap.items.values().any(|child| child.location_id == item_id) {
+                    return Err(BridgeRpcError {
+                        code: "ItemMustBeRepackaged".into(),
+                        message: format!(
+                            "Item {item_id} must be emptied and repackaged before reprocessing"
+                        ),
+                    });
+                }
+                if item.flag == InventoryFlag::Locked
+                    || snap.is_item_locked_in_contract_or_job(item_id)
+                {
                     return Err(BridgeRpcError {
                         code: "ItemLocked".into(),
                         message: format!("Item {item_id} is locked and cannot be reprocessed"),
                     });
                 }
 
-                // Strictly restrict to reprocessable ore types with canonical portion size and base Tritanium yield per portion
-                let (portion_size, base_trit_per_portion): (i32, u32) = match item.type_id {
-                    1230 => (100, 400),  // Veldspar (100 units per portion -> 400 Tritanium base)
-                    28432 => (1, 400),   // Compressed Veldspar (1 unit per portion -> 400 Tritanium base)
-                    1228 => (100, 346),  // Scordite (100 units per portion -> 346 Tritanium base)
-                    28429 => (1, 346),   // Compressed Scordite (1 unit per portion -> 346 Tritanium base)
-                    _ => {
-                        return Err(BridgeRpcError {
-                            code: "ItemNotReprocessable".into(),
-                            message: format!(
-                                "Item type {} cannot be reprocessed into minerals",
-                                item.type_id
-                            ),
-                        });
-                    }
-                };
-
+                let portion_size = inv_type.portion_size.max(1) as i32;
                 if item.quantity < portion_size {
                     return Err(BridgeRpcError {
                         code: "InsufficientBatchPortion".into(),
@@ -100,8 +132,44 @@ pub fn handle(
                     .and_then(|m| m.get(&3389))
                     .map(|s| s.level)
                     .unwrap_or(0);
-                let yield_rate =
-                    compute_reprocessing_yield_rate(0.50, reproc_lvl, reproc_eff_lvl, 0, 0.0);
+                let ore_proc_lvl = inv_type
+                    .default_attributes
+                    .get(&eve_sde::attr_ids::REPROCESSING_SKILL_TYPE)
+                    .and_then(|&skill_id_f| {
+                        let skill_id = skill_id_f as TypeId;
+                        char_skills.and_then(|m| m.get(&skill_id)).map(|s| s.level)
+                    })
+                    .unwrap_or(0);
+
+                // Station tax: 5% base reduced by 0.75% per point of positive NPC station owner standing (0% at >= 6.67 or player structure)
+                let station_tax_rate = if station_id >= 1_000_000_000_000 {
+                    0.0
+                } else {
+                    let owner_corp_id = ctx
+                        .sde
+                        .solar_systems
+                        .values()
+                        .flat_map(|s| s.stations.iter())
+                        .find(|st| st.station_id == station_id)
+                        .map(|st| st.owner_corporation_id as i64);
+                    let standing = owner_corp_id
+                        .and_then(|cid| {
+                            snap.characters
+                                .get(&char_id)
+                                .and_then(|ch| ch.standings.get(&cid).copied())
+                        })
+                        .unwrap_or(0.0);
+                    (0.05_f64 - 0.0075_f64 * standing.max(0.0)).clamp(0.0, 0.05)
+                };
+
+                let yield_rate = compute_reprocessing_yield_rate(
+                    0.50,
+                    reproc_lvl,
+                    reproc_eff_lvl,
+                    ore_proc_lvl,
+                    0.0,
+                );
+                let net_yield_rate = yield_rate * (1.0 - station_tax_rate);
 
                 let portions = item.quantity / portion_size;
                 let remainder = item.quantity % portion_size;
@@ -114,38 +182,64 @@ pub fn handle(
                     snap.items.remove(&item_id);
                 }
 
-                let out_trit = ((portions as f64) * (base_trit_per_portion as f64) * yield_rate)
-                    .floor()
-                    .max(1.0) as i32;
-                snap.next_entity_id += 1;
-                let tid = snap.next_entity_id;
-                snap.items.insert(
-                    tid,
-                    InventoryItemRecord {
-                        item_id: tid,
-                        type_id: 34, // Tritanium
-                        owner_id: char_id,
-                        location_id: station_id,
-                        flag: InventoryFlag::Hangar,
-                        quantity: out_trit,
-                        singleton: false,
-                        version: 1,
-                        dynamic_attributes: HashMap::new(),
-                        source_mutaplasmid_id: None,
-                        insured_payout_isk: 0.0,
-                        is_blueprint_copy: false,
-                        blueprint_runs_remaining: None,
-                    },
-                );
-                Ok((tid, out_trit, yield_rate))
+                let mut outputs: Vec<(i64, TypeId, i32)> = Vec::with_capacity(materials.len());
+                for mat in materials {
+                    let out_qty =
+                        ((portions as f64) * (mat.quantity as f64) * net_yield_rate).floor() as i32;
+                    if out_qty <= 0 {
+                        continue;
+                    }
+                    snap.next_entity_id += 1;
+                    let mid = snap.next_entity_id;
+                    snap.items.insert(
+                        mid,
+                        InventoryItemRecord {
+                            item_id: mid,
+                            type_id: mat.material_type_id,
+                            owner_id: char_id,
+                            location_id: station_id,
+                            flag: InventoryFlag::Hangar,
+                            quantity: out_qty,
+                            singleton: false,
+                            version: 1,
+                            dynamic_attributes: HashMap::new(),
+                            source_mutaplasmid_id: None,
+                            insured_payout_isk: 0.0,
+                            is_blueprint_copy: false,
+                            blueprint_runs_remaining: None,
+                        },
+                    );
+                    outputs.push((mid, mat.material_type_id, out_qty));
+                }
+                Ok((outputs, yield_rate, station_tax_rate))
             });
 
             match res {
-                Ok((trit_id, trit_qty, yield_rate)) => Some(Ok(PyRep::keyval([
-                    ("yieldRate", PyRep::Real(yield_rate)),
-                    ("tritaniumItemID", PyRep::Integer(trit_id)),
-                    ("tritaniumQuantity", PyRep::Integer(trit_qty as i64)),
-                ]))),
+                Ok((outputs, yield_rate, station_tax_rate)) => {
+                    let (trit_id, _, trit_qty) = outputs
+                        .iter()
+                        .copied()
+                        .find(|&(_, tid, _)| tid == 34)
+                        .or_else(|| outputs.first().copied())
+                        .unwrap_or((0, 0, 0));
+                    let output_entries: Vec<PyRep> = outputs
+                        .into_iter()
+                        .map(|(iid, tid, qty)| {
+                            PyRep::keyval([
+                                ("itemID", PyRep::Integer(iid)),
+                                ("typeID", PyRep::Integer(tid as i64)),
+                                ("quantity", PyRep::Integer(qty as i64)),
+                            ])
+                        })
+                        .collect();
+                    Some(Ok(PyRep::keyval([
+                        ("yieldRate", PyRep::Real(yield_rate)),
+                        ("stationTaxRate", PyRep::Real(station_tax_rate)),
+                        ("tritaniumItemID", PyRep::Integer(trit_id)),
+                        ("tritaniumQuantity", PyRep::Integer(trit_qty as i64)),
+                        ("outputs", PyRep::List(output_entries)),
+                    ])))
+                }
                 Err(e) => Some(Err(e)),
             }
         }
@@ -173,7 +267,12 @@ pub fn handle(
                     message: "CompressItemInSpace requires being undocked in space".into(),
                 }));
             }
-            let item_id = args.first().and_then(|a| a.as_i64()).unwrap_or(100_000_012);
+            let Some(item_id) = args.first().and_then(|a| a.as_i64()) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidArgument".into(),
+                    message: "Compression requires an explicit integer itemID".into(),
+                }));
+            };
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let mut remainder_record = None;
                 let mut compressed_out = None;
@@ -250,7 +349,12 @@ pub fn handle(
                     message: "Installing an industry job requires being docked".into(),
                 }));
             };
-            let raw_bp_type_id = args.first().and_then(|a| a.as_i64()).unwrap_or(687);
+            let Some(raw_bp_type_id) = args.first().and_then(|a| a.as_i64()) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidIndustryJobParameters".into(),
+                    message: "InstallJob requires an explicit blueprint typeID".into(),
+                }));
+            };
             let raw_activity_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1);
             let runs_raw = args.get(2).and_then(|a| a.as_i64()).unwrap_or(1);
             let (Ok(bp_type_id), Ok(activity_id)) = (
@@ -798,12 +902,93 @@ pub fn handle(
         }
 
         // Planetary Interaction (`planetMgr`, `E2E-13`)
+        ("planetMgr", "GetPlanetInfo") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let Some(planet_id) = args.first().and_then(|a| a.as_i64()) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidPlanetID".into(),
+                    message: "GetPlanetInfo requires an explicit integer planetID".into(),
+                }));
+            };
+            let planet_sys_id = ctx
+                .sde
+                .solar_systems
+                .values()
+                .find(|s| s.planet_ids.contains(&planet_id))
+                .map(|s| s.solar_system_id);
+            let Some(sys_id) = planet_sys_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidPlanetID".into(),
+                    message: format!("Planet {planet_id} not found in SDE"),
+                }));
+            };
+            let colony_opt = ctx
+                .db
+                .with_snapshot(|snap| snap.planetary_colonies.get(&(char_id, planet_id)).cloned());
+            Some(Ok(PyRep::keyval([
+                ("planetID", PyRep::Integer(planet_id)),
+                ("solarSystemID", PyRep::Integer(sys_id as i64)),
+                ("hasColony", PyRep::Bool(colony_opt.is_some())),
+                (
+                    "commandCenterLevel",
+                    PyRep::Integer(
+                        colony_opt
+                            .as_ref()
+                            .map(|c| c.command_center_level as i64)
+                            .unwrap_or(0),
+                    ),
+                ),
+                (
+                    "pinsCount",
+                    PyRep::Integer(colony_opt.as_ref().map(|c| c.pins_count as i64).unwrap_or(0)),
+                ),
+            ])))
+        }
+
+        ("planetMgr", "GetMyColonies") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let rows = ctx.db.with_snapshot(|snap| {
+                snap.planetary_colonies
+                    .values()
+                    .filter(|c| c.owner_id == char_id)
+                    .map(|c| {
+                        vec![
+                            PyRep::Integer(c.planet_id),
+                            PyRep::Integer(c.solar_system_id as i64),
+                            PyRep::Integer(c.command_center_level as i64),
+                            PyRep::Integer(c.pins_count as i64),
+                        ]
+                    })
+                    .collect()
+            });
+            Some(Ok(PyRep::rowset(
+                vec![
+                    "planetID",
+                    "solarSystemID",
+                    "commandCenterLevel",
+                    "pinsCount",
+                ],
+                rows,
+            )))
+        }
+
         ("planetMgr", "CreateColony") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let planet_id = args.first().and_then(|a| a.as_i64()).unwrap_or(40_009_082);
+            let Some(planet_id) = args.first().and_then(|a| a.as_i64()) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidPlanetID".into(),
+                    message: "CreateColony requires an explicit integer planetID".into(),
+                }));
+            };
             if !(40_000_000..50_000_000).contains(&planet_id) {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidPlanetID".into(),
@@ -812,7 +997,12 @@ pub fn handle(
                     ),
                 }));
             }
-            let sys_id = session.solar_system_id.unwrap_or(30_000_142);
+            let Some(sys_id) = session.solar_system_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "NoSolarSystem".into(),
+                    message: "Session has no active solar system".into(),
+                }));
+            };
             let planet_in_current_sys = ctx
                 .sde
                 .solar_systems
@@ -907,7 +1097,12 @@ pub fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let planet_id = args.first().and_then(|a| a.as_i64()).unwrap_or(40_009_082);
+            let Some(planet_id) = args.first().and_then(|a| a.as_i64()) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidPlanetID".into(),
+                    message: "Flush requires an explicit integer planetID".into(),
+                }));
+            };
             let Some((delivery_loc_id, delivery_flag)) = session
                 .station_id
                 .or(session.structure_id)

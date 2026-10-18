@@ -22,7 +22,12 @@ pub async fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let faction_id = args.first().and_then(|a| a.as_i64()).unwrap_or(500_001);
+            let Some(faction_id) = args.first().and_then(|a| a.as_i64()) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidWarFaction".into(),
+                    message: "Joining Factional Warfare requires an explicit integer factionID".into(),
+                }));
+            };
             if !matches!(
                 faction_id,
                 500_001 | 500_002 | 500_003 | 500_004 | 500_010 | 500_011
@@ -63,7 +68,12 @@ pub async fn handle(
                     message: "Session has no active ship".into(),
                 }));
             };
-            let sys_id = session.solar_system_id.unwrap_or(30_002_813);
+            let Some(sys_id) = session.solar_system_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "NoSolarSystem".into(),
+                    message: "Session has no active solar system".into(),
+                }));
+            };
             let sys_sec = ctx
                 .sde
                 .solar_systems
@@ -236,7 +246,12 @@ pub async fn handle(
                     message: "Session has no active ship".into(),
                 }));
             };
-            let sys_id = session.solar_system_id.unwrap_or(30_002_904);
+            let Some(sys_id) = session.solar_system_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "NoSolarSystem".into(),
+                    message: "Session has no active solar system".into(),
+                }));
+            };
             let sys_sec = ctx
                 .sde
                 .solar_systems
@@ -253,15 +268,17 @@ pub async fn handle(
             }
 
             let sys_handle = ctx.systems.get_or_spawn(sys_id);
-            let Some((current_tick, _)) = (match sys_handle.get_ball_snapshot(ship_id).await {
-                Ok(v) => v,
-                Err(e) => {
-                    return Some(Err(BridgeRpcError {
-                        code: "DestinyQueryFailed".into(),
-                        message: e,
-                    }))
-                }
-            }) else {
+            let Some((current_tick, ship_ball)) =
+                (match sys_handle.get_ball_snapshot(ship_id).await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return Some(Err(BridgeRpcError {
+                            code: "DestinyQueryFailed".into(),
+                            message: e,
+                        }))
+                    }
+                })
+            else {
                 return Some(Err(BridgeRpcError {
                     code: "ShipNotInSpace".into(),
                     message: format!("Ship {ship_id} is not spawned in space in system {sys_id}"),
@@ -291,25 +308,43 @@ pub async fn handle(
                 }
 
                 // Require an online (`ShieldVulnerable`), quantum-core-installed, fueled (`fuel_blocks > 0`) structure in sys_id owned by the caller's player corporation or alliance
-                let has_friendly_struct = snap.structures.values().any(|s| {
-                    let same_player_corp =
-                        caller_corp_id >= 98_000_000 && s.owner_corp_id == caller_corp_id;
-                    let same_alliance = snap
-                        .corporations
-                        .get(&s.owner_corp_id)
-                        .and_then(|c| c.alliance_id)
-                        == Some(alliance_id);
-                    s.solar_system_id == sys_id
-                        && (same_player_corp || same_alliance)
-                        && s.state == "ShieldVulnerable"
-                        && s.quantum_core_installed
-                        && s.fuel_blocks > 0
-                });
-                if !has_friendly_struct {
+                let friendly_structs: Vec<[f64; 3]> = snap
+                    .structures
+                    .values()
+                    .filter(|s| {
+                        let same_player_corp =
+                            caller_corp_id >= 98_000_000 && s.owner_corp_id == caller_corp_id;
+                        let same_alliance = snap
+                            .corporations
+                            .get(&s.owner_corp_id)
+                            .and_then(|c| c.alliance_id)
+                            == Some(alliance_id);
+                        s.solar_system_id == sys_id
+                            && (same_player_corp || same_alliance)
+                            && s.state == "ShieldVulnerable"
+                            && s.quantum_core_installed
+                            && s.fuel_blocks > 0
+                    })
+                    .map(|s| s.position)
+                    .collect();
+                if friendly_structs.is_empty() {
                     return Err(BridgeRpcError {
                         code: "NoFriendlySovStructureInSystem".into(),
                         message: format!(
                             "Claiming sovereignty in system {sys_id} requires an online structure owned by corporation {caller_corp_id} or alliance {alliance_id}"
+                        ),
+                    });
+                }
+                let min_dist = friendly_structs
+                    .iter()
+                    .map(|pos| ship_ball.position.distance(glam::DVec3::from_array(*pos)))
+                    .fold(f64::INFINITY, f64::min);
+                if min_dist > 50_000.0 {
+                    return Err(BridgeRpcError {
+                        code: "OutsideSovStructureProximity".into(),
+                        message: format!(
+                            "Ship is {:.1} m from nearest friendly sovereignty structure (must be <= 50000 m)",
+                            min_dist
                         ),
                     });
                 }
