@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "client": "EVE Online V24.01 (build 3619879), the real client at ~/Library/Application Support/EVE Online/SharedCache/tq/EVE.app",
+  "rules": [
+    "Every journey drives the REAL client against a locally started EvoMu server. Mocks, replayed packets, and server-side shortcuts don't count.",
+    "Automation may use in-client Python (client-bridge) or OS-level UI automation, but every game action must go through the client's own UI or service calls, exactly as a player's would.",
+    "Each journey records evidence (screenshots and/or client log excerpts plus server log excerpts) in result.json.",
+    "The server log for the whole run must contain zero UnimplementedRPC and zero panics. Client logs must contain zero Python tracebacks or EXCEPTION lines."
+  ],
+  "journeys": [
+    {"id": "launch_login", "title": "Launch and log in", "steps": "Start the client pointed at EvoMu, authenticate through emulated SSO/launcher tokens, pass the machoNet handshake, and reach character selection with the account's characters listed."},
+    {"id": "create_character", "title": "Create a character", "steps": "Create a new character for each of the 4 races (bloodline, ancestry, school, paperdoll, portrait). The character appears in its school station with its starter ship, skills and ISK."},
+    {"id": "station_ui", "title": "Station services", "steps": "Docked: open the hangars, inventory, fitting, market, industry, agency, character sheet, skills, wallet, journal, corporation, people & places, mail, notifications, calendar and NES store windows. All of them populate with no errors."},
+    {"id": "fit_ship", "title": "Fit a ship", "steps": "Buy modules on the market, fit them (CPU/PG/slot validation), online them, load ammo, save and load a fitting, and assemble/repackage a ship. Fitting attributes match dogma."},
+    {"id": "undock_navigate", "title": "Undock and navigate", "steps": "Undock, use the overview, approach/orbit/keep at range, align, warp to a celestial and to a bookmark, set a route, autopilot through 3 stargates, and dock at the destination. Destiny updates are smooth and the camera shows celestials."},
+    {"id": "local_chat", "title": "Chat", "steps": "Local, corp, fleet and private channels: messages appear for a second connected client, and member lists update on jump/dock."},
+    {"id": "multiplayer_presence", "title": "Two players", "steps": "Two clients in the same system see each other on the overview and in space, see each other's actions (warp, modules), and can trade directly."},
+    {"id": "skills_training", "title": "Skill training", "steps": "Queue skills, wait while time advances, and see the queue progress and OnSkillTrained arrive. Use skill injectors and extractors, buy and apply a skill plan, and use attribute remap, implants and boosters."},
+    {"id": "market_trade", "title": "Market", "steps": "Place, modify and cancel buy and sell orders, fill them against another player and against NPC-seeded orders, and check the broker fees/taxes, wallet journal, transactions and market history."},
+    {"id": "contracts", "title": "Contracts", "steps": "Item exchange, auction with bids, and courier contracts (with collateral, delivery and expiry) between two clients."},
+    {"id": "mining_loop", "title": "Mining", "steps": "Warp to an asteroid belt, survey scan, mine ore, ice and gas with lasers/harvesters and mining drones into the ore hold, use a mining crystal, deplete an asteroid, check the mining ledger, compress the ore, then dock and reprocess it with skill-based yields."},
+    {"id": "pve_combat", "title": "PvE combat", "steps": "Fight belt rats and an anomaly site: lock targets, cycle weapons with capacitor and heat, take and deal damage per dogma, kill the NPCs, loot and salvage the wrecks, and receive the bounty."},
+    {"id": "missions", "title": "Missions", "steps": "Take security, distribution, mining and storyline missions from agents in the Agency; complete them in mission pockets with acceleration gates; collect rewards, LP and standings; use the LP store."},
+    {"id": "exploration", "title": "Exploration", "steps": "Launch probes and scan down a data site, a relic site and a combat signature. Hack containers with the hacking minigame and loot them. Use D-scan."},
+    {"id": "wormholes_filaments", "title": "Wormholes and filaments", "steps": "Scan down and jump a wormhole (mass and lifetime limits), then run an abyssal filament (timer, rooms, loot) and a Pochven/Triglavian filament."},
+    {"id": "ship_loss", "title": "Ship loss", "steps": "Insure a ship, then lose it to NPCs and to another player. Check the wreck/loot drop, pod ejection, killmail, insurance payout, medical clone respawn and security-status/crimewatch effects (suspect/criminal/CONCORD in high-sec)."},
+    {"id": "clones", "title": "Clones", "steps": "Install a jump clone, clone-jump with implants, check the cooldown, and set the home station."},
+    {"id": "industry", "title": "Industry", "steps": "Run manufacturing, ME/TE research, copying, invention and a reaction in station and in a structure. Check job costs, timers and delivery."},
+    {"id": "planetary", "title": "Planetary industry", "steps": "Build a colony with extractors, factories, links and routes. Wait while time advances, see the product appear, and export it through a customs office/skyhook with tax."},
+    {"id": "corporation", "title": "Corporation", "steps": "Create a corporation, invite and accept a second character, set roles/titles, rent an office, use corp hangars and wallet divisions, set tax, use corp projects/opportunities, and create an alliance."},
+    {"id": "fleet", "title": "Fleet", "steps": "Form a fleet, set wings/squads and roles, broadcast, fleet warp, use command bursts, advertise in the fleet finder and set the MOTD."},
+    {"id": "structures", "title": "Upwell structures", "steps": "Anchor, online and fuel a citadel; fit service modules; set access profiles; dock and use services; reinforce it through the timers; check asset safety."},
+    {"id": "sovereignty_fw", "title": "Sovereignty and faction warfare", "steps": "Equinox sov: hub, upgrades, power/workforce, skyhook. Enlist in faction warfare, capture a complex, see the system contest update, and receive LP."},
+    {"id": "daily_goals_events", "title": "Agency, daily goals and events", "steps": "Daily goals, opportunities/AIR career program, seasonal events and corp goals progress and pay out through the Quasar/public-gateway services."},
+    {"id": "cosmetics_store", "title": "Cosmetics and store", "steps": "Apply SKINs, SKINR/paragon designs, emblems and corp logos. Use the PLEX vault and NES store purchase flows, and multiple-character training."},
+    {"id": "mail_notifications", "title": "Mail and notifications", "steps": "Send/receive mail, mailing lists, labels, the notification feed and calendar events between two clients."},
+    {"id": "esi_external", "title": "ESI", "steps": "An external HTTP client obtains an SSO token for a character and calls ESI endpoints in every tag group. The results match the in-client state, including scope enforcement and caching headers."},
+    {"id": "downtime_persistence", "title": "Persistence and downtime", "steps": "Run a scheduled downtime: the server restarts, every piece of state (items, wallets, skills, orders, structures, PI, timers) survives, belts respawn, and daily resets happen."},
+    {"id": "gm_tools", "title": "GM tools", "steps": "A GM account uses the slash commands (spawn, create item, give skills, teleport, heal, set attribute, kick/ban). The commands are role-gated: a normal account is refused."}
+  ]
+}

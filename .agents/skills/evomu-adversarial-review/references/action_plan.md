@@ -1,12 +1,36 @@
-# EvoMu action plan: close the Crucible-parity gaps
+# EvoMu action plan: 100% live-server parity (machoNet + Quasar + ESI)
 
 **Audience:** the EvoMu coding agent.
-**Status baseline:** commit `479e633` (27/27 tests pass). The feature-gap pass of 2026-10-17 found 4 of 60 tasks done or mostly done, 28 partial and 27 not started. The full mining system was added as Phase 5M (MN-01 … MN-18).
+**Status baseline:** commit `479e633` (27/27 tests pass). The feature-gap pass of 2026-10-17 found 4 of 60 tasks done or mostly done, 28 partial and 27 not started. The full mining system was added as Phase 5M (MN-01 … MN-18). Parity at that point was about 6% of client RPC methods.
 **This is the canonical plan.** Its pinned copy lives at `.agents/skills/evomu-adversarial-review/references/action_plan.md`. Don't rewrite, renumber or drop tasks. Track status in `docs/ACTION_PLAN_STATUS.md`. Descoping a task requires the user's approval.
 **Sources:**
 - Crucible comparison (`crucible_vs_evomu.md`, summarized below).
 - Review findings (`.agents/skills/evomu-adversarial-review/references/open_findings.md` and `.evomu-reviews/latest.md`).
 - Reference implementation: `~/ai/evemu_Crucible`.
+- The real V24.01 client and its static data: `~/Library/Application Support/EVE Online/SharedCache/` (`tq/EVE.app`, `ResFiles/`, `index_tranquility.txt`).
+
+## Goal and definition of done
+- **Goal.** 100% feature parity with the live EVE Online server for the V24.01 client. This covers:
+  - the classic machoNet RPC, notification and destiny surface;
+  - **all Quasar / public-gateway backend services**;
+  - **ESI**, including the SSO/OAuth2 it depends on.
+- **The parity ledger is the scope.** `.agents/skills/evomu-adversarial-review/references/parity/ledger.json` is pinned and read-only for you. It has one row per:
+  - client RPC method;
+  - notification;
+  - destiny action;
+  - Quasar proto;
+  - ESI operation;
+  - client static-data file;
+  - plus all dogma effects, curated game-mechanic rows (`feat:*`), plan tasks and real-client journeys.
+
+  The gap auditor appends rows over time (`auditor_rows.json`). A row is closed only when a test tagged with its ID (`// parity: <row id>`) passes and the implementation check passes. See `scripts/parity/parity_status.py`.
+- **Done = `scripts/final_gate.py` exits 0 on the current tree.** That requires all of the following on the same tree:
+  - 100% of ledger rows closed, with no rows flagged fake;
+  - the claims review is `PASS` and the gap audit is `CLEAN`;
+  - workspace line coverage ≥ 90%;
+  - mutation score ≥ 85% on every crate;
+  - every real-client journey passes, with zero `UnimplementedRPC`, panics or client tracebacks in the logs.
+- **No interim human review.** Run as an unbounded `/goal` loop. Don't stop, don't ask the user to review or test, and don't report "done" before the final gate passes. Stop only for a true external blocker (credentials, hardware, a legal or licensing question). If that happens, write it in `docs/BLOCKERS.md` and keep working on anything that isn't blocked.
 
 ---
 
@@ -23,8 +47,11 @@
 6. **No fixtures in production paths.** Test NPCs, wormholes, ESS banks, hub balances and similar live in test setup or seed data with real positions. They never belong in `SystemActor::spawn`, jump handlers, or `with_demo_seed()` used by `main`.
 7. **Tests prove behaviour.**
    - Every task adds tests under `crates/<crate>/tests/` or `crates/eve-server/tests/<area>.rs` that would fail without the change.
+   - Every test that closes a ledger row carries `// parity: <row id>[, <row id>…]` in the comment block above it. No wildcards. Data-driven tests over the static game data (`sde:*`, `effect:*`) may attest IDs at runtime through `EVOMU_PARITY_ATTEST_DIR` (see T-1).
+   - Tests assert real game values (wiki/SDE/client-derived), never tautologies. Mutation testing at the final gate catches weak tests.
    - Tests use real SDE data once Phase 1 lands.
    - `cargo test --workspace` must actually run. `cargo check` is not verification.
+   - Expect thousands of tests: at least one per ledger row, plus property tests and data-driven sweeps.
 8. **Docs reflect reality.** Don't use "Implemented & Verified" in `PLAN.md`/`README.md` unless the feature has a passing test **and** a non-FAIL review. Use the labels `Not started`, `In progress`, `Implemented (review: <verdict>, <date>)`.
 9. **Small, reviewable increments.** Aim for one workstream (a few task IDs) per commit series, each followed by a review run. Put task IDs in commit messages and in the claims file you pass to the reviewer.
 
@@ -63,6 +90,22 @@
 | D-5 | **Config file** | `evomu.toml`: ports, bind address, DB paths, admin accounts, feature flags. |
 
 **Exit gate:** all existing tests pass against the real SDE (fix tests that relied on fake coordinates or IDs), and the review is non-FAIL.
+
+---
+
+## Phase T: Test and acceptance infrastructure (start right after D-1/D-2; needed to close any ledger row)
+
+| ID | Task | Done when |
+|---|---|---|
+| T-1 | **Parity tagging and attestation.** Write a small test-support crate (e.g. `eve-testkit`) with `attest(&[row_ids])`. It appends `{"test": <fn name>, "rows": [...]}` JSON lines to `$EVOMU_PARITY_ATTEST_DIR/<crate>.jsonl` (no-op when unset). Document the `// parity: <row id>` tag convention. Create `docs/parity/triage.json` for NA claims, each with a disposition and `path:line` evidence. | `parity_status.py` counts a tagged test and an attested data-driven test as DONE on a real row (e.g. one `sde:` file and one `rpc:` method). |
+| T-2 | **Data-driven sweeps over the real static data.** For every client static-data file, assert that the importer's record count equals the client file's and spot-check values. For every type, effect, blueprint, reprocessing/compression recipe, dungeon and agent, run the generic engine and assert invariants plus wiki-derived values. Attest `sde:*` and `effect:<id>`. | Every `sde:*` row and `effect:*` (2,854 effects) is attested by passing tests. Counts match the client files (md5 recorded). |
+| T-3 | **Property and fuzz tests.** Use `proptest` round-trips for every marshal opcode, PackedRow/DBRow, the destiny encoder, protobuf gateway frames and `IskCents` arithmetic. Add `cargo fuzz` targets for every decoder exposed to the network. | ≥10k cases per property in the default test profile. Each fuzz target runs 1h with no crash; the corpus is committed. |
+| T-4 | **Golden wire tests against the client's own codecs.** Through the in-client bridge, round-trip EvoMu-encoded marshal, destiny and protobuf payloads through the client's own decoders, and client-encoded payloads through EvoMu's. Commit the captured fixtures. | Golden suite covers every opcode, every destiny action and a sample of every Quasar package. |
+| T-5 | **Coverage and mutation tooling.** Install `cargo-llvm-cov` and `cargo-mutants`. Run `cargo mutants --in-diff` on every task's diff before review. | Both tools run on the workspace. The per-task mutation score on changed code is ≥85% before each review. |
+| T-6 | **Real-client harness.** `tools/client-harness/run_journeys --out DIR --journeys FILE`: start EvoMu, launch the real V24.01 client (`SharedCache/tq/EVE.app`) pointed at it (emulated SSO/launcher token), and drive each journey in `references/parity/client_journeys.json` through in-client automation (bridge) or UI automation. Collect server and client logs and screenshots. Write `DIR/result.json` per the contract in `final_gate.py`. | The `launch_login` journey passes end to end on the real client. The harness supports two concurrent clients. |
+| T-7 | **Time control.** Add an injectable server clock and time acceleration so skill training, industry, PI, timers, respawns and downtime can be exercised in tests and journeys without wall-clock waits. | The skill queue, an industry job, a PI extraction cycle and belt respawn each complete under accelerated time in tests. |
+
+**Exit gate:** T-1…T-5 and T-7 Done-when met; review non-FAIL. T-6's harness skeleton lands here. Its `launch_login` criterion closes as soon as P-6 (native handshake) and ESI-1 (SSO/launcher tokens) land, and every later phase adds its journeys to the harness.
 
 ---
 
@@ -311,6 +354,56 @@ Don't start MN-04 or later until those land. Mining is a module-cycle feature, n
 
 ---
 
+## Phase Q: Quasar / public-gateway backend services (all of them)
+The client ships 1,455 protobuf files across 135 packages (`references/parity/sources/quasar_protobuf_catalog.json`), and every one is a `quasar:` ledger row. Many features in the modern client exist only here. Examples: daily goals, corp projects, freelance jobs, SKINR/cosmetics, the store/PLEX/vault, Equinox sovereignty, the AIR career program and achievements.
+
+| ID | Task | Done when |
+|---|---|---|
+| Q-1 | **Protobuf extraction and codegen.** Extract the serialized `FileDescriptorProto`s embedded in the client's `*_pb2` modules (inside `code.ccp`) and generate Rust types (`prost`) for every file. Don't hand-write them. | All 1,455 descriptors are extracted, with a recorded checksum. Generated types round-trip every message in property tests (T-3). |
+| Q-2 | **Gateway transport.** Implement the public-gateway request/response/notice framing exactly as the client's gateway client uses it (`publicGatewaySvc` and Quasar streams). Add auth/identity context, idempotency keys, error/status codes, and notice fan-out to character/corp/alliance/fleet/system/all. | The golden tests (T-4) pass against the client's own gateway codec. A notice reaches two connected clients. |
+| Q-3 | **Identity, accounts and entitlements:** `auth`, `login`, `user`, `entitlement`, `omega`, `membership`, `payment`, `plex`, `store`, `vendors`, `fulfillment`, `isk`, `legal`, `pii`, `device`, `cdn`, `localization`. | Every `quasar:` row in these packages is closed. |
+| Q-4 | **Character and progression:** `character`, `skill`, `implant`, `clone`-related, `career`, `achievement`, `academy`, `goal`, `dailygoal`, `seasonalevent`, `battlepass`, `campaign`, `opportunity`, `narrative`, `tale`, `communitytrack`. | Closed. |
+| Q-5 | **Social and organization:** `corporation`, `corporationgoal`, `freelance`, `alliance`, `contact`, `standing`, `mail`, `chat`, `notification`, `calendar`, `fleet`, `medal`, `presence`, `search`, `bookmark`, `tag`, `war`, `duel`, `securitystatus`. | Closed. |
+| Q-6 | **Economy and industry:** `market`, `contract`, `industry`, `blueprint`, `asset`, `assetholding`, `inventory`, `container`, `accounting`, `loyaltypoints`, `planet`, `planetinteraction`, `ore`, `moon`, `asteroidbelt`. | Closed. |
+| Q-7 | **Space and combat:** `ship`, `module`, `fighter`, `dogma`, `effect`, `capacitor`, `space`, `spacecomponent`, `bubble`, `solarsystem`, `constellation`, `region`, `universe`, `star`, `stargate`, `station`, `structure`, `starbase`, `wormhole`, `deadspace`, `dungeon`, `npc`, `pirate`, `piratestronghold`, `dynamicbountysystem`, `killmail`, `pvp`, `probe`, `vanguard`, `starterspace`. | Closed. |
+| Q-8 | **Sovereignty, faction warfare and events:** `sovereignty`, `factionwarfare`, `faction`, `operation`, `tournament`, `raffle`, `contextualoffer`, `csat`, `projectdiscovery`, `thirdpartyapi`. | Closed. |
+| Q-9 | **Cosmetics and app infrastructure:** `cosmetic` (SKINs, SKINR/paragon, emblems, logos), `color`, `graphics`, `app`, `client`, `eve`, `eve_public_root`, `quasar`, `monolith`, `network`, `id`, `idempotency`, `math`, `nodegraph`, `ui`, `debug`, `botdetection`, `legacy`, plus any package not listed above. | Closed, or triaged NA with evidence the auditor accepts. |
+
+**Exit gate:** every `quasar:` row closed or accepted NA; the `daily_goals_events` and `cosmetics_store` journeys pass on the real client; review non-FAIL.
+
+---
+
+## Phase ESI: EVE Swagger Interface and SSO
+Pinned spec: `references/parity/sources/esi_openapi.json` (197 operations, 182 paths). Every operation is an `esi:` ledger row.
+
+| ID | Task | Done when |
+|---|---|---|
+| ESI-1 | **SSO / OAuth2 server** emulating `login.eveonline.com`. Covers the authorization code flow and PKCE, token and refresh endpoints, JWT access tokens with JWKS, scope grants, and revocation. It also issues the launcher/client login tokens the V24 client uses to connect (with P-6). | An external OAuth client obtains and refreshes a token. The real client logs in with an emulated launcher token (`launch_login` journey). |
+| ESI-2 | **ESI HTTP framework.** OpenAPI-conformant routing, including compatibility-date/versioned paths. Bearer validation and per-route scope enforcement. `ETag`, `Expires`, `Last-Modified` and 304s. `X-Pages` pagination. Error and rate-limit headers and the error model. Response bodies are validated against the pinned schemas in tests. | A schema-validation test helper is in place and a sample route in each tag passes. |
+| ESI-3 | Universe, Status, Meta, Routes, Search, Incursions, Insurance, Sovereignty, Wars, Faction Warfare, Dogma, Killmails. | Every `esi:` row in these tags is closed. |
+| ESI-4 | Character, Clones, Skills, Location, Fittings, Assets, Wallet, Loyalty, Calendar, Contacts, Mail. | Closed. |
+| ESI-5 | Corporation, Alliance. | Closed. |
+| ESI-6 | Market, Contracts, Industry, Planetary Interaction. | Closed. |
+| ESI-7 | Fleets and **User Interface** (open window, set waypoint, autopilot). These POST endpoints must act on the connected real client. | Closed; the `esi_external` journey passes. |
+
+**Exit gate:** every `esi:` row closed; `esi_external` journey passes; review non-FAIL.
+
+---
+
+## Phase Z: Ledger closure and final acceptance
+| ID | Task | Done when |
+|---|---|---|
+| Z-1 | Close every `rpc:` row (1,230 client-called methods) with V24 argument layouts and live semantics, or triage NA with evidence the auditor accepts (dead client code only). | `parity.md` shows rpc 100% closed. |
+| Z-2 | Close every `notify:` row. Server-emitted notifications are sent with correct payloads and scopes; client-local events are triaged NA with evidence. | notify 100%. |
+| Z-3 | Close every `destiny:` and `ballmode:` row on the binary destiny stream. | destiny 100%. |
+| Z-4 | Close every `sde:` row and `effect:*`. | sde and effect 100%. |
+| Z-5 | Close every `feat:` row, including every row the gap auditor has appended. Fix every auditor `fake_done` flag until a later audit clears it. | feat 100%, 0 flagged fake. |
+| Z-6 | Pass every `journey:` row on the real client through `tools/client-harness/run_journeys`, with clean logs. | journey 100%. |
+| Z-7 | Reach workspace line coverage ≥ 90% and mutation score ≥ 85% on every crate. | Both thresholds met in `final_gate.py`. |
+| Z-8 | **Final acceptance.** The claims review is `PASS` and the gap audit is `CLEAN` on the final tree, and `final_gate.py` exits 0. Only then tell the user the project is complete, with the gate report path. | `.evomu-reviews/final_gate.json` shows `"passed": true` for HEAD's tree. |
+
+---
+
 ## Out of scope / obsolete in V24
 POS towers and reactions at POS (use Upwell refineries) · medical clone grades · LSC protocol (use XMPP) · XML API server · live updates · the pre-2013 certificate system · 2010 factional warfare.
 
@@ -320,13 +413,15 @@ Fleet warp · jump clone rules · invention details · implants · notification 
 ---
 
 ## Workflow per task (agent checklist)
-1. Read the Crucible reference listed for the task, plus the V24 client call sites (`docs/index/rpc_service_catalog.json`) for exact method names and arguments.
-2. Write failing tests first (wire-level where the task touches the protocol).
-3. Implement in Rust, re-implementing rather than copying. Keep handlers one per method. Use `try_with_mut_snapshot`.
-4. Run `cargo test --workspace`. It must actually execute.
-5. Write `/tmp/evomu_claims.md`: task IDs plus exact claims.
-6. Run `/usr/bin/python3 .agents/skills/evomu-adversarial-review/scripts/run_review.py --claims-file /tmp/evomu_claims.md`.
-7. Fix until there is no P0 and no FALSE claim. Update `docs/ACTION_PLAN_STATUS.md` (task ID → status, test names, review run) and the `PLAN.md` labels honestly. Never edit this plan. Commit with the task IDs.
+1. Pick the next task in plan order and list the ledger rows it closes. Use the `## First open rows` section of `.evomu-reviews/latest.md`, `parity.json`, and the `feat:` rows whose `plan_task` matches.
+2. Read the Crucible reference listed for the task, the V24 client call sites (`references/parity/sources/rpc_service_catalog.json`, the client's own code) and the wiki, for exact method names, arguments and mechanics.
+3. Write failing tests first (wire-level where the task touches the protocol), tagged `// parity: <row id>`.
+4. Implement in Rust, re-implementing rather than copying. Keep handlers one per method. Use `try_with_mut_snapshot`. Use real SDE data only.
+5. Run `cargo test --workspace` (it must actually execute) and `cargo mutants --in-diff` on your diff (≥85% caught).
+6. Write `/tmp/evomu_claims.md`: task IDs, the ledger rows you claim closed, and exact claims.
+7. Run `/usr/bin/python3 .agents/skills/evomu-adversarial-review/scripts/run_review.py --claims-file /tmp/evomu_claims.md`. Every few runs it also chains a gap audit that may append ledger rows. Those rows are now in scope.
+8. Fix until there is no P0 and no FALSE claim. Update `docs/ACTION_PLAN_STATUS.md` (task ID → status, ledger rows, test names, review run) and the `PLAN.md` labels honestly. Never edit this plan or the ledger. Commit with the task IDs.
+9. Go back to step 1. When `parity.md` shows 100%, run `scripts/final_gate.py`, fix what it reports, and repeat until it passes.
 
 ## Status snapshot (maintained by the reviewer/user; live per-task status is in `docs/ACTION_PLAN_STATUS.md`)
 | Phase | Status | Last review | Notes |
@@ -341,3 +436,7 @@ Fleet warp · jump clone rules · invention details · implants · notification 
 | 6 Character/GM | Not started | | |
 | 7 Economy/missions | Not started | | |
 | 8 Social/exploration | Not started | | |
+| T Test/acceptance infra | Not started | | 27 tests at baseline |
+| Q Quasar backends | Not started (only `publicGatewaySvc` stub dispatch) | | 1,455 protos |
+| ESI + SSO | Not started | | 197 operations |
+| Z Ledger closure / final gate | Not started | | ~6% of rpc rows at baseline |

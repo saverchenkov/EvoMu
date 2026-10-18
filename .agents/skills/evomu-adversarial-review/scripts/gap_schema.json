@@ -1,0 +1,46 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["verdict", "summary", "new_rows", "rejected_triage", "fake_done", "cleared_fake", "report_markdown"],
+  "properties": {
+    "cleared_fake": {"type": "array", "items": {"type": "string"}},
+    "verdict": {"type": "string", "enum": ["CLEAN", "GAPS"]},
+    "summary": {"type": "string"},
+    "new_rows": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "domain", "title", "acceptance", "sources", "why_missing"],
+        "properties": {
+          "id": {"type": "string", "pattern": "^feat:[a-z0-9_]+\\.[a-z0-9_.\\-]+$"},
+          "domain": {"type": "string"},
+          "title": {"type": "string"},
+          "acceptance": {"type": "string"},
+          "sources": {"type": "array", "items": {"type": "string"}},
+          "plan_task": {"type": ["string", "null"]},
+          "why_missing": {"type": "string"}
+        }
+      }
+    },
+    "rejected_triage": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "reason"],
+        "properties": {"id": {"type": "string"}, "reason": {"type": "string"}}
+      }
+    },
+    "fake_done": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "evidence"],
+        "properties": {"id": {"type": "string"}, "evidence": {"type": "string"}}
+      }
+    },
+    "report_markdown": {"type": "string"}
+  }
+}

@@ -52,8 +52,32 @@ Run the review **before** any of the following:
 - **Don't optimize for the metric scripts** in `scripts/metrics/`. They only flag places to look. Every catalog method you handle must actually implement that method's semantics, or return `UnimplementedRPC`.
 - **Don't embed test fixtures in production code paths** to make tests pass.
 
+## Completeness: parity ledger, gap audits and the final gate
+Per-change reviews check **precision** (is what you claim true?). Completeness is checked separately and mechanically:
+- **Ledger.** `references/parity/ledger.json` (pinned) plus `references/parity/auditor_rows.json` (appended by gap audits) together define 100% parity:
+  - every client RPC method, notification, destiny action, Quasar proto, ESI operation and static-data file;
+  - all dogma effects;
+  - curated mechanics (`feat:*`), plan tasks and real-client journeys.
+- **Parity status.** Every review run computes `scripts/parity/parity_status.py` after the tests and stores the result in the run's `context/parity.md`/`parity.json`. The report's "Parity" section shows the percentage and the first open rows per category.
+  - A row is closed only when a test tagged `// parity: <row id>` passed in that run and the implementation check passes, or when it's an auditor-accepted NA in `docs/parity/triage.json`.
+- **Gap audit (recall).** Run it with `run_review.py --mode gap-audit`. It's also chained automatically every `EVOMU_GAP_AUDIT_EVERY` (default 5) claims reviews. The auditor:
+  - finds mechanics missing from the ledger and appends them as new rows;
+  - rejects weak NA triage;
+  - flags fake DONE rows, which stay open until a later audit clears them.
+  - Verdict: `CLEAN` or `GAPS`.
+- **Final gate.** `scripts/final_gate.py` is the definition of done. It requires, on the same tree:
+  - 100% of the ledger closed, from a fresh full test run;
+  - a `PASS` claims review and a `CLEAN` gap audit;
+  - line coverage ≥ 90% (`cargo llvm-cov`) and mutation score ≥ 85% (`cargo mutants`);
+  - every journey in `references/parity/client_journeys.json` passing on the real V24 client via `tools/client-harness/run_journeys`, with zero `UnimplementedRPC`, panics or client tracebacks.
+
+  The Stop hook keeps you working until this gate has passed on the current tree.
+
 ## References
 - Reviewer brief (what the reviewer checks and how it decides): [references/reviewer_brief.md](references/reviewer_brief.md)
+- Gap auditor brief: [references/gap_auditor_brief.md](references/gap_auditor_brief.md)
+- Canonical plan: [references/action_plan.md](references/action_plan.md)
+- Parity ledger, sources and client journeys: [references/parity/](references/parity/)
 - Open findings carried forward: [references/open_findings.md](references/open_findings.md)
 - Previous review reports: [references/history/](references/history/)
-- Output schema: [scripts/verdict_schema.json](scripts/verdict_schema.json)
+- Output schemas: [scripts/verdict_schema.json](scripts/verdict_schema.json), [scripts/gap_schema.json](scripts/gap_schema.json)

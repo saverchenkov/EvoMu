@@ -1,0 +1,1680 @@
+{
+  "effects_count": 2854,
+  "effects_source": "evemu_Crucible sql/base/dgmEffects.sql.gz (V24.01 uses res:/staticdata/dogmaeffects.fsdbinary)",
+  "operands": [
+    {
+      "description": "add two numbers",
+      "operandID": 1,
+      "operandKey": "ADD"
+    },
+    {
+      "description": "add gang groupl modifier",
+      "operandID": 2,
+      "operandKey": "AGGM"
+    },
+    {
+      "description": "add gang shipl modifier",
+      "operandID": 3,
+      "operandKey": "AGIM"
+    },
+    {
+      "description": "add gang owner required skill modifier",
+      "operandID": 4,
+      "operandKey": "AGORSM"
+    },
+    {
+      "description": "add gang required skill modifier",
+      "operandID": 5,
+      "operandKey": "AGRSM"
+    },
+    {
+      "description": "add item modifier",
+      "operandID": 6,
+      "operandKey": "AIM"
+    },
+    {
+      "description": "add location group modifier",
+      "operandID": 7,
+      "operandKey": "ALGM"
+    },
+    {
+      "description": "add location modifier",
+      "operandID": 8,
+      "operandKey": "ALM"
+    },
+    {
+      "description": "add location required skill modifier",
+      "operandID": 9,
+      "operandKey": "ALRSM"
+    },
+    {
+      "description": "logical and operation",
+      "operandID": 10,
+      "operandKey": "AND"
+    },
+    {
+      "description": "add owner required skill modifier",
+      "operandID": 11,
+      "operandKey": "AORSM"
+    },
+    {
+      "description": "attribute",
+      "operandID": 12,
+      "operandKey": "ATT"
+    },
+    {
+      "description": "attack given ship",
+      "operandID": 13,
+      "operandKey": "ATTACK"
+    },
+    {
+      "description": "Scans the cargo of the targeted ship.",
+      "operandID": 14,
+      "operandKey": "CARGOSCAN"
+    },
+    {
+      "description": "Instantly enter a station.",
+      "operandID": 15,
+      "operandKey": "CHEATTELEDOCK"
+    },
+    {
+      "description": "Automatically invoke a stargate destination from remote distances.",
+      "operandID": 16,
+      "operandKey": "CHEATTELEGATE"
+    },
+    {
+      "description": "executes two statements",
+      "operandID": 17,
+      "operandKey": "COMBINE"
+    },
+    {
+      "description": "decreases an item-attribute by the value of another attribute",
+      "operandID": 18,
+      "operandKey": "DEC"
+    },
+    {
+      "description": "broadcasts a decloaking wave",
+      "operandID": 19,
+      "operandKey": "DECLOAKWAVE"
+    },
+    {
+      "description": "decreases an item-attribute by number",
+      "operandID": 20,
+      "operandKey": "DECN"
+    },
+    {
+      "description": "define attribute association type",
+      "operandID": 21,
+      "operandKey": "DEFASSOCIATION"
+    },
+    {
+      "description": "define attribute",
+      "operandID": 22,
+      "operandKey": "DEFATTRIBUTE"
+    },
+    {
+      "description": "define bool constant",
+      "operandID": 23,
+      "operandKey": "DEFBOOL"
+    },
+    {
+      "description": "define environment index",
+      "operandID": 24,
+      "operandKey": "DEFENVIDX"
+    },
+    {
+      "description": "defines a float constant",
+      "operandID": 25,
+      "operandKey": "DEFFLOAT"
+    },
+    {
+      "description": "define group",
+      "operandID": 26,
+      "operandKey": "DEFGROUP"
+    },
+    {
+      "description": "defines an int constant",
+      "operandID": 27,
+      "operandKey": "DEFINT"
+    },
+    {
+      "description": "defines a string constant",
+      "operandID": 28,
+      "operandKey": "DEFSTRING"
+    },
+    {
+      "description": "define a type ID",
+      "operandID": 29,
+      "operandKey": "DEFTYPEID"
+    },
+    {
+      "description": "Clears all targets on all ships(excluding self) wihin range. ",
+      "operandID": 30,
+      "operandKey": "ECMBURST"
+    },
+    {
+      "description": "define association type",
+      "operandID": 31,
+      "operandKey": "EFF"
+    },
+    {
+      "description": "broadcasts an EMP wave",
+      "operandID": 32,
+      "operandKey": "EMPWAVE"
+    },
+    {
+      "description": "checks for equality",
+      "operandID": 33,
+      "operandKey": "EQ"
+    },
+    {
+      "description": "attribute on a module group",
+      "operandID": 34,
+      "operandKey": "GA"
+    },
+    {
+      "description": "calculate attribute",
+      "operandID": 35,
+      "operandKey": "GET"
+    },
+    {
+      "description": "gets type of item",
+      "operandID": 36,
+      "operandKey": "GETTYPE"
+    },
+    {
+      "description": "get a module of a given groupID from a given location (ship or player)",
+      "operandID": 37,
+      "operandKey": "GM"
+    },
+    {
+      "description": "checks whether expression 1  is greater than expression 2",
+      "operandID": 38,
+      "operandKey": "GT"
+    },
+    {
+      "description": "checks whether an expression is greater than or equal to another",
+      "operandID": 39,
+      "operandKey": "GTE"
+    },
+    {
+      "description": "generic attribute",
+      "operandID": 40,
+      "operandKey": "IA"
+    },
+    {
+      "description": "if construct",
+      "operandID": 41,
+      "operandKey": "IF"
+    },
+    {
+      "description": "increases an item-attribute by the value of another attribute",
+      "operandID": 42,
+      "operandKey": "INC"
+    },
+    {
+      "description": "increases an item-attribute by a number",
+      "operandID": 43,
+      "operandKey": "INCN"
+    },
+    {
+      "description": "launches a missile",
+      "operandID": 44,
+      "operandKey": "LAUNCH"
+    },
+    {
+      "description": "launches a defender missile",
+      "operandID": 45,
+      "operandKey": "LAUNCHDEFENDERMISSILE"
+    },
+    {
+      "description": "launches a drone.",
+      "operandID": 46,
+      "operandKey": "LAUNCHDRONE"
+    },
+    {
+      "description": "launches an FOF missile",
+      "operandID": 47,
+      "operandKey": "LAUNCHFOFMISSILE"
+    },
+    {
+      "description": "specify a group in a location",
+      "operandID": 48,
+      "operandKey": "LG"
+    },
+    {
+      "description": "location - skill required item group",
+      "operandID": 49,
+      "operandKey": "LS"
+    },
+    {
+      "description": "mines an asteroid",
+      "operandID": 50,
+      "operandKey": "MINE"
+    },
+    {
+      "description": "multiplies two numbers",
+      "operandID": 51,
+      "operandKey": "MUL"
+    },
+    {
+      "description": "logical or operation",
+      "operandID": 52,
+      "operandKey": "OR"
+    },
+    {
+      "description": "",
+      "operandID": 53,
+      "operandKey": "POWERBOOST"
+    },
+    {
+      "description": "remove gang groupl modifier",
+      "operandID": 54,
+      "operandKey": "RGGM"
+    },
+    {
+      "description": "remove gang shipl modifier",
+      "operandID": 55,
+      "operandKey": "RGIM"
+    },
+    {
+      "description": "remove a gang owner required skill modifier",
+      "operandID": 56,
+      "operandKey": "RGORSM"
+    },
+    {
+      "description": "remove a gang required skill modifier",
+      "operandID": 57,
+      "operandKey": "RGRSM"
+    },
+    {
+      "description": "remove  item modifier",
+      "operandID": 58,
+      "operandKey": "RIM"
+    },
+    {
+      "description": "remove location group modifier",
+      "operandID": 59,
+      "operandKey": "RLGM"
+    },
+    {
+      "description": "remove location modifier",
+      "operandID": 60,
+      "operandKey": "RLM"
+    },
+    {
+      "description": "remove a  required skill modifier",
+      "operandID": 61,
+      "operandKey": "RLRSM"
+    },
+    {
+      "description": "remove an owner required skill modifier",
+      "operandID": 62,
+      "operandKey": "RORSM"
+    },
+    {
+      "description": "true if arg1 requires arg2",
+      "operandID": 63,
+      "operandKey": "RS"
+    },
+    {
+      "description": "attribute on modules that have required skill",
+      "operandID": 64,
+      "operandKey": "RSA"
+    },
+    {
+      "description": "sets an item attribute",
+      "operandID": 65,
+      "operandKey": "SET"
+    },
+    {
+      "description": "scans a ship",
+      "operandID": 66,
+      "operandKey": "SHIPSCAN"
+    },
+    {
+      "description": "",
+      "operandID": 67,
+      "operandKey": "SKILLCHECK"
+    },
+    {
+      "description": "subtracts a number from another one",
+      "operandID": 68,
+      "operandKey": "SUB"
+    },
+    {
+      "description": "scans an asteroid for information",
+      "operandID": 69,
+      "operandKey": "SURVEYSCAN"
+    },
+    {
+      "description": "Targets any hostile ships within range (assuming electronics have capability).",
+      "operandID": 70,
+      "operandKey": "TARGETHOSTILES"
+    },
+    {
+      "description": "",
+      "operandID": 71,
+      "operandKey": "TARGETSILENTLY"
+    },
+    {
+      "description": " ",
+      "operandID": 72,
+      "operandKey": "TOOLTARGETSKILLS"
+    },
+    {
+      "description": "raises an user error",
+      "operandID": 73,
+      "operandKey": "UE"
+    },
+    {
+      "description": "raises a user error if incorrect target group",
+      "operandID": 74,
+      "operandKey": "VERIFYTARGETGROUP"
+    },
+    {
+      "description": "applies speed booster to ship",
+      "operandID": 75,
+      "operandKey": "SPEEDBOOST"
+    }
+  ],
+  "operands_count": 75,
+  "sample_effects": [
+    {
+      "effectCategory": 1,
+      "effectID": 4,
+      "effectName": "shieldBoosting"
+    },
+    {
+      "effectCategory": 1,
+      "effectID": 7,
+      "effectName": "speedBoost"
+    },
+    {
+      "effectCategory": 2,
+      "effectID": 9,
+      "effectName": "missileLaunching"
+    },
+    {
+      "effectCategory": 2,
+      "effectID": 10,
+      "effectName": "targetAttack"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 11,
+      "effectName": "loPower"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 12,
+      "effectName": "hiPower"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 13,
+      "effectName": "medPower"
+    },
+    {
+      "effectCategory": 1,
+      "effectID": 14,
+      "effectName": "speedBoost"
+    },
+    {
+      "effectCategory": 1,
+      "effectID": 16,
+      "effectName": "online"
+    },
+    {
+      "effectCategory": 2,
+      "effectID": 17,
+      "effectName": "mining"
+    },
+    {
+      "effectCategory": 2,
+      "effectID": 18,
+      "effectName": "shieldTransfer"
+    },
+    {
+      "effectCategory": 4,
+      "effectID": 21,
+      "effectName": "shieldCapacityBonusOnline"
+    },
+    {
+      "effectCategory": 4,
+      "effectID": 22,
+      "effectName": "maxVelocityBonus"
+    },
+    {
+      "effectCategory": 4,
+      "effectID": 25,
+      "effectName": "capacitorCapacityBonus"
+    },
+    {
+      "effectCategory": 1,
+      "effectID": 26,
+      "effectName": "structureRepair"
+    },
+    {
+      "effectCategory": 1,
+      "effectID": 27,
+      "effectName": "armorRepair"
+    },
+    {
+      "effectCategory": 2,
+      "effectID": 29,
+      "effectName": "modifyTargetSpeed"
+    },
+    {
+      "effectCategory": 2,
+      "effectID": 31,
+      "effectName": "energyTransfer"
+    },
+    {
+      "effectCategory": 2,
+      "effectID": 32,
+      "effectName": "energyVampire"
+    },
+    {
+      "effectCategory": 2,
+      "effectID": 34,
+      "effectName": "projectileFired"
+    },
+    {
+      "effectCategory": 2,
+      "effectID": 36,
+      "effectName": "energyDestabilization"
+    },
+    {
+      "effectCategory": 1,
+      "effectID": 38,
+      "effectName": "empWave"
+    },
+    {
+      "effectCategory": 2,
+      "effectID": 39,
+      "effectName": "warpScramble"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 40,
+      "effectName": "launcherFitted"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 42,
+      "effectName": "turretFitted"
+    },
+    {
+      "effectCategory": 2,
+      "effectID": 46,
+      "effectName": "shipScan"
+    },
+    {
+      "effectCategory": 2,
+      "effectID": 47,
+      "effectName": "cargoScan"
+    },
+    {
+      "effectCategory": 1,
+      "effectID": 48,
+      "effectName": "powerBooster"
+    },
+    {
+      "effectCategory": 4,
+      "effectID": 50,
+      "effectName": "modifyShieldRechargeRate"
+    },
+    {
+      "effectCategory": 4,
+      "effectID": 51,
+      "effectName": "modifyPowerRechargeRate"
+    },
+    {
+      "effectCategory": 1,
+      "effectID": 53,
+      "effectName": "ecmBurst"
+    },
+    {
+      "effectCategory": 2,
+      "effectID": 54,
+      "effectName": "targetPassively"
+    },
+    {
+      "effectCategory": 1,
+      "effectID": 55,
+      "effectName": "targetHostiles"
+    },
+    {
+      "effectCategory": 4,
+      "effectID": 56,
+      "effectName": "powerOutputMultiply"
+    },
+    {
+      "effectCategory": 4,
+      "effectID": 57,
+      "effectName": "shieldCapacityMultiply"
+    },
+    {
+      "effectCategory": 4,
+      "effectID": 58,
+      "effectName": "capacitorCapacityMultiply"
+    },
+    {
+      "effectCategory": 4,
+      "effectID": 59,
+      "effectName": "cargoCapacityMultiply"
+    },
+    {
+      "effectCategory": 4,
+      "effectID": 60,
+      "effectName": "structureHPMultiply"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 61,
+      "effectName": "agilityBonus"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 62,
+      "effectName": "maxPassengersBonus"
+    },
+    {
+      "effectCategory": 4,
+      "effectID": 63,
+      "effectName": "armorHPMultiply"
+    },
+    {
+      "effectCategory": 2,
+      "effectID": 67,
+      "effectName": "miningLaser"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 70,
+      "effectName": "agilityMultiply"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 73,
+      "effectName": "repairCostMultiply"
+    },
+    {
+      "effectCategory": 1,
+      "effectID": 81,
+      "effectName": "surveyScan"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 82,
+      "effectName": "corporationMemberLimitBonus"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 87,
+      "effectName": "cpuUsageMultiply"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 88,
+      "effectName": "miningDurationMultiply"
+    },
+    {
+      "effectCategory": 4,
+      "effectID": 89,
+      "effectName": "projectileWeaponSpeedMultiply"
+    },
+    {
+      "effectCategory": 4,
+      "effectID": 91,
+      "effectName": "energyWeaponDamageMultiply"
+    },
+    {
+      "effectCategory": 4,
+      "effectID": 92,
+      "effectName": "projectileWeaponDamageMultiply"
+    },
+    {
+      "effectCategory": 4,
+      "effectID": 93,
+      "effectName": "hybridWeaponDamageMultiply"
+    },
+    {
+      "effectCategory": 4,
+      "effectID": 95,
+      "effectName": "energyWeaponSpeedMultiply"
+    },
+    {
+      "effectCategory": 4,
+      "effectID": 96,
+      "effectName": "hybridWeaponSpeedMultiply"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 97,
+      "effectName": "turretWeaponAccuracyMultiply"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 100,
+      "effectName": "hybridWeaponAccuracyMultiply"
+    },
+    {
+      "effectCategory": 1,
+      "effectID": 101,
+      "effectName": "useMissiles"
+    },
+    {
+      "effectCategory": 1,
+      "effectID": 102,
+      "effectName": "mineLaying"
+    },
+    {
+      "effectCategory": 1,
+      "effectID": 103,
+      "effectName": "defenderMissileLaunching"
+    },
+    {
+      "effectCategory": 1,
+      "effectID": 104,
+      "effectName": "fofMissileLaunching"
+    },
+    {
+      "effectCategory": 4,
+      "effectID": 105,
+      "effectName": "shieldResonanceMultiplyOnline"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 106,
+      "effectName": "miningAmountMultiply"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 107,
+      "effectName": "characterMissileDamageMultiply"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 109,
+      "effectName": "turretWeaponCapacitorNeedMultiply"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 110,
+      "effectName": "characterBlueprintResearchTimeBonus"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 111,
+      "effectName": "characterBlueprintManufactureTimeBonus"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 112,
+      "effectName": "characterCharismaSkillTrainingTimeBonus"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 113,
+      "effectName": "characterIntelligenceSkillTrainingTimeBonus"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 114,
+      "effectName": "characterMemorySkillTrainingTimeBonus"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 115,
+      "effectName": "characterPerceptionSkillTrainingTimeBonus"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 116,
+      "effectName": "characterWillpowerSkillTrainingTimeBonus"
+    },
+    {
+      "effectCategory": 4,
+      "effectID": 118,
+      "effectName": "electronicAttributeModifyOnline"
+    },
+    {
+      "effectCategory": 4,
+      "effectID": 120,
+      "effectName": "turretWeaponRangeTrackingSpeedMultiplyOnline"
+    },
+    {
+      "effectCategory": 1,
+      "effectID": 123,
+      "effectName": "turretWeaponRangeTrackingSpeedMultiplyActivate"
+    },
+    {
+      "effectCategory": 2,
+      "effectID": 124,
+      "effectName": "scanStrengthBonusTarget"
+    },
+    {
+      "effectCategory": 2,
+      "effectID": 126,
+      "effectName": "turretWeaponRangeTrackingSpeedMultiplyTarget"
+    },
+    {
+      "effectCategory": 1,
+      "effectID": 127,
+      "effectName": "torpedoLaunching"
+    },
+    {
+      "effectCategory": 2,
+      "effectID": 130,
+      "effectName": "cheatTeleDock"
+    },
+    {
+      "effectCategory": 2,
+      "effectID": 131,
+      "effectName": "cheatTeleGate"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 132,
+      "effectName": "skillEffect"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 146,
+      "effectName": "damageMultiplierSkillBonus"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 152,
+      "effectName": "skillBoostDamageMultiplierBonus"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 157,
+      "effectName": "largeHybridTurretDamageMultiplierBonusPostPercentDamageMultiplierLocationShipModulesRequiringLargeHybridTurret"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 159,
+      "effectName": "mediumEnergyTurretDamageMultiplierBonusPostPercentDamageMultiplierLocationShipModulesRequiringMediumEnergyTurret"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 160,
+      "effectName": "mediumHybridTurretDamageMultiplierBonusPostPercentDamageMultiplierLocationShipModulesRequiringMediumHybridTurret"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 161,
+      "effectName": "mediumProjectileTurretDamageMultiplierBonusPostPercentDamageMultiplierLocationShipModulesRequiringMediumProjectileTurret"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 162,
+      "effectName": "largeEnergyTurretDamageMultiplierBonusPostPercentDamageMultiplierLocationShipModulesRequiringLargeEnergyTurret"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 163,
+      "effectName": "rapidFiringSkillBoostRofBonus"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 167,
+      "effectName": "sharpshooterSkillBoostRangeSkillBonus"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 172,
+      "effectName": "smallEnergyTurretDamageMultiplierBonusPostPercentDamageMultiplierLocationShipModulesRequiringSmallEnergyTurret"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 173,
+      "effectName": "smallHybridTurretDamageMultiplierBonusPostPercentDamageMultiplierLocationShipModulesRequiringSmallHybridTurret"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 174,
+      "effectName": "smallProjectileTurretDamageMultiplierBonusPostPercentDamageMultiplierLocationShipModulesRequiringSmallProjectileTurret"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 187,
+      "effectName": "caldariCruiserSkillBoostCcTRangeBonus"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 189,
+      "effectName": "caldariFrigateSkillBoostCfTRangeBonus"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 204,
+      "effectName": "signatureAnalysisSkillBoostScanspeedBonus"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 205,
+      "effectName": "signatureAnalysisScanspeedBonusPostPercentScanSpeedLocationShip"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 206,
+      "effectName": "longRangeTargetingSkillBoostMaxTargetRangeBonus"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 208,
+      "effectName": "propulsionJammingSkillBoostDurationBonus"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 209,
+      "effectName": "propulsionJammingDurationBonusPostPercentDurationLocationShipModulesRequiringPropulsionJamming"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 210,
+      "effectName": "sensorLinkingDurationBonusPostPercentDurationLocationShipModulesRequiringSensorLinking"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 211,
+      "effectName": "sensorUpgradesSkillBoostCpuNeedBonus"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 212,
+      "effectName": "sensorUpgradesCpuNeedBonusPostPercentCpuLocationShipModulesRequiringSensorUpgrades"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 213,
+      "effectName": "targetingSkillBoostMaxTargetBonus"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 214,
+      "effectName": "targetingMaxTargetBonusModAddMaxLockedTargetsLocationChar"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 215,
+      "effectName": "weaponDisruptionDurationBonusPostPercentDurationLocationShipModulesRequiringWeaponDisruption"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 216,
+      "effectName": "electronicWarfareSkillBoostDurationBonus"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 218,
+      "effectName": "engineeringSkillBoostPowerOutputBonus"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 220,
+      "effectName": "energyManagementSkillBoostCapRechargeBonus"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 222,
+      "effectName": "navigationSkillBoostVelocityBonus"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 223,
+      "effectName": "navigationVelocityBonusPostPercentMaxVelocityLocationShip"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 225,
+      "effectName": "accerationControlSkillBoostCapNeedBonus"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 227,
+      "effectName": "accerationControlCapNeedBonusPostPercentCapacitorNeedLocationShipGroupAfterburner"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 228,
+      "effectName": "accerationControlSkillBoostSpeedFBonus"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 230,
+      "effectName": "afterburnerDurationBonusPostPercentDurationLocationShipModulesRequiringAfterburner"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 232,
+      "effectName": "evasiveManuveringSkillBoostAgilityBonus"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 234,
+      "effectName": "warpdriveoperationSkillBoostWarpCapacitorNeedBonus"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 235,
+      "effectName": "warpdriveoperationWarpCapacitorNeedBonusPostPercentWarpCapacitorNeedLocationShip"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 236,
+      "effectName": "energyEmmisionSystemsCapNeedBonusPostPercentCapacitorNeedLocationShipModulesRequiringEnergyEmmisionSystems"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 239,
+      "effectName": "corporationManagementSkillBoostCorporationMemberBonus"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 242,
+      "effectName": "accerationControlSpeedFBonusPostPercentSpeedFactorLocationShipGroupAfterburner"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 243,
+      "effectName": "highSpeedManuveringSkillBoostCapacitorNeedMultiplier"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 244,
+      "effectName": "highSpeedManuveringCapacitorNeedMultiplierPostPercentCapacitorNeedLocationShipModulesRequiringHighSpeedManuvering"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 246,
+      "effectName": "sensorUpgradesSkillBoostPowerNeedBonus"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 251,
+      "effectName": "hullUpgradesSkillBoostHullHpBonus"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 253,
+      "effectName": "shadowBarrageDmgMultiplierWithDamageMultiplierPostPercentBarrageDmgMutator"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 254,
+      "effectName": "shadowBarrageFalloffWithFalloffPostPercentBarrageFalloffMutator"
+    },
+    {
+      "effectCategory": 2,
+      "effectID": 263,
+      "effectName": "barrage"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 267,
+      "effectName": "amarrCruiserSkillBoostPowerOutputBonus"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 270,
+      "effectName": "hullUpgradesSkillBoostArmorHpBonus"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 271,
+      "effectName": "hullUpgradesArmorHpBonusPostPercentHpLocationShip"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 272,
+      "effectName": "repairSystemsDurationBonusPostPercentDurationLocationShipModulesRequiringRepairSystems"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 273,
+      "effectName": "shieldUpgradesPowerNeedBonusPostPercentPowerLocationShipModulesRequiringShieldUpgrades"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 274,
+      "effectName": "energyManagementSkillBoostCapacitorBonus"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 277,
+      "effectName": "tacticalshieldManipulationSkillBoostUniformityBonus"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 279,
+      "effectName": "shieldEmmisionSystemsCapNeedBonusPostPercentCapacitorNeedLocationShipModulesRequiringShieldEmmisionSystems"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 280,
+      "effectName": "shieldManagementSkillBoostShieldCapacityBonus"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 283,
+      "effectName": "shieldoperationSkillBoostRechargeratebonus"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 287,
+      "effectName": "controlledBurstsCapNeedBonusPostPercentCapacitorNeedLocationShipModulesRequiringGunnery"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 288,
+      "effectName": "skillBoostTrackingSpeedMultiplier"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 289,
+      "effectName": "motionPredictionTrackingSpeedMultiplierPostPercentTrackingSpeedLocationShipModulesRequiringGunnery"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 290,
+      "effectName": "sharpshooterRangeSkillBonusPostPercentMaxRangeLocationShipModulesRequiringGunnery"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 297,
+      "effectName": "skillBoostFalloffBonus"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 298,
+      "effectName": "surgicalStrikeFalloffBonusPostPercentFalloffLocationShipModulesRequiringGunnery"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 301,
+      "effectName": "empathySkillBoostCharismaBonus"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 302,
+      "effectName": "empathyCharismaBonusModAddCharismaLocationChar"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 303,
+      "effectName": "instantRecallSkillBoostMemoryBonus"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 304,
+      "effectName": "instantRecallMemoryBonusModAddMemoryLocationChar"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 305,
+      "effectName": "analyticalMindSkillBoostIntelligenceBonus"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 306,
+      "effectName": "analyticalMindIntelligenceBonusModAddIntelligenceLocationChar"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 307,
+      "effectName": "ironWillSkillBoostWillpowerBonus"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 308,
+      "effectName": "ironWillWillpowerBonusModAddWillpowerLocationChar"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 309,
+      "effectName": "spatialAwarenessSkillBoostPerceptionBonus"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 310,
+      "effectName": "spatialAwarenessPerceptionBonusModAddPerceptionLocationChar"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 312,
+      "effectName": "signatureAnalysisMaxTargetRangeBonusPostPercentMaxTargetRangeLocationShip"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 315,
+      "effectName": "dronesSkillBoostMaxActiveDroneBonus"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 316,
+      "effectName": "dronesMaxActiveDroneBonusModAddMaxActiveLocationChar"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 317,
+      "effectName": "amarrTechSkillBoostAmarrTechMutator"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 318,
+      "effectName": "amarrTechAmarrTechMutatorPostPercentAmarrTechTimePercentLocationChar"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 319,
+      "effectName": "caldariTechSkillBoostCaldariTechMutator"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 320,
+      "effectName": "caldariTechCaldariTechMutatorPostPercentCaldariTechTimePercentLocationChar"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 321,
+      "effectName": "gallenteTechSkillBoostGallenteTechMutator"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 322,
+      "effectName": "gallenteTechGallenteTechMutatorPostPercentGallenteTechTimePercentLocationChar"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 325,
+      "effectName": "minmatarTechSkillBoostMinmatarTechMutator"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 326,
+      "effectName": "minmatarTechMinmatarTechMutatorPostPercentMinmatarTechTimePercentLocationChar"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 331,
+      "effectName": "refineryEfficiencySkillBoostRefiningYieldMutator"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 334,
+      "effectName": "cSOTrainingSkillBoostResearchGangSizeBonus"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 335,
+      "effectName": "cSOTrainingResearchGangSizeBonusModAddMaxResearchGangSizeShip"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 336,
+      "effectName": "battleshipConstructionSkillBoostBattleshipConstructionTimeBonus"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 337,
+      "effectName": "battleshipConstructionBattleshipConstructionTimeBonusPostPercentBattleshipConstructionTimeChar"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 338,
+      "effectName": "cruiserConstructionSkillBoostCruiserConstructionTimeBonus"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 339,
+      "effectName": "cruiserConstructionCruiserConstructionTimeBonusPostPercentCruiserConstructionTimeChar"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 340,
+      "effectName": "frigateConstructionSkillBoostFrigateConstructionTimeBonus"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 341,
+      "effectName": "frigateConstructionFrigateConstructionTimeBonusPostPercentFrigateConstructionTimeChar"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 342,
+      "effectName": "industrialConstructionSkillBoostIndustrialConstructionTimeBonus"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 343,
+      "effectName": "industrialConstructionIndustrialConstructionTimeBonusPostPercentIndustrialConstructionTimeChar"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 344,
+      "effectName": "connectionsSkillBoostConnectionBonusMutator"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 346,
+      "effectName": "criminalConnectionsSkillBoostCriminalConnectionsMutator"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 348,
+      "effectName": "diplomacySkillBoostDiplomacyMutator"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 349,
+      "effectName": "diplomacyDiplomacyMutatorModAddDiplomacyBonusChar"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 350,
+      "effectName": "fasttalkSkillBoostFastTalkMutator"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 352,
+      "effectName": "fasttalkFastTalkMutatorPostPercentFastTalkPercentageChar"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 353,
+      "effectName": "ethnicRelationsSkillBoostNonRaceCorporationMembersBonus"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 354,
+      "effectName": "ethnicRelationsNonRaceCorporationMembersBonusPostPercentMaxNonRaceCorporationMembersChar"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 355,
+      "effectName": "ethnicRelationsNonRaceCorporationMembersBonusModAddMaxNonRaceCorporationMembersChar"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 356,
+      "effectName": "assaultFormationDamageMultiplierBonusPostPercentDamageMultiplierGangShipModulesRequiringGunnery"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 368,
+      "effectName": "gallenteFrigateSkillBoostCpuOutputBonus"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 389,
+      "effectName": "astrogeologySkillBoostMiningAmountBonus"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 391,
+      "effectName": "astrogeologyMiningAmountBonusPostPercentMiningAmountLocationShipModulesRequiringMining"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 392,
+      "effectName": "mechanicHullHpBonusPostPercentHpShip"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 394,
+      "effectName": "navigationVelocityBonusPostPercentMaxVelocityShip"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 395,
+      "effectName": "evasiveManeuveringAgilityBonusPostPercentAgilityShip"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 396,
+      "effectName": "energyGridUpgradesCpuNeedBonusPostPercentCpuLocationShipModulesRequiringEnergyGridUpgrades"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 397,
+      "effectName": "electronicsCpuOutputBonusPostPercentCpuOutputLocationShipGroupComputer"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 399,
+      "effectName": "connectionsConnectionBonusMutatorModAddConnectionsBonusChar"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 402,
+      "effectName": "criminalConnectionsCriminalConnectionsMutatorModAddCriminalConnectionsBonusChar"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 403,
+      "effectName": "negotiationSkillBoostNegotiationBonus"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 404,
+      "effectName": "negotiationNegotiationBonusPostPercentNegotiationPercentageChar"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 406,
+      "effectName": "socialSkillBoostSocialMutator"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 407,
+      "effectName": "socialSocialMutatorPostPercentSocialBonusChar"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 408,
+      "effectName": "largeProjectileTurretDamageMultiplierBonusPostPercentDamageMultiplierLocationShipModulesRequiringLargeProjectileTurret"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 412,
+      "effectName": "industrySkillBoostManufacturingTimeBonus"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 413,
+      "effectName": "gunnerySkillBoostTurretSpeeBonus"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 414,
+      "effectName": "gunneryTurretSpeeBonusPostPercentSpeedLocationShipModulesRequiringGunnery"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 415,
+      "effectName": "tradeSkillBoostTradePremiumBonus"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 416,
+      "effectName": "tradeTradePremiumBonusPostPercentTradePremiumChar"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 417,
+      "effectName": "smugglingSkillBoostSmugglingChanceBonus"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 425,
+      "effectName": "industryManufacturingTimeBonusPostPercentManufactureTimeMultiplierChar"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 428,
+      "effectName": "productionEfficiencySkillBoostManufactureCostBonus"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 429,
+      "effectName": "productionEfficiencyManufactureCostBonusPostPercentManufactureCostMultiplierChar"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 430,
+      "effectName": "scienceSkillBoostCopySpeedBonus"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 431,
+      "effectName": "scienceCopySpeedBonusPostPercentCopySpeedPercentChar"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 432,
+      "effectName": "researchSkillBoostBlueprintmanufactureTimeBonus"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 433,
+      "effectName": "researchBlueprintmanufactureTimeBonusPostPercentProductionTimeResearchSpeedChar"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 435,
+      "effectName": "refineryEfficiencyRefiningYieldMutatorPostPercentRefiningYieldPercentageChar"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 436,
+      "effectName": "missileLauncherOperationSpeedBonusPostPercentSpeedLocationShipModulesRequiringMissileLauncherOperation"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 439,
+      "effectName": "learningSkillBoostLearningBonus"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 440,
+      "effectName": "learningLearningBonusPostPercentIntelligenceChar"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 441,
+      "effectName": "learningLearningBonusPostPercentWillpowerChar"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 442,
+      "effectName": "learningLearningBonusPostPercentPerceptionChar"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 443,
+      "effectName": "learningLearningBonusPostPercentCharismaChar"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 444,
+      "effectName": "learningLearningBonusPostPercentMemoryChar"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 445,
+      "effectName": "energyManagementCapacitorBonusPostPercentCapacityLocationShipGroupCapacitor"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 446,
+      "effectName": "shieldManagementShieldCapacityBonusPostPercentCapacityLocationShipGroupShield"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 448,
+      "effectName": "scoutDroneOperationSkillBoostDroneRangeBonus"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 452,
+      "effectName": "shipVelocityBonusMF"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 453,
+      "effectName": "minmatarFrigateSkillLevelPreMulShipBonusMFShip"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 456,
+      "effectName": "shipTargetRangeBonusMF"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 458,
+      "effectName": "shipCargoBonusMF"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 459,
+      "effectName": "shipMiningBonusMF"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 460,
+      "effectName": "caldariFrigateSkillLevelPreMulShipBonusCFShip"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 462,
+      "effectName": "shipHybridRangeBonusCF"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 464,
+      "effectName": "shipShieldCapBonusCF"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 466,
+      "effectName": "shipTargetRangeBonusCF"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 468,
+      "effectName": "gallenteFrigateSkillLevelPreMulShipBonusGFShip"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 469,
+      "effectName": "shipMiningBonusGF"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 472,
+      "effectName": "shipHybridTrackingBonusGf"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 474,
+      "effectName": "shipTargetRangeBonusGF"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 476,
+      "effectName": "amarrFrigateSkillLevelPreMulShipBonusAFShip"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 479,
+      "effectName": "shipDroneRangeBonusGF"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 480,
+      "effectName": "shipCargoBonusAF"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 481,
+      "effectName": "metallurgySkillBoostMineralNeedResearchBonus"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 482,
+      "effectName": "shipTargetingRangeBonusAF"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 485,
+      "effectName": "energysystemsoperationCapRechargeBonusPostPercentRechargeRateLocationShipGroupCapacitor"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 486,
+      "effectName": "shieldOperationRechargeratebonusPostPercentRechargeRateLocationShipGroupShield"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 490,
+      "effectName": "engineeringPowerEngineeringOutputBonusPostPercentPowerOutputLocationShipGroupPowerCore"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 494,
+      "effectName": "warpDriveOperationWarpCapacitorNeedBonusPostPercentWarpCapacitorNeedLocationShipGroupPropulsion"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 496,
+      "effectName": "prototypingSkillBoostPrototypingBonus"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 497,
+      "effectName": "prototypingPrototypingBonusModAddPrototypingChanceChar"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 498,
+      "effectName": "inventionSkillBoostInventionBonus"
+    },
+    {
+      "effectCategory": 0,
+      "effectID": 500,
+      "effectName": "amarrCruiserSkillLevelPreMulShipBonusACShip"
+    }
+  ],
+  "v24_dogma_constants": {
+    "attribute_constants_count": 1343,
+    "dgm_operator_constants": [
+      "dgmAssModAdd",
+      "dgmAssModSub",
+      "dgmAssPostAssignment",
+      "dgmAssPostDiv",
+      "dgmAssPostMul",
+      "dgmAssPostPercent",
+      "dgmAssPostPercentUnNerfed",
+      "dgmAssPreAssignment",
+      "dgmAssPreDiv",
+      "dgmAssPreMul",
+      "dgmAssSpecialSkillRelationship",
+      "dgmEffActivation",
+      "dgmEffArea",
+      "dgmEffDungeon",
+      "dgmEffOnline",
+      "dgmEffOverload",
+      "dgmEffPassive",
+      "dgmEffSystem",
+      "dgmEffTarget"
+    ],
+    "dgm_operator_values": {
+      "dgmAssModAdd": 2,
+      "dgmAssModSub": 3,
+      "dgmAssPostAssignment": 7,
+      "dgmAssPostDiv": 5,
+      "dgmAssPostMul": 4,
+      "dgmAssPostPercent": 6,
+      "dgmAssPostPercentUnNerfed": 8,
+      "dgmAssPreAssignment": -1,
+      "dgmAssPreDiv": 1,
+      "dgmAssPreMul": 0,
+      "dgmAssSpecialSkillRelationship": 9,
+      "dgmEffActivation": 1,
+      "dgmEffArea": 3,
+      "dgmEffDungeon": 6,
+      "dgmEffOnline": 4,
+      "dgmEffOverload": 5,
+      "dgmEffPassive": 0,
+      "dgmEffSystem": 7,
+      "dgmEffTarget": 2
+    },
+    "effect_constants_count": 305
+  }
+}

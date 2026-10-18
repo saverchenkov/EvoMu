@@ -76,14 +76,51 @@ def main():
         # Baseline = last commit, so uncommitted work present at install time is still reviewed.
         hs["baseline_tree"] = rl.head_tree(root) or tree
         json.dump(hs, open(hook_state_path, "w"), indent=2)
-        if hs["baseline_tree"] == tree:
-            emit({"decision": "allow"})
 
     state = rl.load_state(root)
-    if tree == hs.get("baseline_tree") or tree in rl.reviewed_trees(state):
-        hs.pop("forced", None)
+    skill = os.path.join(root, ".agents", "skills", "evomu-adversarial-review", "SKILL.md")
+    reviewed = tree == hs.get("baseline_tree") or tree in rl.reviewed_trees(state)
+
+    if reviewed:
+        # Review gate satisfied. Now the goal gate: the project is only done when final_gate.py passed
+        # on this exact tree. Until then, push the agent to keep closing ledger rows.
+        gate = {}
+        gp = os.path.join(sdir, "final_gate.json")
+        if os.path.exists(gp):
+            try:
+                gate = json.load(open(gp))
+            except Exception:  # noqa: BLE001
+                gate = {}
+        if gate.get("passed") and gate.get("tree") == tree:
+            hs.pop("forced", None)
+            json.dump(hs, open(hook_state_path, "w"), indent=2)
+            emit({"decision": "allow"})
+        key = "goal:" + tree
+        forced = hs.get("forced", {})
+        n = forced.get(key, 0)
+        if n >= MAX_FORCED:
+            emit({"decision": "allow"})
+        hs["forced"] = {key: n + 1}
         json.dump(hs, open(hook_state_path, "w"), indent=2)
-        emit({"decision": "allow"})
+        pct = None
+        for r in reversed(state.get("reviews", [])):
+            if r.get("parity_percent") is not None:
+                pct = r.get("parity_percent")
+                break
+        emit({
+            "decision": "continue",
+            "reason": (
+                "EvoMu goal gate: the project is NOT complete. Last measured parity: %s%% of ledger rows "
+                "closed. The user will only review when `final_gate.py` passes (100%% ledger, PASS review and "
+                "CLEAN gap audit on the same tree, coverage and mutation thresholds, real-client journeys). "
+                "Do not stop and do not ask the user for interim review. Pick the next open ledger rows from "
+                "`.evomu-reviews/latest.md` (Parity section) in canonical plan order, implement them fully with "
+                "tagged tests (`// parity: <row id>`), run the review skill (%s), commit, and continue. When you "
+                "believe everything is done, run `/usr/bin/python3 "
+                ".agents/skills/evomu-adversarial-review/scripts/final_gate.py` and fix whatever it reports. "
+                "(nudge %d/%d for this tree)" % (pct, skill, n + 1, MAX_FORCED)
+            ),
+        })
 
     forced = hs.get("forced", {})
     n = forced.get(tree, 0)
@@ -95,7 +132,6 @@ def main():
     hs["forced"] = forced
     json.dump(hs, open(hook_state_path, "w"), indent=2)
 
-    skill = os.path.join(root, ".agents", "skills", "evomu-adversarial-review", "SKILL.md")
     emit({
         "decision": "continue",
         "reason": (
@@ -103,7 +139,7 @@ def main():
             "independently reviewed. Before finishing, activate the `evomu-adversarial-review` skill "
             "(%s): write your claims to a temp file, run "
             "`/usr/bin/python3 .agents/skills/evomu-adversarial-review/scripts/run_review.py --claims-file <file>`, "
-            "wait for the verdict, and report it verbatim to the user together with the report path. "
+            "wait for the verdict, and act on it. "
             "Do not claim anything is verified unless the verdict says so. (forced %d/%d)"
             % (tree[:12], skill, n + 1, MAX_FORCED)
         ),

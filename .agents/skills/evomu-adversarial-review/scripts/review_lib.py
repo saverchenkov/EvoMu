@@ -12,6 +12,9 @@ import subprocess
 import tempfile
 
 STATE_DIRNAME = ".evomu-reviews"
+# Written by the orchestrator after gap audits; excluded from the fingerprint so an audit does not
+# itself invalidate the tree it just reviewed.
+AUDITOR_ROWS_REL = ".agents/skills/evomu-adversarial-review/references/parity/auditor_rows.json"
 
 
 def repo_root(start=None):
@@ -30,7 +33,7 @@ def worktree_fingerprint(root):
                           capture_output=True).returncode == 0:
             subprocess.run(["git", "read-tree", "HEAD"], cwd=root, env=env, check=True,
                            capture_output=True)
-        subprocess.run(["git", "add", "-A", "--", ".", ":(exclude)%s" % STATE_DIRNAME], cwd=root,
+        subprocess.run(["git", "add", "-A", "--", ".", ":(exclude)%s" % STATE_DIRNAME, ":(exclude)%s" % AUDITOR_ROWS_REL], cwd=root,
                        env=env, check=True, capture_output=True)
         return subprocess.run(["git", "write-tree"], cwd=root, env=env, check=True,
                               capture_output=True, text=True).stdout.strip()
