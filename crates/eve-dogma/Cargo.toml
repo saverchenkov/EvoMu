@@ -7,3 +7,8 @@ license.workspace = true
 [dependencies]
 eve-sde = { path = "../eve-sde" }
 serde.workspace = true
+
+[dev-dependencies]
+eve-testkit = { path = "../eve-testkit" }
+serde_json.workspace = true
+

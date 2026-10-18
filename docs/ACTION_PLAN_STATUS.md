@@ -4,7 +4,7 @@
 
 The canonical plan is `.agents/skills/evomu-adversarial-review/references/action_plan.md`. This file is regenerated from the latest pre-flight parity run, so it can't go stale or be overstated.
 
-**Parity: 9 / 5870 ledger rows closed (0.15%)**, 0 NA, 13 tagged tests, 44 passing tests. Flagged fake by the gap auditor: 7.
+**Parity: 13 / 5870 ledger rows closed (0.22%)**, 0 NA, 13 tagged tests, 47 passing tests. Flagged fake by the gap auditor: 7.
 
 | Category | Total | DONE | NA | Open |
 |---|---|---|---|---|
@@ -17,7 +17,7 @@ The canonical plan is `.agents/skills/evomu-adversarial-review/references/action
 | plan | 109 | 7 | 0 | 102 |
 | quasar | 1455 | 0 | 0 | 1455 |
 | rpc | 1230 | 1 | 0 | 1229 |
-| sde | 213 | 1 | 0 | 212 |
+| sde | 213 | 5 | 0 | 208 |
 
 Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = mapped `feat:` rows closed/total; **Assessment** = the agent's own judgement from `docs/parity/task_notes.json` (DONE is accepted only when the ledger row is DONE).
 
@@ -51,8 +51,8 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 
 | Task | Title | Ledger | Features | Tests | Assessment | Note | Last commit |
 |---|---|---|---|---|---|---|---|
-| T-1 | Parity tagging and attestation. Write a small test-support crate (e.g. eve-testk… | DONE | 0/0 | test_phase_t_t1_machonet_get_time_rpc_parity | DONE | Implemented eve-testkit JSONL attestation crate, parity tag documentation, and machoNet.GetTime RPC test. | — |
-| T-2 | Data-driven sweeps over the real static data. For every client static-data file,… | MISSING | 0/0 | — | NOT STARTED | — | — |
+| T-1 | Parity tagging and attestation. Write a small test-support crate (e.g. eve-testk… | DONE | 0/0 | test_phase_t_t1_machonet_get_time_rpc_parity | DONE | Implemented eve-testkit JSONL attestation crate, parity tag documentation, and machoNet.GetTime RPC test. | 617cd70 2026-10-18 |
+| T-2 | Data-driven sweeps over the real static data. For every client static-data file,… | MISSING | 0/0 | — | PARTIAL | Implemented Dogma modifierInfo evaluator and effect sweep plus SDE domain and SQLite static resource sweeps; remaining FSD binary loaders and expression-only effects pending. | — |
 | T-3 | Property and fuzz tests. Use proptest round-trips for every marshal opcode, Pack… | MISSING | 0/0 | — | NOT STARTED | — | — |
 | T-4 | Golden wire tests against the client's own codecs. Through the in-client bridge,… | MISSING | 0/0 | — | NOT STARTED | — | — |
 | T-5 | Coverage and mutation tooling. Install cargo-llvm-cov and cargo-mutants. Run car… | MISSING | 0/0 | — | NOT STARTED | — | — |
@@ -194,7 +194,7 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 | Z-1 | Close every rpc: row (1,230 client-called methods) with V24 argument layouts and… | MISSING | 0/0 | — | PARTIAL | — | — |
 | Z-2 | Close every notify: row. Server-emitted notifications are sent with correct payl… | MISSING | 0/0 | — | NOT STARTED | — | — |
 | Z-3 | Close every destiny: and ballmode: row on the binary destiny stream. | MISSING | 0/0 | — | PARTIAL | — | — |
-| Z-4 | Close every sde: row and effect:. | MISSING | 0/0 | — | PARTIAL | Initial staticdata resource attested via eve-testkit; full SDE and effect sweeps pending. | — |
+| Z-4 | Close every sde: row and effect:. | MISSING | 0/0 | — | PARTIAL | Attested lossless SQLite staticdata resources against client files; remaining staticdata loaders and expression-only Dogma effects stay open. | — |
 | Z-5 | Close every feat: row, including every row the gap auditor has appended. Fix eve… | MISSING | 0/0 | — | PARTIAL | — | — |
 | Z-6 | Pass every journey: row on the real client through tools/client-harness/run_jour… | MISSING | 0/0 | — | NOT STARTED | — | — |
 | Z-7 | Reach workspace line coverage ≥ 90% and mutation score ≥ 85% on every crate. | MISSING | 0/0 | — | NOT STARTED | — | — |

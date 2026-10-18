@@ -216,6 +216,8 @@ pub struct EffectModifierSpec {
     pub group_id: Option<GroupId>,
     #[serde(default)]
     pub skill_type_id: Option<TypeId>,
+    #[serde(default)]
+    pub effect_id: Option<EffectId>,
 }
 
 /// Static definition of a Dogma effect (`dgmEffects`).
@@ -528,6 +530,35 @@ pub struct CareerGoalTemplate {
     pub sp_reward: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StationOperationInfo {
+    pub operation_id: u32,
+    pub name: String,
+    pub activity_id: Option<u32>,
+    pub services: Vec<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StationServiceInfo {
+    pub service_id: u32,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkinLicenseInfo {
+    pub license_type_id: TypeId,
+    pub skin_id: u32,
+    pub duration: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkinInfo {
+    pub skin_id: u32,
+    pub internal_name: String,
+    pub skin_material_id: u32,
+    pub types: Vec<TypeId>,
+}
+
 #[derive(Debug, Deserialize)]
 struct SdeSeedFile {
     attributes: Vec<DogmaAttributeType>,
@@ -603,6 +634,8 @@ pub struct SdeRegistry {
     pub blueprints: HashMap<TypeId, BlueprintInfo>,
     pub dbuff_collections: HashMap<u32, DbuffCollectionInfo>,
     pub fighter_abilities: HashMap<u32, FighterAbilityInfo>,
+    #[serde(default)]
+    pub fighter_abilities_by_type: HashMap<TypeId, Vec<u32>>,
     pub wrecks: HashMap<TypeId, TypeId>,
     pub compressible_types: HashMap<TypeId, TypeId>,
     #[serde(default)]
@@ -614,6 +647,14 @@ pub struct SdeRegistry {
     pub epic_arcs: HashMap<u32, EpicArcTemplate>,
     pub node_graphs: HashMap<u32, NodeGraphTemplate>,
     pub career_goals: HashMap<u32, CareerGoalTemplate>,
+    #[serde(default)]
+    pub station_operations: HashMap<u32, StationOperationInfo>,
+    #[serde(default)]
+    pub station_services: HashMap<u32, StationServiceInfo>,
+    #[serde(default)]
+    pub skin_licenses: HashMap<TypeId, SkinLicenseInfo>,
+    #[serde(default)]
+    pub skins: HashMap<u32, SkinInfo>,
 }
 
 static SDE_CACHE: OnceLock<Mutex<HashMap<(PathBuf, u64), SdeRegistry>>> = OnceLock::new();
@@ -627,6 +668,7 @@ struct RawModifier {
     operator: Option<i32>,
     group_id: Option<GroupId>,
     skill_type_id: Option<TypeId>,
+    effect_id: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -687,7 +729,14 @@ impl SdeRegistry {
             }
         }
 
-        let conn = Connection::open_with_flags(&canon, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let sde_uri = format!("file:{}?immutable=1", canon.display());
+        let conn = Connection::open_with_flags(
+            &sde_uri,
+            OpenFlags::SQLITE_OPEN_READ_ONLY
+                | OpenFlags::SQLITE_OPEN_URI
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .or_else(|_| Connection::open_with_flags(&canon, OpenFlags::SQLITE_OPEN_READ_ONLY))?;
         let schema_ver: String = conn
             .query_row(
                 "SELECT value FROM sde_meta WHERE key = 'schema_version'",
@@ -873,15 +922,38 @@ impl SdeRegistry {
                 let modifiers = raw_mods
                     .into_iter()
                     .filter_map(|m| {
-                        Some(EffectModifierSpec {
-                            domain: m.domain.unwrap_or_else(|| "shipID".to_string()),
-                            func: m.func?,
-                            modified_attribute_id: u16::try_from(m.modified_attribute_id?).ok()?,
-                            modifying_attribute_id: u16::try_from(m.modifying_attribute_id?).ok()?,
-                            operator: m.operator.unwrap_or(0),
-                            group_id: m.group_id,
-                            skill_type_id: m.skill_type_id,
-                        })
+                        let func = m.func?;
+                        let domain = m.domain.unwrap_or_else(|| "shipID".to_string());
+                        let effect_id = m.effect_id.and_then(|v| u16::try_from(v).ok());
+                        if func == "EffectStopper" {
+                            Some(EffectModifierSpec {
+                                domain,
+                                func,
+                                modified_attribute_id: m
+                                    .modified_attribute_id
+                                    .and_then(|v| u16::try_from(v).ok())
+                                    .unwrap_or(0),
+                                modifying_attribute_id: m
+                                    .modifying_attribute_id
+                                    .and_then(|v| u16::try_from(v).ok())
+                                    .unwrap_or(0),
+                                operator: m.operator.unwrap_or(0),
+                                group_id: m.group_id,
+                                skill_type_id: m.skill_type_id,
+                                effect_id,
+                            })
+                        } else {
+                            Some(EffectModifierSpec {
+                                domain,
+                                func,
+                                modified_attribute_id: u16::try_from(m.modified_attribute_id?).ok()?,
+                                modifying_attribute_id: u16::try_from(m.modifying_attribute_id?).ok()?,
+                                operator: m.operator.unwrap_or(0),
+                                group_id: m.group_id,
+                                skill_type_id: m.skill_type_id,
+                                effect_id,
+                            })
+                        }
                     })
                     .collect();
                 Ok(DogmaEffectType {
@@ -1025,18 +1097,46 @@ impl SdeRegistry {
         }
 
         let mut op_has_clone_bay = HashMap::new();
+        let mut station_operations = HashMap::new();
         {
-            let mut stmt =
-                conn.prepare("SELECT operation_id, services_json FROM sde_station_operations")?;
+            let mut stmt = conn.prepare(
+                "SELECT operation_id, name, activity_id, services_json FROM sde_station_operations",
+            )?;
             let rows = stmt.query_map([], |r| {
                 let oid = r.get::<_, i64>(0)?;
-                let svcs_str: String = r.get(1)?;
-                let svcs: Vec<i64> = parse_json_col(1, &svcs_str)?;
-                Ok((oid, svcs.contains(&10) || svcs.contains(&24)))
+                let name: String = r.get(1)?;
+                let activity_id = r.get::<_, Option<i64>>(2)?.map(|v| v as u32);
+                let svcs_str: String = r.get(3)?;
+                let svcs: Vec<i64> = parse_json_col(3, &svcs_str)?;
+                let has_cb = svcs.contains(&10) || svcs.contains(&24);
+                let info = StationOperationInfo {
+                    operation_id: oid as u32,
+                    name,
+                    activity_id,
+                    services: svcs.into_iter().map(|s| s as u32).collect(),
+                };
+                Ok((oid, has_cb, info))
             })?;
             for r in rows {
-                let (oid, has_cb) = r?;
+                let (oid, has_cb, info) = r?;
                 op_has_clone_bay.insert(oid, has_cb);
+                station_operations.insert(info.operation_id, info);
+            }
+        }
+
+        let mut station_services = HashMap::new();
+        {
+            let mut stmt =
+                conn.prepare("SELECT service_id, name FROM sde_station_services")?;
+            let rows = stmt.query_map([], |r| {
+                Ok(StationServiceInfo {
+                    service_id: r.get::<_, i64>(0)? as u32,
+                    name: r.get(1)?,
+                })
+            })?;
+            for r in rows {
+                let svc = r?;
+                station_services.insert(svc.service_id, svc);
             }
         }
 
@@ -1624,6 +1724,73 @@ impl SdeRegistry {
             }
         }
 
+        let mut fighter_abilities_by_type = HashMap::new();
+        {
+            let mut stmt = conn.prepare(
+                "SELECT type_id, data_json FROM sde_fighter_abilities_by_type",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                let tid = r.get::<_, i64>(0)? as TypeId;
+                let d_str: String = r.get(1)?;
+                let val: serde_json::Value = parse_json_col(1, &d_str)?;
+                let mut ability_ids = Vec::new();
+                if let Some(obj) = val.as_object() {
+                    for slot_key in ["abilitySlot0", "abilitySlot1", "abilitySlot2"] {
+                        if let Some(aid) = obj
+                            .get(slot_key)
+                            .and_then(|s| s.get("abilityID"))
+                            .and_then(|v| v.as_u64())
+                        {
+                            ability_ids.push(aid as u32);
+                        }
+                    }
+                }
+                Ok((tid, ability_ids))
+            })?;
+            for r in rows {
+                let (tid, aids) = r?;
+                fighter_abilities_by_type.insert(tid, aids);
+            }
+        }
+
+        let mut skin_licenses = HashMap::new();
+        {
+            let mut stmt = conn.prepare(
+                "SELECT license_type_id, skin_id, duration FROM sde_skin_licenses",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok(SkinLicenseInfo {
+                    license_type_id: r.get::<_, i64>(0)? as TypeId,
+                    skin_id: r.get::<_, i64>(1)? as u32,
+                    duration: r.get::<_, i64>(2)? as i32,
+                })
+            })?;
+            for r in rows {
+                let sl = r?;
+                skin_licenses.insert(sl.license_type_id, sl);
+            }
+        }
+
+        let mut skins = HashMap::new();
+        {
+            let mut stmt = conn.prepare(
+                "SELECT skin_id, internal_name, skin_material_id, types_json FROM sde_skins",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                let t_str: String = r.get(3)?;
+                Ok(SkinInfo {
+                    skin_id: r.get::<_, i64>(0)? as u32,
+                    internal_name: r.get(1)?,
+                    skin_material_id: r.get::<_, i64>(2)? as u32,
+                    types: parse_json_col(3, &t_str)?,
+                })
+            })?;
+            for r in rows {
+                let sk = r?;
+                skins.insert(sk.skin_id, sk);
+            }
+        }
+
         let registry = Self {
             db_path: Some(canon),
             resources,
@@ -1653,6 +1820,7 @@ impl SdeRegistry {
             blueprints,
             dbuff_collections,
             fighter_abilities,
+            fighter_abilities_by_type,
             wrecks,
             compressible_types,
             type_materials,
@@ -1663,6 +1831,10 @@ impl SdeRegistry {
             epic_arcs,
             node_graphs,
             career_goals: HashMap::new(),
+            station_operations,
+            station_services,
+            skin_licenses,
+            skins,
         };
 
         if let Ok(mut guard) = cache.lock() {
@@ -1678,7 +1850,14 @@ impl SdeRegistry {
         let Some(ref p) = self.db_path else {
             return Vec::new();
         };
-        let Ok(conn) = Connection::open_with_flags(p, OpenFlags::SQLITE_OPEN_READ_ONLY) else {
+        let sde_uri = format!("file:{}?immutable=1", p.display());
+        let Ok(conn) = Connection::open_with_flags(
+            &sde_uri,
+            OpenFlags::SQLITE_OPEN_READ_ONLY
+                | OpenFlags::SQLITE_OPEN_URI
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .or_else(|_| Connection::open_with_flags(p, OpenFlags::SQLITE_OPEN_READ_ONLY)) else {
             return Vec::new();
         };
         let Ok(mut stmt) = conn.prepare(
@@ -1793,6 +1972,7 @@ impl SdeRegistry {
                 .into_iter()
                 .map(|f| (f.ability_id, f))
                 .collect(),
+            fighter_abilities_by_type: HashMap::new(),
             wrecks: parsed.wrecks,
             compressible_types: parsed.compressible_types,
             type_materials: parsed.type_materials,
@@ -1827,6 +2007,10 @@ impl SdeRegistry {
                 .into_iter()
                 .map(|g| (g.goal_id, g))
                 .collect(),
+            station_operations: HashMap::new(),
+            station_services: HashMap::new(),
+            skin_licenses: HashMap::new(),
+            skins: HashMap::new(),
         })
     }
 

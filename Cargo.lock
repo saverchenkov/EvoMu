@@ -178,7 +178,9 @@ name = "eve-dogma"
 version = "0.1.0"
 dependencies = [
  "eve-sde",
+ "eve-testkit",
  "serde",
+ "serde_json",
 ]
 
 [[package]]

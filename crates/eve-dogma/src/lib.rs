@@ -11,7 +11,10 @@
 
 #![forbid(unsafe_code)]
 
-use eve_sde::{attr_ids, AttributeId, SdeRegistry, TypeId};
+use eve_sde::{
+    attr_ids, AttributeId, CategoryId, DogmaEffectType, EffectId, EffectModifierSpec, GroupId,
+    SdeRegistry, TypeId,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -340,20 +343,39 @@ impl DogmaExpressionNode {
         target: &mut DogmaItemState,
         sde: &SdeRegistry,
     ) {
+        self.execute_on_target_with_effect(source_item_id, None, source, target, sde);
+    }
+
+    /// Executes a modifier-applying or modifier-removing Dogma VM expression tree against `target`,
+    /// tagging added or removed modifiers with `effect_id` so multi-effect items remove individual effects cleanly.
+    pub fn execute_on_target_with_effect(
+        &self,
+        source_item_id: i64,
+        effect_id: Option<EffectId>,
+        source: &DogmaItemState,
+        target: &mut DogmaItemState,
+        sde: &SdeRegistry,
+    ) {
         match self.opcode {
             DogmaVmOpcode::Combine | DogmaVmOpcode::Splice => {
                 if let Some(a1) = &self.arg1 {
-                    a1.execute_on_target(source_item_id, source, target, sde);
+                    a1.execute_on_target_with_effect(source_item_id, effect_id, source, target, sde);
                 }
                 if let Some(a2) = &self.arg2 {
-                    a2.execute_on_target(source_item_id, source, target, sde);
+                    a2.execute_on_target_with_effect(source_item_id, effect_id, source, target, sde);
                 }
             }
             DogmaVmOpcode::If => {
                 let cond = self.arg1.as_ref().map(|n| n.evaluate(source, sde)).unwrap_or(0.0);
                 if cond != 0.0 {
                     if let Some(a2) = &self.arg2 {
-                        a2.execute_on_target(source_item_id, source, target, sde);
+                        a2.execute_on_target_with_effect(
+                            source_item_id,
+                            effect_id,
+                            source,
+                            target,
+                            sde,
+                        );
                     }
                 }
             }
@@ -366,7 +388,7 @@ impl DogmaExpressionNode {
             | DogmaVmOpcode::AddGangItmMod
             | DogmaVmOpcode::AddGangOwnSrqMod
             | DogmaVmOpcode::AddGangSrqMod => {
-                // Enforce group or skill-requirement filter when specified in arg1
+                // Enforce strict group filter when specified in arg1 (unknown/0 group never matches)
                 if matches!(
                     self.opcode,
                     DogmaVmOpcode::AddLocGrpMod | DogmaVmOpcode::AddGangGrpMod
@@ -374,18 +396,18 @@ impl DogmaExpressionNode {
                     if let Some(filter_node) = &self.arg1 {
                         if filter_node.opcode == DogmaVmOpcode::DefGroup {
                             if let Some(req_grp) = filter_node.value_f64 {
-                                let actual_grp = sde
-                                    .types
-                                    .get(&target.type_id)
-                                    .map(|t| t.group_id)
+                                let actual_grp = target
+                                    .group_id
+                                    .or_else(|| sde.types.get(&target.type_id).map(|t| t.group_id))
                                     .unwrap_or(0);
-                                if actual_grp != 0 && actual_grp != req_grp as u32 {
+                                if actual_grp == 0 || actual_grp != req_grp as u32 {
                                     return;
                                 }
                             }
                         }
                     }
                 }
+                // Enforce strict skill-requirement filter when specified in arg1 (items without the required skill never match)
                 if matches!(
                     self.opcode,
                     DogmaVmOpcode::AddLocSrqMod
@@ -396,9 +418,8 @@ impl DogmaExpressionNode {
                     if let Some(filter_node) = &self.arg1 {
                         if filter_node.opcode == DogmaVmOpcode::DefType {
                             if let Some(req_skill) = filter_node.value_f64 {
-                                if !target.skill_levels.is_empty()
-                                    && !target.skill_levels.contains_key(&(req_skill as i64))
-                                {
+                                let req_skill_tid = req_skill as TypeId;
+                                if !item_requires_skill(target, req_skill_tid, sde) {
                                     return;
                                 }
                             }
@@ -417,7 +438,7 @@ impl DogmaExpressionNode {
                     .map(|n| n.evaluate(source, sde))
                     .or(self.value_f64)
                     .unwrap_or(0.0);
-                let stacking_penalized = !matches!(
+                let op_penalized = !matches!(
                     op,
                     ModifierOperator::ModAdd
                         | ModifierOperator::ModSub
@@ -426,8 +447,10 @@ impl DogmaExpressionNode {
                         | ModifierOperator::PostPercentUnNerfed
                         | ModifierOperator::SpecialSkillRelationship
                 );
+                let stacking_penalized = op_penalized && !source_is_stacking_exempt(source, sde);
                 target.add_modifier(AttributeModifier {
                     source_item_id,
+                    effect_id,
                     target_attribute_id: target_attr,
                     operator: op,
                     value: val,
@@ -443,9 +466,482 @@ impl DogmaExpressionNode {
             | DogmaVmOpcode::RmGangItmMod
             | DogmaVmOpcode::RmGangOwnSrqMod
             | DogmaVmOpcode::RmGangSrqMod => {
-                target.remove_modifiers_from_source(source_item_id);
+                target.remove_modifiers_from_source_effect(source_item_id, effect_id);
             }
             _ => {}
+        }
+    }
+}
+
+/// All 6 SDE skill-requirement attribute IDs (`requiredSkill1`..`requiredSkill6`).
+pub const REQUIRED_SKILL_ATTR_IDS: [AttributeId; 6] = [182, 183, 184, 1285, 1289, 1290];
+
+/// Returns true if `source` belongs to a category/group exempt from EVE Dogma stacking penalties:
+/// Skills (`category_id == 16`), Ships (`category_id == 6`), Charges (`category_id == 8`),
+/// Implants/Boosters (`category_id == 20` or `group_id == 303`), and Subsystems (`category_id == 32`).
+pub fn source_is_stacking_exempt(source: &DogmaItemState, sde: &SdeRegistry) -> bool {
+    let cat_id = source
+        .category_id
+        .or_else(|| sde.types.get(&source.type_id).map(|t| t.category_id));
+    let grp_id = source
+        .group_id
+        .or_else(|| sde.types.get(&source.type_id).map(|t| t.group_id));
+    matches!(cat_id, Some(6 | 8 | 16 | 20 | 32)) || matches!(grp_id, Some(303))
+}
+
+/// Returns true if `item` defines any `requiredSkill1..6` in its base or SDE attributes.
+pub fn item_has_any_required_skill(item: &DogmaItemState, sde: &SdeRegistry) -> bool {
+    for &attr_id in &REQUIRED_SKILL_ATTR_IDS {
+        if item.base_attributes.get(&attr_id).copied().unwrap_or(0.0) > 0.0 {
+            return true;
+        }
+    }
+    if let Some(t) = sde.types.get(&item.type_id) {
+        for &attr_id in &REQUIRED_SKILL_ATTR_IDS {
+            if t.default_attributes.get(&attr_id).copied().unwrap_or(0.0) > 0.0 {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Returns true if `item` directly requires `skill_type_id` via `requiredSkill1..6`
+/// in `base_attributes` or `sde.types`.
+pub fn item_requires_skill(item: &DogmaItemState, skill_type_id: TypeId, sde: &SdeRegistry) -> bool {
+    for &attr_id in &REQUIRED_SKILL_ATTR_IDS {
+        if let Some(&v) = item.base_attributes.get(&attr_id) {
+            if v > 0.0 && (v.round() as TypeId) == skill_type_id {
+                return true;
+            }
+        }
+    }
+    if let Some(t) = sde.types.get(&item.type_id) {
+        for &attr_id in &REQUIRED_SKILL_ATTR_IDS {
+            if let Some(&v) = t.default_attributes.get(&attr_id) {
+                if v > 0.0 && (v.round() as TypeId) == skill_type_id {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Authoritative V24 Dogma `modifierInfo` target domain (`itemID`, `shipID`, `charID`, `targetID`/`target`, `otherID`, `structureID`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum DogmaDomain {
+    Item,
+    Ship,
+    Char,
+    Target,
+    Other,
+    Structure,
+}
+
+impl DogmaDomain {
+    pub fn from_sde_str(s: &str) -> Option<Self> {
+        match s {
+            "itemID" => Some(Self::Item),
+            "shipID" => Some(Self::Ship),
+            "charID" => Some(Self::Char),
+            "targetID" | "target" => Some(Self::Target),
+            "otherID" => Some(Self::Other),
+            "structureID" => Some(Self::Structure),
+            _ => None,
+        }
+    }
+}
+
+/// Authoritative V24 Dogma `modifierInfo` function (`ItemModifier`, `LocationModifier`,
+/// `LocationGroupModifier`, `LocationRequiredSkillModifier`, `OwnerRequiredSkillModifier`, `EffectStopper`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum DogmaModifierFunc {
+    ItemModifier,
+    LocationModifier,
+    LocationGroupModifier,
+    LocationRequiredSkillModifier,
+    OwnerRequiredSkillModifier,
+    EffectStopper,
+}
+
+impl DogmaModifierFunc {
+    pub fn from_sde_str(s: &str) -> Option<Self> {
+        match s {
+            "ItemModifier" => Some(Self::ItemModifier),
+            "LocationModifier" => Some(Self::LocationModifier),
+            "LocationGroupModifier" => Some(Self::LocationGroupModifier),
+            "LocationRequiredSkillModifier" => Some(Self::LocationRequiredSkillModifier),
+            "OwnerRequiredSkillModifier" => Some(Self::OwnerRequiredSkillModifier),
+            "EffectStopper" => Some(Self::EffectStopper),
+            _ => None,
+        }
+    }
+}
+
+/// Compiles a single SDE [`EffectModifierSpec`] (`modifierInfo` entry) into a [`DogmaExpressionNode`]
+/// using the 75-opcode [`DogmaVmOpcode`] instruction set.
+pub fn compile_modifier_spec_to_vm(
+    spec: &EffectModifierSpec,
+    is_remove: bool,
+) -> Option<DogmaExpressionNode> {
+    let func = DogmaModifierFunc::from_sde_str(&spec.func)?;
+    if func == DogmaModifierFunc::EffectStopper {
+        let stopped_eid = spec.effect_id?;
+        return Some(DogmaExpressionNode {
+            opcode: DogmaVmOpcode::Efct,
+            value_f64: Some(stopped_eid as f64),
+            attribute_id: None,
+            operator: None,
+            arg1: None,
+            arg2: None,
+        });
+    }
+
+    let op = ModifierOperator::try_from_sde_op(spec.operator)?;
+    let opcode = match (func, is_remove) {
+        (DogmaModifierFunc::ItemModifier, false) => DogmaVmOpcode::AddItmMod,
+        (DogmaModifierFunc::ItemModifier, true) => DogmaVmOpcode::RmItmMod,
+        (DogmaModifierFunc::LocationModifier, false) => DogmaVmOpcode::AddLocMod,
+        (DogmaModifierFunc::LocationModifier, true) => DogmaVmOpcode::RmLocMod,
+        (DogmaModifierFunc::LocationGroupModifier, false) => DogmaVmOpcode::AddLocGrpMod,
+        (DogmaModifierFunc::LocationGroupModifier, true) => DogmaVmOpcode::RmLocGrpMod,
+        (DogmaModifierFunc::LocationRequiredSkillModifier, false) => DogmaVmOpcode::AddLocSrqMod,
+        (DogmaModifierFunc::LocationRequiredSkillModifier, true) => DogmaVmOpcode::RmLocSrqMod,
+        (DogmaModifierFunc::OwnerRequiredSkillModifier, false) => DogmaVmOpcode::AddOwnSrqMod,
+        (DogmaModifierFunc::OwnerRequiredSkillModifier, true) => DogmaVmOpcode::RmOwnSrqMod,
+        (DogmaModifierFunc::EffectStopper, _) => unreachable!(),
+    };
+
+    let arg1 = match func {
+        DogmaModifierFunc::LocationGroupModifier => spec.group_id.map(|gid| {
+            Box::new(DogmaExpressionNode {
+                opcode: DogmaVmOpcode::DefGroup,
+                value_f64: Some(gid as f64),
+                attribute_id: Some(spec.modified_attribute_id),
+                operator: None,
+                arg1: None,
+                arg2: None,
+            })
+        }),
+        DogmaModifierFunc::LocationRequiredSkillModifier
+        | DogmaModifierFunc::OwnerRequiredSkillModifier => spec.skill_type_id.map(|stid| {
+            Box::new(DogmaExpressionNode {
+                opcode: DogmaVmOpcode::DefType,
+                value_f64: Some(stid as f64),
+                attribute_id: Some(spec.modified_attribute_id),
+                operator: None,
+                arg1: None,
+                arg2: None,
+            })
+        }),
+        _ => None,
+    };
+
+    let arg2 = Some(Box::new(DogmaExpressionNode {
+        opcode: DogmaVmOpcode::GetAttr,
+        value_f64: None,
+        attribute_id: Some(spec.modifying_attribute_id),
+        operator: None,
+        arg1: None,
+        arg2: None,
+    }));
+
+    Some(DogmaExpressionNode {
+        opcode,
+        value_f64: None,
+        attribute_id: Some(spec.modified_attribute_id),
+        operator: Some(op),
+        arg1,
+        arg2,
+    })
+}
+
+/// Compiles all [`EffectModifierSpec`] entries on an [`DogmaEffectType`] into a combined [`DogmaExpressionNode`] tree.
+pub fn compile_effect_to_vm(effect: &DogmaEffectType, is_remove: bool) -> Option<DogmaExpressionNode> {
+    let mut tree: Option<DogmaExpressionNode> = None;
+    for spec in &effect.modifiers {
+        let node = compile_modifier_spec_to_vm(spec, is_remove)?;
+        tree = Some(match tree {
+            None => node,
+            Some(prev) => DogmaExpressionNode {
+                opcode: DogmaVmOpcode::Combine,
+                value_f64: None,
+                attribute_id: None,
+                operator: None,
+                arg1: Some(Box::new(prev)),
+                arg2: Some(Box::new(node)),
+            },
+        });
+    }
+    tree
+}
+
+/// Multi-domain evaluation context for executing V24 Dogma `modifierInfo` effects.
+///
+/// Supports all 6 domains (`itemID`, `shipID`, `charID`, `targetID`/`target`, `otherID`, `structureID`)
+/// with isolated per-domain location item lists and all 6 modifier functions (`ItemModifier`,
+/// `LocationModifier`, `LocationGroupModifier`, `LocationRequiredSkillModifier`,
+/// `OwnerRequiredSkillModifier`, `EffectStopper`).
+#[derive(Debug, Clone)]
+pub struct DogmaEffectContext {
+    pub item: DogmaItemState,
+    pub ship: DogmaItemState,
+    pub character: DogmaItemState,
+    pub target: DogmaItemState,
+    pub other: DogmaItemState,
+    pub structure: DogmaItemState,
+    /// Items located inside `shipID` (fitted modules, rigs, subsystems, charges in ship).
+    pub ship_located_items: Vec<DogmaItemState>,
+    /// Items located inside `structureID` (fitted structure modules/rigs/service modules).
+    pub structure_located_items: Vec<DogmaItemState>,
+    /// Items located on `charID` (implants, boosters, skills).
+    pub char_located_items: Vec<DogmaItemState>,
+    /// Items located inside `targetID` / `target`.
+    pub target_located_items: Vec<DogmaItemState>,
+    /// Items located inside `otherID`.
+    pub other_located_items: Vec<DogmaItemState>,
+    /// Items located inside `itemID` (e.g. loaded charge/script inside a module).
+    pub item_located_items: Vec<DogmaItemState>,
+    /// Items owned by `charID` (charges in space, drones, fighters, missiles) targeted by `OwnerRequiredSkillModifier`.
+    pub owned_items: Vec<DogmaItemState>,
+    /// Target effect IDs stopped via `EffectStopper` (e.g. Warp Scrambler stopping MWD `6441` / MJD `6442`).
+    pub stopped_target_effects: Vec<EffectId>,
+}
+
+impl DogmaEffectContext {
+    pub fn new(
+        item: DogmaItemState,
+        ship: DogmaItemState,
+        character: DogmaItemState,
+        target: DogmaItemState,
+        other: DogmaItemState,
+        structure: DogmaItemState,
+    ) -> Self {
+        Self {
+            item,
+            ship,
+            character,
+            target,
+            other,
+            structure,
+            ship_located_items: Vec::new(),
+            structure_located_items: Vec::new(),
+            char_located_items: Vec::new(),
+            target_located_items: Vec::new(),
+            other_located_items: Vec::new(),
+            item_located_items: Vec::new(),
+            owned_items: Vec::new(),
+            stopped_target_effects: Vec::new(),
+        }
+    }
+
+    pub fn entity_for_domain(&self, domain: DogmaDomain) -> &DogmaItemState {
+        match domain {
+            DogmaDomain::Item => &self.item,
+            DogmaDomain::Ship => &self.ship,
+            DogmaDomain::Char => &self.character,
+            DogmaDomain::Target => &self.target,
+            DogmaDomain::Other => &self.other,
+            DogmaDomain::Structure => &self.structure,
+        }
+    }
+
+    pub fn entity_for_domain_mut(&mut self, domain: DogmaDomain) -> &mut DogmaItemState {
+        match domain {
+            DogmaDomain::Item => &mut self.item,
+            DogmaDomain::Ship => &mut self.ship,
+            DogmaDomain::Char => &mut self.character,
+            DogmaDomain::Target => &mut self.target,
+            DogmaDomain::Other => &mut self.other,
+            DogmaDomain::Structure => &mut self.structure,
+        }
+    }
+
+    pub fn located_items_for_domain(&self, domain: DogmaDomain) -> &[DogmaItemState] {
+        match domain {
+            DogmaDomain::Item => &self.item_located_items,
+            DogmaDomain::Ship => &self.ship_located_items,
+            DogmaDomain::Char => &self.char_located_items,
+            DogmaDomain::Target => &self.target_located_items,
+            DogmaDomain::Other => &self.other_located_items,
+            DogmaDomain::Structure => &self.structure_located_items,
+        }
+    }
+
+    pub fn located_items_for_domain_mut(
+        &mut self,
+        domain: DogmaDomain,
+    ) -> &mut Vec<DogmaItemState> {
+        match domain {
+            DogmaDomain::Item => &mut self.item_located_items,
+            DogmaDomain::Ship => &mut self.ship_located_items,
+            DogmaDomain::Char => &mut self.char_located_items,
+            DogmaDomain::Target => &mut self.target_located_items,
+            DogmaDomain::Other => &mut self.other_located_items,
+            DogmaDomain::Structure => &mut self.structure_located_items,
+        }
+    }
+
+    /// Applies a single [`EffectModifierSpec`] from `self.item` onto the domain/targets in this context.
+    /// Returns the number of target entities/items modified (or stopped effects recorded).
+    pub fn apply_modifier_spec(
+        &mut self,
+        source_item_id: i64,
+        spec: &EffectModifierSpec,
+        sde: &SdeRegistry,
+    ) -> usize {
+        self.apply_modifier_spec_with_effect(source_item_id, None, spec, sde)
+    }
+
+    /// Applies a single [`EffectModifierSpec`] tagged with `effect_id`.
+    pub fn apply_modifier_spec_with_effect(
+        &mut self,
+        source_item_id: i64,
+        effect_id: Option<EffectId>,
+        spec: &EffectModifierSpec,
+        sde: &SdeRegistry,
+    ) -> usize {
+        let Some(domain) = DogmaDomain::from_sde_str(&spec.domain) else {
+            return 0;
+        };
+        let Some(func) = DogmaModifierFunc::from_sde_str(&spec.func) else {
+            return 0;
+        };
+        let Some(vm_node) = compile_modifier_spec_to_vm(spec, false) else {
+            return 0;
+        };
+
+        if func == DogmaModifierFunc::EffectStopper {
+            if let Some(eid) = spec.effect_id {
+                if !self.stopped_target_effects.contains(&eid) {
+                    self.stopped_target_effects.push(eid);
+                }
+                return 1;
+            }
+            return 0;
+        }
+
+        let source_snapshot = self.item.clone();
+        let mut applied = 0usize;
+
+        match func {
+            DogmaModifierFunc::ItemModifier => {
+                let target_entity = self.entity_for_domain_mut(domain);
+                let before = target_entity.modifiers.len();
+                vm_node.execute_on_target_with_effect(
+                    source_item_id,
+                    effect_id,
+                    &source_snapshot,
+                    target_entity,
+                    sde,
+                );
+                if target_entity.modifiers.len() > before {
+                    applied += 1;
+                }
+            }
+            DogmaModifierFunc::LocationModifier
+            | DogmaModifierFunc::LocationGroupModifier
+            | DogmaModifierFunc::LocationRequiredSkillModifier => {
+                // Location* modifiers apply strictly to items located inside `domain`, never the location entity itself.
+                let list = self.located_items_for_domain_mut(domain);
+                for child in list.iter_mut() {
+                    let b = child.modifiers.len();
+                    vm_node.execute_on_target_with_effect(
+                        source_item_id,
+                        effect_id,
+                        &source_snapshot,
+                        child,
+                        sde,
+                    );
+                    if child.modifiers.len() > b {
+                        applied += 1;
+                    }
+                }
+            }
+            DogmaModifierFunc::OwnerRequiredSkillModifier => {
+                for child in self.owned_items.iter_mut() {
+                    let b = child.modifiers.len();
+                    vm_node.execute_on_target_with_effect(
+                        source_item_id,
+                        effect_id,
+                        &source_snapshot,
+                        child,
+                        sde,
+                    );
+                    if child.modifiers.len() > b {
+                        applied += 1;
+                    }
+                }
+            }
+            DogmaModifierFunc::EffectStopper => unreachable!(),
+        }
+
+        applied
+    }
+
+    /// Applies all [`EffectModifierSpec`] entries on `effect` from `source_item_id`, tagging each with `effect.effect_id`.
+    pub fn apply_effect(
+        &mut self,
+        source_item_id: i64,
+        effect: &DogmaEffectType,
+        sde: &SdeRegistry,
+    ) -> usize {
+        let mut total = 0;
+        for spec in &effect.modifiers {
+            total += self.apply_modifier_spec_with_effect(
+                source_item_id,
+                Some(effect.effect_id),
+                spec,
+                sde,
+            );
+        }
+        total
+    }
+
+    /// Removes only modifiers originating from `(source_item_id, effect.effect_id)` across all domains and location lists,
+    /// and clears stopped target effects if `effect` had `EffectStopper` modifiers.
+    pub fn remove_effect(&mut self, source_item_id: i64, effect: &DogmaEffectType) {
+        let eid = Some(effect.effect_id);
+        self.item
+            .remove_modifiers_from_source_effect(source_item_id, eid);
+        self.ship
+            .remove_modifiers_from_source_effect(source_item_id, eid);
+        self.character
+            .remove_modifiers_from_source_effect(source_item_id, eid);
+        self.target
+            .remove_modifiers_from_source_effect(source_item_id, eid);
+        self.other
+            .remove_modifiers_from_source_effect(source_item_id, eid);
+        self.structure
+            .remove_modifiers_from_source_effect(source_item_id, eid);
+        for c in &mut self.ship_located_items {
+            c.remove_modifiers_from_source_effect(source_item_id, eid);
+        }
+        for c in &mut self.structure_located_items {
+            c.remove_modifiers_from_source_effect(source_item_id, eid);
+        }
+        for c in &mut self.char_located_items {
+            c.remove_modifiers_from_source_effect(source_item_id, eid);
+        }
+        for c in &mut self.target_located_items {
+            c.remove_modifiers_from_source_effect(source_item_id, eid);
+        }
+        for c in &mut self.other_located_items {
+            c.remove_modifiers_from_source_effect(source_item_id, eid);
+        }
+        for c in &mut self.item_located_items {
+            c.remove_modifiers_from_source_effect(source_item_id, eid);
+        }
+        for c in &mut self.owned_items {
+            c.remove_modifiers_from_source_effect(source_item_id, eid);
+        }
+        for spec in &effect.modifiers {
+            if spec.func == "EffectStopper" {
+                if let Some(stopped) = spec.effect_id {
+                    self.stopped_target_effects.retain(|&x| x != stopped);
+                }
+            }
         }
     }
 }
@@ -454,6 +950,8 @@ impl DogmaExpressionNode {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AttributeModifier {
     pub source_item_id: i64,
+    #[serde(default)]
+    pub effect_id: Option<EffectId>,
     pub target_attribute_id: AttributeId,
     pub operator: ModifierOperator,
     pub value: f64,
@@ -517,6 +1015,10 @@ pub struct FittedModule {
 pub struct DogmaItemState {
     pub item_id: i64,
     pub type_id: TypeId,
+    #[serde(default)]
+    pub group_id: Option<GroupId>,
+    #[serde(default)]
+    pub category_id: Option<CategoryId>,
     pub base_attributes: HashMap<AttributeId, f64>,
     pub modifiers: Vec<AttributeModifier>,
     /// Optional trained skill levels keyed by `source_item_id` for `SpecialSkillRelationship` (`dgmAssSpecialSkillRelationship`).
@@ -526,15 +1028,34 @@ pub struct DogmaItemState {
 
 impl DogmaItemState {
     pub fn from_sde(item_id: i64, type_id: TypeId, sde: &SdeRegistry) -> Self {
-        let base_attributes = sde
-            .types
-            .get(&type_id)
-            .map(|t| t.default_attributes.clone())
-            .unwrap_or_default();
+        let mut base_attributes = HashMap::new();
+        let mut group_id = None;
+        let mut category_id = None;
+        if let Some(t) = sde.types.get(&type_id) {
+            group_id = Some(t.group_id);
+            category_id = Some(t.category_id);
+            base_attributes = t.default_attributes.clone();
+            if t.mass > 0.0 {
+                base_attributes.entry(attr_ids::MASS).or_insert(t.mass);
+            }
+            if t.capacity > 0.0 {
+                base_attributes
+                    .entry(attr_ids::CAPACITY)
+                    .or_insert(t.capacity);
+            }
+            if t.volume > 0.0 {
+                base_attributes.entry(161).or_insert(t.volume);
+            }
+            if t.radius > 0.0 {
+                base_attributes.entry(162).or_insert(t.radius);
+            }
+        }
 
         Self {
             item_id,
             type_id,
+            group_id,
+            category_id,
             base_attributes,
             modifiers: Vec::new(),
             skill_levels: HashMap::new(),
@@ -551,6 +1072,19 @@ impl DogmaItemState {
 
     pub fn remove_modifiers_from_source(&mut self, source_item_id: i64) {
         self.modifiers.retain(|m| m.source_item_id != source_item_id);
+    }
+
+    pub fn remove_modifiers_from_source_effect(
+        &mut self,
+        source_item_id: i64,
+        effect_id: Option<EffectId>,
+    ) {
+        match effect_id {
+            Some(eid) => self
+                .modifiers
+                .retain(|m| !(m.source_item_id == source_item_id && m.effect_id == Some(eid))),
+            None => self.remove_modifiers_from_source(source_item_id),
+        }
     }
 
     /// Evaluates the effective value of `attribute_id` after applying all active modifiers
@@ -1372,6 +1906,7 @@ mod tests {
 
         rifter.add_modifier(AttributeModifier {
             source_item_id: 2001,
+            effect_id: None,
             target_attribute_id: attr_ids::MAX_VELOCITY,
             operator: ModifierOperator::PostPercent,
             value: 25.0,
@@ -1381,6 +1916,7 @@ mod tests {
         for id in [3001, 3002] {
             rifter.add_modifier(AttributeModifier {
                 source_item_id: id,
+                effect_id: None,
                 target_attribute_id: attr_ids::MAX_VELOCITY,
                 operator: ModifierOperator::PostPercent,
                 value: 12.5,
@@ -1391,6 +1927,203 @@ mod tests {
         let effective_vel = rifter.get_attribute(attr_ids::MAX_VELOCITY, &sde);
         let expected = 365.0 * 1.25 * (1.0 + 0.125) * (1.0 + 0.125 * stacking_penalty_factor(1));
         assert!((effective_vel - expected).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_dogma_effect_context_domain_isolation_and_semantics() {
+        let sde = SdeRegistry::with_canonical_seed();
+
+        // 1. LocationModifier must modify ONLY items located in the target domain, NOT the location entity itself,
+        //    and per-domain location lists (shipID vs structureID vs charID vs targetID) must be strictly isolated.
+        let mut src_mod = DogmaItemState::from_sde(100, 1236, &sde); // Overdrive II (Module, category 7)
+        src_mod.base_attributes.insert(20, 25.0);
+        let mut ship = DogmaItemState::from_sde(1, 587, &sde);
+        ship.base_attributes.insert(37, 200.0);
+        let mut structure = DogmaItemState::from_sde(2, 35832, &sde);
+        structure.base_attributes.insert(37, 200.0);
+
+        let mut ctx = DogmaEffectContext::new(
+            src_mod,
+            ship,
+            DogmaItemState::from_sde(3, 1373, &sde),
+            DogmaItemState::from_sde(4, 587, &sde),
+            DogmaItemState::from_sde(5, 587, &sde),
+            structure,
+        );
+        let mut ship_child = DogmaItemState::from_sde(10, 438, &sde);
+        ship_child.base_attributes.insert(37, 100.0);
+        let mut struct_child = DogmaItemState::from_sde(11, 438, &sde);
+        struct_child.base_attributes.insert(37, 100.0);
+        ctx.ship_located_items.push(ship_child);
+        ctx.structure_located_items.push(struct_child);
+
+        let loc_spec = EffectModifierSpec {
+            domain: "shipID".into(),
+            func: "LocationModifier".into(),
+            modified_attribute_id: 37,
+            modifying_attribute_id: 20,
+            operator: 6, // PostPercent (+25%)
+            group_id: None,
+            skill_type_id: None,
+            effect_id: None,
+        };
+        assert_eq!(ctx.apply_modifier_spec_with_effect(100, Some(9001), &loc_spec, &sde), 1);
+        // Ship itself must NOT be modified by LocationModifier
+        assert_eq!(ctx.ship.get_attribute(37, &sde), 200.0);
+        // Item located in shipID is modified (+25% -> 125.0)
+        assert!((ctx.ship_located_items[0].get_attribute(37, &sde) - 125.0).abs() < 1e-6);
+        // Item located in structureID is isolated and untouched (100.0)
+        assert_eq!(ctx.structure_located_items[0].get_attribute(37, &sde), 100.0);
+
+        // 2. LocationRequiredSkillModifier must NOT apply to items that have no required skills
+        let mut no_skill_item = DogmaItemState {
+            item_id: 12,
+            type_id: 0,
+            group_id: Some(10),
+            category_id: Some(7),
+            base_attributes: HashMap::from([(51, 1000.0)]),
+            modifiers: Vec::new(),
+            skill_levels: HashMap::new(),
+        };
+        let srq_spec = EffectModifierSpec {
+            domain: "shipID".into(),
+            func: "LocationRequiredSkillModifier".into(),
+            modified_attribute_id: 51,
+            modifying_attribute_id: 20,
+            operator: 6,
+            group_id: None,
+            skill_type_id: Some(3319),
+            effect_id: None,
+        };
+        let srq_vm = compile_modifier_spec_to_vm(&srq_spec, false).unwrap();
+        srq_vm.execute_on_target(100, &ctx.item, &mut no_skill_item, &sde);
+        assert!(
+            no_skill_item.modifiers.is_empty(),
+            "Item with no required skills must not match LocationRequiredSkillModifier"
+        );
+
+        // 3. LocationGroupModifier must NOT apply when the target item's group is unknown (0 / None)
+        let mut unknown_grp_item = DogmaItemState {
+            item_id: 13,
+            type_id: 0,
+            group_id: None,
+            category_id: None,
+            base_attributes: HashMap::from([(64, 100.0)]),
+            modifiers: Vec::new(),
+            skill_levels: HashMap::new(),
+        };
+        let grp_spec = EffectModifierSpec {
+            domain: "shipID".into(),
+            func: "LocationGroupModifier".into(),
+            modified_attribute_id: 64,
+            modifying_attribute_id: 20,
+            operator: 6,
+            group_id: Some(55),
+            skill_type_id: None,
+            effect_id: None,
+        };
+        let grp_vm = compile_modifier_spec_to_vm(&grp_spec, false).unwrap();
+        grp_vm.execute_on_target(100, &ctx.item, &mut unknown_grp_item, &sde);
+        assert!(
+            unknown_grp_item.modifiers.is_empty(),
+            "Item with unknown group must not match LocationGroupModifier"
+        );
+
+        // 4. Per-effect removal: removing one effect from source_item_id must leave other effects from the same source intact
+        let eff_a = DogmaEffectType {
+            effect_id: 9010,
+            name: "effA".into(),
+            effect_category: 4,
+            is_offensive: false,
+            is_assistance: false,
+            modifiers: vec![EffectModifierSpec {
+                domain: "shipID".into(),
+                func: "ItemModifier".into(),
+                modified_attribute_id: 37,
+                modifying_attribute_id: 20,
+                operator: 2, // ModAdd (+25)
+                group_id: None,
+                skill_type_id: None,
+                effect_id: None,
+            }],
+        };
+        let eff_b = DogmaEffectType {
+            effect_id: 9011,
+            name: "effB".into(),
+            effect_category: 4,
+            is_offensive: false,
+            is_assistance: false,
+            modifiers: vec![EffectModifierSpec {
+                domain: "shipID".into(),
+                func: "ItemModifier".into(),
+                modified_attribute_id: 37,
+                modifying_attribute_id: 20,
+                operator: 6, // PostPercent (+25%)
+                group_id: None,
+                skill_type_id: None,
+                effect_id: None,
+            }],
+        };
+        ctx.apply_effect(100, &eff_a, &sde);
+        ctx.apply_effect(100, &eff_b, &sde);
+        assert_eq!(ctx.ship.modifiers.len(), 2);
+        assert!((ctx.ship.get_attribute(37, &sde) - (200.0 + 25.0) * 1.25).abs() < 1e-6);
+
+        // Remove only eff_a; eff_b from the same source_item_id (100) must remain active!
+        ctx.remove_effect(100, &eff_a);
+        assert_eq!(ctx.ship.modifiers.len(), 1);
+        assert_eq!(ctx.ship.modifiers[0].effect_id, Some(9011));
+        assert!((ctx.ship.get_attribute(37, &sde) - 200.0 * 1.25).abs() < 1e-6);
+
+        // 5. Source-category stacking-penalty exemptions:
+        //    Skills (category 16), Ships (category 6), Implants (category 20), Subsystems (category 32),
+        //    and Boosters (group 303) are exempt (stacking_penalized == false),
+        //    whereas Modules (category 7) are stacking-penalized (stacking_penalized == true).
+        let mut skill_src = DogmaItemState::from_sde(201, 3449, &sde); // Navigation (Skill, category 16)
+        skill_src.base_attributes.insert(20, 25.0);
+        let mut ship_src = DogmaItemState::from_sde(202, 587, &sde); // Rifter (Ship, category 6)
+        ship_src.base_attributes.insert(20, 25.0);
+        let implant_src = DogmaItemState {
+            item_id: 203,
+            type_id: 0,
+            group_id: Some(300),
+            category_id: Some(20), // Implant (category 20)
+            base_attributes: HashMap::from([(20, 25.0)]),
+            modifiers: Vec::new(),
+            skill_levels: HashMap::new(),
+        };
+        let subsys_src = DogmaItemState {
+            item_id: 204,
+            type_id: 0,
+            group_id: Some(954),
+            category_id: Some(32), // Subsystem (category 32)
+            base_attributes: HashMap::from([(20, 25.0)]),
+            modifiers: Vec::new(),
+            skill_levels: HashMap::new(),
+        };
+        let booster_src = DogmaItemState {
+            item_id: 205,
+            type_id: 0,
+            group_id: Some(303), // Booster (group 303)
+            category_id: Some(20),
+            base_attributes: HashMap::from([(20, 25.0)]),
+            modifiers: Vec::new(),
+            skill_levels: HashMap::new(),
+        };
+        let mut target_ship = DogmaItemState::from_sde(1, 587, &sde);
+        let pct_vm = compile_modifier_spec_to_vm(&eff_b.modifiers[0], false).unwrap();
+        pct_vm.execute_on_target_with_effect(201, Some(9011), &skill_src, &mut target_ship, &sde);
+        pct_vm.execute_on_target_with_effect(202, Some(9012), &ship_src, &mut target_ship, &sde);
+        pct_vm.execute_on_target_with_effect(203, Some(9013), &implant_src, &mut target_ship, &sde);
+        pct_vm.execute_on_target_with_effect(204, Some(9014), &subsys_src, &mut target_ship, &sde);
+        pct_vm.execute_on_target_with_effect(205, Some(9015), &booster_src, &mut target_ship, &sde);
+        pct_vm.execute_on_target_with_effect(100, Some(9016), &ctx.item, &mut target_ship, &sde);
+        assert!(!target_ship.modifiers[0].stacking_penalized);
+        assert!(!target_ship.modifiers[1].stacking_penalized);
+        assert!(!target_ship.modifiers[2].stacking_penalized);
+        assert!(!target_ship.modifiers[3].stacking_penalized);
+        assert!(!target_ship.modifiers[4].stacking_penalized);
+        assert!(target_ship.modifiers[5].stacking_penalized);
     }
 
     #[test]

@@ -380,8 +380,8 @@
   "note": "Implemented eve-testkit JSONL attestation crate, parity tag documentation, and machoNet.GetTime RPC test."
  },
  "T-2": {
-  "assessment": "NOT STARTED",
-  "note": ""
+  "assessment": "PARTIAL",
+  "note": "Implemented Dogma modifierInfo evaluator and effect sweep plus SDE domain and SQLite static resource sweeps; remaining FSD binary loaders and expression-only effects pending."
  },
  "T-3": {
   "assessment": "NOT STARTED",
@@ -417,7 +417,7 @@
  },
  "Z-4": {
   "assessment": "PARTIAL",
-  "note": "Initial staticdata resource attested via eve-testkit; full SDE and effect sweeps pending."
+  "note": "Attested lossless SQLite staticdata resources against client files; remaining staticdata loaders and expression-only Dogma effects stay open."
  },
  "Z-5": {
   "assessment": "PARTIAL",
