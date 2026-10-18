@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 
 pub mod config;
+pub mod esi;
 pub mod formulas;
 pub mod living_world;
 pub mod router;
