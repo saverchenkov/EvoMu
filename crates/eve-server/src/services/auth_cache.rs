@@ -253,10 +253,13 @@ pub fn handle(
                     Ok(ch.balance.to_wire_f64())
                 });
                 match new_bal {
-                    Ok(bal) => Some(Ok(PyRep::keyval([
-                        ("command", PyRep::String(cmd.to_string())),
-                        ("newBalanceISK", PyRep::Real(bal)),
-                    ]))),
+                    Ok(bal) => {
+                        let _ = ctx.notify_account_change(cid, "cash", cid, bal);
+                        Some(Ok(PyRep::keyval([
+                            ("command", PyRep::String(cmd.to_string())),
+                            ("newBalanceISK", PyRep::Real(bal)),
+                        ])))
+                    }
                     Err(e) => Some(Err(e)),
                 }
             } else if let Some(rest) = cmd.strip_prefix("/ban ") {
@@ -381,6 +384,6 @@ pub fn handle(
             }
         }
 
-        _ => None,
+        _ => super::config_service::handle(ctx, session, service, method, args, _kwargs),
     }
 }

@@ -4,6 +4,7 @@
 //! session validation, and central RPC dispatch across the 12 modular domain services.
 
 pub mod binding;
+pub mod cache_notifications;
 pub mod context;
 pub mod dispatch;
 pub mod session;
@@ -11,4 +12,5 @@ pub mod session;
 #[cfg(test)]
 mod tests;
 
+pub use cache_notifications::*;
 pub use context::*;

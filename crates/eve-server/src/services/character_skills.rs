@@ -12,7 +12,7 @@ use eve_db::{
     TrainedSkillRecord,
 };
 use eve_machonet::SessionState;
-use eve_proto::{BridgeRpcError, PyRep};
+use eve_proto::{BridgeRpcError, DBRowDescriptor, PyRep};
 use eve_sde::{attr_ids, TypeId};
 use std::collections::HashMap;
 
@@ -36,33 +36,48 @@ pub fn handle(
                 Err(e) => return Some(Err(e)),
             };
             let chars = ctx.db.get_characters_for_user(user_id);
-            let rows = chars
-                .into_iter()
-                .map(|c| {
-                    vec![
-                        PyRep::Integer(c.character_id),
-                        PyRep::String(c.name),
-                        PyRep::Integer(c.corporation_id),
-                        PyRep::Integer(c.station_id.unwrap_or(0)),
-                        PyRep::Integer(c.solar_system_id as i64),
-                        PyRep::Real(c.balance.to_wire_f64()),
-                        PyRep::Real(c.skill_points),
-                    ]
-                })
-                .collect();
+            let rows = ctx.db.with_snapshot(|snap| {
+                chars
+                    .into_iter()
+                    .map(|c| {
+                        let (ship_type_rep, ship_name_rep) = snap
+                            .items
+                            .get(&c.active_ship_id)
+                            .map(|item| {
+                                let name = ctx
+                                    .sde
+                                    .types
+                                    .get(&item.type_id)
+                                    .map(|t| PyRep::String(t.name.clone()))
+                                    .unwrap_or(PyRep::None);
+                                (PyRep::Integer(item.type_id as i64), name)
+                            })
+                            .unwrap_or((PyRep::None, PyRep::None));
+                        vec![
+                            PyRep::Integer(c.character_id),
+                            PyRep::String(c.name),
+                            PyRep::Integer(c.corporation_id),
+                            c.alliance_id.map(PyRep::Integer).unwrap_or(PyRep::None),
+                            c.station_id
+                                .or(c.structure_id)
+                                .map(PyRep::Integer)
+                                .unwrap_or(PyRep::None),
+                            PyRep::Integer(c.solar_system_id as i64),
+                            PyRep::Integer(c.constellation_id as i64),
+                            PyRep::Integer(c.region_id as i64),
+                            PyRep::Real(c.balance.to_wire_f64()),
+                            PyRep::Real(c.skill_points),
+                            ship_type_rep,
+                            ship_name_rep,
+                            PyRep::Real(c.security_status),
+                        ]
+                    })
+                    .collect()
+            });
 
-            Some(Ok(PyRep::rowset(
-                vec![
-                    "characterID",
-                    "characterName",
-                    "corporationID",
-                    "stationID",
-                    "solarSystemID",
-                    "balance",
-                    "skillPoints",
-                ],
-                rows,
-            )))
+            Some(Ok(
+                DBRowDescriptor::character_select_list_header().build_crowset(rows),
+            ))
         }
 
         ("charUnboundMgr", "GetCharacterInfo") => {
@@ -189,6 +204,19 @@ pub fn handle(
             };
 
             ctx.release_session_bindings(session.session_id);
+            if ctx
+                .db
+                .get_online_session(user_id)
+                .is_some_and(|os| os.session_id == session.session_id)
+            {
+                let _ = ctx.db.acquire_online_lock(
+                    user_id,
+                    session.session_id,
+                    Some(c.character_id),
+                    false,
+                    ctx.now_unix(),
+                );
+            }
             session.character_id = Some(c.character_id);
             session.corporation_id = Some(c.corporation_id);
             session.alliance_id = c.alliance_id;

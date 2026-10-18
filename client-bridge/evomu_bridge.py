@@ -114,20 +114,78 @@ def from_pyrep_json(node):
         return val
     if tag in ("Buffer", "Bytes", "Picked"):
         return bytes(bytearray(val))
+    if tag in ("SubStream", "SubStruct"):
+        return from_pyrep_json(val)
+    if tag == "ChecksumedStream":
+        if isinstance(val, dict) and "body" in val:
+            return from_pyrep_json(val["body"])
+        return from_pyrep_json(val)
+    if tag == "Object":
+        type_name = val.get("type_name") if isinstance(val, dict) else None
+        args_py = from_pyrep_json(val.get("args")) if isinstance(val, dict) else None
+        if (
+            type_name == "objectCaching.CachedMethodCallResult"
+            and isinstance(args_py, tuple)
+            and len(args_py) >= 2
+        ):
+            return args_py[1]
+        if (
+            type_name == "objectCaching.CachedObject"
+            and isinstance(args_py, tuple)
+            and len(args_py) >= 7
+        ):
+            return LocalKeyVal(
+                {
+                    "type_name": type_name,
+                    "__klass__": type_name,
+                    "objectVersion": args_py[0],
+                    "version": args_py[1],
+                    "nodeID": args_py[2],
+                    "shared": args_py[3],
+                    "lret": args_py[4],
+                    "compressed": args_py[5],
+                    "objectID": args_py[6],
+                }
+            )
+        if isinstance(args_py, LocalKeyVal):
+            args_py["__klass__"] = type_name
+            args_py["type_name"] = type_name
+            return args_py
+        return LocalKeyVal({"__klass__": type_name, "type_name": type_name, "args": args_py})
     if tag == "Tuple":
         return tuple(from_pyrep_json(x) for x in val)
     if tag == "List":
         return [from_pyrep_json(x) for x in val]
     if tag == "Dict":
         return {from_pyrep_json(k): from_pyrep_json(v) for k, v in val}
-    if tag in ("KeyVal", "DBRow"):
+    if tag == "KeyVal":
         return LocalKeyVal({k: from_pyrep_json(v) for k, v in val.items()})
-    if tag == "Object":
-        args_obj = from_pyrep_json(val.get("args"))
-        if isinstance(args_obj, LocalKeyVal):
-            args_obj["__klass__"] = val.get("type_name")
-            return args_obj
-        return LocalKeyVal({"__klass__": val.get("type_name"), "args": args_obj})
+    if tag == "DBRow":
+        if isinstance(val, dict) and "columns" in val:
+            cols = val["columns"]
+            if isinstance(cols, dict):
+                return LocalKeyVal({k: from_pyrep_json(v) for k, v in cols.items()})
+            return LocalKeyVal({k: from_pyrep_json(v) for k, v in cols})
+        return LocalKeyVal({k: from_pyrep_json(v) for k, v in val.items()})
+    if tag == "ObjectEx":
+        list_items = [from_pyrep_json(x) for x in val.get("list", [])]
+        dict_items = {from_pyrep_json(k): from_pyrep_json(v) for k, v in val.get("dict", [])}
+        hdr = val.get("header")
+        hdr_py = from_pyrep_json(hdr) if hdr is not None else None
+        is_indexed = (
+            isinstance(hdr_py, tuple)
+            and len(hdr_py) > 0
+            and isinstance(hdr_py[0], tuple)
+            and len(hdr_py[0]) > 0
+            and hdr_py[0][0] == "dbutil.CIndexedRowset"
+        ) or (
+            isinstance(hdr_py, tuple)
+            and len(hdr_py) > 0
+            and hdr_py[0] == "dbutil.CIndexedRowset"
+        )
+        if is_indexed or (dict_items and not list_items):
+            return dict_items
+        return list_items
     if tag == "Rowset":
         cols = val["columns"]
         rows = [[from_pyrep_json(cell) for cell in row] for row in val["rows"]]
@@ -386,6 +444,55 @@ def _run_self_tests():
 
     dbrow = from_pyrep_json({"$py": "DBRow", "val": {"itemID": {"$py": "Integer", "val": 42}}})
     assert isinstance(dbrow, LocalKeyVal) and dbrow.itemID == 42
+
+    packed_dbrow = from_pyrep_json({
+        "$py": "DBRow",
+        "val": {
+            "header": {"$py": "None"},
+            "columns": [["itemID", {"$py": "Integer", "val": 42}], ["typeID", {"$py": "Integer", "val": 587}]],
+            "raw_rle": [],
+        },
+    })
+    assert isinstance(packed_dbrow, LocalKeyVal) and packed_dbrow.itemID == 42 and packed_dbrow.typeID == 587
+
+    crowset = from_pyrep_json({
+        "$py": "ObjectEx",
+        "val": {
+            "is_type_2": True,
+            "header": {"$py": "Tuple", "val": []},
+            "list": [{
+                "$py": "DBRow",
+                "val": {
+                    "header": {"$py": "None"},
+                    "columns": [["itemID", {"$py": "Integer", "val": 1001001}]],
+                    "raw_rle": [],
+                },
+            }],
+            "dict": [],
+        },
+    })
+    assert isinstance(crowset, list) and len(crowset) == 1 and crowset[0].itemID == 1001001
+
+    cindexed = from_pyrep_json({
+        "$py": "ObjectEx",
+        "val": {
+            "is_type_2": True,
+            "header": {"$py": "Tuple", "val": []},
+            "list": [],
+            "dict": [[
+                {"$py": "Integer", "val": 34},
+                {
+                    "$py": "DBRow",
+                    "val": {
+                        "header": {"$py": "None"},
+                        "columns": [["typeID", {"$py": "Integer", "val": 34}], ["price", {"$py": "Real", "val": 5.25}]],
+                        "raw_rle": [],
+                    },
+                },
+            ]],
+        },
+    })
+    assert isinstance(cindexed, dict) and cindexed[34].price == 5.25
 
     rs = from_pyrep_json({
         "$py": "Rowset",

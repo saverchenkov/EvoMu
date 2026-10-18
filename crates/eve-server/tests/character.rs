@@ -30,7 +30,7 @@ async fn test_phase_0_s4_split_shared_handlers_and_jump_clones() {
         )
         .await
         .expect("GetCharactersToSelect");
-    assert!(matches!(chars_list, PyRep::Rowset { .. }));
+    assert!(chars_list.is_crowset());
     let char_info_missing_arg = ctx
         .dispatch_rpc(
             &mut sess,
@@ -357,3 +357,967 @@ async fn test_phase_0_s4_split_shared_handlers_and_jump_clones() {
         .await;
     assert_eq!(cooldown_err.unwrap_err().code, "CloneJumpCooldownActive");
 }
+
+#[tokio::test]
+async fn test_p1_p2_wire_row_encoders_and_service_crowsets() {
+    // parity: plan:P-1
+    use eve_proto::{marshal, DBRowDescriptor};
+
+    let ctx = ServerContext::new();
+    ctx.seed_demo_world_fixtures();
+    let kw = HashMap::new();
+    let mut sess = SessionState::new(905);
+    common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
+
+    // 1. charUnboundMgr.GetCharactersToSelect returns dbutil.CRowset of packed DBRows that round-trip through marshal
+    let chars_crowset = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "charUnboundMgr",
+            None,
+            "GetCharactersToSelect",
+            &[],
+            &kw,
+            None,
+        )
+        .await
+        .expect("GetCharactersToSelect");
+    assert!(chars_crowset.is_crowset());
+    let chars_wire = marshal::encode(&chars_crowset);
+    let chars_decoded = marshal::decode(&chars_wire).expect("decode GetCharactersToSelect CRowset");
+    assert_eq!(chars_decoded, chars_crowset);
+    let rows = chars_decoded.crowset_rows().expect("crowset rows");
+    assert!(!rows.is_empty());
+    assert_eq!(
+        rows[0].dbrow_get("characterID"),
+        Some(&PyRep::Integer(90_000_001))
+    );
+    assert_eq!(
+        rows[0].dbrow_get("characterName"),
+        Some(&PyRep::String("Aura Capsuleer".into()))
+    );
+    assert_eq!(
+        rows[0].dbrow_get("shipTypeID"),
+        Some(&PyRep::Integer(587))
+    );
+    assert_eq!(
+        rows[0].dbrow_get("shipName"),
+        Some(&PyRep::String("Rifter".into()))
+    );
+
+    ctx.dispatch_rpc(
+        &mut sess,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(90_000_001)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("SelectCharacterID");
+
+    // 2. invbroker.GetItemDescriptor and invbroker.List / GetContainerContents return canonical DBRowDescriptor & dbutil.CRowset
+    let item_desc_rep = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "invbroker",
+            None,
+            "GetItemDescriptor",
+            &[],
+            &kw,
+            None,
+        )
+        .await
+        .expect("GetItemDescriptor");
+    let parsed_desc = DBRowDescriptor::from_pyrep(&item_desc_rep).expect("parse DBRowDescriptor");
+    assert_eq!(parsed_desc, DBRowDescriptor::inv_item_header());
+
+    // invbroker.List uses the bound inventory location (or active station/ship) and optional flag filter
+    let inv_list = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "invbroker",
+            None,
+            "List",
+            &[PyRep::Integer(4)], // Hangar flag filter
+            &kw,
+            None,
+        )
+        .await
+        .expect("invbroker.List");
+    assert!(inv_list.is_crowset());
+    let inv_wire = marshal::encode(&inv_list);
+    let inv_decoded = marshal::decode(&inv_wire).expect("decode invbroker.List CRowset");
+    assert_eq!(inv_decoded, inv_list);
+    let inv_rows = inv_decoded.crowset_rows().unwrap();
+    assert!(!inv_rows.is_empty());
+    assert!(inv_rows[0].dbrow_get("itemID").is_some());
+    assert!(inv_rows[0].dbrow_get("groupID").is_some());
+    assert!(inv_rows[0].dbrow_get("categoryID").is_some());
+    assert_eq!(
+        inv_rows[0].dbrow_get("customInfo"),
+        Some(&PyRep::String(String::new()))
+    );
+
+    // invbroker.GetContainerContents requires a real owned/accessible container item
+    let container_contents = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "invbroker",
+            None,
+            "GetContainerContents",
+            &[PyRep::Integer(100_000_001)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("invbroker.GetContainerContents on owned ship");
+    assert!(container_contents.is_crowset());
+
+    // 3. marketProxy.GetOrders returns a (sell_crowset, buy_crowset) 2-tuple of dbutil.CRowsets
+    let orders_rep = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "marketProxy",
+            None,
+            "GetOrders",
+            &[PyRep::Integer(34)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("marketProxy.GetOrders");
+    let orders_wire = marshal::encode(&orders_rep);
+    let orders_decoded = marshal::decode(&orders_wire).expect("decode marketProxy.GetOrders");
+    assert_eq!(orders_decoded, orders_rep);
+    let PyRep::Tuple(order_pair) = orders_decoded else {
+        panic!("Expected (sell, buy) Tuple from marketProxy.GetOrders");
+    };
+    assert_eq!(order_pair.len(), 2);
+    assert!(order_pair[0].is_crowset());
+    assert!(order_pair[1].is_crowset());
+    let sell_rows = order_pair[0].crowset_rows().unwrap();
+    assert!(!sell_rows.is_empty());
+    assert_eq!(sell_rows[0].dbrow_get("typeID"), Some(&PyRep::Integer(34)));
+    assert_eq!(sell_rows[0].dbrow_get("bid"), Some(&PyRep::Bool(false)));
+
+    // 4. marketProxy.GetStationAsks and GetRegionBest return dbutil.CIndexedRowset keyed by typeID
+    for method in ["GetStationAsks", "GetRegionBest"] {
+        let asks = ctx
+            .dispatch_rpc(&mut sess, "marketProxy", None, method, &[], &kw, None)
+            .await
+            .expect(method);
+        assert!(asks.is_cindexed_rowset());
+        let asks_wire = marshal::encode(&asks);
+        assert_eq!(marshal::decode(&asks_wire).unwrap(), asks);
+        assert!(!asks.cindexed_rowset_entries().unwrap().is_empty());
+    }
+
+    // Undocked calls to GetStationAsks fail cleanly with NotDockedAtStation
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c) = snap.characters.get_mut(&90_000_001) {
+            c.station_id = None;
+        }
+    });
+    sess.station_id = None;
+    let undocked_err = ctx
+        .dispatch_rpc(&mut sess, "marketProxy", None, "GetStationAsks", &[], &kw, None)
+        .await
+        .expect_err("GetStationAsks requires station_id");
+    assert_eq!(undocked_err.code, "NotDockedAtStation");
+}
+
+#[tokio::test]
+async fn test_r50_p1_1_container_contents_ownership_and_range_enforcement() {
+    use eve_destiny::{Ball, MovementMode};
+    use glam::DVec3;
+
+    let ctx = ServerContext::new();
+    let mut sess = SessionState::new(981);
+    let kw = HashMap::new();
+
+    ctx.dispatch_rpc(
+        &mut sess,
+        "authentication",
+        None,
+        "Login",
+        &[
+            PyRep::String("demo".into()),
+            PyRep::String("demo-secret".into()),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Login");
+    ctx.dispatch_rpc(
+        &mut sess,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(90_000_001)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("SelectCharacterID");
+
+    // Put character 90_000_001 in space in Jita (30000142) aboard ship 100_000_001 at (0, 0, 0)
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c) = snap.characters.get_mut(&90_000_001) {
+            c.station_id = None;
+            c.solar_system_id = 30_000_142;
+        }
+        // 1) Another player's ship in Jita (category 6, type 587) -> must NEVER be inspectable
+        snap.items.insert(
+            990_000_001,
+            eve_db::InventoryItemRecord {
+                item_id: 990_000_001,
+                type_id: 587,
+                owner_id: 90_000_002,
+                location_id: 30_000_142,
+                flag: eve_db::InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                is_blueprint_copy: false,
+                blueprint_runs_remaining: None,
+                source_mutaplasmid_id: None,
+                insured_payout_isk: 0.0,
+                dynamic_attributes: HashMap::new(),
+            },
+        );
+        // 2) Cargo container (type 23, group 12) in another solar system (Perimeter = 30000144)
+        snap.items.insert(
+            990_000_002,
+            eve_db::InventoryItemRecord {
+                item_id: 990_000_002,
+                type_id: 23,
+                owner_id: 90_000_002,
+                location_id: 30_000_144,
+                flag: eve_db::InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                is_blueprint_copy: false,
+                blueprint_runs_remaining: None,
+                source_mutaplasmid_id: None,
+                insured_payout_isk: 0.0,
+                dynamic_attributes: HashMap::new(),
+            },
+        );
+        // 3) Cargo container (type 23, group 12) in Jita (30000142)
+        snap.items.insert(
+            990_000_003,
+            eve_db::InventoryItemRecord {
+                item_id: 990_000_003,
+                type_id: 23,
+                owner_id: 90_000_002,
+                location_id: 30_000_142,
+                flag: eve_db::InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                is_blueprint_copy: false,
+                blueprint_runs_remaining: None,
+                source_mutaplasmid_id: None,
+                insured_payout_isk: 0.0,
+                dynamic_attributes: HashMap::new(),
+            },
+        );
+        // Loot item inside container 990_000_003
+        snap.items.insert(
+            990_000_004,
+            eve_db::InventoryItemRecord {
+                item_id: 990_000_004,
+                type_id: 34,
+                owner_id: 90_000_002,
+                location_id: 990_000_003,
+                flag: eve_db::InventoryFlag::Cargo,
+                quantity: 500,
+                singleton: false,
+                version: 1,
+                is_blueprint_copy: false,
+                blueprint_runs_remaining: None,
+                source_mutaplasmid_id: None,
+                insured_payout_isk: 0.0,
+                dynamic_attributes: HashMap::new(),
+            },
+        );
+    });
+
+    let jita = ctx.systems.get_or_spawn(30_000_142);
+    jita.spawn_ball(Ball {
+        id: 100_000_001,
+        type_id: 606,
+        position: DVec3::ZERO,
+        velocity: DVec3::ZERO,
+        max_velocity: 300.0,
+        inertia: 1.0,
+        mass: 1_000_000.0,
+        radius: 40.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    })
+    .await
+    .expect("spawn player ship");
+
+    jita.spawn_ball(Ball {
+        id: 990_000_001,
+        type_id: 587,
+        position: DVec3::new(500.0, 0.0, 0.0),
+        velocity: DVec3::ZERO,
+        max_velocity: 300.0,
+        inertia: 1.0,
+        mass: 1_000_000.0,
+        radius: 40.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    })
+    .await
+    .expect("spawn other player ship");
+
+    // 1. Another player's in-space ship is rejected even at 500m
+    let ship_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "invbroker",
+            None,
+            "GetContainerContents",
+            &[PyRep::Integer(990_000_001)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("another player's ship must not be inspectable");
+    assert_eq!(ship_err.code, "CantDoThatWithSomeoneElsesStuff");
+
+    // 2. Container in another solar system (30000144) is rejected
+    let sys_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "invbroker",
+            None,
+            "GetContainerContents",
+            &[PyRep::Integer(990_000_002)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("container in another system must be rejected");
+    assert_eq!(sys_err.code, "CantDoThatWithSomeoneElsesStuff");
+
+    // 3. Container in same solar system but 10,000m away (> 2,500m) is rejected
+    jita.spawn_ball(Ball {
+        id: 990_000_003,
+        type_id: 23,
+        position: DVec3::new(10_000.0, 0.0, 0.0),
+        velocity: DVec3::ZERO,
+        max_velocity: 0.0,
+        inertia: 1.0,
+        mass: 1_000.0,
+        radius: 10.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    })
+    .await
+    .expect("spawn far container");
+
+    let range_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "invbroker",
+            None,
+            "GetContainerContents",
+            &[PyRep::Integer(990_000_003)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("container beyond 2,500m must be rejected");
+    assert_eq!(range_err.code, "CantDoThatWithSomeoneElsesStuff");
+
+    // 4. Move container within 1,500m (<= 2,500m) in same system -> accepted!
+    jita.remove_ball(990_000_003).await.expect("remove far ball");
+    jita.spawn_ball(Ball {
+        id: 990_000_003,
+        type_id: 23,
+        position: DVec3::new(1_500.0, 0.0, 0.0),
+        velocity: DVec3::ZERO,
+        max_velocity: 0.0,
+        inertia: 1.0,
+        mass: 1_000.0,
+        radius: 10.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    })
+    .await
+    .expect("spawn near container");
+
+    let near_ok = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "invbroker",
+            None,
+            "GetContainerContents",
+            &[PyRep::Integer(990_000_003)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("in-range cargo container in same system should succeed");
+    assert!(near_ok.is_crowset());
+    let rows = near_ok.crowset_rows().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].dbrow_get("itemID"), Some(&PyRep::Integer(990_000_004)));
+}
+
+#[tokio::test]
+async fn test_p3_p4_p5_object_cache_config_service_and_notifications() {
+    use eve_machonet::{MachoAddress, MachoPacket, MachoPacketType};
+    use eve_proto::{marshal, DBRowDescriptor};
+    use eve_server::router::NotificationTarget;
+
+    let ctx = ServerContext::new();
+    let mut sess = SessionState::new(982);
+    let kw = HashMap::new();
+
+    ctx.dispatch_rpc(
+        &mut sess,
+        "authentication",
+        None,
+        "Login",
+        &[
+            PyRep::String("demo".into()),
+            PyRep::String("demo-secret".into()),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Login");
+    ctx.dispatch_rpc(
+        &mut sess,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(90_000_001)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("SelectCharacterID");
+
+    // ========================================================================
+    // P-3: objectCaching.GetCachableObject, CachedMethodCallResult, Invalidation
+    // ========================================================================
+    let units_oid = ServerContext::method_call_object_id("config", "GetUnits");
+    let cached_units_obj = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "objectCaching",
+            None,
+            "GetCachableObject",
+            &[
+                PyRep::Bool(false),
+                units_oid.clone(),
+                PyRep::Tuple(vec![PyRep::Integer(0), PyRep::Integer(0)]),
+                PyRep::Integer(888_444),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect("objectCaching.GetCachableObject(config.GetUnits)");
+
+    // Verify wire round-trip of objectCaching.CachedObject and inner marshaled payload
+    let co_wire = marshal::encode(&cached_units_obj);
+    let co_decoded = marshal::decode(&co_wire).expect("decode objectCaching.CachedObject");
+    assert_eq!(co_decoded, cached_units_obj);
+    let (ts1, ver1) = match &co_decoded {
+        PyRep::Object { type_name, args } => {
+            assert_eq!(type_name, "objectCaching.CachedObject");
+            let PyRep::Tuple(items) = args.as_ref() else {
+                panic!("Expected 7-tuple in objectCaching.CachedObject");
+            };
+            assert_eq!(items.len(), 7);
+            let PyRep::Tuple(ver_pair) = &items[0] else {
+                panic!("Expected (timestamp, version) tuple");
+            };
+            let ts = ver_pair[0].as_i64().unwrap();
+            let ver = ver_pair[1].as_i64().unwrap();
+            let PyRep::Buffer(inner_bytes) = &items[4] else {
+                panic!("Expected Buffer in CachedObject lret");
+            };
+            let inner_rep = marshal::decode(inner_bytes).expect("decode inner cached payload");
+            assert!(matches!(inner_rep, PyRep::IndexRowset { .. }));
+            assert_eq!(items[6], units_oid);
+            (ts, ver)
+        }
+        other => panic!("Expected PyRep::Object, got {other:?}"),
+    };
+
+    // Verify CachedMethodCallResult inline and hint forms round-trip through marshal
+    let wrapped_cmcr = ctx.cache_method_call_result(
+        "config",
+        "GetUnits",
+        ctx.build_config_units_payload(),
+        "run",
+        None,
+    );
+    let cmcr_wire = marshal::encode(&wrapped_cmcr);
+    assert_eq!(marshal::decode(&cmcr_wire).unwrap(), wrapped_cmcr);
+
+    // Unknown config.* cache key must fail with CachedObjectNotFound (no empty-rowset fallback)
+    let unknown_cache_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "objectCaching",
+            None,
+            "GetCachableObject",
+            &[
+                PyRep::Integer(0),
+                PyRep::Tuple(vec![
+                    PyRep::String("Method Call".into()),
+                    PyRep::String("server".into()),
+                    PyRep::Tuple(vec![
+                        PyRep::String("config".into()),
+                        PyRep::String("NonExistentCacheMethod".into()),
+                    ]),
+                ]),
+                PyRep::Tuple(vec![PyRep::Integer(0), PyRep::Integer(0)]),
+                PyRep::Integer(1),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("unknown cache key must return CachedObjectNotFound");
+    assert_eq!(unknown_cache_err.code, "CachedObjectNotFound");
+
+    // Non-GM caller must be rejected on objectCaching.InvalidateCachedObjects
+    let non_gm_inv = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "objectCaching",
+            None,
+            "InvalidateCachedObjects",
+            &[PyRep::List(vec![units_oid.clone()])],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("non-GM InvalidateCachedObjects must fail");
+    assert_eq!(non_gm_inv.code, "InsufficientRole");
+
+    // Grant GM role, invalidate, and re-populate with updated payload -> timestamp strictly advances and version changes
+    sess.role |= eve_db::service_roles::ROLE_GML;
+    let inv_cnt = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "objectCaching",
+            None,
+            "InvalidateCachedObjects",
+            &[PyRep::List(vec![units_oid.clone()])],
+            &kw,
+            None,
+        )
+        .await
+        .expect("InvalidateCachedObjects as GM");
+    assert_eq!(inv_cnt, PyRep::Integer(1));
+    let rec2 = ctx.put_cached_object(
+        units_oid.clone(),
+        PyRep::rowset(vec!["unitID"], vec![vec![PyRep::Integer(999)]]),
+        true,
+    );
+    assert!(rec2.timestamp > ts1);
+    assert_ne!(rec2.version as i64, ver1);
+    let hint_rep = rec2.to_cached_method_call_hint_pyrep("run");
+    assert_eq!(marshal::decode(&marshal::encode(&hint_rep)).unwrap(), hint_rep);
+    sess.role &= !eve_db::service_roles::ROLE_GML;
+
+    // ========================================================================
+    // P-4: config.* RPCs (GetMultiOwnersEx, GetMultiLocationsEx, GetMultiStationEx,
+    //      GetMultiInvTypesEx, GetMultiCorpTickerNamesEx, GetStationSolarSystemsByOwner, etc.)
+    // ========================================================================
+    let owners_rep = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "config",
+            None,
+            "GetMultiOwnersEx",
+            &[PyRep::List(vec![
+                PyRep::Integer(90_000_001),
+                PyRep::Integer(1_000_035),
+                PyRep::Integer(500_001),
+            ])],
+            &kw,
+            None,
+        )
+        .await
+        .expect("config.GetMultiOwnersEx");
+    if let PyRep::TupleSet { columns, rows } = &owners_rep {
+        assert_eq!(
+            columns,
+            &vec!["ownerID", "ownerName", "typeID", "gender", "ownerNameID"]
+        );
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0][0], PyRep::Integer(90_000_001));
+    } else {
+        panic!("Expected TupleSet from GetMultiOwnersEx");
+    }
+
+    // Invalid non-integer element in GetMultiOwnersEx must fail with InvalidArgument
+    let bad_owners = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "config",
+            None,
+            "GetMultiOwnersEx",
+            &[PyRep::List(vec![PyRep::String("not-an-int".into())])],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("non-integer in ownerIDs must fail");
+    assert_eq!(bad_owners.code, "InvalidArgument");
+
+    let locs_rep = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "config",
+            None,
+            "GetMultiLocationsEx",
+            &[PyRep::List(vec![
+                PyRep::Integer(30_000_142),
+                PyRep::Integer(60_003_760),
+                PyRep::Integer(100_000_001),
+            ])],
+            &kw,
+            None,
+        )
+        .await
+        .expect("config.GetMultiLocationsEx");
+    if let PyRep::TupleSet { columns, rows } = &locs_rep {
+        assert_eq!(
+            columns,
+            &vec![
+                "locationID",
+                "locationName",
+                "x",
+                "y",
+                "z",
+                "locationNameID"
+            ]
+        );
+        assert_eq!(rows.len(), 3);
+    } else {
+        panic!("Expected TupleSet from GetMultiLocationsEx");
+    }
+
+    let stations_rep = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "config",
+            None,
+            "GetMultiStationEx",
+            &[PyRep::List(vec![PyRep::Integer(60_003_760)])],
+            &kw,
+            None,
+        )
+        .await
+        .expect("config.GetMultiStationEx");
+    if let PyRep::TupleSet { rows, .. } = &stations_rep {
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][0], PyRep::Integer(60_003_760));
+        assert_eq!(rows[0][3], PyRep::Integer(30_000_142));
+    } else {
+        panic!("Expected TupleSet from GetMultiStationEx");
+    }
+
+    let inv_types_rep = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "config",
+            None,
+            "GetMultiInvTypesEx",
+            &[PyRep::List(vec![PyRep::Integer(34), PyRep::Integer(587)])],
+            &kw,
+            None,
+        )
+        .await
+        .expect("config.GetMultiInvTypesEx");
+    let inv_types_wire = marshal::encode(&inv_types_rep);
+    let inv_types_decoded = marshal::decode(&inv_types_wire).expect("decode GetMultiInvTypesEx");
+    assert_eq!(inv_types_decoded, inv_types_rep);
+    if let PyRep::List(rows) = &inv_types_decoded {
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].dbrow_get("typeID"), Some(&PyRep::Integer(34)));
+        assert_eq!(rows[1].dbrow_get("typeID"), Some(&PyRep::Integer(587)));
+    } else {
+        panic!("Expected List of DBRow from GetMultiInvTypesEx");
+    }
+
+    let tickers_rep = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "config",
+            None,
+            "GetMultiCorpTickerNamesEx",
+            &[PyRep::List(vec![PyRep::Integer(1_000_035)])],
+            &kw,
+            None,
+        )
+        .await
+        .expect("config.GetMultiCorpTickerNamesEx");
+    if let PyRep::List(rows) = &tickers_rep {
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].dbrow_get("corporationID"),
+            Some(&PyRep::Integer(1_000_035))
+        );
+    } else {
+        panic!("Expected List of DBRow from GetMultiCorpTickerNamesEx");
+    }
+
+    let owner_stations_rep = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "config",
+            None,
+            "GetStationSolarSystemsByOwner",
+            &[PyRep::Integer(1_000_035)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("config.GetStationSolarSystemsByOwner");
+    if let PyRep::Rowset { columns, rows } = &owner_stations_rep {
+        assert_eq!(columns, &vec!["stationID", "solarSystemID"]);
+        assert!(rows
+            .iter()
+            .any(|r| r[0] == PyRep::Integer(60_003_760) && r[1] == PyRep::Integer(30_000_142)));
+    } else {
+        panic!("Expected Rowset from GetStationSolarSystemsByOwner");
+    }
+
+    let map_rep = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "config",
+            None,
+            "GetMap",
+            &[PyRep::Integer(30_000_142)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("config.GetMap");
+    assert!(map_rep.row_count().unwrap_or(0) > 0);
+
+    let map_objs_rep = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "config",
+            None,
+            "GetMapObjects",
+            &[PyRep::Integer(30_000_142)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("config.GetMapObjects");
+    assert!(map_objs_rep.is_crowset());
+    assert!(!map_objs_rep.crowset_rows().unwrap().is_empty());
+
+    let map_conns_rep = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "config",
+            None,
+            "GetMapConnections",
+            &[PyRep::Integer(30_000_142)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("config.GetMapConnections");
+    assert!(map_conns_rep.row_count().unwrap_or(0) > 0);
+
+    // GetMultiGraphicsEx and GetCelestialStatistic must return UnimplementedRPC (no fabricated rows)
+    let graphics_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "config",
+            None,
+            "GetMultiGraphicsEx",
+            &[PyRep::List(vec![PyRep::Integer(1)])],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("GetMultiGraphicsEx must return UnimplementedRPC");
+    assert_eq!(graphics_err.code, "UnimplementedRPC");
+
+    let cel_stat_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "config",
+            None,
+            "GetCelestialStatistic",
+            &[PyRep::Integer(40_009_082)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("GetCelestialStatistic must return UnimplementedRPC");
+    assert_eq!(cel_stat_err.code, "UnimplementedRPC");
+
+    // ========================================================================
+    // P-5: Binary MachoPacket notifications & notificationMgr service
+    // ========================================================================
+    // Offline character 90_000_002 must not accumulate queued notifications
+    let offline_emitted = ctx.notify_account_change(90_000_002, "cash", 90_000_002, 100.0);
+    assert!(offline_emitted.is_empty());
+
+    let _ = ctx.drain_notifications_for_char(90_000_001);
+    let emitted_acct = ctx.notify_account_change(90_000_001, "cash", 90_000_001, 2_500_000.0);
+    assert_eq!(emitted_acct.len(), 1);
+    let corp_id = ctx.db.get_character(90_000_001).unwrap().corporation_id;
+    let _ = ctx.notify_remote_message(
+        NotificationTarget::Corporation(corp_id),
+        "CorpNews",
+        vec![("text", PyRep::String("Welcome".into()))],
+    );
+    let sample_item_row = DBRowDescriptor::inv_item_header().build_dbrow(vec![
+        PyRep::Integer(100_000_001),
+        PyRep::Integer(606),
+        PyRep::Integer(90_000_001),
+        PyRep::Integer(60_003_760),
+        PyRep::Integer(4),
+        PyRep::Integer(-1),
+        PyRep::Integer(25),
+        PyRep::Integer(6),
+        PyRep::String(String::new()),
+    ]);
+    let _ = ctx.notify_item_change(90_000_001, sample_item_row, vec![(3, PyRep::Integer(30_000_142))]);
+    let _ = ctx.notify_skill_trained(90_000_001, 200_001, 3_300, 4);
+    let created_notif = ctx.create_character_notification(
+        1_000_035,
+        90_000_001,
+        14,
+        9,
+        "bounty: 125000",
+    );
+
+    let drained = ctx.drain_notifications_for_char(90_000_001);
+    assert_eq!(drained.len(), 5);
+    for notif in &drained {
+        // Every queued notification must be a real binary-marshaled MachoPacket(Notification = 12)
+        let decoded_pyrep =
+            marshal::decode(&notif.marshaled_packet).expect("decode binary MachoPacket");
+        let pkt = MachoPacket::from_pyrep(&decoded_pyrep).expect("parse MachoPacket");
+        assert_eq!(pkt.packet_type, MachoPacketType::Notification);
+        assert_eq!(
+            pkt.destination,
+            MachoAddress::Broadcast {
+                broadcast_id: notif.event.clone(),
+                id_type: "charid".into(),
+                narrowcast: vec![90_000_001],
+            }
+        );
+    }
+
+    // Verify notificationMgr RPCs return dbutil.CRowset with DBRowDescriptor::notification_header()
+    let unproc = ctx
+        .dispatch_rpc(&mut sess, "notificationMgr", None, "GetUnprocessed", &[], &kw, None)
+        .await
+        .expect("notificationMgr.GetUnprocessed");
+    assert!(unproc.is_crowset());
+    let unproc_wire = marshal::encode(&unproc);
+    assert_eq!(marshal::decode(&unproc_wire).unwrap(), unproc);
+    let unproc_rows = unproc.crowset_rows().unwrap();
+    assert_eq!(unproc_rows.len(), 1);
+    assert_eq!(
+        unproc_rows[0].dbrow_get("notificationID"),
+        Some(&PyRep::Integer(created_notif.notification_id))
+    );
+    assert_eq!(
+        unproc_rows[0].dbrow_get("processed"),
+        Some(&PyRep::Bool(false))
+    );
+    assert_eq!(
+        unproc_rows[0].dbrow_get("data"),
+        Some(&PyRep::String("bounty: 125000".into()))
+    );
+
+    let by_grp = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "notificationMgr",
+            None,
+            "GetByGroupID",
+            &[PyRep::Integer(9)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("notificationMgr.GetByGroupID");
+    assert_eq!(by_grp.crowset_rows().unwrap().len(), 1);
+
+    let marked = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "notificationMgr",
+            None,
+            "MarkAsProcessed",
+            &[PyRep::List(vec![PyRep::Integer(
+                created_notif.notification_id,
+            )])],
+            &kw,
+            None,
+        )
+        .await
+        .expect("notificationMgr.MarkAsProcessed");
+    assert_eq!(marked, PyRep::Integer(1));
+
+    let unproc_after = ctx
+        .dispatch_rpc(&mut sess, "notificationMgr", None, "GetUnprocessed", &[], &kw, None)
+        .await
+        .expect("notificationMgr.GetUnprocessed after MarkAsProcessed");
+    assert_eq!(unproc_after.crowset_rows().unwrap().len(), 0);
+
+    let deleted = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "notificationMgr",
+            None,
+            "DeleteNotifications",
+            &[PyRep::List(vec![PyRep::Integer(
+                created_notif.notification_id,
+            )])],
+            &kw,
+            None,
+        )
+        .await
+        .expect("notificationMgr.DeleteNotifications");
+    assert_eq!(deleted, PyRep::Integer(1));
+
+    let all_after_del = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "notificationMgr",
+            None,
+            "GetAllNotifications",
+            &[],
+            &kw,
+            None,
+        )
+        .await
+        .expect("notificationMgr.GetAllNotifications after delete");
+    assert_eq!(all_after_del.crowset_rows().unwrap().len(), 0);
+}
+
+
+

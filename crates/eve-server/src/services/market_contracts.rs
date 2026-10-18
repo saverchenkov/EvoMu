@@ -9,7 +9,7 @@ use eve_db::{
     WalletJournalEntry,
 };
 use eve_machonet::SessionState;
-use eve_proto::{BridgeRpcError, PyRep};
+use eve_proto::{BridgeRpcError, DBRowDescriptor, PyRep};
 use eve_sde::TypeId;
 use std::collections::HashMap;
 
@@ -19,6 +19,46 @@ pub fn compute_sales_tax_cents(fill_gross: IskCents, seller_acct_lvl: u8) -> Isk
     let tax_rate = compute_sales_tax_rate(seller_acct_lvl);
     let tax_ppm = (tax_rate * 1_000_000.0).round() as i128;
     IskCents((((fill_gross.0 as i128) * tax_ppm + 500_000) / 1_000_000) as i64)
+}
+
+fn order_to_packed_cells(o: &MarketOrderRecord) -> Vec<PyRep> {
+    vec![
+        PyRep::Real(o.price.to_wire_f64()),
+        PyRep::Real(o.vol_remaining as f64),
+        PyRep::Integer(o.type_id as i64),
+        PyRep::Integer(o.order_id),
+        PyRep::Integer(o.vol_entered as i64),
+        PyRep::Integer(o.min_volume as i64),
+        PyRep::Bool(o.is_bid),
+        PyRep::Integer(o.station_id),
+        PyRep::Integer(o.region_id as i64),
+    ]
+}
+
+fn best_asks_to_summary_rows<'a>(
+    orders: impl Iterator<Item = &'a MarketOrderRecord>,
+) -> Vec<Vec<PyRep>> {
+    let mut best_by_type: std::collections::BTreeMap<TypeId, &MarketOrderRecord> =
+        std::collections::BTreeMap::new();
+    for o in orders {
+        match best_by_type.get(&o.type_id) {
+            Some(prev) if o.price.0 >= prev.price.0 => {}
+            _ => {
+                best_by_type.insert(o.type_id, o);
+            }
+        }
+    }
+    best_by_type
+        .into_values()
+        .map(|o| {
+            vec![
+                PyRep::Integer(o.type_id as i64),
+                PyRep::Real(o.price.to_wire_f64()),
+                PyRep::Real(o.vol_remaining as f64),
+                PyRep::Integer(o.station_id),
+            ]
+        })
+        .collect()
 }
 
 pub fn handle(
@@ -35,11 +75,7 @@ pub fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let bal = ctx
-                .db
-                .get_character(char_id)
-                .map(|c| c.balance.to_wire_f64())
-                .unwrap_or(0.0);
+            let bal = ctx.db.get_character(char_id).map(|c| c.balance.to_wire_f64()).unwrap_or(0.0);
             Some(Ok(PyRep::Real(bal)))
         }
 
@@ -63,10 +99,7 @@ pub fn handle(
                     })
                     .collect()
             });
-            Some(Ok(PyRep::rowset(
-                vec!["entryID", "entryType", "amount", "balance", "reason"],
-                rows,
-            )))
+            Some(Ok(PyRep::rowset(vec!["entryID", "entryType", "amount", "balance", "reason"], rows)))
         }
 
         ("marketProxy", "GetOrders") => {
@@ -75,47 +108,62 @@ pub fn handle(
                 Err(e) => return Some(Err(e)),
             };
             let Some(region_id) = session.region_id else {
-                return Some(Err(BridgeRpcError {
-                    code: "NoRegion".into(),
-                    message: "Session has no active region".into(),
-                }));
+                return Some(Err(BridgeRpcError { code: "NoRegion".into(), message: "Session has no active region".into() }));
             };
             let Some(raw_type_id) = args.first().and_then(|a| a.as_i64()) else {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidMarketOrder".into(),
-                    message: "GetOrders requires typeID".into(),
-                }));
+                return Some(Err(BridgeRpcError { code: "InvalidMarketOrder".into(), message: "GetOrders requires typeID".into() }));
             };
             let type_id = raw_type_id as TypeId;
-            let rows = ctx.db.with_snapshot(|snap| {
-                snap.market_orders
+            let (sell_rows, buy_rows) = ctx.db.with_snapshot(|snap| {
+                let mut sells = Vec::new();
+                let mut buys = Vec::new();
+                let mut matching: Vec<&MarketOrderRecord> = snap
+                    .market_orders
                     .values()
-                    .filter(|o| {
-                        o.type_id == type_id && o.vol_remaining > 0 && o.region_id == region_id
-                    })
-                    .map(|o| {
-                        vec![
-                            PyRep::Integer(o.order_id),
-                            PyRep::Integer(o.type_id as i64),
-                            PyRep::Bool(o.is_bid),
-                            PyRep::Real(o.price.to_wire_f64()),
-                            PyRep::Integer(o.vol_remaining as i64),
-                            PyRep::Integer(o.station_id),
-                        ]
-                    })
-                    .collect()
+                    .filter(|o| o.type_id == type_id && o.vol_remaining > 0 && o.region_id == region_id)
+                    .collect();
+                matching.sort_by_key(|o| o.order_id);
+                for o in matching {
+                    let cells = order_to_packed_cells(o);
+                    if o.is_bid {
+                        buys.push(cells);
+                    } else {
+                        sells.push(cells);
+                    }
+                }
+                (sells, buys)
             });
-            Some(Ok(PyRep::rowset(
-                vec![
-                    "orderID",
-                    "typeID",
-                    "bid",
-                    "price",
-                    "volRemaining",
-                    "stationID",
-                ],
-                rows,
-            )))
+            let hdr = DBRowDescriptor::market_order_header();
+            Some(Ok(PyRep::Tuple(vec![hdr.build_crowset(sell_rows), hdr.build_crowset(buy_rows)])))
+        }
+
+        ("marketProxy", "GetStationAsks") => {
+            if let Err(e) = ServerContext::require_character(session) {
+                return Some(Err(e));
+            }
+            let Some(station_id) = session.station_id.or(session.structure_id) else {
+                return Some(Err(BridgeRpcError { code: "NotDockedAtStation".into(), message: "GetStationAsks requires being docked at a station or structure".into() }));
+            };
+            let Some(region_id) = session.region_id else {
+                return Some(Err(BridgeRpcError { code: "NoRegion".into(), message: "Session has no active region".into() }));
+            };
+            let rows = ctx.db.with_snapshot(|snap| {
+                best_asks_to_summary_rows(snap.market_orders.values().filter(|o| !o.is_bid && o.vol_remaining > 0 && o.region_id == region_id && o.station_id == station_id))
+            });
+            Some(Ok(DBRowDescriptor::market_summary_header().build_cindexed_rowset("typeID", rows)))
+        }
+
+        ("marketProxy", "GetRegionBest") => {
+            if let Err(e) = ServerContext::require_character(session) {
+                return Some(Err(e));
+            }
+            let Some(region_id) = session.region_id else {
+                return Some(Err(BridgeRpcError { code: "NoRegion".into(), message: "Session has no active region".into() }));
+            };
+            let rows = ctx.db.with_snapshot(|snap| {
+                best_asks_to_summary_rows(snap.market_orders.values().filter(|o| !o.is_bid && o.vol_remaining > 0 && o.region_id == region_id))
+            });
+            Some(Ok(DBRowDescriptor::market_summary_header().build_cindexed_rowset("typeID", rows)))
         }
 
         ("marketProxy", "GetCharOrders") => {
@@ -123,48 +171,20 @@ pub fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let filter_type_id = args
-                .first()
-                .and_then(|a| a.as_i64())
-                .filter(|&tid| tid > 0)
-                .map(|tid| tid as TypeId);
+            let filter_type_id = args.first().and_then(|a| a.as_i64()).filter(|&tid| tid > 0).map(|tid| tid as TypeId);
             let rows = ctx.db.with_snapshot(|snap| {
                 let mut orders: Vec<&MarketOrderRecord> = snap
                     .market_orders
                     .values()
-                    .filter(|o| {
-                        o.owner_id == char_id
-                            && !o.is_npc
-                            && o.vol_remaining > 0
-                            && filter_type_id.map(|tid| o.type_id == tid).unwrap_or(true)
-                    })
+                    .filter(|o| o.owner_id == char_id && !o.is_npc && o.vol_remaining > 0 && filter_type_id.map(|tid| o.type_id == tid).unwrap_or(true))
                     .collect();
                 orders.sort_by_key(|o| o.order_id);
                 orders
                     .into_iter()
-                    .map(|o| {
-                        vec![
-                            PyRep::Integer(o.order_id),
-                            PyRep::Integer(o.type_id as i64),
-                            PyRep::Bool(o.is_bid),
-                            PyRep::Real(o.price.to_wire_f64()),
-                            PyRep::Integer(o.vol_remaining as i64),
-                            PyRep::Integer(o.station_id),
-                        ]
-                    })
+                    .map(|o| vec![PyRep::Integer(o.order_id), PyRep::Integer(o.type_id as i64), PyRep::Bool(o.is_bid), PyRep::Real(o.price.to_wire_f64()), PyRep::Integer(o.vol_remaining as i64), PyRep::Integer(o.station_id)])
                     .collect()
             });
-            Some(Ok(PyRep::rowset(
-                vec![
-                    "orderID",
-                    "typeID",
-                    "bid",
-                    "price",
-                    "volRemaining",
-                    "stationID",
-                ],
-                rows,
-            )))
+            Some(Ok(PyRep::rowset(vec!["orderID", "typeID", "bid", "price", "volRemaining", "stationID"], rows)))
         }
 
         ("marketProxy", "PlaceCharOrder") => {
@@ -173,43 +193,22 @@ pub fn handle(
                 Err(e) => return Some(Err(e)),
             };
             let Some(docked_station_id) = session.station_id else {
-                return Some(Err(BridgeRpcError {
-                    code: "NotDockedAtStation".into(),
-                    message: "Character must be docked at an NPC station to place a market order"
-                        .into(),
-                }));
+                return Some(Err(BridgeRpcError { code: "NotDockedAtStation".into(), message: "Character must be docked at an NPC station to place a market order".into() }));
             };
             let Some(region_id) = session.region_id else {
-                return Some(Err(BridgeRpcError {
-                    code: "NoRegion".into(),
-                    message: "Session has no active region".into(),
-                }));
+                return Some(Err(BridgeRpcError { code: "NoRegion".into(), message: "Session has no active region".into() }));
             };
-            let station_id = args
-                .first()
-                .and_then(|a| a.as_i64())
-                .unwrap_or(docked_station_id);
+            let station_id = args.first().and_then(|a| a.as_i64()).unwrap_or(docked_station_id);
             let Some(raw_type_id) = args.get(1).and_then(|a| a.as_i64()) else {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidMarketOrder".into(),
-                    message: "PlaceCharOrder requires typeID".into(),
-                }));
+                return Some(Err(BridgeRpcError { code: "InvalidMarketOrder".into(), message: "PlaceCharOrder requires typeID".into() }));
             };
             let type_id = raw_type_id as TypeId;
             let price_isk = args.get(2).and_then(|a| a.as_f64()).unwrap_or(0.0);
             let quantity = args.get(3).and_then(|a| a.as_i64()).unwrap_or(0);
             let is_bid = args.get(4).and_then(|a| a.as_bool()).unwrap_or(true);
 
-            if !price_isk.is_finite()
-                || price_isk <= 0.0
-                || quantity <= 0
-                || quantity > (i32::MAX as i64)
-            {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidMarketOrder".into(),
-                    message: "Market order requires finite price > 0 and valid positive quantity"
-                        .into(),
-                }));
+            if !price_isk.is_finite() || price_isk <= 0.0 || quantity <= 0 || quantity > (i32::MAX as i64) {
+                return Some(Err(BridgeRpcError { code: "InvalidMarketOrder".into(), message: "Market order requires finite price > 0 and valid positive quantity".into() }));
             }
             let quantity_i32 = quantity as i32;
             let station_info = ctx.sde.solar_systems.values().find_map(|sys| {
@@ -220,72 +219,42 @@ pub fn handle(
                 }
             });
             let Some(station_def) = station_info else {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidMarketStation".into(),
-                    message: format!("Station {station_id} is not in region {region_id}"),
-                }));
+                return Some(Err(BridgeRpcError { code: "InvalidMarketStation".into(), message: format!("Station {station_id} is not in region {region_id}") }));
             };
             if station_id != docked_station_id {
-                return Some(Err(BridgeRpcError {
-                    code: "StationMismatch".into(),
-                    message: format!(
-                        "Cannot place market order at station {station_id} while docked at {docked_station_id}"
-                    ),
-                }));
+                return Some(Err(BridgeRpcError { code: "StationMismatch".into(), message: format!("Cannot place market order at station {station_id} while docked at {docked_station_id}") }));
             }
             let owner_corp_id = station_def.owner_corporation_id;
             let owner_faction_id = station_def.owner_faction_id;
 
-            let (broker_lvl, acct_lvl, faction_standing, corp_standing) =
-                ctx.db.with_snapshot(|snap| {
-                    let sk = snap.skills.get(&char_id);
-                    let b_lvl = sk.and_then(|m| m.get(&3446)).map(|s| s.level).unwrap_or(0);
-                    let a_lvl = sk.and_then(|m| m.get(&16622)).map(|s| s.level).unwrap_or(0);
-                    let ch = snap.characters.get(&char_id);
-                    let f_st = ch
-                        .and_then(|c| c.standings.get(&owner_faction_id).copied())
-                        .unwrap_or(0.0);
-                    let c_st = ch
-                        .and_then(|c| c.standings.get(&owner_corp_id).copied())
-                        .unwrap_or(0.0);
-                    (b_lvl, a_lvl, f_st, c_st)
-                });
+            let (broker_lvl, acct_lvl, faction_standing, corp_standing) = ctx.db.with_snapshot(|snap| {
+                let sk = snap.skills.get(&char_id);
+                let b_lvl = sk.and_then(|m| m.get(&3446)).map(|s| s.level).unwrap_or(0);
+                let a_lvl = sk.and_then(|m| m.get(&16622)).map(|s| s.level).unwrap_or(0);
+                let ch = snap.characters.get(&char_id);
+                let f_st = ch.and_then(|c| c.standings.get(&owner_faction_id).copied()).unwrap_or(0.0);
+                let c_st = ch.and_then(|c| c.standings.get(&owner_corp_id).copied()).unwrap_or(0.0);
+                (b_lvl, a_lvl, f_st, c_st)
+            });
             let broker_rate = compute_broker_fee_rate(broker_lvl, faction_standing, corp_standing);
             let order_price = IskCents::from_f64_isk(price_isk);
             let Some(max_order_cost) = order_price.checked_mul_qty(quantity) else {
-                return Some(Err(BridgeRpcError {
-                    code: "MarketOrderOverflow".into(),
-                    message: "Order total cost overflows 64-bit ISK cents".into(),
-                }));
+                return Some(Err(BridgeRpcError { code: "MarketOrderOverflow".into(), message: "Order total cost overflows 64-bit ISK cents".into() }));
             };
             let broker_ppm = (broker_rate * 1_000_000.0).round() as i128;
-            let broker_fee = IskCents(
-                (((max_order_cost.0 as i128) * broker_ppm + 500_000) / 1_000_000) as i64,
-            );
+            let broker_fee = IskCents((((max_order_cost.0 as i128) * broker_ppm + 500_000) / 1_000_000) as i64);
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 // 1. Pre-check caller balance for worst-case debit using checked arithmetic
                 let required_upfront = if is_bid {
-                    max_order_cost
-                        .checked_add(broker_fee)
-                        .ok_or_else(|| BridgeRpcError {
-                            code: "MarketOrderOverflow".into(),
-                            message: "Order cost + broker fee overflow".into(),
-                        })?
+                    max_order_cost.checked_add(broker_fee).ok_or_else(|| BridgeRpcError { code: "MarketOrderOverflow".into(), message: "Order cost + broker fee overflow".into() })?
                 } else {
                     broker_fee
                 };
 
-                let caller_balance = snap
-                    .characters
-                    .get(&char_id)
-                    .map(|c| c.balance)
-                    .unwrap_or(IskCents(0));
+                let caller_balance = snap.characters.get(&char_id).map(|c| c.balance).unwrap_or(IskCents(0));
                 if caller_balance.checked_sub(required_upfront).is_none() {
-                    return Err(BridgeRpcError {
-                        code: "InsufficientFunds".into(),
-                        message: "Not enough ISK for market order and broker fee".into(),
-                    });
+                    return Err(BridgeRpcError { code: "InsufficientFunds".into(), message: "Not enough ISK for market order and broker fee".into() });
                 }
 
                 // 2. If sell order (`!is_bid`), verify and deduct `quantity_i32` of `type_id` from seller's hangar at `station_id`

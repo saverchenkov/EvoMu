@@ -228,6 +228,7 @@ async fn handle_bridge_client(stream: TcpStream, ctx: Arc<ServerContext>) -> Res
     // New sessions start strictly unauthenticated (`user_id: None`, `role: 0`)
     let mut session = SessionState::new(session_id);
     let mut sys_rx = ctx.systems.get_or_spawn(30000142).subscribe();
+    let mut notify_rx = ctx.notify_tx.subscribe();
 
     let (mut reader, mut writer) = stream.into_split();
     let (frame_tx, mut frame_rx) = tokio::sync::mpsc::channel::<Result<Vec<u8>>>(16);
@@ -308,7 +309,6 @@ async fn handle_bridge_client(stream: TcpStream, ctx: Arc<ServerContext>) -> Res
                             let sess_bytes = serde_json::to_vec(&session_event)?;
                             write_bounded_frame(&mut writer, &sess_bytes).await?;
                         }
-
                         // Drain and push any pending DoDestinyUpdate notifications (e.g. SetState on Undock/StargateJump/UpdateStateRequest)
                         if session.character_id.is_some()
                             && session.station_id.is_none()
@@ -328,6 +328,30 @@ async fn handle_bridge_client(stream: TcpStream, ctx: Arc<ServerContext>) -> Res
                                     }
                                 }
                             }
+                        }
+                        if let Some(cid) = session.character_id {
+                            for notif in ctx.drain_notifications_for_char(cid) {
+                                let evt = BridgeEnvelope::ServerEvent {
+                                    tick: 0,
+                                    event: notif.event,
+                                    args: notif.args,
+                                };
+                                let evt_bytes = serde_json::to_vec(&evt)?;
+                                write_bounded_frame(&mut writer, &evt_bytes).await?;
+                            }
+                        }
+                    }
+                }
+                Ok((target_cid, _)) = notify_rx.recv() => {
+                    if session.character_id == Some(target_cid) {
+                        for notif in ctx.drain_notifications_for_char(target_cid) {
+                            let evt = BridgeEnvelope::ServerEvent {
+                                tick: 0,
+                                event: notif.event,
+                                args: notif.args,
+                            };
+                            let evt_bytes = serde_json::to_vec(&evt)?;
+                            write_bounded_frame(&mut writer, &evt_bytes).await?;
                         }
                     }
                 }
@@ -357,6 +381,9 @@ async fn handle_bridge_client(stream: TcpStream, ctx: Arc<ServerContext>) -> Res
     .await;
 
     reader_task.abort();
+    if let Some(cid) = session.character_id {
+        let _ = ctx.drain_notifications_for_char(cid);
+    }
     if let Some(uid) = session.user_id {
         ctx.db.release_online_lock(uid, session.session_id);
     }
@@ -366,16 +393,17 @@ async fn handle_bridge_client(stream: TcpStream, ctx: Arc<ServerContext>) -> Res
 
 /// Handles legacy `machoNet` connections on port 26000, performing the `VersionExchange`
 /// handshake, routing `MachoPacket` (`CallReq`, `PingReq`) frames to `ServerContext::dispatch_rpc`,
-/// and pushing `DoDestinyUpdate` `MachoPacketType::Notification` frames (`P-7`).
-async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>) -> Result<()> {
+/// and pushing `DoDestinyUpdate` and `MachoPacketType::Notification` frames (`P-5`, `P-7`).
+async fn handle_macho_client(stream: TcpStream, ctx: Arc<ServerContext>) -> Result<()> {
     let session_id = NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed);
     let mut session = SessionState::new(session_id);
     let mut sys_rx = ctx.systems.get_or_spawn(30000142).subscribe();
+    let mut notify_rx = ctx.notify_tx.subscribe();
+    let (mut reader, mut writer) = stream.into_split();
     let ver = VersionExchange::default().to_pyrep();
     let encoded = marshal::encode(&ver);
-    write_bounded_frame(&mut stream, &encoded).await?;
+    write_bounded_frame(&mut writer, &encoded).await?;
 
-    let (mut reader, mut writer) = stream.into_split();
     let (frame_tx, mut frame_rx) = tokio::sync::mpsc::channel::<Result<Vec<u8>>>(16);
     let reader_task = tokio::spawn(async move {
         loop {
@@ -504,7 +532,6 @@ async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>) -> 
                                     )
                                     .await?;
                                 }
-
                                 // Drain and push any pending DoDestinyUpdate notifications (e.g. SetState on Undock/StargateJump/UpdateStateRequest)
                                 if session.character_id.is_some()
                                     && session.station_id.is_none()
@@ -525,6 +552,11 @@ async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>) -> 
                                                 .await?;
                                             }
                                         }
+                                    }
+                                }
+                                if let Some(cid) = session.character_id {
+                                    for notif in ctx.drain_notifications_for_char(cid) {
+                                        write_bounded_frame(&mut writer, &notif.marshaled_packet).await?;
                                     }
                                 }
                             }
@@ -568,6 +600,13 @@ async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>) -> 
                         }
                     }
                 }
+                Ok((target_cid, _)) = notify_rx.recv() => {
+                    if session.character_id == Some(target_cid) {
+                        for notif in ctx.drain_notifications_for_char(target_cid) {
+                            write_bounded_frame(&mut writer, &notif.marshaled_packet).await?;
+                        }
+                    }
+                }
             }
         }
         Ok(())
@@ -575,6 +614,9 @@ async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>) -> 
     .await;
 
     reader_task.abort();
+    if let Some(cid) = session.character_id {
+        let _ = ctx.drain_notifications_for_char(cid);
+    }
     if let Some(uid) = session.user_id {
         ctx.db.release_online_lock(uid, session.session_id);
     }
