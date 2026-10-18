@@ -254,6 +254,16 @@ async fn test_esi_http_server_routing_versioning_meta_and_openapi_spec() {
         verify_resp.json().expect("verify json")["CharacterID"],
         json!(90_000_001)
     );
+
+    // 7. Oversized Content-Length (> 2 MiB) rejected with 413 Payload Too Large (R53-P1-1)
+    let oversized_resp = send_raw_esi_request(
+        addr,
+        &EsiHttpRequest::new("POST", "/v1/universe/names/")
+            .with_header("Content-Length", "3000000"),
+    )
+    .await
+    .expect("POST with oversized Content-Length");
+    assert_eq!(oversized_resp.status_code, 413);
 }
 
 #[tokio::test]
@@ -366,10 +376,36 @@ async fn test_esi_oauth2_bearer_sso_scopes_character_ownership_and_verify() {
         vec!["esi-wallet.read_character_wallet.v1".to_string()],
     );
     let fresh_ok = router.handle_request(
+        &EsiHttpRequest::new(
+            "GET",
+            "/v1/characters/90000001/wallet/?datasource=tranquilit%79",
+        )
+        .with_bearer_token(&fresh_token),
+    );
+    assert_eq!(fresh_ok.status_code, 200);
+
+    // 9. Banned account -> 401 Unauthorized
+    let now_ban = ctx.now_unix();
+    let _: Result<(), ()> = ctx.db.try_with_mut_snapshot(|snap| {
+        if let Some(acc) = snap.accounts.get_mut("demo") {
+            acc.banned_until_unix = Some(now_ban + 3600);
+            acc.ban_reason = Some("Test ban".to_string());
+        }
+        Ok(())
+    });
+    let banned_resp = router.handle_request(
         &EsiHttpRequest::new("GET", "/v1/characters/90000001/wallet/")
             .with_bearer_token(&fresh_token),
     );
-    assert_eq!(fresh_ok.status_code, 200);
+    assert_eq!(banned_resp.status_code, 401);
+    let _: Result<(), ()> = ctx.db.try_with_mut_snapshot(|snap| {
+        if let Some(acc) = snap.accounts.get_mut("demo") {
+            acc.banned_until_unix = None;
+            acc.ban_reason = None;
+        }
+        Ok(())
+    });
+
     ctx.advance_virtual_clock(10_000);
     let expired_resp = router.handle_request(
         &EsiHttpRequest::new("GET", "/v1/characters/90000001/wallet/")
@@ -1067,10 +1103,22 @@ async fn test_esi_all_31_openapi_tags_sample_routes_and_schema_validation() {
         404
     );
 
-    // 9. GET /wars
+    // 9. GET /wars (+ max_war_id filter and 400 on invalid max_war_id)
     let wars_resp = router.handle_request(&EsiHttpRequest::new("GET", "/v1/wars/"));
     let wars_ids: Vec<i64> = serde_json::from_slice(&wars_resp.body).expect("wars array");
     assert_eq!(wars_ids, vec![702, 701]);
+    let wars_filtered =
+        router.handle_request(&EsiHttpRequest::new("GET", "/v1/wars/?max_war_id=702"));
+    assert_eq!(wars_filtered.status_code, 200);
+    let filtered_ids: Vec<i64> =
+        serde_json::from_slice(&wars_filtered.body).expect("filtered wars array");
+    assert_eq!(filtered_ids, vec![701]);
+    assert_eq!(
+        router
+            .handle_request(&EsiHttpRequest::new("GET", "/v1/wars/?max_war_id=invalid"))
+            .status_code,
+        400
+    );
     assert_eq!(
         router
             .handle_request(&EsiHttpRequest::new("POST", "/v1/wars/"))

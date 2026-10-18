@@ -1,6 +1,7 @@
 //! `esi` — EVE Swagger Interface (ESI) HTTP/1.1 server, OpenAPI 3.0 router, OAuth2 Bearer
 //! scope guard, conditional `ETag` caching, `X-Pages` pagination, and schema validator (`ESI-2`).
 
+pub mod character_routes;
 pub mod openapi;
 pub mod router;
 pub mod sample_routes;
@@ -139,6 +140,7 @@ pub fn http_reason_phrase(status_code: u16) -> &'static str {
         403 => "Forbidden",
         404 => "Not Found",
         405 => "Method Not Allowed",
+        413 => "Payload Too Large",
         420 => "Error Limited",
         422 => "Unprocessable Entity",
         500 => "Internal Server Error",
@@ -230,13 +232,37 @@ pub async fn handle_esi_http_connection(
     mut stream: TcpStream,
     router: Arc<EsiRouter>,
 ) -> std::io::Result<()> {
-    let req = timeout(HTTP_IO_TIMEOUT, read_http11_request(&mut stream))
+    let read_res = timeout(HTTP_IO_TIMEOUT, read_http11_request(&mut stream))
         .await
-        .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "HTTP read timeout"))??;
-    let Some(req) = req else {
-        return Ok(());
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "HTTP read timeout"))?;
+    let resp = match read_res {
+        Ok(Some(req)) => router.handle_request(&req),
+        Ok(None) => return Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+            let msg = e.to_string();
+            let status_code = if msg.contains("Content-Length exceeds") {
+                413
+            } else {
+                400
+            };
+            let mut headers = HashMap::new();
+            headers.insert(
+                "Content-Type".to_string(),
+                "application/json; charset=UTF-8".to_string(),
+            );
+            let body = serde_json::to_vec(&serde_json::json!({
+                "error": msg,
+                "status": status_code,
+            }))
+            .unwrap_or_default();
+            EsiHttpResponse {
+                status_code,
+                headers,
+                body,
+            }
+        }
+        Err(e) => return Err(e),
     };
-    let resp = router.handle_request(&req);
     let wire_bytes = resp.to_http11_bytes();
     timeout(HTTP_IO_TIMEOUT, stream.write_all(&wire_bytes))
         .await
@@ -275,23 +301,50 @@ async fn read_http11_request(stream: &mut TcpStream) -> std::io::Result<Option<E
 
     let mut headers = HashMap::new();
     let mut content_len = 0usize;
-    for _ in 0..MAX_HTTP_HEADERS {
+    let mut saw_end_of_headers = false;
+    for _ in 0..=MAX_HTTP_HEADERS {
         let line = read_bounded_line(&mut reader).await?;
         if line.is_empty() {
+            saw_end_of_headers = true;
             break;
         }
         let clean = line.trim_end_matches(&['\r', '\n'][..]);
         if clean.is_empty() {
+            saw_end_of_headers = true;
             break;
+        }
+        if headers.len() >= MAX_HTTP_HEADERS {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "HTTP header count exceeds maximum allowed",
+            ));
         }
         if let Some((k, v)) = clean.split_once(':') {
             let key = k.trim().to_string();
             let val = v.trim().to_string();
             if key.eq_ignore_ascii_case("content-length") {
-                content_len = val.parse::<usize>().unwrap_or(0).min(MAX_HTTP_BODY_BYTES);
+                let parsed = val.parse::<usize>().map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "Invalid HTTP Content-Length header",
+                    )
+                })?;
+                if parsed > MAX_HTTP_BODY_BYTES {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "HTTP Content-Length exceeds maximum allowed body size",
+                    ));
+                }
+                content_len = parsed;
             }
             headers.insert(key, val);
         }
+    }
+    if !saw_end_of_headers {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "HTTP header count exceeds maximum allowed",
+        ));
     }
 
     let mut body = vec![0u8; content_len];
@@ -323,7 +376,11 @@ pub async fn send_raw_esi_request(
             wire.push_str(&format!("{k}: {v}\r\n"));
         }
     }
-    wire.push_str(&format!("Content-Length: {}\r\n", req.body.len()));
+    let cl_val = req
+        .header("Content-Length")
+        .map(str::to_string)
+        .unwrap_or_else(|| req.body.len().to_string());
+    wire.push_str(&format!("Content-Length: {cl_val}\r\n"));
     wire.push_str("Connection: close\r\n\r\n");
 
     let mut out = wire.into_bytes();

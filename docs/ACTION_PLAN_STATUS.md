@@ -4,14 +4,14 @@
 
 The canonical plan is `.agents/skills/evomu-adversarial-review/references/action_plan.md`. This file is regenerated from the latest pre-flight parity run, so it can't go stale or be overstated.
 
-**Parity: 46 / 5923 ledger rows closed (0.78%)**, 0 NA, 28 tagged tests, 71 passing tests. Flagged fake by the gap auditor: 11.
+**Parity: 118 / 5923 ledger rows closed (1.99%)**, 0 NA, 31 tagged tests, 74 passing tests. Flagged fake by the gap auditor: 11.
 
 | Category | Total | DONE | NA | Open |
 |---|---|---|---|---|
 | destiny | 52 | 7 | 0 | 45 |
 | effect | 1 | 0 | 0 | 1 |
-| esi | 197 | 14 | 0 | 183 |
-| feat | 1326 | 11 | 0 | 1315 |
+| esi | 197 | 61 | 0 | 136 |
+| feat | 1326 | 36 | 0 | 1290 |
 | journey | 29 | 0 | 0 | 29 |
 | notify | 1311 | 1 | 0 | 1310 |
 | plan | 109 | 9 | 0 | 100 |
@@ -63,11 +63,11 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 
 | Task | Title | Ledger | Features | Tests | Assessment | Note | Last commit |
 |---|---|---|---|---|---|---|---|
-| P-1 | PyPackedRow trailing object columns | DONE | 0/0 | test_p1_p2_wire_row_encoders_and_service_crowsets, test_p1_packed_row_in_tuple_does_not_corrupt_subsequent_elements_of_2 | DONE | PyPackedRow RLE codec with boolean bit-packing, null-bit tracking, trailing 0-bit STR/WSTR/BYTES columns, and corrupt RLE error propagation (OF-21) | — |
-| P-2 | DBRow / CRowset / CIndexedRowset / PackedRowList encoders | MISSING | 0/1 | — | PARTIAL | DBRowDescriptor, blue.DBRow, CRowset, CIndexedRowset, Rowset, IndexRowset, and PackedRowList wired into invbroker, charUnboundMgr, marketProxy, config, and notificationMgr | — |
-| P-3 | Object cache / CachedMethodCallResult | MISSING | 0/1 | — | PARTIAL | objectCaching RPCs, CachedObject/CachedMethodCallResult envelopes, IEEE CRC32 versioning, and util.CachedObject hints implemented; full service-wide cache wrapping pending | — |
-| P-4 | config service | MISSING | 0/1 | — | PARTIAL | config service bulk entity/location/station/ticker/type/unit/map/landmark RPCs implemented with SDE+DB containers; GetMultiGraphicsEx and GetCelestialStatistic return UnimplementedRPC until SDE tables | — |
-| P-5 | Notifications | MISSING | 0/5 | — | PARTIAL | ServerContext::notify multi-cast router with binary MachoPacket(Notification) frames, OnAccountChange/OnItemChange/OnSkillTrained, and notificationMgr RPCs implemented | — |
+| P-1 | PyPackedRow trailing object columns | DONE | 0/0 | test_p1_p2_wire_row_encoders_and_service_crowsets, test_p1_packed_row_in_tuple_does_not_corrupt_subsequent_elements_of_2 | DONE | PyPackedRow RLE codec with boolean bit-packing, null-bit tracking, trailing 0-bit STR/WSTR/BYTES columns, and corrupt RLE error propagation (OF-21) | d8a1294 2026-10-18 |
+| P-2 | DBRow / CRowset / CIndexedRowset / PackedRowList encoders | MISSING | 0/1 | — | PARTIAL | DBRowDescriptor, blue.DBRow, CRowset, CIndexedRowset, Rowset, IndexRowset, and PackedRowList wired into invbroker, charUnboundMgr, marketProxy, config, and notificationMgr | 28cffa5 2026-10-18 |
+| P-3 | Object cache / CachedMethodCallResult | MISSING | 0/1 | — | PARTIAL | objectCaching RPCs, CachedObject/CachedMethodCallResult envelopes, IEEE CRC32 versioning, and util.CachedObject hints implemented; full service-wide cache wrapping pending | 5bbac95 2026-10-18 |
+| P-4 | config service | MISSING | 0/1 | — | PARTIAL | config service bulk entity/location/station/ticker/type/unit/map/landmark RPCs implemented with SDE+DB containers; GetMultiGraphicsEx and GetCelestialStatistic return UnimplementedRPC until SDE tables | 5bbac95 2026-10-18 |
+| P-5 | Notifications | MISSING | 0/5 | — | PARTIAL | ServerContext::notify multi-cast router with binary MachoPacket(Notification) frames, OnAccountChange/OnItemChange/OnSkillTrained, and notificationMgr RPCs implemented | d8a1294 2026-10-18 |
 | P-6 | Native handshake | MISSING | 0/1 | — | NOT STARTED | — | — |
 | P-7 | Destiny binary stream | DONE | 2/2 | test_binary_add_balls_roundtrip_all_13_modes, test_do_destiny_update_and_set_state_marshal_roundtrip, test_p7_destiny_bi | DONE | Binary AddBalls/AddBalls2/SetState encoder and decoder matching DestinyStructs.h byte layouts, SlimItemMeta from SDE/DB, and DoDestinyUpdate notification push on space actions and ticks. | 9c4bbed 2026-10-18 |
 
@@ -181,8 +181,8 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 |---|---|---|---|---|---|---|---|
 | ESI-1 | SSO / OAuth2 server emulating login.eveonline.com. Covers the authorization code… | MISSING | 0/0 | — | NOT STARTED | — | — |
 | ESI-2 | ESI HTTP framework. OpenAPI-conformant routing, including compatibility-date/ver… | MISSING | 0/0 | — | PARTIAL | OpenAPI HTTP router, schema validator, OAuth bearer guards, ETag and conditional caching, pagination, rate limiting, and sample routes across tags implemented; remaining tags pending. | 1bfd80c 2026-10-18 |
-| ESI-3 | Universe, Status, Meta, Routes, Search, Incursions, Insurance, Sovereignty, Wars… | MISSING | 0/0 | — | NOT STARTED | — | — |
-| ESI-4 | Character, Clones, Skills, Location, Fittings, Assets, Wallet, Loyalty, Calendar… | MISSING | 0/0 | — | NOT STARTED | — | — |
+| ESI-3 | Universe, Status, Meta, Routes, Search, Incursions, Insurance, Sovereignty, Wars… | MISSING | 0/0 | — | PARTIAL | Universe hierarchy, celestials, stargates, structures, names, ids, Status, Meta, Routes, Search, Insurance, Sovereignty, Wars, Dogma, and Killmails implemented; FW and Incursions pending. | — |
+| ESI-4 | Character, Clones, Skills, Location, Fittings, Assets, Wallet, Loyalty, Calendar… | MISSING | 0/0 | — | PARTIAL | Character affiliation, portrait, standings, fatigue, blueprints, Clones, implants, Skills, attributes, queue, Location, online, ship, Fittings, Assets, Wallet, Loyalty, and Mail CRUD implemented. | — |
 | ESI-5 | Corporation, Alliance. | MISSING | 0/0 | — | NOT STARTED | — | — |
 | ESI-6 | Market, Contracts, Industry, Planetary Interaction. | MISSING | 0/0 | — | NOT STARTED | — | — |
 | ESI-7 | Fleets and User Interface (open window, set waypoint, autopilot). These POST end… | MISSING | 0/0 | — | NOT STARTED | — | — |

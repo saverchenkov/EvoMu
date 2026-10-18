@@ -128,12 +128,12 @@
   "note": "OpenAPI HTTP router, schema validator, OAuth bearer guards, ETag and conditional caching, pagination, rate limiting, and sample routes across tags implemented; remaining tags pending."
  },
  "ESI-3": {
-  "assessment": "NOT STARTED",
-  "note": ""
+  "assessment": "PARTIAL",
+  "note": "Universe hierarchy, celestials, stargates, structures, names, ids, Status, Meta, Routes, Search, Insurance, Sovereignty, Wars, Dogma, and Killmails implemented; FW and Incursions pending."
  },
  "ESI-4": {
-  "assessment": "NOT STARTED",
-  "note": ""
+  "assessment": "PARTIAL",
+  "note": "Character affiliation, portrait, standings, fatigue, blueprints, Clones, implants, Skills, attributes, queue, Location, online, ship, Fittings, Assets, Wallet, Loyalty, and Mail CRUD implemented."
  },
  "ESI-5": {
   "assessment": "NOT STARTED",
