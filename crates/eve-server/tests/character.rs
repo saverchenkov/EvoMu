@@ -30,7 +30,7 @@ async fn test_phase_0_s4_split_shared_handlers_and_jump_clones() {
         )
         .await
         .expect("GetCharactersToSelect");
-    assert!(matches!(chars_list, PyRep::Rowset { .. }));
+    assert!(chars_list.is_crowset());
     let char_info_missing_arg = ctx
         .dispatch_rpc(
             &mut sess,
@@ -357,3 +357,175 @@ async fn test_phase_0_s4_split_shared_handlers_and_jump_clones() {
         .await;
     assert_eq!(cooldown_err.unwrap_err().code, "CloneJumpCooldownActive");
 }
+
+#[tokio::test]
+async fn test_p1_p2_wire_row_encoders_and_service_crowsets() {
+    // parity: plan:P-1
+    use eve_proto::{marshal, DBRowDescriptor};
+
+    let ctx = ServerContext::new();
+    ctx.seed_demo_world_fixtures();
+    let kw = HashMap::new();
+    let mut sess = SessionState::new(905);
+    common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
+
+    // 1. charUnboundMgr.GetCharactersToSelect returns dbutil.CRowset of packed DBRows that round-trip through marshal
+    let chars_crowset = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "charUnboundMgr",
+            None,
+            "GetCharactersToSelect",
+            &[],
+            &kw,
+            None,
+        )
+        .await
+        .expect("GetCharactersToSelect");
+    assert!(chars_crowset.is_crowset());
+    let chars_wire = marshal::encode(&chars_crowset);
+    let chars_decoded = marshal::decode(&chars_wire).expect("decode GetCharactersToSelect CRowset");
+    assert_eq!(chars_decoded, chars_crowset);
+    let rows = chars_decoded.crowset_rows().expect("crowset rows");
+    assert!(!rows.is_empty());
+    assert_eq!(
+        rows[0].dbrow_get("characterID"),
+        Some(&PyRep::Integer(90_000_001))
+    );
+    assert_eq!(
+        rows[0].dbrow_get("characterName"),
+        Some(&PyRep::String("Aura Capsuleer".into()))
+    );
+    assert_eq!(
+        rows[0].dbrow_get("shipTypeID"),
+        Some(&PyRep::Integer(587))
+    );
+    assert_eq!(
+        rows[0].dbrow_get("shipName"),
+        Some(&PyRep::String("Rifter".into()))
+    );
+
+    ctx.dispatch_rpc(
+        &mut sess,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(90_000_001)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("SelectCharacterID");
+
+    // 2. invbroker.GetItemDescriptor and invbroker.List / GetContainerContents return canonical DBRowDescriptor & dbutil.CRowset
+    let item_desc_rep = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "invbroker",
+            None,
+            "GetItemDescriptor",
+            &[],
+            &kw,
+            None,
+        )
+        .await
+        .expect("GetItemDescriptor");
+    let parsed_desc = DBRowDescriptor::from_pyrep(&item_desc_rep).expect("parse DBRowDescriptor");
+    assert_eq!(parsed_desc, DBRowDescriptor::inv_item_header());
+
+    // invbroker.List uses the bound inventory location (or active station/ship) and optional flag filter
+    let inv_list = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "invbroker",
+            None,
+            "List",
+            &[PyRep::Integer(4)], // Hangar flag filter
+            &kw,
+            None,
+        )
+        .await
+        .expect("invbroker.List");
+    assert!(inv_list.is_crowset());
+    let inv_wire = marshal::encode(&inv_list);
+    let inv_decoded = marshal::decode(&inv_wire).expect("decode invbroker.List CRowset");
+    assert_eq!(inv_decoded, inv_list);
+    let inv_rows = inv_decoded.crowset_rows().unwrap();
+    assert!(!inv_rows.is_empty());
+    assert!(inv_rows[0].dbrow_get("itemID").is_some());
+    assert!(inv_rows[0].dbrow_get("groupID").is_some());
+    assert!(inv_rows[0].dbrow_get("categoryID").is_some());
+    assert_eq!(
+        inv_rows[0].dbrow_get("customInfo"),
+        Some(&PyRep::String(String::new()))
+    );
+
+    // invbroker.GetContainerContents requires a real owned/accessible container item
+    let container_contents = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "invbroker",
+            None,
+            "GetContainerContents",
+            &[PyRep::Integer(100_000_001)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("invbroker.GetContainerContents on owned ship");
+    assert!(container_contents.is_crowset());
+
+    // 3. marketProxy.GetOrders returns a (sell_crowset, buy_crowset) 2-tuple of dbutil.CRowsets
+    let orders_rep = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "marketProxy",
+            None,
+            "GetOrders",
+            &[PyRep::Integer(34)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("marketProxy.GetOrders");
+    let orders_wire = marshal::encode(&orders_rep);
+    let orders_decoded = marshal::decode(&orders_wire).expect("decode marketProxy.GetOrders");
+    assert_eq!(orders_decoded, orders_rep);
+    let PyRep::Tuple(order_pair) = orders_decoded else {
+        panic!("Expected (sell, buy) Tuple from marketProxy.GetOrders");
+    };
+    assert_eq!(order_pair.len(), 2);
+    assert!(order_pair[0].is_crowset());
+    assert!(order_pair[1].is_crowset());
+    let sell_rows = order_pair[0].crowset_rows().unwrap();
+    assert!(!sell_rows.is_empty());
+    assert_eq!(sell_rows[0].dbrow_get("typeID"), Some(&PyRep::Integer(34)));
+    assert_eq!(sell_rows[0].dbrow_get("bid"), Some(&PyRep::Bool(false)));
+
+    // 4. marketProxy.GetStationAsks and GetRegionBest return dbutil.CIndexedRowset keyed by typeID
+    for method in ["GetStationAsks", "GetRegionBest"] {
+        let asks = ctx
+            .dispatch_rpc(&mut sess, "marketProxy", None, method, &[], &kw, None)
+            .await
+            .expect(method);
+        assert!(asks.is_cindexed_rowset());
+        let asks_wire = marshal::encode(&asks);
+        assert_eq!(marshal::decode(&asks_wire).unwrap(), asks);
+        assert!(!asks.cindexed_rowset_entries().unwrap().is_empty());
+    }
+
+    // Undocked calls to GetStationAsks fail cleanly with NotDockedAtStation
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c) = snap.characters.get_mut(&90_000_001) {
+            c.station_id = None;
+        }
+    });
+    sess.station_id = None;
+    let undocked_err = ctx
+        .dispatch_rpc(&mut sess, "marketProxy", None, "GetStationAsks", &[], &kw, None)
+        .await
+        .expect_err("GetStationAsks requires station_id");
+    assert_eq!(undocked_err.code, "NotDockedAtStation");
+}
+
+

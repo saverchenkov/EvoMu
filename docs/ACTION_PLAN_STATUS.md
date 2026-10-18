@@ -4,7 +4,7 @@
 
 The canonical plan is `.agents/skills/evomu-adversarial-review/references/action_plan.md`. This file is regenerated from the latest pre-flight parity run, so it can't go stale or be overstated.
 
-**Parity: 9 / 5870 ledger rows closed (0.15%)**, 0 NA, 13 tagged tests, 44 passing tests. Flagged fake by the gap auditor: 7.
+**Parity: 10 / 5870 ledger rows closed (0.17%)**, 0 NA, 16 tagged tests, 48 passing tests. Flagged fake by the gap auditor: 7.
 
 | Category | Total | DONE | NA | Open |
 |---|---|---|---|---|
@@ -14,7 +14,7 @@ The canonical plan is `.agents/skills/evomu-adversarial-review/references/action
 | feat | 1273 | 0 | 0 | 1273 |
 | journey | 29 | 0 | 0 | 29 |
 | notify | 1311 | 0 | 0 | 1311 |
-| plan | 109 | 7 | 0 | 102 |
+| plan | 109 | 8 | 0 | 101 |
 | quasar | 1455 | 0 | 0 | 1455 |
 | rpc | 1230 | 1 | 0 | 1229 |
 | sde | 213 | 1 | 0 | 212 |
@@ -51,7 +51,7 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 
 | Task | Title | Ledger | Features | Tests | Assessment | Note | Last commit |
 |---|---|---|---|---|---|---|---|
-| T-1 | Parity tagging and attestation. Write a small test-support crate (e.g. eve-testk… | DONE | 0/0 | test_phase_t_t1_machonet_get_time_rpc_parity | DONE | Implemented eve-testkit JSONL attestation crate, parity tag documentation, and machoNet.GetTime RPC test. | — |
+| T-1 | Parity tagging and attestation. Write a small test-support crate (e.g. eve-testk… | DONE | 0/0 | test_phase_t_t1_machonet_get_time_rpc_parity | DONE | Implemented eve-testkit JSONL attestation crate, parity tag documentation, and machoNet.GetTime RPC test. | 617cd70 2026-10-18 |
 | T-2 | Data-driven sweeps over the real static data. For every client static-data file,… | MISSING | 0/0 | — | NOT STARTED | — | — |
 | T-3 | Property and fuzz tests. Use proptest round-trips for every marshal opcode, Pack… | MISSING | 0/0 | — | NOT STARTED | — | — |
 | T-4 | Golden wire tests against the client's own codecs. Through the in-client bridge,… | MISSING | 0/0 | — | NOT STARTED | — | — |
@@ -63,8 +63,8 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 
 | Task | Title | Ledger | Features | Tests | Assessment | Note | Last commit |
 |---|---|---|---|---|---|---|---|
-| P-1 | PyPackedRow trailing object columns | MISSING | 0/0 | — | PARTIAL | — | — |
-| P-2 | DBRow / CRowset / CIndexedRowset / PackedRowList encoders | MISSING | 0/1 | — | PARTIAL | — | — |
+| P-1 | PyPackedRow trailing object columns | DONE | 0/0 | test_p1_p2_wire_row_encoders_and_service_crowsets, test_p1_packed_row_in_tuple_does_not_corrupt_subsequent_elements_of_2 | DONE | PyPackedRow RLE encoder/decoder with boolean bit-packing, null-bit tracking, and trailing 0-bit STR/WSTR/BYTES column marshaling/unmarshaling (OF-21) | — |
+| P-2 | DBRow / CRowset / CIndexedRowset / PackedRowList encoders | MISSING | 0/1 | — | PARTIAL | DBRowDescriptor, blue.DBRow, dbutil.CRowset, dbutil.CIndexedRowset, util.Rowset, util.IndexRowset, and PackedRowList builders/encoders implemented and wired into invbroker, charUnboundMgr, and marketP | — |
 | P-3 | Object cache / CachedMethodCallResult | MISSING | 0/1 | — | NOT STARTED | — | — |
 | P-4 | config service | MISSING | 0/1 | — | NOT STARTED | — | — |
 | P-5 | Notifications | MISSING | 0/5 | — | NOT STARTED | — | — |

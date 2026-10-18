@@ -120,8 +120,21 @@ def from_pyrep_json(node):
         return [from_pyrep_json(x) for x in val]
     if tag == "Dict":
         return {from_pyrep_json(k): from_pyrep_json(v) for k, v in val}
-    if tag in ("KeyVal", "DBRow"):
+    if tag == "KeyVal":
         return LocalKeyVal({k: from_pyrep_json(v) for k, v in val.items()})
+    if tag == "DBRow":
+        if isinstance(val, dict) and "columns" in val:
+            cols = val["columns"]
+            if isinstance(cols, dict):
+                return LocalKeyVal({k: from_pyrep_json(v) for k, v in cols.items()})
+            return LocalKeyVal({k: from_pyrep_json(v) for k, v in cols})
+        return LocalKeyVal({k: from_pyrep_json(v) for k, v in val.items()})
+    if tag == "ObjectEx":
+        list_items = [from_pyrep_json(x) for x in val.get("list", [])]
+        dict_items = {from_pyrep_json(k): from_pyrep_json(v) for k, v in val.get("dict", [])}
+        if dict_items and not list_items:
+            return dict_items
+        return list_items
     if tag == "Rowset":
         cols = val["columns"]
         rows = [[from_pyrep_json(cell) for cell in row] for row in val["rows"]]
@@ -380,6 +393,55 @@ def _run_self_tests():
 
     dbrow = from_pyrep_json({"$py": "DBRow", "val": {"itemID": {"$py": "Integer", "val": 42}}})
     assert isinstance(dbrow, LocalKeyVal) and dbrow.itemID == 42
+
+    packed_dbrow = from_pyrep_json({
+        "$py": "DBRow",
+        "val": {
+            "header": {"$py": "None"},
+            "columns": [["itemID", {"$py": "Integer", "val": 42}], ["typeID", {"$py": "Integer", "val": 587}]],
+            "raw_rle": [],
+        },
+    })
+    assert isinstance(packed_dbrow, LocalKeyVal) and packed_dbrow.itemID == 42 and packed_dbrow.typeID == 587
+
+    crowset = from_pyrep_json({
+        "$py": "ObjectEx",
+        "val": {
+            "is_type_2": True,
+            "header": {"$py": "Tuple", "val": []},
+            "list": [{
+                "$py": "DBRow",
+                "val": {
+                    "header": {"$py": "None"},
+                    "columns": [["itemID", {"$py": "Integer", "val": 1001001}]],
+                    "raw_rle": [],
+                },
+            }],
+            "dict": [],
+        },
+    })
+    assert isinstance(crowset, list) and len(crowset) == 1 and crowset[0].itemID == 1001001
+
+    cindexed = from_pyrep_json({
+        "$py": "ObjectEx",
+        "val": {
+            "is_type_2": True,
+            "header": {"$py": "Tuple", "val": []},
+            "list": [],
+            "dict": [[
+                {"$py": "Integer", "val": 34},
+                {
+                    "$py": "DBRow",
+                    "val": {
+                        "header": {"$py": "None"},
+                        "columns": [["typeID", {"$py": "Integer", "val": 34}], ["price", {"$py": "Real", "val": 5.25}]],
+                        "raw_rle": [],
+                    },
+                },
+            ]],
+        },
+    })
+    assert isinstance(cindexed, dict) and cindexed[34].price == 5.25
 
     rs = from_pyrep_json({
         "$py": "Rowset",

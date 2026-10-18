@@ -6,9 +6,36 @@ use crate::formulas::{abyssal_attribute_roll, compute_insurance_quote};
 use crate::router::{BoundObjectEntry, ServerContext};
 use eve_db::{InventoryFlag, IskCents, SavedFittingRecord};
 use eve_machonet::SessionState;
-use eve_proto::{BridgeRpcError, PyRep};
+use eve_proto::{BridgeRpcError, DBRowDescriptor, PyRep};
 use eve_sde::{attr_ids, AttributeId, TypeId};
 use std::collections::HashMap;
+
+fn item_to_packed_cells(ctx: &ServerContext, i: &eve_db::InventoryItemRecord) -> Vec<PyRep> {
+    let (group_id, category_id) = ctx
+        .sde
+        .types
+        .get(&i.type_id)
+        .map(|t| (t.group_id as i64, t.category_id as i64))
+        .unwrap_or((0, 0));
+    let qty = if i.is_blueprint_copy {
+        -2
+    } else if i.singleton {
+        -1
+    } else {
+        i.quantity as i64
+    };
+    vec![
+        PyRep::Integer(i.item_id),
+        PyRep::Integer(i.type_id as i64),
+        PyRep::Integer(i.owner_id),
+        PyRep::Integer(i.location_id),
+        PyRep::Integer(i.flag as i64),
+        PyRep::Integer(qty),
+        PyRep::Integer(group_id),
+        PyRep::Integer(category_id),
+        PyRep::String(String::new()),
+    ]
+}
 
 pub async fn handle(
     ctx: &ServerContext,
@@ -20,46 +47,81 @@ pub async fn handle(
     kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
-        ("invbroker", "ListItems") | ("invbroker", "List") => {
+        ("invbroker", "GetItemDescriptor") => {
+            if let Err(e) = ServerContext::require_character(session) {
+                return Some(Err(e));
+            }
+            Some(Ok(DBRowDescriptor::inv_item_header().to_pyrep()))
+        }
+
+        ("invbroker", "List") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let loc_filter = args
-                .first()
-                .and_then(|a| a.as_i64())
-                .or_else(|| bound_entry.map(|b| b.object_id))
+            let Some(bound_loc_id) = bound_entry
+                .map(|b| b.object_id)
                 .or(session.station_id)
                 .or(session.structure_id)
-                .or(session.ship_id);
-            let items = ctx.db.get_items_for_character(char_id);
-            let rows = items
+                .or(session.ship_id)
+            else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidLocation".into(),
+                    message: "invbroker.List requires a bound inventory location or active station/ship".into(),
+                }));
+            };
+            let list_flag_filter = args
+                .first()
+                .and_then(|a| a.as_i64())
+                .or_else(|| kwargs.get("flag").and_then(|v| v.as_i64()))
+                .filter(|&f| f > 0);
+            let rows = ctx
+                .db
+                .get_items_for_character(char_id)
                 .into_iter()
-                .filter(|i| loc_filter.map(|loc| i.location_id == loc).unwrap_or(false))
-                .map(|i| {
-                    vec![
-                        PyRep::Integer(i.item_id),
-                        PyRep::Integer(i.type_id as i64),
-                        PyRep::Integer(i.owner_id),
-                        PyRep::Integer(i.location_id),
-                        PyRep::Integer(i.flag as i64),
-                        PyRep::Integer(i.quantity as i64),
-                        PyRep::Integer(i.version as i64),
-                    ]
+                .filter(|i| {
+                    i.location_id == bound_loc_id
+                        && list_flag_filter.map(|f| (i.flag as i64) == f).unwrap_or(true)
                 })
+                .map(|i| item_to_packed_cells(ctx, &i))
                 .collect();
-            Some(Ok(PyRep::rowset(
-                vec![
-                    "itemID",
-                    "typeID",
-                    "ownerID",
-                    "locationID",
-                    "flagID",
-                    "quantity",
-                    "version",
-                ],
-                rows,
-            )))
+            Some(Ok(DBRowDescriptor::inv_item_header().build_crowset(rows)))
+        }
+
+        ("invbroker", "GetContainerContents") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let Some(container_id) = args.first().and_then(|a| a.as_i64()) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidArgument".into(),
+                    message: "GetContainerContents requires containerID".into(),
+                }));
+            };
+            let res = ctx.db.with_snapshot(|snap| {
+                let Some(container) = snap.items.get(&container_id) else {
+                    return Err(BridgeRpcError {
+                        code: "ItemNotFound".into(),
+                        message: format!("Container item {container_id} not found"),
+                    });
+                };
+                let is_in_space = ctx.sde.solar_systems.contains_key(&(container.location_id as u32));
+                if container.owner_id != char_id && !is_in_space {
+                    return Err(BridgeRpcError {
+                        code: "CantDoThatWithSomeoneElsesStuff".into(),
+                        message: format!("Container {container_id} is not owned by character {char_id}"),
+                    });
+                }
+                let rows = snap
+                    .items
+                    .values()
+                    .filter(|i| i.location_id == container_id)
+                    .map(|i| item_to_packed_cells(ctx, i))
+                    .collect();
+                Ok(DBRowDescriptor::inv_item_header().build_crowset(rows))
+            });
+            Some(res)
         }
 
         ("invbroker", "MoveItem") | ("invbroker", "Add") => {
@@ -68,84 +130,44 @@ pub async fn handle(
                 Err(e) => return Some(Err(e)),
             };
             let Some(item_id) = args.first().and_then(|a| a.as_i64()) else {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidArgument".into(),
-                    message: "MoveItem requires itemID".into(),
-                }));
+                return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "MoveItem requires itemID".into() }));
             };
-            let Some(new_loc) = args
-                .get(1)
-                .and_then(|a| a.as_i64())
-                .or_else(|| bound_entry.map(|b| b.object_id))
-                .or(session.ship_id)
-                .or(session.station_id)
-                .or(session.structure_id)
-            else {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidLocation".into(),
-                    message: "MoveItem requires a target locationID, bound inventory, or active ship/station".into(),
-                }));
+            let Some(new_loc) = args.get(1).and_then(|a| a.as_i64()).or_else(|| bound_entry.map(|b| b.object_id)).or(session.ship_id).or(session.station_id).or(session.structure_id) else {
+                return Some(Err(BridgeRpcError { code: "InvalidLocation".into(), message: "MoveItem requires a target locationID, bound inventory, or active ship/station".into() }));
             };
-            let raw_flag_opt = args
-                .get(2)
-                .and_then(|a| a.as_i64())
-                .or_else(|| kwargs.get("flag").and_then(|v| v.as_i64()));
+            let raw_flag_opt = args.get(2).and_then(|a| a.as_i64()).or_else(|| kwargs.get("flag").and_then(|v| v.as_i64()));
             if let Some(rf) = raw_flag_opt {
-                if !matches!(
-                    rf,
-                    4 | 5 | 11..=34 | 87 | 90 | 92..=94 | 125..=143 | 179
-                ) {
-                    return Some(Err(BridgeRpcError {
-                        code: "InvalidInventoryFlag".into(),
-                        message: format!("Invalid or restricted inventory flag {rf}"),
-                    }));
+                if !matches!(rf, 4 | 5 | 11..=34 | 87 | 90 | 92..=94 | 125..=143 | 179) {
+                    return Some(Err(BridgeRpcError { code: "InvalidInventoryFlag".into(), message: format!("Invalid or restricted inventory flag {rf}") }));
                 }
             }
-            let flag = raw_flag_opt
-                .map(|v| InventoryFlag::from_u16(v as u16))
-                .unwrap_or(InventoryFlag::Cargo);
+            let flag = raw_flag_opt.map(|v| InventoryFlag::from_u16(v as u16)).unwrap_or(InventoryFlag::Cargo);
             let flag_u16 = flag as u16;
             let is_fitting_slot = matches!(flag_u16, 11..=34 | 92..=94 | 125..=132);
             if is_fitting_slot {
                 let item_cat_opt = ctx.db.with_snapshot(|snap| {
-                    snap.items.get(&item_id).and_then(|item| {
-                        ctx.sde.types.get(&item.type_id).map(|t| t.category_id)
-                    })
+                    snap.items.get(&item_id).and_then(|item| ctx.sde.types.get(&item.type_id).map(|t| t.category_id))
                 });
                 if item_cat_opt == Some(8) && matches!(flag_u16, 27..=34) {
                     let current_dock = session.station_id.or(session.structure_id);
-                    return match ctx.load_charge_into_weapon_slot(
-                        char_id,
-                        new_loc,
-                        flag,
-                        item_id,
-                        current_dock,
-                    ) {
-                        Ok((loaded_id, loaded_type_id, loaded_qty, loaded_ver)) => {
-                            Some(Ok(PyRep::keyval([
-                                ("itemID", PyRep::Integer(loaded_id)),
-                                ("typeID", PyRep::Integer(loaded_type_id as i64)),
-                                ("locationID", PyRep::Integer(new_loc)),
-                                ("flagID", PyRep::Integer(flag as i64)),
-                                ("quantity", PyRep::Integer(loaded_qty as i64)),
-                                ("version", PyRep::Integer(loaded_ver as i64)),
-                            ])))
-                        }
+                    return match ctx.load_charge_into_weapon_slot(char_id, new_loc, flag, item_id, current_dock) {
+                        Ok((loaded_id, loaded_type_id, loaded_qty, loaded_ver)) => Some(Ok(PyRep::keyval([
+                            ("itemID", PyRep::Integer(loaded_id)),
+                            ("typeID", PyRep::Integer(loaded_type_id as i64)),
+                            ("locationID", PyRep::Integer(new_loc)),
+                            ("flagID", PyRep::Integer(flag as i64)),
+                            ("quantity", PyRep::Integer(loaded_qty as i64)),
+                            ("version", PyRep::Integer(loaded_ver as i64)),
+                        ]))),
                         Err(e) => Some(Err(e)),
                     };
                 }
                 if session.station_id.is_none() && session.structure_id.is_none() {
-                    return Some(Err(BridgeRpcError {
-                        code: "CannotFitInSpace".into(),
-                        message: "Fitting modules into ship slots requires being docked at a station or structure".into(),
-                    }));
+                    return Some(Err(BridgeRpcError { code: "CannotFitInSpace".into(), message: "Fitting modules into ship slots requires being docked at a station or structure".into() }));
                 }
                 let pre_check = ctx.db.with_snapshot(|snap| {
                     let Some(item) = snap.items.get(&item_id) else {
-                        return Err(BridgeRpcError {
-                            code: "ItemNotFound".into(),
-                            message: format!("Item {item_id} not found"),
-                        });
+                        return Err(BridgeRpcError { code: "ItemNotFound".into(), message: format!("Item {item_id} not found") });
                     };
                     if item.owner_id != char_id {
                         return Err(BridgeRpcError {
@@ -499,10 +521,7 @@ pub async fn handle(
                 Err(e) => return Some(Err(e)),
             };
             if let Err(e) = fit.deactivate_module(module_id, &ctx.sde) {
-                return Some(Err(BridgeRpcError {
-                    code: "DogmaDeactivateFailed".into(),
-                    message: e.to_string(),
-                }));
+                return Some(Err(BridgeRpcError { code: "DogmaDeactivateFailed".into(), message: e.to_string() }));
             }
             let max_vel = fit.ship.get_attribute(attr_ids::MAX_VELOCITY, &ctx.sde);
             ctx.store_ship_fitting(ship_id, fit);
@@ -518,89 +537,46 @@ pub async fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let name = args
-                .first()
-                .and_then(|a| a.as_str())
-                .unwrap_or("Rifter Combat Fit");
+            let name = args.first().and_then(|a| a.as_str()).unwrap_or("Rifter Combat Fit");
             let Some(raw_ship_type) = args.get(1).and_then(|a| a.as_i64()) else {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidShipType".into(),
-                    message: "SaveFitting requires shipTypeID".into(),
-                }));
+                return Some(Err(BridgeRpcError { code: "InvalidShipType".into(), message: "SaveFitting requires shipTypeID".into() }));
             };
             let ship_type_id = raw_ship_type as TypeId;
 
-            let is_valid_hull = ctx
-                .sde
-                .types
-                .get(&ship_type_id)
-                .map(|t| t.category_id == 6)
-                .unwrap_or(false);
+            let is_valid_hull = ctx.sde.types.get(&ship_type_id).map(|t| t.category_id == 6).unwrap_or(false);
             if !is_valid_hull {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidShipType".into(),
-                    message: format!("Type {ship_type_id} is not a valid ship hull"),
-                }));
+                return Some(Err(BridgeRpcError { code: "InvalidShipType".into(), message: format!("Type {ship_type_id} is not a valid ship hull") }));
             }
 
             let (description, items_arg) = match args.get(2) {
                 Some(PyRep::String(s)) => (s.clone(), args.get(3)),
-                Some(list_or_tuple @ (PyRep::List(_) | PyRep::Tuple(_))) => (
-                    "Saved via charFittingMgr".to_string(),
-                    Some(list_or_tuple),
-                ),
+                Some(list_or_tuple @ (PyRep::List(_) | PyRep::Tuple(_))) => ("Saved via charFittingMgr".to_string(), Some(list_or_tuple)),
                 _ => ("Saved via charFittingMgr".to_string(), args.get(3)),
             };
 
             let parsed_items: Vec<(TypeId, InventoryFlag, i32)> = if let Some(arg) = items_arg {
                 let entries = match arg {
                     PyRep::List(v) | PyRep::Tuple(v) => v,
-                    _ => {
-                        return Some(Err(BridgeRpcError {
-                            code: "InvalidFittingItems".into(),
-                            message: "Fitting items must be a List or Tuple of (typeID, flagID, quantity)".into(),
-                        }));
-                    }
+                    _ => return Some(Err(BridgeRpcError { code: "InvalidFittingItems".into(), message: "Fitting items must be a List or Tuple of (typeID, flagID, quantity)".into() })),
                 };
                 let mut out = Vec::with_capacity(entries.len());
                 for entry in entries {
                     let seq = match entry {
                         PyRep::Tuple(v) | PyRep::List(v) => v,
-                        _ => {
-                            return Some(Err(BridgeRpcError {
-                                code: "InvalidFittingItem".into(),
-                                message: "Each fitting item must be a (typeID, flagID, quantity) tuple".into(),
-                            }));
-                        }
+                        _ => return Some(Err(BridgeRpcError { code: "InvalidFittingItem".into(), message: "Each fitting item must be a (typeID, flagID, quantity) tuple".into() })),
                     };
-                    let Some(mod_type_id) = seq.first().and_then(|v| v.as_i64()).filter(|&v| v > 0)
-                    else {
-                        return Some(Err(BridgeRpcError {
-                            code: "InvalidFittingItem".into(),
-                            message: "Fitting item is missing a positive typeID".into(),
-                        }));
+                    let Some(mod_type_id) = seq.first().and_then(|v| v.as_i64()).filter(|&v| v > 0) else {
+                        return Some(Err(BridgeRpcError { code: "InvalidFittingItem".into(), message: "Fitting item is missing a positive typeID".into() }));
                     };
-                    let Some(flag_raw) = seq.get(1).and_then(|v| v.as_i64()).filter(|&v| v >= 0)
-                    else {
-                        return Some(Err(BridgeRpcError {
-                            code: "InvalidFittingItem".into(),
-                            message: "Fitting item is missing a valid flagID".into(),
-                        }));
+                    let Some(flag_raw) = seq.get(1).and_then(|v| v.as_i64()).filter(|&v| v >= 0) else {
+                        return Some(Err(BridgeRpcError { code: "InvalidFittingItem".into(), message: "Fitting item is missing a valid flagID".into() }));
                     };
                     let qty_i64 = seq.get(2).and_then(|v| v.as_i64()).unwrap_or(1);
                     let Ok(qty) = i32::try_from(qty_i64) else {
-                        return Some(Err(BridgeRpcError {
-                            code: "InvalidFittingItem".into(),
-                            message: format!(
-                                "Fitting item quantity overflows i32 bounds, got {qty_i64}"
-                            ),
-                        }));
+                        return Some(Err(BridgeRpcError { code: "InvalidFittingItem".into(), message: format!("Fitting item quantity overflows i32 bounds, got {qty_i64}") }));
                     };
                     if qty <= 0 {
-                        return Some(Err(BridgeRpcError {
-                            code: "InvalidFittingItem".into(),
-                            message: format!("Fitting item quantity must be positive, got {qty}"),
-                        }));
+                        return Some(Err(BridgeRpcError { code: "InvalidFittingItem".into(), message: format!("Fitting item quantity must be positive, got {qty}") }));
                     }
                     let flag_u16 = u16::try_from(flag_raw).ok();
                     let flag = flag_u16.map(InventoryFlag::from_u16).unwrap_or(InventoryFlag::None);

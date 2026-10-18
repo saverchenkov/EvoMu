@@ -220,12 +220,12 @@
   "note": ""
  },
  "P-1": {
-  "assessment": "PARTIAL",
-  "note": ""
+  "assessment": "DONE",
+  "note": "PyPackedRow RLE encoder/decoder with boolean bit-packing, null-bit tracking, and trailing 0-bit STR/WSTR/BYTES column marshaling/unmarshaling (OF-21)"
  },
  "P-2": {
   "assessment": "PARTIAL",
-  "note": ""
+  "note": "DBRowDescriptor, blue.DBRow, dbutil.CRowset, dbutil.CIndexedRowset, util.Rowset, util.IndexRowset, and PackedRowList builders/encoders implemented and wired into invbroker, charUnboundMgr, and marketProxy; awaiting T-4 client golden captures and full E-2/CH-1 DB schema columns"
  },
  "P-3": {
   "assessment": "NOT STARTED",
