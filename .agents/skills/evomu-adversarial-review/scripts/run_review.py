@@ -216,7 +216,8 @@ def render_report(meta, so, parity_md=""):
     return "\n".join(out)
 
 
-def launch_reviewer(first_cmd, root, sdir, run_dir, tree_before, ts, valid_verdicts, prefix=""):
+def launch_reviewer(first_cmd, root, sdir, run_dir, tree_before, ts, valid_verdicts, prefix="",
+                    lock_name="review_in_progress.json", check_tree=True):
     max_rounds = int(os.environ.get("EVOMU_REVIEW_MAX_ROUNDS", "8"))
     max_errors = int(os.environ.get("EVOMU_REVIEW_MAX_STREAM_ERRORS", "2"))
     base_flags = first_cmd[3:]  # everything after `agy -p <prompt>`
@@ -224,7 +225,7 @@ def launch_reviewer(first_cmd, root, sdir, run_dir, tree_before, ts, valid_verdi
     # coding-agent Stop hook fires inside the reviewer session, forces "continue", burns the per-tree
     # loop guard, and interrupts the reviewer's stream.
     reviewer_env = dict(os.environ, EVOMU_REVIEW_HOOK="off", EVOMU_REVIEWER="1")
-    lock = os.path.join(sdir, "review_in_progress.json")
+    lock = os.path.join(sdir, lock_name)
     write(lock, json.dumps({"pid": os.getpid(), "tree": tree_before, "ts": ts}))
     verdict, so, conv, env = "ERROR", {}, "", {}
     errors = 0
@@ -271,7 +272,11 @@ def launch_reviewer(first_cmd, root, sdir, run_dir, tree_before, ts, valid_verdi
         so = {"summary": "Reviewer did not return a verdict after %d rounds." % max_rounds,
               "report_markdown": (env.get("response") or "")[-4000:]}
     tree_after = rl.worktree_fingerprint(root)
-    if tree_after != tree_before:
+    if tree_after != tree_before and not check_tree:
+        so["summary"] = ("(Background audit of tree %s; the workspace has since moved to %s, so this audit does "
+                         "not count for the final gate on the new tree.) " % (tree_before[:12], tree_after[:12])) \
+            + so.get("summary", "")
+    elif tree_after != tree_before:
         verdict = "INVALID"
         so["summary"] = ("INVALID: the workspace changed during the review (tree %s -> %s). "
                          "Either the reviewer wrote files or someone edited concurrently. Re-run on a quiet tree. "
@@ -331,6 +336,57 @@ def reviews_since_last_audit(state):
     return n
 
 
+def gap_audit_running(sdir):
+    p = os.path.join(sdir, "gap_audit_in_progress.json")
+    try:
+        pid = int(json.load(open(p)).get("pid", 0))
+        if pid > 0:
+            os.kill(pid, 0)
+            return True
+    except PermissionError:
+        return True
+    except (OSError, ValueError, TypeError):
+        pass
+    return False
+
+
+def background_gap_audit(a, root, sdir):
+    """Gap audit of an already-finished claims run (detached). Reuses its context; never blocks the agent."""
+    run_dir = os.path.abspath(a.reuse_context)
+    ctx = os.path.join(run_dir, "context")
+    meta0 = json.load(open(os.path.join(ctx, "run_meta.json")))
+    ts, tree_before = meta0["ts"], meta0["tree"]
+    parity = meta0.get("parity") or {}
+    parity_md = open(os.path.join(ctx, "parity.md")).read() if os.path.exists(os.path.join(ctx, "parity.md")) else ""
+    prompt = build_prompt(ctx, False, "gap-audit")
+    write(os.path.join(run_dir, "gap_prompt.md"), prompt)
+    cmd = ["agy", "-p", prompt, "--model", a.model, "--effort", a.effort, "--output-format", "json",
+           "--json-schema", GAP_SCHEMA, "--print-timeout", a.reviewer_timeout, "--sandbox", "--add-dir", root]
+    for d in (WIKI, CRUCIBLE):
+        if os.path.isdir(d):
+            cmd += ["--add-dir", d]
+    verdict, so, conv = launch_reviewer(cmd, root, sdir, run_dir, tree_before, ts, GAP_EXIT, "gap_",
+                                        lock_name="gap_audit_in_progress.json", check_tree=False)
+    if verdict in GAP_EXIT:
+        added = apply_gap_audit(so, ts)
+        so["summary"] = ("[%d new ledger rows appended to auditor_rows.json] " % added) + so.get("summary", "")
+    meta = {"verdict": verdict, "mode": "gap-audit", "timestamp": ts, "model": a.model, "effort": a.effort,
+            "head": meta0["head"], "base": meta0["base"], "tree": tree_before,
+            "tests_executed": (meta0.get("test_meta") or {}).get("executed"),
+            "test_summary": json.dumps(meta0.get("test_meta")), "parity_percent": parity.get("percent_closed"),
+            "parity_complete": parity.get("complete"), "conversation_id": conv, "background": True}
+    report = render_report(meta, so, parity_md)
+    rpath = os.path.join(run_dir, "gap_report.md")
+    write(rpath, report)
+    write(os.path.join(sdir, "latest_gap_audit.md"), report)
+    write(os.path.join(run_dir, "gap_result.json"), json.dumps({"meta": meta, "structured": so}, indent=2))
+    st = rl.load_state(root)
+    st.setdefault("reviews", []).append(dict(meta, report=rpath))
+    rl.save_state(root, st)
+    print("[review] background gap-audit VERDICT: %s (%s)" % (verdict, rpath))
+    return GAP_EXIT.get(verdict, 3)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--claims-file", help="Markdown file with the coding agent's claims/summary")
@@ -344,6 +400,9 @@ def main():
     ap.add_argument("--test-timeout", type=int, default=int(os.environ.get("EVOMU_TEST_TIMEOUT", "7200")))
     ap.add_argument("--skip-tests", action="store_true", help="Do not run cargo test (recorded in report)")
     ap.add_argument("--no-auto-audit", action="store_true", help="Do not chain a due gap audit after claims")
+    ap.add_argument("--foreground-audit", action="store_true",
+                    help="Run a chained gap audit in the foreground instead of detaching it")
+    ap.add_argument("--reuse-context", help=argparse.SUPPRESS)  # internal: background gap audit of a finished run
     ap.add_argument("--launcher", choices=["agy", "jetski-chat"], default="agy")
     ap.add_argument("--dry-run", action="store_true", help="Collect context and print the reviewer command only")
     a = ap.parse_args()
@@ -351,6 +410,8 @@ def main():
     root = rl.repo_root(os.getcwd())
     sdir = rl.state_dir(root)
     state = rl.load_state(root)
+    if a.reuse_context:
+        return background_gap_audit(a, root, sdir)
     ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     run_dir = os.path.join(sdir, ts)
     ctx = os.path.join(run_dir, "context")
@@ -395,6 +456,9 @@ def main():
         write(os.path.join(ctx, "bridge_selftest.txt"), sh([sys.executable, bridge, "--self-test"], root, timeout=120)[1])
     write(os.path.join(ctx, "py2_compile.txt"), py2_check(root))
 
+    write(os.path.join(ctx, "run_meta.json"), json.dumps({
+        "ts": ts, "head": head, "base": base, "tree": tree_before, "test_meta": test_meta,
+        "parity": parity, "model": a.model, "effort": a.effort}))
     has_claims = bool(a.claims_file and os.path.exists(a.claims_file))
     if has_claims:
         shutil.copy(a.claims_file, os.path.join(ctx, "claims.md"))
@@ -441,11 +505,22 @@ def main():
 
     rc = 0
     modes = [a.mode]
-    if a.mode == "claims" and not a.no_auto_audit and \
+    if a.mode == "claims" and not a.no_auto_audit and not gap_audit_running(sdir) and \
             reviews_since_last_audit(state) + 1 >= int(os.environ.get("EVOMU_GAP_AUDIT_EVERY", "5")):
         modes.append("gap-audit")
     for mode in modes:
         prefix = "" if mode == a.mode else "gap_"
+        if mode == "gap-audit" and mode != a.mode and not a.foreground_audit and not a.dry_run:
+            log = open(os.path.join(run_dir, "gap_background.log"), "w")
+            subprocess.Popen([sys.executable, os.path.abspath(__file__), "--mode", "gap-audit",
+                              "--reuse-context", run_dir, "--model", a.model, "--effort", a.effort,
+                              "--reviewer-timeout", a.reviewer_timeout],
+                             cwd=root, stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                             start_new_session=True)
+            print("[review] gap audit is due: launched it in the BACKGROUND (log: %s). You may commit and "
+                  "continue; new ledger rows land in auditor_rows.json when it finishes, and its report goes "
+                  "to .evomu-reviews/latest_gap_audit.md." % os.path.join(run_dir, "gap_background.log"))
+            continue
         prompt = build_prompt(ctx, has_claims, mode)
         write(os.path.join(run_dir, "%sprompt.md" % prefix), prompt)
         cmd = reviewer_cmd(prompt, GAP_SCHEMA if mode == "gap-audit" else SCHEMA)
