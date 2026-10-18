@@ -9,6 +9,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod quasar;
+
 use flate2::read::ZlibDecoder;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

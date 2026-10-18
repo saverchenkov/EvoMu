@@ -84,6 +84,7 @@ impl ServerContext {
                         .check_session_revoked(uid, session.session_id, self.now_unix())
                 {
                     self.release_session_bindings(session.session_id);
+                    self.quasar_gateway.unsubscribe_session(session.session_id);
                     if code == "MultiLoginBlocked" {
                         if !is_multi_login_blocker_call {
                             return Err(BridgeRpcError { code, message: msg });
@@ -118,6 +119,8 @@ impl ServerContext {
                 session.region_id = Some(ch.region_id);
             }
         }
+        let now_unix = self.now_unix();
+        let _ = self.quasar_gateway.on_session_changed(session, now_unix);
 
         let bound_entry = if let Some(bid) = bound_id {
             Some(self.verify_bound_object(session, bid)?)
@@ -135,6 +138,13 @@ impl ServerContext {
                 code: "FeatureDisabled".into(),
                 message: "Living World Director (taleMgr) is disabled in evomu.toml feature_flags"
                     .into(),
+            });
+        }
+
+        if effective_service == "publicGatewaySvc" && !self.feature_flags.enable_quasar_gateway {
+            return Err(BridgeRpcError {
+                code: "FeatureDisabled".into(),
+                message: "Quasar publicGatewaySvc is disabled in evomu.toml feature_flags".into(),
             });
         }
 
@@ -162,14 +172,25 @@ impl ServerContext {
             }
         }
 
-        // Validate Quasar Protobuf Public Gateway (`publicGatewaySvc`) domains and return explicit UnimplementedRPC
+        if effective_service == "serviceGatewayMgr" {
+            if let Some(res) = self
+                .quasar_gateway
+                .dispatch_service_gateway_mgr_rpc(method, args, kwargs)
+            {
+                return res;
+            }
+        }
+
+        // Dispatch Quasar Protobuf Public Gateway (`publicGatewaySvc`) requests, subscriptions, notices, and events (`Q-2`)
         if effective_service == "publicGatewaySvc" {
-            if !self.feature_flags.enable_quasar_gateway {
-                return Err(BridgeRpcError {
-                    code: "FeatureDisabled".into(),
-                    message: "Quasar publicGatewaySvc is disabled in evomu.toml feature_flags"
-                        .into(),
-                });
+            if let Some(res) = self.quasar_gateway.dispatch_public_gateway_rpc(
+                session,
+                method,
+                args,
+                kwargs,
+                now_unix,
+            ) {
+                return res;
             }
             let _ = Self::require_character(session)?;
             if matches!(method, "SendRequest" | "PublishEvent" | "CallQuasar") {

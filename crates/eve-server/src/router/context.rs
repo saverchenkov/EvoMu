@@ -33,6 +33,7 @@ pub struct ServerContext {
     pub db: Arc<WorldRepository>,
     pub systems: Arc<SystemRegistry>,
     pub living_world: Arc<LivingWorldDirector>,
+    pub quasar_gateway: Arc<crate::quasar_gateway::PublicGatewayRouter>,
     pub cataloged_services: HashSet<String>,
     pub quasar_domains: HashSet<String>,
     pub bound_objects: RwLock<HashMap<u64, BoundObjectEntry>>,
@@ -65,11 +66,19 @@ impl ServerContext {
             serde_json::from_str(EMBEDDED_QUASAR_CATALOG_JSON).unwrap_or_default();
         let quasar_domains: HashSet<String> = quasar_map.into_keys().collect();
 
+        let quasar_descriptors =
+            eve_proto::quasar::QuasarDescriptorRegistry::open_default_or_empty();
+        let quasar_gateway = Arc::new(crate::quasar_gateway::PublicGatewayRouter::new(
+            quasar_descriptors,
+            Arc::clone(&db),
+        ));
+
         Self {
             sde,
             db,
             systems: Arc::new(SystemRegistry::new()),
             living_world: Arc::new(LivingWorldDirector::new()),
+            quasar_gateway,
             cataloged_services,
             quasar_domains,
             bound_objects: RwLock::new(HashMap::new()),

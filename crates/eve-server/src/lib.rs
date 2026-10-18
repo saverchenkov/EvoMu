@@ -5,6 +5,7 @@
 pub mod config;
 pub mod formulas;
 pub mod living_world;
+pub mod quasar_gateway;
 pub mod router;
 pub mod services;
 pub mod system_actor;
