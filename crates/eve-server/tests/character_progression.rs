@@ -97,6 +97,10 @@ async fn test_ch1_skill_training_queue_engine() {
                 last_clone_jump_unix: 0,
                 jump_fatigue_minutes: 0.0,
                 jump_cooldown_until_unix: 0,
+                description: String::new(),
+                title: String::new(),
+                gender: 0,
+                create_date_unix: 0,
                 version: 1,
                 system_epoch: 1,
                 neural: NeuralAttributes {
@@ -144,6 +148,10 @@ async fn test_ch1_skill_training_queue_engine() {
                 last_clone_jump_unix: 0,
                 jump_fatigue_minutes: 0.0,
                 jump_cooldown_until_unix: 0,
+                description: String::new(),
+                title: String::new(),
+                gender: 0,
+                create_date_unix: 0,
                 version: 1,
                 system_epoch: 1,
                 neural: NeuralAttributes {
@@ -297,6 +305,10 @@ async fn test_ch1_skill_training_queue_engine() {
                 last_clone_jump_unix: 0,
                 jump_fatigue_minutes: 0.0,
                 jump_cooldown_until_unix: 0,
+                description: String::new(),
+                title: String::new(),
+                gender: 0,
+                create_date_unix: 0,
                 version: 1,
                 system_epoch: 1,
                 neural: NeuralAttributes {

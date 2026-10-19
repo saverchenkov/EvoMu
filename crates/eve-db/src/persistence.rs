@@ -69,6 +69,8 @@ impl WorldStateWalDelta {
             && old.module_online_states == new.module_online_states
             && old.weapon_banks == new.weapon_banks
             && old.asteroids == new.asteroids
+            && old.owner_notes == new.owner_notes
+            && old.paused_skill_queues == new.paused_skill_queues
             && new.wallet_journal.len() >= old.wallet_journal.len()
             && new.wallet_journal[..old.wallet_journal.len()] == old.wallet_journal[..]
             && old
@@ -363,6 +365,8 @@ impl WorldRepository {
             moon_extractions: HashMap::new(),
             auto_moon_miners: HashMap::new(),
             observer_mining_ledger: HashMap::new(),
+            owner_notes: HashMap::new(),
+            paused_skill_queues: HashSet::new(),
         };
         let mut conn = rusqlite::Connection::open_in_memory().map_err(|e| e.to_string())?;
         sqlite_store::apply_migrations(&conn)?;

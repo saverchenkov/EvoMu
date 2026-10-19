@@ -66,6 +66,10 @@ impl WorldRepository {
                 last_clone_jump_unix: 0,
                 jump_fatigue_minutes: 0.0,
                 jump_cooldown_until_unix: 0,
+                description: String::new(),
+                title: String::new(),
+                gender: 0,
+                create_date_unix: 1704067200,
                 version: 1,
                 system_epoch: 1,
             },
@@ -102,6 +106,10 @@ impl WorldRepository {
                 last_clone_jump_unix: 0,
                 jump_fatigue_minutes: 0.0,
                 jump_cooldown_until_unix: 0,
+                description: String::new(),
+                title: String::new(),
+                gender: 0,
+                create_date_unix: 1704067200,
                 version: 1,
                 system_epoch: 1,
             },
@@ -455,6 +463,8 @@ impl WorldRepository {
             moon_extractions: HashMap::new(),
             auto_moon_miners: HashMap::new(),
             observer_mining_ledger: HashMap::new(),
+            owner_notes: HashMap::new(),
+            paused_skill_queues: HashSet::new(),
         };
         let mut conn = rusqlite::Connection::open_in_memory()
             .expect("open in-memory SQLite connection for WorldRepository");
