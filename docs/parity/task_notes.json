@@ -96,8 +96,8 @@
     "note": "Ammunition load/unload, reload timers, and weapon grouping (LinkWeapons/UnlinkModule) in charFittingMgr and shipGroupingSvc; blocked by remaining features."
   },
   "E-1": {
-    "assessment": "DONE",
-    "note": "Broker fee calculation with Broker Relations and faction/corp standings discount, sales tax with Accounting discount, and escrow deduction tested."
+    "assessment": "PARTIAL",
+    "note": "Broker fee calculation with Broker Relations and faction/corp standings discount, sales tax with Accounting discount, and escrow deduction tested; auditor-flagged feat:market.broker-fee pending clearance."
   },
   "E-2": {
     "assessment": "PARTIAL",
@@ -157,7 +157,7 @@
   },
   "MN-03": {
     "assessment": "PARTIAL",
-    "note": "Asteroid remaining quantity persistence, depletion, OnAsteroidTerminated removal, and respawn tick tracking partially implemented."
+    "note": "In-memory asteroid remaining quantity tracking, belt-level downtime respawn when empty, and OnAsteroidTerminated removal implemented; persistence across restarts open."
   },
   "MN-04": {
     "assessment": "PARTIAL",
@@ -241,7 +241,7 @@
   },
   "P-6": {
     "assessment": "DONE",
-    "note": "Native machoNet GPSTransport 4-step crypto handshake state machine, VIP challenge exchange, session change notifications, and dual-transport listener in place."
+    "note": "Native machoNet GPSTransport 4-step placebo handshake state machine, VIP challenge exchange, session change notifications, and dual-transport listener in place."
   },
   "P-7": {
     "assessment": "DONE",
@@ -304,8 +304,8 @@
     "note": "Pharolux cyno beacon fleet queries, jump to beacon with light-year and isotope checks, bridge, and group jump tested."
   },
   "S-4": {
-    "assessment": "DONE",
-    "note": "Jump clone installation with clone bay fee, clone jump with cooldown timer and implant swap, and clone destruction tested."
+    "assessment": "PARTIAL",
+    "note": "Jump clone installation with clone bay fee, clone jump with cooldown timer and implant swap, and clone destruction tested; auditor-flagged feat:clones.jump-clone-install pending clearance."
   },
   "S-5": {
     "assessment": "DONE",
@@ -360,8 +360,8 @@
     "note": "SystemActor populates real SDE stars, planets, moons, asteroid belts, stargates, and stations as static Rigid balls in Ballpark and includes them in SetState."
   },
   "SP-2": {
-    "assessment": "DONE",
-    "note": "Interdiction spheres, mobile warp disruptors, warp bubble entrapment, and interdiction nullification tested."
+    "assessment": "PARTIAL",
+    "note": "Interdiction spheres, mobile warp disruptors, warp bubble entrapment, and interdiction nullification tested; auditor-flagged feat:modules.warp-disruption-field pending clearance."
   },
   "SP-3": {
     "assessment": "PARTIAL",
@@ -421,7 +421,7 @@
   },
   "Z-5": {
     "assessment": "PARTIAL",
-    "note": "260/1354 feat rows closed; 34 auditor-flagged rows remain FLAGGED_FAKE pending next gap audit."
+    "note": "220/1381 feat rows closed; auditor-flagged rows remain FLAGGED_FAKE pending next gap audit."
   },
   "Z-6": {
     "assessment": "NOT STARTED",

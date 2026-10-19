@@ -186,7 +186,7 @@ async fn test_sp4_asteroid_belt_entities_collision_bounce_and_respawn_cycle() {
         "Ship velocity must bounce backwards after colliding with asteroid"
     );
 
-    // 3. Asteroid depletion and respawn cycle:
+    // 3. Asteroid depletion and downtime respawn cycle:
     // Extract remaining units to deplete asteroid
     let ext1 = perim.mine_asteroid(sample_id, 20_000, 0.0).await.unwrap();
     assert_eq!(ext1.mined_units, 20_000);
@@ -200,12 +200,19 @@ async fn test_sp4_asteroid_belt_entities_collision_bounce_and_respawn_cycle() {
         "Depleted asteroid ball must be removed from the Ballpark"
     );
 
-    // Trigger respawn cycle
-    let respawned = perim.respawn_depleted_asteroids().await.unwrap();
-    assert!(
-        respawned.contains(&sample_id),
-        "Depleted asteroid must be in respawned list"
-    );
+    // Deplete remaining asteroids in the belt and advance virtual clock across downtime
+    for ast in belt_asteroids
+        .iter()
+        .filter(|a| a.belt_id == sample_asteroid.belt_id && a.asteroid_id != sample_id)
+    {
+        let _ = perim
+            .mine_asteroid(ast.asteroid_id, ast.initial_units, 0.0)
+            .await
+            .unwrap();
+    }
+    ctx.set_clock(std::sync::Arc::new(eve_db::VirtualServerClock::new()));
+    ctx.advance_secs(eve_server::system_actor::DEFAULT_BELT_RESPAWN_INTERVAL_SECS * 2);
+    let _ = perim.step_manual(1.0).await.unwrap();
 
     // Verify asteroid ball restored in Ballpark with initial units
     let restored_state = perim.get_asteroid_state(sample_id).await.unwrap().unwrap();

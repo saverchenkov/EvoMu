@@ -28,6 +28,33 @@ use tokio::time::MissedTickBehavior;
 /// Bounded mailbox capacity per solar system actor.
 pub const SYSTEM_MAILBOX_CAPACITY: usize = 256;
 
+/// DERIVED default maintenance/downtime belt respawn period in seconds (86,400s = 1 day),
+/// configurable via `ServerConfig::belt_respawn_interval_secs` (`D-5`, `MN-03`).
+/// Per EVE wiki `Asteroids_and_ore.md:69`, belts respawn after downtime only if there are no asteroids left in the belt.
+pub const DEFAULT_BELT_RESPAWN_INTERVAL_SECS: u64 = 86_400;
+
+/// Default daily server downtime UTC time of day in seconds (11:00 UTC = 39,600s per EVE wiki `Evergreen_Daily_Login_Rewards.md:21`, `Skillbook_Program.md:43`),
+/// configurable via `ServerConfig::downtime_utc_secs_of_day` (`D-5`, `MN-03`).
+pub const DEFAULT_DOWNTIME_UTC_SECS_OF_DAY: u64 = 39_600;
+
+/// Computes the strictly next downtime Unix timestamp (`> now_unix`) aligned to `downtime_utc_secs_of_day`
+/// across recurring maintenance cycles of `interval_secs` (`MN-03`).
+pub fn next_downtime_unix_secs(
+    now_unix: u64,
+    interval_secs: u64,
+    downtime_utc_secs_of_day: u64,
+) -> u64 {
+    let period = interval_secs.max(1);
+    let phase = downtime_utc_secs_of_day % period;
+    let rem = now_unix % period;
+    let delta = if rem < phase {
+        phase - rem
+    } else {
+        period - (rem - phase)
+    };
+    now_unix.saturating_add(delta)
+}
+
 /// State of an individual harvestable asteroid entity in space (`SP-4`, `MN-01`, `MN-02`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AsteroidState {
@@ -116,9 +143,6 @@ pub enum SystemCommand {
     GetAsteroidState {
         asteroid_id: BallId,
         reply: oneshot::Sender<Option<AsteroidState>>,
-    },
-    RespawnDepletedAsteroids {
-        reply: oneshot::Sender<Vec<BallId>>,
     },
     BreakGateCloak {
         ball_id: BallId,
@@ -385,16 +409,6 @@ impl SystemHandle {
                 asteroid_id,
                 reply: tx,
             })
-            .await
-            .map_err(|_| "Solar system actor stopped".to_string())?;
-        rx.await
-            .map_err(|_| "Solar system reply dropped".to_string())
-    }
-
-    pub async fn respawn_depleted_asteroids(&self) -> Result<Vec<BallId>, String> {
-        let (tx, rx) = oneshot::channel();
-        self.cmd_tx
-            .send(SystemCommand::RespawnDepletedAsteroids { reply: tx })
             .await
             .map_err(|_| "Solar system actor stopped".to_string())?;
         rx.await
@@ -1149,6 +1163,8 @@ pub struct SystemRegistry {
     systems: RwLock<HashMap<SolarSystemId, SystemHandle>>,
     sde: Option<Arc<SdeRegistry>>,
     pub db: Option<Arc<eve_db::WorldRepository>>,
+    belt_respawn_interval_secs: Arc<std::sync::atomic::AtomicU64>,
+    downtime_utc_secs_of_day: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl Default for SystemRegistry {
@@ -1163,6 +1179,12 @@ impl SystemRegistry {
             systems: RwLock::new(HashMap::new()),
             sde: None,
             db: None,
+            belt_respawn_interval_secs: Arc::new(std::sync::atomic::AtomicU64::new(
+                DEFAULT_BELT_RESPAWN_INTERVAL_SECS,
+            )),
+            downtime_utc_secs_of_day: Arc::new(std::sync::atomic::AtomicU64::new(
+                DEFAULT_DOWNTIME_UTC_SECS_OF_DAY,
+            )),
         }
     }
 
@@ -1171,6 +1193,12 @@ impl SystemRegistry {
             systems: RwLock::new(HashMap::new()),
             sde: Some(sde),
             db: None,
+            belt_respawn_interval_secs: Arc::new(std::sync::atomic::AtomicU64::new(
+                DEFAULT_BELT_RESPAWN_INTERVAL_SECS,
+            )),
+            downtime_utc_secs_of_day: Arc::new(std::sync::atomic::AtomicU64::new(
+                DEFAULT_DOWNTIME_UTC_SECS_OF_DAY,
+            )),
         }
     }
 
@@ -1179,7 +1207,33 @@ impl SystemRegistry {
             systems: RwLock::new(HashMap::new()),
             sde: Some(sde),
             db: Some(db),
+            belt_respawn_interval_secs: Arc::new(std::sync::atomic::AtomicU64::new(
+                DEFAULT_BELT_RESPAWN_INTERVAL_SECS,
+            )),
+            downtime_utc_secs_of_day: Arc::new(std::sync::atomic::AtomicU64::new(
+                DEFAULT_DOWNTIME_UTC_SECS_OF_DAY,
+            )),
         }
+    }
+
+    pub fn belt_respawn_interval_secs(&self) -> u64 {
+        self.belt_respawn_interval_secs
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn set_belt_respawn_interval_secs(&self, secs: u64) {
+        self.belt_respawn_interval_secs
+            .store(secs.clamp(1, 604_800), std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn downtime_utc_secs_of_day(&self) -> u64 {
+        self.downtime_utc_secs_of_day
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn set_downtime_utc_secs_of_day(&self, secs: u64) {
+        self.downtime_utc_secs_of_day
+            .store(secs % 86_400, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -1274,6 +1328,92 @@ fn step_cycles_and_capacitor(
     }
 }
 
+fn restore_asteroid_from_template(
+    id: BallId,
+    orig_ast: &AsteroidState,
+    orig_ball: &Ball,
+    ballpark: &mut Ballpark,
+    asteroids: &mut HashMap<BallId, AsteroidState>,
+    sde_opt: &Option<Arc<SdeRegistry>>,
+) {
+    let mut reset_ast = orig_ast.clone();
+    reset_ast.remaining_units = reset_ast.initial_units;
+    reset_ast.depleted = false;
+    reset_ast.respawn_at_tick = None;
+    asteroids.insert(id, reset_ast);
+    if !ballpark.balls.contains_key(&id) {
+        let (group_id, category_id) = sde_opt
+            .as_ref()
+            .and_then(|s| s.types.get(&orig_ball.type_id))
+            .map(|t| (t.group_id, t.category_id))
+            .unwrap_or((25, 25));
+        ballpark.set_ball_slim_meta(
+            id,
+            SlimItemMeta {
+                group_id,
+                category_id,
+                owner_id: 1,
+                char_id: None,
+                corp_id: -1,
+                alliance_id: -1,
+                security_status: 0.0,
+                is_cloaked: false,
+            },
+        );
+        ballpark.add_ball(orig_ball.clone());
+    }
+}
+
+fn respawn_due_asteroids(
+    ballpark: &mut Ballpark,
+    asteroids: &mut HashMap<BallId, AsteroidState>,
+    asteroid_templates: &HashMap<BallId, (AsteroidState, Ball)>,
+    sde_opt: &Option<Arc<SdeRegistry>>,
+    db_opt: &Option<Arc<eve_db::WorldRepository>>,
+) -> Vec<BallId> {
+    let Some(db) = db_opt else {
+        return Vec::new();
+    };
+    let now_unix = db.clock().now_unix_secs();
+    let mut belt_ids: Vec<BallId> = asteroid_templates
+        .values()
+        .map(|(ast, _)| ast.belt_id)
+        .collect();
+    belt_ids.sort_unstable();
+    belt_ids.dedup();
+
+    let mut respawned = Vec::new();
+    for belt_id in belt_ids {
+        // Per EVE wiki `Asteroids_and_ore.md:69`, a belt respawns after downtime only if
+        // there are no asteroids left in the belt (`remaining_units == 0` for every asteroid in the belt).
+        let belt_empty_and_due = asteroid_templates
+            .iter()
+            .filter(|(_, (orig_ast, _))| orig_ast.belt_id == belt_id)
+            .all(|(&id, _)| {
+                asteroids.get(&id).is_some_and(|a| {
+                    a.remaining_units == 0
+                        && a.respawn_at_tick.is_some_and(|due_unix| now_unix >= due_unix)
+                })
+            });
+        if belt_empty_and_due {
+            for (&id, (orig_ast, orig_ball)) in asteroid_templates {
+                if orig_ast.belt_id == belt_id {
+                    restore_asteroid_from_template(
+                        id,
+                        orig_ast,
+                        orig_ball,
+                        ballpark,
+                        asteroids,
+                        sde_opt,
+                    );
+                    respawned.push(id);
+                }
+            }
+        }
+    }
+    respawned
+}
+
 impl SystemRegistry {
     /// Spawns or retrieves a running Solar System Actor for `solar_system_id`.
     /// Populates static SDE celestials, stargates, and stations (`SP-1`), and hibernates (`LOD 0`)
@@ -1298,6 +1438,8 @@ impl SystemRegistry {
         let event_tx_actor = event_tx.clone();
         let sde_opt = self.sde.clone();
         let db_opt = self.db.clone();
+        let belt_interval_atomic = self.belt_respawn_interval_secs.clone();
+        let downtime_utc_atomic = self.downtime_utc_secs_of_day.clone();
         let mut ballpark = Ballpark::new(solar_system_id);
         if let Some(sde) = &sde_opt {
             populate_system_celestials(&mut ballpark, solar_system_id, sde);
@@ -1329,6 +1471,7 @@ impl SystemRegistry {
                             (lod_counter.is_multiple_of(5), 5.0) // Tier 1 System Presence: 0.2 Hz
                         };
                         if should_step {
+                            respawn_due_asteroids(&mut ballpark, &mut asteroids, &asteroid_templates, &sde_opt, &db_opt);
                             let events = ballpark.step(dt);
                             step_cycles_and_capacitor(&mut ballpark, &mut active_module_cycles, &db_opt, dt);
                             let broadcast = build_tick_broadcast(solar_system_id, &mut ballpark, events);
@@ -1433,15 +1576,43 @@ impl SystemRegistry {
 
                                         let depleted = ast.remaining_units == 0;
                                         ast.depleted = depleted;
+                                        let remaining_units = ast.remaining_units;
+                                        let ore_type_id = ast.type_id;
+                                        let belt_id = ast.belt_id;
                                         if depleted {
                                             let _ = ballpark.remove_ball(asteroid_id);
+                                            // Per EVE wiki `Asteroids_and_ore.md:69`, belts respawn after downtime
+                                            // only if there are no asteroids left in the belt.
+                                            let belt_fully_depleted = asteroids
+                                                .values()
+                                                .filter(|a| a.belt_id == belt_id)
+                                                .all(|a| a.remaining_units == 0);
+                                            if belt_fully_depleted {
+                                                if let Some(db) = &db_opt {
+                                                    let interval_secs = belt_interval_atomic
+                                                        .load(std::sync::atomic::Ordering::Relaxed);
+                                                    let downtime_secs = downtime_utc_atomic
+                                                        .load(std::sync::atomic::Ordering::Relaxed);
+                                                    let due_unix = next_downtime_unix_secs(
+                                                        db.clock().now_unix_secs(),
+                                                        interval_secs,
+                                                        downtime_secs,
+                                                    );
+                                                    for belt_ast in asteroids
+                                                        .values_mut()
+                                                        .filter(|a| a.belt_id == belt_id)
+                                                    {
+                                                        belt_ast.respawn_at_tick = Some(due_unix);
+                                                    }
+                                                }
+                                            }
                                         }
 
                                         Ok(MiningExtractionResult {
                                             mined_units: to_mine,
                                             wasted_units,
-                                            remaining_units: ast.remaining_units,
-                                            ore_type_id: ast.type_id,
+                                            remaining_units,
+                                            ore_type_id,
                                             depleted,
                                         })
                                     }
@@ -1452,44 +1623,6 @@ impl SystemRegistry {
                             }
                             SystemCommand::GetAsteroidState { asteroid_id, reply } => {
                                 let _ = reply.send(asteroids.get(&asteroid_id).cloned());
-                            }
-                            SystemCommand::RespawnDepletedAsteroids { reply } => {
-                                let mut respawned = Vec::new();
-                                for (&id, (orig_ast, orig_ball)) in &asteroid_templates {
-                                    let is_depleted = match asteroids.get(&id) {
-                                        Some(a) => a.remaining_units == 0,
-                                        None => true,
-                                    };
-                                    if is_depleted {
-                                        let mut reset_ast = orig_ast.clone();
-                                        reset_ast.remaining_units = reset_ast.initial_units;
-                                        reset_ast.depleted = false;
-                                        asteroids.insert(id, reset_ast);
-                                        if !ballpark.balls.contains_key(&id) {
-                                            let (group_id, category_id) = sde_opt
-                                                .as_ref()
-                                                .and_then(|s| s.types.get(&orig_ball.type_id))
-                                                .map(|t| (t.group_id, t.category_id))
-                                                .unwrap_or((25, 25));
-                                            ballpark.set_ball_slim_meta(
-                                                id,
-                                                SlimItemMeta {
-                                                    group_id,
-                                                    category_id,
-                                                    owner_id: 1,
-                                                    char_id: None,
-                                                    corp_id: -1,
-                                                    alliance_id: -1,
-                                                    security_status: 0.0,
-                                                    is_cloaked: false,
-                                                },
-                                            );
-                                            ballpark.add_ball(orig_ball.clone());
-                                        }
-                                        respawned.push(id);
-                                    }
-                                }
-                                let _ = reply.send(respawned);
                             }
                             SystemCommand::BreakGateCloak { ball_id, reply } => {
                                 let mut broken = false;
@@ -1664,6 +1797,13 @@ impl SystemRegistry {
                                 }
                             }
                             SystemCommand::StepManual { dt, reply } => {
+                                respawn_due_asteroids(
+                                    &mut ballpark,
+                                    &mut asteroids,
+                                    &asteroid_templates,
+                                    &sde_opt,
+                                    &db_opt,
+                                );
                                 let events = ballpark.step(dt);
                                 step_cycles_and_capacitor(&mut ballpark, &mut active_module_cycles, &db_opt, dt);
                                 let broadcast = build_tick_broadcast(solar_system_id, &mut ballpark, events);

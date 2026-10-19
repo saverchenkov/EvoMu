@@ -78,6 +78,10 @@ pub struct ServerConfig {
     pub admin_accounts: Vec<AdminAccountConfig>,
     #[serde(default)]
     pub player_accounts: Vec<PlayerAccountConfig>,
+    #[serde(default = "default_belt_respawn_interval_secs")]
+    pub belt_respawn_interval_secs: u64,
+    #[serde(default = "default_downtime_utc_secs_of_day")]
+    pub downtime_utc_secs_of_day: u64,
     #[serde(default)]
     pub feature_flags: FeatureFlagsConfig,
 }
@@ -106,6 +110,14 @@ fn default_world_db_path() -> String {
     "data/evomu_world.sqlite".to_string()
 }
 
+fn default_belt_respawn_interval_secs() -> u64 {
+    86_400
+}
+
+fn default_downtime_utc_secs_of_day() -> u64 {
+    39_600
+}
+
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
@@ -117,6 +129,8 @@ impl Default for ServerConfig {
             world_db_path: default_world_db_path(),
             admin_accounts: Vec::new(),
             player_accounts: Vec::new(),
+            belt_respawn_interval_secs: default_belt_respawn_interval_secs(),
+            downtime_utc_secs_of_day: default_downtime_utc_secs_of_day(),
             feature_flags: FeatureFlagsConfig::default(),
         }
     }
@@ -134,6 +148,14 @@ impl ServerConfig {
         }
         if cfg.world_db_path.trim().is_empty() {
             return Err("world_db_path in evomu.toml must not be empty".into());
+        }
+        if !(1..=604_800).contains(&cfg.belt_respawn_interval_secs) {
+            return Err(
+                "belt_respawn_interval_secs in evomu.toml must be in 1..=604800".into(),
+            );
+        }
+        if cfg.downtime_utc_secs_of_day >= 86_400 {
+            return Err("downtime_utc_secs_of_day in evomu.toml must be < 86400".into());
         }
         Ok(cfg)
     }
@@ -222,6 +244,8 @@ bridge_port = 26012
 esi_port = 26014
 sde_path = "data/evomu_sde_fixture.sqlite"
 world_db_path = "data/test_world.sqlite"
+belt_respawn_interval_secs = 43200
+downtime_utc_secs_of_day = 36000
 
 [feature_flags]
 enable_quasar_gateway = false
@@ -236,6 +260,8 @@ seed_demo = true
         assert_eq!(cfg.esi_port, 26014);
         assert_eq!(cfg.sde_path, "data/evomu_sde_fixture.sqlite");
         assert_eq!(cfg.world_db_path, "data/test_world.sqlite");
+        assert_eq!(cfg.belt_respawn_interval_secs, 43_200);
+        assert_eq!(cfg.downtime_utc_secs_of_day, 36_000);
         assert!(!cfg.feature_flags.enable_quasar_gateway);
         assert!(cfg.feature_flags.enable_esi_http);
         assert!(!cfg.feature_flags.enable_living_world);
@@ -244,5 +270,8 @@ seed_demo = true
         assert!(ServerConfig::from_toml_str(r#"bind_address = """#).is_err());
         assert!(ServerConfig::from_toml_str(r#"sde_path = """#).is_err());
         assert!(ServerConfig::from_toml_str(r#"world_db_path = """#).is_err());
+        assert!(ServerConfig::from_toml_str(r#"belt_respawn_interval_secs = 0"#).is_err());
+        assert!(ServerConfig::from_toml_str(r#"belt_respawn_interval_secs = 9999999"#).is_err());
+        assert!(ServerConfig::from_toml_str(r#"downtime_utc_secs_of_day = 86400"#).is_err());
     }
 }

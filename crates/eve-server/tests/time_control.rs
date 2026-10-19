@@ -4,54 +4,11 @@ use eve_db::{ServerClock, VirtualServerClock};
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
-use std::collections::HashMap;
+use eve_server::system_actor::{
+    next_downtime_unix_secs, DEFAULT_BELT_RESPAWN_INTERVAL_SECS, DEFAULT_DOWNTIME_UTC_SECS_OF_DAY,
+};
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
-
-/// Daily downtime belt respawn interval (24 hours = 86,400 seconds per EVE wiki `Asteroids_and_ore.md:69`).
-const DAILY_DOWNTIME_BELT_RESPAWN_SECS: u64 = 86_400;
-
-#[derive(Debug, Clone)]
-struct SdeBeltRespawnHarness {
-    belts: HashMap<i64, (u32, u64, Option<u64>)>, // belt_id -> (solar_system_id, remaining_units, depleted_at_unix)
-}
-
-impl SdeBeltRespawnHarness {
-    fn from_sde_system(ctx: &ServerContext, solar_system_id: u32, units_per_belt: u64) -> Self {
-        let mut belts = HashMap::new();
-        for cel in ctx.sde.celestials_in_system(solar_system_id) {
-            if cel.group_id == 9 {
-                belts.insert(cel.celestial_id, (solar_system_id, units_per_belt, None));
-            }
-        }
-        Self { belts }
-    }
-
-    fn harvest(&mut self, belt_id: i64, amount: u64, now_unix: u64) -> Result<u64, &'static str> {
-        let Some((_, rem, depleted_at)) = self.belts.get_mut(&belt_id) else {
-            return Err("UnknownAsteroidBelt");
-        };
-        if *rem == 0 {
-            return Err("AsteroidBeltDepleted");
-        }
-        let harvested = amount.min(*rem);
-        *rem -= harvested;
-        if *rem == 0 {
-            *depleted_at = Some(now_unix);
-        }
-        Ok(*rem)
-    }
-
-    fn maintenance_tick(&mut self, now_unix: u64, full_units: u64) {
-        for (_, rem, depleted_at) in self.belts.values_mut() {
-            if let Some(dep_ts) = *depleted_at {
-                if now_unix.saturating_sub(dep_ts) >= DAILY_DOWNTIME_BELT_RESPAWN_SECS {
-                    *rem = full_units;
-                    *depleted_at = None;
-                }
-            }
-        }
-    }
-}
 
 #[tokio::test]
 async fn test_t7_injectable_server_clock_time_acceleration_and_pause_on_tick() {
@@ -444,39 +401,241 @@ async fn test_t7_injectable_server_clock_time_acceleration_and_pause_on_tick() {
 
     // Per EVE wiki Asteroids_and_ore.md:67, Jita (30000142) has 0 asteroid belts in SDE,
     // while neighboring Perimeter (30000144) has 3 real SDE asteroid belts (group_id == 9).
-    let jita_belts = SdeBeltRespawnHarness::from_sde_system(&ctx, 30_000_142, 25_000);
+    let jita_sys = ctx.systems.get_or_spawn(30_000_142);
+    let jita_asteroids = jita_sys
+        .populate_asteroid_belt_entities()
+        .await
+        .expect("populate Jita belts");
     assert!(
-        jita_belts.belts.is_empty(),
+        jita_asteroids.is_empty(),
         "Jita (30000142) has 0 SDE asteroid belts"
     );
 
-    let mut perimeter_belts = SdeBeltRespawnHarness::from_sde_system(&ctx, 30_000_144, 25_000);
+    let perimeter_sys = ctx.systems.get_or_spawn(30_000_144);
+    let perimeter_asteroids = perimeter_sys
+        .populate_asteroid_belt_entities()
+        .await
+        .expect("populate Perimeter belts");
+    let perimeter_belt_ids: BTreeSet<i64> =
+        perimeter_asteroids.iter().map(|a| a.belt_id).collect();
     assert_eq!(
-        perimeter_belts.belts.len(),
+        perimeter_belt_ids.len(),
         3,
         "Perimeter (30000144) must have 3 SDE asteroid belts (group_id == 9)"
     );
-    let belt_id = *perimeter_belts.belts.keys().min().expect("Perimeter belt");
-    assert_eq!(belt_id, 40_009_232);
+    let first_belt_id = *perimeter_belt_ids.iter().next().expect("Perimeter belt");
+    assert_eq!(first_belt_id, 40_009_232);
 
-    // Deplete Perimeter's first SDE belt at current virtual clock timestamp
-    let rem_after_mine = perimeter_belts
-        .harvest(belt_id, 25_000, ctx.now_unix_secs())
-        .expect("harvest full belt");
-    assert_eq!(rem_after_mine, 0);
+    let belt_asteroids: Vec<_> = perimeter_asteroids
+        .iter()
+        .filter(|a| a.belt_id == first_belt_id)
+        .cloned()
+        .collect();
+    assert!(
+        belt_asteroids.len() >= 2,
+        "Perimeter belt must contain multiple asteroids"
+    );
+    let target_ast = &belt_asteroids[0];
+    let ast_id = target_ast.asteroid_id;
+    let full_units = target_ast.initial_units;
+    assert!(full_units > 0);
+
+    // 4a. Partly mined belt: depleting only the first asteroid while others remain in the belt
+    // must NOT schedule belt respawn (`Asteroids_and_ore.md:69`: respawn after downtime only if no asteroids left).
+    let mined = perimeter_sys
+        .mine_asteroid(ast_id, full_units, 0.0)
+        .await
+        .expect("mine first asteroid");
+    assert!(mined.depleted);
+    assert_eq!(mined.remaining_units, 0);
+    assert!(
+        perimeter_sys
+            .mine_asteroid(ast_id, 1, 0.0)
+            .await
+            .is_err(),
+        "mining a depleted asteroid must fail"
+    );
+    assert!(
+        perimeter_sys
+            .get_ball_snapshot(ast_id)
+            .await
+            .expect("get ball snapshot")
+            .is_none(),
+        "depleted asteroid must be removed from Ballpark"
+    );
+    let state_partly_mined = perimeter_sys
+        .get_asteroid_state(ast_id)
+        .await
+        .expect("get asteroid state partly mined")
+        .expect("asteroid state exists");
+    assert!(state_partly_mined.depleted);
     assert_eq!(
-        perimeter_belts.harvest(belt_id, 1_000, ctx.now_unix_secs()),
-        Err("AsteroidBeltDepleted")
+        state_partly_mined.respawn_at_tick, None,
+        "partly mined belt must not schedule respawn while other asteroids remain"
     );
 
-    // Advance virtual clock by 12 hours (43,200s < 86,400s daily downtime respawn): belt stays depleted
-    let _ = ctx.step_clock_tick(43_200 / 600);
-    perimeter_belts.maintenance_tick(ctx.now_unix_secs(), 25_000);
-    assert_eq!(perimeter_belts.belts[&belt_id].1, 0);
+    // Even after advancing a full 24h downtime interval, a partly mined belt must NOT respawn
+    let _ = ctx.step_clock_tick(DEFAULT_BELT_RESPAWN_INTERVAL_SECS / 600);
+    let _ = perimeter_sys
+        .step_manual(1.0)
+        .await
+        .expect("step system after 24h partly mined");
+    let state_still_partial = perimeter_sys
+        .get_asteroid_state(ast_id)
+        .await
+        .expect("get asteroid state after 24h partial")
+        .expect("asteroid state after 24h partial");
+    assert!(state_still_partial.depleted);
+    assert_eq!(state_still_partial.remaining_units, 0);
 
-    // Advance remaining 12 hours (total 86,400s = 24h daily downtime window): belt respawns
+    // 4b. Align virtual clock to 10:50 UTC (600s BEFORE daily 11:00 UTC downtime) and empty the belt:
+    // it must schedule respawn at that upcoming 11:00 UTC downtime (600s later), not 24h later.
+    let upcoming_dt = next_downtime_unix_secs(
+        ctx.now_unix_secs(),
+        DEFAULT_BELT_RESPAWN_INTERVAL_SECS,
+        DEFAULT_DOWNTIME_UTC_SECS_OF_DAY,
+    );
+    let target_just_before_dt = if upcoming_dt.saturating_sub(ctx.now_unix_secs()) >= 600 {
+        upcoming_dt - 600
+    } else {
+        upcoming_dt + DEFAULT_BELT_RESPAWN_INTERVAL_SECS - 600
+    };
+    ctx.advance_secs(target_just_before_dt - ctx.now_unix_secs());
+    let expected_first_downtime = target_just_before_dt + 600;
+    assert_eq!(
+        expected_first_downtime % DEFAULT_BELT_RESPAWN_INTERVAL_SECS,
+        DEFAULT_DOWNTIME_UTC_SECS_OF_DAY
+    );
+
+    for rem_ast in &belt_asteroids[1..] {
+        let m = perimeter_sys
+            .mine_asteroid(rem_ast.asteroid_id, rem_ast.initial_units, 0.0)
+            .await
+            .expect("deplete remaining asteroid in belt before downtime");
+        assert!(m.depleted);
+    }
+
+    let state_before_dt = perimeter_sys
+        .get_asteroid_state(ast_id)
+        .await
+        .expect("get asteroid state after belt empty before downtime")
+        .expect("asteroid state exists");
+    assert!(state_before_dt.depleted);
+    assert_eq!(
+        state_before_dt.respawn_at_tick,
+        Some(expected_first_downtime),
+        "belt emptied 600s before 11:00 UTC downtime must schedule respawn at that 11:00 UTC downtime"
+    );
+
+    // Advance 300s to 10:55 UTC (still 300s before 11:00 UTC downtime): belt stays depleted
+    ctx.advance_secs(300);
+    let _ = perimeter_sys
+        .step_manual(1.0)
+        .await
+        .expect("step system at 10:55 UTC");
+    assert!(
+        perimeter_sys
+            .get_asteroid_state(ast_id)
+            .await
+            .expect("get asteroid state at 10:55 UTC")
+            .expect("asteroid state")
+            .depleted
+    );
+
+    // Advance remaining 300s to reach 11:00 UTC downtime: entire belt respawns together
+    ctx.advance_secs(300);
+    assert_eq!(ctx.now_unix_secs(), expected_first_downtime);
+    let _ = perimeter_sys
+        .step_manual(1.0)
+        .await
+        .expect("step system at 11:00 UTC downtime");
+    for belt_ast in &belt_asteroids {
+        let state_at_dt = perimeter_sys
+            .get_asteroid_state(belt_ast.asteroid_id)
+            .await
+            .expect("get asteroid state at downtime")
+            .expect("asteroid state at downtime");
+        assert!(!state_at_dt.depleted);
+        assert_eq!(state_at_dt.remaining_units, belt_ast.initial_units);
+        assert_eq!(state_at_dt.respawn_at_tick, None);
+        assert!(
+            perimeter_sys
+                .get_ball_snapshot(belt_ast.asteroid_id)
+                .await
+                .expect("get ball snapshot at downtime")
+                .is_some(),
+            "respawned asteroid ball must be restored to Ballpark at downtime"
+        );
+    }
+
+    // 4c. Advance 600s past downtime to 11:10 UTC and empty the belt again:
+    // it must wait for the FOLLOWING day's 11:00 UTC downtime (85,800s later).
+    let _ = ctx.step_clock_tick(1); // +600s -> 11:10 UTC
+    let expected_following_downtime =
+        expected_first_downtime + DEFAULT_BELT_RESPAWN_INTERVAL_SECS;
+    for belt_ast in &belt_asteroids {
+        let m = perimeter_sys
+            .mine_asteroid(belt_ast.asteroid_id, belt_ast.initial_units, 0.0)
+            .await
+            .expect("deplete asteroid after downtime");
+        assert!(m.depleted);
+    }
+    let state_after_dt_empty = perimeter_sys
+        .get_asteroid_state(ast_id)
+        .await
+        .expect("get asteroid state emptied after downtime")
+        .expect("asteroid state");
+    assert!(state_after_dt_empty.depleted);
+    assert_eq!(
+        state_after_dt_empty.respawn_at_tick,
+        Some(expected_following_downtime),
+        "belt emptied at 11:10 UTC must wait for the following day's 11:00 UTC downtime"
+    );
+
+    // Advance virtual clock by 12 hours (43,200s -> 23:10 UTC): belt stays depleted
     let _ = ctx.step_clock_tick(43_200 / 600);
-    perimeter_belts.maintenance_tick(ctx.now_unix_secs(), 25_000);
-    assert_eq!(perimeter_belts.belts[&belt_id].1, 25_000);
-    assert!(perimeter_belts.belts[&belt_id].2.is_none());
+    let _ = perimeter_sys
+        .step_manual(1.0)
+        .await
+        .expect("step system after 12h");
+    let state_12h = perimeter_sys
+        .get_asteroid_state(ast_id)
+        .await
+        .expect("get asteroid state 12h")
+        .expect("asteroid state 12h");
+    assert!(state_12h.depleted);
+    assert_eq!(state_12h.remaining_units, 0);
+    assert!(
+        perimeter_sys
+            .get_ball_snapshot(ast_id)
+            .await
+            .expect("get ball snapshot 12h")
+            .is_none()
+    );
+
+    // Advance remaining 42,600s (71 ticks of 600s) to reach the following day's 11:00 UTC downtime: belt respawns
+    let _ = ctx.step_clock_tick(42_600 / 600);
+    assert_eq!(ctx.now_unix_secs(), expected_following_downtime);
+    let _ = perimeter_sys
+        .step_manual(1.0)
+        .await
+        .expect("step system at following downtime");
+    for belt_ast in &belt_asteroids {
+        let state_next_dt = perimeter_sys
+            .get_asteroid_state(belt_ast.asteroid_id)
+            .await
+            .expect("get asteroid state at following downtime")
+            .expect("asteroid state at following downtime");
+        assert!(!state_next_dt.depleted);
+        assert_eq!(state_next_dt.remaining_units, belt_ast.initial_units);
+        assert_eq!(state_next_dt.respawn_at_tick, None);
+        assert!(
+            perimeter_sys
+                .get_ball_snapshot(belt_ast.asteroid_id)
+                .await
+                .expect("get ball snapshot at following downtime")
+                .is_some(),
+            "respawned asteroid ball must be restored to Ballpark"
+        );
+    }
 }

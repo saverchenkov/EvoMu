@@ -3356,6 +3356,427 @@
    "na_allowed": false,
    "attest_ok": false,
    "added_by_audit": "20261018-131718"
+  },
+  {
+   "acceptance": "Each W-space system with a phenomenon applies its effect set to capsuleer ships only (not Sleepers or structures), at the system's class strength. Pulsar: shield HP, signature radius and neut/nos amount +30/44/58/72/86/100%; armor resists and cap recharge time -15..-50%. Black Hole: ship velocity, targeting range and missile explosion velocity +30..+100%; missile velocity and inertia +15..+50%; web strength -15..-50%. Cataclysmic Variable: remote armor/shield rep and capacitor capacity +30..+100%; local reps and remote cap transmitter -15..-50%; cap recharge time +15..+50%. Magnetar: damage and missile explosion radius +30..+100%; tracking, drone tracking, targeting range and painter strength -15..-50%. Red Giant: heat damage +15..+50%; overload bonus, smartbomb range/damage and bomb damage +30..+100%. Wolf-Rayet: armor HP +30..+100%; shield resists and signature -15..-50%; small weapon damage +60..+200%. C13 systems use C6 Wolf-Rayet values. Drifter wormhole systems use C2 strength. The effect is shown in the system-wide effects HUD.",
+   "domain": "dogma",
+   "id": "feat:dogma.wormhole-phenomena-effects",
+   "plan_task": null,
+   "sources": [
+    "wiki:Wormhole_space",
+    "wiki:Shattered_wormhole_systems",
+    "client:eve/client/script/ui/inflight/shipHud/systemWideEffectsContainer.pyj"
+   ],
+   "title": "Wormhole system phenomena effects by class",
+   "why_missing": "feat:dogma.system-wide-effects lumps wormhole effects, Pochven, insurgency and storms into one sentence with no phenomenon list or magnitudes, so 36 class/phenomenon combinations have no testable row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261019-053529"
+  },
+  {
+   "acceptance": "The 25 J000xxx systems only connect through small-ship wormholes that admit frigates, destroyers, Porpoise and mass-qualified HIC/Odysseus. They spawn C1-C3 sites, apply C6 Wolf-Rayet effects and spawn signatures and anomalies more often than normal systems.",
+   "domain": "navigation",
+   "id": "feat:navigation.small-ship-shattered-wormholes",
+   "plan_task": null,
+   "sources": [
+    "wiki:Shattered_wormhole_systems"
+   ],
+   "title": "Small-ship shattered (C13) wormhole systems",
+   "why_missing": "feat:navigation.wormhole-thera bundles Thera, shattered and Drifter systems into one coarse sentence. C13 hull restrictions and effects are untestable as written.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261019-053529"
+  },
+  {
+   "acceptance": "Shattered systems behave as follows: no moons; Upwell anchoring is refused; they get one K-space static beyond their class statics (C4s use C3-type K-space statics); they spawn sites of their own class plus or minus one; each has one Shattered Debris Field and one Shattered Ice Field (the only ice in J-space), each guarded by a single delayed Sleeper wave.",
+   "domain": "navigation",
+   "id": "feat:navigation.standard-shattered-wormholes",
+   "plan_task": null,
+   "sources": [
+    "wiki:Shattered_wormhole_systems",
+    "wiki:Wormhole_space"
+   ],
+   "title": "Standard shattered wormhole system rules",
+   "why_missing": "No row covers shattered-system statics, the anchoring ban or the unique ore/ice fields. wormhole-thera only says 'behave per rules'.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261019-053529"
+  },
+  {
+   "acceptance": "There are five Drifter systems: J200727, J164710, J174618, J055520 and J110145. Each has around 50-70 K-space connections and six statics to C1-C6 (Z647, D382, O477, Y683, N062, R474), and every signature in them is a wormhole. On the K-space side the connection is an 'unidentified wormhole' beacon that needs no scanning, with types C414, V928, R259, S877 and B735. Both sides are deadspace, so warping in lands about 80 km off. Drifter battleships guard the K-space side. System effects are at C2 strength.",
+   "domain": "navigation",
+   "id": "feat:navigation.drifter-wormhole-systems",
+   "plan_task": null,
+   "sources": [
+    "wiki:Wormhole_space",
+    "wiki:Drifters"
+   ],
+   "title": "Drifter wormhole systems and unidentified wormholes",
+   "why_missing": "No row defines the Drifter wormhole network, its beacon-type K-space entrances or its static set. npc.drifters and pve.drifter-hives cover different content.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261019-053529"
+  },
+  {
+   "acceptance": "When a dreadnought or carrier warps into a C5/C6 combat anomaly or Sleeper data/relic site, Upgraded Avenger battleships spawn: 3 per capital in C5, 4 per capital in C6. They have a 30,000 m signature and web, scram and neut. Each capital type can trigger at most two escalations (four in total), and waves regenerate after downtime. Escalation NPCs despawn when the capital leaves or moves more than 100 km from the warp-in.",
+   "domain": "pve",
+   "id": "feat:pve.wormhole-capital-escalations",
+   "plan_task": null,
+   "sources": [
+    "wiki:Sleepers",
+    "wiki:Wormhole_space",
+    "wiki:Capital_Escalations"
+   ],
+   "title": "C5/C6 capital escalation waves",
+   "why_missing": "feat:pve.wormhole-sites is a single coarse row with no capital-trigger, scaling, cap or despawn rules.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261019-053529"
+  },
+  {
+   "acceptance": "Finishing a C5/C6 combat or Sleeper data/relic site spawns a Decloaked Transmission Relay. Attacking it spawns Arithmos Tyrannos if a capital was on grid when the relay spawned, otherwise Hyleus Tyrannos. Both have warp core strength 3, scram, web and neut, and warp around the system if not killed. Arithmos drops Sleeper loot.",
+   "domain": "pve",
+   "id": "feat:pve.wormhole-drifter-response-escalation",
+   "plan_task": null,
+   "sources": [
+    "wiki:Sleepers"
+   ],
+   "title": "Decloaked Transmission Relay / Drifter response battleship",
+   "why_missing": "No ledger row mentions the Transmission Relay or the Drifter response escalation.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261019-053529"
+  },
+  {
+   "acceptance": "A W-space site that has been activated (first warp-in) despawns at the third downtime after activation if completed, and at the fourth if left unfinished.",
+   "domain": "pve",
+   "id": "feat:pve.wormhole-site-downtime-despawn",
+   "plan_task": null,
+   "sources": [
+    "wiki:Wormhole_space"
+   ],
+   "title": "W-space site despawn by downtime count",
+   "why_missing": "feat:scanning.sig-despawn says only that 'completed/expired sites despawn'. The downtime-count rule for W-space has no row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261019-053529"
+  },
+  {
+   "acceptance": "Selected NPC stations carry permanent buy orders for Sleeper components at fixed prices: Neural Network Analyzer 200,000 ISK, Sleeper Data Library 500,000 ISK, Ancient Coordinates Database 1,500,000 ISK, Sleeper Drone AI Nexus 5,000,000 ISK. Selling into them goes through normal market matching and sales tax, and the orders never deplete.",
+   "domain": "market",
+   "id": "feat:market.npc-buy-orders-sleeper-loot",
+   "plan_task": null,
+   "sources": [
+    "wiki:Sleepers"
+   ],
+   "title": "NPC buy orders for Sleeper components (blue loot)",
+   "why_missing": "feat:market.npc-seed-orders covers NPC sell orders only. Permanent NPC buy orders, the only outlet for blue loot, have no row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261019-053529"
+  },
+  {
+   "acceptance": "Player neutralizers have no effect on Sleeper NPCs; a nosferatu still gains energy for the user without draining the Sleeper. Sleepers that are pulled about 200 km from their spawn point teleport back.",
+   "domain": "npc",
+   "id": "feat:npc.sleeper-capacitor-immunity-and-leash",
+   "plan_task": null,
+   "sources": [
+    "wiki:Sleepers"
+   ],
+   "title": "Sleeper infinite capacitor and spawn leash",
+   "why_missing": "feat:npc.sleepers is one line ('Sleeper AI ... with remote reps'), with no capacitor immunity or leash behaviour.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261019-053529"
+  },
+  {
+   "acceptance": "Sleepers deal EM/Thermal beam and Explosive/Kinetic missile damage, neut (about 40 km for cruisers, 20 km for frigates) and web. They warp-scramble only in C3 and higher, deal extra damage to capital ships, and remote-repair each other in higher classes.",
+   "domain": "npc",
+   "id": "feat:npc.sleeper-ewar-by-wormhole-class",
+   "plan_task": null,
+   "sources": [
+    "wiki:Sleepers"
+   ],
+   "title": "Sleeper EWAR and anti-capital damage by class",
+   "why_missing": "Class-dependent Sleeper EWAR (scramble only in C3+) and anti-capital damage are not covered by any npc row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261019-053529"
+  },
+  {
+   "acceptance": "Vigilant, Wakeful and Restless Sleeper sentries in W-space sites fire every 15 s for EM/Thermal damage out to 250 km and have a 50 m signature radius, with stats taken from the SDE NPC types.",
+   "domain": "pve",
+   "id": "feat:pve.sleeper-sentry-towers",
+   "plan_task": null,
+   "sources": [
+    "wiki:Sleepers"
+   ],
+   "title": "Sleeper sentry towers",
+   "why_missing": "No row covers Sleeper site sentries. npc.sentry-guns is about empire gate/station sentries.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261019-053529"
+  },
+  {
+   "acceptance": "Hypnosian Sleepers in Pochven spawn on celestials, ore anomalies, wormholes and Torpid Sleeper Hive sites in three tiers: Faded, normal, and Aroused (which has a shield layer). They drop Interstellar Navigation Logs instead of blue loot, and the logs can be traded at Triglavian stations.",
+   "domain": "npc",
+   "id": "feat:npc.pochven-hypnosian-sleepers",
+   "plan_task": null,
+   "sources": [
+    "wiki:Sleepers",
+    "wiki:Pochven"
+   ],
+   "title": "Pochven Hypnosian Sleepers and navigation logs",
+   "why_missing": "No Pochven row covers Hypnosian Sleepers or the navigation-log loot replacement.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261019-053529"
+  },
+  {
+   "acceptance": "A newly spawned wormhole's destination-side K162 signature does not exist until a ship first jumps through. After that it appears in the destination system's signatures and is probeable there.",
+   "domain": "navigation",
+   "id": "feat:navigation.wormhole-k162-exit-materialization",
+   "plan_task": null,
+   "sources": [
+    "wiki:Wormhole_space"
+   ],
+   "title": "K162 exit appears only after first transit",
+   "why_missing": "wormhole-jump and wormhole-statics do not cover the delayed creation of the K162 side.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261019-053529"
+  },
+  {
+   "acceptance": "Any skill with an NPC-seeded sell order can be bought and injected directly from the skills UI from any location, at 130% of the NPC price. ISK is debited and journaled, the skill is added at level 0, and skills without NPC-seeded orders are refused.",
+   "domain": "skills",
+   "id": "feat:skills.direct-purchase-inject",
+   "plan_task": null,
+   "sources": [
+    "wiki:Skills_and_learning"
+   ],
+   "title": "Buy and inject skill from the character sheet",
+   "why_missing": "skills rows cover injecting a skillbook item only. The remote buy-and-inject path at a 30% markup has no row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261019-053529"
+  },
+  {
+   "acceptance": "An Alpha character's training queue is disabled once trained SP plus unallocated SP reaches 5,000,000 and cannot be unpaused. Unallocated SP can still be applied to skills. Omega status removes the limit.",
+   "domain": "skills",
+   "id": "feat:skills.alpha-5m-training-limit",
+   "plan_task": null,
+   "sources": [
+    "wiki:Skills_and_learning",
+    "wiki:Clone_states"
+   ],
+   "title": "Alpha queue disabled at 5M total SP",
+   "why_missing": "feat:skills.alpha-skill-caps is about per-skill alpha caps. The total-SP queue lockout, which counts unallocated SP, has no row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261019-053529"
+  },
+  {
+   "acceptance": "Omega accounts can claim a free 15,000 SP offer in the New Eden Store once per week. The offer refreshes at Tuesday downtime, credits unallocated SP and is refused for Alpha accounts or a second claim in the same week.",
+   "domain": "skills",
+   "id": "feat:skills.omega-weekly-free-sp",
+   "plan_task": null,
+   "sources": [
+    "wiki:Skills_and_learning",
+    "wiki:New_Eden_Store"
+   ],
+   "title": "Weekly free 15,000 SP for Omega",
+   "why_missing": "wallet.nes-store covers generic offer purchase. The recurring weekly SP grant and its reset rule are untested.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261019-053529"
+  },
+  {
+   "acceptance": "New characters start with Int/Per/Wil/Mem 20 and Cha 19 (99 total, 14 remappable), and each base attribute stays within 17-27. A new character has one normal remap plus two bonus remaps. The normal remap is consumed before bonus remaps and replenishes after one year.",
+   "domain": "attributes",
+   "id": "feat:attributes.remap-defaults-and-order",
+   "plan_task": null,
+   "sources": [
+    "wiki:Skills_and_learning"
+   ],
+   "title": "Starting attributes and remap consumption order",
+   "why_missing": "feat:attributes.neural-remap and bonus-remap do not specify the 19-Charisma default, the 14-point pool, or that the normal remap is used first.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261019-053529"
+  },
+  {
+   "acceptance": "Booster and cerebral accelerator duration increases by 20% per Biology level (doubled at V). Expiry and the attribute bonus end at the extended time.",
+   "domain": "attributes",
+   "id": "feat:attributes.booster-duration-biology",
+   "plan_task": null,
+   "sources": [
+    "wiki:Skills_and_learning",
+    "wiki:Medical_boosters"
+   ],
+   "title": "Biology extends booster/accelerator duration",
+   "why_missing": "booster-consume and skills.accelerators do not mention the Biology duration modifier.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261019-053529"
+  },
+  {
+   "acceptance": "The broker fee and relist fee each have a 100 ISK minimum. Upwell market orders pay a fixed 0.5% SCC surcharge plus the owner rate (owner minimum 0%), unaffected by skills. Immediate-duration orders pay no broker fee.",
+   "domain": "market",
+   "id": "feat:market.broker-fee-minimum-and-scc-surcharge",
+   "plan_task": null,
+   "sources": [
+    "wiki:Trading"
+   ],
+   "title": "Broker fee minimum, SCC structure surcharge, immediate orders",
+   "why_missing": "feat:market.broker-fee mentions only the NPC formula or 'structure owner fee'. The minimum fee, the SCC surcharge and the immediate-order exemption are untested.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261019-053529"
+  },
+  {
+   "acceptance": "Player orders accept only the client duration set (immediate, 1, 3, 7, 14, 30, 90 days); durations over 90 days are rejected. NPC-seeded orders carry about one year of expiry.",
+   "domain": "market",
+   "id": "feat:market.order-duration-options",
+   "plan_task": null,
+   "sources": [
+    "wiki:Trading",
+    "wiki:Skills_and_learning"
+   ],
+   "title": "Market order duration limits",
+   "why_missing": "order-expiry tests expiry only. Validation of allowed durations and the 90-day cap has no row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261019-053529"
+  },
+  {
+   "acceptance": "Co-Processors raise CPU by a percentage. Reactor Control Units and Micro Auxiliary Power Cores raise powergrid by a percentage or flat amount. Power Diagnostic Systems give shield/cap/PG bonuses. Ancillary current routers and processor overclocking rigs apply. CPU/PG bonuses are not stacking-penalized, per SDE stackable flags.",
+   "domain": "modules",
+   "id": "feat:modules.fitting-capacity-mods",
+   "plan_task": null,
+   "sources": [
+    "wiki:Fitting_ships",
+    "wiki:Fitting_Modules_and_Rigs_Guide"
+   ],
+   "title": "CPU/PG capacity modules and rigs",
+   "why_missing": "No modules row covers fitting-capacity upgrades. cap-mods and damage-mods are unrelated families.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261019-053529"
+  },
+  {
+   "acceptance": "Expanded Cargohold modules increase cargo capacity while reducing max velocity and structure HP, with stacking applied per SDE. Cargo Optimization rigs increase capacity at the cost of their drawback. Cargo moves respect the modified capacity.",
+   "domain": "modules",
+   "id": "feat:modules.cargo-expanders",
+   "plan_task": null,
+   "sources": [
+    "wiki:Hauling",
+    "wiki:Fitting_Modules_and_Rigs_Guide"
+   ],
+   "title": "Expanded cargoholds and cargo rigs",
+   "why_missing": "ships.cargo-capacity checks volume limits only. The capacity-modifying modules and their drawbacks have no row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261019-053529"
+  },
+  {
+   "acceptance": "Drone Damage Amplifiers raise drone damage with stacking penalty. Drone Navigation Computers raise drone MWD velocity. Omnidirectional Tracking Links/Enhancers with scripts raise drone optimal/tracking. Drone Link Augmentors raise drone control range. All apply only to drones launched from the fitted ship.",
+   "domain": "modules",
+   "id": "feat:modules.drone-upgrade-modules",
+   "plan_task": null,
+   "sources": [
+    "wiki:Drone_mechanics",
+    "wiki:Drones"
+   ],
+   "title": "Drone damage amplifiers, navigation computers and tracking links",
+   "why_missing": "Drone rows cover launching, recall and bandwidth. The drone upgrade module family has no row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261019-053529"
+  },
+  {
+   "acceptance": "GetSkillHistory returns one row per training completion, injection, extraction and removal, with logDate, skillTypeID, skillLevel and absolutePoints, in chronological order, kept across relog.",
+   "domain": "skills",
+   "id": "feat:skills.skill-history-events",
+   "plan_task": null,
+   "sources": [
+    "client:eve/client/script/ui/services/skillsvc.pyj"
+   ],
+   "title": "Skill history event rows",
+   "why_missing": "feat:skills.skill-history is marked DONE with a test that only checks column names. This row pins the per-event content so it can be tested separately.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261019-053529"
+  },
+  {
+   "acceptance": "A buy order placed with range station, solar system, 1-40 jumps or region can be filled by a seller at any station inside that range. Items are delivered at the seller's station, and sellers outside the range cannot match. The Visibility level (0 station, 1 system, 2: 5 jumps, 3: 10, 4: 20, 5 region) caps the range allowed at placement.",
+   "domain": "market",
+   "id": "feat:market.buy-order-range-fill",
+   "plan_task": null,
+   "sources": [
+    "wiki:Trading",
+    "wiki:Skills_Trade"
+   ],
+   "title": "Sellers fill buy orders anywhere within order range",
+   "why_missing": "remote-orders covers where orders can be placed. Range-based matching from the seller's station, and delivery at that station, has no testable row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261019-053529"
+  },
+  {
+   "acceptance": "Within a single C5/C6 site, escalation triggers are counted per capital class (dreadnought vs carrier/FAX). The third trigger by the same class spawns nothing, and the counter resets at downtime.",
+   "domain": "pve",
+   "id": "feat:pve.wormhole-site-capital-escalation-cap",
+   "plan_task": null,
+   "sources": [
+    "wiki:Wormhole_space"
+   ],
+   "title": "Capital escalation trigger cap per site",
+   "why_missing": "The two-per-capital-type cap is a separately testable rule apart from wave composition. No row covers it.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261019-053529"
+  },
+  {
+   "acceptance": "Thera (31000005) is the only W-space system with NPC stations: four dockable Sisters of EVE stations with market, clone and other services, and normal docking rules apply. Wormhole connections to Thera spawn from K-space and W-space.",
+   "domain": "navigation",
+   "id": "feat:navigation.thera-npc-stations",
+   "plan_task": null,
+   "sources": [
+    "wiki:Wormhole_space",
+    "wiki:Thera"
+   ],
+   "title": "Thera Sisters of EVE stations",
+   "why_missing": "feat:navigation.wormhole-thera bundles Thera into a generic 'no structures, special effects' clause. Thera's NPC station services and docking have no testable row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261019-053529"
   }
  ],
  "rejected_triage": [],
@@ -3466,6 +3887,46 @@
    "flagged_by_audit": "20261018-073440"
   },
   {
+   "evidence": "tests/character_skills_clones.rs:985-1002 asserts only that the charUnboundMgr.GetCharacterInfo KeyVal has characterID, balance and skillPoints keys. Acceptance requires skills, attributes, implants, jump clones, standings, security status, kill rights, medals and decorations. GetCharacterInfo is a petitioner call (crucible CharUnboundMgrService.cpp:100-107).",
+   "id": "feat:character.character-sheet",
+   "flagged_by_audit": "20261019-053529"
+  },
+  {
+   "evidence": "crates/eve-server/src/services/character_skills.rs:183-219 reads args as (name, raceID, bloodlineID, ancestryID, schoolID) with hardcoded defaults (race 2, bloodline 3, ancestry 19, school 14) and shares the arm with 'CreateCharacter'. The V24 layout is (charactername, bloodlineID, genderID, ancestryID, charInfo, portraitInfo, schoolID) (crucible:src/eve-server/character/CharUnboundMgrService.cpp:142-143). The doll is never validated. The test at tests/character_skills_clones.rs:705-722 uses the invented 5-arg layout.",
+   "id": "feat:character.create-character",
+   "flagged_by_audit": "20261019-053529"
+  },
+  {
+   "evidence": "Acceptance: GetCharacterInfo returns all characters with portrait, location, ship, skill training and wallet. tests/character_skills_clones.rs:762-774 only asserts GetCharactersToSelect returns a CRowset (is_crowset). The ship name is the SDE type name (character_skills.rs:43-55), and there is no skill-training summary.",
+   "id": "feat:character.list-characters",
+   "flagged_by_audit": "20261019-053529"
+  },
+  {
+   "evidence": "crates/eve-server/src/services/character_skills.rs:129-144 checks only length 3-37 and case-insensitive uniqueness. The character-set and banned-word checks that the acceptance requires are absent, and the test (tests/character_skills_clones.rs:660-701) checks only length and duplicates.",
+   "id": "feat:character.name-validation",
+   "flagged_by_audit": "20261019-053529"
+  },
+  {
+   "evidence": "crates/eve-server/src/services/character_skills.rs:146-181 builds the name from a hardcoded 20x20 first/last name list and ignores the bloodline (acceptance: 'valid for the chosen bloodline'). tests/character_skills_clones.rs:642-657 asserts only the string length.",
+   "id": "feat:character.random-name",
+   "flagged_by_audit": "20261019-053529"
+  },
+  {
+   "evidence": "tests/character_skills_clones.rs:822-844 asserts only that characterID, characterName, corporationID, raceID and securityStatus keys are present. The acceptance clauses for alliance, bloodline, birthday and portrait are never checked.",
+   "id": "feat:character.show-info-public",
+   "flagged_by_audit": "20261019-053529"
+  },
+  {
+   "evidence": "Acceptance requires Infomorph Psychology slots and standing/structure service. tests/character_skills_clones.rs:1238-1318 tests the fee and the missing-clone-bay case only; the slot limit and standing gate are never exercised.",
+   "id": "feat:clones.jump-clone-install",
+   "flagged_by_audit": "20261019-053529"
+  },
+  {
+   "evidence": "tests/economy_market_industry.rs:834-852 calls contractProxy.CreateContract with the string type 'ItemExchange' and an invented 6-arg layout instead of the V24 conType integer and full parameter list. Locking the items on creation is not asserted.",
+   "id": "feat:contracts.item-exchange",
+   "flagged_by_audit": "20261019-053529"
+  },
+  {
    "evidence": "crates/eve-server/src/esi/character_routes.rs:304-320 conflates jump activation cooldown (`jump_cooldown_until_unix`) with jump fatigue expiry (`jump_fatigue_expire_date`), ignores `jump_fatigue_minutes`, and uses `last_clone_jump_unix` for `last_jump_date` and `last_update_date`. Tested at crates/eve-server/tests/esi_routes.rs:973-975, 1148-1156.",
    "id": "feat:esi.character.fatigue",
    "flagged_by_audit": "20261018-131718"
@@ -3496,9 +3957,159 @@
    "flagged_by_audit": "20261018-131718"
   },
   {
+   "evidence": "crates/eve-server/tests/character_progression.rs:1271-1315: the only tagged test is a pure DNA string encode/decode (fitting_to_dna/dna_to_fitting) with no RPC. Acceptance requires charFittingMgr/corpFittingMgr/allianceFittingMgr save, list, delete, share and limits; none of these are called or persisted.",
+   "id": "feat:fitting.fittings-save",
+   "flagged_by_audit": "20261019-053529"
+  },
+  {
+   "evidence": "tests/economy_market_industry.rs:1297-1314 calls industryManager.GetFacilities, which is not a V24 industryManager method, and asserts only a non-empty list.",
+   "id": "feat:industry.facilities",
+   "flagged_by_audit": "20261019-053529"
+  },
+  {
+   "evidence": "tests/economy_market_industry.rs:1365-1366 asserts a 10% tax on the hardcoded 10,000 ISK base. There is no SetFacilityTaxes per activity/standing and no NPC facility rate from data.",
+   "id": "feat:industry.facility-tax",
+   "flagged_by_audit": "20261019-053529"
+  },
+  {
+   "evidence": "tests/economy_market_industry.rs:1344-1359 calls InstallJob(blueprint typeID, activity, runs) with no blueprint item. Blueprint ownership/lock, material presence and consumption, skills, slots and range are never validated or asserted.",
+   "id": "feat:industry.install-job",
+   "flagged_by_audit": "20261019-053529"
+  },
+  {
+   "evidence": "Acceptance: EIV x system cost index x structure modifiers + facility tax + SCC surcharge. tests/economy_market_industry.rs:1316-1339 asserts a flat 10,000 ISK per run (baseJobCost 20,000 for 2 runs) through industryManager.GetJobCost. That method is not in the V24 catalog (CancelJob, CompleteJob, CompleteManyJobs, GetJob, GetJobCounts, GetJobsByOwner, InstallJob).",
+   "id": "feat:industry.job-cost",
+   "flagged_by_audit": "20261019-053529"
+  },
+  {
+   "evidence": "tests/character_progression.rs:1193-1243 calls invBroker.StackItems. The V24 service is 'invbroker' with SplitStack/TrashItems and has no StackItems (context/parity.json rpc rows 'rpc:invbroker.*').",
+   "id": "feat:inventory.split-merge",
+   "flagged_by_audit": "20261019-053529"
+  },
+  {
+   "evidence": "tests/character_progression.rs:1245-1268 calls invBroker.DestroyItem, an invented method. The client uses invbroker.TrashItems (catalog).",
+   "id": "feat:inventory.trash-items",
+   "flagged_by_audit": "20261019-053529"
+  },
+  {
+   "evidence": "tests/economy_market_industry.rs:414-446 expects the broker fee to fall to 2.88% because Connections raised a raw 5.0 corp standing to an effective 6.0. wiki:Trading states that broker fees use unmodified standing (faction 0.03%, corp 0.02% per point), so the implementation applies the wrong standing.",
+   "id": "feat:market.broker-fee",
+   "flagged_by_audit": "20261019-053529"
+  },
+  {
+   "evidence": "Acceptance: BuyMultipleItems fills the cheapest sells, the seller pays sales tax and both sides are journaled. tests/economy_market_industry.rs:712-755 crosses an ask with PlaceCharOrder and asserts only that the buyer received the items.",
+   "id": "feat:market.instant-buy",
+   "flagged_by_audit": "20261019-053529"
+  },
+  {
+   "evidence": "Acceptance names PlaceMultiSellOrder. tests/economy_market_industry.rs:561-601 places sells with PlaceCharOrder(bid=false), so the acceptance RPC is never exercised.",
+   "id": "feat:market.place-sell",
+   "flagged_by_audit": "20261019-053529"
+  },
+  {
+   "evidence": "Acceptance: 'HIC infinite point/bubble mode with penalties.' tests/destiny_binary_stream.rs:437-574 only adds generic ballpark bubbles (add_warp_bubble). There is no HIC module, no infinite point and no penalties.",
+   "id": "feat:modules.warp-disruption-field",
+   "flagged_by_audit": "20261019-053529"
+  },
+  {
+   "evidence": "tests/destiny_binary_stream.rs:341-344, 392-395 and 417-420 set warp scramble and warp core strength directly through set_warp_scramble_strength/set_warp_core_strength on the system actor. No disruptor/scrambler module is activated, and neither range nor the SDE warpScrambleStrength attribute is used. The 'scramblers stop MWD/MJD' clause is untested.",
+   "id": "feat:modules.warp-disruptor",
+   "flagged_by_audit": "20261019-053529"
+  },
+  {
+   "evidence": "Acceptance: warp time follows the accel/decel formula per ship class. tests/destiny_binary_stream.rs:140-275 uses a fixed 3 AU/s Rifter ball and checks only monotonic acceleration, cruise speed within 5% and landing within 2,500 m. No warp time or class-dependent deceleration is asserted.",
+   "id": "feat:navigation.warp-speed-formula",
+   "flagged_by_audit": "20261019-053529"
+  },
+  {
+   "evidence": "tests/social_fleets_corps.rs:854-859 calls wormholeMgr.JumpWormhole with a signature-id string. The V24 catalog lists only wormholeMgr.GetWormholePolarization and WormholeJump (context/parity.json rpc rows). Mass subtraction and the max-ship-mass check are never asserted.",
+   "id": "feat:navigation.wormhole-jump",
+   "flagged_by_audit": "20261019-053529"
+  },
+  {
+   "evidence": "tests/social_fleets_corps.rs:800-805 only asserts is_keyval on wormholeMgr.GetWormholeInfo, which is not a V24 method. No expiry or mass-collapse behaviour is tested.",
+   "id": "feat:navigation.wormhole-lifetime",
+   "flagged_by_audit": "20261019-053529"
+  },
+  {
+   "evidence": "tests/social_fleets_corps.rs:819-823 only asserts is_rowset on wormholeMgr.GetSystemStatics, which is not a V24 method. Static respawn after collapse and wandering spawns are untested.",
+   "id": "feat:navigation.wormhole-statics",
+   "flagged_by_audit": "20261019-053529"
+  },
+  {
+   "evidence": "tests/social_fleets_corps.rs:807-817 checks isThera/wormholeClass from wormholeMgr.GetWormholeSystemRules, which is not a V24 method. The structure ban and system effects are untested.",
+   "id": "feat:navigation.wormhole-thera",
+   "flagged_by_audit": "20261019-053529"
+  },
+  {
+   "evidence": "tests/economy_market_industry.rs:1467-1493 exercises the 1 + Interplanetary Consolidation limit only through the invented planetMgr.CreateColony; V24 places command centers through UserUpdateNetwork.",
+   "id": "feat:pi.colony-limit",
+   "flagged_by_audit": "20261019-053529"
+  },
+  {
+   "evidence": "tests/economy_market_industry.rs:1447-1530 uses planetMgr.CreateColony and UpgradeCommandCenter, neither of which is a V24 planetMgr method (catalog: GetColony, GetCommandCenterLevel, UserUpdateNetwork, ...). It asserts pinsCount and a balance delta, not CPU/PG.",
+   "id": "feat:pi.command-center",
+   "flagged_by_audit": "20261019-053529"
+  },
+  {
+   "evidence": "tests/economy_market_industry.rs:1555-1579 calls the invented planetMgr.CreateLink with a client-supplied distance and asserts only linkPowergrid > 0 and linkCPU > 0. Length-based cost and bandwidth upgrades are not verified.",
+   "id": "feat:pi.links",
+   "flagged_by_audit": "20261019-053529"
+  },
+  {
+   "evidence": "tests/economy_market_industry.rs:1532-1553 calls the invented planetMgr.PlacePins(planet, typeID, count) with no coordinates. Acceptance requires placement within CPU/PG with ISK cost; only pinsCount is asserted.",
+   "id": "feat:pi.place-pins",
+   "flagged_by_audit": "20261019-053529"
+  },
+  {
+   "evidence": "Acceptance: per-resource distribution maps, with scan range limited by Remote Sensing. tests/economy_market_industry.rs:1427-1445 asserts only planetID and hasColony.",
+   "id": "feat:pi.planet-info",
+   "flagged_by_audit": "20261019-053529"
+  },
+  {
+   "evidence": "tests/social_fleets_corps.rs:650-667 calls directionalScanMgr.PerformDirectionalScan(angle, range). That service is absent from the V24 catalog (nothing between devIndexManager and dogmaIM in context/parity.json). The scan direction comes from ship velocity rather than a client-supplied vector.",
+   "id": "feat:scanning.dscan",
+   "flagged_by_audit": "20261019-053529"
+  },
+  {
+   "evidence": "tests/social_fleets_corps.rs:669-674 calls probeMgr.LaunchProbes and asserts only is_keyval. The V24 RPC catalog has no probeMgr service (nothing between posMgr and publicQaToolsServer in context/parity.json); probes are launched by the probe-launcher module.",
+   "id": "feat:scanning.probe-launch",
+   "flagged_by_audit": "20261019-053529"
+  },
+  {
+   "evidence": "tests/social_fleets_corps.rs:723-728 calls the invented probeMgr.RecallProbes and asserts only is_keyval.",
+   "id": "feat:scanning.probe-recall",
+   "flagged_by_audit": "20261019-053529"
+  },
+  {
+   "evidence": "tests/social_fleets_corps.rs:676-721 uses scanMgr.GetSystemSignatures and scanMgr.ScanWithProbes. In the V24 catalog scanMgr exposes only GetSystemScanMgr and SignalTrackerRegister (context/parity.json), and plan:S-6 still expects RequestScans to be unimplemented.",
+   "id": "feat:scanning.probe-scan-math",
+   "flagged_by_audit": "20261019-053529"
+  },
+  {
    "evidence": "Acceptance: 'V24 SDE/FSD static data imported and loaded at runtime (types, dogma, map, blueprints, NPCs).' The tagged test test_phase_1_d1_to_d5... (e2e_journeys.rs:6586-6596) asserts only the resource count, non-empty types/solar_systems, the market_groups count and npc_spawn_groups == 392. It has no dogma attribute/effect or blueprint assertions; those exist only in the untagged eve-sde test. The 'NPCs' clause rests on sde_npc_spawn_groups, which tools/sde-import/import_sde.py:1831 synthesizes with build_v24_npc_spawn_groups(groups, types), grouping category-11 types (:1404-1405). That is derived data presented as SDE, not imported and not labelled as derived.",
    "id": "feat:serverops.static-data",
    "flagged_by_audit": "20261018-073440"
+  },
+  {
+   "evidence": "Acceptance: 'refuses fitted/damaged items.' tests/character_progression.rs:1010-1119 tests only the active-ship and not-docked refusals; fitted and damaged items are never exercised.",
+   "id": "feat:ships.repackage",
+   "flagged_by_audit": "20261019-053529"
+  },
+  {
+   "evidence": "Acceptance: 'Alpha characters cannot train above the alpha cap per skill; SP above cap is inactive.' tests/character_skills_clones.rs:256-328 only tests a 5,000,000 total-SP cap. No per-skill clone-grade cap or inactive-SP behaviour is exercised.",
+   "id": "feat:skills.alpha-skill-caps",
+   "flagged_by_audit": "20261019-053529"
+  },
+  {
+   "evidence": "The test asserts InjectSkillIntoBrain fails with SkillPrerequisiteNotMet when prerequisites are missing (tests/character_skills_clones.rs:563-578). Live behaviour lets a skillbook be injected without its prerequisites (wiki:Skills_and_learning, Injecting section), so the server enforces the wrong semantics.",
+   "id": "feat:skills.inject-skillbook",
+   "flagged_by_audit": "20261019-053529"
+  },
+  {
+   "evidence": "Acceptance: 'GetSkillHistory returns trained/injected/removed events with timestamps.' tests/character_skills_clones.rs:514-536 checks only the column names. No row content is asserted, not even for the injection performed at :593-615.",
+   "id": "feat:skills.skill-history",
+   "flagged_by_audit": "20261019-053529"
   },
   {
    "evidence": "crates/eve-sde/src/lib.rs:313-328, 562-658, 1185-1222, 1289, 1887-2015 \u2014 Task D-2 in action_plan.md requires: \"Add indexed lookups: types, groups, categories, dogma_attributes, dogma_effects, type_materials, blueprints, solar_systems, stargates, celestials_in_system, stations, agents, planet_schematics, schools, races, bloodlines, ancestries, factions, npc_corporations.\" SdeRegistry (crates/eve-sde/src/lib.rs:593-658) has no indexed stations lookup map (HashMap<i64, StationInfo>); stations are only nested inside SolarSystem.stations: Vec<StationInfo> (crates/eve-sde/src/lib.rs:313, 1246), requiring a linear scan across all 8,490 solar systems to look up a station by ID. Furthermore, SdeRegistry::open (crates/eve-sde/src/lib.rs:1188-1215) drops reprocessing_efficiency, reprocessing_stations_take, operation_id, constellation_id, region_id, is_conquerable, and orbit_id from sde_stations, hardcodes fallback owner_faction_id = 500001 (crates/eve-sde/src/lib.rs:1200-1203) and fallback corvette_type_id = 601 (crates/eve-sde/src/lib.rs:1289), and retains the legacy SdeSeedFile / SdeRegistry::from_json_str loader (crates/eve-sde/src/lib.rs:562-589, 1887-2015).",

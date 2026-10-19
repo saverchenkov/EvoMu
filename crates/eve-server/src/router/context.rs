@@ -164,6 +164,10 @@ impl ServerContext {
             }
         }
         let mut ctx = Self::with_sde_and_repository(sde, db);
+        ctx.systems
+            .set_belt_respawn_interval_secs(cfg.belt_respawn_interval_secs);
+        ctx.systems
+            .set_downtime_utc_secs_of_day(cfg.downtime_utc_secs_of_day);
         ctx.feature_flags = cfg.feature_flags.clone();
         ctx.esi_port = cfg.esi_port;
         if cfg.feature_flags.seed_demo {
