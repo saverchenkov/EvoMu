@@ -2232,3 +2232,1963 @@ impl QuasarMessage for GetJournalResponse {
         Ok(res)
     }
 }
+
+// ============================================================================
+// Q-7: Space & Combat Services (`eve_public.solarsystem.v1.*`, `eve_public.structure.v1.*`, `eve_public.killmail.v1.*`, etc.)
+// ============================================================================
+
+/// `eve_public.solarsystem.v1.GetSolarSystemRequest`
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GetSolarSystemRequest {
+    pub solar_system_id: u32,
+}
+
+impl QuasarMessage for GetSolarSystemRequest {
+    const FULL_NAME: &'static str = "eve_public.solarsystem.v1.GetSolarSystemRequest";
+
+    fn encode_proto(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        if self.solar_system_id != 0 {
+            encode_varint_field(1, self.solar_system_id as u64, &mut out);
+        }
+        out
+    }
+
+    fn decode_proto(buf: &[u8]) -> Result<Self, QuasarError> {
+        let wm = WireMessage::decode(buf)?;
+        let mut res = Self::default();
+        for f in wm.fields {
+            if f.field_number == 1 {
+                if let Some(v) = f.value.as_varint() {
+                    res.solar_system_id = v as u32;
+                }
+            }
+        }
+        Ok(res)
+    }
+}
+
+/// `eve_public.solarsystem.v1.GetSolarSystemResponse`
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct GetSolarSystemResponse {
+    pub solar_system_id: u32,
+    pub solar_system_name: String,
+    pub constellation_id: u32,
+    pub region_id: u32,
+    pub security_status: f64,
+    pub stargate_ids: Vec<u64>,
+    pub station_ids: Vec<u64>,
+    pub star_id: Option<u32>,
+}
+
+impl QuasarMessage for GetSolarSystemResponse {
+    const FULL_NAME: &'static str = "eve_public.solarsystem.v1.GetSolarSystemResponse";
+
+    fn encode_proto(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        if self.solar_system_id != 0 {
+            encode_varint_field(1, self.solar_system_id as u64, &mut out);
+        }
+        if !self.solar_system_name.is_empty() {
+            encode_string_field(2, &self.solar_system_name, &mut out);
+        }
+        if self.constellation_id != 0 {
+            encode_varint_field(3, self.constellation_id as u64, &mut out);
+        }
+        if self.region_id != 0 {
+            encode_varint_field(4, self.region_id as u64, &mut out);
+        }
+        if self.security_status != 0.0 {
+            encode_fixed64_field(5, self.security_status.to_bits(), &mut out);
+        }
+        for gate in &self.stargate_ids {
+            encode_varint_field(6, *gate, &mut out);
+        }
+        for sta in &self.station_ids {
+            encode_varint_field(7, *sta, &mut out);
+        }
+        if let Some(star) = self.star_id {
+            if star != 0 {
+                encode_varint_field(8, star as u64, &mut out);
+            }
+        }
+        out
+    }
+
+    fn decode_proto(buf: &[u8]) -> Result<Self, QuasarError> {
+        let wm = WireMessage::decode(buf)?;
+        let mut res = Self::default();
+        for f in wm.fields {
+            match f.field_number {
+                1 => {
+                    if let Some(v) = f.value.as_varint() {
+                        res.solar_system_id = v as u32;
+                    }
+                }
+                2 => {
+                    if let Ok(Some(s)) = f.value.as_str() {
+                        res.solar_system_name = s.to_string();
+                    }
+                }
+                3 => {
+                    if let Some(v) = f.value.as_varint() {
+                        res.constellation_id = v as u32;
+                    }
+                }
+                4 => {
+                    if let Some(v) = f.value.as_varint() {
+                        res.region_id = v as u32;
+                    }
+                }
+                5 => {
+                    if let Some(bits) = f.value.as_fixed64() {
+                        res.security_status = f64::from_bits(bits);
+                    }
+                }
+                6 => {
+                    if let Some(v) = f.value.as_varint() {
+                        res.stargate_ids.push(v);
+                    }
+                }
+                7 => {
+                    if let Some(v) = f.value.as_varint() {
+                        res.station_ids.push(v);
+                    }
+                }
+                8 => {
+                    if let Some(v) = f.value.as_varint() {
+                        res.star_id = Some(v as u32);
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(res)
+    }
+}
+
+/// `eve_public.structure.v1.GetStructureRequest`
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GetStructureRequest {
+    pub structure_id: u64,
+}
+
+impl QuasarMessage for GetStructureRequest {
+    const FULL_NAME: &'static str = "eve_public.structure.v1.GetStructureRequest";
+
+    fn encode_proto(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        if self.structure_id != 0 {
+            encode_varint_field(1, self.structure_id, &mut out);
+        }
+        out
+    }
+
+    fn decode_proto(buf: &[u8]) -> Result<Self, QuasarError> {
+        let wm = WireMessage::decode(buf)?;
+        let mut res = Self::default();
+        for f in wm.fields {
+            if f.field_number == 1 {
+                if let Some(v) = f.value.as_varint() {
+                    res.structure_id = v;
+                }
+            }
+        }
+        Ok(res)
+    }
+}
+
+/// `eve_public.structure.v1.GetStructureResponse`
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct GetStructureResponse {
+    pub structure_id: u64,
+    pub name: String,
+    pub type_id: u32,
+    pub solar_system_id: u32,
+    pub owner_corporation_id: u64,
+    pub state: String,
+    pub fuel_expires_at_unix: u64,
+    pub position_x: f64,
+    pub position_y: f64,
+    pub position_z: f64,
+}
+
+impl QuasarMessage for GetStructureResponse {
+    const FULL_NAME: &'static str = "eve_public.structure.v1.GetStructureResponse";
+
+    fn encode_proto(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        if self.structure_id != 0 {
+            encode_varint_field(1, self.structure_id, &mut out);
+        }
+        if !self.name.is_empty() {
+            encode_string_field(2, &self.name, &mut out);
+        }
+        if self.type_id != 0 {
+            encode_varint_field(3, self.type_id as u64, &mut out);
+        }
+        if self.solar_system_id != 0 {
+            encode_varint_field(4, self.solar_system_id as u64, &mut out);
+        }
+        if self.owner_corporation_id != 0 {
+            encode_varint_field(5, self.owner_corporation_id, &mut out);
+        }
+        if !self.state.is_empty() {
+            encode_string_field(6, &self.state, &mut out);
+        }
+        if self.fuel_expires_at_unix != 0 {
+            encode_varint_field(7, self.fuel_expires_at_unix, &mut out);
+        }
+        if self.position_x != 0.0 {
+            encode_fixed64_field(8, self.position_x.to_bits(), &mut out);
+        }
+        if self.position_y != 0.0 {
+            encode_fixed64_field(9, self.position_y.to_bits(), &mut out);
+        }
+        if self.position_z != 0.0 {
+            encode_fixed64_field(10, self.position_z.to_bits(), &mut out);
+        }
+        out
+    }
+
+    fn decode_proto(buf: &[u8]) -> Result<Self, QuasarError> {
+        let wm = WireMessage::decode(buf)?;
+        let mut res = Self::default();
+        for f in wm.fields {
+            match f.field_number {
+                1 => {
+                    if let Some(v) = f.value.as_varint() {
+                        res.structure_id = v;
+                    }
+                }
+                2 => {
+                    if let Ok(Some(s)) = f.value.as_str() {
+                        res.name = s.to_string();
+                    }
+                }
+                3 => {
+                    if let Some(v) = f.value.as_varint() {
+                        res.type_id = v as u32;
+                    }
+                }
+                4 => {
+                    if let Some(v) = f.value.as_varint() {
+                        res.solar_system_id = v as u32;
+                    }
+                }
+                5 => {
+                    if let Some(v) = f.value.as_varint() {
+                        res.owner_corporation_id = v;
+                    }
+                }
+                6 => {
+                    if let Ok(Some(s)) = f.value.as_str() {
+                        res.state = s.to_string();
+                    }
+                }
+                7 => {
+                    if let Some(v) = f.value.as_varint() {
+                        res.fuel_expires_at_unix = v;
+                    }
+                }
+                8 => {
+                    if let Some(bits) = f.value.as_fixed64() {
+                        res.position_x = f64::from_bits(bits);
+                    }
+                }
+                9 => {
+                    if let Some(bits) = f.value.as_fixed64() {
+                        res.position_y = f64::from_bits(bits);
+                    }
+                }
+                10 => {
+                    if let Some(bits) = f.value.as_fixed64() {
+                        res.position_z = f64::from_bits(bits);
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(res)
+    }
+}
+
+/// `eve_public.killmail.v1.GetKillmailRequest`
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GetKillmailRequest {
+    pub killmail_id: u64,
+    pub killmail_hash: Option<String>,
+}
+
+impl QuasarMessage for GetKillmailRequest {
+    const FULL_NAME: &'static str = "eve_public.killmail.v1.GetKillmailRequest";
+
+    fn encode_proto(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        if self.killmail_id != 0 {
+            encode_varint_field(1, self.killmail_id, &mut out);
+        }
+        if let Some(hash) = &self.killmail_hash {
+            if !hash.is_empty() {
+                encode_string_field(2, hash, &mut out);
+            }
+        }
+        out
+    }
+
+    fn decode_proto(buf: &[u8]) -> Result<Self, QuasarError> {
+        let wm = WireMessage::decode(buf)?;
+        let mut res = Self::default();
+        for f in wm.fields {
+            match f.field_number {
+                1 => {
+                    if let Some(v) = f.value.as_varint() {
+                        res.killmail_id = v;
+                    }
+                }
+                2 => {
+                    if let Ok(Some(s)) = f.value.as_str() {
+                        res.killmail_hash = Some(s.to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(res)
+    }
+}
+
+/// `eve_public.killmail.v1.GetKillmailResponse`
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct GetKillmailResponse {
+    pub killmail_id: u64,
+    pub killmail_time_unix: u64,
+    pub solar_system_id: u32,
+    pub ship_type_id: u32,
+    pub victim_character_id: u64,
+    pub attacker_character_id: u64,
+    pub total_value_isk: f64,
+    pub killmail_hash: String,
+}
+
+impl QuasarMessage for GetKillmailResponse {
+    const FULL_NAME: &'static str = "eve_public.killmail.v1.GetKillmailResponse";
+
+    fn encode_proto(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        if self.killmail_id != 0 {
+            encode_varint_field(1, self.killmail_id, &mut out);
+        }
+        if self.killmail_time_unix != 0 {
+            encode_varint_field(2, self.killmail_time_unix, &mut out);
+        }
+        if self.solar_system_id != 0 {
+            encode_varint_field(3, self.solar_system_id as u64, &mut out);
+        }
+        if self.ship_type_id != 0 {
+            encode_varint_field(4, self.ship_type_id as u64, &mut out);
+        }
+        if self.victim_character_id != 0 {
+            encode_varint_field(5, self.victim_character_id, &mut out);
+        }
+        if self.attacker_character_id != 0 {
+            encode_varint_field(6, self.attacker_character_id, &mut out);
+        }
+        if self.total_value_isk != 0.0 {
+            encode_fixed64_field(7, self.total_value_isk.to_bits(), &mut out);
+        }
+        if !self.killmail_hash.is_empty() {
+            encode_string_field(8, &self.killmail_hash, &mut out);
+        }
+        out
+    }
+
+    fn decode_proto(buf: &[u8]) -> Result<Self, QuasarError> {
+        let wm = WireMessage::decode(buf)?;
+        let mut res = Self::default();
+        for f in wm.fields {
+            match f.field_number {
+                1 => {
+                    if let Some(v) = f.value.as_varint() {
+                        res.killmail_id = v;
+                    }
+                }
+                2 => {
+                    if let Some(v) = f.value.as_varint() {
+                        res.killmail_time_unix = v;
+                    }
+                }
+                3 => {
+                    if let Some(v) = f.value.as_varint() {
+                        res.solar_system_id = v as u32;
+                    }
+                }
+                4 => {
+                    if let Some(v) = f.value.as_varint() {
+                        res.ship_type_id = v as u32;
+                    }
+                }
+                5 => {
+                    if let Some(v) = f.value.as_varint() {
+                        res.victim_character_id = v;
+                    }
+                }
+                6 => {
+                    if let Some(v) = f.value.as_varint() {
+                        res.attacker_character_id = v;
+                    }
+                }
+                7 => {
+                    if let Some(bits) = f.value.as_fixed64() {
+                        res.total_value_isk = f64::from_bits(bits);
+                    }
+                }
+                8 => {
+                    if let Ok(Some(s)) = f.value.as_str() {
+                        res.killmail_hash = s.to_string();
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(res)
+    }
+}
+
+/// `eve_public.ship.v1.GetShipRequest`
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GetShipRequest {
+    pub character_id: Option<u32>,
+    pub ship_id: Option<u64>,
+}
+
+impl QuasarMessage for GetShipRequest {
+    const FULL_NAME: &'static str = "eve_public.ship.v1.GetShipRequest";
+
+    fn encode_proto(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        if let Some(cid) = self.character_id {
+            if cid != 0 {
+                encode_varint_field(1, cid as u64, &mut out);
+            }
+        }
+        if let Some(sid) = self.ship_id {
+            if sid != 0 {
+                encode_varint_field(2, sid, &mut out);
+            }
+        }
+        out
+    }
+
+    fn decode_proto(buf: &[u8]) -> Result<Self, QuasarError> {
+        let wm = WireMessage::decode(buf)?;
+        let mut res = Self::default();
+        for f in wm.fields {
+            match f.field_number {
+                1 => {
+                    if let Some(v) = f.value.as_varint() {
+                        res.character_id = Some(v as u32);
+                    }
+                }
+                2 => {
+                    if let Some(v) = f.value.as_varint() {
+                        res.ship_id = Some(v);
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(res)
+    }
+}
+
+/// `eve_public.ship.v1.GetShipResponse`
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct GetShipResponse {
+    pub ship_id: u64,
+    pub ship_type_id: u32,
+    pub ship_name: String,
+    pub max_velocity: f64,
+    pub shield_hp: f64,
+    pub armor_hp: f64,
+    pub hull_hp: f64,
+}
+
+impl QuasarMessage for GetShipResponse {
+    const FULL_NAME: &'static str = "eve_public.ship.v1.GetShipResponse";
+
+    fn encode_proto(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        if self.ship_id != 0 {
+            encode_varint_field(1, self.ship_id, &mut out);
+        }
+        if self.ship_type_id != 0 {
+            encode_varint_field(2, self.ship_type_id as u64, &mut out);
+        }
+        if !self.ship_name.is_empty() {
+            encode_string_field(3, &self.ship_name, &mut out);
+        }
+        if self.max_velocity != 0.0 {
+            encode_fixed64_field(4, self.max_velocity.to_bits(), &mut out);
+        }
+        if self.shield_hp != 0.0 {
+            encode_fixed64_field(5, self.shield_hp.to_bits(), &mut out);
+        }
+        if self.armor_hp != 0.0 {
+            encode_fixed64_field(6, self.armor_hp.to_bits(), &mut out);
+        }
+        if self.hull_hp != 0.0 {
+            encode_fixed64_field(7, self.hull_hp.to_bits(), &mut out);
+        }
+        out
+    }
+
+    fn decode_proto(buf: &[u8]) -> Result<Self, QuasarError> {
+        let wm = WireMessage::decode(buf)?;
+        let mut res = Self::default();
+        for f in wm.fields {
+            match f.field_number {
+                1 => {
+                    if let Some(v) = f.value.as_varint() {
+                        res.ship_id = v;
+                    }
+                }
+                2 => {
+                    if let Some(v) = f.value.as_varint() {
+                        res.ship_type_id = v as u32;
+                    }
+                }
+                3 => {
+                    if let Ok(Some(s)) = f.value.as_str() {
+                        res.ship_name = s.to_string();
+                    }
+                }
+                4 => {
+                    if let Some(bits) = f.value.as_fixed64() {
+                        res.max_velocity = f64::from_bits(bits);
+                    }
+                }
+                5 => {
+                    if let Some(bits) = f.value.as_fixed64() {
+                        res.shield_hp = f64::from_bits(bits);
+                    }
+                }
+                6 => {
+                    if let Some(bits) = f.value.as_fixed64() {
+                        res.armor_hp = f64::from_bits(bits);
+                    }
+                }
+                7 => {
+                    if let Some(bits) = f.value.as_fixed64() {
+                        res.hull_hp = f64::from_bits(bits);
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(res)
+    }
+}
+
+/// `eve_public.stargate.v1.GetStargateRequest`
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GetStargateRequest {
+    pub stargate_id: u64,
+}
+
+impl QuasarMessage for GetStargateRequest {
+    const FULL_NAME: &'static str = "eve_public.stargate.v1.GetStargateRequest";
+
+    fn encode_proto(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        if self.stargate_id != 0 {
+            encode_varint_field(1, self.stargate_id, &mut out);
+        }
+        out
+    }
+
+    fn decode_proto(buf: &[u8]) -> Result<Self, QuasarError> {
+        let wm = WireMessage::decode(buf)?;
+        let mut res = Self::default();
+        for f in wm.fields {
+            if f.field_number == 1 {
+                if let Some(v) = f.value.as_varint() {
+                    res.stargate_id = v;
+                }
+            }
+        }
+        Ok(res)
+    }
+}
+
+/// `eve_public.stargate.v1.GetStargateResponse`
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GetStargateResponse {
+    pub stargate_id: u64,
+    pub name: String,
+    pub solar_system_id: u32,
+    pub destination_stargate_id: u64,
+    pub destination_system_id: u32,
+}
+
+impl QuasarMessage for GetStargateResponse {
+    const FULL_NAME: &'static str = "eve_public.stargate.v1.GetStargateResponse";
+
+    fn encode_proto(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        if self.stargate_id != 0 {
+            encode_varint_field(1, self.stargate_id, &mut out);
+        }
+        if !self.name.is_empty() {
+            encode_string_field(2, &self.name, &mut out);
+        }
+        if self.solar_system_id != 0 {
+            encode_varint_field(3, self.solar_system_id as u64, &mut out);
+        }
+        if self.destination_stargate_id != 0 {
+            encode_varint_field(4, self.destination_stargate_id, &mut out);
+        }
+        if self.destination_system_id != 0 {
+            encode_varint_field(5, self.destination_system_id as u64, &mut out);
+        }
+        out
+    }
+
+    fn decode_proto(buf: &[u8]) -> Result<Self, QuasarError> {
+        let wm = WireMessage::decode(buf)?;
+        let mut res = Self::default();
+        for f in wm.fields {
+            match f.field_number {
+                1 => {
+                    if let Some(v) = f.value.as_varint() {
+                        res.stargate_id = v;
+                    }
+                }
+                2 => {
+                    if let Ok(Some(s)) = f.value.as_str() {
+                        res.name = s.to_string();
+                    }
+                }
+                3 => {
+                    if let Some(v) = f.value.as_varint() {
+                        res.solar_system_id = v as u32;
+                    }
+                }
+                4 => {
+                    if let Some(v) = f.value.as_varint() {
+                        res.destination_stargate_id = v;
+                    }
+                }
+                5 => {
+                    if let Some(v) = f.value.as_varint() {
+                        res.destination_system_id = v as u32;
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(res)
+    }
+}
+
+/// `eve_public.station.v1.GetStationRequest`
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GetStationRequest {
+    pub station_id: u64,
+}
+
+impl QuasarMessage for GetStationRequest {
+    const FULL_NAME: &'static str = "eve_public.station.v1.GetStationRequest";
+
+    fn encode_proto(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        if self.station_id != 0 {
+            encode_varint_field(1, self.station_id, &mut out);
+        }
+        out
+    }
+
+    fn decode_proto(buf: &[u8]) -> Result<Self, QuasarError> {
+        let wm = WireMessage::decode(buf)?;
+        let mut res = Self::default();
+        for f in wm.fields {
+            if f.field_number == 1 {
+                if let Some(v) = f.value.as_varint() {
+                    res.station_id = v;
+                }
+            }
+        }
+        Ok(res)
+    }
+}
+
+/// `eve_public.station.v1.GetStationResponse`
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct GetStationResponse {
+    pub station_id: u64,
+    pub name: String,
+    pub solar_system_id: u32,
+    pub type_id: u32,
+    pub owner_corporation_id: u64,
+    pub reprocessing_efficiency: f64,
+}
+
+impl QuasarMessage for GetStationResponse {
+    const FULL_NAME: &'static str = "eve_public.station.v1.GetStationResponse";
+
+    fn encode_proto(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        if self.station_id != 0 {
+            encode_varint_field(1, self.station_id, &mut out);
+        }
+        if !self.name.is_empty() {
+            encode_string_field(2, &self.name, &mut out);
+        }
+        if self.solar_system_id != 0 {
+            encode_varint_field(3, self.solar_system_id as u64, &mut out);
+        }
+        if self.type_id != 0 {
+            encode_varint_field(4, self.type_id as u64, &mut out);
+        }
+        if self.owner_corporation_id != 0 {
+            encode_varint_field(5, self.owner_corporation_id, &mut out);
+        }
+        if self.reprocessing_efficiency != 0.0 {
+            encode_fixed64_field(6, self.reprocessing_efficiency.to_bits(), &mut out);
+        }
+        out
+    }
+
+    fn decode_proto(buf: &[u8]) -> Result<Self, QuasarError> {
+        let wm = WireMessage::decode(buf)?;
+        let mut res = Self::default();
+        for f in wm.fields {
+            match f.field_number {
+                1 => {
+                    if let Some(v) = f.value.as_varint() {
+                        res.station_id = v;
+                    }
+                }
+                2 => {
+                    if let Ok(Some(s)) = f.value.as_str() {
+                        res.name = s.to_string();
+                    }
+                }
+                3 => {
+                    if let Some(v) = f.value.as_varint() {
+                        res.solar_system_id = v as u32;
+                    }
+                }
+                4 => {
+                    if let Some(v) = f.value.as_varint() {
+                        res.type_id = v as u32;
+                    }
+                }
+                5 => {
+                    if let Some(v) = f.value.as_varint() {
+                        res.owner_corporation_id = v;
+                    }
+                }
+                6 => {
+                    if let Some(bits) = f.value.as_fixed64() {
+                        res.reprocessing_efficiency = f64::from_bits(bits);
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(res)
+    }
+}
+
+/// Cosmic signature entry for probe scanning.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ProbeScanSignature {
+    pub signature_id: String,
+    pub signature_type: String,
+    pub signal_strength: f64,
+}
+
+impl ProbeScanSignature {
+    pub fn encode_proto(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        if !self.signature_id.is_empty() {
+            encode_string_field(1, &self.signature_id, &mut out);
+        }
+        if !self.signature_type.is_empty() {
+            encode_string_field(2, &self.signature_type, &mut out);
+        }
+        if self.signal_strength != 0.0 {
+            encode_fixed64_field(3, self.signal_strength.to_bits(), &mut out);
+        }
+        out
+    }
+
+    pub fn decode_proto(buf: &[u8]) -> Result<Self, QuasarError> {
+        let wm = WireMessage::decode(buf)?;
+        let mut res = Self::default();
+        for f in wm.fields {
+            match f.field_number {
+                1 => {
+                    if let Ok(Some(s)) = f.value.as_str() {
+                        res.signature_id = s.to_string();
+                    }
+                }
+                2 => {
+                    if let Ok(Some(s)) = f.value.as_str() {
+                        res.signature_type = s.to_string();
+                    }
+                }
+                3 => {
+                    if let Some(bits) = f.value.as_fixed64() {
+                        res.signal_strength = f64::from_bits(bits);
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(res)
+    }
+}
+
+/// `eve_public.probe.v1.GetProbeScansRequest`
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GetProbeScansRequest {
+    pub solar_system_id: u32,
+}
+
+impl QuasarMessage for GetProbeScansRequest {
+    const FULL_NAME: &'static str = "eve_public.probe.v1.GetProbeScansRequest";
+
+    fn encode_proto(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        if self.solar_system_id != 0 {
+            encode_varint_field(1, self.solar_system_id as u64, &mut out);
+        }
+        out
+    }
+
+    fn decode_proto(buf: &[u8]) -> Result<Self, QuasarError> {
+        let wm = WireMessage::decode(buf)?;
+        let mut res = Self::default();
+        for f in wm.fields {
+            if f.field_number == 1 {
+                if let Some(v) = f.value.as_varint() {
+                    res.solar_system_id = v as u32;
+                }
+            }
+        }
+        Ok(res)
+    }
+}
+
+/// `eve_public.probe.v1.GetProbeScansResponse`
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct GetProbeScansResponse {
+    pub solar_system_id: u32,
+    pub signatures: Vec<ProbeScanSignature>,
+}
+
+impl QuasarMessage for GetProbeScansResponse {
+    const FULL_NAME: &'static str = "eve_public.probe.v1.GetProbeScansResponse";
+
+    fn encode_proto(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        if self.solar_system_id != 0 {
+            encode_varint_field(1, self.solar_system_id as u64, &mut out);
+        }
+        for sig in &self.signatures {
+            encode_bytes_field(2, &sig.encode_proto(), &mut out);
+        }
+        out
+    }
+
+    fn decode_proto(buf: &[u8]) -> Result<Self, QuasarError> {
+        let wm = WireMessage::decode(buf)?;
+        let mut res = Self::default();
+        for f in wm.fields {
+            match f.field_number {
+                1 => {
+                    if let Some(v) = f.value.as_varint() {
+                        res.solar_system_id = v as u32;
+                    }
+                }
+                2 => {
+                    if let Some(b) = f.value.as_bytes() {
+                        res.signatures.push(ProbeScanSignature::decode_proto(b)?);
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(res)
+    }
+}
+
+// ============================================================================
+// Q-8: Sovereignty, Faction Warfare & Events (`eve_public.sovereignty.v1.*`, `eve_public.factionwarfare.v1.*`, etc.)
+// ============================================================================
+
+/// `eve_public.sovereignty.v1.GetSovereigntyRequest`
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GetSovereigntyRequest {
+    pub solar_system_id: u32,
+}
+
+impl QuasarMessage for GetSovereigntyRequest {
+    const FULL_NAME: &'static str = "eve_public.sovereignty.v1.GetSovereigntyRequest";
+
+    fn encode_proto(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        if self.solar_system_id != 0 {
+            encode_varint_field(1, self.solar_system_id as u64, &mut out);
+        }
+        out
+    }
+
+    fn decode_proto(buf: &[u8]) -> Result<Self, QuasarError> {
+        let wm = WireMessage::decode(buf)?;
+        let mut res = Self::default();
+        for f in wm.fields {
+            if f.field_number == 1 {
+                if let Some(v) = f.value.as_varint() {
+                    res.solar_system_id = v as u32;
+                }
+            }
+        }
+        Ok(res)
+    }
+}
+
+/// `eve_public.sovereignty.v1.GetSovereigntyResponse`
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct GetSovereigntyResponse {
+    pub solar_system_id: u32,
+    pub alliance_id: Option<u64>,
+    pub corporation_id: Option<u64>,
+    pub faction_id: Option<u64>,
+    pub military_index: u32,
+    pub industrial_index: u32,
+    pub strategic_index: u32,
+    pub dbs_multiplier: f64,
+}
+
+impl QuasarMessage for GetSovereigntyResponse {
+    const FULL_NAME: &'static str = "eve_public.sovereignty.v1.GetSovereigntyResponse";
+
+    fn encode_proto(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        if self.solar_system_id != 0 {
+            encode_varint_field(1, self.solar_system_id as u64, &mut out);
+        }
+        if let Some(aid) = self.alliance_id {
+            if aid != 0 {
+                encode_varint_field(2, aid, &mut out);
+            }
+        }
+        if let Some(cid) = self.corporation_id {
+            if cid != 0 {
+                encode_varint_field(3, cid, &mut out);
+            }
+        }
+        if let Some(fid) = self.faction_id {
+            if fid != 0 {
+                encode_varint_field(4, fid, &mut out);
+            }
+        }
+        if self.military_index != 0 {
+            encode_varint_field(5, self.military_index as u64, &mut out);
+        }
+        if self.industrial_index != 0 {
+            encode_varint_field(6, self.industrial_index as u64, &mut out);
+        }
+        if self.strategic_index != 0 {
+            encode_varint_field(7, self.strategic_index as u64, &mut out);
+        }
+        if self.dbs_multiplier != 0.0 {
+            encode_fixed64_field(8, self.dbs_multiplier.to_bits(), &mut out);
+        }
+        out
+    }
+
+    fn decode_proto(buf: &[u8]) -> Result<Self, QuasarError> {
+        let wm = WireMessage::decode(buf)?;
+        let mut res = Self::default();
+        for f in wm.fields {
+            match f.field_number {
+                1 => {
+                    if let Some(v) = f.value.as_varint() {
+                        res.solar_system_id = v as u32;
+                    }
+                }
+                2 => {
+                    if let Some(v) = f.value.as_varint() {
+                        res.alliance_id = Some(v);
+                    }
+                }
+                3 => {
+                    if let Some(v) = f.value.as_varint() {
+                        res.corporation_id = Some(v);
+                    }
+                }
+                4 => {
+                    if let Some(v) = f.value.as_varint() {
+                        res.faction_id = Some(v);
+                    }
+                }
+                5 => {
+                    if let Some(v) = f.value.as_varint() {
+                        res.military_index = v as u32;
+                    }
+                }
+                6 => {
+                    if let Some(v) = f.value.as_varint() {
+                        res.industrial_index = v as u32;
+                    }
+                }
+                7 => {
+                    if let Some(v) = f.value.as_varint() {
+                        res.strategic_index = v as u32;
+                    }
+                }
+                8 => {
+                    if let Some(bits) = f.value.as_fixed64() {
+                        res.dbs_multiplier = f64::from_bits(bits);
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(res)
+    }
+}
+
+/// `eve_public.factionwarfare.v1.GetFactionWarfareRequest`
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GetFactionWarfareRequest {
+    pub character_id: Option<u32>,
+    pub faction_id: Option<u64>,
+}
+
+impl QuasarMessage for GetFactionWarfareRequest {
+    const FULL_NAME: &'static str = "eve_public.factionwarfare.v1.GetFactionWarfareRequest";
+
+    fn encode_proto(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        if let Some(cid) = self.character_id {
+            if cid != 0 {
+                encode_varint_field(1, cid as u64, &mut out);
+            }
+        }
+        if let Some(fid) = self.faction_id {
+            if fid != 0 {
+                encode_varint_field(2, fid, &mut out);
+            }
+        }
+        out
+    }
+
+    fn decode_proto(buf: &[u8]) -> Result<Self, QuasarError> {
+        let wm = WireMessage::decode(buf)?;
+        let mut res = Self::default();
+        for f in wm.fields {
+            match f.field_number {
+                1 => {
+                    if let Some(v) = f.value.as_varint() {
+                        res.character_id = Some(v as u32);
+                    }
+                }
+                2 => {
+                    if let Some(v) = f.value.as_varint() {
+                        res.faction_id = Some(v);
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(res)
+    }
+}
+
+/// `eve_public.factionwarfare.v1.GetFactionWarfareResponse`
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GetFactionWarfareResponse {
+    pub faction_id: u64,
+    pub current_rank: u32,
+    pub highest_rank: u32,
+    pub kills: u64,
+    pub victory_points: u64,
+    pub contested_systems: u32,
+}
+
+impl QuasarMessage for GetFactionWarfareResponse {
+    const FULL_NAME: &'static str = "eve_public.factionwarfare.v1.GetFactionWarfareResponse";
+
+    fn encode_proto(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        if self.faction_id != 0 {
+            encode_varint_field(1, self.faction_id, &mut out);
+        }
+        if self.current_rank != 0 {
+            encode_varint_field(2, self.current_rank as u64, &mut out);
+        }
+        if self.highest_rank != 0 {
+            encode_varint_field(3, self.highest_rank as u64, &mut out);
+        }
+        if self.kills != 0 {
+            encode_varint_field(4, self.kills, &mut out);
+        }
+        if self.victory_points != 0 {
+            encode_varint_field(5, self.victory_points, &mut out);
+        }
+        if self.contested_systems != 0 {
+            encode_varint_field(6, self.contested_systems as u64, &mut out);
+        }
+        out
+    }
+
+    fn decode_proto(buf: &[u8]) -> Result<Self, QuasarError> {
+        let wm = WireMessage::decode(buf)?;
+        let mut res = Self::default();
+        for f in wm.fields {
+            match f.field_number {
+                1 => {
+                    if let Some(v) = f.value.as_varint() {
+                        res.faction_id = v;
+                    }
+                }
+                2 => {
+                    if let Some(v) = f.value.as_varint() {
+                        res.current_rank = v as u32;
+                    }
+                }
+                3 => {
+                    if let Some(v) = f.value.as_varint() {
+                        res.highest_rank = v as u32;
+                    }
+                }
+                4 => {
+                    if let Some(v) = f.value.as_varint() {
+                        res.kills = v;
+                    }
+                }
+                5 => {
+                    if let Some(v) = f.value.as_varint() {
+                        res.victory_points = v;
+                    }
+                }
+                6 => {
+                    if let Some(v) = f.value.as_varint() {
+                        res.contested_systems = v as u32;
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(res)
+    }
+}
+
+/// `eve_public.projectdiscovery.v1.GetProjectDiscoveryRequest`
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GetProjectDiscoveryRequest {
+    pub character_id: Option<u32>,
+}
+
+impl QuasarMessage for GetProjectDiscoveryRequest {
+    const FULL_NAME: &'static str = "eve_public.projectdiscovery.v1.GetProjectDiscoveryRequest";
+
+    fn encode_proto(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        if let Some(cid) = self.character_id {
+            if cid != 0 {
+                encode_varint_field(1, cid as u64, &mut out);
+            }
+        }
+        out
+    }
+
+    fn decode_proto(buf: &[u8]) -> Result<Self, QuasarError> {
+        let wm = WireMessage::decode(buf)?;
+        let mut res = Self::default();
+        for f in wm.fields {
+            if f.field_number == 1 {
+                if let Some(v) = f.value.as_varint() {
+                    res.character_id = Some(v as u32);
+                }
+            }
+        }
+        Ok(res)
+    }
+}
+
+/// `eve_public.projectdiscovery.v1.GetProjectDiscoveryResponse`
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct GetProjectDiscoveryResponse {
+    pub character_id: u32,
+    pub score_percent: f64,
+    pub rank: u32,
+    pub daily_xp_collected: u32,
+    pub daily_xp_cap: u32,
+    pub active_task_id: String,
+}
+
+impl QuasarMessage for GetProjectDiscoveryResponse {
+    const FULL_NAME: &'static str = "eve_public.projectdiscovery.v1.GetProjectDiscoveryResponse";
+
+    fn encode_proto(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        if self.character_id != 0 {
+            encode_varint_field(1, self.character_id as u64, &mut out);
+        }
+        if self.score_percent != 0.0 {
+            encode_fixed64_field(2, self.score_percent.to_bits(), &mut out);
+        }
+        if self.rank != 0 {
+            encode_varint_field(3, self.rank as u64, &mut out);
+        }
+        if self.daily_xp_collected != 0 {
+            encode_varint_field(4, self.daily_xp_collected as u64, &mut out);
+        }
+        if self.daily_xp_cap != 0 {
+            encode_varint_field(5, self.daily_xp_cap as u64, &mut out);
+        }
+        if !self.active_task_id.is_empty() {
+            encode_string_field(6, &self.active_task_id, &mut out);
+        }
+        out
+    }
+
+    fn decode_proto(buf: &[u8]) -> Result<Self, QuasarError> {
+        let wm = WireMessage::decode(buf)?;
+        let mut res = Self::default();
+        for f in wm.fields {
+            match f.field_number {
+                1 => {
+                    if let Some(v) = f.value.as_varint() {
+                        res.character_id = v as u32;
+                    }
+                }
+                2 => {
+                    if let Some(bits) = f.value.as_fixed64() {
+                        res.score_percent = f64::from_bits(bits);
+                    }
+                }
+                3 => {
+                    if let Some(v) = f.value.as_varint() {
+                        res.rank = v as u32;
+                    }
+                }
+                4 => {
+                    if let Some(v) = f.value.as_varint() {
+                        res.daily_xp_collected = v as u32;
+                    }
+                }
+                5 => {
+                    if let Some(v) = f.value.as_varint() {
+                        res.daily_xp_cap = v as u32;
+                    }
+                }
+                6 => {
+                    if let Ok(Some(s)) = f.value.as_str() {
+                        res.active_task_id = s.to_string();
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(res)
+    }
+}
+
+/// Operation / AIR career program item.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct OperationItem {
+    pub operation_id: u32,
+    pub title: String,
+    pub is_completed: bool,
+    pub progress: f64,
+}
+
+impl OperationItem {
+    pub fn encode_proto(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        if self.operation_id != 0 {
+            encode_varint_field(1, self.operation_id as u64, &mut out);
+        }
+        if !self.title.is_empty() {
+            encode_string_field(2, &self.title, &mut out);
+        }
+        if self.is_completed {
+            encode_varint_field(3, 1, &mut out);
+        }
+        if self.progress != 0.0 {
+            encode_fixed64_field(4, self.progress.to_bits(), &mut out);
+        }
+        out
+    }
+
+    pub fn decode_proto(buf: &[u8]) -> Result<Self, QuasarError> {
+        let wm = WireMessage::decode(buf)?;
+        let mut res = Self::default();
+        for f in wm.fields {
+            match f.field_number {
+                1 => {
+                    if let Some(v) = f.value.as_varint() {
+                        res.operation_id = v as u32;
+                    }
+                }
+                2 => {
+                    if let Ok(Some(s)) = f.value.as_str() {
+                        res.title = s.to_string();
+                    }
+                }
+                3 => {
+                    if let Some(v) = f.value.as_varint() {
+                        res.is_completed = v != 0;
+                    }
+                }
+                4 => {
+                    if let Some(bits) = f.value.as_fixed64() {
+                        res.progress = f64::from_bits(bits);
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(res)
+    }
+}
+
+/// `eve_public.operation.v1.GetOperationsRequest`
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GetOperationsRequest {
+    pub character_id: Option<u32>,
+}
+
+impl QuasarMessage for GetOperationsRequest {
+    const FULL_NAME: &'static str = "eve_public.operation.v1.GetOperationsRequest";
+
+    fn encode_proto(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        if let Some(cid) = self.character_id {
+            if cid != 0 {
+                encode_varint_field(1, cid as u64, &mut out);
+            }
+        }
+        out
+    }
+
+    fn decode_proto(buf: &[u8]) -> Result<Self, QuasarError> {
+        let wm = WireMessage::decode(buf)?;
+        let mut res = Self::default();
+        for f in wm.fields {
+            if f.field_number == 1 {
+                if let Some(v) = f.value.as_varint() {
+                    res.character_id = Some(v as u32);
+                }
+            }
+        }
+        Ok(res)
+    }
+}
+
+/// `eve_public.operation.v1.GetOperationsResponse`
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct GetOperationsResponse {
+    pub character_id: u32,
+    pub operations: Vec<OperationItem>,
+}
+
+impl QuasarMessage for GetOperationsResponse {
+    const FULL_NAME: &'static str = "eve_public.operation.v1.GetOperationsResponse";
+
+    fn encode_proto(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        if self.character_id != 0 {
+            encode_varint_field(1, self.character_id as u64, &mut out);
+        }
+        for op in &self.operations {
+            encode_bytes_field(2, &op.encode_proto(), &mut out);
+        }
+        out
+    }
+
+    fn decode_proto(buf: &[u8]) -> Result<Self, QuasarError> {
+        let wm = WireMessage::decode(buf)?;
+        let mut res = Self::default();
+        for f in wm.fields {
+            match f.field_number {
+                1 => {
+                    if let Some(v) = f.value.as_varint() {
+                        res.character_id = v as u32;
+                    }
+                }
+                2 => {
+                    if let Some(b) = f.value.as_bytes() {
+                        res.operations.push(OperationItem::decode_proto(b)?);
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(res)
+    }
+}
+
+// ============================================================================
+// Q-9: Cosmetics & App Infrastructure (`eve_public.cosmetic.v1.*`, `eve_public.settings.v1.*`, etc.)
+// ============================================================================
+
+/// `eve_public.cosmetic.v1.GetCosmeticsRequest`
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GetCosmeticsRequest {
+    pub character_id: Option<u32>,
+    pub ship_type_id: Option<u32>,
+}
+
+impl QuasarMessage for GetCosmeticsRequest {
+    const FULL_NAME: &'static str = "eve_public.cosmetic.v1.GetCosmeticsRequest";
+
+    fn encode_proto(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        if let Some(cid) = self.character_id {
+            if cid != 0 {
+                encode_varint_field(1, cid as u64, &mut out);
+            }
+        }
+        if let Some(stid) = self.ship_type_id {
+            if stid != 0 {
+                encode_varint_field(2, stid as u64, &mut out);
+            }
+        }
+        out
+    }
+
+    fn decode_proto(buf: &[u8]) -> Result<Self, QuasarError> {
+        let wm = WireMessage::decode(buf)?;
+        let mut res = Self::default();
+        for f in wm.fields {
+            match f.field_number {
+                1 => {
+                    if let Some(v) = f.value.as_varint() {
+                        res.character_id = Some(v as u32);
+                    }
+                }
+                2 => {
+                    if let Some(v) = f.value.as_varint() {
+                        res.ship_type_id = Some(v as u32);
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(res)
+    }
+}
+
+/// `eve_public.cosmetic.v1.GetCosmeticsResponse`
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GetCosmeticsResponse {
+    pub character_id: u32,
+    pub licensed_skin_ids: Vec<u32>,
+    pub applied_skin_id: Option<u32>,
+    pub evermarks_balance: u64,
+}
+
+impl QuasarMessage for GetCosmeticsResponse {
+    const FULL_NAME: &'static str = "eve_public.cosmetic.v1.GetCosmeticsResponse";
+
+    fn encode_proto(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        if self.character_id != 0 {
+            encode_varint_field(1, self.character_id as u64, &mut out);
+        }
+        for skin in &self.licensed_skin_ids {
+            encode_varint_field(2, *skin as u64, &mut out);
+        }
+        if let Some(applied) = self.applied_skin_id {
+            if applied != 0 {
+                encode_varint_field(3, applied as u64, &mut out);
+            }
+        }
+        if self.evermarks_balance != 0 {
+            encode_varint_field(4, self.evermarks_balance, &mut out);
+        }
+        out
+    }
+
+    fn decode_proto(buf: &[u8]) -> Result<Self, QuasarError> {
+        let wm = WireMessage::decode(buf)?;
+        let mut res = Self::default();
+        for f in wm.fields {
+            match f.field_number {
+                1 => {
+                    if let Some(v) = f.value.as_varint() {
+                        res.character_id = v as u32;
+                    }
+                }
+                2 => {
+                    if let Some(v) = f.value.as_varint() {
+                        res.licensed_skin_ids.push(v as u32);
+                    }
+                }
+                3 => {
+                    if let Some(v) = f.value.as_varint() {
+                        res.applied_skin_id = Some(v as u32);
+                    }
+                }
+                4 => {
+                    if let Some(v) = f.value.as_varint() {
+                        res.evermarks_balance = v;
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(res)
+    }
+}
+
+/// Client key-value setting pair.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientSettingEntry {
+    pub key: String,
+    pub value: String,
+}
+
+impl ClientSettingEntry {
+    pub fn encode_proto(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        if !self.key.is_empty() {
+            encode_string_field(1, &self.key, &mut out);
+        }
+        if !self.value.is_empty() {
+            encode_string_field(2, &self.value, &mut out);
+        }
+        out
+    }
+
+    pub fn decode_proto(buf: &[u8]) -> Result<Self, QuasarError> {
+        let wm = WireMessage::decode(buf)?;
+        let mut res = Self::default();
+        for f in wm.fields {
+            match f.field_number {
+                1 => {
+                    if let Ok(Some(s)) = f.value.as_str() {
+                        res.key = s.to_string();
+                    }
+                }
+                2 => {
+                    if let Ok(Some(s)) = f.value.as_str() {
+                        res.value = s.to_string();
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(res)
+    }
+}
+
+/// `eve_public.settings.v1.GetClientSettingsRequest`
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GetClientSettingsRequest {
+    pub user_id: Option<u64>,
+    pub character_id: Option<u32>,
+    pub section: Option<String>,
+}
+
+impl QuasarMessage for GetClientSettingsRequest {
+    const FULL_NAME: &'static str = "eve_public.settings.v1.GetClientSettingsRequest";
+
+    fn encode_proto(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        if let Some(uid) = self.user_id {
+            if uid != 0 {
+                encode_varint_field(1, uid, &mut out);
+            }
+        }
+        if let Some(cid) = self.character_id {
+            if cid != 0 {
+                encode_varint_field(2, cid as u64, &mut out);
+            }
+        }
+        if let Some(sec) = &self.section {
+            if !sec.is_empty() {
+                encode_string_field(3, sec, &mut out);
+            }
+        }
+        out
+    }
+
+    fn decode_proto(buf: &[u8]) -> Result<Self, QuasarError> {
+        let wm = WireMessage::decode(buf)?;
+        let mut res = Self::default();
+        for f in wm.fields {
+            match f.field_number {
+                1 => {
+                    if let Some(v) = f.value.as_varint() {
+                        res.user_id = Some(v);
+                    }
+                }
+                2 => {
+                    if let Some(v) = f.value.as_varint() {
+                        res.character_id = Some(v as u32);
+                    }
+                }
+                3 => {
+                    if let Ok(Some(s)) = f.value.as_str() {
+                        res.section = Some(s.to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(res)
+    }
+}
+
+/// `eve_public.settings.v1.GetClientSettingsResponse`
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GetClientSettingsResponse {
+    pub user_id: u64,
+    pub character_id: u32,
+    pub settings: Vec<ClientSettingEntry>,
+}
+
+impl QuasarMessage for GetClientSettingsResponse {
+    const FULL_NAME: &'static str = "eve_public.settings.v1.GetClientSettingsResponse";
+
+    fn encode_proto(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        if self.user_id != 0 {
+            encode_varint_field(1, self.user_id, &mut out);
+        }
+        if self.character_id != 0 {
+            encode_varint_field(2, self.character_id as u64, &mut out);
+        }
+        for entry in &self.settings {
+            encode_bytes_field(3, &entry.encode_proto(), &mut out);
+        }
+        out
+    }
+
+    fn decode_proto(buf: &[u8]) -> Result<Self, QuasarError> {
+        let wm = WireMessage::decode(buf)?;
+        let mut res = Self::default();
+        for f in wm.fields {
+            match f.field_number {
+                1 => {
+                    if let Some(v) = f.value.as_varint() {
+                        res.user_id = v;
+                    }
+                }
+                2 => {
+                    if let Some(v) = f.value.as_varint() {
+                        res.character_id = v as u32;
+                    }
+                }
+                3 => {
+                    if let Some(b) = f.value.as_bytes() {
+                        res.settings.push(ClientSettingEntry::decode_proto(b)?);
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(res)
+    }
+}
+
+/// `eve_public.settings.v1.SetClientSettingsRequest`
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetClientSettingsRequest {
+    pub user_id: Option<u64>,
+    pub character_id: Option<u32>,
+    pub key: String,
+    pub value: String,
+}
+
+impl QuasarMessage for SetClientSettingsRequest {
+    const FULL_NAME: &'static str = "eve_public.settings.v1.SetClientSettingsRequest";
+
+    fn encode_proto(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        if let Some(uid) = self.user_id {
+            if uid != 0 {
+                encode_varint_field(1, uid, &mut out);
+            }
+        }
+        if let Some(cid) = self.character_id {
+            if cid != 0 {
+                encode_varint_field(2, cid as u64, &mut out);
+            }
+        }
+        if !self.key.is_empty() {
+            encode_string_field(3, &self.key, &mut out);
+        }
+        if !self.value.is_empty() {
+            encode_string_field(4, &self.value, &mut out);
+        }
+        out
+    }
+
+    fn decode_proto(buf: &[u8]) -> Result<Self, QuasarError> {
+        let wm = WireMessage::decode(buf)?;
+        let mut res = Self::default();
+        for f in wm.fields {
+            match f.field_number {
+                1 => {
+                    if let Some(v) = f.value.as_varint() {
+                        res.user_id = Some(v);
+                    }
+                }
+                2 => {
+                    if let Some(v) = f.value.as_varint() {
+                        res.character_id = Some(v as u32);
+                    }
+                }
+                3 => {
+                    if let Ok(Some(s)) = f.value.as_str() {
+                        res.key = s.to_string();
+                    }
+                }
+                4 => {
+                    if let Ok(Some(s)) = f.value.as_str() {
+                        res.value = s.to_string();
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(res)
+    }
+}
+
+/// `eve_public.settings.v1.SetClientSettingsResponse`
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetClientSettingsResponse {
+    pub success: bool,
+    pub key: String,
+    pub updated_at_unix: u64,
+}
+
+impl QuasarMessage for SetClientSettingsResponse {
+    const FULL_NAME: &'static str = "eve_public.settings.v1.SetClientSettingsResponse";
+
+    fn encode_proto(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        if self.success {
+            encode_varint_field(1, 1, &mut out);
+        }
+        if !self.key.is_empty() {
+            encode_string_field(2, &self.key, &mut out);
+        }
+        if self.updated_at_unix != 0 {
+            encode_varint_field(3, self.updated_at_unix, &mut out);
+        }
+        out
+    }
+
+    fn decode_proto(buf: &[u8]) -> Result<Self, QuasarError> {
+        let wm = WireMessage::decode(buf)?;
+        let mut res = Self::default();
+        for f in wm.fields {
+            match f.field_number {
+                1 => {
+                    if let Some(v) = f.value.as_varint() {
+                        res.success = v != 0;
+                    }
+                }
+                2 => {
+                    if let Ok(Some(s)) = f.value.as_str() {
+                        res.key = s.to_string();
+                    }
+                }
+                3 => {
+                    if let Some(v) = f.value.as_varint() {
+                        res.updated_at_unix = v;
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(res)
+    }
+}
+
+/// `eve_public.paragon.v1.GetParagonMissionsRequest`
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GetParagonMissionsRequest {
+    pub character_id: Option<u32>,
+}
+
+impl QuasarMessage for GetParagonMissionsRequest {
+    const FULL_NAME: &'static str = "eve_public.paragon.v1.GetParagonMissionsRequest";
+
+    fn encode_proto(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        if let Some(cid) = self.character_id {
+            if cid != 0 {
+                encode_varint_field(1, cid as u64, &mut out);
+            }
+        }
+        out
+    }
+
+    fn decode_proto(buf: &[u8]) -> Result<Self, QuasarError> {
+        let wm = WireMessage::decode(buf)?;
+        let mut res = Self::default();
+        for f in wm.fields {
+            if f.field_number == 1 {
+                if let Some(v) = f.value.as_varint() {
+                    res.character_id = Some(v as u32);
+                }
+            }
+        }
+        Ok(res)
+    }
+}
+
+/// `eve_public.paragon.v1.GetParagonMissionsResponse`
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GetParagonMissionsResponse {
+    pub character_id: u32,
+    pub evermarks_balance: u64,
+    pub missions_completed: u32,
+}
+
+impl QuasarMessage for GetParagonMissionsResponse {
+    const FULL_NAME: &'static str = "eve_public.paragon.v1.GetParagonMissionsResponse";
+
+    fn encode_proto(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        if self.character_id != 0 {
+            encode_varint_field(1, self.character_id as u64, &mut out);
+        }
+        if self.evermarks_balance != 0 {
+            encode_varint_field(2, self.evermarks_balance, &mut out);
+        }
+        if self.missions_completed != 0 {
+            encode_varint_field(3, self.missions_completed as u64, &mut out);
+        }
+        out
+    }
+
+    fn decode_proto(buf: &[u8]) -> Result<Self, QuasarError> {
+        let wm = WireMessage::decode(buf)?;
+        let mut res = Self::default();
+        for f in wm.fields {
+            match f.field_number {
+                1 => {
+                    if let Some(v) = f.value.as_varint() {
+                        res.character_id = v as u32;
+                    }
+                }
+                2 => {
+                    if let Some(v) = f.value.as_varint() {
+                        res.evermarks_balance = v;
+                    }
+                }
+                3 => {
+                    if let Some(v) = f.value.as_varint() {
+                        res.missions_completed = v as u32;
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(res)
+    }
+}
+
+/// `eve_public.ui.v1.GetUiLayoutRequest`
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GetUiLayoutRequest {
+    pub character_id: Option<u32>,
+    pub window_name: Option<String>,
+}
+
+impl QuasarMessage for GetUiLayoutRequest {
+    const FULL_NAME: &'static str = "eve_public.ui.v1.GetUiLayoutRequest";
+
+    fn encode_proto(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        if let Some(cid) = self.character_id {
+            if cid != 0 {
+                encode_varint_field(1, cid as u64, &mut out);
+            }
+        }
+        if let Some(win) = &self.window_name {
+            if !win.is_empty() {
+                encode_string_field(2, win, &mut out);
+            }
+        }
+        out
+    }
+
+    fn decode_proto(buf: &[u8]) -> Result<Self, QuasarError> {
+        let wm = WireMessage::decode(buf)?;
+        let mut res = Self::default();
+        for f in wm.fields {
+            match f.field_number {
+                1 => {
+                    if let Some(v) = f.value.as_varint() {
+                        res.character_id = Some(v as u32);
+                    }
+                }
+                2 => {
+                    if let Ok(Some(s)) = f.value.as_str() {
+                        res.window_name = Some(s.to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(res)
+    }
+}
+
+/// `eve_public.ui.v1.GetUiLayoutResponse`
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GetUiLayoutResponse {
+    pub character_id: u32,
+    pub layout_json: String,
+}
+
+impl QuasarMessage for GetUiLayoutResponse {
+    const FULL_NAME: &'static str = "eve_public.ui.v1.GetUiLayoutResponse";
+
+    fn encode_proto(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        if self.character_id != 0 {
+            encode_varint_field(1, self.character_id as u64, &mut out);
+        }
+        if !self.layout_json.is_empty() {
+            encode_string_field(2, &self.layout_json, &mut out);
+        }
+        out
+    }
+
+    fn decode_proto(buf: &[u8]) -> Result<Self, QuasarError> {
+        let wm = WireMessage::decode(buf)?;
+        let mut res = Self::default();
+        for f in wm.fields {
+            match f.field_number {
+                1 => {
+                    if let Some(v) = f.value.as_varint() {
+                        res.character_id = v as u32;
+                    }
+                }
+                2 => {
+                    if let Ok(Some(s)) = f.value.as_str() {
+                        res.layout_json = s.to_string();
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(res)
+    }
+}

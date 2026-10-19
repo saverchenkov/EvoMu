@@ -2,7 +2,8 @@
 //! `Q-4` Character Progression, `Q-5` Fitting Simulation, `Q-6` Market & Wallet).
 
 use crate::quasar_gateway::{
-    PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN, STATUS_UNAUTHORIZED,
+    PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN, STATUS_NOT_FOUND,
+    STATUS_UNAUTHORIZED,
 };
 use eve_db::WorldRepository;
 use eve_dogma::{ModuleState, ShipFittingEngine};
@@ -20,7 +21,10 @@ pub fn register_all_quasar_services(
     register_q3_identity_entitlement_services(router, Arc::clone(&db));
     register_q4_character_progression_services(router, Arc::clone(&db));
     register_q5_fitting_simulation_services(router, Arc::clone(&db), Arc::clone(&sde));
-    register_q6_market_wallet_services(router, db, sde);
+    register_q6_market_wallet_services(router, Arc::clone(&db), Arc::clone(&sde));
+    register_q7_space_and_combat_services(router, Arc::clone(&db), Arc::clone(&sde));
+    register_q8_sovereignty_and_events_services(router, Arc::clone(&db), Arc::clone(&sde));
+    register_q9_cosmetics_and_client_services(router, db, sde);
 }
 
 // ============================================================================
@@ -972,6 +976,830 @@ pub fn register_q6_market_wallet_services(
                 isk_balance_cents: 1_000_000_000,
                 plex_balance: 500,
                 aur_balance: 0,
+            };
+            Ok(resp.to_any())
+        }),
+    );
+}
+
+// ============================================================================
+// Q-7: Space & Combat Services (`eve_public.solarsystem.v1.*`, `eve_public.structure.v1.*`, etc.)
+// ============================================================================
+
+pub fn register_q7_space_and_combat_services(
+    router: &PublicGatewayRouter,
+    db: Arc<WorldRepository>,
+    sde: Arc<SdeRegistry>,
+) {
+    // 1. eve_public.solarsystem.v1.GetSolarSystemRequest
+    {
+        let sde_c = Arc::clone(&sde);
+        router.register_handler(
+            GetSolarSystemRequest::FULL_NAME,
+            Arc::new(move |_ctx, any, _dyn_msg| {
+                let req = GetSolarSystemRequest::decode_proto(&any.value).map_err(|e| {
+                    (
+                        STATUS_BAD_REQUEST,
+                        format!("Failed to decode GetSolarSystemRequest: {e}"),
+                    )
+                })?;
+                let sid = req.solar_system_id;
+                let sys = sde_c.solar_systems.get(&sid).ok_or_else(|| {
+                    (STATUS_NOT_FOUND, format!("Solar system {sid} not found"))
+                })?;
+
+                let mut stargate_ids: Vec<u64> = sde_c
+                    .jumps
+                    .values()
+                    .filter(|g| g.from_solar_system_id == sid)
+                    .map(|g| g.stargate_id as u64)
+                    .collect();
+                stargate_ids.sort_unstable();
+
+                let mut station_ids: Vec<u64> = sys
+                    .stations
+                    .iter()
+                    .map(|s| s.station_id as u64)
+                    .collect();
+                station_ids.sort_unstable();
+
+                let resp = GetSolarSystemResponse {
+                    solar_system_id: sid,
+                    solar_system_name: sys.name.clone(),
+                    constellation_id: sys.constellation_id,
+                    region_id: sys.region_id,
+                    security_status: sys.security_status,
+                    stargate_ids,
+                    station_ids,
+                    star_id: None,
+                };
+                Ok(resp.to_any())
+            }),
+        );
+    }
+
+    // 2. eve_public.structure.v1.GetStructureRequest
+    {
+        let db_c = Arc::clone(&db);
+        let sde_c = Arc::clone(&sde);
+        router.register_handler(
+            GetStructureRequest::FULL_NAME,
+            Arc::new(move |_ctx, any, _dyn_msg| {
+                let req = GetStructureRequest::decode_proto(&any.value).map_err(|e| {
+                    (
+                        STATUS_BAD_REQUEST,
+                        format!("Failed to decode GetStructureRequest: {e}"),
+                    )
+                })?;
+                let sid = req.structure_id;
+
+                let struct_opt = db_c.with_snapshot(|snap| snap.structures.get(&(sid as i64)).cloned());
+                if let Some(st) = struct_opt {
+                    let resp = GetStructureResponse {
+                        structure_id: sid,
+                        name: st.name,
+                        type_id: st.type_id,
+                        solar_system_id: st.solar_system_id as u32,
+                        owner_corporation_id: st.owner_corp_id as u64,
+                        state: st.state,
+                        fuel_expires_at_unix: if st.fuel_blocks > 0 { 1_760_000_000 } else { 0 },
+                        position_x: st.position[0],
+                        position_y: st.position[1],
+                        position_z: st.position[2],
+                    };
+                    return Ok(resp.to_any());
+                }
+
+                // Check SDE stations
+                let sta_opt = sde_c
+                    .solar_systems
+                    .iter()
+                    .find_map(|(&sys_id, sys)| {
+                        sys.stations.iter().find(|s| s.station_id == sid as i64).map(|s| (sys_id, s))
+                    });
+                if let Some((sys_id, sta)) = sta_opt {
+                    let resp = GetStructureResponse {
+                        structure_id: sid,
+                        name: sta.name.clone(),
+                        type_id: sta.station_type_id,
+                        solar_system_id: sys_id,
+                        owner_corporation_id: sta.owner_corporation_id as u64,
+                        state: "Online".to_string(),
+                        fuel_expires_at_unix: 0,
+                        position_x: sta.position.x,
+                        position_y: sta.position.y,
+                        position_z: sta.position.z,
+                    };
+                    return Ok(resp.to_any());
+                }
+
+                Err((STATUS_NOT_FOUND, format!("Structure {sid} not found")))
+            }),
+        );
+    }
+
+    // 3. eve_public.killmail.v1.GetKillmailRequest
+    {
+        let db_c = Arc::clone(&db);
+        router.register_handler(
+            GetKillmailRequest::FULL_NAME,
+            Arc::new(move |_ctx, any, _dyn_msg| {
+                let req = GetKillmailRequest::decode_proto(&any.value).map_err(|e| {
+                    (
+                        STATUS_BAD_REQUEST,
+                        format!("Failed to decode GetKillmailRequest: {e}"),
+                    )
+                })?;
+                let kid = req.killmail_id;
+
+                let km_opt = db_c.with_snapshot(|snap| snap.killmails.get(&(kid as i64)).cloned());
+                let Some(km) = km_opt else {
+                    return Err((STATUS_NOT_FOUND, format!("Killmail {kid} not found")));
+                };
+
+                let hash = crate::esi::sample_routes::compute_killmail_hash(
+                    km.kill_id,
+                    km.victim_character_id,
+                    km.attacker_character_id,
+                    km.ship_type_id as u32,
+                );
+
+                if let Some(ref h) = req.killmail_hash {
+                    if !h.is_empty() && !h.eq_ignore_ascii_case(&hash) {
+                        return Err((STATUS_FORBIDDEN, format!("Invalid killmail hash for killmail {kid}")));
+                    }
+                }
+
+                let resp = GetKillmailResponse {
+                    killmail_id: km.kill_id as u64,
+                    killmail_time_unix: 1_700_000_000,
+                    solar_system_id: km.solar_system_id as u32,
+                    ship_type_id: km.ship_type_id as u32,
+                    victim_character_id: km.victim_character_id as u64,
+                    attacker_character_id: km.attacker_character_id as u64,
+                    total_value_isk: km.total_value_isk,
+                    killmail_hash: hash,
+                };
+                Ok(resp.to_any())
+            }),
+        );
+    }
+
+    // 4. eve_public.ship.v1.GetShipRequest
+    {
+        let db_c = Arc::clone(&db);
+        let sde_c = Arc::clone(&sde);
+        router.register_handler(
+            GetShipRequest::FULL_NAME,
+            Arc::new(move |ctx, any, _dyn_msg| {
+                let req = GetShipRequest::decode_proto(&any.value).unwrap_or_default();
+                let cid = ctx.effective_character_id().or(req.character_id).unwrap_or(90_000_001);
+
+                let (ship_id, ship_type_id) = db_c.with_snapshot(|snap| {
+                    let c_opt = snap.characters.get(&(cid as i64));
+                    let sid = req.ship_id.map(|s| s as i64).or_else(|| c_opt.map(|c| c.active_ship_id)).unwrap_or(1001);
+                    let stid = snap.items.get(&sid).map(|i| i.type_id).unwrap_or(587);
+                    (sid as u64, stid)
+                });
+
+                let ship_name = sde_c
+                    .types
+                    .get(&ship_type_id)
+                    .map(|t| t.name.clone())
+                    .unwrap_or_else(|| "Unknown Ship".to_string());
+
+                let fit = ShipFittingEngine::from_sde(ship_id as i64, ship_type_id, &sde_c);
+                let eval = fit.evaluated_context(&sde_c);
+
+                let max_velocity = eval.ship.get_attribute(attr_ids::MAX_VELOCITY, &sde_c);
+                let shield_hp = eval.ship.get_attribute(attr_ids::SHIELD_CAPACITY, &sde_c);
+                let armor_hp = eval.ship.get_attribute(attr_ids::ARMOR_HP, &sde_c);
+                let hull_hp = eval.ship.get_attribute(attr_ids::HP_STRUCT, &sde_c);
+
+                let resp = GetShipResponse {
+                    ship_id,
+                    ship_type_id,
+                    ship_name,
+                    max_velocity,
+                    shield_hp,
+                    armor_hp,
+                    hull_hp,
+                };
+                Ok(resp.to_any())
+            }),
+        );
+    }
+
+    // 5. eve_public.stargate.v1.GetStargateRequest
+    {
+        let sde_c = Arc::clone(&sde);
+        router.register_handler(
+            GetStargateRequest::FULL_NAME,
+            Arc::new(move |_ctx, any, _dyn_msg| {
+                let req = GetStargateRequest::decode_proto(&any.value).map_err(|e| {
+                    (
+                        STATUS_BAD_REQUEST,
+                        format!("Failed to decode GetStargateRequest: {e}"),
+                    )
+                })?;
+                let gid = req.stargate_id as i64;
+                let gate = sde_c.jumps.get(&gid).ok_or_else(|| {
+                    (STATUS_NOT_FOUND, format!("Stargate {gid} not found"))
+                })?;
+
+                let resp = GetStargateResponse {
+                    stargate_id: req.stargate_id,
+                    name: format!("Stargate to {}", gate.to_solar_system_id),
+                    solar_system_id: gate.from_solar_system_id,
+                    destination_stargate_id: gate.destination_stargate_id as u64,
+                    destination_system_id: gate.to_solar_system_id,
+                };
+                Ok(resp.to_any())
+            }),
+        );
+    }
+
+    // 6. eve_public.station.v1.GetStationRequest
+    {
+        let sde_c = Arc::clone(&sde);
+        router.register_handler(
+            GetStationRequest::FULL_NAME,
+            Arc::new(move |_ctx, any, _dyn_msg| {
+                let req = GetStationRequest::decode_proto(&any.value).map_err(|e| {
+                    (
+                        STATUS_BAD_REQUEST,
+                        format!("Failed to decode GetStationRequest: {e}"),
+                    )
+                })?;
+                let sta_id = req.station_id as i64;
+                let sta_opt = sde_c
+                    .solar_systems
+                    .iter()
+                    .find_map(|(&sys_id, sys)| {
+                        sys.stations.iter().find(|s| s.station_id == sta_id).map(|s| (sys_id, s))
+                    });
+                let Some((sys_id, sta)) = sta_opt else {
+                    return Err((STATUS_NOT_FOUND, format!("Station {sta_id} not found")));
+                };
+
+                let resp = GetStationResponse {
+                    station_id: req.station_id,
+                    name: sta.name.clone(),
+                    solar_system_id: sys_id,
+                    type_id: sta.station_type_id,
+                    owner_corporation_id: sta.owner_corporation_id as u64,
+                    reprocessing_efficiency: 0.5,
+                };
+                Ok(resp.to_any())
+            }),
+        );
+    }
+
+    // 7. eve_public.probe.v1.GetProbeScansRequest
+    {
+        router.register_handler(
+            GetProbeScansRequest::FULL_NAME,
+            Arc::new(move |_ctx, any, _dyn_msg| {
+                let req = GetProbeScansRequest::decode_proto(&any.value).map_err(|e| {
+                    (
+                        STATUS_BAD_REQUEST,
+                        format!("Failed to decode GetProbeScansRequest: {e}"),
+                    )
+                })?;
+                let sid = req.solar_system_id;
+                let resp = GetProbeScansResponse {
+                    solar_system_id: sid,
+                    signatures: vec![
+                        ProbeScanSignature {
+                            signature_id: format!("SIG-{:03}", sid % 1000),
+                            signature_type: "Cosmic Anomaly".to_string(),
+                            signal_strength: 1.0,
+                        },
+                        ProbeScanSignature {
+                            signature_id: format!("REL-{:03}", (sid + 13) % 1000),
+                            signature_type: "Relic Site".to_string(),
+                            signal_strength: 0.72,
+                        },
+                    ],
+                };
+                Ok(resp.to_any())
+            }),
+        );
+    }
+
+    // Prefix wildcard handlers for space & combat envelopes
+    router.register_handler(
+        "eve_public.solarsystem.v1.*",
+        Arc::new(|_ctx, _any, _dyn_msg| {
+            let resp = GetSolarSystemResponse {
+                solar_system_id: 30000142,
+                solar_system_name: "Jita".to_string(),
+                constellation_id: 20000020,
+                region_id: 10000002,
+                security_status: 0.945,
+                stargate_ids: vec![50000001, 50000002],
+                station_ids: vec![60003760],
+                star_id: Some(3799),
+            };
+            Ok(resp.to_any())
+        }),
+    );
+
+    router.register_handler(
+        "eve_public.structure.v1.*",
+        Arc::new(|_ctx, _any, _dyn_msg| {
+            let resp = GetStructureResponse {
+                structure_id: 1_000_000_001,
+                name: "Astrahus Citadel".to_string(),
+                type_id: 35832,
+                solar_system_id: 30000142,
+                owner_corporation_id: 1000001,
+                state: "Online".to_string(),
+                fuel_expires_at_unix: 1_760_000_000,
+                position_x: 0.0,
+                position_y: 0.0,
+                position_z: 0.0,
+            };
+            Ok(resp.to_any())
+        }),
+    );
+
+    router.register_handler(
+        "eve_public.killmail.v1.*",
+        Arc::new(|_ctx, _any, _dyn_msg| {
+            let resp = GetKillmailResponse {
+                killmail_id: 9001,
+                killmail_time_unix: 1_700_000_000,
+                solar_system_id: 30000142,
+                ship_type_id: 587,
+                victim_character_id: 90000002,
+                attacker_character_id: 90000001,
+                total_value_isk: 2_500_000.0,
+                killmail_hash: "default_killmail_hash".to_string(),
+            };
+            Ok(resp.to_any())
+        }),
+    );
+
+    router.register_handler(
+        "eve_public.ship.v1.*",
+        Arc::new(|_ctx, _any, _dyn_msg| {
+            let resp = GetShipResponse {
+                ship_id: 1001,
+                ship_type_id: 587,
+                ship_name: "Rifter".to_string(),
+                max_velocity: 350.0,
+                shield_hp: 450.0,
+                armor_hp: 400.0,
+                hull_hp: 350.0,
+            };
+            Ok(resp.to_any())
+        }),
+    );
+
+    router.register_handler(
+        "eve_public.stargate.v1.*",
+        Arc::new(|_ctx, _any, _dyn_msg| {
+            let resp = GetStargateResponse {
+                stargate_id: 50000001,
+                name: "Stargate (Jita)".to_string(),
+                solar_system_id: 30000142,
+                destination_stargate_id: 50000002,
+                destination_system_id: 30000144,
+            };
+            Ok(resp.to_any())
+        }),
+    );
+
+    router.register_handler(
+        "eve_public.station.v1.*",
+        Arc::new(|_ctx, _any, _dyn_msg| {
+            let resp = GetStationResponse {
+                station_id: 60003760,
+                name: "Jita IV - Moon 4 - Caldari Navy Assembly Plant".to_string(),
+                solar_system_id: 30000142,
+                type_id: 52678,
+                owner_corporation_id: 1000002,
+                reprocessing_efficiency: 0.5,
+            };
+            Ok(resp.to_any())
+        }),
+    );
+
+    router.register_handler(
+        "eve_public.probe.v1.*",
+        Arc::new(|_ctx, _any, _dyn_msg| {
+            let resp = GetProbeScansResponse {
+                solar_system_id: 30000142,
+                signatures: Vec::new(),
+            };
+            Ok(resp.to_any())
+        }),
+    );
+}
+
+// ============================================================================
+// Q-8: Sovereignty, Faction Warfare & Events (`eve_public.sovereignty.v1.*`, etc.)
+// ============================================================================
+
+pub fn register_q8_sovereignty_and_events_services(
+    router: &PublicGatewayRouter,
+    db: Arc<WorldRepository>,
+    _sde: Arc<SdeRegistry>,
+) {
+    // 1. eve_public.sovereignty.v1.GetSovereigntyRequest
+    {
+        let db_c = Arc::clone(&db);
+        router.register_handler(
+            GetSovereigntyRequest::FULL_NAME,
+            Arc::new(move |_ctx, any, _dyn_msg| {
+                let req = GetSovereigntyRequest::decode_proto(&any.value).map_err(|e| {
+                    (
+                        STATUS_BAD_REQUEST,
+                        format!("Failed to decode GetSovereigntyRequest: {e}"),
+                    )
+                })?;
+                let sid = req.solar_system_id;
+
+                let (alliance_id, mil, ind, strat, dbs) = db_c.with_snapshot(|snap| {
+                    if let Some(st) = snap.system_states.get(&sid) {
+                        (
+                            st.sov_alliance_id.map(|a| a as u64),
+                            st.military_index as u32,
+                            st.industrial_index as u32,
+                            st.strategic_index as u32,
+                            st.dbs_multiplier,
+                        )
+                    } else {
+                        (None, 0, 0, 0, 1.0)
+                    }
+                });
+
+                let resp = GetSovereigntyResponse {
+                    solar_system_id: sid,
+                    alliance_id,
+                    corporation_id: None,
+                    faction_id: None,
+                    military_index: mil,
+                    industrial_index: ind,
+                    strategic_index: strat,
+                    dbs_multiplier: dbs,
+                };
+                Ok(resp.to_any())
+            }),
+        );
+    }
+
+    // 2. eve_public.factionwarfare.v1.GetFactionWarfareRequest
+    {
+        let db_c = Arc::clone(&db);
+        router.register_handler(
+            GetFactionWarfareRequest::FULL_NAME,
+            Arc::new(move |ctx, any, _dyn_msg| {
+                let req = GetFactionWarfareRequest::decode_proto(&any.value).unwrap_or_default();
+                let cid = ctx.effective_character_id().or(req.character_id);
+
+                let (fid, contested) = db_c.with_snapshot(|snap| {
+                    let f = cid
+                        .and_then(|c| snap.characters.get(&(c as i64)))
+                        .and_then(|c| c.war_faction_id)
+                        .or(req.faction_id.map(|x| x as i64))
+                        .unwrap_or(500_001);
+                    let ct = snap
+                        .system_states
+                        .values()
+                        .filter(|s| s.fw_contested_pct > 0.0)
+                        .count() as u32;
+                    (f as u64, ct)
+                });
+
+                let resp = GetFactionWarfareResponse {
+                    faction_id: fid,
+                    current_rank: 3,
+                    highest_rank: 4,
+                    kills: 35,
+                    victory_points: 1500,
+                    contested_systems: contested,
+                };
+                Ok(resp.to_any())
+            }),
+        );
+    }
+
+    // 3. eve_public.projectdiscovery.v1.GetProjectDiscoveryRequest
+    {
+        router.register_handler(
+            GetProjectDiscoveryRequest::FULL_NAME,
+            Arc::new(move |ctx, any, _dyn_msg| {
+                let req = GetProjectDiscoveryRequest::decode_proto(&any.value).unwrap_or_default();
+                let cid = ctx.effective_character_id().or(req.character_id).unwrap_or(90_000_001);
+
+                let resp = GetProjectDiscoveryResponse {
+                    character_id: cid,
+                    score_percent: 94.5,
+                    rank: 16,
+                    daily_xp_collected: 800,
+                    daily_xp_cap: 2000,
+                    active_task_id: "pd_flow_cytometry_task_42".to_string(),
+                };
+                Ok(resp.to_any())
+            }),
+        );
+    }
+
+    // 4. eve_public.operation.v1.GetOperationsRequest
+    {
+        router.register_handler(
+            GetOperationsRequest::FULL_NAME,
+            Arc::new(move |ctx, any, _dyn_msg| {
+                let req = GetOperationsRequest::decode_proto(&any.value).unwrap_or_default();
+                let cid = ctx.effective_character_id().or(req.character_id).unwrap_or(90_000_001);
+
+                let resp = GetOperationsResponse {
+                    character_id: cid,
+                    operations: vec![
+                        OperationItem {
+                            operation_id: 101,
+                            title: "AIR Career Explorer Phase 1".to_string(),
+                            is_completed: true,
+                            progress: 1.0,
+                        },
+                        OperationItem {
+                            operation_id: 102,
+                            title: "AIR Career Enforcer Phase 1".to_string(),
+                            is_completed: false,
+                            progress: 0.65,
+                        },
+                    ],
+                };
+                Ok(resp.to_any())
+            }),
+        );
+    }
+
+    // Fallback wildcards for Q-8
+    router.register_handler(
+        "eve_public.sovereignty.v1.*",
+        Arc::new(|_ctx, _any, _dyn_msg| {
+            let resp = GetSovereigntyResponse {
+                solar_system_id: 30000142,
+                alliance_id: None,
+                corporation_id: None,
+                faction_id: None,
+                military_index: 0,
+                industrial_index: 0,
+                strategic_index: 0,
+                dbs_multiplier: 1.0,
+            };
+            Ok(resp.to_any())
+        }),
+    );
+
+    router.register_handler(
+        "eve_public.factionwarfare.v1.*",
+        Arc::new(|_ctx, _any, _dyn_msg| {
+            let resp = GetFactionWarfareResponse {
+                faction_id: 500001,
+                current_rank: 1,
+                highest_rank: 1,
+                kills: 0,
+                victory_points: 0,
+                contested_systems: 0,
+            };
+            Ok(resp.to_any())
+        }),
+    );
+
+    router.register_handler(
+        "eve_public.projectdiscovery.v1.*",
+        Arc::new(|ctx, _any, _dyn_msg| {
+            let cid = ctx.effective_character_id().unwrap_or(90_000_001);
+            let resp = GetProjectDiscoveryResponse {
+                character_id: cid,
+                score_percent: 90.0,
+                rank: 1,
+                daily_xp_collected: 0,
+                daily_xp_cap: 2000,
+                active_task_id: "default_pd_task".to_string(),
+            };
+            Ok(resp.to_any())
+        }),
+    );
+
+    router.register_handler(
+        "eve_public.operation.v1.*",
+        Arc::new(|ctx, _any, _dyn_msg| {
+            let cid = ctx.effective_character_id().unwrap_or(90_000_001);
+            let resp = GetOperationsResponse {
+                character_id: cid,
+                operations: Vec::new(),
+            };
+            Ok(resp.to_any())
+        }),
+    );
+}
+
+// ============================================================================
+// Q-9: Cosmetics & App Infrastructure (`eve_public.cosmetic.v1.*`, `eve_public.settings.v1.*`, etc.)
+// ============================================================================
+
+pub fn register_q9_cosmetics_and_client_services(
+    router: &PublicGatewayRouter,
+    db: Arc<WorldRepository>,
+    _sde: Arc<SdeRegistry>,
+) {
+    // 1. eve_public.cosmetic.v1.GetCosmeticsRequest
+    {
+        let db_c = Arc::clone(&db);
+        router.register_handler(
+            GetCosmeticsRequest::FULL_NAME,
+            Arc::new(move |ctx, any, _dyn_msg| {
+                let req = GetCosmeticsRequest::decode_proto(&any.value).unwrap_or_default();
+                let cid = ctx.effective_character_id().or(req.character_id).unwrap_or(90_000_001);
+
+                let (licensed, applied) = db_c.with_snapshot(|snap| {
+                    let l = snap.licensed_skins.get(&(cid as i64)).cloned().unwrap_or_default();
+                    let active_ship = snap.characters.get(&(cid as i64)).map(|c| c.active_ship_id).unwrap_or(0);
+                    let a = snap.applied_ship_skins.get(&active_ship).copied();
+                    (l, a)
+                });
+
+                let resp = GetCosmeticsResponse {
+                    character_id: cid,
+                    licensed_skin_ids: licensed,
+                    applied_skin_id: applied,
+                    evermarks_balance: 1400,
+                };
+                Ok(resp.to_any())
+            }),
+        );
+    }
+
+    // 2. eve_public.settings.v1.GetClientSettingsRequest
+    {
+        router.register_handler(
+            GetClientSettingsRequest::FULL_NAME,
+            Arc::new(move |ctx, any, _dyn_msg| {
+                let req = GetClientSettingsRequest::decode_proto(&any.value).unwrap_or_default();
+                let uid = ctx.effective_user_id().map(|u| u as u64).or(req.user_id).unwrap_or(1);
+                let cid = ctx.effective_character_id().or(req.character_id).unwrap_or(90_000_001);
+
+                let resp = GetClientSettingsResponse {
+                    user_id: uid,
+                    character_id: cid,
+                    settings: vec![
+                        ClientSettingEntry {
+                            key: "ui.scale".to_string(),
+                            value: "100".to_string(),
+                        },
+                        ClientSettingEntry {
+                            key: "audio.master".to_string(),
+                            value: "0.8".to_string(),
+                        },
+                        ClientSettingEntry {
+                            key: "graphics.lod".to_string(),
+                            value: "high".to_string(),
+                        },
+                    ],
+                };
+                Ok(resp.to_any())
+            }),
+        );
+    }
+
+    // 3. eve_public.settings.v1.SetClientSettingsRequest
+    {
+        router.register_handler(
+            SetClientSettingsRequest::FULL_NAME,
+            Arc::new(move |_ctx, any, _dyn_msg| {
+                let req = SetClientSettingsRequest::decode_proto(&any.value).map_err(|e| {
+                    (
+                        STATUS_BAD_REQUEST,
+                        format!("Failed to decode SetClientSettingsRequest: {e}"),
+                    )
+                })?;
+                let resp = SetClientSettingsResponse {
+                    success: true,
+                    key: req.key,
+                    updated_at_unix: 1_700_000_000,
+                };
+                Ok(resp.to_any())
+            }),
+        );
+    }
+
+    // 4. eve_public.paragon.v1.GetParagonMissionsRequest
+    {
+        router.register_handler(
+            GetParagonMissionsRequest::FULL_NAME,
+            Arc::new(move |ctx, any, _dyn_msg| {
+                let req = GetParagonMissionsRequest::decode_proto(&any.value).unwrap_or_default();
+                let cid = ctx.effective_character_id().or(req.character_id).unwrap_or(90_000_001);
+
+                let resp = GetParagonMissionsResponse {
+                    character_id: cid,
+                    evermarks_balance: 1400,
+                    missions_completed: 4,
+                };
+                Ok(resp.to_any())
+            }),
+        );
+    }
+
+    // 5. eve_public.ui.v1.GetUiLayoutRequest
+    {
+        router.register_handler(
+            GetUiLayoutRequest::FULL_NAME,
+            Arc::new(move |ctx, any, _dyn_msg| {
+                let req = GetUiLayoutRequest::decode_proto(&any.value).unwrap_or_default();
+                let cid = ctx.effective_character_id().or(req.character_id).unwrap_or(90_000_001);
+
+                let resp = GetUiLayoutResponse {
+                    character_id: cid,
+                    layout_json: r#"{"windows":{"chat":{"x":10,"y":500,"w":400,"h":300},"overview":{"x":1500,"y":50,"w":400,"h":600}}}"#.to_string(),
+                };
+                Ok(resp.to_any())
+            }),
+        );
+    }
+
+    // Fallback wildcards for Q-9
+    router.register_handler(
+        "eve_public.cosmetic.v1.*",
+        Arc::new(|ctx, _any, _dyn_msg| {
+            let cid = ctx.effective_character_id().unwrap_or(90_000_001);
+            let resp = GetCosmeticsResponse {
+                character_id: cid,
+                licensed_skin_ids: Vec::new(),
+                applied_skin_id: None,
+                evermarks_balance: 0,
+            };
+            Ok(resp.to_any())
+        }),
+    );
+
+    router.register_handler(
+        "eve_public.skin.v1.*",
+        Arc::new(|ctx, _any, _dyn_msg| {
+            let cid = ctx.effective_character_id().unwrap_or(90_000_001);
+            let resp = GetCosmeticsResponse {
+                character_id: cid,
+                licensed_skin_ids: Vec::new(),
+                applied_skin_id: None,
+                evermarks_balance: 0,
+            };
+            Ok(resp.to_any())
+        }),
+    );
+
+    router.register_handler(
+        "eve_public.settings.v1.*",
+        Arc::new(|ctx, _any, _dyn_msg| {
+            let uid = ctx.effective_user_id().map(|u| u as u64).unwrap_or(1);
+            let cid = ctx.effective_character_id().unwrap_or(90_000_001);
+            let resp = GetClientSettingsResponse {
+                user_id: uid,
+                character_id: cid,
+                settings: Vec::new(),
+            };
+            Ok(resp.to_any())
+        }),
+    );
+
+    router.register_handler(
+        "eve_public.client.v1.*",
+        Arc::new(|ctx, _any, _dyn_msg| {
+            let uid = ctx.effective_user_id().map(|u| u as u64).unwrap_or(1);
+            let cid = ctx.effective_character_id().unwrap_or(90_000_001);
+            let resp = GetClientSettingsResponse {
+                user_id: uid,
+                character_id: cid,
+                settings: Vec::new(),
+            };
+            Ok(resp.to_any())
+        }),
+    );
+
+    router.register_handler(
+        "eve_public.paragon.v1.*",
+        Arc::new(|ctx, _any, _dyn_msg| {
+            let cid = ctx.effective_character_id().unwrap_or(90_000_001);
+            let resp = GetParagonMissionsResponse {
+                character_id: cid,
+                evermarks_balance: 0,
+                missions_completed: 0,
+            };
+            Ok(resp.to_any())
+        }),
+    );
+
+    router.register_handler(
+        "eve_public.ui.v1.*",
+        Arc::new(|ctx, _any, _dyn_msg| {
+            let cid = ctx.effective_character_id().unwrap_or(90_000_001);
+            let resp = GetUiLayoutResponse {
+                character_id: cid,
+                layout_json: "{}".to_string(),
             };
             Ok(resp.to_any())
         }),

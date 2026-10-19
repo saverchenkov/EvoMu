@@ -641,3 +641,579 @@ async fn test_q6_market_and_wallet_services() {
     let jrn_decoded = GetJournalResponse::from_any(&jrn_payload).expect("decode GetJournalResponse");
     assert_eq!(jrn_decoded.character_id, cid);
 }
+
+// ============================================================================
+// parity: plan:Q-7 — Space & Combat Services
+// ============================================================================
+
+// parity: plan:Q-7
+#[tokio::test]
+async fn test_q7_space_and_combat_services() {
+    let ctx = ServerContext::new();
+    let empty_kw = HashMap::new();
+
+    let user_id = ctx.db.provision_player_account("pilot_echo", "securepass");
+    let char_record = ctx
+        .db
+        .create_character(user_id, "Echo Pilot", 1, 1, 11, 17, &ctx.sde)
+        .expect("create character");
+    let cid = char_record.character_id as u32;
+
+    let mut sess = SessionState::new(4006);
+    sess.user_id = Some(user_id);
+    sess.character_id = Some(cid as i64);
+
+    // Insert test killmail
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.killmails.insert(
+            88881,
+            eve_db::types::KillmailRecord {
+                kill_id: 88881,
+                victim_character_id: cid as i64,
+                attacker_character_id: 90_000_001,
+                solar_system_id: 30000142,
+                ship_type_id: 587,
+                total_value_isk: 15_000_000.0,
+            },
+        );
+    });
+
+    // 1. eve_public.solarsystem.v1.GetSolarSystemRequest (Jita 30000142)
+    let sol_req = EvePublicRequest {
+        correlation_uuid: b"corr-q7-sol00001".to_vec(),
+        payload: Some(GetSolarSystemRequest {
+            solar_system_id: 30000142,
+        }.to_any()),
+        application_instance_uuid: b"app-q7-0001".to_vec(),
+        ..Default::default()
+    };
+    let sol_rep = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "publicGatewaySvc",
+            None,
+            "SendRequest",
+            &[PyRep::Bytes(sol_req.encode_proto())],
+            &empty_kw,
+            None,
+        )
+        .await
+        .expect("dispatch GetSolarSystem");
+    let sol_rsp = extract_response_proto(&sol_rep);
+    assert_eq!(sol_rsp.status_code, STATUS_OK);
+    let sol_payload = sol_rsp.payload.expect("payload present");
+    let sol_decoded = GetSolarSystemResponse::from_any(&sol_payload).expect("decode GetSolarSystemResponse");
+    assert_eq!(sol_decoded.solar_system_id, 30000142);
+    assert_eq!(sol_decoded.solar_system_name, "Jita");
+    assert_eq!(sol_decoded.region_id, 10000002);
+    assert!(sol_decoded.security_status > 0.9);
+    assert!(!sol_decoded.stargate_ids.is_empty());
+    assert!(!sol_decoded.station_ids.is_empty());
+
+    let test_gate_id = sol_decoded.stargate_ids[0];
+    let test_station_id = sol_decoded.station_ids[0];
+
+    // 2. eve_public.structure.v1.GetStructureRequest (query test station as stationary structure)
+    let struct_req = EvePublicRequest {
+        correlation_uuid: b"corr-q7-str00001".to_vec(),
+        payload: Some(GetStructureRequest {
+            structure_id: test_station_id,
+        }.to_any()),
+        application_instance_uuid: b"app-q7-0001".to_vec(),
+        ..Default::default()
+    };
+    let struct_rep = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "publicGatewaySvc",
+            None,
+            "SendRequest",
+            &[PyRep::Bytes(struct_req.encode_proto())],
+            &empty_kw,
+            None,
+        )
+        .await
+        .expect("dispatch GetStructure");
+    let struct_rsp = extract_response_proto(&struct_rep);
+    assert_eq!(struct_rsp.status_code, STATUS_OK);
+    let struct_payload = struct_rsp.payload.expect("payload present");
+    let struct_decoded = GetStructureResponse::from_any(&struct_payload).expect("decode GetStructureResponse");
+    assert_eq!(struct_decoded.structure_id, test_station_id);
+    assert_eq!(struct_decoded.solar_system_id, 30000142);
+    assert!(!struct_decoded.name.is_empty());
+    assert!(struct_decoded.type_id > 0);
+
+    // 3. eve_public.killmail.v1.GetKillmailRequest
+    let km_req = EvePublicRequest {
+        correlation_uuid: b"corr-q7-km000001".to_vec(),
+        payload: Some(GetKillmailRequest {
+            killmail_id: 88881,
+            killmail_hash: None,
+        }.to_any()),
+        application_instance_uuid: b"app-q7-0001".to_vec(),
+        ..Default::default()
+    };
+    let km_rep = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "publicGatewaySvc",
+            None,
+            "SendRequest",
+            &[PyRep::Bytes(km_req.encode_proto())],
+            &empty_kw,
+            None,
+        )
+        .await
+        .expect("dispatch GetKillmail");
+    let km_rsp = extract_response_proto(&km_rep);
+    assert_eq!(km_rsp.status_code, STATUS_OK);
+    let km_payload = km_rsp.payload.expect("payload present");
+    let km_decoded = GetKillmailResponse::from_any(&km_payload).expect("decode GetKillmailResponse");
+    assert_eq!(km_decoded.killmail_id, 88881);
+    assert_eq!(km_decoded.victim_character_id, cid as u64);
+    assert_eq!(km_decoded.attacker_character_id, 90_000_001);
+    assert_eq!(km_decoded.ship_type_id, 587);
+    assert!((km_decoded.total_value_isk - 15_000_000.0).abs() < 1e-4);
+    assert!(!km_decoded.killmail_hash.is_empty());
+
+    // 4. eve_public.ship.v1.GetShipRequest
+    let ship_req = EvePublicRequest {
+        correlation_uuid: b"corr-q7-shp00001".to_vec(),
+        payload: Some(GetShipRequest {
+            character_id: Some(cid),
+            ship_id: None,
+        }.to_any()),
+        application_instance_uuid: b"app-q7-0001".to_vec(),
+        ..Default::default()
+    };
+    let ship_rep = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "publicGatewaySvc",
+            None,
+            "SendRequest",
+            &[PyRep::Bytes(ship_req.encode_proto())],
+            &empty_kw,
+            None,
+        )
+        .await
+        .expect("dispatch GetShip");
+    let ship_rsp = extract_response_proto(&ship_rep);
+    assert_eq!(ship_rsp.status_code, STATUS_OK);
+    let ship_payload = ship_rsp.payload.expect("payload present");
+    let ship_decoded = GetShipResponse::from_any(&ship_payload).expect("decode GetShipResponse");
+    assert!(ship_decoded.ship_id > 0);
+    assert!(ship_decoded.max_velocity > 0.0);
+    assert!(ship_decoded.shield_hp > 0.0);
+    assert!(ship_decoded.armor_hp > 0.0);
+    assert!(ship_decoded.hull_hp > 0.0);
+
+    // 5. eve_public.stargate.v1.GetStargateRequest
+    let gate_req = EvePublicRequest {
+        correlation_uuid: b"corr-q7-gat00001".to_vec(),
+        payload: Some(GetStargateRequest {
+            stargate_id: test_gate_id,
+        }.to_any()),
+        application_instance_uuid: b"app-q7-0001".to_vec(),
+        ..Default::default()
+    };
+    let gate_rep = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "publicGatewaySvc",
+            None,
+            "SendRequest",
+            &[PyRep::Bytes(gate_req.encode_proto())],
+            &empty_kw,
+            None,
+        )
+        .await
+        .expect("dispatch GetStargate");
+    let gate_rsp = extract_response_proto(&gate_rep);
+    assert_eq!(gate_rsp.status_code, STATUS_OK);
+    let gate_payload = gate_rsp.payload.expect("payload present");
+    let gate_decoded = GetStargateResponse::from_any(&gate_payload).expect("decode GetStargateResponse");
+    assert_eq!(gate_decoded.stargate_id, test_gate_id);
+    assert_eq!(gate_decoded.solar_system_id, 30000142);
+    assert!(gate_decoded.destination_stargate_id > 0);
+
+    // 6. eve_public.probe.v1.GetProbeScansRequest
+    let probe_req = EvePublicRequest {
+        correlation_uuid: b"corr-q7-prb00001".to_vec(),
+        payload: Some(GetProbeScansRequest {
+            solar_system_id: 30000142,
+        }.to_any()),
+        application_instance_uuid: b"app-q7-0001".to_vec(),
+        ..Default::default()
+    };
+    let probe_rep = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "publicGatewaySvc",
+            None,
+            "SendRequest",
+            &[PyRep::Bytes(probe_req.encode_proto())],
+            &empty_kw,
+            None,
+        )
+        .await
+        .expect("dispatch GetProbeScans");
+    let probe_rsp = extract_response_proto(&probe_rep);
+    assert_eq!(probe_rsp.status_code, STATUS_OK);
+    let probe_payload = probe_rsp.payload.expect("payload present");
+    let probe_decoded = GetProbeScansResponse::from_any(&probe_payload).expect("decode GetProbeScansResponse");
+    assert_eq!(probe_decoded.solar_system_id, 30000142);
+    assert!(!probe_decoded.signatures.is_empty());
+}
+
+// ============================================================================
+// parity: plan:Q-8 — Sovereignty, Faction Warfare & Events Services
+// ============================================================================
+
+// parity: plan:Q-8
+#[tokio::test]
+async fn test_q8_sovereignty_and_events_services() {
+    let ctx = ServerContext::new();
+    let empty_kw = HashMap::new();
+
+    let user_id = ctx.db.provision_player_account("pilot_foxtrot", "securepass");
+    let char_record = ctx
+        .db
+        .create_character(user_id, "Foxtrot Pilot", 1, 1, 11, 17, &ctx.sde)
+        .expect("create character");
+    let cid = char_record.character_id as u32;
+
+    let mut sess = SessionState::new(4007);
+    sess.user_id = Some(user_id);
+    sess.character_id = Some(cid as i64);
+
+    // Seed system state with sovereignty and military index
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.system_states.insert(
+            30002187,
+            eve_db::types::SystemDynamicState {
+                solar_system_id: 30002187,
+                dbs_multiplier: 1.35,
+                ess_main_bank: eve_db::types::IskCents::from_isk(45_000_000),
+                ess_reserve_bank: eve_db::types::IskCents::from_isk(90_000_000),
+                ess_linked_character_id: None,
+                ess_link_started_tick: None,
+                sov_alliance_id: Some(99000002),
+                military_index: 4,
+                industrial_index: 3,
+                strategic_index: 5,
+                fw_contested_pct: 0.25,
+                insurgency_corruption_stage: 0,
+                insurgency_suppression_stage: 0,
+                wormhole_remaining_mass_kg: 0.0,
+                wormhole_destination_system_id: None,
+                signature_position: None,
+                fw_complex_position: None,
+                fw_capture_seconds_elapsed: 0,
+                fw_capture_duration_seconds: 0,
+                last_fw_capture_tick: 0,
+                last_sov_claim_tick: 100,
+            },
+        );
+    });
+
+    // 1. eve_public.sovereignty.v1.GetSovereigntyRequest (solar system 30002187)
+    let sov_req = EvePublicRequest {
+        correlation_uuid: b"corr-q8-sov00001".to_vec(),
+        payload: Some(GetSovereigntyRequest {
+            solar_system_id: 30002187,
+        }.to_any()),
+        application_instance_uuid: b"app-q8-0001".to_vec(),
+        ..Default::default()
+    };
+    let sov_rep = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "publicGatewaySvc",
+            None,
+            "SendRequest",
+            &[PyRep::Bytes(sov_req.encode_proto())],
+            &empty_kw,
+            None,
+        )
+        .await
+        .expect("dispatch GetSovereignty");
+    let sov_rsp = extract_response_proto(&sov_rep);
+    assert_eq!(sov_rsp.status_code, STATUS_OK);
+    let sov_payload = sov_rsp.payload.expect("payload present");
+    let sov_decoded = GetSovereigntyResponse::from_any(&sov_payload).expect("decode GetSovereigntyResponse");
+    assert_eq!(sov_decoded.solar_system_id, 30002187);
+    assert_eq!(sov_decoded.alliance_id, Some(99000002));
+    assert_eq!(sov_decoded.military_index, 4);
+    assert_eq!(sov_decoded.industrial_index, 3);
+    assert_eq!(sov_decoded.strategic_index, 5);
+    assert!((sov_decoded.dbs_multiplier - 1.35).abs() < 1e-4);
+
+    // 2. eve_public.factionwarfare.v1.GetFactionWarfareRequest
+    let fw_req = EvePublicRequest {
+        correlation_uuid: b"corr-q8-fw000001".to_vec(),
+        payload: Some(GetFactionWarfareRequest {
+            character_id: Some(cid),
+            faction_id: Some(500001),
+        }.to_any()),
+        application_instance_uuid: b"app-q8-0001".to_vec(),
+        ..Default::default()
+    };
+    let fw_rep = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "publicGatewaySvc",
+            None,
+            "SendRequest",
+            &[PyRep::Bytes(fw_req.encode_proto())],
+            &empty_kw,
+            None,
+        )
+        .await
+        .expect("dispatch GetFactionWarfare");
+    let fw_rsp = extract_response_proto(&fw_rep);
+    assert_eq!(fw_rsp.status_code, STATUS_OK);
+    let fw_payload = fw_rsp.payload.expect("payload present");
+    let fw_decoded = GetFactionWarfareResponse::from_any(&fw_payload).expect("decode GetFactionWarfareResponse");
+    assert_eq!(fw_decoded.faction_id, 500001);
+    assert!(fw_decoded.current_rank > 0);
+    assert!(fw_decoded.kills > 0);
+    assert!(fw_decoded.victory_points > 0);
+    assert!(fw_decoded.contested_systems > 0);
+
+    // 3. eve_public.projectdiscovery.v1.GetProjectDiscoveryRequest
+    let pd_req = EvePublicRequest {
+        correlation_uuid: b"corr-q8-pd000001".to_vec(),
+        payload: Some(GetProjectDiscoveryRequest {
+            character_id: Some(cid),
+        }.to_any()),
+        application_instance_uuid: b"app-q8-0001".to_vec(),
+        ..Default::default()
+    };
+    let pd_rep = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "publicGatewaySvc",
+            None,
+            "SendRequest",
+            &[PyRep::Bytes(pd_req.encode_proto())],
+            &empty_kw,
+            None,
+        )
+        .await
+        .expect("dispatch GetProjectDiscovery");
+    let pd_rsp = extract_response_proto(&pd_rep);
+    assert_eq!(pd_rsp.status_code, STATUS_OK);
+    let pd_payload = pd_rsp.payload.expect("payload present");
+    let pd_decoded = GetProjectDiscoveryResponse::from_any(&pd_payload).expect("decode GetProjectDiscoveryResponse");
+    assert_eq!(pd_decoded.character_id, cid);
+    assert!(pd_decoded.score_percent > 90.0);
+    assert_eq!(pd_decoded.daily_xp_cap, 2000);
+    assert!(!pd_decoded.active_task_id.is_empty());
+
+    // 4. eve_public.operation.v1.GetOperationsRequest
+    let op_req = EvePublicRequest {
+        correlation_uuid: b"corr-q8-op000001".to_vec(),
+        payload: Some(GetOperationsRequest {
+            character_id: Some(cid),
+        }.to_any()),
+        application_instance_uuid: b"app-q8-0001".to_vec(),
+        ..Default::default()
+    };
+    let op_rep = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "publicGatewaySvc",
+            None,
+            "SendRequest",
+            &[PyRep::Bytes(op_req.encode_proto())],
+            &empty_kw,
+            None,
+        )
+        .await
+        .expect("dispatch GetOperations");
+    let op_rsp = extract_response_proto(&op_rep);
+    assert_eq!(op_rsp.status_code, STATUS_OK);
+    let op_payload = op_rsp.payload.expect("payload present");
+    let op_decoded = GetOperationsResponse::from_any(&op_payload).expect("decode GetOperationsResponse");
+    assert_eq!(op_decoded.character_id, cid);
+    assert!(!op_decoded.operations.is_empty());
+    assert_eq!(op_decoded.operations[0].operation_id, 101);
+}
+
+// ============================================================================
+// parity: plan:Q-9 — Cosmetics & App Infrastructure Services
+// ============================================================================
+
+// parity: plan:Q-9
+#[tokio::test]
+async fn test_q9_cosmetics_and_app_infrastructure_services() {
+    let ctx = ServerContext::new();
+    let empty_kw = HashMap::new();
+
+    let user_id = ctx.db.provision_player_account("pilot_golf", "securepass");
+    let char_record = ctx
+        .db
+        .create_character(user_id, "Golf Pilot", 1, 1, 11, 17, &ctx.sde)
+        .expect("create character");
+    let cid = char_record.character_id as u32;
+
+    let mut sess = SessionState::new(4008);
+    sess.user_id = Some(user_id);
+    sess.character_id = Some(cid as i64);
+
+    // Seed licensed skin
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.licensed_skins.insert(cid as i64, vec![36400, 36401]);
+    });
+
+    // 1. eve_public.cosmetic.v1.GetCosmeticsRequest
+    let cos_req = EvePublicRequest {
+        correlation_uuid: b"corr-q9-cos00001".to_vec(),
+        payload: Some(GetCosmeticsRequest {
+            character_id: Some(cid),
+            ship_type_id: Some(587),
+        }.to_any()),
+        application_instance_uuid: b"app-q9-0001".to_vec(),
+        ..Default::default()
+    };
+    let cos_rep = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "publicGatewaySvc",
+            None,
+            "SendRequest",
+            &[PyRep::Bytes(cos_req.encode_proto())],
+            &empty_kw,
+            None,
+        )
+        .await
+        .expect("dispatch GetCosmetics");
+    let cos_rsp = extract_response_proto(&cos_rep);
+    assert_eq!(cos_rsp.status_code, STATUS_OK);
+    let cos_payload = cos_rsp.payload.expect("payload present");
+    let cos_decoded = GetCosmeticsResponse::from_any(&cos_payload).expect("decode GetCosmeticsResponse");
+    assert_eq!(cos_decoded.character_id, cid);
+    assert!(cos_decoded.licensed_skin_ids.contains(&36400));
+    assert!(cos_decoded.evermarks_balance > 0);
+
+    // 2. eve_public.settings.v1.GetClientSettingsRequest
+    let set_req = EvePublicRequest {
+        correlation_uuid: b"corr-q9-set00001".to_vec(),
+        payload: Some(GetClientSettingsRequest {
+            user_id: Some(user_id),
+            character_id: Some(cid),
+            section: Some("ui".to_string()),
+        }.to_any()),
+        application_instance_uuid: b"app-q9-0001".to_vec(),
+        ..Default::default()
+    };
+    let set_rep = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "publicGatewaySvc",
+            None,
+            "SendRequest",
+            &[PyRep::Bytes(set_req.encode_proto())],
+            &empty_kw,
+            None,
+        )
+        .await
+        .expect("dispatch GetClientSettings");
+    let set_rsp = extract_response_proto(&set_rep);
+    assert_eq!(set_rsp.status_code, STATUS_OK);
+    let set_payload = set_rsp.payload.expect("payload present");
+    let set_decoded = GetClientSettingsResponse::from_any(&set_payload).expect("decode GetClientSettingsResponse");
+    assert_eq!(set_decoded.user_id, user_id);
+    assert_eq!(set_decoded.character_id, cid);
+    assert!(set_decoded.settings.iter().any(|s| s.key == "ui.scale"));
+
+    // 3. eve_public.settings.v1.SetClientSettingsRequest
+    let save_set_req = EvePublicRequest {
+        correlation_uuid: b"corr-q9-sav00001".to_vec(),
+        payload: Some(SetClientSettingsRequest {
+            user_id: Some(user_id),
+            character_id: Some(cid),
+            key: "overview.fontsize".to_string(),
+            value: "13".to_string(),
+        }.to_any()),
+        application_instance_uuid: b"app-q9-0001".to_vec(),
+        ..Default::default()
+    };
+    let save_set_rep = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "publicGatewaySvc",
+            None,
+            "SendRequest",
+            &[PyRep::Bytes(save_set_req.encode_proto())],
+            &empty_kw,
+            None,
+        )
+        .await
+        .expect("dispatch SetClientSettings");
+    let save_set_rsp = extract_response_proto(&save_set_rep);
+    assert_eq!(save_set_rsp.status_code, STATUS_OK);
+    let save_set_payload = save_set_rsp.payload.expect("payload present");
+    let save_set_decoded = SetClientSettingsResponse::from_any(&save_set_payload).expect("decode SetClientSettingsResponse");
+    assert!(save_set_decoded.success);
+    assert_eq!(save_set_decoded.key, "overview.fontsize");
+
+    // 4. eve_public.paragon.v1.GetParagonMissionsRequest
+    let par_req = EvePublicRequest {
+        correlation_uuid: b"corr-q9-par00001".to_vec(),
+        payload: Some(GetParagonMissionsRequest {
+            character_id: Some(cid),
+        }.to_any()),
+        application_instance_uuid: b"app-q9-0001".to_vec(),
+        ..Default::default()
+    };
+    let par_rep = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "publicGatewaySvc",
+            None,
+            "SendRequest",
+            &[PyRep::Bytes(par_req.encode_proto())],
+            &empty_kw,
+            None,
+        )
+        .await
+        .expect("dispatch GetParagonMissions");
+    let par_rsp = extract_response_proto(&par_rep);
+    assert_eq!(par_rsp.status_code, STATUS_OK);
+    let par_payload = par_rsp.payload.expect("payload present");
+    let par_decoded = GetParagonMissionsResponse::from_any(&par_payload).expect("decode GetParagonMissionsResponse");
+    assert_eq!(par_decoded.character_id, cid);
+    assert!(par_decoded.evermarks_balance > 0);
+    assert!(par_decoded.missions_completed > 0);
+
+    // 5. eve_public.ui.v1.GetUiLayoutRequest
+    let ui_req = EvePublicRequest {
+        correlation_uuid: b"corr-q9-ui000001".to_vec(),
+        payload: Some(GetUiLayoutRequest {
+            character_id: Some(cid),
+            window_name: None,
+        }.to_any()),
+        application_instance_uuid: b"app-q9-0001".to_vec(),
+        ..Default::default()
+    };
+    let ui_rep = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "publicGatewaySvc",
+            None,
+            "SendRequest",
+            &[PyRep::Bytes(ui_req.encode_proto())],
+            &empty_kw,
+            None,
+        )
+        .await
+        .expect("dispatch GetUiLayout");
+    let ui_rsp = extract_response_proto(&ui_rep);
+    assert_eq!(ui_rsp.status_code, STATUS_OK);
+    let ui_payload = ui_rsp.payload.expect("payload present");
+    let ui_decoded = GetUiLayoutResponse::from_any(&ui_payload).expect("decode GetUiLayoutResponse");
+    assert_eq!(ui_decoded.character_id, cid);
+    assert!(ui_decoded.layout_json.contains("overview"));
+}
