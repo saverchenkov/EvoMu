@@ -769,10 +769,10 @@ async fn test_esi_all_31_openapi_tags_sample_routes_and_schema_validation() {
     let cases: Vec<(&str, &str, u16)> = vec![
         ("GET", "/v1/alliances/", 200),
         ("GET", "/v5/characters/90000001/assets/", 200),
-        ("GET", "/v1/characters/90000001/calendar/", 501),
+        ("GET", "/v1/characters/90000001/calendar/", 200),
         ("GET", "/v1/characters/90000001/standings/", 200),
         ("GET", "/v3/characters/90000001/clones/", 200),
-        ("GET", "/v2/characters/90000001/contacts/", 501),
+        ("GET", "/v2/characters/90000001/contacts/", 200),
         (
             "GET",
             "/v1/characters/90000001/contracts/4001/items/",

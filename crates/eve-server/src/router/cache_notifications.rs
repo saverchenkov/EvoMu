@@ -576,8 +576,11 @@ impl ServerContext {
             let mut out = Vec::new();
             match target {
                 NotificationTarget::Character(cid) => {
-                    let uid = snap.characters.get(cid).map(|c| c.user_id);
-                    out.push((*cid, uid));
+                    if let Some(c) = snap.characters.get(cid) {
+                        if self.is_character_online(c.character_id, c.user_id) {
+                            out.push((*cid, Some(c.user_id)));
+                        }
+                    }
                 }
                 NotificationTarget::Corporation(corp_id) => {
                     for c in snap.characters.values() {
