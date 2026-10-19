@@ -1017,7 +1017,9 @@ pub fn dispatch_char_social_route(
                         format!("Character {char_id} not found"),
                     );
                 }
-                if ctx.esi_state.is_mail_deleted(char_id, mail_id) {
+                if snap.deleted_mails.contains(&(char_id, mail_id))
+                    || ctx.esi_state.is_mail_deleted(char_id, mail_id)
+                {
                     return RouteExecutionResult::error(
                         404,
                         format!("Mail {mail_id} not found for character {char_id}"),
@@ -1072,6 +1074,7 @@ pub fn dispatch_char_social_route(
                     .iter()
                     .filter(|m| {
                         (m.recipient_id == char_id || m.sender_id == char_id)
+                            && !snap.deleted_mails.contains(&(char_id, m.message_id))
                             && !ctx.esi_state.is_mail_deleted(char_id, m.message_id)
                     })
                     .map(|m| m.message_id)

@@ -760,12 +760,14 @@ pub fn dispatch_operation(
                     .unwrap_or_default();
                 eff_ids.sort_unstable();
                 eff_ids.dedup();
+                let default_eid =
+                    crate::esi::universe_routes::default_dogma_effect_id(&ctx.sde, &eff_ids);
                 let dogma_effects: Vec<Value> = eff_ids
                     .into_iter()
                     .map(|eid| {
                         json!({
                             "effect_id": eid as i64,
-                            "is_default": false,
+                            "is_default": Some(eid) == default_eid,
                         })
                     })
                     .collect();

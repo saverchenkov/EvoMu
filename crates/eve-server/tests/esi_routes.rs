@@ -18,6 +18,12 @@ const PKCE_VERIFIER: &str = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
 const PKCE_CHALLENGE: &str = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
 
 fn issue_token_with_scopes(ctx: &ServerContext, character_id: i64, scopes: Vec<String>) -> String {
+    let _: Result<(), ()> = ctx.db.try_with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&character_id) {
+            ch.user_id = 1;
+        }
+        Ok(())
+    });
     let now = ctx.now_unix();
     let code = ctx
         .db
@@ -121,6 +127,15 @@ async fn test_esi3_dogma_insurance_killmails_sovereignty_routes_and_wars() {
     let normal_item_id = 990_005_002;
     let friendly_struct_id = 1_030_000_005_001;
     let hostile_struct_id = 1_030_000_005_002;
+    let sov_tcu_id = 1_030_000_005_003;
+    let unallied_tcu_id = 1_030_000_005_004;
+    let nullsec_sys_id = ctx
+        .sde
+        .solar_systems
+        .values()
+        .find(|s| s.security_status <= -0.1)
+        .expect("SDE must contain null-sec solar system")
+        .solar_system_id;
 
     let _: Result<(), ()> = ctx.db.try_with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&90_000_001) {
@@ -170,9 +185,9 @@ async fn test_esi3_dogma_insurance_killmails_sovereignty_routes_and_wars() {
             },
         );
         snap.system_states.insert(
-            30_000_142,
+            nullsec_sys_id,
             SystemDynamicState {
-                solar_system_id: 30_000_142,
+                solar_system_id: nullsec_sys_id,
                 dbs_multiplier: 1.0,
                 ess_main_bank: IskCents(0),
                 ess_reserve_bank: IskCents(0),
@@ -224,6 +239,46 @@ async fn test_esi3_dogma_insurance_killmails_sovereignty_routes_and_wars() {
                 solar_system_id: 30_000_142,
                 name: "Jita Hostile Astrahus".to_string(),
                 position: [-1000.0, -2000.0, -3000.0],
+                state: "ShieldVulnerable".to_string(),
+                quantum_core_installed: true,
+                fuel_blocks: 500,
+                shield_hp: 5000.0,
+                armor_hp: 5000.0,
+                hull_hp: 5000.0,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+            },
+        );
+        snap.structures.insert(
+            sov_tcu_id,
+            UpwellStructureRecord {
+                structure_id: sov_tcu_id,
+                type_id: 32226,
+                owner_corp_id: corp_id,
+                solar_system_id: nullsec_sys_id,
+                name: "Sov Territorial Claim Unit".to_string(),
+                position: [5000.0, 5000.0, 5000.0],
+                state: "ShieldVulnerable".to_string(),
+                quantum_core_installed: true,
+                fuel_blocks: 500,
+                shield_hp: 5000.0,
+                armor_hp: 5000.0,
+                hull_hp: 5000.0,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+            },
+        );
+        snap.structures.insert(
+            unallied_tcu_id,
+            UpwellStructureRecord {
+                structure_id: unallied_tcu_id,
+                type_id: 32226,
+                owner_corp_id: enemy_corp_id,
+                solar_system_id: nullsec_sys_id,
+                name: "Unallied TCU".to_string(),
+                position: [-5000.0, -5000.0, -5000.0],
                 state: "ShieldVulnerable".to_string(),
                 quantum_core_installed: true,
                 fuel_blocks: 500,
@@ -529,14 +584,23 @@ async fn test_esi3_dogma_insurance_killmails_sovereignty_routes_and_wars() {
         &EsiHttpRequest::new("GET", "/v1/sovereignty/structures/"),
         200,
     );
-    let sov_st = sov_structs
-        .as_array()
-        .expect("sov structs")
+    let sov_arr = sov_structs.as_array().expect("sov structs");
+    assert!(
+        !sov_arr.iter().any(|s| s["structure_id"] == json!(friendly_struct_id)),
+        "High-sec Astrahus must not appear in /sovereignty/structures"
+    );
+    assert!(
+        !sov_arr.iter().any(|s| s["structure_id"] == json!(unallied_tcu_id)),
+        "Unallied structure must not be attributed to system sov_alliance_id"
+    );
+    let sov_st = sov_arr
         .iter()
-        .find(|s| s["structure_id"] == json!(friendly_struct_id))
-        .expect("friendly structure in sov structures");
+        .find(|s| s["structure_id"] == json!(sov_tcu_id))
+        .expect("null-sec TCU in sov structures");
     assert_eq!(sov_st["alliance_id"], json!(alliance_id));
-    assert_eq!(sov_st["vulnerability_occupancy_level"], json!(3.0));
+    assert_eq!(sov_st["solar_system_id"], json!(nullsec_sys_id as i64));
+    assert_eq!(sov_st["structure_type_id"], json!(32226));
+    assert_eq!(sov_st["vulnerability_occupancy_level"], json!(4.9));
     assert!(sov_st["vulnerable_start_time"].as_str().is_some());
     assert!(sov_st["vulnerable_end_time"].as_str().is_some());
 
@@ -691,6 +755,7 @@ async fn test_esi3_universe_hierarchy_celestials_stargates_structures_and_bulk_r
     );
     assert_eq!(rifter["type_id"], json!(587));
     assert_eq!(rifter["name"], json!("Rifter"));
+    assert_ne!(rifter["description"], rifter["name"]);
     assert_eq!(rifter["group_id"], json!(25));
     assert!(
         !rifter["dogma_attributes"]
@@ -698,11 +763,11 @@ async fn test_esi3_universe_hierarchy_celestials_stargates_structures_and_bulk_r
             .expect("dogma_attributes")
             .is_empty()
     );
+    let rifter_effs = rifter["dogma_effects"].as_array().expect("dogma_effects");
+    assert!(!rifter_effs.is_empty());
     assert!(
-        !rifter["dogma_effects"]
-            .as_array()
-            .expect("dogma_effects")
-            .is_empty()
+        rifter_effs.iter().any(|e| e["is_default"] == json!(true)),
+        "Rifter dogma_effects must include its default effect"
     );
     validate_and_json(
         &router,
@@ -1341,6 +1406,8 @@ async fn test_esi4_character_clones_skills_location_fittings_assets_wallet_loyal
     assert_eq!(char_locs[0]["item_id"], json!(bpo_item_id));
     assert!(char_locs[0]["position"]["x"].is_number());
 
+    ctx.esi_state
+        .set_custom_item_name(bpo_item_id, "Custom Master BPO");
     let char_names = validate_and_json(
         &router,
         &spec,
@@ -1350,7 +1417,7 @@ async fn test_esi4_character_clones_skills_location_fittings_assets_wallet_loyal
         200,
     );
     assert_eq!(char_names[0]["item_id"], json!(bpo_item_id));
-    assert!(char_names[0]["name"].as_str().is_some_and(|s| !s.is_empty()));
+    assert_eq!(char_names[0]["name"], json!("Custom Master BPO"));
 
     let corp_assets = validate_and_json(
         &router,
@@ -1422,7 +1489,7 @@ async fn test_esi4_character_clones_skills_location_fittings_assets_wallet_loyal
         .iter()
         .any(|e| e["corporation_id"] == json!(1_000_035) && e["loyalty_points"] == json!(12_500)));
 
-    // 8. Mail CRUD (POST -> GET list -> GET detail -> DELETE -> 404)
+    // 8. Mail CRUD (POST -> GET list -> GET detail -> DELETE -> 404 for sender, still visible to recipient)
     let mail_id_val = validate_and_json(
         &router,
         &spec,
@@ -1478,4 +1545,21 @@ async fn test_esi4_character_clones_skills_location_fittings_assets_wallet_loyal
             .with_bearer_token(&token),
         404,
     );
+
+    let recip_token = issue_token_with_scopes(
+        &ctx,
+        90_000_002,
+        vec![
+            "esi-mail.read_mail.v1".to_string(),
+            "esi-mail.organize_mail.v1".to_string(),
+        ],
+    );
+    let recip_mail = validate_and_json(
+        &router,
+        &spec,
+        &EsiHttpRequest::new("GET", format!("/v1/characters/90000002/mail/{mail_id}/"))
+            .with_bearer_token(&recip_token),
+        200,
+    );
+    assert_eq!(recip_mail["subject"], json!("ESI4 Fleet Ping"));
 }

@@ -163,10 +163,19 @@ fn build_owner_asset_names(
             );
         };
         let name = ctx
-            .sde
-            .types
-            .get(&item.type_id)
-            .map(|t| t.name.clone())
+            .esi_state
+            .get_custom_item_name(item.item_id)
+            .or_else(|| {
+                snap.owner_notes
+                    .values()
+                    .find(|n| {
+                        n.item_id == item.item_id
+                            && n.character_id == owner_id
+                            && !n.label.is_empty()
+                    })
+                    .map(|n| n.label.clone())
+            })
+            .or_else(|| ctx.sde.types.get(&item.type_id).map(|t| t.name.clone()))
             .unwrap_or_else(|| format!("Type {}", item.type_id));
         out.push(json!({
             "item_id": item.item_id,
@@ -1058,7 +1067,11 @@ pub fn dispatch_character_routes(
                 let mut msg_ids: Vec<i64> = snap
                     .mails
                     .iter()
-                    .filter(|m| m.recipient_id == char_id || m.sender_id == char_id)
+                    .filter(|m| {
+                        (m.recipient_id == char_id || m.sender_id == char_id)
+                            && !snap.deleted_mails.contains(&(char_id, m.message_id))
+                            && !ctx.esi_state.is_mail_deleted(char_id, m.message_id)
+                    })
                     .map(|m| m.message_id)
                     .collect();
                 msg_ids.sort_by(|a, b| b.cmp(a));
@@ -1212,6 +1225,14 @@ pub fn dispatch_character_routes(
                         format!("Character {char_id} not found"),
                     );
                 }
+                if snap.deleted_mails.contains(&(char_id, mail_id))
+                    || ctx.esi_state.is_mail_deleted(char_id, mail_id)
+                {
+                    return RouteExecutionResult::error(
+                        404,
+                        format!("Mail {mail_id} not found for character {char_id}"),
+                    );
+                }
                 let rows: Vec<_> = snap
                     .mails
                     .iter()
@@ -1273,6 +1294,14 @@ pub fn dispatch_character_routes(
                         format!("Character {char_id} not found"),
                     ));
                 }
+                if snap.deleted_mails.contains(&(char_id, mail_id))
+                    || ctx.esi_state.is_mail_deleted(char_id, mail_id)
+                {
+                    return Err(RouteExecutionResult::error(
+                        404,
+                        format!("Mail {mail_id} not found for character {char_id}"),
+                    ));
+                }
                 let authorized = snap.mails.iter().any(|m| {
                     m.message_id == mail_id && (m.recipient_id == char_id || m.sender_id == char_id)
                 });
@@ -1282,7 +1311,8 @@ pub fn dispatch_character_routes(
                         format!("Mail {mail_id} not found for character {char_id}"),
                     ));
                 }
-                snap.mails.retain(|m| m.message_id != mail_id);
+                snap.deleted_mails.insert((char_id, mail_id));
+                ctx.esi_state.mark_mail_deleted(char_id, mail_id);
                 Ok(())
             });
             Some(match res {

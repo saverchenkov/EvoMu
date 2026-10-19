@@ -51,6 +51,7 @@ pub struct EsiRuntimeState {
     pub autopilot_waypoints: RwLock<HashMap<i64, Vec<i64>>>,
     pub ui_open_window_events: RwLock<HashMap<i64, Vec<Value>>>,
     pub war_allies: RwLock<HashMap<i64, Vec<Value>>>,
+    pub custom_item_names: RwLock<HashMap<i64, String>>,
     pub next_custom_id: AtomicI64,
 }
 
@@ -80,6 +81,7 @@ impl EsiRuntimeState {
             autopilot_waypoints: RwLock::new(HashMap::new()),
             ui_open_window_events: RwLock::new(HashMap::new()),
             war_allies: RwLock::new(HashMap::new()),
+            custom_item_names: RwLock::new(HashMap::new()),
             next_custom_id: AtomicI64::new(16),
         }
     }
@@ -198,5 +200,20 @@ impl EsiRuntimeState {
             .get(&char_id)
             .cloned()
             .unwrap_or_default()
+    }
+
+    pub fn set_custom_item_name(&self, item_id: i64, name: impl Into<String>) {
+        self.custom_item_names
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(item_id, name.into());
+    }
+
+    pub fn get_custom_item_name(&self, item_id: i64) -> Option<String> {
+        self.custom_item_names
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&item_id)
+            .cloned()
     }
 }

@@ -1,18 +1,18 @@
 {
  "C-1": {
-  "assessment": "DONE",
+  "assessment": "PARTIAL",
   "note": "Turret tracking and missile damage formulas with 4-channel resistances across shield, armor, and structure."
  },
  "C-2": {
-  "assessment": "DONE",
+  "assessment": "PARTIAL",
   "note": "CombatState initialized from ship dogma attributes, analytical passive shield/capacitor recharge, and OnDamageStateChange."
  },
  "C-3": {
-  "assessment": "DONE",
+  "assessment": "PARTIAL",
   "note": "Ship destruction at zero hull HP, physical wreck spawn, Loot Fairy cargo roll, pod ejection, pod loss, medical clone respawn, and self-destruct countdown tested."
  },
  "C-4": {
-  "assessment": "DONE",
+  "assessment": "PARTIAL",
   "note": "NPC belt rats, spawn groups, faction damage types, AI targeting and orbit, wreck loot tables, dynamic bounty payout, and sec status gain tested."
  },
  "C-5": {
@@ -24,31 +24,31 @@
   "note": "Superseded by MN-11 (compression) and MN-12 (reprocessing) using SDE typeMaterials, station base yield, skills, and scrapmetal processing."
  },
  "C-7": {
-  "assessment": "DONE",
+  "assessment": "PARTIAL",
   "note": "Salvager wreck consumption and salvage yield, tractor beam pull physics, drone bandwidth validation, launch, orbit, and recall tested."
  },
  "C-8": {
-  "assessment": "DONE",
+  "assessment": "PARTIAL",
   "note": "Weapon timer, aggression tracking, suspect and criminal timers, sec status penalty and gain, and highsec CONCORD retaliation response tested."
  },
  "CH-1": {
-  "assessment": "DONE",
+  "assessment": "PARTIAL",
   "note": "Skill training queue real-time tick engine, Alpha 5M SP cap, Omega 2x multiplier, level completion event, and pause/resume tested."
  },
  "CH-2": {
-  "assessment": "DONE",
+  "assessment": "PARTIAL",
   "note": "Skill queue save and retrieval, prerequisite recursive checking, skill history logging, and inventory skillbook injection tested."
  },
  "CH-3": {
-  "assessment": "DONE",
+  "assessment": "PARTIAL",
   "note": "Character creation with bloodline starter skills, starting 5,000 ISK wallet, starter corvette in home station, and random name generation tested."
  },
  "CH-4": {
-  "assessment": "DONE",
+  "assessment": "PARTIAL",
   "note": "Character public info, biography persistence, employment history, character sheet, owner notes, and neural attribute remap tested."
  },
  "CH-5": {
-  "assessment": "DONE",
+  "assessment": "PARTIAL",
   "note": "GM slash commands giveisk, giveskill, createitem, teleport tr, and heal with role verification tested."
  },
  "D-1": {
@@ -72,7 +72,7 @@
   "note": "Server TOML configuration parsing, validation, default fallbacks, and feature flags tested."
  },
  "DG-1": {
-  "assessment": "DONE",
+  "assessment": "PARTIAL",
   "note": "Dogma modifierInfo evaluator with 6 domains, stacking penalties, weapon upgrades, propulsion & scrambler suppression, and command bursts."
  },
  "DG-2": {
@@ -84,11 +84,11 @@
   "note": "Module activation cycle engine in SystemActor tick, capacitor deduction per cycle, propulsion boost, and deactivation notifications."
  },
  "DG-4": {
-  "assessment": "DONE",
+  "assessment": "PARTIAL",
   "note": "Combat target lock state machine with dynamic lock time from scan resolution, max targets from skills, and lock clearing on warp."
  },
  "DG-5": {
-  "assessment": "DONE",
+  "assessment": "PARTIAL",
   "note": "Ammunition load/unload, reload timers, damage vector arithmetic across shield, armor, and structure with resonance multipliers."
  },
  "DG-6": {
@@ -100,23 +100,23 @@
   "note": "Broker fee calculation with Broker Relations and faction/corp standings discount, sales tax with Accounting discount, and escrow deduction tested."
  },
  "E-2": {
-  "assessment": "DONE",
+  "assessment": "PARTIAL",
   "note": "Limit orders, immediate buy and sell matching against order book, regional order book queries, order cancellation, and escrow refund tested."
  },
  "E-3": {
-  "assessment": "DONE",
+  "assessment": "PARTIAL",
   "note": "Item Exchange, Courier with collateral hold and delivery failure, and Auction contracts with bidding and escrow refund tested."
  },
  "E-4": {
-  "assessment": "DONE",
+  "assessment": "PARTIAL",
   "note": "Industry blueprint data, facilities lookup, job cost with facility tax, manufacturing, TE/ME research, copying, and delivery tested."
  },
  "E-5": {
-  "assessment": "DONE",
+  "assessment": "PARTIAL",
   "note": "Planetary Interaction with colony creation, command center upgrades, P0 extraction to P1 commodity processing, and hangar routing."
  },
  "E-6": {
-  "assessment": "DONE",
+  "assessment": "PARTIAL",
   "note": "Planetary Interaction planet info, command center placement, colony limit from skill, pin placement, links, and production routing tested."
  },
  "ESI-1": {
@@ -196,7 +196,7 @@
   "note": "Station and structure reprocessing service (reprocessingSvc) with tax, scrapmetal, and skill efficiency scaling."
  },
  "MN-13": {
-  "assessment": "DONE",
+  "assessment": "PARTIAL",
   "note": "Moon extraction schedule and explosion with chunk fractured asteroid field generation."
  },
  "MN-14": {
@@ -296,7 +296,7 @@
   "note": ""
  },
  "S-2": {
-  "assessment": "DONE",
+  "assessment": "PARTIAL",
   "note": "Fighter tube loading, launching, recall, movement modes, ability slots execution, and abandon fighters tested."
  },
  "S-3": {
@@ -328,23 +328,23 @@
   "note": "Player accounts receive no GM roles; CCP role bitmasks (ROLE_ADMIN, ROLE_GML, etc.) enforced on privileged commands; admin accounts configured."
  },
  "SO-1": {
-  "assessment": "DONE",
+  "assessment": "PARTIAL",
   "note": "EVE mail send, headers, body with auto-read, read/unread state, labels management, and notifications tested."
  },
  "SO-2": {
-  "assessment": "DONE",
+  "assessment": "PARTIAL",
   "note": "Fleet creation, hierarchy wings and squads, invite and join, broadcast events, member positions, and fleet warp tested."
  },
  "SO-3": {
-  "assessment": "DONE",
+  "assessment": "PARTIAL",
   "note": "Corporation creation, public info, wallet divisions, membership applications, and role bitmask enforcement tested."
  },
  "SO-4": {
-  "assessment": "DONE",
+  "assessment": "PARTIAL",
   "note": "Bookmarks creation, folders, shared corporate folders, update, delete, and cosmic signature bookmarking tested."
  },
  "SO-5": {
-  "assessment": "DONE",
+  "assessment": "PARTIAL",
   "note": "Directional scan cone filtering, cosmic probe launching, scan math convergence, and acceleration gates tested."
  },
  "SO-6": {
@@ -352,7 +352,7 @@
   "note": "Wormhole jump transition, polarization lockout timer, lifetime, mass exhaustion, and Thera system rules tested."
  },
  "SO-7": {
-  "assessment": "DONE",
+  "assessment": "PARTIAL",
   "note": "Chat channels join/leave, messaging, player-owned channels, private conversations, and delayed-local mode tested."
  },
  "SP-1": {
@@ -364,7 +364,7 @@
   "note": "Interdiction spheres, mobile warp disruptors, warp bubble entrapment, and interdiction nullification tested."
  },
  "SP-3": {
-  "assessment": "DONE",
+  "assessment": "PARTIAL",
   "note": "Beyonce approach, keep at range, align, propulsion speed boost, and micro jump drive 100km teleportation tested."
  },
  "SP-4": {
