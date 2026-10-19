@@ -454,6 +454,10 @@ def main():
     a = ap.parse_args()
 
     root = rl.repo_root(os.getcwd())
+    msg = rl.stale_gate(root)
+    if msg and not a.reuse_context:
+        print("[review] " + msg)
+        return 3
     sdir = rl.state_dir(root)
     state = rl.load_state(root)
     if a.reuse_context:

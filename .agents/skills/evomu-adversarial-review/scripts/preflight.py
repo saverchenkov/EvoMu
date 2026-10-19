@@ -149,6 +149,10 @@ def main():
     a = ap.parse_args()
 
     root = rl.repo_root(os.getcwd())
+    msg = rl.stale_gate(root)
+    if msg:
+        print("[preflight] " + msg)
+        return 1
     sdir = rl.state_dir(root)
     pdir = os.path.join(sdir, "preflight")
     os.makedirs(pdir, exist_ok=True)

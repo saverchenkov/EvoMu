@@ -72,6 +72,21 @@ def reviewed_trees(state, verdicts=None):
             if verdicts is None or r.get("verdict") in verdicts}
 
 
+def stale_gate(root):
+    """True (with a message) when this worktree's .agents/ differs from the `main` branch's copy, i.e. a track
+    worktree is running an outdated review gate. auditor_rows.json is exempt (written by the orchestrator)."""
+    if subprocess.run(["git", "rev-parse", "--verify", "-q", "main"], cwd=root, capture_output=True).returncode:
+        return None
+    r = subprocess.run(["git", "diff", "--quiet", "main", "--", ".agents",
+                        ":(exclude).agents/skills/evomu-adversarial-review/references/parity/auditor_rows.json"],
+                       cwd=root, capture_output=True)
+    if r.returncode == 0:
+        return None
+    return ("STALE REVIEW GATE: this worktree's .agents/ differs from the `main` branch. Rebase or merge `main` "
+            "into this branch (git stash; git rebase main; git stash pop) so you run the current pre-flight and "
+            "review rules, then retry. Never edit .agents/ yourself.")
+
+
 if __name__ == "__main__":
     r = repo_root(os.getcwd())
     print(worktree_fingerprint(r))
