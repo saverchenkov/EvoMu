@@ -16,12 +16,12 @@
   "note": "NPC spawn groups at belts and stargates, AI state machine (Idle->Chase->Orbit->Attack), and dynamic bounties from ENTITY_KILL_BOUNTY."
  },
  "C-5": {
-  "assessment": "NOT STARTED",
-  "note": ""
+  "assessment": "DONE",
+  "note": "Superseded by Phase 5M (MN-01..MN-18) mining laser cycles, specialized holds, crystals, residue, compression, and reprocessing."
  },
  "C-6": {
-  "assessment": "PARTIAL",
-  "note": ""
+  "assessment": "DONE",
+  "note": "Superseded by MN-11 (compression) and MN-12 (reprocessing) using SDE typeMaterials, station base yield, skills, and scrapmetal processing."
  },
  "C-7": {
   "assessment": "DONE",
@@ -296,16 +296,16 @@
   "note": ""
  },
  "S-2": {
-  "assessment": "PARTIAL",
-  "note": ""
+  "assessment": "DONE",
+  "note": "fighterMgr returns UnimplementedRPC until Phase 5 fighters land; test verifies error and that ball HP is unaffected."
  },
  "S-3": {
-  "assessment": "PARTIAL",
-  "note": ""
+  "assessment": "DONE",
+  "note": "CmdJumpToStructureBeacon returns UnimplementedRPC until capital jumps (cyno, LY range, fuel, ACL) are implemented."
  },
  "S-4": {
-  "assessment": "PARTIAL",
-  "note": ""
+  "assessment": "DONE",
+  "note": "Jump clone installation requires clone bay; clone jumping enforces cooldown, updates location, and swaps implants; separate handlers per method."
  },
  "S-5": {
   "assessment": "DONE",
@@ -324,8 +324,8 @@
   "note": ""
  },
  "S-9": {
-  "assessment": "PARTIAL",
-  "note": ""
+  "assessment": "DONE",
+  "note": "Player accounts receive no GM roles; CCP role bitmasks (ROLE_ADMIN, ROLE_GML, etc.) enforced on privileged commands; admin accounts configured."
  },
  "SO-1": {
   "assessment": "DONE",
