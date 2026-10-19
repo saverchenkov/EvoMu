@@ -128,6 +128,31 @@ impl WorldRepository {
             let reg_id = sys.map(|s| s.region_id).unwrap_or(10_000_002);
             let corvette_type_id = race.corvette_type_id;
 
+            let mut starter_skills_map = HashMap::new();
+            let mut total_sp = 0.0;
+            for (&skill_id, &lvl) in &race.starter_skills {
+                if lvl > 0 {
+                    let rank = sde
+                        .types
+                        .get(&skill_id)
+                        .and_then(|t| t.default_attributes.get(&275).copied())
+                        .unwrap_or(1.0);
+                    let sp = (250.0 * rank * 2.0_f64.powf(2.5 * (lvl.min(5) as i32 - 1) as f64)).ceil();
+                    total_sp += sp;
+                    starter_skills_map.insert(
+                        skill_id,
+                        TrainedSkillRecord {
+                            type_id: skill_id,
+                            level: lvl,
+                            skill_points: sp,
+                        },
+                    );
+                }
+            }
+            if starter_skills_map.is_empty() {
+                total_sp = 400_000.0;
+            }
+
             let rec = CharacterRecord {
                 character_id: char_id,
                 user_id,
@@ -153,7 +178,7 @@ impl WorldRepository {
                 ancestry_id,
                 school_id,
                 neural: NeuralAttributes::default(),
-                skill_points: 400_000.0,
+                skill_points: total_sp,
                 free_skill_points: 0.0,
                 last_clone_jump_unix: 0,
                 jump_fatigue_minutes: 0.0,
@@ -163,6 +188,7 @@ impl WorldRepository {
             };
 
             guard.characters.insert(char_id, rec.clone());
+            guard.skills.insert(char_id, starter_skills_map);
             guard.items.insert(
                 ship_id,
                 InventoryItemRecord {
@@ -350,6 +376,19 @@ impl WorldRepository {
                     break;
                 }
             }
+            let is_pod = guard
+                .items
+                .get(&destroyed_ship_id)
+                .map(|i| {
+                    i.type_id == 670
+                        || i.type_id == 33328
+                        || sde.types.get(&i.type_id).map(|t| t.group_id == 29).unwrap_or(false)
+                })
+                .unwrap_or(true);
+            if is_pod {
+                guard.active_implants.remove(&character_id);
+            }
+
             guard.items.retain(|id, _| !to_remove.contains(id));
 
             let existing_capsule_id = guard
@@ -453,6 +492,85 @@ impl WorldRepository {
                 ship.version += 1;
             }
             Ok(guard.characters[&character_id].clone())
+        })
+    }
+
+    /// Transactionally applies neural attribute redistribution and enforces the yearly cooldown
+    /// timer or consumes a bonus remap (`CH-5`).
+    pub fn remap_neural_attributes(
+        &self,
+        character_id: i64,
+        charisma: u8,
+        intelligence: u8,
+        memory: u8,
+        perception: u8,
+        willpower: u8,
+        now_unix: u64,
+    ) -> Result<CharacterRecord, DbError> {
+        // Each neural attribute must be between 17 and 27 inclusive
+        for (name, val) in [
+            ("Charisma", charisma),
+            ("Intelligence", intelligence),
+            ("Memory", memory),
+            ("Perception", perception),
+            ("Willpower", willpower),
+        ] {
+            if !(17..=27).contains(&val) {
+                return Err(DbError::ValidationError(format!(
+                    "{name} attribute {val} out of range: must be between 17 and 27"
+                )));
+            }
+        }
+
+        // Sum of all 5 attributes must equal 99 (85 base + 14 points)
+        let total = charisma as u32
+            + intelligence as u32
+            + memory as u32
+            + perception as u32
+            + willpower as u32;
+        if total != 99 {
+            return Err(DbError::ValidationError(format!(
+                "Total neural attribute points must equal 99, got {total}"
+            )));
+        }
+
+        self.try_with_mut_snapshot(|guard| {
+            let ch = guard
+                .characters
+                .get_mut(&character_id)
+                .ok_or(DbError::CharacterNotFound(character_id))?;
+
+            let yearly_cooldown = 365 * 86_400; // 31,536,000 seconds
+            let cooldown_active = ch
+                .neural
+                .remap_cooldown_until_unix
+                .map(|until| now_unix < until)
+                .unwrap_or(false);
+
+            if cooldown_active {
+                if ch.neural.bonus_remaps > 0 {
+                    ch.neural.bonus_remaps -= 1;
+                } else {
+                    let until = ch.neural.remap_cooldown_until_unix.unwrap_or(0);
+                    return Err(DbError::ValidationError(format!(
+                        "Neural remap is on yearly cooldown until unix timestamp {until}"
+                    )));
+                }
+            } else {
+                // Timed yearly remap
+                ch.neural.last_remap_unix = Some(now_unix);
+                ch.neural.remap_cooldown_until_unix = Some(now_unix + yearly_cooldown);
+            }
+
+            ch.neural.charisma = charisma;
+            ch.neural.intelligence = intelligence;
+            ch.neural.memory = memory;
+            ch.neural.perception = perception;
+            ch.neural.willpower = willpower;
+            ch.version += 1;
+            ch.system_epoch += 1;
+
+            Ok(ch.clone())
         })
     }
 }

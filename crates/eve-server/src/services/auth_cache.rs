@@ -3,14 +3,16 @@
 #![forbid(unsafe_code)]
 
 use crate::router::ServerContext;
-use eve_db::IskCents;
+use eve_db::{InventoryFlag, InventoryItemRecord, IskCents};
+use eve_destiny::{Ball, MovementMode};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
+use glam::DVec3;
 use std::collections::HashMap;
 const V24_01_VERSION: f64 = 24.01;
 const V24_01_BUILD: i64 = 3_619_879;
 
-pub fn handle(
+pub async fn handle(
     ctx: &ServerContext,
     session: &mut SessionState,
     service: &str,
@@ -555,6 +557,287 @@ pub fn handle(
                             .unwrap_or(PyRep::None),
                     ),
                     ("reason", PyRep::String(reason.to_string())),
+                ])))
+            } else if let Some(rest) = cmd.strip_prefix("/giveitem ") {
+                let mut parts = rest.trim().split_whitespace();
+                let Some(type_id_str) = parts.next() else {
+                    return Some(Err(BridgeRpcError {
+                        code: "InvalidSlashArgument".into(),
+                        message: "Usage: /giveitem <type_id> [quantity]".into(),
+                    }));
+                };
+                let Ok(type_id) = type_id_str.parse::<u32>() else {
+                    return Some(Err(BridgeRpcError {
+                        code: "InvalidSlashArgument".into(),
+                        message: "Invalid type_id for /giveitem".into(),
+                    }));
+                };
+                let qty: i32 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(1);
+                if qty <= 0 {
+                    return Some(Err(BridgeRpcError {
+                        code: "InvalidSlashArgument".into(),
+                        message: "Quantity for /giveitem must be positive".into(),
+                    }));
+                }
+                let Some(inv_type) = ctx.sde.types.get(&type_id) else {
+                    return Some(Err(BridgeRpcError {
+                        code: "TypeNotFound".into(),
+                        message: format!("Type ID {type_id} not found in SDE"),
+                    }));
+                };
+                let is_ship = inv_type.category_id == 6;
+                let res = ctx.db.try_with_mut_snapshot(|snap| {
+                    let ch = snap.characters.get(&cid).ok_or_else(|| BridgeRpcError {
+                        code: "CharacterNotFound".into(),
+                        message: format!("Character {cid} not found"),
+                    })?;
+                    let (location_id, flag) = if let Some(st_id) = ch.station_id.or(ch.structure_id) {
+                        (st_id, InventoryFlag::Hangar)
+                    } else {
+                        (ch.active_ship_id, InventoryFlag::Cargo)
+                    };
+                    snap.next_entity_id += 1;
+                    let item_id = snap.next_entity_id;
+                    let item = InventoryItemRecord {
+                        item_id,
+                        type_id,
+                        owner_id: cid,
+                        location_id,
+                        flag,
+                        quantity: qty,
+                        singleton: is_ship,
+                        version: 1,
+                        dynamic_attributes: HashMap::new(),
+                        source_mutaplasmid_id: None,
+                        insured_payout_isk: 0.0,
+                        is_blueprint_copy: false,
+                        blueprint_runs_remaining: None,
+                    };
+                    snap.items.insert(item_id, item);
+                    Ok((item_id, location_id))
+                });
+                match res {
+                    Ok((item_id, loc_id)) => Some(Ok(PyRep::keyval([
+                        ("command", PyRep::String(cmd.to_string())),
+                        ("itemID", PyRep::Integer(item_id)),
+                        ("typeID", PyRep::Integer(type_id as i64)),
+                        ("quantity", PyRep::Integer(qty as i64)),
+                        ("locationID", PyRep::Integer(loc_id)),
+                    ]))),
+                    Err(e) => Some(Err(e)),
+                }
+            } else if let Some(rest) = cmd.strip_prefix("/setskill ") {
+                let mut parts = rest.trim().split_whitespace();
+                let Some(skill_id_str) = parts.next() else {
+                    return Some(Err(BridgeRpcError {
+                        code: "InvalidSlashArgument".into(),
+                        message: "Usage: /setskill <skill_id> <level>".into(),
+                    }));
+                };
+                let Ok(skill_id) = skill_id_str.parse::<u32>() else {
+                    return Some(Err(BridgeRpcError {
+                        code: "InvalidSlashArgument".into(),
+                        message: "Invalid skill_id for /setskill".into(),
+                    }));
+                };
+                let Some(lvl_str) = parts.next() else {
+                    return Some(Err(BridgeRpcError {
+                        code: "InvalidSlashArgument".into(),
+                        message: "Usage: /setskill <skill_id> <level>".into(),
+                    }));
+                };
+                let Ok(lvl) = lvl_str.parse::<u8>() else {
+                    return Some(Err(BridgeRpcError {
+                        code: "InvalidSlashArgument".into(),
+                        message: "Invalid level for /setskill".into(),
+                    }));
+                };
+                if lvl > 5 {
+                    return Some(Err(BridgeRpcError {
+                        code: "InvalidSlashArgument".into(),
+                        message: "Level for /setskill must be between 0 and 5".into(),
+                    }));
+                }
+                let Some(skill_type) = ctx.sde.types.get(&skill_id) else {
+                    return Some(Err(BridgeRpcError {
+                        code: "SkillNotFound".into(),
+                        message: format!("Skill type ID {skill_id} not found in SDE"),
+                    }));
+                };
+                if skill_type.category_id != 16 {
+                    return Some(Err(BridgeRpcError {
+                        code: "InvalidSkillType".into(),
+                        message: format!("Type {skill_id} is not a skill (category 16)"),
+                    }));
+                }
+                let rank = skill_type
+                    .default_attributes
+                    .get(&275)
+                    .copied()
+                    .unwrap_or(1.0);
+                let target_sp = crate::formulas::sp_for_skill_level(rank, lvl);
+
+                let res = ctx.db.try_with_mut_snapshot(|snap| {
+                    let ch = snap.characters.get_mut(&cid).ok_or_else(|| BridgeRpcError {
+                        code: "CharacterNotFound".into(),
+                        message: format!("Character {cid} not found"),
+                    })?;
+                    let skills_map = snap.skills.entry(cid).or_default();
+                    let prev_sp = skills_map.get(&skill_id).map(|s| s.skill_points).unwrap_or(0.0);
+                    let sp_diff = target_sp - prev_sp;
+                    ch.skill_points = (ch.skill_points + sp_diff).max(0.0);
+
+                    if lvl == 0 {
+                        skills_map.remove(&skill_id);
+                    } else {
+                        skills_map.insert(
+                            skill_id,
+                            eve_db::TrainedSkillRecord {
+                                type_id: skill_id,
+                                level: lvl,
+                                skill_points: target_sp,
+                            },
+                        );
+                    }
+                    let active_ship = ch.active_ship_id;
+                    Ok((target_sp, ch.skill_points, active_ship))
+                });
+                match res {
+                    Ok((sp, total_sp, active_ship)) => {
+                        ctx.invalidate_ship_fitting(active_ship);
+                        Some(Ok(PyRep::keyval([
+                            ("command", PyRep::String(cmd.to_string())),
+                            ("skillID", PyRep::Integer(skill_id as i64)),
+                            ("level", PyRep::Integer(lvl as i64)),
+                            ("skillPoints", PyRep::Real(sp)),
+                            ("characterTotalSP", PyRep::Real(total_sp)),
+                        ])))
+                    }
+                    Err(e) => Some(Err(e)),
+                }
+            } else if let Some(rest) = cmd.strip_prefix("/spawnnpc ") {
+                let type_id_str = rest.trim();
+                let Ok(type_id) = type_id_str.parse::<u32>() else {
+                    return Some(Err(BridgeRpcError {
+                        code: "InvalidSlashArgument".into(),
+                        message: "Usage: /spawnnpc <type_id>".into(),
+                    }));
+                };
+                let Some(npc_type) = ctx.sde.types.get(&type_id) else {
+                    return Some(Err(BridgeRpcError {
+                        code: "TypeNotFound".into(),
+                        message: format!("NPC type ID {type_id} not found in SDE"),
+                    }));
+                };
+                let (sys_id, ship_id) = ctx.db.with_snapshot(|snap| {
+                    snap.characters.get(&cid).map(|c| (c.solar_system_id, c.active_ship_id))
+                }).unwrap_or((30000142, 0));
+
+                let mass = npc_type.mass.max(1.0);
+                let radius = npc_type.radius.max(1.0);
+                let handle = ctx.systems.get_or_spawn(sys_id);
+                let origin = if ship_id > 0 {
+                    handle
+                        .get_ball_snapshot(ship_id)
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|(_, b)| b.position)
+                        .unwrap_or(DVec3::ZERO)
+                } else {
+                    DVec3::ZERO
+                };
+
+                let npc_id = ctx.db.with_mut_snapshot(|snap| {
+                    snap.next_entity_id += 1;
+                    700_000_000_i64.saturating_add(snap.next_entity_id)
+                });
+
+                let _ = handle
+                    .spawn_ball_with_combat(
+                        Ball {
+                            id: npc_id,
+                            type_id,
+                            position: origin + DVec3::new(1_000.0, 0.0, 0.0),
+                            velocity: DVec3::ZERO,
+                            max_velocity: 350.0,
+                            inertia: 1.0,
+                            mass,
+                            radius,
+                            speed_fraction: 0.0,
+                            mode: MovementMode::Stop,
+                        },
+                        ctx.build_type_combat_state(type_id),
+                    )
+                    .await;
+
+                Some(Ok(PyRep::keyval([
+                    ("command", PyRep::String(cmd.to_string())),
+                    ("npcID", PyRep::Integer(npc_id)),
+                    ("typeID", PyRep::Integer(type_id as i64)),
+                    ("solarSystemID", PyRep::Integer(sys_id as i64)),
+                ])))
+            } else if let Some(rest) = cmd.strip_prefix("/teleport ") {
+                let sys_id_str = rest.trim();
+                let Ok(dest_sys_id) = sys_id_str.parse::<u32>() else {
+                    return Some(Err(BridgeRpcError {
+                        code: "InvalidSlashArgument".into(),
+                        message: "Usage: /teleport <solar_system_id>".into(),
+                    }));
+                };
+                if !ctx.sde.solar_systems.contains_key(&dest_sys_id) {
+                    return Some(Err(BridgeRpcError {
+                        code: "SolarSystemNotFound".into(),
+                        message: format!("Solar system {dest_sys_id} not found in SDE"),
+                    }));
+                }
+                let (old_sys_id, ship_id) = ctx.db.with_snapshot(|snap| {
+                    snap.characters.get(&cid).map(|c| (c.solar_system_id, c.active_ship_id))
+                }).unwrap_or((30000142, 0));
+
+                let updated_ch = match ctx.db.set_character_solar_system(cid, dest_sys_id, &ctx.sde) {
+                    Ok(c) => c,
+                    Err(e) => return Some(Err(BridgeRpcError {
+                        code: "TeleportFailed".into(),
+                        message: e.to_string(),
+                    })),
+                };
+
+                if old_sys_id != dest_sys_id && ship_id > 0 {
+                    let old_handle = ctx.systems.get_or_spawn(old_sys_id);
+                    let existing_ball = old_handle.remove_ball(ship_id).await;
+                    let new_handle = ctx.systems.get_or_spawn(dest_sys_id);
+                    let mut new_ball = existing_ball.unwrap_or(Ball {
+                        id: ship_id,
+                        type_id: 601,
+                        position: DVec3::ZERO,
+                        velocity: DVec3::ZERO,
+                        max_velocity: 300.0,
+                        inertia: 0.5,
+                        mass: 1_000_000.0,
+                        radius: 50.0,
+                        speed_fraction: 0.0,
+                        mode: MovementMode::Stop,
+                    });
+                    new_ball.position = DVec3::new(10_000.0, 0.0, 0.0);
+                    new_ball.velocity = DVec3::ZERO;
+                    let combat_state = ctx.build_ship_combat_state(cid, ship_id, new_ball.type_id);
+                    let slim_meta = ctx.build_ship_slim_meta(cid, new_ball.type_id);
+                    let _ = new_handle.spawn_ball_with_meta(new_ball, combat_state, slim_meta).await;
+                }
+
+                session.solar_system_id = Some(dest_sys_id);
+                session.constellation_id = Some(updated_ch.constellation_id);
+                session.region_id = Some(updated_ch.region_id);
+                session.station_id = None;
+                session.structure_id = None;
+
+                Some(Ok(PyRep::keyval([
+                    ("command", PyRep::String(cmd.to_string())),
+                    ("characterID", PyRep::Integer(cid)),
+                    ("solarSystemID", PyRep::Integer(dest_sys_id as i64)),
+                    ("constellationID", PyRep::Integer(updated_ch.constellation_id as i64)),
+                    ("regionID", PyRep::Integer(updated_ch.region_id as i64)),
                 ])))
             } else {
                 Some(Err(BridgeRpcError {

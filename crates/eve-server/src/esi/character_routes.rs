@@ -525,17 +525,23 @@ pub fn dispatch_character_routes(
                         format!("Character {char_id} not found"),
                     );
                 };
-                RouteExecutionResult::ok_json(
-                    json!({
-                        "charisma": ch.neural.charisma as i64,
-                        "intelligence": ch.neural.intelligence as i64,
-                        "memory": ch.neural.memory as i64,
-                        "perception": ch.neural.perception as i64,
-                        "willpower": ch.neural.willpower as i64,
-                        "bonus_remaps": ch.neural.bonus_remaps as i64,
-                    }),
-                    120,
-                )
+                let mut obj = serde_json::Map::new();
+                obj.insert("charisma".into(), json!(ch.neural.charisma as i64));
+                obj.insert("intelligence".into(), json!(ch.neural.intelligence as i64));
+                obj.insert("memory".into(), json!(ch.neural.memory as i64));
+                obj.insert("perception".into(), json!(ch.neural.perception as i64));
+                obj.insert("willpower".into(), json!(ch.neural.willpower as i64));
+                obj.insert("bonus_remaps".into(), json!(ch.neural.bonus_remaps as i64));
+                if let Some(last) = ch.neural.last_remap_unix {
+                    obj.insert("last_remap_date".into(), json!(format_iso8601_utc(last)));
+                }
+                if let Some(cooldown) = ch.neural.remap_cooldown_until_unix {
+                    obj.insert(
+                        "accrued_remap_cooldown_date".into(),
+                        json!(format_iso8601_utc(cooldown)),
+                    );
+                }
+                RouteExecutionResult::ok_json(Value::Object(obj), 120)
             }))
         }
         ("GET", "/characters/{character_id}/skillqueue") => {

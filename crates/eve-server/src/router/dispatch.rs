@@ -310,6 +310,7 @@ impl ServerContext {
         // Dispatch across the 12 domain modules in order
         if let Some(res) =
             services::auth_cache::handle(self, session, effective_service, method, args, kwargs)
+                .await
         {
             return res;
         }

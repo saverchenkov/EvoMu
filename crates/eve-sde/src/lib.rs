@@ -113,6 +113,13 @@ pub mod attr_ids {
     pub const REQUIRED_SKILL_1_LEVEL: AttributeId = 277;
     pub const REQUIRED_SKILL_2_LEVEL: AttributeId = 278;
     pub const REQUIRED_SKILL_3_LEVEL: AttributeId = 279;
+    pub const PRIMARY_ATTRIBUTE: AttributeId = 180;
+    pub const SECONDARY_ATTRIBUTE: AttributeId = 181;
+    pub const CHARISMA: AttributeId = 164;
+    pub const INTELLIGENCE: AttributeId = 165;
+    pub const MEMORY: AttributeId = 166;
+    pub const PERCEPTION: AttributeId = 167;
+    pub const WILLPOWER: AttributeId = 168;
     pub const CAN_FIT_SHIP_GROUP_01: AttributeId = 1298;
     pub const CAN_FIT_SHIP_GROUP_02: AttributeId = 1299;
     pub const CAN_FIT_SHIP_GROUP_03: AttributeId = 1300;
@@ -237,6 +244,8 @@ pub struct RaceInfo {
     pub race_id: u32,
     pub name: String,
     pub corvette_type_id: TypeId,
+    #[serde(default)]
+    pub starter_skills: HashMap<TypeId, u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1344,12 +1353,22 @@ impl SdeRegistry {
         let mut races = HashMap::new();
         {
             let mut stmt =
-                conn.prepare("SELECT race_id, name, ship_type_id FROM sde_races")?;
+                conn.prepare("SELECT race_id, name, ship_type_id, skills_json FROM sde_races")?;
             let rows = stmt.query_map([], |r| {
+                let skills_json: Option<String> = r.get(3).ok();
+                let starter_skills = skills_json
+                    .and_then(|js| serde_json::from_str::<HashMap<String, u8>>(&js).ok())
+                    .map(|m| {
+                        m.into_iter()
+                            .filter_map(|(k, v)| k.parse::<TypeId>().ok().map(|id| (id, v)))
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 Ok(RaceInfo {
                     race_id: r.get::<_, i64>(0)? as u32,
                     name: r.get(1)?,
                     corvette_type_id: r.get::<_, Option<i64>>(2)?.unwrap_or(601) as TypeId,
+                    starter_skills,
                 })
             })?;
             for r in rows {

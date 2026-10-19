@@ -454,12 +454,26 @@ pub fn handle(
                         message: "Alpha clones cannot queue skills beyond 5,000,000 SP".into(),
                     });
                 }
+                let primary_attr_id = skill_type
+                    .default_attributes
+                    .get(&eve_sde::attr_ids::PRIMARY_ATTRIBUTE)
+                    .copied()
+                    .map(|v| v as u32)
+                    .unwrap_or(eve_sde::attr_ids::PERCEPTION as u32);
+                let secondary_attr_id = skill_type
+                    .default_attributes
+                    .get(&eve_sde::attr_ids::SECONDARY_ATTRIBUTE)
+                    .copied()
+                    .map(|v| v as u32)
+                    .unwrap_or(eve_sde::attr_ids::WILLPOWER as u32);
+                let primary_attr = ch.neural.get_attribute_by_id(primary_attr_id);
+                let secondary_attr = ch.neural.get_attribute_by_id(secondary_attr_id);
                 let clone_mult = if ch.clone_grade == 2 { 1.0 } else { 0.5 };
                 let duration_sec = skill_training_time_seconds(
                     start_sp,
                     end_sp,
-                    ch.neural.perception as f64,
-                    ch.neural.willpower as f64,
+                    primary_attr,
+                    secondary_attr,
                     clone_mult,
                 );
                 snap.skill_queues
@@ -641,6 +655,95 @@ pub fn handle(
             match res {
                 Ok(yielded) => Some(Ok(PyRep::Real(yielded))),
                 Err(e) => Some(Err(e)),
+            }
+        }
+
+        ("charUnboundMgr", "ApplyNeuralRemap")
+        | ("charUnboundMgr", "RemapAttributes")
+        | ("skillMgr2", "RemapAttributes")
+        | ("character", "RemapAttributes") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let (cha_opt, int_opt, mem_opt, per_opt, wil_opt) = match args.first() {
+                Some(PyRep::Dict(map)) => {
+                    let get_u8 = |k: &str| {
+                        map.iter()
+                            .find(|(key, _)| key.as_str() == Some(k))
+                            .and_then(|(_, v)| v.as_i64())
+                            .map(|v| v as u8)
+                    };
+                    (
+                        get_u8("charisma"),
+                        get_u8("intelligence"),
+                        get_u8("memory"),
+                        get_u8("perception"),
+                        get_u8("willpower"),
+                    )
+                }
+                Some(PyRep::KeyVal(kv)) => (
+                    kv.get("charisma").and_then(|v| v.as_i64()).map(|v| v as u8),
+                    kv.get("intelligence").and_then(|v| v.as_i64()).map(|v| v as u8),
+                    kv.get("memory").and_then(|v| v.as_i64()).map(|v| v as u8),
+                    kv.get("perception").and_then(|v| v.as_i64()).map(|v| v as u8),
+                    kv.get("willpower").and_then(|v| v.as_i64()).map(|v| v as u8),
+                ),
+                _ => (
+                    args.first()
+                        .and_then(|v| v.as_i64())
+                        .map(|v| v as u8)
+                        .or_else(|| _kwargs.get("charisma").and_then(|v| v.as_i64()).map(|v| v as u8)),
+                    args.get(1)
+                        .and_then(|v| v.as_i64())
+                        .map(|v| v as u8)
+                        .or_else(|| _kwargs.get("intelligence").and_then(|v| v.as_i64()).map(|v| v as u8)),
+                    args.get(2)
+                        .and_then(|v| v.as_i64())
+                        .map(|v| v as u8)
+                        .or_else(|| _kwargs.get("memory").and_then(|v| v.as_i64()).map(|v| v as u8)),
+                    args.get(3)
+                        .and_then(|v| v.as_i64())
+                        .map(|v| v as u8)
+                        .or_else(|| _kwargs.get("perception").and_then(|v| v.as_i64()).map(|v| v as u8)),
+                    args.get(4)
+                        .and_then(|v| v.as_i64())
+                        .map(|v| v as u8)
+                        .or_else(|| _kwargs.get("willpower").and_then(|v| v.as_i64()).map(|v| v as u8)),
+                ),
+            };
+            let (Some(cha), Some(int), Some(mem), Some(per), Some(wil)) =
+                (cha_opt, int_opt, mem_opt, per_opt, wil_opt)
+            else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidRemapArguments".into(),
+                    message: "Remap requires charisma, intelligence, memory, perception, and willpower values".into(),
+                }));
+            };
+
+            let now_unix = ctx.now_unix();
+            match ctx.db.remap_neural_attributes(char_id, cha, int, mem, per, wil, now_unix) {
+                Ok(ch) => Some(Ok(PyRep::keyval([
+                    ("characterID", PyRep::Integer(char_id)),
+                    ("charisma", PyRep::Integer(ch.neural.charisma as i64)),
+                    ("intelligence", PyRep::Integer(ch.neural.intelligence as i64)),
+                    ("memory", PyRep::Integer(ch.neural.memory as i64)),
+                    ("perception", PyRep::Integer(ch.neural.perception as i64)),
+                    ("willpower", PyRep::Integer(ch.neural.willpower as i64)),
+                    ("bonusRemaps", PyRep::Integer(ch.neural.bonus_remaps as i64)),
+                    (
+                        "lastRemapUnix",
+                        PyRep::Integer(ch.neural.last_remap_unix.unwrap_or(0) as i64),
+                    ),
+                    (
+                        "remapCooldownUntilUnix",
+                        PyRep::Integer(ch.neural.remap_cooldown_until_unix.unwrap_or(0) as i64),
+                    ),
+                ]))),
+                Err(e) => Some(Err(BridgeRpcError {
+                    code: "RemapFailed".into(),
+                    message: e.to_string(),
+                })),
             }
         }
 

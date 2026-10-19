@@ -387,8 +387,9 @@ impl ServerContext {
             return;
         }
         let sde = self.sde.clone();
-        let invalidated_ships = self.db.with_mut_snapshot(|snap| {
+        let (invalidated_ships, completed_events) = self.db.with_mut_snapshot(|snap| {
             let mut ships_to_invalidate = Vec::new();
+            let mut completed_events = Vec::new();
             let char_ids: Vec<i64> = snap
                 .skill_queues
                 .iter()
@@ -396,6 +397,16 @@ impl ServerContext {
                 .map(|(&cid, _)| cid)
                 .collect();
             for char_id in char_ids {
+                let Some(ch) = snap.characters.get(&char_id).cloned() else {
+                    continue;
+                };
+                let is_alpha = ch.clone_grade == 1;
+                let current_char_sp = ch.skill_points;
+                // Alpha clones cannot gain SP beyond 5,000,000 SP (CH-1)
+                if is_alpha && current_char_sp >= 5_000_000.0 {
+                    continue;
+                }
+
                 let queue = snap
                     .skill_queues
                     .get(&char_id)
@@ -411,10 +422,39 @@ impl ServerContext {
                         remaining_queue.push(q);
                         continue;
                     }
+                    if is_alpha && (current_char_sp + total_sp_gained) >= 5_000_000.0 {
+                        remaining_queue.push(q);
+                        continue;
+                    }
+
+                    let skill_type = sde.types.get(&q.type_id);
+                    let p_attr_id = skill_type
+                        .and_then(|t| t.default_attributes.get(&eve_sde::attr_ids::PRIMARY_ATTRIBUTE))
+                        .copied()
+                        .map(|v| v as u32)
+                        .unwrap_or(eve_sde::attr_ids::PERCEPTION as u32);
+                    let s_attr_id = skill_type
+                        .and_then(|t| t.default_attributes.get(&eve_sde::attr_ids::SECONDARY_ATTRIBUTE))
+                        .copied()
+                        .map(|v| v as u32)
+                        .unwrap_or(eve_sde::attr_ids::WILLPOWER as u32);
+                    let p_val = ch.neural.get_attribute_by_id(p_attr_id);
+                    let s_val = ch.neural.get_attribute_by_id(s_attr_id);
+                    let clone_mult = if ch.clone_grade == 2 { 1.0 } else { 0.5 };
+                    let sp_min = crate::formulas::sp_per_minute(p_val, s_val, clone_mult).max(1e-6);
+                    let sp_sec = sp_min / 60.0;
+
                     let needed_sp = (q.end_sp - q.start_sp).max(0.0);
-                    let dur = q.duration_seconds.max(0.0);
-                    if dur <= 0.0 || rem_secs >= dur {
-                        rem_secs = (rem_secs - dur).max(0.0);
+                    let time_for_needed = (needed_sp / sp_sec).max(0.0);
+                    let max_allowed_sp = if is_alpha {
+                        (5_000_000.0 - (current_char_sp + total_sp_gained)).max(0.0)
+                    } else {
+                        f64::INFINITY
+                    };
+
+                    if rem_secs >= time_for_needed && needed_sp <= max_allowed_sp {
+                        // Skill level completed: auto-advance to next skill in queue (CH-1)
+                        rem_secs = (rem_secs - time_for_needed).max(0.0);
                         total_sp_gained += needed_sp;
                         skills_map.insert(
                             q.type_id,
@@ -424,29 +464,35 @@ impl ServerContext {
                                 skill_points: q.end_sp,
                             },
                         );
+                        completed_events.push((char_id, q.type_id, q.target_level));
                     } else {
-                        let frac = (rem_secs / dur).clamp(0.0, 1.0);
-                        let gained_sp = needed_sp * frac;
-                        q.start_sp += gained_sp;
-                        q.duration_seconds = (dur - rem_secs).max(0.0);
-                        rem_secs = 0.0;
-                        total_sp_gained += gained_sp;
-                        let current_lvl =
-                            skills_map.get(&q.type_id).map(|s| s.level).unwrap_or(0);
+                        let mut sp_advance = (rem_secs * sp_sec).min(needed_sp);
+                        if sp_advance > max_allowed_sp {
+                            sp_advance = max_allowed_sp;
+                            rem_secs = 0.0;
+                        } else {
+                            rem_secs = 0.0;
+                        }
+                        q.start_sp += sp_advance;
+                        let rem_sp = (q.end_sp - q.start_sp).max(0.0);
+                        q.duration_seconds = rem_sp / sp_sec;
+                        total_sp_gained += sp_advance;
+
+                        let current_lvl = skills_map.get(&q.type_id).map(|s| s.level).unwrap_or(0);
                         let mut achieved_lvl = current_lvl;
-                        if let Some(rank) = sde.types.get(&q.type_id).and_then(|t| {
-                            t.default_attributes
-                                .get(&eve_sde::attr_ids::SKILL_TIME_CONSTANT)
-                                .copied()
+                        if let Some(rank) = skill_type.and_then(|t| {
+                            t.default_attributes.get(&eve_sde::attr_ids::SKILL_TIME_CONSTANT).copied()
                         }) {
                             for lvl in (current_lvl + 1)..=q.target_level {
-                                if q.start_sp + 0.5 >= crate::formulas::sp_for_skill_level(rank, lvl)
-                                {
+                                if q.start_sp + 0.5 >= crate::formulas::sp_for_skill_level(rank, lvl) {
                                     achieved_lvl = lvl;
                                 } else {
                                     break;
                                 }
                             }
+                        }
+                        if achieved_lvl > current_lvl {
+                            completed_events.push((char_id, q.type_id, achieved_lvl));
                         }
                         skills_map.insert(
                             q.type_id,
@@ -461,14 +507,17 @@ impl ServerContext {
                 }
                 snap.skill_queues.insert(char_id, remaining_queue);
                 if total_sp_gained > 0.0 {
-                    if let Some(ch) = snap.characters.get_mut(&char_id) {
-                        ch.skill_points += total_sp_gained;
-                        ships_to_invalidate.push(ch.active_ship_id);
+                    if let Some(ch_mut) = snap.characters.get_mut(&char_id) {
+                        ch_mut.skill_points += total_sp_gained;
+                        ships_to_invalidate.push(ch_mut.active_ship_id);
                     }
                 }
             }
-            ships_to_invalidate
+            (ships_to_invalidate, completed_events)
         });
+        for (cid, skill_type_id, lvl) in completed_events {
+            let _ = self.notify_skill_trained(cid, 0, skill_type_id, lvl);
+        }
         for ship_id in invalidated_ships {
             self.invalidate_ship_fitting(ship_id);
         }
