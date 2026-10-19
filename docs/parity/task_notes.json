@@ -72,8 +72,8 @@
   "note": ""
  },
  "DG-1": {
-  "assessment": "PARTIAL",
-  "note": "Wired DogmaEffectContext V24 modifierInfo evaluator and stacking-penalty pipeline into ShipFittingEngine (replacing hardcoded group 762/774/46 special cases); remaining DG-1 module-family and client-sync feature rows pending."
+  "assessment": "DONE",
+  "note": "Dogma modifierInfo evaluator with 6 domains, stacking penalties, weapon upgrades, propulsion & scrambler suppression, and command bursts."
  },
  "DG-2": {
   "assessment": "DONE",

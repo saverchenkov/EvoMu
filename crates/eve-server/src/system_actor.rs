@@ -76,6 +76,8 @@ pub struct ActiveModuleCycle {
     pub linked_turrets: Vec<i64>,
     pub ammo_type_id: Option<u32>,
     pub damage_vector: DamageVector,
+    pub cap_drain_target: f64,
+    pub cap_transfer_target: f64,
 }
 
 pub enum SystemCommand {
@@ -1060,6 +1062,16 @@ fn step_cycles_and_capacitor(
             if let Some(target_id) = cycle.target_id {
                 if let Some(cs) = ballpark.combat_states.get_mut(&target_id) {
                     cs.apply_damage(cycle.damage_vector);
+                    if cycle.cap_drain_target > 0.0 {
+                        cs.capacitor = (cs.capacitor - cycle.cap_drain_target).max(0.0);
+                    }
+                    if cycle.cap_transfer_target > 0.0 {
+                        let transferred = cycle.cap_transfer_target.min(cs.capacitor);
+                        cs.capacitor -= transferred;
+                        if let Some(src_cs) = ballpark.combat_states.get_mut(&cycle.ship_id) {
+                            src_cs.capacitor = (src_cs.capacitor + transferred).min(src_cs.max_capacitor);
+                        }
+                    }
                 }
             }
             if let Some(db_ref) = db_opt {

@@ -1182,6 +1182,9 @@ pub async fn handle(
                 });
             }
 
+            let cap_drain_target = mod_state.get_attribute(97, &ctx.sde);
+            let cap_transfer_target = mod_state.get_attribute(90, &ctx.sde);
+
             let cycle = crate::system_actor::ActiveModuleCycle {
                 ship_id,
                 module_id,
@@ -1197,6 +1200,8 @@ pub async fn handle(
                 linked_turrets,
                 ammo_type_id: m.charge_type_id,
                 damage_vector: eve_destiny::DamageVector::new(20.0, 20.0, 20.0, 20.0),
+                cap_drain_target,
+                cap_transfer_target,
             };
 
             let _ = sys.add_module_cycle(cycle).await;
