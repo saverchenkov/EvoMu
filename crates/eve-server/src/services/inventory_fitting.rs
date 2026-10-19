@@ -742,6 +742,15 @@ pub async fn handle(
                 Err(e) => return Some(Err(e)),
             };
 
+            if let Ok(Some(cs)) = sys.get_combat_state(ship_id).await {
+                if cs.ecm_jammed_remaining_s > 0.0 {
+                    return Some(Err(BridgeRpcError {
+                        code: "ShipJammed".into(),
+                        message: "Targeting systems are jammed by ECM".into(),
+                    }));
+                }
+            }
+
             let max_range = fit.ship.get_attribute(attr_ids::MAX_TARGET_RANGE, &ctx.sde);
             let dist = (ship_ball.position - target_ball.position).length();
             if dist > max_range {
@@ -751,7 +760,10 @@ pub async fn handle(
                 }));
             }
 
-            let max_locked = fit.ship.get_attribute(attr_ids::MAX_LOCKED_TARGETS, &ctx.sde).max(1.0) as usize;
+            let ship_max = fit.ship.get_attribute(attr_ids::MAX_LOCKED_TARGETS, &ctx.sde).max(1.0) as usize;
+            let tm_lvl = ctx.character_skill_levels(char_id).get(&3429).copied().unwrap_or(0);
+            let atm_lvl = ctx.character_skill_levels(char_id).get(&3430).copied().unwrap_or(0);
+            let max_locked = eve_dogma::compute_effective_max_locked_targets(ship_max, tm_lvl, atm_lvl);
             let current_locks = sys.get_target_locks(ship_id).await.unwrap_or_default();
             if current_locks.len() >= max_locked {
                 return Some(Err(BridgeRpcError {
@@ -770,6 +782,7 @@ pub async fn handle(
                 lock_time_ms,
                 remaining_lock_ms: lock_time_ms,
                 locked: false,
+                max_range_m: Some(max_range),
             };
             if let Err(e) = sys.add_target_lock(ship_id, lock).await {
                 return Some(Err(BridgeRpcError {
@@ -1229,6 +1242,12 @@ pub async fn handle(
                 || mod_type.default_attributes.contains_key(&77);
 
             if !is_mining_module {
+                if ctx.is_module_in_reactivation_delay(ship_id, module_id) {
+                    return Some(Err(BridgeRpcError {
+                        code: "ModuleReactivationDelay".into(),
+                        message: format!("Module {module_id} cannot reactivate before delay expires"),
+                    }));
+                }
                 if let Some(target_id) = target_id_opt {
                     let locks = sys.get_target_locks(ship_id).await.unwrap_or_default();
                     if !locks.iter().any(|l| l.target_id == target_id && l.locked) {
@@ -1252,6 +1271,25 @@ pub async fn handle(
             let cap_need = mod_state.get_attribute(attr_ids::CAPACITOR_NEED, &ctx.sde);
             let speed_factor = mod_state.get_attribute(attr_ids::SPEED_FACTOR, &ctx.sde);
             let speed_boost_factor = if speed_factor > 0.0 { speed_factor / 100.0 } else { 0.0 };
+
+            let raw_shield = mod_state.get_attribute(68, &ctx.sde);
+            let raw_armor = mod_state.get_attribute(84, &ctx.sde);
+            let overload_mult = if method == "Overload" { 1.20 } else { 1.0 };
+            let shield_boost_amount = raw_shield * overload_mult;
+            let armor_repair_amount = raw_armor * overload_mult;
+
+            let react_delay_ms = mod_state.get_attribute(669, &ctx.sde);
+            let reactivation_delay_s = if react_delay_ms > 0.0 { react_delay_ms / 1000.0 } else { 0.0 };
+
+            let rack_idx = match m.flag_id {
+                27..=34 => 0,
+                19..=26 => 1,
+                _ => 2,
+            };
+            let heat_damage_per_cycle = {
+                let hd = mod_state.get_attribute(1211, &ctx.sde);
+                if hd > 0.0 { hd } else { 3.4 }
+            };
 
             let linked_turrets: Vec<i64> = ctx.db.with_snapshot(|snap| {
                 if let Some(bank) = snap.weapon_banks.get(&ship_id).and_then(|b| b.get(&module_id)) {
@@ -1298,9 +1336,20 @@ pub async fn handle(
                 damage_vector: eve_destiny::DamageVector::new(20.0, 20.0, 20.0, 20.0),
                 cap_drain_target,
                 cap_transfer_target,
+                shield_boost_amount,
+                armor_repair_amount,
+                is_overloaded: method == "Overload",
+                rack_idx,
+                heat_damage_per_cycle,
+                reactivation_delay_s,
             };
 
-            let _ = sys.add_module_cycle(cycle).await;
+            if let Err(e) = sys.add_module_cycle(cycle).await {
+                return Some(Err(BridgeRpcError {
+                    code: "NotEnoughCapacitor".into(),
+                    message: e,
+                }));
+            }
 
             ctx.notify(
                 crate::router::NotificationTarget::Character(char_id),
@@ -1718,6 +1767,13 @@ pub async fn handle(
             if let Err(e) = deact_res {
                 if !is_mining {
                     return Some(Err(BridgeRpcError { code: "DogmaDeactivateFailed".into(), message: e.to_string() }));
+                }
+            }
+            if let Some(m_entry) = fit.modules.get(&module_id) {
+                let mod_state = fit.build_effective_module_state(module_id, m_entry.type_id, false, &ctx.sde);
+                let react_delay_ms = mod_state.get_attribute(669, &ctx.sde);
+                if react_delay_ms > 0.0 {
+                    ctx.record_module_reactivation_delay(ship_id, module_id, react_delay_ms / 1000.0);
                 }
             }
             let max_vel = fit.ship.get_attribute(attr_ids::MAX_VELOCITY, &ctx.sde);

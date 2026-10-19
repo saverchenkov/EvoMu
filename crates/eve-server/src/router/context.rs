@@ -56,6 +56,7 @@ pub struct ServerContext {
     pub fighter_tube_loads: RwLock<HashMap<(i64, usize), i64>>,
     pub scanned_signatures: RwLock<HashSet<(i64, u32, i64)>>,
     pub invention_roll_override: RwLock<Option<f64>>,
+    pub module_reactivation_cooldowns: RwLock<HashMap<(i64, i64), f64>>,
     pub feature_flags: crate::config::FeatureFlagsConfig,
     pub esi_port: u16,
     pub esi_state: Arc<crate::esi::runtime_state::EsiRuntimeState>,
@@ -133,6 +134,7 @@ impl ServerContext {
             fighter_tube_loads: RwLock::new(HashMap::new()),
             scanned_signatures: RwLock::new(HashSet::new()),
             invention_roll_override: RwLock::new(None),
+            module_reactivation_cooldowns: RwLock::new(HashMap::new()),
             feature_flags: crate::config::FeatureFlagsConfig::default(),
             esi_port: 26_004,
             esi_state: Arc::new(crate::esi::runtime_state::EsiRuntimeState::new()),
@@ -275,6 +277,33 @@ impl ServerContext {
                 .map(|m| m.iter().map(|(&tid, rec)| (tid, rec.level)).collect())
                 .unwrap_or_default()
         })
+    }
+
+    /// Checks if a module on a ship is currently under reactivation delay (`feat:dogma.reactivation-delay`, `DG-4`).
+    pub fn is_module_in_reactivation_delay(&self, ship_id: i64, module_id: i64) -> bool {
+        let now = self.now_unix_secs() as f64;
+        let guard = self
+            .module_reactivation_cooldowns
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(&expiry) = guard.get(&(ship_id, module_id)) {
+            now < expiry
+        } else {
+            false
+        }
+    }
+
+    /// Records module reactivation delay until `now + delay_s` (`feat:dogma.reactivation-delay`, `DG-4`).
+    pub fn record_module_reactivation_delay(&self, ship_id: i64, module_id: i64, delay_s: f64) {
+        if delay_s <= 0.0 {
+            return;
+        }
+        let expiry = (self.now_unix_secs() as f64) + delay_s;
+        let mut guard = self
+            .module_reactivation_cooldowns
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        guard.insert((ship_id, module_id), expiry);
     }
 
     pub fn set_invention_roll_override(&self, roll: Option<f64>) {

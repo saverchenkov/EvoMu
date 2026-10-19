@@ -78,6 +78,12 @@ pub struct ActiveModuleCycle {
     pub damage_vector: DamageVector,
     pub cap_drain_target: f64,
     pub cap_transfer_target: f64,
+    pub shield_boost_amount: f64,
+    pub armor_repair_amount: f64,
+    pub is_overloaded: bool,
+    pub rack_idx: usize,
+    pub heat_damage_per_cycle: f64,
+    pub reactivation_delay_s: f64,
 }
 
 pub enum SystemCommand {
@@ -224,6 +230,11 @@ pub enum SystemCommand {
     HealCombatState {
         ball_id: BallId,
         reply: oneshot::Sender<Result<CombatState, String>>,
+    },
+    SetCombatState {
+        ball_id: BallId,
+        combat_state: CombatState,
+        reply: oneshot::Sender<Result<(), String>>,
     },
     GetCombatState {
         ball_id: BallId,
@@ -734,6 +745,15 @@ impl SystemHandle {
         rx.await.map_err(|_| "Solar system reply dropped".to_string())?
     }
 
+    pub async fn set_combat_state(&self, ball_id: BallId, combat_state: CombatState) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SystemCommand::SetCombatState { ball_id, combat_state, reply: tx })
+            .await
+            .map_err(|_| "Solar system actor stopped".to_string())?;
+        rx.await.map_err(|_| "Solar system reply dropped".to_string())?
+    }
+
     pub async fn get_combat_state(&self, ball_id: BallId) -> Result<Option<CombatState>, String> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
@@ -1143,9 +1163,22 @@ fn step_cycles_and_capacitor(
     for (idx, cycle) in active_module_cycles.iter_mut().enumerate() {
         cycle.elapsed_s += dt;
         if cycle.elapsed_s >= cycle.duration_s {
+            // 1. Local shield boost & armor repair healing (`feat:modules.shield-booster`, `DG-4`)
+            if let Some(cs) = ballpark.combat_states.get_mut(&cycle.ship_id) {
+                if cycle.shield_boost_amount > 0.0 {
+                    cs.shield_hp = (cs.shield_hp + cycle.shield_boost_amount).min(cs.max_shield_hp);
+                }
+                if cycle.armor_repair_amount > 0.0 {
+                    cs.armor_hp = (cs.armor_hp + cycle.armor_repair_amount).min(cs.max_armor_hp);
+                }
+            }
+
+            // 2. Target interactions: damage, cap drain, cap transfer (`C-1`, `C-2`, `DG-4`)
             if let Some(target_id) = cycle.target_id {
+                if cycle.damage_vector.total() > 0.0 {
+                    ballpark.apply_damage_to_ball(target_id, cycle.damage_vector);
+                }
                 if let Some(cs) = ballpark.combat_states.get_mut(&target_id) {
-                    cs.apply_damage(cycle.damage_vector);
                     if cycle.cap_drain_target > 0.0 {
                         cs.capacitor = (cs.capacitor - cycle.cap_drain_target).max(0.0);
                     }
@@ -1182,8 +1215,16 @@ fn step_cycles_and_capacitor(
             } else {
                 cycle.elapsed_s -= cycle.duration_s;
                 if cycle.cap_need_per_cycle > 0.0 {
+                    let mut has_cap = true;
                     if let Some(cs) = ballpark.combat_states.get_mut(&cycle.ship_id) {
-                        cs.capacitor = (cs.capacitor - cycle.cap_need_per_cycle).max(0.0);
+                        if cs.capacitor >= cycle.cap_need_per_cycle {
+                            cs.capacitor -= cycle.cap_need_per_cycle;
+                        } else {
+                            has_cap = false;
+                        }
+                    }
+                    if !has_cap {
+                        finished_indices.push(idx);
                     }
                 }
             }
@@ -1624,6 +1665,10 @@ impl SystemRegistry {
                                 cs.capacitor = cs.max_capacitor;
                                 let _ = reply.send(Ok(cs.clone()));
                             }
+                            SystemCommand::SetCombatState { ball_id, combat_state, reply } => {
+                                ballpark.combat_states.insert(ball_id, combat_state);
+                                let _ = reply.send(Ok(()));
+                            }
                             SystemCommand::GetCombatState { ball_id, reply } => {
                                 let cs = ballpark.combat_states.get(&ball_id).cloned();
                                 let _ = reply.send(cs);
@@ -1631,6 +1676,10 @@ impl SystemRegistry {
                             SystemCommand::AddModuleCycle { mut cycle, reply } => {
                                 if cycle.cap_need_per_cycle > 0.0 {
                                     if let Some(cs) = ballpark.combat_states.get_mut(&cycle.ship_id) {
+                                        if cs.capacitor < cycle.cap_need_per_cycle {
+                                            let _ = reply.send(Err("Insufficient capacitor to activate module".to_string()));
+                                            continue;
+                                        }
                                         cs.capacitor = (cs.capacitor - cycle.cap_need_per_cycle).max(0.0);
                                     }
                                 }
