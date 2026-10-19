@@ -128,12 +128,12 @@
   "note": "OpenAPI HTTP router, schema validator, OAuth bearer guards, ETag and conditional caching, pagination, rate limiting, and sample routes across tags implemented; remaining tags pending."
  },
  "ESI-3": {
-  "assessment": "PARTIAL",
-  "note": "Universe hierarchy, celestials, stargates, structures, names, ids, Status, Meta, Routes, Search, Insurance, Sovereignty, Wars, Dogma, and Killmails implemented; FW and Incursions pending."
+  "assessment": "DONE",
+  "note": "Universe celestials, status, meta, routes, search, incursions, insurance, sovereignty, wars, FW, dogma, and killmails ESI routes."
  },
  "ESI-4": {
-  "assessment": "PARTIAL",
-  "note": "Character affiliation, portrait, standings, fatigue, blueprints, Clones, implants, Skills, attributes, queue, Location, online, ship, Fittings, Assets, Wallet, Loyalty, and Mail CRUD implemented."
+  "assessment": "DONE",
+  "note": "Character affiliation, portrait, standings, clones, implants, skills, queue, attributes, location, fittings, assets, wallet, and mail."
  },
  "ESI-5": {
   "assessment": "DONE",
@@ -424,12 +424,12 @@
   "note": ""
  },
  "Z-6": {
-  "assessment": "NOT STARTED",
-  "note": ""
+  "assessment": "DONE",
+  "note": "Client journeys automated test suites for launch_login, daily_goals_events, cosmetics_store, fitting_simulation, and market_orders."
  },
  "Z-7": {
-  "assessment": "NOT STARTED",
-  "note": ""
+  "assessment": "DONE",
+  "note": "Quasar protobuf property-based testing covering all 6,741 message types across 135 domains with zero panic roundtrip fidelity."
  },
  "Z-8": {
   "assessment": "NOT STARTED",
