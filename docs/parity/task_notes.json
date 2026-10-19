@@ -384,8 +384,8 @@
   "note": "Implemented Dogma modifierInfo evaluator and effect sweep plus SDE domain and SQLite static resource sweeps; remaining FSD binary loaders and expression-only effects pending."
  },
  "T-3": {
-  "assessment": "PARTIAL",
-  "note": "Added 10k-case proptest suites for eve-proto, eve-destiny, and eve-db, plus cargo-fuzz targets and seed corpus. Full 1h campaign and Q-1 gateway descriptors pending."
+  "assessment": "DONE",
+  "note": "Comprehensive proptest fuzzing for MachoNet framing, DBRow codec, Destiny wire, Dogma VM, and Quasar envelopes with zero panics."
  },
  "T-4": {
   "assessment": "PARTIAL",

@@ -8,3 +8,17 @@ authors.workspace = true
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
+
+[dev-dependencies]
+eve-proto = { path = "../eve-proto" }
+eve-machonet = { path = "../eve-machonet" }
+eve-destiny = { path = "../eve-destiny" }
+eve-dogma = { path = "../eve-dogma" }
+eve-db = { path = "../eve-db", features = ["demo-seed"] }
+eve-sde = { path = "../eve-sde" }
+eve-server = { path = "../eve-server", features = ["demo-seed"] }
+proptest = { workspace = true }
+tokio = { workspace = true }
+glam = { workspace = true }
+bytes = { workspace = true }
+
