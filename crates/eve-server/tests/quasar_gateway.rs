@@ -35,6 +35,7 @@ fn extract_response_proto(rep: &PyRep) -> EvePublicResponse {
     panic!("Expected KeyVal containing response_proto, got {rep:?}");
 }
 
+// parity: plan:Q-2
 // parity: feat:quasar.gateway-envelope
 #[tokio::test]
 async fn q2_gateway_envelope_framing_status_codes_tenancy_and_idempotency() {

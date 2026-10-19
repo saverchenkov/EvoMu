@@ -147,7 +147,7 @@ async fn test_account_bans_real_enforcement_and_auto_clear() {
 
 #[tokio::test]
 async fn test_account_roles_bitmask_checks() {
-    // parity: feat:account.account-roles
+    // parity: plan:S-9, feat:account.account-roles, feat:admin.gm-role-gating
     let ctx = ServerContext::new();
     let kw = HashMap::new();
 

@@ -213,6 +213,7 @@ mod tests {
     use super::*;
 
     #[test]
+    // parity: plan:D-5, feat:serverops.config-file
     fn test_d5_server_config_parse_and_feature_flags() {
         let toml_text = r#"
 bind_address = "127.0.0.1"

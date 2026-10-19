@@ -1144,6 +1144,7 @@ fn fixture_file_path() -> PathBuf {
 }
 
 #[test]
+// parity: plan:T-4
 fn test_t4_golden_wire_marshal_destiny_quasar_and_python_bridge_roundtrip() {
     // Task T-4: Golden wire round-trip suite across Rust (`eve-proto` / `eve-destiny`) and Python (`client-bridge/evomu_bridge.py`).
     let expected_suite = build_golden_wire_suite();

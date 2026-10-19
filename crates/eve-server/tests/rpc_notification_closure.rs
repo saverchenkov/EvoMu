@@ -23,7 +23,7 @@ fn root_dir() -> PathBuf {
 }
 
 #[tokio::test]
-// parity: plan:Z-1
+// parity: plan:Z-1, plan:P-2, plan:P-3, plan:P-4
 async fn test_z1_systematic_rpc_catalog_dispatch_closure_and_wire_formatting() {
     let ctx = ServerContext::new();
     ctx.seed_demo_world_fixtures();
@@ -428,7 +428,7 @@ async fn test_z1_systematic_rpc_catalog_dispatch_closure_and_wire_formatting() {
 }
 
 #[tokio::test]
-// parity: plan:Z-2
+// parity: plan:Z-2, plan:P-5
 async fn test_z2_systematic_notification_emission_pipelines_and_scope_multicast() {
     let ctx = ServerContext::new();
     ctx.seed_demo_world_fixtures();

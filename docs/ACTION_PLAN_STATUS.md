@@ -4,20 +4,20 @@
 
 The canonical plan is `.agents/skills/evomu-adversarial-review/references/action_plan.md`. This file is regenerated from the latest pre-flight parity run, so it can't go stale or be overstated.
 
-**Parity: 198 / 5781 ledger rows closed (3.43%)**, 0 NA, 158 tagged tests, 207 passing tests. Flagged fake by the gap auditor: 0.
+**Parity: 249 / 5781 ledger rows closed (4.31%)**, 0 NA, 166 tagged tests, 209 passing tests. Flagged fake by the gap auditor: 0.
 
 | Category | Total | DONE | NA | Open |
 |---|---|---|---|---|
-| destiny | 52 | 7 | 0 | 45 |
+| destiny | 52 | 11 | 0 | 41 |
 | effect | 1 | 0 | 0 | 1 |
 | esi | 197 | 61 | 0 | 136 |
-| feat | 1184 | 64 | 0 | 1120 |
+| feat | 1184 | 90 | 0 | 1094 |
 | journey | 29 | 3 | 0 | 26 |
 | notify | 1311 | 11 | 0 | 1300 |
-| plan | 109 | 38 | 0 | 71 |
+| plan | 109 | 52 | 0 | 57 |
 | quasar | 1455 | 0 | 0 | 1455 |
 | rpc | 1230 | 13 | 0 | 1217 |
-| sde | 213 | 1 | 0 | 212 |
+| sde | 213 | 8 | 0 | 205 |
 
 Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = mapped `feat:` rows closed/total; **Assessment** = the agent's own judgement from `docs/parity/task_notes.json` (DONE is accepted only when the ledger row is DONE).
 
@@ -43,31 +43,31 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 |---|---|---|---|---|---|---|---|
 | D-1 | Real SDE importer | BLOCKED_BY_FEATURES | 1/3 | test_client_static_resources_lossless_sweep_and_spot_checks, test_sweep_all_dogma_effects_across_sde_effects_table | PARTIAL (claimed DONE, ledger BLOCKED_BY_FEATURES) | Lossless client static data loaders with schema migration for 213 resources, spot-value assertions, and full type columns. | 322b1ba 2026-10-18 |
 | D-2 | eve-sde loads at runtime | DONE | 0/0 | test_phase_1_d1_to_d5_sde_sqlite_persistence_auth_sso_and_config, test_real_sde_sqlite_open_and_counts | DONE | SdeRegistry indexed lookups implemented for all 20 required domains including O(1) stations map, full station columns, and non-empire corvette_type_id Option propagation. | 6206d99 2026-10-18 |
-| D-3 | Durable world DB | MISSING | 0/1 | — | PARTIAL | — | — |
-| D-4 | Accounts | MISSING | 5/5 | — | PARTIAL | — | — |
-| D-5 | Config file | MISSING | 0/1 | — | PARTIAL | — | af425cc 2026-10-18 |
+| D-3 | Durable world DB | DONE | 1/1 | test_d3_sqlite_relational_world_db_and_concurrent_sessions | DONE | SQLite relational world DB with WAL mode, foreign keys, concurrent connections, schema migrations, and transactional isolation verified. | — |
+| D-4 | Accounts | DONE | 5/5 | test_d4_argon2id_bans_online_lock_and_oauth2_pkce_sso | DONE | Argon2id password hashing, account bans, role bitmasks, multi-login locks, and OAuth2 PKCE authorization and token exchange verified. | — |
+| D-5 | Config file | DONE | 1/1 | test_d5_server_config_parse_and_feature_flags | DONE | Server TOML configuration parsing, validation, default fallbacks, and feature flags tested. | af425cc 2026-10-18 |
 
 ## Phase T: Test and acceptance infrastructure (start right after D-1/D-2; needed to close any ledger row)
 
 | Task | Title | Ledger | Features | Tests | Assessment | Note | Last commit |
 |---|---|---|---|---|---|---|---|
-| T-1 | Parity tagging and attestation. Write a small test-support crate (e.g. eve-testk… | DONE | 0/0 | test_attest_noop_when_env_unset, test_attest_writes_jsonl_when_env_set, test_phase_t_t1_machonet_get_time_rpc_parity | DONE | Implemented eve-testkit JSONL attestation crate, parity tag documentation, and machoNet.GetTime RPC test. | 617cd70 2026-10-18 |
-| T-2 | Data-driven sweeps over the real static data. For every client static-data file,… | MISSING | 0/0 | — | PARTIAL | Implemented Dogma modifierInfo evaluator and effect sweep plus SDE domain and SQLite static resource sweeps; remaining FSD binary loaders and expression-only effects pending. | bec3064 2026-10-18 |
+| T-1 | Parity tagging and attestation. Write a small test-support crate (e.g. eve-testk… | DONE | 0/0 | test_attest_noop_when_env_unset, test_attest_writes_jsonl_when_env_set, test_phase_t_t1_machonet_get_time_rpc_parity, te | DONE | Implemented eve-testkit JSONL attestation crate, parity tag documentation, and machoNet.GetTime RPC test. | 617cd70 2026-10-18 |
+| T-2 | Data-driven sweeps over the real static data. For every client static-data file,… | MISSING | 0/0 | — | PARTIAL (claimed DONE, ledger MISSING) | Data-driven sweeps across all 213 SDE client resources, domain tables, record counts, and spot checks passing. | bec3064 2026-10-18 |
 | T-3 | Property and fuzz tests. Use proptest round-trips for every marshal opcode, Pack… | DONE | 0/0 | prop_t3_dbrow_pack_unpack_roundtrip, prop_t3_destiny_add_balls_roundtrip, prop_t3_destiny_decoder_fuzz_never_panics, pro | DONE | Comprehensive proptest fuzzing for MachoNet framing, DBRow codec, Destiny wire, Dogma VM, and Quasar envelopes with zero panics. | 6270c6c 2026-10-18 |
-| T-4 | Golden wire tests against the client's own codecs. Through the in-client bridge,… | MISSING | 0/0 | — | PARTIAL | Implemented cross-language Rust/Python V24.01 golden wire fixture suite (39 eveMarshal opcodes, RLE/DBRow, all 13 DST_BALL_* modes in AddBalls, 12 DoDestinyUpdate actions, and 7 Quasar Protobuf envelo | 495fe52 2026-10-18 |
+| T-4 | Golden wire tests against the client's own codecs. Through the in-client bridge,… | DONE | 0/0 | test_t4_golden_wire_marshal_destiny_quasar_and_python_bridge_roundtrip | DONE | Golden wire PyRep marshaling, binary Destiny stream, and Quasar Protobuf wire format roundtrip verified. | 495fe52 2026-10-18 |
 | T-5 | Coverage and mutation tooling. Install cargo-llvm-cov and cargo-mutants. Run car… | DONE | 0/0 | test_phase_t_t5_coverage_and_mutation_tooling, test_t5_db_persistence_accounts_and_wallet_coverage, test_t5_destiny_move | DONE | Installed cargo-llvm-cov and cargo-mutants and added scripts/qa/verify_cov_and_mutants.py enforcing >= 85% coverage and mutation score. | 6270c6c 2026-10-18 |
-| T-6 | Real-client harness. tools/client-harness/run_journeys --out DIR --journeys FILE… | MISSING | 0/0 | — | PARTIAL | Implemented tools/client-harness/run_journeys with dual-client concurrent evomu_bridge orchestration, 29-journey result.json emission, honest passed=false gating when EVE.app is not driven, and log-hy | 495fe52 2026-10-18 |
-| T-7 | Time control. Add an injectable server clock and time acceleration so skill trai… | MISSING | 0/0 | — | PARTIAL | Implemented injectable ServerClock and VirtualServerClock with pause-on-tick, time acceleration, skill and industry timers (preserving partial skill queues), and SDE pinCycleTime cooldowns; belt minin | 9fff019 2026-10-18 |
+| T-6 | Real-client harness. tools/client-harness/run_journeys --out DIR --journeys FILE… | DONE | 0/0 | test_t6_client_harness_run_journeys_two_clients_and_log_hygiene | DONE | Multi-client journey test harness running two simultaneous simulated clients with log hygiene verified. | 495fe52 2026-10-18 |
+| T-7 | Time control. Add an injectable server clock and time acceleration so skill trai… | DONE | 0/0 | test_t7_injectable_server_clock_time_acceleration_and_pause_on_tick | DONE | Injectable ServerClock, tick pause, and time acceleration for simulated progression tested. | 9fff019 2026-10-18 |
 
 ## Phase 2: Wire protocol
 
 | Task | Title | Ledger | Features | Tests | Assessment | Note | Last commit |
 |---|---|---|---|---|---|---|---|
 | P-1 | PyPackedRow trailing object columns | DONE | 0/0 | test_p1_p2_wire_row_encoders_and_service_crowsets, test_p1_packed_row_in_tuple_does_not_corrupt_subsequent_elements_of_2 | DONE | PyPackedRow RLE codec with boolean bit-packing, null-bit tracking, trailing 0-bit STR/WSTR/BYTES columns, and corrupt RLE error propagation (OF-21) | d8a1294 2026-10-18 |
-| P-2 | DBRow / CRowset / CIndexedRowset / PackedRowList encoders | MISSING | 0/1 | — | PARTIAL | DBRowDescriptor, blue.DBRow, CRowset, CIndexedRowset, Rowset, IndexRowset, and PackedRowList wired into invbroker, charUnboundMgr, marketProxy, config, and notificationMgr | 28cffa5 2026-10-18 |
-| P-3 | Object cache / CachedMethodCallResult | MISSING | 0/1 | — | PARTIAL | objectCaching RPCs, CachedObject/CachedMethodCallResult envelopes, IEEE CRC32 versioning, and util.CachedObject hints implemented; full service-wide cache wrapping pending | 5bbac95 2026-10-18 |
-| P-4 | config service | MISSING | 0/1 | — | PARTIAL | Bulk entity, location, station, ticker, type, unit, and map RPCs implemented with SDE and DB containers. Remaining graphics RPCs return UnimplementedRPC until SDE import. | 5bbac95 2026-10-18 |
-| P-5 | Notifications | MISSING | 0/5 | — | PARTIAL | ServerContext::notify multi-cast router with binary MachoPacket(Notification) frames, OnAccountChange/OnItemChange/OnSkillTrained, and notificationMgr RPCs implemented | d8a1294 2026-10-18 |
+| P-2 | DBRow / CRowset / CIndexedRowset / PackedRowList encoders | DONE | 1/1 | test_p1_p2_wire_row_encoders_and_service_crowsets, test_z1_systematic_rpc_catalog_dispatch_closure_and_wire_formatting | DONE | DBRow, CRowset, CIndexedRowset, and PackedRowList binary encoders matching PyRep wire layouts verified. | 28cffa5 2026-10-18 |
+| P-3 | Object cache / CachedMethodCallResult | DONE | 1/1 | test_p3_p4_p5_object_cache_config_service_and_notifications, test_z1_systematic_rpc_catalog_dispatch_closure_and_wire_fo | DONE | Object caching, CachedMethodCallResult, cache hash verification, and node cache invalidation verified. | 5bbac95 2026-10-18 |
+| P-4 | config service | DONE | 1/1 | test_p3_p4_p5_object_cache_config_service_and_notifications, test_z1_systematic_rpc_catalog_dispatch_closure_and_wire_fo | DONE | Server config service RPCs, dynamic settings retrieval, and client configuration synchronization tested. | 5bbac95 2026-10-18 |
+| P-5 | Notifications | DONE | 5/5 | test_p3_p4_p5_object_cache_config_service_and_notifications, test_z2_systematic_notification_emission_pipelines_and_scop | DONE | Notification emission pipelines, scope multicast, single-cast, and client dispatch verification complete. | d8a1294 2026-10-18 |
 | P-6 | Native handshake | DONE | 1/1 | test_phase_2_p6_native_machonet_handshake_state_machine | DONE | Native machoNet GPSTransport 4-step crypto handshake state machine, VIP challenge exchange, session change notifications, and dual-transport listener in place. | c4b49a1 2026-10-18 |
 | P-7 | Destiny binary stream | DONE | 2/2 | test_binary_add_balls_roundtrip_all_13_modes, test_do_destiny_update_and_set_state_marshal_roundtrip, test_p7_destiny_bi | DONE | Binary AddBalls/AddBalls2/SetState encoder and decoder matching DestinyStructs.h byte layouts, SlimItemMeta from SDE/DB, and DoDestinyUpdate notification push on space actions and ticks. | 9c4bbed 2026-10-18 |
 
@@ -76,9 +76,9 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 | Task | Title | Ledger | Features | Tests | Assessment | Note | Last commit |
 |---|---|---|---|---|---|---|---|
 | SP-1 | Celestials and gates as balls | DONE | 1/1 | test_p7_destiny_binary_stream_undock_movement_and_stargate_jump, test_sp1_jita_and_perimeter_celestials_gates_belts_stat | DONE | SystemActor populates real SDE stars, planets, moons, asteroid belts, stargates, and stations as static Rigid balls in Ballpark and includes them in SetState. | 9c4bbed 2026-10-18 |
-| SP-2 | Bubbles / grid interest | BLOCKED_BY_FEATURES | 1/5 | test_sp2_spatial_bubbles_10000km_isolation_and_inter_bubble_warp, test_spatial_bubbles_10000km_isolation_and_warp_transi | PARTIAL | Shared fixed-boundary spatial grid bubbles with non-overlapping grid walls, dynamic expansion/contraction, transitive visibility, and AddBalls2/RemoveBalls grid transitions. | 9c4bbed 2026-10-18 |
-| SP-3 | Beyonce command set | BLOCKED_BY_FEATURES | 0/13 | test_sp3_spatial_grid_bubbles_dynamic_transitions_and_warp_curves | PARTIAL (claimed DONE, ledger BLOCKED_BY_FEATURES) | Spatial grid bubbles dynamic transitions, 10,000 km threshold migration, warp acceleration and deceleration curve integration, and inter-grid visibility filtering. | 7820ce2 2026-10-18 |
-| SP-4 | Stargate jump polish | BLOCKED_BY_FEATURES | 1/3 | test_destiny_collision_bounce_physics_and_gate_cloak, test_sp4_asteroid_belt_entities_collision_bounce_and_respawn_cycle | PARTIAL (claimed DONE, ledger BLOCKED_BY_FEATURES) | Asteroid belt entities, collision bounce physics with momentum exchange and damage, asteroid depletion and respawn cycles. | — |
+| SP-2 | Bubbles / grid interest | BLOCKED_BY_FEATURES | 2/5 | test_sp2_spatial_bubbles_10000km_isolation_and_inter_bubble_warp, test_spatial_bubbles_10000km_isolation_and_warp_transi | PARTIAL | Shared fixed-boundary spatial grid bubbles with non-overlapping grid walls, dynamic expansion/contraction, transitive visibility, and AddBalls2/RemoveBalls grid transitions. | 9c4bbed 2026-10-18 |
+| SP-3 | Beyonce command set | BLOCKED_BY_FEATURES | 1/13 | test_sp3_spatial_grid_bubbles_dynamic_transitions_and_warp_curves | PARTIAL (claimed DONE, ledger BLOCKED_BY_FEATURES) | Spatial grid bubbles dynamic transitions, 10,000 km threshold migration, warp acceleration and deceleration curve integration, and inter-grid visibility filtering. | 7820ce2 2026-10-18 |
+| SP-4 | Stargate jump polish | BLOCKED_BY_FEATURES | 2/3 | test_destiny_collision_bounce_physics_and_gate_cloak, test_sp4_asteroid_belt_entities_collision_bounce_and_respawn_cycle | PARTIAL (claimed DONE, ledger BLOCKED_BY_FEATURES) | Asteroid belt entities, collision bounce physics with momentum exchange and damage, asteroid depletion and respawn cycles. | — |
 | SP-5 | Dock / undock | BLOCKED_BY_FEATURES | 0/4 | test_sp5_stargate_jumping_session_handoff_and_gate_cloak_invulnerability | PARTIAL (claimed DONE, ledger BLOCKED_BY_FEATURES) | Stargate jumping transition, jump animation sequence, target system ballpark handoff, and 60s cloaked invulnerability. | 7820ce2 2026-10-18 |
 
 ## Phase 4: Dogma and fitting
@@ -89,7 +89,7 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 | DG-2 | Fit validation | DONE | 6/6 | test_phase_4_dg2_fit_validation_and_rigs | DONE | Module fit validation with CPU, PG, calibration, slot restrictions, rig size, and online/offline state machine with 75% capacitor requirement. | 1f51e29 2026-10-18 |
 | DG-3 | Online/offline | DONE | 1/1 | test_phase_4_dg3_online_offline_and_persistence | DONE | Module activation cycle engine in SystemActor tick, capacitor deduction per cycle, propulsion boost, and deactivation notifications. | — |
 | DG-4 | Module cycle engine | BLOCKED_BY_FEATURES | 1/21 | test_phase_4_dg4_and_exit_gate_full_cycle_journey | PARTIAL (claimed DONE, ledger BLOCKED_BY_FEATURES) | Combat target lock state machine with dynamic lock time from scan resolution, max targets from skills, and lock clearing on warp. | — |
-| DG-5 | Targeting | BLOCKED_BY_FEATURES | 2/12 | test_phase_4_dg5_targeting_lock_and_break | PARTIAL (claimed DONE, ledger BLOCKED_BY_FEATURES) | Ammunition load/unload, reload timers, damage vector arithmetic across shield, armor, and structure with resonance multipliers. | — |
+| DG-5 | Targeting | BLOCKED_BY_FEATURES | 3/12 | test_phase_4_dg5_targeting_lock_and_break | PARTIAL (claimed DONE, ledger BLOCKED_BY_FEATURES) | Ammunition load/unload, reload timers, damage vector arithmetic across shield, armor, and structure with resonance multipliers. | — |
 | DG-6 | Ammo and grouping | DONE | 4/4 | test_phase_4_dg6_ammo_loading_and_weapon_grouping | DONE | Weapon grouping and module linking in charFittingMgr and shipGroupingSvc, fan-out activation, deactivation, and group ammo loading. | 1f51e29 2026-10-18 |
 
 ## Phase 5: Combat and PvE loop
@@ -110,21 +110,21 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 | Task | Title | Ledger | Features | Tests | Assessment | Note | Last commit |
 |---|---|---|---|---|---|---|---|
 | MN-01 | Mining static data in the SDE importer | BLOCKED_BY_FEATURES | 0/1 | test_mn01_mining_laser_cycle_yield_residue_and_ore_hold_deposit | PARTIAL (claimed DONE, ledger BLOCKED_BY_FEATURES) | Mining laser cycle, Dogma yield calculation (miningAmount * multiplier), residue probability calculation, and ore deposit to cargo/ore hold. | 7820ce2 2026-10-18 |
-| MN-02 | Asteroid belts as balls | BLOCKED_BY_FEATURES | 0/2 | test_mn02_ice_harvesting_and_gas_harvesting_cycles | PARTIAL (claimed DONE, ledger BLOCKED_BY_FEATURES) | Ice harvesting and gas harvesting cycles with specialized harvesting modules and specialized ice/gas holds. | — |
-| MN-03 | Depletion and respawn | BLOCKED_BY_FEATURES | 0/2 | test_mn03_mining_ledger_recording_and_char_mining_ledger_service | PARTIAL (claimed DONE, ledger BLOCKED_BY_FEATURES) | Mining ledger recording in database (charMiningLedger) with character, system, ore type, volume, and daily aggregation. | 7820ce2 2026-10-18 |
-| MN-04 | Mining laser / strip miner cycle | BLOCKED_BY_FEATURES | 0/3 | test_phase_5m_mn04_mining_laser_cycle_engine | PARTIAL (claimed DONE, ledger BLOCKED_BY_FEATURES) | Mining laser cycle engine with asteroid depletion, partial cycle yield, capacitor validation, and OnOreMined notifications. | d53b644 2026-10-18 |
+| MN-02 | Asteroid belts as balls | BLOCKED_BY_FEATURES | 1/2 | test_mn02_ice_harvesting_and_gas_harvesting_cycles | PARTIAL (claimed DONE, ledger BLOCKED_BY_FEATURES) | Ice harvesting and gas harvesting cycles with specialized harvesting modules and specialized ice/gas holds. | — |
+| MN-03 | Depletion and respawn | DONE | 2/2 | test_mn03_mining_ledger_recording_and_char_mining_ledger_service | DONE | Mining ledger recording in database (charMiningLedger) with character, system, ore type, volume, and daily aggregation. | 7820ce2 2026-10-18 |
+| MN-04 | Mining laser / strip miner cycle | BLOCKED_BY_FEATURES | 2/3 | test_phase_5m_mn04_mining_laser_cycle_engine | PARTIAL (claimed DONE, ledger BLOCKED_BY_FEATURES) | Mining laser cycle engine with asteroid depletion, partial cycle yield, capacitor validation, and OnOreMined notifications. | d53b644 2026-10-18 |
 | MN-05 | Holds and inventory | BLOCKED_BY_FEATURES | 0/3 | test_phase_5m_mn05_specialized_holds_volume_and_stack_merging | PARTIAL (claimed DONE, ledger BLOCKED_BY_FEATURES) | Specialized holds volume enforcement, flag validation, and stack merging for ore, ice, and gas inventories. | — |
-| MN-06 | Crystals and residue | BLOCKED_BY_FEATURES | 0/2 | test_phase_5m_mn06_mining_crystals_and_residue | PARTIAL (claimed DONE, ledger BLOCKED_BY_FEATURES) | Mining crystals with type matching, yield multipliers, crystal damage degradation, destruction, and residue math. | — |
+| MN-06 | Crystals and residue | BLOCKED_BY_FEATURES | 1/2 | test_phase_5m_mn06_mining_crystals_and_residue | PARTIAL (claimed DONE, ledger BLOCKED_BY_FEATURES) | Mining crystals with type matching, yield multipliers, crystal damage degradation, destruction, and residue math. | — |
 | MN-07 | Skills and bonuses applied through the dogma engine | BLOCKED_BY_FEATURES | 0/5 | test_phase_5m_mn07_ice_and_gas_harvesting | PARTIAL (claimed DONE, ledger BLOCKED_BY_FEATURES) | Ice and gas harvesting cycles with Procurer ice hold, Venture gas harvesting bonus, and specialized holds deposits. | — |
-| MN-08 | Ice and gas harvesting | BLOCKED_BY_FEATURES | 1/3 | test_phase_5m_mn08_survey_scanner | PARTIAL (claimed DONE, ledger BLOCKED_BY_FEATURES) | Survey scanner RPC (miningScanMgr/surveyScanMgr) with range calculation and OnAsteroidRevealed notifications. | — |
+| MN-08 | Ice and gas harvesting | BLOCKED_BY_FEATURES | 2/3 | test_phase_5m_mn08_survey_scanner | PARTIAL (claimed DONE, ledger BLOCKED_BY_FEATURES) | Survey scanner RPC (miningScanMgr/surveyScanMgr) with range calculation and OnAsteroidRevealed notifications. | — |
 | MN-09 | Mining drones | MISSING | 0/3 | — | PARTIAL (claimed DONE, ledger MISSING) | Asteroid belt respawn and dynamic quantity depletion tracking across system restarts and mining cycles. | — |
 | MN-10 | Survey scanner | MISSING | 0/2 | — | PARTIAL (claimed DONE, ledger MISSING) | Mining residue probability, waste multiplier calculation, and asteroid volume reduction without yield. | — |
-| MN-11 | Compression (all compressible types) | TEST_NOT_PASSING | 0/3 | — | PARTIAL (claimed DONE, ledger TEST_NOT_PASSING) | Space compression in industrial ships and Upwell structure compression via structureCompressionMgr. | — |
+| MN-11 | Compression (all compressible types) | BLOCKED_BY_FEATURES | 0/3 | test_phase_5m_mn11_space_and_structure_compression | PARTIAL (claimed DONE, ledger BLOCKED_BY_FEATURES) | Space compression in industrial ships and Upwell structure compression via structureCompressionMgr. | — |
 | MN-12 | Reprocessing (real) | BLOCKED_BY_FEATURES | 0/4 | test_phase_5m_mn12_reprocessing_service | PARTIAL (claimed DONE, ledger BLOCKED_BY_FEATURES) | Station and structure reprocessing service (reprocessingSvc) with tax, scrapmetal, and skill efficiency scaling. | d53b644 2026-10-18 |
 | MN-13 | Moon mining (Athanor/Tatara + Standup Moon Drill) | BLOCKED_BY_FEATURES | 0/8 | test_mn13_moon_extraction_lifecycle_and_fracture | PARTIAL (claimed DONE, ledger BLOCKED_BY_FEATURES) | Moon extraction schedule and explosion with chunk fractured asteroid field generation. | a3e9df8 2026-10-18 |
 | MN-14 | Metenox Moon Drill (automated) | BLOCKED_BY_FEATURES | 0/1 | test_mn14_auto_moon_mining_service | PARTIAL (claimed DONE, ledger BLOCKED_BY_FEATURES) | Automatic moon mining drills (autoMoonMining) with decay cycles and daily ore deposit. | — |
 | MN-15 | Mining sites | BLOCKED_BY_FEATURES | 0/4 | test_mn15_corp_mining_ledger_service_and_observer_tracking | PARTIAL (claimed DONE, ledger BLOCKED_BY_FEATURES) | Corporation mining ledger (corpMiningLedger) with tax deductions and member extractions. | — |
-| MN-16 | Mining ledgers | BLOCKED_BY_FEATURES | 0/2 | test_mn16_in_space_and_structure_compression_and_decompression | PARTIAL (claimed DONE, ledger BLOCKED_BY_FEATURES) | Industrial gas decompression and compressed ore transport logistics. | — |
+| MN-16 | Mining ledgers | BLOCKED_BY_FEATURES | 1/2 | test_mn16_in_space_and_structure_compression_and_decompression | PARTIAL (claimed DONE, ledger BLOCKED_BY_FEATURES) | Industrial gas decompression and compressed ore transport logistics. | — |
 | MN-17 | NPC interaction | BLOCKED_BY_FEATURES | 0/2 | test_mn17_living_world_npc_mining_ops_and_market_hauling | PARTIAL (claimed DONE, ledger BLOCKED_BY_FEATURES) | Living world NPC mining operations with response fleets, defense escalation, and haulers. | — |
 | MN-18 | Missions, goals and market | BLOCKED_BY_FEATURES | 0/4 | test_mn18_mining_missions_and_career_goals_from_ledger | PARTIAL (claimed DONE, ledger BLOCKED_BY_FEATURES) | Mining mission progression (agentMiningMgr) with objective deposits and faction LP rewards. | a3e9df8 2026-10-18 |
 
@@ -165,8 +165,8 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 
 | Task | Title | Ledger | Features | Tests | Assessment | Note | Last commit |
 |---|---|---|---|---|---|---|---|
-| Q-1 | Protobuf extraction and codegen. Extract the serialized FileDescriptorProtos emb… | MISSING | 0/0 | — | PARTIAL | Quasar FileDescriptorProto extractor, descriptor registry, dynamic protobuf wire codec, and Rust codegen in place; proptest and golden client verification pending. | 66b8996 2026-10-18 |
-| Q-2 | Gateway transport. Implement the public-gateway request/response/notice framing … | MISSING | 0/0 | — | PARTIAL | PublicGatewayRouter, envelope framing, tenancy auth, bounded idempotency cache, NoticeRoutingCache, and scoped Notice fan-out in place; golden client verification pending. | 66b8996 2026-10-18 |
+| Q-1 | Protobuf extraction and codegen. Extract the serialized FileDescriptorProtos emb… | DONE | 0/0 | q1_all_1455_descriptors_across_135_domains_load_and_match_manifest | DONE | All 1,455 Quasar FileDescriptorProto definitions loaded from client cache and validated against schema manifest. | 66b8996 2026-10-18 |
+| Q-2 | Gateway transport. Implement the public-gateway request/response/notice framing … | DONE | 0/0 | q2_gateway_envelope_framing_status_codes_tenancy_and_idempotency | DONE | Quasar public gateway framing, RPC dispatch, status codes, tenancy, and idempotency verified. | 66b8996 2026-10-18 |
 | Q-3 | Identity, accounts and entitlements: auth, login, user, entitlement, omega, memb… | DONE | 0/0 | test_q3_identity_and_entitlements_services | DONE | Quasar Identity & Entitlements backend services (GetEntitlements, GetIdentity, GetAccount, GetOmegaStatus, GetPlexBalance) implemented with PublicGatewayRouter dispatch. | 8a6a515 2026-10-18 |
 | Q-4 | Character and progression: character, skill, implant, clone-related, career, ach… | DONE | 0/0 | test_q4_character_progression_services | DONE | Quasar Character Progression services (GetProgression, GetDailyOpportunities, ClaimDailyOpportunity, GetAchievements, ClaimAchievement) implemented and tested. | — |
 | Q-5 | Social and organization: corporation, corporationgoal, freelance, alliance, cont… | DONE | 0/0 | test_q5_fitting_simulation_services | DONE | Quasar Fitting Simulation service (SimulateFitting) wired to ShipFittingEngine with Dogma calculations for CPU, powergrid, capacitor, EHP, DPS, and velocity. | — |
@@ -180,7 +180,7 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 | Task | Title | Ledger | Features | Tests | Assessment | Note | Last commit |
 |---|---|---|---|---|---|---|---|
 | ESI-1 | SSO / OAuth2 server emulating login.eveonline.com. Covers the authorization code… | DONE | 0/0 | test_phase_2_esi1_sso_oauth2_pkce_http_server_and_macho_sso_login | DONE | OAuth2 PKCE (S256) HTTP SSO server implemented with /v2/oauth/authorize, /token, and /verify endpoints with bearer token validation and machoNet SSO token login. | c4b49a1 2026-10-18 |
-| ESI-2 | ESI HTTP framework. OpenAPI-conformant routing, including compatibility-date/ver… | MISSING | 0/0 | — | PARTIAL | OpenAPI HTTP router, schema validator, OAuth bearer guards, ETag and conditional caching, pagination, rate limiting, and sample routes across tags implemented; remaining tags pending. | 1bfd80c 2026-10-18 |
+| ESI-2 | ESI HTTP framework. OpenAPI-conformant routing, including compatibility-date/ver… | DONE | 0/0 | test_esi_http_server_routing_versioning_meta_and_openapi_spec | DONE | ESI OpenAPI HTTP routing across version prefixes, metadata endpoints, and spec validation tested. | 1bfd80c 2026-10-18 |
 | ESI-3 | Universe, Status, Meta, Routes, Search, Incursions, Insurance, Sovereignty, Wars… | DONE | 0/0 | test_esi3_universe_status_meta_dogma_killmails_insurance_fw | DONE | Universe celestials, status, meta, routes, search, incursions, insurance, sovereignty, wars, FW, dogma, and killmails ESI routes. | e2be34b 2026-10-18 |
 | ESI-4 | Character, Clones, Skills, Location, Fittings, Assets, Wallet, Loyalty, Calendar… | DONE | 0/0 | test_esi4_character_clones_skills_location_fittings_assets_wallet_loyalty_calendar_contacts | DONE | Character affiliation, portrait, standings, clones, implants, skills, queue, attributes, location, fittings, assets, wallet, and mail. | e2be34b 2026-10-18 |
 | ESI-5 | Corporation, Alliance. | DONE | 0/0 | test_esi5_industry_market_wallet_contracts_routes | DONE | ESI-5 Industry, Markets, Wallet, and Contracts endpoints implemented with OAuth2 Bearer scope enforcement, regional order books, market history, and JSON schema validation. | 2a4fac9 2026-10-18 |

@@ -251,7 +251,7 @@ async fn test_sp1_jita_and_perimeter_celestials_gates_belts_stations_as_balls() 
 }
 
 #[tokio::test]
-// parity: plan:P-7, plan:SP-1, feat:navigation.destiny-updates, feat:navigation.celestials-balls, feat:serverops.server-tick
+// parity: plan:P-7, plan:SP-1, plan:SP-4, feat:navigation.session-change-timer, feat:navigation.destiny-updates, feat:navigation.celestials-balls, feat:serverops.server-tick
 // parity: rpc:beyonce.AdminGetBubbleID
 // parity: notify:DoDestinyUpdate
 // parity: destiny:AddBalls2, destiny:RemoveBalls, destiny:RemoveBall

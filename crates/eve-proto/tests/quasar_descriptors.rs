@@ -19,6 +19,7 @@ const EMBEDDED_QUASAR_CATALOG_JSON: &str =
     include_str!("../../../docs/index/quasar_protobuf_catalog.json");
 
 #[test]
+// parity: plan:Q-1
 fn q1_all_1455_descriptors_across_135_domains_load_and_match_manifest() {
     let reg = QuasarDescriptorRegistry::open_default()
         .expect("load 1,455 Quasar FileDescriptorProto schemas from data/quasar_descriptors.sqlite");

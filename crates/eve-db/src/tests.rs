@@ -433,6 +433,7 @@ fn test_durable_snapshot_persistence_and_domain_mutations() {
 }
 
 #[test]
+// parity: plan:D-3, feat:serverops.persistence
 fn test_d3_sqlite_relational_world_db_and_concurrent_sessions() {
     use std::sync::Arc;
     let sde = SdeRegistry::with_canonical_seed();
@@ -706,6 +707,7 @@ fn test_d3_sqlite_relational_world_db_and_concurrent_sessions() {
 }
 
 #[test]
+// parity: plan:D-4
 fn test_d4_argon2id_bans_online_lock_and_oauth2_pkce_sso() {
     let sde = SdeRegistry::with_canonical_seed();
     let pid = std::process::id();

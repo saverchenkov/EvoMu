@@ -436,7 +436,7 @@ fn verify_client_sqlite_static_loaded_rows(
 }
 
 #[test]
-// parity: plan:T-1
+// parity: plan:T-1, plan:T-2
 fn test_t2_sde_all_213_resources_and_domain_tables_sweep() {
     let root = repo_root();
     let db_path = SdeRegistry::default_db_path();

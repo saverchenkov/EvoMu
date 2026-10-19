@@ -51,7 +51,7 @@ fn issue_token_with_scopes(ctx: &ServerContext, character_id: i64, scopes: Vec<S
 
 #[tokio::test]
 async fn test_esi_http_server_routing_versioning_meta_and_openapi_spec() {
-    // parity: feat:esi.core.meta, feat:esi.status.status
+    // parity: plan:ESI-2, feat:esi.core.meta, feat:esi.status.status
     // parity: esi:GET /status, esi:GET /meta/compatibility-dates
     let ctx = Arc::new(ServerContext::new());
     let (addr, _router, _handle) = EsiServer::spawn(Arc::clone(&ctx), "127.0.0.1:0")

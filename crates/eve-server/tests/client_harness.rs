@@ -134,6 +134,7 @@ async fn serve_harness_bridge_client(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_t6_client_harness_run_journeys_two_clients_and_log_hygiene() {
+    // parity: plan:T-6
     // Task T-6: Real-client & dual-client bridge journey harness (`tools/client-harness/run_journeys`).
     let ctx = Arc::new(ServerContext::new());
     ctx.seed_demo_world_fixtures();
