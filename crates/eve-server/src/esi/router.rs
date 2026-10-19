@@ -278,6 +278,31 @@ impl EsiRouter {
                         None,
                     );
                 }
+                "/meta" => {
+                    let body = serde_json::to_vec(&json!({
+                        "compatibility_dates": "/meta/compatibility-dates",
+                        "changelog": "/meta/changelog",
+                        "swagger": "/swagger.json",
+                        "openapi": "/openapi.json",
+                        "versions": "/versions",
+                        "status": "/status.json",
+                    }))
+                    .unwrap_or_default();
+                    return self.finalize_cached_response(
+                        req,
+                        now,
+                        req_id,
+                        compat_date,
+                        remain_initial,
+                        reset_initial,
+                        200,
+                        body,
+                        3600,
+                        false,
+                        false,
+                        None,
+                    );
+                }
                 "/versions" => {
                     let body = serde_json::to_vec(&json!([
                         "latest", "v1", "v2", "v3", "v4", "v5", "v6", "dev", "legacy"

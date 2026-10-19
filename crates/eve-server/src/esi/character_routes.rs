@@ -1291,46 +1291,6 @@ pub fn dispatch_character_routes(
             })
         }
 
-        // 10. Calendar & Contacts 501 handlers with parameter/character validation (ESI-4)
-        ("GET", "/characters/{character_id}/calendar") => {
-            let char_id = match parse_path_i64(path_params, "character_id") {
-                Ok(v) => v,
-                Err(e) => return Some(e),
-            };
-            let exists = ctx
-                .db
-                .with_snapshot(|snap| snap.characters.contains_key(&char_id));
-            if !exists {
-                return Some(RouteExecutionResult::error(
-                    404,
-                    format!("Character {char_id} not found"),
-                ));
-            }
-            Some(RouteExecutionResult::error(
-                501,
-                "Character calendar event table is not yet active (ESI-4)",
-            ))
-        }
-        ("GET", "/characters/{character_id}/contacts") => {
-            let char_id = match parse_path_i64(path_params, "character_id") {
-                Ok(v) => v,
-                Err(e) => return Some(e),
-            };
-            let exists = ctx
-                .db
-                .with_snapshot(|snap| snap.characters.contains_key(&char_id));
-            if !exists {
-                return Some(RouteExecutionResult::error(
-                    404,
-                    format!("Character {char_id} not found"),
-                ));
-            }
-            Some(RouteExecutionResult::error(
-                501,
-                "Character contacts table is not yet active (ESI-4)",
-            ))
-        }
-
         _ => None,
     }
 }
