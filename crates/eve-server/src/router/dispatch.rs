@@ -400,6 +400,18 @@ impl ServerContext {
         {
             return res;
         }
+        if let Some(res) = services::fleet_social::handle(
+            self,
+            session,
+            effective_service,
+            method,
+            args,
+            kwargs,
+        )
+        .await
+        {
+            return res;
+        }
         if let Some(res) = services::social_corp_fleet::handle(
             self,
             session,

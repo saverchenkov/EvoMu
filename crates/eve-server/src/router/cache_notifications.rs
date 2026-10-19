@@ -849,4 +849,50 @@ impl ServerContext {
         );
         rec
     }
+
+    /// Synchronizes local chat membership for a character when entering or changing solar systems (SO-3).
+    pub fn sync_character_local_chat(
+        &self,
+        char_id: i64,
+        old_sys: Option<u32>,
+        new_sys: u32,
+    ) {
+        let _ = self.db.try_with_mut_snapshot(|snap| {
+            if let Some(old) = old_sys {
+                if old != new_sys {
+                    let old_chan_id = format!("solarsystemid2:{}", old);
+                    if let Some(chan) = snap.chat_channels.get_mut(&old_chan_id) {
+                        chan.members.remove(&char_id);
+                    }
+                }
+            }
+            let new_chan_id = format!("solarsystemid2:{}", new_sys);
+            let chan = snap
+                .chat_channels
+                .entry(new_chan_id.clone())
+                .or_insert_with(|| eve_db::ChatChannelRecord {
+                    channel_id: new_chan_id.clone(),
+                    name: format!("Local: {}", new_sys),
+                    motd: String::new(),
+                    owner_id: None,
+                    members: std::collections::HashSet::new(),
+                    is_system_local: true,
+                    solar_system_id: Some(new_sys),
+                    is_private: false,
+                });
+            chan.members.insert(char_id);
+            Ok::<(), std::convert::Infallible>(())
+        });
+
+        self.notify(
+            NotificationTarget::SolarSystem(new_sys),
+            "OnLSC",
+            "channelid",
+            vec![
+                PyRep::String(format!("solarsystemid2:{}", new_sys)),
+                PyRep::String("Join".into()),
+                PyRep::Integer(char_id),
+            ],
+        );
+    }
 }

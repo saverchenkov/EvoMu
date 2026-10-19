@@ -702,6 +702,7 @@ pub async fn handle(
                 }
             };
             let existing_ball = old_handle.remove_ball(ship_id).await;
+            ctx.sync_character_local_chat(char_id, Some(old_sys), dest_sys_id);
 
             let new_handle = ctx.systems.get_or_spawn(dest_sys_id);
             let mut new_ball = existing_ball.unwrap_or(current_ball);
@@ -869,6 +870,7 @@ pub async fn handle(
                     }))
                 }
             };
+            ctx.sync_character_local_chat(char_id, Some(old_sys), dest_sys_id);
 
             let arrival_pos = dest_sig_pos - DVec3::new(500.0, 0.0, 0.0);
 
@@ -1006,6 +1008,7 @@ pub async fn handle(
                 }
             };
             let existing_ball = old_handle.remove_ball(ship_id).await;
+            ctx.sync_character_local_chat(char_id, Some(old_sys), dest_sys_id);
 
             let new_handle = ctx.systems.get_or_spawn(dest_sys_id);
             let mut new_ball = existing_ball.unwrap_or(current_ball);

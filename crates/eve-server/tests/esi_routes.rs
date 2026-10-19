@@ -142,6 +142,7 @@ async fn test_esi3_dogma_insurance_killmails_sovereignty_routes_and_wars() {
                 tax_rate: 0.05,
                 master_wallet: IskCents::from_isk(50_000_000),
                 members: HashSet::from([90_000_001]),
+                ..Default::default()
             },
         );
         snap.corporations.insert(
@@ -155,6 +156,7 @@ async fn test_esi3_dogma_insurance_killmails_sovereignty_routes_and_wars() {
                 tax_rate: 0.10,
                 master_wallet: IskCents::from_isk(10_000_000),
                 members: HashSet::from([90_000_002]),
+                ..Default::default()
             },
         );
         snap.alliances.insert(
@@ -987,6 +989,7 @@ async fn test_esi4_character_clones_skills_location_fittings_assets_wallet_loyal
                 tax_rate: 0.05,
                 master_wallet: IskCents::from_isk(250_000_000),
                 members: HashSet::from([90_000_001]),
+                ..Default::default()
             },
         );
         snap.active_implants.insert(90_000_001, vec![9899, 9941]);
@@ -1074,6 +1077,7 @@ async fn test_esi4_character_clones_skills_location_fittings_assets_wallet_loyal
                 tax_rate: 0.05,
                 master_wallet: IskCents::from_isk(1_000_000),
                 members: HashSet::from([90_000_002]),
+                ..Default::default()
             },
         );
         Ok(())

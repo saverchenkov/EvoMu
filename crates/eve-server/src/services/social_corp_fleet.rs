@@ -100,6 +100,8 @@ pub async fn handle(
                         x,
                         y,
                         z,
+                        item_id: None,
+                        memo: String::new(),
                     },
                 );
                 Ok(id)
@@ -194,6 +196,7 @@ pub async fn handle(
                             squads: vec![1],
                             free_move: true,
                             is_registered: true,
+                            ..Default::default()
                         },
                     );
                     Ok::<_, std::convert::Infallible>(id)
@@ -254,6 +257,7 @@ pub async fn handle(
                         tax_rate,
                         master_wallet: IskCents(0),
                         members: HashSet::from([char_id]),
+                        ..Default::default()
                     },
                 );
                 Ok(cid)

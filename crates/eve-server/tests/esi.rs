@@ -623,6 +623,7 @@ async fn test_esi_all_31_openapi_tags_sample_routes_and_schema_validation() {
                 tax_rate: 0.05,
                 master_wallet: IskCents::from_isk(1_000_000),
                 members: HashSet::from([90_000_001]),
+                ..Default::default()
             },
         );
         snap.alliances.insert(
@@ -645,6 +646,7 @@ async fn test_esi_all_31_openapi_tags_sample_routes_and_schema_validation() {
                 squads: vec![7001],
                 free_move: true,
                 is_registered: true,
+                ..Default::default()
             },
         );
         snap.saved_fittings.insert(

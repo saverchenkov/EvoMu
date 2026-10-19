@@ -581,6 +581,7 @@ fn test_d3_sqlite_relational_world_db_and_concurrent_sessions() {
                 squads: vec![],
                 free_move: true,
                 is_registered: true,
+                ..Default::default()
             },
         );
         snap.corporations.insert(
@@ -594,6 +595,7 @@ fn test_d3_sqlite_relational_world_db_and_concurrent_sessions() {
                 tax_rate: 0.05,
                 master_wallet: IskCents::from_isk(1_000_000),
                 members: HashSet::from([c1.character_id]),
+                ..Default::default()
             },
         );
         snap.bookmarks.insert(
@@ -606,6 +608,8 @@ fn test_d3_sqlite_relational_world_db_and_concurrent_sessions() {
                 x: 100.0,
                 y: 200.0,
                 z: 300.0,
+                item_id: None,
+                memo: String::new(),
             },
         );
         snap.structures.insert(

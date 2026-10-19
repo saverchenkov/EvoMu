@@ -12,6 +12,7 @@ pub mod character_skills;
 pub mod combat_crimewatch;
 pub mod config_service;
 pub mod cosmetics_events;
+pub mod fleet_social;
 pub mod industry_pi;
 pub mod inventory_fitting;
 pub mod market_contracts;
