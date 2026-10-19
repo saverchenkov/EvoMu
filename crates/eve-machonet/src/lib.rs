@@ -830,6 +830,7 @@ pub mod service_roles {
     pub const ROLE_IGB: u64 = 0x0000_0000_8000_0000;
     pub const ROLE_SPAWN: u64 = 0x0000_0002_0000_0000;
     pub const ROLE_GMS: u64 = 0x0000_0040_0000_0000;
+    pub const ROLE_WORLDMOD: u64 = 0x0002_0000_0000_0000;
     pub const ROLE_PROGRAMMER: u64 = 0x0008_0000_0000_0000;
     pub const ROLE_QA: u64 = 0x0010_0000_0000_0000;
     pub const ROLE_GMH: u64 = 0x0020_0000_0000_0000;
@@ -845,8 +846,8 @@ pub mod service_roles {
 
     /// Standard player account role mask (`ROLE_PLAYER | ROLE_LOGIN`), containing zero GM/admin bits.
     pub const ROLE_PLAYER_DEFAULT: u64 = ROLE_PLAYER | ROLE_LOGIN;
-    /// Mask of elevated GM / Admin role bits (`ROLE_GML | ROLE_GMH | ROLE_GMS | ROLE_ADMIN`).
-    pub const ROLE_GM_MASK: u64 = ROLE_GML | ROLE_GMH | ROLE_GMS | ROLE_ADMIN;
+    /// Mask of elevated GM / Admin role bits (`ROLE_GML | ROLE_GMH | ROLE_GMS | ROLE_ADMIN | ROLE_WORLDMOD`).
+    pub const ROLE_GM_MASK: u64 = ROLE_GML | ROLE_GMH | ROLE_GMS | ROLE_ADMIN | ROLE_WORLDMOD;
     /// Default provisioned GM account role mask.
     pub const ROLE_GM_DEFAULT: u64 = ROLE_PLAYER_DEFAULT | ROLE_GM_MASK;
 }
@@ -940,11 +941,15 @@ mod tests {
         assert_eq!(service_roles::ROLE_PLAYER_DEFAULT & service_roles::ROLE_GM_MASK, 0);
         assert_eq!(service_roles::ROLE_GML, 0x0040_0000_0000_0000);
         assert_eq!(service_roles::ROLE_GMH, 0x0020_0000_0000_0000);
+        assert_eq!(service_roles::ROLE_GMS, 0x0000_0040_0000_0000);
+        assert_eq!(service_roles::ROLE_WORLDMOD, 0x0002_0000_0000_0000);
         assert_eq!(service_roles::ROLE_CONTENT, 0x0080_0000_0000_0000);
         assert_eq!(service_roles::ROLE_ADMIN, 0x0100_0000_0000_0000);
         s1.role = service_roles::ROLE_PLAYER_DEFAULT;
         assert!(!s1.has_gm_role());
         s1.role |= service_roles::ROLE_GML;
+        assert!(s1.has_gm_role());
+        s1.role = service_roles::ROLE_PLAYER_DEFAULT | service_roles::ROLE_WORLDMOD;
         assert!(s1.has_gm_role());
     }
 }

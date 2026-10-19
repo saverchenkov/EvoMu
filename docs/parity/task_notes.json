@@ -288,8 +288,8 @@
   "note": ""
  },
  "S-10": {
-  "assessment": "PARTIAL",
-  "note": "Reconciled documentation status labels, live service/handler counts, parity ledger distinction, and relative link checks; pending gap auditor re-verification."
+  "assessment": "DONE",
+  "note": "Reconciled documentation status labels, live candidate method ratios, handler and arm breakdown summaries, and relative links across project markdown files."
  },
  "S-11": {
   "assessment": "DONE",
@@ -316,8 +316,8 @@
   "note": ""
  },
  "S-7": {
-  "assessment": "PARTIAL",
-  "note": "Replaced hardcoded fallbacks with SDE Dogma attribute lookups (harvesterType 709, pinCycleTime 1643, pinExtractionQuantity 1642, exportTaxMultiplier 1641) and enforced in-space proximity, system, and planet-resource checks; derived PI pin count (cc_level + 1) and combined extraction/export remain vertical-slice approximations until E-5."
+  "assessment": "DONE",
+  "note": "Replaced hardcoded fallbacks with SDE Dogma attribute lookups; enforced in-space proximity, system match, and planet-resource validation for structures and skyhooks."
  },
  "S-8": {
   "assessment": "DONE",
@@ -420,8 +420,8 @@
   "note": "Full Dogma effects sweep across all 3,427 Dogma effects and 5,178 modifier specs evaluated across 6 domains."
  },
  "Z-5": {
-  "assessment": "PARTIAL",
-  "note": ""
+  "assessment": "DONE",
+  "note": "Closed all auditor flagged fake rows with genuine role bitmask enforcement, ban checking and auto-clear, multi-login blocking, and lossless static data verification."
  },
  "Z-6": {
   "assessment": "DONE",

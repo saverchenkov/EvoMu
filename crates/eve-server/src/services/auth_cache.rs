@@ -72,7 +72,7 @@ pub async fn handle(
                     .authenticate_at(username, token, now_unix)
                     .map_err(|e| BridgeRpcError {
                         code: match e {
-                            eve_db::DbError::AccountBanned { .. } => "AccountBanned".into(),
+                            eve_db::DbError::AccountBanned { .. } => "UserBanned".into(),
                             eve_db::DbError::AccountSuspended { .. } => "AccountSuspended".into(),
                             _ => "AuthenticationFailed".into(),
                         },
@@ -83,12 +83,21 @@ pub async fn handle(
                 Err(e) => return Some(Err(e)),
             };
 
+            let allow_displace = args
+                .get(2)
+                .and_then(|a| a.as_bool())
+                .or_else(|| _kwargs.get("displace").and_then(|a| a.as_bool()))
+                .unwrap_or(false);
+
             if let Some(prev_uid) = session.user_id {
-                ctx.db.release_online_lock(prev_uid, session.session_id);
+                if prev_uid != acc.user_id {
+                    ctx.db.release_online_lock(prev_uid, session.session_id);
+                }
             }
             ctx.release_session_bindings(session.session_id);
             ctx.db
                 .clear_revocation_on_fresh_login(acc.user_id, session.session_id);
+
             if ctx.db.get_online_session(acc.user_id).is_none() {
                 let _ = ctx.db.acquire_online_lock(
                     acc.user_id,
@@ -97,6 +106,21 @@ pub async fn handle(
                     false,
                     now_unix,
                 );
+            } else if allow_displace {
+                if let Ok(Some(displaced)) = ctx.db.acquire_online_lock(
+                    acc.user_id,
+                    session.session_id,
+                    None,
+                    true,
+                    now_unix,
+                ) {
+                    ctx.disconnect_session(
+                        displaced.session_id,
+                        "ACL_DISPLACED",
+                        "Displaced by concurrent login on same account",
+                    );
+                    ctx.release_session_bindings(displaced.session_id);
+                }
             }
             session.user_id = Some(acc.user_id);
             session.role = acc.role;
@@ -300,7 +324,7 @@ pub async fn handle(
             if !session.has_gm_role() {
                 return Some(Err(BridgeRpcError {
                     code: "InsufficientRole".into(),
-                    message: "slash.SlashCmd requires GM/Admin role (ROLE_GMS/ROLE_GML/ROLE_GMH/ROLE_ADMIN)".into(),
+                    message: "slash.SlashCmd requires GM/Admin role (ROLE_GMS/ROLE_GML/ROLE_GMH/ROLE_ADMIN/ROLE_WORLDMOD)".into(),
                 }));
             }
             let cmd = args.first().and_then(|a| a.as_str()).unwrap_or("").trim();
@@ -341,53 +365,62 @@ pub async fn handle(
                 }
             } else if let Some(rest) = cmd.strip_prefix("/ban ") {
                 let mut parts = rest.trim().splitn(3, ' ');
-                let Some(username) = parts.next().map(str::trim).filter(|s| !s.is_empty()) else {
+                let Some(target) = parts.next().map(str::trim).filter(|s| !s.is_empty()) else {
                     return Some(Err(BridgeRpcError {
                         code: "InvalidSlashArgument".into(),
-                        message: "Usage: /ban <username> <duration_seconds> [reason]".into(),
+                        message: "Usage: /ban <account_id> [duration_seconds] [reason]".into(),
                     }));
                 };
-                let Some(dur_str) = parts.next().map(str::trim) else {
-                    return Some(Err(BridgeRpcError {
-                        code: "InvalidSlashArgument".into(),
-                        message: "Usage: /ban <username> <duration_seconds> [reason]".into(),
-                    }));
+                let (duration_secs, reason) = match parts.next().map(str::trim) {
+                    Some(dur_str) => {
+                        if let Ok(secs) = dur_str.parse::<u64>() {
+                            let r = parts.next().map(str::trim).filter(|s| !s.is_empty()).unwrap_or("Banned by GM");
+                            (secs, r)
+                        } else {
+                            let full_reason = if let Some(r3) = parts.next() {
+                                format!("{dur_str} {}", r3.trim())
+                            } else {
+                                dur_str.to_string()
+                            };
+                            (3_153_600_000, Box::leak(full_reason.into_boxed_str()) as &str)
+                        }
+                    }
+                    None => (3_153_600_000, "Banned by GM"),
                 };
-                let Ok(duration_secs) = dur_str.parse::<u64>() else {
-                    return Some(Err(BridgeRpcError {
-                        code: "InvalidSlashArgument".into(),
-                        message: "Duration for /ban must be a positive integer in seconds".into(),
-                    }));
-                };
-                if duration_secs == 0 {
-                    return Some(Err(BridgeRpcError {
-                        code: "InvalidSlashArgument".into(),
-                        message: "Duration for /ban must be greater than zero".into(),
-                    }));
-                }
-                let reason = parts
-                    .next()
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or("Banned by GM");
                 let until_unix = ctx.now_unix().saturating_add(duration_secs);
-                let live_sess = ctx
-                    .db
-                    .with_snapshot(|s| s.accounts.get(username).map(|a| a.user_id))
-                    .and_then(|uid| ctx.db.get_online_session(uid));
-                match ctx.db.ban_account(username, until_unix, reason) {
+                let target_uid = ctx.db.with_snapshot(|s| {
+                    if let Ok(id) = target.trim().parse::<u64>() {
+                        s.accounts
+                            .values()
+                            .find(|a| a.user_id == id)
+                            .map(|a| a.user_id)
+                            .or_else(|| s.accounts.get(target.trim()).map(|a| a.user_id))
+                    } else {
+                        s.accounts.get(target.trim()).map(|a| a.user_id)
+                    }
+                });
+                let live_sess = target_uid.and_then(|uid| ctx.db.get_online_session(uid));
+                match ctx.db.ban_account_by_id_or_username(target, until_unix, reason) {
                     Ok(uid) => {
+                        let username = ctx.db.with_snapshot(|s| {
+                            s.accounts
+                                .values()
+                                .find(|a| a.user_id == uid)
+                                .map(|a| a.username.clone())
+                                .unwrap_or_else(|| target.to_string())
+                        });
                         ctx.release_user_bindings(uid);
                         if let Some(ref s) = live_sess {
                             ctx.disconnect_session(
                                 s.session_id,
-                                "AccountBanned",
+                                "UserBanned",
                                 &format!("Account banned until unix={until_unix}: {reason}"),
                             );
+                            let _ = ctx.db.release_online_lock(uid, s.session_id);
                         }
                         Some(Ok(PyRep::keyval([
                             ("command", PyRep::String(cmd.to_string())),
-                            ("username", PyRep::String(username.to_string())),
+                            ("username", PyRep::String(username)),
                             ("userID", PyRep::Integer(uid as i64)),
                             ("bannedUntilUnix", PyRep::Integer(until_unix as i64)),
                             ("reason", PyRep::String(reason.to_string())),
@@ -405,17 +438,18 @@ pub async fn handle(
                     })),
                 }
             } else if let Some(rest) = cmd.strip_prefix("/unban ") {
-                let username = rest.trim();
-                if username.is_empty() {
+                let mut parts = rest.trim().splitn(2, ' ');
+                let target = parts.next().map(str::trim).filter(|s| !s.is_empty()).unwrap_or("");
+                if target.is_empty() {
                     return Some(Err(BridgeRpcError {
                         code: "InvalidSlashArgument".into(),
-                        message: "Usage: /unban <username>".into(),
+                        message: "Usage: /unban <username|user_id> [reason]".into(),
                     }));
                 }
-                match ctx.db.unban_account(username) {
-                    Ok(uid) => Some(Ok(PyRep::keyval([
+                match ctx.db.unban_account_by_id_or_username(target) {
+                    Ok((uid, uname)) => Some(Ok(PyRep::keyval([
                         ("command", PyRep::String(cmd.to_string())),
-                        ("username", PyRep::String(username.to_string())),
+                        ("username", PyRep::String(uname)),
                         ("userID", PyRep::Integer(uid as i64)),
                         ("unbanned", PyRep::Bool(true)),
                     ]))),
@@ -490,17 +524,18 @@ pub async fn handle(
                     })),
                 }
             } else if let Some(rest) = cmd.strip_prefix("/unsuspend ") {
-                let username = rest.trim();
-                if username.is_empty() {
+                let mut parts = rest.trim().splitn(2, ' ');
+                let target = parts.next().map(str::trim).filter(|s| !s.is_empty()).unwrap_or("");
+                if target.is_empty() {
                     return Some(Err(BridgeRpcError {
                         code: "InvalidSlashArgument".into(),
-                        message: "Usage: /unsuspend <username>".into(),
+                        message: "Usage: /unsuspend <username|user_id> [reason]".into(),
                     }));
                 }
-                match ctx.db.unsuspend_account(username) {
-                    Ok(uid) => Some(Ok(PyRep::keyval([
+                match ctx.db.unban_account_by_id_or_username(target) {
+                    Ok((uid, uname)) => Some(Ok(PyRep::keyval([
                         ("command", PyRep::String(cmd.to_string())),
-                        ("username", PyRep::String(username.to_string())),
+                        ("username", PyRep::String(uname)),
                         ("userID", PyRep::Integer(uid as i64)),
                         ("unsuspended", PyRep::Bool(true)),
                     ]))),

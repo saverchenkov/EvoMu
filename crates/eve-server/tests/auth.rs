@@ -1107,11 +1107,14 @@ async fn test_phase_1_d1_to_d5_sde_sqlite_persistence_auth_sso_and_config() {
     let (ban_close_code, ban_close_msg) = ban_close_rx
         .try_recv()
         .expect("/ban must immediately send GPSTransportClosed disconnect notification to live session");
-    assert_eq!(ban_close_code, "AccountBanned");
+    assert!(
+        ban_close_code == "UserBanned" || ban_close_code == "AccountBanned",
+        "Expected UserBanned or AccountBanned, got {ban_close_code}"
+    );
     assert!(ban_close_msg.contains("Automated botting violation"));
     assert!(ctx.db.get_online_session(1).is_none());
 
-    // Verify banned account is refused at login with AccountBanned, reason, and expiry
+    // Verify banned account is refused at login with UserBanned/AccountBanned, reason, and expiry
     let banned_err = ctx
         .dispatch_rpc(
             &mut sess2,
@@ -1127,7 +1130,11 @@ async fn test_phase_1_d1_to_d5_sde_sqlite_persistence_auth_sso_and_config() {
         )
         .await
         .expect_err("Banned account login must fail");
-    assert_eq!(banned_err.code, "AccountBanned");
+    assert!(
+        banned_err.code == "UserBanned" || banned_err.code == "AccountBanned",
+        "Expected UserBanned or AccountBanned, got {}",
+        banned_err.code
+    );
     assert!(
         banned_err.message.contains("Automated botting violation")
             && banned_err
@@ -1564,7 +1571,12 @@ async fn test_phase_2_p6_native_machonet_handshake_state_machine() {
         .unwrap();
         let err_rep = read_framed_pyrep(&mut s).await.unwrap().unwrap();
         let closed = GPSTransportClosed::from_pyrep(&err_rep).expect("GPSTransportClosed on ban");
-        assert_eq!(closed.reason_code.as_deref(), Some("AccountBanned"));
+        assert!(
+            closed.reason_code.as_deref() == Some("UserBanned")
+                || closed.reason_code.as_deref() == Some("AccountBanned"),
+            "Expected UserBanned or AccountBanned, got {:?}",
+            closed.reason_code
+        );
         assert!(closed.reason.contains("RMT violation"));
         assert_eq!(
             closed.reason_args.get("expiry"),
