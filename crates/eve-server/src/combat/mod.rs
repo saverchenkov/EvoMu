@@ -8,11 +8,16 @@ pub mod drones_salvage_tractor;
 pub mod npc_ai;
 
 pub use crimewatch::{
-    AggressionEvaluation, CharacterCrimeWatchState, ConcordExecutionReport, CrimeWatchDirector,
+    compute_sec_status_loss, AggressionEvaluation, AggressionManager, AggressionRecord,
+    CharacterCrimeWatchState, ConcordExecutionReport, CrimeWatchDirector,
 };
-pub use death_pipeline::{execute_death_pipeline, DeathPipelineResult};
+pub use death_pipeline::{
+    execute_death_pipeline, execute_self_destruct, DeathPipelineResult, SelfDestructManager,
+};
 pub use drones_salvage_tractor::{
     attempt_salvage_wreck, step_tractor_beam, validate_drone_bandwidth, ActiveDrone,
     DroneController, SalvageOutcome,
 };
-pub use npc_ai::{NpcAiState, NpcCombatEntity, NpcSpawnManager};
+pub use npc_ai::{
+    compute_sec_status_gain, faction_damage_vector, NpcAiState, NpcCombatEntity, NpcSpawnManager,
+};

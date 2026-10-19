@@ -1440,6 +1440,181 @@ pub async fn handle(
             )))
         }
 
+        ("crimewatch", "GetMySecurityStatus") | ("crimewatchSvc", "GetMySecurityStatus") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let sec = ctx
+                .db
+                .with_snapshot(|s| s.characters.get(&char_id).map(|c| c.security_status))
+                .unwrap_or(0.0);
+            Some(Ok(PyRep::Real(sec)))
+        }
+
+        ("aggressionMgr", "GetCriminalTimeStamps") | ("aggressionMgr", "CheckLootRightExceptions") => {
+            let _ = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            Some(Ok(PyRep::List(Vec::new())))
+        }
+
+        ("ship", "SelfDestruct") | ("beyonce", "CmdSelfDestruct") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let Some(ship_id) = session.ship_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "NoActiveShip".into(),
+                    message: "Session has no active ship".into(),
+                }));
+            };
+            let Some(sys_id) = session.solar_system_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "NoSolarSystem".into(),
+                    message: "Session has no solar system".into(),
+                }));
+            };
+            let sys_handle = ctx.systems.get_or_spawn(sys_id);
+            let pos = sys_handle
+                .get_ball_snapshot(ship_id)
+                .await
+                .ok()
+                .flatten()
+                .map(|(_, b)| b.position)
+                .unwrap_or(DVec3::ZERO);
+
+            let res = crate::combat::death_pipeline::execute_self_destruct(
+                ctx,
+                sys_id,
+                char_id,
+                ship_id,
+                pos,
+                ctx.now_unix(),
+            )
+            .await;
+
+            match res {
+                Ok(death) => {
+                    if let Some(cap_id) = death.ejected_capsule_id {
+                        session.ship_id = Some(cap_id);
+                    } else if let Ok(ch) = ctx.db.get_character(char_id) {
+                        session.ship_id = Some(ch.active_ship_id);
+                        session.station_id = ch.station_id;
+                        session.structure_id = None;
+                        session.solar_system_id = Some(ch.solar_system_id);
+                    }
+                    Some(Ok(PyRep::keyval([
+                        ("wreckID", PyRep::Integer(death.wreck_item_id)),
+                        ("killmailID", PyRep::Integer(death.killmail_id)),
+                        ("insurancePayoutISK", PyRep::Real(death.insurance_payout_isk)),
+                    ])))
+                }
+                Err(e) => Some(Err(BridgeRpcError {
+                    code: "SelfDestructFailed".into(),
+                    message: e,
+                })),
+            }
+        }
+
+        ("ship", "AbortSelfDestruct") => {
+            let _ = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            Some(Ok(PyRep::None))
+        }
+
+        ("ship", "LaunchDrones") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let Some(ship_id) = session.ship_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "NoActiveShip".into(),
+                    message: "Session has no active ship".into(),
+                }));
+            };
+            let Some(sys_id) = session.solar_system_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "NoSolarSystem".into(),
+                    message: "Session has no active solar system".into(),
+                }));
+            };
+            let drone_ids: Vec<i64> = match args.first() {
+                Some(PyRep::List(items)) | Some(PyRep::Tuple(items)) => {
+                    items.iter().filter_map(|it| it.as_i64()).collect()
+                }
+                Some(PyRep::Integer(id)) => vec![*id],
+                _ => Vec::new(),
+            };
+            let mut ctrl = crate::combat::drones_salvage_tractor::DroneController::new();
+            match ctrl.launch_drones(ctx, sys_id, char_id, ship_id, &drone_ids).await {
+                Ok(launched) => Some(Ok(PyRep::List(launched.into_iter().map(PyRep::Integer).collect()))),
+                Err(e) => Some(Err(BridgeRpcError {
+                    code: "LaunchDronesFailed".into(),
+                    message: e,
+                })),
+            }
+        }
+
+        ("entity", "CmdReturnBay") => {
+            let _ = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let Some(ship_id) = session.ship_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "NoActiveShip".into(),
+                    message: "Session has no active ship".into(),
+                }));
+            };
+            let Some(sys_id) = session.solar_system_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "NoSolarSystem".into(),
+                    message: "Session has no active solar system".into(),
+                }));
+            };
+            let mut ctrl = crate::combat::drones_salvage_tractor::DroneController::new();
+            match ctrl.recall_drones(ctx, sys_id, ship_id).await {
+                Ok(recalled) => Some(Ok(PyRep::List(recalled.into_iter().map(PyRep::Integer).collect()))),
+                Err(e) => Some(Err(BridgeRpcError {
+                    code: "RecallDronesFailed".into(),
+                    message: e,
+                })),
+            }
+        }
+
+        ("entity", "CmdReturnHome") | ("entity", "CmdReturnAndOrbit") => {
+            let _ = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let Some(ship_id) = session.ship_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "NoActiveShip".into(),
+                    message: "Session has no active ship".into(),
+                }));
+            };
+            let Some(sys_id) = session.solar_system_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "NoSolarSystem".into(),
+                    message: "Session has no active solar system".into(),
+                }));
+            };
+            let mut ctrl = crate::combat::drones_salvage_tractor::DroneController::new();
+            match ctrl.return_and_orbit(ctx, sys_id, ship_id).await {
+                Ok(count) => Some(Ok(PyRep::Integer(count as i64))),
+                Err(e) => Some(Err(BridgeRpcError {
+                    code: "ReturnHomeFailed".into(),
+                    message: e,
+                })),
+            }
+        }
+
         _ => None,
     }
 }

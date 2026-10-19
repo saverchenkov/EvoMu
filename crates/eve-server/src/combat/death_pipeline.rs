@@ -53,7 +53,14 @@ pub async fn execute_death_pipeline(
         Ok::<_, String>((ship.type_id, base, ship.insured_payout_isk))
     })?;
 
-    let is_pod = victim_ship_type_id == 670;
+    let is_pod = victim_ship_type_id == 670
+        || victim_ship_type_id == 33328
+        || ctx
+            .sde
+            .types
+            .get(&victim_ship_type_id)
+            .map(|t| t.group_id == 29)
+            .unwrap_or(false);
     let wreck_type_id = if is_pod {
         // Pods leave no standard ship wreck (or corpse/biomass)
         26557
@@ -282,3 +289,93 @@ pub async fn execute_death_pipeline(
         killmail_id,
     })
 }
+
+/// Triggers self-destruct for a ship or capsule in space, executing the canonical death pipeline
+/// with the character as their own attacker (`feat:ships.self-destruct`).
+pub async fn execute_self_destruct(
+    ctx: &ServerContext,
+    sys_id: u32,
+    char_id: i64,
+    ship_id: i64,
+    pos: DVec3,
+    rng_seed: u64,
+) -> Result<DeathPipelineResult, String> {
+    execute_death_pipeline(ctx, sys_id, char_id, ship_id, char_id, pos, rng_seed).await
+}
+
+/// Tracks 2-minute self-destruct countdown timers and cancellations (`feat:ships.self-destruct`).
+#[derive(Debug, Default, Clone)]
+pub struct SelfDestructManager {
+    /// Active self-destruct sequences: `ship_id -> (character_id, system_id, detonation_unix)`
+    pub active_timers: HashMap<i64, (i64, u32, u64)>,
+}
+
+impl SelfDestructManager {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Initiates a 2-minute (120s) self-destruct sequence on a ship.
+    pub fn start_self_destruct(
+        &mut self,
+        ship_id: i64,
+        char_id: i64,
+        sys_id: u32,
+        now_unix: u64,
+    ) -> u64 {
+        let detonation_time = now_unix.saturating_add(120);
+        self.active_timers.insert(ship_id, (char_id, sys_id, detonation_time));
+        detonation_time
+    }
+
+    /// Cancels an active self-destruct sequence (`AbortSelfDestruct`). Returns true if a timer was cancelled.
+    pub fn abort_self_destruct(&mut self, ship_id: i64) -> bool {
+        self.active_timers.remove(&ship_id).is_some()
+    }
+
+    /// Returns true if the ship is currently counting down to self-destruct.
+    pub fn is_self_destructing(&self, ship_id: i64) -> bool {
+        self.active_timers.contains_key(&ship_id)
+    }
+
+    /// Returns remaining seconds until detonation, if self-destruct is active.
+    pub fn remaining_seconds(&self, ship_id: i64, now_unix: u64) -> Option<u64> {
+        self.active_timers
+            .get(&ship_id)
+            .map(|&(_, _, det)| det.saturating_sub(now_unix))
+    }
+
+    /// Detonates any ships whose self-destruct timer has expired.
+    pub async fn step_timers(
+        &mut self,
+        ctx: &ServerContext,
+        now_unix: u64,
+        rng_seed: u64,
+    ) -> Vec<(i64, Result<DeathPipelineResult, String>)> {
+        let mut ready = Vec::new();
+        self.active_timers.retain(|&ship_id, &mut (char_id, sys_id, det_unix)| {
+            if now_unix >= det_unix {
+                ready.push((ship_id, char_id, sys_id));
+                false
+            } else {
+                true
+            }
+        });
+
+        let mut results = Vec::new();
+        for (ship_id, char_id, sys_id) in ready {
+            let sys_handle = ctx.systems.get_or_spawn(sys_id);
+            let pos = sys_handle
+                .get_ball_snapshot(ship_id)
+                .await
+                .ok()
+                .flatten()
+                .map(|(_, b)| b.position)
+                .unwrap_or(DVec3::ZERO);
+            let res = execute_self_destruct(ctx, sys_id, char_id, ship_id, pos, rng_seed).await;
+            results.push((ship_id, res));
+        }
+        results
+    }
+}
+

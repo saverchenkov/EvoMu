@@ -374,4 +374,33 @@ impl DroneController {
 
         Ok(recalled)
     }
+
+    /// Orders active combat drones to return and orbit their parent ship (`feat:drones.return-orbit`).
+    pub async fn return_and_orbit(
+        &mut self,
+        ctx: &ServerContext,
+        sys_id: u32,
+        ship_id: i64,
+    ) -> Result<usize, String> {
+        let sys_handle = ctx.systems.get_or_spawn(sys_id);
+        let mut count = 0;
+
+        for drone in self.active_drones.values_mut() {
+            if drone.parent_ship_id == ship_id {
+                drone.target_id = None;
+                let _ = sys_handle
+                    .set_movement_mode(
+                        drone.ball_id,
+                        MovementMode::Orbit {
+                            target_id: ship_id,
+                            range: 1_000.0,
+                        },
+                    )
+                    .await;
+                count += 1;
+            }
+        }
+
+        Ok(count)
+    }
 }

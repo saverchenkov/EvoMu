@@ -17,11 +17,48 @@ pub enum NpcAiState {
     Attack,
 }
 
+/// Computes faction-specific damage profile (`feat:npc.npc-damage-types`).
+pub fn faction_damage_vector(faction_id: u32, total_dps: f64) -> DamageVector {
+    match faction_id {
+        500010 | 500001 => {
+            // Guristas / Caldari: 70% Kinetic, 30% Thermal
+            DamageVector::new(0.0, total_dps * 0.30, total_dps * 0.70, 0.0)
+        }
+        500012 | 500019 | 500003 => {
+            // Blood Raiders / Sansha's Nation / Amarr: 60% EM, 40% Thermal
+            DamageVector::new(total_dps * 0.60, total_dps * 0.40, 0.0, 0.0)
+        }
+        500020 | 500004 => {
+            // Serpentis / Gallente: 60% Thermal, 40% Kinetic
+            DamageVector::new(0.0, total_dps * 0.60, total_dps * 0.40, 0.0)
+        }
+        500011 | 500002 => {
+            // Angel Cartel / Minmatar: 60% Explosive, 30% Kinetic, 10% Thermal
+            DamageVector::new(0.0, total_dps * 0.10, total_dps * 0.30, total_dps * 0.60)
+        }
+        _ => {
+            let q = total_dps * 0.25;
+            DamageVector::new(q, q, q, q)
+        }
+    }
+}
+
+/// Computes character security status gain from destroying an NPC pirate (`feat:crimewatch.sec-status-gain`).
+pub fn compute_sec_status_gain(current_sec: f64, bounty: f64) -> f64 {
+    if current_sec >= 5.0 || bounty <= 0.0 {
+        return 0.0;
+    }
+    let headroom = (5.0 - current_sec).max(0.0);
+    let scale = (bounty / 500_000.0).clamp(0.01, 0.10);
+    (headroom * 0.01 * scale).clamp(0.001, 0.5)
+}
+
 /// In-memory runtime tracking for an active NPC combat entity in a solar system.
 #[derive(Debug, Clone)]
 pub struct NpcCombatEntity {
     pub ball_id: i64,
     pub type_id: u32,
+    pub faction_id: u32,
     pub state: NpcAiState,
     pub spawn_group_id: u32,
     pub spawn_pos: DVec3,
@@ -30,6 +67,7 @@ pub struct NpcCombatEntity {
     pub optimal_range: f64,
     pub orbit_range: f64,
     pub base_dps: f64,
+    pub damage_vector: DamageVector,
     pub last_attack_tick: u64,
     pub has_shield_rep: bool,
     pub has_armor_rep: bool,
@@ -115,9 +153,13 @@ impl NpcSpawnManager {
             let combat_state = ctx.build_type_combat_state(npc_type_id);
             let _ = sys_handle.spawn_ball_with_combat(ball, combat_state).await;
 
+            let faction_id = spawn_group.faction_id;
+            let damage_vector = faction_damage_vector(faction_id, base_dps);
+
             let entity = NpcCombatEntity {
                 ball_id,
                 type_id: npc_type_id,
+                faction_id,
                 state: NpcAiState::Idle,
                 spawn_group_id,
                 spawn_pos: entity_pos,
@@ -126,6 +168,7 @@ impl NpcSpawnManager {
                 optimal_range: opt_range,
                 orbit_range: orb_range,
                 base_dps,
+                damage_vector,
                 last_attack_tick: 0,
                 has_shield_rep: true,
                 has_armor_rep: true,
@@ -136,6 +179,47 @@ impl NpcSpawnManager {
         }
 
         Ok(spawned_ball_ids)
+    }
+
+    /// Spawns belt rats at asteroid belts in a solar system based on system security and region (`feat:npc.belt-rats`).
+    pub async fn spawn_belt_rats_for_system(
+        &mut self,
+        ctx: &ServerContext,
+        sys_id: u32,
+    ) -> Result<Vec<i64>, String> {
+        let mut belt_positions: Vec<DVec3> = ctx
+            .sde
+            .celestials_in_system(sys_id)
+            .into_iter()
+            .filter(|c| c.group_id == 9) // Asteroid Belt
+            .map(|c| c.position)
+            .collect();
+
+        if belt_positions.is_empty() {
+            belt_positions.push(DVec3::new(100_000.0, 0.0, 50_000.0));
+        }
+
+        let mut candidate_groups: Vec<u32> = ctx
+            .sde
+            .npc_spawn_groups
+            .keys()
+            .copied()
+            .collect();
+        candidate_groups.sort_unstable();
+
+        if candidate_groups.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut all_spawned = Vec::new();
+        for (idx, &belt_pos) in belt_positions.iter().enumerate() {
+            let group_id = candidate_groups[idx % candidate_groups.len()];
+            if let Ok(spawned) = self.spawn_group(ctx, sys_id, group_id, belt_pos).await {
+                all_spawned.extend(spawned);
+            }
+        }
+
+        Ok(all_spawned)
     }
 
     /// Evaluates the NPC AI state machine for all active NPC entities in the solar system:
@@ -213,13 +297,7 @@ impl NpcSpawnManager {
                             entity.state = NpcAiState::Attack;
                             if current_tick >= entity.last_attack_tick.saturating_add(2) {
                                 entity.last_attack_tick = current_tick;
-                                let quarter_dmg = entity.base_dps * 0.5;
-                                let dmg = DamageVector {
-                                    em: quarter_dmg * 0.25,
-                                    thermal: quarter_dmg * 0.35,
-                                    kinetic: quarter_dmg * 0.30,
-                                    explosive: quarter_dmg * 0.10,
-                                };
+                                let dmg = entity.damage_vector.scaled(0.5);
                                 let _ = sys_handle.apply_damage(target_id, dmg).await;
                             }
                         }
@@ -244,7 +322,7 @@ impl NpcSpawnManager {
     }
 
     /// Handles death of an NPC: credits dynamic bounty based on `ENTITY_KILL_BOUNTY`,
-    /// spawns a wreck, records a killmail with the exact bounty value, and updates respawn timers.
+    /// spawns a wreck with loot drops, raises killer's security status, records a killmail with the exact bounty value, and updates respawn timers.
     pub fn handle_npc_destroyed(
         &mut self,
         ctx: &ServerContext,
@@ -269,9 +347,11 @@ impl NpcSpawnManager {
         ctx.db.try_with_mut_snapshot(|snap| {
             let bounty_cents = IskCents::from_f64_isk(bounty);
 
-            // Credit dynamic bounty to killer's wallet
+            // Credit dynamic bounty to killer's wallet and increase security status (feat:crimewatch.sec-status-gain)
             if let Some(ch) = snap.characters.get_mut(&killer_char_id) {
                 ch.balance = ch.balance.checked_add(bounty_cents).unwrap_or(ch.balance);
+                let gain = compute_sec_status_gain(ch.security_status, bounty);
+                ch.security_status = (ch.security_status + gain).min(5.0);
             }
 
             // Wallet journal entry
@@ -326,6 +406,38 @@ impl NpcSpawnManager {
                     blueprint_runs_remaining: None,
                 },
             );
+
+            // Populate NPC loot table drops inside the wreck item (feat:npc.npc-loot)
+            let ammo_type_id = match entity.faction_id {
+                500010 | 500001 => 204, // Scourge Heavy Missile
+                500012 | 500019 | 500003 => 178, // Radio S
+                500020 | 500004 => 230, // Antimatter Charge S
+                500011 | 500002 => 213, // Phased Plasma S
+                _ => 212, // Iron Charge S
+            };
+            let loot_drops = [(15331, 10), (ammo_type_id, 100)];
+            for &(lid_type, lid_qty) in &loot_drops {
+                snap.next_entity_id += 1;
+                let lid = snap.next_entity_id;
+                snap.items.insert(
+                    lid,
+                    InventoryItemRecord {
+                        item_id: lid,
+                        type_id: lid_type,
+                        owner_id: killer_char_id,
+                        location_id: wreck_id,
+                        flag: InventoryFlag::Cargo,
+                        quantity: lid_qty,
+                        singleton: false,
+                        version: 1,
+                        dynamic_attributes: HashMap::new(),
+                        source_mutaplasmid_id: None,
+                        insured_payout_isk: 0.0,
+                        is_blueprint_copy: false,
+                        blueprint_runs_remaining: None,
+                    },
+                );
+            }
 
             Ok::<_, String>(bounty)
         })

@@ -10,6 +10,79 @@ use eve_destiny::{Ball, MovementMode};
 use glam::DVec3;
 use std::collections::HashMap;
 
+/// Computes character security status loss from criminal actions (`feat:crimewatch.sec-status-loss`).
+pub fn compute_sec_status_loss(current_sec: f64, is_pod: bool, sys_sec: f64) -> f64 {
+    if current_sec <= -10.0 {
+        return 0.0;
+    }
+    let base_penalty = if is_pod { 2.0 } else { 0.5 };
+    let sec_scale = (sys_sec.max(0.0) + 1.0) * 0.5;
+    let distance_to_min = (current_sec - (-10.0)).max(0.0);
+    (base_penalty + distance_to_min * 0.02 * sec_scale).max(base_penalty)
+}
+
+/// Individual combat aggression record tracking who aggressed whom (`feat:combat.aggression-tracking`).
+#[derive(Debug, Clone)]
+pub struct AggressionRecord {
+    pub aggressor_char_id: i64,
+    pub victim_char_id: i64,
+    pub system_id: u32,
+    pub started_unix: u64,
+    pub expires_unix: u64,
+    pub is_legal: bool,
+    pub is_pod: bool,
+}
+
+/// Aggression manager tracking PvP engagements between pilots (`feat:combat.aggression-tracking`).
+#[derive(Debug, Default, Clone)]
+pub struct AggressionManager {
+    pub records: HashMap<(i64, i64), AggressionRecord>,
+}
+
+impl AggressionManager {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn record_aggression(
+        &mut self,
+        aggressor: i64,
+        victim: i64,
+        system_id: u32,
+        is_legal: bool,
+        is_pod: bool,
+        now_unix: u64,
+    ) -> AggressionRecord {
+        let record = AggressionRecord {
+            aggressor_char_id: aggressor,
+            victim_char_id: victim,
+            system_id,
+            started_unix: now_unix,
+            expires_unix: now_unix.saturating_add(900),
+            is_legal,
+            is_pod,
+        };
+        self.records.insert((aggressor, victim), record.clone());
+        record
+    }
+
+    pub fn get_aggression(&self, aggressor: i64, victim: i64, now_unix: u64) -> Option<&AggressionRecord> {
+        self.records.get(&(aggressor, victim)).filter(|r| r.expires_unix > now_unix)
+    }
+
+    pub fn is_aggressor_against(&self, aggressor: i64, victim: i64, now_unix: u64) -> bool {
+        self.get_aggression(aggressor, victim, now_unix).is_some()
+    }
+
+    pub fn list_active_aggressors_for_victim(&self, victim: i64, now_unix: u64) -> Vec<i64> {
+        self.records
+            .values()
+            .filter(|r| r.victim_char_id == victim && r.expires_unix > now_unix)
+            .map(|r| r.aggressor_char_id)
+            .collect()
+    }
+}
+
 /// CrimeWatch timers and flags for a single character.
 #[derive(Debug, Clone, Default)]
 pub struct CharacterCrimeWatchState {
@@ -44,10 +117,11 @@ impl CharacterCrimeWatchState {
     }
 }
 
-/// System-wide CrimeWatch director managing timers, legality evaluations, and CONCORD spawns.
+/// System-wide CrimeWatch director managing timers, legality evaluations, aggression tracking, and CONCORD spawns.
 #[derive(Debug, Default)]
 pub struct CrimeWatchDirector {
     pub states: HashMap<i64, CharacterCrimeWatchState>,
+    pub aggression_mgr: AggressionManager,
 }
 
 impl CrimeWatchDirector {
@@ -84,6 +158,15 @@ impl CrimeWatchDirector {
         is_legal: bool,
         now_unix: u64,
     ) -> AggressionEvaluation {
+        self.aggression_mgr.record_aggression(
+            character_id,
+            victim_char_id,
+            sys_id,
+            is_legal,
+            false,
+            now_unix,
+        );
+
         let st = self.get_or_create(character_id);
         st.weapon_timer_until_unix = now_unix.saturating_add(60);
         st.pvp_timer_until_unix = now_unix.saturating_add(900);
@@ -183,7 +266,8 @@ impl CrimeWatchDirector {
             // 3. Apply character security status penalty & grant 30-day Kill Right to victim
             let kill_right_id = ctx.db.with_mut_snapshot(|snap| {
                 if let Some(crim) = snap.characters.get_mut(&criminal_char_id) {
-                    crim.security_status = (crim.security_status - 0.5).max(-10.0);
+                    let loss = compute_sec_status_loss(crim.security_status, false, 1.0);
+                    crim.security_status = (crim.security_status - loss).max(-10.0);
                 }
                 snap.next_entity_id += 1;
                 let kr_id = snap.next_entity_id;
