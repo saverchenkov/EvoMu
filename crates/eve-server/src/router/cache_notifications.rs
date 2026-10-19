@@ -679,6 +679,70 @@ impl ServerContext {
         (pkt, marshaled)
     }
 
+    /// Constructs a `MachoPacket` (`CallRsp` = `7`) and encodes it into binary `eveMarshal` wire bytes (`Z-1`).
+    pub fn build_macho_call_response_packet(
+        source_service: Option<&str>,
+        dest_client_id: u64,
+        call_id: u64,
+        user_id: Option<u64>,
+        value: PyRep,
+    ) -> (MachoPacket, Vec<u8>) {
+        let pkt = MachoPacket {
+            packet_type: MachoPacketType::CallRsp,
+            source: MachoAddress::Node {
+                node_id: 888_444,
+                service: source_service.map(str::to_string),
+                call_id,
+            },
+            destination: MachoAddress::Client {
+                client_id: dest_client_id,
+                call_id,
+                service: None,
+            },
+            user_id,
+            payload: PyRep::Tuple(vec![PyRep::SubStream(Box::new(value))]),
+            named_payload: HashMap::new(),
+        };
+        let marshaled = marshal::encode(&pkt.to_pyrep());
+        (pkt, marshaled)
+    }
+
+    /// Constructs a `MachoPacket` (`ErrorResponse` = `15`) and encodes it into binary `eveMarshal` wire bytes (`Z-1`).
+    pub fn build_macho_error_response_packet(
+        source_service: Option<&str>,
+        dest_client_id: u64,
+        call_id: u64,
+        user_id: Option<u64>,
+        error_code: &str,
+        error_message: &str,
+    ) -> (MachoPacket, Vec<u8>) {
+        let pkt = MachoPacket {
+            packet_type: MachoPacketType::ErrorResponse,
+            source: MachoAddress::Node {
+                node_id: 888_444,
+                service: source_service.map(str::to_string),
+                call_id,
+            },
+            destination: MachoAddress::Client {
+                client_id: dest_client_id,
+                call_id,
+                service: None,
+            },
+            user_id,
+            payload: PyRep::Tuple(vec![
+                PyRep::Integer(MachoPacketType::CallReq as i64),
+                PyRep::Integer(1),
+                PyRep::Tuple(vec![PyRep::SubStream(Box::new(PyRep::keyval([
+                    ("code", PyRep::String(error_code.to_string())),
+                    ("message", PyRep::String(error_message.to_string())),
+                ])))]),
+            ]),
+            named_payload: HashMap::new(),
+        };
+        let marshaled = marshal::encode(&pkt.to_pyrep());
+        (pkt, marshaled)
+    }
+
     /// Emits a binary-marshaled `MachoPacket` notification to all online recipients matching `target` (`P-5`, `R51-P1-3`).
     pub fn notify(
         &self,
@@ -848,6 +912,150 @@ impl ServerContext {
             ],
         );
         rec
+    }
+
+    /// Emits an `OnDamageStateChange` notification (`itemID`, `(shield, armor, structure)`) (`Z-2`).
+    pub fn notify_damage_state_change(
+        &self,
+        target: NotificationTarget,
+        item_id: i64,
+        shield: f64,
+        armor: f64,
+        structure: f64,
+    ) -> Vec<PendingMachoNotification> {
+        self.notify(
+            target,
+            "OnDamageStateChange",
+            "itemid",
+            vec![
+                PyRep::Integer(item_id),
+                PyRep::Tuple(vec![
+                    PyRep::Real(shield),
+                    PyRep::Real(armor),
+                    PyRep::Real(structure),
+                ]),
+            ],
+        )
+    }
+
+    /// Emits an `OnGodmaShipEffect` notification for active module cycle events (`Z-2`).
+    pub fn notify_godma_ship_effect(
+        &self,
+        target: NotificationTarget,
+        item_id: i64,
+        effect_id: i32,
+        active: bool,
+        duration_ms: i64,
+        repeat: i32,
+    ) -> Vec<PendingMachoNotification> {
+        let now_ticks = self.now_blueos_filetime_ticks();
+        let flag = if active { 1 } else { 0 };
+        self.notify(
+            target,
+            "OnGodmaShipEffect",
+            "charid",
+            vec![
+                PyRep::Integer(item_id),
+                PyRep::Integer(effect_id as i64),
+                PyRep::Integer(now_ticks),
+                PyRep::Integer(flag),
+                PyRep::Integer(flag),
+                PyRep::Tuple(vec![
+                    PyRep::Integer(item_id),
+                    PyRep::Integer(item_id),
+                    PyRep::Integer(effect_id as i64),
+                ]),
+                PyRep::Integer(now_ticks),
+                PyRep::Integer(duration_ms),
+                PyRep::Integer(repeat as i64),
+                PyRep::Integer(0),
+                PyRep::None,
+            ],
+        )
+    }
+
+    /// Emits an `OnFleetBroadcast` notification (`broadcastName`, `senderID`, `targetID`, `fleetID`) (`Z-2`).
+    pub fn notify_fleet_broadcast(
+        &self,
+        fleet_id: i64,
+        broadcast_name: &str,
+        sender_id: i64,
+        target_id: i64,
+    ) -> Vec<PendingMachoNotification> {
+        self.notify(
+            NotificationTarget::Fleet(fleet_id),
+            "OnFleetBroadcast",
+            "fleetid",
+            vec![
+                PyRep::String(broadcast_name.to_string()),
+                PyRep::Integer(sender_id),
+                PyRep::Integer(target_id),
+                PyRep::Integer(fleet_id),
+            ],
+        )
+    }
+
+    /// Emits an `OnLSC` chat message notification (`channelID`, `senderID`, `text`) (`Z-2`).
+    pub fn notify_lsc_message(
+        &self,
+        target: NotificationTarget,
+        channel_id: &str,
+        sender_id: i64,
+        text: &str,
+    ) -> Vec<PendingMachoNotification> {
+        self.notify(
+            target,
+            "OnLSC",
+            "channelid",
+            vec![
+                PyRep::String(channel_id.to_string()),
+                PyRep::Integer(sender_id),
+                PyRep::String(text.to_string()),
+            ],
+        )
+    }
+
+    /// Emits an `OnWarpToAsteroidBelt` notification (`charID`, `beltID`) (`Z-2`).
+    pub fn notify_warp_to_asteroid_belt(
+        &self,
+        char_id: i64,
+        belt_id: i64,
+    ) -> Vec<PendingMachoNotification> {
+        self.notify(
+            NotificationTarget::Character(char_id),
+            "OnWarpToAsteroidBelt",
+            "charid",
+            vec![PyRep::Integer(char_id), PyRep::Integer(belt_id)],
+        )
+    }
+
+    /// Emits an `OnAsteroidTerminated` notification (`asteroidID`) to the solar system (`Z-2`).
+    pub fn notify_asteroid_terminated(
+        &self,
+        sys_id: u32,
+        asteroid_id: i64,
+    ) -> Vec<PendingMachoNotification> {
+        self.notify(
+            NotificationTarget::SolarSystem(sys_id),
+            "OnAsteroidTerminated",
+            "solarsystemid",
+            vec![PyRep::Integer(asteroid_id)],
+        )
+    }
+
+    /// Emits an `OnMiningLedgerGraphSettingChanged` notification (`settingKey`, `settingValue`) (`Z-2`).
+    pub fn notify_mining_ledger_graph_setting_changed(
+        &self,
+        char_id: i64,
+        setting_key: &str,
+        setting_value: PyRep,
+    ) -> Vec<PendingMachoNotification> {
+        self.notify(
+            NotificationTarget::Character(char_id),
+            "OnMiningLedgerGraphSettingChanged",
+            "charid",
+            vec![PyRep::String(setting_key.to_string()), setting_value],
+        )
     }
 
     /// Synchronizes local chat membership for a character when entering or changing solar systems (SO-3).
