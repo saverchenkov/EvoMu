@@ -257,7 +257,152 @@ pub async fn handle(
     _kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
-        ("agentMgr", "RequestMission") | ("missionMgr", "RequestMission") => {
+        ("agentMgr", "GetAgents")
+        | ("agentFinder", "GetAgents")
+        | ("agentMgr", "GetAgentList") => {
+            let caller_char = session.character_id;
+            let standings = caller_char
+                .and_then(|cid| {
+                    ctx.db
+                        .with_snapshot(|snap| snap.characters.get(&cid).map(|c| c.standings.clone()))
+                })
+                .unwrap_or_default();
+
+            let filter_level = args
+                .first()
+                .and_then(|a| a.as_i64())
+                .map(|v| v as u8)
+                .or_else(|| _kwargs.get("level").and_then(|v| v.as_i64()).map(|v| v as u8));
+            let filter_division = args
+                .get(1)
+                .and_then(|a| a.as_i64())
+                .map(|v| v as u32)
+                .or_else(|| {
+                    _kwargs
+                        .get("divisionID")
+                        .or_else(|| _kwargs.get("division"))
+                        .and_then(|v| v.as_i64())
+                        .map(|v| v as u32)
+                });
+            let filter_faction = args
+                .get(2)
+                .and_then(|a| a.as_i64())
+                .or_else(|| {
+                    _kwargs
+                        .get("factionID")
+                        .or_else(|| _kwargs.get("faction"))
+                        .and_then(|v| v.as_i64())
+                });
+            let filter_corp = args
+                .get(3)
+                .and_then(|a| a.as_i64())
+                .or_else(|| {
+                    _kwargs
+                        .get("corporationID")
+                        .or_else(|| _kwargs.get("corporation"))
+                        .and_then(|v| v.as_i64())
+                });
+
+            let mut matching_agents: Vec<&eve_sde::AgentInfo> = ctx
+                .sde
+                .agents
+                .values()
+                .filter(|a| {
+                    if let Some(lvl) = filter_level {
+                        if a.level != lvl {
+                            return false;
+                        }
+                    }
+                    if let Some(div) = filter_division {
+                        if a.division_id != div {
+                            return false;
+                        }
+                    }
+                    if let Some(cid) = filter_corp {
+                        if a.corporation_id != cid {
+                            return false;
+                        }
+                    }
+                    if let Some(fid) = filter_faction {
+                        let corp_faction = ctx
+                            .sde
+                            .npc_corporations
+                            .get(&a.corporation_id)
+                            .and_then(|c| c.faction_id)
+                            .map(|f| f as i64);
+                        if corp_faction != Some(fid) {
+                            return false;
+                        }
+                    }
+                    true
+                })
+                .collect();
+
+            matching_agents.sort_by_key(|a| a.agent_id);
+
+            let rows: Vec<Vec<PyRep>> = matching_agents
+                .into_iter()
+                .map(|a| {
+                    let corp_faction = ctx
+                        .sde
+                        .npc_corporations
+                        .get(&a.corporation_id)
+                        .and_then(|c| c.faction_id)
+                        .map(|f| f as i64);
+
+                    let has_access = if a.level <= 1 {
+                        true
+                    } else {
+                        let req_standing = ((a.level as f64) - 1.0) * 2.0 - 1.0;
+                        let agent_st = standings.get(&a.agent_id).copied();
+                        let corp_st = standings.get(&a.corporation_id).copied();
+                        let fac_st = corp_faction.and_then(|fid| standings.get(&fid).copied());
+                        let max_st = [agent_st, corp_st, fac_st]
+                            .into_iter()
+                            .flatten()
+                            .fold(0.0_f64, f64::max);
+                        max_st >= req_standing
+                    };
+
+                    vec![
+                        PyRep::Integer(a.agent_id),
+                        PyRep::Integer(a.agent_type_id as i64),
+                        PyRep::Integer(a.division_id as i64),
+                        PyRep::Integer(a.corporation_id),
+                        corp_faction.map(PyRep::Integer).unwrap_or(PyRep::None),
+                        a.solar_system_id
+                            .map(|s| PyRep::Integer(s as i64))
+                            .unwrap_or(PyRep::None),
+                        a.station_id.map(PyRep::Integer).unwrap_or(PyRep::None),
+                        PyRep::Integer(a.level as i64),
+                        PyRep::Integer(20), // Standard agent quality post-Incursion
+                        PyRep::Bool(has_access),
+                    ]
+                })
+                .collect();
+
+            Some(Ok(PyRep::rowset(
+                vec![
+                    "agentID",
+                    "agentTypeID",
+                    "divisionID",
+                    "corporationID",
+                    "factionID",
+                    "solarSystemID",
+                    "stationID",
+                    "level",
+                    "quality",
+                    "hasAccess",
+                ],
+                rows,
+            )))
+        }
+
+        ("agentMgr", "RequestMission")
+        | ("missionMgr", "RequestMission")
+        | ("agentMgr", "StartConversation")
+        | ("agentMgr", "GetOffer")
+        | ("agentConversation", "StartConversation") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -439,12 +584,46 @@ pub async fn handle(
             });
 
             match res {
-                Ok((mission_id, title)) => Some(Ok(PyRep::keyval([
-                    ("missionID", PyRep::Integer(mission_id as i64)),
-                    ("agentID", PyRep::Integer(agent_id)),
-                    ("title", PyRep::String(title)),
-                    ("state", PyRep::String("Offered".into())),
-                ]))),
+                Ok((mission_id, title)) => {
+                    let tmpl = ctx.sde.missions.get(&mission_id);
+                    let briefing = tmpl
+                        .map(|t| {
+                            format!(
+                                "Agent {} operation: {}. Execute objectives in system {} and report back.",
+                                agent_id, t.title, sys_id
+                            )
+                        })
+                        .unwrap_or_else(|| format!("Mission assignment {mission_id} for agent {agent_id}."));
+                    let is_mining = tmpl
+                        .map(|t| {
+                            t.title.to_lowercase().contains("mining")
+                                || t.content_template
+                                    .as_deref()
+                                    .unwrap_or_default()
+                                    .contains("BasicMining")
+                        })
+                        .unwrap_or(false);
+                    let objectives = if is_mining {
+                        "Mine 500 units of Veldspar and deliver to the agent station hangar."
+                    } else {
+                        "Fly to encounter location, neutralize hostile pirate vessel, and report back."
+                    };
+                    let now = ctx.now_unix();
+                    let expiry_unix = now + 604_800; // 7 days offer expiry
+
+                    Some(Ok(PyRep::keyval([
+                        ("missionID", PyRep::Integer(mission_id as i64)),
+                        ("agentID", PyRep::Integer(agent_id)),
+                        ("title", PyRep::String(title)),
+                        ("state", PyRep::String("Offered".into())),
+                        ("briefing", PyRep::String(briefing)),
+                        ("objectives", PyRep::String(objectives.into())),
+                        ("iskReward", PyRep::Integer(250_000)),
+                        ("lpReward", PyRep::Integer(350)),
+                        ("bonusReward", PyRep::Integer(125_000)),
+                        ("expiryUnix", PyRep::Integer(expiry_unix as i64)),
+                    ])))
+                }
                 Err(e) => Some(Err(e)),
             }
         }
@@ -647,11 +826,44 @@ pub async fn handle(
                 let _ = handle.spawn_asteroid(ast_state, ast_ball).await;
             }
 
+            let now = ctx.now_unix();
+            let expiry_unix = now + 86400; // 24h
+            let bonus_expiry_unix = now + 14400; // 4h
+            let mission_title = ctx
+                .sde
+                .missions
+                .get(&mission_id)
+                .map(|m| m.title.clone())
+                .unwrap_or_else(|| format!("Mission {mission_id}"));
+
+            let bookmark_id = ctx.db.with_mut_snapshot(|snap| {
+                snap.next_entity_id += 1;
+                let bmid = snap.next_entity_id;
+                snap.bookmarks.insert(
+                    bmid,
+                    eve_db::BookmarkRecord {
+                        bookmark_id: bmid,
+                        owner_id: char_id,
+                        solar_system_id: sys_id,
+                        label: format!("Mission: {mission_title}"),
+                        x: 50_000.0,
+                        y: 0.0,
+                        z: 0.0,
+                        item_id: None,
+                        memo: "Mission Pocket Destination".into(),
+                    },
+                );
+                bmid
+            });
+
             Some(Ok(PyRep::keyval([
                 ("missionID", PyRep::Integer(mission_id as i64)),
                 ("state", PyRep::String("Accepted".into())),
                 ("dungeonID", PyRep::None),
                 ("currentRoomID", PyRep::Integer(1)),
+                ("bookmarkID", PyRep::Integer(bookmark_id)),
+                ("expiryUnix", PyRep::Integer(expiry_unix as i64)),
+                ("bonusExpiryUnix", PyRep::Integer(bonus_expiry_unix as i64)),
                 (
                     "spawnedNpcBallID",
                     npc_id_opt.map(PyRep::Integer).unwrap_or(PyRep::None),
@@ -659,7 +871,9 @@ pub async fn handle(
             ])))
         }
 
-        ("agentMgr", "RemoveOfferFromJournal") | ("agentMgr", "QuitMission") => {
+        ("agentMgr", "DeclineMission")
+        | ("agentMgr", "RemoveOfferFromJournal")
+        | ("agentMgr", "QuitMission") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -689,6 +903,9 @@ pub async fn handle(
                 let was_accepted = m.state == "Accepted";
                 let sys_id = m.solar_system_id;
                 let agent_id = m.agent_id;
+                let now = ctx.now_unix();
+                let mut standing_penalty_applied = false;
+
                 m.state = if was_accepted {
                     "Quit".into()
                 } else {
@@ -696,48 +913,85 @@ pub async fn handle(
                 };
                 m.npcs_remaining = 0;
                 let ball_ids = std::mem::take(&mut m.spawned_npc_ball_ids);
-                if was_accepted && ctx.sde.missions.contains_key(&mission_id) {
-                    let corp_id = ctx
-                        .sde
-                        .agents
-                        .get(&agent_id)
-                        .map(|a| a.corporation_id)
-                        .unwrap_or_else(|| {
-                            resolve_agent_and_corp_for_system(
-                                ctx,
-                                char_id,
-                                sys_id,
-                                session.station_id,
-                                false,
-                            )
-                            .1
-                        });
-                    let mut actual_delta = None;
-                    if let Some(ch) = snap.characters.get_mut(&char_id) {
-                        let cur = ch.standings.get(&corp_id).copied().unwrap_or(0.0);
-                        let next = (cur - 0.1).max(-10.0);
-                        ch.standings.insert(corp_id, next);
-                        actual_delta = Some(if cur - 0.1 >= -10.0 { -0.1 } else { -10.0 - cur });
+
+                let corp_id = ctx
+                    .sde
+                    .agents
+                    .get(&agent_id)
+                    .map(|a| a.corporation_id)
+                    .unwrap_or_else(|| {
+                        resolve_agent_and_corp_for_system(
+                            ctx,
+                            char_id,
+                            sys_id,
+                            session.station_id,
+                            false,
+                        )
+                        .1
+                    });
+
+                if was_accepted {
+                    if ctx.sde.missions.contains_key(&mission_id) {
+                        let mut actual_delta = None;
+                        if let Some(ch) = snap.characters.get_mut(&char_id) {
+                            let cur = ch.standings.get(&corp_id).copied().unwrap_or(0.0);
+                            let next = (cur - 0.1).max(-10.0);
+                            ch.standings.insert(corp_id, next);
+                            actual_delta = Some(if cur - 0.1 >= -10.0 { -0.1 } else { -10.0 - cur });
+                        }
+                        if let Some(delta) = actual_delta {
+                            snap.next_entity_id += 1;
+                            let ev_id = snap.next_entity_id;
+                            snap.standing_transactions
+                                .entry(char_id)
+                                .or_default()
+                                .push(StandingTransactionRecord {
+                                    event_id: ev_id,
+                                    from_id: corp_id,
+                                    to_id: char_id,
+                                    modification: delta,
+                                    event_type_id: 83,
+                                });
+                        }
+                        standing_penalty_applied = true;
                     }
-                    if let Some(delta) = actual_delta {
-                        snap.next_entity_id += 1;
-                        let ev_id = snap.next_entity_id;
-                        snap.standing_transactions
-                            .entry(char_id)
-                            .or_default()
-                            .push(StandingTransactionRecord {
-                                event_id: ev_id,
-                                from_id: corp_id,
-                                to_id: char_id,
-                                modification: delta,
-                                event_type_id: 83,
-                            });
+                    // Clean up mission bookmarks
+                    snap.bookmarks.retain(|_, b| !(b.owner_id == char_id && b.solar_system_id == sys_id && b.memo.contains("Mission Pocket")));
+                } else {
+                    // Declined offer: check repeated decline within 4 hours (14,400s)
+                    let last_decline = snap.last_mission_decline_times.get(&char_id).copied().unwrap_or(0);
+                    if now.saturating_sub(last_decline) < 14_400 {
+                        // Repeated decline within 4h incurs standing penalty
+                        let mut actual_delta = None;
+                        if let Some(ch) = snap.characters.get_mut(&char_id) {
+                            let cur = ch.standings.get(&corp_id).copied().unwrap_or(0.0);
+                            let next = (cur - 0.05).max(-10.0);
+                            ch.standings.insert(corp_id, next);
+                            actual_delta = Some(if cur - 0.05 >= -10.0 { -0.05 } else { -10.0 - cur });
+                        }
+                        if let Some(delta) = actual_delta {
+                            snap.next_entity_id += 1;
+                            let ev_id = snap.next_entity_id;
+                            snap.standing_transactions
+                                .entry(char_id)
+                                .or_default()
+                                .push(StandingTransactionRecord {
+                                    event_id: ev_id,
+                                    from_id: corp_id,
+                                    to_id: char_id,
+                                    modification: delta,
+                                    event_type_id: 83,
+                                });
+                        }
+                        standing_penalty_applied = true;
                     }
+                    snap.last_mission_decline_times.insert(char_id, now);
                 }
-                Ok((sys_id, ball_ids, m.state.clone()))
+
+                Ok((sys_id, ball_ids, m.state.clone(), standing_penalty_applied, was_accepted))
             });
             match res {
-                Ok((sys_id, ball_ids, new_state)) => {
+                Ok((sys_id, ball_ids, new_state, penalty_applied, was_accepted)) => {
                     if sys_id > 0 && !ball_ids.is_empty() {
                         let handle = ctx.systems.get_or_spawn(sys_id);
                         for bid in ball_ids {
@@ -747,6 +1001,8 @@ pub async fn handle(
                     Some(Ok(PyRep::keyval([
                         ("missionID", PyRep::Integer(mission_id as i64)),
                         ("state", PyRep::String(new_state)),
+                        ("standingPenaltyApplied", PyRep::Bool(penalty_applied)),
+                        ("dungeonCleaned", PyRep::Bool(was_accepted)),
                     ])))
                 }
                 Err(e) => Some(Err(e)),

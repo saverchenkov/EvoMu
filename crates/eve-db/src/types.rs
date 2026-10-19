@@ -888,6 +888,21 @@ pub struct CosmicSignatureRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CosmicAnomalyRecord {
+    pub anomaly_id: String,
+    pub solar_system_id: SolarSystemId,
+    pub name: String,
+    pub anomaly_type: String, // "Ore", "Combat"
+    pub position: [f64; 3],
+    pub signal_strength: f64, // 1.0 (always visible without probing)
+    pub ore_types: Vec<TypeId>,
+    pub remaining_volume: f64,
+    pub created_unix: u64,
+    pub lifetime_seconds: u64,
+    pub cleared: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AllianceRecord {
     pub alliance_id: i64,
     pub name: String,
@@ -1117,6 +1132,12 @@ pub struct WorldStateSnapshot {
     pub auto_moon_miners: HashMap<i64, AutoMoonMinerRecord>,
     #[serde(default)]
     pub observer_mining_ledger: HashMap<i64, Vec<ObserverMiningRecord>>,
+    #[serde(default)]
+    pub cosmic_anomalies: HashMap<SolarSystemId, Vec<CosmicAnomalyRecord>>,
+    #[serde(default)]
+    pub sov_prospecting_levels: HashMap<SolarSystemId, u32>,
+    #[serde(default)]
+    pub last_mission_decline_times: HashMap<i64, u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

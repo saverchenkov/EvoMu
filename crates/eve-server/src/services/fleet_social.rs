@@ -1859,6 +1859,38 @@ pub async fn handle(
                             max_jump_mass_kg: 0.0,
                             collapsed: false,
                         },
+                        CosmicSignatureRecord {
+                            signature_id: format!("GAS-{}", 500 + (sys_id % 400)),
+                            solar_system_id: sys_id,
+                            sig_group: "Gas Site".into(),
+                            type_name: "Amber Cytoserocin Nebula".into(),
+                            position: [9.0 * AU_IN_METERS, -4.0 * AU_IN_METERS, 7.0 * AU_IN_METERS],
+                            signal_strength: 0.0,
+                            wormhole_type_id: None,
+                            destination_system_id: None,
+                            created_unix: now_unix,
+                            lifetime_seconds: 86_400,
+                            max_mass_kg: 0.0,
+                            remaining_mass_kg: 0.0,
+                            max_jump_mass_kg: 0.0,
+                            collapsed: false,
+                        },
+                        CosmicSignatureRecord {
+                            signature_id: format!("ORE-{}", 600 + (sys_id % 300)),
+                            solar_system_id: sys_id,
+                            sig_group: "Ore Site".into(),
+                            type_name: "Rare Ore Site (Jaspet & Hemorphite)".into(),
+                            position: [-11.0 * AU_IN_METERS, 6.0 * AU_IN_METERS, -13.0 * AU_IN_METERS],
+                            signal_strength: 0.0,
+                            wormhole_type_id: None,
+                            destination_system_id: None,
+                            created_unix: now_unix,
+                            lifetime_seconds: 86_400,
+                            max_mass_kg: 0.0,
+                            remaining_mass_kg: 0.0,
+                            max_jump_mass_kg: 0.0,
+                            collapsed: false,
+                        },
                     ]
                 });
                 Ok::<_, std::convert::Infallible>(list.clone())
@@ -2201,6 +2233,298 @@ pub async fn handle(
                     ])))
                 }
                 Err(e) => Some(Err(e)),
+            }
+        }
+
+        ("scanMgr", "GetGasSiteDetails") => {
+            let Some(sig_id) = args.first().and_then(|a| a.as_str()) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidArgument".into(),
+                    message: "GetGasSiteDetails requires signatureID".into(),
+                }));
+            };
+            let sys_id = session.solar_system_id.unwrap_or(30_000_142);
+            let site = ctx.db.with_snapshot(|snap| {
+                snap.cosmic_signatures.get(&sys_id).and_then(|sigs| {
+                    sigs.iter().find(|s| s.signature_id == sig_id && s.sig_group == "Gas Site").cloned()
+                })
+            });
+            let Some(sig) = site else {
+                return Some(Err(BridgeRpcError {
+                    code: "GasSiteNotFound".into(),
+                    message: format!("Gas site {sig_id} not found in system {sys_id}"),
+                }));
+            };
+
+            Some(Ok(PyRep::keyval([
+                ("signatureID", PyRep::String(sig.signature_id)),
+                ("gasTypeID", PyRep::Integer(25268)), // Amber Cytoserocin
+                ("gasName", PyRep::String("Amber Cytoserocin".into())),
+                ("cloudCount", PyRep::Integer(2)),
+                ("cloudUnits", PyRep::Integer(3_000)),
+                ("signalStrength", PyRep::Real(sig.signal_strength)),
+                ("npcDelaySeconds", PyRep::Integer(900)),
+                ("npcSpawned", PyRep::Bool(false)),
+            ])))
+        }
+
+        ("scanMgr", "GetOreSiteDetails") => {
+            let Some(sig_id) = args.first().and_then(|a| a.as_str()) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidArgument".into(),
+                    message: "GetOreSiteDetails requires signatureID".into(),
+                }));
+            };
+            let sys_id = session.solar_system_id.unwrap_or(30_000_142);
+            let site = ctx.db.with_snapshot(|snap| {
+                snap.cosmic_signatures.get(&sys_id).and_then(|sigs| {
+                    sigs.iter().find(|s| s.signature_id == sig_id && s.sig_group == "Ore Site").cloned()
+                })
+            });
+            let Some(sig) = site else {
+                return Some(Err(BridgeRpcError {
+                    code: "OreSiteNotFound".into(),
+                    message: format!("Ore site {sig_id} not found in system {sys_id}"),
+                }));
+            };
+
+            let rare_types = vec![PyRep::Integer(1226), PyRep::Integer(1231), PyRep::Integer(21)]; // Jaspet, Hemorphite, Hedbergite
+
+            Some(Ok(PyRep::keyval([
+                ("signatureID", PyRep::String(sig.signature_id)),
+                ("isRareSignature", PyRep::Bool(true)),
+                ("signalStrength", PyRep::Real(sig.signal_strength)),
+                ("rareOreTypes", PyRep::List(rare_types)),
+            ])))
+        }
+
+        ("scanMgr", "GetSystemAnomalies")
+        | ("scanMgr", "GetAnomalies")
+        | ("probeMgr", "GetSystemAnomalies") => {
+            let sys_id = args.first().and_then(|a| a.as_i64()).map(|v| v as u32).or(session.solar_system_id).unwrap_or(30_000_142);
+            let now = ctx.now_unix();
+
+            let anomalies = ctx.db.try_with_mut_snapshot(|snap| {
+                let list = snap.cosmic_anomalies.entry(sys_id).or_insert_with(|| {
+                    vec![
+                        eve_db::CosmicAnomalyRecord {
+                            anomaly_id: format!("ANO-{}", 101 + (sys_id % 400)),
+                            solar_system_id: sys_id,
+                            name: "Small Asteroid Cluster".into(),
+                            anomaly_type: "Ore".into(),
+                            position: [2.0 * AU_IN_METERS, 1.0 * AU_IN_METERS, 0.5 * AU_IN_METERS],
+                            signal_strength: 1.0,
+                            ore_types: vec![1230, 1228], // Veldspar, Scordite
+                            remaining_volume: 50_000.0,
+                            created_unix: now,
+                            lifetime_seconds: 86_400,
+                            cleared: false,
+                        },
+                        eve_db::CosmicAnomalyRecord {
+                            anomaly_id: format!("ANO-{}", 201 + (sys_id % 300)),
+                            solar_system_id: sys_id,
+                            name: "Medium Asteroid Cluster".into(),
+                            anomaly_type: "Ore".into(),
+                            position: [-4.0 * AU_IN_METERS, 3.0 * AU_IN_METERS, 1.5 * AU_IN_METERS],
+                            signal_strength: 1.0,
+                            ore_types: vec![1230, 1228, 1224], // Veldspar, Scordite, Pyroxeres
+                            remaining_volume: 120_000.0,
+                            created_unix: now,
+                            lifetime_seconds: 86_400,
+                            cleared: false,
+                        },
+                    ]
+                });
+                let active: Vec<eve_db::CosmicAnomalyRecord> = list.iter().filter(|a| !a.cleared).cloned().collect();
+                Ok::<_, std::convert::Infallible>(active)
+            }).unwrap();
+
+            let rows: Vec<Vec<PyRep>> = anomalies.into_iter().map(|a| {
+                let ores: Vec<PyRep> = a.ore_types.into_iter().map(|t| PyRep::Integer(t as i64)).collect();
+                vec![
+                    PyRep::String(a.anomaly_id),
+                    PyRep::String(a.name),
+                    PyRep::String(a.anomaly_type),
+                    PyRep::Integer(a.solar_system_id as i64),
+                    PyRep::Real(a.signal_strength),
+                    PyRep::List(ores),
+                    PyRep::Real(a.remaining_volume),
+                    PyRep::Bool(a.cleared),
+                ]
+            }).collect();
+
+            Some(Ok(PyRep::rowset(
+                vec![
+                    "anomalyID",
+                    "name",
+                    "anomalyType",
+                    "solarSystemID",
+                    "signalStrength",
+                    "oreTypes",
+                    "remainingVolume",
+                    "cleared",
+                ],
+                rows,
+            )))
+        }
+
+        ("scanMgr", "ClearAnomaly") => {
+            let Some(ano_id) = args.first().and_then(|a| a.as_str()) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidArgument".into(),
+                    message: "ClearAnomaly requires anomalyID".into(),
+                }));
+            };
+            let sys_id = session.solar_system_id.unwrap_or(30_000_142);
+            let cleared = ctx.db.with_mut_snapshot(|snap| {
+                if let Some(list) = snap.cosmic_anomalies.get_mut(&sys_id) {
+                    if let Some(a) = list.iter_mut().find(|a| a.anomaly_id == ano_id) {
+                        a.cleared = true;
+                        return true;
+                    }
+                }
+                false
+            });
+
+            Some(Ok(PyRep::keyval([
+                ("anomalyID", PyRep::String(ano_id.into())),
+                ("cleared", PyRep::Bool(cleared)),
+                ("despawned", PyRep::Bool(cleared)),
+            ])))
+        }
+
+        ("sovMgr", "InstallProspectingUpgrade") => {
+            let sys_id = args.first().and_then(|a| a.as_i64()).map(|v| v as u32).or(session.solar_system_id).unwrap_or(30_000_142);
+            let level = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1) as u32;
+            let now = ctx.now_unix();
+
+            let sites_spawned = ctx.db.with_mut_snapshot(|snap| {
+                snap.sov_prospecting_levels.insert(sys_id, level);
+                let list = snap.cosmic_anomalies.entry(sys_id).or_default();
+                let mut count = 0;
+                if level >= 1 && !list.iter().any(|a| a.name == "Enormous Asteroid Cluster") {
+                    list.push(eve_db::CosmicAnomalyRecord {
+                        anomaly_id: format!("SOV-ORE-{}", 701 + (sys_id % 200)),
+                        solar_system_id: sys_id,
+                        name: "Enormous Asteroid Cluster".into(),
+                        anomaly_type: "SovOre".into(),
+                        position: [6.0 * AU_IN_METERS, -2.0 * AU_IN_METERS, 3.0 * AU_IN_METERS],
+                        signal_strength: 1.0,
+                        ore_types: vec![19, 1229], // Spodumain, Gneiss
+                        remaining_volume: 500_000.0,
+                        created_unix: now,
+                        lifetime_seconds: 86_400 * 3,
+                        cleared: false,
+                    });
+                    count += 1;
+                }
+                if level >= 2 && !list.iter().any(|a| a.name == "Colossal Asteroid Cluster") {
+                    list.push(eve_db::CosmicAnomalyRecord {
+                        anomaly_id: format!("SOV-ORE-{}", 801 + (sys_id % 200)),
+                        solar_system_id: sys_id,
+                        name: "Colossal Asteroid Cluster".into(),
+                        anomaly_type: "SovOre".into(),
+                        position: [-7.0 * AU_IN_METERS, 5.0 * AU_IN_METERS, -4.0 * AU_IN_METERS],
+                        signal_strength: 1.0,
+                        ore_types: vec![19, 22, 1223], // Spodumain, Arkonor, Bistot
+                        remaining_volume: 1_200_000.0,
+                        created_unix: now,
+                        lifetime_seconds: 86_400 * 3,
+                        cleared: false,
+                    });
+                    count += 1;
+                }
+                count
+            });
+
+            Some(Ok(PyRep::keyval([
+                ("solarSystemID", PyRep::Integer(sys_id as i64)),
+                ("prospectingLevel", PyRep::Integer(level as i64)),
+                ("sitesSpawned", PyRep::Integer(sites_spawned)),
+            ])))
+        }
+
+        ("sovMgr", "GetSovOreSites") => {
+            let sys_id = args.first().and_then(|a| a.as_i64()).map(|v| v as u32).or(session.solar_system_id).unwrap_or(30_000_142);
+            let sites = ctx.db.with_snapshot(|snap| {
+                snap.cosmic_anomalies.get(&sys_id).map(|list| {
+                    list.iter().filter(|a| a.anomaly_type == "SovOre" && !a.cleared).cloned().collect::<Vec<_>>()
+                }).unwrap_or_default()
+            });
+
+            let rows: Vec<Vec<PyRep>> = sites.into_iter().map(|a| {
+                let ores: Vec<PyRep> = a.ore_types.into_iter().map(|t| PyRep::Integer(t as i64)).collect();
+                vec![
+                    PyRep::String(a.anomaly_id),
+                    PyRep::String(a.name),
+                    PyRep::Integer(a.solar_system_id as i64),
+                    PyRep::List(ores),
+                    PyRep::Real(a.remaining_volume),
+                ]
+            }).collect();
+
+            Some(Ok(PyRep::rowset(
+                vec!["siteID", "siteName", "solarSystemID", "oreTypes", "remainingVolume"],
+                rows,
+            )))
+        }
+
+        ("livingWorld", "GetMiningOps") | ("miningDirector", "GetBeltMiningOps") => {
+            let sys_id = args.first().and_then(|a| a.as_i64()).map(|v| v as u32).or(session.solar_system_id).unwrap_or(30_000_144);
+            let convoys = ctx.living_world.list_convoys();
+            let mining_ops: Vec<_> = convoys.into_iter().filter(|c| c.archetype == crate::living_world::NpcArchetype::MiningOp && c.current_system_id == sys_id).collect();
+
+            let rows: Vec<Vec<PyRep>> = mining_ops.into_iter().map(|c| {
+                vec![
+                    PyRep::Integer(c.convoy_id),
+                    PyRep::String("MiningOp".into()),
+                    PyRep::Integer(c.ship_type_id as i64), // Venture miner
+                    PyRep::Integer(648),                   // Badger hauler
+                    PyRep::Integer(c.current_system_id as i64),
+                    PyRep::Integer(c.cargo_type_id as i64),
+                    PyRep::Integer(c.cargo_quantity as i64),
+                    PyRep::Bool(c.destroyed),
+                ]
+            }).collect();
+
+            Some(Ok(PyRep::rowset(
+                vec![
+                    "convoyID",
+                    "archetype",
+                    "minerShipTypeID",
+                    "haulerShipTypeID",
+                    "systemID",
+                    "cargoTypeID",
+                    "cargoQuantity",
+                    "destroyed",
+                ],
+                rows,
+            )))
+        }
+
+        ("livingWorld", "StepMiningOp") | ("miningDirector", "StepMiningOp") => {
+            let Some(convoy_id) = args.first().and_then(|a| a.as_i64()) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidArgument".into(),
+                    message: "StepMiningOp requires convoyID".into(),
+                }));
+            };
+
+            match ctx.living_world.step_npc_mining_op(convoy_id, &ctx.systems, &ctx.db, &ctx.sde).await {
+                Ok(res) => Some(Ok(PyRep::keyval([
+                    ("convoyID", PyRep::Integer(res.convoy_id)),
+                    ("systemID", PyRep::Integer(res.system_id as i64)),
+                    ("asteroidID", PyRep::Integer(res.asteroid_id)),
+                    ("oreTypeID", PyRep::Integer(res.ore_type_id as i64)),
+                    ("minedUnits", PyRep::Integer(res.mined_units as i64)),
+                    ("remainingAsteroidUnits", PyRep::Integer(res.remaining_asteroid_units as i64)),
+                    ("convoyCargoUnits", PyRep::Integer(res.convoy_cargo_units as i64)),
+                    ("hauledToStation", PyRep::Bool(res.hauled_to_station)),
+                ]))),
+                Err(e) => Some(Err(BridgeRpcError {
+                    code: "NpcMiningOpFailed".into(),
+                    message: e,
+                })),
             }
         }
 

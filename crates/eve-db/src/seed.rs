@@ -455,6 +455,9 @@ impl WorldRepository {
             moon_extractions: HashMap::new(),
             auto_moon_miners: HashMap::new(),
             observer_mining_ledger: HashMap::new(),
+            cosmic_anomalies: HashMap::new(),
+            sov_prospecting_levels: HashMap::new(),
+            last_mission_decline_times: HashMap::new(),
         };
         let mut conn = rusqlite::Connection::open_in_memory()
             .expect("open in-memory SQLite connection for WorldRepository");

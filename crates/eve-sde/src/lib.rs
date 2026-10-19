@@ -209,6 +209,28 @@ pub struct InvType {
     pub default_attributes: HashMap<AttributeId, f64>,
 }
 
+/// Detailed static show-info metadata for an item type (`D-1`, `feat:ui.show-info-types`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TypeShowInfo {
+    pub type_id: TypeId,
+    pub name: String,
+    pub group_id: GroupId,
+    pub category_id: CategoryId,
+    pub mass: f64,
+    pub volume: f64,
+    pub capacity: f64,
+    pub portion_size: u64,
+    pub base_price: f64,
+    pub published: bool,
+    pub market_group_id: Option<u32>,
+    pub race_id: Option<u32>,
+    pub faction_id: Option<u32>,
+    pub variation_parent_type_id: Option<TypeId>,
+    pub variations: Vec<TypeId>,
+    pub default_attributes: HashMap<AttributeId, f64>,
+    pub effect_ids: Vec<EffectId>,
+}
+
 /// Static definition of a material output row from `res:/staticdata/typematerials.fsdbinary`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TypeMaterialEntry {
@@ -864,6 +886,82 @@ impl SdeRegistry {
             .get(&parent_type_id)
             .map(Vec::as_slice)
             .unwrap_or(&[])
+    }
+
+    /// Returns all published type IDs assigned to `market_group_id` (`D-1`, `feat:market.market-groups`).
+    pub fn types_in_market_group(&self, market_group_id: u32) -> Vec<TypeId> {
+        let mut list: Vec<TypeId> = self
+            .types
+            .values()
+            .filter(|t| t.published && t.market_group_id == Some(market_group_id))
+            .map(|t| t.type_id)
+            .collect();
+        list.sort_unstable();
+        list
+    }
+
+    /// Returns all published types that belong to any market group (`D-1`, `feat:market.market-groups`).
+    pub fn published_market_types(&self) -> Vec<TypeId> {
+        let mut list: Vec<TypeId> = self
+            .types
+            .values()
+            .filter(|t| t.published && t.market_group_id.is_some())
+            .map(|t| t.type_id)
+            .collect();
+        list.sort_unstable();
+        list
+    }
+
+    /// Returns child market groups of `parent_group_id` (`D-1`, `feat:market.market-groups`).
+    pub fn market_groups_for_parent(&self, parent_group_id: Option<u32>) -> Vec<&MarketGroupInfo> {
+        let mut list: Vec<&MarketGroupInfo> = self
+            .market_groups
+            .values()
+            .filter(|mg| mg.parent_group_id == parent_group_id)
+            .collect();
+        list.sort_by_key(|mg| mg.market_group_id);
+        list
+    }
+
+    /// Returns show-info metadata for a type, including its SDE attributes, variations, and grouping (`D-1`, `feat:ui.show-info-types`).
+    pub fn show_info_for_type(&self, type_id: TypeId) -> Option<TypeShowInfo> {
+        let t = self.types.get(&type_id)?;
+        let mut variations = Vec::new();
+        if let Some(parent) = t.variation_parent_type_id {
+            variations.push(parent);
+            for &v in self.variations_of(parent) {
+                if v != type_id && !variations.contains(&v) {
+                    variations.push(v);
+                }
+            }
+        } else {
+            for &v in self.variations_of(type_id) {
+                if !variations.contains(&v) {
+                    variations.push(v);
+                }
+            }
+        }
+        variations.sort_unstable();
+
+        Some(TypeShowInfo {
+            type_id: t.type_id,
+            name: t.name.clone(),
+            group_id: t.group_id,
+            category_id: t.category_id,
+            mass: t.mass,
+            volume: t.volume,
+            capacity: t.capacity,
+            portion_size: t.portion_size,
+            base_price: t.base_price,
+            published: t.published,
+            market_group_id: t.market_group_id,
+            race_id: t.race_id,
+            faction_id: t.faction_id,
+            variation_parent_type_id: t.variation_parent_type_id,
+            variations,
+            default_attributes: t.default_attributes.clone(),
+            effect_ids: t.effect_ids.clone(),
+        })
     }
 
     /// Opens an on-disk SQLite SDE database produced by `tools/sde-import` (`D-2`).
