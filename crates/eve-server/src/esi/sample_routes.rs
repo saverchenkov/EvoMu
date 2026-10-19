@@ -195,6 +195,10 @@ pub(crate) fn asset_location_flag_str(flag: InventoryFlag) -> Option<&'static st
         InventoryFlag::RigSlot1 => Some("RigSlot1"),
         InventoryFlag::RigSlot2 => Some("RigSlot2"),
         InventoryFlag::SubSystemSlot0 => Some("SubSystemSlot0"),
+        InventoryFlag::SubSystemSlot1 => Some("SubSystemSlot1"),
+        InventoryFlag::SubSystemSlot2 => Some("SubSystemSlot2"),
+        InventoryFlag::SubSystemSlot3 => Some("SubSystemSlot3"),
+        InventoryFlag::SubSystemSlot4 => Some("SubSystemSlot4"),
         InventoryFlag::FighterBay => Some("FighterBay"),
         InventoryFlag::Deliveries => Some("Deliveries"),
         InventoryFlag::SpecializedOreHold => Some("SpecializedOreHold"),
@@ -242,6 +246,10 @@ pub(crate) fn fitting_flag_str(flag: InventoryFlag) -> &'static str {
         InventoryFlag::RigSlot1 => "RigSlot1",
         InventoryFlag::RigSlot2 => "RigSlot2",
         InventoryFlag::SubSystemSlot0 => "SubSystemSlot0",
+        InventoryFlag::SubSystemSlot1 => "SubSystemSlot1",
+        InventoryFlag::SubSystemSlot2 => "SubSystemSlot2",
+        InventoryFlag::SubSystemSlot3 => "SubSystemSlot3",
+        InventoryFlag::SubSystemSlot4 => "SubSystemSlot4",
         _ => "Invalid",
     }
 }

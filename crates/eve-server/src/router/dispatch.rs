@@ -60,6 +60,38 @@ impl ServerContext {
         kwargs: &HashMap<String, PyRep>,
         caller_trace: Option<&str>,
     ) -> Result<PyRep, BridgeRpcError> {
+        let res = self
+            .dispatch_rpc_inner(
+                session,
+                service,
+                bound_id,
+                method,
+                args,
+                kwargs,
+                caller_trace,
+            )
+            .await;
+
+        if let Some(cid) = session.character_id {
+            for notif in self.drain_notifications_for_char(cid) {
+                session.push_notification(notif.event, notif.args);
+            }
+        }
+
+        res
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn dispatch_rpc_inner(
+        &self,
+        session: &mut SessionState,
+        service: &str,
+        bound_id: Option<u64>,
+        method: &str,
+        args: &[PyRep],
+        kwargs: &HashMap<String, PyRep>,
+        caller_trace: Option<&str>,
+    ) -> Result<PyRep, BridgeRpcError> {
         info!(
             session_id = session.session_id,
             user_id = ?session.user_id,

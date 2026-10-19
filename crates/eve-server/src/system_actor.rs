@@ -7,6 +7,7 @@ use eve_destiny::wire::{
 };
 use eve_destiny::{
     Ball, BallId, Ballpark, CombatState, DamageVector, DestinyEvent, MovementMode, SlimItemMeta,
+    TargetLock,
 };
 use eve_proto::PyRep;
 use eve_sde::{SdeRegistry, SolarSystemId};
@@ -57,6 +58,24 @@ pub struct TickBroadcast {
     pub events: Vec<DestinyEvent>,
     pub observer_events: BTreeMap<BallId, Vec<DestinyEvent>>,
     pub observer_updates_pyrep: BTreeMap<BallId, PyRep>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ActiveModuleCycle {
+    pub ship_id: BallId,
+    pub module_id: i64,
+    pub module_type_id: u32,
+    pub effect_name: String,
+    pub target_id: Option<BallId>,
+    pub repeat: i32,
+    pub duration_s: f64,
+    pub elapsed_s: f64,
+    pub cap_need_per_cycle: f64,
+    pub speed_boost_factor: f64,
+    pub original_max_velocity: Option<f64>,
+    pub linked_turrets: Vec<i64>,
+    pub ammo_type_id: Option<u32>,
+    pub damage_vector: DamageVector,
 }
 
 pub enum SystemCommand {
@@ -160,6 +179,42 @@ pub enum SystemCommand {
     StepManual {
         dt: f64,
         reply: oneshot::Sender<TickBroadcast>,
+    },
+    GetTargetLocks {
+        ball_id: BallId,
+        reply: oneshot::Sender<Vec<TargetLock>>,
+    },
+    AddTargetLock {
+        source_id: BallId,
+        lock: TargetLock,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    RemoveTargetLock {
+        source_id: BallId,
+        target_id: BallId,
+        reply: oneshot::Sender<bool>,
+    },
+    ClearTargetLocks {
+        source_id: BallId,
+        reply: oneshot::Sender<usize>,
+    },
+    SetCapacitor {
+        ball_id: BallId,
+        capacitor: f64,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    GetCombatState {
+        ball_id: BallId,
+        reply: oneshot::Sender<Option<CombatState>>,
+    },
+    AddModuleCycle {
+        cycle: ActiveModuleCycle,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    RemoveModuleCycle {
+        ship_id: BallId,
+        module_id: i64,
+        reply: oneshot::Sender<Result<(), String>>,
     },
 }
 
@@ -520,6 +575,78 @@ impl SystemHandle {
         rx.await
             .map_err(|_| "Solar system reply dropped".to_string())
     }
+
+    pub async fn get_target_locks(&self, ball_id: BallId) -> Result<Vec<TargetLock>, String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SystemCommand::GetTargetLocks { ball_id, reply: tx })
+            .await
+            .map_err(|_| "Solar system actor stopped".to_string())?;
+        rx.await.map_err(|_| "Solar system reply dropped".to_string())
+    }
+
+    pub async fn add_target_lock(&self, source_id: BallId, lock: TargetLock) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SystemCommand::AddTargetLock { source_id, lock, reply: tx })
+            .await
+            .map_err(|_| "Solar system actor stopped".to_string())?;
+        rx.await.map_err(|_| "Solar system reply dropped".to_string())?
+    }
+
+    pub async fn remove_target_lock(&self, source_id: BallId, target_id: BallId) -> Result<bool, String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SystemCommand::RemoveTargetLock { source_id, target_id, reply: tx })
+            .await
+            .map_err(|_| "Solar system actor stopped".to_string())?;
+        rx.await.map_err(|_| "Solar system reply dropped".to_string())
+    }
+
+    pub async fn clear_target_locks(&self, source_id: BallId) -> Result<usize, String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SystemCommand::ClearTargetLocks { source_id, reply: tx })
+            .await
+            .map_err(|_| "Solar system actor stopped".to_string())?;
+        rx.await.map_err(|_| "Solar system reply dropped".to_string())
+    }
+
+    pub async fn set_capacitor(&self, ball_id: BallId, capacitor: f64) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SystemCommand::SetCapacitor { ball_id, capacitor, reply: tx })
+            .await
+            .map_err(|_| "Solar system actor stopped".to_string())?;
+        rx.await.map_err(|_| "Solar system reply dropped".to_string())?
+    }
+
+    pub async fn get_combat_state(&self, ball_id: BallId) -> Result<Option<CombatState>, String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SystemCommand::GetCombatState { ball_id, reply: tx })
+            .await
+            .map_err(|_| "Solar system actor stopped".to_string())?;
+        rx.await.map_err(|_| "Solar system reply dropped".to_string())
+    }
+
+    pub async fn add_module_cycle(&self, cycle: ActiveModuleCycle) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SystemCommand::AddModuleCycle { cycle, reply: tx })
+            .await
+            .map_err(|_| "Solar system actor stopped".to_string())?;
+        rx.await.map_err(|_| "Solar system reply dropped".to_string())?
+    }
+
+    pub async fn remove_module_cycle(&self, ship_id: BallId, module_id: i64) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SystemCommand::RemoveModuleCycle { ship_id, module_id, reply: tx })
+            .await
+            .map_err(|_| "Solar system actor stopped".to_string())?;
+        rx.await.map_err(|_| "Solar system reply dropped".to_string())?
+    }
 }
 
 /// Populates a solar system's `Ballpark` with its real SDE stars, planets, moons, asteroid belts,
@@ -809,6 +936,7 @@ fn build_tick_broadcast(
 pub struct SystemRegistry {
     systems: RwLock<HashMap<SolarSystemId, SystemHandle>>,
     sde: Option<Arc<SdeRegistry>>,
+    pub db: Option<Arc<eve_db::WorldRepository>>,
 }
 
 impl Default for SystemRegistry {
@@ -822,6 +950,7 @@ impl SystemRegistry {
         Self {
             systems: RwLock::new(HashMap::new()),
             sde: None,
+            db: None,
         }
     }
 
@@ -829,9 +958,80 @@ impl SystemRegistry {
         Self {
             systems: RwLock::new(HashMap::new()),
             sde: Some(sde),
+            db: None,
         }
     }
 
+    pub fn with_sde_and_db(sde: Arc<SdeRegistry>, db: Arc<eve_db::WorldRepository>) -> Self {
+        Self {
+            systems: RwLock::new(HashMap::new()),
+            sde: Some(sde),
+            db: Some(db),
+        }
+    }
+}
+
+fn step_cycles_and_capacitor(
+    ballpark: &mut Ballpark,
+    active_module_cycles: &mut Vec<ActiveModuleCycle>,
+    db_opt: &Option<Arc<eve_db::WorldRepository>>,
+    dt: f64,
+) {
+    for cs in ballpark.combat_states.values_mut() {
+        cs.capacitor = eve_dogma::simulate_capacitor(cs.capacitor, cs.max_capacitor, 250.0, dt);
+    }
+
+    let mut finished_indices = Vec::new();
+    for (idx, cycle) in active_module_cycles.iter_mut().enumerate() {
+        cycle.elapsed_s += dt;
+        if cycle.elapsed_s >= cycle.duration_s {
+            if let Some(target_id) = cycle.target_id {
+                if let Some(cs) = ballpark.combat_states.get_mut(&target_id) {
+                    cs.apply_damage(cycle.damage_vector);
+                }
+            }
+            if let Some(db_ref) = db_opt {
+                if !cycle.linked_turrets.is_empty() {
+                    db_ref.with_mut_snapshot(|snap| {
+                        for &turret_id in &cycle.linked_turrets {
+                            let turret_flag = snap.items.get(&turret_id).map(|i| i.flag);
+                            if let Some(t_flag) = turret_flag {
+                                if let Some(charge_item) = snap.items.values_mut().find(|i| {
+                                    i.location_id == cycle.ship_id
+                                        && i.flag == t_flag
+                                        && (cycle.ammo_type_id.is_none() || Some(i.type_id) == cycle.ammo_type_id)
+                                        && i.quantity > 0
+                                }) {
+                                    charge_item.quantity = charge_item.quantity.saturating_sub(1);
+                                }
+                            }
+                        }
+                    });
+                }
+            }
+            if cycle.repeat == 0 {
+                finished_indices.push(idx);
+            } else {
+                cycle.elapsed_s -= cycle.duration_s;
+                if cycle.cap_need_per_cycle > 0.0 {
+                    if let Some(cs) = ballpark.combat_states.get_mut(&cycle.ship_id) {
+                        cs.capacitor = (cs.capacitor - cycle.cap_need_per_cycle).max(0.0);
+                    }
+                }
+            }
+        }
+    }
+    for idx in finished_indices.into_iter().rev() {
+        let finished = active_module_cycles.remove(idx);
+        if let Some(orig_v) = finished.original_max_velocity {
+            if let Some(ball) = ballpark.balls.get_mut(&finished.ship_id) {
+                ball.max_velocity = orig_v;
+            }
+        }
+    }
+}
+
+impl SystemRegistry {
     /// Spawns or retrieves a running Solar System Actor for `solar_system_id`.
     /// Populates static SDE celestials, stargates, and stations (`SP-1`), and hibernates (`LOD 0`)
     /// with zero timer wakes until dynamic balls are spawned on grid.
@@ -854,12 +1054,14 @@ impl SystemRegistry {
         let (event_tx, _) = broadcast::channel::<TickBroadcast>(64);
         let event_tx_actor = event_tx.clone();
         let sde_opt = self.sde.clone();
+        let db_opt = self.db.clone();
         let mut ballpark = Ballpark::new(solar_system_id);
         if let Some(sde) = &sde_opt {
             populate_system_celestials(&mut ballpark, solar_system_id, sde);
         }
 
         tokio::spawn(async move {
+            let mut active_module_cycles: Vec<ActiveModuleCycle> = Vec::new();
             let mut ticker = tokio::time::interval_at(
                 tokio::time::Instant::now() + Duration::from_secs(1),
                 Duration::from_secs(1),
@@ -885,6 +1087,7 @@ impl SystemRegistry {
                         };
                         if should_step {
                             let events = ballpark.step(dt);
+                            step_cycles_and_capacitor(&mut ballpark, &mut active_module_cycles, &db_opt, dt);
                             let broadcast = build_tick_broadcast(solar_system_id, &mut ballpark, events);
                             let _ = event_tx_actor.send(broadcast);
                         }
@@ -1190,9 +1393,63 @@ impl SystemRegistry {
                             }
                             SystemCommand::StepManual { dt, reply } => {
                                 let events = ballpark.step(dt);
+                                step_cycles_and_capacitor(&mut ballpark, &mut active_module_cycles, &db_opt, dt);
                                 let broadcast = build_tick_broadcast(solar_system_id, &mut ballpark, events);
                                 let _ = event_tx_actor.send(broadcast.clone());
                                 let _ = reply.send(broadcast);
+                            }
+                            SystemCommand::GetTargetLocks { ball_id, reply } => {
+                                let locks = ballpark.get_target_locks(ball_id);
+                                let _ = reply.send(locks);
+                            }
+                            SystemCommand::AddTargetLock { source_id, lock, reply } => {
+                                ballpark.add_target_lock(source_id, lock);
+                                let _ = reply.send(Ok(()));
+                            }
+                            SystemCommand::RemoveTargetLock { source_id, target_id, reply } => {
+                                let removed = ballpark.remove_target_lock(source_id, target_id);
+                                let _ = reply.send(removed);
+                            }
+                            SystemCommand::ClearTargetLocks { source_id, reply } => {
+                                let count = ballpark.clear_target_locks(source_id);
+                                let _ = reply.send(count);
+                            }
+                            SystemCommand::SetCapacitor { ball_id, capacitor, reply } => {
+                                let cs = ballpark.combat_states.entry(ball_id).or_default();
+                                cs.capacitor = capacitor;
+                                let _ = reply.send(Ok(()));
+                            }
+                            SystemCommand::GetCombatState { ball_id, reply } => {
+                                let cs = ballpark.combat_states.get(&ball_id).cloned();
+                                let _ = reply.send(cs);
+                            }
+                            SystemCommand::AddModuleCycle { mut cycle, reply } => {
+                                if cycle.cap_need_per_cycle > 0.0 {
+                                    if let Some(cs) = ballpark.combat_states.get_mut(&cycle.ship_id) {
+                                        cs.capacitor = (cs.capacitor - cycle.cap_need_per_cycle).max(0.0);
+                                    }
+                                }
+                                if cycle.speed_boost_factor > 0.0 {
+                                    if let Some(ball) = ballpark.balls.get_mut(&cycle.ship_id) {
+                                        if cycle.original_max_velocity.is_none() {
+                                            cycle.original_max_velocity = Some(ball.max_velocity);
+                                            ball.max_velocity *= 1.0 + cycle.speed_boost_factor;
+                                        }
+                                    }
+                                }
+                                active_module_cycles.push(cycle);
+                                let _ = reply.send(Ok(()));
+                            }
+                            SystemCommand::RemoveModuleCycle { ship_id, module_id, reply } => {
+                                if let Some(pos) = active_module_cycles.iter().position(|c| c.ship_id == ship_id && c.module_id == module_id) {
+                                    let removed = active_module_cycles.remove(pos);
+                                    if let Some(orig_v) = removed.original_max_velocity {
+                                        if let Some(ball) = ballpark.balls.get_mut(&ship_id) {
+                                            ball.max_velocity = orig_v;
+                                        }
+                                    }
+                                }
+                                let _ = reply.send(Ok(()));
                             }
                         }
                     }

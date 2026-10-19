@@ -492,6 +492,8 @@ pub struct SessionState {
     pub address: String,
     pub user_type: i64,
     pub max_session_time: Option<i64>,
+    #[serde(skip)]
+    pub notifications: Vec<(String, Vec<PyRep>)>,
 }
 
 impl SessionState {
@@ -505,8 +507,17 @@ impl SessionState {
             address: String::new(),
             user_type: 30,
             max_session_time: None,
+            notifications: Vec::new(),
             ..Default::default()
         }
+    }
+
+    pub fn push_notification(&mut self, event: impl Into<String>, args: Vec<PyRep>) {
+        self.notifications.push((event.into(), args));
+    }
+
+    pub fn drain_notifications(&mut self) -> Vec<(String, Vec<PyRep>)> {
+        std::mem::take(&mut self.notifications)
     }
 
     pub fn is_authenticated(&self) -> bool {

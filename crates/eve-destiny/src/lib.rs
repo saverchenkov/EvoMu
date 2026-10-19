@@ -12,7 +12,7 @@
 
 #![forbid(unsafe_code)]
 
-use glam::DVec3;
+pub use glam::DVec3;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -102,6 +102,15 @@ pub struct DamageVector {
 }
 
 impl DamageVector {
+    pub const fn new(em: f64, thermal: f64, kinetic: f64, explosive: f64) -> Self {
+        Self {
+            em,
+            thermal,
+            kinetic,
+            explosive,
+        }
+    }
+
     pub fn total(&self) -> f64 {
         self.em + self.thermal + self.kinetic + self.explosive
     }
@@ -350,6 +359,20 @@ pub enum DestinyEvent {
         ball_a: BallId,
         ball_b: BallId,
     },
+    OnTarget {
+        mode: String,
+        source_id: BallId,
+        target_id: BallId,
+    },
+}
+
+/// Combat target lock state (`#43`–`#45`, `DG-4`, `DG-5`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TargetLock {
+    pub target_id: BallId,
+    pub lock_time_ms: f64,
+    pub remaining_lock_ms: f64,
+    pub locked: bool,
 }
 
 // parity: plan:SP-1, feat:navigation.celestials-balls, plan:SP-2, feat:navigation.bubbles-grid
@@ -471,6 +494,8 @@ pub struct Ballpark {
     pub next_grid_id: u64,
     #[serde(default)]
     pub observer_events: BTreeMap<BallId, Vec<DestinyEvent>>,
+    #[serde(default)]
+    pub target_locks: BTreeMap<BallId, Vec<TargetLock>>,
 }
 
 fn default_next_grid_id() -> u64 {
@@ -498,6 +523,7 @@ impl Ballpark {
             ball_grid_ids: BTreeMap::new(),
             next_grid_id: 1,
             observer_events: BTreeMap::new(),
+            target_locks: BTreeMap::new(),
         }
     }
 
@@ -792,6 +818,10 @@ impl Ballpark {
         self.ball_group_ids.remove(&ball_id);
         self.ball_slim_meta.remove(&ball_id);
         self.combat_states.remove(&ball_id);
+        self.target_locks.remove(&ball_id);
+        for locks in self.target_locks.values_mut() {
+            locks.retain(|l| l.target_id != ball_id);
+        }
         self.observer_events.remove(&ball_id);
         self.pending_events
             .push(DestinyEvent::RemoveBall { ball_id });
@@ -889,6 +919,15 @@ impl Ballpark {
                 if let Some(cs) = self.combat_states.get(&ball_id) {
                     if cs.warp_scramble_strength > 0 {
                         return;
+                    }
+                }
+                if let Some(locks) = self.target_locks.remove(&ball_id) {
+                    for l in locks {
+                        self.pending_events.push(DestinyEvent::OnTarget {
+                            mode: "lost".to_string(),
+                            source_id: ball_id,
+                            target_id: l.target_id,
+                        });
                     }
                 }
             }
@@ -1326,7 +1365,115 @@ impl Ballpark {
             }
         }
 
+        // Advance target locks and validate lock breaks (`DG-4`, `DG-5`).
+        let mut lost_events = Vec::new();
+        let mut completed_events = Vec::new();
+        let mut locks_to_retain = BTreeMap::new();
+
+        for (&source_id, locks) in &self.target_locks {
+            let source_ball = self.balls.get(&source_id);
+            let source_cloaked = self.combat_states.get(&source_id).is_some_and(|c| c.is_cloaked);
+            let source_warping = source_ball
+                .map(|b| matches!(b.mode, MovementMode::Warp { .. }))
+                .unwrap_or(true);
+
+            if source_ball.is_none() || source_cloaked || source_warping {
+                for lock in locks {
+                    lost_events.push((source_id, lock.target_id));
+                }
+                continue;
+            }
+
+            let mut retained = Vec::new();
+            for mut lock in locks.clone() {
+                let target_ball = self.balls.get(&lock.target_id);
+                let target_cloaked = self
+                    .combat_states
+                    .get(&lock.target_id)
+                    .is_some_and(|c| c.is_cloaked);
+                let target_warping = target_ball
+                    .map(|b| matches!(b.mode, MovementMode::Warp { .. }))
+                    .unwrap_or(true);
+
+                if target_ball.is_none() || target_cloaked || target_warping {
+                    lost_events.push((source_id, lock.target_id));
+                } else {
+                    if !lock.locked {
+                        lock.remaining_lock_ms -= dt * 1000.0;
+                        if lock.remaining_lock_ms <= 0.0 {
+                            lock.locked = true;
+                            lock.remaining_lock_ms = 0.0;
+                            completed_events.push((source_id, lock.target_id));
+                        }
+                    }
+                    retained.push(lock);
+                }
+            }
+            if !retained.is_empty() {
+                locks_to_retain.insert(source_id, retained);
+            }
+        }
+        self.target_locks = locks_to_retain;
+
+        for (source_id, target_id) in lost_events {
+            self.pending_events.push(DestinyEvent::OnTarget {
+                mode: "lost".to_string(),
+                source_id,
+                target_id,
+            });
+        }
+        for (source_id, target_id) in completed_events {
+            self.pending_events.push(DestinyEvent::OnTarget {
+                mode: "locked".to_string(),
+                source_id,
+                target_id,
+            });
+        }
+
         std::mem::take(&mut self.pending_events)
+    }
+
+    pub fn add_target_lock(&mut self, source_id: BallId, lock: TargetLock) {
+        self.target_locks.entry(source_id).or_default().push(lock);
+    }
+
+    pub fn remove_target_lock(&mut self, source_id: BallId, target_id: BallId) -> bool {
+        if let Some(locks) = self.target_locks.get_mut(&source_id) {
+            let before = locks.len();
+            locks.retain(|l| l.target_id != target_id);
+            if locks.len() < before {
+                self.pending_events.push(DestinyEvent::OnTarget {
+                    mode: "lost".to_string(),
+                    source_id,
+                    target_id,
+                });
+                return true;
+            }
+        }
+        false
+    }
+
+    pub fn clear_target_locks(&mut self, source_id: BallId) -> usize {
+        if let Some(locks) = self.target_locks.remove(&source_id) {
+            let count = locks.len();
+            for l in &locks {
+                self.pending_events.push(DestinyEvent::OnTarget {
+                    mode: "lost".to_string(),
+                    source_id,
+                    target_id: l.target_id,
+                });
+            }
+            count
+        } else {
+            0
+        }
+    }
+
+    pub fn get_target_locks(&self, source_id: BallId) -> Vec<TargetLock> {
+        self.target_locks
+            .get(&source_id)
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// Drains and returns all bubble-scoped `DestinyEvent`s accumulated for `observer_ball_id`.

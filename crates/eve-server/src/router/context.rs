@@ -80,7 +80,7 @@ impl ServerContext {
         let quasar_domains: HashSet<String> = quasar_map.into_keys().collect();
         let (notify_tx, _) = tokio::sync::broadcast::channel(256);
 
-        let systems = Arc::new(SystemRegistry::with_sde(sde.clone()));
+        let systems = Arc::new(SystemRegistry::with_sde_and_db(sde.clone(), Arc::clone(&db)));
         let quasar_descriptors =
             eve_proto::quasar::QuasarDescriptorRegistry::open_default_or_empty();
         let quasar_gateway = Arc::new(crate::quasar_gateway::PublicGatewayRouter::new(
@@ -571,22 +571,59 @@ impl ServerContext {
 
         let mut fit = ShipFittingEngine::from_sde(ship_id, ship_item.type_id, &self.sde)
             .with_character_skills(skill_levels);
+
+        let online_states = self.db.with_snapshot(|s| s.module_online_states.clone());
+
+        let mut fittable_items: Vec<_> = items
+            .iter()
+            .filter(|item| {
+                item.location_id == ship_id && (item.flag as u16) >= 11 && {
+                    let cat = self.sde.types.get(&item.type_id).map(|t| t.category_id);
+                    cat == Some(7) || cat == Some(32)
+                }
+            })
+            .cloned()
+            .collect();
+
+        // Subsystems (125..=129) must be fitted first to configure hull slot counts
+        fittable_items.sort_by_key(|i| {
+            let flag = i.flag as u16;
+            if (125..=129).contains(&flag) {
+                0
+            } else {
+                1
+            }
+        });
+
+        for item in fittable_items {
+            let online = online_states.get(&item.item_id).copied().unwrap_or(true);
+            let _ = fit.fit_module_with_state(
+                item.item_id,
+                item.type_id,
+                item.flag as u16,
+                online,
+                &self.sde,
+            );
+        }
+
+        // Attach loaded charges / scripts
         for item in &items {
-            let is_module_or_subsystem = self
+            let is_charge = self
                 .sde
                 .types
                 .get(&item.type_id)
-                .map(|t| t.category_id == 7 || t.category_id == 32)
+                .map(|t| t.category_id == 8)
                 .unwrap_or(false);
-            if item.location_id == ship_id && (item.flag as u16) >= 11 && is_module_or_subsystem {
-                let _ = fit.fit_and_online_module(
-                    item.item_id,
-                    item.type_id,
-                    item.flag as u16,
-                    &self.sde,
-                );
+            if item.location_id == ship_id && is_charge {
+                let slot_flag = item.flag as u16;
+                if let Some(m) = fit.modules.values_mut().find(|m| m.flag_id == slot_flag) {
+                    m.charge_type_id = Some(item.type_id);
+                    m.charge_quantity = item.quantity.max(0) as u32;
+                }
             }
         }
+        fit.recalculate_stats(&self.sde);
+
         self.store_ship_fitting(ship_id, fit.clone());
         Ok(fit)
     }

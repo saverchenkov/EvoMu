@@ -57,6 +57,14 @@ pub async fn handle(
     kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
+        // Dogma Phase 4 Exit Gate: dogmaIM.FireWeapon(ship_id, target_id) is deleted in favor of dogmaIM.Activate
+        ("dogmaIM", "FireWeapon") if args.len() >= 2 => {
+            Some(Err(BridgeRpcError {
+                code: "UnimplementedRPC".into(),
+                message: "dogmaIM.FireWeapon is deleted; use dogmaIM.Activate".into(),
+            }))
+        }
+
         // Turret / Missile / Vorton / Entropic / Breacher Combat Engagement & CrimeWatch 2.0 Enforcement
         ("dogmaIM", "FireWeapon") | ("beyonce", "CmdAttackTarget") => {
             let (_, char_id) = match ServerContext::require_character(session) {
