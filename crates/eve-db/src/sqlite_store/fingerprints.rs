@@ -113,6 +113,8 @@ pub(crate) fn fp_character(c: &CharacterRecord) -> u64 {
     h.write_u8(c.neural.perception);
     h.write_u8(c.neural.willpower);
     h.write_u8(c.neural.bonus_remaps);
+    h.write_u64(c.neural.last_remap_unix.unwrap_or(0));
+    h.write_u64(c.neural.remap_cooldown_until_unix.unwrap_or(0));
     h.write_f64(c.skill_points);
     h.write_f64(c.free_skill_points);
     h.write_u64(c.last_clone_jump_unix);

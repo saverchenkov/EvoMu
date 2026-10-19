@@ -360,6 +360,23 @@ pub struct NeuralAttributes {
     pub perception: u8,
     pub willpower: u8,
     pub bonus_remaps: u8,
+    #[serde(default)]
+    pub last_remap_unix: Option<u64>,
+    #[serde(default)]
+    pub remap_cooldown_until_unix: Option<u64>,
+}
+
+impl NeuralAttributes {
+    pub fn get_attribute_by_id(&self, attr_id: u32) -> f64 {
+        match attr_id {
+            164 => self.charisma as f64,
+            165 => self.intelligence as f64,
+            166 => self.memory as f64,
+            167 => self.perception as f64,
+            168 => self.willpower as f64,
+            _ => self.perception as f64,
+        }
+    }
 }
 
 impl Default for NeuralAttributes {
@@ -371,6 +388,8 @@ impl Default for NeuralAttributes {
             perception: 20,
             willpower: 20,
             bonus_remaps: 2,
+            last_remap_unix: None,
+            remap_cooldown_until_unix: None,
         }
     }
 }

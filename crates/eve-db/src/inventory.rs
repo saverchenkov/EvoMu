@@ -2,6 +2,7 @@
 
 use crate::persistence::WorldRepository;
 use crate::types::*;
+use std::collections::{HashMap, HashSet};
 
 const MAX_IDEMPOTENCY_KEYS: usize = 4_096;
 
@@ -129,6 +130,246 @@ impl WorldRepository {
             }
 
             Ok(updated)
+        })
+    }
+
+    /// Repackages an assembled item/ship into its packaged singleton=false state (`INV-1`).
+    pub fn repackage_item(
+        &self,
+        character_id: i64,
+        item_id: i64,
+    ) -> Result<InventoryItemRecord, DbError> {
+        self.try_with_mut_snapshot(|guard| {
+            let ch = guard
+                .characters
+                .get(&character_id)
+                .ok_or(DbError::CharacterNotFound(character_id))?;
+            if item_id == ch.active_ship_id {
+                return Err(DbError::ValidationError(
+                    "Cannot repackage your currently active ship".into(),
+                ));
+            }
+            if guard.is_item_locked_in_contract_or_job(item_id) {
+                return Err(DbError::ItemLocked(item_id));
+            }
+            let has_contained = guard
+                .items
+                .values()
+                .any(|other| other.item_id != item_id && other.location_id == item_id && other.quantity > 0);
+            if has_contained {
+                return Err(DbError::ValidationError(
+                    "Cannot repackage item while it contains fitted modules or cargo".into(),
+                ));
+            }
+            let item = guard
+                .items
+                .get_mut(&item_id)
+                .ok_or(DbError::ItemNotFound(item_id))?;
+            if item.owner_id != character_id {
+                return Err(DbError::ItemOwnershipViolation {
+                    character_id,
+                    item_id,
+                });
+            }
+            if item.flag != InventoryFlag::Hangar {
+                return Err(DbError::ValidationError(
+                    "Item must be in station Hangar to repackage".into(),
+                ));
+            }
+            if item.is_blueprint_copy {
+                return Err(DbError::ValidationError(
+                    "Blueprint copy cannot be repackaged".into(),
+                ));
+            }
+            if item.source_mutaplasmid_id.is_some() || !item.dynamic_attributes.is_empty() {
+                return Err(DbError::ValidationError(
+                    "Abyssal mutated item cannot be repackaged".into(),
+                ));
+            }
+            item.singleton = false;
+            item.insured_payout_isk = 0.0;
+            item.version += 1;
+            Ok(item.clone())
+        })
+    }
+
+    /// Merges `source_item_id` into `target_item_id`. Both items must have the same type,
+    /// location, and flag, be non-singleton, and owned by `character_id` (`INV-2`).
+    pub fn stack_items(
+        &self,
+        character_id: i64,
+        target_item_id: i64,
+        source_item_id: i64,
+    ) -> Result<InventoryItemRecord, DbError> {
+        if target_item_id == source_item_id {
+            return Err(DbError::ValidationError(
+                "Cannot stack an item onto itself".into(),
+            ));
+        }
+        self.try_with_mut_snapshot(|guard| {
+            if guard.is_item_locked_in_contract_or_job(target_item_id) {
+                return Err(DbError::ItemLocked(target_item_id));
+            }
+            if guard.is_item_locked_in_contract_or_job(source_item_id) {
+                return Err(DbError::ItemLocked(source_item_id));
+            }
+            let src = guard
+                .items
+                .get(&source_item_id)
+                .ok_or(DbError::ItemNotFound(source_item_id))?
+                .clone();
+            if src.owner_id != character_id {
+                return Err(DbError::ItemOwnershipViolation {
+                    character_id,
+                    item_id: source_item_id,
+                });
+            }
+            if src.singleton {
+                return Err(DbError::ValidationError(
+                    "Cannot stack singleton (assembled) item".into(),
+                ));
+            }
+            let tgt = guard
+                .items
+                .get_mut(&target_item_id)
+                .ok_or(DbError::ItemNotFound(target_item_id))?;
+            if tgt.owner_id != character_id {
+                return Err(DbError::ItemOwnershipViolation {
+                    character_id,
+                    item_id: target_item_id,
+                });
+            }
+            if tgt.singleton {
+                return Err(DbError::ValidationError(
+                    "Cannot stack onto a singleton (assembled) item".into(),
+                ));
+            }
+            if tgt.type_id != src.type_id {
+                return Err(DbError::ValidationError(format!(
+                    "Cannot stack different item types: {} and {}",
+                    tgt.type_id, src.type_id
+                )));
+            }
+            if tgt.location_id != src.location_id || tgt.flag != src.flag {
+                return Err(DbError::ValidationError(
+                    "Cannot stack items at different locations or flags".into(),
+                ));
+            }
+            tgt.quantity = tgt.quantity.checked_add(src.quantity).ok_or_else(|| {
+                DbError::ValidationError("Stack quantity overflow".into())
+            })?;
+            tgt.version += 1;
+            let updated = tgt.clone();
+
+            guard.items.remove(&source_item_id);
+            Ok(updated)
+        })
+    }
+
+    /// Splits `split_quantity` from `item_id`, creating a new inventory item with the split quantity (`INV-2`).
+    pub fn split_stack(
+        &self,
+        character_id: i64,
+        item_id: i64,
+        split_quantity: i32,
+    ) -> Result<(InventoryItemRecord, InventoryItemRecord), DbError> {
+        if split_quantity <= 0 {
+            return Err(DbError::ValidationError(
+                "Split quantity must be positive".into(),
+            ));
+        }
+        self.try_with_mut_snapshot(|guard| {
+            if guard.is_item_locked_in_contract_or_job(item_id) {
+                return Err(DbError::ItemLocked(item_id));
+            }
+            let item = guard
+                .items
+                .get_mut(&item_id)
+                .ok_or(DbError::ItemNotFound(item_id))?;
+            if item.owner_id != character_id {
+                return Err(DbError::ItemOwnershipViolation {
+                    character_id,
+                    item_id,
+                });
+            }
+            if item.singleton {
+                return Err(DbError::ValidationError(
+                    "Cannot split a singleton item".into(),
+                ));
+            }
+            if split_quantity >= item.quantity {
+                return Err(DbError::ValidationError(format!(
+                    "Split quantity {} must be strictly less than item quantity {}",
+                    split_quantity, item.quantity
+                )));
+            }
+            item.quantity -= split_quantity;
+            item.version += 1;
+            let updated_orig = item.clone();
+
+            guard.next_entity_id += 1;
+            let new_id = guard.next_entity_id;
+            let new_item = InventoryItemRecord {
+                item_id: new_id,
+                type_id: updated_orig.type_id,
+                owner_id: character_id,
+                location_id: updated_orig.location_id,
+                flag: updated_orig.flag,
+                quantity: split_quantity,
+                singleton: false,
+                version: 1,
+                dynamic_attributes: HashMap::new(),
+                source_mutaplasmid_id: None,
+                insured_payout_isk: 0.0,
+                is_blueprint_copy: false,
+                blueprint_runs_remaining: None,
+            };
+            guard.items.insert(new_id, new_item.clone());
+            Ok((updated_orig, new_item))
+        })
+    }
+
+    /// Deletes (trashes) an item and all items contained inside it (`INV-2`).
+    pub fn delete_item(&self, character_id: i64, item_id: i64) -> Result<(), DbError> {
+        self.try_with_mut_snapshot(|guard| {
+            let ch = guard
+                .characters
+                .get(&character_id)
+                .ok_or(DbError::CharacterNotFound(character_id))?;
+            if item_id == ch.active_ship_id {
+                return Err(DbError::ValidationError(
+                    "Cannot delete your currently active ship".into(),
+                ));
+            }
+            if guard.is_item_locked_in_contract_or_job(item_id) {
+                return Err(DbError::ItemLocked(item_id));
+            }
+            let item = guard
+                .items
+                .get(&item_id)
+                .ok_or(DbError::ItemNotFound(item_id))?;
+            if item.owner_id != character_id {
+                return Err(DbError::ItemOwnershipViolation {
+                    character_id,
+                    item_id,
+                });
+            }
+
+            let mut to_remove = HashSet::from([item_id]);
+            loop {
+                let mut added = false;
+                for (&id, it) in &guard.items {
+                    if !to_remove.contains(&id) && to_remove.contains(&it.location_id) {
+                        to_remove.insert(id);
+                        added = true;
+                    }
+                }
+                if !added {
+                    break;
+                }
+            }
+            guard.items.retain(|id, _| !to_remove.contains(id));
+            Ok(())
         })
     }
 }
