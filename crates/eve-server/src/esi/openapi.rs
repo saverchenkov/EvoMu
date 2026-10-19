@@ -213,6 +213,8 @@ impl OpenApiSpec {
             }
         }
 
+        operations.extend(legacy_operations());
+
         let mut tags: Vec<String> = tag_set.into_iter().collect();
         tags.sort();
 
@@ -786,4 +788,85 @@ fn json_type_name(v: &Value) -> &'static str {
         Value::Array(_) => "array",
         Value::Object(_) => "object",
     }
+}
+
+fn make_legacy_op(method: &str, path_pattern: &str, op_id: &str, scope: Option<&str>) -> OperationSpec {
+    let segments = path_pattern
+        .trim_start_matches('/')
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string)
+        .collect();
+    let mut responses = HashMap::new();
+    responses.insert(
+        "200".to_string(),
+        ResponseSpec {
+            status_code: "200".to_string(),
+            required_headers: vec!["Cache-Control".to_string(), "ETag".to_string()],
+            json_schema: None,
+        },
+    );
+    OperationSpec {
+        method: method.to_string(),
+        path_pattern: path_pattern.to_string(),
+        segments,
+        operation_id: op_id.to_string(),
+        tags: vec!["Character".to_string()],
+        required_scopes: scope.map(|s| vec![s.to_string()]).unwrap_or_default(),
+        parameters: Vec::new(),
+        responses,
+    }
+}
+
+pub fn legacy_operations() -> Vec<OperationSpec> {
+    vec![
+        make_legacy_op(
+            "GET",
+            "/characters/{character_id}/bookmarks",
+            "GetCharactersCharacterIdBookmarks",
+            Some("esi-bookmarks.read_character_bookmarks.v1"),
+        ),
+        make_legacy_op(
+            "GET",
+            "/characters/{character_id}/bookmarks/folders",
+            "GetCharactersCharacterIdBookmarkFolders",
+            Some("esi-bookmarks.read_character_bookmarks.v1"),
+        ),
+        make_legacy_op(
+            "GET",
+            "/corporations/{corporation_id}/bookmarks",
+            "GetCorporationsCorporationIdBookmarks",
+            Some("esi-bookmarks.read_corporation_bookmarks.v1"),
+        ),
+        make_legacy_op(
+            "GET",
+            "/corporations/{corporation_id}/bookmarks/folders",
+            "GetCorporationsCorporationIdBookmarkFolders",
+            Some("esi-bookmarks.read_corporation_bookmarks.v1"),
+        ),
+        make_legacy_op(
+            "GET",
+            "/corporations/{corporation_id}/projects",
+            "GetCorporationsCorporationIdProjects",
+            Some("esi-corporations.read_projects.v1"),
+        ),
+        make_legacy_op(
+            "GET",
+            "/opportunities/groups",
+            "GetOpportunitiesGroups",
+            None,
+        ),
+        make_legacy_op(
+            "GET",
+            "/opportunities/tasks",
+            "GetOpportunitiesTasks",
+            None,
+        ),
+        make_legacy_op(
+            "GET",
+            "/characters/{character_id}/opportunities",
+            "GetCharactersCharacterIdOpportunities",
+            Some("esi-characters.read_opportunities.v1"),
+        ),
+    ]
 }

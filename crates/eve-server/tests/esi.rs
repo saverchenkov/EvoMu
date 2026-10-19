@@ -124,13 +124,9 @@ async fn test_esi_http_server_routing_versioning_meta_and_openapi_spec() {
         "/status.json must report green for implemented /status route"
     );
     for unimplemented_route in [
-        "/fleets/{fleet_id}/wings",
         "/characters/{character_id}/calendar",
         "/characters/{character_id}/contacts",
-        "/characters/{character_id}/contracts/{contract_id}/items",
         "/fw/wars",
-        "/incursions",
-        "/industry/facilities",
         "/ui/autopilot/waypoint",
     ] {
         assert!(
@@ -777,7 +773,7 @@ async fn test_esi_all_31_openapi_tags_sample_routes_and_schema_validation() {
         (
             "GET",
             "/v1/characters/90000001/contracts/4001/items/",
-            501,
+            200,
         ),
         ("GET", "/v1/corporations/npccorps/", 200),
         ("GET", "/v1/dogma/attributes/", 200),
@@ -785,8 +781,8 @@ async fn test_esi_all_31_openapi_tags_sample_routes_and_schema_validation() {
         ("GET", "/v1/fw/wars/", 501),
         ("GET", "/v2/characters/90000001/fittings/", 200),
         ("GET", "/v1/characters/90000001/fleet/", 200),
-        ("GET", "/v1/incursions/", 501),
-        ("GET", "/v1/industry/facilities/", 501),
+        ("GET", "/v1/incursions/", 200),
+        ("GET", "/v1/industry/facilities/", 200),
         ("GET", "/v1/insurance/prices/", 200),
         ("GET", "/v1/characters/90000001/killmails/recent/", 200),
         ("GET", "/v1/characters/90000001/location/", 200),

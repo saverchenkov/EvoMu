@@ -56,6 +56,7 @@ pub struct ServerContext {
     pub invention_roll_override: RwLock<Option<f64>>,
     pub feature_flags: crate::config::FeatureFlagsConfig,
     pub esi_port: u16,
+    pub esi_state: Arc<crate::esi::runtime_state::EsiRuntimeState>,
 }
 
 impl Default for ServerContext {
@@ -116,6 +117,7 @@ impl ServerContext {
             invention_roll_override: RwLock::new(None),
             feature_flags: crate::config::FeatureFlagsConfig::default(),
             esi_port: 26_004,
+            esi_state: Arc::new(crate::esi::runtime_state::EsiRuntimeState::new()),
         }
     }
 
