@@ -150,6 +150,7 @@ pub struct CombatState {
     pub is_cloaked: bool,
     pub is_tethered: bool,
     pub warp_scramble_strength: i32,
+    pub warp_core_strength: i32,
     pub entropic_spool_cycles: u32,
     /// Active Breacher Pod DoT `(flat_dmg_per_sec, pct_max_hp_per_sec, remaining_ticks)`.
     pub active_breacher_dot: Option<(f64, f64, u32)>,
@@ -181,6 +182,7 @@ impl Default for CombatState {
             is_cloaked: false,
             is_tethered: false,
             warp_scramble_strength: 0,
+            warp_core_strength: 1,
             entropic_spool_cycles: 0,
             active_breacher_dot: None,
             gate_cloak_remaining_ticks: 0,
@@ -189,6 +191,9 @@ impl Default for CombatState {
 }
 
 impl CombatState {
+    pub fn is_warp_scrambled(&self) -> bool {
+        self.warp_scramble_strength > 0 && self.warp_scramble_strength >= self.warp_core_strength
+    }
     /// Applies a [`DamageVector`] through Shield -> Armor -> Structure layers using each layer's
     /// 4-channel `[EM, Thermal, Kinetic, Explosive]` resonance profile.
     /// Returns `(total_applied_damage, destroyed)`.
@@ -364,6 +369,18 @@ pub enum DestinyEvent {
         source_id: BallId,
         target_id: BallId,
     },
+    OnActivatingWarp {
+        ball_id: BallId,
+    },
+    OnDeactivatingWarp {
+        ball_id: BallId,
+    },
+    OnSpecialFX {
+        ball_id: BallId,
+        module_id: Option<i64>,
+        guid: String,
+        is_active: bool,
+    },
 }
 
 /// Combat target lock state (`#43`–`#45`, `DG-4`, `DG-5`).
@@ -465,6 +482,114 @@ impl GridBubble {
     }
 }
 
+/// A warp disruption bubble in space (e.g. mobile warp disruptor, interdictor probe, or bubble field) (`SP-6`, `Z-3`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WarpBubble {
+    pub id: BallId,
+    pub position: DVec3,
+    pub radius: f64,
+}
+
+impl WarpBubble {
+    pub fn new(id: BallId, position: DVec3, radius: f64) -> Self {
+        Self {
+            id,
+            position,
+            radius: radius.max(1.0),
+        }
+    }
+
+    /// Checks if a point is inside the bubble.
+    pub fn contains(&self, point: DVec3) -> bool {
+        self.position.distance(point) <= self.radius
+    }
+
+    /// Checks if a warp path from `origin` to `destination` intersects this bubble.
+    /// If it does, returns the intercept point where the warp path enters the bubble perimeter.
+    pub fn intercept_warp(&self, origin: DVec3, destination: DVec3) -> Option<DVec3> {
+        let dir = destination - origin;
+        let dist = dir.length();
+        if dist < 1.0 {
+            return None;
+        }
+        let dir_norm = dir / dist;
+
+        // Vector from origin to bubble center
+        let to_center = self.position - origin;
+        let proj = to_center.dot(dir_norm);
+
+        // Closest approach distance squared to bubble center
+        let d2 = to_center.length_squared() - proj * proj;
+        let r2 = self.radius * self.radius;
+        if d2 > r2 {
+            // Ray does not intersect sphere
+            return None;
+        }
+
+        // Distance from closest point to sphere perimeter along ray
+        let thc = (r2 - d2).max(0.0).sqrt();
+        let t0 = proj - thc; // entry point along ray
+        let t1 = proj + thc; // exit point along ray
+
+        // If origin is already inside the bubble
+        if t0 <= 0.0 && t1 >= 0.0 {
+            return Some(origin);
+        }
+
+        // Stop bubble (in front of destination): t0 > 0 and t0 <= dist
+        // Drag bubble (behind destination inline, within 500 km = 500,000 m): t0 > dist and (t0 - dist) <= 500_000.0
+        if t0 > 0.0 && (t0 <= dist || (t0 - dist) <= 500_000.0) {
+            Some(origin + dir_norm * t0)
+        } else {
+            None
+        }
+    }
+}
+
+/// Manages warp disruption bubbles in a solar system / ballpark (`SP-6`, `Z-3`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct WarpBubbleMgr {
+    pub bubbles: BTreeMap<BallId, WarpBubble>,
+}
+
+impl WarpBubbleMgr {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn add_bubble(&mut self, bubble: WarpBubble) {
+        self.bubbles.insert(bubble.id, bubble);
+    }
+
+    pub fn remove_bubble(&mut self, id: BallId) -> Option<WarpBubble> {
+        self.bubbles.remove(&id)
+    }
+
+    pub fn is_scrambled_at(&self, position: DVec3) -> bool {
+        self.bubbles.values().any(|b| b.contains(position))
+    }
+
+    /// Evaluates if a warp from `origin` to `destination` is intercepted by any bubble.
+    /// Returns the earliest intercept point if any bubble intersects the warp path.
+    pub fn check_interception(&self, origin: DVec3, destination: DVec3) -> Option<(BallId, DVec3)> {
+        let mut earliest: Option<(BallId, DVec3, f64)> = None;
+
+        for bubble in self.bubbles.values() {
+            if let Some(intercept) = bubble.intercept_warp(origin, destination) {
+                let dist = origin.distance(intercept);
+                match &earliest {
+                    Some((_, _, min_dist)) if dist >= *min_dist => {}
+                    _ => {
+                        earliest = Some((bubble.id, intercept, dist));
+                    }
+                }
+            }
+        }
+
+        earliest.map(|(id, pos, _)| (id, pos))
+    }
+}
+
 fn default_constellation_id() -> u32 {
     20_000_020
 }
@@ -496,6 +621,8 @@ pub struct Ballpark {
     pub observer_events: BTreeMap<BallId, Vec<DestinyEvent>>,
     #[serde(default)]
     pub target_locks: BTreeMap<BallId, Vec<TargetLock>>,
+    #[serde(default)]
+    pub warp_bubble_mgr: WarpBubbleMgr,
 }
 
 fn default_next_grid_id() -> u64 {
@@ -524,6 +651,7 @@ impl Ballpark {
             next_grid_id: 1,
             observer_events: BTreeMap::new(),
             target_locks: BTreeMap::new(),
+            warp_bubble_mgr: WarpBubbleMgr::default(),
         }
     }
 
@@ -554,6 +682,10 @@ impl Ballpark {
             return false;
         }
         let ball_id = ball.id;
+        if matches!(ball.mode, MovementMode::Field) {
+            self.warp_bubble_mgr
+                .add_bubble(WarpBubble::new(ball_id, ball.position, ball.radius));
+        }
         self.static_ball_ids.insert(ball_id);
         self.ball_group_ids.insert(ball_id, meta.group_id);
         self.ball_slim_meta.insert(ball_id, meta);
@@ -775,6 +907,10 @@ impl Ballpark {
         }
         let ball_id = ball.id;
         let ball_pos = ball.position;
+        if matches!(ball.mode, MovementMode::Field) {
+            self.warp_bubble_mgr
+                .add_bubble(WarpBubble::new(ball_id, ball_pos, ball.radius));
+        }
         self.pending_events
             .push(DestinyEvent::AddBall { ball: ball.clone() });
         self.balls.insert(ball_id, ball.clone());
@@ -813,6 +949,7 @@ impl Ballpark {
 
     pub fn remove_ball(&mut self, ball_id: BallId) -> Option<Ball> {
         let removed = self.balls.remove(&ball_id)?;
+        self.warp_bubble_mgr.remove_bubble(ball_id);
         let old_grid_id = self.ball_grid_ids.remove(&ball_id);
         self.static_ball_ids.remove(&ball_id);
         self.ball_group_ids.remove(&ball_id);
@@ -883,6 +1020,47 @@ impl Ballpark {
         Some((applied, destroyed, ball_snap))
     }
 
+    pub fn add_warp_bubble(&mut self, id: BallId, position: DVec3, radius: f64) {
+        self.warp_bubble_mgr
+            .add_bubble(WarpBubble::new(id, position, radius));
+    }
+
+    pub fn remove_warp_bubble(&mut self, id: BallId) -> Option<WarpBubble> {
+        self.warp_bubble_mgr.remove_bubble(id)
+    }
+
+    pub fn set_warp_scramble_strength(&mut self, ball_id: BallId, strength: i32) -> bool {
+        if let Some(cs) = self.combat_states.get_mut(&ball_id) {
+            cs.warp_scramble_strength = strength;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn set_warp_core_strength(&mut self, ball_id: BallId, strength: i32) -> bool {
+        if let Some(cs) = self.combat_states.get_mut(&ball_id) {
+            cs.warp_core_strength = strength;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn is_ball_scrambled(&self, ball_id: BallId) -> bool {
+        if let Some(cs) = self.combat_states.get(&ball_id) {
+            if cs.is_warp_scrambled() {
+                return true;
+            }
+        }
+        if let Some(ball) = self.balls.get(&ball_id) {
+            if self.warp_bubble_mgr.is_scrambled_at(ball.position) {
+                return true;
+            }
+        }
+        false
+    }
+
     /// Moves `ball_id` to `new_position` and reconciles its [`GridBubble`] membership.
     pub fn set_ball_position(&mut self, ball_id: BallId, new_position: DVec3) -> bool {
         let Some(ball) = self.balls.get_mut(&ball_id) else {
@@ -911,15 +1089,33 @@ impl Ballpark {
         true
     }
 
-    pub fn set_mode(&mut self, ball_id: BallId, mode: MovementMode) {
-        let mut emitted_event: Option<DestinyEvent> = None;
-        if let Some(ball) = self.balls.get_mut(&ball_id) {
-            // Reject warp if warp_scramble_strength > 0
-            if matches!(mode, MovementMode::Warp { .. }) {
-                if let Some(cs) = self.combat_states.get(&ball_id) {
-                    if cs.warp_scramble_strength > 0 {
-                        return;
-                    }
+    pub fn set_mode(&mut self, ball_id: BallId, mut mode: MovementMode) -> Result<(), String> {
+        if !self.balls.contains_key(&ball_id) {
+            return Err(format!("Ball {ball_id} not found in ballpark"));
+        }
+
+        // Reject warp if scrambled
+        if matches!(mode, MovementMode::Warp { .. }) {
+            if self.is_ball_scrambled(ball_id) {
+                return Err(
+                    "WarpScrambled: Warp drive disabled by warp disruption/scrambler effect"
+                        .to_string(),
+                );
+            }
+
+            // Check bubble interception along the warp path
+            if let MovementMode::Warp {
+                origin,
+                ref mut destination,
+                ref mut total_distance,
+                ..
+            } = mode
+            {
+                if let Some((_bid, intercept_pos)) =
+                    self.warp_bubble_mgr.check_interception(origin, *destination)
+                {
+                    *destination = intercept_pos;
+                    *total_distance = (*destination - origin).length();
                 }
                 if let Some(locks) = self.target_locks.remove(&ball_id) {
                     for l in locks {
@@ -931,7 +1127,11 @@ impl Ballpark {
                     }
                 }
             }
-            match &mode {
+        }
+
+        let mut emitted_event: Option<DestinyEvent> = None;
+        let ball = self.balls.get_mut(&ball_id).unwrap();
+        match &mode {
                 MovementMode::GotoDirection { direction } => {
                     let ev = DestinyEvent::GotoDirection {
                         ball_id,
@@ -977,16 +1177,27 @@ impl Ballpark {
                     };
                     self.pending_events.push(ev.clone());
                     emitted_event = Some(ev);
+
+                    // Warp tunnel visual handoff events
+                    let ev_act = DestinyEvent::OnActivatingWarp { ball_id };
+                    let ev_sfx = DestinyEvent::OnSpecialFX {
+                        ball_id,
+                        module_id: None,
+                        guid: "effects.WarpDrive".to_string(),
+                        is_active: true,
+                    };
+                    self.pending_events.push(ev_act);
+                    self.pending_events.push(ev_sfx);
                 }
                 _ => {}
             }
             ball.mode = mode;
-        }
         if let Some(ev) = emitted_event {
             if let Some(&gid) = self.ball_grid_ids.get(&ball_id) {
                 self.queue_event_for_grid_observers(gid, None, &ev);
             }
         }
+        Ok(())
     }
 
     pub fn set_speed_fraction(&mut self, ball_id: BallId, fraction: f64) -> bool {
@@ -1050,6 +1261,15 @@ impl Ballpark {
                 total_distance,
             } = ball.mode.clone()
             {
+                // In-flight warp bubble interception: if ship enters a bubble during flight, drop out of warp
+                if self.warp_bubble_mgr.is_scrambled_at(ball.position) {
+                    ball.velocity = DVec3::ZERO;
+                    ball.speed_fraction = 0.0;
+                    ball.mode = MovementMode::Stop;
+                    warp_exit_stops.push(ball.id);
+                    continue;
+                }
+
                 let exited = step_warp_ball(
                     ball,
                     dt,
@@ -1359,9 +1579,20 @@ impl Ballpark {
 
         for ball_id in warp_exit_stops {
             let ev = DestinyEvent::Stop { ball_id };
+            let ev_deact = DestinyEvent::OnDeactivatingWarp { ball_id };
+            let ev_sfx = DestinyEvent::OnSpecialFX {
+                ball_id,
+                module_id: None,
+                guid: "effects.WarpDrive".to_string(),
+                is_active: false,
+            };
             self.pending_events.push(ev.clone());
+            self.pending_events.push(ev_deact.clone());
+            self.pending_events.push(ev_sfx.clone());
             if let Some(&gid) = self.ball_grid_ids.get(&ball_id) {
                 self.queue_event_for_grid_observers(gid, None, &ev);
+                self.queue_event_for_grid_observers(gid, None, &ev_deact);
+                self.queue_event_for_grid_observers(gid, None, &ev_sfx);
             }
         }
 
@@ -2197,7 +2428,8 @@ mod tests {
             MovementMode::GotoDirection {
                 direction: DVec3::X,
             },
-        );
+        )
+        .expect("set GotoDirection");
         let ev_b = park.drain_observer_events(100_000_002);
         let ev_c = park.drain_observer_events(100_000_003);
         assert!(
@@ -2217,7 +2449,8 @@ mod tests {
         park.set_mode(
             100_000_001,
             MovementMode::new_warp(DVec3::ZERO, far_dest, 3.0),
-        );
+        )
+        .expect("set warp");
         let _ = park.drain_all_observer_events();
 
         let mut b_saw_add = false;

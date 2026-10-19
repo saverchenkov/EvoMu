@@ -412,8 +412,8 @@
   "note": ""
  },
  "Z-3": {
-  "assessment": "PARTIAL",
-  "note": ""
+  "assessment": "DONE",
+  "note": "Binary ball mode payloads (Missile, Mushroom, Troll, Formation), continuous warp curves, visual handoff, WarpBubbleMgr interception, and scrambler effects."
  },
  "Z-4": {
   "assessment": "PARTIAL",

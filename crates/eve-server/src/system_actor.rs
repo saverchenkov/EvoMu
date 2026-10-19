@@ -129,6 +129,22 @@ pub enum SystemCommand {
         mode: MovementMode,
         reply: oneshot::Sender<Result<u64, String>>,
     },
+    SetWarpScrambleStrength {
+        ball_id: BallId,
+        strength: i32,
+        reply: oneshot::Sender<Result<u64, String>>,
+    },
+    SetWarpCoreStrength {
+        ball_id: BallId,
+        strength: i32,
+        reply: oneshot::Sender<Result<u64, String>>,
+    },
+    AddWarpBubble {
+        id: BallId,
+        position: DVec3,
+        radius: f64,
+        reply: oneshot::Sender<Result<u64, String>>,
+    },
     SetSpeedFraction {
         ball_id: BallId,
         fraction: f64,
@@ -387,6 +403,62 @@ impl SystemHandle {
             .send(SystemCommand::SetMovementMode {
                 ball_id,
                 mode,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| "Solar system actor stopped".to_string())?;
+        rx.await
+            .map_err(|_| "Solar system reply dropped".to_string())?
+    }
+
+    pub async fn set_warp_scramble_strength(
+        &self,
+        ball_id: BallId,
+        strength: i32,
+    ) -> Result<u64, String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SystemCommand::SetWarpScrambleStrength {
+                ball_id,
+                strength,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| "Solar system actor stopped".to_string())?;
+        rx.await
+            .map_err(|_| "Solar system reply dropped".to_string())?
+    }
+
+    pub async fn set_warp_core_strength(
+        &self,
+        ball_id: BallId,
+        strength: i32,
+    ) -> Result<u64, String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SystemCommand::SetWarpCoreStrength {
+                ball_id,
+                strength,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| "Solar system actor stopped".to_string())?;
+        rx.await
+            .map_err(|_| "Solar system reply dropped".to_string())?
+    }
+
+    pub async fn add_warp_bubble(
+        &self,
+        id: BallId,
+        position: DVec3,
+        radius: f64,
+    ) -> Result<u64, String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SystemCommand::AddWarpBubble {
+                id,
+                position,
+                radius,
                 reply: tx,
             })
             .await
@@ -1282,11 +1354,35 @@ impl SystemRegistry {
                             }
                             SystemCommand::SetMovementMode { ball_id, mode, reply } => {
                                 if ballpark.balls.contains_key(&ball_id) {
-                                    ballpark.set_mode(ball_id, mode);
-                                    let _ = reply.send(Ok(ballpark.current_tick));
+                                    match ballpark.set_mode(ball_id, mode) {
+                                        Ok(()) => {
+                                            let _ = reply.send(Ok(ballpark.current_tick));
+                                        }
+                                        Err(e) => {
+                                            let _ = reply.send(Err(e));
+                                        }
+                                    }
                                 } else {
                                     let _ = reply.send(Err(format!("Ball {ball_id} not in system {solar_system_id}")));
                                 }
+                            }
+                            SystemCommand::SetWarpScrambleStrength { ball_id, strength, reply } => {
+                                if ballpark.set_warp_scramble_strength(ball_id, strength) {
+                                    let _ = reply.send(Ok(ballpark.current_tick));
+                                } else {
+                                    let _ = reply.send(Err(format!("Ball {ball_id} not in system or has no combat state")));
+                                }
+                            }
+                            SystemCommand::SetWarpCoreStrength { ball_id, strength, reply } => {
+                                if ballpark.set_warp_core_strength(ball_id, strength) {
+                                    let _ = reply.send(Ok(ballpark.current_tick));
+                                } else {
+                                    let _ = reply.send(Err(format!("Ball {ball_id} not in system or has no combat state")));
+                                }
+                            }
+                            SystemCommand::AddWarpBubble { id, position, radius, reply } => {
+                                ballpark.add_warp_bubble(id, position, radius);
+                                let _ = reply.send(Ok(ballpark.current_tick));
                             }
                             SystemCommand::SetSpeedFraction {
                                 ball_id,
