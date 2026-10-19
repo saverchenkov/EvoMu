@@ -48,6 +48,10 @@ impl RouteExecutionResult {
         }
     }
 
+    pub fn ok_paginated_json(body: Value, max_age_secs: u64, total_pages: usize) -> Self {
+        Self::ok_paginated(body, max_age_secs, total_pages)
+    }
+
     pub fn no_content(max_age_secs: u64) -> Self {
         Self {
             status_code: 204,
@@ -369,6 +373,47 @@ pub fn is_operation_implemented(method: &str, path_pattern: &str) -> bool {
             | ("GET", "/wars")
             | ("GET", "/wars/{war_id}")
             | ("GET", "/wars/{war_id}/killmails")
+            | ("GET", "/industry/facilities")
+            | ("GET", "/industry/systems")
+            | ("GET", "/characters/{character_id}/industry/jobs")
+            | ("GET", "/corporations/{corporation_id}/industry/jobs")
+            | ("GET", "/markets/{region_id}/orders")
+            | ("GET", "/markets/{region_id}/history")
+            | ("GET", "/markets/prices")
+            | ("GET", "/markets/{region_id}/types")
+            | ("GET", "/markets/structures/{structure_id}")
+            | ("GET", "/characters/{character_id}/orders")
+            | ("GET", "/characters/{character_id}/orders/history")
+            | ("GET", "/corporations/{corporation_id}/orders")
+            | ("GET", "/corporations/{corporation_id}/orders/history")
+            | ("GET", "/characters/{character_id}/wallet/journal")
+            | ("GET", "/characters/{character_id}/wallet/transactions")
+            | ("GET", "/characters/{character_id}/contracts")
+            | ("GET", "/characters/{character_id}/contracts/{contract_id}/items")
+            | ("GET", "/characters/{character_id}/contracts/{contract_id}/bids")
+            | ("GET", "/contracts/public/{region_id}")
+            | ("GET", "/contracts/public/items/{contract_id}")
+            | ("GET", "/contracts/public/bids/{contract_id}")
+            | ("GET", "/corporations/{corporation_id}/contracts")
+            | ("GET", "/corporations/{corporation_id}/contracts/{contract_id}/items")
+            | ("GET", "/corporations/{corporation_id}/contracts/{contract_id}/bids")
+            | ("GET", "/fleets/{fleet_id}")
+            | ("GET", "/fleets/{fleet_id}/members")
+            | ("GET", "/fleets/{fleet_id}/wings")
+            | ("GET", "/corporations/{corporation_id}")
+            | ("GET", "/corporations/{corporation_id}/members")
+            | ("GET", "/corporations/{corporation_id}/roles")
+            | ("GET", "/alliances/{alliance_id}")
+            | ("GET", "/alliances/{alliance_id}/corporations")
+            | ("GET", "/alliances/{alliance_id}/icons")
+            | ("GET", "/characters/{character_id}/bookmarks")
+            | ("GET", "/characters/{character_id}/bookmarks/folders")
+            | ("GET", "/incursions")
+            | ("GET", "/opportunities/tasks")
+            | ("GET", "/opportunities/groups")
+            | ("GET", "/characters/{character_id}/opportunities")
+            | ("GET", "/characters/{character_id}/planets")
+            | ("GET", "/characters/{character_id}/planets/{planet_id}")
     )
 }
 
@@ -394,6 +439,49 @@ pub fn dispatch_operation(
         claims,
         page,
         req_body,
+    ) {
+        return res;
+    }
+
+    if let Some(res) = super::char_social_routes::dispatch_char_social_route(
+        ctx,
+        method,
+        path_pattern,
+        path_params,
+        query_params,
+        req_body,
+    ) {
+        return res;
+    }
+
+    if let Some(res) = super::corp_alliance_routes::dispatch_corp_alliance_route(
+        ctx,
+        method,
+        path_pattern,
+        path_params,
+        query_params,
+    ) {
+        return res;
+    }
+
+    if let Some(res) = super::economy_routes::dispatch_economy_route(
+        ctx,
+        method,
+        path_pattern,
+        path_params,
+        query_params,
+        claims,
+        page,
+    ) {
+        return res;
+    }
+
+    if let Some(res) = super::fw_universe_routes::dispatch_fw_universe_route(
+        ctx,
+        method,
+        path_pattern,
+        path_params,
+        query_params,
     ) {
         return res;
     }
