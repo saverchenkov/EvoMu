@@ -233,26 +233,65 @@ async fn test_t7_injectable_server_clock_time_acceleration_and_pause_on_tick() {
             &mut session,
             "planetMgr",
             None,
-            "CreateColony",
+            "UserUpdateNetwork",
             &[PyRep::Integer(jita_planet_id), PyRep::Integer(65)],
             &empty,
             None,
         )
         .await
-        .expect_err("CreateColony with client override must fail");
+        .expect_err("UserUpdateNetwork with client override must fail");
     assert_eq!(create_override_err.code, "ClientSchematicOverrideForbidden");
 
+    let ship_id = session.ship_id.unwrap_or(100_000_001);
+    let prev_st = session.station_id;
+    session.station_id = None;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.station_id = None;
+        }
+        snap.next_entity_id += 1;
+        let id = snap.next_entity_id;
+        snap.items.insert(
+            id,
+            eve_db::InventoryItemRecord {
+                item_id: id,
+                type_id: 2254,
+                owner_id: 90_000_001,
+                location_id: ship_id,
+                flag: eve_db::InventoryFlag::Cargo,
+                quantity: 1,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
     ctx.dispatch_rpc(
         &mut session,
         "planetMgr",
         None,
-        "CreateColony",
-        &[PyRep::Integer(jita_planet_id)],
+        "UserUpdateNetwork",
+        &[
+            PyRep::Integer(jita_planet_id),
+            PyRep::List(vec![PyRep::Tuple(vec![
+                PyRep::Integer(1),
+                PyRep::Integer(1),
+                PyRep::Integer(2254),
+                PyRep::Real(0.1),
+                PyRep::Real(0.2),
+            ])]),
+        ],
         &empty,
         None,
     )
     .await
-    .expect("CreateColony on Jita planet should succeed");
+    .expect("UserUpdateNetwork on Jita planet should succeed");
+    session.station_id = prev_st;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.station_id = prev_st;
+        }
+    });
 
     let flush_override_err = ctx
         .dispatch_rpc(
@@ -302,7 +341,7 @@ async fn test_t7_injectable_server_clock_time_acceleration_and_pause_on_tick() {
     assert_eq!(cycle_time, 300); // SDE pinCycleTime (attribute 1643) = 300s
     assert_eq!(produced_type_id, 2_268); // Aqueous Liquids (harvesterType 709 on Barren extractor 2409)
     assert_eq!(first_qty, 1_000); // SDE pinExtractionQuantity (attribute 1642) = 1000 units
-    assert!((poco_tax - 700.0).abs() < 1e-6); // SDE exportTaxMultiplier (attribute 1641) = 5.0 ISK * 1000 units * 0.14 = 700.0 ISK
+    assert!((poco_tax - 750.0).abs() < 1e-6); // SDE exportTaxMultiplier (attribute 1641) = 5.0 ISK * 1000 units * 0.15 = 750.0 ISK
     assert_eq!(
         fkv1.get("totalStoredQuantity"),
         Some(&PyRep::Integer(first_qty))

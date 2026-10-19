@@ -4,14 +4,14 @@
 
 The canonical plan is `.agents/skills/evomu-adversarial-review/references/action_plan.md`. This file is regenerated from the latest pre-flight parity run, so it can't go stale or be overstated.
 
-**Parity: 341 / 5978 ledger rows closed (5.70%)**, 0 NA, 179 tagged tests, 244 passing tests. Flagged fake by the gap auditor: 72.
+**Parity: 321 / 6002 ledger rows closed (5.35%)**, 0 NA, 182 tagged tests, 249 passing tests. Flagged fake by the gap auditor: 92.
 
 | Category | Total | DONE | NA | Open |
 |---|---|---|---|---|
 | destiny | 52 | 11 | 0 | 41 |
 | effect | 1 | 0 | 0 | 1 |
-| esi | 197 | 52 | 0 | 145 |
-| feat | 1381 | 220 | 0 | 1161 |
+| esi | 197 | 62 | 0 | 135 |
+| feat | 1405 | 190 | 0 | 1215 |
 | journey | 29 | 0 | 0 | 29 |
 | notify | 1311 | 11 | 0 | 1300 |
 | plan | 109 | 29 | 0 | 80 |
@@ -133,7 +133,7 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 | Task | Title | Ledger | Features | Tests | Assessment | Note | Last commit |
 |---|---|---|---|---|---|---|---|
 | CH-1 | Skill queue time engine | BLOCKED_BY_FEATURES | 4/7 | test_ch1_skill_training_engine_and_caps, test_ch1_skill_training_queue_engine | PARTIAL | Skill training queue real-time tick engine, Alpha 5M SP cap, Omega 2x multiplier, level completion event, and pause/resume tested; blocked by remaining features. | 4eebb9a 2026-10-18 |
-| CH-2 | skillMgr2 / skill handler semantics | BLOCKED_BY_FEATURES | 3/8 | test_ch2_character_creation_and_starter_assets, test_ch2_skill_handling_and_prerequisites | PARTIAL | Skill queue save and retrieval, prerequisite recursive checking, skill history logging, and inventory skillbook injection tested; blocked by remaining features. | — |
+| CH-2 | skillMgr2 / skill handler semantics | BLOCKED_BY_FEATURES | 4/8 | test_ch2_character_creation_and_starter_assets, test_ch2_skill_handling_and_prerequisites | PARTIAL | Skill queue save and retrieval, prerequisite recursive checking, skill history logging, and inventory skillbook injection tested; blocked by remaining features. | — |
 | CH-3 | Character creation | BLOCKED_BY_FEATURES | 1/8 | test_ch3_character_creation_and_starter_assets, test_ch3_jump_clones_implants_and_pod_death | PARTIAL | Character creation with bloodline starter skills, starting 5,000 ISK wallet, starter corvette in home station, and random name generation tested; blocked by remaining features. | — |
 | CH-4 | Character info | BLOCKED_BY_FEATURES | 3/11 | test_ch4_character_sheet_biography_and_notes, test_ch4_slash_gm_commands | PARTIAL | Character public info, biography persistence, employment history, character sheet, owner notes, and neural attribute remap tested; blocked by remaining features. | — |
 | CH-5 | GM command dispatcher | BLOCKED_BY_FEATURES | 5/12 | test_ch5_gm_command_dispatcher, test_ch5_neural_attribute_remap_and_cooldown | PARTIAL | GM slash commands giveisk, giveskill, createitem, teleport tr, and heal with role verification tested; blocked by remaining features. | 4eebb9a 2026-10-18 |
@@ -142,10 +142,10 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 
 | Task | Title | Ledger | Features | Tests | Assessment | Note | Last commit |
 |---|---|---|---|---|---|---|---|
-| E-1 | Fee inputs | BLOCKED_BY_FEATURES | 3/4 | test_e1_broker_fee_and_sales_tax_skill_discounts, test_market_broker_fee_and_sales_tax | PARTIAL | Broker fee calculation with Broker Relations and faction/corp standings discount, sales tax with Accounting discount, and escrow deduction tested; auditor-flagged feat:market.broker-fee pending cleara | 22e6064 2026-10-18 |
-| E-2 | Order lifecycle | BLOCKED_BY_FEATURES | 3/22 | test_e2_market_order_matching_queries_and_cancellation, test_market_orders_limit_escrow_queries_cancellation | PARTIAL | Limit orders, immediate buy and sell matching against order book, regional order book queries, order cancellation, and escrow refund tested; blocked by remaining features. | 22e6064 2026-10-18 |
-| E-3 | Contracts | BLOCKED_BY_FEATURES | 4/14 | test_contracts_item_exchange_and_request, test_e3_contracts_lifecycle_item_exchange_courier_auction | PARTIAL | Item Exchange, Courier with collateral hold and delivery failure, and Auction contracts with bidding and escrow refund tested; blocked by remaining features. | 22e6064 2026-10-18 |
-| E-4 | Industry | BLOCKED_BY_FEATURES | 1/32 | test_e4_industry_jobs_lifecycle_manufacturing_research_and_copying, test_industry_blueprint_data_facilities_jobs | PARTIAL | Industry blueprint data, facilities lookup, job cost with facility tax, manufacturing, TE/ME research, copying, and delivery tested; blocked by remaining features. | 22e6064 2026-10-18 |
+| E-1 | Fee inputs | BLOCKED_BY_FEATURES | 1/4 | test_e1_broker_fee_and_sales_tax_skill_discounts, test_market_broker_fee_and_sales_tax | PARTIAL | Broker fee calculation with Broker Relations and faction/corp standings discount, sales tax with Accounting discount, and escrow deduction tested; auditor-flagged feat:market.broker-fee pending cleara | 22e6064 2026-10-18 |
+| E-2 | Order lifecycle | BLOCKED_BY_FEATURES | 0/22 | test_e2_market_order_matching_queries_and_cancellation, test_market_orders_limit_escrow_queries_cancellation | PARTIAL | Limit orders, immediate buy and sell matching against order book, regional order book queries, order cancellation, and escrow refund tested; blocked by remaining features. | 22e6064 2026-10-18 |
+| E-3 | Contracts | BLOCKED_BY_FEATURES | 0/14 | test_contracts_item_exchange_and_request, test_e3_contracts_lifecycle_item_exchange_courier_auction | PARTIAL | Item Exchange, Courier with collateral hold and delivery failure, and Auction contracts with bidding and escrow refund tested; blocked by remaining features. | 22e6064 2026-10-18 |
+| E-4 | Industry | BLOCKED_BY_FEATURES | 0/32 | test_e4_industry_jobs_lifecycle_manufacturing_research_and_copying, test_industry_blueprint_data_facilities_jobs | PARTIAL | Industry blueprint data, facilities lookup, job cost with facility tax, manufacturing, TE/ME research, copying, and delivery tested; blocked by remaining features. | 22e6064 2026-10-18 |
 | E-5 | Agents and missions | BLOCKED_BY_FEATURES | 5/25 | test_e5_agent_finder_and_conversation_lifecycle, test_e5_planetary_interaction_lifecycle | PARTIAL | PVE agent finder, agent conversation, mission offer/accept/decline/quit state machine, and standing calculations; blocked by remaining features. | e99a2c2 2026-10-18 |
 | E-6 | PI basics | BLOCKED_BY_FEATURES | 0/21 | test_e6_lp_store_offerings_and_exchange, test_pi_colony_command_center_pins_and_links | PARTIAL | Planetary Interaction planet info, command center placement, colony limit from skill, pin placement, links, and production routing tested; blocked by remaining features. | 22e6064 2026-10-18 |
 
@@ -153,13 +153,13 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 
 | Task | Title | Ledger | Features | Tests | Assessment | Note | Last commit |
 |---|---|---|---|---|---|---|---|
-| SO-1 | EVE mail | BLOCKED_BY_FEATURES | 5/11 | test_so1_fleet_creation_hierarchy_broadcast_and_position_sharing, test_so1_mail_lifecycle_labels_and_notifications | PARTIAL | EVE mail send, headers, body with auto-read, read/unread state, labels management, and notifications tested; blocked by remaining features. | 0321b74 2026-10-18 |
-| SO-2 | Fleets | BLOCKED_BY_FEATURES | 5/20 | test_so2_corporation_roles_applications_and_wallet_divisions, test_so2_fleet_manager_hierarchy_broadcast_and_fleet_warp | PARTIAL | Fleet creation, hierarchy wings and squads, invite and join, broadcast events, member positions, and fleet warp tested; blocked by remaining features. | — |
-| SO-3 | Corporations and alliances | BLOCKED_BY_FEATURES | 4/42 | test_so3_chat_channel_join_leave_local_population_and_broadcast, test_so3_corporation_roles_public_info_and_wallet_divis | PARTIAL | Corporation creation, public info, wallet divisions, membership applications, and role bitmask enforcement tested; blocked by remaining features. | — |
-| SO-4 | Bookmarks | BLOCKED_BY_FEATURES | 5/9 | test_so4_bookmarks_folders_shared_folders_and_scan_bookmarks, test_so4_in_game_mail_lifecycle | PARTIAL | Bookmarks creation, folders, shared corporate folders, update, delete, and cosmic signature bookmarking tested; blocked by remaining features. | — |
-| SO-5 | Exploration | BLOCKED_BY_FEATURES | 1/22 | test_so5_bookmarks_creation_entity_and_deletion, test_so5_scanning_dscan_probes_and_acceleration_gates | PARTIAL | Directional scan cone filtering, cosmic probe launching, scan math convergence, and acceleration gates tested; blocked by remaining features. | — |
-| SO-6 | Wormholes | BLOCKED_BY_FEATURES | 1/7 | test_so6_cosmic_signatures_generation_and_probing_math, test_so6_wormholes_polarization_lifetime_mass_and_thera | PARTIAL | Wormhole jump transition, polarization lockout timer, lifetime, mass exhaustion, and Thera system rules tested; blocked by remaining features. | — |
-| SO-7 | Chat | BLOCKED_BY_FEATURES | 4/9 | test_so7_chat_channels_local_corp_fleet_player_and_private, test_so7_wormhole_lifetime_mass_exhaustion_and_jump | PARTIAL | Chat channels join/leave, messaging, player-owned channels, private conversations, and delayed-local mode tested; blocked by remaining features. | 0321b74 2026-10-18 |
+| SO-1 | EVE mail | BLOCKED_BY_FEATURES | 0/11 | test_so1_fleet_creation_hierarchy_broadcast_and_position_sharing, test_so1_mail_lifecycle_labels_and_notifications | PARTIAL | EVE mail send, headers, body with auto-read, read/unread state, labels management, and notifications tested; blocked by remaining features. | 0321b74 2026-10-18 |
+| SO-2 | Fleets | BLOCKED_BY_FEATURES | 0/20 | test_so2_corporation_roles_applications_and_wallet_divisions, test_so2_fleet_manager_hierarchy_broadcast_and_fleet_warp | PARTIAL | Fleet creation, hierarchy wings and squads, invite and join, broadcast events, member positions, and fleet warp tested; blocked by remaining features. | — |
+| SO-3 | Corporations and alliances | BLOCKED_BY_FEATURES | 0/42 | test_so3_chat_channel_join_leave_local_population_and_broadcast, test_so3_corporation_roles_public_info_and_wallet_divis | PARTIAL | Corporation creation, public info, wallet divisions, membership applications, and role bitmask enforcement tested; blocked by remaining features. | — |
+| SO-4 | Bookmarks | BLOCKED_BY_FEATURES | 0/9 | test_so4_bookmarks_folders_shared_folders_and_scan_bookmarks, test_so4_in_game_mail_lifecycle | PARTIAL | Bookmarks creation, folders, shared corporate folders, update, delete, and cosmic signature bookmarking tested; blocked by remaining features. | — |
+| SO-5 | Exploration | BLOCKED_BY_FEATURES | 0/22 | test_so5_bookmarks_creation_entity_and_deletion, test_so5_scanning_dscan_probes_and_acceleration_gates | PARTIAL | Directional scan cone filtering, cosmic probe launching, scan math convergence, and acceleration gates tested; blocked by remaining features. | — |
+| SO-6 | Wormholes | BLOCKED_BY_FEATURES | 0/7 | test_so6_cosmic_signatures_generation_and_probing_math, test_so6_wormholes_polarization_lifetime_mass_and_thera | PARTIAL | Wormhole jump transition, polarization lockout timer, lifetime, mass exhaustion, and Thera system rules tested; blocked by remaining features. | — |
+| SO-7 | Chat | BLOCKED_BY_FEATURES | 0/9 | test_so7_chat_channels_local_corp_fleet_player_and_private, test_so7_wormhole_lifetime_mass_exhaustion_and_jump | PARTIAL | Chat channels join/leave, messaging, player-owned channels, private conversations, and delayed-local mode tested; blocked by remaining features. | 0321b74 2026-10-18 |
 
 ## Phase Q: Quasar / public-gateway backend services (all of them)
 

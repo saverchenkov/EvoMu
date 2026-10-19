@@ -253,10 +253,10 @@ async fn test_esi3_dogma_insurance_killmails_sovereignty_routes_and_wars() {
             sov_tcu_id,
             UpwellStructureRecord {
                 structure_id: sov_tcu_id,
-                type_id: 32226,
+                type_id: 32458,
                 owner_corp_id: corp_id,
                 solar_system_id: nullsec_sys_id,
-                name: "Sov Territorial Claim Unit".to_string(),
+                name: "Sov Infrastructure Hub".to_string(),
                 position: [5000.0, 5000.0, 5000.0],
                 state: "ShieldVulnerable".to_string(),
                 quantum_core_installed: true,
@@ -280,11 +280,32 @@ async fn test_esi3_dogma_insurance_killmails_sovereignty_routes_and_wars() {
             unallied_tcu_id,
             UpwellStructureRecord {
                 structure_id: unallied_tcu_id,
-                type_id: 32226,
+                type_id: 32458,
                 owner_corp_id: enemy_corp_id,
                 solar_system_id: nullsec_sys_id,
-                name: "Unallied TCU".to_string(),
+                name: "Unallied Hub".to_string(),
                 position: [-5000.0, -5000.0, -5000.0],
+                state: "ShieldVulnerable".to_string(),
+                quantum_core_installed: true,
+                fuel_blocks: 500,
+                shield_hp: 5000.0,
+                armor_hp: 5000.0,
+                hull_hp: 5000.0,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+            },
+        );
+        let legacy_tcu_id = 1_030_000_005_999;
+        snap.structures.insert(
+            legacy_tcu_id,
+            UpwellStructureRecord {
+                structure_id: legacy_tcu_id,
+                type_id: 32226,
+                owner_corp_id: corp_id,
+                solar_system_id: nullsec_sys_id,
+                name: "Legacy TCU".to_string(),
+                position: [0.0, 0.0, 0.0],
                 state: "ShieldVulnerable".to_string(),
                 quantum_core_installed: true,
                 fuel_blocks: 500,
@@ -620,10 +641,10 @@ async fn test_esi3_dogma_insurance_killmails_sovereignty_routes_and_wars() {
     let sov_st = sov_arr
         .iter()
         .find(|s| s["structure_id"] == json!(sov_tcu_id))
-        .expect("null-sec TCU in sov structures");
+        .expect("null-sec Hub in sov structures");
     assert_eq!(sov_st["alliance_id"], json!(alliance_id));
     assert_eq!(sov_st["solar_system_id"], json!(nullsec_sys_id as i64));
-    assert_eq!(sov_st["structure_type_id"], json!(32226));
+    assert_eq!(sov_st["structure_type_id"], json!(32458));
     assert_eq!(sov_st["vulnerability_occupancy_level"], json!(4.9));
     assert_eq!(
         sov_st["vulnerable_start_time"],
@@ -632,6 +653,10 @@ async fn test_esi3_dogma_insurance_killmails_sovereignty_routes_and_wars() {
     assert_eq!(
         sov_st["vulnerable_end_time"],
         json!("2026-06-15T22:00:00Z")
+    );
+    assert!(
+        !sov_arr.iter().any(|s| s["structure_type_id"] == json!(32226)),
+        "Legacy TCU (type 32226) must be excluded from /sovereignty/structures"
     );
 
     // 9. Wars detail & war killmails
@@ -926,7 +951,7 @@ async fn test_esi3_universe_hierarchy_celestials_stargates_structures_and_bulk_r
     assert_eq!(gate_json["system_id"], json!(30_000_001));
     assert!(gate_json["destination"]["system_id"].as_i64().is_some());
 
-    // 3. Structures list + ACL-checked structure detail (200 for allowed, 403 for denied)
+    // 3. Structures list + ACL-checked structure detail (401 without token, 403 without scope, 200 for allowed, 403 for denied)
     let structs_list = validate_and_json(
         &router,
         &spec,
@@ -937,6 +962,32 @@ async fn test_esi3_universe_hierarchy_celestials_stargates_structures_and_bulk_r
         .as_array()
         .expect("structures")
         .contains(&json!(allowed_struct_id)));
+
+    validate_and_json(
+        &router,
+        &spec,
+        &EsiHttpRequest::new(
+            "GET",
+            format!("/v2/universe/structures/{allowed_struct_id}/"),
+        ),
+        401,
+    );
+
+    let unscoped_struct_token = issue_token_with_scopes(
+        &ctx,
+        90_000_001,
+        vec!["esi-location.read_location.v1".to_string()],
+    );
+    validate_and_json(
+        &router,
+        &spec,
+        &EsiHttpRequest::new(
+            "GET",
+            format!("/v2/universe/structures/{allowed_struct_id}/"),
+        )
+        .with_bearer_token(&unscoped_struct_token),
+        403,
+    );
 
     let allowed_st = validate_and_json(
         &router,
@@ -1082,6 +1133,7 @@ async fn test_esi4_character_clones_skills_location_fittings_assets_wallet_loyal
             ch.last_clone_jump_unix = now.saturating_sub(3600);
             ch.jump_cooldown_until_unix = now + 1800;
             ch.jump_fatigue_minutes = 30.0;
+            ch.jump_fatigue_until_unix = now + 1800;
             ch.loyalty_points.insert(1_000_035, 12_500);
             ch.standings.insert(1_000_035, 5.25);
         }
@@ -1127,6 +1179,26 @@ async fn test_esi4_character_clones_skills_location_fittings_assets_wallet_loyal
                 balance: IskCents::from_isk(15_000_000),
             },
             eve_db::CorpWalletDivisionRecord {
+                division_id: 3,
+                name: "3rd Wallet".to_string(),
+                balance: IskCents::from_isk(12_500_000),
+            },
+            eve_db::CorpWalletDivisionRecord {
+                division_id: 4,
+                name: "4th Wallet".to_string(),
+                balance: IskCents::from_isk(9_750_000),
+            },
+            eve_db::CorpWalletDivisionRecord {
+                division_id: 5,
+                name: "5th Wallet".to_string(),
+                balance: IskCents::from_isk(8_200_000),
+            },
+            eve_db::CorpWalletDivisionRecord {
+                division_id: 6,
+                name: "6th Wallet".to_string(),
+                balance: IskCents::from_isk(5_100_000),
+            },
+            eve_db::CorpWalletDivisionRecord {
                 division_id: 7,
                 name: "7th Wallet".to_string(),
                 balance: IskCents::from_isk(3_500_000),
@@ -1157,7 +1229,7 @@ async fn test_esi4_character_clones_skills_location_fittings_assets_wallet_loyal
                 implants: vec![9899],
             }],
         );
-        // Partially trained Gunnery IV (level_start_sp=8000, training_start_sp=15000)
+        let queue_start = now.saturating_sub(600);
         snap.skill_queues.insert(
             90_000_001,
             vec![SkillQueueEntry {
@@ -1166,6 +1238,7 @@ async fn test_esi4_character_clones_skills_location_fittings_assets_wallet_loyal
                 start_sp: 15_000.0,
                 end_sp: 45_255.0,
                 duration_seconds: 1800.0,
+                started_at_unix: Some(queue_start),
             }],
         );
         snap.items.insert(
@@ -1243,6 +1316,26 @@ async fn test_esi4_character_clones_skills_location_fittings_assets_wallet_loyal
         );
         snap.item_positions
             .insert(space_asset_id, [1250.0, -2500.0, 5000.0]);
+        snap.items.insert(
+            880_011,
+            InventoryItemRecord {
+                item_id: 880_011,
+                type_id: 587,
+                owner_id: corp_id,
+                location_id: 30_000_142,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                dynamic_attributes: HashMap::new(),
+                source_mutaplasmid_id: None,
+                insured_payout_isk: 0.0,
+                is_blueprint_copy: false,
+                blueprint_runs_remaining: None,
+            },
+        );
+        snap.item_positions
+            .insert(880_011, [-4500.0, 8250.0, -1100.0]);
         snap.corporations.insert(
             98_000_702,
             CorporationRecord {
@@ -1336,6 +1429,29 @@ async fn test_esi4_character_clones_skills_location_fittings_assets_wallet_loyal
     assert!(fatigue["last_jump_date"].as_str().is_some());
     assert!(fatigue["last_update_date"].as_str().is_some());
 
+    // When fatigue expires or is 0, jump_fatigue_expire_date must be omitted while last_update_date remains
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.jump_fatigue_until_unix = 0;
+            ch.jump_fatigue_minutes = 0.0;
+            ch.jump_cooldown_until_unix = now + 900;
+        }
+    });
+    let fatigue_zero = validate_and_json(
+        &router,
+        &spec,
+        &EsiHttpRequest::new("GET", "/v1/characters/90000001/fatigue/").with_bearer_token(&token),
+        200,
+    );
+    assert!(
+        fatigue_zero.get("jump_fatigue_expire_date").is_none(),
+        "Must NOT fall back to jump_cooldown_until_unix when fatigue is 0"
+    );
+    assert!(
+        fatigue_zero["last_update_date"].as_str().is_some(),
+        "last_update_date must still be emitted from cooldown"
+    );
+
     let bps = validate_and_json(
         &router,
         &spec,
@@ -1425,6 +1541,23 @@ async fn test_esi4_character_clones_skills_location_fittings_assets_wallet_loyal
     );
     assert!(sq[0]["start_date"].as_str().is_some());
     assert!(sq[0]["finish_date"].as_str().is_some());
+
+    // Consecutive GET calls must return identical start_date and finish_date (no drift)
+    let sq2 = validate_and_json(
+        &router,
+        &spec,
+        &EsiHttpRequest::new("GET", "/v2/characters/90000001/skillqueue/")
+            .with_bearer_token(&token),
+        200,
+    );
+    assert_eq!(
+        sq[0]["start_date"], sq2[0]["start_date"],
+        "start_date must be anchored to persisted queue start and not drift"
+    );
+    assert_eq!(
+        sq[0]["finish_date"], sq2[0]["finish_date"],
+        "finish_date must be anchored to persisted queue start and not drift"
+    );
 
     // 4. Location (station & structure), Online, Ship
     let loc = validate_and_json(
@@ -1545,12 +1678,54 @@ async fn test_esi4_character_clones_skills_location_fittings_assets_wallet_loyal
         .iter()
         .any(|a| a["item_id"] == json!(bpo_item_id)));
 
+    let live_ball_item_id = 880_012_i64;
+    let _: Result<(), ()> = ctx.db.try_with_mut_snapshot(|snap| {
+        snap.items.insert(
+            live_ball_item_id,
+            InventoryItemRecord {
+                item_id: live_ball_item_id,
+                type_id: 587,
+                owner_id: 90_000_001,
+                location_id: 30_000_142,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                dynamic_attributes: HashMap::new(),
+                source_mutaplasmid_id: None,
+                insured_payout_isk: 0.0,
+                is_blueprint_copy: false,
+                blueprint_runs_remaining: None,
+            },
+        );
+        Ok(())
+    });
+    let jita_sys = ctx.systems.get_or_spawn(30_000_142);
+    jita_sys
+        .spawn_ball(eve_destiny::Ball {
+            id: live_ball_item_id,
+            type_id: 587,
+            position: glam::DVec3::new(3400.0, -7100.0, 9200.0),
+            velocity: glam::DVec3::ZERO,
+            max_velocity: 350.0,
+            inertia: 2.5,
+            mass: 1_067_000.0,
+            radius: 38.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        })
+        .await
+        .expect("spawn live ball in Jita");
+
     let char_locs = validate_and_json(
         &router,
         &spec,
         &EsiHttpRequest::new("POST", "/v2/characters/90000001/assets/locations/")
             .with_bearer_token(&token)
-            .with_body(serde_json::to_vec(&json!([bpo_item_id, space_asset_id])).unwrap()),
+            .with_body(
+                serde_json::to_vec(&json!([bpo_item_id, space_asset_id, live_ball_item_id]))
+                    .unwrap(),
+            ),
         200,
     );
     let loc_arr = char_locs.as_array().expect("char_locs array");
@@ -1572,19 +1747,63 @@ async fn test_esi4_character_clones_skills_location_fittings_assets_wallet_loyal
         json!({ "x": 1250.0, "y": -2500.0, "z": 5000.0 }),
         "In-space deployed items must report persisted 3D coordinates"
     );
+    let live_ball_loc = loc_arr
+        .iter()
+        .find(|l| l["item_id"] == json!(live_ball_item_id))
+        .expect("live ballpark in-space item location");
+    assert_eq!(
+        live_ball_loc["position"],
+        json!({ "x": 3400.0, "y": -7100.0, "z": 9200.0 }),
+        "In-space items in the live ballpark must report their live ballpark coordinates"
+    );
 
-    ctx.esi_state
-        .set_custom_item_name(bpo_item_id, "Custom Master BPO");
+    let mut label_sess = eve_machonet::SessionState::new(42);
+    label_sess.user_id = Some(1);
+    label_sess.character_id = Some(90_000_001);
+    label_sess.corporation_id = Some(corp_id);
+    ctx.dispatch_rpc(
+        &mut label_sess,
+        "invbroker",
+        None,
+        "SetLabel",
+        &[
+            eve_proto::PyRep::Integer(space_asset_id),
+            eve_proto::PyRep::String("Alpha Forward Depot".into()),
+        ],
+        &HashMap::new(),
+        None,
+    )
+    .await
+    .expect("invbroker.SetLabel character singleton asset");
+    ctx.dispatch_rpc(
+        &mut label_sess,
+        "invbroker",
+        None,
+        "SetLabel",
+        &[
+            eve_proto::PyRep::Integer(corp_asset_id),
+            eve_proto::PyRep::String("Apex Flagship Rifter".into()),
+        ],
+        &HashMap::new(),
+        None,
+    )
+    .await
+    .expect("invbroker.SetLabel corp singleton asset");
+
     let char_names = validate_and_json(
         &router,
         &spec,
         &EsiHttpRequest::new("POST", "/v1/characters/90000001/assets/names/")
             .with_bearer_token(&token)
-            .with_body(serde_json::to_vec(&json!([bpo_item_id])).unwrap()),
+            .with_body(serde_json::to_vec(&json!([space_asset_id, bpo_item_id])).unwrap()),
         200,
     );
-    assert_eq!(char_names[0]["item_id"], json!(bpo_item_id));
-    assert_eq!(char_names[0]["name"], json!("Custom Master BPO"));
+    let char_names_arr = char_names.as_array().expect("char_names array");
+    let depot_name = char_names_arr
+        .iter()
+        .find(|n| n["item_id"] == json!(space_asset_id))
+        .expect("space_asset_id name");
+    assert_eq!(depot_name["name"], json!("Alpha Forward Depot"));
 
     let corp_assets = validate_and_json(
         &router,
@@ -1607,6 +1826,7 @@ async fn test_esi4_character_clones_skills_location_fittings_assets_wallet_loyal
         403,
     );
 
+    let corp_space_asset_id = 880_011_i64;
     let corp_locs = validate_and_json(
         &router,
         &spec,
@@ -1615,13 +1835,25 @@ async fn test_esi4_character_clones_skills_location_fittings_assets_wallet_loyal
             format!("/v2/corporations/{corp_id}/assets/locations/"),
         )
         .with_bearer_token(&token)
-        .with_body(serde_json::to_vec(&json!([corp_asset_id])).unwrap()),
+        .with_body(serde_json::to_vec(&json!([corp_asset_id, corp_space_asset_id])).unwrap()),
         200,
     );
-    assert_eq!(corp_locs[0]["item_id"], json!(corp_asset_id));
+    let corp_locs_arr = corp_locs.as_array().expect("corp_locs array");
+    let corp_hangar_loc = corp_locs_arr
+        .iter()
+        .find(|l| l["item_id"] == json!(corp_asset_id))
+        .expect("corp hangar asset location");
     assert_eq!(
-        corp_locs[0]["position"],
+        corp_hangar_loc["position"],
         json!({ "x": 0.0, "y": 0.0, "z": 0.0 })
+    );
+    let corp_space_loc = corp_locs_arr
+        .iter()
+        .find(|l| l["item_id"] == json!(corp_space_asset_id))
+        .expect("corp in-space asset location");
+    assert_eq!(
+        corp_space_loc["position"],
+        json!({ "x": -4500.0, "y": 8250.0, "z": -1100.0 })
     );
 
     let corp_names = validate_and_json(
@@ -1629,11 +1861,20 @@ async fn test_esi4_character_clones_skills_location_fittings_assets_wallet_loyal
         &spec,
         &EsiHttpRequest::new("POST", format!("/v1/corporations/{corp_id}/assets/names/"))
             .with_bearer_token(&token)
-            .with_body(serde_json::to_vec(&json!([corp_asset_id])).unwrap()),
+            .with_body(serde_json::to_vec(&json!([corp_asset_id, corp_space_asset_id])).unwrap()),
         200,
     );
-    assert_eq!(corp_names[0]["item_id"], json!(corp_asset_id));
-    assert_eq!(corp_names[0]["name"], json!("Rifter"));
+    let corp_names_arr = corp_names.as_array().expect("corp_names array");
+    let corp_custom_name = corp_names_arr
+        .iter()
+        .find(|n| n["item_id"] == json!(corp_asset_id))
+        .expect("corp_asset_id custom name");
+    assert_eq!(corp_custom_name["name"], json!("Apex Flagship Rifter"));
+    let corp_default_name = corp_names_arr
+        .iter()
+        .find(|n| n["item_id"] == json!(corp_space_asset_id))
+        .expect("corp_space_asset_id default name");
+    assert_eq!(corp_default_name["name"], json!("Rifter"));
 
     // 7. Corporation Wallets (all 7 divisions) & Character Loyalty Points
     let corp_wallets = validate_and_json(
@@ -1644,12 +1885,19 @@ async fn test_esi4_character_clones_skills_location_fittings_assets_wallet_loyal
         200,
     );
     assert_eq!(corp_wallets.as_array().expect("divisions").len(), 7);
-    assert_eq!(corp_wallets[0]["division"], json!(1));
-    assert_eq!(corp_wallets[0]["balance"], json!(250_000_000.0));
-    assert_eq!(corp_wallets[1]["division"], json!(2));
-    assert_eq!(corp_wallets[1]["balance"], json!(15_000_000.0));
-    assert_eq!(corp_wallets[6]["division"], json!(7));
-    assert_eq!(corp_wallets[6]["balance"], json!(3_500_000.0));
+    let expected_div_balances = [
+        (1, 250_000_000.0),
+        (2, 15_000_000.0),
+        (3, 12_500_000.0),
+        (4, 9_750_000.0),
+        (5, 8_200_000.0),
+        (6, 5_100_000.0),
+        (7, 3_500_000.0),
+    ];
+    for (idx, (div_num, expected_bal)) in expected_div_balances.into_iter().enumerate() {
+        assert_eq!(corp_wallets[idx]["division"], json!(div_num));
+        assert_eq!(corp_wallets[idx]["balance"], json!(expected_bal));
+    }
 
     let lp = validate_and_json(
         &router,
@@ -1710,6 +1958,47 @@ async fn test_esi4_character_clones_skills_location_fittings_assets_wallet_loyal
         sender_bal_before.0 - sender_bal_after.0,
         IskCents::from_isk(2_950).0,
         "CSPA charge of 2,950 ISK must be debited from sender"
+    );
+
+    // Contact exemption: when recipient has sender in contacts (standing > -10.0 and not blocked), CSPA is exempt (0 ISK charge)
+    ctx.esi_state
+        .char_contacts
+        .write()
+        .unwrap()
+        .entry(90_000_002)
+        .or_default()
+        .push(eve_server::esi::runtime_state::EsiContactEntry {
+            contact_id: 90_000_001,
+            contact_type: "character".to_string(),
+            standing: 5.0,
+            label_ids: vec![],
+            is_watched: false,
+            is_blocked: false,
+        });
+
+    let sender_bal_pre_contact = ctx.db.get_character(90_000_001).unwrap().balance;
+    let _mail_id_contact = validate_and_json(
+        &router,
+        &spec,
+        &EsiHttpRequest::new("POST", "/v1/characters/90000001/mail/")
+            .with_bearer_token(&token)
+            .with_body(
+                serde_json::to_vec(&json!({
+                    "approved_cost": 0,
+                    "subject": "Contact Exemption Test",
+                    "body": "No CSPA charge for contacts",
+                    "recipients": [
+                        { "recipient_id": 90_000_002, "recipient_type": "character" }
+                    ]
+                }))
+                .unwrap(),
+            ),
+        201,
+    );
+    let sender_bal_post_contact = ctx.db.get_character(90_000_001).unwrap().balance;
+    assert_eq!(
+        sender_bal_pre_contact.0, sender_bal_post_contact.0,
+        "Non-blocked contact must be exempt from CSPA charge (0 ISK deducted)"
     );
 
     let mail_list = validate_and_json(

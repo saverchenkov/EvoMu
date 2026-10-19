@@ -148,6 +148,7 @@ fn contract_to_pyrep(c: &ContractRecord) -> PyRep {
         ("bids", bids_rep),
         ("expirationUnix", PyRep::Integer(c.expiration_unix as i64)),
         ("dateIssuedUnix", PyRep::Integer(c.date_issued_unix as i64)),
+        ("numDays", PyRep::Integer(c.num_days.max(1) as i64)),
         ("title", PyRep::String(c.title.clone())),
         ("forCorp", PyRep::Bool(c.for_corp)),
     ])
@@ -191,31 +192,81 @@ pub fn handle(
     args: &[PyRep],
     kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
-    if !matches!(service, "contractProxy" | "contractMgr") {
+    if service != "contractProxy" {
         return None;
     }
 
     match method {
+        // V24.01 `code.ccp` `eve/client/script/ui/shared/neocom/contracts/createContractWnd.pyj`:
+        // `contractProxy.CreateContract(type, avail, assigneeID, expireTime, duration, startStationID, endStationID, price, reward, collateral, title, description, itemList=..., flag=..., requestItemTypeList=..., forCorp=...)`
+        // where `type` is `conTypeItemExchange = 1`, `conTypeAuction = 2`, `conTypeCourier = 3`.
         "CreateContract" => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let contract_type = args
-                .first()
-                .and_then(|a| a.as_str())
-                .unwrap_or("Courier");
-            if !matches!(contract_type, "Courier" | "ItemExchange" | "Auction") {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidContractType".into(),
-                    message: format!(
-                        "Unsupported contract type '{contract_type}'; must be Courier, ItemExchange, or Auction"
-                    ),
-                }));
-            }
-            let Some(start_station_id) = args
-                .get(1)
+            let contract_type = match args.first() {
+                Some(PyRep::Integer(1)) => "ItemExchange",
+                Some(PyRep::Integer(2)) => "Auction",
+                Some(PyRep::Integer(3)) => "Courier",
+                Some(PyRep::Integer(other)) => {
+                    return Some(Err(BridgeRpcError {
+                        code: "InvalidContractType".into(),
+                        message: format!(
+                            "Unsupported contract type code {other}; must be 1 (ItemExchange), 2 (Auction), or 3 (Courier)"
+                        ),
+                    }));
+                }
+                Some(PyRep::String(s)) if matches!(s.as_str(), "Courier" | "ItemExchange" | "Auction") => {
+                    s.as_str()
+                }
+                other => {
+                    return Some(Err(BridgeRpcError {
+                        code: "InvalidContractType".into(),
+                        message: format!("Unsupported contract type {other:?}"),
+                    }));
+                }
+            };
+            let availability = if let Some(av_kw) = kwargs.get("availability").and_then(|v| v.as_str()) {
+                av_kw.to_string()
+            } else {
+                match args.get(1) {
+                    Some(PyRep::Bool(false)) | Some(PyRep::Integer(0)) | None | Some(PyRep::None) => {
+                        "Public".to_string()
+                    }
+                    Some(PyRep::Bool(true)) | Some(PyRep::Integer(1)) => "Personal".to_string(),
+                    Some(PyRep::Integer(2)) => "Corporation".to_string(),
+                    Some(PyRep::Integer(3)) => "Alliance".to_string(),
+                    Some(PyRep::String(s)) => s.clone(),
+                    _ => "Public".to_string(),
+                }
+            };
+            let assignee_id = args
+                .get(2)
                 .and_then(|a| a.as_i64())
+                .or_else(|| kwargs.get("assigneeID").and_then(|v| v.as_i64()))
+                .unwrap_or(0);
+            let num_days = args
+                .get(4)
+                .and_then(|a| a.as_i64())
+                .filter(|&d| d > 0)
+                .map(|d| (d as u32).clamp(1, 28))
+                .unwrap_or(1);
+            let duration_secs = if let Some(ds) = kwargs
+                .get("durationSeconds")
+                .and_then(|v| v.as_i64())
+                .filter(|&d| d > 0)
+            {
+                (ds as u64).min(2_419_200)
+            } else if let Some(exp_min) = args.get(3).and_then(|a| a.as_i64()).filter(|&m| m > 0) {
+                ((exp_min as u64).saturating_mul(60)).clamp(60, 2_419_200)
+            } else {
+                86_400
+            };
+            let Some(start_station_id) = args
+                .get(5)
+                .and_then(|a| a.as_i64())
+                .filter(|&id| id > 0)
                 .or(session.station_id)
                 .or(session.structure_id)
             else {
@@ -225,7 +276,7 @@ pub fn handle(
                         .into(),
                 }));
             };
-            let end_station_id = match args.get(2).and_then(|a| a.as_i64()) {
+            let end_station_id = match args.get(6).and_then(|a| a.as_i64()).filter(|&id| id > 0) {
                 Some(eid) => eid,
                 None if matches!(contract_type, "ItemExchange" | "Auction") => start_station_id,
                 None => {
@@ -236,13 +287,35 @@ pub fn handle(
                     }));
                 }
             };
-            let primary_isk = args.get(3).and_then(|a| a.as_f64()).unwrap_or(0.0);
-            let secondary_isk = args.get(4).and_then(|a| a.as_f64()).unwrap_or(0.0);
-            let item_ids_req = parse_item_ids(args.get(5));
-            let requested_items = match parse_requested_items(args.get(6), kwargs) {
+            let price_arg = args.get(7).and_then(|a| a.as_f64()).unwrap_or(0.0);
+            let reward_arg = args.get(8).and_then(|a| a.as_f64()).unwrap_or(0.0);
+            let collateral_arg = args.get(9).and_then(|a| a.as_f64()).unwrap_or(0.0);
+            let (primary_isk, secondary_isk) = match contract_type {
+                "Courier" => (reward_arg, collateral_arg),
+                "Auction" => (price_arg, collateral_arg),
+                _ => (price_arg, reward_arg),
+            };
+            let raw_title = args
+                .get(10)
+                .and_then(|a| a.as_str())
+                .or_else(|| kwargs.get("title").and_then(|v| v.as_str()))
+                .unwrap_or("");
+            let title = raw_title.chars().take(128).collect::<String>();
+            let _description = args.get(11).and_then(|a| a.as_str()).unwrap_or("");
+            let items_source = args
+                .get(12)
+                .or_else(|| kwargs.get("itemList"))
+                .or_else(|| kwargs.get("items"));
+            let item_ids_req = parse_item_ids(items_source);
+            let requested_items = match parse_requested_items(args.get(14), kwargs) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            let for_corp = args
+                .get(15)
+                .and_then(|a| a.as_bool())
+                .or_else(|| kwargs.get("forCorp").and_then(|v| v.as_bool()))
+                .unwrap_or(false);
 
             if session.station_id.or(session.structure_id) != Some(start_station_id) {
                 return Some(Err(BridgeRpcError {
@@ -292,34 +365,6 @@ pub fn handle(
                     message: "Auction buyout price cannot be lower than starting bid".into(),
                 }));
             }
-
-            let availability = kwargs
-                .get("availability")
-                .and_then(|v| v.as_str())
-                .unwrap_or("Public")
-                .to_string();
-            let assignee_id = kwargs
-                .get("assigneeID")
-                .and_then(|v| v.as_i64())
-                .unwrap_or(0);
-            let title = kwargs
-                .get("title")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .chars()
-                .take(128)
-                .collect::<String>();
-            let for_corp = kwargs
-                .get("forCorp")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            let duration_secs = kwargs
-                .get("durationSeconds")
-                .or_else(|| kwargs.get("expireTime"))
-                .and_then(|v| v.as_i64())
-                .filter(|&d| d > 0)
-                .map(|d| (d as u64).min(2_419_200))
-                .unwrap_or(86_400);
 
             let start_sde_valid = ctx
                 .sde
@@ -556,6 +601,7 @@ pub fn handle(
                         date_issued_unix: now_unix,
                         title,
                         for_corp,
+                        num_days,
                     },
                 );
                 Ok((id, exp_unix))
@@ -566,6 +612,7 @@ pub fn handle(
                     ("contractID", PyRep::Integer(cid)),
                     ("status", PyRep::String("Outstanding".into())),
                     ("expirationUnix", PyRep::Integer(exp_unix as i64)),
+                    ("numDays", PyRep::Integer(num_days as i64)),
                 ]))),
                 Err(e) => Some(Err(e)),
             }
@@ -798,7 +845,8 @@ pub fn handle(
                         item.version += 1;
                     }
                 }
-                let delivery_deadline = now_unix.saturating_add(86_400);
+                let courier_days = (c.num_days.max(1) as u64).min(28);
+                let delivery_deadline = now_unix.saturating_add(courier_days.saturating_mul(86_400));
                 if let Some(c_mut) = snap.contracts.get_mut(&cid) {
                     c_mut.acceptor_id = Some(char_id);
                     c_mut.status = "InProgress".into();

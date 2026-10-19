@@ -583,6 +583,7 @@ async fn test_esi4_character_clones_skills_location_fittings_assets_wallet_loyal
                 start_sp: 40_000.0,
                 end_sp: 256_000.0,
                 duration_seconds: 1800.0,
+                started_at_unix: None,
             }],
         );
 

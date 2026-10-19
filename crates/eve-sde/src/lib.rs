@@ -36,9 +36,12 @@ pub enum SdeError {
 pub mod attr_ids {
     use super::AttributeId;
 
+    pub const DAMAGE: AttributeId = 3;
     pub const MASS: AttributeId = 4;
     pub const CAPACITOR_NEED: AttributeId = 6;
     pub const HP_STRUCT: AttributeId = 9;
+    pub const SHIELD_CHARGE: AttributeId = 264;
+    pub const ARMOR_DAMAGE: AttributeId = 266;
     pub const POWER_OUTPUT: AttributeId = 11;
     pub const LOW_SLOTS: AttributeId = 12;
     pub const MED_SLOTS: AttributeId = 13;
@@ -522,6 +525,9 @@ pub struct WormholeTypeInfo {
     pub max_jump_mass: f64,
 }
 
+/// DERIVED (`sde_npc_spawn_groups`): Synthesized from V24.01 SDE Category 11 (`Entity`)
+/// groups and types (`types.fsdbinary` / `groups.fsdbinary`), since server-side NPC spawn
+/// tables are not distributed in client FSD static data.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NpcSpawnGroupInfo {
     pub spawn_group_id: u32,

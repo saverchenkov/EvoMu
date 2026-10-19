@@ -1022,6 +1022,16 @@ pub async fn handle(
                     message: "Cannot activate dungeon acceleration gate while docked".into(),
                 }));
             }
+            if let Some(raw_id) = args.first().and_then(|a| a.as_i64()) {
+                if raw_id >= 100_000_000 {
+                    let is_mission = u32::try_from(raw_id)
+                        .ok()
+                        .is_some_and(|mid| ctx.db.with_snapshot(|snap| snap.active_missions.contains_key(&(char_id, mid))));
+                    if !is_mission {
+                        return None;
+                    }
+                }
+            }
             let mission_id = match parse_mission_id(args) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),

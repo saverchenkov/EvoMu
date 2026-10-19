@@ -382,6 +382,36 @@ async fn test_phase_0_s9_service_roles_bitmask_and_production_account_seed() {
     .await
     .expect("S-9: Persisted GM account session must pass GM check on slash.SlashCmd");
 
+    // 4. Grant GM role to pilot_persisted via `/role` slash command and verify SQLite persistence + sessionChange payload
+    let role_cmd_rsp = ctx
+        .dispatch_rpc(
+            &mut sess_gm,
+            "slash",
+            None,
+            "SlashCmd",
+            &[PyRep::String("/role pilot_persisted gm".into())],
+            &kw,
+            None,
+        )
+        .await
+        .expect("/role pilot_persisted gm");
+    assert_eq!(
+        role_cmd_rsp.dict_get("role").and_then(|v| v.as_i64()),
+        Some(eve_machonet::service_roles::ROLE_GM_DEFAULT as i64)
+    );
+    assert!(role_cmd_rsp.dict_get("sessionChange").is_some());
+
+    let reopened = eve_db::WorldRepository::new_empty_with_snapshot_path(Some(tmp_roles_db.clone()))
+        .expect("reopen SQLite");
+    let updated_acc = reopened
+        .with_snapshot(|snap| snap.accounts.get("pilot_persisted").cloned())
+        .expect("pilot_persisted in reopened SQLite");
+    assert_eq!(
+        updated_acc.role,
+        eve_machonet::service_roles::ROLE_GM_DEFAULT,
+        "Account role updated via /role must persist across SQLite reopen"
+    );
+
     let _ = std::fs::remove_file(&tmp_roles_db);
 }
 
@@ -415,7 +445,26 @@ async fn test_phase_1_d1_to_d5_sde_sqlite_persistence_auth_sso_and_config() {
     assert!(!ctx.sde.solar_systems.is_empty());
     assert_eq!(ctx.sde.market_groups.len(), 2114);
     assert!(ctx.sde.market_groups.contains_key(&4));
-    assert_eq!(ctx.sde.npc_spawn_groups.len(), 392);
+    assert_eq!(ctx.sde.attributes.len(), 2871);
+    assert_eq!(
+        ctx.sde.attributes.get(&54).map(|a| a.name.as_str()),
+        Some("maxRange")
+    );
+    assert_eq!(ctx.sde.effects.len(), 3427);
+    assert_eq!(
+        ctx.sde.effects.get(&12).map(|e| e.name.as_str()),
+        Some("hiPower")
+    );
+    assert_eq!(ctx.sde.blueprints.len(), 5100);
+    assert!(
+        ctx.sde.blueprints.contains_key(&691),
+        "Rifter Blueprint (691) must be present in SdeRegistry::blueprints"
+    );
+    assert_eq!(
+        ctx.sde.npc_spawn_groups.len(),
+        392,
+        "DERIVED sde_npc_spawn_groups built deterministically from SDE category-11 NPC types"
+    );
     assert!(
         !ctx.sde.variations_of(587).is_empty(),
         "D-2: SdeRegistry::variations_of(587) must return Rifter hull variations in O(1)"
@@ -776,6 +825,21 @@ async fn test_phase_1_d1_to_d5_sde_sqlite_persistence_auth_sso_and_config() {
             ch2.clone_grade = 1;
         }
     });
+    // When both accounts are Omega (clone_grade == 1), multiLoginBlocker.Login on the same computerhash must succeed
+    let omega_same_hw = ctx
+        .dispatch_rpc(
+            &mut sess_other,
+            "multiLoginBlocker",
+            None,
+            "Login",
+            &[PyRep::String("hw-hash-alpha-01".into())],
+            &kw,
+            None,
+        )
+        .await
+        .expect("multiLoginBlocker.Login on second Omega account with same computerhash");
+    assert_eq!(omega_same_hw, PyRep::Bool(true));
+
     ctx.dispatch_rpc(
         &mut sess_other,
         "authentication",
@@ -1103,18 +1167,16 @@ async fn test_phase_1_d1_to_d5_sde_sqlite_persistence_auth_sso_and_config() {
         Some(&PyRep::Integer(sess_live_ban.session_id as i64)),
         "/ban must directly kick and report the target account's active live session"
     );
+    assert_eq!(ban_kv.get("permanent"), Some(&PyRep::Bool(false)));
     let banned_until_unix = ban_kv.get("bannedUntilUnix").unwrap().as_i64().unwrap();
     let (ban_close_code, ban_close_msg) = ban_close_rx
         .try_recv()
         .expect("/ban must immediately send GPSTransportClosed disconnect notification to live session");
-    assert!(
-        ban_close_code == "UserBanned" || ban_close_code == "AccountBanned",
-        "Expected UserBanned or AccountBanned, got {ban_close_code}"
-    );
+    assert_eq!(ban_close_code, "UserBanned");
     assert!(ban_close_msg.contains("Automated botting violation"));
     assert!(ctx.db.get_online_session(1).is_none());
 
-    // Verify banned account is refused at login with UserBanned/AccountBanned, reason, and expiry
+    // Verify banned account is refused at login with UserBanned, reason, and expiry
     let banned_err = ctx
         .dispatch_rpc(
             &mut sess2,
@@ -1130,19 +1192,59 @@ async fn test_phase_1_d1_to_d5_sde_sqlite_persistence_auth_sso_and_config() {
         )
         .await
         .expect_err("Banned account login must fail");
-    assert!(
-        banned_err.code == "UserBanned" || banned_err.code == "AccountBanned",
-        "Expected UserBanned or AccountBanned, got {}",
-        banned_err.code
-    );
+    assert_eq!(banned_err.code, "UserBanned");
     assert!(
         banned_err.message.contains("Automated botting violation")
             && banned_err
                 .message
                 .contains(&banned_until_unix.to_string()),
-        "AccountBanned error message must include ban reason and expiry timestamp: {}",
+        "UserBanned error message must include ban reason and expiry timestamp: {}",
         banned_err.message
     );
+
+    // Unban "demo", then test permanent `/ban demo permanent ...`
+    ctx.dispatch_rpc(
+        &mut gm_sess,
+        "slash",
+        None,
+        "SlashCmd",
+        &[PyRep::String("/unban demo".into())],
+        &kw,
+        None,
+    )
+    .await
+    .expect("/unban demo");
+
+    let perm_ban_rsp = ctx
+        .dispatch_rpc(
+            &mut gm_sess,
+            "slash",
+            None,
+            "SlashCmd",
+            &[PyRep::String("/ban demo permanent Permanent RMT ban".into())],
+            &kw,
+            None,
+        )
+        .await
+        .expect("/ban demo permanent");
+    assert_eq!(perm_ban_rsp.dict_get("permanent"), Some(&PyRep::Bool(true)));
+    let perm_ban_err = ctx
+        .dispatch_rpc(
+            &mut sess2,
+            "authentication",
+            None,
+            "Login",
+            &[
+                PyRep::String("demo".into()),
+                PyRep::String("demo-secret".into()),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Permanently banned account login must fail");
+    assert_eq!(perm_ban_err.code, "UserBanned");
+    assert!(perm_ban_err.message.contains("Permanent RMT ban"));
 
     // Unban "demo" via GM /unban command, log "demo" in on a live session (`sess_live_suspend`),
     // and test `/suspend` + `/unsuspend` (`feat:account.account-bans`, `feat:admin.gm-ban`)
@@ -1571,12 +1673,7 @@ async fn test_phase_2_p6_native_machonet_handshake_state_machine() {
         .unwrap();
         let err_rep = read_framed_pyrep(&mut s).await.unwrap().unwrap();
         let closed = GPSTransportClosed::from_pyrep(&err_rep).expect("GPSTransportClosed on ban");
-        assert!(
-            closed.reason_code.as_deref() == Some("UserBanned")
-                || closed.reason_code.as_deref() == Some("AccountBanned"),
-            "Expected UserBanned or AccountBanned, got {:?}",
-            closed.reason_code
-        );
+        assert_eq!(closed.reason_code.as_deref(), Some("UserBanned"));
         assert!(closed.reason.contains("RMT violation"));
         assert_eq!(
             closed.reason_args.get("expiry"),

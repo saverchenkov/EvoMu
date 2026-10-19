@@ -412,7 +412,7 @@ async fn test_esi_oauth2_bearer_sso_scopes_character_ownership_and_verify() {
 
 #[tokio::test]
 async fn test_esi_etag_caching_304_not_modified_and_pagination_x_pages() {
-    // parity: esi:GET /universe/types, esi:GET /characters/{character_id}/wallet
+    // parity: esi:GET /universe/types, esi:GET /universe/types/{type_id}, esi:GET /characters/{character_id}/wallet
     let ctx = Arc::new(ServerContext::new());
     let router = EsiRouter::new(Arc::clone(&ctx));
     let spec = OpenApiSpec::pinned();
@@ -529,6 +529,48 @@ async fn test_esi_etag_caching_304_not_modified_and_pagination_x_pages() {
         format!("/v1/universe/types/?page={}", x_pages + 10),
     ));
     assert_eq!(out_of_range_resp.status_code, 404);
+
+    // 5. GET /universe/types/{type_id} returns real SDE description (not t.name) and accurate dogma_effects is_default
+    let rifter_sde = ctx.sde.types.get(&587).expect("Rifter 587 in SDE");
+    assert_eq!(rifter_sde.default_effect_id, None);
+    let rifter_resp = router.handle_request(&EsiHttpRequest::new("GET", "/v3/universe/types/587/"));
+    assert_eq!(rifter_resp.status_code, 200);
+    spec.validate_response(
+        "GET",
+        "/v3/universe/types/587/",
+        rifter_resp.status_code,
+        &rifter_resp.headers,
+        &rifter_resp.body,
+    )
+    .expect("validate /v3/universe/types/587/");
+    let rifter_json = rifter_resp.json().expect("rifter json");
+    assert_eq!(rifter_json["name"], json!("Rifter"));
+    assert_eq!(rifter_json["description"], json!(rifter_sde.description));
+    assert_ne!(rifter_json["description"], rifter_json["name"]);
+    let rifter_effects = rifter_json["dogma_effects"].as_array().expect("rifter dogma_effects");
+    assert!(!rifter_effects.is_empty());
+    assert!(
+        rifter_effects.iter().all(|e| e["is_default"] == json!(false)),
+        "Passive hull 587 must have is_default=false on all dogma_effects"
+    );
+
+    let ac_sde = ctx.sde.types.get(&484).expect("125mm Gatling AutoCannon I (484) in SDE");
+    assert_eq!(ac_sde.default_effect_id, Some(34));
+    let ac_resp = router.handle_request(&EsiHttpRequest::new("GET", "/v3/universe/types/484/"));
+    assert_eq!(ac_resp.status_code, 200);
+    let ac_json = ac_resp.json().expect("autocannon json");
+    assert_eq!(ac_json["description"], json!(ac_sde.description));
+    assert_ne!(ac_json["description"], ac_json["name"]);
+    let ac_effects = ac_json["dogma_effects"].as_array().expect("autocannon dogma_effects");
+    assert!(!ac_effects.is_empty());
+    for eff in ac_effects {
+        let eid = eff["effect_id"].as_u64().expect("effect_id") as u16;
+        assert_eq!(
+            eff["is_default"],
+            json!(Some(eid) == ac_sde.default_effect_id),
+            "Effect {eid} is_default must equal (Some(eid) == default_effect_id)"
+        );
+    }
 }
 
 #[tokio::test]

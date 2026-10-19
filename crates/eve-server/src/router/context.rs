@@ -55,9 +55,11 @@ pub struct ServerContext {
     pub fighter_charge_state: RwLock<HashMap<(i64, u32), u32>>,
     pub active_fighters: RwLock<HashMap<i64, ActiveFighterSquadron>>,
     pub fighter_tube_loads: RwLock<HashMap<(i64, usize), i64>>,
+    pub active_scanner_probes: RwLock<HashMap<i64, ActiveScannerProbe>>,
     pub scanned_signatures: RwLock<HashSet<(i64, u32, i64)>>,
     pub invention_roll_override: RwLock<Option<f64>>,
     pub module_reactivation_cooldowns: RwLock<HashMap<(i64, i64), f64>>,
+    pub crimewatch: RwLock<crate::combat::crimewatch::CrimeWatchDirector>,
     pub feature_flags: crate::config::FeatureFlagsConfig,
     pub esi_port: u16,
     pub esi_state: Arc<crate::esi::runtime_state::EsiRuntimeState>,
@@ -75,6 +77,24 @@ pub struct ActiveFighterSquadron {
     pub target_id: Option<i64>,
     pub is_abandoned: bool,
     pub mwd_active: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ActiveScannerProbe {
+    pub probe_id: i64,
+    pub probe_type_id: u32,
+    pub owner_char_id: i64,
+    pub ship_id: i64,
+    pub launcher_module_id: i64,
+    pub solar_system_id: u32,
+    pub position: [f64; 3],
+    pub destination: [f64; 3],
+    pub range_step: i32,
+    pub scan_range_m: f64,
+    pub base_sensor_strength: f64,
+    pub max_flight_time_s: f64,
+    pub launched_at_unix: u64,
+    pub state: i32,
 }
 
 impl Default for ServerContext {
@@ -129,9 +149,11 @@ impl ServerContext {
             fighter_charge_state: RwLock::new(HashMap::new()),
             active_fighters: RwLock::new(HashMap::new()),
             fighter_tube_loads: RwLock::new(HashMap::new()),
+            active_scanner_probes: RwLock::new(HashMap::new()),
             scanned_signatures: RwLock::new(HashSet::new()),
             invention_roll_override: RwLock::new(None),
             module_reactivation_cooldowns: RwLock::new(HashMap::new()),
+            crimewatch: RwLock::new(crate::combat::crimewatch::CrimeWatchDirector::new()),
             feature_flags: crate::config::FeatureFlagsConfig::default(),
             esi_port: 26_004,
             esi_state: Arc::new(crate::esi::runtime_state::EsiRuntimeState::new()),
@@ -273,9 +295,26 @@ impl ServerContext {
 
     pub fn character_skill_levels(&self, char_id: i64) -> HashMap<u32, u8> {
         self.db.with_snapshot(|snap| {
+            let ch = snap.characters.get(&char_id);
+            let is_alpha = ch.map(|c| c.clone_grade <= 1).unwrap_or(false);
+            let race_id = ch.map(|c| c.race_id).unwrap_or(1);
             snap.skills
                 .get(&char_id)
-                .map(|m| m.iter().map(|(&tid, rec)| (tid, rec.level)).collect())
+                .map(|m| {
+                    m.iter()
+                        .map(|(&tid, rec)| {
+                            let lvl = if is_alpha {
+                                let cap = crate::services::character_skills::alpha_skill_cap_for_character(
+                                    &self.sde, race_id, tid,
+                                );
+                                rec.level.min(cap)
+                            } else {
+                                rec.level
+                            };
+                            (tid, lvl)
+                        })
+                        .collect()
+                })
                 .unwrap_or_default()
         })
     }

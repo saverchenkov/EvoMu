@@ -196,6 +196,14 @@ pub enum InventoryFlag {
     SpecializedPlanetaryCommoditiesHold = 149,
     SpecializedMaterialBay = 151,
     FighterBay = 158,
+    ServiceSlot0 = 164,
+    ServiceSlot1 = 165,
+    ServiceSlot2 = 166,
+    ServiceSlot3 = 167,
+    ServiceSlot4 = 168,
+    ServiceSlot5 = 169,
+    ServiceSlot6 = 170,
+    ServiceSlot7 = 171,
     Deliveries = 173,
     SpecializedIceHold = 181,
     SpecializedAsteroidHold = 182,
@@ -263,11 +271,33 @@ impl InventoryFlag {
             149 => Self::SpecializedPlanetaryCommoditiesHold,
             151 => Self::SpecializedMaterialBay,
             158 => Self::FighterBay,
+            164 => Self::ServiceSlot0,
+            165 => Self::ServiceSlot1,
+            166 => Self::ServiceSlot2,
+            167 => Self::ServiceSlot3,
+            168 => Self::ServiceSlot4,
+            169 => Self::ServiceSlot5,
+            170 => Self::ServiceSlot6,
+            171 => Self::ServiceSlot7,
             173 => Self::Deliveries,
             181 => Self::SpecializedIceHold,
             182 => Self::SpecializedAsteroidHold,
             _ => Self::None,
         }
+    }
+
+    pub fn is_service_slot(&self) -> bool {
+        matches!(
+            self,
+            Self::ServiceSlot0
+                | Self::ServiceSlot1
+                | Self::ServiceSlot2
+                | Self::ServiceSlot3
+                | Self::ServiceSlot4
+                | Self::ServiceSlot5
+                | Self::ServiceSlot6
+                | Self::ServiceSlot7
+        )
     }
 }
 
@@ -469,6 +499,8 @@ pub struct CharacterRecord {
     #[serde(default)]
     pub jump_cooldown_until_unix: u64,
     #[serde(default)]
+    pub jump_fatigue_until_unix: u64,
+    #[serde(default)]
     pub description: String,
     #[serde(default)]
     pub title: String,
@@ -504,6 +536,8 @@ pub struct SkillQueueEntry {
     pub start_sp: f64,
     pub end_sp: f64,
     pub duration_seconds: f64,
+    #[serde(default)]
+    pub started_at_unix: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -629,6 +663,12 @@ pub struct ContractRecord {
     pub title: String,
     #[serde(default)]
     pub for_corp: bool,
+    #[serde(default = "default_contract_num_days")]
+    pub num_days: u32,
+}
+
+fn default_contract_num_days() -> u32 {
+    1
 }
 
 impl Default for ContractRecord {
@@ -657,6 +697,7 @@ impl Default for ContractRecord {
             date_issued_unix: 0,
             title: String::new(),
             for_corp: false,
+            num_days: 1,
         }
     }
 }
@@ -891,6 +932,82 @@ pub struct CorporationRecord {
     pub url: String,
     #[serde(default)]
     pub hq_station_id: Option<i64>,
+}
+
+impl CorporationRecord {
+    pub fn default_wallet_divisions(master_wallet: IskCents) -> Vec<CorpWalletDivisionRecord> {
+        (1..=7)
+            .map(|d| CorpWalletDivisionRecord {
+                division_id: d,
+                name: if d == 1 {
+                    "Master Wallet".to_string()
+                } else {
+                    format!("Division {d}")
+                },
+                balance: if d == 1 { master_wallet } else { IskCents(0) },
+            })
+            .collect()
+    }
+
+    pub fn ensure_wallet_divisions(&mut self) {
+        for d in 1..=7u8 {
+            if !self.wallet_divisions.iter().any(|w| w.division_id == d) {
+                self.wallet_divisions.push(CorpWalletDivisionRecord {
+                    division_id: d,
+                    name: if d == 1 {
+                        "Master Wallet".to_string()
+                    } else {
+                        format!("Division {d}")
+                    },
+                    balance: if d == 1 {
+                        self.master_wallet
+                    } else {
+                        IskCents(0)
+                    },
+                });
+            }
+        }
+        self.wallet_divisions.sort_by_key(|w| w.division_id);
+        if let Some(div1) = self.wallet_divisions.iter_mut().find(|w| w.division_id == 1) {
+            if div1.balance.0 == 0 && self.master_wallet.0 != 0 {
+                div1.balance = self.master_wallet;
+            } else {
+                self.master_wallet = div1.balance;
+            }
+        }
+    }
+
+    pub fn division_balance(&self, division_id: u8) -> IskCents {
+        if let Some(div) = self
+            .wallet_divisions
+            .iter()
+            .find(|w| w.division_id == division_id)
+        {
+            if division_id == 1 && div.balance.0 == 0 && self.master_wallet.0 != 0 {
+                return self.master_wallet;
+            }
+            return div.balance;
+        }
+        if division_id == 1 {
+            self.master_wallet
+        } else {
+            IskCents(0)
+        }
+    }
+
+    pub fn set_division_balance(&mut self, division_id: u8, balance: IskCents) {
+        self.ensure_wallet_divisions();
+        if let Some(div) = self
+            .wallet_divisions
+            .iter_mut()
+            .find(|w| w.division_id == division_id)
+        {
+            div.balance = balance;
+        }
+        if division_id == 1 {
+            self.master_wallet = balance;
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1375,6 +1492,29 @@ impl WorldStateSnapshot {
         }
         match c.status.as_str() {
             "Outstanding" => {
+                if c.contract_type == "Auction" {
+                    if let Some(winner_id) = c.current_bidder_id.filter(|_| c.current_bid.0 > 0) {
+                        if let Some(issuer) = self.characters.get_mut(&c.issuer_id) {
+                            issuer.balance = issuer
+                                .balance
+                                .checked_add(c.current_bid)
+                                .unwrap_or(issuer.balance);
+                        }
+                        for iid in &c.item_ids {
+                            if let Some(item) = self.items.get_mut(iid) {
+                                item.owner_id = winner_id;
+                                item.location_id = c.start_station_id;
+                                item.flag = InventoryFlag::Hangar;
+                                item.version += 1;
+                            }
+                        }
+                        if let Some(c_mut) = self.contracts.get_mut(&contract_id) {
+                            c_mut.acceptor_id = Some(winner_id);
+                            c_mut.status = "Completed".into();
+                        }
+                        return Some("Completed");
+                    }
+                }
                 if c.reward.0 > 0 {
                     if let Some(issuer) = self.characters.get_mut(&c.issuer_id) {
                         issuer.balance = issuer

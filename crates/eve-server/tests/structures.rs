@@ -57,8 +57,8 @@ async fn test_phase_0_s7_no_hardcoded_fallbacks_and_in_space_range_checks() {
         .await;
     assert_eq!(missing_mail.unwrap_err().code, "InvalidRecipient");
 
-    // 2. PI: GetPlanetInfo and GetMyColonies are read-only, GetPlanetResourceInfo returns UnimplementedRPC,
-    // and CreateColony rejects a planet not in the character's current system.
+    // 2. PI: GetPlanetInfo and GetPlanetsForChar are read-only, GetPlanetResourceInfo returns SDE resource info,
+    // and UserUpdateNetwork rejects a planet not in the character's current system.
     let planet_info = ctx
         .dispatch_rpc(
             &mut sess,
@@ -77,21 +77,21 @@ async fn test_phase_0_s7_no_hardcoded_fallbacks_and_in_space_range_checks() {
             &mut sess,
             "planetMgr",
             None,
-            "GetMyColonies",
+            "GetPlanetsForChar",
             &[],
             &kw,
             None,
         )
         .await
-        .expect("GetMyColonies");
+        .expect("GetPlanetsForChar");
     assert!(matches!(my_colonies, PyRep::Rowset { .. }));
     ctx.db.with_snapshot(|snap| {
         assert!(
             snap.planetary_colonies.is_empty(),
-            "S-7: GetPlanetInfo and GetMyColonies must be read-only and never auto-create a colony"
+            "S-7: GetPlanetInfo and GetPlanetsForChar must be read-only and never auto-create a colony"
         );
     });
-    let res_info_err = ctx
+    let res_info_ok = ctx
         .dispatch_rpc(
             &mut sess,
             "planetMgr",
@@ -101,14 +101,15 @@ async fn test_phase_0_s7_no_hardcoded_fallbacks_and_in_space_range_checks() {
             &kw,
             None,
         )
-        .await;
-    assert_eq!(res_info_err.unwrap_err().code, "UnimplementedRPC");
+        .await
+        .expect("GetPlanetResourceInfo");
+    assert!(matches!(res_info_ok, PyRep::KeyVal(_)));
     let invalid_planet = ctx
         .dispatch_rpc(
             &mut sess,
             "planetMgr",
             None,
-            "CreateColony",
+            "UserUpdateNetwork",
             &[PyRep::Integer(99_999_999)],
             &kw,
             None,
@@ -116,7 +117,29 @@ async fn test_phase_0_s7_no_hardcoded_fallbacks_and_in_space_range_checks() {
         .await;
     assert_eq!(invalid_planet.unwrap_err().code, "InvalidPlanetID");
 
-    // Real SDE planet in Perimeter (30000144) while character is in Jita (30000142) -> PlanetNotInCurrentSystem
+    let invalid_pin_planet = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "planetMgr",
+            None,
+            "UserUpdateNetwork",
+            &[
+                PyRep::Integer(99_999_999),
+                PyRep::List(vec![PyRep::Tuple(vec![
+                    PyRep::Integer(1),
+                    PyRep::Integer(1),
+                    PyRep::Integer(2256),
+                    PyRep::Real(0.1),
+                    PyRep::Real(0.2),
+                ])]),
+            ],
+            &kw,
+            None,
+        )
+        .await;
+    assert_eq!(invalid_pin_planet.unwrap_err().code, "InvalidPlanetID");
+
+    // Real SDE planet in Perimeter (30000144, e.g. 40009148) while character is in Jita (30000142) -> PlanetNotInCurrentSystem
     let perimeter_planet_id = ctx
         .sde
         .celestials_in_system(30_000_144)
@@ -129,7 +152,7 @@ async fn test_phase_0_s7_no_hardcoded_fallbacks_and_in_space_range_checks() {
             &mut sess,
             "planetMgr",
             None,
-            "CreateColony",
+            "UserUpdateNetwork",
             &[PyRep::Integer(perimeter_planet_id)],
             &kw,
             None,
@@ -137,6 +160,30 @@ async fn test_phase_0_s7_no_hardcoded_fallbacks_and_in_space_range_checks() {
         .await;
     assert_eq!(
         wrong_sys_planet.unwrap_err().code,
+        "PlanetNotInCurrentSystem"
+    );
+    let wrong_sys_pin = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "planetMgr",
+            None,
+            "UserUpdateNetwork",
+            &[
+                PyRep::Integer(perimeter_planet_id),
+                PyRep::List(vec![PyRep::Tuple(vec![
+                    PyRep::Integer(1),
+                    PyRep::Integer(1),
+                    PyRep::Integer(2256),
+                    PyRep::Real(0.1),
+                    PyRep::Real(0.2),
+                ])]),
+            ],
+            &kw,
+            None,
+        )
+        .await;
+    assert_eq!(
+        wrong_sys_pin.unwrap_err().code,
         "PlanetNotInCurrentSystem"
     );
     let flush_override = ctx
@@ -168,12 +215,6 @@ async fn test_phase_0_s7_no_hardcoded_fallbacks_and_in_space_range_checks() {
         )
         .await;
     assert_eq!(attack_docked.unwrap_err().code, "ShipDocked");
-
-    // Legacy Crucible-only sovMgr.ClaimSovereignty returns UnimplementedRPC on V24.01 Equinox server
-    let claim_docked = ctx
-        .dispatch_rpc(&mut sess, "sovMgr", None, "ClaimSovereignty", &[], &kw, None)
-        .await;
-    assert_eq!(claim_docked.unwrap_err().code, "UnimplementedRPC");
 
     let skyhook_docked = ctx
         .dispatch_rpc(&mut sess, "sovMgr", None, "AcquireSkyhooks", &[], &kw, None)
@@ -345,6 +386,18 @@ async fn test_phase_0_s7_no_hardcoded_fallbacks_and_in_space_range_checks() {
         skyhook_far_struct.unwrap_err().code,
         "OutsideSovStructureProximity"
     );
+
+    // Move friendly structure within 20 km (< 50 km max proximity) and verify AcquireSkyhooks succeeds
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(s) = snap.structures.get_mut(&1_040_000_000_099) {
+            s.position = [ship_pos.x + 20_000.0, ship_pos.y, ship_pos.z];
+        }
+    });
+    let claim_ok = ctx
+        .dispatch_rpc(&mut sess, "sovMgr", None, "AcquireSkyhooks", &[], &kw, None)
+        .await
+        .expect("AcquireSkyhooks within 50 km of friendly online ShieldVulnerable structure");
+    assert!(matches!(claim_ok, PyRep::KeyVal(_)));
 
     let attack_far_struct = ctx
         .dispatch_rpc(

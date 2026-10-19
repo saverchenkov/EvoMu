@@ -698,7 +698,14 @@ def build_v24_npc_spawn_groups(
     fsd_types: list[dict],
     label_fn,
 ) -> list[dict]:
-    """Derive NPC spawn groups purely from V24.01 Category 11 (Entity) groups and types."""
+    """DERIVED: Synthesize NPC spawn groups from V24.01 Category 11 (Entity) SDE groups and types.
+
+    Provenance: DERIVED (`sde_npc_spawn_groups`) — CCP does not ship server-side NPC spawn
+    tables in client FSD resources (`types.fsdbinary` / `groups.fsdbinary`). Each row is
+    deterministically derived from published/unpublished Category 11 (`Entity`) groups,
+    preserving real SDE `group_id`, `faction_id`, `npc_type_ids`, and average hull radius
+    classification (`ship_class` 1..4).
+    """
     types_by_group: dict[int, list[dict]] = {}
     for t in fsd_types:
         if t["category_id"] == 11:

@@ -4140,6 +4140,390 @@
    "na_allowed": false,
    "attest_ok": false,
    "added_by_audit": "20261019-110620"
+  },
+  {
+   "acceptance": "Items inside any container must first be moved to the item hangar, otherwise the action is refused with the live UserError. This covers repackagingSvc.RepackageItems, the repair service, contract creation, market sell orders and deliveries. Ammunition in a container in cargo is not used for automatic reload, but a manual LoadAmmo from that container succeeds.",
+   "domain": "inventory",
+   "id": "feat:inventory.container-contents-restrictions",
+   "plan_task": null,
+   "sources": [
+    "wiki:Containers"
+   ],
+   "title": "Items inside containers cannot be repackaged, repaired, contracted, sold or auto-reloaded",
+   "why_missing": "feat:inventory.containers covers assembly, capacity and nesting only. The refusal rules for items held in containers are not covered by any row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261019-145905"
+  },
+  {
+   "acceptance": "Audit log secure containers and station containers record these events with actor and time:\n- assembly;\n- each lock and unlock, with the stack quantity at that moment;\n- password changes;\n- successful and failed password entries;\n- configuration changes;\n- renames.\nThe log is retrievable by the owner or corporation. Containers can be configured to lock inserted items by default and to require a password per action. A container with log entries younger than 3 weeks cannot be repackaged, reprocessed or trashed.",
+   "domain": "inventory",
+   "id": "feat:inventory.audit-log-container-events",
+   "plan_task": null,
+   "sources": [
+    "wiki:Containers"
+   ],
+   "title": "Audit log / station container event log and retention lock",
+   "why_missing": "feat:inventory.secure-containers says only 'record access per lock settings'. The event set, the default-lock and per-action password configuration, and the 3-week trash/repackage lock have no testable row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261019-145905"
+  },
+  {
+   "acceptance": "Anchoring a secure or audit log container needs Anchoring I and is refused in systems with security 0.8 or higher. An anchored container lasts 30 days, and opening it resets the timer. Attacking an anchored container, or an unanchored secure container in high-sec, is a criminal act that brings a CONCORD response. Anchored secure containers cannot be found with probes.",
+   "domain": "inventory",
+   "id": "feat:inventory.secure-container-anchoring",
+   "plan_task": null,
+   "sources": [
+    "wiki:Containers",
+    "wiki:Anchoring"
+   ],
+   "title": "Anchoring secure containers in space",
+   "why_missing": "Ledger and auditor anchoring rows cover Upwell and mobile structures only. The rules for anchoring secure containers are absent.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261019-145905"
+  },
+  {
+   "acceptance": "A packaged freight container launched from cargo or a fleet hangar assembles itself in space. It cannot be anchored or password-protected and despawns at downtime. It can be scooped only into a hold with room for the assembled volume, and it stays assembled when scooped. Freight containers are the only containers allowed assembled in freighter and jump freighter holds.",
+   "domain": "inventory",
+   "id": "feat:inventory.freight-container-space-rules",
+   "plan_task": null,
+   "sources": [
+    "wiki:Containers"
+   ],
+   "title": "Freight containers: launch, lifetime and scooping",
+   "why_missing": "feat:inventory.station-containers mentions freight containers only generically ('obey capacity/anchoring rules'). The space behaviour and freighter-hold exception are untested.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261019-145905"
+  },
+  {
+   "acceptance": "Jettisoning creates a jettison container with 55,000 m3 capacity. It can never be scooped into a hold, despawns as soon as it is emptied, and otherwise despawns when its V24 lifetime ends.",
+   "domain": "inventory",
+   "id": "feat:inventory.jetcan-capacity-and-despawn",
+   "plan_task": null,
+   "sources": [
+    "wiki:Containers"
+   ],
+   "title": "Jettison container capacity, scoop ban and despawn",
+   "why_missing": "feat:mining.mining-to-jetcan covers ownership, the suspect flag and a 1h lifetime only. The 55,000 m3 capacity (doubled in 20.03), the scoop ban and empty-despawn are not covered.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261019-145905"
+  },
+  {
+   "acceptance": "Starting research with an R&D agent requires:\n- Science V;\n- Mechanics V, Power Grid Management V or CPU Management V;\n- the agent's field skill;\n- being docked in the agent's station.\nThe number of concurrent R&D agents is 1 + Research Project Management level, up to 6. Access needs both of these:\n- the normal effective standing for the agent level toward the agent, its corporation or its faction (5.0 for level 4);\n- effective corporation standing at least 2.0 below that requirement (3.0 for level 4).\nIn particular, faction standing 10 with corporation standing 0 is refused.",
+   "domain": "pve",
+   "id": "feat:pve.research-agent-access-requirements",
+   "plan_task": null,
+   "sources": [
+    "wiki:Datacore_farming"
+   ],
+   "title": "R&D agent access, skills and agent slots",
+   "why_missing": "feat:pve.research-agents says only 'accrue research points per day by skill/standing'. The skill gate, the RPM slot cap and the dual standing rule are not testable from it.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261019-145905"
+  },
+  {
+   "acceptance": "Research points accrue per day as RP/day = (1 + (20 + 5*Negotiation + agentStanding)/100) * (fieldSkill + agentLevel)^2. agentStanding is the personal standing with the agent, raised by Connections only after at least one mission for that agent. Accrued RP are persisted per agent and returned by the agent's research query. A level-4 agent's passive maximum is 125.55 RP per day.",
+   "domain": "pve",
+   "id": "feat:pve.research-agent-rp-formula",
+   "plan_task": null,
+   "sources": [
+    "wiki:Datacore_farming"
+   ],
+   "title": "Research point accrual formula",
+   "why_missing": "No ledger or auditor row gives the RP formula or its inputs.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261019-145905"
+  },
+  {
+   "acceptance": "Buying datacores from an R&D agent costs 100 RP plus 10,000 ISK per datacore, of the agent's field type. ISK is debited and journaled, RP are deducted, and the datacores are delivered to the agent station hangar. The agent offers at most as many datacores as the RP balance affords.",
+   "domain": "pve",
+   "id": "feat:pve.datacore-purchase",
+   "plan_task": null,
+   "sources": [
+    "wiki:Datacore_farming"
+   ],
+   "title": "Datacore purchase from R&D agent",
+   "why_missing": "feat:pve.research-agents says only 'points redeem for datacores'. The price, the ISK fee and the delivery location are untested.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261019-145905"
+  },
+  {
+   "acceptance": "An R&D agent with active research offers one mission per day: either a short courier or a Tritanium supply mission scaled by agent level (8,100 Tritanium at level 4). Completing it adds one day's RP. Declining or ignoring it has no standing penalty and does not stop research. Completions count toward the 16-mission storyline counter.",
+   "domain": "pve",
+   "id": "feat:pve.research-agent-daily-mission",
+   "plan_task": null,
+   "sources": [
+    "wiki:Datacore_farming"
+   ],
+   "title": "R&D agent daily missions",
+   "why_missing": "No row covers R&D agent missions, their RP reward or their exemption from decline penalties.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261019-145905"
+  },
+  {
+   "acceptance": "A ship that commands a warp enters warp on the first 1 s server tick at which it has reached 75% of max velocity in the warp direction. The effective align time is therefore ceil(ln(4)*inertia*mass/1e6) seconds; for example, a computed 3.1 s align warps out at 4 s.",
+   "domain": "navigation",
+   "id": "feat:navigation.align-server-tick-rounding",
+   "plan_task": null,
+   "sources": [
+    "wiki:Blockade_Runners",
+    "wiki:Server_tick"
+   ],
+   "title": "Warp entry happens on whole server ticks",
+   "why_missing": "feat:navigation.align-to gives only the continuous align formula. Tick rounding is a separately observable rule with no row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261019-145905"
+  },
+  {
+   "acceptance": "A cargo scanner targeting a Blockade Runner returns no cargo contents, with the live message. NPC customs contraband scans in high-sec still apply to Blockade Runners.",
+   "domain": "ships",
+   "id": "feat:ships.blockade-runner-cargo-scan-immunity",
+   "plan_task": null,
+   "sources": [
+    "wiki:Blockade_Runners"
+   ],
+   "title": "Blockade Runner cargo scanner immunity",
+   "why_missing": "feat:modules.cargo-scanner is 'Show target cargo contents' with no immunity rule. Hull-based scan immunity has no row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261019-145905"
+  },
+  {
+   "acceptance": "Boarding a ship whose requiredSkill1..6 the character lacks at the required level is refused, both in the hangar (ship.Board) and in space, with the live UserError. Omega-only hulls are refused to Alpha clones according to the clonegrades data. Ships the character qualifies for board normally.",
+   "domain": "ships",
+   "id": "feat:ships.board-ship-skill-and-clone-check",
+   "plan_task": null,
+   "sources": [
+    "wiki:Skills_and_learning",
+    "client:eve/client/script/dogma/clientDogmaLocation.pyj"
+   ],
+   "title": "Boarding requires the ship's skills and clone state",
+   "why_missing": "feat:ships.board-ship covers only the session and active-ship update. No row requires skill or clone-state checks when boarding.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261019-145905"
+  },
+  {
+   "acceptance": "Strip Fitting on a docked ship moves every fitted module, loaded charge and drone-bay drone to the hangar in one operation. Rigs and T3 subsystems are left fitted. The operation is refused in space. One inventory-change batch and OnModuleUnfitted notifications are pushed.",
+   "domain": "fitting",
+   "id": "feat:fitting.strip-fitting",
+   "plan_task": null,
+   "sources": [
+    "wiki:Fitting_ships",
+    "client:eve/client/script/environment/fittingSvc.pyj"
+   ],
+   "title": "Strip fitting",
+   "why_missing": "Only single-module unfit (feat:fitting.unfit-module) exists. The bulk strip operation and its rig and subsystem exclusion have no row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261019-145905"
+  },
+  {
+   "acceptance": "Mercoxit (and its variants) can be mined only by Deep Core Mining Lasers or Modulated Deep Core strip miners, with the Deep Core Mining skill. Ordinary mining lasers and strip miners refuse to activate on Mercoxit with the live UserError.",
+   "domain": "mining",
+   "id": "feat:mining.mercoxit-deep-core-restriction",
+   "plan_task": null,
+   "sources": [
+    "wiki:Asteroids_and_ore",
+    "wiki:Mining"
+   ],
+   "title": "Mercoxit requires deep core mining equipment",
+   "why_missing": "Mining rows cover generic lasers, strip miners and crystals. The Mercoxit equipment restriction is untested.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261019-145905"
+  },
+  {
+   "acceptance": "Ice harvester cycle duration is reduced by these modifiers, applied via dogma:\n- the Ice Harvesting skill, per level;\n- Ice Harvester Upgrade modules, stacking-penalised;\n- barge, exhumer and ICS hull bonuses;\n- ice mining crystals or rigs, where applicable.\nEach cycle still yields exactly one ice block.",
+   "domain": "mining",
+   "id": "feat:mining.ice-harvester-cycle-modifiers",
+   "plan_task": null,
+   "sources": [
+    "wiki:Ice_harvesting"
+   ],
+   "title": "Ice harvester cycle-time modifiers",
+   "why_missing": "feat:mining.ice-harvester asserts only one unit per cycle, and feat:mining.mining-upgrades covers yield upgrades. Duration modifiers for ice are absent.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261019-145905"
+  },
+  {
+   "acceptance": "Phased Asteroid Fields spawn randomly in low-sec and null-sec as signatures that must be probed. A hyperspace fracture moves across the site and breaches Phased Asteroids in its path. Breached (phased-out) asteroids yield Prismaticite at 10% efficiency until phased in. When the fracture passes halfway, a beacon spawns and the site becomes visible to everyone in system and on the star map. Asteroids collapse when the fracture moves away.",
+   "domain": "mining",
+   "id": "feat:mining.phased-asteroid-field-lifecycle",
+   "plan_task": null,
+   "sources": [
+    "wiki:Phased_Asteroid_Field",
+    "wiki:Asteroids_and_ore"
+   ],
+   "title": "Phased Asteroid Fields (Catalyst)",
+   "why_missing": "Added in the Catalyst expansion (Nov 2025). No mining, scanning or pve row mentions it.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261019-145905"
+  },
+  {
+   "acceptance": "A deployed Mobile Phase Anchor needs 100 energy from connected Industrial Command Ships: a Rorqual provides 100, an Orca 50 and a Porpoise 35. Once powered, it phases in a breached Phased Asteroid so Prismaticite is mined at 100% efficiency, until the asteroid phases out or the fracture leaves.",
+   "domain": "mining",
+   "id": "feat:mining.mobile-phase-anchor",
+   "plan_task": null,
+   "sources": [
+    "wiki:Phased_Asteroid_Field"
+   ],
+   "title": "Mobile Phase Anchor and ICS energy",
+   "why_missing": "No row covers this deployable or its ICS energy contribution.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261019-145905"
+  },
+  {
+   "acceptance": "Each reprocessing batch of Prismaticite yields one of the 8 mineral types, chosen at random, in a variable quantity. Unrefined Mineral reactions turn Compressed Prismaticite plus atmospheric gases into a chosen Unrefined Mineral; they need a Standup Composite Reactor. Unrefined Minerals reprocess into their mineral with variable output.",
+   "domain": "mining",
+   "id": "feat:mining.prismaticite-reprocessing-and-unrefined-reactions",
+   "plan_task": null,
+   "sources": [
+    "wiki:Phased_Asteroid_Field",
+    "wiki:Reactions"
+   ],
+   "title": "Prismaticite reprocessing and Unrefined Mineral reactions",
+   "why_missing": "feat:mining.reprocessing-yield assumes deterministic typeMaterials. The random-batch Prismaticite rule and the Unrefined Mineral reactions are absent.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261019-145905"
+  },
+  {
+   "acceptance": "Activation and requirements:\n- usable only while the Lancer's siege module is active;\n- needs Disruptive Lance Operation (-5% capacitor per level);\n- the Lancer Dreadnoughts skill gives +10% lance damage and +20% range per level;\n- allowed in low-sec.\nOn activation:\n- deals one third of Titan-lance damage;\n- neutralises 10,000 GJ from ships in the area;\n- disables docking, jumping, tethering, stargate use and warping for affected ships;\n- halves their incoming remote repair.\nThe firing Lancer cannot jump, dock, tether or cloak for 5 min, and a Lancer with a lance fitted cannot activate cloaks.",
+   "domain": "modules",
+   "id": "feat:modules.disruptive-lance",
+   "plan_task": null,
+   "sources": [
+    "wiki:Dreadnoughts"
+   ],
+   "title": "Lancer dreadnought Disruptive Lance",
+   "why_missing": "feat:modules.doomsday covers Titan superweapons only. The Revenant Lancer lance and its logistics and travel denial have no row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261019-145905"
+  },
+  {
+   "acceptance": "Activation: 5-minute cycle consuming 250 - 25*Tactical Weapon Reconfiguration Strontium Clathrates. Activation gives no weapons timer.\nWhile active:\n- turret damage +700% (T2 +840%), missile damage +165% (T2 +200%);\n- XL cruise and torpedo cycle -80%, torpedo velocity +150%;\n- sensor dampener and weapon disruption resistance 60% (T2 70%), 80% remote assistance impedance, ECM immunity;\n- local repair amount +100% and duration -50%;\n- mass x10, velocity -100% (the Sarathiel keeps part of its speed via its hull bonus);\n- no remote repair or capacitor can be received.",
+   "domain": "modules",
+   "id": "feat:modules.siege-module-v24-effects",
+   "plan_task": null,
+   "sources": [
+    "wiki:Dreadnoughts"
+   ],
+   "title": "Siege module V24 effect table and strontium",
+   "why_missing": "feat:modules.siege-module is one line ('bonuses, immobility, remote assistance immunity, cycle 5 min'). The per-attribute effects, strontium formula and weapons-timer exemption are not testable from it, mirroring the Bastion split in auditor rows.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261019-145905"
+  },
+  {
+   "acceptance": "Activation: 5-minute cycle consuming 200 - 25*Tactical Logistics Reconfiguration Strontium Clathrates.\nWhile active:\n- capital remote repair amount +400% (T2 +450%), duration -75%, range +200%;\n- scan resolution +900%, max locked targets +4 (T2 +5);\n- local repair duration -50% and amount +100% (T2 +120%), with capacitor cost unchanged;\n- sensor dampener resistance 60% (T2 70%), 80% remote assistance impedance, ECM immunity;\n- mass x10, velocity -100%, drone damage -100%;\n- EWAR modules disabled;\n- no remote repair or capacitor can be received.",
+   "domain": "modules",
+   "id": "feat:modules.triage-module-v24-effects",
+   "plan_task": null,
+   "sources": [
+    "wiki:Force_Auxiliaries"
+   ],
+   "title": "Triage module V24 effect table and strontium",
+   "why_missing": "feat:modules.triage-module is one line. The effect table, strontium consumption and EWAR lockout are untested.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261019-145905"
+  },
+  {
+   "acceptance": "Anchoring a mobile warp disruptor requires Anchoring II (Small I), III (Small II), IV (Large I) or V (Large II), checked from the type's required skills. Anchoring below the required level is refused with the live UserError.",
+   "domain": "modules",
+   "id": "feat:modules.mobile-warp-disruptor-anchoring-skill",
+   "plan_task": null,
+   "sources": [
+    "wiki:Anchoring",
+    "wiki:Mobile_structures"
+   ],
+   "title": "Mobile warp disruptor Anchoring skill tiers",
+   "why_missing": "feat:modules.mobile-warp-disruptor covers deployment and timers but no skill gate per size and tech level.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261019-145905"
+  },
+  {
+   "acceptance": "Launcher limits:\n- only one Interdiction Sphere Launcher can be fitted;\n- it fires one probe per 5 s, reloads in 60 s and holds 3 probes;\n- it is refused in empire space except low-sec systems at corruption stage 5.\nProbes:\n- a Warp Disrupt Probe makes a 20 km bubble lasting 2 min; a Surgical probe makes a 10 km bubble lasting 3 min;\n- probes take no targeted damage, only bombs and smartbombs hurt them;\n- launching does not create aggression.\nBubbles:\n- stop warps initiated inside them, except logoff warps;\n- block capital cyno jumps out;\n- shuttles and ships with an active Interdiction Nullifier are immune.",
+   "domain": "modules",
+   "id": "feat:modules.interdiction-probe-variants",
+   "plan_task": null,
+   "sources": [
+    "wiki:Interdictors"
+   ],
+   "title": "Interdiction Sphere Launcher probe variants and limits",
+   "why_missing": "feat:modules.interdiction-sphere is one line ('spawn a warp disruption field in null/WH; prevents warp and drags'). Probe variants, lifetimes, launcher cadence, the shuttle exemption and the corruption-5 exception are absent.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261019-145905"
+  },
+  {
+   "acceptance": "A Stasis Webification Probe detonates 3 s after launch. It applies a 40% velocity reduction to every ship within 10 km for 30 s and does not disrupt warp. A second wubble on an already-affected ship resets the timer without stacking. The launcher holds 5 of these probes.",
+   "domain": "modules",
+   "id": "feat:modules.stasis-webification-probe",
+   "plan_task": null,
+   "sources": [
+    "wiki:Interdictors"
+   ],
+   "title": "Stasis Webification Probe (wubble)",
+   "why_missing": "No row mentions webification probes. feat:modules.stasis-webifier covers targeted webs only.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261019-145905"
+  },
+  {
+   "acceptance": "When an Upwell structure's manufacturing, research or reaction service module goes offline (out of fuel, low power or manual), every running job in that service pauses. Job end times are extended by the paused duration and jobs resume when the service is back online. industryManager.GetJobsByOwner reports the paused status.",
+   "domain": "industry",
+   "id": "feat:industry.job-pause-on-service-offline",
+   "plan_task": null,
+   "sources": [
+    "wiki:Upwell_structure",
+    "wiki:Manufacturing"
+   ],
+   "title": "Industry jobs pause when the structure service goes offline",
+   "why_missing": "Industry rows cover install, cost, complete and cancel. The pause and resume behaviour tied to structure service state has no row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261019-145905"
   }
  ],
  "rejected_triage": [],
@@ -4150,43 +4534,13 @@
    "flagged_by_audit": "20261018-131718"
   },
   {
-   "evidence": "crates/eve-server/src/esi/character_routes.rs:541-568 never populates `start_date` or `finish_date` on any skill queue entry (violating \"returns queue with start/finish dates\") and sets `\"training_start_sp\"` equal to `\"level_start_sp\"` (lines 555-556). Tested at crates/eve-server/tests/esi_routes.rs:1204-1213.",
-   "id": "esi:GET /characters/{character_id}/skillqueue",
-   "flagged_by_audit": "20261018-131718"
-  },
-  {
    "evidence": "crates/eve-server/src/esi/universe_routes.rs:466-518 iterates over `snap.structures.values()` (player Upwell structures such as Astrahus type_id 35832 in crates/eve-server/tests/esi_routes.rs:197-215, 524-540) instead of Sovereignty Hubs / Territorial Claim Units, fabricates `vulnerability_occupancy_level` via a hardcoded formula `(1.0 + (s.military_index as f64 + s.industrial_index as f64 + s.strategic_index as f64) * 0.2).clamp(1.0, 6.0)` (universe_routes.rs:483-489), and fabricates `vulnerable_start_time` as `(now / 86_400) * 86_400 + 18 * 3_600` (universe_routes.rs:490-491).",
    "id": "esi:GET /sovereignty/structures",
    "flagged_by_audit": "20261018-131718"
   },
   {
-   "evidence": "Newly closed. Acceptance requires esi-universe.read_structures.v1 scope enforcement, but crates/eve-server/tests/esi_routes.rs:941-963 always sends a correctly scoped token. No missing or insufficient-scope request (401/403) is exercised; the 403 tested is the ACL denial.",
-   "id": "esi:GET /universe/structures/{structure_id}",
-   "flagged_by_audit": "20261019-110620"
-  },
-  {
-   "evidence": "crates/eve-server/src/esi/character_routes.rs:36-57 (`resolve_item_coordinates`) returns the station/structure's solar-system coordinates (`st.position`) when an item is docked in a hangar and `[0.0, 0.0, 0.0]` otherwise (`InventoryItemRecord` has no in-space position field), inverting live ESI semantics where hangar items are `(0,0,0)` and in-space assets return their actual coordinates in space. Tested at crates/eve-server/tests/esi_routes.rs:1329-1339.",
-   "id": "esi:POST /characters/{character_id}/assets/locations",
-   "flagged_by_audit": "20261018-131718"
-  },
-  {
-   "evidence": "crates/eve-server/src/esi/character_routes.rs:1091-1182 (`post_character_mail`) ignores `approved_cost` and never checks or deducts CSPA charges (\"sends mail with CSPA charge\"). Tested at crates/eve-server/tests/esi_routes.rs:1422-1432.",
-   "id": "esi:POST /characters/{character_id}/mail",
-   "flagged_by_audit": "20261018-131718"
-  },
-  {
-   "evidence": "crates/eve-server/src/esi/character_routes.rs:36-57 and 882-919 (`post_corporation_assets_locations`) return the station/structure solar-system position for hangar items and `(0,0,0)` for everything else, with no in-space asset coordinate storage. Tested at crates/eve-server/tests/esi_routes.rs:1372-1384.",
-   "id": "esi:POST /corporations/{corporation_id}/assets/locations",
-   "flagged_by_audit": "20261018-131718"
-  },
-  {
    "evidence": "Acceptance: 'Banned or suspended accounts are refused at login with the correct ban message and expiry.' The tagged test (e2e_journeys.rs:7106-7140) tests only a timed GM /ban; suspension is never exercised. The error code 'AccountBanned' is a bridge-invented string (crates/eve-server/src/services/auth_cache.rs:73), and the test only checks substrings of a server-composed message (:7135-7139). Nothing shows it is the V24 login-failure message/UserError the client renders.",
    "id": "feat:account.account-bans",
-   "flagged_by_audit": "20261018-073440"
-  },
-  {
-   "evidence": "Tagged test test_phase_0_s9_service_roles_bitmask_and_production_account_seed (crates/eve-server/tests/e2e_journeys.rs:6397-6500) grants privilege by mutating the in-process session directly: `sess.role |= ROLE_CONTENT` (:6445) and `sess.role |= ROLE_GML` (:6487). It never uses a persisted GM/admin account role. Acceptance asks for roles 'persisted and sent in session', but there is no restart/persistence check and no assertion that the role reaches the client (session-change payload). Only the in-memory gate is exercised.",
-   "id": "feat:account.account-roles",
    "flagged_by_audit": "20261018-073440"
   },
   {
@@ -4255,11 +4609,6 @@
    "flagged_by_audit": "20261019-053529"
   },
   {
-   "evidence": "crates/eve-server/tests/economy_market_industry.rs:1337-1425 creates the auction with string type 'Auction' (:1344) and the invented 6-arg layout. Acceptance clauses not tested: min increment, winner gets items at expiry, GetMyBids. Buyout is done by bidding the buyout amount (:1404-1414).",
-   "id": "feat:contracts.auction",
-   "flagged_by_audit": "20261019-110620"
-  },
-  {
    "evidence": "crates/eve-server/tests/economy_market_industry.rs:1429-1447 creates the courier with string 'Courier' and start == end == JITA_STATION_ID (:1437-1438) and no items (:1441). No courier package is created in the hauler's hangar, and CompleteContract (:1477-1487) pays out without any delivery at a destination.",
    "id": "feat:contracts.courier",
    "flagged_by_audit": "20261019-110620"
@@ -4295,6 +4644,11 @@
    "flagged_by_audit": "20261019-110620"
   },
   {
+   "evidence": "mining_complete.rs:779-796 calls droneMgr.Mine with a `droneID` kwarg on a drone that sits in the drone bay and is never launched. The droneMgr service is NOT_IN_CLIENT (metrics: mining_complete.rs:784). The asserted minedUnits and isDrone fields are an invented return shape.",
+   "id": "feat:drones.mining-drones",
+   "flagged_by_audit": "20261019-145905"
+  },
+  {
    "evidence": "crates/eve-server/src/esi/character_routes.rs:304-320 conflates jump activation cooldown (`jump_cooldown_until_unix`) with jump fatigue expiry (`jump_fatigue_expire_date`), ignores `jump_fatigue_minutes`, and uses `last_clone_jump_unix` for `last_jump_date` and `last_update_date`. Tested at crates/eve-server/tests/esi_routes.rs:973-975, 1148-1156.",
    "id": "feat:esi.character.fatigue",
    "flagged_by_audit": "20261018-131718"
@@ -4305,9 +4659,39 @@
    "flagged_by_audit": "20261018-131718"
   },
   {
+   "evidence": "crates/eve-server/tests/dogma_modules.rs:126-172 fits through invbroker.MoveItem(itemID, shipID, flag). invbroker.MoveItem is NOT_IN_CLIENT (metrics dogma_modules.rs:132, 153); the V24 client fits through the bound ship inventory Add/MultiAdd.",
+   "id": "feat:fitting.fit-module",
+   "flagged_by_audit": "20261019-145905"
+  },
+  {
+   "evidence": "The same test_phase_4_dg2_fit_validation_and_rigs fits and unfits rigs only through invbroker.MoveItem (NOT_IN_CLIENT, metrics dogma_modules.rs:441, 466).",
+   "id": "feat:fitting.fit-rig",
+   "flagged_by_audit": "20261019-145905"
+  },
+  {
+   "evidence": "dogma_modules.rs:517-560 fits Loki subsystems through invbroker.MoveItem (NOT_IN_CLIENT :523, :550).",
+   "id": "feat:fitting.fit-subsystems",
+   "flagged_by_audit": "20261019-145905"
+  },
+  {
    "evidence": "crates/eve-server/tests/character_progression.rs:1271-1315: the only tagged test is a pure DNA string encode/decode (fitting_to_dna/dna_to_fitting) with no RPC. Acceptance requires charFittingMgr/corpFittingMgr/allianceFittingMgr save, list, delete, share and limits; none of these are called or persisted.",
    "id": "feat:fitting.fittings-save",
    "flagged_by_audit": "20261019-053529"
+  },
+  {
+   "evidence": "The same test_phase_4_dg2 enforces group limits only through invbroker.MoveItem fits (NOT_IN_CLIENT, metrics dogma_modules.rs:225-403).",
+   "id": "feat:fitting.max-group-fitted",
+   "flagged_by_audit": "20261019-145905"
+  },
+  {
+   "evidence": "dogma_modules.rs:196-203+ tests canFitShipGroup (ADC II on Rifter) through invbroker.MoveItem (NOT_IN_CLIENT, metrics dogma_modules.rs:203).",
+   "id": "feat:fitting.max-type-fitted",
+   "flagged_by_audit": "20261019-145905"
+  },
+  {
+   "evidence": "dogma_modules.rs:174-194 unfits through the invented invbroker.MoveItem (NOT_IN_CLIENT :179). The 'only allowed docked' clause is never exercised.",
+   "id": "feat:fitting.unfit-module",
+   "flagged_by_audit": "20261019-145905"
   },
   {
    "evidence": "crates/eve-server/tests/social_fleets_corps.rs:197-215 calls fleetMgr.CreateFleet/CreateWing/CreateSquad and asserts only is_keyval. V24 hierarchy operations are on the bound fleetObjectHandler (see the auditor rows for LoadFleetSetup/SetTakesFleetWarp). No structure is verified.",
@@ -4400,6 +4784,146 @@
    "flagged_by_audit": "20261019-110620"
   },
   {
+   "evidence": "Acceptance: inSpaceCompressionMgr.CompressItemInSpace via an Orca/Rorqual compressor with industrial core. mining_complete.rs:944-978 compresses from the default undocked ship with no compressor module and no core, and the call succeeds.",
+   "id": "feat:mining.compression-space",
+   "flagged_by_audit": "20261019-145905"
+  },
+  {
+   "evidence": "Acceptance: structureCompressionMgr.CompressItemInStructure at Athanor/Tatara. mining_complete.rs:1031-1044 only calls DecompressGasInStructure; CompressItemInStructure is never exercised.",
+   "id": "feat:mining.compression-structure",
+   "flagged_by_audit": "20261019-145905"
+  },
+  {
+   "evidence": "Acceptance: Rorqual excavator drones while the industrial core is active. mining_complete.rs:817-832 calls droneMgr.MineAsteroid (NOT_IN_CLIENT :822) from the default undocked ship, with no Rorqual and no core, and asserts only exc_mined > mined_units.",
+   "id": "feat:mining.excavator-drones",
+   "flagged_by_audit": "20261019-145905"
+  },
+  {
+   "evidence": "Acceptance: gas cloud harvesters in gas sites, wormhole gas and nebulae. mining_complete.rs:660-710 spawns Fullerite as an AsteroidRecord in a Jita belt (belt_id 40000001) and asserts gas_units >= 10. Gas sites, wormhole gas and nebulae are not exercised.",
+   "id": "feat:mining.gas-harvesting",
+   "flagged_by_audit": "20261019-145905"
+  },
+  {
+   "evidence": "Same test_mn15 (pve_mining_sites.rs:496-545) uses NOT_IN_CLIENT scanMgr.GetSystemSignatures/GetGasSiteDetails and reads the site from snap.cosmic_signatures (:517-523). The site is in Jita, and the 'NPCs spawn after a delay' clause is untested.",
+   "id": "feat:mining.gas-sites",
+   "flagged_by_audit": "20261019-145905"
+  },
+  {
+   "evidence": "mining_complete.rs:1294-1325 queries autoMoonMining on structure 1_000_000_001_003, created at :1198-1203 as an Athanor (type 35835), not a Metenox Moon Drill. Output is asserted as the constant 2*500*0.40 = 400.",
+   "id": "feat:mining.metenox",
+   "flagged_by_audit": "20261019-145905"
+  },
+  {
+   "evidence": "Acceptance: each cycle rolls a crit chance and bonus ore goes to the hold. crates/eve-server/tests/mining_complete.rs:294-314 forces the crit with a test-only `forceCrit` kwarg on dogmaIM.Activate; the client never sends it, so it is a test hook in production code. Only isCrit and critYieldMultiplier in an invented return dict are asserted; no roll probability, and no bonus ore in the hold.",
+   "id": "feat:mining.mining-crits",
+   "flagged_by_audit": "20261019-145905"
+  },
+  {
+   "evidence": "mining_complete.rs:528-549 only swaps the hull type to 89240 and asserts pioneer_yield > 0. No hull-bonus magnitude is checked and the Perseverance is not exercised.",
+   "id": "feat:mining.mining-destroyers",
+   "flagged_by_audit": "20261019-145905"
+  },
+  {
+   "evidence": "Acceptance: yield per cycle affected by skills and augmentors. Same invented droneMgr.Mine at mining_complete.rs:779-796, asserting only minedUnits >= 300; skills and augmentors are never varied.",
+   "id": "feat:mining.mining-drones-yield",
+   "flagged_by_audit": "20261019-145905"
+  },
+  {
+   "evidence": "mining_complete.rs:507-526 turns on the boost with a test-only `fleetBoost: true` kwarg. There is no fleet, no Mining Foreman burst module or charge and no dbuff; only cycleTimeMs < 180000 is asserted.",
+   "id": "feat:mining.mining-fleet-boosts",
+   "flagged_by_audit": "20261019-145905"
+  },
+  {
+   "evidence": "Same test_mn18, which uses the NOT_IN_CLIENT agentMgr.AcceptMission/CompleteMission (mining_advanced.rs:806, 837, 875 per metrics_rpc_names.txt).",
+   "id": "feat:mining.mining-missions",
+   "flagged_by_audit": "20261019-145905"
+  },
+  {
+   "evidence": "Acceptance: Mining, Astrogeology, ore specializations, barge skills, implants and MLUs applied via dogma. mining_complete.rs:489-505 sets all skills to V in setup (:48-76) and asserts a single `yield_vol > 20.0`. No per-skill delta, no specialization and no implant.",
+   "id": "feat:mining.mining-skills",
+   "flagged_by_audit": "20261019-145905"
+  },
+  {
+   "evidence": "Acceptance: jettisoning creates a miner-owned jetcan, others taking from it become suspect, and the can despawns after 1h. mining_complete.rs:393-418 passes an invented `mineToJetcan` kwarg to beyonce.CmdMine (NOT_IN_CLIENT :401) and asserts only that a type-23 item exists. Suspect flag and despawn are untested.",
+   "id": "feat:mining.mining-to-jetcan",
+   "flagged_by_audit": "20261019-145905"
+  },
+  {
+   "evidence": "Acceptance: MLUs increase yield with stacking penalty and CPU cost. mining_complete.rs:452-505 fits one MLU (22291) and asserts yield > 20. No second MLU, so no stacking penalty, and no CPU check.",
+   "id": "feat:mining.mining-upgrades",
+   "flagged_by_audit": "20261019-145905"
+  },
+  {
+   "evidence": "mining_complete.rs:1276-1292 calls moonExtractions.ExpireMoonField with a test-only `force` kwarg. The method is NOT_IN_CLIENT (metrics :1284), so no time-based decay is tested.",
+   "id": "feat:mining.moon-field-lifetime",
+   "flagged_by_audit": "20261019-145905"
+  },
+  {
+   "evidence": "mining_complete.rs:1256-1274 forces the jackpot with a test-only `jackpot: true` kwarg on FractureChunkWithStructure. No roll, and no jackpot ore variant in the field is checked.",
+   "id": "feat:mining.moon-jackpot",
+   "flagged_by_audit": "20261019-145905"
+  },
+  {
+   "evidence": "test_mn15 (crates/eve-server/tests/pve_mining_sites.rs:489-693) calls these NOT_IN_CLIENT methods (metrics_rpc_names.txt pve_mining_sites.rs:503,540,562,589,628,647,672,693):\n- scanMgr.GetSystemSignatures, GetGasSiteDetails, GetOreSiteDetails, GetSystemAnomalies, ClearAnomaly;\n- sovMgr.InstallProspectingUpgrade, GetSovOreSites.\nV24 scanMgr exposes only GetSystemScanMgr and SignalTrackerRegister.",
+   "id": "feat:mining.ore-anomalies",
+   "flagged_by_audit": "20261019-145905"
+  },
+  {
+   "evidence": "Acceptance: ore holds accept only ore/ice/gas groups and report capacity. The test is the same invented beyonce.CmdMine at mining_complete.rs:374-391 (NOT_IN_CLIENT :379). Neither rejection nor capacity is tested.",
+   "id": "feat:mining.ore-hold",
+   "flagged_by_audit": "20261019-145905"
+  },
+  {
+   "evidence": "mining_complete.rs:551-587 asserts only hulk_yield > 0. No barge or exhumer bonus value and no ore hold are checked.",
+   "id": "feat:mining.ore-ships",
+   "flagged_by_audit": "20261019-145905"
+  },
+  {
+   "evidence": "Same test_mn15 (pve_mining_sites.rs:496-562) relies on the NOT_IN_CLIENT scanMgr.GetSystemSignatures/GetOreSiteDetails. The signature is read straight from snap.cosmic_signatures (:525-532), not from probing.",
+   "id": "feat:mining.ore-signatures",
+   "flagged_by_audit": "20261019-145905"
+  },
+  {
+   "evidence": "Same test_mn15 uses sovMgr.InstallProspectingUpgrade and sovMgr.GetSovOreSites, both NOT_IN_CLIENT (metrics pve_mining_sites.rs:672,693). The sov hub mechanics they depend on (feat:sovereignty.sov-hub-upgrades) are MISSING.",
+   "id": "feat:mining.sov-ore-sites",
+   "flagged_by_audit": "20261019-145905"
+  },
+  {
+   "evidence": "dogma_combat.rs:522-579 computes jam chance with a library function. Lock breaking calls ballpark.apply_ecm_jam directly, and the burst AoE uses the filter `|_| true` (:578). No ECM module is activated against a target through dogma.",
+   "id": "feat:modules.ecm",
+   "flagged_by_audit": "20261019-145905"
+  },
+  {
+   "evidence": "space_navigation_cyno.rs:111-121 sets the immunity directly with sys_handle.set_interdiction_nullified(ship, true). No Interdiction Nullifier module, subsystem or interceptor hull bonus is involved.",
+   "id": "feat:modules.interdiction-nullifier",
+   "flagged_by_audit": "20261019-145905"
+  },
+  {
+   "evidence": "Acceptance: dictor bubbles in null/WH that prevent warp and drag warpers. space_navigation_cyno.rs:73-81 creates the bubble directly with the system-actor helper add_interdiction_sphere in Jita (30000142, high-sec), and it succeeds. No launcher or probe is used and drag is not asserted. Same pattern as the already-flagged warp-disruption-field.",
+   "id": "feat:modules.interdiction-sphere",
+   "flagged_by_audit": "20261019-145905"
+  },
+  {
+   "evidence": "Acceptance: the MJD jumps 100 km forward after a 12 s spool. space_navigation_cyno.rs:290-313 calls beyonce.CmdMicroJump(100000.0) (NOT_IN_CLIENT metrics :295). The distance is client-supplied, the jump is instant, there is no spool-up and no MJD module is activated.",
+   "id": "feat:modules.micro-jump-drive",
+   "flagged_by_audit": "20261019-145905"
+  },
+  {
+   "evidence": "Acceptance includes the capacitor penalty. space_navigation_cyno.rs:201-209 checks speed, mass, signature and scram via the library eval_propulsion_module only. No capacitor-capacity penalty is asserted and no module is activated on a ship.",
+   "id": "feat:modules.microwarpdrive",
+   "flagged_by_audit": "20261019-145905"
+  },
+  {
+   "evidence": "Acceptance: anchorable bubbles in nullsec with deploy timers. space_navigation_cyno.rs:63-71 calls add_mobile_warp_disruptor on the Jita system actor, and it takes effect instantly. There is no anchoring, no deploy timer and no nullsec restriction.",
+   "id": "feat:modules.mobile-warp-disruptor",
+   "flagged_by_audit": "20261019-145905"
+  },
+  {
+   "evidence": "Acceptance: tracking disruptors and guidance disruptors reduce turret and missile stats per script. dogma_combat.rs:600-617 only calls the library function eval_scripted_tracking_disruptor for a Tracking Disruptor. No guidance disruptor is tested and no module is applied to a target.",
+   "id": "feat:modules.tracking-disruptor",
+   "flagged_by_audit": "20261019-145905"
+  },
+  {
    "evidence": "Acceptance: 'HIC infinite point/bubble mode with penalties.' tests/destiny_binary_stream.rs:437-574 only adds generic ballpark bubbles (add_warp_bubble). There is no HIC module, no infinite point and no penalties.",
    "id": "feat:modules.warp-disruption-field",
    "flagged_by_audit": "20261019-053529"
@@ -4415,9 +4939,19 @@
    "flagged_by_audit": "20261019-110620"
   },
   {
+   "evidence": "Acceptance: 'CmdFollowBall moves toward an object until in range'. space_navigation_cyno.rs:226-238 calls beyonce.CmdApproach, which is NOT_IN_CLIENT (metrics :231), and asserts only that an Integer is returned. No movement is checked.",
+   "id": "feat:navigation.approach",
+   "flagged_by_audit": "20261019-145905"
+  },
+  {
    "evidence": "crates/eve-server/tests/social_fleets_corps.rs:298-310 calls fleetMgr.CmdFleetWarp and asserts only is_keyval. Nothing checks that fleet members on grid warp together.",
    "id": "feat:navigation.fleet-warp",
    "flagged_by_audit": "20261019-110620"
+  },
+  {
+   "evidence": "Acceptance: undock at the station's undock point with velocity, session change and invulnerability. space_navigation_cyno.rs:381-391 asserts a hardcoded station_pos + (1500,0,0) and GotoDirection X for any station rather than the station type's undock point and direction. Undock invulnerability is not asserted.",
+   "id": "feat:navigation.undock",
+   "flagged_by_audit": "20261019-145905"
   },
   {
    "evidence": "Acceptance: warp time follows the accel/decel formula per ship class. tests/destiny_binary_stream.rs:140-275 uses a fixed 3 AU/s Rifter ball and checks only monotonic acceleration, cruise speed within 5% and landing within 2,500 m. No warp time or class-dependent deceleration is asserted.",
@@ -4455,16 +4989,6 @@
    "flagged_by_audit": "20261019-053529"
   },
   {
-   "evidence": "tests/economy_market_industry.rs:1467-1493 exercises the 1 + Interplanetary Consolidation limit only through the invented planetMgr.CreateColony; V24 places command centers through UserUpdateNetwork.",
-   "id": "feat:pi.colony-limit",
-   "flagged_by_audit": "20261019-053529"
-  },
-  {
-   "evidence": "tests/economy_market_industry.rs:1447-1530 uses planetMgr.CreateColony and UpgradeCommandCenter, neither of which is a V24 planetMgr method (catalog: GetColony, GetCommandCenterLevel, UserUpdateNetwork, ...). It asserts pinsCount and a balance delta, not CPU/PG.",
-   "id": "feat:pi.command-center",
-   "flagged_by_audit": "20261019-053529"
-  },
-  {
    "evidence": "tests/economy_market_industry.rs:1555-1579 calls the invented planetMgr.CreateLink with a client-supplied distance and asserts only linkPowergrid > 0 and linkCPU > 0. Length-based cost and bandwidth upgrades are not verified.",
    "id": "feat:pi.links",
    "flagged_by_audit": "20261019-053529"
@@ -4475,14 +4999,39 @@
    "flagged_by_audit": "20261019-053529"
   },
   {
-   "evidence": "Acceptance: per-resource distribution maps, with scan range limited by Remote Sensing. tests/economy_market_industry.rs:1427-1445 asserts only planetID and hasColony.",
-   "id": "feat:pi.planet-info",
-   "flagged_by_audit": "20261019-053529"
+   "evidence": "pve_mining_sites.rs:312-335 calls agentMgr.StartConversation, which is NOT_IN_CLIENT (metrics :317; production handler agents_missions.rs:403 is also flagged). It asserts an invented KeyVal (missionID/state 'Offered'/briefing/iskReward/lpReward/expiryUnix).",
+   "id": "feat:pve.agent-conversation",
+   "flagged_by_audit": "20261019-145905"
+  },
+  {
+   "evidence": "pve_mining_sites.rs:340-365 calls agentMgr.AcceptMission (NOT_IN_CLIENT metrics :345; agents_missions.rs:631) and asserts an invented state string 'Accepted'.",
+   "id": "feat:pve.mission-accept",
+   "flagged_by_audit": "20261019-145905"
+  },
+  {
+   "evidence": "pve_mining_sites.rs:426-480 calls agentMgr.DeclineMission (NOT_IN_CLIENT metrics :431,469; agents_missions.rs:876).",
+   "id": "feat:pve.mission-decline",
+   "flagged_by_audit": "20261019-145905"
+  },
+  {
+   "evidence": "test_mn18 relies on agentMgr.AcceptMission and agentMgr.CompleteMission, both NOT_IN_CLIENT (metrics_rpc_names.txt: mining_advanced.rs:806, 837, 875). V24 agent interaction goes through the agent moniker's DoAction, so the accept/complete path is invented.",
+   "id": "feat:pve.mission-mining",
+   "flagged_by_audit": "20261019-145905"
+  },
+  {
+   "evidence": "pve_mining_sites.rs:374-402 calls agentMgr.QuitMission (NOT_IN_CLIENT metrics :379; agents_missions.rs:878) and asserts an invented KeyVal (dungeonCleaned/standingPenaltyApplied).",
+   "id": "feat:pve.mission-quit",
+   "flagged_by_audit": "20261019-145905"
   },
   {
    "evidence": "tests/social_fleets_corps.rs:650-667 calls directionalScanMgr.PerformDirectionalScan(angle, range). That service is absent from the V24 catalog (nothing between devIndexManager and dogmaIM in context/parity.json). The scan direction comes from ship velocity rather than a client-supplied vector.",
    "id": "feat:scanning.dscan",
    "flagged_by_audit": "20261019-053529"
+  },
+  {
+   "evidence": "mining_complete.rs:1221-1238 calls moonExtractions.LaunchMoonProbe, which is NOT_IN_CLIENT (metrics :1226). The V24 moonExtractions catalog has only CancelExtraction, FractureChunkWithStructure, GetExtractionAndEventIDFromStructureID, GetExtractionsForCorp, GetMoonResourcesForStructure and StartNewExtraction (context/parity.json:4029-4058). Moon probes are launched from a probe launcher module.",
+   "id": "feat:scanning.moon-survey-probe",
+   "flagged_by_audit": "20261019-145905"
   },
   {
    "evidence": "tests/social_fleets_corps.rs:669-674 calls probeMgr.LaunchProbes and asserts only is_keyval. The V24 RPC catalog has no probeMgr service (nothing between posMgr and publicQaToolsServer in context/parity.json); probes are launched by the probe-launcher module.",
@@ -4510,9 +5059,19 @@
    "flagged_by_audit": "20261018-073440"
   },
   {
+   "evidence": "Acceptance: 'ship.Board makes the ship active, updates session shipid and fires ProcessActiveShipChanged'. space_navigation_cyno.rs:347-360 boards the already-active ship 100_000_001 and asserts only that a KeyVal is returned. Neither the session ship change nor the notification is checked.",
+   "id": "feat:ships.board-ship",
+   "flagged_by_audit": "20261019-145905"
+  },
+  {
    "evidence": "Acceptance: 'refuses fitted/damaged items.' tests/character_progression.rs:1010-1119 tests only the active-ship and not-docked refusals; fitted and damaged items are never exercised.",
    "id": "feat:ships.repackage",
    "flagged_by_audit": "20261019-053529"
+  },
+  {
+   "evidence": "Acceptance: ore, ice, gas, mineral, PI, ammo, fuel, infrastructure and mobile depot holds accept only matching groups. mining_complete.rs:373-391 only checks that beyonce.CmdMine deposits into SpecializedOreHold, and CmdMine is NOT_IN_CLIENT (metrics_rpc_names.txt: mining_complete.rs:379). No hold rejects a non-matching group in the test.",
+   "id": "feat:ships.special-holds",
+   "flagged_by_audit": "20261019-145905"
   },
   {
    "evidence": "Acceptance: 'Alpha characters cannot train above the alpha cap per skill; SP above cap is inactive.' tests/character_skills_clones.rs:256-328 only tests a 5,000,000 total-SP cap. No per-skill clone-grade cap or inactive-SP behaviour is exercised.",
@@ -4592,11 +5151,6 @@
   {
    "evidence": "crates/eve-sde/src/lib.rs:455-462, 1530-1572; crates/eve-sde/tests/sde_sweep.rs:198-228 \u2014 FighterAbilityInfo (crates/eve-sde/src/lib.rs:455-462, 1538-1566) discards tooltipTextID, turretGraphicID, abilityNameID, and ability effect/cooldown/charge parameters from sde_fighter_abilities.data_json when populating SdeRegistry.fighter_abilities (only keeping ability_id, target_mode, disallow_in_high_sec, disallow_in_low_sec, icon_id, display_name_id), and sde.fighter_abilities is never referenced anywhere in crates/eve-server/. Moreover, sweep_fighter_abilities (crates/eve-sde/tests/sde_sweep.rs:198-228) only asserts against sde_manifest in SQLite rather than reading the client resource file.",
    "id": "sde:res:/staticdata/fighterabilities.static",
-   "flagged_by_audit": "20261018-122150"
-  },
-  {
-   "evidence": "tools/sde-import/import_sde.py:1251-1256, 1784-1795; crates/eve-sde/src/lib.rs:555-560, 1774-1792; crates/eve-server/src/services/cosmetics_events.rs:208-350 \u2014 tools/sde-import/import_sde.py:1784-1795 drops fields from skins.static (such as allowCCPDevs, visibleSerenity, visibleTranquility, isStructureSkin, etc., storing only skin_id, internal_name, skin_material_id, types), and crates/eve-server/src/services/cosmetics_events.rs:208-350 never consults ctx.sde.skins or ctx.sde.skin_licenses at all (GiveSkin / ActivateSkinLicense / ApplySkin accept any arbitrary integer skinID without validating it against sde.skins).",
-   "id": "sde:res:/staticdata/skins.static",
    "flagged_by_audit": "20261018-122150"
   },
   {

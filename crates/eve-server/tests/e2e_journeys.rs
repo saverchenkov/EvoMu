@@ -126,13 +126,13 @@ async fn test_e2e_01_to_18_integration_journeys() {
             &mut sess,
             "skillMgr2",
             Some(skill_bound),
-            "InjectSkillPoints",
+            "InjectSkillpoints",
             &[PyRep::Integer(100_000_014), PyRep::Integer(1)],
             &kw,
             None,
         )
         .await
-        .expect("InjectSkillPoints");
+        .expect("InjectSkillpoints");
     // Aura has 15,000,000 SP (5M..50M bracket -> 400,000 SP yield)
     assert_eq!(injected.as_f64(), Some(400_000.0));
     let sp_after = ctx

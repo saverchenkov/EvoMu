@@ -281,6 +281,18 @@ impl PyRep {
         }
     }
 
+    pub fn dict_get(&self, key: &str) -> Option<&PyRep> {
+        match self {
+            Self::KeyVal(map) => map.get(key),
+            Self::Dict(entries) => entries
+                .iter()
+                .find(|(k, _)| k.as_str() == Some(key))
+                .map(|(_, v)| v),
+            Self::Object { args, .. } => args.dict_get(key),
+            _ => None,
+        }
+    }
+
     pub fn as_str(&self) -> Option<&str> {
         match self {
             Self::String(s) | Self::Token(s) => Some(s.as_str()),

@@ -73,7 +73,7 @@ impl ServerContext {
         })?;
 
         let authorized = match service {
-            "beyonce" => session.solar_system_id.map(|s| s as i64) == Some(object_id),
+            "beyonce" | "scanMgr" => session.solar_system_id.map(|s| s as i64) == Some(object_id),
             "dogmaIM" | "ship" => {
                 session.ship_id == Some(object_id)
                     || session.station_id == Some(object_id)

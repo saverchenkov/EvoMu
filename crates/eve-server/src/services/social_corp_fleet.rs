@@ -250,6 +250,8 @@ pub async fn handle(
                     ch_mut.corporation_id = cid;
                     ch_mut.alliance_id = None;
                 }
+                let mut member_roles = HashMap::new();
+                member_roles.insert(char_id, u64::MAX);
                 snap.corporations.insert(
                     cid,
                     CorporationRecord {
@@ -261,6 +263,9 @@ pub async fn handle(
                         tax_rate,
                         master_wallet: IskCents(0),
                         members: HashSet::from([char_id]),
+                        member_roles,
+                        wallet_divisions: CorporationRecord::default_wallet_divisions(IskCents(0)),
+                        hq_station_id: Some(60_003_760),
                         ..Default::default()
                     },
                 );

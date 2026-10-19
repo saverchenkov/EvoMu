@@ -423,6 +423,7 @@ impl WorldRepository {
                         last_clone_jump_unix: 0,
                         jump_fatigue_minutes: 0.0,
                         jump_cooldown_until_unix: 0,
+                        jump_fatigue_until_unix: 0,
                         description: String::new(),
                         title: String::new(),
                         gender: 0,
@@ -676,6 +677,68 @@ impl WorldRepository {
         self.unban_account(username)
     }
 
+    /// Lifts a suspension resolving target by either numeric `user_id` or string `username` (`feat:account.account-bans`).
+    pub fn unsuspend_account_by_id_or_username(
+        &self,
+        target: &str,
+    ) -> Result<(u64, String), DbError> {
+        self.unban_account_by_id_or_username(target)
+    }
+
+    /// Suspends an account by numeric `account_id` (`user_id`) OR `username` until `suspended_until_unix` with `reason`,
+    /// persists the suspension to SQLite, revokes SSO tokens, and kicks active session (`feat:account.account-bans`, `feat:admin.gm-ban`).
+    pub fn suspend_account_by_id_or_username(
+        &self,
+        target: &str,
+        suspended_until_unix: u64,
+        reason: &str,
+    ) -> Result<u64, DbError> {
+        let username = {
+            let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
+            if let Ok(uid) = target.trim().parse::<u64>() {
+                guard
+                    .accounts
+                    .values()
+                    .find(|a| a.user_id == uid)
+                    .map(|a| a.username.clone())
+                    .or_else(|| guard.accounts.get(target.trim()).map(|a| a.username.clone()))
+            } else {
+                guard.accounts.get(target.trim()).map(|a| a.username.clone())
+            }
+            .ok_or_else(|| DbError::ValidationError(format!("Unknown account '{target}'")))?
+        };
+        self.suspend_account(&username, suspended_until_unix, reason)
+    }
+
+    /// Updates and persists the 64-bit service role bitmask (`service_roles::ROLE_*`) for an account
+    /// identified by `username` or numeric `user_id` (`feat:account.account-roles`).
+    /// Returns `(user_id, username, previous_role)`.
+    pub fn set_account_role(
+        &self,
+        target: &str,
+        new_role: u64,
+    ) -> Result<(u64, String, u64), DbError> {
+        self.try_with_mut_snapshot(|snap| {
+            let target_trimmed = target.trim();
+            let parsed_id = target_trimmed.parse::<u64>().ok();
+            let acc = if let Some(uid) = parsed_id {
+                snap.accounts
+                    .values_mut()
+                    .find(|a| a.user_id == uid)
+                    .ok_or_else(|| {
+                        DbError::ValidationError(format!("Unknown account ID '{uid}'"))
+                    })?
+            } else {
+                snap.accounts.get_mut(target_trimmed).ok_or_else(|| {
+                    DbError::ValidationError(format!("Unknown account '{target_trimmed}'"))
+                })?
+            };
+            let prev_role = acc.role;
+            acc.role = new_role;
+            Ok((acc.user_id, acc.username.clone(), prev_role))
+        })
+    }
+
     /// Checks and automatically clears any expired ban or suspension on `username` at `now_unix`,
     /// persisting the unbanned state to SQLite (`feat:account.account-bans`).
     pub fn clear_expired_ban(&self, username: &str, now_unix: u64) -> bool {
@@ -802,10 +865,19 @@ impl WorldRepository {
         }
         if let Some(existing) = rt.online_sessions.get(&user_id) {
             if existing.session_id != session_id && !allow_displace {
-                return Err(DbError::AlreadyLoggedIn {
-                    user_id,
-                    active_session_id: existing.session_id,
-                });
+                // If an earlier session only authenticated (`computer_hash: None, character_id: None`)
+                // and has not yet completed `multiLoginBlocker.Login(computerhash)` or character selection,
+                // whereas the current session is explicitly claiming `multiLoginBlocker.Login(computerhash)`,
+                // allow the first `multiLoginBlocker.Login(computerhash)` caller to claim the multi-login slot.
+                let earlier_unclaimed = existing.computer_hash.is_none()
+                    && existing.character_id.is_none()
+                    && computer_hash.is_some();
+                if !earlier_unclaimed {
+                    return Err(DbError::AlreadyLoggedIn {
+                        user_id,
+                        active_session_id: existing.session_id,
+                    });
+                }
             }
         }
         let effective_hash = computer_hash.or_else(|| {
@@ -831,7 +903,12 @@ impl WorldRepository {
                     computer_hash: effective_hash,
                 },
             )
-            .filter(|prev| prev.session_id != session_id);
+            .filter(|prev| {
+                prev.session_id != session_id
+                    && (allow_displace
+                        || prev.computer_hash.is_some()
+                        || prev.character_id.is_some())
+            });
         if let Some(ref prev) = displaced {
             rt.displaced_sessions.insert(
                 prev.session_id,
@@ -840,20 +917,21 @@ impl WorldRepository {
         }
         drop(rt);
         if character_id.is_some() || prev_char_id.is_some() {
-            let mut guard = self.inner.write().unwrap_or_else(|e| e.into_inner());
-            if let Some(prev_cid) = prev_char_id {
-                if Some(prev_cid) != character_id {
-                    let st = guard.character_login_stats.entry(prev_cid).or_default();
-                    st.last_logout_unix = now_unix;
+            self.with_mut_snapshot(|snap| {
+                if let Some(prev_cid) = prev_char_id {
+                    if Some(prev_cid) != character_id {
+                        let st = snap.character_login_stats.entry(prev_cid).or_default();
+                        st.last_logout_unix = now_unix;
+                    }
                 }
-            }
-            if let Some(cid) = character_id {
-                if prev_char_id != Some(cid) {
-                    let st = guard.character_login_stats.entry(cid).or_default();
-                    st.last_login_unix = now_unix;
-                    st.logins_count = st.logins_count.saturating_add(1);
+                if let Some(cid) = character_id {
+                    if prev_char_id != Some(cid) {
+                        let st = snap.character_login_stats.entry(cid).or_default();
+                        st.last_login_unix = now_unix;
+                        st.logins_count = st.logins_count.saturating_add(1);
+                    }
                 }
-            }
+            });
         }
         Ok(displaced)
     }
@@ -892,10 +970,10 @@ impl WorldRepository {
                 .filter(|c| c.user_id == uid)
                 .collect();
             if chars.is_empty() {
-                return true;
+                return false;
             }
             chars.sort_by_key(|c| c.character_id);
-            chars.iter().all(|c| c.clone_grade <= 1)
+            chars.iter().all(|c| c.clone_grade == 0)
         };
         if is_user_alpha(user_id) {
             return true;
@@ -923,9 +1001,10 @@ impl WorldRepository {
         };
         if let Some(cid) = logged_out_char_id {
             let now_unix = self.now_unix_secs();
-            let mut guard = self.inner.write().unwrap_or_else(|e| e.into_inner());
-            let st = guard.character_login_stats.entry(cid).or_default();
-            st.last_logout_unix = now_unix;
+            self.with_mut_snapshot(|snap| {
+                let st = snap.character_login_stats.entry(cid).or_default();
+                st.last_logout_unix = now_unix;
+            });
         }
         released
     }

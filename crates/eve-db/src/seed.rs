@@ -66,6 +66,7 @@ impl WorldRepository {
                 last_clone_jump_unix: 0,
                 jump_fatigue_minutes: 0.0,
                 jump_cooldown_until_unix: 0,
+                jump_fatigue_until_unix: 0,
                 description: String::new(),
                 title: String::new(),
                 gender: 0,
@@ -106,6 +107,7 @@ impl WorldRepository {
                 last_clone_jump_unix: 0,
                 jump_fatigue_minutes: 0.0,
                 jump_cooldown_until_unix: 0,
+                jump_fatigue_until_unix: 0,
                 description: String::new(),
                 title: String::new(),
                 gender: 0,
@@ -398,6 +400,14 @@ impl WorldRepository {
                     type_id: 3452, // Acceleration Control
                     level: 4,
                     skill_points: 181_020.0,
+                },
+            ),
+            (
+                3363,
+                TrainedSkillRecord {
+                    type_id: 3363, // Corporation Management
+                    level: 1,
+                    skill_points: 250.0,
                 },
             ),
             (

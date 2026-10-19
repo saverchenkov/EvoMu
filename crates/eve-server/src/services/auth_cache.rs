@@ -122,6 +122,7 @@ pub async fn handle(
                     ctx.release_session_bindings(displaced.session_id);
                 }
             }
+            let prev_role = session.role;
             session.user_id = Some(acc.user_id);
             session.role = acc.role;
             session.character_id = None;
@@ -141,6 +142,22 @@ pub async fn handle(
             Some(Ok(PyRep::keyval([
                 ("userID", PyRep::Integer(acc.user_id as i64)),
                 ("role", PyRep::Integer(acc.role as i64)),
+                (
+                    "sessionChange",
+                    PyRep::Dict(vec![
+                        (
+                            PyRep::String("userid".into()),
+                            PyRep::Tuple(vec![PyRep::None, PyRep::Integer(acc.user_id as i64)]),
+                        ),
+                        (
+                            PyRep::String("role".into()),
+                            PyRep::Tuple(vec![
+                                PyRep::Integer(prev_role as i64),
+                                PyRep::Integer(acc.role as i64),
+                            ]),
+                        ),
+                    ]),
+                ),
             ])))
         }
 
@@ -218,13 +235,14 @@ pub async fn handle(
                                 "ACL_DISPLACED",
                                 "Displaced by concurrent login on same account",
                             );
+                            ctx.release_session_bindings(d.session_id);
                         }
                         Some(Ok(PyRep::Bool(true)))
                     }
                     Err(eve_db::DbError::AlreadyLoggedIn { .. }) => Some(Ok(PyRep::Bool(false))),
                     Err(e) => {
                         let code = match e {
-                            eve_db::DbError::AccountBanned { .. } => "AccountBanned",
+                            eve_db::DbError::AccountBanned { .. } => "UserBanned",
                             eve_db::DbError::AccountSuspended { .. } => "AccountSuspended",
                             eve_db::DbError::ValidationError(_) => "SessionKicked",
                             _ => "AlreadyLoggedIn",
@@ -251,6 +269,7 @@ pub async fn handle(
                                 "ACL_DISPLACED",
                                 "Displaced by concurrent login on same account",
                             );
+                            ctx.release_session_bindings(d.session_id);
                         }
                         Some(Ok(PyRep::keyval([
                             ("userID", PyRep::Integer(uid as i64)),
@@ -265,7 +284,7 @@ pub async fn handle(
                     }
                     Err(e) => {
                         let code = match e {
-                            eve_db::DbError::AccountBanned { .. } => "AccountBanned",
+                            eve_db::DbError::AccountBanned { .. } => "UserBanned",
                             eve_db::DbError::AccountSuspended { .. } => "AccountSuspended",
                             eve_db::DbError::ValidationError(_) => "SessionKicked",
                             _ => "AlreadyLoggedIn",
@@ -371,23 +390,48 @@ pub async fn handle(
                         message: "Usage: /ban <account_id> [duration_seconds] [reason]".into(),
                     }));
                 };
-                let (duration_secs, reason) = match parts.next().map(str::trim) {
-                    Some(dur_str) => {
-                        if let Ok(secs) = dur_str.parse::<u64>() {
-                            let r = parts.next().map(str::trim).filter(|s| !s.is_empty()).unwrap_or("Banned by GM");
-                            (secs, r)
-                        } else {
-                            let full_reason = if let Some(r3) = parts.next() {
-                                format!("{dur_str} {}", r3.trim())
+                const PERMANENT_BAN_UNTIL_UNIX: u64 = 32_503_680_000; // Year 3000 UTC
+                let (is_permanent, until_unix, reason): (bool, u64, String) =
+                    match parts.next().map(str::trim) {
+                        Some(dur_str) => {
+                            if let Ok(secs) = dur_str.parse::<u64>() {
+                                let r = parts
+                                    .next()
+                                    .map(str::trim)
+                                    .filter(|s| !s.is_empty())
+                                    .unwrap_or("Banned by GM")
+                                    .to_string();
+                                if secs == 0 {
+                                    (true, PERMANENT_BAN_UNTIL_UNIX, r)
+                                } else {
+                                    (false, ctx.now_unix().saturating_add(secs), r)
+                                }
+                            } else if dur_str.eq_ignore_ascii_case("perm")
+                                || dur_str.eq_ignore_ascii_case("permanent")
+                                || dur_str.eq_ignore_ascii_case("forever")
+                            {
+                                let r = parts
+                                    .next()
+                                    .map(str::trim)
+                                    .filter(|s| !s.is_empty())
+                                    .unwrap_or("Permanently banned by GM")
+                                    .to_string();
+                                (true, PERMANENT_BAN_UNTIL_UNIX, r)
                             } else {
-                                dur_str.to_string()
-                            };
-                            (3_153_600_000, Box::leak(full_reason.into_boxed_str()) as &str)
+                                let full_reason = if let Some(r3) = parts.next() {
+                                    format!("{dur_str} {}", r3.trim())
+                                } else {
+                                    dur_str.to_string()
+                                };
+                                (true, PERMANENT_BAN_UNTIL_UNIX, full_reason)
+                            }
                         }
-                    }
-                    None => (3_153_600_000, "Banned by GM"),
-                };
-                let until_unix = ctx.now_unix().saturating_add(duration_secs);
+                        None => (
+                            true,
+                            PERMANENT_BAN_UNTIL_UNIX,
+                            "Banned by GM".to_string(),
+                        ),
+                    };
                 let target_uid = ctx.db.with_snapshot(|s| {
                     if let Ok(id) = target.trim().parse::<u64>() {
                         s.accounts
@@ -400,7 +444,7 @@ pub async fn handle(
                     }
                 });
                 let live_sess = target_uid.and_then(|uid| ctx.db.get_online_session(uid));
-                match ctx.db.ban_account_by_id_or_username(target, until_unix, reason) {
+                match ctx.db.ban_account_by_id_or_username(target, until_unix, &reason) {
                     Ok(uid) => {
                         let username = ctx.db.with_snapshot(|s| {
                             s.accounts
@@ -423,7 +467,8 @@ pub async fn handle(
                             ("username", PyRep::String(username)),
                             ("userID", PyRep::Integer(uid as i64)),
                             ("bannedUntilUnix", PyRep::Integer(until_unix as i64)),
-                            ("reason", PyRep::String(reason.to_string())),
+                            ("permanent", PyRep::Bool(is_permanent)),
+                            ("reason", PyRep::String(reason)),
                             (
                                 "kickedSessionID",
                                 live_sess
@@ -460,16 +505,16 @@ pub async fn handle(
                 }
             } else if let Some(rest) = cmd.strip_prefix("/suspend ") {
                 let mut parts = rest.trim().splitn(3, ' ');
-                let Some(username) = parts.next().map(str::trim).filter(|s| !s.is_empty()) else {
+                let Some(target) = parts.next().map(str::trim).filter(|s| !s.is_empty()) else {
                     return Some(Err(BridgeRpcError {
                         code: "InvalidSlashArgument".into(),
-                        message: "Usage: /suspend <username> <duration_seconds> [reason]".into(),
+                        message: "Usage: /suspend <username|user_id> <duration_seconds> [reason]".into(),
                     }));
                 };
                 let Some(dur_str) = parts.next().map(str::trim) else {
                     return Some(Err(BridgeRpcError {
                         code: "InvalidSlashArgument".into(),
-                        message: "Usage: /suspend <username> <duration_seconds> [reason]".into(),
+                        message: "Usage: /suspend <username|user_id> <duration_seconds> [reason]".into(),
                     }));
                 };
                 let Ok(duration_secs) = dur_str.parse::<u64>() else {
@@ -490,12 +535,27 @@ pub async fn handle(
                     .filter(|s| !s.is_empty())
                     .unwrap_or("Suspended by GM");
                 let until_unix = ctx.now_unix().saturating_add(duration_secs);
-                let live_sess = ctx
-                    .db
-                    .with_snapshot(|s| s.accounts.get(username).map(|a| a.user_id))
-                    .and_then(|uid| ctx.db.get_online_session(uid));
-                match ctx.db.suspend_account(username, until_unix, reason) {
+                let target_uid = ctx.db.with_snapshot(|s| {
+                    if let Ok(id) = target.trim().parse::<u64>() {
+                        s.accounts
+                            .values()
+                            .find(|a| a.user_id == id)
+                            .map(|a| a.user_id)
+                            .or_else(|| s.accounts.get(target.trim()).map(|a| a.user_id))
+                    } else {
+                        s.accounts.get(target.trim()).map(|a| a.user_id)
+                    }
+                });
+                let live_sess = target_uid.and_then(|uid| ctx.db.get_online_session(uid));
+                match ctx.db.suspend_account_by_id_or_username(target, until_unix, reason) {
                     Ok(uid) => {
+                        let username = ctx.db.with_snapshot(|s| {
+                            s.accounts
+                                .values()
+                                .find(|a| a.user_id == uid)
+                                .map(|a| a.username.clone())
+                                .unwrap_or_else(|| target.to_string())
+                        });
                         ctx.release_user_bindings(uid);
                         if let Some(ref s) = live_sess {
                             ctx.disconnect_session(
@@ -503,10 +563,11 @@ pub async fn handle(
                                 "AccountSuspended",
                                 &format!("Account suspended until unix={until_unix}: {reason}"),
                             );
+                            let _ = ctx.db.release_online_lock(uid, s.session_id);
                         }
                         Some(Ok(PyRep::keyval([
                             ("command", PyRep::String(cmd.to_string())),
-                            ("username", PyRep::String(username.to_string())),
+                            ("username", PyRep::String(username)),
                             ("userID", PyRep::Integer(uid as i64)),
                             ("suspendedUntilUnix", PyRep::Integer(until_unix as i64)),
                             ("reason", PyRep::String(reason.to_string())),
@@ -532,7 +593,7 @@ pub async fn handle(
                         message: "Usage: /unsuspend <username|user_id> [reason]".into(),
                     }));
                 }
-                match ctx.db.unban_account_by_id_or_username(target) {
+                match ctx.db.unsuspend_account_by_id_or_username(target) {
                     Ok((uid, uname)) => Some(Ok(PyRep::keyval([
                         ("command", PyRep::String(cmd.to_string())),
                         ("username", PyRep::String(uname)),
@@ -541,6 +602,101 @@ pub async fn handle(
                     ]))),
                     Err(e) => Some(Err(BridgeRpcError {
                         code: "UnsuspendFailed".into(),
+                        message: e.to_string(),
+                    })),
+                }
+            } else if let Some(rest) = cmd.strip_prefix("/role ") {
+                let mut parts = rest.trim().split_whitespace();
+                let Some(target) = parts.next() else {
+                    return Some(Err(BridgeRpcError {
+                        code: "InvalidSlashArgument".into(),
+                        message: "Usage: /role <username|user_id> <role_bitmask_or_name>".into(),
+                    }));
+                };
+                let Some(role_arg) = parts.next() else {
+                    return Some(Err(BridgeRpcError {
+                        code: "InvalidSlashArgument".into(),
+                        message: "Usage: /role <username|user_id> <role_bitmask_or_name>".into(),
+                    }));
+                };
+                let parsed_role = if let Some(hex_str) = role_arg.strip_prefix("0x").or_else(|| role_arg.strip_prefix("0X")) {
+                    u64::from_str_radix(hex_str, 16).ok()
+                } else if let Ok(v) = role_arg.parse::<u64>() {
+                    Some(v)
+                } else {
+                    match role_arg.to_ascii_uppercase().as_str() {
+                        "PLAYER" | "ROLE_PLAYER" | "ROLE_PLAYER_DEFAULT" => {
+                            Some(eve_db::service_roles::ROLE_PLAYER_DEFAULT)
+                        }
+                        "GMS" | "ROLE_GMS" => Some(
+                            eve_db::service_roles::ROLE_PLAYER_DEFAULT
+                                | eve_db::service_roles::ROLE_GMS,
+                        ),
+                        "GML" | "ROLE_GML" => Some(
+                            eve_db::service_roles::ROLE_PLAYER_DEFAULT
+                                | eve_db::service_roles::ROLE_GML,
+                        ),
+                        "GMH" | "ROLE_GMH" => Some(
+                            eve_db::service_roles::ROLE_PLAYER_DEFAULT
+                                | eve_db::service_roles::ROLE_GMH,
+                        ),
+                        "WORLDMOD" | "ROLE_WORLDMOD" => Some(
+                            eve_db::service_roles::ROLE_PLAYER_DEFAULT
+                                | eve_db::service_roles::ROLE_WORLDMOD,
+                        ),
+                        "CONTENT" | "ROLE_CONTENT" => Some(
+                            eve_db::service_roles::ROLE_PLAYER_DEFAULT
+                                | eve_db::service_roles::ROLE_CONTENT,
+                        ),
+                        "ADMIN" | "ROLE_ADMIN" | "GM" | "ROLE_GM_DEFAULT" => {
+                            Some(eve_db::service_roles::ROLE_GM_DEFAULT)
+                        }
+                        _ => None,
+                    }
+                };
+                let Some(new_role) = parsed_role else {
+                    return Some(Err(BridgeRpcError {
+                        code: "InvalidSlashArgument".into(),
+                        message: format!("Invalid role specification '{role_arg}'"),
+                    }));
+                };
+                match ctx.db.set_account_role(target, new_role) {
+                    Ok((uid, uname, old_role)) => {
+                        if session.user_id == Some(uid) {
+                            session.role = new_role;
+                        }
+                        let sess_change = PyRep::Dict(vec![(
+                            PyRep::String("role".into()),
+                            PyRep::Tuple(vec![
+                                PyRep::Integer(old_role as i64),
+                                PyRep::Integer(new_role as i64),
+                            ]),
+                        )]);
+                        if let Some(online) = ctx.db.get_online_session(uid) {
+                            if let Some(target_cid) = online.character_id {
+                                ctx.notify(
+                                    crate::router::NotificationTarget::Character(target_cid),
+                                    "OnSessionChanged",
+                                    "charid",
+                                    vec![
+                                        PyRep::Bool(false),
+                                        PyRep::String("role".into()),
+                                        sess_change.clone(),
+                                    ],
+                                );
+                            }
+                        }
+                        Some(Ok(PyRep::keyval([
+                            ("command", PyRep::String(cmd.to_string())),
+                            ("username", PyRep::String(uname)),
+                            ("userID", PyRep::Integer(uid as i64)),
+                            ("oldRole", PyRep::Integer(old_role as i64)),
+                            ("role", PyRep::Integer(new_role as i64)),
+                            ("sessionChange", sess_change),
+                        ])))
+                    }
+                    Err(e) => Some(Err(BridgeRpcError {
+                        code: "RoleUpdateFailed".into(),
                         message: e.to_string(),
                     })),
                 }

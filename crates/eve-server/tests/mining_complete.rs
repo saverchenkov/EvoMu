@@ -1168,13 +1168,13 @@ async fn test_mn12_c6_reprocessing_yield_tax_modules_and_structure() {
             &mut session,
             "reprocessingSvc",
             None,
-            "GetReprocessingInfo",
+            "GetQuotes",
             &[],
             &kw,
             None,
         )
         .await
-        .expect("GetReprocessingInfo on structure");
+        .expect("GetQuotes on structure");
     let struct_base = get_dict_val(&struct_info, "stationBaseYield").unwrap().as_f64().unwrap();
     assert_eq!(struct_base, 0.52, "Athanor refinery must provide 52% base reprocessing efficiency");
 }

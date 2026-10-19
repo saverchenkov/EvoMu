@@ -71,6 +71,15 @@ impl WorldStateWalDelta {
             && old.asteroids == new.asteroids
             && old.owner_notes == new.owner_notes
             && old.paused_skill_queues == new.paused_skill_queues
+            && old.character_last_jump_unix == new.character_last_jump_unix
+            && old.character_cspa_charges == new.character_cspa_charges
+            && old.mail_timestamps == new.mail_timestamps
+            && old.character_login_stats == new.character_login_stats
+            && old.item_custom_names == new.item_custom_names
+            && old.item_positions == new.item_positions
+            && old.structure_vulnerability_windows == new.structure_vulnerability_windows
+            && old.skill_history == new.skill_history
+            && old.character_doll_info == new.character_doll_info
             && new.wallet_journal.len() >= old.wallet_journal.len()
             && new.wallet_journal[..old.wallet_journal.len()] == old.wallet_journal[..]
             && old

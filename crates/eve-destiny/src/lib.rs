@@ -162,6 +162,12 @@ pub struct CombatState {
     /// Remaining seconds of active ECM jam suppression (`feat:modules.ecm`, `DG-5`).
     #[serde(default)]
     pub ecm_jammed_remaining_s: f64,
+    /// True when an active Warp Scrambler or Scripted HIC WDFG disables MWD and MJD (`feat:modules.warp-disruptor`, `feat:modules.warp-disruption-field`).
+    #[serde(default)]
+    pub is_mwd_mjd_disabled: bool,
+    /// True when remote assistance is disallowed, e.g. active unscripted HIC WDFG (`disallowAssistance` attr 854).
+    #[serde(default)]
+    pub disallow_assistance: bool,
 }
 
 fn default_recharge_time_ms() -> f64 {
@@ -194,6 +200,8 @@ impl Default for CombatState {
             gate_cloak_remaining_ticks: 0,
             is_interdiction_nullified: false,
             ecm_jammed_remaining_s: 0.0,
+            is_mwd_mjd_disabled: false,
+            disallow_assistance: false,
         }
     }
 }
@@ -1140,7 +1148,12 @@ impl Ballpark {
         if !self.balls.contains_key(&ball_id) {
             return Err(format!("Ball {ball_id} not found in ballpark"));
         }
-        if self.is_ball_scrambled(ball_id) {
+        if self.is_ball_scrambled(ball_id)
+            || self
+                .combat_states
+                .get(&ball_id)
+                .is_some_and(|cs| cs.is_mwd_mjd_disabled)
+        {
             return Err("WarpScrambled: Cannot activate micro jump drive while warp scrambled".into());
         }
         let (current_pos, dir) = {

@@ -378,6 +378,16 @@ pub async fn handle(
                     message: "Session has no active solarSystemID".into(),
                 }));
             };
+            let (_, is_thera, is_shattered, _) =
+                crate::services::space_destiny::system_wormhole_profile(sys_id);
+            if is_thera || is_shattered {
+                return Some(Err(BridgeRpcError {
+                    code: "AnchoringDisallowedInTheraOrShattered".into(),
+                    message: format!(
+                        "Anchoring structures or starbases is disallowed in Thera or shattered wormhole system {sys_id}"
+                    ),
+                }));
+            }
             let sys_sec = ctx
                 .sde
                 .solar_systems
@@ -1012,6 +1022,26 @@ pub async fn handle(
             }
         }
 
-        _ => None,
+        _ => {
+            if service == "posMgr" && matches!(method, "AnchorStructure" | "AnchorOrbital") {
+                let _ = match ServerContext::require_character(session) {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e)),
+                };
+                if let Some(sys_id) = session.solar_system_id {
+                    let (_, is_thera, is_shattered, _) =
+                        crate::services::space_destiny::system_wormhole_profile(sys_id);
+                    if is_thera || is_shattered {
+                        return Some(Err(BridgeRpcError {
+                            code: "AnchoringDisallowedInTheraOrShattered".into(),
+                            message: format!(
+                                "Anchoring starbases or orbitals is disallowed in Thera or shattered wormhole system {sys_id}"
+                            ),
+                        }));
+                    }
+                }
+            }
+            None
+        }
     }
 }

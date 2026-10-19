@@ -177,7 +177,7 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                     let msg = format!(
                                         "Account is banned until unix={until_unix}: {reason}"
                                     );
-                                    Err(GPSTransportClosed::new(msg, "AccountBanned")
+                                    Err(GPSTransportClosed::new(msg, "UserBanned")
                                         .with_arg("reason", PyRep::ascii_bytes(&reason))
                                         .with_arg("expiry", PyRep::Integer(until_unix as i64))
                                         .with_arg("until", PyRep::Integer(until_unix as i64)))
@@ -229,7 +229,7 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                             }) {
                                 if let Err(err) = acc.check_active_restriction(now_unix) {
                                     let code = match err {
-                                        eve_db::DbError::AccountBanned { .. } => "AccountBanned",
+                                        eve_db::DbError::AccountBanned { .. } => "UserBanned",
                                         eve_db::DbError::AccountSuspended { .. } => "AccountSuspended",
                                         _ => "LoginAuthFailed",
                                     };

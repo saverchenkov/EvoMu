@@ -228,27 +228,44 @@ pub async fn handle(
                     message: format!("Invalid SKIN ID {raw_skin}"),
                 }));
             };
-            if !ctx.sde.skins.contains_key(&skin_id) && !ctx.sde.skin_licenses.contains_key(&skin_id) {
+            let resolved_skin = ctx.sde.skins.get(&skin_id).or_else(|| {
+                ctx.sde
+                    .skin_licenses
+                    .get(&skin_id)
+                    .and_then(|lic| ctx.sde.skins.get(&lic.skin_id))
+            });
+            let Some(skin_info) = resolved_skin else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidSkinLicenseType".into(),
                     message: format!("SKIN or skin license {skin_id} does not exist in SDE"),
                 }));
+            };
+            if let Some(ship_tid) = args.get(1).and_then(|a| a.as_i64()).filter(|&id| id > 0) {
+                if !skin_info.types.contains(&(ship_tid as u32)) {
+                    return Some(Err(BridgeRpcError {
+                        code: "InvalidShipTypeForSkin".into(),
+                        message: format!(
+                            "SKIN '{}' (id {}) cannot be granted for incompatible ship type {ship_tid}",
+                            skin_info.internal_name, skin_info.skin_id
+                        ),
+                    }));
+                }
             }
             let _ = ctx.db.try_with_mut_snapshot(|snap| {
                 let list = snap.licensed_skins.entry(char_id).or_default();
                 if !list.contains(&skin_id) {
                     list.push(skin_id);
                 }
-                if let Some(lic) = ctx.sde.skin_licenses.get(&skin_id) {
-                    if !list.contains(&lic.skin_id) {
-                        list.push(lic.skin_id);
-                    }
+                if !list.contains(&skin_info.skin_id) {
+                    list.push(skin_info.skin_id);
                 }
                 Ok::<_, std::convert::Infallible>(())
             });
             Some(Ok(PyRep::keyval([
                 ("characterID", PyRep::Integer(char_id)),
                 ("skinID", PyRep::Integer(skin_id as i64)),
+                ("skinMaterialID", PyRep::Integer(skin_info.skin_material_id as i64)),
+                ("internalName", PyRep::String(skin_info.internal_name.clone())),
                 ("licensed", PyRep::Bool(true)),
             ])))
         }
@@ -291,11 +308,22 @@ pub async fn handle(
                     message: format!("Type {requested_skin_id} is not mapped to any SKIN in SDE skin_licenses"),
                 }));
             };
-            if !ctx.sde.skins.contains_key(&lic_info.skin_id) {
+            let Some(skin_info) = ctx.sde.skins.get(&lic_info.skin_id) else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidSkinLicenseType".into(),
                     message: format!("SKIN ID {} mapped by license {requested_skin_id} does not exist in SDE skins", lic_info.skin_id),
                 }));
+            };
+            if let Some(ship_tid) = args.get(1).and_then(|a| a.as_i64()).filter(|&id| id > 0) {
+                if !skin_info.types.contains(&(ship_tid as u32)) {
+                    return Some(Err(BridgeRpcError {
+                        code: "InvalidShipTypeForSkin".into(),
+                        message: format!(
+                            "SKIN license {requested_skin_id} ('{}') is not compatible with ship type {ship_tid}",
+                            skin_info.internal_name
+                        ),
+                    }));
+                }
             }
             let current_dock = session.station_id.or(session.structure_id);
             let current_ship = session.ship_id;
@@ -379,7 +407,7 @@ pub async fn handle(
                 }));
             }
 
-            // Resolve requested SKIN strictly to an SDE category 91 SKIN type_id or skin_id
+            // Resolve requested SKIN strictly to an SDE skin_licenses or skins entry
             let (target_skin_id, resolved_skin_id, design_name) = match args.get(1) {
                 Some(PyRep::Integer(id)) => {
                     let Ok(sid) = u32::try_from(*id) else {
@@ -394,15 +422,10 @@ pub async fn handle(
                     } else if let Some(skin) = ctx.sde.skins.get(&sid) {
                         (sid, sid, skin.internal_name.clone())
                     } else {
-                        let is_cat91 = ctx.sde.types.get(&sid).filter(|t| t.category_id == 91);
-                        if let Some(st) = is_cat91 {
-                            (sid, sid, st.name.clone())
-                        } else {
-                            return Some(Err(BridgeRpcError {
-                                code: "SkinNotLicensed".into(),
-                                message: format!("SKIN ID {sid} is not a valid SDE SKIN"),
-                            }));
-                        }
+                        return Some(Err(BridgeRpcError {
+                            code: "SkinNotLicensed".into(),
+                            message: format!("SKIN ID {sid} is not a valid SDE SKIN"),
+                        }));
                     }
                 }
                 Some(PyRep::String(name)) => {
@@ -419,8 +442,13 @@ pub async fn handle(
                             ),
                         }));
                     };
-                    let skin_id = ctx.sde.skin_licenses.get(&st.type_id).map(|l| l.skin_id).unwrap_or(st.type_id);
-                    (st.type_id, skin_id, st.name.clone())
+                    let Some(lic) = ctx.sde.skin_licenses.get(&st.type_id) else {
+                        return Some(Err(BridgeRpcError {
+                            code: "SkinNotLicensed".into(),
+                            message: format!("Type {} is not mapped to any SDE SKIN", st.type_id),
+                        }));
+                    };
+                    (st.type_id, lic.skin_id, st.name.clone())
                 }
                 _ => {
                     return Some(Err(BridgeRpcError {
@@ -430,16 +458,20 @@ pub async fn handle(
                 }
             };
 
-            if let Some(skin_info) = ctx.sde.skins.get(&resolved_skin_id) {
-                if !skin_info.types.is_empty() && !skin_info.types.contains(&ship_type_id) {
-                    return Some(Err(BridgeRpcError {
-                        code: "InvalidShipTypeForSkin".into(),
-                        message: format!(
-                            "SKIN '{}' (id {resolved_skin_id}) cannot be applied to ship type {ship_type_id}",
-                            skin_info.internal_name
-                        ),
-                    }));
-                }
+            let Some(skin_info) = ctx.sde.skins.get(&resolved_skin_id) else {
+                return Some(Err(BridgeRpcError {
+                    code: "SkinNotLicensed".into(),
+                    message: format!("Resolved SKIN ID {resolved_skin_id} not found in SDE skins"),
+                }));
+            };
+            if !skin_info.types.contains(&ship_type_id) {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidShipTypeForSkin".into(),
+                    message: format!(
+                        "SKIN '{}' (id {resolved_skin_id}) cannot be applied to ship type {ship_type_id}",
+                        skin_info.internal_name
+                    ),
+                }));
             }
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {

@@ -202,6 +202,7 @@ fn setup_esi_test_environment() -> (Arc<ServerContext>, Arc<EsiRouter>, OpenApiS
                 date_issued_unix: now,
                 title: "Test Contract".to_string(),
                 for_corp: false,
+                ..Default::default()
             },
         );
 

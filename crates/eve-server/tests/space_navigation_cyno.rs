@@ -512,20 +512,29 @@ async fn test_s2_fighter_manager_load_launch_recall_movement_abilities_abandon()
     .expect("SelectCharacterID");
 
     let ship_id = 100_000_001;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ship) = snap.items.get_mut(&ship_id) {
+            ship.type_id = 23911; // Thanatos (Carrier with 4 fighter tubes)
+        }
+    });
 
-    // Seed 2 fighter squadrons into ship's FighterBay (flag 158)
+    // Seed fighters into ship's FighterBay (flag 158):
+    // fighter1: Dragonfly I (type 23057, squadron max size 6), quantity 15 -> tests stack splitting / clamping
+    // fighter2: Firbolg I (type 23059, squadron max size 6), quantity 6
+    // fighter3: Ametat I (type 40362, heavy fighter with ability 7 disallowed in low/high sec), quantity 3
     let fighter1_item_id = 70_000_001;
     let fighter2_item_id = 70_000_002;
+    let fighter3_item_id = 70_000_003;
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(
             fighter1_item_id,
             InventoryItemRecord {
                 item_id: fighter1_item_id,
-                type_id: 40358, // Dragonfly I (Light Fighter)
+                type_id: 23057, // Dragonfly I (Light Fighter, max size 6)
                 owner_id: 90_000_001,
                 location_id: ship_id,
                 flag: InventoryFlag::FighterBay,
-                quantity: 9,
+                quantity: 15,
                 singleton: true,
                 version: 1,
                 dynamic_attributes: HashMap::new(),
@@ -539,11 +548,29 @@ async fn test_s2_fighter_manager_load_launch_recall_movement_abilities_abandon()
             fighter2_item_id,
             InventoryItemRecord {
                 item_id: fighter2_item_id,
-                type_id: 40359, // Firbolg I (Light Fighter)
+                type_id: 23059, // Firbolg I (Light Fighter, max size 6)
                 owner_id: 90_000_001,
                 location_id: ship_id,
                 flag: InventoryFlag::FighterBay,
-                quantity: 9,
+                quantity: 6,
+                singleton: true,
+                version: 1,
+                dynamic_attributes: HashMap::new(),
+                source_mutaplasmid_id: None,
+                insured_payout_isk: 0.0,
+                is_blueprint_copy: false,
+                blueprint_runs_remaining: None,
+            },
+        );
+        snap.items.insert(
+            fighter3_item_id,
+            InventoryItemRecord {
+                item_id: fighter3_item_id,
+                type_id: 40362, // Ametat I (Heavy Fighter with ability 7)
+                owner_id: 90_000_001,
+                location_id: ship_id,
+                flag: InventoryFlag::FighterBay,
+                quantity: 3,
                 singleton: true,
                 version: 1,
                 dynamic_attributes: HashMap::new(),
@@ -574,6 +601,22 @@ async fn test_s2_fighter_manager_load_launch_recall_movement_abilities_abandon()
     assert_eq!(columns, vec!["itemID", "typeID", "squadronSize"]);
 
     // 2. Load fighter tubes (feat:drones.fighter-load-tubes)
+    // 2a. Reject invalid tube index (tube 99 on 4-tube carrier)
+    let err_invalid_tube = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "fighterMgr",
+            None,
+            "LoadFightersToTube",
+            &[PyRep::Integer(99), PyRep::Integer(fighter1_item_id)],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err_invalid_tube.code, "InvalidFighterTube");
+
+    // 2b. Load tube 0: clamps quantity 15 to max squadron size 6 and splits remaining 9 into bay
     let load_res1 = ctx
         .dispatch_rpc(
             &mut sess,
@@ -586,8 +629,39 @@ async fn test_s2_fighter_manager_load_launch_recall_movement_abilities_abandon()
         )
         .await
         .expect("Load tube 0");
-    assert!(matches!(load_res1, PyRep::KeyVal(_)));
+    let PyRep::KeyVal(kv1) = load_res1 else {
+        panic!("Expected KeyVal from LoadFightersToTube");
+    };
+    assert_eq!(kv1.get("fighterID").unwrap().as_i64().unwrap(), fighter1_item_id);
+    assert_eq!(
+        ctx.db.with_snapshot(|snap| snap.items[&fighter1_item_id].quantity),
+        6,
+        "Must clamp loaded item quantity to max squadron size 6"
+    );
+    let remaining_in_bay: i32 = ctx.db.with_snapshot(|snap| {
+        snap.items.values()
+            .filter(|i| i.location_id == ship_id && i.flag == InventoryFlag::FighterBay && i.type_id == 23057 && i.item_id != fighter1_item_id)
+            .map(|i| i.quantity)
+            .sum()
+    });
+    assert_eq!(remaining_in_bay, 9, "Excess fighters must remain in bay as split stack");
 
+    // 2c. Reject loading same item already loaded
+    let err_already_loaded = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "fighterMgr",
+            None,
+            "LoadFightersToTube",
+            &[PyRep::Integer(1), PyRep::Integer(fighter1_item_id)],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err_already_loaded.code, "FighterAlreadyLoaded");
+
+    // 2d. Load tube 1 and tube 2
     let load_res2 = ctx
         .dispatch_rpc(
             &mut sess,
@@ -602,18 +676,48 @@ async fn test_s2_fighter_manager_load_launch_recall_movement_abilities_abandon()
         .expect("Load tube 1");
     assert!(matches!(load_res2, PyRep::KeyVal(_)));
 
+    let load_res3 = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "fighterMgr",
+            None,
+            "LoadFightersToTube",
+            &[PyRep::Integer(2), PyRep::Integer(fighter3_item_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("Load tube 2");
+    assert!(matches!(load_res3, PyRep::KeyVal(_)));
+
     // 3. Undock and launch fighters into space (feat:drones.fighter-launch-recall)
     ctx.dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None)
         .await
         .expect("Undock");
 
+    // 3a. Reject launching empty tube 3
+    let err_empty_tube = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "fighterMgr",
+            None,
+            "LaunchFightersFromTubes",
+            &[PyRep::List(vec![PyRep::Integer(3)])],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err_empty_tube.code, "EmptyFighterTube");
+
+    // 3b. Launch loaded tubes 0, 1, 2
     let launch_res = ctx
         .dispatch_rpc(
             &mut sess,
             "fighterMgr",
             None,
             "LaunchFightersFromTubes",
-            &[PyRep::List(vec![PyRep::Integer(0), PyRep::Integer(1)])],
+            &[PyRep::List(vec![PyRep::Integer(0), PyRep::Integer(1), PyRep::Integer(2)])],
             &kw,
             None,
         )
@@ -622,9 +726,10 @@ async fn test_s2_fighter_manager_load_launch_recall_movement_abilities_abandon()
     let PyRep::List(launched_balls) = launch_res else {
         panic!("Expected List from LaunchFightersFromTubes");
     };
-    assert_eq!(launched_balls.len(), 2, "Both loaded tubes must launch");
+    assert_eq!(launched_balls.len(), 3, "All 3 loaded tubes must launch");
     let f1_ball_id = launched_balls[0].as_i64().unwrap();
     let f2_ball_id = launched_balls[1].as_i64().unwrap();
+    let f3_ball_id = launched_balls[2].as_i64().unwrap();
 
     let sys_id = 30_000_142;
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
@@ -632,6 +737,36 @@ async fn test_s2_fighter_manager_load_launch_recall_movement_abilities_abandon()
         sys_handle.get_ball_snapshot(f1_ball_id).await.unwrap().is_some(),
         "Fighter 1 must exist as ball in ballpark"
     );
+
+    // 3c. Reject re-launching already launched tube
+    let err_already_launched = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "fighterMgr",
+            None,
+            "LaunchFightersFromTubes",
+            &[PyRep::List(vec![PyRep::Integer(0)])],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err_already_launched.code, "FighterAlreadyLaunched");
+
+    // 3d. Reject unloading a launched tube
+    let err_unload_launched = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "fighterMgr",
+            None,
+            "UnloadTubeToFighterBay",
+            &[PyRep::Integer(0)],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err_unload_launched.code, "FighterAlreadyLaunched");
 
     // 4. Fighter Movement (feat:drones.fighter-movement)
     let move_res = ctx
@@ -674,7 +809,6 @@ async fn test_s2_fighter_manager_load_launch_recall_movement_abilities_abandon()
     assert!(matches!(orbit_res, PyRep::Bool(true)));
 
     // 5. Fighter Abilities (feat:drones.fighter-abilities)
-    // Spawn a target dummy drone near fighter 1 and lock it from the controlling ship
     let (_, f1_ball) = sys_handle
         .get_ball_snapshot(f1_ball_id)
         .await
@@ -711,7 +845,81 @@ async fn test_s2_fighter_manager_load_launch_recall_movement_abilities_abandon()
         .await
         .expect("lock dummy target");
 
-    // Slot 0: Primary Attack deals damage
+    // 5a. Error: FighterNotOwned when called from unowning pilot
+    let mut sess_other = SessionState::new(2005);
+    sess_other.user_id = Some(1002);
+    sess_other.character_id = Some(90_000_999);
+    sess_other.solar_system_id = Some(sys_id);
+    sess_other.ship_id = Some(100_000_999);
+    let err_not_owned = ctx
+        .dispatch_rpc(
+            &mut sess_other,
+            "fighterMgr",
+            None,
+            "CmdActivateAbilitySlots",
+            &[
+                PyRep::List(vec![PyRep::Integer(f1_ball_id)]),
+                PyRep::Integer(0),
+                PyRep::Integer(dummy_target_id),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err_not_owned.code, "FighterNotOwned");
+
+    // 5b. Error: TargetOutOfRange when target is far beyond ability optimal + falloff
+    let far_target_id = 99_002;
+    let far_ball = Ball {
+        id: far_target_id,
+        type_id: 282,
+        position: f1_ball.position + DVec3::new(200_000.0, 0.0, 0.0),
+        velocity: DVec3::ZERO,
+        max_velocity: 0.0,
+        inertia: 1.0,
+        mass: 1_000.0,
+        radius: 10.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    };
+    sys_handle
+        .spawn_ball_with_combat(far_ball, ctx.build_type_combat_state(282))
+        .await
+        .expect("spawn far dummy");
+    sys_handle
+        .add_target_lock(
+            ship_id,
+            eve_destiny::TargetLock {
+                target_id: far_target_id,
+                lock_time_ms: 1_000.0,
+                remaining_lock_ms: 0.0,
+                locked: true,
+                max_range_m: Some(300_000.0),
+            },
+        )
+        .await
+        .expect("lock far dummy target");
+    let err_out_of_range = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "fighterMgr",
+            None,
+            "CmdActivateAbilitySlots",
+            &[
+                PyRep::List(vec![PyRep::Integer(f1_ball_id)]),
+                PyRep::Integer(0),
+                PyRep::Integer(far_target_id),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err_out_of_range.code, "TargetOutOfRange");
+
+    // 5c. Primary attack deals damage
+    let sec_before_npc = ctx.db.with_snapshot(|s| s.characters[&90_000_001].security_status);
     let cs_before = sys_handle.get_combat_state(dummy_target_id).await.unwrap().unwrap();
     let ability_res = ctx
         .dispatch_rpc(
@@ -736,7 +944,39 @@ async fn test_s2_fighter_manager_load_launch_recall_movement_abilities_abandon()
         "Fighter slot 0 attack must deal damage to target"
     );
 
-    // Slot 1: MWD / Boost
+    // Verify NPC attack in high-sec triggers weapon timer but not criminal/suspect/CONCORD or sec loss
+    let now_npc = ctx.now_unix();
+    {
+        let cw = ctx.crimewatch.read().unwrap();
+        let att_st = cw.states.get(&90_000_001).expect("attacker crimewatch state");
+        assert!(att_st.is_weapon_timer_active(now_npc), "Attacker weapon timer must be active");
+        assert!(!att_st.is_criminal(now_npc), "NPC attack must not flag criminal");
+        assert!(!att_st.is_suspect(now_npc), "NPC attack must not flag suspect");
+        assert!(att_st.pending_concord_arrival.is_none(), "NPC attack must not schedule CONCORD arrival");
+    }
+    let sec_after_npc = ctx.db.with_snapshot(|s| s.characters[&90_000_001].security_status);
+    assert_eq!(sec_after_npc, sec_before_npc, "Attacking NPC dummy must not penalize security status");
+
+    // 5d. Error: AbilityOnCooldown on rapid re-activation
+    let err_cooldown = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "fighterMgr",
+            None,
+            "CmdActivateAbilitySlots",
+            &[
+                PyRep::List(vec![PyRep::Integer(f1_ball_id)]),
+                PyRep::Integer(0),
+                PyRep::Integer(dummy_target_id),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err_cooldown.code, "AbilityOnCooldown");
+
+    // 5e. Slot 1: MWD / Boost (untargeted propulsion dispatch)
     let mwd_res = ctx
         .dispatch_rpc(
             &mut sess,
@@ -750,6 +990,156 @@ async fn test_s2_fighter_manager_load_launch_recall_movement_abilities_abandon()
         .await
         .expect("CmdActivateAbilitySlots Slot 1 MWD");
     assert!(matches!(mwd_res, PyRep::KeyVal(_)));
+    assert!(
+        ctx.active_fighters.read().unwrap()[&f1_ball_id].mwd_active,
+        "Fighter 1 MWD must be marked active"
+    );
+
+    // 5f. Disallowed abilities in high-sec / low-sec:
+    // Ametat I (f3_ball_id) slot 2 has ability 7 which has disallowInHighSec=true and disallowInLowSec=true
+    let err_highsec = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "fighterMgr",
+            None,
+            "CmdActivateAbilitySlots",
+            &[PyRep::List(vec![PyRep::Integer(f3_ball_id)]), PyRep::Integer(2)],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err_highsec.code, "AbilityDisallowedInHighSec");
+
+    // Test in low-sec system (Asabona: 30000012, sec 0.32)
+    let lowsec_sys = 30_000_012;
+    let lowsec_handle = ctx.systems.get_or_spawn(lowsec_sys);
+    let (_, f3_ball) = sys_handle
+        .get_ball_snapshot(f3_ball_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let _ = lowsec_handle.spawn_ball_with_combat(f3_ball, ctx.build_type_combat_state(40362)).await;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&90_000_001).unwrap().solar_system_id = lowsec_sys;
+    });
+    sess.solar_system_id = Some(lowsec_sys);
+    let err_lowsec = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "fighterMgr",
+            None,
+            "CmdActivateAbilitySlots",
+            &[PyRep::List(vec![PyRep::Integer(f3_ball_id)]), PyRep::Integer(2)],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err_lowsec.code, "AbilityDisallowedInLowSec");
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&90_000_001).unwrap().solar_system_id = sys_id;
+    });
+    sess.solar_system_id = Some(sys_id);
+
+    // 5g. CrimeWatch weapon timer and aggression on fighter attack:
+    // Seed a player victim character (90_000_002) and ship (100_000_002)
+    let victim_char_id = 90_000_002;
+    let victim_ship_id = 100_000_002;
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut vic_ch = snap.characters[&90_000_001].clone();
+        vic_ch.character_id = victim_char_id;
+        vic_ch.name = "Victim Pilot".to_string();
+        vic_ch.security_status = 5.0;
+        vic_ch.active_ship_id = victim_ship_id;
+        snap.characters.insert(victim_char_id, vic_ch);
+        snap.items.insert(
+            victim_ship_id,
+            InventoryItemRecord {
+                item_id: victim_ship_id,
+                type_id: 587,
+                owner_id: victim_char_id,
+                location_id: 60003760,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                dynamic_attributes: HashMap::new(),
+                source_mutaplasmid_id: None,
+                insured_payout_isk: 0.0,
+                is_blueprint_copy: false,
+                blueprint_runs_remaining: None,
+            },
+        );
+    });
+    let (_, f2_ball) = sys_handle
+        .get_ball_snapshot(f2_ball_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let victim_ball = Ball {
+        id: victim_ship_id,
+        type_id: 587,
+        position: f2_ball.position + DVec3::new(1_000.0, 0.0, 0.0),
+        velocity: DVec3::ZERO,
+        max_velocity: 0.0,
+        inertia: 1.0,
+        mass: 1_000.0,
+        radius: 30.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    };
+    sys_handle
+        .spawn_ball_with_combat(victim_ball, ctx.build_type_combat_state(587))
+        .await
+        .expect("spawn victim ship");
+    sys_handle
+        .add_target_lock(
+            ship_id,
+            eve_destiny::TargetLock {
+                target_id: victim_ship_id,
+                lock_time_ms: 1_000.0,
+                remaining_lock_ms: 0.0,
+                locked: true,
+                max_range_m: Some(100_000.0),
+            },
+        )
+        .await
+        .expect("lock victim ship");
+
+    let sec_before = ctx.db.with_snapshot(|s| s.characters[&90_000_001].security_status);
+    let pvp_res = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "fighterMgr",
+            None,
+            "CmdActivateAbilitySlots",
+            &[
+                PyRep::List(vec![PyRep::Integer(f2_ball_id)]),
+                PyRep::Integer(0),
+                PyRep::Integer(victim_ship_id),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect("CmdActivateAbilitySlots Slot 0 PvP attack");
+    assert!(matches!(pvp_res, PyRep::KeyVal(_)));
+
+    let now = ctx.now_unix();
+    {
+        let cw = ctx.crimewatch.read().unwrap();
+        let att_st = cw.states.get(&90_000_001).expect("attacker crimewatch state");
+        assert!(att_st.is_weapon_timer_active(now), "Attacker weapon timer must be active");
+        assert!(att_st.is_criminal(now), "Unprovoked high-sec attack must flag attacker criminal");
+        assert!(att_st.pending_concord_arrival.is_some(), "CONCORD arrival must be scheduled");
+        assert!(
+            cw.aggression_mgr.is_aggressor_against(90_000_001, victim_char_id, now),
+            "Aggression against victim must be recorded"
+        );
+    }
+    let sec_after = ctx.db.with_snapshot(|s| s.characters[&90_000_001].security_status);
+    assert!(sec_after < sec_before, "Attacker security status must be penalized");
 
     // 6. Abandon fighters (feat:drones.fighter-abandon)
     let abandon_res = ctx
@@ -772,16 +1162,30 @@ async fn test_s2_fighter_manager_load_launch_recall_movement_abilities_abandon()
         ctx.active_fighters.read().unwrap()[&f1_ball_id].is_abandoned,
         "Fighter 1 must be marked abandoned"
     );
+    // Reloading an abandoned fighter must fail with ItemNotInFighterBay
+    let err_load_abandoned = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "fighterMgr",
+            None,
+            "LoadFightersToTube",
+            &[PyRep::Integer(0), PyRep::Integer(fighter1_item_id)],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err_load_abandoned.code, "ItemNotInFighterBay");
 
     // 7. Recall fighters (feat:drones.fighter-launch-recall)
-    // Recall all active fighters back to ship
+    // Recall active fighters (f2 and f3) back to ship tubes
     let recall_res = ctx
         .dispatch_rpc(
             &mut sess,
             "fighterMgr",
             None,
             "RecallFightersToTubes",
-            &[PyRep::List(vec![PyRep::Integer(f1_ball_id), PyRep::Integer(f2_ball_id)])],
+            &[PyRep::List(vec![PyRep::Integer(f2_ball_id), PyRep::Integer(f3_ball_id)])],
             &kw,
             None,
         )
@@ -790,10 +1194,19 @@ async fn test_s2_fighter_manager_load_launch_recall_movement_abilities_abandon()
     let PyRep::List(rec_list) = recall_res else {
         panic!("Expected List from RecallFightersToTubes");
     };
-    assert_eq!(rec_list.len(), 2, "Both fighters must be recalled from space");
+    assert_eq!(rec_list.len(), 2, "Both active fighters must be recalled from space");
     assert!(
-        sys_handle.get_ball_snapshot(f1_ball_id).await.unwrap().is_none(),
+        sys_handle.get_ball_snapshot(f2_ball_id).await.unwrap().is_none(),
         "Recalled fighter ball must be removed from ballpark"
+    );
+    // Recalled fighters are restored in fighter_tube_loads
+    assert!(
+        ctx.fighter_tube_loads.read().unwrap().contains_key(&(ship_id, 1)),
+        "Tube 1 must be re-loaded upon recall"
+    );
+    assert!(
+        ctx.fighter_tube_loads.read().unwrap().contains_key(&(ship_id, 2)),
+        "Tube 2 must be re-loaded upon recall"
     );
 }
 

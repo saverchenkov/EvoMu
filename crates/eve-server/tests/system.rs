@@ -123,7 +123,8 @@ async fn test_phase_0_s10_doc_reconciliation_and_labels() {
     // Dynamically scan crates/eve-server/src/services/*.rs and rpc_service_catalog.json
     let services_dir = root.join("crates/eve-server/src/services");
     let mut single_arms = 0usize;
-    let mut two_arms = 0usize;
+    let mut multi_arms = 0usize;
+    let mut total_handlers = 0usize;
     let mut service_methods: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
 
     for entry in std::fs::read_dir(&services_dir).expect("read services dir").flatten() {
@@ -138,21 +139,25 @@ async fn test_phase_0_s10_doc_reconciliation_and_labels() {
         let mut idx = 0;
         while idx < raw_lines.len() {
             let trimmed = raw_lines[idx].trim();
-            let combined = if trimmed.starts_with("(\"") && !trimmed.contains("=>") {
-                if idx + 1 < raw_lines.len() && raw_lines[idx + 1].trim().starts_with("| (\"") {
+            let mut combined = trimmed.to_string();
+            if combined.starts_with("(\"") {
+                while !combined.contains("=>")
+                    && idx + 1 < raw_lines.len()
+                    && raw_lines[idx + 1].trim().starts_with("| (\"")
+                {
                     idx += 1;
-                    format!("{trimmed} {}", raw_lines[idx].trim())
-                } else {
-                    trimmed.to_string()
+                    combined.push(' ');
+                    combined.push_str(raw_lines[idx].trim());
                 }
-            } else {
-                trimmed.to_string()
-            };
+            }
             idx += 1;
             if !combined.starts_with("(\"") || !combined.contains("=>") {
                 continue;
             }
             let head = combined.split("=>").next().unwrap_or("");
+            if head.contains(" if ") {
+                continue;
+            }
             // Extract ("svc", "method") pairs on this match arm
             let mut pairs = Vec::new();
             let mut rest = head;
@@ -160,32 +165,36 @@ async fn test_phase_0_s10_doc_reconciliation_and_labels() {
                 let after_open = &rest[open + 2..];
                 if let Some(q1) = after_open.find('"') {
                     let svc = &after_open[..q1];
-                    let after_svc = &after_open[q1 + 1..];
-                    if let Some(q2_start) = after_svc.find('"') {
-                        let after_q2 = &after_svc[q2_start + 1..];
-                        if let Some(q2_end) = after_q2.find('"') {
-                            let method = &after_q2[..q2_end];
-                            pairs.push((svc.to_string(), method.to_string()));
-                            rest = &after_q2[q2_end + 1..];
-                            continue;
+                    let after_svc = after_open[q1 + 1..].trim_start();
+                    if let Some(after_comma) = after_svc.strip_prefix(',') {
+                        let after_comma = after_comma.trim_start();
+                        if let Some(after_q2) = after_comma.strip_prefix('"') {
+                            if let Some(q2_end) = after_q2.find('"') {
+                                let method = &after_q2[..q2_end];
+                                pairs.push((svc.to_string(), method.to_string()));
+                                rest = &after_q2[q2_end + 1..];
+                                continue;
+                            }
                         }
                     }
+                    rest = after_svc;
+                    continue;
                 }
                 break;
             }
             if pairs.len() == 1 {
                 single_arms += 1;
-            } else if pairs.len() == 2 {
-                two_arms += 1;
+            } else if pairs.len() >= 2 {
+                multi_arms += 1;
             }
+            total_handlers += pairs.len();
             for (s, m) in pairs {
                 service_methods.entry(s).or_default().insert(m);
             }
         }
     }
 
-    let total_arms = single_arms + two_arms;
-    let total_handlers: usize = service_methods.values().map(BTreeSet::len).sum();
+    let total_arms = single_arms + multi_arms;
 
     let catalog_raw = std::fs::read_to_string(root.join("docs/index/rpc_service_catalog.json"))
         .expect("read rpc_service_catalog.json");
@@ -225,7 +234,7 @@ async fn test_phase_0_s10_doc_reconciliation_and_labels() {
     let expected_handler_summary =
         format!("`{total_handlers}` `(service, method)` handlers across `{total_arms}` match arms");
     let expected_arm_breakdown =
-        format!("`{single_arms}` single-method + `{two_arms}` two-method arms");
+        format!("`{single_arms}` single-method + `{multi_arms}` multi-method arms");
     let expected_svc_ratio = format!("`{explicit_cat_svcs}/{total_cat_svcs}`");
     let expected_unimpl_ratio = format!("`{unimplemented_cat_svcs}/{total_cat_svcs}`");
     let expected_exact_svc_ratio = format!("`{exact_v24_svcs}/{total_cat_svcs}`");
@@ -539,6 +548,199 @@ fn test_phase_t_t5_coverage_and_mutation_tooling() {
     assert!(
         mutant_count >= 20,
         "Expected >= 20 mutation points in eve-testkit, found {mutant_count}"
+    );
+}
+
+#[tokio::test]
+async fn test_sde_skins_static_and_cosmetics_validation() {
+    // parity: sde:res:/staticdata/skins.static
+    use eve_machonet::SessionState;
+    use eve_proto::PyRep;
+    use eve_server::router::ServerContext;
+    use std::collections::HashMap;
+
+    let ctx = ServerContext::new();
+    let kw = HashMap::new();
+    let mut sess = SessionState::new(9910);
+    sess.user_id = Some(1);
+    sess.character_id = Some(90_000_001);
+    sess.station_id = Some(60_003_760);
+    sess.ship_id = Some(100_000_001);
+    sess.role |= eve_machonet::service_roles::ROLE_GML;
+
+    assert_eq!(ctx.sde.skins.len(), 7_048);
+    assert_eq!(ctx.sde.skin_materials.len(), 875);
+    assert_eq!(ctx.sde.skin_licenses.len(), 11_877);
+
+    let skin5 = ctx.sde.skins.get(&5).expect("skin 5");
+    assert_eq!(skin5.internal_name, "Megathron Quafe");
+    assert_eq!(skin5.skin_material_id, 3);
+    assert_eq!(skin5.types, vec![641]);
+    assert!(skin5.allow_ccp_devs);
+    assert!(!skin5.visible_serenity);
+    assert!(skin5.visible_tranquility);
+    assert!(!skin5.is_structure_skin);
+
+    let skin170 = ctx.sde.skins.get(&170).expect("skin 170 (Rifter Krusual)");
+    assert_eq!(skin170.internal_name, "Rifter Krusual");
+    assert_eq!(skin170.skin_material_id, 22);
+    assert_eq!(skin170.types, vec![587]);
+
+    // 1. GiveSkin rejects non-existent skinID and mismatched ship type
+    let bad_give = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "shipCosmeticsMgr",
+            None,
+            "GiveSkin",
+            &[PyRep::Integer(99_999_999)],
+            &kw,
+            None,
+        )
+        .await;
+    assert_eq!(bad_give.unwrap_err().code, "InvalidSkinLicenseType");
+
+    let mismatch_give = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "shipCosmeticsMgr",
+            None,
+            "GiveSkin",
+            &[PyRep::Integer(5), PyRep::Integer(587)],
+            &kw,
+            None,
+        )
+        .await;
+    assert_eq!(mismatch_give.unwrap_err().code, "InvalidShipTypeForSkin");
+
+    let good_give = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "shipCosmeticsMgr",
+            None,
+            "GiveSkin",
+            &[PyRep::Integer(5), PyRep::Integer(641)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("GiveSkin skin 5 for Megathron 641");
+    let PyRep::KeyVal(give_kv) = good_give else {
+        panic!("Expected GiveSkin KeyVal");
+    };
+    assert_eq!(give_kv.get("skinID"), Some(&PyRep::Integer(5)));
+    assert_eq!(give_kv.get("skinMaterialID"), Some(&PyRep::Integer(3)));
+    assert_eq!(
+        give_kv.get("internalName"),
+        Some(&PyRep::String("Megathron Quafe".into()))
+    );
+
+    // 2. ActivateSkinLicense validates license_type_id against ctx.sde.skin_licenses and ctx.sde.skins
+    let bad_lic = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "shipCosmeticsMgr",
+            None,
+            "ActivateSkinLicense",
+            &[PyRep::Integer(99_999_999)],
+            &kw,
+            None,
+        )
+        .await;
+    assert_eq!(bad_lic.unwrap_err().code, "InvalidSkinLicenseType");
+
+    let mismatch_lic = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "shipCosmeticsMgr",
+            None,
+            "ActivateSkinLicense",
+            &[PyRep::Integer(34748), PyRep::Integer(641)],
+            &kw,
+            None,
+        )
+        .await;
+    assert_eq!(mismatch_lic.unwrap_err().code, "InvalidShipTypeForSkin");
+
+    let _: Result<(), ()> = ctx.db.try_with_mut_snapshot(|snap| {
+        snap.items.insert(
+            999_034_748,
+            eve_db::InventoryItemRecord {
+                item_id: 999_034_748,
+                type_id: 34_748,
+                owner_id: 90_000_001,
+                location_id: 60_003_760,
+                flag: eve_db::InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: false,
+                version: 1,
+                dynamic_attributes: HashMap::new(),
+                source_mutaplasmid_id: None,
+                insured_payout_isk: 0.0,
+                is_blueprint_copy: false,
+                blueprint_runs_remaining: None,
+            },
+        );
+        Ok(())
+    });
+    ctx.dispatch_rpc(
+        &mut sess,
+        "shipCosmeticsMgr",
+        None,
+        "ActivateSkinLicense",
+        &[PyRep::Integer(34748), PyRep::Integer(587)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("ActivateSkinLicense 34748 for Rifter 587");
+
+    // 3. ApplySkinToShip validates skin_id and ship_type_id against ctx.sde.skins
+    let bad_apply = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "shipCosmeticsMgr",
+            None,
+            "ApplySkinToShip",
+            &[PyRep::Integer(587), PyRep::Integer(99_999_999)],
+            &kw,
+            None,
+        )
+        .await;
+    assert_eq!(bad_apply.unwrap_err().code, "SkinNotLicensed");
+
+    let mismatch_apply = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "shipCosmeticsMgr",
+            None,
+            "ApplySkinToShip",
+            &[PyRep::Integer(587), PyRep::Integer(5)],
+            &kw,
+            None,
+        )
+        .await;
+    assert_eq!(mismatch_apply.unwrap_err().code, "InvalidShipTypeForSkin");
+
+    let good_apply = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "shipCosmeticsMgr",
+            None,
+            "ApplySkinToShip",
+            &[PyRep::Integer(587), PyRep::Integer(170)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("ApplySkinToShip skin 170 on Rifter 587");
+    let PyRep::KeyVal(apply_kv) = good_apply else {
+        panic!("Expected ApplySkinToShip KeyVal");
+    };
+    assert_eq!(apply_kv.get("skinID"), Some(&PyRep::Integer(170)));
+    assert_eq!(
+        apply_kv.get("designName"),
+        Some(&PyRep::String("Rifter Krusual".into()))
     );
 }
 

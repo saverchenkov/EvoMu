@@ -111,6 +111,16 @@ pub struct ActiveModuleCycle {
     pub rack_idx: usize,
     pub heat_damage_per_cycle: f64,
     pub reactivation_delay_s: f64,
+    pub is_mwd_or_mjd: bool,
+    pub warp_scramble_points: i32,
+    pub disables_target_mwd_mjd: bool,
+    pub warp_core_stab_bonus: i32,
+    pub hic_bubble_radius_m: Option<f64>,
+    pub hic_velocity_multiplier: Option<f64>,
+    pub hic_sig_multiplier: Option<f64>,
+    pub hic_mass_addition: Option<f64>,
+    pub original_signature_radius: Option<f64>,
+    pub original_mass: Option<f64>,
 }
 
 pub enum SystemCommand {
@@ -176,6 +186,10 @@ pub enum SystemCommand {
         position: DVec3,
         radius: f64,
         reply: oneshot::Sender<Result<u64, String>>,
+    },
+    RemoveWarpBubble {
+        id: BallId,
+        reply: oneshot::Sender<bool>,
     },
     SetSpeedFraction {
         ball_id: BallId,
@@ -306,11 +320,20 @@ pub struct SystemHandle {
     pub solar_system_id: SolarSystemId,
     cmd_tx: mpsc::Sender<SystemCommand>,
     event_tx: broadcast::Sender<TickBroadcast>,
+    ball_positions: Arc<RwLock<HashMap<BallId, DVec3>>>,
 }
 
 impl SystemHandle {
     pub fn subscribe(&self) -> broadcast::Receiver<TickBroadcast> {
         self.event_tx.subscribe()
+    }
+
+    pub fn get_ball_position_sync(&self, ball_id: BallId) -> Option<DVec3> {
+        self.ball_positions
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&ball_id)
+            .copied()
     }
 
     pub async fn spawn_ball(&self, ball: Ball) -> Result<u64, String> {
@@ -522,6 +545,16 @@ impl SystemHandle {
             .map_err(|_| "Solar system actor stopped".to_string())?;
         rx.await
             .map_err(|_| "Solar system reply dropped".to_string())?
+    }
+
+    pub async fn remove_warp_bubble(&self, id: BallId) -> Result<bool, String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SystemCommand::RemoveWarpBubble { id, reply: tx })
+            .await
+            .map_err(|_| "Solar system actor stopped".to_string())?;
+        rx.await
+            .map_err(|_| "Solar system reply dropped".to_string())
     }
 
     pub async fn set_speed_fraction(&self, ball_id: BallId, fraction: f64) -> Result<u64, String> {
@@ -1240,6 +1273,8 @@ impl SystemRegistry {
 fn step_cycles_and_capacitor(
     ballpark: &mut Ballpark,
     active_module_cycles: &mut Vec<ActiveModuleCycle>,
+    base_scramble_strengths: &HashMap<BallId, i32>,
+    base_core_strengths: &HashMap<BallId, i32>,
     db_opt: &Option<Arc<eve_db::WorldRepository>>,
     dt: f64,
 ) {
@@ -1320,10 +1355,107 @@ fn step_cycles_and_capacitor(
     }
     for idx in finished_indices.into_iter().rev() {
         let finished = active_module_cycles.remove(idx);
-        if let Some(orig_v) = finished.original_max_velocity {
-            if let Some(ball) = ballpark.balls.get_mut(&finished.ship_id) {
-                ball.max_velocity = orig_v;
+        cleanup_removed_module_cycle(ballpark, &finished);
+    }
+    reconcile_tackle_and_bubbles(
+        ballpark,
+        active_module_cycles,
+        base_scramble_strengths,
+        base_core_strengths,
+    );
+}
+
+fn cleanup_removed_module_cycle(ballpark: &mut Ballpark, removed: &ActiveModuleCycle) {
+    if let Some(orig_v) = removed.original_max_velocity {
+        if let Some(ball) = ballpark.balls.get_mut(&removed.ship_id) {
+            ball.max_velocity = orig_v;
+        }
+    }
+    if let Some(orig_m) = removed.original_mass {
+        if let Some(ball) = ballpark.balls.get_mut(&removed.ship_id) {
+            ball.mass = orig_m;
+        }
+    }
+    if let Some(orig_sig) = removed.original_signature_radius {
+        if let Some(cs) = ballpark.combat_states.get_mut(&removed.ship_id) {
+            cs.signature_radius = orig_sig;
+        }
+    }
+    if removed.hic_bubble_radius_m.is_some() {
+        ballpark.remove_warp_bubble(removed.module_id);
+    }
+}
+
+fn reconcile_tackle_and_bubbles(
+    ballpark: &mut Ballpark,
+    active_module_cycles: &mut Vec<ActiveModuleCycle>,
+    base_scramble_strengths: &HashMap<BallId, i32>,
+    base_core_strengths: &HashMap<BallId, i32>,
+) {
+    // 1. Collect all target balls currently subjected to MWD/MJD suppression (Warp Scrambler / Scripted HIC WDFG)
+    let mut mwd_disabled_targets: Vec<BallId> = Vec::new();
+    for cycle in active_module_cycles.iter() {
+        if cycle.disables_target_mwd_mjd {
+            if let Some(tid) = cycle.target_id {
+                if !mwd_disabled_targets.contains(&tid) {
+                    mwd_disabled_targets.push(tid);
+                }
             }
+        }
+    }
+
+    // Immediately shut down any active MWD or MJD cycle on scrambled targets
+    if !mwd_disabled_targets.is_empty() {
+        let mut idx = 0;
+        while idx < active_module_cycles.len() {
+            if active_module_cycles[idx].is_mwd_or_mjd
+                && mwd_disabled_targets.contains(&active_module_cycles[idx].ship_id)
+            {
+                let shut_down = active_module_cycles.remove(idx);
+                cleanup_removed_module_cycle(ballpark, &shut_down);
+            } else {
+                idx += 1;
+            }
+        }
+    }
+
+    // 2. Sync HIC unscripted warp disruption bubbles to the HIC ship's current position
+    for cycle in active_module_cycles.iter() {
+        if let Some(radius) = cycle.hic_bubble_radius_m {
+            if let Some(ship_ball) = ballpark.balls.get(&cycle.ship_id) {
+                ballpark.add_warp_bubble(cycle.module_id, ship_ball.position, radius);
+            }
+        }
+    }
+
+    // 3. Recompute warp_scramble_strength, warp_core_strength, is_mwd_mjd_disabled, and disallow_assistance for all balls
+    let ball_ids: Vec<BallId> = ballpark.combat_states.keys().copied().collect();
+    for ball_id in ball_ids {
+        let base_scram = base_scramble_strengths.get(&ball_id).copied().unwrap_or(0);
+        let base_core = base_core_strengths.get(&ball_id).copied().unwrap_or(1);
+
+        let mod_scram: i32 = active_module_cycles
+            .iter()
+            .filter(|c| c.target_id == Some(ball_id))
+            .map(|c| c.warp_scramble_points)
+            .sum();
+        let mod_core: i32 = active_module_cycles
+            .iter()
+            .filter(|c| c.ship_id == ball_id)
+            .map(|c| c.warp_core_stab_bonus)
+            .sum();
+        let mwd_disabled = active_module_cycles
+            .iter()
+            .any(|c| c.target_id == Some(ball_id) && c.disables_target_mwd_mjd);
+        let disallow_assist = active_module_cycles
+            .iter()
+            .any(|c| c.ship_id == ball_id && c.hic_bubble_radius_m.is_some());
+
+        if let Some(cs) = ballpark.combat_states.get_mut(&ball_id) {
+            cs.warp_scramble_strength = base_scram + mod_scram;
+            cs.warp_core_strength = base_core + mod_core;
+            cs.is_mwd_mjd_disabled = mwd_disabled;
+            cs.disallow_assistance = disallow_assist;
         }
     }
 }
@@ -1414,7 +1546,36 @@ fn respawn_due_asteroids(
     respawned
 }
 
+fn sync_ball_positions(ballpark: &Ballpark, cache: &RwLock<HashMap<BallId, DVec3>>) {
+    let mut guard = cache.write().unwrap_or_else(|e| e.into_inner());
+    guard.retain(|&id, _| ballpark.balls.contains_key(&id));
+    for (&id, ball) in &ballpark.balls {
+        guard.insert(id, ball.position);
+    }
+}
+
 impl SystemRegistry {
+    pub fn get_ball_position_sync(
+        &self,
+        solar_system_id: SolarSystemId,
+        ball_id: BallId,
+    ) -> Option<DVec3> {
+        let guard = self.systems.read().unwrap_or_else(|e| e.into_inner());
+        guard
+            .get(&solar_system_id)
+            .and_then(|h| h.get_ball_position_sync(ball_id))
+    }
+
+    pub fn find_ball_position_sync(&self, ball_id: BallId) -> Option<DVec3> {
+        let guard = self.systems.read().unwrap_or_else(|e| e.into_inner());
+        for handle in guard.values() {
+            if let Some(pos) = handle.get_ball_position_sync(ball_id) {
+                return Some(pos);
+            }
+        }
+        None
+    }
+
     /// Spawns or retrieves a running Solar System Actor for `solar_system_id`.
     /// Populates static SDE celestials, stargates, and stations (`SP-1`), and hibernates (`LOD 0`)
     /// with zero timer wakes until dynamic balls are spawned on grid.
@@ -1444,9 +1605,18 @@ impl SystemRegistry {
         if let Some(sde) = &sde_opt {
             populate_system_celestials(&mut ballpark, solar_system_id, sde);
         }
+        let initial_positions: HashMap<BallId, DVec3> = ballpark
+            .balls
+            .iter()
+            .map(|(&id, b)| (id, b.position))
+            .collect();
+        let ball_positions = Arc::new(RwLock::new(initial_positions));
+        let ball_positions_actor = ball_positions.clone();
 
         tokio::spawn(async move {
             let mut active_module_cycles: Vec<ActiveModuleCycle> = Vec::new();
+            let mut base_scramble_strengths: HashMap<BallId, i32> = HashMap::new();
+            let mut base_core_strengths: HashMap<BallId, i32> = HashMap::new();
             let mut ticker = tokio::time::interval_at(
                 tokio::time::Instant::now() + Duration::from_secs(1),
                 Duration::from_secs(1),
@@ -1473,7 +1643,15 @@ impl SystemRegistry {
                         if should_step {
                             respawn_due_asteroids(&mut ballpark, &mut asteroids, &asteroid_templates, &sde_opt, &db_opt);
                             let events = ballpark.step(dt);
-                            step_cycles_and_capacitor(&mut ballpark, &mut active_module_cycles, &db_opt, dt);
+                            step_cycles_and_capacitor(
+                                &mut ballpark,
+                                &mut active_module_cycles,
+                                &base_scramble_strengths,
+                                &base_core_strengths,
+                                &db_opt,
+                                dt,
+                            );
+                            sync_ball_positions(&ballpark, &ball_positions_actor);
                             let broadcast = build_tick_broadcast(solar_system_id, &mut ballpark, events);
                             let _ = event_tx_actor.send(broadcast);
                         }
@@ -1490,6 +1668,7 @@ impl SystemRegistry {
                                 }
                                 ensure_default_slim_meta(&mut ballpark, &ball, &sde_opt);
                                 ballpark.add_ball(ball);
+                                sync_ball_positions(&ballpark, &ball_positions_actor);
                                 let _ = reply.send(Ok(ballpark.current_tick));
                             }
                             SystemCommand::SpawnBallWithCombat {
@@ -1502,8 +1681,11 @@ impl SystemRegistry {
                                     let _ = ballpark.remove_ball(ball_id);
                                 }
                                 ensure_default_slim_meta(&mut ballpark, &ball, &sde_opt);
+                                base_scramble_strengths.insert(ball_id, combat_state.warp_scramble_strength);
+                                base_core_strengths.insert(ball_id, combat_state.warp_core_strength);
                                 ballpark.add_ball(ball);
                                 ballpark.combat_states.insert(ball_id, combat_state);
+                                sync_ball_positions(&ballpark, &ball_positions_actor);
                                 let _ = reply.send(Ok(ballpark.current_tick));
                             }
                             SystemCommand::SpawnBallWithMeta {
@@ -1516,9 +1698,12 @@ impl SystemRegistry {
                                 if ballpark.balls.contains_key(&ball_id) {
                                     let _ = ballpark.remove_ball(ball_id);
                                 }
+                                base_scramble_strengths.insert(ball_id, combat_state.warp_scramble_strength);
+                                base_core_strengths.insert(ball_id, combat_state.warp_core_strength);
                                 ballpark.set_ball_slim_meta(ball_id, slim_meta);
                                 ballpark.add_ball(ball);
                                 ballpark.combat_states.insert(ball_id, combat_state);
+                                sync_ball_positions(&ballpark, &ball_positions_actor);
                                 let _ = reply.send(Ok(ballpark.current_tick));
                             }
                             SystemCommand::SpawnAsteroid { asteroid, ball, reply } => {
@@ -1547,6 +1732,7 @@ impl SystemRegistry {
                                 ballpark.add_ball(ball.clone());
                                 asteroid_templates.insert(ball_id, (asteroid.clone(), ball));
                                 asteroids.insert(ball_id, asteroid);
+                                sync_ball_positions(&ballpark, &ball_positions_actor);
                                 let _ = reply.send(Ok(ball_id));
                             }
                             SystemCommand::MineAsteroid {
@@ -1619,6 +1805,7 @@ impl SystemRegistry {
                                 } else {
                                     Err(format!("Asteroid {asteroid_id} not found in system {solar_system_id}"))
                                 };
+                                sync_ball_positions(&ballpark, &ball_positions_actor);
                                 let _ = reply.send(res);
                             }
                             SystemCommand::GetAsteroidState { asteroid_id, reply } => {
@@ -1655,10 +1842,14 @@ impl SystemRegistry {
                                         populated.push(ast.clone());
                                     }
                                 }
+                                sync_ball_positions(&ballpark, &ball_positions_actor);
                                 let _ = reply.send(populated);
                             }
                             SystemCommand::RemoveBall { ball_id, reply } => {
+                                base_scramble_strengths.remove(&ball_id);
+                                base_core_strengths.remove(&ball_id);
                                 let removed = ballpark.remove_ball(ball_id);
+                                sync_ball_positions(&ballpark, &ball_positions_actor);
                                 let _ = reply.send(removed);
                             }
                             SystemCommand::SetMovementMode { ball_id, mode, reply } => {
@@ -1677,6 +1868,13 @@ impl SystemRegistry {
                             }
                             SystemCommand::SetWarpScrambleStrength { ball_id, strength, reply } => {
                                 if ballpark.set_warp_scramble_strength(ball_id, strength) {
+                                    base_scramble_strengths.insert(ball_id, strength);
+                                    reconcile_tackle_and_bubbles(
+                                        &mut ballpark,
+                                        &mut active_module_cycles,
+                                        &base_scramble_strengths,
+                                        &base_core_strengths,
+                                    );
                                     let _ = reply.send(Ok(ballpark.current_tick));
                                 } else {
                                     let _ = reply.send(Err(format!("Ball {ball_id} not in system or has no combat state")));
@@ -1684,6 +1882,13 @@ impl SystemRegistry {
                             }
                             SystemCommand::SetWarpCoreStrength { ball_id, strength, reply } => {
                                 if ballpark.set_warp_core_strength(ball_id, strength) {
+                                    base_core_strengths.insert(ball_id, strength);
+                                    reconcile_tackle_and_bubbles(
+                                        &mut ballpark,
+                                        &mut active_module_cycles,
+                                        &base_scramble_strengths,
+                                        &base_core_strengths,
+                                    );
                                     let _ = reply.send(Ok(ballpark.current_tick));
                                 } else {
                                     let _ = reply.send(Err(format!("Ball {ball_id} not in system or has no combat state")));
@@ -1692,6 +1897,10 @@ impl SystemRegistry {
                             SystemCommand::AddWarpBubble { id, position, radius, reply } => {
                                 ballpark.add_warp_bubble(id, position, radius);
                                 let _ = reply.send(Ok(ballpark.current_tick));
+                            }
+                            SystemCommand::RemoveWarpBubble { id, reply } => {
+                                let removed = ballpark.remove_warp_bubble(id).is_some();
+                                let _ = reply.send(removed);
                             }
                             SystemCommand::SetSpeedFraction {
                                 ball_id,
@@ -1710,6 +1919,7 @@ impl SystemRegistry {
                                 reply,
                             } => {
                                 let updated = ballpark.set_ball_position(ball_id, position);
+                                sync_ball_positions(&ballpark, &ball_positions_actor);
                                 let _ = reply.send(updated);
                             }
                             SystemCommand::PushSetState {
@@ -1787,6 +1997,7 @@ impl SystemRegistry {
                             }
                             SystemCommand::ApplyDamage { ball_id, damage, reply } => {
                                 if let Some((applied, destroyed, ball_opt)) = ballpark.apply_damage_to_ball(ball_id, damage) {
+                                    sync_ball_positions(&ballpark, &ball_positions_actor);
                                     if let Some(ball_snap) = ball_opt {
                                         let _ = reply.send(Some((applied, destroyed, ball_snap)));
                                     } else {
@@ -1805,7 +2016,15 @@ impl SystemRegistry {
                                     &db_opt,
                                 );
                                 let events = ballpark.step(dt);
-                                step_cycles_and_capacitor(&mut ballpark, &mut active_module_cycles, &db_opt, dt);
+                                step_cycles_and_capacitor(
+                                    &mut ballpark,
+                                    &mut active_module_cycles,
+                                    &base_scramble_strengths,
+                                    &base_core_strengths,
+                                    &db_opt,
+                                    dt,
+                                );
+                                sync_ball_positions(&ballpark, &ball_positions_actor);
                                 let broadcast = build_tick_broadcast(solar_system_id, &mut ballpark, events);
                                 let _ = event_tx_actor.send(broadcast.clone());
                                 let _ = reply.send(broadcast);
@@ -1840,7 +2059,15 @@ impl SystemRegistry {
                                 let _ = reply.send(Ok(cs.clone()));
                             }
                             SystemCommand::SetCombatState { ball_id, combat_state, reply } => {
+                                base_scramble_strengths.insert(ball_id, combat_state.warp_scramble_strength);
+                                base_core_strengths.insert(ball_id, combat_state.warp_core_strength);
                                 ballpark.combat_states.insert(ball_id, combat_state);
+                                reconcile_tackle_and_bubbles(
+                                    &mut ballpark,
+                                    &mut active_module_cycles,
+                                    &base_scramble_strengths,
+                                    &base_core_strengths,
+                                );
                                 let _ = reply.send(Ok(()));
                             }
                             SystemCommand::GetCombatState { ball_id, reply } => {
@@ -1848,6 +2075,18 @@ impl SystemRegistry {
                                 let _ = reply.send(cs);
                             }
                             SystemCommand::AddModuleCycle { mut cycle, reply } => {
+                                if cycle.is_mwd_or_mjd {
+                                    if ballpark
+                                        .combat_states
+                                        .get(&cycle.ship_id)
+                                        .is_some_and(|cs| cs.is_mwd_mjd_disabled)
+                                    {
+                                        let _ = reply.send(Err(
+                                            "WarpScrambled: Propulsion module disabled by warp scrambler or focused warp disruption script".to_string(),
+                                        ));
+                                        continue;
+                                    }
+                                }
                                 if cycle.cap_need_per_cycle > 0.0 {
                                     if let Some(cs) = ballpark.combat_states.get_mut(&cycle.ship_id) {
                                         if cs.capacitor < cycle.cap_need_per_cycle {
@@ -1857,7 +2096,20 @@ impl SystemRegistry {
                                         cs.capacitor = (cs.capacitor - cycle.cap_need_per_cycle).max(0.0);
                                     }
                                 }
-                                if cycle.speed_boost_factor > 0.0 {
+                                // Remove any existing cycle for this (ship_id, module_id) before re-adding
+                                if let Some(pos) = active_module_cycles
+                                    .iter()
+                                    .position(|c| c.ship_id == cycle.ship_id && c.module_id == cycle.module_id)
+                                {
+                                    let prev = active_module_cycles.remove(pos);
+                                    cleanup_removed_module_cycle(&mut ballpark, &prev);
+                                }
+                                if let Some(vel_mult) = cycle.hic_velocity_multiplier {
+                                    if let Some(ball) = ballpark.balls.get_mut(&cycle.ship_id) {
+                                        cycle.original_max_velocity = Some(ball.max_velocity);
+                                        ball.max_velocity *= vel_mult;
+                                    }
+                                } else if cycle.speed_boost_factor > 0.0 {
                                     if let Some(ball) = ballpark.balls.get_mut(&cycle.ship_id) {
                                         if cycle.original_max_velocity.is_none() {
                                             cycle.original_max_velocity = Some(ball.max_velocity);
@@ -1865,17 +2117,37 @@ impl SystemRegistry {
                                         }
                                     }
                                 }
+                                if let Some(mass_add) = cycle.hic_mass_addition {
+                                    if let Some(ball) = ballpark.balls.get_mut(&cycle.ship_id) {
+                                        cycle.original_mass = Some(ball.mass);
+                                        ball.mass += mass_add;
+                                    }
+                                }
+                                if let Some(sig_mult) = cycle.hic_sig_multiplier {
+                                    if let Some(cs) = ballpark.combat_states.get_mut(&cycle.ship_id) {
+                                        cycle.original_signature_radius = Some(cs.signature_radius);
+                                        cs.signature_radius *= sig_mult;
+                                    }
+                                }
                                 active_module_cycles.push(cycle);
+                                reconcile_tackle_and_bubbles(
+                                    &mut ballpark,
+                                    &mut active_module_cycles,
+                                    &base_scramble_strengths,
+                                    &base_core_strengths,
+                                );
                                 let _ = reply.send(Ok(()));
                             }
                             SystemCommand::RemoveModuleCycle { ship_id, module_id, reply } => {
                                 if let Some(pos) = active_module_cycles.iter().position(|c| c.ship_id == ship_id && c.module_id == module_id) {
                                     let removed = active_module_cycles.remove(pos);
-                                    if let Some(orig_v) = removed.original_max_velocity {
-                                        if let Some(ball) = ballpark.balls.get_mut(&ship_id) {
-                                            ball.max_velocity = orig_v;
-                                        }
-                                    }
+                                    cleanup_removed_module_cycle(&mut ballpark, &removed);
+                                    reconcile_tackle_and_bubbles(
+                                        &mut ballpark,
+                                        &mut active_module_cycles,
+                                        &base_scramble_strengths,
+                                        &base_core_strengths,
+                                    );
                                 }
                                 let _ = reply.send(Ok(()));
                             }
@@ -1885,6 +2157,7 @@ impl SystemRegistry {
                             }
                             SystemCommand::MicroJump { ball_id, distance_meters, reply } => {
                                 let res = ballpark.micro_jump(ball_id, distance_meters);
+                                sync_ball_positions(&ballpark, &ball_positions_actor);
                                 let _ = reply.send(res);
                             }
                             SystemCommand::IsBallScrambled { ball_id, reply } => {
@@ -1909,6 +2182,7 @@ impl SystemRegistry {
             solar_system_id,
             cmd_tx,
             event_tx,
+            ball_positions,
         };
         guard.insert(solar_system_id, handle.clone());
         handle

@@ -62,6 +62,7 @@ CREATE TABLE IF NOT EXISTS skill_queues (
     start_sp REAL NOT NULL,
     end_sp REAL NOT NULL,
     duration_seconds REAL NOT NULL,
+    started_at_unix INTEGER,
     PRIMARY KEY (character_id, queue_index),
     FOREIGN KEY (character_id) REFERENCES characters(character_id) ON DELETE CASCADE
 );
@@ -344,6 +345,57 @@ CREATE TABLE IF NOT EXISTS asteroids (
     z REAL NOT NULL,
     radius REAL NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS character_last_jump_unix (
+    character_id INTEGER PRIMARY KEY,
+    last_jump_unix INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS character_cspa_charges (
+    character_id INTEGER PRIMARY KEY,
+    cspa_charge_cents INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS mail_timestamps (
+    mail_id INTEGER PRIMARY KEY,
+    timestamp_unix INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS character_login_stats (
+    character_id INTEGER PRIMARY KEY,
+    last_login_unix INTEGER NOT NULL,
+    last_logout_unix INTEGER NOT NULL,
+    logins_count INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS item_custom_names (
+    item_id INTEGER PRIMARY KEY,
+    custom_name TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS item_positions (
+    item_id INTEGER PRIMARY KEY,
+    x REAL NOT NULL,
+    y REAL NOT NULL,
+    z REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS structure_vulnerability_windows (
+    structure_id INTEGER PRIMARY KEY,
+    window_start_unix INTEGER NOT NULL,
+    window_end_unix INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS skill_history (
+    character_id INTEGER PRIMARY KEY,
+    history_json TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS character_doll_info (
+    character_id INTEGER PRIMARY KEY,
+    doll_dna TEXT NOT NULL,
+    portrait_meta TEXT NOT NULL
+);
 "#;
 
 pub fn apply_migrations(conn: &Connection) -> Result<(), String> {
@@ -369,6 +421,7 @@ pub fn apply_migrations(conn: &Connection) -> Result<(), String> {
         "INSERT OR IGNORE INTO world_meta (meta_key, meta_value) VALUES ('next_entity_id', 200000000), ('wal_seq', 0), ('markets_seeded', 0);",
     )
     .map_err(|e| e.to_string())?;
+    let _ = conn.execute("ALTER TABLE skill_queues ADD COLUMN started_at_unix INTEGER", []);
     Ok(())
 }
 

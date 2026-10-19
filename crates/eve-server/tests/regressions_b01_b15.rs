@@ -265,7 +265,7 @@ async fn test_blocking_findings_b01_to_b15_regressions() {
     let bpo_inv_err = ctx
         .dispatch_rpc(
             &mut sess,
-            "ramProxy",
+            "industryManager",
             None,
             "InstallJob",
             &[PyRep::Integer(691), PyRep::Integer(8), PyRep::Integer(1)],
@@ -279,7 +279,7 @@ async fn test_blocking_findings_b01_to_b15_regressions() {
     let copy1 = ctx
         .dispatch_rpc(
             &mut sess,
-            "ramProxy",
+            "industryManager",
             None,
             "InstallJob",
             &[PyRep::Integer(691), PyRep::Integer(5), PyRep::Integer(1)],
@@ -308,7 +308,7 @@ async fn test_blocking_findings_b01_to_b15_regressions() {
     let copy2 = ctx
         .dispatch_rpc(
             &mut sess,
-            "ramProxy",
+            "industryManager",
             None,
             "InstallJob",
             &[PyRep::Integer(691), PyRep::Integer(5), PyRep::Integer(1)],
@@ -338,7 +338,7 @@ async fn test_blocking_findings_b01_to_b15_regressions() {
     let inv1 = ctx
         .dispatch_rpc(
             &mut sess,
-            "ramProxy",
+            "industryManager",
             None,
             "InstallJob",
             &[PyRep::Integer(691), PyRep::Integer(8), PyRep::Integer(1)],
@@ -370,7 +370,7 @@ async fn test_blocking_findings_b01_to_b15_regressions() {
     let inv2 = ctx
         .dispatch_rpc(
             &mut sess,
-            "ramProxy",
+            "industryManager",
             None,
             "InstallJob",
             &[PyRep::Integer(691), PyRep::Integer(8), PyRep::Integer(1)],
@@ -406,18 +406,57 @@ async fn test_blocking_findings_b01_to_b15_regressions() {
         Some(11372)
     );
 
-    // planetMgr.CreateColony + planetMgr.Flush materializes 200x Water (type_id 3645) into station hangar
+    // planetMgr.UserUpdateNetwork + planetMgr.Flush materializes 200x Water (type_id 3645) into station hangar
+    let ship_id = sess.ship_id.unwrap_or(100_000_001);
+    let prev_st = sess.station_id;
+    sess.station_id = None;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.station_id = None;
+        }
+        snap.next_entity_id += 1;
+        let id = snap.next_entity_id;
+        snap.items.insert(
+            id,
+            eve_db::InventoryItemRecord {
+                item_id: id,
+                type_id: 2254,
+                owner_id: 90_000_001,
+                location_id: ship_id,
+                flag: eve_db::InventoryFlag::Cargo,
+                quantity: 1,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
     ctx.dispatch_rpc(
         &mut sess,
         "planetMgr",
         None,
-        "CreateColony",
-        &[PyRep::Integer(40009082)],
+        "UserUpdateNetwork",
+        &[
+            PyRep::Integer(40009082),
+            PyRep::List(vec![PyRep::Tuple(vec![
+                PyRep::Integer(1),
+                PyRep::Integer(1),
+                PyRep::Integer(2254),
+                PyRep::Real(0.1),
+                PyRep::Real(0.2),
+            ])]),
+        ],
         &kw,
         None,
     )
     .await
-    .expect("planetMgr.CreateColony");
+    .expect("planetMgr.UserUpdateNetwork");
+    sess.station_id = prev_st;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.station_id = prev_st;
+        }
+    });
     let flush = ctx
         .dispatch_rpc(
             &mut sess,
@@ -685,6 +724,30 @@ async fn test_blocking_findings_b01_to_b15_regressions() {
     )
     .await
     .expect("Dock at Tama Cyno Citadel");
+    // Fit and online Standup Cloning Center I (35894) in ServiceSlot0 to provide medical clone services
+    let clone_bay_item_id = 100_000_980_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            clone_bay_item_id,
+            InventoryItemRecord {
+                item_id: clone_bay_item_id,
+                type_id: 35894,
+                owner_id: 90_000_001,
+                location_id: tama_struct_id as i64,
+                flag: InventoryFlag::ServiceSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                dynamic_attributes: HashMap::new(),
+                source_mutaplasmid_id: None,
+                insured_payout_isk: 0.0,
+                is_blueprint_copy: false,
+                blueprint_runs_remaining: None,
+            },
+        );
+        snap.module_online_states.insert(clone_bay_item_id, true);
+    });
+
     // S-4: InstallCloneInStation rejects when docked in a structure; InstallCloneInStructure succeeds
     // parity: plan:S-4
     let wrong_clone_rpc = ctx

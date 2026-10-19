@@ -209,26 +209,25 @@ def run_two_client_bridge_probe(host, bridge_port, client_1_log_path, client_2_l
             % (getattr(fleet, "fleetID", None), getattr(fleet, "bossID", None)),
         }
 
-        # Journey 5: planetary (SDE planet lookup, CreateColony, Flush)
+        # Journey 5 & 6: planetary + undock_navigate & multiplayer_presence in shared Jita (30000142) ballpark, then redock
         pinfo = sm1.RemoteSvc("planetMgr").GetPlanetInfo(40009077)
+        sm1.RemoteSvc("marketProxy").BuyMultipleItems([(2254, 1, 500000.0)])
+        _, inv_after_buy = sm1.RemoteSvc("invbroker").MachoBindObject(60003760, ("List", (), {}))
+        cc_items = [it for it in inv_after_buy if getattr(it, "typeID", None) == 2254]
+        if cc_items:
+            sm1.RemoteSvc("invbroker").Add(cc_items[0].itemID, 100000001, 148)
+
+        undock1 = sm1.RemoteSvc("stationSvc").Undock()
+        undock2 = sm2.RemoteSvc("stationSvc").Undock()
         try:
-            colony = sm1.RemoteSvc("planetMgr").CreateColony(40009077)
+            colony = sm1.RemoteSvc("planetMgr").UserUpdateNetwork(
+                40009077, [(1, 1, 2254, 0.1, 0.2)]
+            )
         except RuntimeError as exc:
             if "ColonyAlreadyExists" in str(exc):
                 colony = True
             else:
                 raise
-        flush = sm1.RemoteSvc("planetMgr").Flush(40009077)
-        log1.info("planetMgr.Flush(40009077) -> %r" % (flush,))
-        outcomes["planetary"] = {
-            "bridge_verified": bool(pinfo and colony and flush),
-            "evidence": "planetMgr.CreateColony & Flush on Jita planet 40009077 produced typeID=%r qty=%r"
-            % (getattr(flush, "producedTypeID", None), getattr(flush, "producedQuantity", None)),
-        }
-
-        # Journey 6: undock_navigate & multiplayer_presence in shared Jita (30000142) ballpark, then redock
-        undock1 = sm1.RemoteSvc("stationSvc").Undock()
-        undock2 = sm2.RemoteSvc("stationSvc").Undock()
         beyonce1, _ = sm1.RemoteSvc("beyonce").MachoBindObject(30000142, None)
         beyonce2, _ = sm2.RemoteSvc("beyonce").MachoBindObject(30000142, None)
         beyonce1.CmdGotoDirection(1.0, 0.0, 0.0)
@@ -236,6 +235,13 @@ def run_two_client_bridge_probe(host, bridge_port, client_1_log_path, client_2_l
         snap_from_client2 = beyonce2.GetBallSnapshot(100000001)
         dock1 = sm1.RemoteSvc("stationSvc").Dock(60003760)
         dock2 = sm2.RemoteSvc("stationSvc").Dock(60003760)
+        flush = sm1.RemoteSvc("planetMgr").Flush(40009077)
+        log1.info("planetMgr.Flush(40009077) -> %r" % (flush,))
+        outcomes["planetary"] = {
+            "bridge_verified": bool(pinfo and colony and flush),
+            "evidence": "planetMgr.UserUpdateNetwork & Flush on Jita planet 40009077 produced typeID=%r qty=%r"
+            % (getattr(flush, "producedTypeID", None), getattr(flush, "producedQuantity", None)),
+        }
         log1.info(
             "Undocked, issued CmdGotoDirection/CmdStop in 30000142 (%r), and redocked (%r)"
             % (undock1, dock1)

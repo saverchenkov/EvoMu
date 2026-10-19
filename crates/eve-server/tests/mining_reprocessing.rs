@@ -1152,19 +1152,19 @@ async fn test_phase_5m_mn12_reprocessing_service() {
         );
     });
 
-    // 1. GetReprocessingInfo
+    // 1. GetQuotes
     let info_res = ctx
         .dispatch_rpc(
             &mut sess,
             "reprocessingSvc",
             None,
-            "GetReprocessingInfo",
+            "GetQuotes",
             &[],
             &kw,
             None,
         )
         .await
-        .expect("GetReprocessingInfo");
+        .expect("GetQuotes");
 
     let base_yield = get_dict_val(&info_res, "stationBaseYield")
         .and_then(|v| match v {
@@ -1210,19 +1210,19 @@ async fn test_phase_5m_mn12_reprocessing_service() {
         );
     });
 
-    // GetQuote
+    // GetQuotes
     let quote_res = ctx
         .dispatch_rpc(
             &mut sess,
             "reprocessingSvc",
             None,
-            "GetQuote",
+            "GetQuotes",
             &[PyRep::Integer(veldspar_id)],
             &kw,
             None,
         )
         .await
-        .expect("GetQuote");
+        .expect("GetQuotes");
 
     let quote_entry = match &quote_res {
         PyRep::List(l) => l.first().expect("quote entry"),

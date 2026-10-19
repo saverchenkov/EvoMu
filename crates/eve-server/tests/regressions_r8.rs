@@ -77,12 +77,19 @@ async fn test_review_r8_regressions() {
             None,
             "CreateContract",
             &[
-                PyRep::String("ItemExchange".into()),
+                PyRep::Integer(1), // ItemExchange
+                PyRep::Integer(0),
+                PyRep::Integer(0),
+                PyRep::Integer(1440),
+                PyRep::Integer(1),
                 PyRep::Integer(60_003_760),
                 PyRep::Integer(60_003_760),
                 PyRep::Real(50_000.0),
                 PyRep::Real(0.0),
-                PyRep::Integer(100_000_003),
+                PyRep::Real(0.0),
+                PyRep::String("".into()),
+                PyRep::String("".into()),
+                PyRep::List(vec![PyRep::Integer(100_000_003)]),
             ],
             &kw,
             None,
@@ -186,12 +193,19 @@ async fn test_review_r8_regressions() {
             None,
             "CreateContract",
             &[
-                PyRep::String("ItemExchange".into()),
+                PyRep::Integer(1), // ItemExchange
+                PyRep::Integer(0),
+                PyRep::Integer(0),
+                PyRep::Integer(1440),
+                PyRep::Integer(1),
                 PyRep::Integer(60_003_760),
                 PyRep::Integer(60_003_760),
                 PyRep::Real(10_000.0),
                 PyRep::Real(0.0),
-                PyRep::Integer(100_000_007),
+                PyRep::Real(0.0),
+                PyRep::String("".into()),
+                PyRep::String("".into()),
+                PyRep::List(vec![PyRep::Integer(100_000_007)]),
             ],
             &kw,
             None,
@@ -246,11 +260,18 @@ async fn test_review_r8_regressions() {
             None,
             "CreateContract",
             &[
-                PyRep::String("Courier".into()),
+                PyRep::Integer(3), // Courier
+                PyRep::Integer(0),
+                PyRep::Integer(0),
+                PyRep::Integer(1440),
+                PyRep::Integer(1),
                 PyRep::Integer(60_003_760),
                 PyRep::Integer(60_008_494),
+                PyRep::Real(0.0),
                 PyRep::Real(5_000.0),
                 PyRep::Real(20_000.0),
+                PyRep::String("".into()),
+                PyRep::String("".into()),
             ],
             &kw,
             None,
@@ -292,12 +313,19 @@ async fn test_review_r8_regressions() {
             None,
             "CreateContract",
             &[
-                PyRep::String("Courier".into()),
+                PyRep::Integer(3), // Courier
+                PyRep::Integer(0),
+                PyRep::Integer(0),
+                PyRep::Integer(1440),
+                PyRep::Integer(1),
                 PyRep::Integer(60_003_760),
                 PyRep::Integer(60_003_760),
+                PyRep::Real(0.0),
                 PyRep::Real(5_000.0),
                 PyRep::Real(20_000.0),
-                PyRep::Integer(100_000_003),
+                PyRep::String("".into()),
+                PyRep::String("".into()),
+                PyRep::List(vec![PyRep::Integer(100_000_003)]),
             ],
             &kw,
             None,
@@ -1090,12 +1118,19 @@ async fn test_review_r8_regressions() {
             None,
             "CreateContract",
             &[
-                PyRep::String("ItemExchange".into()),
+                PyRep::Integer(1), // ItemExchange
+                PyRep::Integer(0),
+                PyRep::Integer(0),
+                PyRep::Integer(1440),
+                PyRep::Integer(1),
                 PyRep::Integer(60_003_760),
                 PyRep::Integer(60_003_760),
                 PyRep::Real(100_000.0),
                 PyRep::Real(0.0),
-                PyRep::Integer(100_009_910),
+                PyRep::Real(0.0),
+                PyRep::String("".into()),
+                PyRep::String("".into()),
+                PyRep::List(vec![PyRep::Integer(100_009_910)]),
             ],
             &kw,
             None,
@@ -1154,6 +1189,9 @@ async fn test_review_r8_regressions() {
 
     // Restore Afterburner IV (3450: 4) and verify 1MN Afterburner II (438) fits into MedSlot0 (19)
     ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_002) {
+            ch.clone_grade = 2; // Omega clone so Afterburner IV is effective
+        }
         snap.skills.entry(90_000_002).or_default().insert(
             3450,
             eve_db::TrainedSkillRecord {
@@ -1634,20 +1672,21 @@ async fn test_review_r8_regressions() {
     assert_eq!(mb_kv.get("totalQuantity"), Some(&PyRep::Integer(10)));
     assert_eq!(mb_kv.get("totalCostISK"), Some(&PyRep::Real(50.0)));
 
-    // R15-P1-1: marketProxy.PlaceCharOrder rejects placing an order at a remote station in the same region (`StationMismatch`)
+    // R15-P1-1: marketProxy.PlaceBuyOrder rejects placing an order at a remote station in the same region (`StationMismatch`)
     // and rejects placing an order while undocked in space (`NotDockedAtStation`)
     let remote_station_order = ctx
         .dispatch_rpc(
             &mut s2,
             "marketProxy",
             None,
-            "PlaceCharOrder",
+            "PlaceBuyOrder",
             &[
                 PyRep::Integer(60_003_766), // Perimeter station in same region 10000002 while s2 is docked at Jita 60003760
                 PyRep::Integer(34),
                 PyRep::Real(5.0),
                 PyRep::Integer(10),
-                PyRep::Bool(true),
+                PyRep::Integer(90),
+                PyRep::Integer(1),
             ],
             &kw,
             None,
@@ -1661,13 +1700,14 @@ async fn test_review_r8_regressions() {
             &mut s1,
             "marketProxy",
             None,
-            "PlaceCharOrder",
+            "PlaceBuyOrder",
             &[
                 PyRep::Integer(60_003_760),
                 PyRep::Integer(34),
                 PyRep::Real(5.0),
                 PyRep::Integer(10),
-                PyRep::Bool(true),
+                PyRep::Integer(90),
+                PyRep::Integer(1),
             ],
             &kw,
             None,
@@ -1675,7 +1715,7 @@ async fn test_review_r8_regressions() {
         .await;
     assert_eq!(in_space_order.unwrap_err().code, "NotDockedAtStation");
 
-    // R20-P1-3: Verify PlaceCharOrder resolves station-specific owner_corporation_id (1000035) and owner_faction_id (500001)
+    // R20-P1-3: Verify PlaceBuyOrder resolves station-specific owner_corporation_id (1000035) and owner_faction_id (500001)
     // standings separately for Jita 4-4 (60003760) instead of passing corp standing as both faction and corp standing
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&90_000_002) {
@@ -1695,19 +1735,20 @@ async fn test_review_r8_regressions() {
             &mut s2,
             "marketProxy",
             None,
-            "PlaceCharOrder",
+            "PlaceBuyOrder",
             &[
                 PyRep::Integer(60_003_760),
                 PyRep::Integer(34),
                 PyRep::Real(1.0),
                 PyRep::Integer(10_000),
-                PyRep::Bool(true),
+                PyRep::Integer(90),
+                PyRep::Integer(1),
             ],
             &kw,
             None,
         )
         .await
-        .expect("PlaceCharOrder resting bid with separate faction and corp standings");
+        .expect("PlaceBuyOrder resting bid with separate faction and corp standings");
     let bal_after_bid = ctx
         .db
         .with_snapshot(|snap| snap.characters[&90_000_002].balance.0);
@@ -1933,15 +1974,42 @@ async fn test_review_r8_regressions() {
         .unwrap()
         .is_some());
 
-    // R21-P1-1: planetMgr.CreateColony gates max colonies per character on 1 + Interplanetary Consolidation (2495) trained level
+    // R21-P1-1: planetMgr.UserUpdateNetwork gates max colonies per character on 1 + Interplanetary Consolidation (2495) trained level
     // Character 90_000_002 has Interplanetary Consolidation untrained (0 -> max 1 colony); establishing 1st colony on Jita 40009082 succeeds,
     // and attempting a 2nd colony on Jita 40009077 fails with MaxColoniesReached
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.next_entity_id += 1;
+        let id = snap.next_entity_id;
+        snap.items.insert(
+            id,
+            eve_db::InventoryItemRecord {
+                item_id: id,
+                type_id: 2254,
+                owner_id: 90_000_002,
+                location_id: 100_009_950,
+                flag: InventoryFlag::Cargo,
+                quantity: 2,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
     ctx.dispatch_rpc(
         &mut s2,
         "planetMgr",
         None,
-        "CreateColony",
-        &[PyRep::Integer(40_009_082)],
+        "UserUpdateNetwork",
+        &[
+            PyRep::Integer(40_009_082),
+            PyRep::List(vec![PyRep::Tuple(vec![
+                PyRep::Integer(1),
+                PyRep::Integer(1),
+                PyRep::Integer(2254),
+                PyRep::Real(0.1),
+                PyRep::Real(0.2),
+            ])]),
+        ],
         &kw,
         None,
     )
@@ -1952,8 +2020,17 @@ async fn test_review_r8_regressions() {
             &mut s2,
             "planetMgr",
             None,
-            "CreateColony",
-            &[PyRep::Integer(40_009_077)],
+            "UserUpdateNetwork",
+            &[
+                PyRep::Integer(40_009_077),
+                PyRep::List(vec![PyRep::Tuple(vec![
+                    PyRep::Integer(1),
+                    PyRep::Integer(1),
+                    PyRep::Integer(2254),
+                    PyRep::Real(0.1),
+                    PyRep::Real(0.2),
+                ])]),
+            ],
             &kw,
             None,
         )
@@ -2006,13 +2083,17 @@ async fn test_review_r8_regressions() {
             &mut s2,
             "marketProxy",
             None,
-            "PlaceCharOrder",
+            "PlaceMultiSellOrder",
             &[
-                PyRep::Integer(60_003_760),
-                PyRep::Integer(1236),
-                PyRep::Real(250_000.0),
-                PyRep::Integer(1),
+                PyRep::List(vec![PyRep::keyval([
+                    ("stationID", PyRep::Integer(60_003_760)),
+                    ("typeID", PyRep::Integer(1236)),
+                    ("price", PyRep::Real(250_000.0)),
+                    ("quantity", PyRep::Integer(1)),
+                ])]),
                 PyRep::Bool(false),
+                PyRep::Integer(90),
+                PyRep::Real(0.0),
             ],
             &kw,
             None,
@@ -2030,13 +2111,17 @@ async fn test_review_r8_regressions() {
             &mut s2,
             "marketProxy",
             None,
-            "PlaceCharOrder",
+            "PlaceMultiSellOrder",
             &[
-                PyRep::Integer(60_003_760),
-                PyRep::Integer(587),
-                PyRep::Real(250_000.0),
-                PyRep::Integer(1),
+                PyRep::List(vec![PyRep::keyval([
+                    ("stationID", PyRep::Integer(60_003_760)),
+                    ("typeID", PyRep::Integer(587)),
+                    ("price", PyRep::Real(250_000.0)),
+                    ("quantity", PyRep::Integer(1)),
+                ])]),
                 PyRep::Bool(false),
+                PyRep::Integer(90),
+                PyRep::Real(0.0),
             ],
             &kw,
             None,
@@ -2048,7 +2133,7 @@ async fn test_review_r8_regressions() {
     );
 
     // R22-P1-2: Place a resting player bid order for 2x Overdrive Injector System II (1236) at 500,000.00 ISK (50_000_000 cents, above the 329,000.00 ISK NPC bid),
-    // repackage 100_009_911 into a 2-unit stack, and verify PlaceCharOrder sell fills charge exact integer ppm salesTaxISK for Accounting level 0 (75,000 ppm = 37,500.00 ISK) and level 4 (42,000 ppm = 21,000.00 ISK)
+    // repackage 100_009_911 into a 2-unit stack, and verify PlaceMultiSellOrder sell fills charge exact integer ppm salesTaxISK for Accounting level 0 (75,000 ppm = 37,500.00 ISK) and level 4 (42,000 ppm = 21,000.00 ISK)
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(m) = snap.items.get_mut(&100_009_911) {
             m.singleton = false;
@@ -2083,13 +2168,17 @@ async fn test_review_r8_regressions() {
             &mut s2,
             "marketProxy",
             None,
-            "PlaceCharOrder",
+            "PlaceMultiSellOrder",
             &[
-                PyRep::Integer(60_003_760),
-                PyRep::Integer(1236),
-                PyRep::Real(500_000.0),
-                PyRep::Integer(1),
+                PyRep::List(vec![PyRep::keyval([
+                    ("stationID", PyRep::Integer(60_003_760)),
+                    ("typeID", PyRep::Integer(1236)),
+                    ("price", PyRep::Real(500_000.0)),
+                    ("quantity", PyRep::Integer(1)),
+                ])]),
                 PyRep::Bool(false),
+                PyRep::Integer(90),
+                PyRep::Real(0.0),
             ],
             &kw,
             None,
@@ -2097,15 +2186,15 @@ async fn test_review_r8_regressions() {
         .await
         .expect("Sell 1x 1236 at Accounting level 0");
     let PyRep::KeyVal(sa0_kv) = sell_acct_0 else {
-        panic!("Expected KeyVal from PlaceCharOrder sell at Accounting 0");
+        panic!("Expected KeyVal from PlaceMultiSellOrder sell at Accounting 0");
     };
     assert_eq!(sa0_kv.get("filledImmediately"), Some(&PyRep::Bool(true)));
     assert_eq!(sa0_kv.get("salesTaxISK"), Some(&PyRep::Real(37_500.0)));
     let bal_after_acct_0 = ctx
         .db
         .with_snapshot(|snap| snap.characters[&90_000_002].balance.0);
-    // 100,000.00 ISK - 8,050.00 ISK broker fee (16,100 ppm) + (500,000.00 ISK - 37,500.00 ISK sales tax) = 554,450.00 ISK (55_445_000 cents)
-    assert_eq!(bal_after_acct_0, 55_445_000);
+    // 100,000.00 ISK + (500,000.00 ISK - 37,500.00 ISK sales tax) = 562,500.00 ISK (56_250_000 cents; no broker fee on immediate fill)
+    assert_eq!(bal_after_acct_0, 56_250_000);
 
     ctx.db.with_mut_snapshot(|snap| {
         snap.skills.entry(90_000_002).or_default().insert(
@@ -2122,13 +2211,17 @@ async fn test_review_r8_regressions() {
             &mut s2,
             "marketProxy",
             None,
-            "PlaceCharOrder",
+            "PlaceMultiSellOrder",
             &[
-                PyRep::Integer(60_003_760),
-                PyRep::Integer(1236),
-                PyRep::Real(500_000.0),
-                PyRep::Integer(1),
+                PyRep::List(vec![PyRep::keyval([
+                    ("stationID", PyRep::Integer(60_003_760)),
+                    ("typeID", PyRep::Integer(1236)),
+                    ("price", PyRep::Real(500_000.0)),
+                    ("quantity", PyRep::Integer(1)),
+                ])]),
                 PyRep::Bool(false),
+                PyRep::Integer(90),
+                PyRep::Real(0.0),
             ],
             &kw,
             None,
@@ -2136,15 +2229,15 @@ async fn test_review_r8_regressions() {
         .await
         .expect("Sell 1x 1236 at Accounting level 4");
     let PyRep::KeyVal(sa4_kv) = sell_acct_4 else {
-        panic!("Expected KeyVal from PlaceCharOrder sell at Accounting 4");
+        panic!("Expected KeyVal from PlaceMultiSellOrder sell at Accounting 4");
     };
     assert_eq!(sa4_kv.get("filledImmediately"), Some(&PyRep::Bool(true)));
     assert_eq!(sa4_kv.get("salesTaxISK"), Some(&PyRep::Real(21_000.0)));
     let bal_after_acct_4 = ctx
         .db
         .with_snapshot(|snap| snap.characters[&90_000_002].balance.0);
-    // 554,450.00 ISK - 8,050.00 ISK broker fee (16,100 ppm) + (500,000.00 ISK - 21,000.00 ISK sales tax) = 1,025,400.00 ISK (102_540_000 cents)
-    assert_eq!(bal_after_acct_4, 102_540_000);
+    // 562,500.00 ISK + (500,000.00 ISK - 21,000.00 ISK sales tax) = 1,041,500.00 ISK (104_150_000 cents; no broker fee on immediate fill)
+    assert_eq!(bal_after_acct_4, 104_150_000);
 
     // R23-P1-1: standingMgr.GetStandingTransactions records only actual standing deltas (no Decline penalty, exact derived Complete delta)
     fn extract_rowset_rows(rep: &PyRep) -> &Vec<Vec<PyRep>> {

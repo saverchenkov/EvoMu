@@ -473,7 +473,7 @@ pub fn dispatch_universe_and_nav(
                     .values()
                     .filter(|st| {
                         st.state != "Destroyed"
-                            && (st.type_id == 32226 || st.type_id == 32458)
+                            && (st.type_id == 32458 || st.type_id == 35841)
                             && ctx
                                 .sde
                                 .solar_systems
@@ -502,28 +502,16 @@ pub fn dispatch_universe_and_nav(
                             ((1.0 + mil + ind + strat).clamp(1.0, 6.0) * 10.0).round() / 10.0
                         })
                         .unwrap_or(1.0);
-                    let window_secs = ((18.0 / adm.max(1.0)) * 3_600.0).round() as u64;
                     let stored_window = if st.state == "CommandNodeEvent" {
                         None
                     } else if let Some(&(v_start, v_end)) =
                         snap.structure_vulnerability_windows.get(&st.structure_id)
                     {
-                        if v_start > 0 {
-                            let end = if v_end > v_start {
-                                v_end
-                            } else {
-                                v_start.saturating_add(window_secs.max(3_600))
-                            };
-                            Some((v_start, end))
+                        if v_start > 0 && v_end > v_start {
+                            Some((v_start, v_end))
                         } else {
                             None
                         }
-                    } else if st.reinforced_until_unix > 0 {
-                        Some((
-                            st.reinforced_until_unix,
-                            st.reinforced_until_unix
-                                .saturating_add(window_secs.max(3_600)),
-                        ))
                     } else {
                         None
                     };

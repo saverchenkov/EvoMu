@@ -428,6 +428,40 @@ fn verify_client_sqlite_static_loaded_rows(
                     .map(|v| v.as_u64().expect("skin type u64") as u32)
                     .collect();
                 assert_eq!(sk.types, expected_types);
+                assert_eq!(
+                    sk.allow_ccp_devs,
+                    row_json
+                        .get("allowCCPDevs")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false)
+                );
+                assert_eq!(
+                    sk.visible_serenity,
+                    row_json
+                        .get("visibleSerenity")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false)
+                );
+                assert_eq!(
+                    sk.visible_tranquility,
+                    row_json
+                        .get("visibleTranquility")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false)
+                );
+                assert_eq!(
+                    sk.is_structure_skin,
+                    row_json
+                        .get("isStructureSkin")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false)
+                );
+                let expected_desc = row_json.get("skinDescription").and_then(|v| {
+                    v.as_str()
+                        .map(|s| s.to_string())
+                        .or_else(|| v.as_i64().map(|n| n.to_string()))
+                });
+                assert_eq!(sk.skin_description, expected_desc);
             }
             true
         }

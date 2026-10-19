@@ -272,14 +272,83 @@ fn test_warp_continuous_physics_curves_and_visual_handoff() {
     assert!(saw_cruise, "Long warp must exhibit cruise phase at ship warp speed");
     assert!(saw_deceleration, "Warp must exhibit deceleration phase without overshoot");
     assert!(max_speed > 1.0e9, "Warp must reach relativistic AU/s velocities");
+
+    // Verify exact EVE warp acceleration, cruise, and deceleration duration formulas across ship classes:
+    // - Stiletto (11198, Interceptor, 8.0 AU/s): k_a = 8.0, k_d = min(8.0 / 3.0, 2.0) = 2.0 (capped at 2.0!)
+    // - Rifter (587, Frigate, 5.0 AU/s): k_a = 5.0, k_d = 5.0 / 3.0
+    // - Caracal (621, Cruiser, 4.0 AU/s): k_a = 4.0, k_d = 4.0 / 3.0
+    // - Raven (638, Battleship, 3.0 AU/s): k_a = 3.0, k_d = 1.0
+    // - Charon (20185, Freighter, 1.5 AU/s): k_a = 1.5, k_d = 0.5
+    let class_cases = [
+        ("Stiletto", 11198u32, 8.0f64, 2.0f64),
+        ("Rifter", 587, 5.0f64, 5.0 / 3.0),
+        ("Caracal", 621, 4.0f64, 4.0 / 3.0),
+        ("Raven", 638, 3.0f64, 1.0f64),
+        ("Charon", 20185, 1.5f64, 0.5f64),
+    ];
+    let mut prev_total_time = 0.0f64;
+    for (name, ship_type_id, k, expected_kd) in class_cases {
+        let kd = (k / 3.0).min(2.0);
+        assert!(
+            (kd - expected_kd).abs() < 1e-9,
+            "{name} deceleration constant k_d mismatch: got {kd}, expected {expected_kd}"
+        );
+        let mut class_park = Ballpark::new(30_000_142);
+        let test_ball = Ball {
+            id: 2100 + ship_type_id as i64,
+            type_id: ship_type_id,
+            position: origin,
+            velocity: DVec3::new(300.0, 0.0, 0.0), // already aligned
+            max_velocity: 300.0,
+            inertia: 2.0,
+            mass: 1_000_000.0,
+            radius: 40.0,
+            speed_fraction: 1.0,
+            mode: MovementMode::Stop,
+        };
+        let bid = test_ball.id;
+        class_park.add_ball(test_ball);
+        class_park
+            .set_mode(bid, MovementMode::new_warp(origin, destination, k))
+            .expect("set warp");
+
+        let mut total_t = 0.0f64;
+        let mut decel_t = 0.0f64;
+        for _ in 0..1000 {
+            class_park.step(0.1);
+            total_t += 0.1;
+            let b = class_park.balls.get(&bid).unwrap();
+            match b.mode {
+                MovementMode::Warp {
+                    phase: WarpPhase::Decelerating,
+                    ..
+                } => {
+                    decel_t += 0.1;
+                }
+                MovementMode::Stop => break,
+                _ => {}
+            }
+        }
+        assert!(
+            decel_t > 5.0,
+            "{name} must spend significant time in exponential deceleration ({decel_t:.1}s)"
+        );
+        if prev_total_time > 0.0 {
+            assert!(
+                total_t > prev_total_time,
+                "Slower ship class {name} ({k} AU/s) must take strictly longer to warp 20 AU than faster class ({total_t:.1}s vs {prev_total_time:.1}s)"
+            );
+        }
+        prev_total_time = total_t;
+    }
 }
 
-// parity: feat:modules.warp-disruptor
+// parity: feat:navigation.warp-speed-formula
 #[tokio::test]
-async fn test_warp_scrambler_disruptor_blocking() {
+async fn test_server_cmd_warp_to_stuff_uses_sde_ship_warp_speed() {
     let ctx = ServerContext::new();
     let kw = HashMap::new();
-    let mut sess = SessionState::new(9901);
+    let mut sess = SessionState::new(9900);
 
     ctx.dispatch_rpc(
         &mut sess,
@@ -316,122 +385,901 @@ async fn test_warp_scrambler_disruptor_blocking() {
     let beyonce_id = undock_kv["beyonceBoundID"].as_i64().unwrap() as u64;
     let ship_id = undock_kv["shipID"].as_i64().unwrap();
     let jita_handle = ctx.systems.get_or_spawn(30_000_142);
+    let dest_gate_id = 50_001_249i64;
 
-    // Perimeter stargate position
-    let dest_x = 50_001_249i64;
+    // Test Stiletto (11198 -> 8.0 AU/s), Rifter (587 -> 5.0 AU/s), Raven (638 -> 3.0 AU/s), Charon (20185 -> 1.5 AU/s)
+    for (ship_type_id, expected_au_s) in [(11198u32, 8.0f64), (587, 5.0), (638, 3.0), (20185, 1.5)] {
+        ctx.db.with_mut_snapshot(|snap| {
+            if let Some(ship_item) = snap.items.get_mut(&ship_id) {
+                ship_item.type_id = ship_type_id;
+            }
+        });
+        ctx.invalidate_ship_fitting(ship_id);
+        let (_, mut ball) = jita_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+        ball.type_id = ship_type_id;
+        ball.position = DVec3::ZERO;
+        ball.velocity = DVec3::ZERO;
+        ball.mode = MovementMode::Stop;
+        jita_handle.spawn_ball(ball).await.unwrap();
 
-    // 1. Unscrambled warp attempt: CmdWarpTo succeeds
-    let ok_warp = ctx
-        .dispatch_rpc(
+        ctx.dispatch_rpc(
             &mut sess,
             "beyonce",
             Some(beyonce_id),
-            "CmdWarpTo",
-            &[PyRep::Integer(dest_x)],
-            &kw,
-            None,
-        )
-        .await;
-    assert!(ok_warp.is_ok(), "Unscrambled ship can warp");
-
-    // Stop the ship
-    let _ = jita_handle.set_movement_mode(ship_id, MovementMode::Stop).await;
-
-    // 2. Apply warp scrambler: strength 1 vs warp core strength 1
-    jita_handle
-        .set_warp_scramble_strength(ship_id, 1)
-        .await
-        .expect("set_warp_scramble_strength");
-
-    let scrambled_err = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "beyonce",
-            Some(beyonce_id),
-            "CmdWarpTo",
-            &[PyRep::Integer(dest_x)],
+            "CmdWarpToStuff",
+            &[PyRep::String("item".into()), PyRep::Integer(dest_gate_id)],
             &kw,
             None,
         )
         .await
-        .unwrap_err();
-    assert_eq!(
-        scrambled_err.code, "WarpScrambled",
-        "Warp scrambler must reject CmdWarpTo with WarpScrambled"
+        .expect("CmdWarpToStuff");
+
+        let (_, active_ball) = jita_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+        let MovementMode::Warp { warp_speed_au_s, .. } = active_ball.mode else {
+            panic!("Expected ship {ship_type_id} in Warp mode");
+        };
+        assert!(
+            (warp_speed_au_s - expected_au_s).abs() < 1e-4,
+            "Ship type {ship_type_id} must warp at SDE warp speed {expected_au_s} AU/s, got {warp_speed_au_s}"
+        );
+    }
+}
+
+fn seed_fitting_item(
+    ctx: &ServerContext,
+    item_id: i64,
+    type_id: u32,
+    owner_id: i64,
+    location_id: i64,
+    flag: eve_db::InventoryFlag,
+    quantity: i32,
+) {
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            item_id,
+            eve_db::InventoryItemRecord {
+                item_id,
+                type_id,
+                owner_id,
+                location_id,
+                flag,
+                quantity,
+                singleton: quantity == 1,
+                version: 1,
+                dynamic_attributes: HashMap::new(),
+                source_mutaplasmid_id: None,
+                insured_payout_isk: 0.0,
+                is_blueprint_copy: false,
+                blueprint_runs_remaining: None,
+            },
+        );
+    });
+}
+
+fn grant_fitting_skills(ctx: &ServerContext, char_id: i64) {
+    ctx.db.with_mut_snapshot(|snap| {
+        let entry = snap.skills.entry(char_id).or_default();
+        for &skill_id in &[
+            3402u32, // Science
+            3412,    // Astrometrics
+            3413,    // Power Grid Management
+            3420,    // Tactical Shield Manipulation
+            3426,    // CPU Management
+            3429,    // Target Management
+            3430,    // Advanced Target Management
+            3435,    // Propulsion Jamming
+            3449,    // Navigation
+            3450,    // Afterburner
+            3454,    // High Speed Maneuvering
+            3455,    // Warp Drive Operation
+            11446,   // Graviton Physics
+            28609,   // Heavy Interdiction Cruisers
+        ] {
+            entry.insert(
+                skill_id,
+                eve_db::TrainedSkillRecord {
+                    type_id: skill_id,
+                    level: 5,
+                    skill_points: 256_000.0,
+                },
+            );
+        }
+    });
+}
+
+// parity: feat:modules.warp-disruptor
+#[tokio::test]
+async fn test_warp_scrambler_disruptor_blocking() {
+    let ctx = ServerContext::new();
+    let kw = HashMap::new();
+
+    // Pilot 1 (Victim in Rifter 100_000_001)
+    let mut sess_victim = SessionState::new(9901);
+    ctx.dispatch_rpc(
+        &mut sess_victim,
+        "authentication",
+        None,
+        "Login",
+        &[
+            PyRep::String("demo".into()),
+            PyRep::String("demo-secret".into()),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Login victim");
+    ctx.dispatch_rpc(
+        &mut sess_victim,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(90_000_001)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("SelectCharacterID victim");
+
+    // Pilot 2 (Tackler in Rifter)
+    let mut sess_tackler = SessionState::new(9902);
+    ctx.dispatch_rpc(
+        &mut sess_tackler,
+        "authentication",
+        None,
+        "Login",
+        &[
+            PyRep::String("other".into()),
+            PyRep::String("other-secret".into()),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Login tackler");
+    ctx.dispatch_rpc(
+        &mut sess_tackler,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(90_000_002)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("SelectCharacterID tackler");
+
+    let victim_char_id = 90_000_001i64;
+    let victim_ship_id = sess_victim.ship_id.expect("victim ship_id");
+    let tackler_char_id = 90_000_002i64;
+    let tackler_ship_id = sess_tackler.ship_id.expect("tackler ship_id");
+
+    // Clear any pre-seeded modules on both ships so slots and CPU/PG are clean
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.retain(|_, i| {
+            !(i.location_id == victim_ship_id || i.location_id == tackler_ship_id)
+        });
+    });
+
+    grant_fitting_skills(&ctx, victim_char_id);
+    grant_fitting_skills(&ctx, tackler_char_id);
+
+    // Fit 5MN Microwarpdrive I (type 434) and Warp Core Stabilizer I (type 10998) on Victim
+    let victim_mwd_id = 880_001i64;
+    let victim_wcs_id = 880_002i64;
+    seed_fitting_item(
+        &ctx,
+        victim_mwd_id,
+        434,
+        victim_char_id,
+        victim_ship_id,
+        eve_db::InventoryFlag::MedSlot0,
+        1,
     );
+    seed_fitting_item(
+        &ctx,
+        victim_wcs_id,
+        10998,
+        victim_char_id,
+        victim_ship_id,
+        eve_db::InventoryFlag::LoSlot0,
+        1,
+    );
+    ctx.invalidate_ship_fitting(victim_ship_id);
 
-    // Also verify CmdWarpToPoint is blocked
-    let p_gate_pos = ctx
-        .sde
-        .jumps
-        .get(&dest_x)
-        .map(|j| j.position)
-        .expect("stargate pos");
-    let scrambled_point_err = ctx
+    // Fit Warp Disruptor I (type 3242, range 20km, strength 1) and Warp Scrambler I (type 447, range 7.5km, strength 2, blocks MWD/MJD) on Tackler
+    let disruptor_id = 880_003i64;
+    let scrambler_id = 880_004i64;
+    seed_fitting_item(
+        &ctx,
+        disruptor_id,
+        3242,
+        tackler_char_id,
+        tackler_ship_id,
+        eve_db::InventoryFlag::MedSlot0,
+        1,
+    );
+    seed_fitting_item(
+        &ctx,
+        scrambler_id,
+        447,
+        tackler_char_id,
+        tackler_ship_id,
+        eve_db::InventoryFlag::MedSlot1,
+        1,
+    );
+    ctx.invalidate_ship_fitting(tackler_ship_id);
+
+    // Both pilots undock into Jita (30000142)
+    let undock_v = ctx
+        .dispatch_rpc(&mut sess_victim, "stationSvc", None, "Undock", &[], &kw, None)
+        .await
+        .expect("Undock victim");
+    let PyRep::KeyVal(uv_kv) = &undock_v else { panic!() };
+    let beyonce_victim = uv_kv["beyonceBoundID"].as_i64().unwrap() as u64;
+
+    let _undock_t = ctx
+        .dispatch_rpc(&mut sess_tackler, "stationSvc", None, "Undock", &[], &kw, None)
+        .await
+        .expect("Undock tackler");
+
+    let jita_handle = ctx.systems.get_or_spawn(30_000_142);
+    let dest_x = 50_001_249i64; // Perimeter stargate
+
+    // Position victim at (0, 0, 0) and tackler at (22,000, 0, 0) -> within targeting range (27.5km) but out of 20km disruptor range
+    let _ = jita_handle
+        .set_ball_position(victim_ship_id, DVec3::ZERO)
+        .await;
+    let _ = jita_handle
+        .set_ball_position(tackler_ship_id, DVec3::new(22_000.0, 0.0, 0.0))
+        .await;
+
+    // Lock victim via dogmaIM.AddTarget and step 10s so lock completes
+    ctx.dispatch_rpc(
+        &mut sess_tackler,
+        "dogmaIM",
+        None,
+        "AddTarget",
+        &[PyRep::Integer(victim_ship_id)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("AddTarget at 22km");
+    jita_handle.step_manual(10.0).await.unwrap();
+
+    // 1. Out of range (> 20km): activating Warp Disruptor I fails with TargetOutOfRange
+    let oor_err = ctx
         .dispatch_rpc(
-            &mut sess,
-            "beyonce",
-            Some(beyonce_id),
-            "CmdWarpToPoint",
+            &mut sess_tackler,
+            "dogmaIM",
+            None,
+            "Activate",
             &[
-                PyRep::Real(p_gate_pos.x),
-                PyRep::Real(p_gate_pos.y),
-                PyRep::Real(p_gate_pos.z),
+                PyRep::Integer(disruptor_id),
+                PyRep::String("warpScramble".into()),
+                PyRep::Integer(victim_ship_id),
+                PyRep::Integer(1),
             ],
             &kw,
             None,
         )
         .await
-        .unwrap_err();
-    assert_eq!(
-        scrambled_point_err.code, "WarpScrambled",
-        "Warp scrambler must reject CmdWarpToPoint with WarpScrambled"
+        .expect_err("Warp Disruptor I must reject target beyond 20km");
+    assert_eq!(oor_err.code, "TargetOutOfRange");
+
+    // 2. Move tackler to 15km (within 20km Warp Disruptor I range, outside 7.5km Warp Scrambler I range)
+    let _ = jita_handle
+        .set_ball_position(tackler_ship_id, DVec3::new(15_000.0, 0.0, 0.0))
+        .await;
+
+    // Activate 5MN Microwarpdrive I on victim before being tackled
+    ctx.dispatch_rpc(
+        &mut sess_victim,
+        "dogmaIM",
+        None,
+        "Activate",
+        &[
+            PyRep::Integer(victim_mwd_id),
+            PyRep::String("moduleBonusMicrowarpdrive".into()),
+            PyRep::None,
+            PyRep::Integer(1),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Activate MWD on victim");
+
+    // Activate Warp Disruptor I (strength 1) on tackler -> succeeds at 15km
+    ctx.dispatch_rpc(
+        &mut sess_tackler,
+        "dogmaIM",
+        None,
+        "Activate",
+        &[
+            PyRep::Integer(disruptor_id),
+            PyRep::String("warpScramble".into()),
+            PyRep::Integer(victim_ship_id),
+            PyRep::Integer(1),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Activate Warp Disruptor I at 15km");
+
+    let cs_disrupted = jita_handle.get_combat_state(victim_ship_id).await.unwrap().unwrap();
+    assert_eq!(cs_disrupted.warp_scramble_strength, 1);
+    assert!(
+        !cs_disrupted.is_mwd_mjd_disabled,
+        "Long point (Warp Disruptor I) must NOT disable MWD/MJD"
     );
 
-    // 3. Equip warp core stabilizer (increase warp_core_strength to 2 > scramble strength 1)
-    jita_handle
-        .set_warp_core_strength(ship_id, 2)
+    // Victim warp attempt fails with WarpScrambled (strength 1 >= core strength 1)
+    let scrambled_err = ctx
+        .dispatch_rpc(
+            &mut sess_victim,
+            "beyonce",
+            Some(beyonce_victim),
+            "CmdWarpToStuff",
+            &[PyRep::String("item".into()), PyRep::Integer(dest_x)],
+            &kw,
+            None,
+        )
         .await
-        .expect("set_warp_core_strength");
+        .expect_err("Disrupted ship cannot warp");
+    assert_eq!(scrambled_err.code, "WarpScrambled");
 
+    // Warp Scrambler I at 15km fails with TargetOutOfRange (7.5km maxRange)
+    let scram_oor = ctx
+        .dispatch_rpc(
+            &mut sess_tackler,
+            "dogmaIM",
+            None,
+            "Activate",
+            &[
+                PyRep::Integer(scrambler_id),
+                PyRep::String("warpScrambleBlockMWDWithNPCEffect".into()),
+                PyRep::Integer(victim_ship_id),
+                PyRep::Integer(1),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Warp Scrambler I must reject target at 15km > 7.5km");
+    assert_eq!(scram_oor.code, "TargetOutOfRange");
+
+    // 3. Victim activates Warp Core Stabilizer I (type 10998, +2 warp core strength -> total 3)
+    ctx.dispatch_rpc(
+        &mut sess_victim,
+        "dogmaIM",
+        None,
+        "Activate",
+        &[
+            PyRep::Integer(victim_wcs_id),
+            PyRep::String("warpCoreFitted".into()),
+            PyRep::None,
+            PyRep::Integer(1),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Activate Warp Core Stabilizer I");
+
+    let cs_stabilized = jita_handle.get_combat_state(victim_ship_id).await.unwrap().unwrap();
+    assert_eq!(
+        cs_stabilized.warp_core_strength, 3,
+        "Warp Core Stabilizer I must add +2 warp core strength (total 3)"
+    );
+
+    // Victim can now warp through the 1-point Warp Disruptor I!
     let stabilized_ok = ctx
         .dispatch_rpc(
-            &mut sess,
+            &mut sess_victim,
             "beyonce",
-            Some(beyonce_id),
-            "CmdWarpTo",
-            &[PyRep::Integer(dest_x)],
+            Some(beyonce_victim),
+            "CmdWarpToStuff",
+            &[PyRep::String("item".into()), PyRep::Integer(dest_x)],
             &kw,
             None,
         )
         .await;
     assert!(
         stabilized_ok.is_ok(),
-        "Ship with 2 warp core strength can warp through 1 disruptor strength"
+        "Ship with 3 warp core strength can warp through 1 disruptor strength"
     );
 
-    // Stop again
-    let _ = jita_handle.set_movement_mode(ship_id, MovementMode::Stop).await;
+    // Stop victim ship and move tackler within 5km (inside 7.5km Warp Scrambler I range)
+    let _ = jita_handle.set_movement_mode(victim_ship_id, MovementMode::Stop).await;
+    let _ = jita_handle
+        .set_ball_position(tackler_ship_id, DVec3::new(5_000.0, 0.0, 0.0))
+        .await;
 
-    // 4. Heavy warp scrambler with strength 2 (strength 2 >= core strength 2)
-    jita_handle
-        .set_warp_scramble_strength(ship_id, 2)
-        .await
-        .expect("set_warp_scramble_strength 2");
+    // 4. Tackler activates Warp Scrambler I (strength 2) alongside Warp Disruptor I (strength 1) -> total 3
+    ctx.dispatch_rpc(
+        &mut sess_tackler,
+        "dogmaIM",
+        None,
+        "Activate",
+        &[
+            PyRep::Integer(scrambler_id),
+            PyRep::String("warpScrambleBlockMWDWithNPCEffect".into()),
+            PyRep::Integer(victim_ship_id),
+            PyRep::Integer(1),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Activate Warp Scrambler I at 5km");
 
-    let heavy_scrambled_err = ctx
+    let cs_scrammed = jita_handle.get_combat_state(victim_ship_id).await.unwrap().unwrap();
+    assert_eq!(
+        cs_scrammed.warp_scramble_strength, 3,
+        "Combined Warp Disruptor I (1) + Warp Scrambler I (2) must apply 3 scramble strength"
+    );
+    assert!(
+        cs_scrammed.is_mwd_mjd_disabled,
+        "Warp Scrambler I must disable MWD and MJD on target"
+    );
+
+    // Reactivating MWD while scrambled must fail with WarpScrambled
+    let mwd_blocked = ctx
         .dispatch_rpc(
-            &mut sess,
-            "beyonce",
-            Some(beyonce_id),
-            "CmdWarpTo",
-            &[PyRep::Integer(dest_x)],
+            &mut sess_victim,
+            "dogmaIM",
+            None,
+            "Activate",
+            &[
+                PyRep::Integer(victim_mwd_id),
+                PyRep::String("moduleBonusMicrowarpdrive".into()),
+                PyRep::None,
+                PyRep::Integer(1),
+            ],
             &kw,
             None,
         )
         .await
-        .unwrap_err();
+        .expect_err("MWD activation must be blocked by Warp Scrambler I");
+    assert_eq!(mwd_blocked.code, "WarpScrambled");
+
+    // Victim warp fails with WarpScrambled (scramble 3 >= core strength 3)
+    let heavy_scrambled_err = ctx
+        .dispatch_rpc(
+            &mut sess_victim,
+            "beyonce",
+            Some(beyonce_victim),
+            "CmdWarpToStuff",
+            &[PyRep::String("item".into()), PyRep::Integer(dest_x)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("3 scramble points must block ship with 3 warp core strength");
     assert_eq!(heavy_scrambled_err.code, "WarpScrambled");
+
+    // 5. Deactivate Warp Scrambler I via dogmaIM.Deactivate -> scramble strength drops to 1 and MWD/MJD block clears
+    ctx.dispatch_rpc(
+        &mut sess_tackler,
+        "dogmaIM",
+        None,
+        "Deactivate",
+        &[
+            PyRep::Integer(scrambler_id),
+            PyRep::String("warpScrambleBlockMWDWithNPCEffect".into()),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Deactivate Warp Scrambler I");
+
+    let cs_after_deact = jita_handle.get_combat_state(victim_ship_id).await.unwrap().unwrap();
+    assert_eq!(cs_after_deact.warp_scramble_strength, 1);
+    assert!(!cs_after_deact.is_mwd_mjd_disabled);
+}
+
+// parity: feat:modules.warp-disruption-field
+#[tokio::test]
+async fn test_hic_warp_disruption_field_generator_bubble_and_focused_script() {
+    let ctx = ServerContext::new();
+    let kw = HashMap::new();
+
+    // Pilot 1 (HIC pilot)
+    let mut sess_hic = SessionState::new(9903);
+    ctx.dispatch_rpc(
+        &mut sess_hic,
+        "authentication",
+        None,
+        "Login",
+        &[
+            PyRep::String("demo".into()),
+            PyRep::String("demo-secret".into()),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Login HIC");
+    ctx.dispatch_rpc(
+        &mut sess_hic,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(90_000_001)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("SelectCharacterID HIC");
+
+    // Pilot 2 (Victim pilot)
+    let mut sess_victim = SessionState::new(9904);
+    ctx.dispatch_rpc(
+        &mut sess_victim,
+        "authentication",
+        None,
+        "Login",
+        &[
+            PyRep::String("other".into()),
+            PyRep::String("other-secret".into()),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Login victim");
+    ctx.dispatch_rpc(
+        &mut sess_victim,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(90_000_002)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("SelectCharacterID victim");
+
+    let hic_char_id = 90_000_001i64;
+    let hic_ship_id = sess_hic.ship_id.expect("hic ship_id");
+    let victim_char_id = 90_000_002i64;
+    let victim_ship_id = sess_victim.ship_id.expect("victim ship_id");
+    let station_id = 60_003_760i64;
+
+    // Clear any pre-seeded modules on both ships so slots are clean
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.retain(|_, i| {
+            !(i.location_id == hic_ship_id || i.location_id == victim_ship_id)
+        });
+    });
+
+    grant_fitting_skills(&ctx, hic_char_id);
+    grant_fitting_skills(&ctx, victim_char_id);
+
+    // Seed Warp Disruption Field Generator I (type 28654, group 899, bubble radius 16,000m) in station hangar first
+    let wdfg_id = 880_010i64;
+    let script_id = 880_011i64; // Focused Warp Scrambling Script (type 45010)
+    seed_fitting_item(
+        &ctx,
+        wdfg_id,
+        28654,
+        hic_char_id,
+        station_id,
+        eve_db::InventoryFlag::Hangar,
+        1,
+    );
+
+    // 1. Hull restriction check: Rifter (587, group 25) cannot fit Warp Disruption Field Generator I (canFitShipGroup01 = 894)
+    let non_hic_fit_err = ctx
+        .dispatch_rpc(
+            &mut sess_hic,
+            "invbroker",
+            None,
+            "Add",
+            &[
+                PyRep::Integer(wdfg_id),
+                PyRep::Integer(hic_ship_id),
+                PyRep::Integer(eve_db::InventoryFlag::HiSlot0 as i64),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Non-HIC hull must not fit WDFG");
+    assert_eq!(non_hic_fit_err.code, "FittingValidationFailed");
+    assert!(
+        non_hic_fit_err.message.contains("894"),
+        "Fitting error must cite Heavy Interdiction Cruiser group 894: {}",
+        non_hic_fit_err.message
+    );
+
+    // 2. Transform Pilot 1's ship into an Onyx Heavy Interdiction Cruiser (type 11995, group 894) and fit WDFG
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ship_item) = snap.items.get_mut(&hic_ship_id) {
+            ship_item.type_id = 11995;
+        }
+    });
+    ctx.invalidate_ship_fitting(hic_ship_id);
+
+    ctx.dispatch_rpc(
+        &mut sess_hic,
+        "invbroker",
+        None,
+        "Add",
+        &[
+            PyRep::Integer(wdfg_id),
+            PyRep::Integer(hic_ship_id),
+            PyRep::Integer(eve_db::InventoryFlag::HiSlot0 as i64),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Onyx (group 894) must fit WDFG I");
+
+    seed_fitting_item(
+        &ctx,
+        script_id,
+        45010,
+        hic_char_id,
+        hic_ship_id,
+        eve_db::InventoryFlag::Cargo,
+        5,
+    );
+
+    // Fit Warp Core Stabilizer I (type 10998, maxGroupFitted = 1) on Victim via invbroker.Add
+    seed_fitting_item(
+        &ctx,
+        880_012,
+        10998,
+        victim_char_id,
+        station_id,
+        eve_db::InventoryFlag::Hangar,
+        1,
+    );
+    ctx.dispatch_rpc(
+        &mut sess_victim,
+        "invbroker",
+        None,
+        "Add",
+        &[
+            PyRep::Integer(880_012),
+            PyRep::Integer(victim_ship_id),
+            PyRep::Integer(eve_db::InventoryFlag::LoSlot0 as i64),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Fit WCS on victim");
+    ctx.invalidate_ship_fitting(hic_ship_id);
+    ctx.invalidate_ship_fitting(victim_ship_id);
+
+    // Undock both ships
+    ctx.dispatch_rpc(&mut sess_hic, "stationSvc", None, "Undock", &[], &kw, None)
+        .await
+        .expect("Undock HIC");
+    let undock_v = ctx
+        .dispatch_rpc(&mut sess_victim, "stationSvc", None, "Undock", &[], &kw, None)
+        .await
+        .expect("Undock victim");
+    let PyRep::KeyVal(uv_kv) = &undock_v else { panic!() };
+    let beyonce_victim = uv_kv["beyonceBoundID"].as_i64().unwrap() as u64;
+    let jita_handle = ctx.systems.get_or_spawn(30_000_142);
+    let dest_x = 50_001_249i64;
+
+    let (_, mut hic_ball) = jita_handle.get_ball_snapshot(hic_ship_id).await.unwrap().unwrap();
+    hic_ball.type_id = 11995;
+    hic_ball.position = DVec3::ZERO;
+    hic_ball.max_velocity = 185.0;
+    hic_ball.mass = 12_600_000.0;
+    jita_handle.spawn_ball(hic_ball).await.unwrap();
+    let base_cs = ctx.build_ship_combat_state(hic_char_id, hic_ship_id, 11995);
+    let base_sig = base_cs.signature_radius;
+    jita_handle.set_combat_state(hic_ship_id, base_cs).await.unwrap();
+
+    // Place victim at (10,000m, 0, 0) -> inside the 16,000m unscripted WDFG bubble
+    let _ = jita_handle
+        .set_ball_position(victim_ship_id, DVec3::new(10_000.0, 0.0, 0.0))
+        .await;
+
+    // 3. Activate unscripted WDFG I on Onyx -> spawns 16,000m bubble and applies self-penalties
+    let act_unscripted = ctx
+        .dispatch_rpc(
+            &mut sess_hic,
+            "dogmaIM",
+            None,
+            "Activate",
+            &[
+                PyRep::Integer(wdfg_id),
+                PyRep::String("warpDisruptionSphere".into()),
+                PyRep::None,
+                PyRep::Integer(1),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect("Activate unscripted WDFG on Onyx");
+    let PyRep::KeyVal(act_kv) = &act_unscripted else { panic!() };
+    assert_eq!(act_kv["scripted"], PyRep::Bool(false));
+    assert_eq!(act_kv["bubbleRadius"], PyRep::Real(16_000.0));
+
+    // Verify HIC self-penalties (velocity -60%, mass +80M kg, sig radius +50%, disallow_assistance = true)
+    let (_, hic_ball_active) = jita_handle.get_ball_snapshot(hic_ship_id).await.unwrap().unwrap();
+    assert!(
+        (hic_ball_active.max_velocity - 185.0 * 0.40).abs() < 1.0,
+        "Unscripted WDFG must reduce HIC max velocity by 60%"
+    );
+    assert!(
+        (hic_ball_active.mass - (12_600_000.0 + 80_000_000.0)).abs() < 100.0,
+        "Unscripted WDFG must add 80,000,000 kg mass penalty"
+    );
+    let hic_cs_active = jita_handle.get_combat_state(hic_ship_id).await.unwrap().unwrap();
+    assert!(
+        (hic_cs_active.signature_radius - base_sig * 1.50).abs() < 1.0,
+        "Unscripted WDFG must increase HIC signature radius by 50%"
+    );
+    assert!(
+        hic_cs_active.disallow_assistance,
+        "Unscripted WDFG must set disallow_assistance = true"
+    );
+
+    // Victim at 10km (inside 16km bubble) cannot warp even with Warp Core Stabilizers!
+    ctx.dispatch_rpc(
+        &mut sess_victim,
+        "dogmaIM",
+        None,
+        "Activate",
+        &[
+            PyRep::Integer(880_012),
+            PyRep::String("warpCoreFitted".into()),
+            PyRep::None,
+            PyRep::Integer(1),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Activate WCS 1");
+    let bubble_warp_err = ctx
+        .dispatch_rpc(
+            &mut sess_victim,
+            "beyonce",
+            Some(beyonce_victim),
+            "CmdWarpToStuff",
+            &[PyRep::String("item".into()), PyRep::Integer(dest_x)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Ship inside HIC bubble cannot warp regardless of WCS");
+    assert_eq!(bubble_warp_err.code, "WarpScrambled");
+
+    // 4. Deactivate unscripted WDFG -> bubble removed and HIC stats restored
+    ctx.dispatch_rpc(
+        &mut sess_hic,
+        "dogmaIM",
+        None,
+        "Deactivate",
+        &[
+            PyRep::Integer(wdfg_id),
+            PyRep::String("warpDisruptionSphere".into()),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Deactivate unscripted WDFG");
+
+    let (_, hic_ball_restored) = jita_handle.get_ball_snapshot(hic_ship_id).await.unwrap().unwrap();
+    assert!((hic_ball_restored.max_velocity - 185.0).abs() < 1.0);
+    assert!((hic_ball_restored.mass - 12_600_000.0).abs() < 100.0);
+    let hic_cs_restored = jita_handle.get_combat_state(hic_ship_id).await.unwrap().unwrap();
+    assert!(!hic_cs_restored.disallow_assistance);
+
+    // 5. Load Focused Warp Scrambling Script (type 45010) into WDFG via dogmaIM.LoadAmmo
+    ctx.dispatch_rpc(
+        &mut sess_hic,
+        "dogmaIM",
+        None,
+        "LoadAmmo",
+        &[
+            PyRep::Integer(hic_ship_id),
+            PyRep::List(vec![PyRep::Integer(wdfg_id)]),
+            PyRep::List(vec![PyRep::Integer(script_id)]),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Load Focused Warp Scrambling Script into WDFG");
+
+    // Activating scripted WDFG without a target fails with TargetRequired
+    let no_tgt_err = ctx
+        .dispatch_rpc(
+            &mut sess_hic,
+            "dogmaIM",
+            None,
+            "Activate",
+            &[
+                PyRep::Integer(wdfg_id),
+                PyRep::String("warpDisruptionSphere".into()),
+                PyRep::None,
+                PyRep::Integer(1),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Scripted WDFG requires a target");
+    assert_eq!(no_tgt_err.code, "TargetRequired");
+
+    // Lock victim before activating scripted WDFG
+    ctx.dispatch_rpc(
+        &mut sess_hic,
+        "dogmaIM",
+        None,
+        "AddTarget",
+        &[PyRep::Integer(victim_ship_id)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("HIC AddTarget victim");
+    jita_handle.step_manual(10.0).await.unwrap();
+
+    // Activate scripted WDFG on victim -> applies infinite point (100 strength) + disables MWD/MJD, no bubble
+    let act_scripted = ctx
+        .dispatch_rpc(
+            &mut sess_hic,
+            "dogmaIM",
+            None,
+            "Activate",
+            &[
+                PyRep::Integer(wdfg_id),
+                PyRep::String("warpDisruptionSphere".into()),
+                PyRep::Integer(victim_ship_id),
+                PyRep::Integer(1),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect("Activate scripted WDFG on victim");
+    let PyRep::KeyVal(scr_kv) = &act_scripted else { panic!() };
+    assert_eq!(scr_kv["scripted"], PyRep::Bool(true));
+    assert_eq!(scr_kv["bubbleRadius"], PyRep::None);
+    assert_eq!(scr_kv["warpScrambleStrength"], PyRep::Integer(100));
+
+    let victim_cs_inf = jita_handle.get_combat_state(victim_ship_id).await.unwrap().unwrap();
+    assert_eq!(
+        victim_cs_inf.warp_scramble_strength, 100,
+        "Focused script must apply 100 warp scramble strength (infinite point)"
+    );
+    assert!(
+        victim_cs_inf.is_mwd_mjd_disabled,
+        "Focused script must disable target MWD and MJD"
+    );
+
+    // Victim cannot warp despite Warp Core Stabilizers
+    let inf_warp_err = ctx
+        .dispatch_rpc(
+            &mut sess_victim,
+            "beyonce",
+            Some(beyonce_victim),
+            "CmdWarpToStuff",
+            &[PyRep::String("item".into()), PyRep::Integer(dest_x)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Focused WDFG infinite point must prevent warp regardless of WCS");
+    assert_eq!(inf_warp_err.code, "WarpScrambled");
 }
 
 // parity: feat:modules.warp-disruption-field
@@ -572,3 +1420,4 @@ fn test_warp_bubble_interception_stop_and_drag() {
         "Must emit OnDeactivatingWarp when stopped by in-flight bubble"
     );
 }
+

@@ -63,7 +63,7 @@ async fn test_all_18_e2e_journeys_and_catalog_coverage() {
             &mut session,
             "skillMgr2",
             None,
-            "InjectSkillPoints",
+            "InjectSkillpoints",
             &[],
             &empty,
             None,
@@ -506,13 +506,14 @@ async fn test_all_18_e2e_journeys_and_catalog_coverage() {
             &mut session,
             "marketProxy",
             None,
-            "PlaceCharOrder",
+            "PlaceBuyOrder",
             &[
                 PyRep::Integer(60_003_760),
                 PyRep::Integer(34),
                 PyRep::Real(10.0),
                 PyRep::Integer(100),
-                PyRep::Bool(true),
+                PyRep::Integer(90),
+                PyRep::Integer(1),
             ],
             &empty,
             None,
@@ -979,12 +980,44 @@ async fn test_all_18_e2e_journeys_and_catalog_coverage() {
     .unwrap();
 
     // E2E-13: Planetary Interaction Colony Setup, Routing, & POCO Export Tax
+    let active_loc = session
+        .ship_id
+        .or(session.station_id)
+        .or(session.structure_id)
+        .unwrap_or(100_000_001);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.next_entity_id += 1;
+        let id = snap.next_entity_id;
+        snap.items.insert(
+            id,
+            eve_db::InventoryItemRecord {
+                item_id: id,
+                type_id: 2254,
+                owner_id: 90_000_001,
+                location_id: active_loc,
+                flag: eve_db::InventoryFlag::Cargo,
+                quantity: 1,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
     ctx.dispatch_rpc(
         &mut session,
         "planetMgr",
         None,
-        "CreateColony",
-        &[PyRep::Integer(40_009_082)],
+        "UserUpdateNetwork",
+        &[
+            PyRep::Integer(40_009_082),
+            PyRep::List(vec![PyRep::Tuple(vec![
+                PyRep::Integer(1),
+                PyRep::Integer(1),
+                PyRep::Integer(2254),
+                PyRep::Real(0.1),
+                PyRep::Real(0.2),
+            ])]),
+        ],
         &empty,
         None,
     )
@@ -1145,11 +1178,18 @@ async fn test_all_18_e2e_journeys_and_catalog_coverage() {
             None,
             "CreateContract",
             &[
-                PyRep::String("Courier".into()),
+                PyRep::Integer(3), // Courier
+                PyRep::Integer(0),
+                PyRep::Integer(0),
+                PyRep::Integer(1440),
+                PyRep::Integer(1),
                 PyRep::Integer(st_id),
                 PyRep::Integer(60_003_760),
+                PyRep::Real(0.0),
                 PyRep::Real(500_000.0),
                 PyRep::Real(2_000_000.0),
+                PyRep::String("".into()),
+                PyRep::String("".into()),
             ],
             &empty,
             None,

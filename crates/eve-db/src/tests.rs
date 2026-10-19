@@ -482,6 +482,7 @@ fn test_d3_sqlite_relational_world_db_and_concurrent_sessions() {
                 start_sp: 8_000.0,
                 end_sp: 45_255.0,
                 duration_seconds: 1200.0,
+                started_at_unix: None,
             }],
         );
         snap.market_orders.insert(
@@ -898,6 +899,129 @@ fn test_d4_argon2id_bans_online_lock_and_oauth2_pkce_sso() {
     assert!(repo
         .authenticate_at("capsuleer_auth", "S3cretP@ss!", 1_700_001_000)
         .is_ok());
+
+    let _ = std::fs::remove_file(&sqlite_path);
+    let _ = std::fs::remove_file(sqlite_path.with_extension("sqlite-wal"));
+    let _ = std::fs::remove_file(sqlite_path.with_extension("sqlite-shm"));
+}
+
+#[test]
+fn test_r66_p1_3_nine_maps_sqlite_persistence_restart_and_rollback() {
+    let pid = std::process::id();
+    let now_nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let sqlite_path = std::env::temp_dir().join(format!("evomu_r66_maps_{}_{}.sqlite", pid, now_nanos));
+    let _ = std::fs::remove_file(&sqlite_path);
+
+    let repo = WorldRepository::open_sqlite(&sqlite_path).expect("open_sqlite world DB");
+
+    // 1. Populate all 9 maps through with_mut_snapshot (committed to SQLite)
+    repo.with_mut_snapshot(|snap| {
+        snap.character_last_jump_unix.insert(90_000_001, 1_700_000_100);
+        snap.character_cspa_charges.insert(90_000_001, IskCents(250_00));
+        snap.mail_timestamps.insert(888_001, 1_700_000_200);
+        snap.character_login_stats.insert(
+            90_000_001,
+            CharacterLoginStats {
+                last_login_unix: 1_700_000_300,
+                last_logout_unix: 1_700_000_400,
+                logins_count: 5,
+            },
+        );
+        snap.item_custom_names.insert(100_000_001, "My Battle Rifter".to_string());
+        snap.item_positions.insert(100_000_001, [1234.5, 6789.0, -4321.25]);
+        snap.structure_vulnerability_windows.insert(970_001, (1_700_000_500, 1_700_004_100));
+        snap.skill_history.insert(
+            90_000_001,
+            vec![SkillHistoryEntry {
+                log_date_ft: 133_000_000_000,
+                event_type_id: 37,
+                skill_type_id: 3300,
+                skill_level: 5,
+                absolute_points: 256_000.0,
+            }],
+        );
+        snap.character_doll_info.insert(
+            90_000_001,
+            ("dna:caldari:male:123".to_string(), "meta:portrait:v2".to_string()),
+        );
+    });
+
+    // 2. Transaction rollback verification: a failed transaction must revert all 9 maps
+    let rollback_res: Result<(), DbError> = repo.try_with_mut_snapshot(|snap| {
+        snap.character_last_jump_unix.insert(90_000_001, 9_999_999);
+        snap.character_last_jump_unix.insert(90_000_002, 8_888_888);
+        snap.character_cspa_charges.insert(90_000_001, IskCents(999));
+        snap.mail_timestamps.insert(888_001, 9_999_999);
+        snap.character_login_stats.get_mut(&90_000_001).unwrap().logins_count = 999;
+        snap.item_custom_names.insert(100_000_001, "Corrupted Name".to_string());
+        snap.item_positions.insert(100_000_001, [0.0, 0.0, 0.0]);
+        snap.structure_vulnerability_windows.insert(970_001, (0, 0));
+        snap.skill_history.get_mut(&90_000_001).unwrap().clear();
+        snap.character_doll_info.insert(
+            90_000_001,
+            ("corrupted".to_string(), "corrupted".to_string()),
+        );
+        Err(DbError::ValidationError("Forced rollback error".into()))
+    });
+    assert!(rollback_res.is_err(), "Transaction must fail and trigger rollback");
+
+    // Verify in-memory state was fully restored from SQLite on rollback
+    repo.with_snapshot(|snap| {
+        assert_eq!(snap.character_last_jump_unix.get(&90_000_001), Some(&1_700_000_100));
+        assert!(!snap.character_last_jump_unix.contains_key(&90_000_002));
+        assert_eq!(snap.character_cspa_charges.get(&90_000_001), Some(&IskCents(250_00)));
+        assert_eq!(snap.mail_timestamps.get(&888_001), Some(&1_700_000_200));
+        let stats = snap.character_login_stats.get(&90_000_001).expect("login stats");
+        assert_eq!(stats.logins_count, 5);
+        assert_eq!(stats.last_login_unix, 1_700_000_300);
+        assert_eq!(stats.last_logout_unix, 1_700_000_400);
+        assert_eq!(snap.item_custom_names.get(&100_000_001).unwrap(), "My Battle Rifter");
+        assert_eq!(snap.item_positions.get(&100_000_001), Some(&[1234.5, 6789.0, -4321.25]));
+        assert_eq!(
+            snap.structure_vulnerability_windows.get(&970_001),
+            Some(&(1_700_000_500, 1_700_004_100))
+        );
+        let hist = snap.skill_history.get(&90_000_001).expect("skill history");
+        assert_eq!(hist.len(), 1);
+        assert_eq!(hist[0].skill_type_id, 3300);
+        assert_eq!(hist[0].skill_level, 5);
+        assert_eq!(
+            snap.character_doll_info.get(&90_000_001).unwrap(),
+            &("dna:caldari:male:123".to_string(), "meta:portrait:v2".to_string())
+        );
+    });
+
+    drop(repo);
+
+    // 3. Restart server via open_sqlite and verify all 9 maps survived restart from disk
+    let restarted = WorldRepository::open_sqlite(&sqlite_path).expect("reopen SQLite DB");
+    restarted.with_snapshot(|snap| {
+        assert_eq!(snap.character_last_jump_unix.get(&90_000_001), Some(&1_700_000_100));
+        assert!(!snap.character_last_jump_unix.contains_key(&90_000_002));
+        assert_eq!(snap.character_cspa_charges.get(&90_000_001), Some(&IskCents(250_00)));
+        assert_eq!(snap.mail_timestamps.get(&888_001), Some(&1_700_000_200));
+        let stats = snap.character_login_stats.get(&90_000_001).expect("login stats after restart");
+        assert_eq!(stats.logins_count, 5);
+        assert_eq!(stats.last_login_unix, 1_700_000_300);
+        assert_eq!(stats.last_logout_unix, 1_700_000_400);
+        assert_eq!(snap.item_custom_names.get(&100_000_001).unwrap(), "My Battle Rifter");
+        assert_eq!(snap.item_positions.get(&100_000_001), Some(&[1234.5, 6789.0, -4321.25]));
+        assert_eq!(
+            snap.structure_vulnerability_windows.get(&970_001),
+            Some(&(1_700_000_500, 1_700_004_100))
+        );
+        let hist = snap.skill_history.get(&90_000_001).expect("skill history after restart");
+        assert_eq!(hist.len(), 1);
+        assert_eq!(hist[0].skill_type_id, 3300);
+        assert_eq!(hist[0].skill_level, 5);
+        assert_eq!(
+            snap.character_doll_info.get(&90_000_001).unwrap(),
+            &("dna:caldari:male:123".to_string(), "meta:portrait:v2".to_string())
+        );
+    });
 
     let _ = std::fs::remove_file(&sqlite_path);
     let _ = std::fs::remove_file(sqlite_path.with_extension("sqlite-wal"));

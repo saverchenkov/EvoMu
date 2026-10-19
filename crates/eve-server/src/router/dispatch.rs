@@ -70,17 +70,16 @@ impl ServerContext {
             })
             .unwrap_or(0);
 
-        let res = self
-            .dispatch_rpc_inner(
-                session,
-                service,
-                bound_id,
-                method,
-                args,
-                kwargs,
-                caller_trace,
-            )
-            .await;
+        let res = Box::pin(self.dispatch_rpc_inner(
+            session,
+            service,
+            bound_id,
+            method,
+            args,
+            kwargs,
+            caller_trace,
+        ))
+        .await;
 
         if let Some(cid) = session.character_id {
             if let Some(notifs) = self
@@ -357,9 +356,15 @@ impl ServerContext {
         }
 
         // Dispatch across the 12 domain modules in order
-        if let Some(res) =
-            services::auth_cache::handle(self, session, effective_service, method, args, kwargs)
-                .await
+        if let Some(res) = Box::pin(services::auth_cache::handle(
+            self,
+            session,
+            effective_service,
+            method,
+            args,
+            kwargs,
+        ))
+        .await
         {
             return res;
         }
@@ -373,7 +378,7 @@ impl ServerContext {
         ) {
             return res;
         }
-        if let Some(res) = services::inventory_fitting::handle(
+        if let Some(res) = Box::pin(services::inventory_fitting::handle(
             self,
             session,
             bound_entry.as_ref(),
@@ -381,24 +386,24 @@ impl ServerContext {
             method,
             args,
             kwargs,
-        )
+        ))
         .await
         {
             return res;
         }
-        if let Some(res) = services::station_structure::handle(
+        if let Some(res) = Box::pin(services::station_structure::handle(
             self,
             session,
             effective_service,
             method,
             args,
             kwargs,
-        )
+        ))
         .await
         {
             return res;
         }
-        if let Some(res) = services::space_destiny::handle(
+        if let Some(res) = Box::pin(services::space_destiny::handle(
             self,
             session,
             bound_entry.as_ref(),
@@ -406,19 +411,19 @@ impl ServerContext {
             method,
             args,
             kwargs,
-        )
+        ))
         .await
         {
             return res;
         }
-        if let Some(res) = services::combat_crimewatch::handle(
+        if let Some(res) = Box::pin(services::combat_crimewatch::handle(
             self,
             session,
             effective_service,
             method,
             args,
             kwargs,
-        )
+        ))
         .await
         {
             return res;
@@ -463,14 +468,14 @@ impl ServerContext {
         ) {
             return res;
         }
-        if let Some(res) = services::mining_advanced::handle(
+        if let Some(res) = Box::pin(services::mining_advanced::handle(
             self,
             session,
             effective_service,
             method,
             args,
             kwargs,
-        )
+        ))
         .await
         {
             return res;
@@ -480,62 +485,62 @@ impl ServerContext {
         {
             return res;
         }
-        if let Some(res) = services::agents_missions::handle(
+        if let Some(res) = Box::pin(services::agents_missions::handle(
             self,
             session,
             effective_service,
             method,
             args,
             kwargs,
-        )
+        ))
         .await
         {
             return res;
         }
-        if let Some(res) = services::fleet_social::handle(
+        if let Some(res) = Box::pin(services::fleet_social::handle(
             self,
             session,
             effective_service,
             method,
             args,
             kwargs,
-        )
+        ))
         .await
         {
             return res;
         }
-        if let Some(res) = services::social_corp_fleet::handle(
+        if let Some(res) = Box::pin(services::social_corp_fleet::handle(
             self,
             session,
             effective_service,
             method,
             args,
             kwargs,
-        )
+        ))
         .await
         {
             return res;
         }
-        if let Some(res) = services::sov_fw_insurgency::handle(
+        if let Some(res) = Box::pin(services::sov_fw_insurgency::handle(
             self,
             session,
             effective_service,
             method,
             args,
             kwargs,
-        )
+        ))
         .await
         {
             return res;
         }
-        if let Some(res) = services::cosmetics_events::handle(
+        if let Some(res) = Box::pin(services::cosmetics_events::handle(
             self,
             session,
             effective_service,
             method,
             args,
             kwargs,
-        )
+        ))
         .await
         {
             return res;

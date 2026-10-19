@@ -87,6 +87,7 @@ async fn test_ch1_skill_training_engine_and_caps() {
                 last_clone_jump_unix: 0,
                 jump_fatigue_minutes: 0.0,
                 jump_cooldown_until_unix: 0,
+                jump_fatigue_until_unix: 0,
                 description: String::new(),
                 title: String::new(),
                 gender: 0,
@@ -138,6 +139,7 @@ async fn test_ch1_skill_training_engine_and_caps() {
                 last_clone_jump_unix: 0,
                 jump_fatigue_minutes: 0.0,
                 jump_cooldown_until_unix: 0,
+                jump_fatigue_until_unix: 0,
                 description: String::new(),
                 title: String::new(),
                 gender: 0,
@@ -169,6 +171,7 @@ async fn test_ch1_skill_training_engine_and_caps() {
                 start_sp: 0.0,
                 end_sp: 250.0,
                 duration_seconds: 500.0,
+                started_at_unix: None,
             }],
         );
         snap.skill_queues.insert(
@@ -179,6 +182,7 @@ async fn test_ch1_skill_training_engine_and_caps() {
                 start_sp: 0.0,
                 end_sp: 250.0,
                 duration_seconds: 1000.0,
+                started_at_unix: None,
             }],
         );
     });
@@ -221,6 +225,7 @@ async fn test_ch1_skill_training_engine_and_caps() {
                     start_sp: 30.0,
                     end_sp: 250.0,
                     duration_seconds: 440.0,
+                    started_at_unix: None,
                 },
                 SkillQueueEntry {
                     type_id: 3301,
@@ -228,6 +233,7 @@ async fn test_ch1_skill_training_engine_and_caps() {
                     start_sp: 0.0,
                     end_sp: 250.0,
                     duration_seconds: 500.0,
+                    started_at_unix: None,
                 },
             ],
         );
@@ -286,6 +292,7 @@ async fn test_ch1_skill_training_engine_and_caps() {
                 last_clone_jump_unix: 0,
                 jump_fatigue_minutes: 0.0,
                 jump_cooldown_until_unix: 0,
+                jump_fatigue_until_unix: 0,
                 description: String::new(),
                 title: String::new(),
                 gender: 0,
@@ -313,6 +320,7 @@ async fn test_ch1_skill_training_engine_and_caps() {
                 start_sp: 0.0,
                 end_sp: 256_000.0,
                 duration_seconds: 1_000_000.0,
+                started_at_unix: None,
             }],
         );
     });
@@ -441,6 +449,73 @@ async fn test_ch1_skill_training_engine_and_caps() {
         "Omega-only skill trained to IV must have activeSkillLevel=0 (inactive SP) on Alpha clone"
     );
 
+    // Verify that Dogma applies the clamped skill level for Alpha clones (feat:skills.alpha-skill-caps)
+    // Sharpshooter (3311) trained to V (+25% optimal range). Caldari/Minmatar Alpha clone cap is IV (+20%).
+    let test_pilot_id = 90_000_001;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.skills.entry(test_pilot_id).or_default().insert(
+            3311,
+            TrainedSkillRecord {
+                type_id: 3311,
+                level: 5,
+                skill_points: 256_000.0,
+            },
+        );
+        if let Some(ch) = snap.characters.get_mut(&test_pilot_id) {
+            ch.clone_grade = 2; // Omega
+        }
+    });
+    ctx.ship_fittings.write().unwrap().remove(&100_000_001);
+    let omega_fit = ctx.get_or_rebuild_ship_fitting(test_pilot_id, 100_000_001).expect("omega fit");
+    let omega_ctx = omega_fit.evaluated_context(&ctx.sde);
+    let omega_range = omega_ctx
+        .ship_located_items
+        .iter()
+        .find(|i| i.item_id == 100_000_005)
+        .expect("fitted 200mm autocannon")
+        .get_attribute(54, &ctx.sde);
+
+    // Downgrade to Alpha (clone_grade = 0)
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&test_pilot_id) {
+            ch.clone_grade = 0; // Alpha
+        }
+    });
+    ctx.ship_fittings.write().unwrap().remove(&100_000_001);
+    let alpha_fit = ctx.get_or_rebuild_ship_fitting(test_pilot_id, 100_000_001).expect("alpha fit");
+    let alpha_ctx = alpha_fit.evaluated_context(&ctx.sde);
+    let alpha_range = alpha_ctx
+        .ship_located_items
+        .iter()
+        .find(|i| i.item_id == 100_000_005)
+        .expect("fitted 200mm autocannon")
+        .get_attribute(54, &ctx.sde);
+
+    let base_range = ctx.sde.types[&2889].default_attributes[&54];
+    assert!(
+        (omega_range - base_range * 1.25).abs() < 1e-3,
+        "Omega clone with Sharpshooter V must get 25% optimal range bonus: expected {}, got {}",
+        base_range * 1.25,
+        omega_range
+    );
+    assert!(
+        (alpha_range - base_range * 1.20).abs() < 1e-3,
+        "Alpha clone with Sharpshooter V must get Alpha-capped level 4 (20%) optimal range bonus: expected {}, got {}",
+        base_range * 1.20,
+        alpha_range
+    );
+    assert!(
+        omega_range > alpha_range,
+        "Dogma must clamp skill bonuses for Alpha clones"
+    );
+
+    // Restore Omega for subsequent tests
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&test_pilot_id) {
+            ch.clone_grade = 2;
+        }
+    });
+
     // 5. Skill queue pause & resume (feat:skills.queue-pause)
     ctx.db.with_mut_snapshot(|snap| {
         snap.skill_queues.insert(
@@ -451,6 +526,7 @@ async fn test_ch1_skill_training_engine_and_caps() {
                 start_sp: 0.0,
                 end_sp: 250.0,
                 duration_seconds: 500.0,
+                started_at_unix: None,
             }],
         );
     });
@@ -472,13 +548,13 @@ async fn test_ch1_skill_training_engine_and_caps() {
             &mut sess,
             "skillMgr2",
             None,
-            "PauseSkillQueue",
+            "AbortTraining",
             &[],
             &kw,
             None,
         )
         .await
-        .expect("PauseSkillQueue");
+        .expect("AbortTraining");
     assert_eq!(pause_res, PyRep::Bool(true));
 
     let pause_notifs = ctx.drain_notifications_for_char(omega_char_id);
@@ -497,14 +573,17 @@ async fn test_ch1_skill_training_engine_and_caps() {
             &mut sess,
             "skillMgr2",
             None,
-            "ResumeSkillQueue",
-            &[],
+            "SaveSkillQueue",
+            &[PyRep::List(vec![PyRep::Tuple(vec![
+                PyRep::Integer(3302),
+                PyRep::Integer(1),
+            ])])],
             &kw,
             None,
         )
         .await
-        .expect("ResumeSkillQueue");
-    assert_eq!(resume_res, PyRep::Bool(true));
+        .expect("SaveSkillQueue");
+    assert!(matches!(resume_res, PyRep::KeyVal(_)));
 
     ctx.advance_skill_queues(100.0);
     let sp_resumed = ctx.db.with_snapshot(|s| s.skill_queues[&omega_char_id][0].start_sp);
@@ -701,8 +780,56 @@ async fn test_ch2_skill_handling_and_prerequisites() {
         "Training/queueing an injected skill still requires prerequisites"
     );
 
+    // Complete a skill to trigger eventTypeID=37 (Skill completion)
+    ctx.dispatch_rpc(
+        &mut sess,
+        "skillMgr2",
+        None,
+        "SaveSkillQueue",
+        &[PyRep::List(vec![PyRep::Tuple(vec![
+            PyRep::Integer(3300),
+            PyRep::Integer(1),
+        ])])],
+        &kw,
+        None,
+    )
+    .await
+    .expect("SaveSkillQueue Gunnery I");
+    // Advance queue to completion (250 SP completes in <1000s)
+    ctx.advance_skill_queues(1000.0);
+
+    // Queue Small Hybrid Turret (3302) now that Gunnery I prerequisite is completed
+    ctx.dispatch_rpc(
+        &mut sess,
+        "skillMgr2",
+        None,
+        "SaveSkillQueue",
+        &[PyRep::List(vec![PyRep::Tuple(vec![
+            PyRep::Integer(3302),
+            PyRep::Integer(1),
+        ])])],
+        &kw,
+        None,
+    )
+    .await
+    .expect("SaveSkillQueue Small Hybrid Turret I");
+
+    // Clear skill queue to trigger eventTypeID=38 (Skill training cancelled / removal)
+    ctx.dispatch_rpc(
+        &mut sess,
+        "skillMgr2",
+        None,
+        "SaveSkillQueue",
+        &[PyRep::List(vec![])],
+        &kw,
+        None,
+    )
+    .await
+    .expect("SaveSkillQueue clear queue to trigger event 38");
+
     // 4. GetSkillHistory (feat:skills.skill-history)
-    // Verify GetSkillHistory records event log rows (including eventTypeID=56 SkillEventSkillInjected for injected skill 3302)
+    // Verify GetSkillHistory records event log rows with valid filetime logDate:
+    // eventTypeID=36 (SkillEventSkillInjected), eventTypeID=37 (Skill completed), eventTypeID=38 (Skill cancelled)
     let history_res = ctx
         .dispatch_rpc(
             &mut sess,
@@ -732,14 +859,44 @@ async fn test_ch2_skill_handling_and_prerequisites() {
             "absolutePoints"
         ]
     );
+
+    // Assert event 36 (Skill Injected for 3302)
     assert!(
         hist_rows.iter().any(|r| {
-            r.get(1) == Some(&PyRep::Integer(56))
+            r.get(1) == Some(&PyRep::Integer(36))
                 && r.get(2) == Some(&PyRep::Integer(3302))
                 && r.get(3) == Some(&PyRep::Integer(0))
         }),
-        "GetSkillHistory must include injected skill event row (eventTypeID=56, skillTypeID=3302)"
+        "GetSkillHistory must include injected skill event row (eventTypeID=36, skillTypeID=3302)"
     );
+
+    // Assert event 37 (Skill Completed for 3300 level 1)
+    assert!(
+        hist_rows.iter().any(|r| {
+            r.get(1) == Some(&PyRep::Integer(37))
+                && r.get(2) == Some(&PyRep::Integer(3300))
+                && r.get(3) == Some(&PyRep::Integer(1))
+        }),
+        "GetSkillHistory must include completed skill event row (eventTypeID=37, skillTypeID=3300)"
+    );
+
+    // Assert event 38 (Skill Cancelled / Removal for 3302)
+    assert!(
+        hist_rows.iter().any(|r| {
+            r.get(1) == Some(&PyRep::Integer(38))
+                && r.get(2) == Some(&PyRep::Integer(3302))
+        }),
+        "GetSkillHistory must include cancelled skill event row (eventTypeID=38, skillTypeID=3302)"
+    );
+
+    // Assert valid Windows/BlueOS FILETIME logDate (> 116444736000000000, i.e. past year 1970)
+    for r in &hist_rows {
+        let ft = r.first().and_then(|v| v.as_i64()).expect("logDate i64");
+        assert!(
+            ft > 116_444_736_000_000_000,
+            "logDate {ft} must be a valid BlueOS FILETIME timestamp"
+        );
+    }
 
     // Second injection of already known skill fails
     let already_injected = ctx
@@ -878,9 +1035,84 @@ async fn test_ch3_character_creation_and_starter_assets() {
         .expect("ValidateNameEx duplicate");
     assert_eq!(dup_check, PyRep::Bool(false));
 
-    // 3. CreateCharacterWithDoll with V24 7-argument layout (feat:character.create-character)
+    // Reject invalid doll info (None, empty dict, non-structured scalar placeholder) (feat:character.create-character)
+    let invalid_doll_err1 = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "charUnboundMgr",
+            None,
+            "CreateCharacterWithDoll",
+            &[
+                PyRep::String("Invalid Doll Pilot".into()),
+                PyRep::Integer(1),
+                PyRep::Integer(1),
+                PyRep::Integer(11),
+                PyRep::None,
+                PyRep::None,
+                PyRep::Integer(17),
+            ],
+            &kw,
+            None,
+        )
+        .await;
+    assert_eq!(invalid_doll_err1.unwrap_err().code, "InvalidDollInfo");
+
+    let invalid_doll_err2 = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "charUnboundMgr",
+            None,
+            "CreateCharacterWithDoll",
+            &[
+                PyRep::String("Invalid Doll Pilot".into()),
+                PyRep::Integer(1),
+                PyRep::Integer(1),
+                PyRep::Integer(11),
+                PyRep::String("doll_info_placeholder".into()),
+                PyRep::String("portrait_info_placeholder".into()),
+                PyRep::Integer(17),
+            ],
+            &kw,
+            None,
+        )
+        .await;
+    assert_eq!(invalid_doll_err2.unwrap_err().code, "InvalidDollInfo");
+
+    let invalid_doll_err3 = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "charUnboundMgr",
+            None,
+            "CreateCharacterWithDoll",
+            &[
+                PyRep::String("Invalid Doll Pilot".into()),
+                PyRep::Integer(1),
+                PyRep::Integer(1),
+                PyRep::Integer(11),
+                PyRep::Dict(vec![]),
+                PyRep::Dict(vec![]),
+                PyRep::Integer(17),
+            ],
+            &kw,
+            None,
+        )
+        .await;
+    assert_eq!(invalid_doll_err3.unwrap_err().code, "InvalidDollInfo");
+
+    // 3. CreateCharacterWithDoll with V24 7-argument layout and structured doll descriptor (feat:character.create-character)
     // (charactername, bloodlineID, genderID, ancestryID, charInfo, portraitInfo, schoolID)
     // Deteis bloodline=1 (Caldari race=1), gender=1, Scientists ancestry=11, STI school=17
+    let valid_doll = PyRep::keyval([
+        ("costume", PyRep::Integer(301)),
+        ("gender", PyRep::Integer(1)),
+        ("hair", PyRep::Integer(101)),
+        ("skin", PyRep::Integer(201)),
+    ]);
+    let valid_portrait = PyRep::keyval([
+        ("background", PyRep::Integer(42)),
+        ("camera", PyRep::Integer(1)),
+        ("pose", PyRep::Integer(7)),
+    ]);
     let new_char_rep = ctx
         .dispatch_rpc(
             &mut sess,
@@ -892,8 +1124,8 @@ async fn test_ch3_character_creation_and_starter_assets() {
                 PyRep::Integer(1),  // bloodlineID = 1 (Deteis -> Caldari race 1)
                 PyRep::Integer(1),  // genderID = 1 (Male)
                 PyRep::Integer(11), // ancestryID = 11 (Scientists)
-                PyRep::String("doll:deteis-vanguard-dna".into()),
-                PyRep::String("portrait:deteis-cam-01".into()),
+                valid_doll,
+                valid_portrait,
                 PyRep::Integer(17), // schoolID = 17 (Science and Trade Institute)
             ],
             &kw,
@@ -903,6 +1135,8 @@ async fn test_ch3_character_creation_and_starter_assets() {
         .expect("CreateCharacterWithDoll V24 7-arg");
     let new_char_id = new_char_rep.as_i64().expect("character ID i64");
 
+    let mut home_st = 0;
+    let mut ship_id = 0;
     ctx.db.with_mut_snapshot(|snap| {
         let ch = snap.characters.get(&new_char_id).expect("character record");
         assert_eq!(ch.race_id, 1);
@@ -919,8 +1153,8 @@ async fn test_ch3_character_creation_and_starter_assets() {
             .character_doll_info
             .get(&new_char_id)
             .expect("character_doll_info persisted");
-        assert_eq!(doll_dna, "doll:deteis-vanguard-dna");
-        assert_eq!(portrait_meta, "portrait:deteis-cam-01");
+        assert_eq!(doll_dna, "costume=301&gender=1&hair=101&skin=201");
+        assert_eq!(portrait_meta, "background=42&camera=1&pose=7");
 
         // Starter skills populated
         let skills = &snap.skills[&new_char_id];
@@ -939,7 +1173,7 @@ async fn test_ch3_character_creation_and_starter_assets() {
         }
 
         // Starting rookie ship (corvette type 601 for Caldari) in home station hangar
-        let home_st = ch.station_id.expect("home station");
+        home_st = ch.station_id.expect("home station");
         let corvette = snap.items.values().find(|i| {
             i.owner_id == new_char_id
                 && i.location_id == home_st
@@ -950,11 +1184,8 @@ async fn test_ch3_character_creation_and_starter_assets() {
         let ship = corvette.unwrap();
         assert!(ship.singleton);
         assert_eq!(ship.quantity, 1);
-        let ship_id = ship.item_id;
+        ship_id = ship.item_id;
 
-        // Set custom ship name and active skill queue to verify character selection metadata
-        snap.item_custom_names
-            .insert(ship_id, "Vanguard Ibis".to_string());
         snap.skill_queues.insert(
             new_char_id,
             vec![SkillQueueEntry {
@@ -963,9 +1194,35 @@ async fn test_ch3_character_creation_and_starter_assets() {
                 start_sp: 250.0,
                 end_sp: 1415.0,
                 duration_seconds: 1200.0,
+                started_at_unix: None,
             }],
         );
     });
+
+    // Select character and set custom ship name via invbroker.SetLabel (feat:character.list-characters)
+    ctx.dispatch_rpc(
+        &mut sess,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(new_char_id)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("SelectCharacterID");
+
+    ctx.dispatch_rpc(
+        &mut sess,
+        "invbroker",
+        None,
+        "SetLabel",
+        &[PyRep::Integer(ship_id), PyRep::String("Vanguard Ibis".into())],
+        &kw,
+        None,
+    )
+    .await
+    .expect("SetLabel for active ship");
 
     // 4. List characters & character selection summary (feat:character.list-characters)
     let char_list = ctx
@@ -1000,10 +1257,42 @@ async fn test_ch3_character_creation_and_starter_assets() {
     assert_eq!(
         created_row
             .iter()
+            .find(|(k, _)| k == "characterName")
+            .map(|(_, v)| v),
+        Some(&PyRep::String("Caldari Vanguard".into())),
+        "GetCharactersToSelect must return exact characterName"
+    );
+    assert_eq!(
+        created_row
+            .iter()
+            .find(|(k, _)| k == "stationID")
+            .map(|(_, v)| v),
+        Some(&PyRep::Integer(home_st)),
+        "GetCharactersToSelect must return exact stationID"
+    );
+    assert_eq!(
+        created_row
+            .iter()
+            .find(|(k, _)| k == "balance")
+            .map(|(_, v)| v),
+        Some(&PyRep::Real(5_000.0)),
+        "GetCharactersToSelect must return exact wallet balance"
+    );
+    assert_eq!(
+        created_row
+            .iter()
+            .find(|(k, _)| k == "shipTypeID")
+            .map(|(_, v)| v),
+        Some(&PyRep::Integer(601)),
+        "GetCharactersToSelect must return exact shipTypeID (Ibis)"
+    );
+    assert_eq!(
+        created_row
+            .iter()
             .find(|(k, _)| k == "shipName")
             .map(|(_, v)| v),
         Some(&PyRep::String("Vanguard Ibis".into())),
-        "GetCharactersToSelect must return custom ship name"
+        "GetCharactersToSelect must return custom ship name set via SetLabel"
     );
 
     let select_info = ctx
@@ -1027,11 +1316,11 @@ async fn test_ch3_character_creation_and_starter_assets() {
     );
     assert_eq!(
         sel_info_kv.get("paperdollState"),
-        Some(&PyRep::String("doll:deteis-vanguard-dna".into()))
+        Some(&PyRep::String("costume=301&gender=1&hair=101&skin=201".into()))
     );
     assert_eq!(
         sel_info_kv.get("portraitInfo"),
-        Some(&PyRep::String("portrait:deteis-cam-01".into()))
+        Some(&PyRep::String("background=42&camera=1&pose=7".into()))
     );
     assert_eq!(
         sel_info_kv.get("trainingSkillTypeID"),
@@ -1107,16 +1396,38 @@ async fn test_ch4_character_sheet_biography_and_notes() {
         pub_kv.get("characterID").unwrap().as_i64(),
         Some(char_id)
     );
-    assert!(pub_kv.contains_key("characterName"));
-    assert!(pub_kv.contains_key("corporationID"));
-    assert!(pub_kv.contains_key("allianceID"));
-    assert!(pub_kv.contains_key("raceID"));
-    assert!(pub_kv.contains_key("bloodlineID"));
-    assert!(pub_kv.contains_key("ancestryID"));
-    assert!(pub_kv.contains_key("schoolID"));
-    assert!(pub_kv.contains_key("createDateTime"));
-    assert!(pub_kv.contains_key("securityStatus"));
-    assert!(pub_kv.contains_key("portraitInfo"));
+    assert_eq!(
+        pub_kv.get("characterName"),
+        Some(&PyRep::String("Aura Capsuleer".into()))
+    );
+    assert_eq!(
+        pub_kv.get("corporationID").and_then(|v| v.as_i64()),
+        Some(1_000_170)
+    );
+    assert_eq!(
+        pub_kv.get("allianceID"),
+        Some(&PyRep::None)
+    );
+    assert_eq!(
+        pub_kv.get("raceID").and_then(|v| v.as_i64()),
+        Some(2)
+    );
+    assert_eq!(
+        pub_kv.get("bloodlineID").and_then(|v| v.as_i64()),
+        Some(3)
+    );
+    assert_eq!(
+        pub_kv.get("ancestryID").and_then(|v| v.as_i64()),
+        Some(19)
+    );
+    assert_eq!(
+        pub_kv.get("schoolID").and_then(|v| v.as_i64()),
+        Some(14)
+    );
+    assert_eq!(
+        pub_kv.get("securityStatus").and_then(|v| v.as_f64()),
+        Some(0.5)
+    );
 
     // 2. Biography (feat:character.biography)
     let test_bio = "Veteran Capsuleer operating in Lonetrek and The Citadel.";
@@ -1168,6 +1479,11 @@ async fn test_ch4_character_sheet_biography_and_notes() {
     };
     assert_eq!(emp_cols, vec!["recordID", "corporationID", "startDate"]);
     assert!(!emp_rows.is_empty());
+    assert_eq!(
+        emp_rows[0].get(1).and_then(|v| v.as_i64()),
+        Some(1_000_170),
+        "Employment history row must match pilot corporation"
+    );
 
     // 4. Owner notes (feat:character.owner-notes)
     let add_note_rep = ctx
@@ -1281,7 +1597,7 @@ async fn test_ch4_character_sheet_biography_and_notes() {
     let char_sheet = ctx
         .dispatch_rpc(
             &mut sess,
-            "charUnboundMgr",
+            "charMgr",
             None,
             "GetCharacterInfo",
             &[PyRep::Integer(char_id)],
@@ -1294,26 +1610,51 @@ async fn test_ch4_character_sheet_biography_and_notes() {
         panic!("Expected KeyVal from GetCharacterInfo");
     };
     assert_eq!(sheet_kv.get("characterID").unwrap().as_i64(), Some(char_id));
-    assert!(sheet_kv.contains_key("balance"));
-    assert!(sheet_kv.contains_key("skillPoints"));
-    assert!(sheet_kv.contains_key("skills"));
-    assert!(sheet_kv.contains_key("attributes"));
-    assert!(sheet_kv.contains_key("implants"));
-    assert!(sheet_kv.contains_key("jumpClones"));
-    assert!(sheet_kv.contains_key("standings"));
-    assert!(sheet_kv.contains_key("securityStatus"));
-    assert!(sheet_kv.contains_key("killRights"));
-    assert!(sheet_kv.contains_key("medals"));
-    assert!(sheet_kv.contains_key("decorations"));
+    assert_eq!(
+        sheet_kv.get("characterName"),
+        Some(&PyRep::String("Aura Capsuleer".into()))
+    );
+    assert_eq!(
+        sheet_kv.get("corporationID").and_then(|v| v.as_i64()),
+        Some(1_000_170)
+    );
+    assert_eq!(
+        sheet_kv.get("raceID").and_then(|v| v.as_i64()),
+        Some(2)
+    );
+    assert_eq!(
+        sheet_kv.get("bloodlineID").and_then(|v| v.as_i64()),
+        Some(3)
+    );
+    assert_eq!(
+        sheet_kv.get("ancestryID").and_then(|v| v.as_i64()),
+        Some(19)
+    );
+    assert_eq!(
+        sheet_kv.get("securityStatus").and_then(|v| v.as_f64()),
+        Some(0.5)
+    );
+    assert_eq!(
+        sheet_kv.get("balance").and_then(|v| v.as_f64()),
+        Some(1_000_000_000.0)
+    );
+    let PyRep::KeyVal(attr_kv) = sheet_kv.get("attributes").expect("attributes KeyVal") else {
+        panic!("Expected KeyVal for attributes");
+    };
+    assert_eq!(attr_kv.get("intelligence").and_then(|v| v.as_i64()), Some(20));
+    assert_eq!(attr_kv.get("memory").and_then(|v| v.as_i64()), Some(20));
+    assert_eq!(attr_kv.get("perception").and_then(|v| v.as_i64()), Some(20));
+    assert_eq!(attr_kv.get("willpower").and_then(|v| v.as_i64()), Some(20));
+    assert_eq!(attr_kv.get("charisma").and_then(|v| v.as_i64()), Some(19));
 
     // Neural remap: 99 total, 17..=27 per attribute
     // Valid: 27 Perception, 21 Willpower, 17 Charisma, 17 Intelligence, 17 Memory = 99
     let remap_ok = ctx
         .dispatch_rpc(
             &mut sess,
-            "charUnboundMgr",
+            "charMgr",
             None,
-            "ApplyNeuralRemap",
+            "RespecCharacter",
             &[
                 PyRep::Integer(17), // Charisma
                 PyRep::Integer(17), // Intelligence
@@ -1325,9 +1666,9 @@ async fn test_ch4_character_sheet_biography_and_notes() {
             None,
         )
         .await
-        .expect("ApplyNeuralRemap valid");
+        .expect("RespecCharacter valid");
     let PyRep::KeyVal(remap_kv) = remap_ok else {
-        panic!("Expected KeyVal from ApplyNeuralRemap");
+        panic!("Expected KeyVal from RespecCharacter");
     };
     assert_eq!(remap_kv.get("perception").unwrap().as_i64(), Some(27));
     assert_eq!(remap_kv.get("willpower").unwrap().as_i64(), Some(21));
@@ -1336,9 +1677,9 @@ async fn test_ch4_character_sheet_biography_and_notes() {
     let bad_sum = ctx
         .dispatch_rpc(
             &mut sess,
-            "charUnboundMgr",
+            "charMgr",
             None,
-            "ApplyNeuralRemap",
+            "RespecCharacter",
             &[
                 PyRep::Integer(20),
                 PyRep::Integer(20),
@@ -1653,6 +1994,48 @@ async fn test_s4_jump_clones_implants_and_cooldown() {
     sess.station_id = None;
     sess.structure_id = Some(clone_struct_id);
 
+    // Bare Astrahus lacking Standup Cloning Center I service module must fail with NoCloneBayService (feat:clones.jump-clone-install)
+    let bare_struct_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "jumpCloneSvc",
+            None,
+            "InstallCloneInStructure",
+            &[],
+            &kw,
+            None,
+        )
+        .await;
+    assert_eq!(
+        bare_struct_err.unwrap_err().code,
+        "NoCloneBayService",
+        "Bare Upwell structure lacking Standup Cloning Center module must be rejected with NoCloneBayService"
+    );
+
+    // Fit Standup Cloning Center I (type_id 35894) in ServiceSlot0 and set online
+    let clone_bay_item_id = 100_000_999_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            clone_bay_item_id,
+            InventoryItemRecord {
+                item_id: clone_bay_item_id,
+                type_id: 35894,
+                owner_id: 1_000_001,
+                location_id: clone_struct_id,
+                flag: InventoryFlag::ServiceSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                dynamic_attributes: HashMap::new(),
+                source_mutaplasmid_id: None,
+                insured_payout_isk: 0.0,
+                is_blueprint_copy: false,
+                blueprint_runs_remaining: None,
+            },
+        );
+        snap.module_online_states.insert(clone_bay_item_id, true);
+    });
+
     let max_clones_err = ctx
         .dispatch_rpc(
             &mut sess,
@@ -1805,4 +2188,121 @@ async fn test_s4_jump_clones_implants_and_cooldown() {
             "Destroyed jump clone must be removed"
         );
     });
+}
+
+#[tokio::test]
+async fn test_r66_p1_3_nine_maps_durability_restart_and_rollback() {
+    let pid = std::process::id();
+    let now_nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let sqlite_path = std::env::temp_dir().join(format!("evomu_server_r66_{}_{}.sqlite", pid, now_nanos));
+    let _ = std::fs::remove_file(&sqlite_path);
+
+    let repo = eve_db::WorldRepository::open_sqlite(&sqlite_path).expect("open_sqlite DB");
+
+    repo.with_mut_snapshot(|snap| {
+        snap.character_last_jump_unix.insert(90_000_001, 1_700_000_100);
+        snap.character_cspa_charges.insert(90_000_001, IskCents(250_00));
+        snap.mail_timestamps.insert(888_001, 1_700_000_200);
+        snap.character_login_stats.insert(
+            90_000_001,
+            eve_db::CharacterLoginStats {
+                last_login_unix: 1_700_000_300,
+                last_logout_unix: 1_700_000_400,
+                logins_count: 5,
+            },
+        );
+        snap.item_custom_names.insert(100_000_001, "My Battle Rifter".to_string());
+        snap.item_positions.insert(100_000_001, [1234.5, 6789.0, -4321.25]);
+        snap.structure_vulnerability_windows.insert(970_001, (1_700_000_500, 1_700_004_100));
+        snap.skill_history.insert(
+            90_000_001,
+            vec![eve_db::SkillHistoryEntry {
+                log_date_ft: 133_000_000_000,
+                event_type_id: 37,
+                skill_type_id: 3300,
+                skill_level: 5,
+                absolute_points: 256_000.0,
+            }],
+        );
+        snap.character_doll_info.insert(
+            90_000_001,
+            ("dna:caldari:male:123".to_string(), "meta:portrait:v2".to_string()),
+        );
+    });
+
+    // Rollback test
+    let res: Result<(), eve_db::DbError> = repo.try_with_mut_snapshot(|snap| {
+        snap.character_last_jump_unix.insert(90_000_001, 9_999_999);
+        snap.character_last_jump_unix.insert(90_000_002, 8_888_888);
+        snap.character_cspa_charges.insert(90_000_001, IskCents(999));
+        snap.mail_timestamps.insert(888_001, 9_999_999);
+        snap.character_login_stats.get_mut(&90_000_001).unwrap().logins_count = 999;
+        snap.item_custom_names.insert(100_000_001, "Corrupted Name".to_string());
+        snap.item_positions.insert(100_000_001, [0.0, 0.0, 0.0]);
+        snap.structure_vulnerability_windows.insert(970_001, (0, 0));
+        snap.skill_history.get_mut(&90_000_001).unwrap().clear();
+        snap.character_doll_info.insert(
+            90_000_001,
+            ("corrupted".to_string(), "corrupted".to_string()),
+        );
+        Err(eve_db::DbError::ValidationError("trigger rollback".into()))
+    });
+    assert!(res.is_err());
+
+    // Verify rollback restored committed state
+    repo.with_snapshot(|snap| {
+        assert_eq!(snap.character_last_jump_unix.get(&90_000_001), Some(&1_700_000_100));
+        assert!(!snap.character_last_jump_unix.contains_key(&90_000_002));
+        assert_eq!(snap.character_cspa_charges.get(&90_000_001), Some(&IskCents(250_00)));
+        assert_eq!(snap.mail_timestamps.get(&888_001), Some(&1_700_000_200));
+        let stats = snap.character_login_stats.get(&90_000_001).unwrap();
+        assert_eq!(stats.logins_count, 5);
+        assert_eq!(snap.item_custom_names.get(&100_000_001).unwrap(), "My Battle Rifter");
+        assert_eq!(snap.item_positions.get(&100_000_001), Some(&[1234.5, 6789.0, -4321.25]));
+        assert_eq!(
+            snap.structure_vulnerability_windows.get(&970_001),
+            Some(&(1_700_000_500, 1_700_004_100))
+        );
+        assert_eq!(snap.skill_history.get(&90_000_001).unwrap().len(), 1);
+        assert_eq!(
+            snap.character_doll_info.get(&90_000_001).unwrap(),
+            &("dna:caldari:male:123".to_string(), "meta:portrait:v2".to_string())
+        );
+    });
+
+    drop(repo);
+
+    // Reopen from SQLite and verify restart survival
+    let restarted = eve_db::WorldRepository::open_sqlite(&sqlite_path).expect("reopen SQLite DB");
+    restarted.with_snapshot(|snap| {
+        assert_eq!(snap.character_last_jump_unix.get(&90_000_001), Some(&1_700_000_100));
+        assert!(!snap.character_last_jump_unix.contains_key(&90_000_002));
+        assert_eq!(snap.character_cspa_charges.get(&90_000_001), Some(&IskCents(250_00)));
+        assert_eq!(snap.mail_timestamps.get(&888_001), Some(&1_700_000_200));
+        let stats = snap.character_login_stats.get(&90_000_001).unwrap();
+        assert_eq!(stats.logins_count, 5);
+        assert_eq!(stats.last_login_unix, 1_700_000_300);
+        assert_eq!(stats.last_logout_unix, 1_700_000_400);
+        assert_eq!(snap.item_custom_names.get(&100_000_001).unwrap(), "My Battle Rifter");
+        assert_eq!(snap.item_positions.get(&100_000_001), Some(&[1234.5, 6789.0, -4321.25]));
+        assert_eq!(
+            snap.structure_vulnerability_windows.get(&970_001),
+            Some(&(1_700_000_500, 1_700_004_100))
+        );
+        let hist = snap.skill_history.get(&90_000_001).unwrap();
+        assert_eq!(hist.len(), 1);
+        assert_eq!(hist[0].skill_type_id, 3300);
+        assert_eq!(hist[0].skill_level, 5);
+        assert_eq!(
+            snap.character_doll_info.get(&90_000_001).unwrap(),
+            &("dna:caldari:male:123".to_string(), "meta:portrait:v2".to_string())
+        );
+    });
+
+    let _ = std::fs::remove_file(&sqlite_path);
+    let _ = std::fs::remove_file(sqlite_path.with_extension("sqlite-wal"));
+    let _ = std::fs::remove_file(sqlite_path.with_extension("sqlite-shm"));
 }

@@ -158,6 +158,23 @@ pub fn alpha_skill_cap_for_character(
         .unwrap_or(0)
 }
 
+fn is_valid_doll_or_portrait_payload(rep: &PyRep) -> bool {
+    match rep {
+        PyRep::KeyVal(map) => !map.is_empty(),
+        PyRep::Dict(entries) => !entries.is_empty(),
+        PyRep::Object { .. } | PyRep::ObjectEx { .. } => true,
+        PyRep::Tuple(items) | PyRep::List(items) => !items.is_empty(),
+        PyRep::String(s) => {
+            let trimmed = s.trim();
+            !trimmed.is_empty()
+                && (trimmed.starts_with("doll:") || trimmed.starts_with("portrait:") || trimmed.contains('='))
+                && trimmed != "doll_info_placeholder"
+                && trimmed != "portrait_info_placeholder"
+        }
+        _ => false,
+    }
+}
+
 fn serialize_doll_pyrep(rep: &PyRep) -> String {
     match rep {
         PyRep::String(s) => s.clone(),
@@ -250,7 +267,8 @@ pub fn handle(
             ))
         }
 
-        ("charUnboundMgr", "GetCharacterInfo") => {
+        ("charUnboundMgr", "GetCharacterInfo")
+        | ("charMgr", "GetCharacterInfo") => {
             let user_id = match ServerContext::require_auth(session) {
                 Ok(u) => u,
                 Err(e) => return Some(Err(e)),
@@ -554,14 +572,16 @@ pub fn handle(
             };
             let Some(portrait_info_rep) = args.get(5) else {
                 return Some(Err(BridgeRpcError {
-                    code: "InvalidPortraitInfo".into(),
+                    code: "InvalidDollInfo".into(),
                     message: "Missing portraitInfo argument".into(),
                 }));
             };
-            if matches!(char_info_rep, PyRep::None) || matches!(portrait_info_rep, PyRep::None) {
+            if !is_valid_doll_or_portrait_payload(char_info_rep)
+                || !is_valid_doll_or_portrait_payload(portrait_info_rep)
+            {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidDollInfo".into(),
-                    message: "charInfo and portraitInfo must not be None".into(),
+                    message: "charInfo and portraitInfo must be non-empty structured appearance descriptors (KeyVal or Dict)".into(),
                 }));
             }
             let Some(school_id) = args.get(6).and_then(|a| a.as_i64()).map(|v| v as u32) else {
@@ -744,12 +764,12 @@ pub fn handle(
             )))
         }
 
-        ("skillMgr2", "SaveSkillQueue") | ("skillMgr2", "AddToEndOfSkillQueue") => {
+        ("skillMgr2", "SaveSkillQueue") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let is_add_to_end = method == "AddToEndOfSkillQueue";
+            let is_add_to_end = false;
 
             let mut skills_to_queue: Vec<(TypeId, u8)> = Vec::new();
             match args.first() {
@@ -782,8 +802,20 @@ pub fn handle(
 
             if skills_to_queue.is_empty() {
                 if !is_add_to_end {
+                    let now_ft = ctx.now_blueos_filetime_ticks();
                     ctx.db.with_mut_snapshot(|snap| {
-                        snap.skill_queues.insert(char_id, Vec::new());
+                        if let Some(old_q) = snap.skill_queues.insert(char_id, Vec::new()) {
+                            let hist = snap.skill_history.entry(char_id).or_default();
+                            for q in old_q {
+                                hist.push(SkillHistoryEntry {
+                                    log_date_ft: now_ft,
+                                    event_type_id: 38,
+                                    skill_type_id: q.type_id,
+                                    skill_level: q.target_level,
+                                    absolute_points: q.start_sp,
+                                });
+                            }
+                        }
                         snap.paused_skill_queues.insert(char_id);
                     });
                     let _ = ctx.notify_skill_queue_paused(char_id);
@@ -804,8 +836,21 @@ pub fn handle(
                     });
                 };
 
+                let now = ctx.now_unix();
                 if !is_add_to_end {
-                    snap.skill_queues.insert(char_id, Vec::new());
+                    let now_ft = ctx.now_blueos_filetime_ticks();
+                    if let Some(old_q) = snap.skill_queues.insert(char_id, Vec::new()) {
+                        let hist = snap.skill_history.entry(char_id).or_default();
+                        for q in old_q {
+                            hist.push(SkillHistoryEntry {
+                                log_date_ft: now_ft,
+                                event_type_id: 38,
+                                skill_type_id: q.type_id,
+                                skill_level: q.target_level,
+                                absolute_points: q.start_sp,
+                            });
+                        }
+                    }
                     snap.paused_skill_queues.remove(&char_id);
                 }
 
@@ -962,6 +1007,12 @@ pub fn handle(
                         secondary_attr,
                         clone_mult,
                     );
+                    let is_first = snap.skill_queues.get(&char_id).map(|q| q.is_empty()).unwrap_or(true);
+                    let started_at = if is_first {
+                        Some(now)
+                    } else {
+                        None
+                    };
                     snap.skill_queues
                         .entry(char_id)
                         .or_default()
@@ -971,6 +1022,18 @@ pub fn handle(
                             start_sp,
                             end_sp,
                             duration_seconds: duration_sec,
+                            started_at_unix: started_at,
+                        });
+                    let now_ft = ctx.now_blueos_filetime_ticks();
+                    snap.skill_history
+                        .entry(char_id)
+                        .or_default()
+                        .push(SkillHistoryEntry {
+                            log_date_ft: now_ft,
+                            event_type_id: 53,
+                            skill_type_id,
+                            skill_level: target_level,
+                            absolute_points: start_sp,
                         });
                     last_ret = (skill_type_id, target_level, end_sp, duration_sec);
                 }
@@ -1122,7 +1185,7 @@ pub fn handle(
             }
         }
 
-        ("skillMgr2", "InjectSkillPoints") => {
+        ("skillMgr2", "InjectSkillpoints") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -1173,9 +1236,7 @@ pub fn handle(
             }
         }
 
-        ("skillMgr2", "PauseSkillQueue")
-        | ("skillMgr2", "CharStopTrainingSkill")
-        | ("skillMgr2", "PauseTraining") => {
+        ("skillMgr2", "AbortTraining") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -1184,20 +1245,6 @@ pub fn handle(
                 snap.paused_skill_queues.insert(char_id);
             });
             let _ = ctx.notify_skill_queue_paused(char_id);
-            Some(Ok(PyRep::Bool(true)))
-        }
-
-        ("skillMgr2", "ResumeSkillQueue")
-        | ("skillMgr2", "CharStartTrainingSkill")
-        | ("skillMgr2", "ResumeTraining") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            ctx.db.with_mut_snapshot(|snap| {
-                snap.paused_skill_queues.remove(&char_id);
-            });
-            let _ = ctx.notify_skill_queue_changed(char_id);
             Some(Ok(PyRep::Bool(true)))
         }
 
@@ -1233,7 +1280,7 @@ pub fn handle(
             )))
         }
 
-        ("skillMgr2", "InjectSkillIntoBrain") | ("skillMgr2", "InjectSkill") => {
+        ("skillMgr2", "InjectSkillIntoBrain") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -1321,8 +1368,8 @@ pub fn handle(
                     .or_default()
                     .push(SkillHistoryEntry {
                         log_date_ft: now_ft,
-                        // 56 = SkillEventSkillInjected (evemu_Crucible EVE_Skills.h:30)
-                        event_type_id: 56,
+                        // 36 = SkillEventSkillInjected (CCP V24 / evemu)
+                        event_type_id: 36,
                         skill_type_id,
                         skill_level: 0,
                         absolute_points: 0.0,
@@ -1340,7 +1387,7 @@ pub fn handle(
             }
         }
 
-        ("charMgr", "GetPublicInfo") | ("charMgr", "GetPublicInfo3") => {
+        ("charMgr", "GetPublicInfo3") => {
             let target_char_id = args
                 .first()
                 .and_then(|a| a.as_i64())
@@ -1348,7 +1395,7 @@ pub fn handle(
             let Some(cid) = target_char_id else {
                 return Some(Err(BridgeRpcError {
                     code: "CharacterNotSelected".into(),
-                    message: "GetPublicInfo requires an explicit charID or selected character".into(),
+                    message: "GetPublicInfo3 requires an explicit charID or selected character".into(),
                 }));
             };
             let res = ctx.db.with_snapshot(|snap| {
@@ -1596,10 +1643,8 @@ pub fn handle(
             Some(Ok(PyRep::List(labels)))
         }
 
-        ("charUnboundMgr", "ApplyNeuralRemap")
-        | ("charUnboundMgr", "RemapAttributes")
-        | ("skillMgr2", "RemapAttributes")
-        | ("character", "RemapAttributes") => {
+        ("charMgr", "RespecCharacter")
+        | ("skillMgr2", "RespecCharacter") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -1706,26 +1751,48 @@ pub fn handle(
                     message: "InstallCloneInStation requires being docked at an NPC station".into(),
                 }));
             };
-            let station_info = ctx
-                .sde
-                .solar_systems
-                .values()
-                .flat_map(|s| s.stations.iter())
-                .find(|st| st.station_id == station_id);
-            let Some(station) = station_info else {
-                return Some(Err(BridgeRpcError {
-                    code: "StationNotFound".into(),
-                    message: format!("Station {station_id} not found in SDE"),
-                }));
-            };
-            if !station.has_clone_bay {
-                return Some(Err(BridgeRpcError {
-                    code: "StationHasNoCloneBay".into(),
-                    message: format!(
-                        "Station {} ({station_id}) does not have a medical/clone bay service",
-                        station.name
-                    ),
-                }));
+            let is_structure = ctx
+                .db
+                .with_snapshot(|snap| snap.structures.contains_key(&station_id));
+            if is_structure {
+                let has_online_clone_bay = ctx.db.with_snapshot(|snap| {
+                    snap.items.values().any(|i| {
+                        i.location_id == station_id
+                            && i.type_id == 35894
+                            && i.flag.is_service_slot()
+                            && snap.module_online_states.get(&i.item_id).copied().unwrap_or(true)
+                    })
+                });
+                if !has_online_clone_bay {
+                    return Some(Err(BridgeRpcError {
+                        code: "NoCloneBayService".into(),
+                        message: format!(
+                            "Structure {station_id} does not have an online Standup Cloning Center service module fitted in a service slot"
+                        ),
+                    }));
+                }
+            } else {
+                let station_info = ctx
+                    .sde
+                    .solar_systems
+                    .values()
+                    .flat_map(|s| s.stations.iter())
+                    .find(|st| st.station_id == station_id);
+                let Some(station) = station_info else {
+                    return Some(Err(BridgeRpcError {
+                        code: "StationNotFound".into(),
+                        message: format!("Station {station_id} not found in SDE"),
+                    }));
+                };
+                if !station.has_clone_bay {
+                    return Some(Err(BridgeRpcError {
+                        code: "StationHasNoCloneBay".into(),
+                        message: format!(
+                            "Station {} ({station_id}) does not have a medical/clone bay service",
+                            station.name
+                        ),
+                    }));
+                }
             }
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 // Read Infomorph Psychology (24242), Advanced Infomorph Psychology (33407), Elite Infomorph Psychology (73910),
@@ -1836,9 +1903,23 @@ pub fn handle(
                         message: format!("Structure {structure_id} not found"),
                     });
                 };
+                let has_online_clone_bay = snap.items.values().any(|i| {
+                    i.location_id == structure_id
+                        && i.type_id == 35894
+                        && i.flag.is_service_slot()
+                        && snap.module_online_states.get(&i.item_id).copied().unwrap_or(true)
+                });
+                if !has_online_clone_bay {
+                    return Err(BridgeRpcError {
+                        code: "NoCloneBayService".into(),
+                        message: format!(
+                            "Structure {structure_id} does not have an online Standup Cloning Center service module fitted in a service slot"
+                        ),
+                    });
+                }
                 if !st.quantum_core_installed || st.fuel_blocks == 0 {
                     return Err(BridgeRpcError {
-                        code: "StructureHasNoCloneBay".into(),
+                        code: "NoCloneBayService".into(),
                         message: format!(
                             "Structure {structure_id} does not have an online Standup Cloning Center service"
                         ),

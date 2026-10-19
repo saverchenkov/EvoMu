@@ -63,7 +63,7 @@ async fn test_account_bans_real_enforcement_and_auto_clear() {
         other => panic!("Expected DbError::AccountBanned, got {other:?}"),
     }
 
-    // 3. Active ban rejected on MachoNet authentication.Login RPC with UserBanned / AccountBanned
+    // 3. Active ban rejected on MachoNet authentication.Login RPC with UserBanned
     let mut sess = SessionState::new(20_101);
     let login_err = ctx
         .dispatch_rpc(
@@ -80,11 +80,7 @@ async fn test_account_bans_real_enforcement_and_auto_clear() {
         )
         .await
         .expect_err("Banned account login must fail");
-    assert!(
-        login_err.code == "UserBanned" || login_err.code == "AccountBanned",
-        "Expected UserBanned or AccountBanned, got {}",
-        login_err.code
-    );
+    assert_eq!(login_err.code, "UserBanned");
     assert!(login_err.message.contains("Security Botting Violation"));
     assert!(login_err.message.contains(&ban_expiry.to_string()));
 
@@ -170,30 +166,64 @@ async fn test_account_roles_bitmask_checks() {
         0
     );
 
-    // 2. Test SessionState role checks for all GM roles
+    // 2. Test persisted DB roles populated via authentication.Login (never mutating sess.role in memory)
     let mut sess_player = SessionState::new(20_201);
-    sess_player.role = service_roles::ROLE_PLAYER_DEFAULT;
+    let login_player_rep = ctx
+        .dispatch_rpc(
+            &mut sess_player,
+            "authentication",
+            None,
+            "Login",
+            &[
+                PyRep::String("demo".into()),
+                PyRep::String("demo-secret".into()),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect("Login demo");
     assert!(!sess_player.has_gm_role());
+    assert!(login_player_rep.dict_get("sessionChange").is_some());
 
     let gm_roles = [
-        ("ROLE_GMS", service_roles::ROLE_GMS),
-        ("ROLE_GML", service_roles::ROLE_GML),
-        ("ROLE_GMH", service_roles::ROLE_GMH),
-        ("ROLE_ADMIN", service_roles::ROLE_ADMIN),
-        ("ROLE_WORLDMOD", service_roles::ROLE_WORLDMOD),
+        ("role_gms_user", service_roles::ROLE_GMS, 90_000_801),
+        ("role_gml_user", service_roles::ROLE_GML, 90_000_802),
+        ("role_gmh_user", service_roles::ROLE_GMH, 90_000_803),
+        ("role_admin_user", service_roles::ROLE_ADMIN, 90_000_804),
+        ("role_wm_user", service_roles::ROLE_WORLDMOD, 90_000_805),
     ];
 
-    for (name, role_bit) in gm_roles {
-        let mut sess_gm = SessionState::new(20_202);
-        sess_gm.role = service_roles::ROLE_PLAYER_DEFAULT | role_bit;
+    for (idx, (uname, role_bit, cid)) in gm_roles.into_iter().enumerate() {
+        ctx.db
+            .provision_gm_account(uname, "gm-role-pass", cid, &format!("GM Role {idx}"));
+        ctx.db
+            .set_account_role(uname, service_roles::ROLE_PLAYER_DEFAULT | role_bit)
+            .expect("set_account_role");
+        let mut sess_gm = SessionState::new(20_210 + idx as u64);
+        let login_gm_rep = ctx
+            .dispatch_rpc(
+                &mut sess_gm,
+                "authentication",
+                None,
+                "Login",
+                &[
+                    PyRep::String(uname.into()),
+                    PyRep::String("gm-role-pass".into()),
+                ],
+                &kw,
+                None,
+            )
+            .await
+            .expect("Login GM role account");
         assert!(
             sess_gm.has_gm_role(),
-            "{name} (0x{role_bit:016X}) must satisfy session.has_gm_role()"
+            "{uname} (0x{role_bit:016X}) loaded from DB must satisfy session.has_gm_role()"
         );
+        assert!(login_gm_rep.dict_get("sessionChange").is_some());
     }
 
     // 3. Regular player session rejected on GM slash commands
-    common::login_pilot(&ctx, &mut sess_player, "demo", "demo-secret").await;
     ctx.dispatch_rpc(
         &mut sess_player,
         "charUnboundMgr",
@@ -220,12 +250,17 @@ async fn test_account_roles_bitmask_checks() {
         .expect_err("Non-GM player session calling slash command must be rejected");
     assert_eq!(slash_err.code, "InsufficientRole");
 
-    // 4. Session with ROLE_WORLDMOD is permitted to execute slash commands
+    // 4. Session with persisted ROLE_WORLDMOD is permitted to execute slash commands
     ctx.db
         .provision_gm_account("worldmod_pilot", "wm-secret", 90_000_004, "Worldmod Pilot");
+    ctx.db
+        .set_account_role(
+            "worldmod_pilot",
+            service_roles::ROLE_PLAYER_DEFAULT | service_roles::ROLE_WORLDMOD,
+        )
+        .expect("set_account_role worldmod_pilot");
     let mut sess_worldmod = SessionState::new(20_203);
     common::login_pilot(&ctx, &mut sess_worldmod, "worldmod_pilot", "wm-secret").await;
-    sess_worldmod.role = service_roles::ROLE_PLAYER_DEFAULT | service_roles::ROLE_WORLDMOD;
     ctx.dispatch_rpc(
         &mut sess_worldmod,
         "charUnboundMgr",
@@ -259,7 +294,69 @@ async fn test_multi_login_block_enforcement() {
     let ctx = ServerContext::new();
     let kw = HashMap::new();
 
-    // 1. Session 1 logs in and acquires online lock
+    // 1. Two sessions both call authentication.Login before either claims multiLoginBlocker.Login:
+    //    whichever session calls multiLoginBlocker.Login first wins the lock, and the other gets False.
+    ctx.db.provision_player_account("mlb_race_pilot", "race-pass");
+    let mut race_s1 = SessionState::new(20_290);
+    let mut race_s2 = SessionState::new(20_291);
+    ctx.dispatch_rpc(
+        &mut race_s1,
+        "authentication",
+        None,
+        "Login",
+        &[
+            PyRep::String("mlb_race_pilot".into()),
+            PyRep::String("race-pass".into()),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("race_s1 authentication.Login");
+    ctx.dispatch_rpc(
+        &mut race_s2,
+        "authentication",
+        None,
+        "Login",
+        &[
+            PyRep::String("mlb_race_pilot".into()),
+            PyRep::String("race-pass".into()),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("race_s2 authentication.Login");
+
+    let race_s2_claim = ctx
+        .dispatch_rpc(
+            &mut race_s2,
+            "multiLoginBlocker",
+            None,
+            "Login",
+            &[PyRep::String("hw-race-02".into())],
+            &kw,
+            None,
+        )
+        .await
+        .expect("race_s2 claims multiLoginBlocker.Login first");
+    assert_eq!(race_s2_claim, PyRep::Bool(true));
+
+    let race_s1_late = ctx
+        .dispatch_rpc(
+            &mut race_s1,
+            "multiLoginBlocker",
+            None,
+            "Login",
+            &[PyRep::String("hw-race-01".into())],
+            &kw,
+            None,
+        )
+        .await
+        .expect("race_s1 calls multiLoginBlocker.Login second");
+    assert_eq!(race_s1_late, PyRep::Bool(false));
+
+    // 2. Session 1 logs in and acquires online lock on "demo"
     let mut sess1 = SessionState::new(20_301);
     let (sess1_closer_tx, mut sess1_closer_rx) =
         tokio::sync::mpsc::unbounded_channel::<(String, String)>();
@@ -297,7 +394,7 @@ async fn test_multi_login_block_enforcement() {
         Some(sess1.session_id)
     );
 
-    // 2. Concurrent Session 2 attempts to login to the same account
+    // 3. Concurrent Session 2 attempts to login to the same account
     let mut sess2 = SessionState::new(20_302);
     common::login_pilot(&ctx, &mut sess2, "demo", "demo-secret").await;
 
@@ -331,7 +428,7 @@ async fn test_multi_login_block_enforcement() {
         .expect_err("Concurrent session without lock must be rejected with MultiLoginBlocked");
     assert_eq!(char_err.code, "MultiLoginBlocked");
 
-    // 3. Displace Session 1 from Session 2
+    // 4. Displace Session 1 from Session 2
     let mlb_displaced = ctx
         .dispatch_rpc(
             &mut sess2,
@@ -388,7 +485,7 @@ async fn test_multi_login_block_enforcement() {
     .await
     .expect("SelectCharacterID on displaced sess2 must succeed");
 
-    // 4. Alpha clone hardware concurrency restriction
+    // 5. Alpha clone hardware concurrency restriction
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch1) = snap.characters.get_mut(&90_000_001) {
             ch1.clone_grade = 0; // Alpha
@@ -420,7 +517,7 @@ async fn test_multi_login_block_enforcement() {
         "Alpha clone hardware concurrency must be rejected on identical computerhash"
     );
 
-    // Restore clone grades
+    // Restore clone grades to Omega (1) and verify Omega+Omega on same computerhash is allowed
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch1) = snap.characters.get_mut(&90_000_001) {
             ch1.clone_grade = 1;
@@ -429,6 +526,19 @@ async fn test_multi_login_block_enforcement() {
             ch2.clone_grade = 1;
         }
     });
+    let omega_concurrency = ctx
+        .dispatch_rpc(
+            &mut sess_other,
+            "multiLoginBlocker",
+            None,
+            "Login",
+            &[PyRep::String("hw-blocker-02".into())],
+            &kw,
+            None,
+        )
+        .await
+        .expect("multiLoginBlocker.Login on second Omega account");
+    assert_eq!(omega_concurrency, PyRep::Bool(true));
 }
 
 #[tokio::test]
@@ -468,7 +578,7 @@ async fn test_gm_ban_slash_command() {
         Some(target_sess.session_id)
     );
 
-    // 2. GM executes /ban by username with duration and reason
+    // 2. GM executes timed /ban by username with duration and reason
     let ban_rsp = ctx
         .dispatch_rpc(
             &mut gm_sess,
@@ -489,15 +599,13 @@ async fn test_gm_ban_slash_command() {
         Some(&PyRep::Integer(target_sess.session_id as i64)),
         "/ban must kick the active live session"
     );
+    assert_eq!(ban_kv.get("permanent"), Some(&PyRep::Bool(false)));
 
     // Live session closer channel immediately receives UserBanned notification
     let (close_code, close_reason) = target_closer_rx
         .try_recv()
         .expect("Target live session must be immediately disconnected on /ban");
-    assert!(
-        close_code == "UserBanned" || close_code == "AccountBanned",
-        "Expected UserBanned or AccountBanned, got {close_code}"
-    );
+    assert_eq!(close_code, "UserBanned");
     assert!(close_reason.contains("Market manipulation bot"));
 
     // Online session must be removed from DB
@@ -520,11 +628,9 @@ async fn test_gm_ban_slash_command() {
         )
         .await
         .expect_err("Banned account must fail login");
-    assert!(
-        relogin_err.code == "UserBanned" || relogin_err.code == "AccountBanned"
-    );
+    assert_eq!(relogin_err.code, "UserBanned");
 
-    // 3. GM /ban by numeric account user_id
+    // 3. GM /ban by numeric account user_id (permanent ban with duration 0)
     ctx.db
         .provision_player_account("bot_suspect_2", "botpass456");
     let target2 = ctx
@@ -538,15 +644,15 @@ async fn test_gm_ban_slash_command() {
             None,
             "SlashCmd",
             &[PyRep::String(format!(
-                "/ban {} 1800 Exploiting warp bug",
+                "/ban {} 0 Exploiting warp bug permanently",
                 target2.user_id
             ))],
             &kw,
             None,
         )
         .await
-        .expect("GM /ban by user_id");
-    assert!(matches!(ban_by_id_rsp, PyRep::KeyVal(_)));
+        .expect("GM permanent /ban by user_id");
+    assert_eq!(ban_by_id_rsp.dict_get("permanent"), Some(&PyRep::Bool(true)));
 
     let target2_reloaded = ctx
         .db
@@ -632,6 +738,10 @@ async fn test_serverops_lossless_static_data() {
     assert_eq!(count_table("sde_skins"), 7_048);
     assert_eq!(count_table("sde_space_components"), 11_238);
     assert_eq!(count_table("sde_market_groups"), 2_114);
+    assert_eq!(count_table("sde_dogma_attributes"), 2_871);
+    assert_eq!(count_table("sde_dogma_effects"), 3_427);
+    assert_eq!(count_table("sde_blueprints"), 5_100);
+    assert_eq!(count_table("sde_npc_spawn_groups"), 392);
 
     // 2. Verify columns added in latest schema revisions exist and are queryable
     let type_desc_id: Option<i64> = conn
@@ -657,6 +767,19 @@ async fn test_serverops_lossless_static_data() {
     assert_eq!(ctx.sde.resources.len(), 213);
     assert!(ctx.sde.solar_systems.contains_key(&30_000_142)); // Jita
     assert!(ctx.sde.solar_systems.contains_key(&30_000_144)); // Perimeter
+    assert_eq!(ctx.sde.attributes.len(), 2_871);
+    assert_eq!(
+        ctx.sde.attributes.get(&54).map(|a| a.name.as_str()),
+        Some("maxRange")
+    );
+    assert_eq!(ctx.sde.effects.len(), 3_427);
+    assert_eq!(
+        ctx.sde.effects.get(&12).map(|e| e.name.as_str()),
+        Some("hiPower")
+    );
+    assert_eq!(ctx.sde.blueprints.len(), 5_100);
+    assert!(ctx.sde.blueprints.contains_key(&691));
+    assert_eq!(ctx.sde.npc_spawn_groups.len(), 392);
 
     // Rifter (587) verification
     let rifter = ctx.sde.types.get(&587).expect("Rifter (587) in SdeRegistry");
@@ -705,7 +828,8 @@ async fn test_s10_doc_reconciliation_and_labels() {
     // 2. Scan services and catalog to verify exact counts
     let services_dir = root.join("crates/eve-server/src/services");
     let mut single_arms = 0usize;
-    let mut two_arms = 0usize;
+    let mut multi_arms = 0usize;
+    let mut total_handlers = 0usize;
     let mut service_methods: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
 
     for entry in std::fs::read_dir(&services_dir).expect("read services dir").flatten() {
@@ -720,53 +844,61 @@ async fn test_s10_doc_reconciliation_and_labels() {
         let mut idx = 0;
         while idx < raw_lines.len() {
             let trimmed = raw_lines[idx].trim();
-            let combined = if trimmed.starts_with("(\"") && !trimmed.contains("=>") {
-                if idx + 1 < raw_lines.len() && raw_lines[idx + 1].trim().starts_with("| (\"") {
+            let mut combined = trimmed.to_string();
+            if combined.starts_with("(\"") {
+                while !combined.contains("=>")
+                    && idx + 1 < raw_lines.len()
+                    && raw_lines[idx + 1].trim().starts_with("| (\"")
+                {
                     idx += 1;
-                    format!("{trimmed} {}", raw_lines[idx].trim())
-                } else {
-                    trimmed.to_string()
+                    combined.push(' ');
+                    combined.push_str(raw_lines[idx].trim());
                 }
-            } else {
-                trimmed.to_string()
-            };
+            }
             idx += 1;
             if !combined.starts_with("(\"") || !combined.contains("=>") {
                 continue;
             }
             let head = combined.split("=>").next().unwrap_or("");
+            if head.contains(" if ") {
+                continue;
+            }
             let mut pairs = Vec::new();
             let mut rest = head;
             while let Some(open) = rest.find("(\"") {
                 let after_open = &rest[open + 2..];
                 if let Some(q1) = after_open.find('"') {
                     let svc = &after_open[..q1];
-                    let after_svc = &after_open[q1 + 1..];
-                    if let Some(q2_start) = after_svc.find('"') {
-                        let after_q2 = &after_svc[q2_start + 1..];
-                        if let Some(q2_end) = after_q2.find('"') {
-                            let method = &after_q2[..q2_end];
-                            pairs.push((svc.to_string(), method.to_string()));
-                            rest = &after_q2[q2_end + 1..];
-                            continue;
+                    let after_svc = after_open[q1 + 1..].trim_start();
+                    if let Some(after_comma) = after_svc.strip_prefix(',') {
+                        let after_comma = after_comma.trim_start();
+                        if let Some(after_q2) = after_comma.strip_prefix('"') {
+                            if let Some(q2_end) = after_q2.find('"') {
+                                let method = &after_q2[..q2_end];
+                                pairs.push((svc.to_string(), method.to_string()));
+                                rest = &after_q2[q2_end + 1..];
+                                continue;
+                            }
                         }
                     }
+                    rest = after_svc;
+                    continue;
                 }
                 break;
             }
             if pairs.len() == 1 {
                 single_arms += 1;
-            } else if pairs.len() == 2 {
-                two_arms += 1;
+            } else if pairs.len() >= 2 {
+                multi_arms += 1;
             }
+            total_handlers += pairs.len();
             for (s, m) in pairs {
                 service_methods.entry(s).or_default().insert(m);
             }
         }
     }
 
-    let total_arms = single_arms + two_arms;
-    let total_handlers: usize = service_methods.values().map(BTreeSet::len).sum();
+    let total_arms = single_arms + multi_arms;
 
     let catalog_raw = std::fs::read_to_string(root.join("docs/index/rpc_service_catalog.json"))
         .expect("read rpc_service_catalog.json");
@@ -800,7 +932,7 @@ async fn test_s10_doc_reconciliation_and_labels() {
     let expected_handler_summary =
         format!("`{total_handlers}` `(service, method)` handlers across `{total_arms}` match arms");
     let expected_arm_breakdown =
-        format!("`{single_arms}` single-method + `{two_arms}` two-method arms");
+        format!("`{single_arms}` single-method + `{multi_arms}` multi-method arms");
     for (name, doc) in [("PLAN.md", &plan_md), ("README.md", &readme_md)] {
         assert!(
             doc.contains(&expected_cand_ratio),
@@ -813,6 +945,13 @@ async fn test_s10_doc_reconciliation_and_labels() {
         assert!(
             doc.contains(&expected_arm_breakdown),
             "S-10: {name} must report live match arm breakdown: {expected_arm_breakdown}"
+        );
+        assert!(
+            doc.contains("V24.01 client candidate methods")
+                && doc.contains("`(service, method)` handlers across")
+                && doc.contains("single-method +")
+                && doc.contains("docs/ACTION_PLAN_STATUS.md"),
+            "S-10: {name} must report handler routing summary and reference docs/ACTION_PLAN_STATUS.md"
         );
     }
 }
@@ -875,22 +1014,22 @@ async fn test_s7_structures_skyhooks_pi_range_checks() {
             &mut sess,
             "planetMgr",
             None,
-            "GetMyColonies",
+            "GetPlanetsForChar",
             &[],
             &kw,
             None,
         )
         .await
-        .expect("GetMyColonies");
+        .expect("GetPlanetsForChar");
     assert!(matches!(my_colonies, PyRep::Rowset { .. }));
 
-    // Colony creation on invalid planet ID fails
+    // Colony and pin creation on invalid planet ID fails
     let invalid_planet = ctx
         .dispatch_rpc(
             &mut sess,
             "planetMgr",
             None,
-            "CreateColony",
+            "UserUpdateNetwork",
             &[PyRep::Integer(99_999_999)],
             &kw,
             None,
@@ -898,7 +1037,29 @@ async fn test_s7_structures_skyhooks_pi_range_checks() {
         .await;
     assert_eq!(invalid_planet.unwrap_err().code, "InvalidPlanetID");
 
-    // Colony creation on planet in a different system fails
+    let invalid_pin_planet = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "planetMgr",
+            None,
+            "UserUpdateNetwork",
+            &[
+                PyRep::Integer(99_999_999),
+                PyRep::List(vec![PyRep::Tuple(vec![
+                    PyRep::Integer(1),
+                    PyRep::Integer(1),
+                    PyRep::Integer(2256),
+                    PyRep::Real(0.1),
+                    PyRep::Real(0.2),
+                ])]),
+            ],
+            &kw,
+            None,
+        )
+        .await;
+    assert_eq!(invalid_pin_planet.unwrap_err().code, "InvalidPlanetID");
+
+    // Colony and pin creation on planet in a different system (Perimeter 30000144 while in Jita 30000142) fails
     let perimeter_planet_id = ctx
         .sde
         .celestials_in_system(30_000_144)
@@ -911,13 +1072,41 @@ async fn test_s7_structures_skyhooks_pi_range_checks() {
             &mut sess,
             "planetMgr",
             None,
-            "CreateColony",
+            "UserUpdateNetwork",
             &[PyRep::Integer(perimeter_planet_id as i64)],
             &kw,
             None,
         )
         .await;
     assert_eq!(wrong_sys_planet.unwrap_err().code, "PlanetNotInCurrentSystem");
+
+    let wrong_sys_pin = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "planetMgr",
+            None,
+            "UserUpdateNetwork",
+            &[
+                PyRep::Integer(perimeter_planet_id as i64),
+                PyRep::List(vec![PyRep::Tuple(vec![
+                    PyRep::Integer(1),
+                    PyRep::Integer(1),
+                    PyRep::Integer(2256),
+                    PyRep::Real(0.1),
+                    PyRep::Real(0.2),
+                ])]),
+            ],
+            &kw,
+            None,
+        )
+        .await;
+    assert_eq!(wrong_sys_pin.unwrap_err().code, "PlanetNotInCurrentSystem");
+
+    // 3. sovMgr.AcquireSkyhooks docked check
+    let claim_docked = ctx
+        .dispatch_rpc(&mut sess, "sovMgr", None, "AcquireSkyhooks", &[], &kw, None)
+        .await;
+    assert_eq!(claim_docked.unwrap_err().code, "ShipDocked");
 }
 
 #[tokio::test]
@@ -939,14 +1128,20 @@ async fn test_z5_auditor_flagged_rows_closure_suite() {
     assert_eq!(ctx.sde.resources.len(), 213);
     assert!(!ctx.sde.types.is_empty());
     assert!(!ctx.sde.solar_systems.is_empty());
+    assert_eq!(ctx.sde.attributes.len(), 2_871);
+    assert_eq!(ctx.sde.effects.len(), 3_427);
+    assert_eq!(ctx.sde.blueprints.len(), 5_100);
+    assert_eq!(ctx.sde.npc_spawn_groups.len(), 392);
 
-    // B. Role bitmasks and GM status (feat:account.account-roles)
+    // B. Role bitmasks and GM status loaded from DB via authentication.Login (feat:account.account-roles)
+    ctx.db
+        .provision_gm_account("z5_gm", "gm_secret", 90_000_003, "Z5 GM");
     let mut sess_gm = SessionState::new(20_901);
-    sess_gm.role = service_roles::ROLE_PLAYER_DEFAULT | service_roles::ROLE_ADMIN;
+    common::login_pilot(&ctx, &mut sess_gm, "z5_gm", "gm_secret").await;
     assert!(sess_gm.has_gm_role());
 
     let mut sess_player = SessionState::new(20_902);
-    sess_player.role = service_roles::ROLE_PLAYER_DEFAULT;
+    common::login_pilot(&ctx, &mut sess_player, "demo", "demo-secret").await;
     assert!(!sess_player.has_gm_role());
 
     // C. Multi-login concurrency & displacement (feat:account.multi-login-block)
@@ -983,10 +1178,7 @@ async fn test_z5_auditor_flagged_rows_closure_suite() {
     assert_eq!(d_code, "ACL_DISPLACED");
 
     // D. GM slash ban with live session revocation (feat:admin.gm-ban)
-    ctx.db
-        .provision_gm_account("z5_gm", "gm_secret", 90_000_003, "Z5 GM");
-    let mut gm_runner = SessionState::new(20_905);
-    common::login_pilot(&ctx, &mut gm_runner, "z5_gm", "gm_secret").await;
+    let mut gm_runner = sess_gm;
     ctx.dispatch_rpc(
         &mut gm_runner,
         "charUnboundMgr",
@@ -1018,7 +1210,7 @@ async fn test_z5_auditor_flagged_rows_closure_suite() {
     assert!(matches!(ban_exec, PyRep::KeyVal(_)));
 
     let (ban_signal, _) = s2_close_rx.try_recv().expect("s2 disconnected on ban");
-    assert!(ban_signal == "UserBanned" || ban_signal == "AccountBanned");
+    assert_eq!(ban_signal, "UserBanned");
     assert!(ctx.db.get_online_session(s1_uid).is_none());
 
     // E. Ban enforcement and auto-expiry clearing (feat:account.account-bans)
@@ -1038,7 +1230,7 @@ async fn test_z5_auditor_flagged_rows_closure_suite() {
         )
         .await
         .expect_err("Banned pilot login rejected");
-    assert!(ban_rejection.code == "UserBanned" || ban_rejection.code == "AccountBanned");
+    assert_eq!(ban_rejection.code, "UserBanned");
 
     // Set ban expiry in the past and verify auto-clear on authenticate_at
     ctx.db

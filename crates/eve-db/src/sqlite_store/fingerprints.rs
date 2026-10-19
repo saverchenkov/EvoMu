@@ -120,6 +120,7 @@ pub(crate) fn fp_character(c: &CharacterRecord) -> u64 {
     h.write_u64(c.last_clone_jump_unix);
     h.write_f64(c.jump_fatigue_minutes);
     h.write_u64(c.jump_cooldown_until_unix);
+    h.write_u64(c.jump_fatigue_until_unix);
     h.write_u64(c.version);
     h.write_u64(c.system_epoch);
     let mut lp_xor = 0u64;
@@ -196,6 +197,7 @@ pub(crate) fn fp_contract(c: &ContractRecord) -> u64 {
     h.write_i64(c.reward.0);
     h.write_i64(c.collateral.0);
     h.write_u64(c.expiration_unix);
+    h.write_u32(c.num_days);
     for &id in &c.item_ids {
         h.write_i64(id);
     }
@@ -285,6 +287,20 @@ pub(crate) fn fp_mails_slice(entries: &[MailRecord]) -> u64 {
     h.finish()
 }
 
+pub(crate) fn fp_skill_queue(q: &[SkillQueueEntry]) -> u64 {
+    let mut h = FnvHasher::new();
+    h.write_u64(q.len() as u64);
+    for entry in q {
+        h.write_u32(entry.type_id);
+        h.write_u8(entry.target_level);
+        h.write_f64(entry.start_sp);
+        h.write_f64(entry.end_sp);
+        h.write_f64(entry.duration_seconds);
+        h.write_u64(entry.started_at_unix.unwrap_or(0));
+    }
+    h.finish()
+}
+
 pub(crate) fn fp_json<T: serde::Serialize>(val: &T) -> u64 {
     let mut h = FnvHasher::new();
     if let Ok(s) = serde_json::to_string(val) {
@@ -332,6 +348,15 @@ pub struct TableFingerprints {
     pub licensed_skins: HashMap<i64, u64>,
     pub applied_ship_skins: HashMap<i64, u32>,
     pub asteroids: HashMap<i64, u64>,
+    pub character_last_jump_unix: HashMap<i64, u64>,
+    pub character_cspa_charges: HashMap<i64, i64>,
+    pub mail_timestamps: HashMap<i64, u64>,
+    pub character_login_stats: HashMap<i64, u64>,
+    pub item_custom_names: HashMap<i64, u64>,
+    pub item_positions: HashMap<i64, u64>,
+    pub structure_vulnerability_windows: HashMap<i64, (u64, u64)>,
+    pub skill_history: HashMap<i64, u64>,
+    pub character_doll_info: HashMap<i64, u64>,
 }
 
 /// Synchronizes only modified/inserted/deleted rows from `snap` into `tx` and updates `fp`,
@@ -368,7 +393,7 @@ pub fn compute_fingerprints(snap: &WorldStateSnapshot) -> TableFingerprints {
         }
     }
     for (&cid, q) in &snap.skill_queues {
-        fp.skill_queues.insert(cid, fp_json(q));
+        fp.skill_queues.insert(cid, fp_skill_queue(q));
     }
     for (&cid, jc) in &snap.jump_clones {
         fp.jump_clones.insert(cid, fp_json(jc));
@@ -438,6 +463,33 @@ pub fn compute_fingerprints(snap: &WorldStateSnapshot) -> TableFingerprints {
     }
     for (&id, ast) in &snap.asteroids {
         fp.asteroids.insert(id, fp_json(ast));
+    }
+    for (&cid, &v) in &snap.character_last_jump_unix {
+        fp.character_last_jump_unix.insert(cid, v);
+    }
+    for (&cid, &cents) in &snap.character_cspa_charges {
+        fp.character_cspa_charges.insert(cid, cents.0);
+    }
+    for (&mid, &v) in &snap.mail_timestamps {
+        fp.mail_timestamps.insert(mid, v);
+    }
+    for (&cid, v) in &snap.character_login_stats {
+        fp.character_login_stats.insert(cid, fp_json(v));
+    }
+    for (&iid, v) in &snap.item_custom_names {
+        fp.item_custom_names.insert(iid, fp_json(v));
+    }
+    for (&iid, v) in &snap.item_positions {
+        fp.item_positions.insert(iid, fp_json(v));
+    }
+    for (&sid, &v) in &snap.structure_vulnerability_windows {
+        fp.structure_vulnerability_windows.insert(sid, v);
+    }
+    for (&cid, v) in &snap.skill_history {
+        fp.skill_history.insert(cid, fp_json(v));
+    }
+    for (&cid, v) in &snap.character_doll_info {
+        fp.character_doll_info.insert(cid, fp_json(v));
     }
     fp
 }

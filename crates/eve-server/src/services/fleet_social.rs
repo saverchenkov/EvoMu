@@ -26,6 +26,17 @@ pub async fn handle(
     args: &[PyRep],
     _kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
+    let method = if service == "fleetObjectHandler" {
+        match method {
+            "AcceptInvite" => "JoinFleet",
+            "GetInitState" | "GetWings" => "GetFleet",
+            "MoveMember" => "SetRole",
+            "SendBroadcast" => "Broadcast",
+            _ => method,
+        }
+    } else {
+        method
+    };
     match (service, method) {
         // =========================================================================
         // SO-1: Fleet Manager (`fleetMgr`, `fleetObjectHandler`, `fleetProxy`)
@@ -395,6 +406,12 @@ pub async fn handle(
                         "OnFleetMemberKicked",
                         "charid",
                         vec![PyRep::Integer(fid)],
+                    );
+                    ctx.notify(
+                        NotificationTarget::Character(target_char_id),
+                        "OnFleetLeave",
+                        "charid",
+                        vec![PyRep::Integer(fid), PyRep::Integer(target_char_id)],
                     );
                     ctx.notify(
                         NotificationTarget::Fleet(fid),
@@ -866,7 +883,7 @@ pub async fn handle(
         }
 
         ("fleetMgr", "GetFleet") | ("fleetMgr", "GetInitState") | ("fleetObjectHandler", "GetFleet") => {
-            let (_, _) = match ServerContext::require_character(session) {
+            let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
@@ -880,6 +897,9 @@ pub async fn handle(
 
             let fleet_data = ctx.db.with_snapshot(|snap| {
                 let fl = snap.fleets.get(&fid)?;
+                if !fl.members.contains(&char_id) {
+                    return None;
+                }
                 let members_rows: Vec<Vec<PyRep>> = fl.member_details.values().map(|m| {
                     vec![
                         PyRep::Integer(m.character_id),
@@ -912,9 +932,10 @@ pub async fn handle(
             });
 
             let Some((boss_id, motd, m_rows, w_rows, s_rows)) = fleet_data else {
+                session.fleet_id = None;
                 return Some(Err(BridgeRpcError {
-                    code: "FleetNotFound".into(),
-                    message: format!("Fleet {fid} not found"),
+                    code: "NotInFleet".into(),
+                    message: format!("Character {char_id} is no longer in fleet {fid}"),
                 }));
             };
 
@@ -942,6 +963,18 @@ pub async fn handle(
             let reg_fee = IskCents::from_isk(1_599_800);
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let corp_mgmt_lvl = snap
+                    .skills
+                    .get(&char_id)
+                    .and_then(|m| m.get(&3363))
+                    .map(|s| s.level)
+                    .unwrap_or(0);
+                if corp_mgmt_lvl < 1 {
+                    return Err(BridgeRpcError {
+                        code: "MissingCorporationManagementSkill".into(),
+                        message: "Creating a corporation requires Corporation Management (3363) level 1".into(),
+                    });
+                }
                 let Some(ch) = snap.characters.get_mut(&char_id) else {
                     return Err(BridgeRpcError {
                         code: "CharacterNotFound".into(),
@@ -1045,6 +1078,15 @@ pub async fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            let db_corp_id = ctx.db.with_snapshot(|snap| {
+                snap.characters
+                    .get(&char_id)
+                    .map(|c| c.corporation_id)
+                    .filter(|cid| snap.corporations.contains_key(cid))
+            });
+            if let Some(cid) = db_corp_id {
+                session.corporation_id = Some(cid);
+            }
             let corp_id = match session.corporation_id {
                 Some(c) => c,
                 None => return Some(Err(BridgeRpcError {
@@ -1350,13 +1392,27 @@ pub async fn handle(
                         message: "Viewing corporation wallet divisions requires Accountant role".into(),
                     });
                 }
-                let rows: Vec<Vec<PyRep>> = corp.wallet_divisions.iter().map(|div| {
-                    vec![
-                        PyRep::Integer(div.division_id as i64),
-                        PyRep::String(div.name.clone()),
-                        PyRep::Real(div.balance.to_wire_f64()),
-                    ]
-                }).collect();
+                let rows: Vec<Vec<PyRep>> = (1..=7u8)
+                    .map(|d| {
+                        let name = corp
+                            .wallet_divisions
+                            .iter()
+                            .find(|w| w.division_id == d)
+                            .map(|w| w.name.clone())
+                            .unwrap_or_else(|| {
+                                if d == 1 {
+                                    "Master Wallet".to_string()
+                                } else {
+                                    format!("Division {d}")
+                                }
+                            });
+                        vec![
+                            PyRep::Integer(d as i64),
+                            PyRep::String(name),
+                            PyRep::Real(corp.division_balance(d).to_wire_f64()),
+                        ]
+                    })
+                    .collect();
                 Ok(rows)
             });
 
@@ -1406,6 +1462,19 @@ pub async fn handle(
                         message: "Transferring between corp wallet divisions requires Accountant role".into(),
                     });
                 }
+                if !(1..=7).contains(&from_div) {
+                    return Err(BridgeRpcError {
+                        code: "DivisionNotFound".into(),
+                        message: format!("Source wallet division {from_div} not found"),
+                    });
+                }
+                if !(1..=7).contains(&to_div) {
+                    return Err(BridgeRpcError {
+                        code: "DivisionNotFound".into(),
+                        message: format!("Target wallet division {to_div} not found"),
+                    });
+                }
+                corp.ensure_wallet_divisions();
                 let from_pos = corp.wallet_divisions.iter().position(|d| d.division_id == from_div).ok_or_else(|| BridgeRpcError {
                     code: "DivisionNotFound".into(),
                     message: format!("Source wallet division {from_div} not found"),
@@ -1424,6 +1493,12 @@ pub async fn handle(
 
                 corp.wallet_divisions[from_pos].balance = new_source;
                 corp.wallet_divisions[to_pos].balance = new_target;
+                if from_div == 1 {
+                    corp.master_wallet = new_source;
+                }
+                if to_div == 1 {
+                    corp.master_wallet = new_target;
+                }
                 Ok(())
             });
 
@@ -1542,9 +1617,19 @@ pub async fn handle(
                     message: "Character has no active corporation".into(),
                 })),
             };
-            let desc = args.get(0).and_then(|a| a.as_str()).unwrap_or("");
-            let url = args.get(1).and_then(|a| a.as_str()).unwrap_or("");
-            let tax_rate_opt = args.get(2).and_then(|a| a.as_f64());
+            let (desc, url, tax_rate_opt) = if args.first().and_then(|a| a.as_i64()).is_some() {
+                (
+                    args.get(1).and_then(|a| a.as_str()).unwrap_or(""),
+                    args.get(2).and_then(|a| a.as_str()).unwrap_or(""),
+                    args.get(3).and_then(|a| a.as_f64()),
+                )
+            } else {
+                (
+                    args.first().and_then(|a| a.as_str()).unwrap_or(""),
+                    args.get(1).and_then(|a| a.as_str()).unwrap_or(""),
+                    args.get(2).and_then(|a| a.as_f64()),
+                )
+            };
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(corp) = snap.corporations.get_mut(&corp_id) else {
@@ -1903,14 +1988,51 @@ pub async fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let Some(recipient_id) = args.first().and_then(|a| a.as_i64()) else {
+            let mut recipient_ids: Vec<i64> = Vec::new();
+            match args.first() {
+                Some(PyRep::List(list)) | Some(PyRep::Tuple(list)) => {
+                    for item in list {
+                        if let Some(id) = item.as_i64() {
+                            recipient_ids.push(id);
+                        }
+                    }
+                }
+                Some(rep) => {
+                    if let Some(id) = rep.as_i64() {
+                        recipient_ids.push(id);
+                    }
+                }
+                None => {}
+            }
+            let (subject, body) = if args.len() >= 5 {
+                if recipient_ids.is_empty() {
+                    if let Some(corp_or_alliance_id) = args.get(2).and_then(|a| a.as_i64()) {
+                        let corp_members = ctx.db.with_snapshot(|snap| {
+                            snap.corporations
+                                .get(&corp_or_alliance_id)
+                                .map(|c| c.members.iter().copied().collect::<Vec<_>>())
+                                .unwrap_or_default()
+                        });
+                        recipient_ids.extend(corp_members);
+                    }
+                }
+                (
+                    args.get(3).and_then(|a| a.as_str()).unwrap_or("o7"),
+                    args.get(4).and_then(|a| a.as_str()).unwrap_or("Fly safe!"),
+                )
+            } else {
+                (
+                    args.get(1).and_then(|a| a.as_str()).unwrap_or("o7"),
+                    args.get(2).and_then(|a| a.as_str()).unwrap_or("Fly safe!"),
+                )
+            };
+            if recipient_ids.is_empty() {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidRecipient".into(),
                     message: "SendMail requires recipientID".into(),
                 }));
-            };
-            let subject = args.get(1).and_then(|a| a.as_str()).unwrap_or("o7");
-            let body = args.get(2).and_then(|a| a.as_str()).unwrap_or("Fly safe!");
+            }
+            let recipient_id = recipient_ids[0];
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 if snap.mails.len() >= 1_000 {
@@ -1921,15 +2043,17 @@ pub async fn handle(
                 }
                 snap.next_entity_id += 1;
                 let id = snap.next_entity_id;
-                snap.mails.push(MailRecord {
-                    message_id: id,
-                    sender_id: char_id,
-                    recipient_id,
-                    subject: subject.to_string(),
-                    body: body.to_string(),
-                });
-                // Default label assignments: 1 (Inbox) for recipient, 2 (Sent) for sender
-                snap.mail_assigned_labels.insert((recipient_id, id), vec![1]);
+                for &rec_id in &recipient_ids {
+                    snap.mails.push(MailRecord {
+                        message_id: id,
+                        sender_id: char_id,
+                        recipient_id: rec_id,
+                        subject: subject.to_string(),
+                        body: body.to_string(),
+                    });
+                    // Default label assignments: 1 (Inbox) for recipient, 2 (Sent) for sender
+                    snap.mail_assigned_labels.insert((rec_id, id), vec![1]);
+                }
                 snap.mail_assigned_labels.insert((char_id, id), vec![2]);
                 // Sender automatically marks their sent mail as read
                 snap.read_mails.insert((char_id, id));
@@ -1938,6 +2062,14 @@ pub async fn handle(
 
             match res {
                 Ok(mid) => {
+                    for &rec_id in &recipient_ids {
+                        ctx.notify(
+                            NotificationTarget::Character(rec_id),
+                            "OnNewMailReceived",
+                            "charid",
+                            vec![PyRep::Integer(mid), PyRep::Integer(char_id)],
+                        );
+                    }
                     ctx.notify(
                         NotificationTarget::Character(recipient_id),
                         "OnMailReceived",
@@ -1962,37 +2094,60 @@ pub async fn handle(
                 Err(e) => return Some(Err(e)),
             };
 
-            let rows = ctx.db.with_snapshot(|snap| {
-                snap.mails
-                    .iter()
-                    .filter(|m| {
-                        (m.recipient_id == char_id || m.sender_id == char_id)
-                            && !snap.deleted_mails.contains(&(char_id, m.message_id))
-                    })
-                    .map(|m| {
-                        let read = snap.read_mails.contains(&(char_id, m.message_id));
-                        let labels = snap
-                            .mail_assigned_labels
-                            .get(&(char_id, m.message_id))
-                            .cloned()
-                            .unwrap_or_else(|| vec![if m.sender_id == char_id { 2 } else { 1 }]);
-                        vec![
-                            PyRep::Integer(m.message_id),
-                            PyRep::Integer(m.sender_id),
-                            PyRep::List(vec![PyRep::Integer(m.recipient_id)]),
-                            PyRep::String(m.subject.clone()),
-                            PyRep::Integer(133_000_000_000_000_000), // Standard BlueOS filetime
-                            PyRep::Bool(read),
-                            PyRep::List(labels.into_iter().map(PyRep::Integer).collect()),
-                        ]
-                    })
-                    .collect()
+            let (rows, status_rows) = ctx.db.with_snapshot(|snap| {
+                let mut hdrs = Vec::new();
+                let mut statuses = Vec::new();
+                for m in snap.mails.iter().filter(|m| {
+                    (m.recipient_id == char_id || m.sender_id == char_id)
+                        && !snap.deleted_mails.contains(&(char_id, m.message_id))
+                }) {
+                    let read = snap.read_mails.contains(&(char_id, m.message_id));
+                    let labels = snap
+                        .mail_assigned_labels
+                        .get(&(char_id, m.message_id))
+                        .cloned()
+                        .unwrap_or_else(|| vec![if m.sender_id == char_id { 2 } else { 1 }]);
+                    let label_mask: i64 = labels.iter().copied().fold(0i64, |acc, l| acc | l);
+                    hdrs.push(vec![
+                        PyRep::Integer(m.message_id),
+                        PyRep::Integer(m.sender_id),
+                        PyRep::List(vec![PyRep::Integer(m.recipient_id)]),
+                        PyRep::String(m.subject.clone()),
+                        PyRep::Integer(133_000_000_000_000_000), // Standard BlueOS filetime
+                        PyRep::Bool(read),
+                        PyRep::List(labels.into_iter().map(PyRep::Integer).collect()),
+                    ]);
+                    statuses.push(vec![
+                        PyRep::Integer(m.message_id),
+                        PyRep::Integer(if read { 1 } else { 0 }),
+                        PyRep::Integer(label_mask),
+                        PyRep::Bool(read),
+                    ]);
+                }
+                (hdrs, statuses)
             });
 
-            Some(Ok(PyRep::rowset(
+            let headers_rowset = PyRep::rowset(
                 vec!["messageID", "senderID", "toCharacterIDs", "title", "sentDate", "read", "labels"],
                 rows,
-            )))
+            );
+            if method == "SyncMail" {
+                let old_mail_rowset = PyRep::rowset(
+                    vec!["messageID", "senderID", "toCharacterIDs", "title", "sentDate", "read", "labels"],
+                    Vec::new(),
+                );
+                let status_rowset = PyRep::rowset(
+                    vec!["messageID", "statusMask", "labelMask", "read"],
+                    status_rows,
+                );
+                Some(Ok(PyRep::keyval([
+                    ("oldMail", old_mail_rowset),
+                    ("newMail", headers_rowset),
+                    ("mailStatus", status_rowset),
+                ])))
+            } else {
+                Some(Ok(headers_rowset))
+            }
         }
 
         ("mailMgr", "GetBody") | ("mailMgr", "GetMailBody") => {
@@ -2043,20 +2198,39 @@ pub async fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let Some(mail_id) = args.first().and_then(|a| a.as_i64()) else {
+            let mut mail_ids = Vec::new();
+            match args.first() {
+                Some(PyRep::List(list)) | Some(PyRep::Tuple(list)) => {
+                    for item in list {
+                        if let Some(id) = item.as_i64() {
+                            mail_ids.push(id);
+                        }
+                    }
+                }
+                Some(rep) => {
+                    if let Some(id) = rep.as_i64() {
+                        mail_ids.push(id);
+                    }
+                }
+                None => {}
+            }
+            if mail_ids.is_empty() {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
-                    message: "MarkRead requires messageID".into(),
+                    message: "MarkAsRead requires messageID or messageIDs list".into(),
                 }));
-            };
+            }
 
             ctx.db.try_with_mut_snapshot(|snap| {
-                snap.read_mails.insert((char_id, mail_id));
+                for &mid in &mail_ids {
+                    snap.read_mails.insert((char_id, mid));
+                }
                 Ok::<(), std::convert::Infallible>(())
             }).unwrap();
 
             Some(Ok(PyRep::keyval([
-                ("messageID", PyRep::Integer(mail_id)),
+                ("messageID", PyRep::Integer(mail_ids[0])),
+                ("messageIDs", PyRep::List(mail_ids.into_iter().map(PyRep::Integer).collect())),
                 ("read", PyRep::Bool(true)),
             ])))
         }
@@ -2066,20 +2240,39 @@ pub async fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let Some(mail_id) = args.first().and_then(|a| a.as_i64()) else {
+            let mut mail_ids = Vec::new();
+            match args.first() {
+                Some(PyRep::List(list)) | Some(PyRep::Tuple(list)) => {
+                    for item in list {
+                        if let Some(id) = item.as_i64() {
+                            mail_ids.push(id);
+                        }
+                    }
+                }
+                Some(rep) => {
+                    if let Some(id) = rep.as_i64() {
+                        mail_ids.push(id);
+                    }
+                }
+                None => {}
+            }
+            if mail_ids.is_empty() {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
-                    message: "MarkAsUnread requires messageID".into(),
+                    message: "MarkAsUnread requires messageID or messageIDs list".into(),
                 }));
-            };
+            }
 
             ctx.db.try_with_mut_snapshot(|snap| {
-                snap.read_mails.remove(&(char_id, mail_id));
+                for &mid in &mail_ids {
+                    snap.read_mails.remove(&(char_id, mid));
+                }
                 Ok::<(), std::convert::Infallible>(())
             }).unwrap();
 
             Some(Ok(PyRep::keyval([
-                ("messageID", PyRep::Integer(mail_id)),
+                ("messageID", PyRep::Integer(mail_ids[0])),
+                ("messageIDs", PyRep::List(mail_ids.into_iter().map(PyRep::Integer).collect())),
                 ("read", PyRep::Bool(false)),
             ])))
         }
@@ -2269,14 +2462,30 @@ pub async fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let Some(mail_id) = args.first().and_then(|a| a.as_i64()) else {
+            let mut mail_ids = Vec::new();
+            match args.first() {
+                Some(PyRep::List(list)) | Some(PyRep::Tuple(list)) => {
+                    for item in list {
+                        if let Some(id) = item.as_i64() {
+                            mail_ids.push(id);
+                        }
+                    }
+                }
+                Some(rep) => {
+                    if let Some(id) = rep.as_i64() {
+                        mail_ids.push(id);
+                    }
+                }
+                None => {}
+            }
+            if mail_ids.is_empty() {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
-                    message: "AssignLabels requires messageID".into(),
+                    message: "AssignLabels requires messageID or messageIDs list".into(),
                 }));
-            };
+            }
             let mut labels_to_add = Vec::new();
-            if let Some(PyRep::List(l)) = args.get(1) {
+            if let Some(PyRep::List(l)) | Some(PyRep::Tuple(l)) = args.get(1) {
                 for item in l {
                     if let Some(lid) = item.as_i64() {
                         labels_to_add.push(lid);
@@ -2287,17 +2496,19 @@ pub async fn handle(
             }
 
             ctx.db.try_with_mut_snapshot(|snap| {
-                let current = snap.mail_assigned_labels.entry((char_id, mail_id)).or_default();
-                for lid in labels_to_add {
-                    if !current.contains(&lid) {
-                        current.push(lid);
+                for &mail_id in &mail_ids {
+                    let current = snap.mail_assigned_labels.entry((char_id, mail_id)).or_default();
+                    for &lid in &labels_to_add {
+                        if !current.contains(&lid) {
+                            current.push(lid);
+                        }
                     }
                 }
                 Ok::<(), std::convert::Infallible>(())
             }).unwrap();
 
             Some(Ok(PyRep::keyval([
-                ("messageID", PyRep::Integer(mail_id)),
+                ("messageID", PyRep::Integer(mail_ids[0])),
                 ("assigned", PyRep::Bool(true)),
             ])))
         }
@@ -2307,14 +2518,30 @@ pub async fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let Some(mail_id) = args.first().and_then(|a| a.as_i64()) else {
+            let mut mail_ids = Vec::new();
+            match args.first() {
+                Some(PyRep::List(list)) | Some(PyRep::Tuple(list)) => {
+                    for item in list {
+                        if let Some(id) = item.as_i64() {
+                            mail_ids.push(id);
+                        }
+                    }
+                }
+                Some(rep) => {
+                    if let Some(id) = rep.as_i64() {
+                        mail_ids.push(id);
+                    }
+                }
+                None => {}
+            }
+            if mail_ids.is_empty() {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
-                    message: "RemoveLabels requires messageID".into(),
+                    message: "RemoveLabels requires messageID or messageIDs list".into(),
                 }));
-            };
+            }
             let mut labels_to_remove = Vec::new();
-            if let Some(PyRep::List(l)) = args.get(1) {
+            if let Some(PyRep::List(l)) | Some(PyRep::Tuple(l)) = args.get(1) {
                 for item in l {
                     if let Some(lid) = item.as_i64() {
                         labels_to_remove.push(lid);
@@ -2325,14 +2552,16 @@ pub async fn handle(
             }
 
             ctx.db.try_with_mut_snapshot(|snap| {
-                if let Some(current) = snap.mail_assigned_labels.get_mut(&(char_id, mail_id)) {
-                    current.retain(|lid| !labels_to_remove.contains(lid));
+                for &mail_id in &mail_ids {
+                    if let Some(current) = snap.mail_assigned_labels.get_mut(&(char_id, mail_id)) {
+                        current.retain(|lid| !labels_to_remove.contains(lid));
+                    }
                 }
                 Ok::<(), std::convert::Infallible>(())
             }).unwrap();
 
             Some(Ok(PyRep::keyval([
-                ("messageID", PyRep::Integer(mail_id)),
+                ("messageID", PyRep::Integer(mail_ids[0])),
                 ("removed", PyRep::Bool(true)),
             ])))
         }
@@ -2383,9 +2612,19 @@ pub async fn handle(
             };
 
             // Derive bookmark coordinates
-            let explicit_entity_id = args.get(1).and_then(|a| a.as_i64());
-            let memo = args.get(2).and_then(|a| a.as_str()).unwrap_or("").to_string();
-            let folder_id = args.get(3).and_then(|a| a.as_i64());
+            let (explicit_entity_id, memo, folder_id) = if args.get(1).and_then(|a| a.as_str()).is_some() {
+                (
+                    args.get(3).and_then(|a| a.as_i64()),
+                    args.get(1).and_then(|a| a.as_str()).unwrap_or("").to_string(),
+                    args.get(2).and_then(|a| a.as_i64()),
+                )
+            } else {
+                (
+                    args.get(1).and_then(|a| a.as_i64()),
+                    args.get(2).and_then(|a| a.as_str()).unwrap_or("").to_string(),
+                    args.get(3).and_then(|a| a.as_i64()),
+                )
+            };
 
             let (x, y, z) = if let Some(ent_id) = explicit_entity_id {
                 let sys_handle = ctx.systems.get_or_spawn(sys_id);
@@ -2549,33 +2788,51 @@ pub async fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let Some(bm_id) = args.first().and_then(|a| a.as_i64()) else {
+            let mut bm_ids = Vec::new();
+            match args.first() {
+                Some(PyRep::List(list)) | Some(PyRep::Tuple(list)) => {
+                    for item in list {
+                        if let Some(id) = item.as_i64() {
+                            bm_ids.push(id);
+                        }
+                    }
+                }
+                Some(rep) => {
+                    if let Some(id) = rep.as_i64() {
+                        bm_ids.push(id);
+                    }
+                }
+                None => {}
+            }
+            if bm_ids.is_empty() {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "DeleteBookmark requires bookmarkID".into(),
                 }));
-            };
+            }
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {
-                let Some(bm) = snap.bookmarks.get(&bm_id) else {
-                    return Err(BridgeRpcError {
-                        code: "BookmarkNotFound".into(),
-                        message: format!("Bookmark {bm_id} not found"),
-                    });
-                };
-                if bm.owner_id != char_id && !bm.is_shared {
-                    return Err(BridgeRpcError {
-                        code: "AccessDenied".into(),
-                        message: "Cannot delete another character's bookmark".into(),
-                    });
+                for &bm_id in &bm_ids {
+                    let Some(bm) = snap.bookmarks.get(&bm_id) else {
+                        return Err(BridgeRpcError {
+                            code: "BookmarkNotFound".into(),
+                            message: format!("Bookmark {bm_id} not found"),
+                        });
+                    };
+                    if bm.owner_id != char_id && !bm.is_shared {
+                        return Err(BridgeRpcError {
+                            code: "AccessDenied".into(),
+                            message: "Cannot delete another character's bookmark".into(),
+                        });
+                    }
+                    snap.bookmarks.remove(&bm_id);
                 }
-                snap.bookmarks.remove(&bm_id);
                 Ok(())
             });
 
             match res {
                 Ok(()) => Some(Ok(PyRep::keyval([
-                    ("bookmarkID", PyRep::Integer(bm_id)),
+                    ("bookmarkID", PyRep::Integer(bm_ids[0])),
                     ("deleted", PyRep::Bool(true)),
                 ]))),
                 Err(e) => Some(Err(e)),
@@ -2589,7 +2846,18 @@ pub async fn handle(
             };
             let name = args.first().and_then(|a| a.as_str()).unwrap_or("New Folder");
 
-            let folder_id = ctx.db.try_with_mut_snapshot(|snap| {
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let personal_root_count = snap
+                    .bookmark_folders
+                    .values()
+                    .filter(|f| f.owner_id == char_id && !f.is_shared && !f.folder_name.contains('/'))
+                    .count();
+                if personal_root_count >= 5 {
+                    return Err(BridgeRpcError {
+                        code: "MaxPersonalFoldersReached".into(),
+                        message: "Character has reached the maximum of 5 personal bookmark folders".into(),
+                    });
+                }
                 snap.next_entity_id += 1;
                 let id = snap.next_entity_id;
                 snap.bookmark_folders.insert(
@@ -2602,14 +2870,17 @@ pub async fn handle(
                         corporation_id: None,
                     },
                 );
-                Ok::<_, std::convert::Infallible>(id)
-            }).unwrap();
+                Ok(id)
+            });
 
-            Some(Ok(PyRep::keyval([
-                ("folderID", PyRep::Integer(folder_id)),
-                ("folderName", PyRep::String(name.to_string())),
-                ("isShared", PyRep::Bool(false)),
-            ])))
+            match res {
+                Ok(folder_id) => Some(Ok(PyRep::keyval([
+                    ("folderID", PyRep::Integer(folder_id)),
+                    ("folderName", PyRep::String(name.to_string())),
+                    ("isShared", PyRep::Bool(false)),
+                ]))),
+                Err(e) => Some(Err(e)),
+            }
         }
 
         ("bookmark", "GetFolders") | ("bookmarkMgr", "GetFolders") => {
@@ -2690,6 +2961,15 @@ pub async fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            let db_corp_id = ctx.db.with_snapshot(|snap| {
+                snap.characters
+                    .get(&char_id)
+                    .map(|c| c.corporation_id)
+                    .filter(|cid| snap.corporations.contains_key(cid))
+            });
+            if let Some(cid) = db_corp_id {
+                session.corporation_id = Some(cid);
+            }
             let corp_id = match session.corporation_id {
                 Some(c) => c,
                 None => return Some(Err(BridgeRpcError {
@@ -2699,7 +2979,22 @@ pub async fn handle(
             };
             let name = args.first().and_then(|a| a.as_str()).unwrap_or("Shared Corp Bookmarks");
 
-            let folder_id = ctx.db.try_with_mut_snapshot(|snap| {
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let has_rights = if let Some(corp) = snap.corporations.get(&corp_id) {
+                    let role = corp.member_roles.get(&char_id).copied().unwrap_or(0);
+                    char_id == corp.ceo_id
+                        || corp_roles::has_role(role, corp_roles::ROLE_DIRECTOR)
+                        || corp_roles::has_role(role, corp_roles::ROLE_PERSONNEL_MANAGER)
+                } else {
+                    corp_roles::has_role(session.corp_role, corp_roles::ROLE_DIRECTOR)
+                        || corp_roles::has_role(session.corp_role, corp_roles::ROLE_PERSONNEL_MANAGER)
+                };
+                if !has_rights {
+                    return Err(BridgeRpcError {
+                        code: "BookmarkAccessDenied".into(),
+                        message: "Creating a shared bookmark folder requires corporation Director/CEO access-group rights".into(),
+                    });
+                }
                 snap.next_entity_id += 1;
                 let id = snap.next_entity_id;
                 snap.bookmark_folders.insert(
@@ -2712,8 +3007,13 @@ pub async fn handle(
                         corporation_id: Some(corp_id),
                     },
                 );
-                Ok::<_, std::convert::Infallible>(id)
-            }).unwrap();
+                Ok(id)
+            });
+
+            let folder_id = match res {
+                Ok(id) => id,
+                Err(e) => return Some(Err(e)),
+            };
 
             ctx.notify(
                 NotificationTarget::Corporation(corp_id),
@@ -2731,10 +3031,19 @@ pub async fn handle(
         }
 
         ("accessGroupBookmarkMgr", "GetSharedFolders") | ("bookmark", "GetSharedFolders") => {
-            let (_, _) = match ServerContext::require_character(session) {
+            let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            let db_corp_id = ctx.db.with_snapshot(|snap| {
+                snap.characters
+                    .get(&char_id)
+                    .map(|c| c.corporation_id)
+                    .filter(|cid| snap.corporations.contains_key(cid))
+            });
+            if let Some(cid) = db_corp_id {
+                session.corporation_id = Some(cid);
+            }
             let corp_id_opt = session.corporation_id;
 
             let rows: Vec<Vec<PyRep>> = ctx.db.with_snapshot(|snap| {
@@ -2775,21 +3084,34 @@ pub async fn handle(
                 }));
             };
             let label = args.get(1).and_then(|a| a.as_str()).unwrap_or(sig_id);
+            let folder_id = args.get(2).and_then(|a| a.as_i64());
 
-            let sig_pos_opt = ctx.db.with_snapshot(|snap| {
+            let sig_res = ctx.db.with_snapshot(|snap| {
                 snap.cosmic_signatures.get(&sys_id).and_then(|sigs| {
-                    sigs.iter().find(|s| s.signature_id == sig_id).map(|s| s.position)
+                    sigs.iter()
+                        .find(|s| s.signature_id == sig_id)
+                        .map(|s| (s.position, s.signal_strength))
                 })
             });
 
-            let Some(pos) = sig_pos_opt else {
+            let Some((pos, signal_strength)) = sig_res else {
                 return Some(Err(BridgeRpcError {
                     code: "SignatureNotFound".into(),
                     message: format!("Cosmic signature {sig_id} not found in system {sys_id}"),
                 }));
             };
+            if signal_strength < 1.0 {
+                return Some(Err(BridgeRpcError {
+                    code: "SignatureNotResolved".into(),
+                    message: format!("Cosmic signature {sig_id} must be resolved to 100% before bookmarking"),
+                }));
+            }
 
             let bm_id = ctx.db.try_with_mut_snapshot(|snap| {
+                let is_shared_folder = folder_id
+                    .and_then(|fid| snap.bookmark_folders.get(&fid))
+                    .map(|f| f.is_shared)
+                    .unwrap_or(false);
                 snap.next_entity_id += 1;
                 let id = snap.next_entity_id;
                 snap.bookmarks.insert(
@@ -2804,8 +3126,8 @@ pub async fn handle(
                         z: pos[2],
                         item_id: None,
                         memo: format!("Scanned cosmic signature {sig_id}"),
-                        folder_id: None,
-                        is_shared: false,
+                        folder_id,
+                        is_shared: is_shared_folder,
                     },
                 );
                 Ok::<_, std::convert::Infallible>(id)
@@ -3484,8 +3806,18 @@ pub async fn handle(
                 }));
             };
 
-            // Capital ship restriction: mass > 500,000,000 kg (500k metric tons)
-            if ship_ball.mass > 500_000_000.0 {
+            let ship_type_id = ship_ball.type_id;
+            let ship_group_id = ctx
+                .sde
+                .types
+                .get(&ship_type_id)
+                .map(|t| t.group_id)
+                .unwrap_or(0);
+
+            // Capital ship restriction from SDE ship group or mass
+            if [30, 485, 547, 659, 883, 1538, 4594].contains(&ship_group_id)
+                || ship_ball.mass > 500_000_000.0
+            {
                 return Some(Err(BridgeRpcError {
                     code: "ShipTooLargeForGate".into(),
                     message: "Capital ships cannot activate this acceleration gate".into(),
@@ -3505,14 +3837,110 @@ pub async fn handle(
                 }
             }
 
-            // Warps ship forward into the dungeon pocket
-            let pocket_pos = ship_ball.position + DVec3::new(100_000.0, 0.0, 0.0);
+            // Per-gate SDE dungeon ship class restriction & key item check
+            let gate_check = ctx.db.try_with_mut_snapshot(|snap| {
+                let (dungeon_id_opt, req_key_opt, consume_key) = snap
+                    .items
+                    .get(&gate_id)
+                    .map(|g| {
+                        let did = g.dynamic_attributes.get(&1001).map(|v| *v as u32);
+                        let key_tid = g.dynamic_attributes.get(&1002).map(|v| *v as u32);
+                        let consume = g.dynamic_attributes.get(&1003).is_some_and(|v| *v >= 0.5);
+                        (did, key_tid, consume)
+                    })
+                    .unwrap_or((None, None, false));
+
+                let effective_dungeon_id = dungeon_id_opt.or_else(|| {
+                    args.get(1)
+                        .and_then(|a| a.as_i64())
+                        .and_then(|v| u32::try_from(v).ok())
+                });
+
+                if let Some(did) = effective_dungeon_id {
+                    if let Some(dungeon) = ctx.sde.dungeons.get(&did) {
+                        match dungeon.difficulty {
+                            Some(1) => {
+                                const ALLOWED_SCOUT_GROUPS: &[u32] = &[
+                                    25, 31, 324, 420, 541, 830, 831, 834, 1283, 1305, 1527, 1534,
+                                ];
+                                if ship_group_id > 0 && !ALLOWED_SCOUT_GROUPS.contains(&ship_group_id) {
+                                    return Err(BridgeRpcError {
+                                        code: "ShipRestrictedByDungeonGate".into(),
+                                        message: format!(
+                                            "Dungeon '{}' (ID {did}, difficulty 1) restricts gate {gate_id} to Frigate/Destroyer hulls (ship group {ship_group_id} rejected)",
+                                            dungeon.name
+                                        ),
+                                    });
+                                }
+                            }
+                            Some(2) | Some(3) => {
+                                if [27, 898, 900].contains(&ship_group_id) {
+                                    return Err(BridgeRpcError {
+                                        code: "ShipRestrictedByDungeonGate".into(),
+                                        message: format!(
+                                            "Dungeon '{}' (ID {did}) restricts gate {gate_id} against Battleship hulls",
+                                            dungeon.name
+                                        ),
+                                    });
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+
+                let mut key_consumed = false;
+                if let Some(req_key_type_id) = req_key_opt.filter(|&k| k > 0) {
+                    let key_item_id = snap
+                        .items
+                        .values()
+                        .find(|i| {
+                            i.location_id == ship_id
+                                && i.flag == eve_db::InventoryFlag::Cargo
+                                && i.type_id == req_key_type_id
+                                && i.quantity >= 1
+                        })
+                        .map(|i| i.item_id);
+
+                    let Some(kid) = key_item_id else {
+                        return Err(BridgeRpcError {
+                            code: "MissingGateKey".into(),
+                            message: format!(
+                                "Acceleration gate {gate_id} requires key item type {req_key_type_id} in active ship cargo"
+                            ),
+                        });
+                    };
+
+                    if consume_key {
+                        if let Some(item) = snap.items.get_mut(&kid) {
+                            item.quantity -= 1;
+                            if item.quantity <= 0 {
+                                snap.items.remove(&kid);
+                            }
+                            key_consumed = true;
+                        }
+                    }
+                }
+
+                Ok((effective_dungeon_id, req_key_opt, key_consumed))
+            });
+
+            let (dungeon_id_used, key_type_used, key_consumed) = match gate_check {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+
+            // Warps ship forward into the dungeon pocket (500 km >= 150 km min warp distance)
+            let pocket_pos = ship_ball.position + DVec3::new(500_000.0, 0.0, 0.0);
             let warp_mode = MovementMode::new_warp(ship_ball.position, pocket_pos, 3.0);
             let _ = sys_handle.set_movement_mode(ship_id, warp_mode).await;
 
             Some(Ok(PyRep::keyval([
                 ("success", PyRep::Bool(true)),
                 ("gateID", PyRep::Integer(gate_id)),
+                ("dungeonID", dungeon_id_used.map(|d| PyRep::Integer(d as i64)).unwrap_or(PyRep::None)),
+                ("requiredKeyTypeID", key_type_used.map(|k| PyRep::Integer(k as i64)).unwrap_or(PyRep::None)),
+                ("keyConsumed", PyRep::Bool(key_consumed)),
                 ("destinationX", PyRep::Real(pocket_pos.x)),
                 ("destinationY", PyRep::Real(pocket_pos.y)),
                 ("destinationZ", PyRep::Real(pocket_pos.z)),
@@ -3811,6 +4239,617 @@ pub async fn handle(
             }
         }
 
-        _ => None,
+        _ => handle_bookmark_and_fleet_extras(ctx, session, service, method, args),
     }
+}
+
+fn handle_bookmark_and_fleet_extras(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    service: &str,
+    method: &str,
+    args: &[PyRep],
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    if service == "account" && method == "GetWalletDivisionsInfo" {
+        let (_, char_id) = match ServerContext::require_character(session) {
+            Ok(v) => v,
+            Err(e) => return Some(Err(e)),
+        };
+        let corp_id = args.first().and_then(|a| a.as_i64()).or(session.corporation_id).unwrap_or(0);
+        let res = ctx.db.with_snapshot(|snap| {
+            let Some(corp) = snap.corporations.get(&corp_id) else {
+                return Err(BridgeRpcError {
+                    code: "CorporationNotFound".into(),
+                    message: format!("Corporation {corp_id} not found"),
+                });
+            };
+            let caller_role = corp.member_roles.get(&char_id).copied().unwrap_or(0);
+            if char_id != corp.ceo_id
+                && !corp_roles::has_role(caller_role, corp_roles::ROLE_ACCOUNTANT)
+                && !corp_roles::has_role(caller_role, corp_roles::ROLE_JUNIOR_ACCOUNTANT)
+            {
+                return Err(BridgeRpcError {
+                    code: "CorpRoleDenied".into(),
+                    message: "Viewing corporation wallet divisions requires Accountant role".into(),
+                });
+            }
+            let rows: Vec<Vec<PyRep>> = corp
+                .wallet_divisions
+                .iter()
+                .map(|div| {
+                    vec![
+                        PyRep::Integer(div.division_id as i64),
+                        PyRep::String(div.name.clone()),
+                        PyRep::Real(div.balance.to_wire_f64()),
+                    ]
+                })
+                .collect();
+            Ok(rows)
+        });
+        return match res {
+            Ok(rows) => Some(Ok(PyRep::rowset(
+                vec!["divisionID", "name", "balance"],
+                rows,
+            ))),
+            Err(e) => Some(Err(e)),
+        };
+    }
+
+    if service == "account" && method == "GiveCashFromCorpAccount" {
+        let (_, char_id) = match ServerContext::require_character(session) {
+            Ok(v) => v,
+            Err(e) => return Some(Err(e)),
+        };
+        let corp_id = match session.corporation_id {
+            Some(c) => c,
+            None => {
+                return Some(Err(BridgeRpcError {
+                    code: "NoCorporation".into(),
+                    message: "Character has no active corporation".into(),
+                }))
+            }
+        };
+        let from_div = args.first().and_then(|a| a.as_i64()).unwrap_or(1) as u8;
+        let to_div = args.get(1).and_then(|a| a.as_i64()).unwrap_or(2) as u8;
+        let amount_isk = args.get(2).and_then(|a| a.as_f64()).unwrap_or(0.0);
+        if amount_isk <= 0.0 || !amount_isk.is_finite() {
+            return Some(Err(BridgeRpcError {
+                code: "InvalidArgument".into(),
+                message: "Transfer amount must be positive and finite".into(),
+            }));
+        }
+        let transfer_amount = IskCents::from_f64_isk(amount_isk);
+        let res = ctx.db.try_with_mut_snapshot(|snap| {
+            let Some(corp) = snap.corporations.get_mut(&corp_id) else {
+                return Err(BridgeRpcError {
+                    code: "CorporationNotFound".into(),
+                    message: format!("Corporation {corp_id} not found"),
+                });
+            };
+            let caller_role = corp.member_roles.get(&char_id).copied().unwrap_or(0);
+            if char_id != corp.ceo_id && !corp_roles::has_role(caller_role, corp_roles::ROLE_ACCOUNTANT) {
+                return Err(BridgeRpcError {
+                    code: "CorpRoleDenied".into(),
+                    message: "Transferring between corp wallet divisions requires Accountant role".into(),
+                });
+            }
+            let from_pos = corp
+                .wallet_divisions
+                .iter()
+                .position(|d| d.division_id == from_div)
+                .ok_or_else(|| BridgeRpcError {
+                    code: "DivisionNotFound".into(),
+                    message: format!("Source wallet division {from_div} not found"),
+                })?;
+            let to_pos = corp
+                .wallet_divisions
+                .iter()
+                .position(|d| d.division_id == to_div)
+                .ok_or_else(|| BridgeRpcError {
+                    code: "DivisionNotFound".into(),
+                    message: format!("Target wallet division {to_div} not found"),
+                })?;
+            let source_bal = corp.wallet_divisions[from_pos].balance;
+            let new_source = source_bal.checked_sub(transfer_amount).ok_or_else(|| BridgeRpcError {
+                code: "InsufficientDivisionFunds".into(),
+                message: "Insufficient funds in source wallet division".into(),
+            })?;
+            let new_target = corp.wallet_divisions[to_pos]
+                .balance
+                .checked_add(transfer_amount)
+                .unwrap_or(corp.wallet_divisions[to_pos].balance);
+            corp.wallet_divisions[from_pos].balance = new_source;
+            corp.wallet_divisions[to_pos].balance = new_target;
+            Ok(())
+        });
+        return match res {
+            Ok(()) => Some(Ok(PyRep::keyval([
+                ("fromDivisionID", PyRep::Integer(from_div as i64)),
+                ("toDivisionID", PyRep::Integer(to_div as i64)),
+                ("transferredISK", PyRep::Real(amount_isk)),
+            ]))),
+            Err(e) => Some(Err(e)),
+        };
+    }
+
+    if service == "corpRegistry" && method == "InsertApplication" {
+        let (_, char_id) = match ServerContext::require_character(session) {
+            Ok(v) => v,
+            Err(e) => return Some(Err(e)),
+        };
+        let Some(corp_id) = args.first().and_then(|a| a.as_i64()) else {
+            return Some(Err(BridgeRpcError {
+                code: "InvalidArgument".into(),
+                message: "InsertApplication requires target corporationID".into(),
+            }));
+        };
+        let message = args.get(1).and_then(|a| a.as_str()).unwrap_or("o7 requesting to join");
+        let now_unix = ctx.now_unix();
+        let res = ctx.db.try_with_mut_snapshot(|snap| {
+            let Some(corp) = snap.corporations.get_mut(&corp_id) else {
+                return Err(BridgeRpcError {
+                    code: "CorporationNotFound".into(),
+                    message: format!("Corporation {corp_id} not found"),
+                });
+            };
+            if corp.members.contains(&char_id) {
+                return Err(BridgeRpcError {
+                    code: "AlreadyInCorporation".into(),
+                    message: "Character is already a member of this corporation".into(),
+                });
+            }
+            snap.next_entity_id += 1;
+            let app_id = snap.next_entity_id;
+            corp.applications.insert(
+                app_id,
+                CorpApplicationRecord {
+                    application_id: app_id,
+                    character_id: char_id,
+                    corporation_id: corp_id,
+                    message: message.to_string(),
+                    created_unix: now_unix,
+                    status: "Applied".into(),
+                },
+            );
+            Ok(app_id)
+        });
+        return match res {
+            Ok(app_id) => {
+                ctx.notify(
+                    NotificationTarget::Corporation(corp_id),
+                    "OnCorporationApplicationChanged",
+                    "corpid",
+                    vec![
+                        PyRep::Integer(corp_id),
+                        PyRep::Integer(char_id),
+                        PyRep::Integer(app_id),
+                    ],
+                );
+                Some(Ok(PyRep::keyval([
+                    ("applicationID", PyRep::Integer(app_id)),
+                    ("status", PyRep::String("Applied".into())),
+                ])))
+            }
+            Err(e) => Some(Err(e)),
+        };
+    }
+
+    if service == "corpRegistry" && method == "UpdateApplicationOffer" {
+        let (_, char_id) = match ServerContext::require_character(session) {
+            Ok(v) => v,
+            Err(e) => return Some(Err(e)),
+        };
+        let corp_id = match session.corporation_id {
+            Some(c) => c,
+            None => {
+                return Some(Err(BridgeRpcError {
+                    code: "NoCorporation".into(),
+                    message: "Character has no active corporation".into(),
+                }))
+            }
+        };
+        let Some(app_id) = args.first().and_then(|a| a.as_i64()) else {
+            return Some(Err(BridgeRpcError {
+                code: "InvalidArgument".into(),
+                message: "UpdateApplicationOffer requires applicationID".into(),
+            }));
+        };
+        let res = ctx.db.try_with_mut_snapshot(|snap| {
+            let Some(corp) = snap.corporations.get_mut(&corp_id) else {
+                return Err(BridgeRpcError {
+                    code: "CorporationNotFound".into(),
+                    message: format!("Corporation {corp_id} not found"),
+                });
+            };
+            let caller_role = corp.member_roles.get(&char_id).copied().unwrap_or(0);
+            if char_id != corp.ceo_id && !corp_roles::has_role(caller_role, corp_roles::ROLE_PERSONNEL_MANAGER) {
+                return Err(BridgeRpcError {
+                    code: "CorpRoleDenied".into(),
+                    message: "Accepting applications requires Personnel Manager or Director role".into(),
+                });
+            }
+            let Some(app) = corp.applications.get_mut(&app_id) else {
+                return Err(BridgeRpcError {
+                    code: "ApplicationNotFound".into(),
+                    message: format!("Application {app_id} not found"),
+                });
+            };
+            let applicant_id = app.character_id;
+            app.status = "Accepted".into();
+            corp.members.insert(applicant_id);
+            corp.member_roles.insert(applicant_id, 0);
+            if let Some(ch) = snap.characters.get_mut(&applicant_id) {
+                ch.corporation_id = corp_id;
+                ch.alliance_id = corp.alliance_id;
+            }
+            Ok(applicant_id)
+        });
+        return match res {
+            Ok(applicant_id) => {
+                ctx.notify(
+                    NotificationTarget::Character(applicant_id),
+                    "OnCorporationApplicationChanged",
+                    "charid",
+                    vec![PyRep::Integer(corp_id), PyRep::Integer(app_id)],
+                );
+                Some(Ok(PyRep::keyval([
+                    ("applicationID", PyRep::Integer(app_id)),
+                    ("status", PyRep::String("Accepted".into())),
+                    ("characterID", PyRep::Integer(applicant_id)),
+                ])))
+            }
+            Err(e) => Some(Err(e)),
+        };
+    }
+
+    if !matches!(service, "accessGroupBookmarkMgr" | "bookmark") {
+        return None;
+    }
+
+    if method == "AddFolder" {
+        let (_, char_id) = match ServerContext::require_character(session) {
+            Ok(v) => v,
+            Err(e) => return Some(Err(e)),
+        };
+        let name = args.first().and_then(|a| a.as_str()).unwrap_or("New Folder");
+        let is_shared = matches!(args.get(1), Some(PyRep::Bool(true)))
+            || args.get(1).and_then(|a| a.as_i64()).is_some_and(|v| v > 0);
+        if is_shared {
+            let db_corp_id = ctx.db.with_snapshot(|snap| {
+                snap.characters
+                    .get(&char_id)
+                    .map(|c| c.corporation_id)
+                    .filter(|cid| snap.corporations.contains_key(cid))
+            });
+            if let Some(cid) = db_corp_id {
+                session.corporation_id = Some(cid);
+            }
+            let corp_id = match session.corporation_id {
+                Some(c) => c,
+                None => {
+                    return Some(Err(BridgeRpcError {
+                        code: "NoCorporation".into(),
+                        message: "Creating shared folder requires corporation membership".into(),
+                    }))
+                }
+            };
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let has_rights = if let Some(corp) = snap.corporations.get(&corp_id) {
+                    let role = corp.member_roles.get(&char_id).copied().unwrap_or(0);
+                    char_id == corp.ceo_id
+                        || corp_roles::has_role(role, corp_roles::ROLE_DIRECTOR)
+                        || corp_roles::has_role(role, corp_roles::ROLE_PERSONNEL_MANAGER)
+                } else {
+                    corp_roles::has_role(session.corp_role, corp_roles::ROLE_DIRECTOR)
+                        || corp_roles::has_role(session.corp_role, corp_roles::ROLE_PERSONNEL_MANAGER)
+                };
+                if !has_rights {
+                    return Err(BridgeRpcError {
+                        code: "BookmarkAccessDenied".into(),
+                        message: "Creating a shared bookmark folder requires corporation Director/CEO access-group rights".into(),
+                    });
+                }
+                snap.next_entity_id += 1;
+                let id = snap.next_entity_id;
+                snap.bookmark_folders.insert(
+                    id,
+                    BookmarkFolderRecord {
+                        folder_id: id,
+                        owner_id: char_id,
+                        folder_name: name.to_string(),
+                        is_shared: true,
+                        corporation_id: Some(corp_id),
+                    },
+                );
+                Ok(id)
+            });
+            return match res {
+                Ok(folder_id) => {
+                    ctx.notify(
+                        NotificationTarget::Corporation(corp_id),
+                        "OnSharedBookmarksFolderUpdated",
+                        "corpid",
+                        vec![PyRep::Integer(folder_id), PyRep::Integer(corp_id)],
+                    );
+                    Some(Ok(PyRep::keyval([
+                        ("folderID", PyRep::Integer(folder_id)),
+                        ("folderName", PyRep::String(name.to_string())),
+                        ("isShared", PyRep::Bool(true)),
+                        ("corporationID", PyRep::Integer(corp_id)),
+                    ])))
+                }
+                Err(e) => Some(Err(e)),
+            };
+        }
+
+        let res = ctx.db.try_with_mut_snapshot(|snap| {
+            let personal_root_count = snap
+                .bookmark_folders
+                .values()
+                .filter(|f| f.owner_id == char_id && !f.is_shared && !f.folder_name.contains('/'))
+                .count();
+            if personal_root_count >= 5 {
+                return Err(BridgeRpcError {
+                    code: "MaxPersonalFoldersReached".into(),
+                    message: "Character has reached the maximum of 5 personal bookmark folders".into(),
+                });
+            }
+            snap.next_entity_id += 1;
+            let id = snap.next_entity_id;
+            snap.bookmark_folders.insert(
+                id,
+                BookmarkFolderRecord {
+                    folder_id: id,
+                    owner_id: char_id,
+                    folder_name: name.to_string(),
+                    is_shared: false,
+                    corporation_id: None,
+                },
+            );
+            Ok(id)
+        });
+        return match res {
+            Ok(folder_id) => Some(Ok(PyRep::keyval([
+                ("folderID", PyRep::Integer(folder_id)),
+                ("folderName", PyRep::String(name.to_string())),
+                ("isShared", PyRep::Bool(false)),
+            ]))),
+            Err(e) => Some(Err(e)),
+        };
+    }
+
+    if method == "DeleteFolder" {
+        let (_, char_id) = match ServerContext::require_character(session) {
+            Ok(v) => v,
+            Err(e) => return Some(Err(e)),
+        };
+        let Some(folder_id) = args.first().and_then(|a| a.as_i64()) else {
+            return Some(Err(BridgeRpcError {
+                code: "InvalidArgument".into(),
+                message: "DeleteFolder requires folderID".into(),
+            }));
+        };
+        let res = ctx.db.try_with_mut_snapshot(|snap| {
+            let Some(f) = snap.bookmark_folders.get(&folder_id) else {
+                return Err(BridgeRpcError {
+                    code: "FolderNotFound".into(),
+                    message: format!("Folder {folder_id} not found"),
+                });
+            };
+            if f.owner_id != char_id {
+                return Err(BridgeRpcError {
+                    code: "AccessDenied".into(),
+                    message: "Cannot delete another character's folder".into(),
+                });
+            }
+            snap.bookmark_folders.remove(&folder_id);
+            for bm in snap.bookmarks.values_mut() {
+                if bm.folder_id == Some(folder_id) {
+                    bm.folder_id = None;
+                }
+            }
+            Ok(())
+        });
+        return match res {
+            Ok(()) => Some(Ok(PyRep::keyval([
+                ("folderID", PyRep::Integer(folder_id)),
+                ("deleted", PyRep::Bool(true)),
+            ]))),
+            Err(e) => Some(Err(e)),
+        };
+    }
+
+    if method == "CreateSubfolder" {
+        let (_, char_id) = match ServerContext::require_character(session) {
+            Ok(v) => v,
+            Err(e) => return Some(Err(e)),
+        };
+        let Some(parent_folder_id) = args.first().and_then(|a| a.as_i64()) else {
+            return Some(Err(BridgeRpcError {
+                code: "InvalidArgument".into(),
+                message: "CreateSubfolder requires parent folderID".into(),
+            }));
+        };
+        let sub_name = args.get(1).and_then(|a| a.as_str()).unwrap_or("Subfolder");
+
+        let res = ctx.db.try_with_mut_snapshot(|snap| {
+            let Some(parent) = snap.bookmark_folders.get(&parent_folder_id).cloned() else {
+                return Err(BridgeRpcError {
+                    code: "FolderNotFound".into(),
+                    message: format!("Parent folder {parent_folder_id} not found"),
+                });
+            };
+            let prefix = format!("{}/", parent.folder_name);
+            let sub_count = snap
+                .bookmark_folders
+                .values()
+                .filter(|f| f.owner_id == char_id && f.folder_name.starts_with(&prefix))
+                .count();
+            if sub_count >= 5 {
+                return Err(BridgeRpcError {
+                    code: "MaxSubfoldersReached".into(),
+                    message: "Maximum of 5 subfolders per folder reached".into(),
+                });
+            }
+            let full_name = format!("{}/{sub_name}", parent.folder_name);
+            snap.next_entity_id += 1;
+            let id = snap.next_entity_id;
+            snap.bookmark_folders.insert(
+                id,
+                BookmarkFolderRecord {
+                    folder_id: id,
+                    owner_id: char_id,
+                    folder_name: full_name.clone(),
+                    is_shared: parent.is_shared,
+                    corporation_id: parent.corporation_id,
+                },
+            );
+            Ok((id, full_name))
+        });
+
+        return match res {
+            Ok((subfolder_id, full_name)) => Some(Ok(PyRep::keyval([
+                ("subfolderID", PyRep::Integer(subfolder_id)),
+                ("folderID", PyRep::Integer(subfolder_id)),
+                ("parentFolderID", PyRep::Integer(parent_folder_id)),
+                ("subfolderName", PyRep::String(sub_name.to_string())),
+                ("folderName", PyRep::String(full_name)),
+            ]))),
+            Err(e) => Some(Err(e)),
+        };
+    }
+
+    if method == "DeleteSubfolder" {
+        let (_, char_id) = match ServerContext::require_character(session) {
+            Ok(v) => v,
+            Err(e) => return Some(Err(e)),
+        };
+        let Some(subfolder_id) = args.first().and_then(|a| a.as_i64()) else {
+            return Some(Err(BridgeRpcError {
+                code: "InvalidArgument".into(),
+                message: "DeleteSubfolder requires subfolderID".into(),
+            }));
+        };
+        let res = ctx.db.try_with_mut_snapshot(|snap| {
+            let Some(f) = snap.bookmark_folders.get(&subfolder_id) else {
+                return Err(BridgeRpcError {
+                    code: "SubfolderNotFound".into(),
+                    message: format!("Subfolder {subfolder_id} not found"),
+                });
+            };
+            if f.owner_id != char_id {
+                return Err(BridgeRpcError {
+                    code: "AccessDenied".into(),
+                    message: "Cannot delete another character's subfolder".into(),
+                });
+            }
+            snap.bookmark_folders.remove(&subfolder_id);
+            for bm in snap.bookmarks.values_mut() {
+                if bm.folder_id == Some(subfolder_id) {
+                    bm.folder_id = None;
+                }
+            }
+            Ok(())
+        });
+        return match res {
+            Ok(()) => Some(Ok(PyRep::keyval([
+                ("subfolderID", PyRep::Integer(subfolder_id)),
+                ("deleted", PyRep::Bool(true)),
+            ]))),
+            Err(e) => Some(Err(e)),
+        };
+    }
+
+    if method == "AddToKnownFolders" {
+        let (_, char_id) = match ServerContext::require_character(session) {
+            Ok(v) => v,
+            Err(e) => return Some(Err(e)),
+        };
+        let Some(folder_id) = args.first().and_then(|a| a.as_i64()) else {
+            return Some(Err(BridgeRpcError {
+                code: "InvalidArgument".into(),
+                message: "AddToKnownFolders requires folderID".into(),
+            }));
+        };
+        let db_corp_id = ctx.db.with_snapshot(|snap| {
+            snap.characters
+                .get(&char_id)
+                .map(|c| c.corporation_id)
+                .filter(|cid| snap.corporations.contains_key(cid))
+        });
+        if let Some(cid) = db_corp_id {
+            session.corporation_id = Some(cid);
+        }
+        let check = ctx.db.with_snapshot(|snap| {
+            let Some(f) = snap.bookmark_folders.get(&folder_id) else {
+                return Err(BridgeRpcError {
+                    code: "FolderNotFound".into(),
+                    message: format!("Shared folder {folder_id} not found"),
+                });
+            };
+            if !f.is_shared || f.corporation_id != session.corporation_id {
+                return Err(BridgeRpcError {
+                    code: "BookmarkAccessDenied".into(),
+                    message: "Character lacks access-group rights to subscribe to this shared bookmark folder".into(),
+                });
+            }
+            Ok((f.folder_name.clone(), f.corporation_id))
+        });
+        return match check {
+            Ok((folder_name, corp_id_opt)) => {
+                ctx.notify(
+                    NotificationTarget::Character(char_id),
+                    "OnSharedBookmarksFolderUpdated",
+                    "charid",
+                    vec![PyRep::Integer(folder_id), PyRep::Bool(true)],
+                );
+                if let Some(corp_id) = corp_id_opt {
+                    ctx.notify(
+                        NotificationTarget::Corporation(corp_id),
+                        "OnSharedBookmarksFolderUpdated",
+                        "corpid",
+                        vec![PyRep::Integer(folder_id), PyRep::Integer(corp_id)],
+                    );
+                }
+                Some(Ok(PyRep::keyval([
+                    ("folderID", PyRep::Integer(folder_id)),
+                    ("folderName", PyRep::String(folder_name)),
+                    ("subscribed", PyRep::Bool(true)),
+                ])))
+            }
+            Err(e) => Some(Err(e)),
+        };
+    }
+
+    if method == "RemoveFromKnownFolders" {
+        let (_, char_id) = match ServerContext::require_character(session) {
+            Ok(v) => v,
+            Err(e) => return Some(Err(e)),
+        };
+        let Some(folder_id) = args.first().and_then(|a| a.as_i64()) else {
+            return Some(Err(BridgeRpcError {
+                code: "InvalidArgument".into(),
+                message: "RemoveFromKnownFolders requires folderID".into(),
+            }));
+        };
+        let exists = ctx.db.with_snapshot(|snap| snap.bookmark_folders.contains_key(&folder_id));
+        if !exists {
+            return Some(Err(BridgeRpcError {
+                code: "FolderNotFound".into(),
+                message: format!("Shared folder {folder_id} not found"),
+            }));
+        }
+        ctx.notify(
+            NotificationTarget::Character(char_id),
+            "OnSharedBookmarksFolderUpdated",
+            "charid",
+            vec![PyRep::Integer(folder_id), PyRep::Bool(false)],
+        );
+        return Some(Ok(PyRep::keyval([
+            ("folderID", PyRep::Integer(folder_id)),
+            ("subscribed", PyRep::Bool(false)),
+        ])));
+    }
+
+    None
 }

@@ -204,10 +204,10 @@ pub fn rollback_dirty_from_sqlite(
     snap.skill_queues
         .retain(|cid, _| fp.skill_queues.contains_key(cid));
     for (&cid, &eh) in &fp.skill_queues {
-        if snap.skill_queues.get(&cid).map(fp_json) != Some(eh) {
+        if snap.skill_queues.get(&cid).map(|q| fp_skill_queue(q)) != Some(eh) {
             let mut q = Vec::new();
             let mut stmt = conn
-                .prepare("SELECT type_id, target_level, start_sp, end_sp, duration_seconds FROM skill_queues WHERE character_id = ?1 ORDER BY queue_index ASC")
+                .prepare("SELECT type_id, target_level, start_sp, end_sp, duration_seconds, started_at_unix FROM skill_queues WHERE character_id = ?1 ORDER BY queue_index ASC")
                 .map_err(|e| e.to_string())?;
             let rows = stmt
                 .query_map(params![cid], |r| {
@@ -217,6 +217,7 @@ pub fn rollback_dirty_from_sqlite(
                         start_sp: r.get(2)?,
                         end_sp: r.get(3)?,
                         duration_seconds: r.get(4)?,
+                        started_at_unix: r.get::<_, Option<i64>>(5)?.map(|v| v as u64),
                     })
                 })
                 .map_err(|e| e.to_string())?;
@@ -642,6 +643,158 @@ pub fn rollback_dirty_from_sqlite(
             );
             if let Ok(ast) = ast_res {
                 snap.asteroids.insert(id, ast);
+            }
+        }
+    }
+
+    // 29. character_last_jump_unix
+    snap.character_last_jump_unix
+        .retain(|k, _| fp.character_last_jump_unix.contains_key(k));
+    for (&k, &expected_v) in &fp.character_last_jump_unix {
+        if snap.character_last_jump_unix.get(&k) != Some(&expected_v) {
+            let res: Result<i64, _> = conn.query_row(
+                "SELECT last_jump_unix FROM character_last_jump_unix WHERE character_id = ?1",
+                params![k],
+                |r| r.get(0),
+            );
+            if let Ok(v) = res {
+                snap.character_last_jump_unix.insert(k, v as u64);
+            }
+        }
+    }
+
+    // 30. character_cspa_charges
+    snap.character_cspa_charges
+        .retain(|k, _| fp.character_cspa_charges.contains_key(k));
+    for (&k, &expected_cents) in &fp.character_cspa_charges {
+        if snap.character_cspa_charges.get(&k).map(|c| c.0) != Some(expected_cents) {
+            let res: Result<i64, _> = conn.query_row(
+                "SELECT cspa_charge_cents FROM character_cspa_charges WHERE character_id = ?1",
+                params![k],
+                |r| r.get(0),
+            );
+            if let Ok(cents) = res {
+                snap.character_cspa_charges.insert(k, IskCents(cents));
+            }
+        }
+    }
+
+    // 31. mail_timestamps
+    snap.mail_timestamps
+        .retain(|k, _| fp.mail_timestamps.contains_key(k));
+    for (&k, &expected_v) in &fp.mail_timestamps {
+        if snap.mail_timestamps.get(&k) != Some(&expected_v) {
+            let res: Result<i64, _> = conn.query_row(
+                "SELECT timestamp_unix FROM mail_timestamps WHERE mail_id = ?1",
+                params![k],
+                |r| r.get(0),
+            );
+            if let Ok(v) = res {
+                snap.mail_timestamps.insert(k, v as u64);
+            }
+        }
+    }
+
+    // 32. character_login_stats
+    snap.character_login_stats
+        .retain(|k, _| fp.character_login_stats.contains_key(k));
+    for (&k, &expected_h) in &fp.character_login_stats {
+        if snap.character_login_stats.get(&k).map(fp_json) != Some(expected_h) {
+            let res = conn.query_row(
+                "SELECT last_login_unix, last_logout_unix, logins_count FROM character_login_stats WHERE character_id = ?1",
+                params![k],
+                |r| {
+                    Ok(CharacterLoginStats {
+                        last_login_unix: r.get::<_, i64>(0)? as u64,
+                        last_logout_unix: r.get::<_, i64>(1)? as u64,
+                        logins_count: r.get::<_, i64>(2)? as u64,
+                    })
+                },
+            );
+            if let Ok(st) = res {
+                snap.character_login_stats.insert(k, st);
+            }
+        }
+    }
+
+    // 33. item_custom_names
+    snap.item_custom_names
+        .retain(|k, _| fp.item_custom_names.contains_key(k));
+    for (&k, &expected_h) in &fp.item_custom_names {
+        if snap.item_custom_names.get(&k).map(fp_json) != Some(expected_h) {
+            let res: Result<String, _> = conn.query_row(
+                "SELECT custom_name FROM item_custom_names WHERE item_id = ?1",
+                params![k],
+                |r| r.get(0),
+            );
+            if let Ok(name) = res {
+                snap.item_custom_names.insert(k, name);
+            }
+        }
+    }
+
+    // 34. item_positions
+    snap.item_positions
+        .retain(|k, _| fp.item_positions.contains_key(k));
+    for (&k, &expected_h) in &fp.item_positions {
+        if snap.item_positions.get(&k).map(fp_json) != Some(expected_h) {
+            let res: Result<[f64; 3], _> = conn.query_row(
+                "SELECT x, y, z FROM item_positions WHERE item_id = ?1",
+                params![k],
+                |r| Ok([r.get(0)?, r.get(1)?, r.get(2)?]),
+            );
+            if let Ok(pos) = res {
+                snap.item_positions.insert(k, pos);
+            }
+        }
+    }
+
+    // 35. structure_vulnerability_windows
+    snap.structure_vulnerability_windows
+        .retain(|k, _| fp.structure_vulnerability_windows.contains_key(k));
+    for (&k, &expected_v) in &fp.structure_vulnerability_windows {
+        if snap.structure_vulnerability_windows.get(&k) != Some(&expected_v) {
+            let res: Result<(i64, i64), _> = conn.query_row(
+                "SELECT window_start_unix, window_end_unix FROM structure_vulnerability_windows WHERE structure_id = ?1",
+                params![k],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            );
+            if let Ok(v) = res {
+                snap.structure_vulnerability_windows.insert(k, (v.0 as u64, v.1 as u64));
+            }
+        }
+    }
+
+    // 36. skill_history
+    snap.skill_history
+        .retain(|k, _| fp.skill_history.contains_key(k));
+    for (&k, &expected_h) in &fp.skill_history {
+        if snap.skill_history.get(&k).map(fp_json) != Some(expected_h) {
+            let res: Result<String, _> = conn.query_row(
+                "SELECT history_json FROM skill_history WHERE character_id = ?1",
+                params![k],
+                |r| r.get(0),
+            );
+            if let Ok(js) = res {
+                if let Ok(hist) = serde_json::from_str::<Vec<SkillHistoryEntry>>(&js) {
+                    snap.skill_history.insert(k, hist);
+                }
+            }
+        }
+    }
+
+    // 37. character_doll_info
+    snap.character_doll_info
+        .retain(|k, _| fp.character_doll_info.contains_key(k));
+    for (&k, &expected_h) in &fp.character_doll_info {
+        if snap.character_doll_info.get(&k).map(fp_json) != Some(expected_h) {
+            let res: Result<(String, String), _> = conn.query_row(
+                "SELECT doll_dna, portrait_meta FROM character_doll_info WHERE character_id = ?1",
+                params![k],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            );
+            if let Ok(info) = res {
+                snap.character_doll_info.insert(k, info);
             }
         }
     }

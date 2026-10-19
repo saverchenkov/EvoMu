@@ -45,13 +45,13 @@ async fn test_review_r6_np0_np1_regressions() {
     .await
     .unwrap();
 
-    // N-P1-3: planetMgr.CreateColony rejects forged planet_id where (planet_id / 1000) == sys_id
+    // N-P1-3: planetMgr.UserUpdateNetwork rejects forged planet_id where (planet_id / 1000) == sys_id
     let bad_planet = ctx
         .dispatch_rpc(
             &mut s1,
             "planetMgr",
             None,
-            "CreateColony",
+            "UserUpdateNetwork",
             &[PyRep::Integer(30_000_142_000)],
             &kw,
             None,
@@ -63,7 +63,7 @@ async fn test_review_r6_np0_np1_regressions() {
             &mut s1,
             "planetMgr",
             None,
-            "CreateColony",
+            "UserUpdateNetwork",
             &[PyRep::Integer(40_139_295)], // Amarr VIII is in 30002187, not Jita 30000142
             &kw,
             None,
@@ -74,18 +74,57 @@ async fn test_review_r6_np0_np1_regressions() {
         "PlanetNotInCurrentSystem"
     );
 
-    // CreateColony on Jita planet 40009082 and verify Flush deducts POCO export tax from wallet
+    // UserUpdateNetwork on Jita planet 40009082 and verify Flush deducts POCO export tax from wallet
+    let s1_ship_id = s1.ship_id.unwrap_or(100_000_001);
+    let prev_st = s1.station_id;
+    s1.station_id = None;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.station_id = None;
+        }
+        snap.next_entity_id += 1;
+        let id = snap.next_entity_id;
+        snap.items.insert(
+            id,
+            eve_db::InventoryItemRecord {
+                item_id: id,
+                type_id: 2254,
+                owner_id: 90_000_001,
+                location_id: s1_ship_id,
+                flag: eve_db::InventoryFlag::Cargo,
+                quantity: 1,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
     ctx.dispatch_rpc(
         &mut s1,
         "planetMgr",
         None,
-        "CreateColony",
-        &[PyRep::Integer(40_009_082)],
+        "UserUpdateNetwork",
+        &[
+            PyRep::Integer(40_009_082),
+            PyRep::List(vec![PyRep::Tuple(vec![
+                PyRep::Integer(1),
+                PyRep::Integer(1),
+                PyRep::Integer(2254),
+                PyRep::Real(0.1),
+                PyRep::Real(0.2),
+            ])]),
+        ],
         &kw,
         None,
     )
     .await
     .unwrap();
+    s1.station_id = prev_st;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.station_id = prev_st;
+        }
+    });
     let bal_before_flush = ctx.db.get_character(90_000_001).unwrap().balance.0;
     ctx.dispatch_rpc(
         &mut s1,
@@ -137,11 +176,18 @@ async fn test_review_r6_np0_np1_regressions() {
             None,
             "CreateContract",
             &[
-                PyRep::String("Courier".into()),
+                PyRep::Integer(3), // Courier
+                PyRep::Integer(0),
+                PyRep::Integer(0),
+                PyRep::Integer(1440),
+                PyRep::Integer(1),
                 PyRep::Integer(60_003_760),
                 PyRep::Integer(60_008_494),
+                PyRep::Real(0.0),
                 PyRep::Real(10_000.0),
                 PyRep::Real(25_000.0),
+                PyRep::String("".into()),
+                PyRep::String("".into()),
             ],
             &kw,
             None,
@@ -187,11 +233,18 @@ async fn test_review_r6_np0_np1_regressions() {
             None,
             "CreateContract",
             &[
-                PyRep::String("Courier".into()),
+                PyRep::Integer(3), // Courier
+                PyRep::Integer(0),
+                PyRep::Integer(0),
+                PyRep::Integer(1440),
+                PyRep::Integer(1),
                 PyRep::Integer(60_008_494),
                 PyRep::Integer(60_003_760),
+                PyRep::Real(0.0),
                 PyRep::Real(10_000.0),
                 PyRep::Real(25_000.0),
+                PyRep::String("".into()),
+                PyRep::String("".into()),
             ],
             &kw,
             None,
@@ -236,11 +289,18 @@ async fn test_review_r6_np0_np1_regressions() {
             None,
             "CreateContract",
             &[
-                PyRep::String("Courier".into()),
+                PyRep::Integer(3), // Courier
+                PyRep::Integer(0),
+                PyRep::Integer(0),
+                PyRep::Integer(1440),
+                PyRep::Integer(1),
                 PyRep::Integer(60_003_760),
                 PyRep::Integer(60_008_494),
+                PyRep::Real(0.0),
                 PyRep::Real(10_000.0),
                 PyRep::Real(25_000.0),
+                PyRep::String("".into()),
+                PyRep::String("".into()),
             ],
             &kw,
             None,
@@ -314,7 +374,7 @@ async fn test_review_r6_np0_np1_regressions() {
         Some("Completed")
     );
 
-    // N-P1-7 & R7-P1-3: Seed a player ask order in Jita for Tritanium (34) at 4.00 ISK, verify Auction contract rejection (R7-P1-1), undock s1 in Jita (auto-promoting convoy 800_000_001 to LOD 2), destroy convoy via dogmaIM.FireWeapon, and verify space wreck + +15% NPC ask spike + player order untouched
+    // N-P1-7 & R7-P1-3: Seed a player ask order in Jita for Tritanium (34) at 4.00 ISK, verify invalid contract type rejection, undock s1 in Jita (auto-promoting convoy 800_000_001 to LOD 2), destroy convoy via dogmaIM.FireWeapon, and verify space wreck + +15% NPC ask spike + player order untouched
     let auction_err = ctx
         .dispatch_rpc(
             &mut s1,

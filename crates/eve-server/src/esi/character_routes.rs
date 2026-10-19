@@ -37,22 +37,56 @@ fn parse_unique_id_array(req_body: &[u8], max_items: usize) -> Result<Vec<i64>, 
 }
 
 fn resolve_item_coordinates(
-    _ctx: &ServerContext,
+    ctx: &ServerContext,
     snap: &eve_db::WorldStateSnapshot,
     item: &eve_db::InventoryItemRecord,
 ) -> [f64; 3] {
+    let mut root = item;
+    for _ in 0..8 {
+        if let Some(parent) = snap.items.get(&root.location_id) {
+            root = parent;
+        } else {
+            break;
+        }
+    }
+    // Items docked inside a station or structure hangar always have (0.0, 0.0, 0.0) in ESI /assets/locations
+    if (60_000_000..64_000_000).contains(&root.location_id) {
+        return [0.0, 0.0, 0.0];
+    }
+    if snap.structures.contains_key(&root.location_id) && root.flag != InventoryFlag::None {
+        return [0.0, 0.0, 0.0];
+    }
     if let Some(&pos) = snap.item_positions.get(&item.item_id) {
         return pos;
+    }
+    if let Some(&pos) = snap.item_positions.get(&root.item_id) {
+        return pos;
+    }
+    if (30_000_000..33_000_000).contains(&root.location_id) {
+        let solar_system_id = root.location_id as u32;
+        if let Some(pos) = ctx
+            .systems
+            .get_ball_position_sync(solar_system_id, item.item_id)
+            .or_else(|| ctx.systems.get_ball_position_sync(solar_system_id, root.item_id))
+        {
+            return [pos.x, pos.y, pos.z];
+        }
+    }
+    if let Some(pos) = ctx
+        .systems
+        .find_ball_position_sync(item.item_id)
+        .or_else(|| ctx.systems.find_ball_position_sync(root.item_id))
+    {
+        return [pos.x, pos.y, pos.z];
     }
     if let Some(st) = snap.structures.get(&item.item_id) {
         return st.position;
     }
-    if let Some(parent) = snap.items.get(&item.location_id) {
-        if let Some(&pos) = snap.item_positions.get(&parent.item_id) {
-            return pos;
+    if let Some(st) = snap.structures.get(&root.location_id) {
+        if root.flag == InventoryFlag::None {
+            return st.position;
         }
     }
-    // Items docked inside a station or structure hangar have (0, 0, 0) in ESI /assets/locations
     [0.0, 0.0, 0.0]
 }
 
@@ -338,26 +372,38 @@ pub fn dispatch_character_routes(
                     .unwrap_or(0);
                 if last_jump_unix > 0 {
                     let ts = format_iso8601_utc(last_jump_unix);
-                    obj.insert("last_jump_date".into(), json!(ts.clone()));
-                    obj.insert("last_update_date".into(), json!(ts));
+                    obj.insert("last_jump_date".into(), json!(ts));
                 }
-                if ch.jump_fatigue_minutes > 0.0 {
+                if ch.jump_cooldown_until_unix > 0 {
+                    obj.insert(
+                        "last_update_date".into(),
+                        json!(format_iso8601_utc(ch.jump_cooldown_until_unix)),
+                    );
+                } else if last_jump_unix > 0 {
+                    obj.insert(
+                        "last_update_date".into(),
+                        json!(format_iso8601_utc(last_jump_unix)),
+                    );
+                }
+                let fatigue_until = if ch.jump_fatigue_until_unix > 0 {
+                    Some(ch.jump_fatigue_until_unix)
+                } else if ch.jump_fatigue_minutes > 0.0 {
                     let anchor = if last_jump_unix > 0 {
                         last_jump_unix
                     } else {
                         now
                     };
-                    let exp =
-                        anchor.saturating_add((ch.jump_fatigue_minutes * 60.0).round() as u64);
-                    obj.insert(
-                        "jump_fatigue_expire_date".into(),
-                        json!(format_iso8601_utc(exp)),
-                    );
-                } else if ch.jump_cooldown_until_unix > 0 {
-                    obj.insert(
-                        "jump_fatigue_expire_date".into(),
-                        json!(format_iso8601_utc(ch.jump_cooldown_until_unix)),
-                    );
+                    Some(anchor.saturating_add((ch.jump_fatigue_minutes * 60.0).round() as u64))
+                } else {
+                    None
+                };
+                if let Some(fat_unix) = fatigue_until {
+                    if fat_unix > now {
+                        obj.insert(
+                            "jump_fatigue_expire_date".into(),
+                            json!(format_iso8601_utc(fat_unix)),
+                        );
+                    }
                 }
                 RouteExecutionResult::ok_json(Value::Object(obj), 300)
             }))
@@ -620,7 +666,11 @@ pub fn dispatch_character_routes(
                 let clone_mult = if ch.clone_grade >= 2 { 1.0 } else { 0.5 };
                 let mut out = Vec::new();
                 if let Some(queue) = snap.skill_queues.get(&char_id) {
-                    let mut cursor_unix = now;
+                    let queue_anchor = queue
+                        .first()
+                        .and_then(|e| e.started_at_unix)
+                        .unwrap_or(now);
+                    let mut cursor_unix = queue_anchor;
                     for (idx, entry) in queue.iter().enumerate() {
                         let skill_type = ctx.sde.types.get(&entry.type_id);
                         let rank = skill_type
@@ -1155,18 +1205,7 @@ pub fn dispatch_character_routes(
                 };
                 let mut divisions = Vec::with_capacity(7);
                 for div in 1..=7u8 {
-                    let bal = corp
-                        .wallet_divisions
-                        .iter()
-                        .find(|d| d.division_id == div)
-                        .map(|d| d.balance.to_wire_f64())
-                        .unwrap_or_else(|| {
-                            if div == 1 {
-                                corp.master_wallet.to_wire_f64()
-                            } else {
-                                0.0
-                            }
-                        });
+                    let bal = corp.division_balance(div).to_wire_f64();
                     divisions.push(json!({
                         "division": div as i64,
                         "balance": bal,
@@ -1417,7 +1456,15 @@ pub fn dispatch_character_routes(
                             .characters
                             .get(&rid)
                             .is_some_and(|rc| rc.corporation_id == sender.corporation_id);
-                        if !same_corp {
+                        let is_exempt_contact = ctx
+                            .esi_state
+                            .char_contacts
+                            .read()
+                            .ok()
+                            .and_then(|map| map.get(&rid).cloned())
+                            .and_then(|list| list.into_iter().find(|c| c.contact_id == char_id))
+                            .is_some_and(|c| !c.is_blocked && c.standing > -10.0);
+                        if !same_corp && !is_exempt_contact {
                             let cspa = snap
                                 .character_cspa_charges
                                 .get(&rid)

@@ -183,6 +183,7 @@ impl WorldRepository {
                 last_clone_jump_unix: 0,
                 jump_fatigue_minutes: 0.0,
                 jump_cooldown_until_unix: 0,
+                jump_fatigue_until_unix: 0,
                 description: String::new(),
                 title: String::new(),
                 gender: 0,

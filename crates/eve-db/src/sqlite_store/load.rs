@@ -92,7 +92,7 @@ pub fn load_snapshot_from_sqlite(
 
     {
         let mut stmt = conn
-            .prepare("SELECT character_id, type_id, target_level, start_sp, end_sp, duration_seconds FROM skill_queues ORDER BY character_id ASC, queue_index ASC")
+            .prepare("SELECT character_id, type_id, target_level, start_sp, end_sp, duration_seconds, started_at_unix FROM skill_queues ORDER BY character_id ASC, queue_index ASC")
             .map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map([], |r| {
@@ -104,6 +104,7 @@ pub fn load_snapshot_from_sqlite(
                         start_sp: r.get(3)?,
                         end_sp: r.get(4)?,
                         duration_seconds: r.get(5)?,
+                        started_at_unix: r.get::<_, Option<i64>>(6)?.map(|v| v as u64),
                     },
                 ))
             })
@@ -618,6 +619,122 @@ pub fn load_snapshot_from_sqlite(
             }) {
                 for r in rows.flatten() {
                     snap.asteroids.insert(r.asteroid_id, r);
+                }
+            }
+        }
+    }
+
+    {
+        if let Ok(mut stmt) = conn.prepare("SELECT character_id, last_jump_unix FROM character_last_jump_unix") {
+            if let Ok(rows) = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)? as u64))) {
+                for r in rows.flatten() {
+                    snap.character_last_jump_unix.insert(r.0, r.1);
+                }
+            }
+        }
+    }
+
+    {
+        if let Ok(mut stmt) = conn.prepare("SELECT character_id, cspa_charge_cents FROM character_cspa_charges") {
+            if let Ok(rows) = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, IskCents(r.get::<_, i64>(1)?)))) {
+                for r in rows.flatten() {
+                    snap.character_cspa_charges.insert(r.0, r.1);
+                }
+            }
+        }
+    }
+
+    {
+        if let Ok(mut stmt) = conn.prepare("SELECT mail_id, timestamp_unix FROM mail_timestamps") {
+            if let Ok(rows) = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)? as u64))) {
+                for r in rows.flatten() {
+                    snap.mail_timestamps.insert(r.0, r.1);
+                }
+            }
+        }
+    }
+
+    {
+        if let Ok(mut stmt) = conn.prepare("SELECT character_id, last_login_unix, last_logout_unix, logins_count FROM character_login_stats") {
+            if let Ok(rows) = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    CharacterLoginStats {
+                        last_login_unix: r.get::<_, i64>(1)? as u64,
+                        last_logout_unix: r.get::<_, i64>(2)? as u64,
+                        logins_count: r.get::<_, i64>(3)? as u64,
+                    },
+                ))
+            }) {
+                for r in rows.flatten() {
+                    snap.character_login_stats.insert(r.0, r.1);
+                }
+            }
+        }
+    }
+
+    {
+        if let Ok(mut stmt) = conn.prepare("SELECT item_id, custom_name FROM item_custom_names") {
+            if let Ok(rows) = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))) {
+                for r in rows.flatten() {
+                    snap.item_custom_names.insert(r.0, r.1);
+                }
+            }
+        }
+    }
+
+    {
+        if let Ok(mut stmt) = conn.prepare("SELECT item_id, x, y, z FROM item_positions") {
+            if let Ok(rows) = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    [r.get::<_, f64>(1)?, r.get::<_, f64>(2)?, r.get::<_, f64>(3)?],
+                ))
+            }) {
+                for r in rows.flatten() {
+                    snap.item_positions.insert(r.0, r.1);
+                }
+            }
+        }
+    }
+
+    {
+        if let Ok(mut stmt) = conn.prepare("SELECT structure_id, window_start_unix, window_end_unix FROM structure_vulnerability_windows") {
+            if let Ok(rows) = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    (r.get::<_, i64>(1)? as u64, r.get::<_, i64>(2)? as u64),
+                ))
+            }) {
+                for r in rows.flatten() {
+                    snap.structure_vulnerability_windows.insert(r.0, r.1);
+                }
+            }
+        }
+    }
+
+    {
+        if let Ok(mut stmt) = conn.prepare("SELECT character_id, history_json FROM skill_history") {
+            if let Ok(rows) = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))) {
+                for r in rows.flatten() {
+                    if let Ok(hist) = serde_json::from_str::<Vec<SkillHistoryEntry>>(&r.1) {
+                        snap.skill_history.insert(r.0, hist);
+                    }
+                }
+            }
+        }
+    }
+
+    {
+        if let Ok(mut stmt) = conn.prepare("SELECT character_id, doll_dna, portrait_meta FROM character_doll_info") {
+            if let Ok(rows) = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    (r.get::<_, String>(1)?, r.get::<_, String>(2)?),
+                ))
+            }) {
+                for r in rows.flatten() {
+                    snap.character_doll_info.insert(r.0, r.1);
                 }
             }
         }

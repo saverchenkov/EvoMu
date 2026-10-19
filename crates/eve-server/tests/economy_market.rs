@@ -87,22 +87,23 @@ async fn test_e1_broker_fee_and_sales_tax_skill_discounts() {
             &mut s1,
             "marketProxy",
             None,
-            "PlaceCharOrder",
+            "PlaceBuyOrder",
             &[
                 PyRep::Integer(JITA_STATION_ID),
                 PyRep::Integer(TRITANIUM_TYPE_ID as i64),
                 PyRep::Real(1.0),
                 PyRep::Integer(10_000),
-                PyRep::Bool(true),
+                PyRep::Integer(90),
+                PyRep::Integer(1),
             ],
             &kw,
             None,
         )
         .await
-        .expect("PlaceCharOrder level 0");
+        .expect("PlaceBuyOrder level 0");
 
     let PyRep::KeyVal(kv_l0) = order_l0 else {
-        panic!("Expected KeyVal from PlaceCharOrder");
+        panic!("Expected KeyVal from PlaceBuyOrder");
     };
     assert_eq!(kv_l0.get("filledImmediately"), Some(&PyRep::Bool(false)));
     let fee_l0 = kv_l0
@@ -146,22 +147,23 @@ async fn test_e1_broker_fee_and_sales_tax_skill_discounts() {
             &mut s1,
             "marketProxy",
             None,
-            "PlaceCharOrder",
+            "PlaceBuyOrder",
             &[
                 PyRep::Integer(JITA_STATION_ID),
                 PyRep::Integer(TRITANIUM_TYPE_ID as i64),
                 PyRep::Real(1.0),
                 PyRep::Integer(10_000),
-                PyRep::Bool(true),
+                PyRep::Integer(90),
+                PyRep::Integer(1),
             ],
             &kw,
             None,
         )
         .await
-        .expect("PlaceCharOrder level 5");
+        .expect("PlaceBuyOrder level 5");
 
     let PyRep::KeyVal(kv_l5) = order_l5 else {
-        panic!("Expected KeyVal from PlaceCharOrder");
+        panic!("Expected KeyVal from PlaceBuyOrder");
     };
     assert_eq!(kv_l5.get("filledImmediately"), Some(&PyRep::Bool(false)));
     let fee_l5 = kv_l5
@@ -205,13 +207,14 @@ async fn test_e1_broker_fee_and_sales_tax_skill_discounts() {
             &mut s1,
             "marketProxy",
             None,
-            "PlaceCharOrder",
+            "PlaceBuyOrder",
             &[
                 PyRep::Integer(JITA_STATION_ID),
                 PyRep::Integer(TRITANIUM_TYPE_ID as i64),
                 PyRep::Real(1.0),
                 PyRep::Integer(200),
-                PyRep::Bool(true),
+                PyRep::Integer(90),
+                PyRep::Integer(1),
             ],
             &kw,
             None,
@@ -261,19 +264,23 @@ async fn test_e1_broker_fee_and_sales_tax_skill_discounts() {
             &mut s2,
             "marketProxy",
             None,
-            "PlaceCharOrder",
+            "PlaceMultiSellOrder",
             &[
-                PyRep::Integer(JITA_STATION_ID),
-                PyRep::Integer(TRITANIUM_TYPE_ID as i64),
-                PyRep::Real(1.0),
-                PyRep::Integer(100),
+                PyRep::List(vec![PyRep::keyval([
+                    ("stationID", PyRep::Integer(JITA_STATION_ID)),
+                    ("typeID", PyRep::Integer(TRITANIUM_TYPE_ID as i64)),
+                    ("price", PyRep::Real(1.0)),
+                    ("quantity", PyRep::Integer(100)),
+                ])]),
                 PyRep::Bool(false),
+                PyRep::Integer(90),
+                PyRep::Real(0.0),
             ],
             &kw,
             None,
         )
         .await
-        .expect("PlaceCharOrder sell level 0");
+        .expect("PlaceMultiSellOrder sell level 0");
 
     let PyRep::KeyVal(sell_l0_kv) = sell_l0 else {
         panic!("Expected KeyVal");
@@ -319,19 +326,23 @@ async fn test_e1_broker_fee_and_sales_tax_skill_discounts() {
             &mut s2,
             "marketProxy",
             None,
-            "PlaceCharOrder",
+            "PlaceMultiSellOrder",
             &[
-                PyRep::Integer(JITA_STATION_ID),
-                PyRep::Integer(TRITANIUM_TYPE_ID as i64),
-                PyRep::Real(1.0),
-                PyRep::Integer(100),
+                PyRep::List(vec![PyRep::keyval([
+                    ("stationID", PyRep::Integer(JITA_STATION_ID)),
+                    ("typeID", PyRep::Integer(TRITANIUM_TYPE_ID as i64)),
+                    ("price", PyRep::Real(1.0)),
+                    ("quantity", PyRep::Integer(100)),
+                ])]),
                 PyRep::Bool(false),
+                PyRep::Integer(90),
+                PyRep::Real(0.0),
             ],
             &kw,
             None,
         )
         .await
-        .expect("PlaceCharOrder sell level 5");
+        .expect("PlaceMultiSellOrder sell level 5");
 
     let PyRep::KeyVal(sell_l5_kv) = sell_l5 else {
         panic!("Expected KeyVal");
@@ -432,13 +443,17 @@ async fn test_e2_market_order_matching_queries_and_cancellation() {
             &mut s1,
             "marketProxy",
             None,
-            "PlaceCharOrder",
+            "PlaceMultiSellOrder",
             &[
-                PyRep::Integer(JITA_STATION_ID),
-                PyRep::Integer(TRITANIUM_TYPE_ID as i64),
-                PyRep::Real(15.00),
-                PyRep::Integer(1_000),
+                PyRep::List(vec![PyRep::keyval([
+                    ("stationID", PyRep::Integer(JITA_STATION_ID)),
+                    ("typeID", PyRep::Integer(TRITANIUM_TYPE_ID as i64)),
+                    ("price", PyRep::Real(15.00)),
+                    ("quantity", PyRep::Integer(1_000)),
+                ])]),
                 PyRep::Bool(false),
+                PyRep::Integer(90),
+                PyRep::Real(0.0),
             ],
             &kw,
             None,
@@ -520,13 +535,17 @@ async fn test_e2_market_order_matching_queries_and_cancellation() {
             &mut s1,
             "marketProxy",
             None,
-            "PlaceCharOrder",
+            "PlaceMultiSellOrder",
             &[
-                PyRep::Integer(JITA_STATION_ID),
-                PyRep::Integer(TRITANIUM_TYPE_ID as i64),
-                PyRep::Real(3.00),
-                PyRep::Integer(100),
+                PyRep::List(vec![PyRep::keyval([
+                    ("stationID", PyRep::Integer(JITA_STATION_ID)),
+                    ("typeID", PyRep::Integer(TRITANIUM_TYPE_ID as i64)),
+                    ("price", PyRep::Real(3.00)),
+                    ("quantity", PyRep::Integer(100)),
+                ])]),
                 PyRep::Bool(false),
+                PyRep::Integer(90),
+                PyRep::Real(0.0),
             ],
             &kw,
             None,
@@ -557,13 +576,14 @@ async fn test_e2_market_order_matching_queries_and_cancellation() {
             &mut s2,
             "marketProxy",
             None,
-            "PlaceCharOrder",
+            "PlaceBuyOrder",
             &[
                 PyRep::Integer(JITA_STATION_ID),
                 PyRep::Integer(TRITANIUM_TYPE_ID as i64),
                 PyRep::Real(3.00),
                 PyRep::Integer(40),
-                PyRep::Bool(true),
+                PyRep::Integer(90),
+                PyRep::Integer(1),
             ],
             &kw,
             None,
@@ -621,13 +641,14 @@ async fn test_e2_market_order_matching_queries_and_cancellation() {
             &mut s2,
             "marketProxy",
             None,
-            "PlaceCharOrder",
+            "PlaceBuyOrder",
             &[
                 PyRep::Integer(JITA_STATION_ID),
                 PyRep::Integer(TRITANIUM_TYPE_ID as i64),
                 PyRep::Real(2.00),
                 PyRep::Integer(500), // gross = 1,000.00 ISK
-                PyRep::Bool(true),
+                PyRep::Integer(90),
+                PyRep::Integer(1),
             ],
             &kw,
             None,
@@ -716,12 +737,19 @@ async fn test_e3_contracts_lifecycle_item_exchange_courier_auction() {
             None,
             "CreateContract",
             &[
-                PyRep::String("ItemExchange".into()),
+                PyRep::Integer(1), // ItemExchange
+                PyRep::Integer(0), // Public
+                PyRep::Integer(0),
+                PyRep::Integer(1440),
+                PyRep::Integer(1),
                 PyRep::Integer(JITA_STATION_ID),
                 PyRep::Integer(JITA_STATION_ID),
                 PyRep::Real(50_000.0),
                 PyRep::Real(0.0),
-                PyRep::Integer(100_000_003),
+                PyRep::Real(0.0),
+                PyRep::String("".into()),
+                PyRep::String("".into()),
+                PyRep::List(vec![PyRep::Integer(100_000_003)]),
             ],
             &kw,
             None,
@@ -849,12 +877,19 @@ async fn test_e3_contracts_lifecycle_item_exchange_courier_auction() {
             None,
             "CreateContract",
             &[
-                PyRep::String("Courier".into()),
+                PyRep::Integer(3), // Courier
+                PyRep::Integer(0), // Public
+                PyRep::Integer(0),
+                PyRep::Integer(1440),
+                PyRep::Integer(1),
                 PyRep::Integer(JITA_STATION_ID),
                 PyRep::Integer(JITA_STATION_ID),
+                PyRep::Real(0.0),
                 PyRep::Real(20_000.0),  // reward
                 PyRep::Real(100_000.0), // collateral
-                PyRep::Integer(courier_item_id),
+                PyRep::String("".into()),
+                PyRep::String("".into()),
+                PyRep::List(vec![PyRep::Integer(courier_item_id)]),
             ],
             &kw,
             None,
@@ -940,12 +975,19 @@ async fn test_e3_contracts_lifecycle_item_exchange_courier_auction() {
             None,
             "CreateContract",
             &[
-                PyRep::String("Auction".into()),
+                PyRep::Integer(2), // Auction
+                PyRep::Integer(0), // Public
+                PyRep::Integer(0),
+                PyRep::Integer(1440),
+                PyRep::Integer(1),
                 PyRep::Integer(JITA_STATION_ID),
                 PyRep::Integer(JITA_STATION_ID),
                 PyRep::Real(10_000.0), // starting bid
+                PyRep::Real(0.0),
                 PyRep::Real(50_000.0), // buyout
-                PyRep::Integer(auction_item_id),
+                PyRep::String("".into()),
+                PyRep::String("".into()),
+                PyRep::List(vec![PyRep::Integer(auction_item_id)]),
             ],
             &kw,
             None,
@@ -1333,24 +1375,62 @@ async fn test_e5_planetary_interaction_lifecycle() {
 
     let mut s1 = setup_pilot(&ctx, 501, "demo", "demo-secret", 90_000_001).await;
 
-    // 1. Create Colony on Jita planet 40009082
+    // 1. Create Colony on Jita planet 40009082 using COMMAND_CREATEPIN = 1 while undocked with CC in ship cargo
+    let s1_ship_id = s1.ship_id.expect("s1 active ship");
+    s1.station_id = None;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.station_id = None;
+        }
+        snap.next_entity_id += 1;
+        let id = snap.next_entity_id;
+        snap.items.insert(
+            id,
+            InventoryItemRecord {
+                item_id: id,
+                type_id: 2254,
+                owner_id: 90_000_001,
+                location_id: s1_ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 1,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
     let create_colony = ctx
         .dispatch_rpc(
             &mut s1,
             "planetMgr",
             None,
-            "CreateColony",
-            &[PyRep::Integer(JITA_PLANET_ID)],
+            "UserUpdateNetwork",
+            &[
+                PyRep::Integer(JITA_PLANET_ID),
+                PyRep::List(vec![PyRep::Tuple(vec![
+                    PyRep::Integer(1),
+                    PyRep::Integer(1),
+                    PyRep::Integer(2254),
+                    PyRep::Real(0.1),
+                    PyRep::Real(0.2),
+                ])]),
+            ],
             &kw,
             None,
         )
         .await
-        .expect("CreateColony");
+        .expect("UserUpdateNetwork");
+    s1.station_id = Some(JITA_STATION_ID);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.station_id = Some(JITA_STATION_ID);
+        }
+    });
     let PyRep::KeyVal(col_kv) = create_colony else {
         panic!("Expected KeyVal");
     };
-    assert_eq!(col_kv.get("commandCenterLevel"), Some(&PyRep::Integer(1)));
-    assert_eq!(col_kv.get("pinsCount"), Some(&PyRep::Integer(2)));
+    assert_eq!(col_kv.get("commandCenterLevel"), Some(&PyRep::Integer(0)));
+    assert_eq!(col_kv.get("pinsCount"), Some(&PyRep::Integer(1)));
 
     // 2. Command Center Upgrades validation
     // Clear skill 2505 to verify missing skill error
@@ -1392,7 +1472,7 @@ async fn test_e5_planetary_interaction_lifecycle() {
 
     let s1_bal_before_up = ctx.db.get_character(90_000_001).unwrap().balance;
 
-    // Upgrade Command Center to level 2 (cost: 2 * 250,000 = 500,000 ISK)
+    // Upgrade Command Center from level 0 to level 2 (cost: 580,000 + 930,000 = 1,510,000 ISK)
     let upgrade_res = ctx
         .dispatch_rpc(
             &mut s1,
@@ -1412,7 +1492,7 @@ async fn test_e5_planetary_interaction_lifecycle() {
     assert_eq!(up_kv.get("pinsCount"), Some(&PyRep::Integer(3)));
 
     let s1_bal_after_up = ctx.db.get_character(90_000_001).unwrap().balance;
-    assert_eq!(s1_bal_before_up.0 - s1_bal_after_up.0, 50_000_000); // 500,000 ISK in cents
+    assert_eq!(s1_bal_before_up.0 - s1_bal_after_up.0, 151_000_000); // 1,510,000 ISK in cents
 
     let has_cc_journal = ctx.db.with_snapshot(|snap| {
         snap.wallet_journal.iter().any(|j| {
@@ -1421,7 +1501,7 @@ async fn test_e5_planetary_interaction_lifecycle() {
     });
     assert!(has_cc_journal, "Wallet journal must record PlanetCommandCenterUpgrade");
 
-    // 3. Processor Conversion: ProcessCommodity
+    // 3. Processor Conversion: UserTransferCommodities
     // Seed 6,000 units of P0 commodity (type 2288: Aqueous Liquids) into colony storage
     let p0_type: TypeId = 2288;
     let p1_type: TypeId = 3645; // Water
@@ -1436,7 +1516,7 @@ async fn test_e5_planetary_interaction_lifecycle() {
             &mut s1,
             "planetMgr",
             None,
-            "ProcessCommodity",
+            "UserTransferCommodities",
             &[
                 PyRep::Integer(JITA_PLANET_ID),
                 PyRep::Integer(p0_type as i64),
@@ -1447,7 +1527,7 @@ async fn test_e5_planetary_interaction_lifecycle() {
             None,
         )
         .await
-        .expect("ProcessCommodity");
+        .expect("UserTransferCommodities");
     let PyRep::KeyVal(proc_kv) = process_res else {
         panic!("Expected KeyVal");
     };
@@ -1455,13 +1535,13 @@ async fn test_e5_planetary_interaction_lifecycle() {
     assert_eq!(proc_kv.get("outputQuantityProduced"), Some(&PyRep::Integer(40)));
     assert_eq!(proc_kv.get("totalStoredOutput"), Some(&PyRep::Integer(40)));
 
-    // 4. Storage Routing: RouteCommodity to Hangar
+    // 4. Storage Routing: UserLaunchCommodities to Hangar
     let route_res = ctx
         .dispatch_rpc(
             &mut s1,
             "planetMgr",
             None,
-            "RouteCommodity",
+            "UserLaunchCommodities",
             &[
                 PyRep::Integer(JITA_PLANET_ID),
                 PyRep::Integer(p1_type as i64),
@@ -1472,7 +1552,7 @@ async fn test_e5_planetary_interaction_lifecycle() {
             None,
         )
         .await
-        .expect("RouteCommodity");
+        .expect("UserLaunchCommodities");
     let PyRep::KeyVal(route_kv) = route_res else {
         panic!("Expected KeyVal");
     };

@@ -1635,10 +1635,70 @@ pub async fn handle(
                 (a1 as usize, a0)
             } else {
                 return Some(Err(BridgeRpcError {
-                    code: "InvalidTubeIndex".into(),
+                    code: "InvalidFighterTube".into(),
                     message: "LoadFightersToTube requires a valid tube index".into(),
                 }));
             };
+
+            let carrier_type_id = if let Some(struct_id) = session.structure_id {
+                ctx.db
+                    .with_snapshot(|snap| snap.structures.get(&struct_id).map(|s| s.type_id))
+                    .unwrap_or(0)
+            } else {
+                ctx.db
+                    .with_snapshot(|snap| snap.items.get(&ship_id).map(|s| s.type_id))
+                    .unwrap_or(0)
+            };
+            let tube_count = ctx
+                .sde
+                .types
+                .get(&carrier_type_id)
+                .and_then(|t| t.default_attributes.get(&2216).copied())
+                .map(|v| v as usize)
+                .unwrap_or(0);
+            if !(0..tube_count).contains(&tube_idx) {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidFighterTube".into(),
+                    message: format!(
+                        "Tube index {tube_idx} is invalid (ship/structure has {tube_count} fighter tubes)"
+                    ),
+                }));
+            }
+
+            {
+                let tube_loads = ctx.fighter_tube_loads.read().unwrap();
+                if tube_loads
+                    .iter()
+                    .any(|(&(sid, tidx), &fid)| sid == ship_id && fid == fighter_item_id && tidx != tube_idx)
+                {
+                    return Some(Err(BridgeRpcError {
+                        code: "FighterAlreadyLoaded".into(),
+                        message: format!("Fighter item {fighter_item_id} is already loaded in another tube"),
+                    }));
+                }
+            }
+            {
+                let active = ctx.active_fighters.read().unwrap();
+                if active
+                    .values()
+                    .any(|f| f.item_id == fighter_item_id && !f.is_abandoned)
+                {
+                    return Some(Err(BridgeRpcError {
+                        code: "FighterAlreadyLaunched".into(),
+                        message: format!("Fighter item {fighter_item_id} is already launched in space"),
+                    }));
+                }
+                if active
+                    .values()
+                    .any(|f| f.parent_ship_id == ship_id && f.tube_index == tube_idx && !f.is_abandoned)
+                {
+                    return Some(Err(BridgeRpcError {
+                        code: "FighterAlreadyLaunched".into(),
+                        message: format!("Tube {tube_idx} currently has a squadron deployed in space"),
+                    }));
+                }
+            }
+
             let item_opt = ctx
                 .db
                 .with_snapshot(|snap| snap.items.get(&fighter_item_id).cloned());
@@ -1648,10 +1708,16 @@ pub async fn handle(
                     message: format!("Fighter item {fighter_item_id} not found"),
                 }));
             };
-            if item.owner_id != char_id || item.location_id != ship_id {
+            if item.owner_id != char_id {
                 return Some(Err(BridgeRpcError {
                     code: "OwnershipViolation".into(),
-                    message: format!("Fighter item {fighter_item_id} not in pilot's ship"),
+                    message: format!("Fighter item {fighter_item_id} not owned by pilot"),
+                }));
+            }
+            if item.location_id != ship_id || item.flag != InventoryFlag::FighterBay {
+                return Some(Err(BridgeRpcError {
+                    code: "ItemNotInFighterBay".into(),
+                    message: format!("Fighter item {fighter_item_id} not in pilot's fighter bay"),
                 }));
             }
             let is_fighter_category = ctx
@@ -1669,13 +1735,53 @@ pub async fn handle(
                     ),
                 }));
             }
+
+            let max_squadron_size = ctx
+                .sde
+                .types
+                .get(&item.type_id)
+                .and_then(|t| t.default_attributes.get(&2215).copied())
+                .map(|v| v as u32)
+                .unwrap_or(9);
+
+            let loaded_fighter_id = if item.quantity > max_squadron_size as i32 {
+                let excess_qty = item.quantity - max_squadron_size as i32;
+                ctx.db.with_mut_snapshot(|snap| {
+                    if let Some(it) = snap.items.get_mut(&fighter_item_id) {
+                        it.quantity = max_squadron_size as i32;
+                        it.version += 1;
+                    }
+                    snap.next_entity_id += 1;
+                    let rem_id = snap.next_entity_id;
+                    let rem_item = InventoryItemRecord {
+                        item_id: rem_id,
+                        type_id: item.type_id,
+                        owner_id: item.owner_id,
+                        location_id: item.location_id,
+                        flag: item.flag,
+                        quantity: excess_qty,
+                        singleton: false,
+                        version: 1,
+                        dynamic_attributes: HashMap::new(),
+                        source_mutaplasmid_id: None,
+                        insured_payout_isk: 0.0,
+                        is_blueprint_copy: false,
+                        blueprint_runs_remaining: None,
+                    };
+                    snap.items.insert(rem_id, rem_item);
+                    fighter_item_id
+                })
+            } else {
+                fighter_item_id
+            };
+
             ctx.fighter_tube_loads
                 .write()
                 .unwrap()
-                .insert((ship_id, tube_idx), fighter_item_id);
+                .insert((ship_id, tube_idx), loaded_fighter_id);
             Some(Ok(PyRep::keyval([
                 ("tubeIndex", PyRep::Integer(tube_idx as i64)),
-                ("fighterID", PyRep::Integer(fighter_item_id)),
+                ("fighterID", PyRep::Integer(loaded_fighter_id)),
                 ("success", PyRep::Bool(true)),
             ])))
         }
@@ -1692,13 +1798,43 @@ pub async fn handle(
                 }));
             };
             let raw_tube = args.first().and_then(|a| a.as_i64()).unwrap_or(-1);
-            if !(0..10).contains(&raw_tube) {
+            let carrier_type_id = if let Some(struct_id) = session.structure_id {
+                ctx.db
+                    .with_snapshot(|snap| snap.structures.get(&struct_id).map(|s| s.type_id))
+                    .unwrap_or(0)
+            } else {
+                ctx.db
+                    .with_snapshot(|snap| snap.items.get(&ship_id).map(|s| s.type_id))
+                    .unwrap_or(0)
+            };
+            let tube_count = ctx
+                .sde
+                .types
+                .get(&carrier_type_id)
+                .and_then(|t| t.default_attributes.get(&2216).copied())
+                .map(|v| v as usize)
+                .unwrap_or(0);
+            if raw_tube < 0 || raw_tube as usize >= tube_count {
                 return Some(Err(BridgeRpcError {
-                    code: "InvalidTubeIndex".into(),
-                    message: "UnloadTubeToFighterBay requires a valid tube index".into(),
+                    code: "InvalidFighterTube".into(),
+                    message: format!(
+                        "Tube index {raw_tube} is invalid (ship/structure has {tube_count} tubes)"
+                    ),
                 }));
             }
             let tube_idx = raw_tube as usize;
+            {
+                let active = ctx.active_fighters.read().unwrap();
+                if active
+                    .values()
+                    .any(|f| f.parent_ship_id == ship_id && f.tube_index == tube_idx && !f.is_abandoned)
+                {
+                    return Some(Err(BridgeRpcError {
+                        code: "FighterAlreadyLaunched".into(),
+                        message: format!("Cannot unload tube {tube_idx} while squadron is deployed in space"),
+                    }));
+                }
+            }
             let removed = ctx
                 .fighter_tube_loads
                 .write()
@@ -1740,17 +1876,95 @@ pub async fn handle(
                 }));
             };
 
-            let tube_loads = ctx.fighter_tube_loads.read().unwrap().clone();
-            let mut launched_ball_ids = Vec::new();
-
-            for ((sid, tube_idx), fighter_item_id) in tube_loads {
-                if sid != ship_id {
-                    continue;
+            let requested_tubes: Option<Vec<usize>> = match args.first() {
+                Some(PyRep::List(items)) | Some(PyRep::Tuple(items)) if !items.is_empty() => {
+                    Some(items.iter().filter_map(|x| x.as_i64()).map(|t| t as usize).collect())
                 }
+                Some(PyRep::Integer(t)) => Some(vec![*t as usize]),
+                _ => None,
+            };
+
+            let carrier_type_id = if let Some(struct_id) = session.structure_id {
+                ctx.db
+                    .with_snapshot(|snap| snap.structures.get(&struct_id).map(|s| s.type_id))
+                    .unwrap_or(0)
+            } else {
+                ctx.db
+                    .with_snapshot(|snap| snap.items.get(&ship_id).map(|s| s.type_id))
+                    .unwrap_or(0)
+            };
+            let tube_count = ctx
+                .sde
+                .types
+                .get(&carrier_type_id)
+                .and_then(|t| t.default_attributes.get(&2216).copied())
+                .map(|v| v as usize)
+                .unwrap_or(0);
+
+            let tubes_to_launch: Vec<usize> = if let Some(req) = requested_tubes {
+                for &tidx in &req {
+                    if !(0..tube_count).contains(&tidx) {
+                        return Some(Err(BridgeRpcError {
+                            code: "InvalidFighterTube".into(),
+                            message: format!("Tube index {tidx} is invalid (ship/structure has {tube_count} tubes)"),
+                        }));
+                    }
+                    let active = ctx.active_fighters.read().unwrap();
+                    if active
+                        .values()
+                        .any(|f| f.parent_ship_id == ship_id && f.tube_index == tidx && !f.is_abandoned)
+                    {
+                        return Some(Err(BridgeRpcError {
+                            code: "FighterAlreadyLaunched".into(),
+                            message: format!("Fighter squadron in tube {tidx} is already launched in space"),
+                        }));
+                    }
+                    let tube_loads = ctx.fighter_tube_loads.read().unwrap();
+                    if !tube_loads.contains_key(&(ship_id, tidx)) {
+                        return Some(Err(BridgeRpcError {
+                            code: "EmptyFighterTube".into(),
+                            message: format!("Fighter tube {tidx} is empty"),
+                        }));
+                    }
+                }
+                req
+            } else {
+                let tube_loads = ctx.fighter_tube_loads.read().unwrap();
+                let available: Vec<usize> = (0..tube_count)
+                    .filter(|&tidx| tube_loads.contains_key(&(ship_id, tidx)))
+                    .collect();
+                if available.is_empty() {
+                    let active = ctx.active_fighters.read().unwrap();
+                    if (0..tube_count).any(|tidx| {
+                        active
+                            .values()
+                            .any(|f| f.parent_ship_id == ship_id && f.tube_index == tidx && !f.is_abandoned)
+                    }) {
+                        return Some(Err(BridgeRpcError {
+                            code: "FighterAlreadyLaunched".into(),
+                            message: "All loaded fighter squadrons are already launched in space".into(),
+                        }));
+                    }
+                    return Some(Err(BridgeRpcError {
+                        code: "EmptyFighterTube".into(),
+                        message: "No fighters loaded in tubes".into(),
+                    }));
+                }
+                available
+            };
+
+            let mut launched_ball_ids = Vec::new();
+            for tube_idx in tubes_to_launch {
+                let fighter_item_id = {
+                    let mut guard = ctx.fighter_tube_loads.write().unwrap();
+                    guard.remove(&(ship_id, tube_idx))
+                };
+                let Some(fighter_item_id) = fighter_item_id else { continue };
                 let item_opt = ctx
                     .db
                     .with_snapshot(|snap| snap.items.get(&fighter_item_id).cloned());
                 let Some(item) = item_opt else { continue };
+
                 let ball_id = ctx.db.with_mut_snapshot(|snap| {
                     snap.next_entity_id += 1;
                     snap.next_entity_id
@@ -1774,6 +1988,14 @@ pub async fn handle(
                 let cs = ctx.build_type_combat_state(item.type_id);
                 let _ = sys_handle.spawn_ball_with_combat(ball, cs).await;
 
+                let max_squadron_size = ctx
+                    .sde
+                    .types
+                    .get(&item.type_id)
+                    .and_then(|t| t.default_attributes.get(&2215).copied())
+                    .map(|v| v as u32)
+                    .unwrap_or(9);
+
                 let squad = crate::router::context::ActiveFighterSquadron {
                     ball_id,
                     item_id: fighter_item_id,
@@ -1781,7 +2003,7 @@ pub async fn handle(
                     owner_char_id: char_id,
                     parent_ship_id: ship_id,
                     tube_index: tube_idx,
-                    squadron_size: item.quantity as u32,
+                    squadron_size: (item.quantity as u32).min(max_squadron_size),
                     target_id: None,
                     is_abandoned: false,
                     mwd_active: false,
@@ -1810,20 +2032,42 @@ pub async fn handle(
                 }));
             };
             let sys_handle = ctx.systems.get_or_spawn(sys_id);
-            let fighter_ball_ids: Vec<i64> = ctx
+            let filter_ids: Option<Vec<i64>> = match args.first() {
+                Some(PyRep::List(items)) | Some(PyRep::Tuple(items)) if !items.is_empty() => {
+                    Some(items.iter().filter_map(|x| x.as_i64()).collect())
+                }
+                Some(PyRep::Integer(t)) => Some(vec![*t]),
+                _ => None,
+            };
+
+            let fighters_to_recall: Vec<crate::router::context::ActiveFighterSquadron> = ctx
                 .active_fighters
                 .read()
                 .unwrap()
                 .values()
-                .filter(|f| f.parent_ship_id == ship_id)
-                .map(|f| f.ball_id)
+                .filter(|f| {
+                    f.parent_ship_id == ship_id
+                        && filter_ids
+                            .as_ref()
+                            .map(|ids| {
+                                ids.contains(&(f.tube_index as i64))
+                                    || ids.contains(&f.ball_id)
+                                    || ids.contains(&f.item_id)
+                            })
+                            .unwrap_or(true)
+                })
+                .cloned()
                 .collect();
 
             let mut recalled = Vec::new();
-            for bid in fighter_ball_ids {
-                ctx.active_fighters.write().unwrap().remove(&bid);
-                let _ = sys_handle.remove_ball(bid).await;
-                recalled.push(PyRep::Integer(bid));
+            for f in fighters_to_recall {
+                ctx.active_fighters.write().unwrap().remove(&f.ball_id);
+                ctx.fighter_tube_loads
+                    .write()
+                    .unwrap()
+                    .insert((ship_id, f.tube_index), f.item_id);
+                let _ = sys_handle.remove_ball(f.ball_id).await;
+                recalled.push(PyRep::Integer(f.ball_id));
             }
             Some(Ok(PyRep::List(recalled)))
         }
@@ -2070,7 +2314,7 @@ pub async fn handle(
                     ),
                 }));
             }
-            if (0.05..0.45).contains(&sec) && fa.disallow_in_low_sec {
+            if (0.0..0.45).contains(&sec) && fa.disallow_in_low_sec {
                 return Some(Err(BridgeRpcError {
                     code: "AbilityDisallowedInLowSec".into(),
                     message: format!(
@@ -2133,22 +2377,53 @@ pub async fn handle(
                         ),
                     }));
                 }
-                let max_range = if slot_id == 0 {
-                    if let Some(opt) = attr(2236).or_else(|| attr(2175)) {
-                        let fall = attr(2237).or_else(|| attr(2176)).unwrap_or(0.0);
+                let max_range = match ability_id {
+                    18..=27 | 29..=32 => {
+                        let opt = attr(2175).unwrap_or(10_000.0);
+                        let fall = attr(2176).unwrap_or(0.0);
                         opt + 2.0 * fall
-                    } else {
-                        attr(2149).unwrap_or(10_000.0)
                     }
-                } else {
-                    attr(2149)
-                        .or_else(|| attr(2330))
-                        .or_else(|| attr(2204))
-                        .or_else(|| attr(2239))
-                        .or_else(|| attr(2186).map(|o| o + 2.0 * attr(2187).unwrap_or(0.0)))
-                        .or_else(|| attr(2209).map(|o| o + 2.0 * attr(2210).unwrap_or(0.0)))
-                        .or_else(|| attr(2221).map(|o| o + 2.0 * attr(2222).unwrap_or(0.0)))
-                        .unwrap_or(10_000.0)
+                    44 | 45 => {
+                        let opt = attr(2236).unwrap_or(10_000.0);
+                        let fall = attr(2237).unwrap_or(0.0);
+                        opt + 2.0 * fall
+                    }
+                    33..=36 => attr(2149).unwrap_or(10_000.0),
+                    38 => attr(2330).unwrap_or(1_000.0),
+                    7 => {
+                        let opt = attr(2236).unwrap_or(30_000.0);
+                        let fall = attr(2237).unwrap_or(0.0);
+                        opt + 2.0 * fall
+                    }
+                    2 => {
+                        let opt = attr(2186).unwrap_or(8_000.0);
+                        let fall = attr(2187).unwrap_or(0.0);
+                        opt + 2.0 * fall
+                    }
+                    10 => attr(2204).unwrap_or(8_000.0),
+                    11 => {
+                        let opt = attr(2209).unwrap_or(5_000.0);
+                        let fall = attr(2210).unwrap_or(0.0);
+                        opt + 2.0 * fall
+                    }
+                    12 => {
+                        let opt = attr(2221).unwrap_or(5_000.0);
+                        let fall = attr(2222).unwrap_or(0.0);
+                        opt + 2.0 * fall
+                    }
+                    16 => attr(2239).unwrap_or(10_000.0),
+                    _ => {
+                        if let Some(opt) = attr(2175).or_else(|| attr(2236)) {
+                            let fall = attr(2176).or_else(|| attr(2237)).unwrap_or(0.0);
+                            opt + 2.0 * fall
+                        } else {
+                            attr(2149)
+                                .or_else(|| attr(2330))
+                                .or_else(|| attr(2204))
+                                .or_else(|| attr(2239))
+                                .unwrap_or(10_000.0)
+                        }
+                    }
                 };
                 let dist = fighter_ball.position.distance(target_ball.position);
                 if dist > max_range {
@@ -2161,24 +2436,8 @@ pub async fn handle(
                 }
 
                 let squad_mult = fighter.squadron_size.max(1) as f64;
-                let dmg = if slot_id == 0 {
-                    if attr(2227).is_some()
-                        || attr(2228).is_some()
-                        || attr(2229).is_some()
-                        || attr(2230).is_some()
-                    {
-                        let dmg_mult = attr(2226).unwrap_or(1.0) * squad_mult;
-                        DamageVector {
-                            em: attr(2227).unwrap_or(0.0) * dmg_mult,
-                            thermal: attr(2228).unwrap_or(0.0) * dmg_mult,
-                            kinetic: attr(2229).unwrap_or(0.0) * dmg_mult,
-                            explosive: attr(2230).unwrap_or(0.0) * dmg_mult,
-                        }
-                    } else if attr(2171).is_some()
-                        || attr(2172).is_some()
-                        || attr(2173).is_some()
-                        || attr(2174).is_some()
-                    {
+                let dmg = match ability_id {
+                    18..=27 | 29..=32 => {
                         let dmg_mult = attr(2178).unwrap_or(1.0) * squad_mult;
                         DamageVector {
                             em: attr(2171).unwrap_or(0.0) * dmg_mult,
@@ -2186,7 +2445,17 @@ pub async fn handle(
                             kinetic: attr(2173).unwrap_or(0.0) * dmg_mult,
                             explosive: attr(2174).unwrap_or(0.0) * dmg_mult,
                         }
-                    } else {
+                    }
+                    44 | 45 => {
+                        let dmg_mult = attr(2226).unwrap_or(1.0) * squad_mult;
+                        DamageVector {
+                            em: attr(2227).unwrap_or(0.0) * dmg_mult,
+                            thermal: attr(2228).unwrap_or(0.0) * dmg_mult,
+                            kinetic: attr(2229).unwrap_or(0.0) * dmg_mult,
+                            explosive: attr(2230).unwrap_or(0.0) * dmg_mult,
+                        }
+                    }
+                    33..=36 => {
                         let dmg_mult = attr(2130).unwrap_or(1.0) * squad_mult;
                         DamageVector {
                             em: attr(2131).unwrap_or(0.0) * dmg_mult,
@@ -2195,17 +2464,129 @@ pub async fn handle(
                             explosive: attr(2134).unwrap_or(0.0) * dmg_mult,
                         }
                     }
-                } else {
-                    let dmg_mult = attr(2130).unwrap_or(1.0) * squad_mult;
-                    DamageVector {
-                        em: attr(2131).or_else(|| attr(2325)).unwrap_or(0.0) * dmg_mult,
-                        thermal: attr(2132).or_else(|| attr(2326)).unwrap_or(0.0) * dmg_mult,
-                        kinetic: attr(2133).or_else(|| attr(2327)).unwrap_or(0.0) * dmg_mult,
-                        explosive: attr(2134).or_else(|| attr(2328)).unwrap_or(0.0) * dmg_mult,
+                    38 => {
+                        let dmg_mult = squad_mult;
+                        DamageVector {
+                            em: attr(2325).unwrap_or(0.0) * dmg_mult,
+                            thermal: attr(2326).unwrap_or(0.0) * dmg_mult,
+                            kinetic: attr(2327).unwrap_or(0.0) * dmg_mult,
+                            explosive: attr(2328).unwrap_or(0.0) * dmg_mult,
+                        }
+                    }
+                    7 => {
+                        if let Some(bomb_type_id) = attr(2324).map(|b| b as u32) {
+                            let bomb_attrs = ctx.sde.types.get(&bomb_type_id).map(|t| &t.default_attributes);
+                            let b_attr = |id: u16| -> f64 { bomb_attrs.and_then(|m| m.get(&id).copied()).unwrap_or(0.0) };
+                            let dmg_mult = squad_mult;
+                            DamageVector {
+                                em: b_attr(114) * dmg_mult,
+                                explosive: b_attr(116) * dmg_mult,
+                                kinetic: b_attr(117) * dmg_mult,
+                                thermal: b_attr(118) * dmg_mult,
+                            }
+                        } else {
+                            DamageVector::default()
+                        }
+                    }
+                    2 | 10 | 11 | 12 | 16 => DamageVector::default(),
+                    _ => {
+                        if attr(2227).is_some() || attr(2228).is_some() || attr(2229).is_some() || attr(2230).is_some() {
+                            let dmg_mult = attr(2226).unwrap_or(1.0) * squad_mult;
+                            DamageVector {
+                                em: attr(2227).unwrap_or(0.0) * dmg_mult,
+                                thermal: attr(2228).unwrap_or(0.0) * dmg_mult,
+                                kinetic: attr(2229).unwrap_or(0.0) * dmg_mult,
+                                explosive: attr(2230).unwrap_or(0.0) * dmg_mult,
+                            }
+                        } else if attr(2171).is_some() || attr(2172).is_some() || attr(2173).is_some() || attr(2174).is_some() {
+                            let dmg_mult = attr(2178).unwrap_or(1.0) * squad_mult;
+                            DamageVector {
+                                em: attr(2171).unwrap_or(0.0) * dmg_mult,
+                                thermal: attr(2172).unwrap_or(0.0) * dmg_mult,
+                                kinetic: attr(2173).unwrap_or(0.0) * dmg_mult,
+                                explosive: attr(2174).unwrap_or(0.0) * dmg_mult,
+                            }
+                        } else if attr(2131).is_some() || attr(2132).is_some() || attr(2133).is_some() || attr(2134).is_some() {
+                            let dmg_mult = attr(2130).unwrap_or(1.0) * squad_mult;
+                            DamageVector {
+                                em: attr(2131).unwrap_or(0.0) * dmg_mult,
+                                thermal: attr(2132).unwrap_or(0.0) * dmg_mult,
+                                kinetic: attr(2133).unwrap_or(0.0) * dmg_mult,
+                                explosive: attr(2134).unwrap_or(0.0) * dmg_mult,
+                            }
+                        } else {
+                            DamageVector::default()
+                        }
                     }
                 };
                 if dmg.em + dmg.thermal + dmg.kinetic + dmg.explosive > 0.0 {
                     let _ = sys_handle.apply_damage(tid, dmg).await;
+                }
+
+                // CrimeWatch: trigger weapon timer and track combat aggression
+                ctx.crimewatch.write().unwrap().trigger_weapon_timer(char_id, now_unix);
+
+                let victim_char_opt = ctx.db.with_snapshot(|snap| {
+                    if snap.characters.contains_key(&tid) {
+                        Some(tid)
+                    } else if let Some(item) = snap.items.get(&tid) {
+                        if snap.characters.contains_key(&item.owner_id) {
+                            Some(item.owner_id)
+                        } else {
+                            None
+                        }
+                    } else if let Some(ch) = snap.characters.values().find(|c| c.active_ship_id == tid) {
+                        Some(ch.character_id)
+                    } else if let Some(st) = snap.structures.get(&tid) {
+                        if !ctx.sde.npc_corporations.contains_key(&st.owner_corp_id) {
+                            snap.corporations
+                                .get(&st.owner_corp_id)
+                                .map(|c| c.ceo_id)
+                                .filter(|cid| snap.characters.contains_key(cid))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                });
+
+                if let Some(victim_char_id) = victim_char_opt {
+                    if victim_char_id != char_id {
+                        let is_legal = {
+                            let cw = ctx.crimewatch.read().unwrap();
+                            if let Some(vic_st) = cw.states.get(&victim_char_id) {
+                                vic_st.is_suspect(now_unix) || vic_st.is_criminal(now_unix)
+                            } else {
+                                false
+                            }
+                        };
+                        let eval = ctx.crimewatch.write().unwrap().handle_combat_aggression(
+                            char_id,
+                            victim_char_id,
+                            fighter.parent_ship_id,
+                            sys_id,
+                            sec,
+                            is_legal,
+                            now_unix,
+                        );
+                        if matches!(
+                            eval,
+                            crate::combat::crimewatch::AggressionEvaluation::CriminalFlagTriggered { .. }
+                                | crate::combat::crimewatch::AggressionEvaluation::SuspectFlagTriggered
+                        ) {
+                            ctx.db.with_mut_snapshot(|snap| {
+                                if let Some(ch) = snap.characters.get_mut(&char_id) {
+                                    let loss = crate::combat::crimewatch::compute_sec_status_loss(
+                                        ch.security_status,
+                                        false,
+                                        sec,
+                                    );
+                                    ch.security_status = (ch.security_status - loss).max(-10.0);
+                                }
+                            });
+                        }
+                    }
                 }
             } else {
                 if target_id.is_some() && target_mode == "untargeted" {
@@ -2216,37 +2597,70 @@ pub async fn handle(
                         ),
                     }));
                 }
-                if slot_id == 1 {
-                    let _ = sys_handle.set_speed_fraction(fighter_ball_id, 1.0).await;
-                    if let Some(f) = ctx
-                        .active_fighters
-                        .write()
-                        .unwrap()
-                        .get_mut(&fighter_ball_id)
-                    {
-                        f.mwd_active = true;
+                match ability_id {
+                    5 => {
+                        let mjd_dist = attr(2154).unwrap_or(100_000.0);
+                        let _ = sys_handle.micro_jump(fighter_ball_id, mjd_dist).await;
+                    }
+                    4 | 9 | 13 => {
+                        let _ = sys_handle.set_speed_fraction(fighter_ball_id, 1.0).await;
+                        if let Some(f) = ctx
+                            .active_fighters
+                            .write()
+                            .unwrap()
+                            .get_mut(&fighter_ball_id)
+                        {
+                            f.mwd_active = true;
+                        }
+                    }
+                    _ => {
+                        if let Some(mjd_dist) = attr(2154) {
+                            let _ = sys_handle.micro_jump(fighter_ball_id, mjd_dist).await;
+                        } else if attr(2152).is_some() || attr(2151).is_some() || attr(2224).is_some() {
+                            let _ = sys_handle.set_speed_fraction(fighter_ball_id, 1.0).await;
+                            if let Some(f) = ctx
+                                .active_fighters
+                                .write()
+                                .unwrap()
+                                .get_mut(&fighter_ball_id)
+                            {
+                                f.mwd_active = true;
+                            }
+                        }
                     }
                 }
             }
 
-            let cycle_duration_ms = match slot_id {
-                0 => attr(2233)
-                    .or_else(|| attr(2177))
-                    .or_else(|| attr(2182))
-                    .unwrap_or(4_000.0),
-                1 => attr(2157)
-                    .or_else(|| attr(2158))
-                    .or_else(|| attr(2123))
-                    .or_else(|| attr(2155))
-                    .unwrap_or(10_000.0),
-                _ => attr(2182)
-                    .or_else(|| attr(2183))
-                    .or_else(|| attr(2203))
-                    .or_else(|| attr(2208))
-                    .or_else(|| attr(2220))
-                    .or_else(|| attr(2238))
-                    .or_else(|| attr(2349))
-                    .unwrap_or(10_000.0),
+            let cycle_duration_ms = match ability_id {
+                18..=27 | 29..=32 => attr(2177).unwrap_or(4_000.0),
+                44 | 45 => attr(2233).unwrap_or(5_000.0),
+                33..=36 => attr(2182).unwrap_or(14_000.0),
+                38 => attr(2401).unwrap_or(10_000.0),
+                7 => attr(2349).unwrap_or(60_000.0),
+                2 => attr(2183).unwrap_or(10_000.0),
+                10 => attr(2203).unwrap_or(10_000.0),
+                11 => attr(2208).unwrap_or(6_000.0),
+                12 => attr(2220).unwrap_or(10_000.0),
+                16 => attr(2238).unwrap_or(10_000.0),
+                4 => attr(2157).unwrap_or(20_000.0),
+                5 => attr(2155).unwrap_or(10_000.0),
+                9 => attr(2158).unwrap_or(20_000.0),
+                13 => attr(2123).unwrap_or(10_000.0),
+                _ => {
+                    attr(2177)
+                        .or_else(|| attr(2233))
+                        .or_else(|| attr(2182))
+                        .or_else(|| attr(2157))
+                        .or_else(|| attr(2158))
+                        .or_else(|| attr(2123))
+                        .or_else(|| attr(2155))
+                        .or_else(|| attr(2183))
+                        .or_else(|| attr(2203))
+                        .or_else(|| attr(2208))
+                        .or_else(|| attr(2220))
+                        .or_else(|| attr(2238))
+                        .unwrap_or(10_000.0)
+                }
             };
             let cooldown_sec = slot_def.cooldown_seconds.unwrap_or(0.0);
             let effective_gate_sec = cooldown_sec.max((cycle_duration_ms / 1_000.0).max(1.0));
@@ -2300,6 +2714,7 @@ pub async fn handle(
             let target_fighter_id = args.first().and_then(|a| a.as_i64());
             let sys_handle = ctx.systems.get_or_spawn(sys_id);
             let mut abandoned = Vec::new();
+            let mut abandoned_item_ids = Vec::new();
             {
                 let mut fighters = ctx.active_fighters.write().unwrap();
                 for f in fighters.values_mut() {
@@ -2308,8 +2723,20 @@ pub async fn handle(
                     {
                         f.is_abandoned = true;
                         abandoned.push(f.ball_id);
+                        abandoned_item_ids.push(f.item_id);
                     }
                 }
+            }
+            if !abandoned_item_ids.is_empty() {
+                ctx.db.with_mut_snapshot(|snap| {
+                    for iid in &abandoned_item_ids {
+                        if let Some(item) = snap.items.get_mut(iid) {
+                            item.location_id = sys_id as i64;
+                            item.flag = InventoryFlag::None;
+                            item.version += 1;
+                        }
+                    }
+                });
             }
             for &bid in &abandoned {
                 let _ = sys_handle
