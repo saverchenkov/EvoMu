@@ -35,6 +35,8 @@ sys.path.insert(0, HERE)
 import review_lib as rl  # noqa: E402
 
 PARITY_STATUS = os.path.join(HERE, "parity", "parity_status.py")
+sys.path.insert(0, os.path.join(HERE, "metrics"))
+import rpc_names  # noqa: E402
 LEDGER = os.path.join(os.path.dirname(HERE), "references", "parity", "ledger.json")
 AUDITOR = os.path.join(os.path.dirname(HERE), "references", "parity", "auditor_rows.json")
 WRAPPER_ENV = ["RUSTC_WRAPPER", "CARGO_BUILD_RUSTC_WRAPPER", "RUSTDOC", "CARGO_BUILD_RUSTDOC",
@@ -226,6 +228,42 @@ def main():
     L += ["", "## Diffstat vs HEAD", "```", diffstat.strip() or "(clean)", "```"]
     if untracked.strip():
         L += ["", "## Untracked files", "```", untracked.strip()[:4000], "```"]
+    # RPC-name check: names must exist in the real client (blocking for files changed since the last review)
+    st = rl.load_state(root)
+    base = None
+    for r in reversed(st.get("reviews", [])):
+        h = r.get("head")
+        if h and subprocess.run(["git", "merge-base", "--is-ancestor", h, "HEAD"], cwd=root).returncode == 0:
+            base = h
+            break
+    added = {}  # file -> set of added/modified line numbers (new code must be clean; legacy lines are reported)
+
+    def collect(diff_args):
+        cur = None
+        for ln in sh(["git", "diff", "-U0"] + diff_args, root)[1].splitlines():
+            if ln.startswith("+++ "):
+                cur = ln[6:] if ln.startswith("+++ b/") else None
+            elif ln.startswith("@@") and cur:
+                m = re.search(r"\+(\d+)(?:,(\d+))?", ln)
+                if m:
+                    a0, n = int(m.group(1)), int(m.group(2) or 1)
+                    added.setdefault(cur, set()).update(range(a0, a0 + n))
+    if base:
+        collect([base])
+    collect(["HEAD"])
+    for f in sh(["git", "ls-files", "--others", "--exclude-standard"], root)[1].split():
+        if f.endswith(".rs") and os.path.exists(os.path.join(root, f)):
+            added[f] = None  # whole new file
+    all_viol, have_client = rpc_names.run()
+    hard_all = [v for v in all_viol if v["kind"] == "NOT_IN_CLIENT"]
+    rpc_block = [v for v in hard_all if v["file"] in added and (added[v["file"]] is None or v["line"] in added[v["file"]])]
+    L += ["", "## RPC-name check (names must exist in the real V24 client)",
+          "- Repo-wide: **%d NOT_IN_CLIENT**, %d NOT_IN_CATALOG (informational)%s" % (
+              len(hard_all), len(all_viol) - len(hard_all),
+              "" if have_client else " [WARNING: client code.ccp not found; catalog-only]"),
+          "- On lines you added or changed since the last review (blocking): **%d**" % len(rpc_block)]
+    for v in rpc_block[:80]:
+        L.append("  - `%s:%d` %s `%s`" % (v["file"], v["line"], v["what"], v["name"]))
     report = "\n".join(L)
     open(os.path.join(pdir, "claims_template.md"), "w").write(report)
     print(report)
@@ -240,7 +278,10 @@ def main():
             print("- " + p)
         lint_ok = not probs
     print("\n[preflight] template: %s" % os.path.join(pdir, "claims_template.md"))
-    ok = failed == 0 and not compile_err and passed > 0 and lint_ok
+    if rpc_block:
+        print("\n# RPC-name check: %d name(s) on lines you added/changed don't exist anywhere in the V24 client. Remove them, "
+              "use the client's real method, or justify with `rpc-lint: allow <reason>`." % len(rpc_block))
+    ok = failed == 0 and not compile_err and passed > 0 and lint_ok and not rpc_block
     print("[preflight] %s" % ("OK: run the review now." if ok else "NOT READY: fix the items above before spending a review."))
     return 0 if ok else 1
 

@@ -69,6 +69,10 @@
   - It prints authoritative numbers and a claims template (`.evomu-reviews/preflight/claims_template.md`).
   - It lints your claims for untraceable numbers, bad `path:line` references, quotes that don't exist in the repo, and ledger rows that aren't closed.
 - **Copy numbers from the template; don't type them.**
+- **RPC-name check (blocking).** Pre-flight checks every RPC service/method and `On…` notification name on lines you added or changed since the last review against the identifiers in the real V24 client code (`code.ccp`, parsed locally and cached in `.evomu-reviews/`).
+  - A name the client code doesn't contain can't be a client RPC. Use the client's real method name instead of an invented or Crucible-era one: e.g. no `marketProxy.PlaceCharOrder`, `dogmaIM.FireWeapon`, `invbroker.MoveItem`, `planetMgr.CreateColony`, `wormholeMgr.JumpWormhole`.
+  - The only escape is `rpc-lint: allow <reason>` on that line or the line above. The reviewer checks every such reason.
+  - Repo-wide there are about 610 legacy violations (see `metrics_rpc_names.txt` in each review's context). Rows whose tests depend on them are suspect; remove or replace them as you touch those areas.
 - **Don't start a review until pre-flight prints `OK`.** Every lint problem must be fixed or explicitly explained in the claims. For example, a row you mention as still open, or a number about removed code that you cite with its commit hash.
 - Pre-flight also lists the rows newly closed since the last review, with their acceptance text. Re-check that every clause is really tested before claiming them.
 

@@ -491,7 +491,7 @@ def main():
     print("[review] parity: %s%% closed (%s/%s rows)" % (parity.get("percent_closed"), parity.get("closed_rows"),
                                                         parity.get("total_rows")))
 
-    for name in ["coverage", "hollow", "stubs", "padding"]:
+    for name in ["coverage", "hollow", "stubs", "padding", "rpc_names"]:
         write(os.path.join(ctx, "metrics_%s.txt" % name),
               sh([sys.executable, os.path.join(HERE, "metrics", name + ".py")], root)[1])
     vpm = os.path.join(root, "tools", "eve-indexer", "verify_plan_mapping.py")
