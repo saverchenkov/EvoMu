@@ -103,7 +103,7 @@ async fn test_phase_0_s7_no_hardcoded_fallbacks_and_in_space_range_checks() {
         )
         .await;
     assert_eq!(res_info_err.unwrap_err().code, "UnimplementedRPC");
-    let wrong_sys_planet = ctx
+    let invalid_planet = ctx
         .dispatch_rpc(
             &mut sess,
             "planetMgr",
@@ -114,9 +114,48 @@ async fn test_phase_0_s7_no_hardcoded_fallbacks_and_in_space_range_checks() {
             None,
         )
         .await;
-    assert_eq!(wrong_sys_planet.unwrap_err().code, "InvalidPlanetID");
+    assert_eq!(invalid_planet.unwrap_err().code, "InvalidPlanetID");
 
-    // 3. AttackStructure, AcquireSkyhooks, and CaptureComplex enforce in-space and proximity/system checks
+    // Real SDE planet in Perimeter (30000144) while character is in Jita (30000142) -> PlanetNotInCurrentSystem
+    let perimeter_planet_id = ctx
+        .sde
+        .celestials_in_system(30_000_144)
+        .into_iter()
+        .find(|c| c.group_id == 7)
+        .map(|c| c.celestial_id)
+        .expect("Perimeter (30000144) must have a real SDE planet");
+    let wrong_sys_planet = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "planetMgr",
+            None,
+            "CreateColony",
+            &[PyRep::Integer(perimeter_planet_id)],
+            &kw,
+            None,
+        )
+        .await;
+    assert_eq!(
+        wrong_sys_planet.unwrap_err().code,
+        "PlanetNotInCurrentSystem"
+    );
+    let flush_override = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "planetMgr",
+            None,
+            "Flush",
+            &[PyRep::Integer(40_009_077), PyRep::Integer(65)],
+            &kw,
+            None,
+        )
+        .await;
+    assert_eq!(
+        flush_override.unwrap_err().code,
+        "ClientSchematicOverrideForbidden"
+    );
+
+    // 3. AttackStructure, ClaimSovereignty, AcquireSkyhooks, and CaptureComplex enforce in-space and proximity/system checks
     let attack_docked = ctx
         .dispatch_rpc(
             &mut sess,
@@ -129,6 +168,12 @@ async fn test_phase_0_s7_no_hardcoded_fallbacks_and_in_space_range_checks() {
         )
         .await;
     assert_eq!(attack_docked.unwrap_err().code, "ShipDocked");
+
+    // Legacy Crucible-only sovMgr.ClaimSovereignty returns UnimplementedRPC on V24.01 Equinox server
+    let claim_docked = ctx
+        .dispatch_rpc(&mut sess, "sovMgr", None, "ClaimSovereignty", &[], &kw, None)
+        .await;
+    assert_eq!(claim_docked.unwrap_err().code, "UnimplementedRPC");
 
     let skyhook_docked = ctx
         .dispatch_rpc(&mut sess, "sovMgr", None, "AcquireSkyhooks", &[], &kw, None)

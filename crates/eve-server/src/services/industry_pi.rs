@@ -18,6 +18,145 @@ use std::collections::HashMap;
 
 const ATTR_BLUEPRINT_ME: u16 = 1112;
 const ATTR_BLUEPRINT_TE: u16 = 1113;
+const ATTR_HARVESTER_TYPE: u16 = 709;
+const ATTR_PLANET_RESTRICTION: u16 = 1632;
+const ATTR_EXPORT_TAX_MULTIPLIER: u16 = 1641;
+const ATTR_PIN_EXTRACTION_QUANTITY: u16 = 1642;
+const ATTR_PIN_CYCLE_TIME: u16 = 1643;
+
+/// Resolves the raw P0 planetary resource (`harvesterType` attribute `709`), base pin extraction
+/// cycle duration (`pinCycleTime` attribute `1643` = `300`s, used as the vertical-slice cooldown
+/// until Phase 7 `E-5` dynamic ECU program durations land), base pin extraction quantity
+/// (`pinExtractionQuantity` attribute `1642` = `1000` units), and R0 export tax base
+/// (`exportTaxMultiplier` attribute `1641` = `5.0` ISK per `Planetary_Industry.md:248`) for an
+/// SDE planet celestial (`group_id == 7`) via SDE extractor pins (`group_id == 1026`, linked by
+/// `planetRestriction` attribute `1632`). Supports selecting any of the planet's 5 SDE raw P0
+/// resources via `requested_resource_or_pin`, rejecting any non-planet resource or schematic ID.
+fn resolve_sde_planet_p0_extraction(
+    ctx: &ServerContext,
+    solar_system_id: u32,
+    planet_id: i64,
+    requested_resource_or_pin: Option<TypeId>,
+) -> Result<(TypeId, u64, u64, f64), BridgeRpcError> {
+    let planet_celestial = ctx
+        .sde
+        .celestials_in_system(solar_system_id)
+        .into_iter()
+        .find(|c| c.celestial_id == planet_id && c.group_id == 7)
+        .ok_or_else(|| BridgeRpcError {
+            code: "PlanetNotInCurrentSystem".into(),
+            message: format!(
+                "Planet {planet_id} is not a planet celestial in solar system {solar_system_id}"
+            ),
+        })?;
+    let planet_type = ctx
+        .sde
+        .types
+        .get(&planet_celestial.type_id)
+        .ok_or_else(|| BridgeRpcError {
+            code: "UnknownPlanetType".into(),
+            message: format!(
+                "Planet type {} not found in SDE types",
+                planet_celestial.type_id
+            ),
+        })?;
+    let restriction_type_id = planet_type
+        .variation_parent_type_id
+        .unwrap_or(planet_type.type_id);
+    let mut matching_extractors: Vec<&eve_sde::InvType> = ctx
+        .sde
+        .types
+        .values()
+        .filter(|t| {
+            t.group_id == 1026
+                && t.default_attributes
+                    .get(&ATTR_PLANET_RESTRICTION)
+                    .map(|v| *v as u32)
+                    == Some(restriction_type_id)
+        })
+        .collect();
+    if matching_extractors.is_empty() {
+        return Err(BridgeRpcError {
+            code: "UncolonizablePlanetType".into(),
+            message: format!(
+                "Planet {planet_id} ({}) has no SDE extractor pins with planetRestriction {}",
+                planet_type.name, restriction_type_id
+            ),
+        });
+    }
+    matching_extractors.sort_by_key(|t| t.type_id);
+    let extractor_type = match requested_resource_or_pin {
+        None => matching_extractors[0],
+        Some(req_id) => matching_extractors
+            .into_iter()
+            .find(|t| {
+                t.type_id == req_id
+                    || t.default_attributes
+                        .get(&ATTR_HARVESTER_TYPE)
+                        .map(|v| *v as u32)
+                        == Some(req_id)
+            })
+            .ok_or_else(|| BridgeRpcError {
+                code: "ClientSchematicOverrideForbidden".into(),
+                message: format!(
+                    "Requested type {req_id} is not a valid SDE extractor pin or harvesterType (709) raw P0 resource on planet {planet_id} ({})",
+                    planet_type.name
+                ),
+            })?,
+    };
+    let p0_type_id = extractor_type
+        .default_attributes
+        .get(&ATTR_HARVESTER_TYPE)
+        .map(|v| *v as u32)
+        .filter(|&id| id > 0)
+        .ok_or_else(|| BridgeRpcError {
+            code: "MissingPlanetRawResource".into(),
+            message: format!(
+                "Extractor pin {} is missing SDE harvesterType (709) attribute",
+                extractor_type.type_id
+            ),
+        })?;
+    let p0_qty_per_pin = extractor_type
+        .default_attributes
+        .get(&ATTR_PIN_EXTRACTION_QUANTITY)
+        .map(|v| *v as u64)
+        .filter(|&q| q > 0)
+        .ok_or_else(|| BridgeRpcError {
+            code: "MissingPinExtractionQuantity".into(),
+            message: format!(
+                "Extractor pin {} is missing SDE pinExtractionQuantity (1642) attribute",
+                extractor_type.type_id
+            ),
+        })?;
+    let cycle_secs = extractor_type
+        .default_attributes
+        .get(&ATTR_PIN_CYCLE_TIME)
+        .map(|v| *v as u64)
+        .filter(|&c| c > 0)
+        .ok_or_else(|| BridgeRpcError {
+            code: "MissingPinCycleTime".into(),
+            message: format!(
+                "Extractor pin {} is missing SDE pinCycleTime (1643) attribute",
+                extractor_type.type_id
+            ),
+        })?;
+    let p0_type = ctx.sde.types.get(&p0_type_id).ok_or_else(|| BridgeRpcError {
+        code: "MissingPlanetRawResource".into(),
+        message: format!("Raw P0 resource {p0_type_id} not found in SDE types"),
+    })?;
+    let p0_unit_tax_value = p0_type
+        .default_attributes
+        .get(&ATTR_EXPORT_TAX_MULTIPLIER)
+        .copied()
+        .filter(|&v| v > 0.0)
+        .ok_or_else(|| BridgeRpcError {
+            code: "MissingExportTaxMultiplier".into(),
+            message: format!(
+                "Raw P0 resource {p0_type_id} is missing SDE exportTaxMultiplier (1641) attribute"
+            ),
+        })?;
+    Ok((p0_type_id, cycle_secs, p0_qty_per_pin, p0_unit_tax_value))
+}
 
 pub fn handle(
     ctx: &ServerContext,
@@ -983,6 +1122,12 @@ pub fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            if args.len() > 1 {
+                return Some(Err(BridgeRpcError {
+                    code: "ClientSchematicOverrideForbidden".into(),
+                    message: "CreateColony only accepts (planetID) and forbids client-supplied overrides".into(),
+                }));
+            }
             let Some(planet_id) = args.first().and_then(|a| a.as_i64()) else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidPlanetID".into(),
@@ -1017,6 +1162,11 @@ pub fn handle(
                     ),
                 }));
             }
+            let (_p0_type_id, _cycle_secs, p0_qty_per_pin, p0_unit_tax_value) =
+                match resolve_sde_planet_p0_extraction(ctx, sys_id, planet_id, None) {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e)),
+                };
             let (link_pg, link_cpu) = compute_pi_link_cost(150.0, 1);
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {
@@ -1049,12 +1199,6 @@ pub fn handle(
                         ),
                     });
                 }
-                let water_tax_base = ctx
-                    .sde
-                    .types
-                    .get(&3645)
-                    .map(|t| t.base_price * 200.0)
-                    .unwrap_or(80_000.0);
                 // Derive Command Center upgrade level from Command Center Upgrades (skill 2505, defaulting to level 1 base CC when untrained)
                 let cc_level = snap
                     .skills
@@ -1063,7 +1207,10 @@ pub fn handle(
                     .map(|s| s.level.clamp(1, 5))
                     .unwrap_or(1);
                 let pins_count = (cc_level as u32) + 1;
-                let export_tax = compute_poco_export_tax(water_tax_base, 0.10, cc_level, 0.05);
+                let produced_qty =
+                    p0_qty_per_pin.saturating_mul(u64::from((pins_count - 1).max(1)));
+                let tax_base = p0_unit_tax_value * (produced_qty as f64);
+                let export_tax = compute_poco_export_tax(tax_base, 0.10, cc_level, 0.05);
                 snap.planetary_colonies.insert(
                     (char_id, planet_id),
                     PlanetaryColonyRecord {
@@ -1097,11 +1244,42 @@ pub fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            if args.len() > 2 {
+                return Some(Err(BridgeRpcError {
+                    code: "ClientSchematicOverrideForbidden".into(),
+                    message: "Flush accepts at most (planetID, [planetHarvesterOrResourceTypeID])".into(),
+                }));
+            }
             let Some(planet_id) = args.first().and_then(|a| a.as_i64()) else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidPlanetID".into(),
                     message: "Flush requires an explicit integer planetID".into(),
                 }));
+            };
+            let requested_resource_or_pin = match args.get(1) {
+                None => None,
+                Some(arg) => {
+                    let Some(raw_id) = arg
+                        .as_i64()
+                        .filter(|&id| id > 0 && id <= i64::from(u32::MAX))
+                        .map(|id| id as u32)
+                        .filter(|id| {
+                            ctx.sde
+                                .types
+                                .get(id)
+                                .map(|t| {
+                                    t.group_id == 1026 || matches!(t.group_id, 1032 | 1033 | 1035)
+                                })
+                                .unwrap_or(false)
+                        })
+                    else {
+                        return Some(Err(BridgeRpcError {
+                            code: "ClientSchematicOverrideForbidden".into(),
+                            message: "Flush optional second argument must be a valid planet extractor pin or raw P0 resource typeID".into(),
+                        }));
+                    };
+                    Some(raw_id)
+                }
             };
             let Some((delivery_loc_id, delivery_flag)) = session
                 .station_id
@@ -1117,15 +1295,9 @@ pub fn handle(
             let current_sys_id = session.solar_system_id;
             let (link_pg, link_cpu) = compute_pi_link_cost(150.0, 1);
             let now_unix = ctx.now_unix();
-            let water_tax_base = ctx
-                .sde
-                .types
-                .get(&3645)
-                .map(|t| t.base_price * 200.0)
-                .unwrap_or(80_000.0);
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {
-                let cc_level = {
+                let (cc_level, pins_count, col_sys_id) = {
                     let Some(col) = snap.planetary_colonies.get(&(char_id, planet_id)) else {
                         return Err(BridgeRpcError {
                             code: "ColonyNotFound".into(),
@@ -1143,19 +1315,49 @@ pub fn handle(
                             ),
                         });
                     }
+                    (
+                        col.command_center_level,
+                        col.pins_count,
+                        col.solar_system_id,
+                    )
+                };
+
+                let (p0_type_id, cycle_secs, p0_qty_per_pin, p0_unit_tax_value) =
+                    resolve_sde_planet_p0_extraction(
+                        ctx,
+                        col_sys_id,
+                        planet_id,
+                        requested_resource_or_pin,
+                    )?;
+                let extractor_pins = pins_count.saturating_sub(1).max(1);
+                let produced_qty = p0_qty_per_pin.saturating_mul(u64::from(extractor_pins));
+                let produced_qty_i32 =
+                    i32::try_from(produced_qty).map_err(|_| BridgeRpcError {
+                        code: "QuantityOverflow".into(),
+                        message: format!(
+                            "Extracted quantity {produced_qty} overflows i32 inventory stack"
+                        ),
+                    })?;
+
+                {
+                    let col = snap
+                        .planetary_colonies
+                        .get(&(char_id, planet_id))
+                        .expect("colony checked above");
                     if col.last_extracted_unix > 0
-                        && now_unix < col.last_extracted_unix.saturating_add(3_600)
+                        && now_unix < col.last_extracted_unix.saturating_add(cycle_secs)
                     {
                         return Err(BridgeRpcError {
                             code: "ExtractorCycleNotReady".into(),
                             message: format!(
-                                "Extractor cycle on planet {planet_id} requires 3600s between flushes"
+                                "Extractor cycle on planet {planet_id} requires {cycle_secs}s between flushes"
                             ),
                         });
                     }
-                    col.command_center_level
-                };
-                let export_tax = compute_poco_export_tax(water_tax_base, 0.10, cc_level, 0.05);
+                }
+
+                let tax_base = p0_unit_tax_value * (produced_qty as f64);
+                let export_tax = compute_poco_export_tax(tax_base, 0.10, cc_level, 0.05);
                 let tax_cents = IskCents::from_f64_isk(export_tax);
                 if let Some(ch) = snap.characters.get_mut(&char_id) {
                     let new_bal =
@@ -1175,38 +1377,37 @@ pub fn handle(
                     .get_mut(&(char_id, planet_id))
                     .expect("colony checked above");
                 col.last_extracted_unix = now_unix;
-                *col.extracted_commodities.entry(3645).or_insert(0) += 200; // Water (P1)
-                let total_water = col.extracted_commodities[&3645];
+                *col.extracted_commodities.entry(p0_type_id).or_insert(0) += produced_qty;
+                let total_stored = col.extracted_commodities[&p0_type_id];
 
-                // Materialize 200x Water (type_id = 3645) into snap.items at delivery_loc_id
-                let existing_water_id = snap
+                let existing_item_id = snap
                     .items
                     .values()
                     .find(|i| {
                         i.owner_id == char_id
                             && i.location_id == delivery_loc_id
                             && i.flag == delivery_flag
-                            && i.type_id == 3645
+                            && i.type_id == p0_type_id
                     })
                     .map(|i| i.item_id);
-                let water_item_id = if let Some(wid) = existing_water_id {
-                    if let Some(w_mut) = snap.items.get_mut(&wid) {
-                        w_mut.quantity += 200;
-                        w_mut.version += 1;
+                let delivered_item_id = if let Some(iid) = existing_item_id {
+                    if let Some(item_mut) = snap.items.get_mut(&iid) {
+                        item_mut.quantity = item_mut.quantity.saturating_add(produced_qty_i32);
+                        item_mut.version += 1;
                     }
-                    wid
+                    iid
                 } else {
                     snap.next_entity_id += 1;
-                    let wid = snap.next_entity_id;
+                    let iid = snap.next_entity_id;
                     snap.items.insert(
-                        wid,
+                        iid,
                         InventoryItemRecord {
-                            item_id: wid,
-                            type_id: 3645, // Water (P1)
+                            item_id: iid,
+                            type_id: p0_type_id,
                             owner_id: char_id,
                             location_id: delivery_loc_id,
                             flag: delivery_flag,
-                            quantity: 200,
+                            quantity: produced_qty_i32,
                             singleton: false,
                             version: 1,
                             dynamic_attributes: HashMap::new(),
@@ -1216,18 +1417,33 @@ pub fn handle(
                             blueprint_runs_remaining: None,
                         },
                     );
-                    wid
+                    iid
                 };
-                Ok((total_water, water_item_id, export_tax))
+                Ok((
+                    p0_type_id,
+                    produced_qty,
+                    total_stored,
+                    delivered_item_id,
+                    export_tax,
+                    cycle_secs,
+                ))
             });
 
             match res {
-                Ok((total_water, water_item_id, export_tax)) => Some(Ok(PyRep::keyval([
+                Ok((
+                    p0_type_id,
+                    produced_qty,
+                    total_stored,
+                    delivered_item_id,
+                    export_tax,
+                    cycle_secs,
+                )) => Some(Ok(PyRep::keyval([
                     ("planetID", PyRep::Integer(planet_id)),
-                    ("producedTypeID", PyRep::Integer(3645)),
-                    ("producedQuantity", PyRep::Integer(200)),
-                    ("totalStoredQuantity", PyRep::Integer(total_water as i64)),
-                    ("deliveredItemID", PyRep::Integer(water_item_id)),
+                    ("cycleTimeSeconds", PyRep::Integer(cycle_secs as i64)),
+                    ("producedTypeID", PyRep::Integer(p0_type_id as i64)),
+                    ("producedQuantity", PyRep::Integer(produced_qty as i64)),
+                    ("totalStoredQuantity", PyRep::Integer(total_stored as i64)),
+                    ("deliveredItemID", PyRep::Integer(delivered_item_id)),
                     ("linkPowergrid", PyRep::Real(link_pg)),
                     ("linkCPU", PyRep::Real(link_cpu)),
                     ("pocoExportTaxISK", PyRep::Real(export_tax)),

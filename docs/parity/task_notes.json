@@ -289,7 +289,7 @@
  },
  "S-10": {
   "assessment": "PARTIAL",
-  "note": ""
+  "note": "Reconciled documentation status labels, live service/handler counts, parity ledger distinction, and relative link checks; pending gap auditor re-verification."
  },
  "S-11": {
   "assessment": "DONE",
@@ -317,7 +317,7 @@
  },
  "S-7": {
   "assessment": "PARTIAL",
-  "note": ""
+  "note": "Replaced hardcoded fallbacks with SDE Dogma attribute lookups and enforced in-space proximity, system, and planet-resource checks across structure, planet, FW, and sov RPCs."
  },
  "S-8": {
   "assessment": "DONE",
@@ -401,7 +401,7 @@
  },
  "T-7": {
   "assessment": "PARTIAL",
-  "note": "Virtual clock offset helper present; full injectable clock and time acceleration pending."
+  "note": "Implemented injectable ServerClock and VirtualServerClock with pause-on-tick, time acceleration, skill and industry timers, and SDE pinCycleTime cooldowns; belt mining and PI pin graphs pending."
  },
  "Z-1": {
   "assessment": "PARTIAL",

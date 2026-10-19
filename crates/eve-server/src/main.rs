@@ -89,8 +89,14 @@ async fn main() -> Result<()> {
         "Listening on Legacy machoNet / eveMarshal TCP"
     );
 
+    let mut clock_tick_interval = tokio::time::interval(Duration::from_secs(1));
+    clock_tick_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
     loop {
         tokio::select! {
+            _ = clock_tick_interval.tick() => {
+                ctx.tick_wall_second();
+            }
             Ok((stream, addr)) = bridge_listener.accept() => {
                 let Ok(permit) = Arc::clone(&conn_limiter).try_acquire_owned() else {
                     warn!(%addr, "Connection limit reached; rejecting Client Bridge connection");

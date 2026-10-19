@@ -10,6 +10,7 @@
 
 pub mod accounts;
 pub mod characters;
+pub mod clock;
 pub mod inventory;
 pub mod persistence;
 #[cfg(any(test, feature = "demo-seed"))]
@@ -22,5 +23,6 @@ mod tests;
 
 pub use accounts::service_roles;
 pub use accounts::{base64url_decode_no_pad, base64url_encode_no_pad};
+pub use clock::{ServerClock, VirtualServerClock};
 pub use persistence::WorldRepository;
 pub use types::*;

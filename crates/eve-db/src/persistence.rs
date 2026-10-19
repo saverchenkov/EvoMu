@@ -187,6 +187,7 @@ pub struct WorldRepository {
     pub(crate) sqlite_fp: std::sync::Mutex<sqlite_store::TableFingerprints>,
     pub(crate) sqlite_path: Option<std::path::PathBuf>,
     pub(crate) auth_runtime: RwLock<AuthRuntimeState>,
+    pub(crate) clock: std::sync::RwLock<std::sync::Arc<dyn crate::clock::ServerClock>>,
     pub(crate) wal_lock: std::sync::Mutex<()>,
     pub(crate) snapshot_path: Option<std::path::PathBuf>,
     pub(crate) pending_wal_records: std::sync::atomic::AtomicUsize,
@@ -215,6 +216,24 @@ impl Default for WorldRepository {
 }
 
 impl WorldRepository {
+    /// Returns the shared [`crate::clock::ServerClock`] for this repository (`T-7`).
+    pub fn clock(&self) -> std::sync::Arc<dyn crate::clock::ServerClock> {
+        self.clock
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Replaces the [`crate::clock::ServerClock`] used by this repository (`T-7`).
+    pub fn set_clock(&self, clock: std::sync::Arc<dyn crate::clock::ServerClock>) {
+        *self.clock.write().unwrap_or_else(|e| e.into_inner()) = clock;
+    }
+
+    /// Returns the current server Unix timestamp in seconds from the injected [`crate::clock::ServerClock`] (`T-7`).
+    pub fn now_unix_secs(&self) -> u64 {
+        self.clock().now_unix_secs()
+    }
+
     pub(crate) fn wal_path_for(path: &Path) -> std::path::PathBuf {
         path.with_extension("json.wal")
     }
@@ -246,6 +265,9 @@ impl WorldRepository {
             sqlite_fp: std::sync::Mutex::new(fp),
             sqlite_path: Some(target.to_path_buf()),
             auth_runtime: RwLock::new(AuthRuntimeState::new(jwt_secret)),
+            clock: std::sync::RwLock::new(std::sync::Arc::new(
+                crate::clock::VirtualServerClock::new(),
+            )),
             wal_lock: std::sync::Mutex::new(()),
             snapshot_path: None,
             pending_wal_records: std::sync::atomic::AtomicUsize::new(0),
@@ -340,6 +362,9 @@ impl WorldRepository {
             sqlite_fp: std::sync::Mutex::new(fp),
             sqlite_path: None,
             auth_runtime: RwLock::new(AuthRuntimeState::new(jwt_secret)),
+            clock: std::sync::RwLock::new(std::sync::Arc::new(
+                crate::clock::VirtualServerClock::new(),
+            )),
             wal_lock: std::sync::Mutex::new(()),
             snapshot_path: None,
             pending_wal_records: std::sync::atomic::AtomicUsize::new(0),

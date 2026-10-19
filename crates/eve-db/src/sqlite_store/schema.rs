@@ -332,10 +332,7 @@ pub fn apply_migrations(conn: &Connection) -> Result<(), String> {
     .map_err(|e| e.to_string())?;
     conn.execute_batch(SCHEMA_V1_SQL)
         .map_err(|e| e.to_string())?;
-    let now_unix = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
+    let now_unix = crate::clock::host_wall_unix_secs_and_nanos().0 as i64;
     conn.execute(
         "INSERT OR IGNORE INTO schema_migrations (version, name, applied_unix) VALUES (?1, ?2, ?3)",
         params![

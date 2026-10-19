@@ -448,17 +448,6 @@ impl WorldRepository {
         });
     }
 
-    /// Writes a compact checkpoint of `snap` to `target` with `fsync`, atomically renames the
-    /// checkpoint file into place, and atomically rotates/removes the companion `.json.wal`
-    /// while the caller holds both the snapshot lock and `wal_lock` (`R21-P1-5`).
-
-    fn current_unix_secs() -> u64 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(1_700_000_000)
-    }
-
     /// Configures and persists an explicit per-deployment SSO JWT HS256 signing secret, requiring
     /// at least 32 bytes (256 bits) of key material (`R34-P0-1`, `D-4`).
     pub fn set_jwt_signing_secret(&self, raw_secret: &[u8]) -> Result<(), String> {
@@ -483,7 +472,7 @@ impl WorldRepository {
         username: &str,
         password_token: &str,
     ) -> Result<AccountRecord, DbError> {
-        self.authenticate_at(username, password_token, Self::current_unix_secs())
+        self.authenticate_at(username, password_token, self.now_unix_secs())
     }
 
     /// Authenticates `username` against `password_token` (or a signed SSO JWT access token) at
@@ -607,7 +596,7 @@ impl WorldRepository {
             acc.ban_reason = Some(reason.to_string());
             Ok(acc.user_id)
         })?;
-        let _ = self.kick_user(user_id, reason, Self::current_unix_secs());
+        let _ = self.kick_user(user_id, reason, self.now_unix_secs());
         Ok(user_id)
     }
 

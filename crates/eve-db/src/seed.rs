@@ -460,6 +460,9 @@ impl WorldRepository {
             sqlite_fp: std::sync::Mutex::new(fp),
             sqlite_path: None,
             auth_runtime: RwLock::new(AuthRuntimeState::new(jwt_secret)),
+            clock: std::sync::RwLock::new(std::sync::Arc::new(
+                crate::clock::VirtualServerClock::new(),
+            )),
             wal_lock: std::sync::Mutex::new(()),
             snapshot_path: None,
             pending_wal_records: std::sync::atomic::AtomicUsize::new(0),

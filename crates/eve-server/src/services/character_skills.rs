@@ -540,6 +540,7 @@ pub fn handle(
                         remaining_budget = 0.0;
                         total_applied += applied;
                         q.start_sp += applied;
+                        q.duration_seconds *= ((q.end_sp - q.start_sp).max(0.0)) / needed;
                         let current_lvl = skills_map.get(&q.type_id).map(|s| s.level).unwrap_or(0);
                         let rank = ctx
                             .sde

@@ -8,7 +8,7 @@ use eve_dogma::ShipFittingEngine;
 use eve_proto::BridgeRpcError;
 use eve_sde::SdeRegistry;
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, RwLock};
 
 pub static NEXT_BOUND_ID: AtomicU64 = AtomicU64::new(10_000);
@@ -31,6 +31,7 @@ pub struct BoundObjectEntry {
 pub struct ServerContext {
     pub sde: Arc<SdeRegistry>,
     pub db: Arc<WorldRepository>,
+    pub clock: RwLock<Arc<dyn eve_db::ServerClock>>,
     pub systems: Arc<SystemRegistry>,
     pub living_world: Arc<LivingWorldDirector>,
     pub quasar_gateway: Arc<crate::quasar_gateway::PublicGatewayRouter>,
@@ -51,7 +52,6 @@ pub struct ServerContext {
     pub weapon_cycle_state: RwLock<HashMap<i64, (Option<u64>, u32)>>,
     pub fighter_cooldown_state: RwLock<HashMap<(i64, u32), u64>>,
     pub scanned_signatures: RwLock<HashSet<(i64, u32, i64)>>,
-    pub virtual_clock_offset_sec: AtomicU64,
     pub invention_roll_override: RwLock<Option<f64>>,
     pub feature_flags: crate::config::FeatureFlagsConfig,
     pub esi_port: u16,
@@ -67,6 +67,7 @@ impl ServerContext {
     /// Initializes a `ServerContext` with the provided `WorldRepository` and `SdeRegistry`, and seeds NPC regional markets.
     pub fn with_sde_and_repository(sde: Arc<SdeRegistry>, db: Arc<WorldRepository>) -> Self {
         let _ = world_seeder::seed_dual_anchor_markets(&db, &sde);
+        let clock = db.clock();
 
         let catalog_map: HashMap<String, serde_json::Value> =
             serde_json::from_str(EMBEDDED_RPC_CATALOG_JSON).unwrap_or_default();
@@ -88,6 +89,7 @@ impl ServerContext {
         Self {
             sde,
             db,
+            clock: RwLock::new(clock),
             systems,
             living_world: Arc::new(LivingWorldDirector::new()),
             quasar_gateway,
@@ -104,7 +106,6 @@ impl ServerContext {
             weapon_cycle_state: RwLock::new(HashMap::new()),
             fighter_cooldown_state: RwLock::new(HashMap::new()),
             scanned_signatures: RwLock::new(HashSet::new()),
-            virtual_clock_offset_sec: AtomicU64::new(0),
             invention_roll_override: RwLock::new(None),
             feature_flags: crate::config::FeatureFlagsConfig::default(),
             esi_port: 26_004,
@@ -271,13 +272,10 @@ impl ServerContext {
                 return (raw as f64) / ((1u64 << 53) as f64);
             }
         }
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos() as u64)
-            .unwrap_or(now_unix);
+        let ticks = (self.now_blueos_filetime_ticks() as u64).max(now_unix);
         let mut z = job_id
             .wrapping_add(installer_id.wrapping_mul(0x517c_c1b7_2722_0a95))
-            .wrapping_add(nanos)
+            .wrapping_add(ticks)
             .wrapping_add(0x9E37_79B9_7F4A_7C15);
         z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
         z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
@@ -285,26 +283,193 @@ impl ServerContext {
         ((z >> 11) as f64) / ((1u64 << 53) as f64)
     }
 
-    pub fn now_unix(&self) -> u64 {
-        let base = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(1_760_000_000);
-        base.saturating_add(self.virtual_clock_offset_sec.load(Ordering::Relaxed))
+    /// Returns the active [`eve_db::ServerClock`] implementation (`T-7`).
+    pub fn clock(&self) -> Arc<dyn eve_db::ServerClock> {
+        self.clock
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
+    /// Injects a custom [`eve_db::ServerClock`] into both `ServerContext` and `WorldRepository` (`T-7`).
+    pub fn set_clock(&self, clock: Arc<dyn eve_db::ServerClock>) {
+        self.db.set_clock(clock.clone());
+        *self.clock.write().unwrap_or_else(|e| e.into_inner()) = clock;
+    }
+
+    /// Returns the current server Unix timestamp in seconds (`T-7`).
+    pub fn now_unix_secs(&self) -> u64 {
+        self.clock().now_unix_secs()
+    }
+
+    /// Alias for [`Self::now_unix_secs`] (`T-7`).
+    pub fn now_unix(&self) -> u64 {
+        self.now_unix_secs()
+    }
+
+    /// Advances virtual server time by `secs` seconds and runs time-driven skill queue progression (`T-7`).
+    pub fn advance_secs(&self, secs: u64) {
+        self.clock().advance_secs(secs);
+        if secs > 0 {
+            self.advance_skill_queues(secs as f64);
+        }
+    }
+
+    /// Advances the virtual server clock by `secs` seconds (`T-7`).
     pub fn advance_virtual_clock(&self, secs: u64) {
-        self.virtual_clock_offset_sec
-            .fetch_add(secs, Ordering::Relaxed);
+        self.advance_secs(secs);
+    }
+
+    /// Returns the active time-acceleration multiplier (`>= 1`) (`T-7`).
+    pub fn time_acceleration_multiplier(&self) -> u64 {
+        self.clock().acceleration_multiplier()
+    }
+
+    /// Configures the time-acceleration multiplier (`>= 1`) (`T-7`).
+    pub fn set_time_acceleration_multiplier(&self, multiplier: u64) {
+        self.clock().set_acceleration_multiplier(multiplier);
+    }
+
+    /// Returns `true` if the server clock is currently paused (`T-7`).
+    pub fn is_clock_paused(&self) -> bool {
+        self.clock().is_paused()
+    }
+
+    /// Pauses or unpauses the server clock (`T-7`).
+    pub fn set_clock_paused(&self, paused: bool) {
+        self.clock().set_paused(paused);
+    }
+
+    /// Returns `true` if pause-on-tick mode is enabled (`T-7`).
+    pub fn pause_on_tick(&self) -> bool {
+        self.clock().pause_on_tick()
+    }
+
+    /// Enables or disables automatic clock pause at the end of each tick (`T-7`).
+    pub fn set_pause_on_tick(&self, enabled: bool) {
+        self.clock().set_pause_on_tick(enabled);
+    }
+
+    /// Steps the server clock by `base_secs` real seconds scaled by the time-acceleration multiplier,
+    /// advancing skill queues (`T-7`).
+    pub fn step_clock_tick(&self, base_secs: u64) -> u64 {
+        let advanced = self.clock().step_tick(base_secs);
+        if advanced > 0 {
+            self.advance_skill_queues(advanced as f64);
+        }
+        advanced
+    }
+
+    /// Steps a 1 Hz live server wall-clock tick, advancing skill queues (`T-7`).
+    pub fn tick_wall_second(&self) -> u64 {
+        let advanced = self.clock().tick_wall_second();
+        if advanced > 0 {
+            self.advance_skill_queues(advanced as f64);
+        }
+        advanced
     }
 
     pub fn now_blueos_filetime_ticks(&self) -> i64 {
-        let (secs, nanos) = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| (d.as_secs(), d.subsec_nanos()))
-            .unwrap_or((1_760_000_000, 0));
-        let total_secs = secs.saturating_add(self.virtual_clock_offset_sec.load(Ordering::Relaxed));
-        ((total_secs as i64) + 11_644_473_600) * 10_000_000 + ((nanos as i64) / 100)
+        self.clock().now_blueos_filetime_ticks()
+    }
+
+    /// Advances all active character skill queues by `elapsed_secs` of virtual time (`T-7`).
+    pub fn advance_skill_queues(&self, elapsed_secs: f64) {
+        if elapsed_secs <= 0.0 || !elapsed_secs.is_finite() {
+            return;
+        }
+        let has_queued = self
+            .db
+            .with_snapshot(|snap| snap.skill_queues.values().any(|q| !q.is_empty()));
+        if !has_queued {
+            return;
+        }
+        let sde = self.sde.clone();
+        let invalidated_ships = self.db.with_mut_snapshot(|snap| {
+            let mut ships_to_invalidate = Vec::new();
+            let char_ids: Vec<i64> = snap
+                .skill_queues
+                .iter()
+                .filter(|(_, q)| !q.is_empty())
+                .map(|(&cid, _)| cid)
+                .collect();
+            for char_id in char_ids {
+                let queue = snap
+                    .skill_queues
+                    .get(&char_id)
+                    .cloned()
+                    .unwrap_or_default();
+                let mut rem_secs = elapsed_secs;
+                let mut remaining_queue = Vec::new();
+                let mut total_sp_gained = 0.0;
+                let skills_map = snap.skills.entry(char_id).or_default();
+
+                for mut q in queue {
+                    if rem_secs <= 0.0 {
+                        remaining_queue.push(q);
+                        continue;
+                    }
+                    let needed_sp = (q.end_sp - q.start_sp).max(0.0);
+                    let dur = q.duration_seconds.max(0.0);
+                    if dur <= 0.0 || rem_secs >= dur {
+                        rem_secs = (rem_secs - dur).max(0.0);
+                        total_sp_gained += needed_sp;
+                        skills_map.insert(
+                            q.type_id,
+                            eve_db::TrainedSkillRecord {
+                                type_id: q.type_id,
+                                level: q.target_level,
+                                skill_points: q.end_sp,
+                            },
+                        );
+                    } else {
+                        let frac = (rem_secs / dur).clamp(0.0, 1.0);
+                        let gained_sp = needed_sp * frac;
+                        q.start_sp += gained_sp;
+                        q.duration_seconds = (dur - rem_secs).max(0.0);
+                        rem_secs = 0.0;
+                        total_sp_gained += gained_sp;
+                        let current_lvl =
+                            skills_map.get(&q.type_id).map(|s| s.level).unwrap_or(0);
+                        let Some(rank) = sde.types.get(&q.type_id).and_then(|t| {
+                            t.default_attributes
+                                .get(&eve_sde::attr_ids::SKILL_TIME_CONSTANT)
+                                .copied()
+                        }) else {
+                            continue;
+                        };
+                        let mut achieved_lvl = current_lvl;
+                        for lvl in (current_lvl + 1)..=q.target_level {
+                            if q.start_sp + 0.5 >= crate::formulas::sp_for_skill_level(rank, lvl) {
+                                achieved_lvl = lvl;
+                            } else {
+                                break;
+                            }
+                        }
+                        skills_map.insert(
+                            q.type_id,
+                            eve_db::TrainedSkillRecord {
+                                type_id: q.type_id,
+                                level: achieved_lvl,
+                                skill_points: q.start_sp,
+                            },
+                        );
+                        remaining_queue.push(q);
+                    }
+                }
+                snap.skill_queues.insert(char_id, remaining_queue);
+                if total_sp_gained > 0.0 {
+                    if let Some(ch) = snap.characters.get_mut(&char_id) {
+                        ch.skill_points += total_sp_gained;
+                        ships_to_invalidate.push(ch.active_ship_id);
+                    }
+                }
+            }
+            ships_to_invalidate
+        });
+        for ship_id in invalidated_ships {
+            self.invalidate_ship_fitting(ship_id);
+        }
     }
 
     pub fn invalidate_ship_fitting(&self, ship_id: i64) {
