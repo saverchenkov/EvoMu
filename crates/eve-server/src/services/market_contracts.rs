@@ -2,7 +2,7 @@
 
 #![forbid(unsafe_code)]
 
-use crate::formulas::{compute_broker_fee_rate, compute_sales_tax_rate};
+use crate::formulas::{compute_broker_fee_rate, compute_effective_standing, compute_sales_tax_rate};
 use crate::router::ServerContext;
 use eve_db::{
     ContractRecord, InventoryFlag, InventoryItemRecord, IskCents, MarketOrderRecord,
@@ -232,10 +232,22 @@ pub fn handle(
                 let sk = snap.skills.get(&char_id);
                 let b_lvl = sk.and_then(|m| m.get(&3446)).map(|s| s.level).unwrap_or(0);
                 let a_lvl = sk.and_then(|m| m.get(&16622)).map(|s| s.level).unwrap_or(0);
+                let conn_lvl = sk.and_then(|m| m.get(&3355)).map(|s| s.level).unwrap_or(0);
+                let dip_lvl = sk.and_then(|m| m.get(&3357)).map(|s| s.level).unwrap_or(0);
                 let ch = snap.characters.get(&char_id);
                 let f_st = ch.and_then(|c| owner_faction_id.and_then(|fid| c.standings.get(&fid).copied())).unwrap_or(0.0);
                 let c_st = ch.and_then(|c| c.standings.get(&owner_corp_id).copied()).unwrap_or(0.0);
-                (b_lvl, a_lvl, f_st, c_st)
+                let f_eff = if f_st != 0.0 {
+                    compute_effective_standing(f_st, conn_lvl, dip_lvl)
+                } else {
+                    0.0
+                };
+                let c_eff = if c_st != 0.0 {
+                    compute_effective_standing(c_st, conn_lvl, dip_lvl)
+                } else {
+                    0.0
+                };
+                (b_lvl, a_lvl, f_eff, c_eff)
             });
             let broker_rate = compute_broker_fee_rate(broker_lvl, faction_standing, corp_standing);
             let order_price = IskCents::from_f64_isk(price_isk);
