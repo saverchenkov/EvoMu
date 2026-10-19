@@ -2537,6 +2537,7 @@ mod tests {
                 skill_type_id: None,
                 effect_id: None,
             }],
+            ..Default::default()
         };
         let eff_b = DogmaEffectType {
             effect_id: 9011,
@@ -2554,6 +2555,7 @@ mod tests {
                 skill_type_id: None,
                 effect_id: None,
             }],
+            ..Default::default()
         };
         ctx.apply_effect(100, &eff_a, &sde);
         ctx.apply_effect(100, &eff_b, &sde);

@@ -217,7 +217,7 @@ pub struct TypeMaterialEntry {
 }
 
 /// Static definition of a Dogma attribute (`dgmAttributeTypes`).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DogmaAttributeType {
     pub attribute_id: AttributeId,
     pub name: String,
@@ -225,6 +225,8 @@ pub struct DogmaAttributeType {
     pub high_is_good: bool,
     /// `false` means stacking penalties apply when modified via `PostMul` / `PostPercent`.
     pub stackable: bool,
+    #[serde(default)]
+    pub published: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -243,13 +245,27 @@ pub struct EffectModifierSpec {
 }
 
 /// Static definition of a Dogma effect (`dgmEffects`).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DogmaEffectType {
     pub effect_id: EffectId,
     pub name: String,
     pub effect_category: u16,
     pub is_offensive: bool,
     pub is_assistance: bool,
+    #[serde(default)]
+    pub is_warp_safe: bool,
+    #[serde(default)]
+    pub disallow_auto_repeat: bool,
+    #[serde(default)]
+    pub electronic_chance: bool,
+    #[serde(default)]
+    pub propulsion_chance: bool,
+    #[serde(default)]
+    pub range_chance: bool,
+    #[serde(default)]
+    pub guid: Option<String>,
+    #[serde(default)]
+    pub published: bool,
     #[serde(default)]
     pub modifiers: Vec<EffectModifierSpec>,
 }
@@ -1044,7 +1060,7 @@ impl SdeRegistry {
         let mut attributes = HashMap::new();
         {
             let mut stmt = conn.prepare(
-                "SELECT attribute_id, name, default_value, high_is_good, stackable FROM sde_dogma_attributes",
+                "SELECT attribute_id, name, default_value, high_is_good, stackable, published FROM sde_dogma_attributes",
             )?;
             let rows = stmt.query_map([], |r| {
                 Ok(DogmaAttributeType {
@@ -1053,6 +1069,7 @@ impl SdeRegistry {
                     default_value: r.get(2)?,
                     high_is_good: r.get::<_, i64>(3)? != 0,
                     stackable: r.get::<_, i64>(4)? != 0,
+                    published: r.get::<_, i64>(5)? != 0,
                 })
             })?;
             for r in rows {
@@ -1064,12 +1081,19 @@ impl SdeRegistry {
         let mut effects = HashMap::new();
         {
             let mut stmt = conn.prepare(
-                "SELECT effect_id, name, effect_category, is_offensive, is_assistance, modifiers_json FROM sde_dogma_effects",
+                "SELECT effect_id, name, effect_category, is_offensive, is_assistance, is_warp_safe, disallow_auto_repeat, electronic_chance, propulsion_chance, range_chance, guid, published, modifiers_json FROM sde_dogma_effects",
             )?;
             let rows = stmt.query_map([], |r| {
                 let eid = r.get::<_, i64>(0)? as EffectId;
-                let mods_str: String = r.get(5)?;
-                let raw_mods: Vec<RawModifier> = parse_json_col(5, &mods_str)?;
+                let is_warp_safe = r.get::<_, i64>(5)? != 0;
+                let disallow_auto_repeat = r.get::<_, i64>(6)? != 0;
+                let electronic_chance = r.get::<_, i64>(7)? != 0;
+                let propulsion_chance = r.get::<_, i64>(8)? != 0;
+                let range_chance = r.get::<_, i64>(9)? != 0;
+                let guid: Option<String> = r.get(10)?;
+                let published = r.get::<_, i64>(11)? != 0;
+                let mods_str: String = r.get(12)?;
+                let raw_mods: Vec<RawModifier> = parse_json_col(12, &mods_str)?;
                 let modifiers = raw_mods
                     .into_iter()
                     .filter_map(|m| {
@@ -1113,6 +1137,13 @@ impl SdeRegistry {
                     effect_category: r.get::<_, i64>(2)? as u16,
                     is_offensive: r.get::<_, i64>(3)? != 0,
                     is_assistance: r.get::<_, i64>(4)? != 0,
+                    is_warp_safe,
+                    disallow_auto_repeat,
+                    electronic_chance,
+                    propulsion_chance,
+                    range_chance,
+                    guid,
+                    published,
                     modifiers,
                 })
             })?;

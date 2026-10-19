@@ -1061,6 +1061,7 @@ def run_import(
             published INTEGER NOT NULL,
             modifiers_json TEXT NOT NULL
         );
+        CREATE VIEW IF NOT EXISTS sde_effects AS SELECT * FROM sde_dogma_effects;
         CREATE TABLE sde_type_materials (
             type_id INTEGER PRIMARY KEY,
             materials_json TEXT NOT NULL
