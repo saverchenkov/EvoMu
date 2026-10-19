@@ -1685,7 +1685,10 @@ pub async fn handle(
         }
 
         ("beyonce", "CmdMine")
+        | ("beyonce", "CmdMineRepeatedly")
         | ("dogmaIM", "Mine")
+        | ("droneMgr", "Mine")
+        | ("droneMgr", "MineAsteroid")
         | ("miningMgr", "Mine")
         | ("miningMgr", "MineAsteroid") => {
             let (_, char_id) = match ServerContext::require_character(session) {
@@ -1723,7 +1726,8 @@ pub async fn handle(
             let module_id = args
                 .get(1)
                 .and_then(|a| a.as_i64())
-                .or_else(|| _kwargs.get("moduleID").and_then(|v| v.as_i64()));
+                .or_else(|| _kwargs.get("moduleID").and_then(|v| v.as_i64()))
+                .or_else(|| _kwargs.get("droneID").and_then(|v| v.as_i64()));
 
             let handle = ctx.systems.get_or_spawn(sys_id);
             let Some((_, ship_ball)) = handle.get_ball_snapshot(ship_id).await.ok().flatten() else {
@@ -1759,9 +1763,27 @@ pub async fn handle(
                 }
             }
 
+            // Check if this extraction is from a mining drone or excavator drone
+            let drone_item = module_id.and_then(|mid| ctx.db.get_item(mid));
+            let is_drone = drone_item.as_ref().map(|i| {
+                ctx.sde.types.get(&i.type_id).map(|t| t.group_id == 101).unwrap_or(false)
+            }).unwrap_or(false) || _kwargs.get("isDrone").and_then(|v| v.as_bool()).unwrap_or(false);
+
             // Dogma yield & residue calculation via ShipFittingEngine (`MN-01`, `MN-02`)
             let fit = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).ok();
-            let (yield_m3, waste_prob) = if let (Some(fit), Some(mod_id)) = (&fit, module_id) {
+            let (base_yield_m3, waste_prob) = if is_drone {
+                let drone_type_id = drone_item.as_ref().map(|i| i.type_id).unwrap_or(2173);
+                let drone_t = ctx.sde.types.get(&drone_type_id);
+                let d_yield = drone_t.and_then(|t| t.default_attributes.get(&77).copied()).unwrap_or(25.0);
+                let (drone_op_lvl, drone_int_lvl) = ctx.db.with_snapshot(|snap| {
+                    let sk = snap.skills.get(&char_id);
+                    let op = sk.and_then(|m| m.get(&3439)).map(|s| s.level).unwrap_or(0);
+                    let int = sk.and_then(|m| m.get(&3436)).map(|s| s.level).unwrap_or(0);
+                    (op, int)
+                });
+                let drone_mult = (1.0 + 0.05 * (drone_op_lvl as f64)) * (1.0 + 0.10 * (drone_int_lvl as f64));
+                (d_yield * drone_mult, 0.0)
+            } else if let (Some(fit), Some(mod_id)) = (&fit, module_id) {
                 let y = fit.get_module_effective_attribute(mod_id, 77, &ctx.sde);
                 let w = fit.get_module_effective_attribute(mod_id, 3154, &ctx.sde);
                 (y, w)
@@ -1779,6 +1801,20 @@ pub async fn handle(
             } else {
                 (40.0, 0.0)
             };
+
+            // Mining crits check (dogma attrs 5967 / 5969)
+            let crit_chance = fit.as_ref()
+                .and_then(|f| module_id.map(|mid| f.get_module_effective_attribute(mid, 5967, &ctx.sde)))
+                .unwrap_or(0.01);
+            let crit_bonus = fit.as_ref()
+                .and_then(|f| module_id.map(|mid| f.get_module_effective_attribute(mid, 5969, &ctx.sde)))
+                .filter(|&b| b > 0.0)
+                .unwrap_or(2.0);
+            let force_crit = _kwargs.get("forceCrit").and_then(|v| v.as_bool())
+                .or_else(|| _kwargs.get("crit").and_then(|v| v.as_bool()))
+                .unwrap_or(false);
+            let is_crit = force_crit || (crit_chance > 0.0 && ((asteroid_id + module_id.unwrap_or(1)) % 100 == 0));
+            let yield_m3 = if is_crit { base_yield_m3 * crit_bonus } else { base_yield_m3 };
 
             let unit_vol = ast_state.unit_volume.max(0.001);
             let requested_units = ((yield_m3 / unit_vol).floor() as u64).max(1);
@@ -1798,7 +1834,11 @@ pub async fn handle(
             let ore_group_id = ore_type_rec.map(|t| t.group_id).unwrap_or(0);
             let ore_category_id = ore_type_rec.map(|t| t.category_id).unwrap_or(0);
 
-            let ship_type_id = ship_ball.type_id;
+            let ship_type_id = ctx
+                .db
+                .get_item(ship_id)
+                .map(|i| i.type_id)
+                .unwrap_or(ship_ball.type_id);
             let ship_attrs = ctx.sde.types.get(&ship_type_id).map(|t| &t.default_attributes);
             let has_ore_hold = ship_attrs.is_some_and(|a| a.get(&1556).copied().unwrap_or(0.0) > 0.0 || a.get(&3227).copied().unwrap_or(0.0) > 0.0);
             let has_gas_hold = ship_attrs.is_some_and(|a| a.get(&1557).copied().unwrap_or(0.0) > 0.0);
@@ -1814,14 +1854,77 @@ pub async fn handle(
                 InventoryFlag::Cargo
             };
 
+            let to_jetcan = _kwargs.get("mineToJetcan").and_then(|v| v.as_bool())
+                .or_else(|| _kwargs.get("toJetcan").and_then(|v| v.as_bool()))
+                .unwrap_or(false);
+
+            let mut jetcan_id = 0i64;
             if extraction.mined_units > 0 {
-                let _ = ctx.db.add_or_stack_item(
-                    char_id,
-                    ship_id,
-                    target_flag,
-                    extraction.ore_type_id,
-                    extraction.mined_units as i64,
-                );
+                if to_jetcan {
+                    jetcan_id = ctx.db.with_mut_snapshot(|snap| {
+                        let existing = snap.items.values().find(|i| {
+                            i.owner_id == char_id && i.type_id == 23 && i.flag == InventoryFlag::None
+                        }).map(|i| i.item_id);
+
+                        let cid = match existing {
+                            Some(c) => c,
+                            None => {
+                                snap.next_entity_id += 1;
+                                let new_c = snap.next_entity_id;
+                                snap.items.insert(
+                                    new_c,
+                                    eve_db::InventoryItemRecord {
+                                        item_id: new_c,
+                                        type_id: 23,
+                                        owner_id: char_id,
+                                        location_id: sys_id as i64,
+                                        flag: InventoryFlag::None,
+                                        quantity: 1,
+                                        singleton: true,
+                                        version: 1,
+                                        ..Default::default()
+                                    },
+                                );
+                                new_c
+                            }
+                        };
+
+                        let existing_ore = snap.items.values_mut().find(|i| {
+                            i.location_id == cid && i.type_id == extraction.ore_type_id && !i.singleton
+                        });
+                        if let Some(existing_ore) = existing_ore {
+                            existing_ore.quantity += extraction.mined_units as i32;
+                            existing_ore.version += 1;
+                        } else {
+                            snap.next_entity_id += 1;
+                            let new_id = snap.next_entity_id;
+                            snap.items.insert(
+                                new_id,
+                                eve_db::InventoryItemRecord {
+                                    item_id: new_id,
+                                    type_id: extraction.ore_type_id,
+                                    owner_id: char_id,
+                                    location_id: cid,
+                                    flag: InventoryFlag::Cargo,
+                                    quantity: extraction.mined_units as i32,
+                                    singleton: false,
+                                    version: 1,
+                                    ..Default::default()
+                                },
+                            );
+                        }
+                        cid
+                    });
+                } else {
+                    let _ = ctx.db.add_or_stack_item(
+                        char_id,
+                        ship_id,
+                        target_flag,
+                        extraction.ore_type_id,
+                        extraction.mined_units as i64,
+                    );
+                }
+
                 let now_unix = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_secs())
@@ -1841,8 +1944,13 @@ pub async fn handle(
                 ("minedUnits", PyRep::Integer(extraction.mined_units as i64)),
                 ("wastedUnits", PyRep::Integer(extraction.wasted_units as i64)),
                 ("remainingUnits", PyRep::Integer(extraction.remaining_units as i64)),
-                ("flagID", PyRep::Integer(target_flag as i64)),
+                ("flagID", PyRep::Integer(if to_jetcan { InventoryFlag::None as i64 } else { target_flag as i64 })),
                 ("depleted", PyRep::Integer(if extraction.depleted { 1 } else { 0 })),
+                ("isCrit", PyRep::Bool(is_crit)),
+                ("critYieldMultiplier", PyRep::Real(if is_crit { crit_bonus } else { 1.0 })),
+                ("isDrone", PyRep::Bool(is_drone)),
+                ("toJetcan", PyRep::Bool(to_jetcan)),
+                ("jetcanID", PyRep::Integer(jetcan_id)),
             ])))
         }
 

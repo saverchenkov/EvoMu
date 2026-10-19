@@ -975,15 +975,46 @@ pub fn populate_asteroid_belt_entities(
     let mut states = Vec::new();
     let mut ast_id_counter = 750_000_000i64;
 
+    let sec = sde
+        .solar_systems
+        .get(&solar_system_id)
+        .map(|s| s.security_status)
+        .unwrap_or(1.0);
+
     for cel in sde.celestials_in_system(solar_system_id) {
         if cel.group_id == 9 {
             let belt_pos = cel.position;
-            let ores: [(u32, u64, f64); 4] = [
-                (1230, 20_000, 0.1),  // Veldspar
-                (1228, 15_000, 0.15), // Scordite
-                (1224, 10_000, 0.3),  // Pyroxeres
-                (18, 8_000, 0.35),    // Plagioclase
-            ];
+            let is_ice_belt = cel.name.to_lowercase().contains("ice");
+
+            let ores: Vec<(u32, u64, f64)> = if is_ice_belt {
+                vec![
+                    (16262, 500, 1000.0), // Clear Icicle
+                    (16263, 500, 1000.0), // Blue Ice
+                    (16264, 500, 1000.0), // Glacial Mass
+                ]
+            } else if sec >= 0.45 {
+                vec![
+                    (1230, 20_000, 0.1),  // Veldspar
+                    (1228, 15_000, 0.15), // Scordite
+                    (1224, 10_000, 0.3),  // Pyroxeres
+                    (18, 8_000, 0.35),    // Plagioclase
+                ]
+            } else if sec >= 0.05 {
+                vec![
+                    (1227, 10_000, 0.6), // Omber
+                    (20, 8_000, 1.2),    // Kernite
+                    (1231, 6_000, 3.0),  // Hemorphite
+                    (1226, 5_000, 2.0),  // Jaspet
+                ]
+            } else {
+                vec![
+                    (21, 6_000, 3.0),    // Hedbergite
+                    (19, 5_000, 0.1),    // Spodumain
+                    (1232, 4_000, 8.0),  // Dark Ochre
+                    (1229, 3_000, 16.0), // Bistot
+                    (1225, 2_000, 40.0), // Arkonor
+                ]
+            };
 
             for (idx, &(type_id, units, unit_vol)) in ores.iter().enumerate() {
                 let id = ast_id_counter;

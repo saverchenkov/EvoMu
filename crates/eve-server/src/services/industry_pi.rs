@@ -307,14 +307,28 @@ pub fn handle(
                     (0.05_f64 - 0.0075_f64 * standing.max(0.0)).clamp(0.0, 0.05)
                 };
 
-                let station_base_yield = ctx
-                    .sde
-                    .solar_systems
-                    .values()
-                    .flat_map(|s| s.stations.iter())
-                    .find(|st| st.station_id == station_id)
-                    .map(|st| st.reprocessing_efficiency)
-                    .unwrap_or(0.50);
+                let station_base_yield = if station_id >= 1_000_000_000_000 {
+                    snap.structures
+                        .get(&station_id)
+                        .map(|st| {
+                            if st.type_id == 35836 {
+                                0.54
+                            } else if st.type_id == 35835 {
+                                0.52
+                            } else {
+                                0.50
+                            }
+                        })
+                        .unwrap_or(0.50)
+                } else {
+                    ctx.sde
+                        .solar_systems
+                        .values()
+                        .flat_map(|s| s.stations.iter())
+                        .find(|st| st.station_id == station_id)
+                        .map(|st| st.reprocessing_efficiency)
+                        .unwrap_or(0.50)
+                };
 
                 let implant_bonus = snap
                     .active_implants
@@ -462,14 +476,21 @@ pub fn handle(
                 Vec::new()
             };
             if method == "GetReprocessingInfo" && item_ids.is_empty() {
-                let station_base_yield = ctx
-                    .sde
-                    .solar_systems
-                    .values()
-                    .flat_map(|s| s.stations.iter())
-                    .find(|st| st.station_id == station_id)
-                    .map(|st| st.reprocessing_efficiency)
-                    .unwrap_or(0.50);
+                let station_base_yield = if station_id >= 1_000_000_000_000 {
+                    ctx.db.with_snapshot(|snap| {
+                        snap.structures.get(&station_id).map(|st| {
+                            if st.type_id == 35836 { 0.54 } else if st.type_id == 35835 { 0.52 } else { 0.50 }
+                        }).unwrap_or(0.50)
+                    })
+                } else {
+                    ctx.sde
+                        .solar_systems
+                        .values()
+                        .flat_map(|s| s.stations.iter())
+                        .find(|st| st.station_id == station_id)
+                        .map(|st| st.reprocessing_efficiency)
+                        .unwrap_or(0.50)
+                };
                 let (reproc_lvl, reproc_eff_lvl) = ctx.db.with_snapshot(|snap| {
                     let char_skills = snap.skills.get(&char_id);
                     let r = char_skills.and_then(|m| m.get(&3385)).map(|s| s.level).unwrap_or(0);
@@ -495,7 +516,13 @@ pub fn handle(
                         .and_then(|&skill_id_f| char_skills.and_then(|m| m.get(&(skill_id_f as TypeId))).map(|s| s.level))
                         .unwrap_or(0);
                     let scrap_lvl = char_skills.and_then(|m| m.get(&12196)).map(|s| s.level).unwrap_or(0);
-                    let station_base_yield = ctx.sde.solar_systems.values().flat_map(|s| s.stations.iter()).find(|st| st.station_id == station_id).map(|st| st.reprocessing_efficiency).unwrap_or(0.50);
+                    let station_base_yield = if station_id >= 1_000_000_000_000 {
+                        snap.structures.get(&station_id).map(|st| {
+                            if st.type_id == 35836 { 0.54 } else if st.type_id == 35835 { 0.52 } else { 0.50 }
+                        }).unwrap_or(0.50)
+                    } else {
+                        ctx.sde.solar_systems.values().flat_map(|s| s.stations.iter()).find(|st| st.station_id == station_id).map(|st| st.reprocessing_efficiency).unwrap_or(0.50)
+                    };
                     let implant_bonus = snap.active_implants.get(&char_id).map(|implants| {
                         let mut b = 0.0;
                         for &imp_id in implants {
