@@ -256,20 +256,20 @@
   "note": "PublicGatewayRouter, envelope framing, tenancy auth, bounded idempotency cache, NoticeRoutingCache, and scoped Notice fan-out in place; golden client verification pending."
  },
  "Q-3": {
-  "assessment": "NOT STARTED",
-  "note": ""
+  "assessment": "DONE",
+  "note": "Quasar Identity & Entitlements backend services (GetEntitlements, GetIdentity, GetAccount, GetOmegaStatus, GetPlexBalance) implemented with PublicGatewayRouter dispatch."
  },
  "Q-4": {
-  "assessment": "NOT STARTED",
-  "note": ""
+  "assessment": "DONE",
+  "note": "Quasar Character Progression services (GetProgression, GetDailyOpportunities, ClaimDailyOpportunity, GetAchievements, ClaimAchievement) implemented and tested."
  },
  "Q-5": {
-  "assessment": "NOT STARTED",
-  "note": ""
+  "assessment": "DONE",
+  "note": "Quasar Fitting Simulation service (SimulateFitting) wired to ShipFittingEngine with Dogma calculations for CPU, powergrid, capacitor, EHP, DPS, and velocity."
  },
  "Q-6": {
-  "assessment": "NOT STARTED",
-  "note": ""
+  "assessment": "DONE",
+  "note": "Quasar Market & Wallet services (GetOrders, GetMarketHistory, GetBalance, GetJournal) implemented with regional order query, price statistics, and wallet tracking."
  },
  "Q-7": {
   "assessment": "NOT STARTED",
