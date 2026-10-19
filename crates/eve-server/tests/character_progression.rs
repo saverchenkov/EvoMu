@@ -367,8 +367,8 @@ async fn test_ch2_character_creation_and_starter_assets() {
 
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
 
-    // Call charUnboundMgr.CreateCharacterWithDoll with Caldari pilot
-    // (race=1 Caldari, bloodline=1 Deteis, ancestry=11 Scientists, school=17 Science and Trade Institute)
+    // Call charUnboundMgr.CreateCharacterWithDoll with V24 7-argument signature:
+    // (charactername, bloodlineID=1 Deteis, genderID=1 Male, ancestryID=11 Scientists, charInfo, portraitInfo, schoolID=17 STI)
     let new_char_rep = ctx
         .dispatch_rpc(
             &mut sess,
@@ -377,10 +377,12 @@ async fn test_ch2_character_creation_and_starter_assets() {
             "CreateCharacterWithDoll",
             &[
                 PyRep::String("Caldari Cadet".into()),
-                PyRep::Integer(1),  // Caldari
-                PyRep::Integer(1),  // Deteis
-                PyRep::Integer(11), // Scientists
-                PyRep::Integer(17), // Science and Trade Institute
+                PyRep::Integer(1),  // bloodlineID = 1 (Deteis -> Caldari race 1)
+                PyRep::Integer(1),  // genderID = 1 (Male)
+                PyRep::Integer(11), // ancestryID = 11 (Scientists)
+                PyRep::String("doll:deteis-cadet".into()),
+                PyRep::String("portrait:deteis-cadet".into()),
+                PyRep::Integer(17), // schoolID = 17 (Science and Trade Institute)
             ],
             &kw,
             None,
@@ -1242,28 +1244,32 @@ async fn test_inv2_stack_split_destroy_inventory() {
         assert_eq!(new_item.type_id, 34);
     });
 
-    // 3. Delete/Destroy item
+    // 3. Trash items via canonical invbroker.TrashItems (feat:inventory.trash-items)
     let destroy_rep = ctx
         .dispatch_rpc(
             &mut sess,
-            "invBroker",
+            "invbroker",
             None,
-            "DestroyItem",
-            &[PyRep::Integer(new_item_id)],
+            "TrashItems",
+            &[
+                PyRep::List(vec![PyRep::Integer(new_item_id)]),
+                PyRep::Integer(60_003_760),
+            ],
             &kw,
             None,
         )
         .await
-        .expect("DestroyItem");
+        .expect("TrashItems");
     let PyRep::KeyVal(des_kv) = destroy_rep else {
-        panic!("Expected KeyVal from DestroyItem");
+        panic!("Expected KeyVal from TrashItems");
     };
     assert_eq!(des_kv.get("deleted"), Some(&PyRep::Bool(true)));
+    assert_eq!(des_kv.get("count"), Some(&PyRep::Integer(1)));
 
     ctx.db.with_snapshot(|snap| {
         assert!(
             !snap.items.contains_key(&new_item_id),
-            "Destroyed item must be removed from inventory"
+            "Trashed item must be removed from inventory"
         );
     });
 }

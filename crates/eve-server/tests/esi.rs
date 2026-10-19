@@ -1067,16 +1067,19 @@ async fn test_esi_all_31_openapi_tags_sample_routes_and_schema_validation() {
         &EsiHttpRequest::new("GET", "/v1/characters/90000001/mail/").with_bearer_token(&token),
     );
     let mail_json = mail_resp.json().expect("mail json");
+    let mail_arr = mail_json.as_array().expect("mail array");
+    assert_eq!(mail_arr.len(), 1);
+    assert_eq!(mail_arr[0]["mail_id"], json!(101));
+    assert_eq!(mail_arr[0]["from"], json!(90_000_001));
+    assert_eq!(mail_arr[0]["subject"], json!("Welcome to ESI"));
+    assert_eq!(mail_arr[0]["is_read"], json!(false));
+    assert!(mail_arr[0]["timestamp"].as_str().is_some());
+    assert_eq!(mail_arr[0]["labels"], json!([1]));
     assert_eq!(
-        mail_json,
+        mail_arr[0]["recipients"],
         json!([{
-            "mail_id": 101,
-            "from": 90_000_001,
-            "subject": "Welcome to ESI",
-            "recipients": [{
-                "recipient_id": 90_000_001,
-                "recipient_type": "character",
-            }],
+            "recipient_id": 90_000_001,
+            "recipient_type": "character",
         }])
     );
 

@@ -81,10 +81,21 @@ impl eve_db::FromWalError for RouteExecutionResult {
     }
 }
 
-/// Opens the on-disk SQLite SDE database (`ctx.sde.db_path`) read-only for celestials/stargates/dogma queries.
+/// Opens the on-disk SQLite SDE database (`ctx.sde.db_path`) read-only with `?immutable=1` for celestials/stargates/dogma queries.
 pub(crate) fn open_sde_sqlite(ctx: &ServerContext) -> Option<Connection> {
-    let path = ctx.sde.db_path.as_ref()?;
-    Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).ok()
+    let path = ctx
+        .sde
+        .db_path
+        .clone()
+        .unwrap_or_else(eve_sde::SdeRegistry::default_db_path);
+    let uri = format!("file:{}?immutable=1", path.display());
+    Connection::open_with_flags(
+        &uri,
+        OpenFlags::SQLITE_OPEN_READ_ONLY
+            | OpenFlags::SQLITE_OPEN_URI
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .ok()
 }
 
 /// Paginates a slice of items (`1`-indexed `page`, `page_size` items per page).
@@ -848,6 +859,7 @@ pub fn dispatch_operation(
         ),
 
         // 11. Insurance tag (ESI-3)
+        // parity: esi:GET /insurance/prices, feat:esi.insurance.prices
         ("GET", "/insurance/prices") => {
             let mut ship_types: Vec<_> = ctx
                 .sde
@@ -859,17 +871,21 @@ pub fn dispatch_operation(
             let out: Vec<Value> = ship_types
                 .into_iter()
                 .map(|t| {
-                    let base = t.base_price;
+                    let ref_val =
+                        crate::formulas::compute_ship_insurance_reference_value(&ctx.sde, t.type_id);
+                    let levels: Vec<Value> = crate::formulas::compute_insurance_levels(ref_val)
+                        .into_iter()
+                        .map(|(name, cost, payout)| {
+                            json!({
+                                "name": name,
+                                "cost": cost,
+                                "payout": payout,
+                            })
+                        })
+                        .collect();
                     json!({
                         "type_id": t.type_id as i64,
-                        "levels": [
-                            { "name": "Basic", "cost": base * 0.05, "payout": base * 0.50 },
-                            { "name": "Standard", "cost": base * 0.10, "payout": base * 0.60 },
-                            { "name": "Bronze", "cost": base * 0.15, "payout": base * 0.70 },
-                            { "name": "Silver", "cost": base * 0.20, "payout": base * 0.80 },
-                            { "name": "Gold", "cost": base * 0.25, "payout": base * 0.90 },
-                            { "name": "Platinum", "cost": base * 0.30, "payout": base * 1.00 },
-                        ]
+                        "levels": levels,
                     })
                 })
                 .collect();

@@ -146,7 +146,7 @@ def run_two_client_bridge_probe(host, bridge_port, client_1_log_path, client_2_l
         log2.info("authentication.Login('other') -> %r" % (login2,))
         if sm2.RemoteSvc("charUnboundMgr").ValidateNameEx("Aura Two"):
             created_char_id = sm2.RemoteSvc("charUnboundMgr").CreateCharacterWithDoll(
-                "Aura Two", 1, 1, 11, 17
+                "Aura Two", 1, 0, 11, {"hair": "short"}, {"poseID": 1}, 17
             )
             log2.info(
                 "charUnboundMgr.CreateCharacterWithDoll -> created_char_id=%r"

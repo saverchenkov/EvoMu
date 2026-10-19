@@ -5,7 +5,7 @@
 
 use crate::esi::sample_routes::{format_iso8601_utc, RouteExecutionResult};
 use crate::router::ServerContext;
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::Connection;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
@@ -32,16 +32,7 @@ fn parse_path_i64(
 }
 
 fn open_sde_conn(ctx: &ServerContext) -> Option<Connection> {
-    let path = ctx
-        .sde
-        .db_path
-        .clone()
-        .unwrap_or_else(eve_sde::SdeRegistry::default_db_path);
-    Connection::open_with_flags(
-        path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .ok()
+    crate::esi::sample_routes::open_sde_sqlite(ctx)
 }
 
 pub fn dispatch_fw_universe_route(

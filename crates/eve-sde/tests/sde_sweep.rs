@@ -915,6 +915,7 @@ fn test_t2_sde_all_213_resources_and_domain_tables_sweep() {
         assert!(sde.types.contains_key(&wreck_tid));
     }
 
+    // parity: sde:res:/staticdata/types.fsdbinary
     // Spot-check Raven (638), minerals (34..37), Rifter (587), and Nemesis (11377)
     let raven = &sde.types[&638];
     assert_eq!(raven.name, "Raven");

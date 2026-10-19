@@ -6,7 +6,7 @@
 //! CH-5: GM command dispatcher
 //! S-4: Jump clones
 // parity: plan:CH-1, plan:CH-2, plan:CH-3, plan:CH-4, plan:CH-5, plan:S-4
-// parity: feat:skills.queue-training-engine, feat:skills.queue-pause, feat:skills.skill-levels-sp, feat:skills.alpha-skill-caps, feat:skills.alpha-training-speed, feat:skills.queue-get, feat:skills.queue-save, feat:skills.skill-history, feat:skills.inject-skillbook, feat:skills.prereq-check, feat:character.list-characters, feat:character.select-character, feat:character.create-character, feat:character.random-name, feat:character.name-validation, feat:character.show-info-public, feat:character.biography, feat:character.employment-history, feat:character.owner-notes, feat:character.character-sheet, feat:admin.slash-dispatcher, feat:admin.gm-giveskill, feat:admin.gm-giveisk, feat:admin.gm-createitem, feat:admin.gm-tr, feat:clones.jump-clone-install, feat:clones.jump-clone-jump, feat:clones.jump-clone-destroy
+// parity: feat:skills.queue-training-engine, feat:skills.queue-pause, feat:skills.skill-levels-sp, feat:skills.alpha-skill-caps, feat:skills.alpha-training-speed, feat:skills.queue-get, feat:skills.queue-save, feat:skills.skill-history, feat:skills.inject-skillbook, feat:skills.prereq-check, feat:character.list-characters, feat:character.select-character, feat:character.create-character, feat:character.show-info-public, feat:character.biography, feat:character.employment-history, feat:character.owner-notes, feat:character.character-sheet, feat:admin.slash-dispatcher, feat:admin.gm-giveskill, feat:admin.gm-giveisk, feat:admin.gm-createitem, feat:admin.gm-tr, feat:clones.jump-clone-install, feat:clones.jump-clone-jump, feat:clones.jump-clone-destroy
 
 #![forbid(unsafe_code)]
 
@@ -327,6 +327,120 @@ async fn test_ch1_skill_training_engine_and_caps() {
         assert_eq!(q.start_sp, 40.0, "Only SP up to 5M cap granted");
     });
 
+    // 4b. Per-skill Alpha level cap from clonegrades.fsdbinary & inactive SP when downgraded (feat:skills.alpha-skill-caps)
+    // Caldari Alpha (clone_grade_id=1) has Anchoring (11584) capped at 1 and Cloaking (11579) capped at 0.
+    // Give alpha_cap_id trained Anchoring IV, Cloaking IV (from prior Omega state), and Gunnery IV, reset SP to 1,000,000 so 5M cap doesn't trigger first.
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&alpha_cap_id) {
+            ch.skill_points = 1_000_000.0;
+            ch.user_id = 1;
+        }
+        let skills = snap.skills.entry(alpha_cap_id).or_default();
+        skills.insert(
+            3300,
+            TrainedSkillRecord {
+                type_id: 3300,
+                level: 4,
+                skill_points: 45_255.0,
+            },
+        );
+        skills.insert(
+            11584,
+            TrainedSkillRecord {
+                type_id: 11584,
+                level: 4,
+                skill_points: 135_765.0,
+            },
+        );
+        skills.insert(
+            11579,
+            TrainedSkillRecord {
+                type_id: 11579,
+                level: 4,
+                skill_points: 271_530.0,
+            },
+        );
+    });
+    ctx.dispatch_rpc(
+        &mut sess,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(alpha_cap_id)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("SelectCharacterID alpha_cap_id");
+
+    // Attempt to queue Science V (3402, no prerequisites, Alpha cap 4 in clonegrades.fsdbinary) -> AlphaCloneSkillLevelCapExceeded
+    let alpha_lvl_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "skillMgr2",
+            None,
+            "SaveSkillQueue",
+            &[PyRep::List(vec![PyRep::Tuple(vec![
+                PyRep::Integer(3402),
+                PyRep::Integer(5),
+            ])])],
+            &kw,
+            None,
+        )
+        .await;
+    assert_eq!(
+        alpha_lvl_err.unwrap_err().code,
+        "AlphaCloneSkillLevelCapExceeded",
+        "Alpha clone must not be able to queue skills above clonegrades.fsdbinary per-skill level cap"
+    );
+
+    // Verify inactive SP: GetCharacterInfo reports skillLevel=4, activeSkillLevel=1 for Anchoring (11584)
+    // and skillLevel=4, activeSkillLevel=0 for Cloaking (11579) on Alpha clone
+    let alpha_info = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "charUnboundMgr",
+            None,
+            "GetCharacterInfo",
+            &[PyRep::Integer(alpha_cap_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("GetCharacterInfo alpha");
+    let PyRep::KeyVal(alpha_kv) = alpha_info else {
+        panic!("Expected KeyVal from GetCharacterInfo");
+    };
+    let PyRep::List(alpha_skills) = alpha_kv.get("skills").expect("skills list") else {
+        panic!("Expected skills List");
+    };
+    let anchoring_entry = alpha_skills
+        .iter()
+        .find_map(|s| match s {
+            PyRep::KeyVal(kv) if kv.get("typeID").and_then(|v| v.as_i64()) == Some(11584) => Some(kv),
+            _ => None,
+        })
+        .expect("Anchoring skill entry in character sheet");
+    assert_eq!(anchoring_entry.get("skillLevel").and_then(|v| v.as_i64()), Some(4));
+    assert_eq!(
+        anchoring_entry.get("activeSkillLevel").and_then(|v| v.as_i64()),
+        Some(1),
+        "Anchoring trained to IV must have activeSkillLevel=1 on Alpha clone"
+    );
+    let cloaking_entry = alpha_skills
+        .iter()
+        .find_map(|s| match s {
+            PyRep::KeyVal(kv) if kv.get("typeID").and_then(|v| v.as_i64()) == Some(11579) => Some(kv),
+            _ => None,
+        })
+        .expect("Cloaking skill entry in character sheet");
+    assert_eq!(cloaking_entry.get("skillLevel").and_then(|v| v.as_i64()), Some(4));
+    assert_eq!(
+        cloaking_entry.get("activeSkillLevel").and_then(|v| v.as_i64()),
+        Some(0),
+        "Omega-only skill trained to IV must have activeSkillLevel=0 (inactive SP) on Alpha clone"
+    );
+
     // 5. Skill queue pause & resume (feat:skills.queue-pause)
     ctx.db.with_mut_snapshot(|snap| {
         snap.skill_queues.insert(
@@ -511,32 +625,10 @@ async fn test_ch2_skill_handling_and_prerequisites() {
         assert!(snap.paused_skill_queues.contains(&char_id));
     });
 
-    // 3. GetSkillHistory (feat:skills.skill-history)
-    let history_res = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "skillMgr2",
-            None,
-            "GetSkillHistory",
-            &[],
-            &kw,
-            None,
-        )
-        .await
-        .expect("GetSkillHistory");
-    let PyRep::Rowset {
-        columns: hist_cols, ..
-    } = history_res
-    else {
-        panic!("Expected Rowset from GetSkillHistory");
-    };
-    assert_eq!(
-        hist_cols,
-        vec!["logDate", "skillTypeID", "skillLevel", "absolutePoints"]
-    );
-
-    // 4. Inject skillbook (feat:skills.inject-skillbook, feat:skills.prereq-check)
-    // Add skillbook item for Medium Hybrid Turret (type 3302, requires Small Hybrid Turret 3) to hangar
+    // 3. Inject skillbook without prerequisites trained (feat:skills.inject-skillbook, feat:skills.prereq-check)
+    // Per wiki:Skills_and_learning, any skillbook can be injected without having trained its prerequisites,
+    // whereas training/queueing requires the prerequisite skills.
+    // Add skillbook item for Small Projectile Turret (type 3302, requires Gunnery 3300 level 1) to hangar
     let book_item_id = 992_000_201;
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(
@@ -557,39 +649,13 @@ async fn test_ch2_skill_handling_and_prerequisites() {
                 blueprint_runs_remaining: None,
             },
         );
+        snap.skills.entry(char_id).or_default().remove(&3300);
+        snap.skills.entry(char_id).or_default().remove(&3301);
         snap.skills.entry(char_id).or_default().remove(&3302);
     });
 
-    // Prerequisite not met: Medium Hybrid Turret requires Small Hybrid Turret III
-    let inject_prereq_err = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "skillMgr2",
-            None,
-            "InjectSkillIntoBrain",
-            &[PyRep::Integer(book_item_id)],
-            &kw,
-            None,
-        )
-        .await;
-    assert_eq!(
-        inject_prereq_err.unwrap_err().code,
-        "SkillPrerequisiteNotMet"
-    );
-
-    // Now satisfy prerequisite: Gunnery level 1
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.skills.entry(char_id).or_default().insert(
-            3300,
-            TrainedSkillRecord {
-                type_id: 3300,
-                level: 1,
-                skill_points: 250.0,
-            },
-        );
-    });
-
-    // Inject succeeds: consumes item and adds skill at level 0 (0 SP)
+    // Inject succeeds even though prerequisite (Gunnery I) is not yet trained:
+    // consumes item and adds skill at level 0 (0 SP)
     let inject_ok = ctx
         .dispatch_rpc(
             &mut sess,
@@ -601,7 +667,7 @@ async fn test_ch2_skill_handling_and_prerequisites() {
             None,
         )
         .await
-        .expect("InjectSkillIntoBrain");
+        .expect("InjectSkillIntoBrain succeeds without prerequisites trained");
     assert!(matches!(inject_ok, PyRep::KeyVal(_)));
 
     ctx.db.with_snapshot(|snap| {
@@ -613,6 +679,67 @@ async fn test_ch2_skill_handling_and_prerequisites() {
         assert_eq!(s.level, 0);
         assert_eq!(s.skill_points, 0.0);
     });
+
+    // Attempting to queue the injected skill (3302) without its prerequisite (3300 level 1) must fail
+    let queue_unprereq_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "skillMgr2",
+            None,
+            "SaveSkillQueue",
+            &[PyRep::List(vec![PyRep::Tuple(vec![
+                PyRep::Integer(3302),
+                PyRep::Integer(1),
+            ])])],
+            &kw,
+            None,
+        )
+        .await;
+    assert_eq!(
+        queue_unprereq_err.unwrap_err().code,
+        "SkillPrerequisiteNotMet",
+        "Training/queueing an injected skill still requires prerequisites"
+    );
+
+    // 4. GetSkillHistory (feat:skills.skill-history)
+    // Verify GetSkillHistory records event log rows (including eventTypeID=56 SkillEventSkillInjected for injected skill 3302)
+    let history_res = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "skillMgr2",
+            None,
+            "GetSkillHistory",
+            &[],
+            &kw,
+            None,
+        )
+        .await
+        .expect("GetSkillHistory");
+    let PyRep::Rowset {
+        columns: hist_cols,
+        rows: hist_rows,
+    } = history_res
+    else {
+        panic!("Expected Rowset from GetSkillHistory");
+    };
+    assert_eq!(
+        hist_cols,
+        vec![
+            "logDate",
+            "eventTypeID",
+            "skillTypeID",
+            "skillLevel",
+            "absolutePoints"
+        ]
+    );
+    assert!(
+        hist_rows.iter().any(|r| {
+            r.get(1) == Some(&PyRep::Integer(56))
+                && r.get(2) == Some(&PyRep::Integer(3302))
+                && r.get(3) == Some(&PyRep::Integer(0))
+        }),
+        "GetSkillHistory must include injected skill event row (eventTypeID=56, skillTypeID=3302)"
+    );
 
     // Second injection of already known skill fails
     let already_injected = ctx
@@ -632,38 +759,59 @@ async fn test_ch2_skill_handling_and_prerequisites() {
 #[tokio::test]
 async fn test_ch3_character_creation_and_starter_assets() {
     // parity: plan:CH-3
-    // parity: feat:character.list-characters, feat:character.select-character, feat:character.create-character, feat:character.random-name, feat:character.name-validation
+    // parity: feat:character.list-characters, feat:character.select-character, feat:character.create-character
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let mut sess = SessionState::new(933);
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
 
-    // 1. Random name generation (feat:character.random-name)
+    // 1. Random name generation per bloodline (feat:character.random-name)
     let rand_name = ctx
         .dispatch_rpc(
             &mut sess,
             "charUnboundMgr",
             None,
             "GetValidRandomName",
-            &[],
+            &[PyRep::Integer(1)], // Deteis bloodline
             &kw,
             None,
         )
         .await
-        .expect("GetValidRandomName");
+        .expect("GetValidRandomName Deteis");
     let PyRep::String(ref generated_name) = rand_name else {
         panic!("Expected string name from GetValidRandomName");
     };
     assert!((3..=37).contains(&generated_name.len()));
+    assert!(
+        generated_name.contains(' '),
+        "Generated character name should include first and last name from bloodline pool"
+    );
 
-    // 2. Name validation (feat:character.name-validation)
+    let amarr_rand_name = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "charUnboundMgr",
+            None,
+            "GetValidRandomName",
+            &[PyRep::Integer(5)], // Amarr bloodline
+            &kw,
+            None,
+        )
+        .await
+        .expect("GetValidRandomName Amarr");
+    let PyRep::String(ref amarr_name) = amarr_rand_name else {
+        panic!("Expected string name from GetValidRandomName Amarr");
+    };
+    assert_ne!(generated_name, amarr_name, "Different bloodlines must draw from distinct name pools");
+
+    // 2. Name validation: character set, banned words, length, duplicate (feat:character.name-validation)
     let valid_check = ctx
         .dispatch_rpc(
             &mut sess,
             "charUnboundMgr",
             None,
             "ValidateNameEx",
-            &[PyRep::String("Valid Capsuleer Name".into())],
+            &[PyRep::String("Valid Capsuleer-Name".into())],
             &kw,
             None,
         )
@@ -685,6 +833,36 @@ async fn test_ch3_character_creation_and_starter_assets() {
         .expect("ValidateNameEx short");
     assert_eq!(short_check, PyRep::Bool(false));
 
+    // Invalid punctuation / character set check
+    let bad_chars_check = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "charUnboundMgr",
+            None,
+            "ValidateNameEx",
+            &[PyRep::String("Bad_Name!@#".into())],
+            &kw,
+            None,
+        )
+        .await
+        .expect("ValidateNameEx invalid chars");
+    assert_eq!(bad_chars_check, PyRep::Bool(false));
+
+    // Banned / reserved word check
+    let banned_word_check = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "charUnboundMgr",
+            None,
+            "ValidateNameEx",
+            &[PyRep::String("CCP Dev Tester".into())],
+            &kw,
+            None,
+        )
+        .await
+        .expect("ValidateNameEx banned word");
+    assert_eq!(banned_word_check, PyRep::Bool(false));
+
     // Duplicate check
     let dup_check = ctx
         .dispatch_rpc(
@@ -700,8 +878,9 @@ async fn test_ch3_character_creation_and_starter_assets() {
         .expect("ValidateNameEx duplicate");
     assert_eq!(dup_check, PyRep::Bool(false));
 
-    // 3. CreateCharacterWithDoll (feat:character.create-character)
-    // Caldari race=1, Deteis bloodline=1, Scientists ancestry=11, STI school=17
+    // 3. CreateCharacterWithDoll with V24 7-argument layout (feat:character.create-character)
+    // (charactername, bloodlineID, genderID, ancestryID, charInfo, portraitInfo, schoolID)
+    // Deteis bloodline=1 (Caldari race=1), gender=1, Scientists ancestry=11, STI school=17
     let new_char_rep = ctx
         .dispatch_rpc(
             &mut sess,
@@ -710,23 +889,38 @@ async fn test_ch3_character_creation_and_starter_assets() {
             "CreateCharacterWithDoll",
             &[
                 PyRep::String("Caldari Vanguard".into()),
-                PyRep::Integer(1),  // Caldari
-                PyRep::Integer(1),  // Deteis
-                PyRep::Integer(11), // Scientists
-                PyRep::Integer(17), // Science and Trade Institute
+                PyRep::Integer(1),  // bloodlineID = 1 (Deteis -> Caldari race 1)
+                PyRep::Integer(1),  // genderID = 1 (Male)
+                PyRep::Integer(11), // ancestryID = 11 (Scientists)
+                PyRep::String("doll:deteis-vanguard-dna".into()),
+                PyRep::String("portrait:deteis-cam-01".into()),
+                PyRep::Integer(17), // schoolID = 17 (Science and Trade Institute)
             ],
             &kw,
             None,
         )
         .await
-        .expect("CreateCharacterWithDoll");
+        .expect("CreateCharacterWithDoll V24 7-arg");
     let new_char_id = new_char_rep.as_i64().expect("character ID i64");
 
-    ctx.db.with_snapshot(|snap| {
+    ctx.db.with_mut_snapshot(|snap| {
         let ch = snap.characters.get(&new_char_id).expect("character record");
+        assert_eq!(ch.race_id, 1);
+        assert_eq!(ch.bloodline_id, 1);
+        assert_eq!(ch.gender, 1);
+        assert_eq!(ch.ancestry_id, 11);
+        assert_eq!(ch.school_id, 17);
         // 5,000 ISK starting wallet
         assert_eq!(ch.balance, IskCents::from_isk(5_000));
         assert_eq!(ch.balance.to_wire_f64(), 5_000.0);
+
+        // Doll & portrait metadata persisted
+        let (doll_dna, portrait_meta) = snap
+            .character_doll_info
+            .get(&new_char_id)
+            .expect("character_doll_info persisted");
+        assert_eq!(doll_dna, "doll:deteis-vanguard-dna");
+        assert_eq!(portrait_meta, "portrait:deteis-cam-01");
 
         // Starter skills populated
         let skills = &snap.skills[&new_char_id];
@@ -756,9 +950,24 @@ async fn test_ch3_character_creation_and_starter_assets() {
         let ship = corvette.unwrap();
         assert!(ship.singleton);
         assert_eq!(ship.quantity, 1);
+        let ship_id = ship.item_id;
+
+        // Set custom ship name and active skill queue to verify character selection metadata
+        snap.item_custom_names
+            .insert(ship_id, "Vanguard Ibis".to_string());
+        snap.skill_queues.insert(
+            new_char_id,
+            vec![SkillQueueEntry {
+                type_id: 3300,
+                target_level: 2,
+                start_sp: 250.0,
+                end_sp: 1415.0,
+                duration_seconds: 1200.0,
+            }],
+        );
     });
 
-    // 4. List characters (feat:character.list-characters)
+    // 4. List characters & character selection summary (feat:character.list-characters)
     let char_list = ctx
         .dispatch_rpc(
             &mut sess,
@@ -772,6 +981,66 @@ async fn test_ch3_character_creation_and_starter_assets() {
         .await
         .expect("GetCharactersToSelect");
     assert!(char_list.is_crowset());
+    let select_rows = char_list
+        .crowset_rows()
+        .expect("Expected CRowset from GetCharactersToSelect");
+    let created_row = select_rows
+        .iter()
+        .find_map(|r| match r {
+            PyRep::DBRow { columns, .. } => {
+                if columns.iter().any(|(k, v)| k == "characterID" && v == &PyRep::Integer(new_char_id)) {
+                    Some(columns)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        })
+        .expect("Created character in GetCharactersToSelect");
+    assert_eq!(
+        created_row
+            .iter()
+            .find(|(k, _)| k == "shipName")
+            .map(|(_, v)| v),
+        Some(&PyRep::String("Vanguard Ibis".into())),
+        "GetCharactersToSelect must return custom ship name"
+    );
+
+    let select_info = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "charUnboundMgr",
+            None,
+            "GetCharacterInfo",
+            &[PyRep::Integer(new_char_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("GetCharacterInfo");
+    let PyRep::KeyVal(sel_info_kv) = select_info else {
+        panic!("Expected KeyVal from GetCharacterInfo");
+    };
+    assert_eq!(
+        sel_info_kv.get("shipName"),
+        Some(&PyRep::String("Vanguard Ibis".into()))
+    );
+    assert_eq!(
+        sel_info_kv.get("paperdollState"),
+        Some(&PyRep::String("doll:deteis-vanguard-dna".into()))
+    );
+    assert_eq!(
+        sel_info_kv.get("portraitInfo"),
+        Some(&PyRep::String("portrait:deteis-cam-01".into()))
+    );
+    assert_eq!(
+        sel_info_kv.get("trainingSkillTypeID"),
+        Some(&PyRep::Integer(3300))
+    );
+    assert_eq!(
+        sel_info_kv.get("trainingToLevel"),
+        Some(&PyRep::Integer(2))
+    );
 
     // 5. Select character (feat:character.select-character)
     let select_rep = ctx
@@ -824,15 +1093,15 @@ async fn test_ch4_character_sheet_biography_and_notes() {
             &mut sess,
             "charMgr",
             None,
-            "GetPublicInfo",
+            "GetPublicInfo3",
             &[PyRep::Integer(char_id)],
             &kw,
             None,
         )
         .await
-        .expect("GetPublicInfo");
+        .expect("GetPublicInfo3");
     let PyRep::KeyVal(pub_kv) = pub_info else {
-        panic!("Expected KeyVal from GetPublicInfo");
+        panic!("Expected KeyVal from GetPublicInfo3");
     };
     assert_eq!(
         pub_kv.get("characterID").unwrap().as_i64(),
@@ -840,8 +1109,14 @@ async fn test_ch4_character_sheet_biography_and_notes() {
     );
     assert!(pub_kv.contains_key("characterName"));
     assert!(pub_kv.contains_key("corporationID"));
+    assert!(pub_kv.contains_key("allianceID"));
     assert!(pub_kv.contains_key("raceID"));
+    assert!(pub_kv.contains_key("bloodlineID"));
+    assert!(pub_kv.contains_key("ancestryID"));
+    assert!(pub_kv.contains_key("schoolID"));
+    assert!(pub_kv.contains_key("createDateTime"));
     assert!(pub_kv.contains_key("securityStatus"));
+    assert!(pub_kv.contains_key("portraitInfo"));
 
     // 2. Biography (feat:character.biography)
     let test_bio = "Veteran Capsuleer operating in Lonetrek and The Citadel.";
@@ -981,7 +1256,28 @@ async fn test_ch4_character_sheet_biography_and_notes() {
         .expect("RemoveOwnerNote");
     assert_eq!(remove_note, PyRep::Bool(true));
 
-    // 5. Character sheet & Neural Remap (feat:character.character-sheet)
+    // 5. Character sheet & Private Info & Neural Remap (feat:character.character-sheet)
+    let priv_info = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "charMgr",
+            None,
+            "GetPrivateInfo",
+            &[PyRep::Integer(char_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("GetPrivateInfo");
+    let PyRep::KeyVal(priv_kv) = priv_info else {
+        panic!("Expected KeyVal from GetPrivateInfo");
+    };
+    assert_eq!(priv_kv.get("characterID").unwrap().as_i64(), Some(char_id));
+    assert!(priv_kv.contains_key("balance"));
+    assert!(priv_kv.contains_key("skillPoints"));
+    assert!(priv_kv.contains_key("freeSkillPoints"));
+    assert!(priv_kv.contains_key("cloneStationID"));
+
     let char_sheet = ctx
         .dispatch_rpc(
             &mut sess,
@@ -1000,6 +1296,15 @@ async fn test_ch4_character_sheet_biography_and_notes() {
     assert_eq!(sheet_kv.get("characterID").unwrap().as_i64(), Some(char_id));
     assert!(sheet_kv.contains_key("balance"));
     assert!(sheet_kv.contains_key("skillPoints"));
+    assert!(sheet_kv.contains_key("skills"));
+    assert!(sheet_kv.contains_key("attributes"));
+    assert!(sheet_kv.contains_key("implants"));
+    assert!(sheet_kv.contains_key("jumpClones"));
+    assert!(sheet_kv.contains_key("standings"));
+    assert!(sheet_kv.contains_key("securityStatus"));
+    assert!(sheet_kv.contains_key("killRights"));
+    assert!(sheet_kv.contains_key("medals"));
+    assert!(sheet_kv.contains_key("decorations"));
 
     // Neural remap: 99 total, 17..=27 per attribute
     // Valid: 27 Perception, 21 Willpower, 17 Charisma, 17 Intelligence, 17 Memory = 99
@@ -1295,7 +1600,7 @@ async fn test_s4_jump_clones_implants_and_cooldown() {
 
     let bal_before = ctx.db.with_snapshot(|s| s.characters[&char_id].balance.to_wire_f64());
 
-    // Install jump clone (feat:clones.jump-clone-install)
+    // Install jump clone in NPC station (feat:clones.jump-clone-install)
     let install_rep = ctx
         .dispatch_rpc(
             &mut sess,
@@ -1316,6 +1621,95 @@ async fn test_s4_jump_clones_implants_and_cooldown() {
     // Verify 900,000 ISK fee deducted
     let bal_after = ctx.db.with_snapshot(|s| s.characters[&char_id].balance.to_wire_f64());
     assert_eq!(bal_before - bal_after, 900_000.0);
+
+    // Verify MaxJumpClonesReached when Infomorph Psychology I (1 slot) is full
+    let clone_struct_id = 1_030_000_099_001_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(
+            clone_struct_id,
+            eve_db::UpwellStructureRecord {
+                structure_id: clone_struct_id,
+                type_id: 35832,
+                owner_corp_id: 1_000_001,
+                solar_system_id: 30_000_142,
+                name: "Jita Clone Bay Astrahus".into(),
+                position: [1000.0, 2000.0, 3000.0],
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 500,
+                shield_hp: 5000.0,
+                armor_hp: 5000.0,
+                hull_hp: 5000.0,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+            },
+        );
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = None;
+            ch.structure_id = Some(clone_struct_id);
+        }
+    });
+    sess.station_id = None;
+    sess.structure_id = Some(clone_struct_id);
+
+    let max_clones_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "jumpCloneSvc",
+            None,
+            "InstallCloneInStructure",
+            &[],
+            &kw,
+            None,
+        )
+        .await;
+    assert_eq!(
+        max_clones_err.unwrap_err().code,
+        "MaxJumpClonesReached",
+        "Must enforce max jump clone slot limit from Infomorph Psychology"
+    );
+
+    // Grant Advanced Infomorph Psychology I (33407) to unlock a 2nd jump clone slot, then install in Upwell structure
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.skills.entry(char_id).or_default().insert(
+            33407,
+            TrainedSkillRecord {
+                type_id: 33407,
+                level: 1,
+                skill_points: 750.0,
+            },
+        );
+    });
+    let struct_install_rep = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "jumpCloneSvc",
+            None,
+            "InstallCloneInStructure",
+            &[],
+            &kw,
+            None,
+        )
+        .await
+        .expect("InstallCloneInStructure with Advanced Infomorph Psychology I");
+    let PyRep::KeyVal(struct_jc_kv) = struct_install_rep else {
+        panic!("Expected KeyVal from InstallCloneInStructure");
+    };
+    assert_eq!(
+        struct_jc_kv.get("locationID").and_then(|v| v.as_i64()),
+        Some(clone_struct_id)
+    );
+
+    // Return pilot to Jita 4-4 (60003760) for clone jump test
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = Some(60_003_760);
+            ch.structure_id = None;
+        }
+    });
+    sess.station_id = Some(60_003_760);
+    sess.structure_id = None;
 
     // 2. Clone Jump & Implant swap (feat:clones.jump-clone-jump)
     // Setup destination clone at another station (60008494) with implant 9941

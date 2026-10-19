@@ -52,6 +52,7 @@ pub struct ServerContext {
     pub ship_fittings: RwLock<HashMap<i64, ShipFittingEngine>>,
     pub weapon_cycle_state: RwLock<HashMap<i64, (Option<u64>, u32)>>,
     pub fighter_cooldown_state: RwLock<HashMap<(i64, u32), u64>>,
+    pub fighter_charge_state: RwLock<HashMap<(i64, u32), u32>>,
     pub active_fighters: RwLock<HashMap<i64, ActiveFighterSquadron>>,
     pub fighter_tube_loads: RwLock<HashMap<(i64, usize), i64>>,
     pub scanned_signatures: RwLock<HashSet<(i64, u32, i64)>>,
@@ -125,6 +126,7 @@ impl ServerContext {
             ship_fittings: RwLock::new(HashMap::new()),
             weapon_cycle_state: RwLock::new(HashMap::new()),
             fighter_cooldown_state: RwLock::new(HashMap::new()),
+            fighter_charge_state: RwLock::new(HashMap::new()),
             active_fighters: RwLock::new(HashMap::new()),
             fighter_tube_loads: RwLock::new(HashMap::new()),
             scanned_signatures: RwLock::new(HashSet::new()),
@@ -440,6 +442,7 @@ impl ServerContext {
             return;
         }
         let sde = self.sde.clone();
+        let now_ft = self.now_blueos_filetime_ticks();
         let (invalidated_ships, completed_events) = self.db.with_mut_snapshot(|snap| {
             let mut ships_to_invalidate = Vec::new();
             let mut completed_events = Vec::new();
@@ -456,9 +459,9 @@ impl ServerContext {
                 let Some(ch) = snap.characters.get(&char_id).cloned() else {
                     continue;
                 };
-                let is_alpha = ch.clone_grade == 1;
-                let current_char_sp = ch.skill_points;
-                // Alpha clones cannot gain SP beyond 5,000,000 SP (CH-1)
+                let is_alpha = ch.clone_grade <= 1;
+                let current_char_sp = ch.skill_points + ch.free_skill_points;
+                // Alpha clones cannot gain SP beyond 5,000,000 SP (CH-1) including unallocated SP
                 if is_alpha && current_char_sp >= 5_000_000.0 {
                     continue;
                 }
@@ -471,6 +474,7 @@ impl ServerContext {
                 let mut rem_secs = elapsed_secs;
                 let mut remaining_queue = Vec::new();
                 let mut total_sp_gained = 0.0;
+                let mut history_to_append = Vec::new();
                 let skills_map = snap.skills.entry(char_id).or_default();
 
                 for mut q in queue {
@@ -521,6 +525,13 @@ impl ServerContext {
                             },
                         );
                         completed_events.push((char_id, q.type_id, q.target_level));
+                        history_to_append.push(eve_db::SkillHistoryEntry {
+                            log_date_ft: now_ft,
+                            event_type_id: 37,
+                            skill_type_id: q.type_id,
+                            skill_level: q.target_level,
+                            absolute_points: q.end_sp,
+                        });
                     } else {
                         let mut sp_advance = (rem_secs * sp_sec).min(needed_sp);
                         if sp_advance > max_allowed_sp {
@@ -549,6 +560,13 @@ impl ServerContext {
                         }
                         if achieved_lvl > current_lvl {
                             completed_events.push((char_id, q.type_id, achieved_lvl));
+                            history_to_append.push(eve_db::SkillHistoryEntry {
+                                log_date_ft: now_ft,
+                                event_type_id: 37,
+                                skill_type_id: q.type_id,
+                                skill_level: achieved_lvl,
+                                absolute_points: q.start_sp,
+                            });
                         }
                         skills_map.insert(
                             q.type_id,
@@ -562,6 +580,12 @@ impl ServerContext {
                     }
                 }
                 snap.skill_queues.insert(char_id, remaining_queue);
+                if !history_to_append.is_empty() {
+                    snap.skill_history
+                        .entry(char_id)
+                        .or_default()
+                        .extend(history_to_append);
+                }
                 if total_sp_gained > 0.0 {
                     if let Some(ch_mut) = snap.characters.get_mut(&char_id) {
                         ch_mut.skill_points += total_sp_gained;

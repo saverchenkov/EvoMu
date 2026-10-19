@@ -411,9 +411,10 @@ async fn test_effective_standing_and_broker_discount() {
             });
     });
 
-    // Place buy order: rate with raw 5.0 boosted to effective 6.0:
-    // Base 3.0% - 0.02 * 6.0 = 3.0% - 0.12% = 2.88%
-    // 10,000 units at 1.00 ISK = 10,000 ISK gross -> broker fee = 288.00 ISK
+    // Place buy order: NPC station broker fee uses raw unmodified standing (5.0),
+    // never Connections/Diplomacy effective standing (`wiki:Broker_fee_and_sales_tax`):
+    // Base 3.0% - 0.02% * 5.0 = 3.0% - 0.10% = 2.90%
+    // 10,000 units at 1.00 ISK = 10,000 ISK gross -> broker fee = 290.00 ISK
     let order_eff = ctx
         .dispatch_rpc(
             &mut s1,
@@ -431,7 +432,7 @@ async fn test_effective_standing_and_broker_discount() {
             None,
         )
         .await
-        .expect("PlaceCharOrder with effective standing");
+        .expect("PlaceCharOrder with raw corp standing");
 
     let PyRep::KeyVal(eff_kv) = order_eff else {
         panic!("Expected KeyVal");
@@ -441,8 +442,8 @@ async fn test_effective_standing_and_broker_discount() {
         .and_then(|v| v.as_f64())
         .expect("brokerFeeISK");
     assert!(
-        (fee_eff - 288.0).abs() < 0.01,
-        "Broker fee with effective standing 6.0 must be 288.00 ISK, got {fee_eff}"
+        (fee_eff - 290.0).abs() < 0.01,
+        "Broker fee with raw corp standing 5.0 (unaffected by Connections 5) must be 290.00 ISK, got {fee_eff}"
     );
 
     let oid = eff_kv.get("orderID").and_then(|v| v.as_i64()).unwrap();
@@ -537,9 +538,10 @@ async fn test_market_orders_limit_escrow_queries_cancellation() {
     };
     assert_eq!(books.len(), 2, "GetOrders must return (sells, buys) tuple");
 
-    // 3. Place resting limit sell order (feat:market.place-sell)
-    // Give pilot 2 some Tritanium in hangar
-    ctx.db.with_mut_snapshot(|snap| {
+    // 3. Place resting limit sell order & PlaceMultiSellOrder (feat:market.place-sell)
+    // Give pilot 2 some Tritanium and Pyerite (type 35) + an assembled Velator (606) in hangar
+    let (pye_item_id, assembled_ship_id) = ctx.db.with_mut_snapshot(|snap| {
+        snap.skills.entry(90_000_002).or_default().remove(&3443); // untrained Trade -> base openOrderLimit = 5
         snap.next_entity_id += 1;
         let item_id = snap.next_entity_id;
         snap.items.insert(
@@ -556,7 +558,69 @@ async fn test_market_orders_limit_escrow_queries_cancellation() {
                 ..Default::default()
             },
         );
+        snap.next_entity_id += 1;
+        let pye_id = snap.next_entity_id;
+        snap.items.insert(
+            pye_id,
+            InventoryItemRecord {
+                item_id: pye_id,
+                type_id: 35,
+                owner_id: 90_000_002,
+                location_id: JITA_STATION_ID,
+                flag: InventoryFlag::Hangar,
+                quantity: 1_000,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.next_entity_id += 1;
+        let assembled_id = snap.next_entity_id;
+        snap.items.insert(
+            assembled_id,
+            InventoryItemRecord {
+                item_id: assembled_id,
+                type_id: 606,
+                owner_id: 90_000_002,
+                location_id: JITA_STATION_ID,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        (pye_id, assembled_id)
     });
+
+    // Attempting to sell assembled (singleton=true) ship must be rejected
+    let assembled_err = ctx
+        .dispatch_rpc(
+            &mut s2,
+            "marketProxy",
+            None,
+            "PlaceMultiSellOrder",
+            &[
+                PyRep::List(vec![PyRep::keyval([
+                    ("stationID", PyRep::Integer(JITA_STATION_ID)),
+                    ("typeID", PyRep::Integer(606)),
+                    ("itemID", PyRep::Integer(assembled_ship_id)),
+                    ("price", PyRep::Real(500_000.0)),
+                    ("quantity", PyRep::Integer(1)),
+                ])]),
+                PyRep::Bool(false),
+                PyRep::Integer(90),
+                PyRep::Real(100_000.0),
+            ],
+            &kw,
+            None,
+        )
+        .await;
+    assert_eq!(
+        assembled_err.unwrap_err().code,
+        "CannotSellAssembledItem",
+        "Assembled items must be repackaged before selling on the market"
+    );
 
     let sell_price = 25.0; // High price so it rests without matching
     let sell_qty = 2_000;
@@ -599,6 +663,194 @@ async fn test_market_orders_limit_escrow_queries_cancellation() {
             .sum::<i32>()
     });
     assert_eq!(s2_hangar_trit, 8_000, "10,000 - 2,000 sell order = 8,000 remaining in hangar");
+
+    // Verify PlaceMultiSellOrder atomicity: if a later entry fails (e.g., assembled ship), earlier entries roll back
+    let atomic_fail = ctx
+        .dispatch_rpc(
+            &mut s2,
+            "marketProxy",
+            None,
+            "PlaceMultiSellOrder",
+            &[
+                PyRep::List(vec![
+                    PyRep::keyval([
+                        ("stationID", PyRep::Integer(JITA_STATION_ID)),
+                        ("typeID", PyRep::Integer(35)),
+                        ("itemID", PyRep::Integer(pye_item_id)),
+                        ("price", PyRep::Real(12.0)),
+                        ("quantity", PyRep::Integer(200)),
+                    ]),
+                    PyRep::keyval([
+                        ("stationID", PyRep::Integer(JITA_STATION_ID)),
+                        ("typeID", PyRep::Integer(606)),
+                        ("itemID", PyRep::Integer(assembled_ship_id)),
+                        ("price", PyRep::Real(500_000.0)),
+                        ("quantity", PyRep::Integer(1)),
+                    ]),
+                ]),
+                PyRep::Bool(false),
+                PyRep::Integer(90),
+                PyRep::Real(100_000.0),
+            ],
+            &kw,
+            None,
+        )
+        .await;
+    assert_eq!(atomic_fail.unwrap_err().code, "CannotSellAssembledItem");
+    let pye_qty_after_rollback = ctx
+        .db
+        .with_snapshot(|snap| snap.items[&pye_item_id].quantity);
+    assert_eq!(
+        pye_qty_after_rollback, 1_000,
+        "PlaceMultiSellOrder must roll back earlier item deductions when a later entry fails"
+    );
+
+    // Verify useCorp=true without corporation trader/accountant role is rejected
+    let corp_err = ctx
+        .dispatch_rpc(
+            &mut s2,
+            "marketProxy",
+            None,
+            "PlaceMultiSellOrder",
+            &[
+                PyRep::List(vec![PyRep::keyval([
+                    ("stationID", PyRep::Integer(JITA_STATION_ID)),
+                    ("typeID", PyRep::Integer(35)),
+                    ("itemID", PyRep::Integer(pye_item_id)),
+                    ("price", PyRep::Real(12.0)),
+                    ("quantity", PyRep::Integer(100)),
+                ])]),
+                PyRep::Bool(true),
+                PyRep::Integer(90),
+                PyRep::Real(1_000.0),
+            ],
+            &kw,
+            None,
+        )
+        .await;
+    assert!(
+        matches!(
+            corp_err.unwrap_err().code.as_str(),
+            "CorporationNotFound" | "CorpRoleRequired"
+        ),
+        "useCorp=true without corp wallet/role must be rejected"
+    );
+
+    // Verify expectedBrokersFee slippage check rejects when actual broker fee (100 ISK floor) > expectedBrokersFee (10 ISK)
+    let fee_exceeded_err = ctx
+        .dispatch_rpc(
+            &mut s2,
+            "marketProxy",
+            None,
+            "PlaceMultiSellOrder",
+            &[
+                PyRep::List(vec![PyRep::keyval([
+                    ("stationID", PyRep::Integer(JITA_STATION_ID)),
+                    ("typeID", PyRep::Integer(35)),
+                    ("itemID", PyRep::Integer(pye_item_id)),
+                    ("price", PyRep::Real(12.0)),
+                    ("quantity", PyRep::Integer(200)),
+                ])]),
+                PyRep::Bool(false),
+                PyRep::Integer(90),
+                PyRep::Real(10.0),
+            ],
+            &kw,
+            None,
+        )
+        .await;
+    assert_eq!(
+        fee_exceeded_err.unwrap_err().code,
+        "BrokerFeeExceeded",
+        "PlaceMultiSellOrder must reject when actual broker fee exceeds expectedBrokersFee"
+    );
+
+    // Exercise PlaceMultiSellOrder(itemList, useCorp, duration, expectedBrokersFee) per V24 marketsvc.pyj / sellMulti.pyj
+    let multi_sell = ctx
+        .dispatch_rpc(
+            &mut s2,
+            "marketProxy",
+            None,
+            "PlaceMultiSellOrder",
+            &[
+                PyRep::List(vec![
+                    PyRep::keyval([
+                        ("stationID", PyRep::Integer(JITA_STATION_ID)),
+                        ("typeID", PyRep::Integer(35)),
+                        ("itemID", PyRep::Integer(pye_item_id)),
+                        ("price", PyRep::Real(12.0)),
+                        ("quantity", PyRep::Integer(200)),
+                    ]),
+                    PyRep::keyval([
+                        ("stationID", PyRep::Integer(JITA_STATION_ID)),
+                        ("typeID", PyRep::Integer(35)),
+                        ("itemID", PyRep::Integer(pye_item_id)),
+                        ("price", PyRep::Real(13.0)),
+                        ("quantity", PyRep::Integer(200)),
+                    ]),
+                    PyRep::keyval([
+                        ("stationID", PyRep::Integer(JITA_STATION_ID)),
+                        ("typeID", PyRep::Integer(35)),
+                        ("itemID", PyRep::Integer(pye_item_id)),
+                        ("price", PyRep::Real(14.0)),
+                        ("quantity", PyRep::Integer(200)),
+                    ]),
+                    PyRep::keyval([
+                        ("stationID", PyRep::Integer(JITA_STATION_ID)),
+                        ("typeID", PyRep::Integer(35)),
+                        ("itemID", PyRep::Integer(pye_item_id)),
+                        ("price", PyRep::Real(15.0)),
+                        ("quantity", PyRep::Integer(200)),
+                    ]),
+                ]),
+                PyRep::Bool(false),
+                PyRep::Integer(90),
+                PyRep::Real(400.0),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect("PlaceMultiSellOrder");
+    let PyRep::KeyVal(ms_kv) = multi_sell else {
+        panic!("Expected KeyVal from PlaceMultiSellOrder");
+    };
+    assert_eq!(ms_kv.get("placedCount"), Some(&PyRep::Integer(4)));
+    assert_eq!(
+        ms_kv.get("totalBrokerFeeISK"),
+        Some(&PyRep::Real(400.0)),
+        "4 resting sell orders each below 100 ISK raw fee must pay 4 * 100.0 ISK minimum broker fee"
+    );
+
+    // Pilot 2 now has 1 + 4 = 5 open resting orders (base openOrderLimit = 5 with untrained Trade skill).
+    // Placing a 6th resting order must fail with MaxOpenOrdersReached:
+    let limit_err = ctx
+        .dispatch_rpc(
+            &mut s2,
+            "marketProxy",
+            None,
+            "PlaceMultiSellOrder",
+            &[
+                PyRep::List(vec![PyRep::keyval([
+                    ("stationID", PyRep::Integer(JITA_STATION_ID)),
+                    ("typeID", PyRep::Integer(35)),
+                    ("itemID", PyRep::Integer(pye_item_id)),
+                    ("price", PyRep::Real(16.0)),
+                    ("quantity", PyRep::Integer(100)),
+                ])]),
+                PyRep::Bool(false),
+                PyRep::Integer(90),
+                PyRep::Real(1_000.0),
+            ],
+            &kw,
+            None,
+        )
+        .await;
+    assert_eq!(
+        limit_err.unwrap_err().code,
+        "MaxOpenOrdersReached",
+        "Must enforce openOrderLimit from Trade/Retail/Wholesale/Tycoon skills"
+    );
 
     // 4. Cancel buy order with escrow refund (feat:market.escrow)
     let cancel_buy = ctx
@@ -664,8 +916,11 @@ async fn test_market_instant_matching() {
     let mut s1 = setup_pilot(&ctx, 203, "demo", "demo-secret", 90_000_001).await;
     let mut s2 = setup_pilot(&ctx, 204, "other", "other-secret", 90_000_002).await;
 
-    // Give pilot 2 Tritanium in Jita
+    // Give pilot 2 Tritanium in Jita and clear pre-seeded NPC Tritanium orders so s1 matches s2's ask directly
     ctx.db.with_mut_snapshot(|snap| {
+        snap.skills.entry(90_000_002).or_default().remove(&16622); // untrained Accounting -> 7.5% sales tax
+        snap.market_orders
+            .retain(|_, o| o.type_id != TRITANIUM_TYPE_ID);
         snap.next_entity_id += 1;
         let item_id = snap.next_entity_id;
         snap.items.insert(
@@ -709,7 +964,9 @@ async fn test_market_instant_matching() {
     };
     assert_eq!(ask_kv.get("filledImmediately"), Some(&PyRep::Bool(false)));
 
-    // 1. Instant Buy (feat:market.instant-buy)
+    let s2_bal_before_fill = ctx.db.get_character(90_000_002).unwrap().balance;
+
+    // 1. Instant Buy & BuyMultipleItems (feat:market.instant-buy)
     // Pilot 1 places buy order at 10.00 ISK for 500 units, immediately crossing the resting ask
     let instant_buy = ctx
         .dispatch_rpc(
@@ -739,7 +996,52 @@ async fn test_market_instant_matching() {
         "Order crossing resting ask must be filledImmediately"
     );
 
-    // Verify buyer received 500 Tritanium in hangar
+    // Verify seller received net proceeds (5,000 ISK - 7.5% sales tax = 4,625 ISK) and wallet journal entries
+    let s2_bal_after_fill = ctx.db.get_character(90_000_002).unwrap().balance;
+    let seller_net_isk = (s2_bal_after_fill.0 - s2_bal_before_fill.0) as f64 / 100.0;
+    assert!(
+        (seller_net_isk - 4_625.0).abs() < 0.02,
+        "Seller must receive gross minus sales tax (4,625.00 ISK), got {seller_net_isk}"
+    );
+    ctx.db.with_snapshot(|snap| {
+        assert!(
+            snap.wallet_journal
+                .iter()
+                .any(|j| j.character_id == 90_000_001 && j.entry_type == "MarketTransaction"),
+            "Buyer MarketTransaction journal entry must be recorded"
+        );
+        assert!(
+            snap.wallet_journal
+                .iter()
+                .any(|j| j.character_id == 90_000_002 && j.entry_type == "MarketSell"),
+            "Seller MarketSell journal entry must be recorded"
+        );
+    });
+
+    // Exercise BuyMultipleItems for the remaining 500 units on the resting ask
+    let multi_buy = ctx
+        .dispatch_rpc(
+            &mut s1,
+            "marketProxy",
+            None,
+            "BuyMultipleItems",
+            &[PyRep::List(vec![PyRep::Tuple(vec![
+                PyRep::Integer(TRITANIUM_TYPE_ID as i64),
+                PyRep::Integer(500),
+                PyRep::Real(10.0),
+            ])])],
+            &kw,
+            None,
+        )
+        .await
+        .expect("BuyMultipleItems");
+    let PyRep::KeyVal(mb_kv) = multi_buy else {
+        panic!("Expected KeyVal from BuyMultipleItems");
+    };
+    assert_eq!(mb_kv.get("purchasedCount"), Some(&PyRep::Integer(1)));
+    assert_eq!(mb_kv.get("totalQuantity"), Some(&PyRep::Integer(500)));
+
+    // Verify buyer received 500 + 500 = 1,000 Tritanium in hangar
     let s1_hangar_trit = ctx.db.with_snapshot(|snap| {
         snap.items
             .values()
@@ -752,7 +1054,7 @@ async fn test_market_instant_matching() {
             .map(|i| i.quantity)
             .sum::<i32>()
     });
-    assert!(s1_hangar_trit >= 500, "Buyer must have received purchased Tritanium");
+    assert!(s1_hangar_trit >= 1_000, "Buyer must have received purchased Tritanium");
 
     // 2. Instant Sell (feat:market.instant-sell)
     // Pilot 1 places resting buy order at 8.00 ISK for 400 units

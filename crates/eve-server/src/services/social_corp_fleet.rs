@@ -154,6 +154,7 @@ pub async fn handle(
             };
             let subject = args.get(1).and_then(|a| a.as_str()).unwrap_or("o7");
             let body = args.get(2).and_then(|a| a.as_str()).unwrap_or("Fly safe!");
+            let now_unix = ctx.now_unix();
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 if snap.mails.len() >= 1_000 {
                     return Err(BridgeRpcError {
@@ -170,6 +171,7 @@ pub async fn handle(
                     subject: subject.to_string(),
                     body: body.to_string(),
                 });
+                snap.mail_timestamps.insert(id, now_unix);
                 Ok(id)
             });
             match res {

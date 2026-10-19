@@ -374,6 +374,15 @@ impl WorldRepository {
             cosmic_anomalies: HashMap::new(),
             sov_prospecting_levels: HashMap::new(),
             last_mission_decline_times: HashMap::new(),
+            character_last_jump_unix: HashMap::new(),
+            character_cspa_charges: HashMap::new(),
+            mail_timestamps: HashMap::new(),
+            character_login_stats: HashMap::new(),
+            item_custom_names: HashMap::new(),
+            item_positions: HashMap::new(),
+            structure_vulnerability_windows: HashMap::new(),
+            skill_history: HashMap::new(),
+            character_doll_info: HashMap::new(),
         };
         let mut conn = rusqlite::Connection::open_in_memory().map_err(|e| e.to_string())?;
         sqlite_store::apply_migrations(&conn)?;

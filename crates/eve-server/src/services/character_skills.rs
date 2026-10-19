@@ -8,7 +8,7 @@ use crate::formulas::{
 };
 use crate::router::ServerContext;
 use eve_db::{
-    InventoryFlag, InventoryItemRecord, IskCents, JumpCloneRecord, SkillQueueEntry,
+    InventoryFlag, IskCents, JumpCloneRecord, SkillHistoryEntry, SkillQueueEntry,
     TrainedSkillRecord,
 };
 use eve_machonet::SessionState;
@@ -19,6 +19,174 @@ use std::collections::HashMap;
 /// Canonical jump clone installation fee at NPC stations (`900,000 ISK` per `Jump_clones.md:20, 54`; `R23-P1-2`).
 pub fn jump_clone_install_fee_cents() -> IskCents {
     IskCents::from_isk(900_000)
+}
+
+/// DERIVED: Validates character name syntax, ASCII alphanumeric + space/hyphen/apostrophe rules,
+/// word count (1..=3 words, 3..=37 chars), and reserved prefix/banned token checks (`feat:character.name-validation`).
+/// CCP's server-side profanity/reserved-word table is not part of the client staticdata distribution.
+pub fn is_valid_character_name_syntax(name: &str) -> bool {
+    let trimmed = name.trim();
+    if trimmed.len() != name.len() || !(3..=37).contains(&trimmed.len()) {
+        return false;
+    }
+    let bytes = trimmed.as_bytes();
+    if !bytes[0].is_ascii_alphanumeric() || !bytes[bytes.len() - 1].is_ascii_alphanumeric() {
+        return false;
+    }
+    let mut space_count = 0usize;
+    let mut prev_special = false;
+    for ch in trimmed.chars() {
+        let is_special = matches!(ch, ' ' | '-' | '\'');
+        if !ch.is_ascii_alphanumeric() && !is_special {
+            return false;
+        }
+        if ch == ' ' {
+            space_count += 1;
+        }
+        if is_special && prev_special {
+            return false;
+        }
+        prev_special = is_special;
+    }
+    if space_count > 2 {
+        return false;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.starts_with("ccp ")
+        || lower.starts_with("ccp-")
+        || lower == "ccp"
+        || lower.starts_with("gm ")
+        || lower.starts_with("isd ")
+        || lower.starts_with("dev ")
+    {
+        return false;
+    }
+    for banned in [
+        "admin",
+        "moderator",
+        "concord",
+        "fuck",
+        "shit",
+        "hitler",
+        "nazi",
+    ] {
+        if lower.contains(banned) {
+            return false;
+        }
+    }
+    true
+}
+
+/// DERIVED: Fallback first and family name pools per bloodline when SDE agent names are unavailable (`feat:character.random-name`).
+/// CCP's server-side random character name tables are not shipped in the client staticdata archives.
+pub fn bloodline_name_pools(bloodline_id: u32) -> (&'static [&'static str], &'static [&'static str]) {
+    match bloodline_id {
+        // Caldari: Deteis (1), Civire (2), Achura (11)
+        1 => (
+            &["Tibus", "Kari", "Matti", "Tuomas", "Eetu", "Sanna", "Ilmari", "Aino"],
+            &["Heth", "Kallio", "Lindqvist", "Koskinen", "Hakkarainen", "Nieminen", "Vaananen", "Lehtonen"],
+        ),
+        2 => (
+            &["Kael", "Vesper", "Corin", "Bren", "Talia", "Jarek", "Mira", "Rhea"],
+            &["Mercer", "Stark", "Kruger", "Holloway", "Vance", "Blackwood", "Keller", "Cross"],
+        ),
+        11 => (
+            &["Kenji", "Akira", "Sora", "Yuki", "Ren", "Haruki", "Kaede", "Mei"],
+            &["Takahashi", "Watanabe", "Kobayashi", "Ito", "Saito", "Yamamoto", "Nakamura", "Kato"],
+        ),
+        // Minmatar: Sebiestor (3), Brutor (4), Vherokior (14)
+        3 => (
+            &["Toran", "Sari", "Nesta", "Valen", "Eirik", "Freja", "Sigurd", "Astrid"],
+            &["Kouris", "Solari", "Nilsen", "Solberg", "Hagen", "Bakke", "Lund", "Strand"],
+        ),
+        4 => (
+            &["Karishal", "Malaetu", "Krag", "Vuk", "Dragan", "Zoran", "Milena", "Tara"],
+            &["Shakor", "Saraki", "Novak", "Kovac", "Horvat", "Babic", "Jovanovic", "Vukic"],
+        ),
+        14 => (
+            &["Temujin", "Altai", "Batu", "Chotan", "Sarnai", "Zaya", "Nergui", "Oyun"],
+            &["Khasar", "Borjigin", "Chonos", "Olkhunut", "Jalayir", "Taidjut", "Merkit", "Tatar"],
+        ),
+        // Amarr: Amarr (5), Ni-Kunni (6), Khanid (13)
+        5 => (
+            &["Jamyl", "Catiz", "Aritcio", "Heideran", "Uriam", "Doriam", "Maximilian", "Aurelia"],
+            &["Sarum", "Tash-Murkon", "Kor-Azor", "Kador", "Ardishapur", "Khanid", "Valate", "Dacella"],
+        ),
+        6 => (
+            &["Rashid", "Tariq", "Nadia", "Layla", "Zayd", "Faris", "Samira", "Yasmin"],
+            &["Al-Maktoum", "Qadir", "Sarkis", "Mansoor", "Hakim", "Nasser", "Bakr", "Zaman"],
+        ),
+        13 => (
+            &["Garkeh", "Darius", "Cyrus", "Khosrow", "Shirin", "Roxana", "Bahram", "Azadeh"],
+            &["Khanid", "Ravan", "Pahlavi", "Sasan", "Arshak", "Karen", "Mihran", "Suren"],
+        ),
+        // Gallente: Gallente (7), Intaki (8), Jin-Mei (12)
+        7 => (
+            &["Jacus", "Souro", "Celes", "Laurent", "Camille", "Etienne", "Manon", "Luc"],
+            &["Roden", "Foiritan", "Aguard", "Moreau", "Laurent", "Dubois", "Mercier", "Blanc"],
+        ),
+        8 => (
+            &["Vindhya", "Aarav", "Priya", "Kiran", "Dev", "Ananya", "Rohan", "Meera"],
+            &["Isu", "Chatterjee", "Sen", "Bose", "Mukherjee", "Dasgupta", "Banerjee", "Roy"],
+        ),
+        12 => (
+            &["Liang", "Wei", "Chen", "Ming", "Xia", "Jian", "Hua", "Zhen"],
+            &["Zhang", "Wang", "Liu", "Huang", "Zhao", "Wu", "Zhou", "Xu"],
+        ),
+        _ => (
+            &["Alexander", "Lyra", "Orion", "Selene", "Caelum", "Aethel", "Elena", "Vesper"],
+            &["Vander", "Artemis", "Vandermeer", "O'Neill", "Solari", "Mercer", "Kallio", "Stark"],
+        ),
+    }
+}
+
+/// Returns the maximum trainable/active skill level for an Alpha clone (`grade 1`) from `clonegrades.fsdbinary`.
+pub fn alpha_skill_cap_for_character(
+    sde: &eve_sde::SdeRegistry,
+    race_id: u32,
+    skill_type_id: TypeId,
+) -> u8 {
+    sde.clone_grades
+        .get(&race_id)
+        .and_then(|cg| cg.alpha_skill_caps.get(&skill_type_id).copied())
+        .or_else(|| {
+            sde.clone_grades
+                .values()
+                .filter_map(|cg| cg.alpha_skill_caps.get(&skill_type_id).copied())
+                .max()
+        })
+        .unwrap_or(0)
+}
+
+fn serialize_doll_pyrep(rep: &PyRep) -> String {
+    match rep {
+        PyRep::String(s) => s.clone(),
+        PyRep::Integer(v) => v.to_string(),
+        PyRep::Real(v) => v.to_string(),
+        PyRep::Bool(v) => v.to_string(),
+        PyRep::None => String::new(),
+        PyRep::Tuple(items) | PyRep::List(items) => {
+            let parts: Vec<String> = items.iter().map(serialize_doll_pyrep).collect();
+            format!("[{}]", parts.join(","))
+        }
+        PyRep::KeyVal(map) => {
+            let mut entries: Vec<(&String, &PyRep)> = map.iter().collect();
+            entries.sort_by_key(|(k, _)| *k);
+            let parts: Vec<String> = entries
+                .into_iter()
+                .map(|(k, v)| format!("{k}={}", serialize_doll_pyrep(v)))
+                .collect();
+            parts.join("&")
+        }
+        PyRep::Dict(entries) => {
+            let parts: Vec<String> = entries
+                .iter()
+                .map(|(k, v)| format!("{}={}", serialize_doll_pyrep(k), serialize_doll_pyrep(v)))
+                .collect();
+            parts.join("&")
+        }
+        _ => String::from("paperdoll"),
+    }
 }
 
 pub fn handle(
@@ -44,11 +212,13 @@ pub fn handle(
                             .items
                             .get(&c.active_ship_id)
                             .map(|item| {
-                                let name = ctx
-                                    .sde
-                                    .types
-                                    .get(&item.type_id)
-                                    .map(|t| PyRep::String(t.name.clone()))
+                                let name = snap
+                                    .item_custom_names
+                                    .get(&item.item_id)
+                                    .cloned()
+                                    .or_else(|| ctx.esi_state.get_custom_item_name(item.item_id))
+                                    .or_else(|| ctx.sde.types.get(&item.type_id).map(|t| t.name.clone()))
+                                    .map(PyRep::String)
                                     .unwrap_or(PyRep::None);
                                 (PyRep::Integer(item.type_id as i64), name)
                             })
@@ -102,28 +272,168 @@ pub fn handle(
                     message: format!("Character {cid} does not belong to user {user_id}"),
                 }));
             };
-            Some(Ok(PyRep::keyval([
-                ("characterID", PyRep::Integer(c.character_id)),
-                ("characterName", PyRep::String(c.name)),
-                ("corporationID", PyRep::Integer(c.corporation_id)),
-                (
-                    "allianceID",
-                    c.alliance_id.map(PyRep::Integer).unwrap_or(PyRep::None),
-                ),
-                ("stationID", PyRep::Integer(c.station_id.unwrap_or(0))),
-                ("solarSystemID", PyRep::Integer(c.solar_system_id as i64)),
-                ("constellationID", PyRep::Integer(c.constellation_id as i64)),
-                ("regionID", PyRep::Integer(c.region_id as i64)),
-                ("raceID", PyRep::Integer(c.race_id as i64)),
-                ("bloodlineID", PyRep::Integer(c.bloodline_id as i64)),
-                ("ancestryID", PyRep::Integer(c.ancestry_id as i64)),
-                ("schoolID", PyRep::Integer(c.school_id as i64)),
-                ("balance", PyRep::Real(c.balance.to_wire_f64())),
-                ("skillPoints", PyRep::Real(c.skill_points)),
-                ("freeSkillPoints", PyRep::Real(c.free_skill_points)),
-                ("securityStatus", PyRep::Real(c.security_status)),
-                ("cloneGrade", PyRep::Integer(c.clone_grade as i64)),
-            ])))
+            let sheet = ctx.db.with_snapshot(|snap| {
+                let (ship_type_id, ship_name) = snap
+                    .items
+                    .get(&c.active_ship_id)
+                    .map(|item| {
+                        let nm = snap
+                            .item_custom_names
+                            .get(&item.item_id)
+                            .cloned()
+                            .or_else(|| ctx.esi_state.get_custom_item_name(item.item_id))
+                            .or_else(|| ctx.sde.types.get(&item.type_id).map(|t| t.name.clone()))
+                            .unwrap_or_else(|| format!("Ship {}", item.type_id));
+                        (item.type_id as i64, nm)
+                    })
+                    .unwrap_or((0, String::new()));
+                let (doll_dna, portrait_meta) = snap
+                    .character_doll_info
+                    .get(&cid)
+                    .cloned()
+                    .unwrap_or_else(|| (format!("bloodline:{}", c.bloodline_id), "portrait:default".to_string()));
+                let queue = snap.skill_queues.get(&cid).cloned().unwrap_or_default();
+                let (training_skill_id, training_level, training_start_sp, training_dest_sp) = queue
+                    .first()
+                    .map(|q| (q.type_id as i64, q.target_level as i64, q.start_sp, q.end_sp))
+                    .unwrap_or((0, 0, 0.0, 0.0));
+                let mut skills_list = Vec::new();
+                if let Some(smap) = snap.skills.get(&cid) {
+                    let mut sorted: Vec<_> = smap.values().collect();
+                    sorted.sort_by_key(|s| s.type_id);
+                    for s in sorted {
+                        let active_lvl = if c.clone_grade <= 1 {
+                            s.level.min(alpha_skill_cap_for_character(&ctx.sde, c.race_id, s.type_id))
+                        } else {
+                            s.level
+                        };
+                        skills_list.push(PyRep::keyval([
+                            ("typeID", PyRep::Integer(s.type_id as i64)),
+                            ("skillLevel", PyRep::Integer(s.level as i64)),
+                            ("activeSkillLevel", PyRep::Integer(active_lvl as i64)),
+                            ("skillPoints", PyRep::Real(s.skill_points)),
+                        ]));
+                    }
+                }
+                let implants_list: Vec<PyRep> = snap
+                    .active_implants
+                    .get(&cid)
+                    .map(|v| v.iter().map(|&tid| PyRep::Integer(tid as i64)).collect())
+                    .unwrap_or_default();
+                let jump_clones_list: Vec<PyRep> = snap
+                    .jump_clones
+                    .get(&cid)
+                    .map(|v| {
+                        v.iter()
+                            .map(|jc| {
+                                PyRep::keyval([
+                                    ("jumpCloneID", PyRep::Integer(jc.jump_clone_id)),
+                                    ("locationID", PyRep::Integer(jc.location_id)),
+                                    (
+                                        "implants",
+                                        PyRep::List(
+                                            jc.implants.iter().map(|&t| PyRep::Integer(t as i64)).collect(),
+                                        ),
+                                    ),
+                                ])
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let mut standings_entries: Vec<_> = c.standings.iter().collect();
+                standings_entries.sort_by_key(|(&fid, _)| fid);
+                let standings_list: Vec<PyRep> = standings_entries
+                    .into_iter()
+                    .map(|(&from_id, &val)| {
+                        PyRep::keyval([
+                            ("fromID", PyRep::Integer(from_id)),
+                            ("standing", PyRep::Real(val)),
+                        ])
+                    })
+                    .collect();
+                let kill_rights_list: Vec<PyRep> = snap
+                    .kill_rights
+                    .values()
+                    .filter(|kr| kr.owner_id == cid || kr.target_id == cid)
+                    .map(|kr| {
+                        PyRep::keyval([
+                            ("killRightID", PyRep::Integer(kr.kill_right_id)),
+                            ("fromID", PyRep::Integer(kr.owner_id)),
+                            ("toID", PyRep::Integer(kr.target_id)),
+                            ("isActiveSuspect", PyRep::Bool(kr.is_active_suspect)),
+                            ("price", PyRep::Real(kr.activation_fee.to_wire_f64())),
+                        ])
+                    })
+                    .collect();
+                let attrs_kv = PyRep::keyval([
+                    ("charisma", PyRep::Integer(c.neural.charisma as i64)),
+                    ("intelligence", PyRep::Integer(c.neural.intelligence as i64)),
+                    ("memory", PyRep::Integer(c.neural.memory as i64)),
+                    ("perception", PyRep::Integer(c.neural.perception as i64)),
+                    ("willpower", PyRep::Integer(c.neural.willpower as i64)),
+                    ("bonusRemaps", PyRep::Integer(c.neural.bonus_remaps as i64)),
+                    (
+                        "lastRemapDate",
+                        c.neural.last_remap_unix.map(|u| PyRep::Integer(u as i64)).unwrap_or(PyRep::None),
+                    ),
+                    (
+                        "accruedRemapCooldownDate",
+                        c.neural
+                            .remap_cooldown_until_unix
+                            .map(|u| PyRep::Integer(u as i64))
+                            .unwrap_or(PyRep::None),
+                    ),
+                ]);
+
+                PyRep::keyval([
+                    ("characterID", PyRep::Integer(c.character_id)),
+                    ("characterName", PyRep::String(c.name)),
+                    ("corporationID", PyRep::Integer(c.corporation_id)),
+                    (
+                        "allianceID",
+                        c.alliance_id.map(PyRep::Integer).unwrap_or(PyRep::None),
+                    ),
+                    ("stationID", PyRep::Integer(c.station_id.unwrap_or(0))),
+                    (
+                        "structureID",
+                        c.structure_id.map(PyRep::Integer).unwrap_or(PyRep::None),
+                    ),
+                    ("solarSystemID", PyRep::Integer(c.solar_system_id as i64)),
+                    ("constellationID", PyRep::Integer(c.constellation_id as i64)),
+                    ("regionID", PyRep::Integer(c.region_id as i64)),
+                    ("raceID", PyRep::Integer(c.race_id as i64)),
+                    ("bloodlineID", PyRep::Integer(c.bloodline_id as i64)),
+                    ("ancestryID", PyRep::Integer(c.ancestry_id as i64)),
+                    ("schoolID", PyRep::Integer(c.school_id as i64)),
+                    ("gender", PyRep::Integer(c.gender as i64)),
+                    ("createDateTime", PyRep::Integer(c.create_date_unix as i64)),
+                    ("balance", PyRep::Real(c.balance.to_wire_f64())),
+                    ("skillPoints", PyRep::Real(c.skill_points)),
+                    ("freeSkillPoints", PyRep::Real(c.free_skill_points)),
+                    ("securityStatus", PyRep::Real(c.security_status)),
+                    ("cloneGrade", PyRep::Integer(c.clone_grade as i64)),
+                    ("shipID", PyRep::Integer(c.active_ship_id)),
+                    ("shipTypeID", PyRep::Integer(ship_type_id)),
+                    ("shipName", PyRep::String(ship_name)),
+                    ("dollInfo", PyRep::String(doll_dna.clone())),
+                    ("paperdollState", PyRep::String(doll_dna)),
+                    ("portraitInfo", PyRep::String(portrait_meta)),
+                    ("trainingSkillTypeID", PyRep::Integer(training_skill_id)),
+                    ("trainingToLevel", PyRep::Integer(training_level)),
+                    ("trainingStartSP", PyRep::Real(training_start_sp)),
+                    ("trainingDestinationSP", PyRep::Real(training_dest_sp)),
+                    ("skillQueueLength", PyRep::Integer(queue.len() as i64)),
+                    ("skills", PyRep::List(skills_list)),
+                    ("attributes", attrs_kv),
+                    ("implants", PyRep::List(implants_list)),
+                    ("jumpClones", PyRep::List(jump_clones_list)),
+                    ("standings", PyRep::List(standings_list)),
+                    ("killRights", PyRep::List(kill_rights_list)),
+                    ("medals", PyRep::List(Vec::new())),
+                    ("decorations", PyRep::List(Vec::new())),
+                ])
+            });
+            Some(Ok(sheet))
         }
 
         ("charUnboundMgr", "ValidateNameEx") => {
@@ -132,9 +442,7 @@ pub fn handle(
                 Err(e) => return Some(Err(e)),
             };
             let name = args.first().and_then(|a| a.as_str()).unwrap_or("");
-            let trimmed_len = name.trim().len();
-            let valid = (3..=37).contains(&trimmed_len)
-                && name.len() <= 37
+            let valid = is_valid_character_name_syntax(name)
                 && ctx.db.with_snapshot(|s| {
                     !s.characters
                         .values()
@@ -148,17 +456,25 @@ pub fn handle(
                 Ok(u) => u,
                 Err(e) => return Some(Err(e)),
             };
-            let first_names = [
-                "Alexander", "Kael", "Lyra", "Vesper", "Toran", "Rhea", "Darius", "Mira",
-                "Orion", "Selene", "Caelum", "Aethel", "Bren", "Talia", "Corin", "Sari",
-                "Valen", "Nesta", "Jarek", "Elena",
-            ];
-            let last_names = [
-                "Vander", "Chen", "Kallio", "Stark", "Holloway", "Kruger", "Sarkis", "Novak",
-                "Artemis", "Blackwood", "Mercer", "Solari", "Tash-Murkon", "Kor-Azor", "Saraki",
-                "Ravan", "Vandermeer", "O'Neill", "Lindqvist", "Kouris",
-            ];
-            let seed = ctx.now_unix() ^ (session.session_id as u64);
+            let bloodline_id = if let Some(arg0) = args.first() {
+                let Some(bid) = arg0.as_i64().filter(|&v| v > 0).map(|v| v as u32) else {
+                    return Some(Err(BridgeRpcError {
+                        code: "InvalidBloodline".into(),
+                        message: "GetValidRandomName requires a valid positive bloodlineID".into(),
+                    }));
+                };
+                if !ctx.sde.bloodlines.contains_key(&bid) {
+                    return Some(Err(BridgeRpcError {
+                        code: "InvalidBloodline".into(),
+                        message: format!("Bloodline {bid} does not exist in SDE"),
+                    }));
+                }
+                bid
+            } else {
+                1
+            };
+            let (first_names, last_names) = bloodline_name_pools(bloodline_id);
+            let seed = ctx.now_unix() ^ (session.session_id as u64) ^ ((bloodline_id as u64) << 16);
             let mut chosen = String::new();
             for i in 0..100 {
                 let f_idx = ((seed + i) as usize) % first_names.len();
@@ -169,36 +485,99 @@ pub fn handle(
                         .values()
                         .any(|c| c.name.eq_ignore_ascii_case(&candidate))
                 });
-                if !exists {
+                if !exists && is_valid_character_name_syntax(&candidate) {
                     chosen = candidate;
                     break;
                 }
             }
             if chosen.is_empty() {
-                chosen = format!("Pilot {}", ctx.now_unix() % 1_000_000);
+                chosen = format!("{} {}", first_names[0], ctx.now_unix() % 1_000_000);
             }
             Some(Ok(PyRep::String(chosen)))
         }
 
-        ("charUnboundMgr", "CreateCharacterWithDoll") | ("charUnboundMgr", "CreateCharacter") => {
+        ("charUnboundMgr", "CreateCharacterWithDoll") => {
             let user_id = match ServerContext::require_auth(session) {
                 Ok(u) => u,
                 Err(e) => return Some(Err(e)),
             };
-            let name = args
-                .first()
-                .and_then(|a| a.as_str())
-                .unwrap_or("New Capsuleer");
-            if !(3..=37).contains(&name.trim().len()) || name.len() > 37 {
+            let Some(name) = args.first().and_then(|a| a.as_str()) else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidCharacterName".into(),
-                    message: "Character name must be between 3 and 37 characters".into(),
+                    message: "CreateCharacterWithDoll requires charactername string".into(),
+                }));
+            };
+            if !is_valid_character_name_syntax(name) {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidCharacterName".into(),
+                    message: format!("Character name '{name}' violates EVE naming rules"),
                 }));
             }
-            let race_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(2) as u32;
-            let bloodline_id = args.get(2).and_then(|a| a.as_i64()).unwrap_or(3) as u32;
-            let ancestry_id = args.get(3).and_then(|a| a.as_i64()).unwrap_or(19) as u32;
-            let school_id = args.get(4).and_then(|a| a.as_i64()).unwrap_or(14) as u32;
+
+            // V24 signature: CreateCharacterWithDoll(charactername, bloodlineID, genderID, ancestryID, charInfo, portraitInfo, schoolID)
+            if args.len() < 7 {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidArgument".into(),
+                    message: "CreateCharacterWithDoll requires (charactername, bloodlineID, genderID, ancestryID, charInfo, portraitInfo, schoolID)".into(),
+                }));
+            }
+            let Some(bloodline_id) = args.get(1).and_then(|a| a.as_i64()).map(|v| v as u32) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidArgument".into(),
+                    message: "CreateCharacterWithDoll requires integer bloodlineID".into(),
+                }));
+            };
+            let Some(gid) = args.get(2).and_then(|a| a.as_i64()) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidArgument".into(),
+                    message: "CreateCharacterWithDoll requires integer genderID (0 or 1)".into(),
+                }));
+            };
+            if !(0..=1).contains(&gid) {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidGender".into(),
+                    message: format!("Invalid genderID {gid}; expected 0 (female) or 1 (male)"),
+                }));
+            }
+            let gender_id = gid as u32;
+            let Some(ancestry_id) = args.get(3).and_then(|a| a.as_i64()).map(|v| v as u32) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidArgument".into(),
+                    message: "CreateCharacterWithDoll requires integer ancestryID".into(),
+                }));
+            };
+            let Some(char_info_rep) = args.get(4) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidDollInfo".into(),
+                    message: "Missing charInfo doll appearance argument".into(),
+                }));
+            };
+            let Some(portrait_info_rep) = args.get(5) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidPortraitInfo".into(),
+                    message: "Missing portraitInfo argument".into(),
+                }));
+            };
+            if matches!(char_info_rep, PyRep::None) || matches!(portrait_info_rep, PyRep::None) {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidDollInfo".into(),
+                    message: "charInfo and portraitInfo must not be None".into(),
+                }));
+            }
+            let Some(school_id) = args.get(6).and_then(|a| a.as_i64()).map(|v| v as u32) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidArgument".into(),
+                    message: "CreateCharacterWithDoll requires integer schoolID".into(),
+                }));
+            };
+            let Some(race_id) = ctx.sde.bloodlines.get(&bloodline_id).map(|b| b.race_id) else {
+                return Some(Err(BridgeRpcError {
+                    code: "CharacterCreationFailed".into(),
+                    message: format!("Unknown bloodline_id {bloodline_id}"),
+                }));
+            };
+            let doll_str = serialize_doll_pyrep(char_info_rep);
+            let portrait_str = serialize_doll_pyrep(portrait_info_rep);
 
             let res = ctx.db.create_character(
                 user_id,
@@ -210,7 +589,34 @@ pub fn handle(
                 &ctx.sde,
             );
             match res {
-                Ok(ch) => Some(Ok(PyRep::Integer(ch.character_id))),
+                Ok(ch) => {
+                    let now_ft = ctx.now_blueos_filetime_ticks();
+                    let now_unix = ctx.now_unix();
+                    ctx.db.with_mut_snapshot(|snap| {
+                        if let Some(c_mut) = snap.characters.get_mut(&ch.character_id) {
+                            c_mut.gender = gender_id;
+                            c_mut.create_date_unix = now_unix;
+                        }
+                        snap.character_doll_info
+                            .insert(ch.character_id, (doll_str, portrait_str));
+                        if let Some(smap) = snap.skills.get(&ch.character_id).cloned() {
+                            let hist = snap.skill_history.entry(ch.character_id).or_default();
+                            let mut sorted: Vec<_> = smap.values().collect();
+                            sorted.sort_by_key(|s| s.type_id);
+                            for s in sorted {
+                                hist.push(SkillHistoryEntry {
+                                    log_date_ft: now_ft,
+                                    // 33 = SkillEventCharCreation (evemu_Crucible EVE_Skills.h:24)
+                                    event_type_id: 33,
+                                    skill_type_id: s.type_id,
+                                    skill_level: s.level,
+                                    absolute_points: s.skill_points,
+                                });
+                            }
+                        }
+                    });
+                    Some(Ok(PyRep::Integer(ch.character_id)))
+                }
                 Err(e) => Some(Err(BridgeRpcError {
                     code: "CharacterCreationFailed".into(),
                     message: e.to_string(),
@@ -511,12 +917,27 @@ pub fn handle(
                         .map(|q| q.iter().map(|e| (e.end_sp - e.start_sp).max(0.0)).sum())
                         .unwrap_or(0.0);
 
-                    // Enforce 5,000,000 SP Alpha Clone cap (grade 1) using incremental SP delta
-                    if ch.clone_grade == 1 && ch.skill_points + queued_sp + sp_delta > 5_000_000.0 {
-                        return Err(BridgeRpcError {
-                            code: "AlphaCloneSpCapExceeded".into(),
-                            message: "Alpha clones cannot queue skills beyond 5,000,000 SP".into(),
-                        });
+                    // Enforce per-skill Alpha Clone level cap from clonegrades.fsdbinary and 5,000,000 SP total cap (grade 1)
+                    if ch.clone_grade <= 1 {
+                        let alpha_cap =
+                            alpha_skill_cap_for_character(&ctx.sde, ch.race_id, skill_type_id);
+                        if target_level > alpha_cap {
+                            return Err(BridgeRpcError {
+                                code: "AlphaCloneSkillLevelCapExceeded".into(),
+                                message: format!(
+                                    "Alpha clones cannot train {} (type {skill_type_id}) to level {target_level} (Alpha cap is level {alpha_cap})",
+                                    skill_type.name
+                                ),
+                            });
+                        }
+                        if ch.skill_points + ch.free_skill_points + queued_sp + sp_delta > 5_000_000.0
+                        {
+                            return Err(BridgeRpcError {
+                                code: "AlphaCloneSpCapExceeded".into(),
+                                message:
+                                    "Alpha clones cannot queue skills beyond 5,000,000 SP".into(),
+                            });
+                        }
                     }
 
                     let primary_attr_id = skill_type
@@ -585,6 +1006,7 @@ pub fn handle(
                     }));
                 }
             }
+            let now_ft = ctx.now_blueos_filetime_ticks();
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let available_free_sp = snap
                     .characters
@@ -603,6 +1025,7 @@ pub fn handle(
                     .unwrap_or(available_free_sp);
                 let queue = snap.skill_queues.entry(char_id).or_default().clone();
                 let mut remaining_queue = Vec::new();
+                let mut history_to_append = Vec::new();
                 let skills_map = snap.skills.entry(char_id).or_default();
                 let mut total_applied = 0.0;
 
@@ -619,6 +1042,14 @@ pub fn handle(
                                 skill_points: q.end_sp,
                             },
                         );
+                        history_to_append.push(SkillHistoryEntry {
+                            log_date_ft: now_ft,
+                            // 307 = SkillEventSkillPointsApplied (evemu_Crucible EVE_Skills.h:35)
+                            event_type_id: 307,
+                            skill_type_id: q.type_id,
+                            skill_level: q.target_level,
+                            absolute_points: q.end_sp,
+                        });
                     } else if remaining_budget > 0.0 && needed > 0.0 {
                         let applied = remaining_budget;
                         remaining_budget = 0.0;
@@ -652,12 +1083,26 @@ pub fn handle(
                                 skill_points: q.start_sp,
                             },
                         );
+                        history_to_append.push(SkillHistoryEntry {
+                            log_date_ft: now_ft,
+                            // 307 = SkillEventSkillPointsApplied (evemu_Crucible EVE_Skills.h:35)
+                            event_type_id: 307,
+                            skill_type_id: q.type_id,
+                            skill_level: achieved_lvl,
+                            absolute_points: q.start_sp,
+                        });
                         remaining_queue.push(q);
                     } else {
                         remaining_queue.push(q);
                     }
                 }
                 snap.skill_queues.insert(char_id, remaining_queue);
+                if !history_to_append.is_empty() {
+                    snap.skill_history
+                        .entry(char_id)
+                        .or_default()
+                        .extend(history_to_append);
+                }
 
                 if let Some(ch) = snap.characters.get_mut(&char_id) {
                     ch.free_skill_points = (ch.free_skill_points - total_applied).max(0.0);
@@ -762,24 +1207,28 @@ pub fn handle(
                 Err(e) => return Some(Err(e)),
             };
             let rows = ctx.db.with_snapshot(|snap| {
-                snap.skills
-                    .get(&char_id)
-                    .map(|m| {
-                        m.values()
-                            .map(|s| {
-                                vec![
-                                    PyRep::Integer(1704067200),
-                                    PyRep::Integer(s.type_id as i64),
-                                    PyRep::Integer(s.level as i64),
-                                    PyRep::Real(s.skill_points),
-                                ]
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default()
+                let mut out: Vec<Vec<PyRep>> = Vec::new();
+                if let Some(events) = snap.skill_history.get(&char_id) {
+                    for ev in events {
+                        out.push(vec![
+                            PyRep::Integer(ev.log_date_ft),
+                            PyRep::Integer(ev.event_type_id),
+                            PyRep::Integer(ev.skill_type_id as i64),
+                            PyRep::Integer(ev.skill_level as i64),
+                            PyRep::Real(ev.absolute_points),
+                        ]);
+                    }
+                }
+                out
             });
             Some(Ok(PyRep::rowset(
-                vec!["logDate", "skillTypeID", "skillLevel", "absolutePoints"],
+                vec![
+                    "logDate",
+                    "eventTypeID",
+                    "skillTypeID",
+                    "skillLevel",
+                    "absolutePoints",
+                ],
                 rows,
             )))
         }
@@ -798,6 +1247,7 @@ pub fn handle(
                     message: "InjectSkillIntoBrain requires itemID or skill typeID".into(),
                 }));
             }
+            let now_ft = ctx.now_blueos_filetime_ticks();
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let (item_id_opt, skill_type_id) = if let Some(item) = snap.items.get(&raw_id) {
@@ -836,40 +1286,9 @@ pub fn handle(
                     });
                 }
 
-                // Check prerequisites
-                for (skill_attr, level_attr) in [
-                    (attr_ids::REQUIRED_SKILL_1, attr_ids::REQUIRED_SKILL_1_LEVEL),
-                    (attr_ids::REQUIRED_SKILL_2, attr_ids::REQUIRED_SKILL_2_LEVEL),
-                    (attr_ids::REQUIRED_SKILL_3, attr_ids::REQUIRED_SKILL_3_LEVEL),
-                ] {
-                    if let Some(&req_skill_f) = skill_type.default_attributes.get(&skill_attr) {
-                        let req_skill_id = req_skill_f as TypeId;
-                        if req_skill_id > 0 {
-                            let req_lvl = skill_type
-                                .default_attributes
-                                .get(&level_attr)
-                                .copied()
-                                .unwrap_or(1.0)
-                                .max(1.0) as u8;
-                            let trained_lvl = snap
-                                .skills
-                                .get(&char_id)
-                                .and_then(|m| m.get(&req_skill_id))
-                                .map(|s| s.level)
-                                .unwrap_or(0);
-                            if trained_lvl < req_lvl {
-                                return Err(BridgeRpcError {
-                                    code: "SkillPrerequisiteNotMet".into(),
-                                    message: format!(
-                                        "Skill {} (type {skill_type_id}) requires prerequisite skill {req_skill_id} at level {req_lvl}",
-                                        skill_type.name
-                                    ),
-                                });
-                            }
-                        }
-                    }
-                }
-
+                // Note: In EVE Online (Skills_and_learning), a skillbook can be injected into the brain
+                // at any time without having trained its prerequisite skills; prerequisites are enforced
+                // when adding the skill to the training queue (SaveSkillQueue).
                 let skills_map = snap.skills.entry(char_id).or_default();
                 if skills_map.contains_key(&skill_type_id) {
                     return Err(BridgeRpcError {
@@ -897,6 +1316,17 @@ pub fn handle(
                         skill_points: 0.0,
                     },
                 );
+                snap.skill_history
+                    .entry(char_id)
+                    .or_default()
+                    .push(SkillHistoryEntry {
+                        log_date_ft: now_ft,
+                        // 56 = SkillEventSkillInjected (evemu_Crucible EVE_Skills.h:30)
+                        event_type_id: 56,
+                        skill_type_id,
+                        skill_level: 0,
+                        absolute_points: 0.0,
+                    });
 
                 Ok(skill_type_id)
             });
@@ -922,9 +1352,16 @@ pub fn handle(
                 }));
             };
             let res = ctx.db.with_snapshot(|snap| {
-                snap.characters.get(&cid).cloned()
+                snap.characters.get(&cid).cloned().map(|c| {
+                    let (_, portrait) = snap
+                        .character_doll_info
+                        .get(&cid)
+                        .cloned()
+                        .unwrap_or_else(|| (String::new(), format!("portrait:bloodline:{}", c.bloodline_id)));
+                    (c, portrait)
+                })
             });
-            let Some(c) = res else {
+            let Some((c, portrait_info)) = res else {
                 return Some(Err(BridgeRpcError {
                     code: "CharacterNotFound".into(),
                     message: format!("Character {cid} not found"),
@@ -938,10 +1375,51 @@ pub fn handle(
                 ("raceID", PyRep::Integer(c.race_id as i64)),
                 ("bloodlineID", PyRep::Integer(c.bloodline_id as i64)),
                 ("ancestryID", PyRep::Integer(c.ancestry_id as i64)),
+                ("schoolID", PyRep::Integer(c.school_id as i64)),
                 ("securityStatus", PyRep::Real(c.security_status)),
                 ("description", PyRep::String(c.description)),
+                ("title", PyRep::String(c.title)),
                 ("gender", PyRep::Integer(c.gender as i64)),
                 ("createDateTime", PyRep::Integer(c.create_date_unix as i64)),
+                ("portraitInfo", PyRep::String(portrait_info)),
+            ])))
+        }
+
+        ("charMgr", "GetPrivateInfo") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let target_cid = args.first().and_then(|a| a.as_i64()).unwrap_or(char_id);
+            if target_cid != char_id {
+                return Some(Err(BridgeRpcError {
+                    code: "CharacterOwnershipMismatch".into(),
+                    message: format!("GetPrivateInfo can only be queried for the active character {char_id}"),
+                }));
+            }
+            let Some(c) = ctx.db.with_snapshot(|snap| snap.characters.get(&char_id).cloned()) else {
+                return Some(Err(BridgeRpcError {
+                    code: "CharacterNotFound".into(),
+                    message: format!("Character {char_id} not found"),
+                }));
+            };
+            Some(Ok(PyRep::keyval([
+                ("characterID", PyRep::Integer(c.character_id)),
+                ("charName", PyRep::String(c.name.clone())),
+                ("characterName", PyRep::String(c.name)),
+                ("gender", PyRep::Integer(c.gender as i64)),
+                ("createDateTime", PyRep::Integer(c.create_date_unix as i64)),
+                ("raceID", PyRep::Integer(c.race_id as i64)),
+                ("bloodlineID", PyRep::Integer(c.bloodline_id as i64)),
+                ("ancestryID", PyRep::Integer(c.ancestry_id as i64)),
+                ("schoolID", PyRep::Integer(c.school_id as i64)),
+                ("corporationID", PyRep::Integer(c.corporation_id)),
+                ("allianceID", c.alliance_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
+                ("balance", PyRep::Real(c.balance.to_wire_f64())),
+                ("skillPoints", PyRep::Real(c.skill_points)),
+                ("freeSkillPoints", PyRep::Real(c.free_skill_points)),
+                ("securityStatus", PyRep::Real(c.security_status)),
+                ("cloneStationID", PyRep::Integer(c.home_station_id)),
             ])))
         }
 
@@ -1339,7 +1817,11 @@ pub fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let Some(structure_id) = session.structure_id else {
+            let Some(structure_id) = ctx
+                .db
+                .with_snapshot(|snap| snap.characters.get(&char_id).and_then(|c| c.structure_id))
+                .or(session.structure_id)
+            else {
                 return Some(Err(BridgeRpcError {
                     code: "MustBeDocked".into(),
                     message:
@@ -1715,7 +2197,7 @@ pub fn handle(
                     let cid = snap.next_entity_id;
                     snap.items.insert(
                         cid,
-                        InventoryItemRecord {
+                        eve_db::InventoryItemRecord {
                             item_id: cid,
                             type_id: 670, // Capsule
                             owner_id: char_id,

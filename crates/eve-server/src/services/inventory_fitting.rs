@@ -2,7 +2,9 @@
 
 #![forbid(unsafe_code)]
 
-use crate::formulas::{abyssal_attribute_roll, compute_insurance_quote};
+use crate::formulas::{
+    abyssal_attribute_roll, compute_insurance_quote, compute_ship_insurance_reference_value,
+};
 use crate::router::{BoundObjectEntry, ServerContext};
 use eve_db::{InventoryFlag, IskCents, SavedFittingRecord};
 use eve_machonet::SessionState;
@@ -25,6 +27,10 @@ fn item_to_packed_cells(ctx: &ServerContext, i: &eve_db::InventoryItemRecord) ->
     } else {
         i.quantity as i64
     };
+    let custom_name = ctx
+        .db
+        .with_snapshot(|snap| snap.item_custom_names.get(&i.item_id).cloned())
+        .unwrap_or_default();
     vec![
         PyRep::Integer(i.item_id),
         PyRep::Integer(i.type_id as i64),
@@ -34,7 +40,7 @@ fn item_to_packed_cells(ctx: &ServerContext, i: &eve_db::InventoryItemRecord) ->
         PyRep::Integer(qty),
         PyRep::Integer(group_id),
         PyRep::Integer(category_id),
-        PyRep::String(String::new()),
+        PyRep::String(custom_name),
     ]
 }
 
@@ -2267,13 +2273,8 @@ pub async fn handle(
                         message: format!("Ship {ship_id} does not belong to character {char_id}"),
                     });
                 }
-                let base_price = ctx
-                    .sde
-                    .types
-                    .get(&ship.type_id)
-                    .map(|t| t.base_price)
-                    .unwrap_or(230_000.0);
-                let (cost, payout) = compute_insurance_quote(base_price, level_fraction);
+                let ref_val = compute_ship_insurance_reference_value(&ctx.sde, ship.type_id);
+                let (cost, payout) = compute_insurance_quote(ref_val, level_fraction);
                 let cost_cents = IskCents::from_f64_isk(cost);
 
                 let Some(ch) = snap.characters.get_mut(&char_id) else {
@@ -2327,13 +2328,8 @@ pub async fn handle(
                     message: format!("Ship {ship_id} not found or not owned by character {char_id}"),
                 }));
             };
-            let base_price = ctx
-                .sde
-                .types
-                .get(&type_id)
-                .map(|t| t.base_price)
-                .unwrap_or(230_000.0);
-            let (platinum_cost, platinum_payout) = compute_insurance_quote(base_price, 1.0);
+            let ref_val = compute_ship_insurance_reference_value(&ctx.sde, type_id);
+            let (platinum_cost, platinum_payout) = compute_insurance_quote(ref_val, 1.0);
             Some(Ok(PyRep::keyval([
                 ("shipID", PyRep::Integer(ship_id)),
                 ("platinumCostISK", PyRep::Real(platinum_cost)),
@@ -3020,28 +3016,174 @@ pub async fn handle(
             }
         }
 
-        ("invBroker", "DestroyItem")
-        | ("invbroker", "DestroyItem")
-        | ("inventory", "DestroyItem")
-        | ("invBroker", "TrashItems")
-        | ("invbroker", "TrashItems") => {
+        ("invbroker", "TrashItems") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let item_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            match ctx.db.delete_item(char_id, item_id) {
-                Ok(()) => {
-                    ctx.invalidate_ship_fitting(item_id);
-                    Some(Ok(PyRep::keyval([
-                        ("itemID", PyRep::Integer(item_id)),
-                        ("deleted", PyRep::Bool(true)),
-                    ])))
+            let item_ids: Vec<i64> = match args.first() {
+                Some(PyRep::List(list) | PyRep::Tuple(list)) => {
+                    list.iter().filter_map(|v| v.as_i64()).collect()
                 }
-                Err(e) => Some(Err(BridgeRpcError {
+                Some(PyRep::Integer(id)) => vec![*id],
+                _ => Vec::new(),
+            };
+            if item_ids.is_empty() {
+                return Some(Err(BridgeRpcError {
                     code: "DeleteFailed".into(),
-                    message: e.to_string(),
-                })),
+                    message: "TrashItems requires at least one itemID".into(),
+                }));
+            }
+            let expected_station = args.get(1).and_then(|a| a.as_i64()).filter(|&st| st > 0);
+            let first_id = item_ids[0];
+
+            // Execute all item deletions atomically in a single snapshot transaction
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let active_ship_id = snap
+                    .characters
+                    .get(&char_id)
+                    .map(|c| c.active_ship_id)
+                    .unwrap_or(0);
+                let mut trashed: Vec<(i64, i64)> = Vec::with_capacity(item_ids.len());
+                for &item_id in &item_ids {
+                    let Some(item) = snap.items.get(&item_id) else {
+                        return Err(BridgeRpcError {
+                            code: "DeleteFailed".into(),
+                            message: format!("Item {item_id} not found"),
+                        });
+                    };
+                    if item.owner_id != char_id {
+                        return Err(BridgeRpcError {
+                            code: "DeleteFailed".into(),
+                            message: format!("Item {item_id} is not owned by character {char_id}"),
+                        });
+                    }
+                    if item_id == active_ship_id {
+                        return Err(BridgeRpcError {
+                            code: "DeleteFailed".into(),
+                            message: format!("Cannot trash active ship {item_id}"),
+                        });
+                    }
+                    if let Some(st_id) = expected_station {
+                        if item.location_id != st_id {
+                            return Err(BridgeRpcError {
+                                code: "DeleteFailed".into(),
+                                message: format!(
+                                    "Item {item_id} is located at {}, not expected station {st_id}",
+                                    item.location_id
+                                ),
+                            });
+                        }
+                    }
+                    if snap.items.values().any(|child| child.location_id == item_id) {
+                        return Err(BridgeRpcError {
+                            code: "DeleteFailed".into(),
+                            message: format!(
+                                "Cannot trash non-empty container or fitted ship {item_id}"
+                            ),
+                        });
+                    }
+                    trashed.push((item_id, item.location_id));
+                }
+                for &(item_id, _) in &trashed {
+                    snap.items.remove(&item_id);
+                    snap.item_custom_names.remove(&item_id);
+                    snap.item_positions.remove(&item_id);
+                }
+                Ok(trashed)
+            });
+
+            let trashed = match res {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            for &(item_id, old_location_id) in &trashed {
+                ctx.invalidate_ship_fitting(item_id);
+                ctx.notify(
+                    crate::router::NotificationTarget::Character(char_id),
+                    "OnItemChange",
+                    "charid",
+                    vec![
+                        PyRep::keyval([
+                            ("itemID", PyRep::Integer(item_id)),
+                            ("locationID", PyRep::Integer(6)), // Junkyard (locationID 6)
+                        ]),
+                        PyRep::Dict(vec![(
+                            PyRep::Integer(3), // ixLocationID
+                            PyRep::Integer(old_location_id),
+                        )]),
+                    ],
+                );
+            }
+            Some(Ok(PyRep::keyval([
+                ("itemID", PyRep::Integer(first_id)),
+                ("deleted", PyRep::Bool(true)),
+                ("count", PyRep::Integer(trashed.len() as i64)),
+            ])))
+        }
+
+        ("invbroker", "SetLabel") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let (item_id, raw_label) = if args.len() >= 2 {
+                (
+                    args.first().and_then(|a| a.as_i64()).or(session.ship_id).unwrap_or(0),
+                    args.get(1).and_then(|a| a.as_str()).unwrap_or(""),
+                )
+            } else {
+                (
+                    bound_entry
+                        .map(|b| b.object_id)
+                        .or(session.ship_id)
+                        .unwrap_or(0),
+                    args.first().and_then(|a| a.as_str()).unwrap_or(""),
+                )
+            };
+            let label = raw_label.trim();
+            if label.is_empty() || label.chars().count() > 100 {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidLabel".into(),
+                    message: "Item/ship custom name must be 1..=100 characters".into(),
+                }));
+            }
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let Some(item) = snap.items.get(&item_id) else {
+                    return Err(BridgeRpcError {
+                        code: "ItemNotFound".into(),
+                        message: format!("Item {item_id} not found"),
+                    });
+                };
+                if item.owner_id != char_id {
+                    let corp_id = snap.characters.get(&char_id).map(|c| c.corporation_id);
+                    let has_corp_rename_role = corp_id == Some(item.owner_id)
+                        && snap.corporations.get(&item.owner_id).is_some_and(|corp| {
+                            if corp.ceo_id == char_id {
+                                return true;
+                            }
+                            let roles = corp.member_roles.get(&char_id).copied().unwrap_or(0);
+                            // corpRoleDirector (1) or corpRoleEquipmentConfig (2199023255552)
+                            (roles & (1 | 2_199_023_255_552)) != 0
+                        });
+                    if !has_corp_rename_role {
+                        return Err(BridgeRpcError {
+                            code: "OwnershipViolation".into(),
+                            message: format!(
+                                "Character {char_id} lacks permission to rename item {item_id}"
+                            ),
+                        });
+                    }
+                }
+                snap.item_custom_names.insert(item_id, label.to_string());
+                Ok(())
+            });
+            match res {
+                Ok(()) => Some(Ok(PyRep::keyval([
+                    ("itemID", PyRep::Integer(item_id)),
+                    ("name", PyRep::String(label.to_string())),
+                ]))),
+                Err(e) => Some(Err(e)),
             }
         }
 

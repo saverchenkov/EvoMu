@@ -2364,6 +2364,7 @@ async fn test_review_r8_regressions() {
         &PyRep::String("Jita IV - Moon 4 - Caldari Navy Assembly Plant".into())
     );
 
+    // parity: sde:res:/staticdata/types.fsdbinary
     // Verify InvType full columns preserved in SDE registry
     let rifter_t = ctx.sde.types.get(&587).expect("Rifter type");
     assert_eq!(rifter_t.description_id, Some(93841));
@@ -2501,10 +2502,147 @@ async fn test_review_r8_regressions() {
     assert_eq!(incomp_apply.unwrap_err().code, "InvalidShipTypeForSkin");
 
     // parity: sde:res:/staticdata/fighterabilities.static
-    // Verify fighter abilities full columns and mappings
+    // Verify fighter abilities full columns, mappings, and fighterMgr.CmdActivateAbilitySlots SDE wiring
     let fa2 = ctx.sde.fighter_abilities.get(&2).expect("fighter ability 2");
     assert_eq!(fa2.tooltip_text_id, Some(516650));
     let fa18 = ctx.sde.fighter_abilities.get(&18).expect("fighter ability 18");
     assert_eq!(fa18.turret_graphic_id, Some(11515));
     assert_eq!(fa18.tooltip_text_id, Some(516660));
+
+    s1.solar_system_id = Some(30_000_142); // Jita (high-sec)
+    let jita_sys = ctx.systems.get_or_spawn(30_000_142);
+    for (bid, tid, x) in [(880_001_i64, 32340_u32, 0.0), (880_002_i64, 40362_u32, 100.0), (100_000_002_i64, 282_u32, 2_000.0)] {
+        jita_sys
+            .spawn_ball_with_combat(
+                eve_destiny::Ball {
+                    id: bid,
+                    type_id: tid,
+                    position: glam::DVec3::new(x, 0.0, 0.0),
+                    velocity: glam::DVec3::ZERO,
+                    max_velocity: 1_000.0,
+                    inertia: 1.0,
+                    mass: 10_000.0,
+                    radius: 20.0,
+                    speed_fraction: 0.0,
+                    mode: eve_destiny::MovementMode::Stop,
+                },
+                ctx.build_type_combat_state(tid),
+            )
+            .await
+            .expect("spawn ball in Jita");
+    }
+    ctx.active_fighters.write().unwrap().insert(
+        880_001,
+        eve_server::router::context::ActiveFighterSquadron {
+            ball_id: 880_001,
+            item_id: 770_001,
+            type_id: 32340, // Malleus I (slot 2 -> ability 18: 9 charges, 6s rearm, turretGraphicID 11515, tooltipTextID 516660)
+            owner_char_id: 90_000_001,
+            parent_ship_id: 100_000_001,
+            tube_index: 0,
+            squadron_size: 6,
+            target_id: None,
+            is_abandoned: false,
+            mwd_active: false,
+        },
+    );
+    ctx.active_fighters.write().unwrap().insert(
+        880_002,
+        eve_server::router::context::ActiveFighterSquadron {
+            ball_id: 880_002,
+            item_id: 770_002,
+            type_id: 40362, // Ametat I (slot 2 -> ability 7: disallow_in_high_sec = true)
+            owner_char_id: 90_000_001,
+            parent_ship_id: 100_000_001,
+            tube_index: 1,
+            squadron_size: 6,
+            target_id: None,
+            is_abandoned: false,
+            mwd_active: false,
+        },
+    );
+
+    // Unlocked target must be rejected with TargetNotLocked
+    let unlocked_err = ctx
+        .dispatch_rpc(
+            &mut s1,
+            "fighterMgr",
+            None,
+            "CmdActivateAbilitySlots",
+            &[
+                PyRep::Integer(880_001),
+                PyRep::Integer(2),
+                PyRep::Integer(100_000_002),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Unlocked target must be rejected");
+    assert_eq!(unlocked_err.code, "TargetNotLocked");
+
+    // Lock target 100_000_002 from controlling ship 100_000_001
+    jita_sys
+        .add_target_lock(
+            100_000_001,
+            eve_destiny::TargetLock {
+                target_id: 100_000_002,
+                lock_time_ms: 1_000.0,
+                remaining_lock_ms: 0.0,
+                locked: true,
+                max_range_m: Some(100_000.0),
+            },
+        )
+        .await
+        .expect("lock target 100_000_002");
+
+    let act_fa18 = ctx
+        .dispatch_rpc(
+            &mut s1,
+            "fighterMgr",
+            None,
+            "CmdActivateAbilitySlots",
+            &[
+                PyRep::Integer(880_001),
+                PyRep::Integer(2),
+                PyRep::Integer(100_000_002),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect("CmdActivateAbilitySlots slot 2 on Malleus I 32340");
+    let PyRep::KeyVal(fa18_kv) = act_fa18 else {
+        panic!("Expected fa18_kv");
+    };
+    assert_eq!(fa18_kv.get("abilityID").unwrap(), &PyRep::Integer(18));
+    assert_eq!(
+        fa18_kv.get("targetMode").unwrap(),
+        &PyRep::String("itemTargeted".into())
+    );
+    assert_eq!(fa18_kv.get("chargeCount").unwrap(), &PyRep::Integer(9));
+    assert_eq!(fa18_kv.get("remainingCharges").unwrap(), &PyRep::Integer(8));
+    assert_eq!(fa18_kv.get("rearmTimeSeconds").unwrap(), &PyRep::Real(6.0));
+    assert_eq!(
+        fa18_kv.get("tooltipTextID").unwrap(),
+        &PyRep::Integer(516660)
+    );
+    assert_eq!(
+        fa18_kv.get("turretGraphicID").unwrap(),
+        &PyRep::Integer(11515)
+    );
+
+    let act_hisec_err = ctx
+        .dispatch_rpc(
+            &mut s1,
+            "fighterMgr",
+            None,
+            "CmdActivateAbilitySlots",
+            &[PyRep::Integer(880_002), PyRep::Integer(2)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Ability 7 must be disallowed in high-sec Jita");
+    assert_eq!(act_hisec_err.code, "AbilityDisallowedInHighSec");
 }

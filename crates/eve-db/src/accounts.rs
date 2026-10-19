@@ -814,6 +814,10 @@ impl WorldRepository {
                 .filter(|prev| prev.session_id == session_id)
                 .and_then(|prev| prev.computer_hash.clone())
         });
+        let prev_char_id = rt
+            .online_sessions
+            .get(&user_id)
+            .and_then(|prev| prev.character_id);
         let displaced = rt
             .online_sessions
             .insert(
@@ -833,6 +837,23 @@ impl WorldRepository {
                 prev.session_id,
                 "Displaced by concurrent login on same account".to_string(),
             );
+        }
+        drop(rt);
+        if character_id.is_some() || prev_char_id.is_some() {
+            let mut guard = self.inner.write().unwrap_or_else(|e| e.into_inner());
+            if let Some(prev_cid) = prev_char_id {
+                if Some(prev_cid) != character_id {
+                    let st = guard.character_login_stats.entry(prev_cid).or_default();
+                    st.last_logout_unix = now_unix;
+                }
+            }
+            if let Some(cid) = character_id {
+                if prev_char_id != Some(cid) {
+                    let st = guard.character_login_stats.entry(cid).or_default();
+                    st.last_login_unix = now_unix;
+                    st.logins_count = st.logins_count.saturating_add(1);
+                }
+            }
         }
         Ok(displaced)
     }
@@ -884,15 +905,29 @@ impl WorldRepository {
 
     /// Releases the active online session lock for `user_id` if held by `session_id` (or unconditionally when `session_id == 0`).
     pub fn release_online_lock(&self, user_id: u64, session_id: u64) -> bool {
-        let mut rt = self.auth_runtime.write().unwrap_or_else(|e| e.into_inner());
-        rt.displaced_sessions.remove(&session_id);
-        if let Some(existing) = rt.online_sessions.get(&user_id) {
-            if session_id == 0 || existing.session_id == session_id {
-                rt.online_sessions.remove(&user_id);
-                return true;
+        let mut logged_out_char_id = None;
+        let released = {
+            let mut rt = self.auth_runtime.write().unwrap_or_else(|e| e.into_inner());
+            rt.displaced_sessions.remove(&session_id);
+            if let Some(existing) = rt.online_sessions.get(&user_id) {
+                if session_id == 0 || existing.session_id == session_id {
+                    logged_out_char_id = existing.character_id;
+                    rt.online_sessions.remove(&user_id);
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
             }
+        };
+        if let Some(cid) = logged_out_char_id {
+            let now_unix = self.now_unix_secs();
+            let mut guard = self.inner.write().unwrap_or_else(|e| e.into_inner());
+            let st = guard.character_login_stats.entry(cid).or_default();
+            st.last_logout_unix = now_unix;
         }
-        false
+        released
     }
 
     /// Returns the currently active online session for `user_id`, if any (`D-4`).

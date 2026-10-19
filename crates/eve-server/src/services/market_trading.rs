@@ -11,15 +11,9 @@
 //! - Price history queries (`GetOldPriceHistory`, `GetNewPriceHistory`)
 //! - Atomic multi-item buy order execution (`BuyMultipleItems`)
 
-// parity: plan:E-1, plan:E-2
-// parity: feat:market.order-matching, feat:market.limit-orders, feat:market.escrow
-// parity: feat:market.broker-fee, feat:market.sales-tax, feat:market.order-cancellation
-// parity: feat:market.order-book, feat:market.price-history, feat:market.buy-multiple
-// parity: feat:standings.effective-standing, feat:market.get-orders, feat:market.place-buy, feat:market.place-sell, feat:market.instant-buy, feat:market.instant-sell
-
 #![forbid(unsafe_code)]
 
-use crate::formulas::{compute_broker_fee_rate, compute_effective_standing, compute_sales_tax_rate};
+use crate::formulas::{compute_broker_fee_rate, compute_sales_tax_rate};
 use crate::router::ServerContext;
 use eve_db::{InventoryFlag, InventoryItemRecord, IskCents, MarketOrderRecord};
 use eve_machonet::SessionState;
@@ -333,15 +327,17 @@ pub fn handle(
             let price_isk = args.get(2).and_then(|a| a.as_f64()).unwrap_or(0.0);
             let quantity = args.get(3).and_then(|a| a.as_i64()).unwrap_or(0);
             let is_bid = args.get(4).and_then(|a| a.as_bool()).unwrap_or(true);
+            let duration_days = args.get(5).and_then(|a| a.as_i64()).unwrap_or(90);
 
             if !price_isk.is_finite()
                 || price_isk <= 0.0
                 || quantity <= 0
                 || quantity > (i32::MAX as i64)
+                || ![0, 1, 3, 7, 14, 30, 90].contains(&duration_days)
             {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidMarketOrder".into(),
-                    message: "Market order requires finite price > 0 and valid positive quantity"
+                    message: "Market order requires finite price > 0, positive quantity, and duration in [0, 1, 3, 7, 14, 30, 90]"
                         .into(),
                 }));
             }
@@ -370,13 +366,16 @@ pub fn handle(
             let owner_corp_id = station_def.owner_corporation_id;
             let owner_faction_id = station_def.owner_faction_id;
 
-            let (broker_lvl, acct_lvl, faction_standing, corp_standing) =
+            let (broker_lvl, acct_lvl, faction_standing, corp_standing, max_open_orders) =
                 ctx.db.with_snapshot(|snap| {
                     let sk = snap.skills.get(&char_id);
                     let b_lvl = sk.and_then(|m| m.get(&3446)).map(|s| s.level).unwrap_or(0);
                     let a_lvl = sk.and_then(|m| m.get(&16622)).map(|s| s.level).unwrap_or(0);
-                    let conn_lvl = sk.and_then(|m| m.get(&3355)).map(|s| s.level).unwrap_or(0);
-                    let dip_lvl = sk.and_then(|m| m.get(&3357)).map(|s| s.level).unwrap_or(0);
+                    let trade_lvl = sk.and_then(|m| m.get(&3443)).map(|s| s.level).unwrap_or(0) as usize;
+                    let retail_lvl = sk.and_then(|m| m.get(&3444)).map(|s| s.level).unwrap_or(0) as usize;
+                    let wholesale_lvl = sk.and_then(|m| m.get(&16596)).map(|s| s.level).unwrap_or(0) as usize;
+                    let tycoon_lvl = sk.and_then(|m| m.get(&18580)).map(|s| s.level).unwrap_or(0) as usize;
+                    let order_limit = 5 + 4 * trade_lvl + 8 * retail_lvl + 16 * wholesale_lvl + 32 * tycoon_lvl;
                     let ch = snap.characters.get(&char_id);
                     let f_st = ch
                         .and_then(|c| owner_faction_id.and_then(|fid| c.standings.get(&fid).copied()))
@@ -384,17 +383,8 @@ pub fn handle(
                     let c_st = ch
                         .and_then(|c| c.standings.get(&owner_corp_id).copied())
                         .unwrap_or(0.0);
-                    let f_eff = if f_st != 0.0 {
-                        compute_effective_standing(f_st, conn_lvl, dip_lvl)
-                    } else {
-                        0.0
-                    };
-                    let c_eff = if c_st != 0.0 {
-                        compute_effective_standing(c_st, conn_lvl, dip_lvl)
-                    } else {
-                        0.0
-                    };
-                    (b_lvl, a_lvl, f_eff, c_eff)
+                    // NPC station broker fee uses raw unmodified standings (never Connections/Diplomacy)
+                    (b_lvl, a_lvl, f_st, c_st, order_limit)
                 });
             let broker_rate = compute_broker_fee_rate(broker_lvl, faction_standing, corp_standing);
             let order_price = IskCents::from_f64_isk(price_isk);
@@ -404,10 +394,12 @@ pub fn handle(
                     message: "Order total cost overflows 64-bit ISK cents".into(),
                 }));
             };
-            let broker_ppm = (broker_rate * 1_000_000.0).round() as i128;
-            let broker_fee = IskCents(
-                (((max_order_cost.0 as i128) * broker_ppm + 500_000) / 1_000_000) as i64,
-            );
+            let broker_fee = if duration_days > 0 {
+                let broker_ppm = (broker_rate * 1_000_000.0).round() as i128;
+                IskCents((((max_order_cost.0 as i128) * broker_ppm + 500_000) / 1_000_000) as i64)
+            } else {
+                IskCents(0)
+            };
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 // 1. Pre-check caller balance for worst-case debit using checked arithmetic
@@ -671,6 +663,27 @@ pub fn handle(
                     ));
                 }
 
+                if duration_days == 0 {
+                    return Err(BridgeRpcError {
+                        code: "ImmediateOrderUnfilled".into(),
+                        message: "Immediate order (duration=0) could not be completely filled against existing orders".into(),
+                    });
+                }
+
+                let active_open_orders = snap
+                    .market_orders
+                    .values()
+                    .filter(|o| o.owner_id == char_id && !o.is_npc && o.vol_remaining > 0)
+                    .count();
+                if active_open_orders >= max_open_orders {
+                    return Err(BridgeRpcError {
+                        code: "MaxOpenOrdersReached".into(),
+                        message: format!(
+                            "Character has reached maximum open market orders ({active_open_orders}/{max_open_orders})"
+                        ),
+                    });
+                }
+
                 let escrow = if is_bid {
                     let esc = order_price
                         .checked_mul_qty(remaining_qty as i64)
@@ -717,6 +730,513 @@ pub fn handle(
                         ),
                     ])))
                 }
+                Err(e) => Some(Err(e)),
+            }
+        }
+
+        // V24.01 `code.ccp` `eve/client/script/ui/services/marketsvc.pyj` (`SellMulti`) and
+        // `eve/client/script/ui/shared/market/sellMulti.pyj` (`GetValidatedItem`):
+        // `marketProxy.PlaceMultiSellOrder(itemList, useCorp, duration, expectedBrokersFee)`
+        // where each entry in `itemList` is a KeyVal/dict with `(stationID, typeID, itemID, price, quantity[, officeID, delta, rawBrokerFeePercentage])`.
+        "PlaceMultiSellOrder" => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let Some(docked_station_id) = session.station_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "NotDockedAtStation".into(),
+                    message: "Character must be docked at an NPC station to PlaceMultiSellOrder".into(),
+                }));
+            };
+            let Some(region_id) = session.region_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "NoRegion".into(),
+                    message: "Session has no active region".into(),
+                }));
+            };
+            let Some(PyRep::List(entries) | PyRep::Tuple(entries)) = args.first() else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidMultiSellOrder".into(),
+                    message: "PlaceMultiSellOrder requires itemList as first argument".into(),
+                }));
+            };
+            if entries.is_empty() {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidMultiSellOrder".into(),
+                    message: "PlaceMultiSellOrder requires at least one item entry".into(),
+                }));
+            }
+            let use_corp = args.get(1).and_then(|a| a.as_bool()).unwrap_or(false);
+            let duration_days = args.get(2).and_then(|a| a.as_i64()).unwrap_or(90);
+            if ![0, 1, 3, 7, 14, 30, 90].contains(&duration_days) {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidMarketOrder".into(),
+                    message: format!(
+                        "Invalid market order duration {duration_days}; expected one of [0, 1, 3, 7, 14, 30, 90]"
+                    ),
+                }));
+            }
+            let expected_brokers_fee = match args.get(3) {
+                Some(PyRep::None) | None => None,
+                Some(v) => match v.as_f64() {
+                    Some(f) if f.is_finite() && f >= 0.0 => Some(IskCents::from_f64_isk(f)),
+                    _ => {
+                        return Some(Err(BridgeRpcError {
+                            code: "InvalidMultiSellOrder".into(),
+                            message: "PlaceMultiSellOrder expectedBrokersFee must be non-negative and finite".into(),
+                        }));
+                    }
+                },
+            };
+
+            let station_info = ctx.sde.solar_systems.values().find_map(|sys| {
+                if sys.region_id == region_id {
+                    sys.stations
+                        .iter()
+                        .find(|st| st.station_id == docked_station_id)
+                } else {
+                    None
+                }
+            });
+            let Some(station_def) = station_info else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidMarketStation".into(),
+                    message: format!("Station {docked_station_id} is not in region {region_id}"),
+                }));
+            };
+            let owner_corp_id = station_def.owner_corporation_id;
+            let owner_faction_id = station_def.owner_faction_id;
+
+            let mut parsed_items: Vec<(i64, TypeId, i64, IskCents, i32)> =
+                Vec::with_capacity(entries.len());
+            for entry in entries {
+                let (st_id, raw_tid, item_id, price_isk, qty) = match entry {
+                    PyRep::KeyVal(kv) => (
+                        kv.get("stationID")
+                            .and_then(|v| v.as_i64())
+                            .unwrap_or(docked_station_id),
+                        kv.get("typeID").and_then(|v| v.as_i64()).unwrap_or(0),
+                        kv.get("itemID").and_then(|v| v.as_i64()).unwrap_or(0),
+                        kv.get("price").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                        kv.get("quantity").and_then(|v| v.as_i64()).unwrap_or(0),
+                    ),
+                    PyRep::Dict(kv) => {
+                        let find_key = |k: &str| {
+                            kv.iter()
+                                .find(|(ek, _)| ek.as_str() == Some(k))
+                                .map(|(_, ev)| ev)
+                        };
+                        (
+                            find_key("stationID")
+                                .and_then(|e| e.as_i64())
+                                .unwrap_or(docked_station_id),
+                            find_key("typeID").and_then(|e| e.as_i64()).unwrap_or(0),
+                            find_key("itemID").and_then(|e| e.as_i64()).unwrap_or(0),
+                            find_key("price").and_then(|e| e.as_f64()).unwrap_or(0.0),
+                            find_key("quantity").and_then(|e| e.as_i64()).unwrap_or(0),
+                        )
+                    }
+                    _ => {
+                        return Some(Err(BridgeRpcError {
+                            code: "InvalidMultiSellOrder".into(),
+                            message: "Each PlaceMultiSellOrder entry must be a KeyVal/dict with stationID, typeID, itemID, price, quantity".into(),
+                        }));
+                    }
+                };
+                if st_id != docked_station_id {
+                    return Some(Err(BridgeRpcError {
+                        code: "StationMismatch".into(),
+                        message: format!(
+                            "Cannot place sell order at station {st_id} while docked at {docked_station_id}"
+                        ),
+                    }));
+                }
+                if item_id <= 0
+                    || raw_tid <= 0
+                    || !price_isk.is_finite()
+                    || price_isk <= 0.0
+                    || qty <= 0
+                    || qty > (i32::MAX as i64)
+                {
+                    return Some(Err(BridgeRpcError {
+                        code: "InvalidMultiSellOrder".into(),
+                        message: "PlaceMultiSellOrder entry requires valid positive itemID, typeID, price, and quantity".into(),
+                    }));
+                }
+                parsed_items.push((
+                    st_id,
+                    raw_tid as TypeId,
+                    item_id,
+                    IskCents::from_f64_isk(price_isk),
+                    qty as i32,
+                ));
+            }
+
+            // Execute the entire multi-sell batch atomically inside a single snapshot transaction
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let caller_corp_id = snap
+                    .characters
+                    .get(&char_id)
+                    .map(|c| c.corporation_id)
+                    .unwrap_or(0);
+                if use_corp {
+                    let Some(corp) = snap.corporations.get(&caller_corp_id) else {
+                        return Err(BridgeRpcError {
+                            code: "CorporationNotFound".into(),
+                            message: format!(
+                                "Corporation {caller_corp_id} not found for corporate sell order"
+                            ),
+                        });
+                    };
+                    let role_mask = corp.member_roles.get(&char_id).copied().unwrap_or(0);
+                    if corp.ceo_id != char_id
+                        && !eve_db::corp_roles::has_role(
+                            role_mask,
+                            eve_db::corp_roles::ROLE_ACCOUNTANT,
+                        )
+                        && !eve_db::corp_roles::has_role(
+                            role_mask,
+                            eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT,
+                        )
+                    {
+                        return Err(BridgeRpcError {
+                            code: "CorpRoleRequired".into(),
+                            message: "Character lacks corporation trader/accountant role to place corporate sell order".into(),
+                        });
+                    }
+                }
+                let order_owner_id = if use_corp { caller_corp_id } else { char_id };
+
+                let sk = snap.skills.get(&char_id);
+                let broker_lvl = sk.and_then(|m| m.get(&3446)).map(|s| s.level).unwrap_or(0);
+                let acct_lvl = sk.and_then(|m| m.get(&16622)).map(|s| s.level).unwrap_or(0);
+                let trade_lvl =
+                    sk.and_then(|m| m.get(&3443)).map(|s| s.level).unwrap_or(0) as usize;
+                let retail_lvl =
+                    sk.and_then(|m| m.get(&3444)).map(|s| s.level).unwrap_or(0) as usize;
+                let wholesale_lvl =
+                    sk.and_then(|m| m.get(&16596)).map(|s| s.level).unwrap_or(0) as usize;
+                let tycoon_lvl =
+                    sk.and_then(|m| m.get(&18580)).map(|s| s.level).unwrap_or(0) as usize;
+                let max_open_orders =
+                    5 + 4 * trade_lvl + 8 * retail_lvl + 16 * wholesale_lvl + 32 * tycoon_lvl;
+                let ch = snap.characters.get(&char_id);
+                let faction_standing = ch
+                    .and_then(|c| owner_faction_id.and_then(|fid| c.standings.get(&fid).copied()))
+                    .unwrap_or(0.0);
+                let corp_standing = ch
+                    .and_then(|c| c.standings.get(&owner_corp_id).copied())
+                    .unwrap_or(0.0);
+                let broker_rate =
+                    compute_broker_fee_rate(broker_lvl, faction_standing, corp_standing);
+                let broker_ppm = (broker_rate * 1_000_000.0).round() as i128;
+
+                let mut order_ids = Vec::with_capacity(parsed_items.len());
+                let mut total_broker_fee = IskCents(0);
+                let mut total_sales_tax = IskCents(0);
+
+                for (station_id, type_id, item_id, order_price, quantity_i32) in parsed_items {
+                    let _ = order_price
+                        .checked_mul_qty(quantity_i32 as i64)
+                        .ok_or_else(|| BridgeRpcError {
+                            code: "MarketOrderOverflow".into(),
+                            message: "Order total cost overflows 64-bit ISK cents".into(),
+                        })?;
+
+                    // Validate and consume exact itemID from seller's hangar at station_id
+                    let Some(item) = snap.items.get(&item_id).cloned() else {
+                        return Err(BridgeRpcError {
+                            code: "InsufficientInventoryForSellOrder".into(),
+                            message: format!("Item {item_id} not found in seller inventory"),
+                        });
+                    };
+                    if item.type_id != type_id
+                        || !snap.is_item_consumable_by(&item, char_id, Some(station_id), None)
+                    {
+                        return Err(BridgeRpcError {
+                            code: "InsufficientInventoryForSellOrder".into(),
+                            message: format!(
+                                "Item {item_id} (type {type_id}) is not reachable in station {station_id} hangar"
+                            ),
+                        });
+                    }
+                    if item.singleton {
+                        return Err(BridgeRpcError {
+                            code: "CannotSellAssembledItem".into(),
+                            message: format!(
+                                "Item {item_id} of type {type_id} must be repackaged before selling"
+                            ),
+                        });
+                    }
+                    if snap.items.values().any(|other| {
+                        other.item_id != item_id
+                            && other.location_id == item_id
+                            && other.quantity > 0
+                    }) {
+                        return Err(BridgeRpcError {
+                            code: "CannotSellItemWithContents".into(),
+                            message: format!(
+                                "Cannot sell container/ship {item_id} while it contains items"
+                            ),
+                        });
+                    }
+                    if item.quantity < quantity_i32 {
+                        return Err(BridgeRpcError {
+                            code: "InsufficientInventoryForSellOrder".into(),
+                            message: format!(
+                                "Item {item_id} has quantity {}, less than requested {quantity_i32}",
+                                item.quantity
+                            ),
+                        });
+                    }
+                    if let Some(item_mut) = snap.items.get_mut(&item_id) {
+                        if item_mut.quantity > quantity_i32 {
+                            item_mut.quantity -= quantity_i32;
+                            item_mut.version += 1;
+                        } else {
+                            snap.items.remove(&item_id);
+                        }
+                    }
+
+                    // Match against resting bid orders at station_id first (taker fills pay sales tax, not broker fee)
+                    let mut candidate_ids: Vec<(i64, i64)> = snap
+                        .market_orders
+                        .values()
+                        .filter(|o| {
+                            o.type_id == type_id
+                                && o.station_id == station_id
+                                && o.is_bid
+                                && o.vol_remaining > 0
+                                && o.price.0 >= order_price.0
+                        })
+                        .map(|o| (o.order_id, o.price.0))
+                        .collect();
+                    candidate_ids.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+
+                    let mut remaining_qty = quantity_i32;
+                    let mut first_matched_oid = None;
+
+                    for (oid, _) in candidate_ids {
+                        if remaining_qty <= 0 {
+                            break;
+                        }
+                        let Some(resting) = snap.market_orders.get(&oid).cloned() else {
+                            continue;
+                        };
+                        let fill_qty = remaining_qty.min(resting.vol_remaining);
+                        if fill_qty <= 0 {
+                            continue;
+                        }
+                        let Some(fill_gross) = resting.price.checked_mul_qty(fill_qty as i64)
+                        else {
+                            continue;
+                        };
+                        let fill_tax = compute_sales_tax_cents(fill_gross, acct_lvl);
+                        total_sales_tax = total_sales_tax
+                            .checked_add(fill_tax)
+                            .unwrap_or(total_sales_tax);
+                        let seller_net =
+                            fill_gross.checked_sub(fill_tax).unwrap_or(IskCents(0));
+                        if use_corp {
+                            if let Some(corp_mut) = snap.corporations.get_mut(&caller_corp_id) {
+                                corp_mut.master_wallet = corp_mut
+                                    .master_wallet
+                                    .checked_add(seller_net)
+                                    .unwrap_or(corp_mut.master_wallet);
+                                let bal_after = corp_mut.master_wallet;
+                                snap.append_journal(
+                                    caller_corp_id,
+                                    "MarketSell",
+                                    seller_net,
+                                    bal_after,
+                                    format!("Sold {fill_qty}x type {type_id}"),
+                                );
+                            }
+                        } else if let Some(seller) = snap.characters.get_mut(&char_id) {
+                            seller.balance = seller
+                                .balance
+                                .checked_add(seller_net)
+                                .unwrap_or(seller.balance);
+                            let bal_after = seller.balance;
+                            snap.append_journal(
+                                char_id,
+                                "MarketSell",
+                                seller_net,
+                                bal_after,
+                                format!("Sold {fill_qty}x type {type_id}"),
+                            );
+                        }
+                        if !resting.is_npc {
+                            snap.next_entity_id += 1;
+                            let new_item_id = snap.next_entity_id;
+                            snap.items.insert(
+                                new_item_id,
+                                InventoryItemRecord {
+                                    item_id: new_item_id,
+                                    type_id,
+                                    owner_id: resting.owner_id,
+                                    location_id: station_id,
+                                    flag: InventoryFlag::Hangar,
+                                    quantity: fill_qty,
+                                    singleton: false,
+                                    version: 1,
+                                    ..Default::default()
+                                },
+                            );
+                        }
+                        if let Some(o_mut) = snap.market_orders.get_mut(&oid) {
+                            o_mut.vol_remaining -= fill_qty;
+                            o_mut.escrow =
+                                o_mut.escrow.checked_sub(fill_gross).unwrap_or(IskCents(0));
+                        }
+                        remaining_qty -= fill_qty;
+                        if first_matched_oid.is_none() {
+                            first_matched_oid = Some(oid);
+                        }
+                    }
+
+                    if remaining_qty == 0 {
+                        // Immediate fill against resting bid orders: no resting order is placed and no broker fee is charged
+                        order_ids.push(PyRep::Integer(first_matched_oid.unwrap_or(0)));
+                        continue;
+                    }
+
+                    if duration_days == 0 {
+                        return Err(BridgeRpcError {
+                            code: "ImmediateOrderUnfilled".into(),
+                            message: "Immediate sell order (duration=0) could not be completely filled".into(),
+                        });
+                    }
+
+                    // Broker fee applies only to the resting portion (`remaining_qty`) with a 100.00 ISK minimum floor
+                    let resting_cost = order_price
+                        .checked_mul_qty(remaining_qty as i64)
+                        .ok_or_else(|| BridgeRpcError {
+                            code: "MarketOrderOverflow".into(),
+                            message: "Order resting cost overflows 64-bit ISK cents".into(),
+                        })?;
+                    let raw_broker_fee = IskCents(
+                        (((resting_cost.0 as i128) * broker_ppm + 500_000) / 1_000_000) as i64,
+                    );
+                    let broker_fee = raw_broker_fee.max(IskCents(10_000));
+
+                    if use_corp {
+                        let corp_bal = snap
+                            .corporations
+                            .get(&caller_corp_id)
+                            .map(|c| c.master_wallet)
+                            .unwrap_or(IskCents(0));
+                        if corp_bal.checked_sub(broker_fee).is_none() {
+                            return Err(BridgeRpcError {
+                                code: "InsufficientFunds".into(),
+                                message: "Not enough corporation ISK for market broker fee".into(),
+                            });
+                        }
+                        if let Some(corp_mut) = snap.corporations.get_mut(&caller_corp_id) {
+                            corp_mut.master_wallet = corp_mut
+                                .master_wallet
+                                .checked_sub(broker_fee)
+                                .unwrap_or(IskCents(0));
+                            let bal_after = corp_mut.master_wallet;
+                            snap.append_journal(
+                                caller_corp_id,
+                                "MarketBrokerFee",
+                                broker_fee,
+                                bal_after,
+                                format!("Broker fee for sell order on type {type_id}"),
+                            );
+                        }
+                    } else {
+                        let caller_balance = snap
+                            .characters
+                            .get(&char_id)
+                            .map(|c| c.balance)
+                            .unwrap_or(IskCents(0));
+                        if caller_balance.checked_sub(broker_fee).is_none() {
+                            return Err(BridgeRpcError {
+                                code: "InsufficientFunds".into(),
+                                message: "Not enough ISK for market broker fee".into(),
+                            });
+                        }
+                        if let Some(ch_mut) = snap.characters.get_mut(&char_id) {
+                            ch_mut.balance = ch_mut
+                                .balance
+                                .checked_sub(broker_fee)
+                                .unwrap_or(IskCents(0));
+                            let bal_after = ch_mut.balance;
+                            snap.append_journal(
+                                char_id,
+                                "MarketBrokerFee",
+                                broker_fee,
+                                bal_after,
+                                format!("Broker fee for sell order on type {type_id}"),
+                            );
+                        }
+                    }
+                    total_broker_fee = total_broker_fee
+                        .checked_add(broker_fee)
+                        .unwrap_or(total_broker_fee);
+
+                    let active_open_orders = snap
+                        .market_orders
+                        .values()
+                        .filter(|o| o.owner_id == char_id && !o.is_npc && o.vol_remaining > 0)
+                        .count();
+                    if active_open_orders >= max_open_orders {
+                        return Err(BridgeRpcError {
+                            code: "MaxOpenOrdersReached".into(),
+                            message: format!(
+                                "Character has reached maximum open market orders ({active_open_orders}/{max_open_orders})"
+                            ),
+                        });
+                    }
+
+                    snap.next_entity_id += 1;
+                    let new_oid = snap.next_entity_id;
+                    snap.market_orders.insert(
+                        new_oid,
+                        MarketOrderRecord {
+                            order_id: new_oid,
+                            owner_id: order_owner_id,
+                            station_id,
+                            region_id,
+                            type_id,
+                            is_bid: false,
+                            price: order_price,
+                            vol_entered: quantity_i32,
+                            vol_remaining: remaining_qty,
+                            min_volume: 1,
+                            is_npc: false,
+                            escrow: IskCents(0),
+                        },
+                    );
+                    order_ids.push(PyRep::Integer(new_oid));
+                }
+
+                if let Some(expected_fee) = expected_brokers_fee {
+                    if total_broker_fee.0 > expected_fee.0.saturating_add(1) {
+                        return Err(BridgeRpcError {
+                            code: "BrokerFeeExceeded".into(),
+                            message: format!(
+                                "Actual broker fee {:.2} ISK exceeds expectedBrokersFee {:.2} ISK",
+                                total_broker_fee.to_wire_f64(),
+                                expected_fee.to_wire_f64()
+                            ),
+                        });
+                    }
+                }
+
+                Ok((order_ids, total_broker_fee, total_sales_tax))
+            });
+
+            match res {
+                Ok((order_ids, total_broker, total_tax)) => Some(Ok(PyRep::keyval([
+                    ("placedCount", PyRep::Integer(order_ids.len() as i64)),
+                    ("orderIDs", PyRep::List(order_ids)),
+                    ("totalBrokerFeeISK", PyRep::Real(total_broker.to_wire_f64())),
+                    ("totalSalesTaxISK", PyRep::Real(total_tax.to_wire_f64())),
+                ]))),
                 Err(e) => Some(Err(e)),
             }
         }

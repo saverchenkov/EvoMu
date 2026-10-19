@@ -468,6 +468,32 @@ pub fn compute_insurance_quote(base_ship_price: f64, level_fraction: f64) -> (f6
     (cost, payout)
 }
 
+/// DERIVED: Returns the ship insurance reference value from the SDE hull `base_price`
+/// per `evemu_Crucible/src/eve-server/station/InsuranceService.cpp:65-67, 117-150`
+/// (CCP's live per-hull insurance multipliers are server-secret per `wiki:Insurance.md:56`).
+pub fn compute_ship_insurance_reference_value(
+    sde: &eve_sde::SdeRegistry,
+    ship_type_id: eve_sde::TypeId,
+) -> f64 {
+    sde.types
+        .get(&ship_type_id)
+        .map(|t| t.base_price.max(0.0))
+        .unwrap_or(0.0)
+}
+
+/// Returns the 6 standard paid insurance tiers (`Basic`, `Standard`, `Bronze`, `Silver`, `Gold`, `Platinum`)
+/// computed via [`compute_insurance_quote`] for a ship's reference value (`wiki:Insurance`).
+pub fn compute_insurance_levels(reference_value: f64) -> [(&'static str, f64, f64); 6] {
+    [
+        ("Basic", (reference_value * 0.05 * 100.0).round() / 100.0, (reference_value * 0.50 * 100.0).round() / 100.0),
+        ("Standard", (reference_value * 0.10 * 100.0).round() / 100.0, (reference_value * 0.60 * 100.0).round() / 100.0),
+        ("Bronze", (reference_value * 0.15 * 100.0).round() / 100.0, (reference_value * 0.70 * 100.0).round() / 100.0),
+        ("Silver", (reference_value * 0.20 * 100.0).round() / 100.0, (reference_value * 0.80 * 100.0).round() / 100.0),
+        ("Gold", (reference_value * 0.25 * 100.0).round() / 100.0, (reference_value * 0.90 * 100.0).round() / 100.0),
+        ("Platinum", (reference_value * 0.30 * 100.0).round() / 100.0, (reference_value * 1.00 * 100.0).round() / 100.0),
+    ]
+}
+
 /// #75-#82: Manufacturing Material Efficiency (ME `0..10`) & Time Efficiency (TE `0..20`):
 /// $$M_{\text{req}} = \max\left(\text{runs}, \left\lceil \text{runs} \cdot M_{\text{base}} \cdot \left(1 - \frac{\text{ME}}{100}\right) \cdot (1 - f_{\text{structure}}) \right\rceil\right)$$
 pub fn compute_manufacturing_material_qty(

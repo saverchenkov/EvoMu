@@ -579,7 +579,7 @@ async fn test_s2_fighter_manager_load_launch_recall_movement_abilities_abandon()
             &mut sess,
             "fighterMgr",
             None,
-            "CmdLoadFighterTube",
+            "LoadFightersToTube",
             &[PyRep::Integer(0), PyRep::Integer(fighter1_item_id)],
             &kw,
             None,
@@ -593,7 +593,7 @@ async fn test_s2_fighter_manager_load_launch_recall_movement_abilities_abandon()
             &mut sess,
             "fighterMgr",
             None,
-            "CmdLoadFighterTube",
+            "LoadFightersToTube",
             &[PyRep::Integer(1), PyRep::Integer(fighter2_item_id)],
             &kw,
             None,
@@ -612,15 +612,15 @@ async fn test_s2_fighter_manager_load_launch_recall_movement_abilities_abandon()
             &mut sess,
             "fighterMgr",
             None,
-            "CmdLaunchFighters",
-            &[],
+            "LaunchFightersFromTubes",
+            &[PyRep::List(vec![PyRep::Integer(0), PyRep::Integer(1)])],
             &kw,
             None,
         )
         .await
         .expect("Launch fighters");
     let PyRep::List(launched_balls) = launch_res else {
-        panic!("Expected List from CmdLaunchFighters");
+        panic!("Expected List from LaunchFightersFromTubes");
     };
     assert_eq!(launched_balls.len(), 2, "Both loaded tubes must launch");
     let f1_ball_id = launched_balls[0].as_i64().unwrap();
@@ -639,9 +639,10 @@ async fn test_s2_fighter_manager_load_launch_recall_movement_abilities_abandon()
             &mut sess,
             "fighterMgr",
             None,
-            "CmdMoveFighters",
+            "ExecuteMovementCommandOnFighters",
             &[
-                PyRep::Integer(f1_ball_id),
+                PyRep::List(vec![PyRep::Integer(f1_ball_id)]),
+                PyRep::String("GOTO_POINT".into()),
                 PyRep::Real(10_000.0),
                 PyRep::Real(0.0),
                 PyRep::Real(0.0),
@@ -650,7 +651,7 @@ async fn test_s2_fighter_manager_load_launch_recall_movement_abilities_abandon()
             None,
         )
         .await
-        .expect("CmdMoveFighters");
+        .expect("ExecuteMovementCommandOnFighters GOTO_POINT");
     assert!(matches!(move_res, PyRep::Bool(true)));
 
     let orbit_res = ctx
@@ -658,9 +659,10 @@ async fn test_s2_fighter_manager_load_launch_recall_movement_abilities_abandon()
             &mut sess,
             "fighterMgr",
             None,
-            "CmdOrbitTarget",
+            "ExecuteMovementCommandOnFighters",
             &[
-                PyRep::Integer(f2_ball_id),
+                PyRep::List(vec![PyRep::Integer(f2_ball_id)]),
+                PyRep::String("ORBIT".into()),
                 PyRep::Integer(ship_id),
                 PyRep::Real(2_000.0),
             ],
@@ -668,16 +670,21 @@ async fn test_s2_fighter_manager_load_launch_recall_movement_abilities_abandon()
             None,
         )
         .await
-        .expect("CmdOrbitTarget");
+        .expect("ExecuteMovementCommandOnFighters ORBIT");
     assert!(matches!(orbit_res, PyRep::Bool(true)));
 
     // 5. Fighter Abilities (feat:drones.fighter-abilities)
-    // Spawn a target dummy drone to attack
+    // Spawn a target dummy drone near fighter 1 and lock it from the controlling ship
+    let (_, f1_ball) = sys_handle
+        .get_ball_snapshot(f1_ball_id)
+        .await
+        .unwrap()
+        .unwrap();
     let dummy_target_id = 99_001;
     let dummy_ball = Ball {
         id: dummy_target_id,
         type_id: 282,
-        position: DVec3::new(5_000.0, 0.0, 0.0),
+        position: f1_ball.position + DVec3::new(1_000.0, 0.0, 0.0),
         velocity: DVec3::ZERO,
         max_velocity: 0.0,
         inertia: 1.0,
@@ -690,6 +697,19 @@ async fn test_s2_fighter_manager_load_launch_recall_movement_abilities_abandon()
         .spawn_ball_with_combat(dummy_ball, ctx.build_type_combat_state(282))
         .await
         .expect("spawn dummy");
+    sys_handle
+        .add_target_lock(
+            ship_id,
+            eve_destiny::TargetLock {
+                target_id: dummy_target_id,
+                lock_time_ms: 1_000.0,
+                remaining_lock_ms: 0.0,
+                locked: true,
+                max_range_m: Some(100_000.0),
+            },
+        )
+        .await
+        .expect("lock dummy target");
 
     // Slot 0: Primary Attack deals damage
     let cs_before = sys_handle.get_combat_state(dummy_target_id).await.unwrap().unwrap();
@@ -700,7 +720,7 @@ async fn test_s2_fighter_manager_load_launch_recall_movement_abilities_abandon()
             None,
             "CmdActivateAbilitySlots",
             &[
-                PyRep::Integer(f1_ball_id),
+                PyRep::List(vec![PyRep::Integer(f1_ball_id)]),
                 PyRep::Integer(0),
                 PyRep::Integer(dummy_target_id),
             ],
@@ -723,7 +743,7 @@ async fn test_s2_fighter_manager_load_launch_recall_movement_abilities_abandon()
             "fighterMgr",
             None,
             "CmdActivateAbilitySlots",
-            &[PyRep::Integer(f1_ball_id), PyRep::Integer(1)],
+            &[PyRep::List(vec![PyRep::Integer(f1_ball_id)]), PyRep::Integer(1)],
             &kw,
             None,
         )
@@ -737,17 +757,17 @@ async fn test_s2_fighter_manager_load_launch_recall_movement_abilities_abandon()
             &mut sess,
             "fighterMgr",
             None,
-            "CmdAbandonFighters",
-            &[],
+            "CmdAbandonFighter",
+            &[PyRep::Integer(f1_ball_id)],
             &kw,
             None,
         )
         .await
-        .expect("CmdAbandonFighters");
+        .expect("CmdAbandonFighter");
     let PyRep::List(ab_list) = abandon_res else {
-        panic!("Expected List from CmdAbandonFighters");
+        panic!("Expected List from CmdAbandonFighter");
     };
-    assert!(!ab_list.is_empty(), "Fighters must be abandoned in space");
+    assert!(!ab_list.is_empty(), "Fighter must be abandoned in space");
     assert!(
         ctx.active_fighters.read().unwrap()[&f1_ball_id].is_abandoned,
         "Fighter 1 must be marked abandoned"
@@ -760,15 +780,15 @@ async fn test_s2_fighter_manager_load_launch_recall_movement_abilities_abandon()
             &mut sess,
             "fighterMgr",
             None,
-            "CmdRecallFighters",
-            &[],
+            "RecallFightersToTubes",
+            &[PyRep::List(vec![PyRep::Integer(f1_ball_id), PyRep::Integer(f2_ball_id)])],
             &kw,
             None,
         )
         .await
-        .expect("CmdRecallFighters");
+        .expect("RecallFightersToTubes");
     let PyRep::List(rec_list) = recall_res else {
-        panic!("Expected List from CmdRecallFighters");
+        panic!("Expected List from RecallFightersToTubes");
     };
     assert_eq!(rec_list.len(), 2, "Both fighters must be recalled from space");
     assert!(

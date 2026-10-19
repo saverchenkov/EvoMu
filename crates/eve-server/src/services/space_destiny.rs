@@ -1443,12 +1443,14 @@ pub async fn handle(
                 .with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.jump_fatigue_minutes).unwrap_or(0.0));
             let (cd_min, fat_min) =
                 compute_jump_fatigue_and_cooldown_minutes(cur_fatigue, dist_ly, 0.0);
+            let now = ctx.now_unix();
             ctx.db.with_mut_snapshot(|snap| {
                 if let Some(ch) = snap.characters.get_mut(&char_id) {
                     ch.jump_fatigue_minutes = fat_min;
-                    ch.jump_cooldown_until_unix = ctx.now_unix() + (cd_min * 60.0).round() as u64;
+                    ch.jump_cooldown_until_unix = now + (cd_min * 60.0).round() as u64;
                     ch.solar_system_id = target_sys_id;
                 }
+                snap.character_last_jump_unix.insert(char_id, now);
             });
 
             // System handoff

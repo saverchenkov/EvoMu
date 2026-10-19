@@ -66,10 +66,12 @@ async fn test_e2e_01_to_18_integration_journeys() {
             "CreateCharacterWithDoll",
             &[
                 PyRep::String("Integration Pilot".into()),
-                PyRep::Integer(1),  // Caldari
-                PyRep::Integer(1),  // Deteis
-                PyRep::Integer(11), // Scientists (bloodline 1)
-                PyRep::Integer(17), // Science and Trade Institute (race 1)
+                PyRep::Integer(1),  // bloodlineID = 1 (Deteis -> Caldari race 1)
+                PyRep::Integer(1),  // genderID = 1 (Male)
+                PyRep::Integer(11), // ancestryID = 11 (Scientists)
+                PyRep::String("doll:integration-pilot".into()),
+                PyRep::String("portrait:integration-pilot".into()),
+                PyRep::Integer(17), // schoolID = 17 (Science and Trade Institute)
             ],
             &kw,
             None,

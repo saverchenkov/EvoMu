@@ -1616,8 +1616,7 @@ pub async fn handle(
             }
         }
 
-        // parity: plan:S-2, feat:drones.fighter-load-tubes
-        ("fighterMgr", "CmdLoadFighterTube") | ("fighterMgr", "LoadFighterTube") => {
+        ("fighterMgr", "LoadFightersToTube") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -1630,10 +1629,15 @@ pub async fn handle(
             };
             let a0 = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
             let a1 = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
-            let (tube_idx, fighter_item_id) = if a0 < 10 {
+            let (tube_idx, fighter_item_id) = if (0..10).contains(&a0) {
                 (a0 as usize, a1)
-            } else {
+            } else if (0..10).contains(&a1) {
                 (a1 as usize, a0)
+            } else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidTubeIndex".into(),
+                    message: "LoadFightersToTube requires a valid tube index".into(),
+                }));
             };
             let item_opt = ctx
                 .db
@@ -1650,6 +1654,21 @@ pub async fn handle(
                     message: format!("Fighter item {fighter_item_id} not in pilot's ship"),
                 }));
             }
+            let is_fighter_category = ctx
+                .sde
+                .types
+                .get(&item.type_id)
+                .map(|t| t.category_id == 87)
+                .unwrap_or(false);
+            if !is_fighter_category {
+                return Some(Err(BridgeRpcError {
+                    code: "ItemNotAFighter".into(),
+                    message: format!(
+                        "Item {fighter_item_id} (type {}) is not a fighter squadron (category 87)",
+                        item.type_id
+                    ),
+                }));
+            }
             ctx.fighter_tube_loads
                 .write()
                 .unwrap()
@@ -1661,8 +1680,7 @@ pub async fn handle(
             ])))
         }
 
-        // parity: plan:S-2, feat:drones.fighter-load-tubes
-        ("fighterMgr", "CmdUnloadFighterTube") | ("fighterMgr", "UnloadFighterTube") => {
+        ("fighterMgr", "UnloadTubeToFighterBay") => {
             let (_, _char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -1673,7 +1691,14 @@ pub async fn handle(
                     message: "Session has no active ship".into(),
                 }));
             };
-            let tube_idx = args.first().and_then(|a| a.as_i64()).unwrap_or(0) as usize;
+            let raw_tube = args.first().and_then(|a| a.as_i64()).unwrap_or(-1);
+            if !(0..10).contains(&raw_tube) {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidTubeIndex".into(),
+                    message: "UnloadTubeToFighterBay requires a valid tube index".into(),
+                }));
+            }
+            let tube_idx = raw_tube as usize;
             let removed = ctx
                 .fighter_tube_loads
                 .write()
@@ -1682,8 +1707,7 @@ pub async fn handle(
             Some(Ok(PyRep::Bool(removed.is_some())))
         }
 
-        // parity: plan:S-2, feat:drones.fighter-launch-recall
-        ("fighterMgr", "CmdLaunchFighters") | ("fighterMgr", "LaunchFighters") => {
+        ("fighterMgr", "LaunchFightersFromTubes") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -1768,8 +1792,7 @@ pub async fn handle(
             Some(Ok(PyRep::List(launched_ball_ids)))
         }
 
-        // parity: plan:S-2, feat:drones.fighter-launch-recall
-        ("fighterMgr", "CmdRecallFighters") | ("fighterMgr", "RecallFighters") => {
+        ("fighterMgr", "RecallFightersToTubes") => {
             let (_, _char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -1805,12 +1828,8 @@ pub async fn handle(
             Some(Ok(PyRep::List(recalled)))
         }
 
-        // parity: plan:S-2, feat:drones.fighter-movement
-        ("fighterMgr", "CmdMoveFighters")
-        | ("fighterMgr", "CmdGotoPosition")
-        | ("fighterMgr", "CmdOrbitTarget")
-        | ("fighterMgr", "CmdFollowTarget") => {
-            let (_, _char_id) = match ServerContext::require_character(session) {
+        ("fighterMgr", "ExecuteMovementCommandOnFighters") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
@@ -1820,31 +1839,83 @@ pub async fn handle(
                     message: "Session has no active solar system".into(),
                 }));
             };
-            let fighter_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let fighter_ids: Vec<i64> = match args.first() {
+                Some(PyRep::List(items)) | Some(PyRep::Tuple(items)) => {
+                    items.iter().filter_map(|x| x.as_i64()).collect()
+                }
+                Some(a) => a.as_i64().into_iter().collect(),
+                None => Vec::new(),
+            };
+            if fighter_ids.is_empty() {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidArgument".into(),
+                    message: "ExecuteMovementCommandOnFighters requires fighterIDs".into(),
+                }));
+            }
+            {
+                let fighters = ctx.active_fighters.read().unwrap();
+                for &fid in &fighter_ids {
+                    let Some(f) = fighters.get(&fid) else {
+                        return Some(Err(BridgeRpcError {
+                            code: "FighterNotFound".into(),
+                            message: format!("Fighter squadron {fid} not found"),
+                        }));
+                    };
+                    if f.owner_char_id != char_id || f.is_abandoned {
+                        return Some(Err(BridgeRpcError {
+                            code: "FighterNotOwned".into(),
+                            message: format!("Fighter squadron {fid} is not controlled by pilot"),
+                        }));
+                    }
+                }
+            }
             let sys_handle = ctx.systems.get_or_spawn(sys_id);
-            let mode = if method == "CmdOrbitTarget" {
-                let target_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
-                let range = args.get(2).and_then(|a| a.as_f64()).unwrap_or(1_000.0);
-                eve_destiny::MovementMode::Orbit { target_id, range }
-            } else if method == "CmdFollowTarget" {
-                let target_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
-                let range = args.get(2).and_then(|a| a.as_f64()).unwrap_or(500.0);
-                eve_destiny::MovementMode::Follow { target_id, range }
-            } else {
-                let x = args.get(1).and_then(|a| a.as_f64()).unwrap_or(1.0);
-                let y = args.get(2).and_then(|a| a.as_f64()).unwrap_or(0.0);
-                let z = args.get(3).and_then(|a| a.as_f64()).unwrap_or(0.0);
-                eve_destiny::MovementMode::GotoDirection {
-                    direction: DVec3::new(x, y, z),
+            let cmd = args
+                .get(1)
+                .and_then(|a| a.as_str())
+                .unwrap_or("GOTO_POINT")
+                .to_ascii_uppercase();
+            let mode = match cmd.as_str() {
+                "ORBIT" => {
+                    let target_id = args.get(2).and_then(|a| a.as_i64()).unwrap_or(0);
+                    let range = args.get(3).and_then(|a| a.as_f64()).unwrap_or(1_000.0);
+                    eve_destiny::MovementMode::Orbit { target_id, range }
+                }
+                "FOLLOW" | "APPROACH" => {
+                    let target_id = args.get(2).and_then(|a| a.as_i64()).unwrap_or(0);
+                    let range = args.get(3).and_then(|a| a.as_f64()).unwrap_or(500.0);
+                    eve_destiny::MovementMode::Follow { target_id, range }
+                }
+                "STOP" => eve_destiny::MovementMode::Stop,
+                _ => {
+                    let x = args
+                        .get(2)
+                        .or_else(|| args.get(1))
+                        .and_then(|a| a.as_f64())
+                        .unwrap_or(1.0);
+                    let y = args
+                        .get(3)
+                        .or_else(|| args.get(2))
+                        .and_then(|a| a.as_f64())
+                        .unwrap_or(0.0);
+                    let z = args
+                        .get(4)
+                        .or_else(|| args.get(3))
+                        .and_then(|a| a.as_f64())
+                        .unwrap_or(0.0);
+                    eve_destiny::MovementMode::GotoDirection {
+                        direction: DVec3::new(x, y, z),
+                    }
                 }
             };
-            let _ = sys_handle.set_movement_mode(fighter_id, mode).await;
+            for fid in fighter_ids {
+                let _ = sys_handle.set_movement_mode(fid, mode.clone()).await;
+            }
             Some(Ok(PyRep::Bool(true)))
         }
 
-        // parity: plan:S-2, feat:drones.fighter-abilities
-        ("fighterMgr", "CmdActivateAbilitySlots") | ("fighterMgr", "ActivateAbilitySlot") => {
-            let (_, _char_id) = match ServerContext::require_character(session) {
+        ("fighterMgr", "CmdActivateAbilitySlots") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
@@ -1854,40 +1925,298 @@ pub async fn handle(
                     message: "Session has no active solar system".into(),
                 }));
             };
-            let fighter_ball_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let slot_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0) as u32;
+            let fighter_ball_id = match args.first() {
+                Some(PyRep::List(items)) | Some(PyRep::Tuple(items)) => {
+                    items.first().and_then(|x| x.as_i64()).unwrap_or(0)
+                }
+                Some(a) => a.as_i64().unwrap_or(0),
+                None => 0,
+            };
+            let raw_slot_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(-1);
+            if !(0..=2).contains(&raw_slot_id) {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidFighterAbilitySlot".into(),
+                    message: format!("Fighter ability slot {raw_slot_id} must be in 0..=2"),
+                }));
+            }
+            let slot_id = raw_slot_id as u32;
             let target_id = args.get(2).and_then(|a| a.as_i64());
 
-            let fighter_exists = ctx
+            let fighter_opt = ctx
                 .active_fighters
                 .read()
                 .unwrap()
-                .contains_key(&fighter_ball_id);
-            if !fighter_exists {
+                .get(&fighter_ball_id)
+                .cloned();
+            let Some(fighter) = fighter_opt else {
                 return Some(Err(BridgeRpcError {
                     code: "FighterNotFound".into(),
                     message: format!(
                         "Fighter squadron {fighter_ball_id} not found or not launched"
                     ),
                 }));
+            };
+            if fighter.owner_char_id != char_id || fighter.is_abandoned {
+                return Some(Err(BridgeRpcError {
+                    code: "FighterNotOwned".into(),
+                    message: format!(
+                        "Fighter squadron {fighter_ball_id} is not controlled by character {char_id}"
+                    ),
+                }));
             }
 
             let sys_handle = ctx.systems.get_or_spawn(sys_id);
-            match slot_id {
-                0 => {
-                    // Slot 0: Primary Attack -> applies damage to target
-                    if let Some(tid) = target_id {
-                        let dmg = DamageVector {
-                            em: 30.0,
-                            thermal: 30.0,
-                            kinetic: 30.0,
-                            explosive: 30.0,
-                        };
-                        let _ = sys_handle.apply_damage(tid, dmg).await;
-                    }
+            let Some((_, fighter_ball)) = sys_handle
+                .get_ball_snapshot(fighter_ball_id)
+                .await
+                .ok()
+                .flatten()
+            else {
+                return Some(Err(BridgeRpcError {
+                    code: "FighterNotInSystem".into(),
+                    message: format!(
+                        "Fighter squadron {fighter_ball_id} is not in solar system {sys_id}"
+                    ),
+                }));
+            };
+
+            let now_unix = ctx.now_unix();
+            if let Some(&ready_at) = ctx
+                .fighter_cooldown_state
+                .read()
+                .unwrap()
+                .get(&(fighter_ball_id, slot_id))
+            {
+                if now_unix < ready_at {
+                    return Some(Err(BridgeRpcError {
+                        code: "AbilityOnCooldown".into(),
+                        message: format!(
+                            "Fighter ability slot {slot_id} on {fighter_ball_id} is on cooldown until {ready_at}"
+                        ),
+                    }));
                 }
-                1 => {
-                    // Slot 1: MWD / Afterburner speed boost
+            }
+
+            let Some(slots) = ctx.sde.fighter_abilities_by_type.get(&fighter.type_id) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidFighterAbilitySlot".into(),
+                    message: format!(
+                        "Fighter type {} has no defined fighter abilities in SDE",
+                        fighter.type_id
+                    ),
+                }));
+            };
+            let Some(slot_def) = slots.iter().find(|s| s.slot_index as u32 == slot_id) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidFighterAbilitySlot".into(),
+                    message: format!(
+                        "Fighter type {} has no ability in slot {slot_id}",
+                        fighter.type_id
+                    ),
+                }));
+            };
+            let ability_id = slot_def.ability_id;
+            let Some(fa) = ctx.sde.fighter_abilities.get(&ability_id) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidFighterAbilitySlot".into(),
+                    message: format!("Fighter ability {ability_id} not found in SDE"),
+                }));
+            };
+
+            let mut charge_count = 0i64;
+            let mut rearm_time_sec = 0.0f64;
+            if let Some(ref ch) = slot_def.charges {
+                charge_count = ch.charge_count as i64;
+                rearm_time_sec = ch.rearm_time_seconds;
+                let used = ctx
+                    .fighter_charge_state
+                    .read()
+                    .unwrap()
+                    .get(&(fighter_ball_id, slot_id))
+                    .copied()
+                    .unwrap_or(0);
+                if used >= ch.charge_count {
+                    return Some(Err(BridgeRpcError {
+                        code: "OutOfCharges".into(),
+                        message: format!(
+                            "Fighter ability slot {slot_id} on {fighter_ball_id} has exhausted all {} charges",
+                            ch.charge_count
+                        ),
+                    }));
+                }
+            }
+
+            let target_mode = fa.target_mode.clone();
+            let tooltip_text_id = fa
+                .tooltip_text_id
+                .map(|tt| PyRep::Integer(tt as i64))
+                .unwrap_or(PyRep::None);
+            let turret_graphic_id = fa
+                .turret_graphic_id
+                .map(|tg| PyRep::Integer(tg as i64))
+                .unwrap_or(PyRep::None);
+
+            let sec = ctx
+                .sde
+                .solar_systems
+                .get(&sys_id)
+                .map(|s| s.security_status)
+                .unwrap_or(0.0);
+            if sec >= 0.45 && fa.disallow_in_high_sec {
+                return Some(Err(BridgeRpcError {
+                    code: "AbilityDisallowedInHighSec".into(),
+                    message: format!(
+                        "Fighter ability {ability_id} is disallowed in high-security space"
+                    ),
+                }));
+            }
+            if (0.05..0.45).contains(&sec) && fa.disallow_in_low_sec {
+                return Some(Err(BridgeRpcError {
+                    code: "AbilityDisallowedInLowSec".into(),
+                    message: format!(
+                        "Fighter ability {ability_id} is disallowed in low-security space"
+                    ),
+                }));
+            }
+
+            let fighter_attrs = ctx
+                .sde
+                .types
+                .get(&fighter.type_id)
+                .map(|t| &t.default_attributes);
+            let attr = |id: u16| -> Option<f64> {
+                fighter_attrs.and_then(|m| m.get(&id).copied())
+            };
+
+            if target_mode == "itemTargeted" {
+                let Some(tid) = target_id else {
+                    return Some(Err(BridgeRpcError {
+                        code: "TargetRequired".into(),
+                        message: format!("Fighter ability {ability_id} requires an item target"),
+                    }));
+                };
+                if tid <= 0 || tid == fighter_ball_id || tid == fighter.parent_ship_id {
+                    return Some(Err(BridgeRpcError {
+                        code: "InvalidTarget".into(),
+                        message: format!("Invalid fighter ability target {tid}"),
+                    }));
+                }
+                let Some((_, target_ball)) = sys_handle
+                    .get_ball_snapshot(tid)
+                    .await
+                    .ok()
+                    .flatten()
+                else {
+                    return Some(Err(BridgeRpcError {
+                        code: "TargetNotInSpace".into(),
+                        message: format!("Target {tid} is not in solar system {sys_id}"),
+                    }));
+                };
+                let ship_locks = sys_handle
+                    .get_target_locks(fighter.parent_ship_id)
+                    .await
+                    .unwrap_or_default();
+                let fighter_locks = sys_handle
+                    .get_target_locks(fighter_ball_id)
+                    .await
+                    .unwrap_or_default();
+                let is_locked = ship_locks
+                    .iter()
+                    .chain(fighter_locks.iter())
+                    .any(|l| l.target_id == tid && l.locked);
+                if !is_locked {
+                    return Some(Err(BridgeRpcError {
+                        code: "TargetNotLocked".into(),
+                        message: format!(
+                            "Target {tid} must be locked by controlling ship {} before activating fighter ability",
+                            fighter.parent_ship_id
+                        ),
+                    }));
+                }
+                let max_range = if slot_id == 0 {
+                    if let Some(opt) = attr(2236).or_else(|| attr(2175)) {
+                        let fall = attr(2237).or_else(|| attr(2176)).unwrap_or(0.0);
+                        opt + 2.0 * fall
+                    } else {
+                        attr(2149).unwrap_or(10_000.0)
+                    }
+                } else {
+                    attr(2149)
+                        .or_else(|| attr(2330))
+                        .or_else(|| attr(2204))
+                        .or_else(|| attr(2239))
+                        .or_else(|| attr(2186).map(|o| o + 2.0 * attr(2187).unwrap_or(0.0)))
+                        .or_else(|| attr(2209).map(|o| o + 2.0 * attr(2210).unwrap_or(0.0)))
+                        .or_else(|| attr(2221).map(|o| o + 2.0 * attr(2222).unwrap_or(0.0)))
+                        .unwrap_or(10_000.0)
+                };
+                let dist = fighter_ball.position.distance(target_ball.position);
+                if dist > max_range {
+                    return Some(Err(BridgeRpcError {
+                        code: "TargetOutOfRange".into(),
+                        message: format!(
+                            "Target {tid} is {dist:.1}m from fighter {fighter_ball_id} (exceeds SDE ability range {max_range:.1}m)"
+                        ),
+                    }));
+                }
+
+                let squad_mult = fighter.squadron_size.max(1) as f64;
+                let dmg = if slot_id == 0 {
+                    if attr(2227).is_some()
+                        || attr(2228).is_some()
+                        || attr(2229).is_some()
+                        || attr(2230).is_some()
+                    {
+                        let dmg_mult = attr(2226).unwrap_or(1.0) * squad_mult;
+                        DamageVector {
+                            em: attr(2227).unwrap_or(0.0) * dmg_mult,
+                            thermal: attr(2228).unwrap_or(0.0) * dmg_mult,
+                            kinetic: attr(2229).unwrap_or(0.0) * dmg_mult,
+                            explosive: attr(2230).unwrap_or(0.0) * dmg_mult,
+                        }
+                    } else if attr(2171).is_some()
+                        || attr(2172).is_some()
+                        || attr(2173).is_some()
+                        || attr(2174).is_some()
+                    {
+                        let dmg_mult = attr(2178).unwrap_or(1.0) * squad_mult;
+                        DamageVector {
+                            em: attr(2171).unwrap_or(0.0) * dmg_mult,
+                            thermal: attr(2172).unwrap_or(0.0) * dmg_mult,
+                            kinetic: attr(2173).unwrap_or(0.0) * dmg_mult,
+                            explosive: attr(2174).unwrap_or(0.0) * dmg_mult,
+                        }
+                    } else {
+                        let dmg_mult = attr(2130).unwrap_or(1.0) * squad_mult;
+                        DamageVector {
+                            em: attr(2131).unwrap_or(0.0) * dmg_mult,
+                            thermal: attr(2132).unwrap_or(0.0) * dmg_mult,
+                            kinetic: attr(2133).unwrap_or(0.0) * dmg_mult,
+                            explosive: attr(2134).unwrap_or(0.0) * dmg_mult,
+                        }
+                    }
+                } else {
+                    let dmg_mult = attr(2130).unwrap_or(1.0) * squad_mult;
+                    DamageVector {
+                        em: attr(2131).or_else(|| attr(2325)).unwrap_or(0.0) * dmg_mult,
+                        thermal: attr(2132).or_else(|| attr(2326)).unwrap_or(0.0) * dmg_mult,
+                        kinetic: attr(2133).or_else(|| attr(2327)).unwrap_or(0.0) * dmg_mult,
+                        explosive: attr(2134).or_else(|| attr(2328)).unwrap_or(0.0) * dmg_mult,
+                    }
+                };
+                if dmg.em + dmg.thermal + dmg.kinetic + dmg.explosive > 0.0 {
+                    let _ = sys_handle.apply_damage(tid, dmg).await;
+                }
+            } else {
+                if target_id.is_some() && target_mode == "untargeted" {
+                    return Some(Err(BridgeRpcError {
+                        code: "UnexpectedTarget".into(),
+                        message: format!(
+                            "Untargeted fighter ability {ability_id} does not accept a target entity ID"
+                        ),
+                    }));
+                }
+                if slot_id == 1 {
                     let _ = sys_handle.set_speed_fraction(fighter_ball_id, 1.0).await;
                     if let Some(f) = ctx
                         .active_fighters
@@ -1898,30 +2227,60 @@ pub async fn handle(
                         f.mwd_active = true;
                     }
                 }
-                2 => {
-                    // Slot 2: Secondary ability / tackle / heavy salvo
-                    if let Some(tid) = target_id {
-                        let dmg = DamageVector {
-                            em: 60.0,
-                            thermal: 60.0,
-                            kinetic: 0.0,
-                            explosive: 0.0,
-                        };
-                        let _ = sys_handle.apply_damage(tid, dmg).await;
-                    }
-                }
-                _ => {}
             }
+
+            let cycle_duration_ms = match slot_id {
+                0 => attr(2233)
+                    .or_else(|| attr(2177))
+                    .or_else(|| attr(2182))
+                    .unwrap_or(4_000.0),
+                1 => attr(2157)
+                    .or_else(|| attr(2158))
+                    .or_else(|| attr(2123))
+                    .or_else(|| attr(2155))
+                    .unwrap_or(10_000.0),
+                _ => attr(2182)
+                    .or_else(|| attr(2183))
+                    .or_else(|| attr(2203))
+                    .or_else(|| attr(2208))
+                    .or_else(|| attr(2220))
+                    .or_else(|| attr(2238))
+                    .or_else(|| attr(2349))
+                    .unwrap_or(10_000.0),
+            };
+            let cooldown_sec = slot_def.cooldown_seconds.unwrap_or(0.0);
+            let effective_gate_sec = cooldown_sec.max((cycle_duration_ms / 1_000.0).max(1.0));
+            ctx.fighter_cooldown_state.write().unwrap().insert(
+                (fighter_ball_id, slot_id),
+                now_unix.saturating_add(effective_gate_sec.ceil() as u64),
+            );
+
+            let remaining_charges = if charge_count > 0 {
+                let mut guard = ctx.fighter_charge_state.write().unwrap();
+                let entry = guard.entry((fighter_ball_id, slot_id)).or_insert(0);
+                *entry = entry.saturating_add(1);
+                (charge_count as i64).saturating_sub(*entry as i64)
+            } else {
+                0
+            };
 
             Some(Ok(PyRep::keyval([
                 ("fighterID", PyRep::Integer(fighter_ball_id)),
                 ("slotID", PyRep::Integer(slot_id as i64)),
+                ("abilityID", PyRep::Integer(ability_id as i64)),
+                ("targetMode", PyRep::String(target_mode)),
+                ("cooldownSeconds", PyRep::Real(cooldown_sec)),
+                ("cycleDurationSeconds", PyRep::Real(cycle_duration_ms / 1_000.0)),
+                ("chargeCount", PyRep::Integer(charge_count)),
+                ("remainingCharges", PyRep::Integer(remaining_charges)),
+                ("rearmTimeSeconds", PyRep::Real(rearm_time_sec)),
+                ("tooltipTextID", tooltip_text_id),
+                ("turretGraphicID", turret_graphic_id),
                 ("success", PyRep::Bool(true)),
             ])))
         }
 
-        // parity: plan:S-2, feat:drones.fighter-abandon
-        ("fighterMgr", "CmdAbandonFighters") | ("fighterMgr", "AbandonFighters") => {
+        ("fighterMgr", "CmdAbandonFighter") => {
             let (_, _char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -1938,12 +2297,15 @@ pub async fn handle(
                     message: "Session has no active solar system".into(),
                 }));
             };
+            let target_fighter_id = args.first().and_then(|a| a.as_i64());
             let sys_handle = ctx.systems.get_or_spawn(sys_id);
             let mut abandoned = Vec::new();
             {
                 let mut fighters = ctx.active_fighters.write().unwrap();
                 for f in fighters.values_mut() {
-                    if f.parent_ship_id == ship_id {
+                    if f.parent_ship_id == ship_id
+                        && target_fighter_id.map(|tid| tid == f.ball_id).unwrap_or(true)
+                    {
                         f.is_abandoned = true;
                         abandoned.push(f.ball_id);
                     }

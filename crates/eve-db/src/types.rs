@@ -1202,6 +1202,40 @@ pub struct WorldStateSnapshot {
     pub sov_prospecting_levels: HashMap<SolarSystemId, u32>,
     #[serde(default)]
     pub last_mission_decline_times: HashMap<i64, u64>,
+    #[serde(default)]
+    pub character_last_jump_unix: HashMap<i64, u64>,
+    #[serde(default)]
+    pub character_cspa_charges: HashMap<i64, IskCents>,
+    #[serde(default)]
+    pub mail_timestamps: HashMap<i64, u64>,
+    #[serde(default)]
+    pub character_login_stats: HashMap<i64, CharacterLoginStats>,
+    #[serde(default)]
+    pub item_custom_names: HashMap<i64, String>,
+    #[serde(default)]
+    pub item_positions: HashMap<i64, [f64; 3]>,
+    #[serde(default)]
+    pub structure_vulnerability_windows: HashMap<i64, (u64, u64)>,
+    #[serde(default)]
+    pub skill_history: HashMap<i64, Vec<SkillHistoryEntry>>,
+    #[serde(default)]
+    pub character_doll_info: HashMap<i64, (String, String)>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CharacterLoginStats {
+    pub last_login_unix: u64,
+    pub last_logout_unix: u64,
+    pub logins_count: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SkillHistoryEntry {
+    pub log_date_ft: i64,
+    pub event_type_id: i64,
+    pub skill_type_id: TypeId,
+    pub skill_level: u8,
+    pub absolute_points: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

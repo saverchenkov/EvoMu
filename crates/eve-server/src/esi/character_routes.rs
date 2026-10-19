@@ -6,8 +6,11 @@ use crate::esi::sample_routes::{
     asset_location_flag_str, fitting_flag_str, format_iso8601_utc, paginate_slice,
     parse_fitting_flag, parse_path_i64, RouteExecutionResult,
 };
+use crate::formulas::{skill_training_time_seconds, sp_for_skill_level};
 use crate::router::ServerContext;
-use eve_db::{InventoryFlag, MailRecord, SavedFittingRecord, SsoTokenClaims};
+use eve_db::{
+    InventoryFlag, IskCents, MailRecord, SavedFittingRecord, SsoTokenClaims, WalletJournalEntry,
+};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 
@@ -34,25 +37,22 @@ fn parse_unique_id_array(req_body: &[u8], max_items: usize) -> Result<Vec<i64>, 
 }
 
 fn resolve_item_coordinates(
-    ctx: &ServerContext,
+    _ctx: &ServerContext,
     snap: &eve_db::WorldStateSnapshot,
-    location_id: i64,
+    item: &eve_db::InventoryItemRecord,
 ) -> [f64; 3] {
-    let resolved_loc = snap
-        .items
-        .get(&location_id)
-        .map(|parent| parent.location_id)
-        .unwrap_or(location_id);
-    if let Some(st) = snap.structures.get(&resolved_loc) {
+    if let Some(&pos) = snap.item_positions.get(&item.item_id) {
+        return pos;
+    }
+    if let Some(st) = snap.structures.get(&item.item_id) {
         return st.position;
     }
-    for sys in ctx.sde.solar_systems.values() {
-        for st in &sys.stations {
-            if st.station_id == resolved_loc {
-                return [st.position.x, st.position.y, st.position.z];
-            }
+    if let Some(parent) = snap.items.get(&item.location_id) {
+        if let Some(&pos) = snap.item_positions.get(&parent.item_id) {
+            return pos;
         }
     }
+    // Items docked inside a station or structure hangar have (0, 0, 0) in ESI /assets/locations
     [0.0, 0.0, 0.0]
 }
 
@@ -127,7 +127,7 @@ fn build_owner_asset_locations(
                 format!("Asset item {item_id} not found for owner {owner_id}"),
             );
         };
-        let pos = resolve_item_coordinates(ctx, snap, item.location_id);
+        let pos = resolve_item_coordinates(ctx, snap, item);
         out.push(json!({
             "item_id": item.item_id,
             "position": {
@@ -162,9 +162,11 @@ fn build_owner_asset_names(
                 format!("Asset item {item_id} not found for owner {owner_id}"),
             );
         };
-        let name = ctx
-            .esi_state
-            .get_custom_item_name(item.item_id)
+        let name = snap
+            .item_custom_names
+            .get(&item.item_id)
+            .cloned()
+            .or_else(|| ctx.esi_state.get_custom_item_name(item.item_id))
             .or_else(|| {
                 snap.owner_notes
                     .values()
@@ -193,7 +195,7 @@ pub fn dispatch_character_routes(
     method: &str,
     path_pattern: &str,
     path_params: &HashMap<String, String>,
-    _query_params: &HashMap<String, String>,
+    query_params: &HashMap<String, String>,
     _claims: Option<&SsoTokenClaims>,
     page: usize,
     req_body: &[u8],
@@ -242,18 +244,37 @@ pub fn dispatch_character_routes(
                 Err(e) => return Some(e),
             };
             Some(ctx.db.with_snapshot(|snap| {
-                if !snap.characters.contains_key(&char_id) {
+                let Some(ch) = snap.characters.get(&char_id) else {
                     return RouteExecutionResult::error(
                         404,
                         format!("Character {char_id} not found"),
                     );
-                }
+                };
+                let base_url = std::env::var("EVOMU_IMAGE_SERVER_URL")
+                    .unwrap_or_else(|_| format!("http://127.0.0.1:{}/images", ctx.esi_port));
+                let base_url = base_url.trim_end_matches('/');
+                let doll_query = snap
+                    .character_doll_info
+                    .get(&char_id)
+                    .map(|(dna, _)| {
+                        let mut encoded = String::with_capacity(dna.len());
+                        for b in dna.bytes() {
+                            if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~')
+                            {
+                                encoded.push(b as char);
+                            } else {
+                                encoded.push_str(&format!("%{b:02X}"));
+                            }
+                        }
+                        format!("&dna={encoded}")
+                    })
+                    .unwrap_or_default();
                 RouteExecutionResult::ok_json(
                     json!({
-                        "px64x64": format!("https://images.evetech.net/characters/{char_id}/portrait?tenant=tranquility&size=64"),
-                        "px128x128": format!("https://images.evetech.net/characters/{char_id}/portrait?tenant=tranquility&size=128"),
-                        "px256x256": format!("https://images.evetech.net/characters/{char_id}/portrait?tenant=tranquility&size=256"),
-                        "px512x512": format!("https://images.evetech.net/characters/{char_id}/portrait?tenant=tranquility&size=512"),
+                        "px64x64": format!("{base_url}/characters/{char_id}/portrait?size=64&bloodline_id={}{doll_query}", ch.bloodline_id),
+                        "px128x128": format!("{base_url}/characters/{char_id}/portrait?size=128&bloodline_id={}{doll_query}", ch.bloodline_id),
+                        "px256x256": format!("{base_url}/characters/{char_id}/portrait?size=256&bloodline_id={}{doll_query}", ch.bloodline_id),
+                        "px512x512": format!("{base_url}/characters/{char_id}/portrait?size=512&bloodline_id={}{doll_query}", ch.bloodline_id),
                     }),
                     3600,
                 )
@@ -310,22 +331,33 @@ pub fn dispatch_character_routes(
                     );
                 };
                 let mut obj = serde_json::Map::new();
-                if ch.jump_cooldown_until_unix > 0 {
-                    obj.insert(
-                        "jump_fatigue_expire_date".into(),
-                        json!(format_iso8601_utc(ch.jump_cooldown_until_unix)),
-                    );
-                } else if ch.jump_fatigue_minutes > 0.0 {
-                    let exp = now.saturating_add((ch.jump_fatigue_minutes * 60.0).round() as u64);
+                let last_jump_unix = snap
+                    .character_last_jump_unix
+                    .get(&char_id)
+                    .copied()
+                    .unwrap_or(0);
+                if last_jump_unix > 0 {
+                    let ts = format_iso8601_utc(last_jump_unix);
+                    obj.insert("last_jump_date".into(), json!(ts.clone()));
+                    obj.insert("last_update_date".into(), json!(ts));
+                }
+                if ch.jump_fatigue_minutes > 0.0 {
+                    let anchor = if last_jump_unix > 0 {
+                        last_jump_unix
+                    } else {
+                        now
+                    };
+                    let exp =
+                        anchor.saturating_add((ch.jump_fatigue_minutes * 60.0).round() as u64);
                     obj.insert(
                         "jump_fatigue_expire_date".into(),
                         json!(format_iso8601_utc(exp)),
                     );
-                }
-                if ch.last_clone_jump_unix > 0 {
-                    let ts = format_iso8601_utc(ch.last_clone_jump_unix);
-                    obj.insert("last_jump_date".into(), json!(ts));
-                    obj.insert("last_update_date".into(), json!(ts));
+                } else if ch.jump_cooldown_until_unix > 0 {
+                    obj.insert(
+                        "jump_fatigue_expire_date".into(),
+                        json!(format_iso8601_utc(ch.jump_cooldown_until_unix)),
+                    );
                 }
                 RouteExecutionResult::ok_json(Value::Object(obj), 300)
             }))
@@ -504,10 +536,28 @@ pub fn dispatch_character_routes(
                     let mut sorted: Vec<_> = skill_map.values().collect();
                     sorted.sort_by_key(|s| s.type_id);
                     for s in sorted {
+                        let active_level = if ch.clone_grade <= 1 {
+                            let alpha_cap = ctx
+                                .sde
+                                .clone_grades
+                                .get(&ch.race_id)
+                                .and_then(|cg| cg.alpha_skill_caps.get(&s.type_id).copied())
+                                .or_else(|| {
+                                    ctx.sde
+                                        .clone_grades
+                                        .values()
+                                        .filter_map(|cg| cg.alpha_skill_caps.get(&s.type_id).copied())
+                                        .max()
+                                })
+                                .unwrap_or(0);
+                            s.level.min(alpha_cap)
+                        } else {
+                            s.level
+                        };
                         skills_vec.push(json!({
                             "skill_id": s.type_id as i64,
                             "trained_skill_level": s.level as i64,
-                            "active_skill_level": s.level as i64,
+                            "active_skill_level": active_level as i64,
                             "skillpoints_in_skill": s.skill_points.round() as i64,
                         }));
                     }
@@ -558,24 +608,72 @@ pub fn dispatch_character_routes(
                 Ok(v) => v,
                 Err(e) => return Some(e),
             };
+            let now = ctx.now_unix();
             Some(ctx.db.with_snapshot(|snap| {
-                if !snap.characters.contains_key(&char_id) {
+                let Some(ch) = snap.characters.get(&char_id) else {
                     return RouteExecutionResult::error(
                         404,
                         format!("Character {char_id} not found"),
                     );
-                }
+                };
+                let is_paused = snap.paused_skill_queues.contains(&char_id);
+                let clone_mult = if ch.clone_grade >= 2 { 1.0 } else { 0.5 };
                 let mut out = Vec::new();
                 if let Some(queue) = snap.skill_queues.get(&char_id) {
+                    let mut cursor_unix = now;
                     for (idx, entry) in queue.iter().enumerate() {
-                        out.push(json!({
+                        let skill_type = ctx.sde.types.get(&entry.type_id);
+                        let rank = skill_type
+                            .and_then(|t| t.default_attributes.get(&275).copied())
+                            .unwrap_or(1.0)
+                            .max(1.0);
+                        let level_start_sp =
+                            sp_for_skill_level(rank, entry.target_level.saturating_sub(1)).round()
+                                as i64;
+                        let level_end_sp = if entry.end_sp > 0.0 {
+                            entry.end_sp.round() as i64
+                        } else {
+                            sp_for_skill_level(rank, entry.target_level).round() as i64
+                        };
+                        let training_start_sp = entry.start_sp.round() as i64;
+                        let mut item = json!({
                             "queue_position": idx as i64,
                             "skill_id": entry.type_id as i64,
                             "finished_level": entry.target_level as i64,
-                            "training_start_sp": entry.start_sp.round() as i64,
-                            "level_start_sp": entry.start_sp.round() as i64,
-                            "level_end_sp": entry.end_sp.round() as i64,
-                        }));
+                            "training_start_sp": training_start_sp,
+                            "level_start_sp": level_start_sp,
+                            "level_end_sp": level_end_sp,
+                        });
+                        if !is_paused {
+                            let start_unix = cursor_unix;
+                            let dur = if entry.duration_seconds > 0.0 {
+                                entry.duration_seconds
+                            } else {
+                                let primary_attr_id = skill_type
+                                    .and_then(|t| t.default_attributes.get(&180).copied())
+                                    .map(|v| v as u32)
+                                    .unwrap_or(164);
+                                let secondary_attr_id = skill_type
+                                    .and_then(|t| t.default_attributes.get(&181).copied())
+                                    .map(|v| v as u32)
+                                    .unwrap_or(165);
+                                let primary = ch.neural.get_attribute_by_id(primary_attr_id);
+                                let secondary = ch.neural.get_attribute_by_id(secondary_attr_id);
+                                skill_training_time_seconds(
+                                    entry.start_sp,
+                                    level_end_sp as f64,
+                                    primary,
+                                    secondary,
+                                    clone_mult,
+                                )
+                            };
+                            let finish_unix =
+                                start_unix.saturating_add((dur.round() as u64).max(1));
+                            item["start_date"] = json!(format_iso8601_utc(start_unix));
+                            item["finish_date"] = json!(format_iso8601_utc(finish_unix));
+                            cursor_unix = finish_unix;
+                        }
+                        out.push(item);
                     }
                 }
                 RouteExecutionResult::ok_json(json!(out), 120)
@@ -615,20 +713,57 @@ pub fn dispatch_character_routes(
                 Ok(v) => v,
                 Err(e) => return Some(e),
             };
-            let user_id = ctx
-                .db
-                .with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.user_id));
-            let Some(uid) = user_id else {
+            let char_info = ctx.db.with_snapshot(|snap| {
+                snap.characters.get(&char_id).map(|c| {
+                    let stats = snap
+                        .character_login_stats
+                        .get(&char_id)
+                        .cloned()
+                        .unwrap_or_default();
+                    (c.user_id, stats)
+                })
+            });
+            let Some((uid, stats)) = char_info else {
                 return Some(RouteExecutionResult::error(
                     404,
                     format!("Character {char_id} not found"),
                 ));
             };
-            let online = ctx
+            let session = ctx
                 .db
                 .get_online_session(uid)
-                .is_some_and(|s| s.character_id == Some(char_id) || s.character_id.is_none());
-            Some(RouteExecutionResult::ok_json(json!({ "online": online }), 60))
+                .filter(|s| s.character_id == Some(char_id));
+            let online = session.is_some();
+            let mut obj = serde_json::Map::new();
+            obj.insert("online".into(), json!(online));
+            let logins = if stats.logins_count > 0 {
+                stats.logins_count
+            } else if online {
+                1
+            } else {
+                0
+            };
+            if logins > 0 {
+                obj.insert("logins".into(), json!(logins as i64));
+            }
+            let last_login_unix = if stats.last_login_unix > 0 {
+                stats.last_login_unix
+            } else {
+                session.as_ref().map(|s| s.connected_at_unix).unwrap_or(0)
+            };
+            if last_login_unix > 0 {
+                obj.insert(
+                    "last_login".into(),
+                    json!(format_iso8601_utc(last_login_unix)),
+                );
+            }
+            if stats.last_logout_unix > 0 {
+                obj.insert(
+                    "last_logout".into(),
+                    json!(format_iso8601_utc(stats.last_logout_unix)),
+                );
+            }
+            Some(RouteExecutionResult::ok_json(Value::Object(obj), 60))
         }
         ("GET", "/characters/{character_id}/ship") => {
             let char_id = match parse_path_i64(path_params, "character_id") {
@@ -652,11 +787,22 @@ pub fn dispatch_character_routes(
                         format!("Active ship {} not found for character {char_id}", ch.active_ship_id),
                     );
                 };
-                let ship_name = ctx
-                    .sde
-                    .types
-                    .get(&ship.type_id)
-                    .map(|t| t.name.clone())
+                let ship_name = snap
+                    .item_custom_names
+                    .get(&ship.item_id)
+                    .cloned()
+                    .or_else(|| ctx.esi_state.get_custom_item_name(ship.item_id))
+                    .or_else(|| {
+                        snap.owner_notes
+                            .values()
+                            .find(|n| {
+                                n.character_id == char_id
+                                    && n.item_id == ship.item_id
+                                    && !n.label.is_empty()
+                            })
+                            .map(|n| n.label.clone())
+                    })
+                    .or_else(|| ctx.sde.types.get(&ship.type_id).map(|t| t.name.clone()))
                     .unwrap_or_else(|| format!("Ship {}", ship.type_id));
                 RouteExecutionResult::ok_json(
                     json!({
@@ -1008,14 +1154,21 @@ pub fn dispatch_character_routes(
                     );
                 };
                 let mut divisions = Vec::with_capacity(7);
-                for div in 1..=7 {
-                    let bal = if div == 1 {
-                        corp.master_wallet.to_wire_f64()
-                    } else {
-                        0.0
-                    };
+                for div in 1..=7u8 {
+                    let bal = corp
+                        .wallet_divisions
+                        .iter()
+                        .find(|d| d.division_id == div)
+                        .map(|d| d.balance.to_wire_f64())
+                        .unwrap_or_else(|| {
+                            if div == 1 {
+                                corp.master_wallet.to_wire_f64()
+                            } else {
+                                0.0
+                            }
+                        });
                     divisions.push(json!({
-                        "division": div,
+                        "division": div as i64,
                         "balance": bal,
                     }));
                 }
@@ -1057,6 +1210,40 @@ pub fn dispatch_character_routes(
                 Ok(v) => v,
                 Err(e) => return Some(e),
             };
+            let last_mail_id: Option<i64> = match query_params.get("last_mail_id") {
+                Some(raw) => match raw.parse::<i64>() {
+                    Ok(v) if v > 0 => Some(v),
+                    _ => {
+                        return Some(RouteExecutionResult::error(
+                            400,
+                            format!("Invalid last_mail_id '{raw}'"),
+                        ));
+                    }
+                },
+                None => None,
+            };
+            let labels_filter: Option<Vec<i64>> = match query_params.get("labels") {
+                Some(raw) => {
+                    let trimmed = raw.trim().trim_start_matches('[').trim_end_matches(']');
+                    let mut parsed = Vec::new();
+                    if !trimmed.is_empty() {
+                        for part in trimmed.split(',') {
+                            match part.trim().parse::<i64>() {
+                                Ok(v) if v > 0 => parsed.push(v),
+                                _ => {
+                                    return Some(RouteExecutionResult::error(
+                                        400,
+                                        format!("Invalid labels query parameter '{raw}'"),
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                    Some(parsed)
+                }
+                None => None,
+            };
+            let now = ctx.now_unix();
             Some(ctx.db.with_snapshot(|snap| {
                 if !snap.characters.contains_key(&char_id) {
                     return RouteExecutionResult::error(
@@ -1071,6 +1258,7 @@ pub fn dispatch_character_routes(
                         (m.recipient_id == char_id || m.sender_id == char_id)
                             && !snap.deleted_mails.contains(&(char_id, m.message_id))
                             && !ctx.esi_state.is_mail_deleted(char_id, m.message_id)
+                            && last_mail_id.map_or(true, |lid| m.message_id < lid)
                     })
                     .map(|m| m.message_id)
                     .collect();
@@ -1078,11 +1266,25 @@ pub fn dispatch_character_routes(
                 msg_ids.dedup();
                 let out: Vec<Value> = msg_ids
                     .into_iter()
-                    .take(50)
                     .filter_map(|mid| {
                         let rows: Vec<_> =
                             snap.mails.iter().filter(|m| m.message_id == mid).collect();
                         let first = rows.first()?;
+                        let is_sender_only = first.sender_id == char_id
+                            && !rows.iter().any(|r| r.recipient_id == char_id);
+                        let meta = ctx.esi_state.get_mail_meta(char_id, mid, is_sender_only);
+                        let is_read = meta.is_read || snap.read_mails.contains(&(char_id, mid));
+                        let labels = snap
+                            .mail_assigned_labels
+                            .get(&(char_id, mid))
+                            .cloned()
+                            .unwrap_or(meta.labels);
+                        if let Some(ref req_labels) = labels_filter {
+                            if !req_labels.iter().any(|l| labels.contains(l)) {
+                                return None;
+                            }
+                        }
+                        let ts = snap.mail_timestamps.get(&mid).copied().unwrap_or(now);
                         let recipients: Vec<Value> = rows
                             .iter()
                             .map(|m| {
@@ -1106,9 +1308,13 @@ pub fn dispatch_character_routes(
                             "mail_id": first.message_id,
                             "from": first.sender_id,
                             "subject": first.subject,
+                            "timestamp": format_iso8601_utc(ts),
+                            "is_read": is_read,
+                            "labels": labels,
                             "recipients": recipients,
                         }))
                     })
+                    .take(50)
                     .collect();
                 RouteExecutionResult::ok_json(json!(out), 30)
             }))
@@ -1126,6 +1332,18 @@ pub fn dispatch_character_routes(
                         format!("Invalid mail JSON body: {e}"),
                     ));
                 }
+            };
+            let approved_cost = match payload.get("approved_cost") {
+                Some(v) => match v.as_i64() {
+                    Some(c) if c >= 0 => c,
+                    _ => {
+                        return Some(RouteExecutionResult::error(
+                            400,
+                            "Mail 'approved_cost' must be a non-negative integer",
+                        ));
+                    }
+                },
+                None => 0,
             };
             let Some(subject) = payload.get("subject").and_then(Value::as_str) else {
                 return Some(RouteExecutionResult::error(400, "Missing mail 'subject'"));
@@ -1157,7 +1375,7 @@ pub fn dispatch_character_routes(
                     "Mail 'recipients' must contain 1..=50 entries",
                 ));
             }
-            let mut recipient_ids = Vec::with_capacity(recipients.len());
+            let mut recipient_specs = Vec::with_capacity(recipients.len());
             for r in recipients {
                 let Some(rid) = r.get("recipient_id").and_then(Value::as_i64) else {
                     return Some(RouteExecutionResult::error(
@@ -1180,20 +1398,81 @@ pub fn dispatch_character_routes(
                         format!("Invalid recipient_type '{rtype}'"),
                     ));
                 }
-                if !recipient_ids.contains(&rid) {
-                    recipient_ids.push(rid);
+                if !recipient_specs.iter().any(|&(id, _)| id == rid) {
+                    recipient_specs.push((rid, rtype.to_string()));
                 }
             }
+            let now = ctx.now_unix();
             let res: Result<i64, RouteExecutionResult> = ctx.db.try_with_mut_snapshot(|snap| {
-                if !snap.characters.contains_key(&char_id) {
+                let Some(sender) = snap.characters.get(&char_id).cloned() else {
                     return Err(RouteExecutionResult::error(
                         404,
                         format!("Character {char_id} not found"),
                     ));
+                };
+                let mut total_cspa_cents = 0i64;
+                for &(rid, ref rtype) in &recipient_specs {
+                    if rtype == "character" && rid != char_id {
+                        let same_corp = snap
+                            .characters
+                            .get(&rid)
+                            .is_some_and(|rc| rc.corporation_id == sender.corporation_id);
+                        if !same_corp {
+                            let cspa = snap
+                                .character_cspa_charges
+                                .get(&rid)
+                                .copied()
+                                .unwrap_or(IskCents(0));
+                            total_cspa_cents = total_cspa_cents.saturating_add(cspa.0.max(0));
+                        }
+                    }
+                }
+                let approved_cents = IskCents::from_f64_isk(approved_cost as f64).0;
+                if total_cspa_cents > approved_cents {
+                    return Err(RouteExecutionResult::error(
+                        400,
+                        format!(
+                            "CSPA charge ({:.2} ISK) exceeds approved_cost ({approved_cost} ISK)",
+                            IskCents(total_cspa_cents).to_wire_f64()
+                        ),
+                    ));
+                }
+                if total_cspa_cents > 0 {
+                    if sender.balance.0 < total_cspa_cents {
+                        return Err(RouteExecutionResult::error(
+                            400,
+                            "Insufficient wallet balance to cover CSPA charge",
+                        ));
+                    }
+                    let new_balance = IskCents(sender.balance.0 - total_cspa_cents);
+                    if let Some(ch_mut) = snap.characters.get_mut(&char_id) {
+                        ch_mut.balance = new_balance;
+                    }
+                    snap.next_entity_id += 1;
+                    let tx_id = snap.next_entity_id;
+                    snap.wallet_journal.push(WalletJournalEntry {
+                        entry_id: tx_id,
+                        character_id: char_id,
+                        entry_type: "cspa".to_string(),
+                        amount: IskCents(-total_cspa_cents),
+                        balance_after: new_balance,
+                        reason: "CONCORD Spam Protection Act (CSPA) mail charge".to_string(),
+                    });
                 }
                 snap.next_entity_id += 1;
                 let mail_id = snap.next_entity_id;
-                for rid in recipient_ids {
+                snap.mail_timestamps.insert(mail_id, now);
+                snap.read_mails.insert((char_id, mail_id));
+                snap.mail_assigned_labels.insert((char_id, mail_id), vec![2]);
+                ctx.esi_state.set_mail_meta(
+                    char_id,
+                    mail_id,
+                    crate::esi::runtime_state::EsiMailMeta {
+                        is_read: true,
+                        labels: vec![2],
+                    },
+                );
+                for (rid, rtype) in recipient_specs {
                     snap.mails.push(MailRecord {
                         message_id: mail_id,
                         sender_id: char_id,
@@ -1201,6 +1480,23 @@ pub fn dispatch_character_routes(
                         subject: subject.to_string(),
                         body: body.to_string(),
                     });
+                    if rid != char_id {
+                        let label_id = match rtype.as_str() {
+                            "corporation" => 4,
+                            "alliance" => 8,
+                            _ => 1,
+                        };
+                        snap.mail_assigned_labels
+                            .insert((rid, mail_id), vec![label_id]);
+                        ctx.esi_state.set_mail_meta(
+                            rid,
+                            mail_id,
+                            crate::esi::runtime_state::EsiMailMeta {
+                                is_read: false,
+                                labels: vec![label_id],
+                            },
+                        );
+                    }
                 }
                 Ok(mail_id)
             });
@@ -1218,6 +1514,7 @@ pub fn dispatch_character_routes(
                 Ok(v) => v,
                 Err(e) => return Some(e),
             };
+            let now = ctx.now_unix();
             Some(ctx.db.with_snapshot(|snap| {
                 if !snap.characters.contains_key(&char_id) {
                     return RouteExecutionResult::error(
@@ -1249,6 +1546,16 @@ pub fn dispatch_character_routes(
                     );
                 }
                 let first = rows[0];
+                let is_sender_only = first.sender_id == char_id
+                    && !rows.iter().any(|r| r.recipient_id == char_id);
+                let meta = ctx.esi_state.get_mail_meta(char_id, mail_id, is_sender_only);
+                let is_read = meta.is_read || snap.read_mails.contains(&(char_id, mail_id));
+                let labels = snap
+                    .mail_assigned_labels
+                    .get(&(char_id, mail_id))
+                    .cloned()
+                    .unwrap_or(meta.labels);
+                let ts = snap.mail_timestamps.get(&mail_id).copied().unwrap_or(now);
                 let recipients: Vec<Value> = rows
                     .iter()
                     .map(|m| {
@@ -1272,6 +1579,9 @@ pub fn dispatch_character_routes(
                         "from": first.sender_id,
                         "subject": first.subject,
                         "body": first.body,
+                        "timestamp": format_iso8601_utc(ts),
+                        "read": is_read,
+                        "labels": labels,
                         "recipients": recipients,
                     }),
                     30,

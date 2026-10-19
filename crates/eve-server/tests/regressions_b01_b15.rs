@@ -906,7 +906,7 @@ async fn test_blocking_findings_b01_to_b15_regressions() {
             "fighterMgr",
             None,
             "CmdActivateAbilitySlots",
-            &[PyRep::Integer(1), PyRep::Integer(700_000_077)],
+            &[PyRep::Integer(700_000_077), PyRep::Integer(0)],
             &kw,
             None,
         )

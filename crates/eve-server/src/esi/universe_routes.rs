@@ -463,10 +463,10 @@ pub fn dispatch_universe_and_nav(
             }
             RouteExecutionResult::ok_json(json!(out), 3600)
         }),
+        // parity: esi:GET /sovereignty/structures, feat:esi.sovereignty.structures
         ("GET", "/sovereignty/structures") => {
             const MIL_IND_ADM_BONUS: [f64; 6] = [0.0, 0.6, 1.2, 1.7, 2.1, 2.5];
             const STRAT_ADM_BONUS: [f64; 6] = [0.0, 0.4, 0.6, 0.8, 0.9, 1.0];
-            let now = ctx.now_unix();
             ctx.db.with_snapshot(|snap| {
                 let mut structs: Vec<_> = snap
                     .structures
@@ -502,22 +502,45 @@ pub fn dispatch_universe_and_nav(
                             ((1.0 + mil + ind + strat).clamp(1.0, 6.0) * 10.0).round() / 10.0
                         })
                         .unwrap_or(1.0);
-                    let vuln_start = if st.reinforced_until_unix > 0 {
-                        st.reinforced_until_unix
-                    } else {
-                        (now / 86_400) * 86_400 + 18 * 3_600
-                    };
                     let window_secs = ((18.0 / adm.max(1.0)) * 3_600.0).round() as u64;
-                    let vuln_end = vuln_start.saturating_add(window_secs.max(3_600));
-                    out.push(json!({
+                    let stored_window = if st.state == "CommandNodeEvent" {
+                        None
+                    } else if let Some(&(v_start, v_end)) =
+                        snap.structure_vulnerability_windows.get(&st.structure_id)
+                    {
+                        if v_start > 0 {
+                            let end = if v_end > v_start {
+                                v_end
+                            } else {
+                                v_start.saturating_add(window_secs.max(3_600))
+                            };
+                            Some((v_start, end))
+                        } else {
+                            None
+                        }
+                    } else if st.reinforced_until_unix > 0 {
+                        Some((
+                            st.reinforced_until_unix,
+                            st.reinforced_until_unix
+                                .saturating_add(window_secs.max(3_600)),
+                        ))
+                    } else {
+                        None
+                    };
+                    let mut entry = json!({
                         "alliance_id": aid,
                         "solar_system_id": st.solar_system_id as i64,
                         "structure_id": st.structure_id,
                         "structure_type_id": st.type_id as i64,
-                        "vulnerability_occupancy_level": adm,
-                        "vulnerable_start_time": crate::esi::sample_routes::format_iso8601_utc(vuln_start),
-                        "vulnerable_end_time": crate::esi::sample_routes::format_iso8601_utc(vuln_end),
-                    }));
+                    });
+                    if let Some((vuln_start, vuln_end)) = stored_window {
+                        entry["vulnerability_occupancy_level"] = json!(adm);
+                        entry["vulnerable_start_time"] =
+                            json!(crate::esi::sample_routes::format_iso8601_utc(vuln_start));
+                        entry["vulnerable_end_time"] =
+                            json!(crate::esi::sample_routes::format_iso8601_utc(vuln_end));
+                    }
+                    out.push(entry);
                 }
                 RouteExecutionResult::ok_json(json!(out), 120)
             })

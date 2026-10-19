@@ -409,6 +409,22 @@ impl WorldRepository {
                 },
             ),
         ]);
+        let mut sorted_starter_skills: Vec<_> = starter_skill_map.values().cloned().collect();
+        sorted_starter_skills.sort_by_key(|s| s.type_id);
+        let starter_history: Vec<SkillHistoryEntry> = sorted_starter_skills
+            .into_iter()
+            .map(|s| SkillHistoryEntry {
+                log_date_ft: 133_485_408_000_000_000, // 2024-01-01T00:00:00Z in BlueOS FILETIME ticks
+                event_type_id: 33,                   // SkillEventCharCreation (EVE_Skills.h:24)
+                skill_type_id: s.type_id,
+                skill_level: s.level,
+                absolute_points: s.skill_points,
+            })
+            .collect();
+        let mut skill_history = HashMap::new();
+        skill_history.insert(90_000_001, starter_history.clone());
+        skill_history.insert(90_000_002, starter_history);
+
         skills.insert(90_000_001, starter_skill_map.clone());
         skills.insert(90_000_002, starter_skill_map);
 
@@ -472,6 +488,15 @@ impl WorldRepository {
             cosmic_anomalies: HashMap::new(),
             sov_prospecting_levels: HashMap::new(),
             last_mission_decline_times: HashMap::new(),
+            character_last_jump_unix: HashMap::new(),
+            character_cspa_charges: HashMap::new(),
+            mail_timestamps: HashMap::new(),
+            character_login_stats: HashMap::new(),
+            item_custom_names: HashMap::new(),
+            item_positions: HashMap::new(),
+            structure_vulnerability_windows: HashMap::new(),
+            skill_history,
+            character_doll_info: HashMap::new(),
         };
         let mut conn = rusqlite::Connection::open_in_memory()
             .expect("open in-memory SQLite connection for WorldRepository");

@@ -36,10 +36,18 @@ async fn test_all_18_e2e_journeys_and_catalog_coverage() {
             "CreateCharacterWithDoll",
             &[
                 PyRep::String("Valkyrie Pilot".into()),
-                PyRep::Integer(2),
-                PyRep::Integer(3),
-                PyRep::Integer(19),
-                PyRep::Integer(14),
+                PyRep::Integer(3),  // Sebiestor bloodline (Minmatar race=2)
+                PyRep::Integer(1),  // genderID
+                PyRep::Integer(19), // Rebels ancestry
+                PyRep::Dict(vec![(
+                    PyRep::String("hair".into()),
+                    PyRep::String("braids".into()),
+                )]),
+                PyRep::Dict(vec![(
+                    PyRep::String("poseID".into()),
+                    PyRep::Integer(1),
+                )]),
+                PyRep::Integer(14), // Republic Military School
             ],
             &empty,
             None,
