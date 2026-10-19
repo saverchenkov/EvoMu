@@ -437,6 +437,23 @@ impl PublicGatewayRouter {
             || normalized_type_name.starts_with("eve_public.membership.")
             || normalized_type_name.starts_with("eve_public.payment.")
             || normalized_type_name.starts_with("eve_public.plex.")
+            || normalized_type_name.starts_with("eve_public.solarsystem.")
+            || normalized_type_name.starts_with("eve_public.universe.")
+            || normalized_type_name.starts_with("eve_public.stargate.")
+            || normalized_type_name.starts_with("eve_public.station.")
+            || normalized_type_name.starts_with("eve_public.structure.")
+            || normalized_type_name.starts_with("eve_public.killmail.")
+            || normalized_type_name.starts_with("eve_public.probe.")
+            || normalized_type_name.starts_with("eve_public.sovereignty.")
+            || normalized_type_name.starts_with("eve_public.factionwarfare.")
+            || normalized_type_name.starts_with("eve_public.projectdiscovery.")
+            || normalized_type_name.starts_with("eve_public.operation.")
+            || normalized_type_name.starts_with("eve_public.cosmetic.")
+            || normalized_type_name.starts_with("eve_public.skin.")
+            || normalized_type_name.starts_with("eve_public.paragon.")
+            || normalized_type_name.starts_with("eve_public.client.")
+            || normalized_type_name.starts_with("eve_public.ui.")
+            || normalized_type_name.starts_with("eve_public.settings.")
         {
             return false;
         }
