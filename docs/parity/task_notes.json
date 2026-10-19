@@ -272,16 +272,16 @@
   "note": "Quasar Market & Wallet services (GetOrders, GetMarketHistory, GetBalance, GetJournal) implemented with regional order query, price statistics, and wallet tracking."
  },
  "Q-7": {
-  "assessment": "NOT STARTED",
-  "note": ""
+  "assessment": "DONE",
+  "note": "Quasar Space & Combat services (solarsystem, structure, killmail, ship, stargate, station, probe) implemented with SDE celestials and Dogma ship HP."
  },
  "Q-8": {
-  "assessment": "NOT STARTED",
-  "note": ""
+  "assessment": "DONE",
+  "note": "Quasar Sovereignty, Faction Warfare, Project Discovery, and Operations services implemented with alliance sov indices, LP stats, and seasonal campaigns."
  },
  "Q-9": {
-  "assessment": "NOT STARTED",
-  "note": ""
+  "assessment": "DONE",
+  "note": "Quasar Cosmetics and App Infrastructure services (cosmetic, skin, settings, paragon, ui) implemented with licensed SKINs, client settings, and UI layouts."
  },
  "S-1": {
   "assessment": "DONE",
