@@ -321,6 +321,19 @@ CREATE TABLE IF NOT EXISTS applied_ship_skins (
     ship_id INTEGER PRIMARY KEY,
     skin_id INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS asteroids (
+    asteroid_id INTEGER PRIMARY KEY,
+    solar_system_id INTEGER NOT NULL,
+    belt_id INTEGER NOT NULL,
+    type_id INTEGER NOT NULL,
+    quantity INTEGER NOT NULL,
+    initial_quantity INTEGER NOT NULL,
+    x REAL NOT NULL,
+    y REAL NOT NULL,
+    z REAL NOT NULL,
+    radius REAL NOT NULL
+);
 "#;
 
 pub fn apply_migrations(conn: &Connection) -> Result<(), String> {

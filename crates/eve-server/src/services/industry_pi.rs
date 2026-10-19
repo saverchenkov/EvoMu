@@ -302,13 +302,52 @@ pub fn handle(
                     (0.05_f64 - 0.0075_f64 * standing.max(0.0)).clamp(0.0, 0.05)
                 };
 
-                let yield_rate = compute_reprocessing_yield_rate(
-                    0.50,
-                    reproc_lvl,
-                    reproc_eff_lvl,
-                    ore_proc_lvl,
-                    0.0,
-                );
+                let station_base_yield = ctx
+                    .sde
+                    .solar_systems
+                    .values()
+                    .flat_map(|s| s.stations.iter())
+                    .find(|st| st.station_id == station_id)
+                    .map(|st| st.reprocessing_efficiency)
+                    .unwrap_or(0.50);
+
+                let implant_bonus = snap
+                    .active_implants
+                    .get(&char_id)
+                    .map(|implants| {
+                        let mut b = 0.0;
+                        for &imp_id in implants {
+                            if let Some(imp_type) = ctx.sde.types.get(&imp_id) {
+                                if let Some(&bonus) = imp_type.default_attributes.get(&379) {
+                                    b += bonus / 100.0;
+                                }
+                            }
+                        }
+                        b
+                    })
+                    .unwrap_or(0.0);
+
+                let is_ore_or_ice = inv_type.category_id == 25
+                    || inv_type.group_id == 465
+                    || inv_type
+                        .default_attributes
+                        .contains_key(&eve_sde::attr_ids::REPROCESSING_SKILL_TYPE);
+
+                let yield_rate = if is_ore_or_ice {
+                    compute_reprocessing_yield_rate(
+                        station_base_yield,
+                        reproc_lvl,
+                        reproc_eff_lvl,
+                        ore_proc_lvl,
+                        implant_bonus,
+                    )
+                } else {
+                    let scrap_lvl = char_skills
+                        .and_then(|m| m.get(&12196))
+                        .map(|s| s.level)
+                        .unwrap_or(0);
+                    (station_base_yield * (1.0 + 0.02 * (scrap_lvl.min(5) as f64))).clamp(0.0, 1.0)
+                };
                 let net_yield_rate = yield_rate * (1.0 - station_tax_rate);
 
                 let portions = item.quantity / portion_size;
@@ -356,6 +395,15 @@ pub fn handle(
 
             match res {
                 Ok((outputs, yield_rate, station_tax_rate)) => {
+                    ctx.notify(
+                        crate::router::NotificationTarget::Character(char_id),
+                        "OnReprocessingMaterialsChanged",
+                        "character",
+                        vec![
+                            PyRep::Integer(char_id),
+                            PyRep::Integer(station_id),
+                        ],
+                    );
                     let (trit_id, _, trit_qty) = outputs
                         .iter()
                         .copied()
@@ -382,6 +430,112 @@ pub fn handle(
                 }
                 Err(e) => Some(Err(e)),
             }
+        }
+
+        ("reprocessingSvc", "GetQuote")
+        | ("reprocessingSvc", "GetQuotes")
+        | ("reprocessingSvc", "GetReprocessingInfo") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let Some(station_id) = session.station_id.or(session.structure_id) else {
+                return Some(Err(BridgeRpcError {
+                    code: "NotDocked".into(),
+                    message: "Reprocessing quote requires being docked at a station or structure".into(),
+                }));
+            };
+            let item_ids: Vec<i64> = if let Some(first) = args.first() {
+                if let PyRep::List(list) = first {
+                    list.iter().filter_map(|a| a.as_i64()).collect()
+                } else if let Some(iid) = first.as_i64() {
+                    vec![iid]
+                } else {
+                    Vec::new()
+                }
+            } else {
+                Vec::new()
+            };
+            if method == "GetReprocessingInfo" && item_ids.is_empty() {
+                let station_base_yield = ctx
+                    .sde
+                    .solar_systems
+                    .values()
+                    .flat_map(|s| s.stations.iter())
+                    .find(|st| st.station_id == station_id)
+                    .map(|st| st.reprocessing_efficiency)
+                    .unwrap_or(0.50);
+                let (reproc_lvl, reproc_eff_lvl) = ctx.db.with_snapshot(|snap| {
+                    let char_skills = snap.skills.get(&char_id);
+                    let r = char_skills.and_then(|m| m.get(&3385)).map(|s| s.level).unwrap_or(0);
+                    let re = char_skills.and_then(|m| m.get(&3389)).map(|s| s.level).unwrap_or(0);
+                    (r, re)
+                });
+                return Some(Ok(PyRep::keyval([
+                    ("stationBaseYield", PyRep::Real(station_base_yield)),
+                    ("reprocessingSkillLevel", PyRep::Integer(reproc_lvl as i64)),
+                    ("reprocessingEfficiencyLevel", PyRep::Integer(reproc_eff_lvl as i64)),
+                ])));
+            }
+            let res = ctx.db.with_snapshot(|snap| {
+                let mut quotes = Vec::new();
+                for item_id in item_ids {
+                    let Some(item) = snap.items.get(&item_id) else { continue; };
+                    let Some(inv_type) = ctx.sde.types.get(&item.type_id) else { continue; };
+                    let Some(materials) = ctx.sde.type_materials.get(&item.type_id).filter(|m| !m.is_empty()) else { continue; };
+                    let char_skills = snap.skills.get(&char_id);
+                    let reproc_lvl = char_skills.and_then(|m| m.get(&3385)).map(|s| s.level).unwrap_or(0);
+                    let reproc_eff_lvl = char_skills.and_then(|m| m.get(&3389)).map(|s| s.level).unwrap_or(0);
+                    let ore_proc_lvl = inv_type.default_attributes.get(&eve_sde::attr_ids::REPROCESSING_SKILL_TYPE)
+                        .and_then(|&skill_id_f| char_skills.and_then(|m| m.get(&(skill_id_f as TypeId))).map(|s| s.level))
+                        .unwrap_or(0);
+                    let scrap_lvl = char_skills.and_then(|m| m.get(&12196)).map(|s| s.level).unwrap_or(0);
+                    let station_base_yield = ctx.sde.solar_systems.values().flat_map(|s| s.stations.iter()).find(|st| st.station_id == station_id).map(|st| st.reprocessing_efficiency).unwrap_or(0.50);
+                    let implant_bonus = snap.active_implants.get(&char_id).map(|implants| {
+                        let mut b = 0.0;
+                        for &imp_id in implants {
+                            if let Some(imp_type) = ctx.sde.types.get(&imp_id) {
+                                if let Some(&bonus) = imp_type.default_attributes.get(&379) { b += bonus / 100.0; }
+                            }
+                        }
+                        b
+                    }).unwrap_or(0.0);
+                    let is_ore_or_ice = inv_type.category_id == 25 || inv_type.group_id == 465 || inv_type.default_attributes.contains_key(&eve_sde::attr_ids::REPROCESSING_SKILL_TYPE);
+                    let yield_rate = if is_ore_or_ice {
+                        compute_reprocessing_yield_rate(station_base_yield, reproc_lvl, reproc_eff_lvl, ore_proc_lvl, implant_bonus)
+                    } else {
+                        (station_base_yield * (1.0 + 0.02 * (scrap_lvl.min(5) as f64))).clamp(0.0, 1.0)
+                    };
+                    let station_tax_rate = if station_id >= 1_000_000_000_000 { 0.0 } else {
+                        let owner_corp_id = ctx.sde.solar_systems.values().flat_map(|s| s.stations.iter()).find(|st| st.station_id == station_id).map(|st| st.owner_corporation_id as i64);
+                        let standing = owner_corp_id.and_then(|cid| snap.characters.get(&char_id).and_then(|ch| ch.standings.get(&cid).copied())).unwrap_or(0.0);
+                        (0.05_f64 - 0.0075_f64 * standing.max(0.0)).clamp(0.0, 0.05)
+                    };
+                    let net_yield_rate = yield_rate * (1.0 - station_tax_rate);
+                    let portion_size = inv_type.portion_size.max(1) as i32;
+                    let portions = item.quantity / portion_size;
+                    let mut est_outputs = Vec::new();
+                    for mat in materials {
+                        let out_qty = ((portions as f64) * (mat.quantity as f64) * net_yield_rate).floor() as i32;
+                        if out_qty > 0 {
+                            est_outputs.push(PyRep::keyval([
+                                ("typeID", PyRep::Integer(mat.material_type_id as i64)),
+                                ("quantity", PyRep::Integer(out_qty as i64)),
+                            ]));
+                        }
+                    }
+                    quotes.push(PyRep::keyval([
+                        ("itemID", PyRep::Integer(item_id)),
+                        ("yieldRate", PyRep::Real(yield_rate)),
+                        ("stationTaxRate", PyRep::Real(station_tax_rate)),
+                        ("netYieldRate", PyRep::Real(net_yield_rate)),
+                        ("portionSize", PyRep::Integer(portion_size as i64)),
+                        ("outputs", PyRep::List(est_outputs)),
+                    ]));
+                }
+                quotes
+            });
+            Some(Ok(PyRep::List(res)))
         }
 
         ("structureCompressionMgr", "CompressItemInStructure")
@@ -420,18 +574,25 @@ pub fn handle(
                     let reachable = (Some(item.location_id) == session.station_id)
                         || (Some(item.location_id) == session.structure_id)
                         || (Some(item.location_id) == session.ship_id);
+                    let portion_size = ctx
+                        .sde
+                        .types
+                        .get(&item.type_id)
+                        .map(|t| t.portion_size as i32)
+                        .unwrap_or(100)
+                        .max(1);
                     if item.owner_id == char_id
                         && reachable
                         && item.flag != InventoryFlag::Locked
-                        && item.quantity >= 100
+                        && item.quantity >= portion_size
                     {
                         if let Some(&comp_type) = ctx.sde.compressible_types.get(&item.type_id) {
                             let orig_type = item.type_id;
                             let orig_loc = item.location_id;
                             let orig_flag = item.flag;
-                            let rem = item.quantity % 100;
+                            let rem = item.quantity % portion_size;
                             item.type_id = comp_type;
-                            item.quantity /= 100;
+                            item.quantity /= portion_size;
                             item.version += 1;
                             compressed_out = Some((item.item_id, item.type_id, item.quantity, rem));
                             if rem > 0 {

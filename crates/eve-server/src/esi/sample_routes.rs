@@ -197,6 +197,18 @@ pub(crate) fn asset_location_flag_str(flag: InventoryFlag) -> Option<&'static st
         InventoryFlag::SubSystemSlot0 => Some("SubSystemSlot0"),
         InventoryFlag::FighterBay => Some("FighterBay"),
         InventoryFlag::Deliveries => Some("Deliveries"),
+        InventoryFlag::SpecializedFuelBay => Some("SpecializedFuelBay"),
+        InventoryFlag::SpecializedOreHold => Some("SpecializedOreHold"),
+        InventoryFlag::SpecializedGasHold => Some("SpecializedGasHold"),
+        InventoryFlag::SpecializedMineralHold => Some("SpecializedMineralHold"),
+        InventoryFlag::SpecializedSalvageHold => Some("SpecializedSalvageHold"),
+        InventoryFlag::SpecializedShipHold => Some("SpecializedShipHold"),
+        InventoryFlag::SpecializedAmmoHold => Some("SpecializedAmmoHold"),
+        InventoryFlag::SpecializedCommandCenterHold => Some("SpecializedCommandCenterHold"),
+        InventoryFlag::SpecializedPlanetaryCommoditiesHold => Some("SpecializedPlanetaryCommoditiesHold"),
+        InventoryFlag::SpecializedMaterialBay => Some("SpecializedMaterialBay"),
+        InventoryFlag::SpecializedIceHold => Some("SpecializedIceHold"),
+        InventoryFlag::SpecializedAsteroidHold => Some("SpecializedAsteroidHold"),
         InventoryFlag::None
         | InventoryFlag::Capsule
         | InventoryFlag::Pilot

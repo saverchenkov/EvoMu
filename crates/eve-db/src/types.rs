@@ -181,11 +181,30 @@ pub enum InventoryFlag {
     RigSlot1 = 93,
     RigSlot2 = 94,
     SubSystemSlot0 = 125,
+    SpecializedFuelBay = 133,
+    SpecializedOreHold = 134,
+    SpecializedGasHold = 135,
+    SpecializedMineralHold = 136,
+    SpecializedSalvageHold = 137,
+    SpecializedShipHold = 138,
+    SpecializedAmmoHold = 143,
+    SpecializedCommandCenterHold = 148,
+    SpecializedPlanetaryCommoditiesHold = 149,
+    SpecializedMaterialBay = 151,
     FighterBay = 158,
     Deliveries = 173,
+    SpecializedIceHold = 181,
+    SpecializedAsteroidHold = 182,
 }
 
 impl InventoryFlag {
+    #[allow(non_upper_case_globals)]
+    pub const OreHold: InventoryFlag = InventoryFlag::SpecializedOreHold;
+    #[allow(non_upper_case_globals)]
+    pub const GasHold: InventoryFlag = InventoryFlag::SpecializedGasHold;
+    #[allow(non_upper_case_globals)]
+    pub const IceHold: InventoryFlag = InventoryFlag::SpecializedIceHold;
+
     pub fn from_u16(v: u16) -> Self {
         match v {
             4 => Self::Hangar,
@@ -225,8 +244,20 @@ impl InventoryFlag {
             93 => Self::RigSlot1,
             94 => Self::RigSlot2,
             125 => Self::SubSystemSlot0,
+            133 => Self::SpecializedFuelBay,
+            134 => Self::SpecializedOreHold,
+            135 => Self::SpecializedGasHold,
+            136 => Self::SpecializedMineralHold,
+            137 => Self::SpecializedSalvageHold,
+            138 => Self::SpecializedShipHold,
+            143 => Self::SpecializedAmmoHold,
+            148 => Self::SpecializedCommandCenterHold,
+            149 => Self::SpecializedPlanetaryCommoditiesHold,
+            151 => Self::SpecializedMaterialBay,
             158 => Self::FighterBay,
             173 => Self::Deliveries,
+            181 => Self::SpecializedIceHold,
+            182 => Self::SpecializedAsteroidHold,
             _ => Self::None,
         }
     }
@@ -760,6 +791,18 @@ pub struct StandingTransactionRecord {
     pub event_type_id: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AsteroidRecord {
+    pub asteroid_id: i64,
+    pub solar_system_id: u32,
+    pub belt_id: i64,
+    pub type_id: u32,
+    pub quantity: i64,
+    pub initial_quantity: i64,
+    pub position: (f64, f64, f64),
+    pub radius: f64,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct WorldStateSnapshot {
     pub next_entity_id: i64,
@@ -805,6 +848,8 @@ pub struct WorldStateSnapshot {
     pub licensed_skins: HashMap<i64, Vec<u32>>,
     #[serde(default)]
     pub applied_ship_skins: HashMap<i64, u32>,
+    #[serde(default)]
+    pub asteroids: HashMap<i64, AsteroidRecord>,
 }
 
 impl WorldStateSnapshot {

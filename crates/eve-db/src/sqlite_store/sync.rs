@@ -1139,6 +1139,43 @@ pub fn sync_dirty_to_sqlite(
         }
     }
 
+    // 32. asteroids
+    let rem_asteroids: Vec<i64> = fp
+        .asteroids
+        .keys()
+        .filter(|k| !snap.asteroids.contains_key(*k))
+        .copied()
+        .collect();
+    for id in rem_asteroids {
+        cold_changed = true;
+        tx.execute("DELETE FROM asteroids WHERE asteroid_id = ?1", params![id])
+            .map_err(|e| e.to_string())?;
+        fp.asteroids.remove(&id);
+    }
+    for (&id, ast) in &snap.asteroids {
+        let h = fp_json(ast);
+        if fp.asteroids.get(&id) != Some(&h) {
+            cold_changed = true;
+            tx.execute(
+                "INSERT OR REPLACE INTO asteroids (asteroid_id, solar_system_id, belt_id, type_id, quantity, initial_quantity, x, y, z, radius) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![
+                    ast.asteroid_id,
+                    ast.solar_system_id,
+                    ast.belt_id,
+                    ast.type_id,
+                    ast.quantity,
+                    ast.initial_quantity,
+                    ast.position.0,
+                    ast.position.1,
+                    ast.position.2,
+                    ast.radius,
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+            fp.asteroids.insert(id, h);
+        }
+    }
+
     if need_wal_delta && cold_changed {
         delta.full_snapshot = Some(snap.clone());
     }
@@ -1184,7 +1221,8 @@ pub fn replace_sqlite_from_snapshot(
          DELETE FROM system_states;
          DELETE FROM idempotency_keys;
          DELETE FROM licensed_skins;
-         DELETE FROM applied_ship_skins;",
+         DELETE FROM applied_ship_skins;
+         DELETE FROM asteroids;",
     )
     .map_err(|e| e.to_string())?;
     let mut fp = TableFingerprints::default();
