@@ -56,8 +56,8 @@
   "note": "Completed lossless loading and full-row field verification for all 7 SQLite .static files (blueprints, clonegrades, compressibletypes, dbuffcollections, dynamicitemattributes, fighterabilities, fighterabilitiesbytype); remaining .fsdbinary/.static client resources stay open."
  },
  "D-2": {
-  "assessment": "PARTIAL",
-  "note": "SDE SQLite loader and indexed tables in place; station index map and full station columns pending."
+  "assessment": "DONE",
+  "note": "SdeRegistry indexed lookups implemented for all 20 required domains including O(1) stations map, full station columns, and non-empire corvette_type_id Option propagation."
  },
  "D-3": {
   "assessment": "PARTIAL",
