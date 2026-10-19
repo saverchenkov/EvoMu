@@ -55,6 +55,27 @@ impl DynamicQuasarMessage {
     pub fn get(&self, field_number: u32) -> Option<&DynamicValue> {
         self.fields.get(&field_number)
     }
+
+    pub fn from_wire_fallback(full_name: &str, buf: &[u8]) -> Result<Self, QuasarError> {
+        let wm = WireMessage::decode(buf)?;
+        let mut msg = DynamicQuasarMessage::new(full_name);
+        for wf in wm.fields {
+            let val = match wf.value {
+                WireValue::Varint(v) => DynamicValue::Uint64(v),
+                WireValue::Fixed64(v) => DynamicValue::Fixed64(v),
+                WireValue::Fixed32(v) => DynamicValue::Fixed32(v),
+                WireValue::LengthDelimited(b) => {
+                    if let Ok(s) = std::str::from_utf8(&b) {
+                        DynamicValue::String(s.to_string())
+                    } else {
+                        DynamicValue::Bytes(b)
+                    }
+                }
+            };
+            msg.set(wf.field_number, val);
+        }
+        Ok(msg)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

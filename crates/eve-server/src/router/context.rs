@@ -86,6 +86,11 @@ impl ServerContext {
             quasar_descriptors,
             Arc::clone(&db),
         ));
+        crate::quasar_services::register_all_quasar_services(
+            &quasar_gateway,
+            Arc::clone(&db),
+            Arc::clone(&sde),
+        );
 
         Self {
             sde,
