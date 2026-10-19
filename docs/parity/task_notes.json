@@ -233,7 +233,7 @@
  },
  "P-4": {
   "assessment": "PARTIAL",
-  "note": "config service bulk entity/location/station/ticker/type/unit/map/landmark RPCs implemented with SDE+DB containers; GetMultiGraphicsEx and GetCelestialStatistic return UnimplementedRPC until SDE tables are imported"
+  "note": "Bulk entity, location, station, ticker, type, unit, and map RPCs implemented with SDE and DB containers. Remaining graphics RPCs return UnimplementedRPC until SDE import."
  },
  "P-5": {
   "assessment": "PARTIAL",
@@ -385,7 +385,7 @@
  },
  "T-3": {
   "assessment": "PARTIAL",
-  "note": "Added 10,000-case proptest round-trip suites for eve-proto (marshal opcodes, PyPackedRow/DBRow, BridgeEnvelope, synthetic GatewayFrame fixture), eve-destiny (AddBalls wire codec), and eve-db (IskCents invariants), plus cargo-fuzz targets and minimized seed corpus; 1h fuzz campaign and Q-1/Q-2 client gateway descriptors pending."
+  "note": "Added 10k-case proptest suites for eve-proto, eve-destiny, and eve-db, plus cargo-fuzz targets and seed corpus. Full 1h campaign and Q-1 gateway descriptors pending."
  },
  "T-4": {
   "assessment": "NOT STARTED",
