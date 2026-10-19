@@ -315,6 +315,26 @@ pub fn turret_chance_to_hit(
     combat::compute_turret_chance_to_hit(omega, tracking, sig_radius, distance, optimal, falloff)
 }
 
+pub fn turret_chance_to_hit_with_res(
+    omega: f64,
+    tracking: f64,
+    sig_resolution: f64,
+    sig_radius: f64,
+    distance: f64,
+    optimal: f64,
+    falloff: f64,
+) -> f64 {
+    combat::compute_turret_chance_to_hit_with_res(
+        omega,
+        tracking,
+        sig_resolution,
+        sig_radius,
+        distance,
+        optimal,
+        falloff,
+    )
+}
+
 pub fn turret_shot_damage(
     base_damage: DamageVector,
     chance_to_hit: f64,

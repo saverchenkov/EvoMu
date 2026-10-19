@@ -128,6 +128,10 @@ pub struct CombatState {
     pub armor_resonance: [f64; 4],
     /// Structure damage resonance `[EM, Thermal, Kinetic, Explosive]` (`1.0` = 0% resistance).
     pub structure_resonance: [f64; 4],
+    #[serde(default = "default_recharge_time_ms")]
+    pub shield_recharge_time_ms: f64,
+    #[serde(default = "default_recharge_time_ms")]
+    pub capacitor_recharge_time_ms: f64,
     pub capacitor: f64,
     pub max_capacitor: f64,
     pub signature_radius: f64,
@@ -137,6 +141,10 @@ pub struct CombatState {
     pub entropic_spool_cycles: u32,
     /// Active Breacher Pod DoT `(flat_dmg_per_sec, pct_max_hp_per_sec, remaining_ticks)`.
     pub active_breacher_dot: Option<(f64, f64, u32)>,
+}
+
+fn default_recharge_time_ms() -> f64 {
+    120_000.0
 }
 
 impl Default for CombatState {
@@ -151,6 +159,8 @@ impl Default for CombatState {
             shield_resonance: [1.0, 1.0, 1.0, 1.0],
             armor_resonance: [1.0, 1.0, 1.0, 1.0],
             structure_resonance: [1.0, 1.0, 1.0, 1.0],
+            shield_recharge_time_ms: 120_000.0,
+            capacitor_recharge_time_ms: 120_000.0,
             capacitor: 250.0,
             max_capacitor: 250.0,
             signature_radius: 35.0,
@@ -789,6 +799,50 @@ impl Ballpark {
         Some(removed)
     }
 
+    /// Applies incoming damage to `ball_id`, updates its [`CombatState`], emits
+    /// `DestinyEvent::OnDamageStateChange` to all observers in the entity's grid,
+    /// and if destroyed, queues `DestinyEvent::TerminalExplosion` and removes the ball.
+    pub fn apply_damage_to_ball(
+        &mut self,
+        ball_id: BallId,
+        dmg: DamageVector,
+    ) -> Option<(f64, bool, Option<Ball>)> {
+        let ball_snap = self.balls.get(&ball_id).cloned();
+        let grid_id = self.ball_grid_ids.get(&ball_id).copied();
+        let cs = self.combat_states.entry(ball_id).or_default();
+        let (applied, destroyed) = cs.apply_damage(dmg);
+        let s_ratio = if cs.max_shield_hp > 0.0 {
+            (cs.shield_hp / cs.max_shield_hp).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let a_ratio = if cs.max_armor_hp > 0.0 {
+            (cs.armor_hp / cs.max_armor_hp).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let h_ratio = if cs.max_structure_hp > 0.0 {
+            (cs.structure_hp / cs.max_structure_hp).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let ev = DestinyEvent::OnDamageStateChange {
+            ball_id,
+            shield_ratio: s_ratio,
+            armor_ratio: a_ratio,
+            structure_ratio: h_ratio,
+        };
+        if let Some(gid) = grid_id {
+            self.queue_event_for_grid_observers(gid, None, &ev);
+        } else {
+            self.observer_events.entry(ball_id).or_default().push(ev);
+        }
+        if destroyed {
+            let _ = self.remove_ball(ball_id);
+        }
+        Some((applied, destroyed, ball_snap))
+    }
+
     /// Moves `ball_id` to `new_position` and reconciles its [`GridBubble`] membership.
     pub fn set_ball_position(&mut self, ball_id: BallId, new_position: DVec3) -> bool {
         let Some(ball) = self.balls.get_mut(&ball_id) else {
@@ -1001,6 +1055,27 @@ impl Ballpark {
                     } else {
                         cs.active_breacher_dot = Some((flat_dps, pct_dps, rem_ticks - 1));
                     }
+                }
+
+                // Passive Shield and Capacitor recharge simulation (C-2)
+                if cs.shield_hp > 0.0
+                    && cs.shield_hp < cs.max_shield_hp
+                    && cs.shield_recharge_time_ms > 0.0
+                {
+                    cs.shield_hp = combat::compute_passive_recharge(
+                        cs.shield_hp,
+                        cs.max_shield_hp,
+                        cs.shield_recharge_time_ms,
+                        dt * 1000.0,
+                    );
+                }
+                if cs.capacitor < cs.max_capacitor && cs.capacitor_recharge_time_ms > 0.0 {
+                    cs.capacitor = combat::compute_passive_recharge(
+                        cs.capacitor,
+                        cs.max_capacitor,
+                        cs.capacitor_recharge_time_ms,
+                        dt * 1000.0,
+                    );
                 }
             }
         }
@@ -1227,6 +1302,48 @@ pub mod combat {
         d.cross(dv).length() / dist_sq
     }
 
+    /// Computes the analytical EVE passive recharge curve (used by Capacitor and Shield regeneration):
+    ///
+    /// $$C(t) = C_{\max} \left(1 + \left(\sqrt{\frac{C_0}{C_{\max}}} - 1\right) e^{-\frac{5 \Delta t}{\tau_{\text{recharge}}}}\right)^2$$
+    pub fn compute_passive_recharge(
+        current: f64,
+        max_capacity: f64,
+        recharge_time_ms: f64,
+        dt_ms: f64,
+    ) -> f64 {
+        if max_capacity <= 0.0 || recharge_time_ms <= 0.0 || current >= max_capacity {
+            return current.min(max_capacity);
+        }
+        let c0_ratio = (current.max(0.0) / max_capacity).sqrt();
+        let decay = (-5.0 * dt_ms / recharge_time_ms).exp();
+        let term = 1.0 + (c0_ratio - 1.0) * decay;
+        (max_capacity * term * term).clamp(0.0, max_capacity)
+    }
+
+    /// Computes EVE Turret ChanceToHit with explicit signature resolution (`C-1`):
+    /// $$P_{\text{hit}} = 0.5^{\left(\frac{\omega \cdot S_{\text{res}}}{\omega_{\text{track}} \cdot \sigma_{\text{target}}}\right)^2 + \left(\frac{\max(0, d - R_{\text{opt}})}{R_{\text{falloff}}}\right)^2}$$
+    pub fn compute_turret_chance_to_hit_with_res(
+        angular_velocity: f64,
+        turret_tracking: f64,
+        signature_resolution: f64,
+        target_sig_radius: f64,
+        distance: f64,
+        optimal_range: f64,
+        falloff_range: f64,
+    ) -> f64 {
+        let track_denom = (turret_tracking * target_sig_radius).max(1e-6);
+        let track_term = ((angular_velocity * signature_resolution.max(1.0)) / track_denom).powi(2);
+        let range_excess = (distance - optimal_range).max(0.0);
+        let range_term = if falloff_range > 0.0 {
+            (range_excess / falloff_range).powi(2)
+        } else if range_excess > 0.0 {
+            100.0
+        } else {
+            0.0
+        };
+        0.5_f64.powf(track_term + range_term)
+    }
+
     /// Computes EVE Turret ChanceToHit (`#47`):
     /// $$P_{\text{hit}} = 0.5^{\left(\frac{\omega \cdot 40000}{\omega_{\text{track}} \cdot \sigma_{\text{target}}}\right)^2 + \left(\frac{\max(0, d - R_{\text{opt}})}{R_{\text{falloff}}}\right)^2}$$
     pub fn compute_turret_chance_to_hit(
@@ -1237,17 +1354,15 @@ pub mod combat {
         optimal_range: f64,
         falloff_range: f64,
     ) -> f64 {
-        let track_denom = (turret_tracking * target_sig_radius).max(1e-6);
-        let track_term = ((angular_velocity * 40_000.0) / track_denom).powi(2);
-        let range_excess = (distance - optimal_range).max(0.0);
-        let range_term = if falloff_range > 0.0 {
-            (range_excess / falloff_range).powi(2)
-        } else if range_excess > 0.0 {
-            100.0
-        } else {
-            0.0
-        };
-        0.5_f64.powf(track_term + range_term)
+        compute_turret_chance_to_hit_with_res(
+            angular_velocity,
+            turret_tracking,
+            40_000.0,
+            target_sig_radius,
+            distance,
+            optimal_range,
+            falloff_range,
+        )
     }
 
     /// Resolves a turret shot given `chance_to_hit` and deterministic uniform roll `u in [0.0, 1.0)` (`#48`–`#49`).

@@ -65,6 +65,11 @@ pub enum SystemCommand {
         fraction: f64,
         reply: oneshot::Sender<Result<u64, String>>,
     },
+    SetBallPosition {
+        ball_id: BallId,
+        position: glam::DVec3,
+        reply: oneshot::Sender<bool>,
+    },
     PushSetState {
         observer_ball_id: BallId,
         reply: oneshot::Sender<Result<u64, String>>,
@@ -210,6 +215,23 @@ impl SystemHandle {
             .map_err(|_| "Solar system actor stopped".to_string())?;
         rx.await
             .map_err(|_| "Solar system reply dropped".to_string())?
+    }
+
+    pub async fn set_ball_position(&self, ball_id: BallId, position: glam::DVec3) -> bool {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(SystemCommand::SetBallPosition {
+                ball_id,
+                position,
+                reply: tx,
+            })
+            .await
+            .is_err()
+        {
+            return false;
+        }
+        rx.await.unwrap_or(false)
     }
 
     /// Queues a `SetState` destiny update for `observer_ball_id` (`P-7`).
@@ -700,6 +722,14 @@ impl SystemRegistry {
                                     let _ = reply.send(Err(format!("Ball {ball_id} not in system {solar_system_id}")));
                                 }
                             }
+                            SystemCommand::SetBallPosition {
+                                ball_id,
+                                position,
+                                reply,
+                            } => {
+                                let updated = ballpark.set_ball_position(ball_id, position);
+                                let _ = reply.send(updated);
+                            }
                             SystemCommand::PushSetState {
                                 observer_ball_id,
                                 reply,
@@ -774,13 +804,12 @@ impl SystemRegistry {
                                 let _ = reply.send((ballpark.current_tick, events, pyrep));
                             }
                             SystemCommand::ApplyDamage { ball_id, damage, reply } => {
-                                if let Some(ball_snap) = ballpark.balls.get(&ball_id).cloned() {
-                                    let cs = ballpark.combat_states.entry(ball_id).or_default();
-                                    let (applied, destroyed) = cs.apply_damage(damage);
-                                    if destroyed {
-                                        let _ = ballpark.remove_ball(ball_id);
+                                if let Some((applied, destroyed, ball_opt)) = ballpark.apply_damage_to_ball(ball_id, damage) {
+                                    if let Some(ball_snap) = ball_opt {
+                                        let _ = reply.send(Some((applied, destroyed, ball_snap)));
+                                    } else {
+                                        let _ = reply.send(None);
                                     }
-                                    let _ = reply.send(Some((applied, destroyed, ball_snap)));
                                 } else {
                                     let _ = reply.send(None);
                                 }

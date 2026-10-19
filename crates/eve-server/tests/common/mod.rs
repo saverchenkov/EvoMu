@@ -5,6 +5,7 @@ use eve_proto::PyRep;
 use eve_server::router::ServerContext;
 use std::collections::HashMap;
 
+#[allow(dead_code)]
 pub async fn login_pilot(
     ctx: &ServerContext,
     sess: &mut SessionState,

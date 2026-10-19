@@ -2,6 +2,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod combat;
 pub mod config;
 pub mod esi;
 pub mod formulas;
