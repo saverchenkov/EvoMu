@@ -1569,6 +1569,17 @@ impl ShipFittingEngine {
             .find(|m| m.item_id == module_item_id)
     }
 
+    /// Returns the evaluated dogma attribute for a fitted module after character skills, hull bonuses, and modifiers (`DG-1`, `MN-01`).
+    pub fn get_module_effective_attribute(&self, module_item_id: i64, attr_id: AttributeId, sde: &SdeRegistry) -> f64 {
+        if let Some(st) = self.module_state(module_item_id, sde) {
+            return st.get_attribute(attr_id, sde);
+        }
+        self.modules
+            .get(&module_item_id)
+            .map(|m| DogmaItemState::from_sde(module_item_id, m.type_id, sde).get_attribute(attr_id, sde))
+            .unwrap_or(0.0)
+    }
+
     /// Fits and brings a module online, validating slot effects, hull slot counts, turret/launcher
     /// hardpoints, hull/group restrictions, rig/charge size classes, character skills, and CPU/PG/Calibration.
     pub fn fit_and_online_module(

@@ -579,6 +579,25 @@ pub fn load_snapshot_from_sqlite(
         }
     }
 
+    {
+        if let Ok(mut stmt) = conn.prepare("SELECT character_id, solar_system_id, type_id, quantity, date, timestamp_unix FROM char_mining_ledger") {
+            if let Ok(rows) = stmt.query_map([], |r| {
+                Ok(MiningLedgerRecord {
+                    character_id: r.get(0)?,
+                    solar_system_id: r.get::<_, i64>(1)? as u32,
+                    type_id: r.get::<_, i64>(2)? as u32,
+                    quantity: r.get(3)?,
+                    date: r.get(4)?,
+                    timestamp_unix: r.get::<_, i64>(5)? as u64,
+                })
+            }) {
+                for r in rows.flatten() {
+                    snap.mining_ledger.push(r);
+                }
+            }
+        }
+    }
+
     let fp = compute_fingerprints(&snap);
     Ok((snap, fp))
 }

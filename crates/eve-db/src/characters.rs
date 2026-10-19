@@ -455,4 +455,39 @@ impl WorldRepository {
             Ok(guard.characters[&character_id].clone())
         })
     }
+
+    /// Records an entry in the character's mining ledger (`MN-03`, `charMiningLedger`).
+    pub fn record_mining_ledger_entry(
+        &self,
+        character_id: i64,
+        solar_system_id: u32,
+        type_id: u32,
+        quantity: i64,
+        timestamp_unix: u64,
+    ) -> Result<(), DbError> {
+        let date = crate::types::unix_secs_to_date_string(timestamp_unix);
+        self.try_with_mut_snapshot(|guard| {
+            guard.mining_ledger.push(MiningLedgerRecord {
+                character_id,
+                solar_system_id,
+                type_id,
+                quantity,
+                date,
+                timestamp_unix,
+            });
+            Ok(())
+        })
+    }
+
+    /// Returns all mining ledger entries for a character (`MN-03`).
+    pub fn get_mining_ledger(&self, character_id: i64) -> Vec<MiningLedgerRecord> {
+        let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
+        guard
+            .mining_ledger
+            .iter()
+            .filter(|r| r.character_id == character_id)
+            .cloned()
+            .collect()
+    }
 }
+

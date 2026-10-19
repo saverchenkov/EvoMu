@@ -24,6 +24,9 @@ pub const AU_METERS: f64 = 149_597_870_700.0;
 /// Standard EVE V24 grid bubble radius in meters (`8,000 km` = `8,000,000 m`).
 pub const BUBBLE_RADIUS_METERS: f64 = 8_000_000.0;
 
+/// Bubble transition threshold in meters (`10,000 km` = `10,000,000 m`, `SP-3`).
+pub const BUBBLE_TRANSITION_THRESHOLD_METERS: f64 = 10_000_000.0;
+
 /// Proximity decloak distance in meters (`2,000m` surface-to-surface).
 pub const DECLOAK_DISTANCE_METERS: f64 = 2_000.0;
 
@@ -137,6 +140,8 @@ pub struct CombatState {
     pub entropic_spool_cycles: u32,
     /// Active Breacher Pod DoT `(flat_dmg_per_sec, pct_max_hp_per_sec, remaining_ticks)`.
     pub active_breacher_dot: Option<(f64, f64, u32)>,
+    /// Remaining ticks of gate cloak invulnerability (SP-5).
+    pub gate_cloak_remaining_ticks: u32,
 }
 
 impl Default for CombatState {
@@ -159,6 +164,7 @@ impl Default for CombatState {
             warp_scramble_strength: 0,
             entropic_spool_cycles: 0,
             active_breacher_dot: None,
+            gate_cloak_remaining_ticks: 0,
         }
     }
 }
@@ -168,7 +174,7 @@ impl CombatState {
     /// 4-channel `[EM, Thermal, Kinetic, Explosive]` resonance profile.
     /// Returns `(total_applied_damage, destroyed)`.
     pub fn apply_damage(&mut self, dmg: DamageVector) -> (f64, bool) {
-        if self.is_tethered {
+        if self.is_tethered || self.gate_cloak_remaining_ticks > 0 {
             return (0.0, false);
         }
         let mut rem_vec = DamageVector {
@@ -329,6 +335,10 @@ pub enum DestinyEvent {
     TerminalExplosion {
         ball_id: BallId,
         wreck_ball_id: BallId,
+    },
+    Collision {
+        ball_a: BallId,
+        ball_b: BallId,
     },
 }
 
@@ -626,7 +636,7 @@ impl Ballpark {
         let Some(grid) = self.grids.get(&grid_id) else {
             return false;
         };
-        let max_ext = MAX_GRID_EXTENT_METERS.max(grid.base_radius);
+        let max_ext = BUBBLE_TRANSITION_THRESHOLD_METERS.max(grid.base_radius);
         let delta = (target_pos - grid.center).abs();
         if delta.x > max_ext || delta.y > max_ext || delta.z > max_ext {
             return false;
@@ -967,6 +977,147 @@ impl Ballpark {
             integrate_subwarp(ball, goal_velocity, dt);
         }
 
+        // Collision bounce physics (`Destiny::Ball::Collision`, `SP-4`)
+        let ball_keys: Vec<BallId> = self.balls.keys().copied().collect();
+        let mut collision_events = Vec::new();
+        let restitution = 0.8;
+
+        for i in 0..ball_keys.len() {
+            let id_a = ball_keys[i];
+            let is_static_a = self.is_static_ball(id_a);
+
+            for j in (i + 1)..ball_keys.len() {
+                let id_b = ball_keys[j];
+                let is_static_b = self.is_static_ball(id_b);
+
+                // Skip static-static collisions
+                if is_static_a && is_static_b {
+                    continue;
+                }
+
+                // Celestial spheres, stargates, and stations do not have elastic bounce collision physics
+                let group_a = self.ball_group_ids.get(&id_a).copied().unwrap_or(0);
+                let group_b = self.ball_group_ids.get(&id_b).copied().unwrap_or(0);
+                if matches!(group_a, 6 | 7 | 8 | 9 | 10 | 15) || matches!(group_b, 6 | 7 | 8 | 9 | 10 | 15) {
+                    continue;
+                }
+
+                let (pos_a, rad_a, mass_a, vel_a) = {
+                    let b = &self.balls[&id_a];
+                    (b.position, b.radius, b.mass.max(1.0), b.velocity)
+                };
+                let (pos_b, rad_b, mass_b, vel_b) = {
+                    let b = &self.balls[&id_b];
+                    (b.position, b.radius, b.mass.max(1.0), b.velocity)
+                };
+
+                if rad_a > 50_000.0 || rad_b > 50_000.0 {
+                    continue;
+                }
+
+                let delta = pos_a - pos_b;
+                let dist = delta.length();
+                let min_dist = rad_a + rad_b;
+
+                if dist < min_dist {
+                    let normal = if dist > 1e-4 {
+                        delta / dist
+                    } else {
+                        DVec3::X
+                    };
+                    let overlap = min_dist - dist;
+                    let v_rel = (vel_a - vel_b).dot(normal);
+
+                    if !is_static_a && !is_static_b {
+                        // Dynamic vs dynamic
+                        if v_rel < 0.0 {
+                            let total_inv_mass = (1.0 / mass_a) + (1.0 / mass_b);
+                            let impulse = -(1.0 + restitution) * v_rel / total_inv_mass;
+                            if let Some(ba) = self.balls.get_mut(&id_a) {
+                                ba.velocity += normal * (impulse / mass_a);
+                            }
+                            if let Some(bb) = self.balls.get_mut(&id_b) {
+                                bb.velocity -= normal * (impulse / mass_b);
+                            }
+                        }
+                        let total_mass = mass_a + mass_b;
+                        if let Some(ba) = self.balls.get_mut(&id_a) {
+                            ba.position += normal * (overlap * (mass_b / total_mass));
+                            if matches!(ba.mode, MovementMode::Warp { .. }) {
+                                ba.mode = MovementMode::Stop;
+                                ba.speed_fraction = 0.0;
+                            }
+                        }
+                        if let Some(bb) = self.balls.get_mut(&id_b) {
+                            bb.position -= normal * (overlap * (mass_a / total_mass));
+                            if matches!(bb.mode, MovementMode::Warp { .. }) {
+                                bb.mode = MovementMode::Stop;
+                                bb.speed_fraction = 0.0;
+                            }
+                        }
+                    } else if !is_static_a && is_static_b {
+                        // Dynamic A vs Static B
+                        if v_rel < 0.0 {
+                            if let Some(ba) = self.balls.get_mut(&id_a) {
+                                ba.velocity -= normal * ((1.0 + restitution) * v_rel);
+                            }
+                        }
+                        if let Some(ba) = self.balls.get_mut(&id_a) {
+                            ba.position += normal * overlap;
+                            if matches!(ba.mode, MovementMode::Warp { .. }) {
+                                ba.mode = MovementMode::Stop;
+                                ba.speed_fraction = 0.0;
+                            }
+                        }
+                    } else if is_static_a && !is_static_b {
+                        // Static A vs Dynamic B
+                        if v_rel < 0.0 {
+                            if let Some(bb) = self.balls.get_mut(&id_b) {
+                                bb.velocity -= normal * ((1.0 + restitution) * v_rel);
+                            }
+                        }
+                        if let Some(bb) = self.balls.get_mut(&id_b) {
+                            bb.position -= normal * overlap;
+                            if matches!(bb.mode, MovementMode::Warp { .. }) {
+                                bb.mode = MovementMode::Stop;
+                                bb.speed_fraction = 0.0;
+                            }
+                        }
+                    }
+
+                    collision_events.push((id_a, id_b));
+                }
+            }
+        }
+
+        for (id_a, id_b) in collision_events {
+            let ev = DestinyEvent::Collision { ball_a: id_a, ball_b: id_b };
+            self.pending_events.push(ev.clone());
+            if let Some(&gid) = self.ball_grid_ids.get(&id_a).or_else(|| self.ball_grid_ids.get(&id_b)) {
+                self.queue_event_for_grid_observers(gid, None, &ev);
+            }
+        }
+
+        // Gate cloak decay and break on active movement (`SP-5`)
+        for (&id, cs) in &mut self.combat_states {
+            if cs.gate_cloak_remaining_ticks > 0 {
+                let has_moved = self.balls.get(&id).is_some_and(|b| {
+                    !matches!(b.mode, MovementMode::Stop) || b.speed_fraction > 0.0 || b.velocity.length_squared() > 1.0
+                });
+                if has_moved {
+                    cs.gate_cloak_remaining_ticks = 0;
+                    cs.is_cloaked = false;
+                } else {
+                    cs.gate_cloak_remaining_ticks = cs.gate_cloak_remaining_ticks.saturating_sub(1);
+                    if cs.gate_cloak_remaining_ticks == 0 {
+                        cs.is_cloaked = false;
+                    } else {
+                        cs.is_cloaked = true;
+                    }
+                }
+            }
+        }
+
         // Check 2,000m surface-to-surface proximity decloak and active Breacher Pod DoT
         let updated_positions: Vec<(BallId, DVec3, f64)> = self
             .balls
@@ -976,7 +1127,7 @@ impl Ballpark {
 
         for &(id_a, pos_a, rad_a) in &updated_positions {
             if let Some(cs) = self.combat_states.get_mut(&id_a) {
-                if cs.is_cloaked {
+                if cs.is_cloaked && cs.gate_cloak_remaining_ticks == 0 {
                     for &(id_b, pos_b, rad_b) in &updated_positions {
                         if id_a != id_b {
                             let surface_dist = (pos_a - pos_b).length() - rad_a - rad_b;
@@ -1005,7 +1156,7 @@ impl Ballpark {
             }
         }
 
-        // Reconcile shared dynamic GridBubble membership after movement (`SP-2`, `Grid.md:13-15`).
+        // Reconcile shared dynamic GridBubble membership after movement (`SP-2`, `SP-3`, `Grid.md:13-15`).
         for &ball_id in &dynamic_ids {
             let Some((new_pos, is_warping)) = self
                 .balls
@@ -1017,7 +1168,13 @@ impl Ballpark {
             let old_gid = self.ball_grid_ids.get(&ball_id).copied();
             let still_in_old = old_gid
                 .and_then(|gid| self.grids.get(&gid))
-                .is_some_and(|g| g.contains(new_pos));
+                .is_some_and(|g| {
+                    let d = (new_pos - g.center).abs();
+                    d.x <= BUBBLE_TRANSITION_THRESHOLD_METERS
+                        && d.y <= BUBBLE_TRANSITION_THRESHOLD_METERS
+                        && d.z <= BUBBLE_TRANSITION_THRESHOLD_METERS
+                        && g.contains(new_pos)
+                });
             if still_in_old {
                 if !is_warping {
                     if let Some(gid) = old_gid {
@@ -1027,7 +1184,7 @@ impl Ballpark {
                 }
                 continue;
             }
-            // Sub-warp ships pushing a grid boundary expand the grid (up to 20,000 km) if no adjacent grid wall blocks it.
+            // Sub-warp ships pushing a grid boundary expand the grid (up to 10,000 km) if no adjacent grid wall blocks it.
             if !is_warping {
                 if let Some(gid) = old_gid {
                     if self.try_expand_grid(gid, new_pos) {
@@ -1879,4 +2036,56 @@ mod tests {
         park.remove_ball(100_000_003);
         assert!(!park.grids.contains_key(&gid_a), "Empty grid must be deleted");
     }
+
+    #[test]
+    // parity: plan:SP-4, destiny:Ball::Collision
+    fn test_destiny_collision_bounce_physics_and_gate_cloak() {
+        let mut park = Ballpark::new(30_000_142);
+
+        // Dynamic ship 1 moving along +X towards static asteroid
+        let ship1 = Ball {
+            id: 2001,
+            type_id: 587,
+            position: DVec3::ZERO,
+            velocity: DVec3::new(15.0, 0.0, 0.0),
+            max_velocity: 365.0,
+            inertia: 3.45,
+            mass: 1_000_000.0,
+            radius: 50.0,
+            speed_fraction: 0.1,
+            mode: MovementMode::GotoDirection { direction: DVec3::X },
+        };
+        // Static asteroid at x = 80m, radius 50m (overlap: 50 + 50 - 80 = 20m)
+        let asteroid = Ball {
+            id: 9001,
+            type_id: 1230,
+            position: DVec3::new(80.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 0.0,
+            mass: 10_000_000.0,
+            radius: 50.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Rigid,
+        };
+
+        park.add_ball(ship1);
+        park.add_static_ball(asteroid, 25);
+
+        // Step physics -> collision bounce
+        let events = park.step(1.0);
+        let has_collision = events.iter().any(|e| matches!(e, DestinyEvent::Collision { ball_a, ball_b } if (*ball_a == 2001 && *ball_b == 9001) || (*ball_a == 9001 && *ball_b == 2001)));
+        assert!(has_collision, "Must emit DestinyEvent::Collision upon collision");
+
+        let b1 = park.balls.get(&2001).unwrap();
+        assert!(b1.velocity.x < 0.0, "Velocity must bounce back after colliding with static asteroid, got {}", b1.velocity.x);
+
+        // Gate cloak test (SP-5): ship with gate cloak is invulnerable and cloaked for 60s
+        let mut cs = CombatState::default();
+        cs.gate_cloak_remaining_ticks = 60;
+        let (applied, destroyed) = cs.apply_damage(DamageVector { em: 100.0, thermal: 100.0, kinetic: 100.0, explosive: 100.0 });
+        assert_eq!(applied, 0.0);
+        assert!(!destroyed);
+    }
 }
+

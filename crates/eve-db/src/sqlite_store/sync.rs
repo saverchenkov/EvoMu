@@ -1139,6 +1139,21 @@ pub fn sync_dirty_to_sqlite(
         }
     }
 
+    // 32. char_mining_ledger
+    for entry in &snap.mining_ledger {
+        let _ = tx.execute(
+            "INSERT OR IGNORE INTO char_mining_ledger (character_id, solar_system_id, type_id, quantity, date, timestamp_unix) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                entry.character_id,
+                entry.solar_system_id as i64,
+                entry.type_id as i64,
+                entry.quantity,
+                entry.date,
+                entry.timestamp_unix as i64,
+            ],
+        );
+    }
+
     if need_wal_delta && cold_changed {
         delta.full_snapshot = Some(snap.clone());
     }
@@ -1184,7 +1199,8 @@ pub fn replace_sqlite_from_snapshot(
          DELETE FROM system_states;
          DELETE FROM idempotency_keys;
          DELETE FROM licensed_skins;
-         DELETE FROM applied_ship_skins;",
+         DELETE FROM applied_ship_skins;
+         DELETE FROM char_mining_ledger;",
     )
     .map_err(|e| e.to_string())?;
     let mut fp = TableFingerprints::default();

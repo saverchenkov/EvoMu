@@ -11,20 +11,44 @@ use eve_destiny::{
 use eve_proto::PyRep;
 use eve_sde::{SdeRegistry, SolarSystemId};
 use glam::DVec3;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::time::MissedTickBehavior;
 
-// parity: plan:P-7, plan:SP-1, plan:SP-2
+// parity: plan:P-7, plan:SP-1, plan:SP-2, plan:SP-4, plan:SP-5, plan:MN-01, plan:MN-02, plan:MN-03
 // parity: feat:navigation.celestials-balls, feat:navigation.bubbles-grid
 // parity: feat:navigation.destiny-updates, feat:serverops.server-tick
 // parity: notify:DoDestinyUpdate
-// parity: destiny:AddBalls2, destiny:RemoveBalls, destiny:RemoveBall
+// parity: destiny:AddBalls2, destiny:RemoveBalls, destiny:RemoveBall, destiny:Ball::Collision
 
 /// Bounded mailbox capacity per solar system actor.
 pub const SYSTEM_MAILBOX_CAPACITY: usize = 256;
+
+/// State of an individual harvestable asteroid entity in space (`SP-4`, `MN-01`, `MN-02`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AsteroidState {
+    pub asteroid_id: BallId,
+    pub belt_id: BallId,
+    pub type_id: u32,
+    pub initial_units: u64,
+    pub remaining_units: u64,
+    pub unit_volume: f64,
+    pub depleted: bool,
+    pub respawn_at_tick: Option<u64>,
+}
+
+/// Result of an individual mining/harvesting extraction cycle (`MN-01`, `MN-02`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MiningExtractionResult {
+    pub mined_units: u64,
+    pub wasted_units: u64,
+    pub remaining_units: u64,
+    pub ore_type_id: u32,
+    pub depleted: bool,
+}
 
 #[derive(Debug, Clone)]
 pub struct TickBroadcast {
@@ -51,6 +75,32 @@ pub enum SystemCommand {
         slim_meta: SlimItemMeta,
         reply: oneshot::Sender<Result<u64, String>>,
     },
+    SpawnAsteroid {
+        asteroid: AsteroidState,
+        ball: Ball,
+        reply: oneshot::Sender<Result<BallId, String>>,
+    },
+    MineAsteroid {
+        asteroid_id: BallId,
+        requested_units: u64,
+        waste_probability: f64,
+        reply: oneshot::Sender<Result<MiningExtractionResult, String>>,
+    },
+    GetAsteroidState {
+        asteroid_id: BallId,
+        reply: oneshot::Sender<Option<AsteroidState>>,
+    },
+    RespawnDepletedAsteroids {
+        reply: oneshot::Sender<Vec<BallId>>,
+    },
+    BreakGateCloak {
+        ball_id: BallId,
+        reply: oneshot::Sender<bool>,
+    },
+    PopulateAsteroids {
+        reply: oneshot::Sender<Vec<AsteroidState>>,
+    },
+
     RemoveBall {
         ball_id: BallId,
         reply: oneshot::Sender<Option<Ball>>,
@@ -166,6 +216,93 @@ impl SystemHandle {
             .map_err(|_| "Solar system actor stopped".to_string())?;
         rx.await
             .map_err(|_| "Solar system reply dropped".to_string())?
+    }
+
+    pub async fn spawn_asteroid(
+        &self,
+        asteroid: AsteroidState,
+        ball: Ball,
+    ) -> Result<BallId, String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SystemCommand::SpawnAsteroid {
+                asteroid,
+                ball,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| "Solar system actor stopped".to_string())?;
+        rx.await
+            .map_err(|_| "Solar system reply dropped".to_string())?
+    }
+
+    pub async fn mine_asteroid(
+        &self,
+        asteroid_id: BallId,
+        requested_units: u64,
+        waste_probability: f64,
+    ) -> Result<MiningExtractionResult, String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SystemCommand::MineAsteroid {
+                asteroid_id,
+                requested_units,
+                waste_probability,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| "Solar system actor stopped".to_string())?;
+        rx.await
+            .map_err(|_| "Solar system reply dropped".to_string())?
+    }
+
+    pub async fn get_asteroid_state(
+        &self,
+        asteroid_id: BallId,
+    ) -> Result<Option<AsteroidState>, String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SystemCommand::GetAsteroidState {
+                asteroid_id,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| "Solar system actor stopped".to_string())?;
+        rx.await
+            .map_err(|_| "Solar system reply dropped".to_string())
+    }
+
+    pub async fn respawn_depleted_asteroids(&self) -> Result<Vec<BallId>, String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SystemCommand::RespawnDepletedAsteroids { reply: tx })
+            .await
+            .map_err(|_| "Solar system actor stopped".to_string())?;
+        rx.await
+            .map_err(|_| "Solar system reply dropped".to_string())
+    }
+
+    pub async fn break_gate_cloak(&self, ball_id: BallId) -> Result<bool, String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SystemCommand::BreakGateCloak {
+                ball_id,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| "Solar system actor stopped".to_string())?;
+        rx.await
+            .map_err(|_| "Solar system reply dropped".to_string())
+    }
+
+    pub async fn populate_asteroid_belt_entities(&self) -> Result<Vec<AsteroidState>, String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SystemCommand::PopulateAsteroids { reply: tx })
+            .await
+            .map_err(|_| "Solar system actor stopped".to_string())?;
+        rx.await
+            .map_err(|_| "Solar system reply dropped".to_string())
     }
 
     pub async fn remove_ball(&self, ball_id: BallId) -> Option<Ball> {
@@ -502,6 +639,100 @@ pub fn populate_system_celestials(
     }
 }
 
+/// Populates asteroid belt entities (Veldspar, Scordite, Pyroxeres, etc.) around asteroid belt celestials (`SP-4`, `MN-01`).
+pub fn populate_asteroid_belt_entities(
+    ballpark: &mut Ballpark,
+    solar_system_id: SolarSystemId,
+    sde: &SdeRegistry,
+) -> Vec<AsteroidState> {
+    let mut states = Vec::new();
+    let mut ast_id_counter = 750_000_000i64;
+
+    for cel in sde.celestials_in_system(solar_system_id) {
+        if cel.group_id == 9 {
+            let belt_pos = cel.position;
+            let ores: [(u32, u64, f64); 4] = [
+                (1230, 20_000, 0.1),  // Veldspar
+                (1228, 15_000, 0.15), // Scordite
+                (1224, 10_000, 0.3),  // Pyroxeres
+                (18, 8_000, 0.35),    // Plagioclase
+            ];
+
+            for (idx, &(type_id, units, unit_vol)) in ores.iter().enumerate() {
+                let id = ast_id_counter;
+                ast_id_counter += 1;
+
+                let offset = DVec3::new(
+                    (idx as f64 * 600.0) + 200.0,
+                    (idx as f64 * 300.0) - 100.0,
+                    (idx as f64 * 400.0) + 150.0,
+                );
+                let pos = belt_pos + offset;
+
+                let ast_state = AsteroidState {
+                    asteroid_id: id,
+                    belt_id: cel.celestial_id,
+                    type_id,
+                    initial_units: units,
+                    remaining_units: units,
+                    unit_volume: unit_vol,
+                    depleted: false,
+                    respawn_at_tick: None,
+                };
+
+                let ball = Ball {
+                    id,
+                    type_id,
+                    position: pos,
+                    velocity: DVec3::ZERO,
+                    max_velocity: 0.0,
+                    inertia: 0.0,
+                    mass: 1.0e10,
+                    radius: 60.0,
+                    speed_fraction: 0.0,
+                    mode: MovementMode::Stop,
+                };
+
+                ballpark.set_ball_slim_meta(
+                    id,
+                    SlimItemMeta {
+                        group_id: 25,
+                        category_id: 25,
+                        owner_id: 1,
+                        char_id: None,
+                        corp_id: -1,
+                        alliance_id: -1,
+                        security_status: 0.0,
+                        is_cloaked: false,
+                    },
+                );
+                ballpark.add_ball(ball);
+                states.push(ast_state);
+            }
+        }
+    }
+    states
+}
+
+fn roll_probability(prob: f64) -> bool {
+    if prob <= 0.0 {
+        return false;
+    }
+    if prob >= 1.0 {
+        return true;
+    }
+    let mut buf = [0u8; 8];
+    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+        use std::io::Read;
+        if f.read_exact(&mut buf).is_ok() {
+            let val = u64::from_ne_bytes(buf);
+            let frac = (val as f64) / (u64::MAX as f64);
+            return frac < prob;
+        }
+    }
+    true
+}
+
 fn ensure_default_slim_meta(
     ballpark: &mut Ballpark,
     ball: &Ball,
@@ -613,6 +844,8 @@ impl SystemRegistry {
             );
             ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
             let mut lod_counter: u64 = 0;
+            let mut asteroids: HashMap<BallId, AsteroidState> = HashMap::new();
+            let mut asteroid_templates: HashMap<BallId, (AsteroidState, Ball)> = HashMap::new();
 
             loop {
                 tokio::select! {
@@ -676,6 +909,147 @@ impl SystemRegistry {
                                 ballpark.add_ball(ball);
                                 ballpark.combat_states.insert(ball_id, combat_state);
                                 let _ = reply.send(Ok(ballpark.current_tick));
+                            }
+                            SystemCommand::SpawnAsteroid { asteroid, ball, reply } => {
+                                let ball_id = asteroid.asteroid_id;
+                                if ballpark.balls.contains_key(&ball_id) {
+                                    let _ = ballpark.remove_ball(ball_id);
+                                }
+                                let (group_id, category_id) = sde_opt
+                                    .as_ref()
+                                    .and_then(|s| s.types.get(&ball.type_id))
+                                    .map(|t| (t.group_id, t.category_id))
+                                    .unwrap_or((25, 25));
+                                ballpark.set_ball_slim_meta(
+                                    ball_id,
+                                    SlimItemMeta {
+                                        group_id,
+                                        category_id,
+                                        owner_id: 1,
+                                        char_id: None,
+                                        corp_id: -1,
+                                        alliance_id: -1,
+                                        security_status: 0.0,
+                                        is_cloaked: false,
+                                    },
+                                );
+                                ballpark.add_ball(ball.clone());
+                                asteroid_templates.insert(ball_id, (asteroid.clone(), ball));
+                                asteroids.insert(ball_id, asteroid);
+                                let _ = reply.send(Ok(ball_id));
+                            }
+                            SystemCommand::MineAsteroid {
+                                asteroid_id,
+                                requested_units,
+                                waste_probability,
+                                reply,
+                            } => {
+                                let res = if let Some(ast) = asteroids.get_mut(&asteroid_id) {
+                                    if ast.remaining_units == 0 {
+                                        Err("Asteroid is already depleted".to_string())
+                                    } else {
+                                        let to_mine = requested_units.min(ast.remaining_units);
+                                        ast.remaining_units -= to_mine;
+
+                                        let wasted_units = if waste_probability > 0.0 && ast.remaining_units > 0 {
+                                            let rolls = waste_probability >= 1.0 || roll_probability(waste_probability);
+                                            if rolls {
+                                                to_mine.min(ast.remaining_units)
+                                            } else {
+                                                0
+                                            }
+                                        } else {
+                                            0
+                                        };
+                                        ast.remaining_units -= wasted_units;
+
+                                        let depleted = ast.remaining_units == 0;
+                                        ast.depleted = depleted;
+                                        if depleted {
+                                            let _ = ballpark.remove_ball(asteroid_id);
+                                        }
+
+                                        Ok(MiningExtractionResult {
+                                            mined_units: to_mine,
+                                            wasted_units,
+                                            remaining_units: ast.remaining_units,
+                                            ore_type_id: ast.type_id,
+                                            depleted,
+                                        })
+                                    }
+                                } else {
+                                    Err(format!("Asteroid {asteroid_id} not found in system {solar_system_id}"))
+                                };
+                                let _ = reply.send(res);
+                            }
+                            SystemCommand::GetAsteroidState { asteroid_id, reply } => {
+                                let _ = reply.send(asteroids.get(&asteroid_id).cloned());
+                            }
+                            SystemCommand::RespawnDepletedAsteroids { reply } => {
+                                let mut respawned = Vec::new();
+                                for (&id, (orig_ast, orig_ball)) in &asteroid_templates {
+                                    let is_depleted = match asteroids.get(&id) {
+                                        Some(a) => a.remaining_units == 0,
+                                        None => true,
+                                    };
+                                    if is_depleted {
+                                        let mut reset_ast = orig_ast.clone();
+                                        reset_ast.remaining_units = reset_ast.initial_units;
+                                        reset_ast.depleted = false;
+                                        asteroids.insert(id, reset_ast);
+                                        if !ballpark.balls.contains_key(&id) {
+                                            let (group_id, category_id) = sde_opt
+                                                .as_ref()
+                                                .and_then(|s| s.types.get(&orig_ball.type_id))
+                                                .map(|t| (t.group_id, t.category_id))
+                                                .unwrap_or((25, 25));
+                                            ballpark.set_ball_slim_meta(
+                                                id,
+                                                SlimItemMeta {
+                                                    group_id,
+                                                    category_id,
+                                                    owner_id: 1,
+                                                    char_id: None,
+                                                    corp_id: -1,
+                                                    alliance_id: -1,
+                                                    security_status: 0.0,
+                                                    is_cloaked: false,
+                                                },
+                                            );
+                                            ballpark.add_ball(orig_ball.clone());
+                                        }
+                                        respawned.push(id);
+                                    }
+                                }
+                                let _ = reply.send(respawned);
+                            }
+                            SystemCommand::BreakGateCloak { ball_id, reply } => {
+                                let mut broken = false;
+                                if let Some(cs) = ballpark.combat_states.get_mut(&ball_id) {
+                                    if cs.gate_cloak_remaining_ticks > 0 || cs.is_cloaked {
+                                        cs.gate_cloak_remaining_ticks = 0;
+                                        cs.is_cloaked = false;
+                                        broken = true;
+                                    }
+                                }
+                                if let Some(meta) = ballpark.ball_slim_meta.get_mut(&ball_id) {
+                                    meta.is_cloaked = false;
+                                }
+                                let _ = reply.send(broken);
+                            }
+                            SystemCommand::PopulateAsteroids { reply } => {
+                                let mut populated = Vec::new();
+                                if let Some(sde) = &sde_opt {
+                                    let spawned = populate_asteroid_belt_entities(&mut ballpark, solar_system_id, sde);
+                                    for ast in spawned {
+                                        if let Some(ball) = ballpark.balls.get(&ast.asteroid_id).cloned() {
+                                            asteroid_templates.insert(ast.asteroid_id, (ast.clone(), ball));
+                                            asteroids.insert(ast.asteroid_id, ast.clone());
+                                            populated.push(ast);
+                                        }
+                                    }
+                                }
+                                let _ = reply.send(populated);
                             }
                             SystemCommand::RemoveBall { ball_id, reply } => {
                                 let removed = ballpark.remove_ball(ball_id);

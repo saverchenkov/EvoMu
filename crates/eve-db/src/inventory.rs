@@ -131,4 +131,53 @@ impl WorldRepository {
             Ok(updated)
         })
     }
+
+    /// Atomically adds an item stack to an owner's location and flag, or increments quantity if an un-singleton stack exists.
+    pub fn add_or_stack_item(
+        &self,
+        owner_id: i64,
+        location_id: i64,
+        flag: InventoryFlag,
+        type_id: u32,
+        quantity: i64,
+    ) -> Result<InventoryItemRecord, DbError> {
+        if quantity <= 0 {
+            return Err(DbError::ValidationError("Quantity must be positive".into()));
+        }
+        self.try_with_mut_snapshot(|guard| {
+            // Check if existing non-singleton item stack exists at location/flag
+            if let Some(existing) = guard.items.values_mut().find(|it| {
+                it.owner_id == owner_id
+                    && it.location_id == location_id
+                    && it.flag == flag
+                    && it.type_id == type_id
+                    && !it.singleton
+            }) {
+                existing.quantity = existing.quantity.saturating_add(quantity as i32);
+                existing.version += 1;
+                return Ok(existing.clone());
+            }
+
+            let item_id = guard.next_entity_id;
+            guard.next_entity_id += 1;
+            let item = InventoryItemRecord {
+                item_id,
+                type_id,
+                owner_id,
+                location_id,
+                flag,
+                quantity: quantity as i32,
+                singleton: false,
+                version: 1,
+                dynamic_attributes: std::collections::HashMap::new(),
+                source_mutaplasmid_id: None,
+                insured_payout_isk: 0.0,
+                is_blueprint_copy: false,
+                blueprint_runs_remaining: None,
+            };
+            guard.items.insert(item_id, item.clone());
+            Ok(item)
+        })
+    }
 }
+

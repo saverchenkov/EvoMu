@@ -863,6 +863,10 @@ pub fn encode_destiny_event(stamp: u32, event: &DestinyEvent, park: Option<&Ball
                 PyRep::Integer(*wreck_ball_id),
             ]),
         ]),
+        DestinyEvent::Collision { ball_a, ball_b } => PyRep::Tuple(vec![
+            PyRep::String("Collision".into()),
+            PyRep::Tuple(vec![PyRep::Integer(*ball_a), PyRep::Integer(*ball_b)]),
+        ]),
     };
 
     PyRep::Tuple(vec![PyRep::Integer(stamp as i64), action_tuple])
