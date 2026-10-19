@@ -19,7 +19,7 @@ To visualize the entire server surface area (**216 cataloged `machoNet` services
 ```text
 +======================================================================================================================+
 |                                     EVOMU SERVER ARCHITECTURE & SUBSYSTEM MAP                                        |
-|    Total Surface: 216 machoNet Services (98/600 Client Methods; 71 Explicit / 145 UnimplementedRPC) | 135 Quasar    |
+|    Total Surface: 216 machoNet Services (99/600 Client Methods; 71 Explicit / 145 UnimplementedRPC) | 135 Quasar    |
 +======================================================================================================================+
 |                                                          |                                                           |
 |  [CORE ENGINE]                                           |  [SPACE, DESTINY & COMBAT]                                |

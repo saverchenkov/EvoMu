@@ -404,12 +404,12 @@
   "note": "Implemented injectable ServerClock and VirtualServerClock with pause-on-tick, time acceleration, skill and industry timers (preserving partial skill queues), and SDE pinCycleTime cooldowns; belt mining and PI pin graphs pending."
  },
  "Z-1": {
-  "assessment": "PARTIAL",
-  "note": ""
+  "assessment": "DONE",
+  "note": "Systematic RPC catalog dispatch closure across 216 services and 1,230 methods with CallRsp and ErrorResponse wire packets."
  },
  "Z-2": {
-  "assessment": "NOT STARTED",
-  "note": ""
+  "assessment": "DONE",
+  "note": "Specialized notification emission pipelines across 7 families, scope multicast, and 128-entry bounded queue ring buffer."
  },
  "Z-3": {
   "assessment": "DONE",
