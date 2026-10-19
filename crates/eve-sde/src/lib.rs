@@ -183,6 +183,20 @@ pub struct InvType {
     #[serde(default)]
     pub variation_parent_type_id: Option<TypeId>,
     #[serde(default)]
+    pub description_id: Option<u32>,
+    #[serde(default)]
+    pub icon_id: Option<u32>,
+    #[serde(default)]
+    pub graphic_id: Option<u32>,
+    #[serde(default)]
+    pub sound_id: Option<u32>,
+    #[serde(default)]
+    pub meta_group_id: Option<u32>,
+    #[serde(default)]
+    pub meta_level: Option<i64>,
+    #[serde(default)]
+    pub tech_level: Option<u32>,
+    #[serde(default)]
     pub effect_ids: Vec<EffectId>,
     pub default_attributes: HashMap<AttributeId, f64>,
 }
@@ -236,7 +250,8 @@ pub struct DogmaEffectType {
 pub struct RaceInfo {
     pub race_id: u32,
     pub name: String,
-    pub corvette_type_id: TypeId,
+    #[serde(default)]
+    pub corvette_type_id: Option<TypeId>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -316,13 +331,29 @@ pub struct SolarSystem {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StationInfo {
     pub station_id: i64,
+    #[serde(default)]
+    pub solar_system_id: SolarSystemId,
+    #[serde(default)]
+    pub constellation_id: u32,
+    #[serde(default)]
+    pub region_id: u32,
     pub station_type_id: TypeId,
     pub name: String,
     pub position: DVec3,
     #[serde(default)]
     pub owner_corporation_id: i64,
     #[serde(default)]
-    pub owner_faction_id: i64,
+    pub owner_faction_id: Option<i64>,
+    #[serde(default)]
+    pub operation_id: u32,
+    #[serde(default)]
+    pub reprocessing_efficiency: f64,
+    #[serde(default)]
+    pub reprocessing_stations_take: f64,
+    #[serde(default)]
+    pub is_conquerable: bool,
+    #[serde(default)]
+    pub orbit_id: Option<i64>,
     #[serde(default = "default_has_clone_bay")]
     pub has_clone_bay: bool,
 }
@@ -628,11 +659,30 @@ pub struct SkinLicenseInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkinMaterialInfo {
+    pub skin_material_id: u32,
+    #[serde(default)]
+    pub display_name_id: Option<u32>,
+    #[serde(default)]
+    pub material_set_id: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkinInfo {
     pub skin_id: u32,
     pub internal_name: String,
     pub skin_material_id: u32,
     pub types: Vec<TypeId>,
+    #[serde(default)]
+    pub allow_ccp_devs: bool,
+    #[serde(default)]
+    pub visible_serenity: bool,
+    #[serde(default)]
+    pub visible_tranquility: bool,
+    #[serde(default)]
+    pub is_structure_skin: bool,
+    #[serde(default)]
+    pub skin_description: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -689,6 +739,8 @@ pub struct SdeRegistry {
     #[serde(default)]
     pub constellations: HashMap<u32, ConstellationInfo>,
     pub solar_systems: HashMap<SolarSystemId, SolarSystem>,
+    #[serde(default)]
+    pub stations: HashMap<i64, StationInfo>,
     pub jumps: HashMap<i64, StargateJump>,
     #[serde(default)]
     pub celestial_count: usize,
@@ -729,6 +781,8 @@ pub struct SdeRegistry {
     pub station_services: HashMap<u32, StationServiceInfo>,
     #[serde(default)]
     pub skin_licenses: HashMap<TypeId, SkinLicenseInfo>,
+    #[serde(default)]
+    pub skin_materials: HashMap<u32, SkinMaterialInfo>,
     #[serde(default)]
     pub skins: HashMap<u32, SkinInfo>,
 }
@@ -903,7 +957,7 @@ impl SdeRegistry {
         let mut wrecks = HashMap::new();
         {
             let mut stmt = conn.prepare(
-                "SELECT type_id, group_id, category_id, name, mass, volume, capacity, portion_size, base_price, radius, market_group_id, race_id, faction_id, variation_parent_type_id, wreck_type_id, published, attributes_json, effects_json FROM sde_types",
+                "SELECT type_id, group_id, category_id, name, mass, volume, capacity, portion_size, base_price, radius, market_group_id, race_id, faction_id, variation_parent_type_id, wreck_type_id, published, attributes_json, effects_json, description_id, icon_id, graphic_id, sound_id, meta_group_id, meta_level, tech_level FROM sde_types",
             )?;
             let rows = stmt.query_map([], |r| {
                 let tid = r.get::<_, i64>(0)? as TypeId;
@@ -922,6 +976,13 @@ impl SdeRegistry {
                     .into_iter()
                     .filter_map(|eid| u16::try_from(eid).ok())
                     .collect();
+                let desc_id: Option<u32> = r.get::<_, Option<i64>>(18)?.map(|v| v as u32);
+                let icon_id: Option<u32> = r.get::<_, Option<i64>>(19)?.map(|v| v as u32);
+                let graphic_id: Option<u32> = r.get::<_, Option<i64>>(20)?.map(|v| v as u32);
+                let sound_id: Option<u32> = r.get::<_, Option<i64>>(21)?.map(|v| v as u32);
+                let meta_group_id: Option<u32> = r.get::<_, Option<i64>>(22)?.map(|v| v as u32);
+                let meta_level: Option<i64> = r.get(23)?;
+                let tech_level: Option<u32> = r.get::<_, Option<i64>>(24)?.map(|v| v as u32);
                 Ok((
                     InvType {
                         type_id: tid,
@@ -939,6 +1000,13 @@ impl SdeRegistry {
                         faction_id: r.get::<_, Option<i64>>(12)?.map(|v| v as u32),
                         variation_parent_type_id: r.get::<_, Option<i64>>(13)?.map(|v| v as TypeId),
                         published: r.get::<_, i64>(15)? != 0,
+                        description_id: desc_id,
+                        icon_id,
+                        graphic_id,
+                        sound_id,
+                        meta_group_id,
+                        meta_level,
+                        tech_level,
                         effect_ids,
                         default_attributes,
                     },
@@ -1245,41 +1313,57 @@ impl SdeRegistry {
             }
         }
 
+        let mut stations: HashMap<i64, StationInfo> = HashMap::new();
         let mut stations_by_system: HashMap<SolarSystemId, Vec<StationInfo>> = HashMap::new();
         {
             let mut stmt = conn.prepare(
-                "SELECT station_id, system_id, owner_id, type_id, operation_id, name, x, y, z FROM sde_stations ORDER BY station_id",
+                "SELECT station_id, system_id, constellation_id, region_id, owner_id, type_id, operation_id, name, x, y, z, reprocessing_efficiency, reprocessing_stations_take, is_conquerable, orbit_id FROM sde_stations ORDER BY station_id",
             )?;
             let rows = stmt.query_map([], |r| {
                 let sta_id: i64 = r.get(0)?;
                 let sys_id = r.get::<_, i64>(1)? as SolarSystemId;
-                let owner_id: i64 = r.get(2)?;
-                let tid = r.get::<_, i64>(3)? as TypeId;
-                let op_id: i64 = r.get(4)?;
-                let name: String = r.get(5)?;
-                let x: f64 = r.get(6)?;
-                let y: f64 = r.get(7)?;
-                let z: f64 = r.get(8)?;
+                let const_id = r.get::<_, i64>(2)? as u32;
+                let reg_id = r.get::<_, i64>(3)? as u32;
+                let owner_id: i64 = r.get(4)?;
+                let tid = r.get::<_, i64>(5)? as TypeId;
+                let op_id: i64 = r.get(6)?;
+                let name: String = r.get(7)?;
+                let x: f64 = r.get(8)?;
+                let y: f64 = r.get(9)?;
+                let z: f64 = r.get(10)?;
+                let reproc_eff: f64 = r.get(11)?;
+                let reproc_take: f64 = r.get(12)?;
+                let is_conq = r.get::<_, i64>(13)? != 0;
+                let orbit_id: Option<i64> = r.get(14)?;
                 let faction_id = npc_corporations
                     .get(&owner_id)
                     .and_then(|c| c.faction_id)
-                    .unwrap_or(500001) as i64;
+                    .map(|f| f as i64);
                 let has_clone_bay = op_has_clone_bay.get(&op_id).copied().unwrap_or(true);
                 Ok((
                     sys_id,
                     StationInfo {
                         station_id: sta_id,
+                        solar_system_id: sys_id,
+                        constellation_id: const_id,
+                        region_id: reg_id,
                         station_type_id: tid,
                         name,
                         position: DVec3::new(x, y, z),
                         owner_corporation_id: owner_id,
                         owner_faction_id: faction_id,
+                        operation_id: op_id as u32,
+                        reprocessing_efficiency: reproc_eff,
+                        reprocessing_stations_take: reproc_take,
+                        is_conquerable: is_conq,
+                        orbit_id,
                         has_clone_bay,
                     },
                 ))
             })?;
             for r in rows {
                 let (sys_id, sta) = r?;
+                stations.insert(sta.station_id, sta.clone());
                 stations_by_system.entry(sys_id).or_default().push(sta);
             }
         }
@@ -1349,7 +1433,7 @@ impl SdeRegistry {
                 Ok(RaceInfo {
                     race_id: r.get::<_, i64>(0)? as u32,
                     name: r.get(1)?,
-                    corvette_type_id: r.get::<_, Option<i64>>(2)?.unwrap_or(601) as TypeId,
+                    corvette_type_id: r.get::<_, Option<i64>>(2)?.map(|tid| tid as TypeId),
                 })
             })?;
             for r in rows {
@@ -1944,10 +2028,37 @@ impl SdeRegistry {
             }
         }
 
+        let mut skin_materials = HashMap::new();
+        {
+            let table_exists: bool = conn
+                .query_row(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='sde_skin_materials'",
+                    [],
+                    |_| Ok(true),
+                )
+                .unwrap_or(false);
+            if table_exists {
+                let mut stmt = conn.prepare(
+                    "SELECT skin_material_id, display_name_id, material_set_id FROM sde_skin_materials",
+                )?;
+                let rows = stmt.query_map([], |r| {
+                    Ok(SkinMaterialInfo {
+                        skin_material_id: r.get::<_, i64>(0)? as u32,
+                        display_name_id: r.get::<_, Option<i64>>(1)?.map(|v| v as u32),
+                        material_set_id: r.get::<_, Option<i64>>(2)?.map(|v| v as u32),
+                    })
+                })?;
+                for r in rows {
+                    let sm = r?;
+                    skin_materials.insert(sm.skin_material_id, sm);
+                }
+            }
+        }
+
         let mut skins = HashMap::new();
         {
             let mut stmt = conn.prepare(
-                "SELECT skin_id, internal_name, skin_material_id, types_json FROM sde_skins",
+                "SELECT skin_id, internal_name, skin_material_id, types_json, allow_ccp_devs, visible_serenity, visible_tranquility, is_structure_skin, skin_description FROM sde_skins",
             )?;
             let rows = stmt.query_map([], |r| {
                 let t_str: String = r.get(3)?;
@@ -1956,6 +2067,11 @@ impl SdeRegistry {
                     internal_name: r.get(1)?,
                     skin_material_id: r.get::<_, i64>(2)? as u32,
                     types: parse_json_col(3, &t_str)?,
+                    allow_ccp_devs: r.get::<_, i64>(4)? != 0,
+                    visible_serenity: r.get::<_, i64>(5)? != 0,
+                    visible_tranquility: r.get::<_, i64>(6)? != 0,
+                    is_structure_skin: r.get::<_, i64>(7)? != 0,
+                    skin_description: r.get(8)?,
                 })
             })?;
             for r in rows {
@@ -1980,6 +2096,7 @@ impl SdeRegistry {
             regions,
             constellations,
             solar_systems,
+            stations,
             jumps,
             celestial_count,
             factions,
@@ -2007,6 +2124,7 @@ impl SdeRegistry {
             station_operations,
             station_services,
             skin_licenses,
+            skin_materials,
             skins,
         };
 
@@ -2069,6 +2187,12 @@ impl SdeRegistry {
         for list in variations_by_parent.values_mut() {
             list.sort_unstable();
         }
+        let mut stations = HashMap::new();
+        for sys in &parsed.solar_systems {
+            for sta in &sys.stations {
+                stations.insert(sta.station_id, sta.clone());
+            }
+        }
         Ok(Self {
             db_path: None,
             resources: HashMap::new(),
@@ -2109,6 +2233,7 @@ impl SdeRegistry {
                 .into_iter()
                 .map(|s| (s.solar_system_id, s))
                 .collect(),
+            stations,
             jumps: parsed
                 .jumps
                 .into_iter()
@@ -2180,6 +2305,7 @@ impl SdeRegistry {
             station_operations: HashMap::new(),
             station_services: HashMap::new(),
             skin_licenses: HashMap::new(),
+            skin_materials: HashMap::new(),
             skins: HashMap::new(),
         })
     }

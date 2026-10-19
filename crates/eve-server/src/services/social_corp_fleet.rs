@@ -46,9 +46,8 @@ pub async fn handle(
             // Derive bookmark coordinates strictly from the pilot's docked station/structure or server-side ship ball (never client args)
             let (x, y, z) = if let Some(st_id) = session.station_id {
                 ctx.sde
-                    .solar_systems
-                    .get(&sys_id)
-                    .and_then(|s| s.stations.iter().find(|st| st.station_id == st_id))
+                    .stations
+                    .get(&st_id)
                     .map(|st| (st.position.x, st.position.y, st.position.z))
                     .unwrap_or((0.0, 0.0, 0.0))
             } else if let Some(struct_id) = session.structure_id {

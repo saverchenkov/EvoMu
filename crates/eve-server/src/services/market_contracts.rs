@@ -211,13 +211,7 @@ pub fn handle(
                 return Some(Err(BridgeRpcError { code: "InvalidMarketOrder".into(), message: "Market order requires finite price > 0 and valid positive quantity".into() }));
             }
             let quantity_i32 = quantity as i32;
-            let station_info = ctx.sde.solar_systems.values().find_map(|sys| {
-                if sys.region_id == region_id {
-                    sys.stations.iter().find(|st| st.station_id == station_id)
-                } else {
-                    None
-                }
-            });
+            let station_info = ctx.sde.stations.get(&station_id).filter(|st| st.region_id == region_id);
             let Some(station_def) = station_info else {
                 return Some(Err(BridgeRpcError { code: "InvalidMarketStation".into(), message: format!("Station {station_id} is not in region {region_id}") }));
             };
@@ -232,7 +226,7 @@ pub fn handle(
                 let b_lvl = sk.and_then(|m| m.get(&3446)).map(|s| s.level).unwrap_or(0);
                 let a_lvl = sk.and_then(|m| m.get(&16622)).map(|s| s.level).unwrap_or(0);
                 let ch = snap.characters.get(&char_id);
-                let f_st = ch.and_then(|c| c.standings.get(&owner_faction_id).copied()).unwrap_or(0.0);
+                let f_st = ch.and_then(|c| owner_faction_id.and_then(|fid| c.standings.get(&fid).copied())).unwrap_or(0.0);
                 let c_st = ch.and_then(|c| c.standings.get(&owner_corp_id).copied()).unwrap_or(0.0);
                 (b_lvl, a_lvl, f_st, c_st)
             });
@@ -896,16 +890,8 @@ pub fn handle(
                 }));
             }
 
-            let start_sde_valid = ctx
-                .sde
-                .solar_systems
-                .values()
-                .any(|s| s.stations.iter().any(|st| st.station_id == start_station_id));
-            let end_sde_valid = ctx
-                .sde
-                .solar_systems
-                .values()
-                .any(|s| s.stations.iter().any(|st| st.station_id == end_station_id));
+            let start_sde_valid = ctx.sde.stations.contains_key(&start_station_id);
+            let end_sde_valid = ctx.sde.stations.contains_key(&end_station_id);
             let now_unix = ctx.now_unix();
             let active_ship = session.ship_id;
 

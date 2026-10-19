@@ -1073,14 +1073,15 @@ pub fn dispatch_universe_and_nav(
             let mut station_counts: HashMap<u32, (i64, HashSet<u32>)> = HashMap::new();
             for sys in ctx.sde.solar_systems.values() {
                 for st in &sys.stations {
-                    let fid_opt = if st.owner_faction_id > 0 {
-                        u32::try_from(st.owner_faction_id).ok()
-                    } else {
-                        ctx.sde
-                            .npc_corporations
-                            .get(&st.owner_corporation_id)
-                            .and_then(|c| c.faction_id)
-                    };
+                    let fid_opt = st
+                        .owner_faction_id
+                        .and_then(|fid| u32::try_from(fid).ok())
+                        .or_else(|| {
+                            ctx.sde
+                                .npc_corporations
+                                .get(&st.owner_corporation_id)
+                                .and_then(|c| c.faction_id)
+                        });
                     if let Some(fid) = fid_opt {
                         let entry = station_counts.entry(fid).or_insert((0, HashSet::new()));
                         entry.0 += 1;
@@ -1172,7 +1173,8 @@ pub fn dispatch_universe_and_nav(
                         .sde
                         .races
                         .get(&b.race_id)
-                        .map(|r| r.corvette_type_id as i64)
+                        .and_then(|r| r.corvette_type_id)
+                        .map(|tid| tid as i64)
                         .unwrap_or(601);
                     json!({
                         "bloodline_id": b.bloodline_id as i64,
@@ -1257,18 +1259,14 @@ pub fn dispatch_universe_and_nav(
                             Some(("inventory_type", t.name.clone()))
                         } else {
                             ctx.sde
-                                .solar_systems
-                                .values()
-                                .flat_map(|s| s.stations.iter())
-                                .find(|st| st.station_id == id)
+                                .stations
+                                .get(&id)
                                 .map(|st| ("station", st.name.clone()))
                         }
                     } else {
                         ctx.sde
-                            .solar_systems
-                            .values()
-                            .flat_map(|s| s.stations.iter())
-                            .find(|st| st.station_id == id)
+                            .stations
+                            .get(&id)
                             .map(|st| ("station", st.name.clone()))
                     };
                     let Some((category, name)) = resolved else {
@@ -1449,11 +1447,7 @@ pub fn dispatch_universe_and_nav(
             let is_known_destination = u32::try_from(destination_id)
                 .ok()
                 .is_some_and(|sid| ctx.sde.solar_systems.contains_key(&sid))
-                || ctx
-                    .sde
-                    .solar_systems
-                    .values()
-                    .any(|s| s.stations.iter().any(|st| st.station_id == destination_id))
+                || ctx.sde.stations.contains_key(&destination_id)
                 || ctx
                     .db
                     .with_snapshot(|snap| snap.structures.contains_key(&destination_id));

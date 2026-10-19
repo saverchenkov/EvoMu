@@ -1029,7 +1029,14 @@ def run_import(
             wreck_type_id INTEGER,
             published INTEGER NOT NULL,
             attributes_json TEXT NOT NULL,
-            effects_json TEXT NOT NULL
+            effects_json TEXT NOT NULL,
+            description_id INTEGER,
+            icon_id INTEGER,
+            graphic_id INTEGER,
+            sound_id INTEGER,
+            meta_group_id INTEGER,
+            meta_level INTEGER,
+            tech_level INTEGER
         );
         CREATE TABLE sde_dogma_attributes (
             attribute_id INTEGER PRIMARY KEY,
@@ -1195,7 +1202,7 @@ def run_import(
             career_id INTEGER NOT NULL,
             starting_station_id INTEGER NOT NULL,
             starting_system_id INTEGER NOT NULL,
-            corvette_type_id INTEGER NOT NULL,
+            corvette_type_id INTEGER,
             starting_stations_json TEXT NOT NULL,
             career_agents_json TEXT NOT NULL
         );
@@ -1252,7 +1259,17 @@ def run_import(
             skin_id INTEGER PRIMARY KEY,
             internal_name TEXT NOT NULL,
             skin_material_id INTEGER NOT NULL,
-            types_json TEXT NOT NULL
+            types_json TEXT NOT NULL,
+            allow_ccp_devs INTEGER NOT NULL DEFAULT 0,
+            visible_serenity INTEGER NOT NULL DEFAULT 0,
+            visible_tranquility INTEGER NOT NULL DEFAULT 0,
+            is_structure_skin INTEGER NOT NULL DEFAULT 0,
+            skin_description TEXT
+        );
+        CREATE TABLE sde_skin_materials (
+            skin_material_id INTEGER PRIMARY KEY,
+            display_name_id INTEGER,
+            material_set_id INTEGER
         );
         CREATE TABLE sde_skin_licenses (
             license_type_id INTEGER PRIMARY KEY,
@@ -1435,10 +1452,17 @@ def run_import(
                     t["published"],
                     json.dumps(attrs_dict, separators=(",", ":")),
                     json.dumps(eff_ids, separators=(",", ":")),
+                    t.get("description_id"),
+                    t.get("icon_id"),
+                    t.get("graphic_id"),
+                    t.get("sound_id"),
+                    t.get("meta_group_id"),
+                    t.get("meta_level"),
+                    t.get("tech_level"),
                 )
             )
         conn.executemany(
-            "INSERT INTO sde_types VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO sde_types VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             type_rows,
         )
 
@@ -1679,7 +1703,7 @@ def run_import(
             sta_list = s["starting_stations"]
             start_sta = int(sta_list[0]) if sta_list else 60003760
             start_sys = station_sys_by_id.get(start_sta, 30000142)
-            corvette_tid = race_ship_by_id.get(s["race_id"], 601)
+            corvette_tid = race_ship_by_id.get(s["race_id"])
             school_rows.append(
                 (
                     s["school_id"],
@@ -1782,15 +1806,31 @@ def run_import(
             ],
         )
         conn.executemany(
-            "INSERT INTO sde_skins VALUES (?, ?, ?, ?)",
+            "INSERT INTO sde_skins VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [
                 (
                     int(v.get("skinID") or k),
                     str(v.get("internalName", "")),
                     int(v.get("skinMaterialID", 0)),
                     json.dumps(v.get("types", []), separators=(",", ":")),
+                    int(bool(v.get("allowCCPDevs", False))),
+                    int(bool(v.get("visibleSerenity", False))),
+                    int(bool(v.get("visibleTranquility", False))),
+                    int(bool(v.get("isStructureSkin", False))),
+                    str(v.get("skinDescription")) if v.get("skinDescription") is not None else None,
                 )
                 for k, v in skins_cache
+            ],
+        )
+        conn.executemany(
+            "INSERT INTO sde_skin_materials VALUES (?, ?, ?)",
+            [
+                (
+                    int(v.get("skinMaterialID") or k),
+                    v.get("displayNameID"),
+                    v.get("materialSetID"),
+                )
+                for k, v in skinmaterials_cache
             ],
         )
         conn.executemany(

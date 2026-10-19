@@ -2307,4 +2307,205 @@ async fn test_review_r8_regressions() {
         .await
         .expect_err("get_active_tales_by_template must return UnimplementedRPC");
     assert_eq!(tale_err_2.code, "UnimplementedRPC");
+
+    // -------------------------------------------------------------------------
+    // Track 2: SDE Loaders & Auditor Fixes
+    // -------------------------------------------------------------------------
+
+    // parity: plan:D-2
+    // Verify O(1) indexed stations map in SdeRegistry and preserved columns
+    assert_eq!(ctx.sde.stations.len(), 5_210);
+    let jita_sta = ctx.sde.stations.get(&60_003_760).expect("Jita 4-4 station");
+    assert_eq!(jita_sta.station_id, 60_003_760);
+    assert_eq!(jita_sta.solar_system_id, 30_000_142);
+    assert_eq!(jita_sta.constellation_id, 20_000_020);
+    assert_eq!(jita_sta.region_id, 10_000_002);
+    assert_eq!(jita_sta.operation_id, 14);
+    assert_eq!(jita_sta.reprocessing_efficiency, 0.5);
+    assert_eq!(jita_sta.reprocessing_stations_take, 0.05);
+    assert!(!jita_sta.is_conquerable);
+    assert_eq!(jita_sta.orbit_id, Some(40_009_087));
+    assert_eq!(jita_sta.owner_faction_id, Some(500_001));
+
+    // Station without NPC corp faction_id has None owner_faction_id (no hardcoded Caldari 500001 fallback)
+    let non_emp_sta = ctx.sde.stations.get(&60_014_839).expect("station 60014839");
+    assert_eq!(non_emp_sta.owner_faction_id, None);
+
+    // Non-empire race has None corvette_type_id (no hardcoded Ibis 601 fallback)
+    assert_eq!(ctx.sde.races.get(&16).unwrap().corvette_type_id, None);
+    assert_eq!(ctx.sde.races.get(&1).unwrap().corvette_type_id, Some(601));
+
+    // RPC GetStation uses O(1) indexed station map
+    let gsta = ctx
+        .dispatch_rpc(
+            &mut s1,
+            "station",
+            None,
+            "GetStation",
+            &[PyRep::Integer(60_003_760)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("station.GetStation via indexed map");
+    let PyRep::KeyVal(gsta_kv) = gsta else {
+        panic!("Expected gsta_kv");
+    };
+    assert_eq!(
+        gsta_kv.get("stationID").unwrap(),
+        &PyRep::Integer(60_003_760)
+    );
+    assert_eq!(
+        gsta_kv.get("solarSystemID").unwrap(),
+        &PyRep::Integer(30_000_142)
+    );
+    assert_eq!(
+        gsta_kv.get("stationName").unwrap(),
+        &PyRep::String("Jita IV - Moon 4 - Caldari Navy Assembly Plant".into())
+    );
+
+    // parity: sde:res:/staticdata/types.fsdbinary
+    // Verify InvType full columns preserved in SDE registry
+    let rifter_t = ctx.sde.types.get(&587).expect("Rifter type");
+    assert_eq!(rifter_t.description_id, Some(93841));
+    assert_eq!(rifter_t.icon_id, None);
+    assert_eq!(rifter_t.graphic_id, Some(46));
+    assert_eq!(rifter_t.sound_id, Some(20078));
+    assert_eq!(rifter_t.meta_group_id, Some(1));
+    assert_eq!(rifter_t.meta_level, Some(0));
+    assert_eq!(rifter_t.tech_level, Some(1));
+
+    let trit_t = ctx.sde.types.get(&34).expect("Tritanium type");
+    assert_eq!(trit_t.description_id, Some(87134));
+    assert_eq!(trit_t.icon_id, Some(22));
+    assert_eq!(trit_t.graphic_id, None);
+    assert_eq!(trit_t.sound_id, None);
+    assert_eq!(trit_t.meta_group_id, None);
+    assert_eq!(trit_t.meta_level, None);
+    assert_eq!(trit_t.tech_level, None);
+
+    let nemesis_t = ctx.sde.types.get(&11377).expect("Nemesis type");
+    assert_eq!(nemesis_t.description_id, Some(93939));
+    assert_eq!(nemesis_t.icon_id, None);
+    assert_eq!(nemesis_t.graphic_id, Some(1909));
+    assert_eq!(nemesis_t.sound_id, Some(20072));
+    assert_eq!(nemesis_t.meta_group_id, Some(2));
+    assert_eq!(nemesis_t.meta_level, Some(5));
+    assert_eq!(nemesis_t.tech_level, Some(2));
+
+    // parity: sde:res:/staticdata/skins.static
+    // Verify skin materials and expanded skin fields
+    assert_eq!(ctx.sde.skin_materials.len(), 875);
+    let smat1 = ctx.sde.skin_materials.get(&1).expect("skin material 1");
+    assert_eq!(smat1.skin_material_id, 1);
+    assert_eq!(smat1.display_name_id, Some(505346));
+    assert_eq!(smat1.material_set_id, Some(1));
+
+    let skin5 = ctx.sde.skins.get(&5).expect("skin 5");
+    assert_eq!(skin5.internal_name, "Megathron Quafe");
+    assert_eq!(skin5.types, vec![641]);
+    assert_eq!(skin5.skin_material_id, 3);
+    assert!(skin5.allow_ccp_devs);
+    assert!(!skin5.visible_serenity);
+    assert!(skin5.visible_tranquility);
+    assert!(!skin5.is_structure_skin);
+
+    // Cosmetics RPC validation against ctx.sde.skins and ctx.sde.skin_licenses
+    s1.role |= eve_machonet::service_roles::ROLE_GML;
+    // GiveSkin rejects invalid skinID
+    let bad_giveskin = ctx
+        .dispatch_rpc(
+            &mut s1,
+            "shipCosmeticsMgr",
+            None,
+            "GiveSkin",
+            &[PyRep::Integer(99_999_999)],
+            &kw,
+            None,
+        )
+        .await;
+    assert_eq!(bad_giveskin.unwrap_err().code, "InvalidSkinLicenseType");
+
+    // GiveSkin succeeds with valid skinID (170 for Rifter Krusual)
+    let good_giveskin = ctx
+        .dispatch_rpc(
+            &mut s1,
+            "shipCosmeticsMgr",
+            None,
+            "GiveSkin",
+            &[PyRep::Integer(170)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("GiveSkin with valid skinID 170");
+    let PyRep::KeyVal(gsk_kv) = good_giveskin else {
+        panic!("Expected gsk_kv");
+    };
+    assert_eq!(gsk_kv.get("skinID").unwrap(), &PyRep::Integer(170));
+    assert_eq!(gsk_kv.get("licensed").unwrap(), &PyRep::Bool(true));
+
+    // ActivateSkinLicense rejects invalid skin license typeID
+    let bad_act = ctx
+        .dispatch_rpc(
+            &mut s1,
+            "shipCosmeticsMgr",
+            None,
+            "ActivateSkinLicense",
+            &[PyRep::Integer(99_999_999)],
+            &kw,
+            None,
+        )
+        .await;
+    assert_eq!(bad_act.unwrap_err().code, "InvalidSkinLicenseType");
+
+    // ActivateSkinLicense rejects item that is not category 91 (e.g. Tritanium 34)
+    let non_cat91_act = ctx
+        .dispatch_rpc(
+            &mut s1,
+            "shipCosmeticsMgr",
+            None,
+            "ActivateSkinLicense",
+            &[PyRep::Integer(34)],
+            &kw,
+            None,
+        )
+        .await;
+    assert_eq!(non_cat91_act.unwrap_err().code, "InvalidSkinLicenseType");
+
+    // ApplySkinToShip rejects invalid skinID
+    let bad_apply = ctx
+        .dispatch_rpc(
+            &mut s1,
+            "shipCosmeticsMgr",
+            None,
+            "ApplySkinToShip",
+            &[PyRep::Integer(587), PyRep::Integer(99_999_999)],
+            &kw,
+            None,
+        )
+        .await;
+    assert_eq!(bad_apply.unwrap_err().code, "SkinNotLicensed");
+
+    // ApplySkinToShip rejects incompatible ship type (skin 5 is for Megathron 641, not Rifter 587)
+    let incomp_apply = ctx
+        .dispatch_rpc(
+            &mut s1,
+            "shipCosmeticsMgr",
+            None,
+            "ApplySkinToShip",
+            &[PyRep::Integer(587), PyRep::Integer(5)],
+            &kw,
+            None,
+        )
+        .await;
+    assert_eq!(incomp_apply.unwrap_err().code, "InvalidShipTypeForSkin");
+
+    // parity: sde:res:/staticdata/fighterabilities.static
+    // Verify fighter abilities full columns and mappings
+    let fa2 = ctx.sde.fighter_abilities.get(&2).expect("fighter ability 2");
+    assert_eq!(fa2.tooltip_text_id, Some(516650));
+    let fa18 = ctx.sde.fighter_abilities.get(&18).expect("fighter ability 18");
+    assert_eq!(fa18.turret_graphic_id, Some(11515));
+    assert_eq!(fa18.tooltip_text_id, Some(516660));
 }

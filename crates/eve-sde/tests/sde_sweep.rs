@@ -915,7 +915,8 @@ fn test_t2_sde_all_213_resources_and_domain_tables_sweep() {
         assert!(sde.types.contains_key(&wreck_tid));
     }
 
-    // Spot-check Raven (638) and minerals (34..37)
+    // parity: sde:res:/staticdata/types.fsdbinary
+    // Spot-check Raven (638), minerals (34..37), Rifter (587), and Nemesis (11377)
     let raven = &sde.types[&638];
     assert_eq!(raven.name, "Raven");
     assert_eq!(raven.group_id, 27);
@@ -925,6 +926,40 @@ fn test_t2_sde_all_213_resources_and_domain_tables_sweep() {
     assert_eq!(raven.default_attributes[&attr_ids::ARMOR_HP], 6_380.0);
     assert_eq!(raven.default_attributes[&attr_ids::HP_STRUCT], 7_040.0);
     assert_eq!(raven.default_attributes[&attr_ids::RIG_SIZE], 3.0);
+    assert_eq!(raven.description_id, Some(84205));
+    assert_eq!(raven.icon_id, None);
+    assert_eq!(raven.graphic_id, Some(43));
+    assert_eq!(raven.sound_id, Some(20068));
+    assert_eq!(raven.meta_group_id, Some(1));
+    assert_eq!(raven.meta_level, Some(0));
+    assert_eq!(raven.tech_level, Some(1));
+
+    let tritanium = &sde.types[&34];
+    assert_eq!(tritanium.description_id, Some(87134));
+    assert_eq!(tritanium.icon_id, Some(22));
+    assert_eq!(tritanium.graphic_id, None);
+    assert_eq!(tritanium.sound_id, None);
+    assert_eq!(tritanium.meta_group_id, None);
+    assert_eq!(tritanium.meta_level, None);
+    assert_eq!(tritanium.tech_level, None);
+
+    let rifter = &sde.types[&587];
+    assert_eq!(rifter.description_id, Some(93841));
+    assert_eq!(rifter.icon_id, None);
+    assert_eq!(rifter.graphic_id, Some(46));
+    assert_eq!(rifter.sound_id, Some(20078));
+    assert_eq!(rifter.meta_group_id, Some(1));
+    assert_eq!(rifter.meta_level, Some(0));
+    assert_eq!(rifter.tech_level, Some(1));
+
+    let nemesis = &sde.types[&11377];
+    assert_eq!(nemesis.description_id, Some(93939));
+    assert_eq!(nemesis.icon_id, None);
+    assert_eq!(nemesis.graphic_id, Some(1909));
+    assert_eq!(nemesis.sound_id, Some(20072));
+    assert_eq!(nemesis.meta_group_id, Some(2));
+    assert_eq!(nemesis.meta_level, Some(5));
+    assert_eq!(nemesis.tech_level, Some(2));
 
     // 5. Domain sweep: Type Materials (9,866), Compressible Types (212), Blueprints (5,100)
     assert!(!sde.type_materials.contains_key(&34)); // Tritanium cannot be reprocessed
@@ -1056,6 +1091,34 @@ fn test_t2_sde_all_213_resources_and_domain_tables_sweep() {
     }
     assert_eq!(total_stations, 5_210);
 
+    // parity: plan:D-2
+    // SdeRegistry::stations indexed map for O(1) station lookups
+    assert_eq!(sde.stations.len(), 5_210);
+    for (sid, sta) in &sde.stations {
+        assert_eq!(*sid, sta.station_id);
+        assert!(!sta.name.is_empty());
+        assert!(sde.types.contains_key(&sta.station_type_id));
+        assert!(sde.npc_corporations.contains_key(&sta.owner_corporation_id));
+        assert!(sde.solar_systems.contains_key(&sta.solar_system_id));
+        assert!(sde.constellations.contains_key(&sta.constellation_id));
+        assert!(sde.regions.contains_key(&sta.region_id));
+    }
+    let jita_4_4 = &sde.stations[&60003760];
+    assert_eq!(jita_4_4.name, "Jita IV - Moon 4 - Caldari Navy Assembly Plant");
+    assert_eq!(jita_4_4.solar_system_id, 30000142);
+    assert_eq!(jita_4_4.constellation_id, 20000020);
+    assert_eq!(jita_4_4.region_id, 10000002);
+    assert_eq!(jita_4_4.operation_id, 14);
+    assert_eq!(jita_4_4.reprocessing_efficiency, 0.5);
+    assert_eq!(jita_4_4.reprocessing_stations_take, 0.05);
+    assert!(!jita_4_4.is_conquerable);
+    assert_eq!(jita_4_4.orbit_id, Some(40009087));
+    assert_eq!(jita_4_4.owner_faction_id, Some(500001));
+
+    // Station without NPC corp faction_id must have None owner_faction_id (no hardcoded fallback 500001)
+    let non_empire_sta = &sde.stations[&60014839];
+    assert_eq!(non_empire_sta.owner_faction_id, None);
+
     for gate in sde.jumps.values() {
         assert!(sde.solar_systems.contains_key(&gate.from_solar_system_id));
         assert!(sde.solar_systems.contains_key(&gate.to_solar_system_id));
@@ -1080,18 +1143,23 @@ fn test_t2_sde_all_213_resources_and_domain_tables_sweep() {
     assert_eq!(sde.solar_systems[&30002510].name, "Rens");
 
     // 7. Domain sweep: Lineages, Schools, Factions, NPC Corps, Agents
+    // parity: plan:D-2
     for race in sde.races.values() {
         assert!(!race.name.is_empty());
-        assert!(sde.types.contains_key(&race.corvette_type_id));
+        if let Some(ctid) = race.corvette_type_id {
+            assert!(sde.types.contains_key(&ctid));
+        }
     }
     assert_eq!(sde.races[&1].name, "Caldari");
-    assert_eq!(sde.races[&1].corvette_type_id, 601);
+    assert_eq!(sde.races[&1].corvette_type_id, Some(601));
     assert_eq!(sde.races[&2].name, "Minmatar");
-    assert_eq!(sde.races[&2].corvette_type_id, 588);
+    assert_eq!(sde.races[&2].corvette_type_id, Some(588));
     assert_eq!(sde.races[&4].name, "Amarr");
-    assert_eq!(sde.races[&4].corvette_type_id, 596);
+    assert_eq!(sde.races[&4].corvette_type_id, Some(596));
     assert_eq!(sde.races[&8].name, "Gallente");
-    assert_eq!(sde.races[&8].corvette_type_id, 606);
+    assert_eq!(sde.races[&8].corvette_type_id, Some(606));
+    // Non-empire races have None corvette_type_id (no hardcoded fallback 601)
+    assert_eq!(sde.races[&16].corvette_type_id, None);
 
     for bl in sde.bloodlines.values() {
         assert!(!bl.name.is_empty());
@@ -1205,9 +1273,15 @@ fn test_t2_sde_all_213_resources_and_domain_tables_sweep() {
         .values()
         .any(|d| !d.location_required_skill_modifiers.is_empty()));
 
+    // parity: sde:res:/staticdata/fighterabilities.static
     for fa in sde.fighter_abilities.values() {
         assert!(!fa.target_mode.is_empty());
     }
+    let fa2 = &sde.fighter_abilities[&2];
+    assert_eq!(fa2.tooltip_text_id, Some(516650));
+    let fa18 = &sde.fighter_abilities[&18];
+    assert_eq!(fa18.turret_graphic_id, Some(11515));
+    assert_eq!(fa18.tooltip_text_id, Some(516660));
     for (&ftid, slots) in &sde.fighter_abilities_by_type {
         assert!(sde.types.contains_key(&ftid));
         assert!(!slots.is_empty());
@@ -1266,6 +1340,13 @@ fn test_t2_sde_all_213_resources_and_domain_tables_sweep() {
         assert!(ng.node_count > 0);
     }
 
+    // parity: sde:res:/staticdata/skins.static
+    assert_eq!(sde.skin_materials.len(), 875);
+    let mat1 = &sde.skin_materials[&1];
+    assert_eq!(mat1.skin_material_id, 1);
+    assert_eq!(mat1.display_name_id, Some(505346));
+    assert_eq!(mat1.material_set_id, Some(1));
+
     let mut resolved_skin_licenses = 0usize;
     for sl in sde.skin_licenses.values() {
         if sde.types.contains_key(&sl.license_type_id) && sde.skins.contains_key(&sl.skin_id) {
@@ -1276,9 +1357,15 @@ fn test_t2_sde_all_213_resources_and_domain_tables_sweep() {
     for sk in sde.skins.values() {
         assert!(!sk.internal_name.is_empty());
         assert!(!sk.types.is_empty());
+        assert!(sde.skin_materials.contains_key(&sk.skin_material_id));
     }
     assert_eq!(sde.skins[&5].internal_name, "Megathron Quafe");
     assert_eq!(sde.skins[&5].types, vec![641]);
+    assert_eq!(sde.skins[&5].skin_material_id, 3);
+    assert!(sde.skins[&5].allow_ccp_devs);
+    assert!(!sde.skins[&5].visible_serenity);
+    assert!(sde.skins[&5].visible_tranquility);
+    assert!(!sde.skins[&5].is_structure_skin);
 
     for op in sde.station_operations.values() {
         assert!(!op.name.is_empty());
