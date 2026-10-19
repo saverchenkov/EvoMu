@@ -4,7 +4,7 @@
 
 The canonical plan is `.agents/skills/evomu-adversarial-review/references/action_plan.md`. This file is regenerated from the latest pre-flight parity run, so it can't go stale or be overstated.
 
-**Parity: 254 / 5781 ledger rows closed (4.39%)**, 0 NA, 171 tagged tests, 209 passing tests. Flagged fake by the gap auditor: 0.
+**Parity: 254 / 5781 ledger rows closed (4.39%)**, 0 NA, 179 tagged tests, 209 passing tests. Flagged fake by the gap auditor: 0.
 
 | Category | Total | DONE | NA | Open |
 |---|---|---|---|---|
@@ -98,12 +98,12 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 |---|---|---|---|---|---|---|---|
 | C-1 | Turret and missile damage from attributes | BLOCKED_BY_FEATURES | 0/15 | test_c1_turret_tracking_missile_damage_and_resistances | PARTIAL (claimed DONE, ledger BLOCKED_BY_FEATURES) | Turret tracking and missile damage formulas with 4-channel resistances across shield, armor, and structure. | 1dbdca3 2026-10-18 |
 | C-2 | HP from dogma; damage notifications | BLOCKED_BY_FEATURES | 0/4 | test_c2_hp_from_dogma_recharge_and_damage_notifications | PARTIAL (claimed DONE, ledger BLOCKED_BY_FEATURES) | CombatState initialized from ship dogma attributes, analytical passive shield/capacitor recharge, and OnDamageStateChange. | — |
-| C-3 | Death pipeline | BLOCKED_BY_FEATURES | 0/12 | test_c3_death_pipeline_explosion_wreck_loot_pod_insurance_killmail | PARTIAL (claimed DONE, ledger BLOCKED_BY_FEATURES) | Ship destruction at zero hull HP, physical wreck spawn, Loot Fairy cargo roll, pod ejection, pod loss, medical clone respawn, and self-destruct countdown tested. | a732887 2026-10-18 |
-| C-4 | NPC spawns and AI | BLOCKED_BY_FEATURES | 0/17 | test_c4_npc_spawns_ai_state_machine_and_dynamic_bounties | PARTIAL (claimed DONE, ledger BLOCKED_BY_FEATURES) | NPC belt rats, spawn groups, faction damage types, AI targeting and orbit, wreck loot tables, dynamic bounty payout, and sec status gain tested. | a732887 2026-10-18 |
+| C-3 | Death pipeline | BLOCKED_BY_FEATURES | 0/12 | test_c3_death_pipeline_explosion_wreck_loot_pod_insurance_killmail | PARTIAL (claimed DONE, ledger BLOCKED_BY_FEATURES) | Ship destruction at zero hull HP, physical wreck spawn, Loot Fairy cargo roll, pod ejection, pod loss, medical clone respawn, and self-destruct countdown tested. | 1405b8e 2026-10-18 |
+| C-4 | NPC spawns and AI | BLOCKED_BY_FEATURES | 0/17 | test_c4_npc_spawns_ai_state_machine_and_dynamic_bounties | PARTIAL (claimed DONE, ledger BLOCKED_BY_FEATURES) | NPC belt rats, spawn groups, faction damage types, AI targeting and orbit, wreck loot tables, dynamic bounty payout, and sec status gain tested. | 1405b8e 2026-10-18 |
 | C-5 | Asteroid belts and mining | MISSING | 0/0 | — | PARTIAL (claimed DONE, ledger MISSING) | Superseded by Phase 5M (MN-01..MN-18) mining laser cycles, specialized holds, crystals, residue, compression, and reprocessing. | dc4dcc0 2026-10-18 |
 | C-6 | Reprocessing (real) | MISSING | 0/0 | — | PARTIAL (claimed DONE, ledger MISSING) | Superseded by MN-11 (compression) and MN-12 (reprocessing) using SDE typeMaterials, station base yield, skills, and scrapmetal processing. | dc4dcc0 2026-10-18 |
-| C-7 | Salvage, tractor, drones | BLOCKED_BY_FEATURES | 0/17 | test_c7_salvage_mechanics_tractor_beam_and_combat_drones | PARTIAL (claimed DONE, ledger BLOCKED_BY_FEATURES) | Salvager wreck consumption and salvage yield, tractor beam pull physics, drone bandwidth validation, launch, orbit, and recall tested. | a732887 2026-10-18 |
-| C-8 | CrimeWatch and CONCORD | BLOCKED_BY_FEATURES | 0/29 | test_c8_crimewatch_state_machine_timers_flags_and_concord | PARTIAL (claimed DONE, ledger BLOCKED_BY_FEATURES) | Weapon timer, aggression tracking, suspect and criminal timers, sec status penalty and gain, and highsec CONCORD retaliation response tested. | a732887 2026-10-18 |
+| C-7 | Salvage, tractor, drones | BLOCKED_BY_FEATURES | 0/17 | test_c7_salvage_mechanics_tractor_beam_and_combat_drones | PARTIAL (claimed DONE, ledger BLOCKED_BY_FEATURES) | Salvager wreck consumption and salvage yield, tractor beam pull physics, drone bandwidth validation, launch, orbit, and recall tested. | 1405b8e 2026-10-18 |
+| C-8 | CrimeWatch and CONCORD | BLOCKED_BY_FEATURES | 0/29 | test_c8_crimewatch_state_machine_timers_flags_and_concord | PARTIAL (claimed DONE, ledger BLOCKED_BY_FEATURES) | Weapon timer, aggression tracking, suspect and criminal timers, sec status penalty and gain, and highsec CONCORD retaliation response tested. | 1405b8e 2026-10-18 |
 
 ## Phase 5M: Full mining system
 
@@ -142,12 +142,12 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 
 | Task | Title | Ledger | Features | Tests | Assessment | Note | Last commit |
 |---|---|---|---|---|---|---|---|
-| E-1 | Fee inputs | BLOCKED_BY_FEATURES | 0/4 | test_e1_broker_fee_and_sales_tax_skill_discounts | PARTIAL (claimed DONE, ledger BLOCKED_BY_FEATURES) | Market order placement, broker fee calculation with skills (Broker Relations), sales tax with Accounting discounts, and wallet journal logging. | ae66ae5 2026-10-18 |
-| E-2 | Order lifecycle | BLOCKED_BY_FEATURES | 0/17 | test_e2_market_order_matching_queries_and_cancellation | PARTIAL (claimed DONE, ledger BLOCKED_BY_FEATURES) | Market order matching engine with price-time priority, escrow ISK deduction, order cancellation, and regional price history queries. | — |
-| E-3 | Contracts | BLOCKED_BY_FEATURES | 0/11 | test_e3_contracts_lifecycle_item_exchange_courier_auction | PARTIAL (claimed DONE, ledger BLOCKED_BY_FEATURES) | Contracts system for Item Exchange, Courier (collateral hold, plastic-wrap containers, reward payout), and Auction bidding mechanics. | — |
-| E-4 | Industry | BLOCKED_BY_FEATURES | 0/26 | test_e4_industry_jobs_lifecycle_manufacturing_research_and_copying | PARTIAL (claimed DONE, ledger BLOCKED_BY_FEATURES) | Industry jobs lifecycle for manufacturing, TE/ME research, and copying, BOM material consumption, facility tax, and hangar delivery. | — |
+| E-1 | Fee inputs | BLOCKED_BY_FEATURES | 0/4 | test_e1_broker_fee_and_sales_tax_skill_discounts | PARTIAL (claimed DONE, ledger BLOCKED_BY_FEATURES) | Broker fee calculation with Broker Relations and faction/corp standings discount, sales tax with Accounting discount, and escrow deduction tested. | 4ab8be0 2026-10-18 |
+| E-2 | Order lifecycle | BLOCKED_BY_FEATURES | 0/17 | test_e2_market_order_matching_queries_and_cancellation | PARTIAL (claimed DONE, ledger BLOCKED_BY_FEATURES) | Limit orders, immediate buy and sell matching against order book, regional order book queries, order cancellation, and escrow refund tested. | 4ab8be0 2026-10-18 |
+| E-3 | Contracts | BLOCKED_BY_FEATURES | 0/11 | test_e3_contracts_lifecycle_item_exchange_courier_auction | PARTIAL (claimed DONE, ledger BLOCKED_BY_FEATURES) | Item Exchange, Courier with collateral hold and delivery failure, and Auction contracts with bidding and escrow refund tested. | 4ab8be0 2026-10-18 |
+| E-4 | Industry | BLOCKED_BY_FEATURES | 0/26 | test_e4_industry_jobs_lifecycle_manufacturing_research_and_copying | PARTIAL (claimed DONE, ledger BLOCKED_BY_FEATURES) | Industry blueprint data, facilities lookup, job cost with facility tax, manufacturing, TE/ME research, copying, and delivery tested. | 4ab8be0 2026-10-18 |
 | E-5 | Agents and missions | BLOCKED_BY_FEATURES | 0/25 | test_e5_planetary_interaction_lifecycle | PARTIAL (claimed DONE, ledger BLOCKED_BY_FEATURES) | Planetary Interaction with colony creation, command center upgrades, P0 extraction to P1 commodity processing, and hangar routing. | — |
-| E-6 | PI basics | BLOCKED_BY_FEATURES | 0/18 | test_e6_lp_store_offerings_and_exchange | PARTIAL (claimed DONE, ledger BLOCKED_BY_FEATURES) | LP store offers catalog, LP balance checking, LP and ISK deduction, and purchased item delivery to station hangar. | ae66ae5 2026-10-18 |
+| E-6 | PI basics | BLOCKED_BY_FEATURES | 0/18 | test_e6_lp_store_offerings_and_exchange | PARTIAL (claimed DONE, ledger BLOCKED_BY_FEATURES) | Planetary Interaction planet info, command center placement, colony limit from skill, pin placement, links, and production routing tested. | 4ab8be0 2026-10-18 |
 
 ## Phase 8: Social and exploration
 

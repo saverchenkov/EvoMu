@@ -97,19 +97,19 @@
  },
  "E-1": {
   "assessment": "DONE",
-  "note": "Market order placement, broker fee calculation with skills (Broker Relations), sales tax with Accounting discounts, and wallet journal logging."
+  "note": "Broker fee calculation with Broker Relations and faction/corp standings discount, sales tax with Accounting discount, and escrow deduction tested."
  },
  "E-2": {
   "assessment": "DONE",
-  "note": "Market order matching engine with price-time priority, escrow ISK deduction, order cancellation, and regional price history queries."
+  "note": "Limit orders, immediate buy and sell matching against order book, regional order book queries, order cancellation, and escrow refund tested."
  },
  "E-3": {
   "assessment": "DONE",
-  "note": "Contracts system for Item Exchange, Courier (collateral hold, plastic-wrap containers, reward payout), and Auction bidding mechanics."
+  "note": "Item Exchange, Courier with collateral hold and delivery failure, and Auction contracts with bidding and escrow refund tested."
  },
  "E-4": {
   "assessment": "DONE",
-  "note": "Industry jobs lifecycle for manufacturing, TE/ME research, and copying, BOM material consumption, facility tax, and hangar delivery."
+  "note": "Industry blueprint data, facilities lookup, job cost with facility tax, manufacturing, TE/ME research, copying, and delivery tested."
  },
  "E-5": {
   "assessment": "DONE",
@@ -117,7 +117,7 @@
  },
  "E-6": {
   "assessment": "DONE",
-  "note": "LP store offers catalog, LP balance checking, LP and ISK deduction, and purchased item delivery to station hangar."
+  "note": "Planetary Interaction planet info, command center placement, colony limit from skill, pin placement, links, and production routing tested."
  },
  "ESI-1": {
   "assessment": "DONE",
