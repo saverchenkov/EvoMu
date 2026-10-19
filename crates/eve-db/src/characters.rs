@@ -126,7 +126,7 @@ impl WorldRepository {
             let sys = sde.solar_systems.get(&sys_id);
             let const_id = sys.map(|s| s.constellation_id).unwrap_or(20_000_020);
             let reg_id = sys.map(|s| s.region_id).unwrap_or(10_000_002);
-            let corvette_type_id = race.corvette_type_id;
+            let corvette_type_id = race.corvette_type_id.unwrap_or(0);
 
             let rec = CharacterRecord {
                 character_id: char_id,

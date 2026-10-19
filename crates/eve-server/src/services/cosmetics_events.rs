@@ -228,10 +228,21 @@ pub async fn handle(
                     message: format!("Invalid SKIN ID {raw_skin}"),
                 }));
             };
+            if !ctx.sde.skins.contains_key(&skin_id) && !ctx.sde.skin_licenses.contains_key(&skin_id) {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidSkinLicenseType".into(),
+                    message: format!("SKIN or skin license {skin_id} does not exist in SDE"),
+                }));
+            }
             let _ = ctx.db.try_with_mut_snapshot(|snap| {
                 let list = snap.licensed_skins.entry(char_id).or_default();
                 if !list.contains(&skin_id) {
                     list.push(skin_id);
+                }
+                if let Some(lic) = ctx.sde.skin_licenses.get(&skin_id) {
+                    if !list.contains(&lic.skin_id) {
+                        list.push(lic.skin_id);
+                    }
                 }
                 Ok::<_, std::convert::Infallible>(())
             });
@@ -274,6 +285,18 @@ pub async fn handle(
                     ),
                 }));
             }
+            let Some(lic_info) = ctx.sde.skin_licenses.get(&requested_skin_id) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidSkinLicenseType".into(),
+                    message: format!("Type {requested_skin_id} is not mapped to any SKIN in SDE skin_licenses"),
+                }));
+            };
+            if !ctx.sde.skins.contains_key(&lic_info.skin_id) {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidSkinLicenseType".into(),
+                    message: format!("SKIN ID {} mapped by license {requested_skin_id} does not exist in SDE skins", lic_info.skin_id),
+                }));
+            }
             let current_dock = session.station_id.or(session.structure_id);
             let current_ship = session.ship_id;
 
@@ -308,6 +331,9 @@ pub async fn handle(
                 let list = snap.licensed_skins.entry(char_id).or_default();
                 if !list.contains(&requested_skin_id) {
                     list.push(requested_skin_id);
+                }
+                if !list.contains(&lic_info.skin_id) {
+                    list.push(lic_info.skin_id);
                 }
                 Ok(requested_skin_id)
             });
@@ -353,8 +379,8 @@ pub async fn handle(
                 }));
             }
 
-            // Resolve requested SKIN strictly to an SDE category 91 SKIN type_id
-            let (target_skin_id, design_name) = match args.get(1) {
+            // Resolve requested SKIN strictly to an SDE category 91 SKIN type_id or skin_id
+            let (target_skin_id, resolved_skin_id, design_name) = match args.get(1) {
                 Some(PyRep::Integer(id)) => {
                     let Ok(sid) = u32::try_from(*id) else {
                         return Some(Err(BridgeRpcError {
@@ -362,13 +388,22 @@ pub async fn handle(
                             message: format!("Invalid SKIN ID {id}"),
                         }));
                     };
-                    let Some(st) = ctx.sde.types.get(&sid).filter(|t| t.category_id == 91) else {
-                        return Some(Err(BridgeRpcError {
-                            code: "SkinNotLicensed".into(),
-                            message: format!("SKIN ID {sid} is not a valid SDE SKIN"),
-                        }));
-                    };
-                    (sid, st.name.clone())
+                    if let Some(lic) = ctx.sde.skin_licenses.get(&sid) {
+                        let name = ctx.sde.types.get(&sid).map(|t| t.name.clone()).unwrap_or_else(|| format!("SKIN {sid}"));
+                        (sid, lic.skin_id, name)
+                    } else if let Some(skin) = ctx.sde.skins.get(&sid) {
+                        (sid, sid, skin.internal_name.clone())
+                    } else {
+                        let is_cat91 = ctx.sde.types.get(&sid).filter(|t| t.category_id == 91);
+                        if let Some(st) = is_cat91 {
+                            (sid, sid, st.name.clone())
+                        } else {
+                            return Some(Err(BridgeRpcError {
+                                code: "SkinNotLicensed".into(),
+                                message: format!("SKIN ID {sid} is not a valid SDE SKIN"),
+                            }));
+                        }
+                    }
                 }
                 Some(PyRep::String(name)) => {
                     let found = ctx
@@ -384,7 +419,8 @@ pub async fn handle(
                             ),
                         }));
                     };
-                    (st.type_id, st.name.clone())
+                    let skin_id = ctx.sde.skin_licenses.get(&st.type_id).map(|l| l.skin_id).unwrap_or(st.type_id);
+                    (st.type_id, skin_id, st.name.clone())
                 }
                 _ => {
                     return Some(Err(BridgeRpcError {
@@ -393,6 +429,18 @@ pub async fn handle(
                     }));
                 }
             };
+
+            if let Some(skin_info) = ctx.sde.skins.get(&resolved_skin_id) {
+                if !skin_info.types.is_empty() && !skin_info.types.contains(&ship_type_id) {
+                    return Some(Err(BridgeRpcError {
+                        code: "InvalidShipTypeForSkin".into(),
+                        message: format!(
+                            "SKIN '{}' (id {resolved_skin_id}) cannot be applied to ship type {ship_type_id}",
+                            skin_info.internal_name
+                        ),
+                    }));
+                }
+            }
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let active_ship = snap
@@ -422,7 +470,7 @@ pub async fn handle(
                 let is_licensed = snap
                     .licensed_skins
                     .get(&char_id)
-                    .map(|list| list.contains(&target_skin_id))
+                    .map(|list| list.contains(&target_skin_id) || list.contains(&resolved_skin_id))
                     .unwrap_or(false);
                 if !is_licensed {
                     return Err(BridgeRpcError {

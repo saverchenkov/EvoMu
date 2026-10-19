@@ -71,12 +71,11 @@ pub async fn handle(
                         .into(),
                 }));
             };
-            let found = ctx.sde.solar_systems.values().find_map(|sys| {
-                sys.stations
-                    .iter()
-                    .find(|st| st.station_id == station_id)
-                    .map(|st| (sys.solar_system_id, st.clone()))
-            });
+            let found = ctx
+                .sde
+                .stations
+                .get(&station_id)
+                .map(|st| (st.solar_system_id, st.clone()));
             if let Some((sys_id, st)) = found {
                 Some(Ok(PyRep::keyval([
                     ("stationID", PyRep::Integer(st.station_id)),
@@ -116,9 +115,8 @@ pub async fn handle(
                     .unwrap_or_else(|| DVec3::new(51_500.0, 0.0, 0.0))
             } else {
                 ctx.sde
-                    .solar_systems
-                    .get(&ch.solar_system_id)
-                    .and_then(|sys| sys.stations.iter().find(|s| s.station_id == station_id))
+                    .stations
+                    .get(&station_id)
                     .map(|st| st.position + DVec3::new(1_500.0, 0.0, 0.0))
                     .unwrap_or_else(|| DVec3::new(100_000.0, 0.0, 0.0))
             };
@@ -263,9 +261,9 @@ pub async fn handle(
             } else {
                 let st_opt = ctx
                     .sde
-                    .solar_systems
-                    .get(&sys_id)
-                    .and_then(|sys| sys.stations.iter().find(|s| s.station_id == dock_id))
+                    .stations
+                    .get(&dock_id)
+                    .filter(|st| st.solar_system_id == sys_id)
                     .cloned();
                 let Some(st) = st_opt else {
                     return Some(Err(BridgeRpcError {
