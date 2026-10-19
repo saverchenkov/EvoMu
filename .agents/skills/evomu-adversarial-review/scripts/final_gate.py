@@ -6,7 +6,8 @@ on the current working tree. It is deliberately mechanical and slow. Every check
 
   1. Ledger complete: parity_status over a fresh `cargo test --workspace` run reports 100% of rows
      closed (DONE or audited NA), no FLAGGED_FAKE rows, and no ledger rows removed.
-  2. Claims review: the latest claims review on this exact tree is PASS (not PASS_WITH_ISSUES).
+  2. Claims review: the latest claims review on this exact tree is PASS (not PASS_WITH_ISSUES), by the primary
+     reviewer model (EVOMU_FINAL_REVIEW_MODEL, default opus-5.5-high), not a quota fallback.
   3. Gap audit: the latest gap audit on this exact tree is CLEAN.
   4. Line coverage (cargo llvm-cov, whole workspace) >= EVOMU_MIN_LINE_COVERAGE (default 90).
   5. Mutation score (cargo mutants, every workspace crate) >= EVOMU_MIN_MUTATION_SCORE (default 85),
@@ -107,8 +108,10 @@ def main():
     state = rl.load_state(root)
     cr = latest(state, tree, "claims")
     ga = latest(state, tree, "gap-audit")
-    checks["claims_review_pass"] = {"passed": bool(cr and cr.get("verdict") == "PASS"),
-                                    "latest": cr and {k: cr.get(k) for k in ("verdict", "timestamp", "report")}}
+    final_model = os.environ.get("EVOMU_FINAL_REVIEW_MODEL", "opus-5.5-high")
+    checks["claims_review_pass"] = {"passed": bool(cr and cr.get("verdict") == "PASS" and cr.get("model") == final_model),
+                                    "required_model": final_model,
+                                    "latest": cr and {k: cr.get(k) for k in ("verdict", "model", "timestamp", "report")}}
     checks["gap_audit_clean"] = {"passed": bool(ga and ga.get("verdict") == "CLEAN"),
                                  "latest": ga and {k: ga.get(k) for k in ("verdict", "timestamp", "report")}}
 

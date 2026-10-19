@@ -101,6 +101,24 @@
 - **Subagents must get `AGENTS.md` and the plan as context** and obey every rule here. No subagent may modify `.agents/`, disable hooks or bypass Santa. Delegation doesn't relax any rule.
 - **Subagent reports to you are claims, not facts.** Verify them with pre-flight and the review before recording anything in `docs/ACTION_PLAN_STATUS.md`.
 
+## Reviewer unavailable (quota or capacity outages)
+- **How the orchestrator handles quota errors.** `run_review.py` tries the primary reviewer (Opus) first, then the fallbacks `fable-5.1-high` and `gemini-3.1-pro-high` (`EVOMU_REVIEW_FALLBACK_MODELS`).
+  - A fallback verdict is a real review and gates commits normally. The report says which model reviewed.
+  - The final gate still needs a PASS from the primary model.
+- **If every model is out, the review returns `UNAVAILABLE` (exit code 4).** Nothing was reviewed, so never treat it as a pass. Also don't treat a user instruction to "keep developing while the reviewer is down" as permission to skip the gate. While the reviewer is unavailable:
+  1. **Never commit, merge, cherry-pick or push to `main` or to any `track/*` branch.** Commit only to local `wip/<task-id>` branches, one task per branch, never pushed. Subagents follow the same rule in their worktrees.
+  2. **The free gates still apply to every wip commit:**
+     - `cargo test --workspace` passes;
+     - `preflight.py --claims` prints OK;
+     - `cargo mutants --in-diff` on the change;
+     - no RPC or notification names that aren't in the V24 client catalog (`references/parity/sources/`);
+     - no hardcoded or synthesized data presented as real.
+  3. **Prefer work that's hard to fake and easy to check mechanically:** SDE importers and data sweeps, test and harness infrastructure, property and fuzz tests, wire codecs with golden tests, behaviour-neutral refactors. **Don't start new game-behaviour features** (mechanics, RPC handlers, Quasar/ESI services). Invention hides there, and it compounds without review.
+  4. **Keep each wip branch to one canonical task and a reviewable diff size.** Don't stack later work on unreviewed earlier work unless it truly depends on it.
+  5. **Keep a queue** in `docs/parity/review_queue.md`: one line per wip branch with task ID, branch, pre-flight result and date. When quota returns, review the queue **in order, one branch per review**, and merge each into `main` only after its own non-FAIL verdict. Rebase later branches as needed.
+  6. **Re-try the review** at most once an hour while unavailable. Don't burn time polling.
+- **This rule exists because of a real failure.** During the 2026-10-18 outage, about 80 unreviewed commits were merged and pushed to `main`. They included about 6,000 lines of invented Quasar services and tests against RPCs the client never calls, and 72 ledger rows were later flagged fake. Cleaning it up took longer than reviewing per task would have.
+
 ## Increment size and WIP
 - **Review one canonical task (or a few tightly coupled ones) at a time**, not a whole phase. Smaller diffs review faster and fail more narrowly.
 - **To avoid losing work while a review is failing**, you may commit to a local `wip/<task-id>` branch without a review.

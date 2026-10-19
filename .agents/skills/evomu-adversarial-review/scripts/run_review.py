@@ -6,7 +6,8 @@ headless Jetski/Antigravity CLI reviewer (`agy -p ... --model opus-5.5-high --ef
 with a structured-output schema, validates that the reviewer did not touch the workspace,
 and records the verdict in <repo>/.evomu-reviews/ (gitignored).
 
-Exit codes: 0 PASS, 1 PASS_WITH_ISSUES, 2 FAIL, 3 INVALID / ERROR.
+Exit codes: 0 PASS, 1 PASS_WITH_ISSUES, 2 FAIL, 3 INVALID / ERROR, 4 UNAVAILABLE (every reviewer model out of
+quota/capacity; nothing was reviewed; see AGENTS.md "Reviewer unavailable").
 """
 import argparse
 import datetime
@@ -36,6 +37,11 @@ WRAPPER_ENV = ["RUSTC_WRAPPER", "CARGO_BUILD_RUSTC_WRAPPER", "RUSTDOC", "CARGO_B
                "RUSTC", "CARGO_BUILD_RUSTC", "RUSTC_WORKSPACE_WRAPPER", "CARGO_TARGET_DIR"]
 EXIT = {"PASS": 0, "PASS_WITH_ISSUES": 1, "FAIL": 2}
 GAP_EXIT = {"CLEAN": 0, "GAPS": 2}
+UNAVAILABLE_EXIT = 4  # every reviewer model was out of quota/capacity: NOTHING was reviewed
+QUOTA_RE = re.compile(r"RESOURCE_EXHAUSTED|[Qq]uota|rate.?limit|\b429\b|No capacity|UNAVAILABLE \(code 503\)|"
+                      r"\b503\b|overloaded|insufficient (?:credits|balance)|usage limit", re.I)
+FALLBACK_MODELS = [m.strip() for m in os.environ.get(
+    "EVOMU_REVIEW_FALLBACK_MODELS", "fable-5.1-high,gemini-3.1-pro-high").split(",") if m.strip()]
 CONTINUE_PROMPT = (
     "Continue the EvoMu review exactly where you left off. Do not restart and do not summarize progress. "
     "Keep using file-reading/search tools silently (no prose between tool calls) until every step of the "
@@ -218,6 +224,38 @@ def render_report(meta, so, parity_md=""):
 
 def launch_reviewer(first_cmd, root, sdir, run_dir, tree_before, ts, valid_verdicts, prefix="",
                     lock_name="review_in_progress.json", check_tree=True):
+    """Run the reviewer, falling back to other models when the primary is out of quota/capacity.
+    Returns (verdict, structured, conversation_id, model_used). verdict == "UNAVAILABLE" means every model
+    was out of quota: nothing was reviewed and the result must never be treated as a pass."""
+    i = first_cmd.index("--model")
+    primary = first_cmd[i + 1]
+    models = [primary] + [m for m in FALLBACK_MODELS if m != primary]
+    exhausted = []
+    for n, model in enumerate(models):
+        cmd = list(first_cmd)
+        cmd[i + 1] = model
+        pfx = prefix if n == 0 else "%sfb%d_" % (prefix, n)
+        verdict, so, conv, quota = _launch_one(cmd, root, sdir, run_dir, tree_before, ts, valid_verdicts, pfx,
+                                               lock_name, check_tree)
+        if not quota or verdict in valid_verdicts or verdict == "INVALID":
+            if n:
+                so["summary"] = ("(Reviewed by FALLBACK model %s because %s %s out of quota/capacity.) "
+                                 % (model, ", ".join(exhausted), "was" if len(exhausted) == 1 else "were")) \
+                    + so.get("summary", "")
+            return verdict, so, conv, model
+        exhausted.append(model)
+        print("[review] %smodel %s is out of quota/capacity; %s" % (
+            prefix, model, "trying %s" % models[n + 1] if n + 1 < len(models) else "no fallback left"))
+    so = {"summary": ("REVIEWER UNAVAILABLE: every reviewer model (%s) is out of quota or capacity. NOTHING was "
+                      "reviewed. This is not a pass. Follow AGENTS.md 'Reviewer unavailable': keep working only on "
+                      "local wip/<task-id> branches, don't merge or push main, and re-run the review when quota "
+                      "returns." % ", ".join(exhausted)),
+          "report_markdown": "All reviewer models returned quota/capacity errors: %s" % ", ".join(exhausted)}
+    return "UNAVAILABLE", so, "", ",".join(exhausted)
+
+
+def _launch_one(first_cmd, root, sdir, run_dir, tree_before, ts, valid_verdicts, prefix="",
+                lock_name="review_in_progress.json", check_tree=True):
     max_rounds = int(os.environ.get("EVOMU_REVIEW_MAX_ROUNDS", "8"))
     max_errors = int(os.environ.get("EVOMU_REVIEW_MAX_STREAM_ERRORS", "2"))
     base_flags = first_cmd[3:]  # everything after `agy -p <prompt>`
@@ -229,6 +267,7 @@ def launch_reviewer(first_cmd, root, sdir, run_dir, tree_before, ts, valid_verdi
     write(lock, json.dumps({"pid": os.getpid(), "tree": tree_before, "ts": ts}))
     verdict, so, conv, env = "ERROR", {}, "", {}
     errors = 0
+    quota = False
     try:
         for rnd in range(1, max_rounds + 1):
             if rnd == 1:
@@ -251,6 +290,13 @@ def launch_reviewer(first_cmd, root, sdir, run_dir, tree_before, ts, valid_verdi
                     so["summary"] = ("(Verdict salvaged from a reviewer stream that ended with status %s: %s) "
                                      % (env.get("status"), env.get("error"))) + so.get("summary", "")
                 break
+            if env.get("status") != "SUCCESS" or not p.stdout.strip():
+                if QUOTA_RE.search("%s\n%s" % (env.get("error") or "", p.stderr[-4000:])):
+                    quota = True
+                    so = {"summary": "Reviewer model out of quota/capacity: %s" % (
+                        env.get("error") or p.stderr[-500:]).strip()}
+                    verdict = "ERROR"
+                    break
             if env.get("status") != "SUCCESS":
                 errors += 1
                 so = {"summary": "Reviewer run failed: %s" % (env.get("error") or p.stderr[-2000:] or "no output"),
@@ -281,7 +327,7 @@ def launch_reviewer(first_cmd, root, sdir, run_dir, tree_before, ts, valid_verdi
         so["summary"] = ("INVALID: the workspace changed during the review (tree %s -> %s). "
                          "Either the reviewer wrote files or someone edited concurrently. Re-run on a quiet tree. "
                          % (tree_before[:12], tree_after[:12])) + so.get("summary", "")
-    return verdict, so, conv
+    return verdict, so, conv, quota
 
 
 def apply_gap_audit(so, ts):
@@ -365,12 +411,12 @@ def background_gap_audit(a, root, sdir):
     for d in (WIKI, CRUCIBLE):
         if os.path.isdir(d):
             cmd += ["--add-dir", d]
-    verdict, so, conv = launch_reviewer(cmd, root, sdir, run_dir, tree_before, ts, GAP_EXIT, "gap_",
-                                        lock_name="gap_audit_in_progress.json", check_tree=False)
+    verdict, so, conv, model_used = launch_reviewer(cmd, root, sdir, run_dir, tree_before, ts, GAP_EXIT, "gap_",
+                                                    lock_name="gap_audit_in_progress.json", check_tree=False)
     if verdict in GAP_EXIT:
         added = apply_gap_audit(so, ts)
         so["summary"] = ("[%d new ledger rows appended to auditor_rows.json] " % added) + so.get("summary", "")
-    meta = {"verdict": verdict, "mode": "gap-audit", "timestamp": ts, "model": a.model, "effort": a.effort,
+    meta = {"verdict": verdict, "mode": "gap-audit", "timestamp": ts, "model": model_used, "effort": a.effort,
             "head": meta0["head"], "base": meta0["base"], "tree": tree_before,
             "tests_executed": (meta0.get("test_meta") or {}).get("executed"),
             "test_summary": json.dumps(meta0.get("test_meta")), "parity_percent": parity.get("percent_closed"),
@@ -384,7 +430,7 @@ def background_gap_audit(a, root, sdir):
     st.setdefault("reviews", []).append(dict(meta, report=rpath))
     rl.save_state(root, st)
     print("[review] background gap-audit VERDICT: %s (%s)" % (verdict, rpath))
-    return GAP_EXIT.get(verdict, 3)
+    return UNAVAILABLE_EXIT if verdict == "UNAVAILABLE" else GAP_EXIT.get(verdict, 3)
 
 
 def main():
@@ -486,8 +532,8 @@ def main():
             c += ["--add-dir", SKILL_DIR]  # reviewing a separate worktree: brief/history live elsewhere
         return c
 
-    def record(mode, verdict, so, conv, prefix):
-        meta = {"verdict": verdict, "mode": mode, "timestamp": ts, "model": a.model, "effort": a.effort,
+    def record(mode, verdict, so, conv, prefix, model_used=None):
+        meta = {"verdict": verdict, "mode": mode, "timestamp": ts, "model": model_used or a.model, "effort": a.effort,
                 "head": head, "base": base, "tree": tree_before, "tests_executed": test_meta.get("executed"),
                 "test_summary": json.dumps(test_meta), "parity_percent": parity.get("percent_closed"),
                 "parity_complete": parity.get("complete"), "conversation_id": conv}
@@ -530,14 +576,16 @@ def main():
             continue
         print("[review] launching headless %s reviewer (this can take a while)..." % mode)
         valid = GAP_EXIT if mode == "gap-audit" else EXIT
-        verdict, so, conv = launch_reviewer(cmd, root, sdir, run_dir, tree_before, ts, valid, prefix)
+        verdict, so, conv, model_used = launch_reviewer(cmd, root, sdir, run_dir, tree_before, ts, valid, prefix)
         if mode == "gap-audit" and verdict in GAP_EXIT:
             added = apply_gap_audit(so, ts)
             so["summary"] = ("[%d new ledger rows appended to auditor_rows.json] " % added) + so.get("summary", "")
-        record(mode, verdict, so, conv, prefix)
+        record(mode, verdict, so, conv, prefix, model_used)
+        if verdict == "UNAVAILABLE":
+            print("[review] " + so["summary"])
         if so.get("blocking_findings"):
             print("[review] blocking findings: %d" % len(so["blocking_findings"]))
-        code = (GAP_EXIT if mode == "gap-audit" else EXIT).get(verdict, 3)
+        code = UNAVAILABLE_EXIT if verdict == "UNAVAILABLE" else (GAP_EXIT if mode == "gap-audit" else EXIT).get(verdict, 3)
         if mode == a.mode:
             rc = code
         if mode == "claims" and verdict not in ("PASS", "PASS_WITH_ISSUES") and len(modes) > 1:
