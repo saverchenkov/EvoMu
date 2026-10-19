@@ -1015,6 +1015,15 @@ impl Ballpark {
             self.observer_events.entry(ball_id).or_default().push(ev);
         }
         if destroyed {
+            let term_ev = DestinyEvent::TerminalExplosion {
+                ball_id,
+                wreck_ball_id: 0,
+            };
+            if let Some(gid) = grid_id {
+                self.queue_event_for_grid_observers(gid, None, &term_ev);
+            } else {
+                self.observer_events.entry(ball_id).or_default().push(term_ev);
+            }
             let _ = self.remove_ball(ball_id);
         }
         Some((applied, destroyed, ball_snap))
