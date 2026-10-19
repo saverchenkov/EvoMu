@@ -234,6 +234,32 @@ pub enum SystemCommand {
         module_id: i64,
         reply: oneshot::Sender<Result<(), String>>,
     },
+    SetInterdictionNullified {
+        ball_id: BallId,
+        nullified: bool,
+        reply: oneshot::Sender<bool>,
+    },
+    MicroJump {
+        ball_id: BallId,
+        distance_meters: f64,
+        reply: oneshot::Sender<Result<DVec3, String>>,
+    },
+    IsBallScrambled {
+        ball_id: BallId,
+        reply: oneshot::Sender<bool>,
+    },
+    AddInterdictionSphere {
+        id: BallId,
+        position: DVec3,
+        radius: f64,
+        reply: oneshot::Sender<bool>,
+    },
+    AddMobileWarpDisruptor {
+        id: BallId,
+        position: DVec3,
+        radius: f64,
+        reply: oneshot::Sender<bool>,
+    },
 }
 
 #[derive(Clone)]
@@ -720,6 +746,51 @@ impl SystemHandle {
             .await
             .map_err(|_| "Solar system actor stopped".to_string())?;
         rx.await.map_err(|_| "Solar system reply dropped".to_string())?
+    }
+
+    pub async fn set_interdiction_nullified(&self, ball_id: BallId, nullified: bool) -> Result<bool, String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SystemCommand::SetInterdictionNullified { ball_id, nullified, reply: tx })
+            .await
+            .map_err(|_| "Solar system actor stopped".to_string())?;
+        rx.await.map_err(|_| "Solar system reply dropped".to_string())
+    }
+
+    pub async fn micro_jump(&self, ball_id: BallId, distance_meters: f64) -> Result<DVec3, String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SystemCommand::MicroJump { ball_id, distance_meters, reply: tx })
+            .await
+            .map_err(|_| "Solar system actor stopped".to_string())?;
+        rx.await.map_err(|_| "Solar system reply dropped".to_string())?
+    }
+
+    pub async fn is_ball_scrambled(&self, ball_id: BallId) -> Result<bool, String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SystemCommand::IsBallScrambled { ball_id, reply: tx })
+            .await
+            .map_err(|_| "Solar system actor stopped".to_string())?;
+        rx.await.map_err(|_| "Solar system reply dropped".to_string())
+    }
+
+    pub async fn add_interdiction_sphere(&self, id: BallId, position: DVec3, radius: f64) -> Result<bool, String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SystemCommand::AddInterdictionSphere { id, position, radius, reply: tx })
+            .await
+            .map_err(|_| "Solar system actor stopped".to_string())?;
+        rx.await.map_err(|_| "Solar system reply dropped".to_string())
+    }
+
+    pub async fn add_mobile_warp_disruptor(&self, id: BallId, position: DVec3, radius: f64) -> Result<bool, String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SystemCommand::AddMobileWarpDisruptor { id, position, radius, reply: tx })
+            .await
+            .map_err(|_| "Solar system actor stopped".to_string())?;
+        rx.await.map_err(|_| "Solar system reply dropped".to_string())
     }
 }
 
@@ -1563,6 +1634,26 @@ impl SystemRegistry {
                                     }
                                 }
                                 let _ = reply.send(Ok(()));
+                            }
+                            SystemCommand::SetInterdictionNullified { ball_id, nullified, reply } => {
+                                let ok = ballpark.set_interdiction_nullified(ball_id, nullified);
+                                let _ = reply.send(ok);
+                            }
+                            SystemCommand::MicroJump { ball_id, distance_meters, reply } => {
+                                let res = ballpark.micro_jump(ball_id, distance_meters);
+                                let _ = reply.send(res);
+                            }
+                            SystemCommand::IsBallScrambled { ball_id, reply } => {
+                                let is_scram = ballpark.is_ball_scrambled(ball_id);
+                                let _ = reply.send(is_scram);
+                            }
+                            SystemCommand::AddInterdictionSphere { id, position, radius, reply } => {
+                                let ok = ballpark.add_interdiction_sphere(id, position, radius);
+                                let _ = reply.send(ok);
+                            }
+                            SystemCommand::AddMobileWarpDisruptor { id, position, radius, reply } => {
+                                let ok = ballpark.add_mobile_warp_disruptor(id, position, radius);
+                                let _ = reply.send(ok);
                             }
                         }
                     }

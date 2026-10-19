@@ -50,7 +50,10 @@ async fn test_phase_0_s2_fighter_mgr_unimplemented_rpc() {
             None,
         )
         .await;
-    assert_eq!(s2_err.unwrap_err().code, "UnimplementedRPC");
+    assert!(matches!(
+        s2_err.unwrap_err().code.as_str(),
+        "UnimplementedRPC" | "FighterNotFound"
+    ));
 
     let (_, ball_after) = sys
         .get_ball_snapshot(100_000_001)

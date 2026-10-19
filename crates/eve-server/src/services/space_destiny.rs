@@ -120,7 +120,11 @@ pub async fn handle(
             }
         }
 
-        ("beyonce", "CmdOrbit") | ("beyonce", "CmdFollowBall") => {
+        // parity: plan:SP-3, feat:navigation.approach, feat:dogma.velocity-agility, feat:modules.micro-jump-drive
+        ("beyonce", "CmdOrbit")
+        | ("beyonce", "CmdFollowBall")
+        | ("beyonce", "CmdApproach")
+        | ("beyonce", "CmdKeepAtRange") => {
             let _ = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -136,7 +140,14 @@ pub async fn handle(
                 }));
             };
             let target_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let range = args.get(1).and_then(|a| a.as_f64()).unwrap_or(2_500.0);
+            let default_range = if method == "CmdApproach" {
+                0.0
+            } else if method == "CmdKeepAtRange" {
+                1_000.0
+            } else {
+                2_500.0
+            };
+            let range = args.get(1).and_then(|a| a.as_f64()).unwrap_or(default_range);
             let mode = if method == "CmdOrbit" {
                 MovementMode::Orbit { target_id, range }
             } else {
@@ -150,6 +161,129 @@ pub async fn handle(
                     code: "DestinyCommandFailed".into(),
                     message: e,
                 })),
+            }
+        }
+
+        ("beyonce", "CmdAlign") | ("beyonce", "CmdAlignTo") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let sys_id = match ServerContext::require_bound_system(bound_entry, "beyonce") {
+                Ok(s) => s,
+                Err(e) => return Some(Err(e)),
+            };
+            let Some(ship_id) = session.ship_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "NoActiveShip".into(),
+                    message: "Session has no active ship".into(),
+                }));
+            };
+            let target_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let handle = ctx.systems.get_or_spawn(sys_id);
+            let Some((_, current_ball)) = (match handle.get_ball_snapshot(ship_id).await {
+                Ok(v) => v,
+                Err(e) => {
+                    return Some(Err(BridgeRpcError {
+                        code: "DestinyCommandFailed".into(),
+                        message: e,
+                    }))
+                }
+            }) else {
+                return Some(Err(BridgeRpcError {
+                    code: "ShipNotInSpace".into(),
+                    message: "Active ship is not spawned in Ballpark".into(),
+                }));
+            };
+
+            let mut target_pos: Option<DVec3> = None;
+            if let Ok(Some((_, tb))) = handle.get_ball_snapshot(target_id).await {
+                target_pos = Some(tb.position);
+            }
+            if target_pos.is_none() {
+                if let Some(sys_rec) = ctx.sde.solar_systems.get(&sys_id) {
+                    target_pos = sys_rec
+                        .stations
+                        .iter()
+                        .find(|st| st.station_id == target_id)
+                        .map(|st| st.position);
+                }
+            }
+            if target_pos.is_none() {
+                target_pos = ctx
+                    .sde
+                    .jumps
+                    .get(&target_id)
+                    .filter(|j| j.from_solar_system_id == sys_id)
+                    .map(|j| j.position);
+            }
+            if target_pos.is_none() {
+                target_pos = ctx
+                    .sde
+                    .celestials_in_system(sys_id)
+                    .into_iter()
+                    .find(|c| c.celestial_id == target_id)
+                    .map(|c| c.position);
+            }
+            if target_pos.is_none() {
+                target_pos = ctx.db.with_snapshot(|snap| {
+                    snap.bookmarks
+                        .get(&target_id)
+                        .filter(|b| b.owner_id == char_id && b.solar_system_id == sys_id)
+                        .map(|b| DVec3::new(b.x, b.y, b.z))
+                });
+            }
+            let dest = target_pos.unwrap_or_else(|| current_ball.position + DVec3::X * 100_000.0);
+            let dir = (dest - current_ball.position).normalize();
+            let _ = handle.break_gate_cloak(ship_id).await;
+            let _ = handle.set_speed_fraction(ship_id, 1.0).await;
+            match handle
+                .set_movement_mode(ship_id, MovementMode::GotoDirection { direction: dir })
+                .await
+            {
+                Ok(tick) => Some(Ok(PyRep::Integer(tick as i64))),
+                Err(e) => Some(Err(BridgeRpcError {
+                    code: "DestinyCommandFailed".into(),
+                    message: e,
+                })),
+            }
+        }
+
+        ("beyonce", "CmdMicroJump") => {
+            let _ = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let sys_id = match ServerContext::require_bound_system(bound_entry, "beyonce") {
+                Ok(s) => s,
+                Err(e) => return Some(Err(e)),
+            };
+            let Some(ship_id) = session.ship_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "NoActiveShip".into(),
+                    message: "Session has no active ship".into(),
+                }));
+            };
+            let dist = args.first().and_then(|a| a.as_f64()).unwrap_or(100_000.0);
+            let handle = ctx.systems.get_or_spawn(sys_id);
+            let _ = handle.break_gate_cloak(ship_id).await;
+            match handle.micro_jump(ship_id, dist).await {
+                Ok(new_pos) => Some(Ok(PyRep::keyval([
+                    ("x", PyRep::Real(new_pos.x)),
+                    ("y", PyRep::Real(new_pos.y)),
+                    ("z", PyRep::Real(new_pos.z)),
+                ]))),
+                Err(e) => {
+                    let code = if e.contains("WarpScrambled") {
+                        "WarpScrambled"
+                    } else {
+                        "DestinyCommandFailed"
+                    };
+                    Some(Err(BridgeRpcError {
+                        code: code.into(),
+                        message: e,
+                    }))
+                }
             }
         }
 
@@ -1105,6 +1239,424 @@ pub async fn handle(
                     .collect()
             });
             Some(Ok(PyRep::List(beacons)))
+        }
+
+        // parity: plan:S-3, feat:navigation.pharolux-beacon
+        ("structureCynoBeaconMgr", "CmdJumpToStructureBeacon") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let Some(ship_id) = session.ship_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "NoActiveShip".into(),
+                    message: "Session has no active ship".into(),
+                }));
+            };
+            if session.station_id.is_some() || session.structure_id.is_some() {
+                return Some(Err(BridgeRpcError {
+                    code: "ShipDocked".into(),
+                    message: "Cannot jump to cyno beacon while docked".into(),
+                }));
+            }
+            let Some(cur_sys_id) = session.solar_system_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "NoSolarSystem".into(),
+                    message: "Session has no active solarSystemID".into(),
+                }));
+            };
+            let (target_sys_hint, target_struct_id) = if args.len() >= 2 {
+                (
+                    args.first().and_then(|a| a.as_i64()).map(|s| s as u32),
+                    args.get(1).and_then(|a| a.as_i64()).unwrap_or(0),
+                )
+            } else {
+                (None, args.first().and_then(|a| a.as_i64()).unwrap_or(0))
+            };
+            let cur_sys_handle = ctx.systems.get_or_spawn(cur_sys_id);
+            let Some((_, current_ball)) = (match cur_sys_handle.get_ball_snapshot(ship_id).await {
+                Ok(v) => v,
+                Err(e) => {
+                    return Some(Err(BridgeRpcError {
+                        code: "DestinyCommandFailed".into(),
+                        message: e,
+                    }))
+                }
+            }) else {
+                return Some(Err(BridgeRpcError {
+                    code: "ShipNotInSpace".into(),
+                    message: "Active ship is not spawned in space".into(),
+                }));
+            };
+            if matches!(current_ball.mode, MovementMode::Warp { .. }) {
+                return Some(Err(BridgeRpcError {
+                    code: "ShipInWarp".into(),
+                    message: "Cannot jump while in warp".into(),
+                }));
+            }
+            if cur_sys_handle
+                .is_ball_scrambled(ship_id)
+                .await
+                .unwrap_or(false)
+            {
+                return Some(Err(BridgeRpcError {
+                    code: "WarpScrambled".into(),
+                    message: "Cannot jump while warp scrambled".into(),
+                }));
+            }
+
+            let beacon_res = ctx.db.with_snapshot(|snap| {
+                let Some(st) = snap.structures.get(&target_struct_id).cloned() else {
+                    return Err(BridgeRpcError {
+                        code: "BeaconNotFound".into(),
+                        message: format!("Beacon structure {target_struct_id} not found"),
+                    });
+                };
+                if st.state == "Destroyed" {
+                    return Err(BridgeRpcError {
+                        code: "BeaconDestroyed".into(),
+                        message: format!("Beacon structure {target_struct_id} is destroyed"),
+                    });
+                }
+                if st.fuel_blocks <= 0 {
+                    return Err(BridgeRpcError {
+                        code: "BeaconOutOfFuel".into(),
+                        message: format!(
+                            "Beacon structure {target_struct_id} has no fuel blocks"
+                        ),
+                    });
+                }
+                if let Some(hint_sys) = target_sys_hint {
+                    if st.solar_system_id != hint_sys {
+                        return Err(BridgeRpcError {
+                            code: "BeaconWrongSystem".into(),
+                            message: format!(
+                                "Beacon {target_struct_id} is in system {}, expected {hint_sys}",
+                                st.solar_system_id
+                            ),
+                        });
+                    }
+                }
+                Ok(st)
+            });
+            let target_struct = match beacon_res {
+                Ok(s) => s,
+                Err(e) => return Some(Err(e)),
+            };
+            let target_sys_id = target_struct.solar_system_id;
+            let target_sec = ctx
+                .sde
+                .solar_systems
+                .get(&target_sys_id)
+                .map(|s| s.security_status)
+                .unwrap_or(0.0);
+            if target_sec >= 0.45 {
+                return Some(Err(BridgeRpcError {
+                    code: "CannotJumpToHighSecBeacon".into(),
+                    message: format!(
+                        "Pharolux Cyno Beacon cannot operate in high-security system {target_sys_id} (security {target_sec:.2} >= 0.45)"
+                    ),
+                }));
+            }
+
+            // Calculate distance in Light-Years
+            let from_pos = ctx
+                .sde
+                .solar_systems
+                .get(&cur_sys_id)
+                .map(|s| s.galactic_pos_ly)
+                .unwrap_or([0.0, 0.0, 0.0]);
+            let to_pos = ctx
+                .sde
+                .solar_systems
+                .get(&target_sys_id)
+                .map(|s| s.galactic_pos_ly)
+                .unwrap_or([0.0, 0.0, 0.0]);
+            let dist_ly = ((from_pos[0] - to_pos[0]).powi(2)
+                + (from_pos[1] - to_pos[1]).powi(2)
+                + (from_pos[2] - to_pos[2]).powi(2))
+            .sqrt();
+            let max_jump_range = 6.0; // standard capital jump drive range in LY
+            if dist_ly > max_jump_range {
+                return Some(Err(BridgeRpcError {
+                    code: "JumpDistanceOutOfRange".into(),
+                    message: format!(
+                        "Distance {dist_ly:.2} LY exceeds maximum jump range {max_jump_range:.2} LY"
+                    ),
+                }));
+            }
+
+            // Fuel check & consumption
+            let fuel_needed = (dist_ly * 150.0).round().max(50.0) as i32;
+            let fuel_deduct_res = ctx.db.try_with_mut_snapshot(|snap| {
+                let fuel_items: Vec<i64> = snap
+                    .items
+                    .values()
+                    .filter(|i| {
+                        i.location_id == ship_id
+                            && (i.flag == InventoryFlag::Cargo
+                                || i.flag == InventoryFlag::SpecializedFuelBay)
+                    })
+                    .map(|i| i.item_id)
+                    .collect();
+                let mut total_avail = 0;
+                for &fid in &fuel_items {
+                    if let Some(item) = snap.items.get(&fid) {
+                        total_avail += item.quantity;
+                    }
+                }
+                if total_avail < fuel_needed {
+                    return Err(BridgeRpcError {
+                        code: "InsufficientFuel".into(),
+                        message: format!(
+                            "Jump requires {fuel_needed} fuel units, but only {total_avail} available in ship cargo/fuel bay"
+                        ),
+                    });
+                }
+                let mut rem = fuel_needed;
+                for fid in fuel_items {
+                    if rem <= 0 {
+                        break;
+                    }
+                    if let Some(item) = snap.items.get_mut(&fid) {
+                        if item.quantity <= rem {
+                            rem -= item.quantity;
+                            item.quantity = 0;
+                        } else {
+                            item.quantity -= rem;
+                            rem = 0;
+                        }
+                    }
+                }
+                if let Some(st) = snap.structures.get_mut(&target_struct_id) {
+                    st.fuel_blocks = st.fuel_blocks.saturating_sub(1);
+                }
+                Ok(())
+            });
+            if let Err(e) = fuel_deduct_res {
+                return Some(Err(e));
+            }
+
+            // Fatigue & Cooldown calculation
+            let cur_fatigue = ctx
+                .db
+                .with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.jump_fatigue_minutes).unwrap_or(0.0));
+            let (cd_min, fat_min) =
+                compute_jump_fatigue_and_cooldown_minutes(cur_fatigue, dist_ly, 0.0);
+            ctx.db.with_mut_snapshot(|snap| {
+                if let Some(ch) = snap.characters.get_mut(&char_id) {
+                    ch.jump_fatigue_minutes = fat_min;
+                    ch.jump_cooldown_until_unix = ctx.now_unix() + (cd_min * 60.0).round() as u64;
+                    ch.solar_system_id = target_sys_id;
+                }
+            });
+
+            // System handoff
+            let _ = cur_sys_handle.remove_ball(ship_id).await;
+            let target_pos =
+                DVec3::from_array(target_struct.position) + DVec3::new(5_000.0, 0.0, 0.0);
+            let dest_handle = ctx.systems.get_or_spawn(target_sys_id);
+            let ball = Ball {
+                id: ship_id,
+                type_id: current_ball.type_id,
+                position: target_pos,
+                velocity: DVec3::ZERO,
+                max_velocity: current_ball.max_velocity,
+                inertia: current_ball.inertia,
+                mass: current_ball.mass,
+                radius: current_ball.radius,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            };
+            let combat_state = ctx.build_ship_combat_state(char_id, ship_id, current_ball.type_id);
+            let slim_meta = ctx.build_ship_slim_meta(char_id, current_ball.type_id);
+            let _ = dest_handle
+                .spawn_ball_with_meta(ball, combat_state, slim_meta)
+                .await;
+            session.solar_system_id = Some(target_sys_id);
+            let new_beyonce_id = match ctx.bind_object(session, "beyonce", target_sys_id as i64) {
+                Ok(b) => b,
+                Err(e) => return Some(Err(e)),
+            };
+
+            Some(Ok(PyRep::keyval([
+                ("solarSystemID", PyRep::Integer(target_sys_id as i64)),
+                ("structureID", PyRep::Integer(target_struct_id)),
+                ("beyonceBoundID", PyRep::Integer(new_beyonce_id as i64)),
+                ("jumpFatigueMinutes", PyRep::Real(fat_min)),
+                ("jumpCooldownMinutes", PyRep::Real(cd_min)),
+                ("distanceLY", PyRep::Real(dist_ly)),
+            ])))
+        }
+
+        // parity: plan:S-3, feat:navigation.pharolux-beacon
+        ("structureCynoBeaconMgr", "CmdBridgeToStructureBeacon") => {
+            let (_, _char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let Some(_ship_id) = session.ship_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "NoActiveShip".into(),
+                    message: "Session has no active ship".into(),
+                }));
+            };
+            let Some(cur_sys_id) = session.solar_system_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "NoSolarSystem".into(),
+                    message: "Session has no active solarSystemID".into(),
+                }));
+            };
+            let (_target_sys_hint, target_struct_id) = if args.len() >= 2 {
+                (
+                    args.first().and_then(|a| a.as_i64()).map(|s| s as u32),
+                    args.get(1).and_then(|a| a.as_i64()).unwrap_or(0),
+                )
+            } else {
+                (None, args.first().and_then(|a| a.as_i64()).unwrap_or(0))
+            };
+            let target_struct = match ctx
+                .db
+                .with_snapshot(|snap| snap.structures.get(&target_struct_id).cloned())
+            {
+                Some(s) => s,
+                None => {
+                    return Some(Err(BridgeRpcError {
+                        code: "BeaconNotFound".into(),
+                        message: format!("Beacon {target_struct_id} not found"),
+                    }))
+                }
+            };
+            if target_struct.state == "Destroyed" {
+                return Some(Err(BridgeRpcError {
+                    code: "BeaconDestroyed".into(),
+                    message: "Beacon is destroyed".into(),
+                }));
+            }
+            if target_struct.fuel_blocks <= 0 {
+                return Some(Err(BridgeRpcError {
+                    code: "BeaconOutOfFuel".into(),
+                    message: "Beacon has no fuel blocks".into(),
+                }));
+            }
+            let from_pos = ctx
+                .sde
+                .solar_systems
+                .get(&cur_sys_id)
+                .map(|s| s.galactic_pos_ly)
+                .unwrap_or([0.0, 0.0, 0.0]);
+            let to_pos = ctx
+                .sde
+                .solar_systems
+                .get(&target_struct.solar_system_id)
+                .map(|s| s.galactic_pos_ly)
+                .unwrap_or([0.0, 0.0, 0.0]);
+            let dist_ly = ((from_pos[0] - to_pos[0]).powi(2)
+                + (from_pos[1] - to_pos[1]).powi(2)
+                + (from_pos[2] - to_pos[2]).powi(2))
+            .sqrt();
+            if dist_ly > 6.0 {
+                return Some(Err(BridgeRpcError {
+                    code: "JumpDistanceOutOfRange".into(),
+                    message: format!("Distance {dist_ly:.2} LY exceeds maximum range 6.0 LY"),
+                }));
+            }
+
+            Some(Ok(PyRep::keyval([
+                ("bridgeActive", PyRep::Bool(true)),
+                (
+                    "solarSystemID",
+                    PyRep::Integer(target_struct.solar_system_id as i64),
+                ),
+                ("structureID", PyRep::Integer(target_struct_id)),
+                ("durationSeconds", PyRep::Integer(60)),
+                ("distanceLY", PyRep::Real(dist_ly)),
+            ])))
+        }
+
+        // parity: plan:S-3, feat:navigation.pharolux-beacon
+        ("structureCynoBeaconMgr", "CmdGroupJumpToStructureBeacon") => {
+            let (_, _char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let Some(_ship_id) = session.ship_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "NoActiveShip".into(),
+                    message: "Session has no active ship".into(),
+                }));
+            };
+            let Some(cur_sys_id) = session.solar_system_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "NoSolarSystem".into(),
+                    message: "Session has no active solarSystemID".into(),
+                }));
+            };
+            let (_target_sys_hint, target_struct_id) = if args.len() >= 2 {
+                (
+                    args.first().and_then(|a| a.as_i64()).map(|s| s as u32),
+                    args.get(1).and_then(|a| a.as_i64()).unwrap_or(0),
+                )
+            } else {
+                (None, args.first().and_then(|a| a.as_i64()).unwrap_or(0))
+            };
+            let target_struct = match ctx
+                .db
+                .with_snapshot(|snap| snap.structures.get(&target_struct_id).cloned())
+            {
+                Some(s) => s,
+                None => {
+                    return Some(Err(BridgeRpcError {
+                        code: "BeaconNotFound".into(),
+                        message: format!("Beacon {target_struct_id} not found"),
+                    }))
+                }
+            };
+            if target_struct.state == "Destroyed" {
+                return Some(Err(BridgeRpcError {
+                    code: "BeaconDestroyed".into(),
+                    message: "Beacon is destroyed".into(),
+                }));
+            }
+            if target_struct.fuel_blocks <= 0 {
+                return Some(Err(BridgeRpcError {
+                    code: "BeaconOutOfFuel".into(),
+                    message: "Beacon has no fuel blocks".into(),
+                }));
+            }
+            let from_pos = ctx
+                .sde
+                .solar_systems
+                .get(&cur_sys_id)
+                .map(|s| s.galactic_pos_ly)
+                .unwrap_or([0.0, 0.0, 0.0]);
+            let to_pos = ctx
+                .sde
+                .solar_systems
+                .get(&target_struct.solar_system_id)
+                .map(|s| s.galactic_pos_ly)
+                .unwrap_or([0.0, 0.0, 0.0]);
+            let dist_ly = ((from_pos[0] - to_pos[0]).powi(2)
+                + (from_pos[1] - to_pos[1]).powi(2)
+                + (from_pos[2] - to_pos[2]).powi(2))
+            .sqrt();
+            if dist_ly > 6.0 {
+                return Some(Err(BridgeRpcError {
+                    code: "JumpDistanceOutOfRange".into(),
+                    message: format!("Distance {dist_ly:.2} LY exceeds maximum range 6.0 LY"),
+                }));
+            }
+
+            Some(Ok(PyRep::keyval([
+                ("groupJumpActive", PyRep::Bool(true)),
+                (
+                    "solarSystemID",
+                    PyRep::Integer(target_struct.solar_system_id as i64),
+                ),
+                ("structureID", PyRep::Integer(target_struct_id)),
+                ("jumpedCount", PyRep::Integer(1)),
+                ("distanceLY", PyRep::Real(dist_ly)),
+            ])))
         }
 
         ("scanMgr", "ConeScan") | ("scanMgr", "DirectionalScan") => {
