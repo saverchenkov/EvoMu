@@ -175,6 +175,9 @@ def main():
     ignored = sum(int(m) for m in re.findall(r"test result: \w+\. \d+ passed; \d+ failed; (\d+) ignored", out))
     failing = re.findall(r"^test (\S+) \.\.\. FAILED", out, re.M)
     compile_err = "error[E" in out or "could not compile" in out
+    m_exit = re.match(r"exit=(-?\d+)", out)
+    test_exit = int(m_exit.group(1)) if m_exit else 0
+    aborted = re.findall(r"(?:process didn't exit successfully|stack overflow|SIGABRT|SIGSEGV|signal: \d+)[^\n]*", out)
 
     sh([sys.executable, PARITY_STATUS, "--tests", tests_txt, "--attest-dir", attest,
         "--out", os.path.join(pdir, "parity.json"), "--md", os.path.join(pdir, "parity.md")], root, timeout=900)
@@ -205,8 +208,9 @@ def main():
         pass
 
     L = ["# Pre-flight numbers (authoritative; paste, don't type)", "",
-         "- Tests: **%d passed, %d failed, %d ignored**%s" % (passed, failed, ignored,
-                                                              " (COMPILE ERROR)" if compile_err else ""),
+         "- Tests: **%d passed, %d failed, %d ignored**, cargo exit %d%s%s" % (
+             passed, failed, ignored, test_exit, " (COMPILE ERROR)" if compile_err else "",
+             " (A TEST BINARY ABORTED: some tests never ran: %s)" % aborted[0][:160] if aborted else ""),
          "- Parity: **%d / %d rows closed (%.2f%%)**, %d NA, %d tagged tests" % (
              summ["closed_rows"], summ["total_rows"], summ["percent_closed"], summ["na_rows"], summ["tagged_tests"]),
          "- Baseline for the diff below: last review %s" % (prev_ts or "(none)"), "",
@@ -285,7 +289,11 @@ def main():
     if rpc_block:
         print("\n# RPC-name check: %d name(s) on lines you added/changed don't exist anywhere in the V24 client. Remove them, "
               "use the client's real method, or justify with `rpc-lint: allow <reason>`." % len(rpc_block))
-    ok = failed == 0 and not compile_err and passed > 0 and lint_ok and not rpc_block
+    if test_exit != 0 or aborted:
+        print("\n# cargo test exited %d%s. A non-zero exit means tests failed or a test binary aborted, so some tests "
+              "never ran. Don't claim tests pass." % (test_exit, " (%s)" % aborted[0][:160] if aborted else ""))
+    ok = (failed == 0 and test_exit == 0 and not aborted and not compile_err and passed > 0 and lint_ok
+          and not rpc_block)
     print("[preflight] %s" % ("OK: run the review now." if ok else "NOT READY: fix the items above before spending a review."))
     return 0 if ok else 1
 
