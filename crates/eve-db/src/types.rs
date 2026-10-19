@@ -574,6 +574,10 @@ pub struct BookmarkRecord {
     pub x: f64,
     pub y: f64,
     pub z: f64,
+    #[serde(default)]
+    pub item_id: Option<i64>,
+    #[serde(default)]
+    pub memo: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -585,7 +589,62 @@ pub struct MailRecord {
     pub body: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[repr(u8)]
+pub enum FleetRole {
+    FleetCommander = 1,
+    WingCommander = 2,
+    SquadCommander = 3,
+    SquadMember = 4,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FleetMemberRecord {
+    pub character_id: i64,
+    pub role: FleetRole,
+    #[serde(default)]
+    pub wing_id: Option<i64>,
+    #[serde(default)]
+    pub squad_id: Option<i64>,
+    #[serde(default)]
+    pub takes_fleet_warp: bool,
+    #[serde(default)]
+    pub job: u32,
+    #[serde(default)]
+    pub role_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FleetWingRecord {
+    pub wing_id: i64,
+    pub name: String,
+    #[serde(default)]
+    pub commander_id: Option<i64>,
+    #[serde(default)]
+    pub squad_ids: Vec<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FleetSquadRecord {
+    pub squad_id: i64,
+    pub wing_id: i64,
+    pub name: String,
+    #[serde(default)]
+    pub commander_id: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FleetBroadcastRecord {
+    pub broadcast_id: i64,
+    pub broadcast_type: String,
+    pub sender_id: i64,
+    pub target_id: Option<i64>,
+    pub solar_system_id: Option<SolarSystemId>,
+    pub item_id: Option<i64>,
+    pub created_at_ft: i64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct FleetRecord {
     pub fleet_id: i64,
     pub boss_id: i64,
@@ -594,9 +653,53 @@ pub struct FleetRecord {
     pub squads: Vec<i64>,
     pub free_move: bool,
     pub is_registered: bool,
+    #[serde(default)]
+    pub wing_details: HashMap<i64, FleetWingRecord>,
+    #[serde(default)]
+    pub squad_details: HashMap<i64, FleetSquadRecord>,
+    #[serde(default)]
+    pub member_details: HashMap<i64, FleetMemberRecord>,
+    #[serde(default)]
+    pub invites: HashSet<i64>,
+    #[serde(default)]
+    pub motd: String,
+}
+
+pub mod corp_roles {
+    pub const ROLE_DIRECTOR: u64 = 1 << 0;
+    pub const ROLE_PERSONNEL_MANAGER: u64 = 1 << 7;
+    pub const ROLE_ACCOUNTANT: u64 = 1 << 8;
+    pub const ROLE_SECURITY_OFFICER: u64 = 1 << 9;
+    pub const ROLE_FACTORY_MANAGER: u64 = 1 << 10;
+    pub const ROLE_STATION_MANAGER: u64 = 1 << 11;
+    pub const ROLE_AUDITOR: u64 = 1 << 12;
+    pub const ROLE_DIPLOMAT: u64 = 1 << 14;
+    pub const ROLE_CONFIG_EQUIPMENT: u64 = 1 << 24;
+    pub const ROLE_JUNIOR_ACCOUNTANT: u64 = 1 << 31;
+
+    pub fn has_role(role_mask: u64, required: u64) -> bool {
+        role_mask == u64::MAX || (role_mask & ROLE_DIRECTOR) != 0 || (role_mask & required) == required
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CorpApplicationRecord {
+    pub application_id: i64,
+    pub character_id: i64,
+    pub corporation_id: i64,
+    pub message: String,
+    pub created_unix: u64,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CorpWalletDivisionRecord {
+    pub division_id: u8,
+    pub name: String,
+    pub balance: IskCents,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct CorporationRecord {
     pub corporation_id: i64,
     pub name: String,
@@ -606,6 +709,52 @@ pub struct CorporationRecord {
     pub tax_rate: f64,
     pub master_wallet: IskCents,
     pub members: HashSet<i64>,
+    #[serde(default)]
+    pub member_roles: HashMap<i64, u64>,
+    #[serde(default)]
+    pub applications: HashMap<i64, CorpApplicationRecord>,
+    #[serde(default)]
+    pub wallet_divisions: Vec<CorpWalletDivisionRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ChatChannelRecord {
+    pub channel_id: String,
+    pub name: String,
+    pub motd: String,
+    pub owner_id: Option<i64>,
+    pub members: HashSet<i64>,
+    pub is_system_local: bool,
+    pub solar_system_id: Option<SolarSystemId>,
+    pub is_private: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ChatMessageRecord {
+    pub message_id: i64,
+    pub channel_id: String,
+    pub sender_id: i64,
+    pub sender_name: String,
+    pub message: String,
+    pub timestamp_ft: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CosmicSignatureRecord {
+    pub signature_id: String,
+    pub solar_system_id: SolarSystemId,
+    pub sig_group: String,
+    pub type_name: String,
+    pub position: [f64; 3],
+    pub signal_strength: f64,
+    pub wormhole_type_id: Option<TypeId>,
+    pub destination_system_id: Option<SolarSystemId>,
+    pub created_unix: u64,
+    pub lifetime_seconds: u64,
+    pub max_mass_kg: f64,
+    pub remaining_mass_kg: f64,
+    pub max_jump_mass_kg: f64,
+    pub collapsed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -805,6 +954,14 @@ pub struct WorldStateSnapshot {
     pub licensed_skins: HashMap<i64, Vec<u32>>,
     #[serde(default)]
     pub applied_ship_skins: HashMap<i64, u32>,
+    #[serde(default)]
+    pub chat_channels: HashMap<String, ChatChannelRecord>,
+    #[serde(default)]
+    pub cosmic_signatures: HashMap<SolarSystemId, Vec<CosmicSignatureRecord>>,
+    #[serde(default)]
+    pub read_mails: HashSet<(i64, i64)>,
+    #[serde(default)]
+    pub deleted_mails: HashSet<(i64, i64)>,
 }
 
 impl WorldStateSnapshot {

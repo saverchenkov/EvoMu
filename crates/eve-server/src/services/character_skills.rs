@@ -229,6 +229,8 @@ pub fn handle(
             session.ship_id = Some(c.active_ship_id);
             session.race_id = Some(c.race_id);
 
+            ctx.sync_character_local_chat(c.character_id, None, c.solar_system_id);
+
             Some(Ok(PyRep::keyval([
                 ("characterID", PyRep::Integer(c.character_id)),
                 ("corporationID", PyRep::Integer(c.corporation_id)),

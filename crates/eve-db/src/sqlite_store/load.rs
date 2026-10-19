@@ -350,6 +350,8 @@ pub fn load_snapshot_from_sqlite(
                     x: r.get(4)?,
                     y: r.get(5)?,
                     z: r.get(6)?,
+                    item_id: None,
+                    memo: String::new(),
                 })
             })
             .map_err(|e| e.to_string())?;
