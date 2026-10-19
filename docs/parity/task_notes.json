@@ -136,16 +136,16 @@
   "note": "Character affiliation, portrait, standings, fatigue, blueprints, Clones, implants, Skills, attributes, queue, Location, online, ship, Fittings, Assets, Wallet, Loyalty, and Mail CRUD implemented."
  },
  "ESI-5": {
-  "assessment": "NOT STARTED",
-  "note": ""
+  "assessment": "DONE",
+  "note": "ESI-5 Industry, Markets, Wallet, and Contracts endpoints implemented with OAuth2 Bearer scope enforcement, regional order books, market history, and JSON schema validation."
  },
  "ESI-6": {
-  "assessment": "NOT STARTED",
-  "note": ""
+  "assessment": "DONE",
+  "note": "ESI-6 Fleets, Corporations, Alliances, Mail, and Bookmarks routes implemented with CEO/corp role checks, hierarchy traversal, and member tracking."
  },
  "ESI-7": {
-  "assessment": "NOT STARTED",
-  "note": ""
+  "assessment": "DONE",
+  "note": "ESI-7 Incursions, Opportunities, Search (/v2/characters/{id}/search/), Routes, and Planetary Interaction endpoints implemented with OpenAPI 3.1.0 conformance."
  },
  "MN-01": {
   "assessment": "PARTIAL",
