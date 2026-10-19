@@ -106,188 +106,329 @@ fn md5_hex(data: &[u8]) -> String {
     out
 }
 
-/// Independently verifies a SQLite3 `.static` client file's record count and spot JSON record
+/// Independently verifies every row and every loaded field of a SQLite3 `.static` client file
 /// against the parsed domain table in `SdeRegistry`. Returns `true` iff the resource is loaded
-/// into `SdeRegistry` and verified against the client `.static` file.
-fn verify_client_sqlite_static_loaded_spot(
+/// into `SdeRegistry` and verified across all rows against the client `.static` file.
+fn verify_client_sqlite_static_loaded_rows(
     res_path: &str,
-    spot_key: &str,
-    spot_json: &serde_json::Value,
+    c_conn: &Connection,
     cache_cnt: usize,
     sde: &SdeRegistry,
 ) -> bool {
+    let mut stmt = c_conn
+        .prepare("SELECT CAST(key AS TEXT), value FROM cache")
+        .expect("prepare SELECT key, value FROM cache");
+    let rows: Vec<(String, serde_json::Value)> = stmt
+        .query_map([], |r| {
+            let k: String = r.get(0)?;
+            let v_str: String = r.get(1)?;
+            let v: serde_json::Value =
+                serde_json::from_str(&v_str).expect("parse client .static row JSON");
+            Ok((k, v))
+        })
+        .expect("query cache rows")
+        .map(|r| r.expect("valid cache row"))
+        .collect();
+    assert_eq!(rows.len(), cache_cnt);
+
     match res_path {
         "res:/staticdata/blueprints.static" => {
             assert_eq!(sde.blueprints.len(), cache_cnt);
-            let bp_id: u32 = spot_key.parse().expect("blueprint spot key u32");
-            let bp = sde
-                .blueprints
-                .get(&bp_id)
-                .expect("spot blueprint must exist in SdeRegistry");
-            assert_eq!(
-                spot_json["blueprintTypeID"].as_u64(),
-                Some(u64::from(bp.blueprint_type_id))
-            );
-            let mfg = &spot_json["activities"]["manufacturing"];
-            assert_eq!(mfg["time"].as_u64(), Some(bp.manufacturing_time_sec));
-            let prod = &mfg["products"][0];
-            assert_eq!(
-                prod["typeID"].as_u64(),
-                Some(u64::from(bp.product_type_id))
-            );
-            assert_eq!(
-                prod["quantity"].as_u64(),
-                Some(u64::from(bp.product_quantity))
-            );
-            let client_mats = mfg["materials"].as_array().expect("client blueprint materials");
-            assert_eq!(bp.materials.len(), client_mats.len());
-            for (actual, expected) in bp.materials.iter().zip(client_mats.iter()) {
+            for (key_str, row_json) in &rows {
+                let bp_id: u32 = key_str.parse().expect("blueprint key u32");
+                let bp = sde
+                    .blueprints
+                    .get(&bp_id)
+                    .expect("blueprint row must exist in SdeRegistry");
                 assert_eq!(
-                    Some(u64::from(actual.type_id)),
-                    expected["typeID"].as_u64()
+                    row_json["blueprintTypeID"].as_u64(),
+                    Some(u64::from(bp.blueprint_type_id))
                 );
-                assert_eq!(Some(actual.quantity), expected["quantity"].as_u64());
+                assert_eq!(
+                    row_json
+                        .get("maxProductionLimit")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0),
+                    u64::from(bp.max_production_limit)
+                );
+                let client_acts = row_json["activities"]
+                    .as_object()
+                    .expect("client blueprint activities object");
+                assert_eq!(bp.activities.len(), client_acts.len());
+                for (act_name, client_act) in client_acts {
+                    let actual_act = bp
+                        .activities
+                        .get(act_name)
+                        .expect("activity must exist on BlueprintInfo");
+                    assert_eq!(
+                        actual_act.time,
+                        client_act
+                            .get("time")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0)
+                    );
+                    let empty_arr = Vec::new();
+                    let c_mats = client_act
+                        .get("materials")
+                        .and_then(|v| v.as_array())
+                        .unwrap_or(&empty_arr);
+                    assert_eq!(actual_act.materials.len(), c_mats.len());
+                    for (am, cm) in actual_act.materials.iter().zip(c_mats.iter()) {
+                        assert_eq!(Some(u64::from(am.type_id)), cm["typeID"].as_u64());
+                        assert_eq!(Some(am.quantity), cm["quantity"].as_u64());
+                    }
+                    let c_prods = client_act
+                        .get("products")
+                        .and_then(|v| v.as_array())
+                        .unwrap_or(&empty_arr);
+                    assert_eq!(actual_act.products.len(), c_prods.len());
+                    for (ap, cp) in actual_act.products.iter().zip(c_prods.iter()) {
+                        assert_eq!(Some(u64::from(ap.type_id)), cp["typeID"].as_u64());
+                        assert_eq!(Some(ap.quantity), cp["quantity"].as_u64());
+                        assert_eq!(
+                            ap.probability,
+                            cp.get("probability").and_then(|v| v.as_f64())
+                        );
+                    }
+                    let c_skills = client_act
+                        .get("skills")
+                        .and_then(|v| v.as_array())
+                        .unwrap_or(&empty_arr);
+                    assert_eq!(actual_act.skills.len(), c_skills.len());
+                    for (ask, csk) in actual_act.skills.iter().zip(c_skills.iter()) {
+                        assert_eq!(Some(u64::from(ask.type_id)), csk["typeID"].as_u64());
+                        assert_eq!(Some(u64::from(ask.level)), csk["level"].as_u64());
+                    }
+                }
+                if let Some(mfg) = bp.activities.get("manufacturing") {
+                    assert_eq!(bp.manufacturing_time_sec, mfg.time);
+                    assert_eq!(bp.materials, mfg.materials);
+                }
             }
-            // Pending lossless non-manufacturing activity loading (R5-P1-1)
-            false
+            true
         }
         "res:/staticdata/clonegrades.static" => {
             assert_eq!(sde.clone_grades.len(), cache_cnt);
-            let grade_id: u32 = spot_key.parse().expect("clonegrade spot key u32");
-            let cg = sde
-                .clone_grades
-                .get(&grade_id)
-                .expect("spot clone grade must exist in SdeRegistry");
-            let client_skills = spot_json["skills"]
-                .as_array()
-                .expect("client clonegrade skills array");
-            assert_eq!(cg.alpha_skill_caps.len(), client_skills.len());
-            for sk in client_skills {
-                let tid = sk["typeID"].as_u64().expect("skill typeID") as u32;
-                let lvl = sk
-                    .get("level")
-                    .or_else(|| sk.get("maxTrainingLevel"))
-                    .and_then(|v| v.as_u64())
-                    .expect("clonegrade skill level") as u8;
-                assert_eq!(cg.alpha_skill_caps.get(&tid).copied(), Some(lvl));
+            for (key_str, row_json) in &rows {
+                let grade_id: u32 = key_str.parse().expect("clonegrade key u32");
+                let cg = sde
+                    .clone_grades
+                    .get(&grade_id)
+                    .expect("clone grade must exist in SdeRegistry");
+                let client_skills = row_json["skills"]
+                    .as_array()
+                    .expect("client clonegrade skills array");
+                assert_eq!(cg.alpha_skill_caps.len(), client_skills.len());
+                for sk in client_skills {
+                    let tid = sk["typeID"].as_u64().expect("skill typeID") as u32;
+                    let lvl = sk
+                        .get("level")
+                        .or_else(|| sk.get("maxTrainingLevel"))
+                        .and_then(|v| v.as_u64())
+                        .expect("clonegrade skill level") as u8;
+                    assert_eq!(cg.alpha_skill_caps.get(&tid).copied(), Some(lvl));
+                }
             }
             true
         }
         "res:/staticdata/dbuffcollections.static" => {
             assert_eq!(sde.dbuff_collections.len(), cache_cnt);
-            let dbuff_id: u32 = spot_key.parse().expect("dbuff spot key u32");
-            let dbuff = sde
-                .dbuff_collections
-                .get(&dbuff_id)
-                .expect("spot dbuff collection must exist in SdeRegistry");
-            assert_eq!(
-                Some(dbuff.operation.as_str()),
-                spot_json["operationName"].as_str()
-            );
-            assert_eq!(
-                Some(dbuff.aggregate_mode.as_str()),
-                spot_json["aggregateMode"].as_str()
-            );
-            assert_eq!(
-                Some(dbuff.name.as_str()),
-                spot_json["developerDescription"].as_str()
-            );
-            // Pending lossless locationGroupModifiers/locationRequiredSkillModifiers loading (R5-P1-1)
-            false
+            for (key_str, row_json) in &rows {
+                let dbuff_id: u32 = key_str.parse().expect("dbuff key u32");
+                let dbuff = sde
+                    .dbuff_collections
+                    .get(&dbuff_id)
+                    .expect("dbuff collection must exist in SdeRegistry");
+                assert_eq!(
+                    Some(dbuff.operation.as_str()),
+                    row_json["operationName"].as_str()
+                );
+                assert_eq!(
+                    Some(dbuff.aggregate_mode.as_str()),
+                    row_json["aggregateMode"].as_str()
+                );
+                assert_eq!(
+                    Some(dbuff.name.as_str()),
+                    row_json["developerDescription"].as_str()
+                );
+                assert_eq!(
+                    dbuff.display_name_id.map(u64::from),
+                    row_json.get("displayNameID").and_then(|v| v.as_u64())
+                );
+                assert_eq!(
+                    dbuff.show_output_value_in_ui.as_deref(),
+                    row_json.get("showOutputValueInUI").and_then(|v| v.as_str())
+                );
+                let empty_arr = Vec::new();
+                let exp_item_mods: Vec<u16> = row_json
+                    .get("itemModifiers")
+                    .and_then(|v| v.as_array())
+                    .unwrap_or(&empty_arr)
+                    .iter()
+                    .map(|m| m["dogmaAttributeID"].as_u64().unwrap() as u16)
+                    .collect();
+                assert_eq!(dbuff.item_modifiers, exp_item_mods);
+                let exp_loc_mods: Vec<u16> = row_json
+                    .get("locationModifiers")
+                    .and_then(|v| v.as_array())
+                    .unwrap_or(&empty_arr)
+                    .iter()
+                    .map(|m| m["dogmaAttributeID"].as_u64().unwrap() as u16)
+                    .collect();
+                assert_eq!(dbuff.location_modifiers, exp_loc_mods);
+                let exp_grp_mods: Vec<eve_sde::DbuffGroupModifier> = row_json
+                    .get("locationGroupModifiers")
+                    .and_then(|v| v.as_array())
+                    .unwrap_or(&empty_arr)
+                    .iter()
+                    .map(|m| eve_sde::DbuffGroupModifier {
+                        attribute_id: m["dogmaAttributeID"].as_u64().unwrap() as u16,
+                        group_id: m["groupID"].as_u64().unwrap() as u32,
+                    })
+                    .collect();
+                assert_eq!(dbuff.location_group_modifiers, exp_grp_mods);
+                let exp_srq_mods: Vec<eve_sde::DbuffSkillModifier> = row_json
+                    .get("locationRequiredSkillModifiers")
+                    .and_then(|v| v.as_array())
+                    .unwrap_or(&empty_arr)
+                    .iter()
+                    .map(|m| eve_sde::DbuffSkillModifier {
+                        attribute_id: m["dogmaAttributeID"].as_u64().unwrap() as u16,
+                        skill_id: m["skillID"].as_u64().unwrap() as u32,
+                    })
+                    .collect();
+                assert_eq!(dbuff.location_required_skill_modifiers, exp_srq_mods);
+            }
+            true
         }
         "res:/staticdata/fighterabilities.static" => {
             assert_eq!(sde.fighter_abilities.len(), cache_cnt);
-            let ability_id: u32 = spot_key.parse().expect("fighter ability spot key u32");
-            let fa = sde
-                .fighter_abilities
-                .get(&ability_id)
-                .expect("spot fighter ability must exist in SdeRegistry");
-            assert_eq!(
-                Some(fa.target_mode.as_str()),
-                spot_json["targetMode"].as_str()
-            );
-            assert_eq!(
-                fa.disallow_in_high_sec,
-                spot_json
-                    .get("disallowInHighSec")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false)
-            );
-            assert_eq!(
-                fa.disallow_in_low_sec,
-                spot_json
-                    .get("disallowInLowSec")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false)
-            );
-            assert_eq!(
-                fa.icon_id.map(u64::from),
-                spot_json.get("iconID").and_then(|v| v.as_u64())
-            );
+            for (key_str, row_json) in &rows {
+                let ability_id: u32 = key_str.parse().expect("fighter ability key u32");
+                let fa = sde
+                    .fighter_abilities
+                    .get(&ability_id)
+                    .expect("fighter ability must exist in SdeRegistry");
+                assert_eq!(
+                    Some(fa.target_mode.as_str()),
+                    row_json["targetMode"].as_str()
+                );
+                assert_eq!(
+                    fa.disallow_in_high_sec,
+                    row_json
+                        .get("disallowInHighSec")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false)
+                );
+                assert_eq!(
+                    fa.disallow_in_low_sec,
+                    row_json
+                        .get("disallowInLowSec")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false)
+                );
+                assert_eq!(
+                    fa.icon_id.map(u64::from),
+                    row_json.get("iconID").and_then(|v| v.as_u64())
+                );
+                assert_eq!(
+                    fa.display_name_id.map(u64::from),
+                    row_json.get("displayNameID").and_then(|v| v.as_u64())
+                );
+                assert_eq!(
+                    fa.tooltip_text_id.map(u64::from),
+                    row_json.get("tooltipTextID").and_then(|v| v.as_u64())
+                );
+                assert_eq!(
+                    fa.turret_graphic_id.map(u64::from),
+                    row_json.get("turretGraphicID").and_then(|v| v.as_u64())
+                );
+            }
             true
         }
         "res:/staticdata/fighterabilitiesbytype.static" => {
             assert_eq!(sde.fighter_abilities_by_type.len(), cache_cnt);
-            let type_id: u32 = spot_key.parse().expect("fighter type spot key u32");
-            let abilities = sde
-                .fighter_abilities_by_type
-                .get(&type_id)
-                .expect("spot fighter abilities by type must exist in SdeRegistry");
-            let mut expected_aids = Vec::new();
-            for slot_key in ["abilitySlot0", "abilitySlot1", "abilitySlot2"] {
-                if let Some(aid) = spot_json
-                    .get(slot_key)
-                    .and_then(|s| s.get("abilityID"))
-                    .and_then(|v| v.as_u64())
+            for (key_str, row_json) in &rows {
+                let type_id: u32 = key_str.parse().expect("fighter type key u32");
+                let slots = sde
+                    .fighter_abilities_by_type
+                    .get(&type_id)
+                    .expect("fighter abilities by type must exist in SdeRegistry");
+                let mut expected_slots = Vec::new();
+                for (slot_idx, slot_key) in ["abilitySlot0", "abilitySlot1", "abilitySlot2"]
+                    .into_iter()
+                    .enumerate()
                 {
-                    expected_aids.push(aid as u32);
+                    if let Some(slot_obj) = row_json.get(slot_key).and_then(|s| s.as_object()) {
+                        if let Some(aid) = slot_obj.get("abilityID").and_then(|v| v.as_u64()) {
+                            let cooldown_seconds = slot_obj
+                                .get("cooldownSeconds")
+                                .and_then(|v| v.as_f64());
+                            let charges = slot_obj
+                                .get("charges")
+                                .and_then(|c| c.as_object())
+                                .map(|c| eve_sde::FighterAbilityCharges {
+                                    charge_count: c["chargeCount"].as_u64().unwrap() as u32,
+                                    rearm_time_seconds: c["rearmTimeSeconds"].as_f64().unwrap(),
+                                });
+                            expected_slots.push(eve_sde::FighterAbilitySlot {
+                                slot_index: slot_idx as u8,
+                                ability_id: aid as u32,
+                                cooldown_seconds,
+                                charges,
+                            });
+                        }
+                    }
                 }
+                assert_eq!(slots, &expected_slots);
             }
-            assert_eq!(abilities, &expected_aids);
-            // Pending lossless slot cooldownSeconds and charges loading (R5-P1-1)
-            false
+            true
         }
         "res:/staticdata/skinlicenses.static" => {
             assert_eq!(sde.skin_licenses.len(), cache_cnt);
-            let license_tid: u32 = spot_key.parse().expect("skin license spot key u32");
-            let sl = sde
-                .skin_licenses
-                .get(&license_tid)
-                .expect("spot skin license must exist in SdeRegistry");
-            assert_eq!(
-                spot_json["licenseTypeID"].as_u64(),
-                Some(u64::from(sl.license_type_id))
-            );
-            assert_eq!(spot_json["skinID"].as_u64(), Some(u64::from(sl.skin_id)));
-            assert_eq!(
-                spot_json["duration"].as_i64(),
-                Some(i64::from(sl.duration))
-            );
+            for (key_str, row_json) in &rows {
+                let license_tid: u32 = key_str.parse().expect("skin license key u32");
+                let sl = sde
+                    .skin_licenses
+                    .get(&license_tid)
+                    .expect("skin license must exist in SdeRegistry");
+                assert_eq!(
+                    row_json["licenseTypeID"].as_u64(),
+                    Some(u64::from(sl.license_type_id))
+                );
+                assert_eq!(row_json["skinID"].as_u64(), Some(u64::from(sl.skin_id)));
+                assert_eq!(
+                    row_json["duration"].as_i64(),
+                    Some(i64::from(sl.duration))
+                );
+            }
             true
         }
         "res:/staticdata/skins.static" => {
             assert_eq!(sde.skins.len(), cache_cnt);
-            let skin_id: u32 = spot_key.parse().expect("skin spot key u32");
-            let sk = sde
-                .skins
-                .get(&skin_id)
-                .expect("spot skin must exist in SdeRegistry");
-            assert_eq!(spot_json["skinID"].as_u64(), Some(u64::from(sk.skin_id)));
-            assert_eq!(
-                spot_json["internalName"].as_str(),
-                Some(sk.internal_name.as_str())
-            );
-            assert_eq!(
-                spot_json["skinMaterialID"].as_u64(),
-                Some(u64::from(sk.skin_material_id))
-            );
-            let expected_types: Vec<u32> = spot_json["types"]
-                .as_array()
-                .expect("client skin types array")
-                .iter()
-                .map(|v| v.as_u64().expect("skin type u64") as u32)
-                .collect();
-            assert_eq!(sk.types, expected_types);
+            for (key_str, row_json) in &rows {
+                let skin_id: u32 = key_str.parse().expect("skin key u32");
+                let sk = sde
+                    .skins
+                    .get(&skin_id)
+                    .expect("skin must exist in SdeRegistry");
+                assert_eq!(row_json["skinID"].as_u64(), Some(u64::from(sk.skin_id)));
+                assert_eq!(
+                    row_json["internalName"].as_str(),
+                    Some(sk.internal_name.as_str())
+                );
+                assert_eq!(
+                    row_json["skinMaterialID"].as_u64(),
+                    Some(u64::from(sk.skin_material_id))
+                );
+                let expected_types: Vec<u32> = row_json["types"]
+                    .as_array()
+                    .expect("client skin types array")
+                    .iter()
+                    .map(|v| v.as_u64().expect("skin type u64") as u32)
+                    .collect();
+                assert_eq!(sk.types, expected_types);
+            }
             true
         }
         _ => false,
@@ -295,6 +436,7 @@ fn verify_client_sqlite_static_loaded_spot(
 }
 
 #[test]
+// parity: plan:T-1
 fn test_t2_sde_all_213_resources_and_domain_tables_sweep() {
     let root = repo_root();
     let db_path = SdeRegistry::default_db_path();
@@ -443,7 +585,7 @@ fn test_t2_sde_all_213_resources_and_domain_tables_sweep() {
             "Client file MD5 mismatch vs catalog for {res_path}"
         );
 
-        // For SQLite3 .static client files, independently verify record_count and spot record
+        // For SQLite3 .static client files, independently verify record_count, spot key, and all loaded rows
         if info.format == "SQLite3" && raw_bytes.starts_with(b"SQLite format 3\0") {
             let c_conn = Connection::open_with_flags(&client_file, OpenFlags::SQLITE_OPEN_READ_ONLY)
                 .expect("open client sqlite .static");
@@ -463,23 +605,13 @@ fn test_t2_sde_all_213_resources_and_domain_tables_sweep() {
                 first_key, info.spot,
                 "Client SQLite spot key mismatch for {res_path}"
             );
-            let first_val_str: String = c_conn
-                .query_row(
-                    "SELECT value FROM cache WHERE CAST(key AS TEXT) = ?1 LIMIT 1",
-                    [&first_key],
-                    |r| r.get(0),
-                )
-                .expect("query spot value in client .static");
-            let spot_json: serde_json::Value =
-                serde_json::from_str(&first_val_str).expect("parse client .static spot JSON");
             sqlite_static_verified += 1;
 
-            // Only attest sde: rows that are both losslessly loaded into SdeRegistry AND independently verified
-            // against the client file for MD5, byte size, record count, and spot record contents (R-P0-1, R5-P1-1).
-            if verify_client_sqlite_static_loaded_spot(
+            // Only attest sde: rows that are both loaded into SdeRegistry AND independently verified
+            // across all rows and fields against the client file (R-P0-1, R5-P1-1).
+            if verify_client_sqlite_static_loaded_rows(
                 res_path,
-                &first_key,
-                &spot_json,
+                &c_conn,
                 cache_cnt as usize,
                 &sde,
             ) {
@@ -489,7 +621,7 @@ fn test_t2_sde_all_213_resources_and_domain_tables_sweep() {
     }
 
     assert_eq!(sqlite_static_verified, 14);
-    assert_eq!(attested_sde_rows.len(), 4);
+    assert_eq!(attested_sde_rows.len(), 7);
 
     // 2. Verify all 42 SQLite table_counts in manifest against data/evomu_sde.sqlite and SdeRegistry
     let sde_uri = format!("file:{}?immutable=1", db_path.display());
@@ -1052,18 +1184,43 @@ fn test_t2_sde_all_213_resources_and_domain_tables_sweep() {
     }
 
     for dbuff in sde.dbuff_collections.values() {
+        assert!(!dbuff.name.is_empty());
         assert!(!dbuff.operation.is_empty());
         assert!(!dbuff.aggregate_mode.is_empty());
     }
+    assert!(sde
+        .dbuff_collections
+        .values()
+        .any(|d| !d.item_modifiers.is_empty()));
+    assert!(sde
+        .dbuff_collections
+        .values()
+        .any(|d| !d.location_modifiers.is_empty()));
+    assert!(sde
+        .dbuff_collections
+        .values()
+        .any(|d| !d.location_group_modifiers.is_empty()));
+    assert!(sde
+        .dbuff_collections
+        .values()
+        .any(|d| !d.location_required_skill_modifiers.is_empty()));
 
     for fa in sde.fighter_abilities.values() {
         assert!(!fa.target_mode.is_empty());
     }
-    for (&ftid, aids) in &sde.fighter_abilities_by_type {
+    for (&ftid, slots) in &sde.fighter_abilities_by_type {
         assert!(sde.types.contains_key(&ftid));
-        assert!(!aids.is_empty());
-        for aid in aids {
-            assert!(sde.fighter_abilities.contains_key(aid));
+        assert!(!slots.is_empty());
+        for slot in slots {
+            assert!(slot.slot_index <= 2);
+            assert!(sde.fighter_abilities.contains_key(&slot.ability_id));
+            if let Some(cd) = slot.cooldown_seconds {
+                assert!(cd > 0.0);
+            }
+            if let Some(ref ch) = slot.charges {
+                assert!(ch.charge_count > 0);
+                assert!(ch.rearm_time_seconds > 0.0);
+            }
         }
     }
 
@@ -1133,10 +1290,10 @@ fn test_t2_sde_all_213_resources_and_domain_tables_sweep() {
     assert_eq!(sde.station_services[&2].name, "Assassination Missions");
     assert_eq!(sde.station_services[&3].name, "Courier Missions");
 
-    // 9. Attest only the 4 sde:res:/... SQLite rows that are losslessly loaded into SdeRegistry AND independently
-    //    verified against the raw client files in ResFiles/ for MD5, byte size, record count, and spot record (R-P0-1, R5-P1-1).
+    // 9. Attest only the 7 sde:res:/... rows that are loaded into SdeRegistry AND independently
+    //    verified against the raw client files in ResFiles/ for MD5, byte size, record count, and spot record (R-P0-1).
     let unique_attested: HashSet<&str> = attested_sde_rows.iter().map(String::as_str).collect();
-    assert_eq!(unique_attested.len(), 4);
+    assert_eq!(unique_attested.len(), 7);
     let attested_refs: Vec<&str> = attested_sde_rows.iter().map(String::as_str).collect();
     eve_testkit::attest(&attested_refs);
 }

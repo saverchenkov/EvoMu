@@ -422,10 +422,39 @@ pub struct CloneGradeInfo {
     pub alpha_skill_caps: HashMap<TypeId, u8>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BlueprintMaterial {
+    #[serde(alias = "typeID")]
     pub type_id: TypeId,
     pub quantity: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BlueprintProduct {
+    #[serde(alias = "typeID")]
+    pub type_id: TypeId,
+    pub quantity: u64,
+    #[serde(default)]
+    pub probability: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlueprintSkill {
+    #[serde(alias = "typeID")]
+    pub type_id: TypeId,
+    pub level: u8,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct BlueprintActivity {
+    #[serde(default)]
+    pub time: u64,
+    #[serde(default)]
+    pub materials: Vec<BlueprintMaterial>,
+    #[serde(default)]
+    pub products: Vec<BlueprintProduct>,
+    #[serde(default)]
+    pub skills: Vec<BlueprintSkill>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -434,12 +463,28 @@ pub struct BlueprintInfo {
     pub product_type_id: TypeId,
     pub product_quantity: u32,
     pub manufacturing_time_sec: u64,
+    #[serde(default)]
+    pub max_production_limit: u32,
     pub research_me_time_sec: u64,
     pub research_te_time_sec: u64,
     pub copy_time_sec: u64,
     pub invention_time_sec: u64,
     pub invention_base_probability: f64,
     pub materials: Vec<BlueprintMaterial>,
+    #[serde(default)]
+    pub activities: HashMap<String, BlueprintActivity>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DbuffGroupModifier {
+    pub attribute_id: AttributeId,
+    pub group_id: GroupId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DbuffSkillModifier {
+    pub attribute_id: AttributeId,
+    pub skill_id: TypeId,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -448,6 +493,19 @@ pub struct DbuffCollectionInfo {
     pub name: String,
     pub operation: String,
     pub aggregate_mode: String,
+    #[serde(default)]
+    pub display_name_id: Option<u32>,
+    #[serde(default)]
+    pub show_output_value_in_ui: Option<String>,
+    #[serde(default)]
+    pub item_modifiers: Vec<AttributeId>,
+    #[serde(default)]
+    pub location_modifiers: Vec<AttributeId>,
+    #[serde(default)]
+    pub location_group_modifiers: Vec<DbuffGroupModifier>,
+    #[serde(default)]
+    pub location_required_skill_modifiers: Vec<DbuffSkillModifier>,
+    #[serde(default)]
     pub target_attribute_ids: Vec<AttributeId>,
 }
 
@@ -459,6 +517,24 @@ pub struct FighterAbilityInfo {
     pub disallow_in_low_sec: bool,
     pub icon_id: Option<u32>,
     pub display_name_id: Option<u32>,
+    #[serde(default)]
+    pub tooltip_text_id: Option<u32>,
+    #[serde(default)]
+    pub turret_graphic_id: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FighterAbilityCharges {
+    pub charge_count: u32,
+    pub rearm_time_seconds: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FighterAbilitySlot {
+    pub slot_index: u8,
+    pub ability_id: u32,
+    pub cooldown_seconds: Option<f64>,
+    pub charges: Option<FighterAbilityCharges>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -635,7 +711,7 @@ pub struct SdeRegistry {
     pub dbuff_collections: HashMap<u32, DbuffCollectionInfo>,
     pub fighter_abilities: HashMap<u32, FighterAbilityInfo>,
     #[serde(default)]
-    pub fighter_abilities_by_type: HashMap<TypeId, Vec<u32>>,
+    pub fighter_abilities_by_type: HashMap<TypeId, Vec<FighterAbilitySlot>>,
     pub wrecks: HashMap<TypeId, TypeId>,
     pub compressible_types: HashMap<TypeId, TypeId>,
     #[serde(default)]
@@ -729,14 +805,11 @@ impl SdeRegistry {
             }
         }
 
-        let sde_uri = format!("file:{}?immutable=1", canon.display());
+        let uri = format!("file:{}?immutable=1", canon.display());
         let conn = Connection::open_with_flags(
-            &sde_uri,
-            OpenFlags::SQLITE_OPEN_READ_ONLY
-                | OpenFlags::SQLITE_OPEN_URI
-                | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )
-        .or_else(|_| Connection::open_with_flags(&canon, OpenFlags::SQLITE_OPEN_READ_ONLY))?;
+            &uri,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+        )?;
         let schema_ver: String = conn
             .query_row(
                 "SELECT value FROM sde_meta WHERE key = 'schema_version'",
@@ -990,16 +1063,17 @@ impl SdeRegistry {
         let mut blueprints = HashMap::new();
         {
             let mut stmt = conn.prepare(
-                "SELECT blueprint_type_id, product_type_id, product_quantity, manufacturing_time_sec, materials_json, activities_json FROM sde_blueprints",
+                "SELECT blueprint_type_id, product_type_id, product_quantity, manufacturing_time_sec, max_production_limit, materials_json, activities_json FROM sde_blueprints",
             )?;
             let rows = stmt.query_map([], |r| {
                 let bpid = r.get::<_, i64>(0)? as TypeId;
                 let prod_tid = r.get::<_, i64>(1)? as TypeId;
                 let prod_qty = r.get::<_, i64>(2)? as u32;
                 let mfg_time = r.get::<_, i64>(3)? as u64;
-                let mats_str: String = r.get(4)?;
-                let acts_str: String = r.get(5)?;
-                let raw_mats: Vec<TypeMaterialEntry> = parse_json_col(4, &mats_str)?;
+                let max_prod_limit = r.get::<_, i64>(4)?.max(0) as u32;
+                let mats_str: String = r.get(5)?;
+                let acts_str: String = r.get(6)?;
+                let raw_mats: Vec<TypeMaterialEntry> = parse_json_col(5, &mats_str)?;
                 let materials = raw_mats
                     .into_iter()
                     .map(|m| BlueprintMaterial {
@@ -1007,46 +1081,35 @@ impl SdeRegistry {
                         quantity: m.quantity,
                     })
                     .collect();
-                let acts_val: serde_json::Value = parse_json_col(5, &acts_str)?;
-                let me_time = acts_val
+                let activities: HashMap<String, BlueprintActivity> = parse_json_col(6, &acts_str)?;
+                let me_time = activities
                     .get("research_material")
-                    .and_then(|v| v.get("time"))
-                    .and_then(|v| v.as_u64())
+                    .map(|a| a.time)
                     .unwrap_or(0);
-                let te_time = acts_val
+                let te_time = activities
                     .get("research_time")
-                    .and_then(|v| v.get("time"))
-                    .and_then(|v| v.as_u64())
+                    .map(|a| a.time)
                     .unwrap_or(0);
-                let copy_time = acts_val
-                    .get("copying")
-                    .and_then(|v| v.get("time"))
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
-                let inv_time = acts_val
+                let copy_time = activities.get("copying").map(|a| a.time).unwrap_or(0);
+                let inv_time = activities.get("invention").map(|a| a.time).unwrap_or(0);
+                let inv_prob = activities
                     .get("invention")
-                    .and_then(|v| v.get("time"))
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
-                let inv_prob = acts_val
-                    .get("invention")
-                    .and_then(|v| v.get("products"))
-                    .and_then(|v| v.as_array())
-                    .and_then(|a| a.first())
-                    .and_then(|p| p.get("probability"))
-                    .and_then(|v| v.as_f64())
+                    .and_then(|a| a.products.first())
+                    .and_then(|p| p.probability)
                     .unwrap_or(0.34);
                 Ok(BlueprintInfo {
                     blueprint_type_id: bpid,
                     product_type_id: prod_tid,
                     product_quantity: prod_qty,
                     manufacturing_time_sec: mfg_time,
+                    max_production_limit: max_prod_limit,
                     research_me_time_sec: me_time,
                     research_te_time_sec: te_time,
                     copy_time_sec: copy_time,
                     invention_time_sec: inv_time,
                     invention_base_probability: inv_prob,
                     materials,
+                    activities,
                 })
             })?;
             for r in rows {
@@ -1498,26 +1561,100 @@ impl SdeRegistry {
                 let name = val
                     .get("developerDescription")
                     .and_then(|v| v.as_str())
-                    .unwrap_or("dbuff")
+                    .ok_or_else(|| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            2,
+                            rusqlite::types::Type::Text,
+                            format!("missing developerDescription on dbuff {id}").into(),
+                        )
+                    })?
                     .to_string();
                 let agg = val
                     .get("aggregateMode")
                     .and_then(|v| v.as_str())
-                    .unwrap_or("Maximum")
+                    .ok_or_else(|| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            2,
+                            rusqlite::types::Type::Text,
+                            format!("missing aggregateMode on dbuff {id}").into(),
+                        )
+                    })?
                     .to_string();
-                let mut target_attrs = Vec::new();
+                let display_name_id = val
+                    .get("displayNameID")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as u32);
+                let show_output_value_in_ui = val
+                    .get("showOutputValueInUI")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+                let mut item_modifiers = Vec::new();
                 if let Some(arr) = val.get("itemModifiers").and_then(|v| v.as_array()) {
                     for item in arr {
                         if let Some(aid) = item.get("dogmaAttributeID").and_then(|v| v.as_u64()) {
-                            target_attrs.push(aid as AttributeId);
+                            item_modifiers.push(aid as AttributeId);
                         }
                     }
                 }
+                let mut location_modifiers = Vec::new();
+                if let Some(arr) = val.get("locationModifiers").and_then(|v| v.as_array()) {
+                    for item in arr {
+                        if let Some(aid) = item.get("dogmaAttributeID").and_then(|v| v.as_u64()) {
+                            location_modifiers.push(aid as AttributeId);
+                        }
+                    }
+                }
+                let mut location_group_modifiers = Vec::new();
+                if let Some(arr) = val.get("locationGroupModifiers").and_then(|v| v.as_array()) {
+                    for item in arr {
+                        if let (Some(aid), Some(gid)) = (
+                            item.get("dogmaAttributeID").and_then(|v| v.as_u64()),
+                            item.get("groupID").and_then(|v| v.as_u64()),
+                        ) {
+                            location_group_modifiers.push(DbuffGroupModifier {
+                                attribute_id: aid as AttributeId,
+                                group_id: gid as GroupId,
+                            });
+                        }
+                    }
+                }
+                let mut location_required_skill_modifiers = Vec::new();
+                if let Some(arr) = val
+                    .get("locationRequiredSkillModifiers")
+                    .and_then(|v| v.as_array())
+                {
+                    for item in arr {
+                        if let (Some(aid), Some(sid)) = (
+                            item.get("dogmaAttributeID").and_then(|v| v.as_u64()),
+                            item.get("skillID").and_then(|v| v.as_u64()),
+                        ) {
+                            location_required_skill_modifiers.push(DbuffSkillModifier {
+                                attribute_id: aid as AttributeId,
+                                skill_id: sid as TypeId,
+                            });
+                        }
+                    }
+                }
+                let mut target_attrs = Vec::new();
+                target_attrs.extend(item_modifiers.iter().copied());
+                target_attrs.extend(location_modifiers.iter().copied());
+                target_attrs.extend(location_group_modifiers.iter().map(|m| m.attribute_id));
+                target_attrs.extend(
+                    location_required_skill_modifiers
+                        .iter()
+                        .map(|m| m.attribute_id),
+                );
                 Ok(DbuffCollectionInfo {
                     dbuff_id: id,
                     name,
                     operation: op,
                     aggregate_mode: agg,
+                    display_name_id,
+                    show_output_value_in_ui,
+                    item_modifiers,
+                    location_modifiers,
+                    location_group_modifiers,
+                    location_required_skill_modifiers,
                     target_attribute_ids: target_attrs,
                 })
             })?;
@@ -1538,7 +1675,13 @@ impl SdeRegistry {
                 let target_mode = val
                     .get("targetMode")
                     .and_then(|v| v.as_str())
-                    .unwrap_or("untargeted")
+                    .ok_or_else(|| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            1,
+                            rusqlite::types::Type::Text,
+                            format!("missing targetMode on fighter ability {id}").into(),
+                        )
+                    })?
                     .to_string();
                 let disallow_in_high_sec = val
                     .get("disallowInHighSec")
@@ -1556,6 +1699,14 @@ impl SdeRegistry {
                     .get("displayNameID")
                     .and_then(|v| v.as_u64())
                     .map(|v| v as u32);
+                let tooltip_text_id = val
+                    .get("tooltipTextID")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as u32);
+                let turret_graphic_id = val
+                    .get("turretGraphicID")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as u32);
                 Ok(FighterAbilityInfo {
                     ability_id: id,
                     target_mode,
@@ -1563,6 +1714,8 @@ impl SdeRegistry {
                     disallow_in_low_sec,
                     icon_id,
                     display_name_id,
+                    tooltip_text_id,
+                    turret_graphic_id,
                 })
             })?;
             for r in rows {
@@ -1733,23 +1886,43 @@ impl SdeRegistry {
                 let tid = r.get::<_, i64>(0)? as TypeId;
                 let d_str: String = r.get(1)?;
                 let val: serde_json::Value = parse_json_col(1, &d_str)?;
-                let mut ability_ids = Vec::new();
+                let mut slots = Vec::new();
                 if let Some(obj) = val.as_object() {
-                    for slot_key in ["abilitySlot0", "abilitySlot1", "abilitySlot2"] {
-                        if let Some(aid) = obj
-                            .get(slot_key)
-                            .and_then(|s| s.get("abilityID"))
-                            .and_then(|v| v.as_u64())
-                        {
-                            ability_ids.push(aid as u32);
+                    for (slot_idx, slot_key) in ["abilitySlot0", "abilitySlot1", "abilitySlot2"]
+                        .into_iter()
+                        .enumerate()
+                    {
+                        if let Some(slot_obj) = obj.get(slot_key).and_then(|s| s.as_object()) {
+                            if let Some(aid) = slot_obj.get("abilityID").and_then(|v| v.as_u64()) {
+                                let cooldown_seconds = slot_obj
+                                    .get("cooldownSeconds")
+                                    .and_then(|v| v.as_f64());
+                                let charges = slot_obj
+                                    .get("charges")
+                                    .and_then(|c| c.as_object())
+                                    .and_then(|c| {
+                                        Some(FighterAbilityCharges {
+                                            charge_count: c.get("chargeCount")?.as_u64()? as u32,
+                                            rearm_time_seconds: c
+                                                .get("rearmTimeSeconds")?
+                                                .as_f64()?,
+                                        })
+                                    });
+                                slots.push(FighterAbilitySlot {
+                                    slot_index: slot_idx as u8,
+                                    ability_id: aid as u32,
+                                    cooldown_seconds,
+                                    charges,
+                                });
+                            }
                         }
                     }
                 }
-                Ok((tid, ability_ids))
+                Ok((tid, slots))
             })?;
             for r in rows {
-                let (tid, aids) = r?;
-                fighter_abilities_by_type.insert(tid, aids);
+                let (tid, slots) = r?;
+                fighter_abilities_by_type.insert(tid, slots);
             }
         }
 
@@ -1850,14 +2023,11 @@ impl SdeRegistry {
         let Some(ref p) = self.db_path else {
             return Vec::new();
         };
-        let sde_uri = format!("file:{}?immutable=1", p.display());
+        let uri = format!("file:{}?immutable=1", p.display());
         let Ok(conn) = Connection::open_with_flags(
-            &sde_uri,
-            OpenFlags::SQLITE_OPEN_READ_ONLY
-                | OpenFlags::SQLITE_OPEN_URI
-                | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )
-        .or_else(|_| Connection::open_with_flags(p, OpenFlags::SQLITE_OPEN_READ_ONLY)) else {
+            &uri,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+        ) else {
             return Vec::new();
         };
         let Ok(mut stmt) = conn.prepare(
@@ -2239,8 +2409,5 @@ mod tests {
         assert_eq!(types_res.md5, "c0ee9c292aa113737029c9ec63503233");
         assert_eq!(types_res.byte_size, 9_169_272);
         assert_eq!(types_res.record_count, 53_288);
-
-        // Parity runtime attestation (T-1)
-        eve_testkit::attest(&["sde:res:/staticdata/types.fsdbinary"]);
     }
 }

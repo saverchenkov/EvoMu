@@ -447,7 +447,13 @@ impl DogmaExpressionNode {
                         | ModifierOperator::PostPercentUnNerfed
                         | ModifierOperator::SpecialSkillRelationship
                 );
-                let stacking_penalized = op_penalized && !source_is_stacking_exempt(source, sde);
+                let attr_non_stackable = sde
+                    .attributes
+                    .get(&target_attr)
+                    .map(|a| !a.stackable)
+                    .unwrap_or(false);
+                let stacking_penalized =
+                    op_penalized && attr_non_stackable && !source_is_stacking_exempt(source, sde);
                 target.add_modifier(AttributeModifier {
                     source_item_id,
                     effect_id,
@@ -1244,112 +1250,323 @@ impl ShipFittingEngine {
         self
     }
 
-    fn apply_online_modifiers_for_module(
-        &mut self,
-        module_item_id: i64,
-        module_type_id: TypeId,
-        sde: &SdeRegistry,
-    ) {
-        let Some(mod_type) = sde.types.get(&module_type_id) else {
-            return;
-        };
-        let mod_state = DogmaItemState::from_sde(module_item_id, module_type_id, sde);
-        let cpu_need = mod_state.get_attribute(attr_ids::CPU, sde);
-        let pg_need = mod_state.get_attribute(attr_ids::POWER, sde);
-        let cal_need = mod_state.get_attribute(attr_ids::UPGRADE_COST, sde);
+    /// Builds and evaluates a [`DogmaEffectContext`] for the current ship hull, character skills,
+    /// and fitted modules over real V24.01 SDE `modifierInfo` records (`DG-1`, `OF-31`).
+    pub fn evaluated_context(&self, sde: &SdeRegistry) -> DogmaEffectContext {
+        let mut base_ship = self.ship.clone();
+        base_ship.modifiers.clear();
 
-        if cpu_need > 0.0 {
-            let expr = DogmaExpressionNode {
-                opcode: DogmaVmOpcode::AddItmMod,
-                value_f64: None,
-                attribute_id: Some(attr_ids::CPU_LOAD),
-                operator: Some(ModifierOperator::ModAdd),
-                arg1: None,
-                arg2: Some(Box::new(DogmaExpressionNode {
-                    opcode: DogmaVmOpcode::GetAttr,
-                    value_f64: None,
-                    attribute_id: Some(attr_ids::CPU),
-                    operator: None,
-                    arg1: None,
-                    arg2: None,
-                })),
-            };
-            expr.execute_on_target(module_item_id, &mod_state, &mut self.ship, sde);
-        }
-        if pg_need > 0.0 {
-            let expr = DogmaExpressionNode {
-                opcode: DogmaVmOpcode::AddItmMod,
-                value_f64: None,
-                attribute_id: Some(attr_ids::POWER_LOAD),
-                operator: Some(ModifierOperator::ModAdd),
-                arg1: None,
-                arg2: Some(Box::new(DogmaExpressionNode {
-                    opcode: DogmaVmOpcode::GetAttr,
-                    value_f64: None,
-                    attribute_id: Some(attr_ids::POWER),
-                    operator: None,
-                    arg1: None,
-                    arg2: None,
-                })),
-            };
-            expr.execute_on_target(module_item_id, &mod_state, &mut self.ship, sde);
-        }
-        if cal_need > 0.0 {
-            let expr = DogmaExpressionNode {
-                opcode: DogmaVmOpcode::AddItmMod,
-                value_f64: None,
-                attribute_id: Some(attr_ids::UPGRADE_CAPACITY),
-                operator: Some(ModifierOperator::ModSub),
-                arg1: None,
-                arg2: Some(Box::new(DogmaExpressionNode {
-                    opcode: DogmaVmOpcode::GetAttr,
-                    value_f64: None,
-                    attribute_id: Some(attr_ids::UPGRADE_COST),
-                    operator: None,
-                    arg1: None,
-                    arg2: None,
-                })),
-            };
-            expr.execute_on_target(module_item_id, &mod_state, &mut self.ship, sde);
+        let mut sorted_modules: Vec<FittedModule> = self
+            .modules
+            .values()
+            .filter(|m| m.state != ModuleState::Offline)
+            .cloned()
+            .collect();
+        sorted_modules.sort_by_key(|m| (m.flag_id, m.item_id));
+
+        let dummy = DogmaItemState::from_sde(0, 0, sde);
+        let char_state = DogmaItemState::from_sde(-1, 1373, sde);
+        let mut ctx = DogmaEffectContext::new(
+            dummy.clone(),
+            base_ship,
+            char_state,
+            dummy.clone(),
+            dummy.clone(),
+            dummy,
+        );
+        for m in &sorted_modules {
+            ctx.ship_located_items
+                .push(DogmaItemState::from_sde(m.item_id, m.type_id, sde));
         }
 
-        // Apply passive velocity/shield bonus via DogmaExpressionNode VM if present (Overdrive Injector or Rig)
-        if mod_type.default_attributes.contains_key(&attr_ids::SPEED_FACTOR) && mod_type.group_id == 762 {
-            let expr = DogmaExpressionNode {
-                opcode: DogmaVmOpcode::AddItmMod,
-                value_f64: None,
-                attribute_id: Some(attr_ids::MAX_VELOCITY),
-                operator: Some(ModifierOperator::PostPercent),
-                arg1: None,
-                arg2: Some(Box::new(DogmaExpressionNode {
-                    opcode: DogmaVmOpcode::GetAttr,
-                    value_f64: None,
-                    attribute_id: Some(attr_ids::SPEED_FACTOR),
-                    operator: None,
-                    arg1: None,
-                    arg2: None,
-                })),
+        // 1. Evaluate trained character skills (`category_id == 16`, passive effects `effect_category == 0`).
+        //    First evaluate each skill's self-modifiers (`domain == "itemID"`, e.g. `skillLevel` -> `velocityBonus`),
+        //    then apply its cross-domain modifiers (`shipID`, `charID`, `LocationGroupModifier`, `LocationRequiredSkillModifier`, `OwnerRequiredSkillModifier`).
+        let mut sorted_skills: Vec<(TypeId, u8)> = self
+            .character_skills
+            .iter()
+            .filter(|&(_, &lvl)| lvl > 0)
+            .map(|(&tid, &lvl)| (tid, lvl))
+            .collect();
+        sorted_skills.sort_by_key(|&(tid, _)| tid);
+
+        for (skill_tid, trained_lvl) in sorted_skills {
+            let Some(skill_type) = sde.types.get(&skill_tid) else {
+                continue;
             };
-            expr.execute_on_target(module_item_id, &mod_state, &mut self.ship, sde);
+            if !skill_type.effect_ids.iter().any(|&eid| eid != 132) {
+                continue;
+            }
+            let skill_item_id = i64::from(skill_tid);
+            let mut skill_state = DogmaItemState::from_sde(skill_item_id, skill_tid, sde);
+            skill_state
+                .base_attributes
+                .insert(280, f64::from(trained_lvl.min(5)));
+
+            for &eid in &skill_type.effect_ids {
+                if eid == 132 {
+                    continue;
+                }
+                if let Some(effect) = sde.effects.get(&eid) {
+                    if effect.effect_category == 0 {
+                        for spec in &effect.modifiers {
+                            if spec.domain == "itemID" {
+                                if let Some(vm) = compile_modifier_spec_to_vm(spec, false) {
+                                    let snap = skill_state.clone();
+                                    vm.execute_on_target_with_effect(
+                                        skill_item_id,
+                                        Some(eid),
+                                        &snap,
+                                        &mut skill_state,
+                                        sde,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            ctx.item = skill_state;
+            for &eid in &skill_type.effect_ids {
+                if eid == 132 {
+                    continue;
+                }
+                if let Some(effect) = sde.effects.get(&eid) {
+                    if effect.effect_category == 0 {
+                        for spec in &effect.modifiers {
+                            if spec.domain != "itemID" {
+                                ctx.apply_modifier_spec_with_effect(
+                                    skill_item_id,
+                                    Some(eid),
+                                    spec,
+                                    sde,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
         }
-        if mod_type.default_attributes.contains_key(&attr_ids::SHIELD_BONUS) && mod_type.group_id == 774 {
-            let expr = DogmaExpressionNode {
-                opcode: DogmaVmOpcode::AddItmMod,
-                value_f64: None,
-                attribute_id: Some(attr_ids::SHIELD_CAPACITY),
-                operator: Some(ModifierOperator::PostPercent),
-                arg1: None,
-                arg2: Some(Box::new(DogmaExpressionNode {
-                    opcode: DogmaVmOpcode::GetAttr,
-                    value_f64: None,
-                    attribute_id: Some(attr_ids::SHIELD_BONUS),
-                    operator: None,
-                    arg1: None,
-                    arg2: None,
-                })),
+
+        // 2. Evaluate ship hull passive effects (`effect_category == 0`).
+        if let Some(hull_type) = sde.types.get(&self.ship.type_id) {
+            ctx.item = ctx.ship.clone();
+            for &eid in &hull_type.effect_ids {
+                if let Some(effect) = sde.effects.get(&eid) {
+                    if effect.effect_category == 0 {
+                        ctx.apply_effect(self.ship.item_id, effect, sde);
+                    }
+                }
+            }
+        }
+
+        // 3. For overloaded modules, evaluate self-targeting overload effects (`effect_category == 5`, `domain == "itemID"`,
+        //    such as `3175` `overloadSelfSpeedBonus`, `3174` `overloadSelfRangeBonus`, `3200` `overloadSelfArmorDamageAmountDurationBonus`)
+        //    onto the module's own state in `ctx.ship_located_items` before evaluating active effects that read those modified module attributes.
+        for (idx, m) in sorted_modules.iter().enumerate() {
+            if m.state == ModuleState::Overloaded {
+                if let Some(mod_type) = sde.types.get(&m.type_id) {
+                    for &eid in &mod_type.effect_ids {
+                        if let Some(effect) = sde.effects.get(&eid) {
+                            if effect.effect_category == 5 {
+                                for spec in &effect.modifiers {
+                                    if spec.domain == "itemID" {
+                                        if let Some(vm) = compile_modifier_spec_to_vm(spec, false) {
+                                            let snap = ctx.ship_located_items[idx].clone();
+                                            vm.execute_on_target_with_effect(
+                                                m.item_id,
+                                                Some(eid),
+                                                &snap,
+                                                &mut ctx.ship_located_items[idx],
+                                                sde,
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 4. Evaluate fitted modules' online fitting load (`16` `online` / `2663` `rigSlot`),
+        //    passive/online SDE `modifierInfo` effects (`effect_category == 0 | 4`),
+        //    and (when `Active` or `Overloaded`) active SDE `modifierInfo` effects (`effect_category == 1..=3`)
+        //    plus active propulsion engine effects (`6730` `moduleBonusMicrowarpdrive`, `6731` `moduleBonusAfterburner`).
+        for (idx, m) in sorted_modules.iter().enumerate() {
+            let Some(mod_type) = sde.types.get(&m.type_id) else {
+                continue;
             };
-            expr.execute_on_target(module_item_id, &mod_state, &mut self.ship, sde);
+            let mod_state = ctx.ship_located_items[idx].clone();
+            ctx.item = mod_state.clone();
+
+            let cpu_need = mod_state.get_attribute(attr_ids::CPU, sde);
+            let pg_need = mod_state.get_attribute(attr_ids::POWER, sde);
+            let cal_need = mod_state.get_attribute(attr_ids::UPGRADE_COST, sde);
+
+            if cpu_need > 0.0 {
+                let expr = DogmaExpressionNode {
+                    opcode: DogmaVmOpcode::AddItmMod,
+                    value_f64: None,
+                    attribute_id: Some(attr_ids::CPU_LOAD),
+                    operator: Some(ModifierOperator::ModAdd),
+                    arg1: None,
+                    arg2: Some(Box::new(DogmaExpressionNode {
+                        opcode: DogmaVmOpcode::GetAttr,
+                        value_f64: None,
+                        attribute_id: Some(attr_ids::CPU),
+                        operator: None,
+                        arg1: None,
+                        arg2: None,
+                    })),
+                };
+                expr.execute_on_target_with_effect(m.item_id, Some(16), &mod_state, &mut ctx.ship, sde);
+            }
+            if pg_need > 0.0 {
+                let expr = DogmaExpressionNode {
+                    opcode: DogmaVmOpcode::AddItmMod,
+                    value_f64: None,
+                    attribute_id: Some(attr_ids::POWER_LOAD),
+                    operator: Some(ModifierOperator::ModAdd),
+                    arg1: None,
+                    arg2: Some(Box::new(DogmaExpressionNode {
+                        opcode: DogmaVmOpcode::GetAttr,
+                        value_f64: None,
+                        attribute_id: Some(attr_ids::POWER),
+                        operator: None,
+                        arg1: None,
+                        arg2: None,
+                    })),
+                };
+                expr.execute_on_target_with_effect(m.item_id, Some(16), &mod_state, &mut ctx.ship, sde);
+            }
+            if cal_need > 0.0 {
+                let expr = DogmaExpressionNode {
+                    opcode: DogmaVmOpcode::AddItmMod,
+                    value_f64: None,
+                    attribute_id: Some(attr_ids::UPGRADE_CAPACITY),
+                    operator: Some(ModifierOperator::ModSub),
+                    arg1: None,
+                    arg2: Some(Box::new(DogmaExpressionNode {
+                        opcode: DogmaVmOpcode::GetAttr,
+                        value_f64: None,
+                        attribute_id: Some(attr_ids::UPGRADE_COST),
+                        operator: None,
+                        arg1: None,
+                        arg2: None,
+                    })),
+                };
+                expr.execute_on_target_with_effect(
+                    m.item_id,
+                    Some(2663),
+                    &mod_state,
+                    &mut ctx.ship,
+                    sde,
+                );
+            }
+
+            let is_active = matches!(m.state, ModuleState::Active | ModuleState::Overloaded);
+            for &eid in &mod_type.effect_ids {
+                if let Some(effect) = sde.effects.get(&eid) {
+                    let should_apply = match effect.effect_category {
+                        0 | 4 => true,
+                        1..=3 => is_active,
+                        5 => m.state == ModuleState::Overloaded,
+                        _ => false,
+                    };
+                    if should_apply {
+                        for spec in &effect.modifiers {
+                            if effect.effect_category == 5 && spec.domain == "itemID" {
+                                continue;
+                            }
+                            ctx.apply_modifier_spec_with_effect(
+                                m.item_id,
+                                Some(eid),
+                                spec,
+                                sde,
+                            );
+                        }
+                    }
+                    // Engine propulsion effects (`6730` MWD, `6731` Afterburner) have empty `modifiers` in `dogmaeffects.fsdbinary`
+                    // and read the module's effective `SPEED_FACTOR` (already modified by `Acceleration Control` `1176` and `overloadSelfSpeedBonus` `3175`)
+                    if is_active && matches!(eid, 6730 | 6731) {
+                        let mass_attr_id = if mod_type
+                            .default_attributes
+                            .contains_key(&attr_ids::MASS_ADDITION)
+                        {
+                            attr_ids::MASS_ADDITION
+                        } else {
+                            attr_ids::MASS
+                        };
+                        let expr = DogmaExpressionNode {
+                            opcode: DogmaVmOpcode::Combine,
+                            value_f64: None,
+                            attribute_id: None,
+                            operator: None,
+                            arg1: Some(Box::new(DogmaExpressionNode {
+                                opcode: DogmaVmOpcode::AddItmMod,
+                                value_f64: None,
+                                attribute_id: Some(attr_ids::MASS),
+                                operator: Some(ModifierOperator::ModAdd),
+                                arg1: None,
+                                arg2: Some(Box::new(DogmaExpressionNode {
+                                    opcode: DogmaVmOpcode::GetAttr,
+                                    value_f64: None,
+                                    attribute_id: Some(mass_attr_id),
+                                    operator: None,
+                                    arg1: None,
+                                    arg2: None,
+                                })),
+                            })),
+                            arg2: Some(Box::new(DogmaExpressionNode {
+                                opcode: DogmaVmOpcode::AddItmMod,
+                                value_f64: None,
+                                attribute_id: Some(attr_ids::MAX_VELOCITY),
+                                operator: Some(ModifierOperator::PostPercent),
+                                arg1: None,
+                                arg2: Some(Box::new(DogmaExpressionNode {
+                                    opcode: DogmaVmOpcode::GetAttr,
+                                    value_f64: None,
+                                    attribute_id: Some(attr_ids::SPEED_FACTOR),
+                                    operator: None,
+                                    arg1: None,
+                                    arg2: None,
+                                })),
+                            })),
+                        };
+                        expr.execute_on_target_with_effect(
+                            m.item_id,
+                            Some(eid),
+                            &mod_state,
+                            &mut ctx.ship,
+                            sde,
+                        );
+                    }
+                }
+            }
+            ctx.ship_located_items[idx] = ctx.item.clone();
         }
+
+        ctx
+    }
+
+    /// Evaluates the ship's passive hull effects, character skill effects (`category_id == 16`),
+    /// and fitted module passive/online/active/overload effects through [`DogmaEffectContext`]
+    /// over real V24.01 SDE `modifierInfo` records (`DG-1`, `OF-31`).
+    pub fn recalculate_stats(&mut self, sde: &SdeRegistry) {
+        let ctx = self.evaluated_context(sde);
+        self.ship = ctx.ship;
+    }
+
+    /// Returns the evaluated [`DogmaItemState`] of a fitted module (including character skill,
+    /// ship hull bonus, and overload modifiers applied through [`DogmaEffectContext`]).
+    pub fn module_state(&self, module_item_id: i64, sde: &SdeRegistry) -> Option<DogmaItemState> {
+        self.evaluated_context(sde)
+            .ship_located_items
+            .into_iter()
+            .find(|m| m.item_id == module_item_id)
     }
 
     /// Fits and brings a module online, validating slot effects, hull slot counts, turret/launcher
@@ -1574,9 +1791,9 @@ impl ShipFittingEngine {
 
         // Prevent duplicate online modifiers if already fitted
         if self.modules.contains_key(&module_item_id) {
-            self.ship.remove_modifiers_from_source(module_item_id);
             self.modules.remove(&module_item_id);
         }
+        self.recalculate_stats(sde);
 
         let cpu_need = mod_type
             .default_attributes
@@ -1614,8 +1831,6 @@ impl ShipFittingEngine {
             ));
         }
 
-        self.apply_online_modifiers_for_module(module_item_id, module_type_id, sde);
-
         self.modules.insert(
             module_item_id,
             FittedModule {
@@ -1629,6 +1844,7 @@ impl ShipFittingEngine {
                 charge_quantity: 0,
             },
         );
+        self.recalculate_stats(sde);
         Ok(())
     }
 
@@ -1638,7 +1854,7 @@ impl ShipFittingEngine {
         module_item_id: i64,
         sde: &SdeRegistry,
     ) -> Result<(), String> {
-        let mod_type_id = {
+        {
             let mod_entry = self
                 .modules
                 .get_mut(&module_item_id)
@@ -1647,10 +1863,8 @@ impl ShipFittingEngine {
                 return Err("Module is offline".into());
             }
             mod_entry.state = ModuleState::Online;
-            mod_entry.type_id
-        };
-        self.ship.remove_modifiers_from_source(module_item_id);
-        self.apply_online_modifiers_for_module(module_item_id, mod_type_id, sde);
+        }
+        self.recalculate_stats(sde);
         Ok(())
     }
 
@@ -1662,7 +1876,7 @@ impl ShipFittingEngine {
         overload: bool,
         sde: &SdeRegistry,
     ) -> Result<(), String> {
-        let mod_type_id = {
+        {
             let mod_entry = self
                 .modules
                 .get_mut(&module_item_id)
@@ -1678,79 +1892,8 @@ impl ShipFittingEngine {
             } else {
                 ModuleState::Active
             };
-            mod_entry.type_id
-        };
-
-        // Reset to clean online modifiers first so repeated Activate calls never stack duplicate active modifiers
-        self.ship.remove_modifiers_from_source(module_item_id);
-        self.apply_online_modifiers_for_module(module_item_id, mod_type_id, sde);
-
-        if let Some(mod_type) = sde.types.get(&mod_type_id) {
-            if mod_type.group_id == 46 {
-                // Propulsion module (Afterburner / MWD): execute DogmaExpressionNode VM for effect 67 (moduleBonusAfterburner)
-                let mod_state = DogmaItemState::from_sde(module_item_id, mod_type_id, sde);
-                let overload_mult = if overload { 1.5 } else { 1.0 };
-                let mass_attr_id = if mod_type
-                    .default_attributes
-                    .contains_key(&attr_ids::MASS_ADDITION)
-                {
-                    attr_ids::MASS_ADDITION
-                } else {
-                    attr_ids::MASS
-                };
-                let expr = DogmaExpressionNode {
-                    opcode: DogmaVmOpcode::Combine,
-                    value_f64: None,
-                    attribute_id: None,
-                    operator: None,
-                    arg1: Some(Box::new(DogmaExpressionNode {
-                        opcode: DogmaVmOpcode::AddItmMod,
-                        value_f64: None,
-                        attribute_id: Some(attr_ids::MASS),
-                        operator: Some(ModifierOperator::ModAdd),
-                        arg1: None,
-                        arg2: Some(Box::new(DogmaExpressionNode {
-                            opcode: DogmaVmOpcode::GetAttr,
-                            value_f64: None,
-                            attribute_id: Some(mass_attr_id),
-                            operator: None,
-                            arg1: None,
-                            arg2: None,
-                        })),
-                    })),
-                    arg2: Some(Box::new(DogmaExpressionNode {
-                        opcode: DogmaVmOpcode::AddItmMod,
-                        value_f64: None,
-                        attribute_id: Some(attr_ids::MAX_VELOCITY),
-                        operator: Some(ModifierOperator::PostPercent),
-                        arg1: None,
-                        arg2: Some(Box::new(DogmaExpressionNode {
-                            opcode: DogmaVmOpcode::Mul,
-                            value_f64: None,
-                            attribute_id: None,
-                            operator: None,
-                            arg1: Some(Box::new(DogmaExpressionNode {
-                                opcode: DogmaVmOpcode::GetAttr,
-                                value_f64: None,
-                                attribute_id: Some(attr_ids::SPEED_FACTOR),
-                                operator: None,
-                                arg1: None,
-                                arg2: None,
-                            })),
-                            arg2: Some(Box::new(DogmaExpressionNode {
-                                opcode: DogmaVmOpcode::DefFloat,
-                                value_f64: Some(overload_mult),
-                                attribute_id: None,
-                                operator: None,
-                                arg1: None,
-                                arg2: None,
-                            })),
-                        })),
-                    })),
-                };
-                expr.execute_on_target(module_item_id, &mod_state, &mut self.ship, sde);
-            }
         }
+        self.recalculate_stats(sde);
         Ok(())
     }
 }
@@ -2124,11 +2267,183 @@ mod tests {
         assert!(!target_ship.modifiers[3].stacking_penalized);
         assert!(!target_ship.modifiers[4].stacking_penalized);
         assert!(target_ship.modifiers[5].stacking_penalized);
+
+        // Module modifying a stackable attribute (38 `capacity`, stackable == true) must have stacking_penalized == false
+        let cap_spec = EffectModifierSpec {
+            domain: "shipID".into(),
+            func: "ItemModifier".into(),
+            modified_attribute_id: 38,
+            modifying_attribute_id: 20,
+            operator: 6,
+            group_id: None,
+            skill_type_id: None,
+            effect_id: None,
+        };
+        let cap_vm = compile_modifier_spec_to_vm(&cap_spec, false).unwrap();
+        cap_vm.execute_on_target_with_effect(100, Some(9017), &ctx.item, &mut target_ship, &sde);
+        assert!(!target_ship.modifiers[6].stacking_penalized);
+
+        // Multi-attribute effect modifying 3 distinct non-stackable attributes (37 maxVelocity, 70 agility, 552 signatureRadius)
+        // must evaluate rank 0 (1.0 penalty factor) per attribute independently without cross-attribute penalty contamination.
+        let mut multi_attr_ship = DogmaItemState::from_sde(99, 587, &sde);
+        multi_attr_ship.base_attributes.insert(37, 100.0);
+        multi_attr_ship.base_attributes.insert(70, 100.0);
+        multi_attr_ship.base_attributes.insert(552, 100.0);
+        for (idx, attr_id) in [37_u16, 70, 552].into_iter().enumerate() {
+            let spec = EffectModifierSpec {
+                domain: "shipID".into(),
+                func: "ItemModifier".into(),
+                modified_attribute_id: attr_id,
+                modifying_attribute_id: 20,
+                operator: 6, // +25%
+                group_id: None,
+                skill_type_id: None,
+                effect_id: None,
+            };
+            let vm = compile_modifier_spec_to_vm(&spec, false).unwrap();
+            vm.execute_on_target_with_effect(
+                100,
+                Some(9030 + idx as u16),
+                &ctx.item,
+                &mut multi_attr_ship,
+                &sde,
+            );
+        }
+        assert!((multi_attr_ship.get_attribute(37, &sde) - 125.0).abs() < 1e-6);
+        assert!((multi_attr_ship.get_attribute(70, &sde) - 125.0).abs() < 1e-6);
+        assert!((multi_attr_ship.get_attribute(552, &sde) - 125.0).abs() < 1e-6);
+
+        // 6. OwnerRequiredSkillModifier must modify ONLY items in ctx.owned_items that require
+        //    the specified skill, and NEVER modify ship_located_items, ship, character, or owned items
+        //    that do not require that skill.
+        let mut owned_matching = DogmaItemState::from_sde(301, 438, &sde); // 1MN Afterburner II (requires 3450 Afterburner)
+        owned_matching.base_attributes.insert(73, 10_000.0);
+        let mut owned_non_matching = DogmaItemState::from_sde(302, 1236, &sde); // Overdrive II (does NOT require 3450)
+        owned_non_matching.base_attributes.insert(73, 10_000.0);
+        let mut unowned_ship_located = DogmaItemState::from_sde(303, 438, &sde); // Same type 438, but in ship_located_items only
+        unowned_ship_located.base_attributes.insert(73, 10_000.0);
+
+        let mut char_src = DogmaItemState::from_sde(300, 3450, &sde); // Afterburner skill
+        char_src.base_attributes.insert(20, -10.0);
+        let mut owner_ctx = DogmaEffectContext::new(
+            char_src,
+            DogmaItemState::from_sde(1, 587, &sde),
+            DogmaItemState::from_sde(3, 1373, &sde),
+            DogmaItemState::from_sde(4, 587, &sde),
+            DogmaItemState::from_sde(5, 587, &sde),
+            DogmaItemState::from_sde(2, 35832, &sde),
+        );
+        owner_ctx.ship.base_attributes.insert(73, 10_000.0);
+        owner_ctx.character.base_attributes.insert(73, 10_000.0);
+        owner_ctx.ship_located_items.push(unowned_ship_located);
+        owner_ctx.owned_items.push(owned_matching);
+        owner_ctx.owned_items.push(owned_non_matching);
+
+        let orq_spec = EffectModifierSpec {
+            domain: "charID".into(),
+            func: "OwnerRequiredSkillModifier".into(),
+            modified_attribute_id: 73,
+            modifying_attribute_id: 20,
+            operator: 6, // PostPercent (-10%)
+            group_id: None,
+            skill_type_id: Some(3450),
+            effect_id: None,
+        };
+        assert_eq!(
+            owner_ctx.apply_modifier_spec_with_effect(300, Some(9020), &orq_spec, &sde),
+            1
+        );
+        assert!((owner_ctx.owned_items[0].get_attribute(73, &sde) - 9_000.0).abs() < 1e-6);
+        assert_eq!(owner_ctx.owned_items[1].get_attribute(73, &sde), 10_000.0);
+        assert_eq!(owner_ctx.ship_located_items[0].get_attribute(73, &sde), 10_000.0);
+        assert_eq!(owner_ctx.ship.get_attribute(73, &sde), 10_000.0);
+        assert_eq!(owner_ctx.character.get_attribute(73, &sde), 10_000.0);
     }
 
     #[test]
+    // parity: plan:DG-1, feat:dogma.modifier-engine, feat:fitting.stacking-penalty, feat:skills.skill-bonus-application, feat:modules.nanofiber-overdrive
     fn test_ship_fitting_thermodynamics_boosters_and_abyssal_roll() {
+        eve_testkit::attest(&[
+            "feat:dogma.modifier-engine",
+            "feat:fitting.stacking-penalty",
+            "feat:skills.skill-bonus-application",
+            "feat:modules.nanofiber-overdrive",
+        ]);
         let sde = SdeRegistry::with_canonical_seed();
+
+        // 1. Prove Rifter (587) with Navigation V (3449 -> 5) and 2x Overdrive Injector System II (1236)
+        //    fitted through ShipFittingEngine matches exact published attribute values:
+        //    - Base Rifter maxVelocity (37) = 365.0 m/s, capacity (38) = 140.0 m3
+        //    - Navigation V (category 16 skill, unpenalized): +25% maxVelocity (5% * level 5)
+        //    - 2x Overdrive Injector System II (category 7 module, effects 59 & 2865):
+        //      +12.5% maxVelocity (stacking-penalized across the 2 modules)
+        //      and -20% cargo capacity (PostMul 0.8 * 0.8, unpenalized)
+        {
+            let mut rifter_fit = ShipFittingEngine::from_sde(1000, 587, &sde);
+            rifter_fit.set_character_skills(HashMap::from([
+                (3449, 5), // Navigation V
+                (3394, 2), // Hull Upgrades II
+            ]));
+            rifter_fit.fit_and_online_module(4001, 1236, 11, &sde).unwrap();
+            rifter_fit.fit_and_online_module(4002, 1236, 12, &sde).unwrap();
+
+            let expected_vel =
+                365.0 * 1.25 * (1.0 + 0.125) * (1.0 + 0.125 * stacking_penalty_factor(1));
+            let actual_vel = rifter_fit.ship.get_attribute(attr_ids::MAX_VELOCITY, &sde);
+            assert!(
+                (actual_vel - expected_vel).abs() < 1e-6,
+                "Rifter + Navigation V + 2x Overdrive II maxVelocity mismatch: got {actual_vel}, expected {expected_vel}"
+            );
+
+            let expected_cap = 140.0 * 0.8 * 0.8;
+            let actual_cap = rifter_fit.ship.get_attribute(attr_ids::CAPACITY, &sde);
+            assert!(
+                (actual_cap - expected_cap).abs() < 1e-6,
+                "Rifter + 2x Overdrive II cargo capacity mismatch: got {actual_cap}, expected {expected_cap}"
+            );
+
+            // Fit Nanofiber Internal Structure II (2605) in slot 13 and Inertial Stabilizers II (1405) in slot 12
+            // to verify all 3 passive speed/agility low-slot module families (Overdrive, Nanofiber, Inertial Stabilizer)
+            rifter_fit.fit_and_online_module(4002, 1405, 12, &sde).unwrap();
+            rifter_fit.fit_and_online_module(4003, 2605, 13, &sde).unwrap();
+
+            let base_agility = sde.types[&587].default_attributes[&attr_ids::AGILITY];
+            let base_hull_hp = sde.types[&587].default_attributes[&attr_ids::HP_STRUCT];
+            let base_sig = sde.types[&587].default_attributes[&attr_ids::SIGNATURE_RADIUS];
+
+            // Velocity: Navigation V (+25% unpenalized), Overdrive II (+12.5% rank 0), Nanofiber II (+9.5% rank 1)
+            let expected_mixed_vel =
+                365.0 * 1.25 * (1.0 + 0.125) * (1.0 + 0.095 * stacking_penalty_factor(1));
+            assert!(
+                (rifter_fit.ship.get_attribute(attr_ids::MAX_VELOCITY, &sde) - expected_mixed_vel)
+                    .abs()
+                    < 1e-6
+            );
+
+            // Agility: Inertial Stabilizers II (-20.0% rank 0), Nanofiber II (-15.75% rank 1)
+            let expected_agility =
+                base_agility * (1.0 - 0.20) * (1.0 - 0.1575 * stacking_penalty_factor(1));
+            assert!(
+                (rifter_fit.ship.get_attribute(attr_ids::AGILITY, &sde) - expected_agility).abs()
+                    < 1e-6
+            );
+
+            // Structure HP: Nanofiber II (PostMul 0.8)
+            assert!(
+                (rifter_fit.ship.get_attribute(attr_ids::HP_STRUCT, &sde) - base_hull_hp * 0.8)
+                    .abs()
+                    < 1e-6
+            );
+
+            // Signature radius: Inertial Stabilizers II (+11% PostPercent)
+            assert!(
+                (rifter_fit.ship.get_attribute(attr_ids::SIGNATURE_RADIUS, &sde)
+                    - base_sig * 1.11)
+                    .abs()
+                    < 1e-6
+            );
+        }
+
         let mut fit = ShipFittingEngine::from_sde(1001, 587, &sde);
 
         // Fitting without trained skills must fail
@@ -2154,6 +2469,22 @@ mod tests {
 
         assert!(fit.ship.get_attribute(attr_ids::MAX_VELOCITY, &sde) > 800.0);
         assert_eq!(fit.ship.get_attribute(attr_ids::CPU_LOAD, &sde), 15.0);
+
+        // Verify LocationRequiredSkillModifier from trained Afterburner IV (3450 -> 4, -5%/lvl duration)
+        // and Acceleration Control IV (3452 -> 4, +5%/lvl speedFactor) plus overloadSelfSpeedBonus (3175, +50% speedFactor)
+        // were applied to the fitted Afterburner II (5001)
+        let fitted_ab_ovl = fit.module_state(5001, &sde).unwrap();
+        assert!((fitted_ab_ovl.get_attribute(attr_ids::DURATION, &sde) - 10_000.0 * 0.8).abs() < 1e-6);
+        assert!((fitted_ab_ovl.get_attribute(attr_ids::SPEED_FACTOR, &sde) - 135.0 * 1.2 * 1.5).abs() < 1e-6);
+
+        // Deactivate 1MN Afterburner II and verify active/overload effects are removed cleanly while passive/online effects remain
+        fit.deactivate_module(5001, &sde).unwrap();
+        let fitted_ab_online = fit.module_state(5001, &sde).unwrap();
+        assert!((fitted_ab_online.get_attribute(attr_ids::SPEED_FACTOR, &sde) - 135.0 * 1.2).abs() < 1e-6);
+        let expected_passive_vel = 365.0 * 1.20 * 1.125;
+        assert!(
+            (fit.ship.get_attribute(attr_ids::MAX_VELOCITY, &sde) - expected_passive_vel).abs() < 1e-6
+        );
 
         // Thermodynamics check
         let heat = thermodynamics::step_rack_heat(0.0, 0.04, 0.01, 10.0);

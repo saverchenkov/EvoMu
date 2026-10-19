@@ -29,7 +29,14 @@ fn expected_single_modifier_value(base_val: f64, op: ModifierOperator) -> (f64, 
 }
 
 #[test]
+// parity: plan:DG-1, feat:dogma.modifier-engine, feat:fitting.stacking-penalty, feat:skills.skill-bonus-application, feat:modules.nanofiber-overdrive
 fn test_t2_dogma_all_effects_and_modifier_info_sweep() {
+    eve_testkit::attest(&[
+        "feat:dogma.modifier-engine",
+        "feat:fitting.stacking-penalty",
+        "feat:skills.skill-bonus-application",
+        "feat:modules.nanofiber-overdrive",
+    ]);
     let root = repo_root();
     let sde = SdeRegistry::with_canonical_seed();
     assert_eq!(sde.effects.len(), 3_427);

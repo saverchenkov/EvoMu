@@ -53,7 +53,7 @@
  },
  "D-1": {
   "assessment": "PARTIAL",
-  "note": ""
+  "note": "Completed lossless loading and full-row field verification for all 7 SQLite .static files (blueprints, clonegrades, compressibletypes, dbuffcollections, dynamicitemattributes, fighterabilities, fighterabilitiesbytype); remaining .fsdbinary/.static client resources stay open."
  },
  "D-2": {
   "assessment": "PARTIAL",
@@ -73,7 +73,7 @@
  },
  "DG-1": {
   "assessment": "PARTIAL",
-  "note": ""
+  "note": "Wired DogmaEffectContext V24 modifierInfo evaluator and stacking-penalty pipeline into ShipFittingEngine (replacing hardcoded group 762/774/46 special cases); remaining DG-1 module-family and client-sync feature rows pending."
  },
  "DG-2": {
   "assessment": "PARTIAL",
