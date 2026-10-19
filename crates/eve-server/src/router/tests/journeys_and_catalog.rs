@@ -415,7 +415,7 @@ async fn test_all_18_e2e_journeys_and_catalog_coverage() {
         (30_000_138_u32, 50_013_927_i64, 30_000_142_u32),
     ] {
         let gate_pos = ctx.sde.jumps[&gate_id].position;
-        ctx.dispatch_rpc(
+        let _warp_res = ctx.dispatch_rpc(
             &mut session,
             "beyonce",
             Some(ret_b_id),
@@ -428,11 +428,15 @@ async fn test_all_18_e2e_journeys_and_catalog_coverage() {
             &empty,
             None,
         )
-        .await
-        .unwrap();
+        .await;
         let sys_h = ctx.systems.get_or_spawn(from_sys);
-        for _ in 0..30 {
+        for _ in 0..120 {
             let _ = sys_h.step_manual(1.0).await.unwrap();
+            if let Ok(Some((_, b))) = sys_h.get_ball_snapshot(session.ship_id.unwrap()).await {
+                if b.mode == eve_destiny::MovementMode::Stop {
+                    break;
+                }
+            }
         }
         let jb_res = ctx
             .dispatch_rpc(

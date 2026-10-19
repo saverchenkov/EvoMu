@@ -1019,6 +1019,12 @@ impl Ballpark {
                 let dist = delta.length();
                 let min_dist = rad_a + rad_b;
 
+                if matches!(self.balls[&id_a].mode, MovementMode::Warp { phase, .. } if phase != WarpPhase::Aligning)
+                    || matches!(self.balls[&id_b].mode, MovementMode::Warp { phase, .. } if phase != WarpPhase::Aligning)
+                {
+                    continue;
+                }
+
                 if dist < min_dist {
                     let normal = if dist > 1e-4 {
                         delta / dist
@@ -1043,17 +1049,9 @@ impl Ballpark {
                         let total_mass = mass_a + mass_b;
                         if let Some(ba) = self.balls.get_mut(&id_a) {
                             ba.position += normal * (overlap * (mass_b / total_mass));
-                            if matches!(ba.mode, MovementMode::Warp { .. }) {
-                                ba.mode = MovementMode::Stop;
-                                ba.speed_fraction = 0.0;
-                            }
                         }
                         if let Some(bb) = self.balls.get_mut(&id_b) {
                             bb.position -= normal * (overlap * (mass_a / total_mass));
-                            if matches!(bb.mode, MovementMode::Warp { .. }) {
-                                bb.mode = MovementMode::Stop;
-                                bb.speed_fraction = 0.0;
-                            }
                         }
                     } else if !is_static_a && is_static_b {
                         // Dynamic A vs Static B
@@ -1064,10 +1062,6 @@ impl Ballpark {
                         }
                         if let Some(ba) = self.balls.get_mut(&id_a) {
                             ba.position += normal * overlap;
-                            if matches!(ba.mode, MovementMode::Warp { .. }) {
-                                ba.mode = MovementMode::Stop;
-                                ba.speed_fraction = 0.0;
-                            }
                         }
                     } else if is_static_a && !is_static_b {
                         // Static A vs Dynamic B
@@ -1078,10 +1072,6 @@ impl Ballpark {
                         }
                         if let Some(bb) = self.balls.get_mut(&id_b) {
                             bb.position -= normal * overlap;
-                            if matches!(bb.mode, MovementMode::Warp { .. }) {
-                                bb.mode = MovementMode::Stop;
-                                bb.speed_fraction = 0.0;
-                            }
                         }
                     }
 

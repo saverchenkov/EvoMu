@@ -677,7 +677,14 @@ pub async fn handle(
                 }));
             }
 
-            let dist = current_ball.position.distance(jump.position);
+            let gate_radius = ctx
+                .sde
+                .types
+                .get(&16)
+                .map(|t| t.radius)
+                .filter(|&r| r > 0.0)
+                .unwrap_or(14_051.0);
+            let dist = (current_ball.position.distance(jump.position) - gate_radius).max(0.0);
             if dist > 2_500.0 {
                 return Some(Err(BridgeRpcError {
                     code: "OutsideStargateJumpRange".into(),
@@ -695,7 +702,7 @@ pub async fn handle(
                 .get(&jump.destination_stargate_id)
                 .map(|j| j.position)
                 .unwrap_or(DVec3::ZERO);
-            let arrival_pos = dest_gate_pos + DVec3::new(1_500.0, 0.0, 0.0);
+            let arrival_pos = dest_gate_pos + DVec3::new(gate_radius + 1_500.0, 0.0, 0.0);
 
             let updated_ch = match ctx
                 .db
@@ -883,7 +890,7 @@ pub async fn handle(
             };
             ctx.sync_character_local_chat(char_id, Some(old_sys), dest_sys_id);
 
-            let arrival_pos = dest_sig_pos - DVec3::new(500.0, 0.0, 0.0);
+            let arrival_pos = dest_sig_pos + DVec3::new(2_000.0, 0.0, 0.0);
 
             let new_handle = ctx.systems.get_or_spawn(dest_sys_id);
             let mut new_ball = existing_ball.unwrap_or(current_ball);

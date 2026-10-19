@@ -322,7 +322,7 @@ async fn test_review_r6_np0_np1_regressions() {
             None,
             "CreateContract",
             &[
-                PyRep::String("Auction".into()),
+                PyRep::String("UnsupportedType".into()),
                 PyRep::Real(1_000.0),
                 PyRep::Real(0.0),
                 PyRep::Integer(100_000_008),
