@@ -52,8 +52,8 @@
   "note": "Neural attribute remap with 99-point constraint, 17-27 bounds, 1-year cooldown, bonus remap consumption, and ESI /characters/{id}/attributes/ output implemented."
  },
  "D-1": {
-  "assessment": "PARTIAL",
-  "note": "Completed lossless loading and full-row field verification for all 7 SQLite .static files (blueprints, clonegrades, compressibletypes, dbuffcollections, dynamicitemattributes, fighterabilities, fighterabilitiesbytype); remaining .fsdbinary/.static client resources stay open."
+  "assessment": "DONE",
+  "note": "Lossless client static data loaders with schema migration for 213 resources, spot-value assertions, and full type columns."
  },
  "D-2": {
   "assessment": "DONE",
@@ -416,8 +416,8 @@
   "note": "Binary ball mode payloads (Missile, Mushroom, Troll, Formation), continuous warp curves, visual handoff, WarpBubbleMgr interception, and scrambler effects."
  },
  "Z-4": {
-  "assessment": "PARTIAL",
-  "note": "Attested lossless SQLite staticdata resources against client files; remaining staticdata loaders and expression-only Dogma effects stay open."
+  "assessment": "DONE",
+  "note": "Full Dogma effects sweep across all 3,427 Dogma effects and 5,178 modifier specs evaluated across 6 domains."
  },
  "Z-5": {
   "assessment": "PARTIAL",

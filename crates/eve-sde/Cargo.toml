@@ -13,4 +13,7 @@ rusqlite.workspace = true
 
 [dev-dependencies]
 eve-testkit = { path = "../eve-testkit" }
+eve-dogma = { path = "../eve-dogma" }
+serde_json.workspace = true
+rusqlite.workspace = true
 

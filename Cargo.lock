@@ -292,6 +292,7 @@ dependencies = [
 name = "eve-sde"
 version = "0.1.0"
 dependencies = [
+ "eve-dogma",
  "eve-testkit",
  "glam",
  "rusqlite",
