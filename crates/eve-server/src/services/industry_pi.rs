@@ -743,6 +743,33 @@ pub fn handle(
                         }
                     }
                 }
+                snap.next_entity_id += 1;
+                let jid = snap.next_entity_id;
+
+                // Deduct facility tax (10% base tax on estimated job cost: 10,000 ISK * runs)
+                let base_job_cost = 10_000.0 * (runs as f64);
+                let facility_tax_isk = base_job_cost * 0.10;
+                let facility_tax_cents = IskCents::from_f64_isk(facility_tax_isk);
+                if let Some(ch) = snap.characters.get_mut(&char_id) {
+                    if ch.balance < facility_tax_cents {
+                        return Err(BridgeRpcError {
+                            code: "InsufficientFunds".into(),
+                            message: format!(
+                                "Insufficient funds for industry facility tax ({:.2} ISK required, {:.2} available)",
+                                facility_tax_isk, ch.balance.to_wire_f64()
+                            ),
+                        });
+                    }
+                    ch.balance = ch.balance.checked_sub(facility_tax_cents).unwrap_or(IskCents(0));
+                    let bal_after = ch.balance;
+                    snap.append_journal(
+                        char_id,
+                        "IndustryFacilityTax",
+                        facility_tax_cents,
+                        bal_after,
+                        format!("Facility tax for industry job {jid}"),
+                    );
+                }
 
                 // Lock blueprint while job is active
                 if let Some(bp_mut) = snap.items.get_mut(&bp_iid) {
@@ -750,8 +777,6 @@ pub fn handle(
                     bp_mut.version += 1;
                 }
 
-                snap.next_entity_id += 1;
-                let jid = snap.next_entity_id;
                 snap.industry_jobs.insert(
                     jid,
                     IndustryJobRecord {
@@ -768,19 +793,51 @@ pub fn handle(
                         start_unix: now_unix,
                     },
                 );
-                Ok((jid, duration_sec, trit_req, inv_prob))
+                Ok((jid, duration_sec, trit_req, inv_prob, facility_tax_isk))
             });
 
             match res {
-                Ok((job_id, duration_sec, trit_req, inv_prob)) => Some(Ok(PyRep::keyval([
+                Ok((job_id, duration_sec, trit_req, inv_prob, facility_tax_isk)) => Some(Ok(PyRep::keyval([
                     ("jobID", PyRep::Integer(job_id)),
                     ("productTypeID", PyRep::Integer(product_type_id as i64)),
                     ("durationSeconds", PyRep::Integer(duration_sec as i64)),
                     ("tritaniumRequired", PyRep::Integer(trit_req as i64)),
                     ("inventionProbability", PyRep::Real(inv_prob)),
+                    ("facilityTaxISK", PyRep::Real(facility_tax_isk)),
                 ]))),
                 Err(e) => Some(Err(e)),
             }
+        }
+
+        ("industryManager", "GetJobsByOwner")
+        | ("ramProxy", "GetJobsByOwner")
+        | ("industryManager", "GetJobs") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let jobs = ctx.db.with_snapshot(|snap| {
+                snap.industry_jobs
+                    .values()
+                    .filter(|j| j.installer_id == char_id)
+                    .map(|j| {
+                        PyRep::keyval([
+                            ("jobID", PyRep::Integer(j.job_id)),
+                            ("installerID", PyRep::Integer(j.installer_id)),
+                            ("facilityID", PyRep::Integer(j.facility_id)),
+                            ("blueprintItemID", PyRep::Integer(j.blueprint_item_id)),
+                            ("blueprintTypeID", PyRep::Integer(j.blueprint_type_id as i64)),
+                            ("activityID", PyRep::Integer(j.activity_id as i64)),
+                            ("runs", PyRep::Integer(j.runs as i64)),
+                            ("productTypeID", PyRep::Integer(j.product_type_id as i64)),
+                            ("status", PyRep::String(j.status.clone())),
+                            ("durationSeconds", PyRep::Integer(j.duration_seconds as i64)),
+                            ("startUnix", PyRep::Integer(j.start_unix as i64)),
+                        ])
+                    })
+                    .collect::<Vec<_>>()
+            });
+            Some(Ok(PyRep::List(jobs)))
         }
 
         ("industryManager", "CompleteJob") | ("ramProxy", "CompleteJob") => {
@@ -1448,6 +1505,255 @@ pub fn handle(
                     ("linkPowergrid", PyRep::Real(link_pg)),
                     ("linkCPU", PyRep::Real(link_cpu)),
                     ("pocoExportTaxISK", PyRep::Real(export_tax)),
+                ]))),
+                Err(e) => Some(Err(e)),
+            }
+        }
+
+        ("planetMgr", "UpgradeCommandCenter") | ("planetMgr", "UpgradeColony") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let Some(planet_id) = args.first().and_then(|a| a.as_i64()) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidPlanetID".into(),
+                    message: "UpgradeCommandCenter requires an explicit integer planetID".into(),
+                }));
+            };
+            let Some(target_level_raw) = args.get(1).and_then(|a| a.as_i64()) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidCommandCenterLevel".into(),
+                    message: "UpgradeCommandCenter requires target upgrade level (1..=5)".into(),
+                }));
+            };
+            if !(1..=5).contains(&target_level_raw) {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidCommandCenterLevel".into(),
+                    message: format!("Target level {target_level_raw} must be in range 1..=5"),
+                }));
+            }
+            let target_level = target_level_raw as u8;
+
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let Some(col) = snap.planetary_colonies.get(&(char_id, planet_id)) else {
+                    return Err(BridgeRpcError {
+                        code: "ColonyNotFound".into(),
+                        message: format!("No colony found for character {char_id} on planet {planet_id}"),
+                    });
+                };
+                if target_level <= col.command_center_level {
+                    return Err(BridgeRpcError {
+                        code: "InvalidCommandCenterLevel".into(),
+                        message: format!(
+                            "Target level {target_level} must be greater than current level {}",
+                            col.command_center_level
+                        ),
+                    });
+                }
+                // Verify Command Center Upgrades skill (2505)
+                let cc_skill_lvl = snap
+                    .skills
+                    .get(&char_id)
+                    .and_then(|m| m.get(&2505))
+                    .map(|s| s.level)
+                    .unwrap_or(0);
+                if cc_skill_lvl < target_level {
+                    return Err(BridgeRpcError {
+                        code: "MissingSkillForCommandCenterUpgrade".into(),
+                        message: format!(
+                            "Command Center upgrade to level {target_level} requires Command Center Upgrades skill (2505) >= {target_level} (current: {cc_skill_lvl})"
+                        ),
+                    });
+                }
+
+                let upgrade_cost_isk = (target_level as f64) * 250_000.0;
+                let upgrade_cost_cents = IskCents::from_f64_isk(upgrade_cost_isk);
+                if let Some(ch) = snap.characters.get_mut(&char_id) {
+                    if ch.balance < upgrade_cost_cents {
+                        return Err(BridgeRpcError {
+                            code: "InsufficientFunds".into(),
+                            message: format!(
+                                "Insufficient funds for command center upgrade ({upgrade_cost_isk:.2} ISK required)"
+                            ),
+                        });
+                    }
+                    ch.balance = ch.balance.checked_sub(upgrade_cost_cents).unwrap_or(IskCents(0));
+                    let bal_after = ch.balance;
+                    snap.append_journal(
+                        char_id,
+                        "PlanetCommandCenterUpgrade",
+                        upgrade_cost_cents,
+                        bal_after,
+                        format!("Upgraded Command Center on planet {planet_id} to level {target_level}"),
+                    );
+                }
+
+                let col_mut = snap
+                    .planetary_colonies
+                    .get_mut(&(char_id, planet_id))
+                    .expect("colony exists");
+                col_mut.command_center_level = target_level;
+                col_mut.pins_count = (target_level as u32) + 1;
+                let new_pins = col_mut.pins_count;
+
+                Ok((target_level, new_pins, upgrade_cost_isk))
+            });
+
+            match res {
+                Ok((new_level, new_pins, cost)) => Some(Ok(PyRep::keyval([
+                    ("planetID", PyRep::Integer(planet_id)),
+                    ("commandCenterLevel", PyRep::Integer(new_level as i64)),
+                    ("pinsCount", PyRep::Integer(new_pins as i64)),
+                    ("upgradeCostISK", PyRep::Real(cost)),
+                ]))),
+                Err(e) => Some(Err(e)),
+            }
+        }
+
+        ("planetMgr", "ProcessCommodity") | ("planetMgr", "ConvertCommodities") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let Some(planet_id) = args.first().and_then(|a| a.as_i64()) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidPlanetID".into(),
+                    message: "ProcessCommodity requires an explicit integer planetID".into(),
+                }));
+            };
+            let Some(input_type_id_raw) = args.get(1).and_then(|a| a.as_i64()) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidProcessorParameters".into(),
+                    message: "ProcessCommodity requires input commodity typeID".into(),
+                }));
+            };
+            let Some(output_type_id_raw) = args.get(2).and_then(|a| a.as_i64()) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidProcessorParameters".into(),
+                    message: "ProcessCommodity requires output commodity typeID".into(),
+                }));
+            };
+            let input_type_id = input_type_id_raw as TypeId;
+            let output_type_id = output_type_id_raw as TypeId;
+            let cycles = args.get(3).and_then(|a| a.as_i64()).unwrap_or(1).max(1) as u64;
+
+            // Basic processor conversion ratio: 3,000 P0 -> 20 P1 per cycle
+            // Advanced processor conversion ratio: 40 P1 -> 5 P2 per cycle
+            let is_p1_input = ctx
+                .sde
+                .types
+                .get(&input_type_id)
+                .map(|t| t.group_id == 1032)
+                .unwrap_or(false);
+            let (input_per_cycle, output_per_cycle) = if is_p1_input {
+                (40_u64, 5_u64)
+            } else {
+                (3_000_u64, 20_u64)
+            };
+            let req_input = input_per_cycle.saturating_mul(cycles);
+            let produced_output = output_per_cycle.saturating_mul(cycles);
+
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let Some(col) = snap.planetary_colonies.get_mut(&(char_id, planet_id)) else {
+                    return Err(BridgeRpcError {
+                        code: "ColonyNotFound".into(),
+                        message: format!("No colony found for character {char_id} on planet {planet_id}"),
+                    });
+                };
+                let current_input = col.extracted_commodities.get(&input_type_id).copied().unwrap_or(0);
+                if current_input < req_input {
+                    return Err(BridgeRpcError {
+                        code: "InsufficientInputCommodities".into(),
+                        message: format!(
+                            "Colony storage has {current_input}x type {input_type_id}, but {req_input}x is required for {cycles} processor cycles"
+                        ),
+                    });
+                }
+                *col.extracted_commodities.entry(input_type_id).or_insert(0) -= req_input;
+                *col.extracted_commodities.entry(output_type_id).or_insert(0) += produced_output;
+                let total_output = col.extracted_commodities[&output_type_id];
+
+                Ok((req_input, produced_output, total_output))
+            });
+
+            match res {
+                Ok((consumed, produced, total)) => Some(Ok(PyRep::keyval([
+                    ("planetID", PyRep::Integer(planet_id)),
+                    ("inputTypeID", PyRep::Integer(input_type_id as i64)),
+                    ("inputQuantityConsumed", PyRep::Integer(consumed as i64)),
+                    ("outputTypeID", PyRep::Integer(output_type_id as i64)),
+                    ("outputQuantityProduced", PyRep::Integer(produced as i64)),
+                    ("totalStoredOutput", PyRep::Integer(total as i64)),
+                ]))),
+                Err(e) => Some(Err(e)),
+            }
+        }
+
+        ("planetMgr", "RouteCommodity") | ("planetMgr", "TransferCommodity") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let Some(planet_id) = args.first().and_then(|a| a.as_i64()) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidPlanetID".into(),
+                    message: "RouteCommodity requires planetID".into(),
+                }));
+            };
+            let Some(type_id_raw) = args.get(1).and_then(|a| a.as_i64()) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidRoutingParameters".into(),
+                    message: "RouteCommodity requires commodity typeID".into(),
+                }));
+            };
+            let type_id = type_id_raw as TypeId;
+            let qty = args.get(2).and_then(|a| a.as_i64()).unwrap_or(0).max(1) as u64;
+            let destination = args.get(3).and_then(|a| a.as_str()).unwrap_or("Storage");
+
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let Some(col) = snap.planetary_colonies.get_mut(&(char_id, planet_id)) else {
+                    return Err(BridgeRpcError {
+                        code: "ColonyNotFound".into(),
+                        message: format!("No colony found for character {char_id} on planet {planet_id}"),
+                    });
+                };
+                let available = col.extracted_commodities.get(&type_id).copied().unwrap_or(0);
+                if available < qty {
+                    return Err(BridgeRpcError {
+                        code: "InsufficientCommoditiesForRouting".into(),
+                        message: format!("Colony has {available} of type {type_id}, cannot route {qty}"),
+                    });
+                }
+                if destination == "Hangar" || destination == "CustomsOffice" {
+                    *col.extracted_commodities.entry(type_id).or_insert(0) -= qty;
+                    let delivery_loc = session.station_id.or(session.structure_id).unwrap_or(col.planet_id);
+                    snap.next_entity_id += 1;
+                    let nid = snap.next_entity_id;
+                    snap.items.insert(
+                        nid,
+                        InventoryItemRecord {
+                            item_id: nid,
+                            type_id,
+                            owner_id: char_id,
+                            location_id: delivery_loc,
+                            flag: InventoryFlag::Hangar,
+                            quantity: qty as i32,
+                            singleton: false,
+                            version: 1,
+                            ..Default::default()
+                        },
+                    );
+                }
+                Ok(qty)
+            });
+
+            match res {
+                Ok(routed) => Some(Ok(PyRep::keyval([
+                    ("planetID", PyRep::Integer(planet_id)),
+                    ("commodityTypeID", PyRep::Integer(type_id as i64)),
+                    ("routedQuantity", PyRep::Integer(routed as i64)),
+                    ("destination", PyRep::String(destination.to_string())),
                 ]))),
                 Err(e) => Some(Err(e)),
             }

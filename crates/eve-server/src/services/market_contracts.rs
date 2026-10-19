@@ -69,6 +69,13 @@ pub fn handle(
     args: &[PyRep],
     _kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
+    if service == "marketProxy" {
+        return super::market_trading::handle(ctx, session, service, method, args, _kwargs);
+    }
+    if service == "contractProxy" || service == "contractMgr" {
+        return super::contracts_service::handle(ctx, session, service, method, args, _kwargs);
+    }
+
     match (service, method) {
         ("account", "GetCashBalance") | ("vaultManager", "get_account_balance") => {
             let (_, char_id) = match ServerContext::require_character(session) {
@@ -1045,6 +1052,7 @@ pub fn handle(
                         },
                         item_ids: escrowed_items,
                         expiration_unix: now_unix.saturating_add(86_400),
+                        ..Default::default()
                     },
                 );
                 Ok((id, now_unix.saturating_add(86_400)))

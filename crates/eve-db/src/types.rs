@@ -1,6 +1,6 @@
 //! Domain models, record types, currency fixed-point types, and world state snapshots.
 
-use eve_sde::{AttributeId, SolarSystemId, TypeId};
+pub use eve_sde::{AttributeId, SolarSystemId, TypeId};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use thiserror::Error;
@@ -489,6 +489,26 @@ pub struct InventoryItemRecord {
     pub blueprint_runs_remaining: Option<i32>,
 }
 
+impl Default for InventoryItemRecord {
+    fn default() -> Self {
+        Self {
+            item_id: 0,
+            type_id: 0,
+            owner_id: 0,
+            location_id: 0,
+            flag: InventoryFlag::Hangar,
+            quantity: 1,
+            singleton: false,
+            version: 1,
+            dynamic_attributes: HashMap::new(),
+            source_mutaplasmid_id: None,
+            insured_payout_isk: 0.0,
+            is_blueprint_copy: false,
+            blueprint_runs_remaining: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SavedFittingRecord {
     pub fitting_id: i64,
@@ -530,8 +550,8 @@ pub struct ContractRecord {
     pub contract_id: i64,
     pub issuer_id: i64,
     pub acceptor_id: Option<i64>,
-    pub contract_type: String, // "ItemExchange", "Courier"
-    pub status: String,        // "Outstanding", "InProgress", "Completed", "Failed"
+    pub contract_type: String, // "ItemExchange", "Courier", "Auction"
+    pub status: String,        // "Outstanding", "InProgress", "Completed", "Failed", "Expired", "Deleted", "Rejected"
     pub start_station_id: i64,
     pub end_station_id: i64,
     pub price: IskCents,
@@ -540,6 +560,58 @@ pub struct ContractRecord {
     pub item_ids: Vec<i64>,
     #[serde(default)]
     pub expiration_unix: u64,
+    #[serde(default)]
+    pub issuer_corp_id: i64,
+    #[serde(default)]
+    pub assignee_id: i64,
+    #[serde(default)]
+    pub availability: String, // "Public", "Personal", "Corporation", "Alliance"
+    #[serde(default)]
+    pub buyout: IskCents,
+    #[serde(default)]
+    pub current_bid: IskCents,
+    #[serde(default)]
+    pub current_bidder_id: Option<i64>,
+    #[serde(default)]
+    pub requested_items: Vec<(TypeId, i32)>,
+    #[serde(default)]
+    pub bid_history: Vec<(i64, IskCents, u64)>,
+    #[serde(default)]
+    pub date_issued_unix: u64,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub for_corp: bool,
+}
+
+impl Default for ContractRecord {
+    fn default() -> Self {
+        Self {
+            contract_id: 0,
+            issuer_id: 0,
+            acceptor_id: None,
+            contract_type: String::new(),
+            status: String::new(),
+            start_station_id: 0,
+            end_station_id: 0,
+            price: IskCents(0),
+            reward: IskCents(0),
+            collateral: IskCents(0),
+            item_ids: Vec::new(),
+            expiration_unix: 0,
+            issuer_corp_id: 0,
+            assignee_id: 0,
+            availability: String::new(),
+            buyout: IskCents(0),
+            current_bid: IskCents(0),
+            current_bidder_id: None,
+            requested_items: Vec::new(),
+            bid_history: Vec::new(),
+            date_issued_unix: 0,
+            title: String::new(),
+            for_corp: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1166,6 +1238,84 @@ impl WorldStateSnapshot {
             }
             _ => None,
         }
+    }
+
+    /// Appends an entry to the wallet journal with auto-incrementing ID.
+    pub fn append_journal(
+        &mut self,
+        character_id: i64,
+        entry_type: impl Into<String>,
+        amount: IskCents,
+        balance_after: IskCents,
+        reason: impl Into<String>,
+    ) -> i64 {
+        self.next_entity_id += 1;
+        let entry_id = self.next_entity_id;
+        self.wallet_journal.push(WalletJournalEntry {
+            entry_id,
+            character_id,
+            entry_type: entry_type.into(),
+            amount,
+            balance_after,
+            reason: reason.into(),
+        });
+        entry_id
+    }
+
+    /// Fails an active in-progress courier contract, paying collateral + reward to issuer
+    /// and assigning the wrapped goods (or items) to the acceptor (if collateral was posted)
+    /// or returning to issuer.
+    pub fn fail_courier_contract(&mut self, contract_id: i64, _now_unix: u64) -> bool {
+        let c = match self.contracts.get(&contract_id).cloned() {
+            Some(c) => c,
+            None => return false,
+        };
+        if c.contract_type != "Courier" || c.status != "InProgress" {
+            return false;
+        }
+        let refund_and_collateral =
+            c.collateral.checked_add(c.reward).unwrap_or(c.collateral);
+        if refund_and_collateral.0 > 0 {
+            if let Some(issuer) = self.characters.get_mut(&c.issuer_id) {
+                issuer.balance = issuer
+                    .balance
+                    .checked_add(refund_and_collateral)
+                    .unwrap_or(issuer.balance);
+            }
+        }
+        for iid in &c.item_ids {
+            let is_temp_wrap = self
+                .items
+                .get(iid)
+                .map(|item| item.type_id == 24445)
+                .unwrap_or(false);
+            let in_ship_container = self
+                .items
+                .get(iid)
+                .map(|item| self.items.contains_key(&item.location_id))
+                .unwrap_or(false);
+            if is_temp_wrap {
+                self.items.remove(iid);
+            } else if let Some(item) = self.items.get_mut(iid) {
+                if c.collateral.0 > 0 {
+                    item.owner_id = c.acceptor_id.unwrap_or(c.issuer_id);
+                    item.flag = if in_ship_container {
+                        InventoryFlag::Cargo
+                    } else {
+                        InventoryFlag::Hangar
+                    };
+                } else {
+                    item.owner_id = c.issuer_id;
+                    item.location_id = c.start_station_id;
+                    item.flag = InventoryFlag::Hangar;
+                }
+                item.version += 1;
+            }
+        }
+        if let Some(c_mut) = self.contracts.get_mut(&contract_id) {
+            c_mut.status = "Failed".into();
+        }
+        true
     }
 }
 
