@@ -291,6 +291,18 @@ impl DBRowDescriptor {
         ])
     }
 
+    /// Canonical market price history descriptor (`marketProxy.GetOldPriceHistory`, `GetNewPriceHistory`).
+    pub fn market_history_header() -> Self {
+        Self::new([
+            ("historyDate", DbColumnType::FileTime),
+            ("lowPrice", DbColumnType::R8),
+            ("highPrice", DbColumnType::R8),
+            ("avgPrice", DbColumnType::R8),
+            ("volume", DbColumnType::I8),
+            ("orders", DbColumnType::I4),
+        ])
+    }
+
     /// Canonical notification descriptor (`NotificationMgrService.cpp:66-90`).
     pub fn notification_header() -> Self {
         Self::new([

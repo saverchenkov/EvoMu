@@ -695,6 +695,7 @@ async fn test_esi_all_31_openapi_tags_sample_routes_and_schema_validation() {
                 collateral: IskCents(0),
                 item_ids: vec![contract_item_id],
                 expiration_unix: now + 86_400,
+                ..Default::default()
             },
         );
         snap.mails.push(MailRecord {

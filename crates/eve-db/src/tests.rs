@@ -523,6 +523,7 @@ fn test_d3_sqlite_relational_world_db_and_concurrent_sessions() {
                 end_station_id: 60_003_760,
                 item_ids: vec![],
                 expiration_unix: 2_000_000_000,
+                ..Default::default()
             },
         );
         snap.industry_jobs.insert(
