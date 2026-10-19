@@ -181,6 +181,8 @@ pub fn base64url_decode_no_pad(input: &str) -> Result<Vec<u8>, String> {
 pub mod service_roles {
     /// `ROLE_GMS` (`1 << 38` = `274877906944`)
     pub const ROLE_GMS: u64 = 0x0000_0040_0000_0000;
+    /// `ROLE_WORLDMOD` (`1 << 49` = `0x0002_0000_0000_0000`)
+    pub const ROLE_WORLDMOD: u64 = 0x0002_0000_0000_0000;
     /// `ROLE_GMH` (`1 << 53` = `9007199254740992`)
     pub const ROLE_GMH: u64 = 0x0020_0000_0000_0000;
     /// `ROLE_GML` (`1 << 54` = `18014398509481984`)
@@ -195,8 +197,8 @@ pub mod service_roles {
     pub const ROLE_LOGIN: u64 = 0x4000_0000_0000_0000;
     /// Default role mask for standard player accounts (`0` GM bits).
     pub const ROLE_PLAYER_DEFAULT: u64 = ROLE_PLAYER | ROLE_LOGIN;
-    /// Combined GM / admin authorization bitmask (`ROLE_GML | ROLE_GMH | ROLE_GMS | ROLE_ADMIN`).
-    pub const ROLE_GM_MASK: u64 = ROLE_GML | ROLE_GMH | ROLE_GMS | ROLE_ADMIN;
+    /// Combined GM / admin authorization bitmask (`ROLE_GML | ROLE_GMH | ROLE_GMS | ROLE_ADMIN | ROLE_WORLDMOD`).
+    pub const ROLE_GM_MASK: u64 = ROLE_GML | ROLE_GMH | ROLE_GMS | ROLE_ADMIN | ROLE_WORLDMOD;
     /// Default role mask for provisioned GM / admin accounts.
     pub const ROLE_GM_DEFAULT: u64 = ROLE_PLAYER_DEFAULT | ROLE_GM_MASK;
 }
@@ -493,27 +495,34 @@ impl WorldRepository {
                 {
                     return Err(DbError::InvalidCredentials);
                 }
+                let target_username = {
+                    let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
+                    let acc = if username.is_empty()
+                        || username == "__sso__"
+                        || username == "EVE-SSO-CONNECTION"
+                    {
+                        guard
+                            .accounts
+                            .values()
+                            .find(|a| a.user_id == claims.user_id)
+                    } else {
+                        guard
+                            .accounts
+                            .get(username)
+                            .filter(|a| a.user_id == claims.user_id)
+                    }
+                    .ok_or(DbError::InvalidCredentials)?;
+                    acc.username.clone()
+                };
+                self.clear_expired_ban(&target_username, now_unix);
                 let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
-                let acc = if username.is_empty()
-                    || username == "__sso__"
-                    || username == "EVE-SSO-CONNECTION"
-                {
-                    guard
-                        .accounts
-                        .values()
-                        .find(|a| a.user_id == claims.user_id)
-                } else {
-                    guard
-                        .accounts
-                        .get(username)
-                        .filter(|a| a.user_id == claims.user_id)
-                }
-                .ok_or(DbError::InvalidCredentials)?;
+                let acc = guard.accounts.get(&target_username).ok_or(DbError::InvalidCredentials)?;
                 acc.check_active_restriction(now_unix)?;
                 return Ok(acc.clone());
             }
         }
 
+        self.clear_expired_ban(username, now_unix);
         let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
         let acc = guard
             .accounts
@@ -634,9 +643,95 @@ impl WorldRepository {
         Ok(user_id)
     }
 
+    /// Lifts any active ban or suspension resolving target by either numeric `user_id` or string `username`.
+    pub fn unban_account_by_id_or_username(&self, target: &str) -> Result<(u64, String), DbError> {
+        let (user_id, username) = self.try_with_mut_snapshot(|snap| {
+            let target_trimmed = target.trim();
+            let parsed_id = target_trimmed.parse::<u64>().ok();
+            let acc = if let Some(uid) = parsed_id {
+                snap.accounts
+                    .values_mut()
+                    .find(|a| a.user_id == uid)
+                    .ok_or_else(|| DbError::ValidationError(format!("Unknown account ID '{uid}'")))?
+            } else {
+                snap.accounts
+                    .get_mut(target_trimmed)
+                    .ok_or_else(|| DbError::ValidationError(format!("Unknown account '{target_trimmed}'")))?
+            };
+            acc.banned_until_unix = None;
+            acc.ban_reason = None;
+            Ok((acc.user_id, acc.username.clone()))
+        })?;
+        let mut rt = self.auth_runtime.write().unwrap_or_else(|e| e.into_inner());
+        rt.kicked_users.remove(&user_id);
+        Ok((user_id, username))
+    }
+
     /// Alias for lifting a suspension on `username` (`D-4`).
     pub fn unsuspend_account(&self, username: &str) -> Result<u64, DbError> {
         self.unban_account(username)
+    }
+
+    /// Checks and automatically clears any expired ban or suspension on `username` at `now_unix`,
+    /// persisting the unbanned state to SQLite (`feat:account.account-bans`).
+    pub fn clear_expired_ban(&self, username: &str, now_unix: u64) -> bool {
+        let has_expired = {
+            let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
+            guard
+                .accounts
+                .get(username)
+                .and_then(|a| a.banned_until_unix)
+                .is_some_and(|until| now_unix >= until)
+        };
+        if has_expired {
+            let _ = self.unban_account(username);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Checks and automatically clears any expired ban or suspension on `user_id` at `now_unix`,
+    /// persisting the unbanned state to SQLite (`feat:account.account-bans`).
+    pub fn clear_expired_ban_by_id(&self, user_id: u64, now_unix: u64) -> bool {
+        let uname = {
+            let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
+            guard
+                .accounts
+                .values()
+                .find(|a| a.user_id == user_id)
+                .map(|a| a.username.clone())
+        };
+        if let Some(username) = uname {
+            self.clear_expired_ban(&username, now_unix)
+        } else {
+            false
+        }
+    }
+
+    /// Bans an account by numeric `account_id` (user_id) OR `username` until `banned_until_unix` with `reason`,
+    /// persists the ban to SQLite, revokes SSO tokens, and kicks active session (`feat:admin.gm-ban`).
+    pub fn ban_account_by_id_or_username(
+        &self,
+        target: &str,
+        banned_until_unix: u64,
+        reason: &str,
+    ) -> Result<u64, DbError> {
+        let username = {
+            let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
+            if let Ok(uid) = target.trim().parse::<u64>() {
+                guard
+                    .accounts
+                    .values()
+                    .find(|a| a.user_id == uid)
+                    .map(|a| a.username.clone())
+                    .or_else(|| guard.accounts.get(target.trim()).map(|a| a.username.clone()))
+            } else {
+                guard.accounts.get(target.trim()).map(|a| a.username.clone())
+            }
+            .ok_or_else(|| DbError::ValidationError(format!("Unknown account '{target}'")))?
+        };
+        self.ban_account(&username, banned_until_unix, reason)
     }
 
     /// Clears prior kick/displacement revocation markers ONLY when `authentication.Login` succeeds
@@ -822,13 +917,14 @@ impl WorldRepository {
         session_id: u64,
         now_unix: u64,
     ) -> Option<(String, String)> {
+        self.clear_expired_ban_by_id(user_id, now_unix);
         {
             let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
             if let Some(acc) = guard.accounts.values().find(|a| a.user_id == user_id) {
                 match acc.check_active_restriction(now_unix) {
                     Err(DbError::AccountBanned { until_unix, reason }) => {
                         return Some((
-                            "AccountBanned".to_string(),
+                            "UserBanned".to_string(),
                             format!(
                                 "Account is banned until unix timestamp {until_unix}: {reason}"
                             ),
