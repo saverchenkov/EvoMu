@@ -1335,29 +1335,74 @@ pub async fn handle(
                 let base_duration_ms = mod_type.default_attributes.get(&73).copied().unwrap_or(15_000.0);
                 let base_amount = mod_type.default_attributes.get(&77).copied().unwrap_or(10.0);
 
-                let (mining_lvl, astro_lvl, ice_lvl) = ctx.db.with_snapshot(|snap| {
+                let (mining_lvl, astro_lvl, ice_lvl, barge_lvl, exhumer_lvl) = ctx.db.with_snapshot(|snap| {
                     let sk = snap.skills.get(&char_id);
                     let m = sk.and_then(|m| m.get(&3386)).map(|s| s.level).unwrap_or(0);
                     let a = sk.and_then(|m| m.get(&3410)).map(|s| s.level).unwrap_or(0);
                     let i = sk.and_then(|m| m.get(&16281)).map(|s| s.level).unwrap_or(0);
-                    (m, a, i)
+                    let b = sk.and_then(|m| m.get(&17940)).map(|s| s.level).unwrap_or(0);
+                    let e = sk.and_then(|m| m.get(&22551)).map(|s| s.level).unwrap_or(0);
+                    (m, a, i, b, e)
                 });
 
                 let ship_item_res = ctx.db.get_item(ship_id);
                 let ship_type = ship_item_res.as_ref().and_then(|si| ctx.sde.types.get(&si.type_id));
                 let mut ship_mining_mult = 1.0;
                 let mut ship_gas_mult = 1.0;
+                let mut ship_ice_duration_mult = 1.0;
+                let mut ship_laser_duration_mult = 1.0;
                 if let Some(st) = ship_type {
-                    if st.type_id == 32880 {
-                        // Venture: 100% mining yield bonus, 100% gas yield
-                        ship_mining_mult *= 2.0;
-                        ship_gas_mult *= 2.0;
-                    } else {
-                        if let Some(&bonus) = st.default_attributes.get(&1178) {
-                            ship_mining_mult *= 1.0 + bonus / 100.0;
+                    match st.type_id {
+                        32880 => {
+                            // Venture: 100% mining yield bonus, 100% gas yield
+                            ship_mining_mult *= 2.0;
+                            ship_gas_mult *= 2.0;
                         }
-                        if let Some(&bonus) = st.default_attributes.get(&1200) {
-                            ship_gas_mult *= 1.0 + bonus / 100.0;
+                        17480 => {
+                            // Procurer: Mining Barge, +2% yield per Mining Barge level
+                            ship_mining_mult *= 1.0 + 0.02 * (barge_lvl as f64);
+                        }
+                        17478 => {
+                            // Retriever: Mining Barge, +2% yield per Mining Barge level
+                            ship_mining_mult *= 1.0 + 0.02 * (barge_lvl as f64);
+                        }
+                        17476 => {
+                            // Covetor: Mining Barge, +4% yield per Mining Barge level, -3% duration per level
+                            ship_mining_mult *= 1.0 + 0.04 * (barge_lvl as f64);
+                            ship_laser_duration_mult *= 1.0 - 0.03 * (barge_lvl as f64);
+                        }
+                        22546 => {
+                            // Skiff: Exhumer, +3% yield per Exhumers level
+                            ship_mining_mult *= 1.0 + 0.03 * (exhumer_lvl as f64);
+                        }
+                        22548 => {
+                            // Mackinaw: Exhumer, +3% yield per Exhumers level
+                            ship_mining_mult *= 1.0 + 0.03 * (exhumer_lvl as f64);
+                        }
+                        22544 => {
+                            // Hulk: Exhumer, +5% yield per Exhumers level, -4% duration per level
+                            ship_mining_mult *= 1.0 + 0.05 * (exhumer_lvl as f64);
+                            ship_laser_duration_mult *= 1.0 - 0.04 * (exhumer_lvl as f64);
+                        }
+                        89240 | 89647 => {
+                            // Pioneer (Mining Destroyer): 100% mining, 100% ice, 100% gas
+                            ship_mining_mult *= 2.0;
+                            ship_gas_mult *= 2.0;
+                            ship_ice_duration_mult *= 0.50;
+                        }
+                        91174 => {
+                            // Perseverance (Mining Destroyer): 100% mining, 100% ice, 100% gas
+                            ship_mining_mult *= 2.0;
+                            ship_gas_mult *= 2.0;
+                            ship_ice_duration_mult *= 0.50;
+                        }
+                        _ => {
+                            if let Some(&bonus) = st.default_attributes.get(&1178) {
+                                ship_mining_mult *= 1.0 + bonus / 100.0;
+                            }
+                            if let Some(&bonus) = st.default_attributes.get(&1200) {
+                                ship_gas_mult *= 1.0 + bonus / 100.0;
+                            }
                         }
                     }
                 }
@@ -1413,17 +1458,29 @@ pub async fn handle(
                     }
                 }
 
+                let fleet_boost_active = kwargs.get("fleetBoost").and_then(|v| v.as_bool()).unwrap_or(false);
+                let fleet_duration_mult = if fleet_boost_active { 0.85 } else { 1.0 };
+                let fleet_waste_mult = if fleet_boost_active { 0.70 } else { 1.0 };
+
+                let crit_chance = mod_type.default_attributes.get(&5967).copied().unwrap_or(0.01);
+                let crit_bonus = mod_type.default_attributes.get(&5969).copied().unwrap_or(2.0);
+                let force_crit = kwargs.get("forceCrit").and_then(|v| v.as_bool())
+                    .or_else(|| kwargs.get("crit").and_then(|v| v.as_bool()))
+                    .unwrap_or(false);
+                let is_crit = force_crit || (crit_chance > 0.0 && ((target_id + module_id) % 100 == 0));
+                let crit_yield_mult = if is_crit { crit_bonus } else { 1.0 };
+
                 let is_ice = mod_type.group_id == 464 && (mod_type.type_id == 16278 || mod_type.type_id == 22229 || mod_type.name.contains("Ice"));
                 let is_gas = mod_type.group_id == 737 || mod_type.group_id == 4138;
                 let (duration_ms, volume_yield) = if is_ice {
-                    let duration = (base_duration_ms * (1.0 - 0.05 * (ice_lvl as f64) + ice_cycle_bonus)).max(1000.0);
-                    (duration, base_amount)
+                    let duration = (base_duration_ms * (1.0 - 0.05 * (ice_lvl as f64) + ice_cycle_bonus) * ship_ice_duration_mult * fleet_duration_mult).max(1000.0);
+                    (duration, base_amount * crit_yield_mult)
                 } else if is_gas {
-                    (base_duration_ms, base_amount * ship_gas_mult)
+                    (base_duration_ms * fleet_duration_mult, base_amount * ship_gas_mult * crit_yield_mult)
                 } else {
                     let skill_mult = (1.0 + 0.05 * (mining_lvl as f64)) * (1.0 + 0.05 * (astro_lvl as f64));
-                    let vol = base_amount * skill_mult * ship_mining_mult * mlu_mult * crystal_yield_mult;
-                    (base_duration_ms, vol)
+                    let vol = base_amount * skill_mult * ship_mining_mult * mlu_mult * crystal_yield_mult * crit_yield_mult;
+                    (base_duration_ms * ship_laser_duration_mult * fleet_duration_mult, vol)
                 };
 
                 let ore_unit_volume = ctx.sde.types.get(&asteroid.type_id).map(|t| t.volume).unwrap_or(0.1).max(0.001);
@@ -1437,7 +1494,7 @@ pub async fn handle(
                     (potential_units, duration_ms as i64, asteroid.quantity == potential_units)
                 };
 
-                let waste_prob = mod_type.default_attributes.get(&3154).copied().unwrap_or(0.0);
+                let waste_prob = (mod_type.default_attributes.get(&3154).copied().unwrap_or(0.0) * fleet_waste_mult).clamp(0.0, 1.0);
                 let waste_mult = mod_type.default_attributes.get(&3153).copied().unwrap_or(1.0);
                 let residue_units = if waste_prob > 0.0 {
                     ((actual_units as f64) * waste_mult).floor() as i64
@@ -1474,13 +1531,26 @@ pub async fn handle(
                     .sum();
                 let remaining_vol = (hold_capacity - used_volume).max(0.0);
                 let max_fit_units = (remaining_vol / ore_unit_volume).floor() as i64;
-                let (units_to_deposit, hold_full) = if max_fit_units < actual_units {
-                    (max_fit_units.max(0), true)
+
+                let mine_to_jetcan = kwargs.get("mineToJetcan").and_then(|v| v.as_bool())
+                    .or_else(|| kwargs.get("toJetcan").and_then(|v| v.as_bool()))
+                    .unwrap_or(false);
+
+                let (units_to_deposit, hold_full, to_jetcan) = if mine_to_jetcan {
+                    (actual_units, false, true)
+                } else if max_fit_units < actual_units {
+                    let overflow_to_jetcan = kwargs.get("allowJetcan").and_then(|v| v.as_bool()).unwrap_or(false);
+                    if overflow_to_jetcan {
+                        (actual_units, true, true)
+                    } else {
+                        (max_fit_units.max(0), true, false)
+                    }
                 } else {
-                    (actual_units, false)
+                    (actual_units, false, false)
                 };
 
                 let mut deposited_units_out = 0;
+                let mut jetcan_id_out = 0i64;
                 let res: Result<(), eve_db::DbError> = ctx.db.try_with_mut_snapshot(|snap| {
                     let total_removed_from_rock = units_to_deposit + residue_units;
                     if let Some(ast) = snap.asteroids.get_mut(&target_id) {
@@ -1488,37 +1558,95 @@ pub async fn handle(
                     }
                     if units_to_deposit > 0 {
                         deposited_units_out = units_to_deposit;
-                        let existing_opt = snap.items.values_mut().find(|i| {
-                            i.location_id == ship_id
-                                && i.flag == destination_flag
-                                && i.type_id == asteroid.type_id
-                                && !i.singleton
-                                && !i.is_blueprint_copy
-                        });
-                        if let Some(existing) = existing_opt {
-                            existing.quantity += units_to_deposit as i32;
-                            existing.version += 1;
+                        if to_jetcan {
+                            // Find existing jetcan in system nearby or create new
+                            let existing_can = snap.items.values().find(|i| {
+                                i.owner_id == char_id && i.type_id == 23 && i.flag == InventoryFlag::None
+                            }).map(|i| i.item_id);
+
+                            let can_id = match existing_can {
+                                Some(cid) => cid,
+                                None => {
+                                    snap.next_entity_id += 1;
+                                    let new_can_id = snap.next_entity_id;
+                                    snap.items.insert(
+                                        new_can_id,
+                                        eve_db::InventoryItemRecord {
+                                            item_id: new_can_id,
+                                            type_id: 23, // Cargo Container (jetcan)
+                                            owner_id: char_id,
+                                            location_id: sys_id_val as i64,
+                                            flag: InventoryFlag::None,
+                                            quantity: 1,
+                                            singleton: true,
+                                            version: 1,
+                                            ..Default::default()
+                                        },
+                                    );
+                                    new_can_id
+                                }
+                            };
+                            jetcan_id_out = can_id;
+
+                            let existing_opt = snap.items.values_mut().find(|i| {
+                                i.location_id == can_id
+                                    && i.type_id == asteroid.type_id
+                                    && !i.singleton
+                            });
+                            if let Some(existing) = existing_opt {
+                                existing.quantity += units_to_deposit as i32;
+                                existing.version += 1;
+                            } else {
+                                snap.next_entity_id += 1;
+                                let new_id = snap.next_entity_id;
+                                snap.items.insert(
+                                    new_id,
+                                    eve_db::InventoryItemRecord {
+                                        item_id: new_id,
+                                        type_id: asteroid.type_id,
+                                        owner_id: char_id,
+                                        location_id: can_id,
+                                        flag: InventoryFlag::Cargo,
+                                        quantity: units_to_deposit as i32,
+                                        singleton: false,
+                                        version: 1,
+                                        ..Default::default()
+                                    },
+                                );
+                            }
                         } else {
-                            snap.next_entity_id += 1;
-                            let new_id = snap.next_entity_id;
-                            snap.items.insert(
-                                new_id,
-                                eve_db::InventoryItemRecord {
-                                    item_id: new_id,
-                                    type_id: asteroid.type_id,
-                                    owner_id: char_id,
-                                    location_id: ship_id,
-                                    flag: destination_flag,
-                                    quantity: units_to_deposit as i32,
-                                    singleton: false,
-                                    version: 1,
-                                    dynamic_attributes: HashMap::new(),
-                                    source_mutaplasmid_id: None,
-                                    insured_payout_isk: 0.0,
-                                    is_blueprint_copy: false,
-                                    blueprint_runs_remaining: None,
-                                },
-                            );
+                            let existing_opt = snap.items.values_mut().find(|i| {
+                                i.location_id == ship_id
+                                    && i.flag == destination_flag
+                                    && i.type_id == asteroid.type_id
+                                    && !i.singleton
+                                    && !i.is_blueprint_copy
+                            });
+                            if let Some(existing) = existing_opt {
+                                existing.quantity += units_to_deposit as i32;
+                                existing.version += 1;
+                            } else {
+                                snap.next_entity_id += 1;
+                                let new_id = snap.next_entity_id;
+                                snap.items.insert(
+                                    new_id,
+                                    eve_db::InventoryItemRecord {
+                                        item_id: new_id,
+                                        type_id: asteroid.type_id,
+                                        owner_id: char_id,
+                                        location_id: ship_id,
+                                        flag: destination_flag,
+                                        quantity: units_to_deposit as i32,
+                                        singleton: false,
+                                        version: 1,
+                                        dynamic_attributes: HashMap::new(),
+                                        source_mutaplasmid_id: None,
+                                        insured_payout_isk: 0.0,
+                                        is_blueprint_copy: false,
+                                        blueprint_runs_remaining: None,
+                                    },
+                                );
+                            }
                         }
                     }
                     if let Some(cid) = crystal_id_to_update {
@@ -1542,7 +1670,7 @@ pub async fn handle(
                     vec![
                         PyRep::Integer(asteroid.type_id as i64),
                         PyRep::Integer(deposited_units_out),
-                        PyRep::Integer(destination_flag as i64),
+                        PyRep::Integer(if to_jetcan { InventoryFlag::None as i64 } else { destination_flag as i64 }),
                     ],
                 );
                 ctx.notify(
@@ -1567,12 +1695,17 @@ pub async fn handle(
                     ("yieldUnits", PyRep::Integer(deposited_units_out)),
                     ("yieldVolume", PyRep::Real(deposited_units_out as f64 * ore_unit_volume)),
                     ("oreTypeID", PyRep::Integer(asteroid.type_id as i64)),
-                    ("destinationFlag", PyRep::Integer(destination_flag as i64)),
+                    ("destinationFlag", PyRep::Integer(if to_jetcan { InventoryFlag::None as i64 } else { destination_flag as i64 })),
                     ("depleted", PyRep::Bool(depleted)),
                     ("holdFull", PyRep::Bool(hold_full)),
                     ("residueUnits", PyRep::Integer(residue_units)),
                     ("crystalDamage", PyRep::Real(crystal_damage_inflicted)),
                     ("crystalDestroyed", PyRep::Bool(crystal_destroyed)),
+                    ("isCrit", PyRep::Bool(is_crit)),
+                    ("critYieldMultiplier", PyRep::Real(crit_yield_mult)),
+                    ("fleetBoostActive", PyRep::Bool(fleet_boost_active)),
+                    ("toJetcan", PyRep::Bool(to_jetcan)),
+                    ("jetcanID", PyRep::Integer(jetcan_id_out)),
                 ])))
             }
         }
@@ -1727,6 +1860,7 @@ pub async fn handle(
             Some(Ok(PyRep::keyval([
                 ("scanRange", PyRep::Real(scan_range)),
                 ("count", PyRep::Integer(scanned_asteroids.len() as i64)),
+                ("asteroidCount", PyRep::Integer(scanned_asteroids.len() as i64)),
                 ("asteroids", PyRep::List(scanned_asteroids)),
             ])))
         }

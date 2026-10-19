@@ -266,11 +266,23 @@ pub async fn handle(
             // Chunk explosion: spawn minable moon asteroids into the Ballpark near the structure
             let handle = ctx.systems.get_or_spawn(sys_id);
 
-            let ores_to_spawn = vec![
-                (MOON_ORE_BITUMENS, 5_000_u64, 10.0_f64),
-                (MOON_ORE_ZEOLITES, 4_500_u64, 10.0_f64),
-                (MOON_ORE_COBALTITE, 3_500_u64, 10.0_f64),
-            ];
+            let is_jackpot = _kwargs.get("jackpot").and_then(|v| v.as_bool())
+                .or_else(|| _kwargs.get("isJackpot").and_then(|v| v.as_bool()))
+                .unwrap_or(false);
+
+            let ores_to_spawn = if is_jackpot {
+                vec![
+                    (46284, 5_000_u64, 10.0_f64), // Bountiful Bitumens (+100% yield)
+                    (46281, 4_500_u64, 10.0_f64), // Shining Zeolites (+100% yield)
+                    (46288, 3_500_u64, 10.0_f64), // Resplendent Cobaltite (+100% yield)
+                ]
+            } else {
+                vec![
+                    (MOON_ORE_BITUMENS, 5_000_u64, 10.0_f64),
+                    (MOON_ORE_ZEOLITES, 4_500_u64, 10.0_f64),
+                    (MOON_ORE_COBALTITE, 3_500_u64, 10.0_f64),
+                ]
+            };
 
             let mut spawned_ids = Vec::new();
             let base_pos = DVec3::new(st_pos[0], st_pos[1], st_pos[2]);
@@ -332,6 +344,8 @@ pub async fn handle(
                         ("status", PyRep::String("Fractured".into())),
                         ("asteroidCount", PyRep::Integer(ast_ids.len() as i64)),
                         ("oreTypes", PyRep::List(ore_tids)),
+                        ("isJackpot", PyRep::Bool(is_jackpot)),
+                        ("jackpotBonus", PyRep::Real(if is_jackpot { 2.0 } else { 1.0 })),
                     ])))
                 }
                 Err(e) => Some(Err(e)),
@@ -456,6 +470,147 @@ pub async fn handle(
             } else {
                 Some(Ok(PyRep::None))
             }
+        }
+
+        ("moonExtractions", "CheckMoonFieldDecay") | ("moonExtractions", "ExpireMoonField") => {
+            let Some(structure_id) = args
+                .first()
+                .and_then(|a| a.as_i64())
+                .or_else(|| _kwargs.get("structureID").and_then(|v| v.as_i64()))
+            else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidArgument".into(),
+                    message: "CheckMoonFieldDecay requires structureID".into(),
+                }));
+            };
+
+            let now = ctx.now_unix();
+            let force = _kwargs.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
+
+            let (sys_id_opt, ast_ids_to_despawn, decayed) = ctx.db.with_mut_snapshot(|snap| {
+                let Some(ext) = snap.moon_extractions.get_mut(&structure_id) else {
+                    return (None, Vec::new(), false);
+                };
+                let sys_id = snap.structures.get(&structure_id).map(|s| s.solar_system_id);
+                if force || now >= ext.natural_decay_unix {
+                    ext.status = "Decayed".into();
+                    let ids = std::mem::take(&mut ext.spawned_asteroid_ids);
+                    (sys_id, ids, true)
+                } else {
+                    (sys_id, Vec::new(), false)
+                }
+            });
+
+            if let Some(sys_id) = sys_id_opt {
+                if !ast_ids_to_despawn.is_empty() {
+                    let handle = ctx.systems.get_or_spawn(sys_id);
+                    for ast_id in &ast_ids_to_despawn {
+                        let _ = handle.remove_ball(*ast_id).await;
+                    }
+                }
+            }
+
+            Some(Ok(PyRep::keyval([
+                ("structureID", PyRep::Integer(structure_id)),
+                ("decayed", PyRep::Bool(decayed)),
+                ("status", PyRep::String(if decayed { "Decayed".into() } else { "Active".into() })),
+                ("despawnedCount", PyRep::Integer(ast_ids_to_despawn.len() as i64)),
+            ])))
+        }
+
+        ("moonExtractions", "LaunchMoonProbe") | ("moonExtractions", "ScanMoon") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let moon_id = args.first().and_then(|a| a.as_i64())
+                .or_else(|| _kwargs.get("moonID").and_then(|v| v.as_i64()))
+                .unwrap_or(40_009_087);
+            let probe_type_id = args.get(1).and_then(|a| a.as_i64())
+                .or_else(|| _kwargs.get("probeTypeID").and_then(|v| v.as_i64()))
+                .unwrap_or(16654);
+
+            let probe_id = ctx.db.with_mut_snapshot(|snap| {
+                snap.next_entity_id += 1;
+                snap.next_entity_id
+            });
+
+            ctx.notify(
+                crate::router::NotificationTarget::Character(char_id),
+                "OnNewMoonProbe",
+                "character",
+                vec![
+                    PyRep::Integer(probe_id),
+                    PyRep::Integer(moon_id),
+                    PyRep::Integer(probe_type_id),
+                ],
+            );
+
+            let resources = vec![
+                (MOON_ORE_BITUMENS, "Bitumens", 0.40),
+                (MOON_ORE_ZEOLITES, "Zeolites", 0.35),
+                (MOON_ORE_COBALTITE, "Cobaltite", 0.25),
+            ];
+
+            let res_reps: Vec<PyRep> = resources.iter().map(|&(tid, name, frac)| {
+                PyRep::keyval([
+                    ("typeID", PyRep::Integer(tid as i64)),
+                    ("oreName", PyRep::String(name.to_string())),
+                    ("yield", PyRep::Real(frac)),
+                    ("moonID", PyRep::Integer(moon_id)),
+                ])
+            }).collect();
+
+            ctx.notify(
+                crate::router::NotificationTarget::Character(char_id),
+                "OnMoonScanComplete",
+                "character",
+                vec![
+                    PyRep::Integer(moon_id),
+                    PyRep::List(res_reps.clone()),
+                    PyRep::Integer(char_id),
+                ],
+            );
+
+            ctx.notify(
+                crate::router::NotificationTarget::Character(char_id),
+                "OnRemoveMoonProbe",
+                "character",
+                vec![PyRep::Integer(probe_id)],
+            );
+
+            Some(Ok(PyRep::keyval([
+                ("moonID", PyRep::Integer(moon_id)),
+                ("probeID", PyRep::Integer(probe_id)),
+                ("probeTypeID", PyRep::Integer(probe_type_id)),
+                ("resources", PyRep::List(res_reps)),
+            ])))
+        }
+
+        ("moonExtractions", "GetMoonScanResults") => {
+            let moon_id = args.first().and_then(|a| a.as_i64())
+                .or_else(|| _kwargs.get("moonID").and_then(|v| v.as_i64()))
+                .unwrap_or(40_009_087);
+
+            let resources = vec![
+                (MOON_ORE_BITUMENS, "Bitumens", 0.40),
+                (MOON_ORE_ZEOLITES, "Zeolites", 0.35),
+                (MOON_ORE_COBALTITE, "Cobaltite", 0.25),
+            ];
+
+            let res_reps: Vec<PyRep> = resources.iter().map(|&(tid, name, frac)| {
+                PyRep::keyval([
+                    ("typeID", PyRep::Integer(tid as i64)),
+                    ("oreName", PyRep::String(name.to_string())),
+                    ("yield", PyRep::Real(frac)),
+                    ("moonID", PyRep::Integer(moon_id)),
+                ])
+            }).collect();
+
+            Some(Ok(PyRep::keyval([
+                ("moonID", PyRep::Integer(moon_id)),
+                ("resources", PyRep::List(res_reps)),
+            ])))
         }
 
         // ====================================================================
@@ -883,6 +1038,7 @@ pub async fn handle(
                     ("itemID", PyRep::Integer(iid)),
                     ("compressedTypeID", PyRep::Integer(ctype as i64)),
                     ("quantity", PyRep::Integer(qty as i64)),
+                    ("compressedUnits", PyRep::Integer(qty as i64)),
                     ("remainderUnits", PyRep::Integer(rem as i64)),
                 ]))),
                 Err(e) => Some(Err(e)),
@@ -982,6 +1138,7 @@ pub async fn handle(
                     ("itemID", PyRep::Integer(iid)),
                     ("compressedTypeID", PyRep::Integer(ctype as i64)),
                     ("quantity", PyRep::Integer(qty as i64)),
+                    ("compressedUnits", PyRep::Integer(qty as i64)),
                     ("remainderUnits", PyRep::Integer(rem as i64)),
                 ]))),
                 Err(e) => Some(Err(e)),
@@ -1083,6 +1240,7 @@ pub async fn handle(
                     ("itemID", PyRep::Integer(new_iid)),
                     ("decompressedTypeID", PyRep::Integer(r_tid as i64)),
                     ("decompressedQuantity", PyRep::Integer(d_qty)),
+                    ("decompressedUnits", PyRep::Integer(d_qty)),
                     ("efficiency", PyRep::Real(efficiency)),
                 ]))),
                 Err(e) => Some(Err(e)),
