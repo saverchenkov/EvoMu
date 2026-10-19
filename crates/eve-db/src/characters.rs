@@ -574,7 +574,8 @@ impl WorldRepository {
         })
     }
 
-    /// Records an entry in the character's mining ledger (`MN-03`, `charMiningLedger`).
+    /// Records an entry in the character's mining ledger (`MN-03`, `charMiningLedger`),
+    /// and mirrors the mining event to any observer structures in the system (`MN-15`, `corpMiningLedger`).
     pub fn record_mining_ledger_entry(
         &self,
         character_id: i64,
@@ -590,9 +591,39 @@ impl WorldRepository {
                 solar_system_id,
                 type_id,
                 quantity,
-                date,
+                date: date.clone(),
                 timestamp_unix,
             });
+
+            // Mirror to observers in the same solar system (MN-15 observer volume tracking)
+            let corp_id = guard
+                .characters
+                .get(&character_id)
+                .map(|c| c.corporation_id)
+                .unwrap_or(0);
+            let observer_ids: Vec<i64> = guard
+                .structures
+                .values()
+                .filter(|s| s.solar_system_id == solar_system_id)
+                .map(|s| s.structure_id)
+                .collect();
+
+            for obs_id in observer_ids {
+                guard
+                    .observer_mining_ledger
+                    .entry(obs_id)
+                    .or_default()
+                    .push(crate::types::ObserverMiningRecord {
+                        observer_id: obs_id,
+                        character_id,
+                        recorded_corporation_id: corp_id,
+                        type_id,
+                        quantity,
+                        last_updated_date: date.clone(),
+                        timestamp_unix,
+                    });
+            }
+
             Ok(())
         })
     }
@@ -606,6 +637,24 @@ impl WorldRepository {
             .filter(|r| r.character_id == character_id)
             .cloned()
             .collect()
+    }
+
+    /// Returns all observer mining records for a given observer structure (`MN-15`).
+    pub fn get_observer_mining_ledger(&self, observer_id: i64) -> Vec<crate::types::ObserverMiningRecord> {
+        let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
+        guard
+            .observer_mining_ledger
+            .get(&observer_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Returns all observer IDs that have recorded mining events (`MN-15`).
+    pub fn get_observers_with_mining_events(&self) -> Vec<i64> {
+        let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
+        let mut ids: Vec<i64> = guard.observer_mining_ledger.keys().copied().collect();
+        ids.sort_unstable();
+        ids
     }
 }
 

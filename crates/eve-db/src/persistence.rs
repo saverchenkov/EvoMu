@@ -354,6 +354,9 @@ impl WorldRepository {
             read_mails: HashSet::new(),
             deleted_mails: HashSet::new(),
             mining_ledger: Vec::new(),
+            moon_extractions: HashMap::new(),
+            auto_moon_miners: HashMap::new(),
+            observer_mining_ledger: HashMap::new(),
         };
         let mut conn = rusqlite::Connection::open_in_memory().map_err(|e| e.to_string())?;
         sqlite_store::apply_migrations(&conn)?;

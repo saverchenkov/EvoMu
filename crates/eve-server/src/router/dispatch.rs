@@ -414,6 +414,18 @@ impl ServerContext {
         ) {
             return res;
         }
+        if let Some(res) = services::mining_advanced::handle(
+            self,
+            session,
+            effective_service,
+            method,
+            args,
+            kwargs,
+        )
+        .await
+        {
+            return res;
+        }
         if let Some(res) =
             services::industry_pi::handle(self, session, effective_service, method, args, kwargs)
         {

@@ -1065,6 +1065,12 @@ pub struct WorldStateSnapshot {
     pub deleted_mails: HashSet<(i64, i64)>,
     #[serde(default)]
     pub mining_ledger: Vec<MiningLedgerRecord>,
+    #[serde(default)]
+    pub moon_extractions: HashMap<i64, MoonExtractionRecord>,
+    #[serde(default)]
+    pub auto_moon_miners: HashMap<i64, AutoMoonMinerRecord>,
+    #[serde(default)]
+    pub observer_mining_ledger: HashMap<i64, Vec<ObserverMiningRecord>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1074,6 +1080,47 @@ pub struct MiningLedgerRecord {
     pub type_id: u32,
     pub quantity: i64,
     pub date: String,
+    pub timestamp_unix: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MoonExtractionRecord {
+    pub structure_id: i64,
+    pub moon_id: i64,
+    pub extraction_start_unix: u64,
+    pub chunk_arrival_unix: u64,
+    pub natural_decay_unix: u64,
+    pub status: String, // "Started", "Ready", "Fractured", "Cancelled"
+    pub auto_fracture: bool,
+    #[serde(default)]
+    pub event_id: i64,
+    #[serde(default)]
+    pub moon_ores: Vec<(TypeId, f64)>,
+    #[serde(default)]
+    pub spawned_asteroid_ids: Vec<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AutoMoonMinerRecord {
+    pub structure_id: i64,
+    pub fuel_units_remaining: u32,
+    pub magmatic_gas_remaining: u32,
+    pub efficiency: f64,
+    pub cycle_duration_seconds: u64,
+    pub last_cycle_unix: u64,
+    pub ore_type_id: TypeId,
+    pub hourly_yield: u64,
+    pub status: String, // "Active", "OutOfFuel", "Idle"
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObserverMiningRecord {
+    pub observer_id: i64,
+    pub character_id: i64,
+    pub recorded_corporation_id: i64,
+    pub type_id: TypeId,
+    pub quantity: i64,
+    pub last_updated_date: String,
     pub timestamp_unix: u64,
 }
 

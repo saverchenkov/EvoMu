@@ -238,6 +238,10 @@ fn resolve_mission_npc_type(ctx: &ServerContext) -> u32 {
 }
 
 fn resolve_career_goal_def(ctx: &ServerContext, goal_id: u32) -> Option<(u64, f64)> {
+    if goal_id == 2 {
+        // MN-18: Mining Career Goal: "Mine 500 units of Ore", 50,000 SP reward
+        return Some((500, 50_000.0));
+    }
     ctx.sde
         .career_goals
         .get(&goal_id)
@@ -410,6 +414,14 @@ pub async fn handle(
                 };
                 let mission_id = tmpl.mission_id;
                 let title = tmpl.title.clone();
+                let is_mining = tmpl
+                    .content_template
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("BasicMining")
+                    || tmpl.title.to_lowercase().contains("mining")
+                    || agent_info.division_id == 23;
+                let npcs_remaining = if is_mining { 0 } else { 1 };
                 snap.active_missions.insert(
                     (char_id, mission_id),
                     ActiveMissionRecord {
@@ -419,7 +431,7 @@ pub async fn handle(
                         solar_system_id: sys_id,
                         state: "Offered".into(),
                         current_room_id: 1,
-                        npcs_remaining: 1,
+                        npcs_remaining,
                         spawned_npc_ball_ids: Vec::new(),
                     },
                 );
@@ -587,6 +599,52 @@ pub async fn handle(
                         ctx.build_type_combat_state(npc_type_id),
                     )
                     .await;
+            }
+
+            let is_mining_mission = ctx.sde.missions.get(&mission_id)
+                .map(|m| {
+                    let t = m.title.to_lowercase();
+                    let c = m.content_template.as_deref().unwrap_or_default().to_lowercase();
+                    c.contains("mining") || t.contains("mining") || t.contains("mineral") || t.contains("ore")
+                })
+                .unwrap_or(false);
+
+            if is_mining_mission {
+                let origin = if let Some(ship_id) = session.ship_id {
+                    handle
+                        .get_ball_snapshot(ship_id)
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|(_, b)| b.position)
+                        .unwrap_or(DVec3::ZERO)
+                } else {
+                    DVec3::ZERO
+                };
+                let ast_id = 910_000_000 + (mission_id as i64) * 1000 + 1;
+                let ast_ball = Ball {
+                    id: ast_id,
+                    type_id: 1230, // Veldspar
+                    position: origin + DVec3::new(8_000.0, 1_000.0, -5_000.0),
+                    velocity: DVec3::ZERO,
+                    max_velocity: 0.0,
+                    inertia: 1.0,
+                    mass: 50_000.0,
+                    radius: 50.0,
+                    speed_fraction: 0.0,
+                    mode: MovementMode::Stop,
+                };
+                let ast_state = crate::system_actor::AsteroidState {
+                    asteroid_id: ast_id,
+                    belt_id: 0,
+                    type_id: 1230,
+                    initial_units: 5_000,
+                    remaining_units: 5_000,
+                    unit_volume: 0.1,
+                    depleted: false,
+                    respawn_at_tick: None,
+                };
+                let _ = handle.spawn_asteroid(ast_state, ast_ball).await;
             }
 
             Some(Ok(PyRep::keyval([
@@ -832,7 +890,13 @@ pub async fn handle(
                         ),
                     });
                 };
-                if m.state != "Accepted" || m.npcs_remaining > 0 {
+                let is_mining_mission = {
+                    let t = tmpl.title.to_lowercase();
+                    let c = tmpl.content_template.as_deref().unwrap_or_default().to_lowercase();
+                    c.contains("mining") || t.contains("mining") || t.contains("mineral") || t.contains("ore")
+                };
+
+                if m.state != "Accepted" || (m.npcs_remaining > 0 && !is_mining_mission) {
                     return Err(BridgeRpcError {
                         code: "MissionIncomplete".into(),
                         message: format!(
@@ -840,6 +904,45 @@ pub async fn handle(
                             m.state, m.npcs_remaining
                         ),
                     });
+                }
+
+                if is_mining_mission {
+                    let req_ore_tid = 1230; // Veldspar
+                    let req_units = 500_i32;
+                    let mut found_qty = 0_i32;
+                    for item in snap.items.values() {
+                        if item.owner_id == char_id && item.type_id == req_ore_tid {
+                            found_qty += item.quantity;
+                        }
+                    }
+                    if found_qty < req_units {
+                        return Err(BridgeRpcError {
+                            code: "MissionIncomplete".into(),
+                            message: format!(
+                                "Mission {mission_id} requires delivering {req_units} units of type {req_ore_tid}, character only has {found_qty}"
+                            ),
+                        });
+                    }
+
+                    let mut remaining_to_consume = req_units;
+                    let mut to_remove = Vec::new();
+                    for item in snap.items.values_mut() {
+                        if item.owner_id == char_id
+                            && item.type_id == req_ore_tid
+                            && remaining_to_consume > 0
+                        {
+                            if item.quantity <= remaining_to_consume {
+                                remaining_to_consume -= item.quantity;
+                                to_remove.push(item.item_id);
+                            } else {
+                                item.quantity -= remaining_to_consume;
+                                remaining_to_consume = 0;
+                            }
+                        }
+                    }
+                    for iid in to_remove {
+                        snap.items.remove(&iid);
+                    }
                 }
                 let agent_id = m.agent_id;
                 m.state = "Completed".into();
@@ -1030,10 +1133,20 @@ pub async fn handle(
                 }));
             }
             let prog = ctx.db.with_snapshot(|snap| {
-                snap.npe_progress
-                    .get(&char_id)
-                    .and_then(|n| n.career_goal_progress.get(&goal_id).copied())
-                    .unwrap_or(0)
+                if goal_id == 2 {
+                    let total_mined: u64 = snap
+                        .mining_ledger
+                        .iter()
+                        .filter(|r| r.character_id == char_id)
+                        .map(|r| r.quantity.max(0) as u64)
+                        .sum();
+                    total_mined
+                } else {
+                    snap.npe_progress
+                        .get(&char_id)
+                        .and_then(|n| n.career_goal_progress.get(&goal_id).copied())
+                        .unwrap_or(0)
+                }
             });
             Some(Ok(PyRep::keyval([
                 ("goalID", PyRep::Integer(goal_id as i64)),
@@ -1073,7 +1186,18 @@ pub async fn handle(
                         claimed_goals: Default::default(),
                     }
                 });
-                let cur_prog = npe.career_goal_progress.get(&goal_id).copied().unwrap_or(0);
+                let cur_prog = if goal_id == 2 {
+                    let total_mined: u64 = snap
+                        .mining_ledger
+                        .iter()
+                        .filter(|r| r.character_id == char_id)
+                        .map(|r| r.quantity.max(0) as u64)
+                        .sum();
+                    npe.career_goal_progress.insert(goal_id, total_mined);
+                    total_mined
+                } else {
+                    npe.career_goal_progress.get(&goal_id).copied().unwrap_or(0)
+                };
                 if cur_prog < target_prog {
                     return Err(BridgeRpcError {
                         code: "GoalProgressIncomplete".into(),

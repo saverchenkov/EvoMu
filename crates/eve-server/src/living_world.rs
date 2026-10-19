@@ -214,6 +214,11 @@ impl LivingWorldDirector {
         }
     }
 
+    pub fn register_convoy(&self, convoy: LivingWorldConvoy) {
+        let mut guard = self.convoys.write().unwrap_or_else(|e| e.into_inner());
+        guard.insert(convoy.convoy_id, convoy);
+    }
+
     pub fn get_convoy(&self, convoy_id: i64) -> Option<LivingWorldConvoy> {
         self.convoys
             .read()
@@ -308,4 +313,134 @@ impl LivingWorldDirector {
             Ok((wreck_item_id, loot_item_id, new_ask_price))
         })
     }
+
+    /// Advances an NPC mining operation cycle (`MN-17`).
+    /// Mines asteroids in the current solar system using MN-04 laser cycle mechanics,
+    /// depleting asteroid volume, accumulating ore in the mining op's cargo, and hauling
+    /// ore to the NPC destination station to replenish regional market supply.
+    pub async fn step_npc_mining_op(
+        &self,
+        convoy_id: i64,
+        systems: &SystemRegistry,
+        db: &WorldRepository,
+        _sde: &eve_sde::SdeRegistry,
+    ) -> Result<NpcMiningStepResult, String> {
+        let (sys_id, cargo_type, current_cargo, dest_station_id) = {
+            let guard = self.convoys.read().unwrap_or_else(|e| e.into_inner());
+            let c = guard
+                .get(&convoy_id)
+                .ok_or_else(|| format!("Convoy {convoy_id} not found"))?;
+            if c.destroyed {
+                return Err(format!("Convoy {convoy_id} is destroyed"));
+            }
+            if c.archetype != NpcArchetype::MiningOp {
+                return Err(format!("Convoy {convoy_id} is not a MiningOp"));
+            }
+            (
+                c.current_system_id,
+                c.cargo_type_id,
+                c.cargo_quantity,
+                c.destination_station_id,
+            )
+        };
+
+        let handle = systems.get_or_spawn(sys_id);
+        let asteroids = handle
+            .populate_asteroid_belt_entities()
+            .await
+            .unwrap_or_default();
+
+        let target_ast = asteroids
+            .iter()
+            .find(|a| a.type_id == cargo_type && !a.depleted && a.remaining_units > 0)
+            .or_else(|| asteroids.iter().find(|a| !a.depleted && a.remaining_units > 0));
+
+        let Some(target) = target_ast else {
+            return Err(format!("No minable asteroids remaining in system {sys_id}"));
+        };
+
+        let target_id = target.asteroid_id;
+        let ore_type_id = target.type_id;
+
+        // Run mining cycle using MN-04 mechanics
+        let extraction = handle.mine_asteroid(target_id, 250, 0.0).await?;
+
+        let mut hauled = false;
+        let mut final_cargo = current_cargo + extraction.mined_units as i32;
+
+        // When cargo threshold reached (>=5000 units), haul to NPC destination station
+        if final_cargo >= 5_000 {
+            hauled = true;
+            // Replenish destination station NPC market orders
+            let added_units = final_cargo;
+            db.with_mut_snapshot(|snap| {
+                let mut found_order = false;
+                for order in snap.market_orders.values_mut() {
+                    if !order.is_bid
+                        && order.is_npc
+                        && order.station_id == dest_station_id
+                        && order.type_id == ore_type_id
+                    {
+                        order.vol_remaining += added_units;
+                        order.vol_entered += added_units;
+                        found_order = true;
+                        break;
+                    }
+                }
+                if !found_order {
+                    snap.next_entity_id += 1;
+                    let oid = snap.next_entity_id;
+                    snap.market_orders.insert(
+                        oid,
+                        eve_db::MarketOrderRecord {
+                            order_id: oid,
+                            owner_id: 1_000_035, // Caldari Navy
+                            station_id: dest_station_id,
+                            region_id: 10_000_002, // The Forge
+                            type_id: ore_type_id,
+                            is_bid: false,
+                            price: IskCents::from_isk(5),
+                            vol_entered: added_units,
+                            vol_remaining: added_units,
+                            min_volume: 1,
+                            is_npc: true,
+                            escrow: IskCents(0),
+                        },
+                    );
+                }
+            });
+            final_cargo = 0;
+        }
+
+        // Update convoy state
+        {
+            let mut guard = self.convoys.write().unwrap_or_else(|e| e.into_inner());
+            if let Some(c) = guard.get_mut(&convoy_id) {
+                c.cargo_quantity = final_cargo;
+            }
+        }
+
+        Ok(NpcMiningStepResult {
+            convoy_id,
+            system_id: sys_id,
+            asteroid_id: target_id as i64,
+            ore_type_id,
+            mined_units: extraction.mined_units,
+            remaining_asteroid_units: extraction.remaining_units,
+            convoy_cargo_units: final_cargo as u64,
+            hauled_to_station: hauled,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NpcMiningStepResult {
+    pub convoy_id: i64,
+    pub system_id: SolarSystemId,
+    pub asteroid_id: i64,
+    pub ore_type_id: TypeId,
+    pub mined_units: u64,
+    pub remaining_asteroid_units: u64,
+    pub convoy_cargo_units: u64,
+    pub hauled_to_station: bool,
 }

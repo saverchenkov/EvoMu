@@ -123,6 +123,7 @@ fn setup_esi_test_environment() -> (Arc<ServerContext>, Arc<EsiRouter>, OpenApiS
                 tax_rate: 0.05,
                 master_wallet: IskCents::from_isk(250_000_000),
                 members: HashSet::from([char_id, 90_000_002]),
+                ..Default::default()
             },
         );
 
@@ -185,6 +186,7 @@ fn setup_esi_test_environment() -> (Arc<ServerContext>, Arc<EsiRouter>, OpenApiS
                 collateral: IskCents(0),
                 item_ids: vec![contract_item_id],
                 expiration_unix: now + 86_400,
+                ..Default::default()
             },
         );
 
@@ -217,6 +219,7 @@ fn setup_esi_test_environment() -> (Arc<ServerContext>, Arc<EsiRouter>, OpenApiS
                 squads: vec![1],
                 free_move: false,
                 is_registered: false,
+                ..Default::default()
             },
         );
 
@@ -245,6 +248,8 @@ fn setup_esi_test_environment() -> (Arc<ServerContext>, Arc<EsiRouter>, OpenApiS
                 x: 150_000.0,
                 y: -50_000.0,
                 z: 80_000.0,
+                item_id: None,
+                memo: String::new(),
             },
         );
 
