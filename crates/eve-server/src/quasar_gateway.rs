@@ -22,7 +22,7 @@ use eve_proto::quasar::{
 };
 use eve_proto::{BridgeRpcError, PyRep};
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use tokio::sync::mpsc;
 
@@ -341,7 +341,6 @@ pub struct PublicGatewayRouter {
     pub published_events: RwLock<VecDeque<EvePublicEvent>>,
     pub server_hijack_state: RwLock<QuasarHijackState>,
     pub next_notice_seq: AtomicU64,
-    pub omega_override: AtomicBool,
 }
 
 impl PublicGatewayRouter {
@@ -358,18 +357,9 @@ impl PublicGatewayRouter {
             published_events: RwLock::new(VecDeque::new()),
             server_hijack_state: RwLock::new(QuasarHijackState::default()),
             next_notice_seq: AtomicU64::new(1),
-            omega_override: AtomicBool::new(true),
         };
         router.register_builtin_core_handlers(db);
         router
-    }
-
-    pub fn is_omega_entitlement_granted(&self) -> bool {
-        self.omega_override.load(Ordering::Relaxed)
-    }
-
-    pub fn set_omega_entitlement_granted(&self, granted: bool) {
-        self.omega_override.store(granted, Ordering::Relaxed);
     }
 
     pub fn register_handler(&self, full_name_or_type_url: &str, handler: QuasarHandlerFn) {
@@ -423,41 +413,10 @@ impl PublicGatewayRouter {
     /// User-level and Ping requests (`google.protobuf.Empty`, `eve_public.character.GetNamesByUserRequest`)
     /// can be invoked prior to character selection; all character-scoped requests require an active character.
     pub fn requires_active_character(normalized_type_name: &str) -> bool {
-        if matches!(
+        !matches!(
             normalized_type_name,
             "google.protobuf.Empty" | "eve_public.character.GetNamesByUserRequest"
-        ) {
-            return false;
-        }
-        if normalized_type_name.starts_with("eve_public.identity.")
-            || normalized_type_name.starts_with("eve_public.account.")
-            || normalized_type_name.starts_with("eve_public.user.")
-            || normalized_type_name.starts_with("eve_public.entitlement.")
-            || normalized_type_name.starts_with("eve_public.omega.")
-            || normalized_type_name.starts_with("eve_public.membership.")
-            || normalized_type_name.starts_with("eve_public.payment.")
-            || normalized_type_name.starts_with("eve_public.plex.")
-            || normalized_type_name.starts_with("eve_public.solarsystem.")
-            || normalized_type_name.starts_with("eve_public.universe.")
-            || normalized_type_name.starts_with("eve_public.stargate.")
-            || normalized_type_name.starts_with("eve_public.station.")
-            || normalized_type_name.starts_with("eve_public.structure.")
-            || normalized_type_name.starts_with("eve_public.killmail.")
-            || normalized_type_name.starts_with("eve_public.probe.")
-            || normalized_type_name.starts_with("eve_public.sovereignty.")
-            || normalized_type_name.starts_with("eve_public.factionwarfare.")
-            || normalized_type_name.starts_with("eve_public.projectdiscovery.")
-            || normalized_type_name.starts_with("eve_public.operation.")
-            || normalized_type_name.starts_with("eve_public.cosmetic.")
-            || normalized_type_name.starts_with("eve_public.skin.")
-            || normalized_type_name.starts_with("eve_public.paragon.")
-            || normalized_type_name.starts_with("eve_public.client.")
-            || normalized_type_name.starts_with("eve_public.ui.")
-            || normalized_type_name.starts_with("eve_public.settings.")
-        {
-            return false;
-        }
-        true
+        )
     }
 
     pub fn default_app_instance_uuid(session_id: u64) -> Vec<u8> {
@@ -797,18 +756,7 @@ impl PublicGatewayRouter {
             );
         };
         let norm_type = payload_any.normalized_type_name().to_string();
-        let has_handler = {
-            let handlers = self.handlers.read().unwrap_or_else(|e| e.into_inner());
-            handlers.contains_key(&norm_type)
-                || handlers.keys().any(|k| {
-                    if let Some(prefix) = k.strip_suffix('*') {
-                        norm_type.starts_with(prefix)
-                    } else {
-                        false
-                    }
-                })
-        };
-        if self.descriptors.get_message(&norm_type).is_none() && !has_handler {
+        if self.descriptors.get_message(&norm_type).is_none() {
             return build_response(
                 STATUS_NOT_FOUND,
                 format!("Unknown Quasar protobuf message type '{norm_type}'"),
@@ -827,27 +775,14 @@ impl PublicGatewayRouter {
             );
         }
 
-        let dyn_msg = if self.descriptors.get_message(&norm_type).is_some() {
-            match self.descriptors.decode_dynamic(&norm_type, &payload_any.value) {
-                Ok(m) => m,
-                Err(e) => {
-                    return build_response(
-                        STATUS_BAD_REQUEST,
-                        format!("Invalid protobuf wire payload for '{norm_type}': {e}"),
-                        None,
-                    );
-                }
-            }
-        } else {
-            match DynamicQuasarMessage::from_wire_fallback(&norm_type, &payload_any.value) {
-                Ok(m) => m,
-                Err(e) => {
-                    return build_response(
-                        STATUS_BAD_REQUEST,
-                        format!("Invalid protobuf wire payload for '{norm_type}': {e}"),
-                        None,
-                    );
-                }
+        let dyn_msg = match self.descriptors.decode_dynamic(&norm_type, &payload_any.value) {
+            Ok(m) => m,
+            Err(e) => {
+                return build_response(
+                    STATUS_BAD_REQUEST,
+                    format!("Invalid protobuf wire payload for '{norm_type}': {e}"),
+                    None,
+                );
             }
         };
 
@@ -878,21 +813,12 @@ impl PublicGatewayRouter {
             now_unix,
         );
 
-        let handler_opt = {
-            let handlers = self.handlers.read().unwrap_or_else(|e| e.into_inner());
-            handlers.get(&norm_type).cloned().or_else(|| {
-                handlers
-                    .iter()
-                    .find(|(k, _)| {
-                        if let Some(prefix) = k.strip_suffix('*') {
-                            norm_type.starts_with(prefix)
-                        } else {
-                            false
-                        }
-                    })
-                    .map(|(_, h)| h.clone())
-            })
-        };
+        let handler_opt = self
+            .handlers
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&norm_type)
+            .cloned();
 
         let (status_code, status_message, rsp_payload) = match handler_opt {
             Some(handler) => match handler(&auth_ctx, payload_any, &dyn_msg) {

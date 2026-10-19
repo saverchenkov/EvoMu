@@ -2364,7 +2364,6 @@ async fn test_review_r8_regressions() {
         &PyRep::String("Jita IV - Moon 4 - Caldari Navy Assembly Plant".into())
     );
 
-    // parity: sde:res:/staticdata/types.fsdbinary
     // Verify InvType full columns preserved in SDE registry
     let rifter_t = ctx.sde.types.get(&587).expect("Rifter type");
     assert_eq!(rifter_t.description_id, Some(93841));

@@ -8,7 +8,7 @@
 //!   and search/query endpoints (`GetContractInfo`, `SearchContracts`, `GetMyCurrentContractList`,
 //!   `GetMyExpiredContractList`, `GetContractListForOwner`, `GetMyBids`, `RejectContract`).
 
-// parity: plan:E-3, journey:contracts
+// parity: plan:E-3
 // parity: feat:contracts.item-exchange, feat:contracts.item-exchange-request, feat:contracts.auction
 // parity: feat:contracts.courier, feat:contracts.courier-failure, feat:contracts.visibility
 // parity: feat:contracts.search, feat:contracts.my-contracts, feat:contracts.fees-limits

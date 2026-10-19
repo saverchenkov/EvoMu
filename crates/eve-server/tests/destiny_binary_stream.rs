@@ -3,7 +3,6 @@
 
 #![forbid(unsafe_code)]
 
-// parity: plan:Z-3
 // parity: feat:navigation.warp-speed-formula
 // parity: ballmode:DSTBALL_MISSILE
 // parity: ballmode:DSTBALL_MUSHROOM
@@ -38,7 +37,6 @@ fn sample_test_ball(id: i64, mode: MovementMode) -> Ball {
     }
 }
 
-// parity: plan:Z-3
 // parity: ballmode:DSTBALL_MISSILE
 // parity: ballmode:DSTBALL_MUSHROOM
 // parity: ballmode:DSTBALL_TROLL
@@ -139,7 +137,6 @@ fn test_destiny_binary_mode_missile_mushroom_troll_formation() {
     assert_eq!(dec_form.effect_stamp, Some(42));
 }
 
-// parity: plan:Z-3
 // parity: feat:navigation.warp-speed-formula
 #[test]
 fn test_warp_continuous_physics_curves_and_visual_handoff() {
@@ -277,7 +274,6 @@ fn test_warp_continuous_physics_curves_and_visual_handoff() {
     assert!(max_speed > 1.0e9, "Warp must reach relativistic AU/s velocities");
 }
 
-// parity: plan:Z-3
 // parity: feat:modules.warp-disruptor
 #[tokio::test]
 async fn test_warp_scrambler_disruptor_blocking() {
@@ -438,7 +434,6 @@ async fn test_warp_scrambler_disruptor_blocking() {
     assert_eq!(heavy_scrambled_err.code, "WarpScrambled");
 }
 
-// parity: plan:Z-3
 // parity: feat:modules.warp-disruption-field
 #[test]
 fn test_warp_bubble_interception_stop_and_drag() {

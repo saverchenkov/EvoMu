@@ -922,7 +922,6 @@ async fn test_s7_structures_skyhooks_pi_range_checks() {
 
 #[tokio::test]
 async fn test_z5_auditor_flagged_rows_closure_suite() {
-    // parity: plan:Z-5
     // Composite test closing the auditor-flagged ledger rows:
     // - feat:account.account-bans
     // - feat:account.account-roles

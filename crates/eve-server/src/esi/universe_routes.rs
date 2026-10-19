@@ -38,35 +38,6 @@ fn cached_base_jump_adjacency(ctx: &ServerContext) -> Arc<JumpAdjacencyMap> {
     arc_adj
 }
 
-/// Resolves the primary default Dogma effect ID for a type's effect list (`dgmTypeEffects.isDefault`).
-/// Prefers active/target/area activation effects (`effect_category` in `1..=3` excluding `online` `16`),
-/// then non-slot passive effects, then the first effect in sorted order.
-pub(crate) fn default_dogma_effect_id(
-    sde: &eve_sde::SdeRegistry,
-    eff_ids: &[eve_sde::EffectId],
-) -> Option<eve_sde::EffectId> {
-    if eff_ids.is_empty() {
-        return None;
-    }
-    if let Some(&active_eid) = eff_ids.iter().find(|&&eid| {
-        eid != 16
-            && sde
-                .effects
-                .get(&eid)
-                .map(|e| matches!(e.effect_category, 1..=3))
-                .unwrap_or(false)
-    }) {
-        return Some(active_eid);
-    }
-    if let Some(&non_slot_eid) = eff_ids
-        .iter()
-        .find(|&&eid| !matches!(eid, 11 | 12 | 13 | 16 | 2663 | 3772))
-    {
-        return Some(non_slot_eid);
-    }
-    eff_ids.first().copied()
-}
-
 /// Evaluates whether `char_id` is authorized by ACL to view or dock at `st`.
 /// Denies destroyed structures, pilots with negative standing toward `st.owner_corp_id`,
 /// or pilots whose corporation is in an active war with `st.owner_corp_id`.
@@ -662,7 +633,7 @@ pub fn dispatch_universe_and_nav(
             let mut eff_ids = t.effect_ids.clone();
             eff_ids.sort_unstable();
             eff_ids.dedup();
-            let default_eid = default_dogma_effect_id(&ctx.sde, &eff_ids);
+            let default_eid = t.default_effect_id;
             let dogma_effects: Vec<Value> = eff_ids
                 .into_iter()
                 .map(|eid| {
@@ -672,26 +643,10 @@ pub fn dispatch_universe_and_nav(
                     })
                 })
                 .collect();
-            let grp_name = ctx
-                .sde
-                .groups
-                .get(&t.group_id)
-                .map(|g| g.name.as_str())
-                .unwrap_or("Item");
-            let cat_name = ctx
-                .sde
-                .categories
-                .get(&t.category_id)
-                .map(|c| c.name.as_str())
-                .unwrap_or("Inventory");
-            let desc = match t.description_id {
-                Some(did) => format!("{} ({} / {}, description_id={did})", t.name, cat_name, grp_name),
-                None => format!("{} ({} / {})", t.name, cat_name, grp_name),
-            };
             let mut obj = json!({
                 "type_id": t.type_id as i64,
                 "name": t.name,
-                "description": desc,
+                "description": t.description,
                 "published": t.published,
                 "group_id": t.group_id as i64,
                 "mass": t.mass,
@@ -1141,20 +1096,6 @@ pub fn dispatch_universe_and_nav(
                     }
                 }
             }
-            let mut size_factors: HashMap<u32, f64> = HashMap::new();
-            if let Some(conn) = open_sde_sqlite(ctx) {
-                if let Ok(mut stmt) =
-                    conn.prepare("SELECT faction_id, size_factor FROM sde_factions")
-                {
-                    if let Ok(rows) = stmt.query_map([], |r| {
-                        Ok((r.get::<_, i64>(0)? as u32, r.get::<_, f64>(1)?))
-                    }) {
-                        for r in rows.flatten() {
-                            size_factors.insert(r.0, r.1);
-                        }
-                    }
-                }
-            }
             let mut facs: Vec<_> = ctx.sde.factions.values().collect();
             facs.sort_by_key(|f| f.faction_id);
             let out: Vec<Value> = facs
@@ -1164,21 +1105,11 @@ pub fn dispatch_universe_and_nav(
                         .get(&f.faction_id)
                         .map(|(c, s)| (*c, s.len() as i64))
                         .unwrap_or((0, 0));
-                    let sf = size_factors.get(&f.faction_id).copied().unwrap_or(1.0);
-                    let sys_name = f
-                        .solar_system_id
-                        .and_then(|sid| ctx.sde.solar_systems.get(&sid))
-                        .map(|s| s.name.as_str())
-                        .unwrap_or("New Eden");
-                    let desc = format!(
-                        "{} sovereign faction headquartered in {} (size_factor={:.1})",
-                        f.name, sys_name, sf
-                    );
                     let mut obj = json!({
                         "faction_id": f.faction_id as i64,
                         "name": f.name,
-                        "description": desc,
-                        "size_factor": sf,
+                        "description": f.description,
+                        "size_factor": f.size_factor,
                         "station_count": st_cnt,
                         "station_system_count": sys_set,
                         "is_unique": true,
@@ -1198,121 +1129,52 @@ pub fn dispatch_universe_and_nav(
             RouteExecutionResult::ok_json(json!(out), 3600)
         }
         ("GET", "/universe/bloodlines") => {
-            let mut attrs_by_bl: HashMap<u32, (i64, i64, i64, i64, i64)> = HashMap::new();
-            if let Some(conn) = open_sde_sqlite(ctx) {
-                if let Ok(mut stmt) = conn.prepare(
-                    "SELECT bloodline_id, charisma, intelligence, memory, perception, willpower FROM sde_bloodlines",
-                ) {
-                    if let Ok(rows) = stmt.query_map([], |r| {
-                        Ok((
-                            r.get::<_, i64>(0)? as u32,
-                            (
-                                r.get::<_, i64>(1)?,
-                                r.get::<_, i64>(2)?,
-                                r.get::<_, i64>(3)?,
-                                r.get::<_, i64>(4)?,
-                                r.get::<_, i64>(5)?,
-                            ),
-                        ))
-                    }) {
-                        for r in rows.flatten() {
-                            attrs_by_bl.insert(r.0, r.1);
-                        }
-                    }
-                }
-            }
             let mut bls: Vec<_> = ctx.sde.bloodlines.values().collect();
             bls.sort_by_key(|b| b.bloodline_id);
             let out: Vec<Value> = bls
                 .into_iter()
-                .map(|b| {
-                    let (cha, int, mem, per, wil) = attrs_by_bl
-                        .get(&b.bloodline_id)
-                        .copied()
-                        .unwrap_or((6, 6, 6, 6, 6));
-                    let ship_type_id = ctx
-                        .sde
-                        .races
-                        .get(&b.race_id)
-                        .and_then(|r| r.corvette_type_id)
-                        .map(|tid| tid as i64)
-                        .unwrap_or(601);
-                    let race_name = ctx
-                        .sde
-                        .races
-                        .get(&b.race_id)
-                        .map(|r| r.name.as_str())
-                        .unwrap_or("New Eden");
-                    let desc = format!(
-                        "{} bloodline of the {} race (CHA {cha}, INT {int}, MEM {mem}, PER {per}, WIL {wil})",
-                        b.name, race_name
-                    );
-                    json!({
+                .filter_map(|b| {
+                    let ship_type_id = b
+                        .ship_type_id
+                        .or_else(|| {
+                            ctx.sde
+                                .races
+                                .get(&b.race_id)
+                                .and_then(|r| r.corvette_type_id)
+                        })? as i64;
+                    Some(json!({
                         "bloodline_id": b.bloodline_id as i64,
                         "name": b.name,
-                        "description": desc,
+                        "description": b.description,
                         "race_id": b.race_id as i64,
                         "ship_type_id": ship_type_id,
                         "corporation_id": b.corporation_id,
-                        "charisma": cha,
-                        "intelligence": int,
-                        "memory": mem,
-                        "perception": per,
-                        "willpower": wil,
-                    })
+                        "charisma": b.charisma,
+                        "intelligence": b.intelligence,
+                        "memory": b.memory,
+                        "perception": b.perception,
+                        "willpower": b.willpower,
+                    }))
                 })
                 .collect();
             RouteExecutionResult::ok_json(json!(out), 3600)
         }
         ("GET", "/universe/ancestries") => {
-            let mut attrs_by_anc: HashMap<u32, (i64, i64, i64, i64, i64)> = HashMap::new();
-            if let Some(conn) = open_sde_sqlite(ctx) {
-                if let Ok(mut stmt) = conn.prepare(
-                    "SELECT ancestry_id, charisma, intelligence, memory, perception, willpower FROM sde_ancestries",
-                ) {
-                    if let Ok(rows) = stmt.query_map([], |r| {
-                        Ok((
-                            r.get::<_, i64>(0)? as u32,
-                            (
-                                r.get::<_, i64>(1)?,
-                                r.get::<_, i64>(2)?,
-                                r.get::<_, i64>(3)?,
-                                r.get::<_, i64>(4)?,
-                                r.get::<_, i64>(5)?,
-                            ),
-                        ))
-                    }) {
-                        for r in rows.flatten() {
-                            attrs_by_anc.insert(r.0, r.1);
-                        }
-                    }
-                }
-            }
             let mut ancs: Vec<_> = ctx.sde.ancestries.values().collect();
             ancs.sort_by_key(|a| a.ancestry_id);
             let out: Vec<Value> = ancs
                 .into_iter()
                 .map(|a| {
-                    let (cha, int, mem, per, wil) = attrs_by_anc
-                        .get(&a.ancestry_id)
-                        .copied()
-                        .unwrap_or((0, 0, 0, 0, 0));
-                    let bl_name = ctx
-                        .sde
-                        .bloodlines
-                        .get(&a.bloodline_id)
-                        .map(|b| b.name.as_str())
-                        .unwrap_or("Capsuleer");
-                    let desc = format!(
-                        "{} ancestry of the {} bloodline (CHA +{cha}, INT +{int}, MEM +{mem}, PER +{per}, WIL +{wil})",
-                        a.name, bl_name
-                    );
-                    json!({
+                    let mut obj = json!({
                         "id": a.ancestry_id as i64,
                         "name": a.name,
                         "bloodline_id": a.bloodline_id as i64,
-                        "description": desc,
-                    })
+                        "description": a.description,
+                    });
+                    if !a.short_description.is_empty() {
+                        obj["short_description"] = json!(a.short_description);
+                    }
+                    obj
                 })
                 .collect();
             RouteExecutionResult::ok_json(json!(out), 3600)

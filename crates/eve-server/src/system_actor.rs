@@ -19,7 +19,7 @@ use std::time::Duration;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::time::MissedTickBehavior;
 
-// parity: plan:P-7, plan:SP-1, plan:SP-2, plan:SP-4, plan:SP-5, plan:MN-01, plan:MN-02, plan:MN-03
+// parity: plan:P-7, plan:SP-1, plan:SP-2, plan:SP-4, plan:SP-5
 // parity: feat:navigation.celestials-balls, feat:navigation.bubbles-grid
 // parity: feat:navigation.destiny-updates, feat:serverops.server-tick
 // parity: notify:DoDestinyUpdate
@@ -921,22 +921,14 @@ pub fn populate_system_celestials(
     if let Some(sys) = sde.solar_systems.get(&solar_system_id) {
         for st in &sys.stations {
             if !ballpark.balls.contains_key(&st.station_id) {
-                let type_rec = sde.types.get(&st.station_type_id);
-                let group_id = type_rec.map(|t| t.group_id).unwrap_or(15);
-                let category_id = type_rec.map(|t| t.category_id).unwrap_or(3);
-                let owner_id = if st.owner_corporation_id > 0 {
-                    st.owner_corporation_id
-                } else {
-                    1_000_035
+                let Some(type_rec) = sde.types.get(&st.station_type_id) else {
+                    continue;
                 };
-                let radius = type_rec
-                    .map(|t| t.radius)
-                    .filter(|&r| r > 0.0)
-                    .unwrap_or(30_000.0);
-                let mass = type_rec
-                    .map(|t| t.mass)
-                    .filter(|&m| m > 0.0)
-                    .unwrap_or(1.0e12);
+                let group_id = type_rec.group_id;
+                let category_id = type_rec.category_id;
+                let owner_id = st.owner_corporation_id;
+                let radius = type_rec.radius;
+                let mass = type_rec.mass;
                 ballpark.add_static_ball_with_meta(
                     Ball {
                         id: st.station_id,
@@ -975,50 +967,61 @@ pub fn populate_asteroid_belt_entities(
     let mut states = Vec::new();
     let mut ast_id_counter = 750_000_000i64;
 
-    let sec = sde
-        .solar_systems
-        .get(&solar_system_id)
-        .map(|s| s.security_status)
-        .unwrap_or(1.0);
+    let Some(sys) = sde.solar_systems.get(&solar_system_id) else {
+        return states;
+    };
+    let sec = sys.security_status;
 
+    let mut base_ores: Vec<&eve_sde::InvType> = sde
+        .types
+        .values()
+        .filter(|t| {
+            t.category_id == 25
+                && t.published
+                && (450..=469).contains(&t.group_id)
+                && t.group_id != 465
+                && sde.groups.get(&t.group_id).is_some_and(|g| g.name == t.name)
+        })
+        .collect();
+    base_ores.sort_by(|a, b| {
+        a.volume
+            .partial_cmp(&b.volume)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.type_id.cmp(&b.type_id))
+    });
+
+    // DERIVED (OF-36 / R57-P1-2): security-band volume thresholds and initial asteroid
+    // unit/radius/mass scaling are derived server-side heuristics because belt ore tables
+    // are server-only and not present in V24 client ResFiles. `feat:mining.belt-ore-distribution`
+    // and `feat:mining.ice-belts` remain open until regional/ice spawn tables are wired.
     for cel in sde.celestials_in_system(solar_system_id) {
         if cel.group_id == 9 {
             let belt_pos = cel.position;
-            let is_ice_belt = cel.name.to_lowercase().contains("ice");
+            let band_ores: Vec<&eve_sde::InvType> = base_ores
+                .iter()
+                .copied()
+                .filter(|t| {
+                    if sec >= 0.45 {
+                        t.volume <= 0.35
+                    } else if sec >= 0.05 {
+                        t.volume > 0.35 && t.volume < 3.0
+                    } else {
+                        t.volume >= 3.0 && t.volume <= 16.0
+                    }
+                })
+                .collect();
 
-            let ores: Vec<(u32, u64, f64)> = if is_ice_belt {
-                vec![
-                    (16262, 500, 1000.0), // Clear Icicle
-                    (16263, 500, 1000.0), // Blue Ice
-                    (16264, 500, 1000.0), // Glacial Mass
-                ]
-            } else if sec >= 0.45 {
-                vec![
-                    (1230, 20_000, 0.1),  // Veldspar
-                    (1228, 15_000, 0.15), // Scordite
-                    (1224, 10_000, 0.3),  // Pyroxeres
-                    (18, 8_000, 0.35),    // Plagioclase
-                ]
-            } else if sec >= 0.05 {
-                vec![
-                    (1227, 10_000, 0.6), // Omber
-                    (20, 8_000, 1.2),    // Kernite
-                    (1231, 6_000, 3.0),  // Hemorphite
-                    (1226, 5_000, 2.0),  // Jaspet
-                ]
-            } else {
-                vec![
-                    (21, 6_000, 3.0),    // Hedbergite
-                    (19, 5_000, 0.1),    // Spodumain
-                    (1232, 4_000, 8.0),  // Dark Ochre
-                    (1229, 3_000, 16.0), // Bistot
-                    (1225, 2_000, 40.0), // Arkonor
-                ]
-            };
-
-            for (idx, &(type_id, units, unit_vol)) in ores.iter().enumerate() {
+            for (idx, ore_type) in band_ores.iter().enumerate() {
                 let id = ast_id_counter;
                 ast_id_counter += 1;
+
+                let unit_vol = ore_type.volume.max(0.01);
+                let batch = ore_type.portion_size.max(1);
+                let raw_units = ((2_000.0 / unit_vol).round() as u64).max(batch);
+                let units = (raw_units / batch).max(1) * batch;
+                let total_m3 = (units as f64) * unit_vol;
+                let scaled_radius =
+                    (ore_type.radius.max(1.0) * 5.0 * total_m3.cbrt()).clamp(60.0, 2_500.0);
 
                 let offset = DVec3::new(
                     (idx as f64 * 600.0) + 200.0,
@@ -1030,7 +1033,7 @@ pub fn populate_asteroid_belt_entities(
                 let ast_state = AsteroidState {
                     asteroid_id: id,
                     belt_id: cel.celestial_id,
-                    type_id,
+                    type_id: ore_type.type_id,
                     initial_units: units,
                     remaining_units: units,
                     unit_volume: unit_vol,
@@ -1040,13 +1043,13 @@ pub fn populate_asteroid_belt_entities(
 
                 let ball = Ball {
                     id,
-                    type_id,
+                    type_id: ore_type.type_id,
                     position: pos,
                     velocity: DVec3::ZERO,
                     max_velocity: 0.0,
                     inertia: 0.0,
-                    mass: 1.0e10,
-                    radius: 60.0,
+                    mass: (total_m3 * 5.0e7).max(ore_type.mass),
+                    radius: scaled_radius,
                     speed_fraction: 0.0,
                     mode: MovementMode::Stop,
                 };
@@ -1054,8 +1057,8 @@ pub fn populate_asteroid_belt_entities(
                 ballpark.set_ball_slim_meta(
                     id,
                     SlimItemMeta {
-                        group_id: 25,
-                        category_id: 25,
+                        group_id: ore_type.group_id,
+                        category_id: ore_type.category_id,
                         owner_id: 1,
                         char_id: None,
                         corp_id: -1,

@@ -871,7 +871,11 @@ async fn test_t5_server_dispatch_and_quasar_gateway_routing() {
     // 2. Quasar publicGatewaySvc: unauthenticated character service access -> 401 Unauthorized
     let unauth_req = EvePublicRequest {
         correlation_uuid: b"corr-t5-unauth".to_vec(),
-        payload: Some(GetProgressionRequest { character_id: None }.to_any()),
+        payload: Some(GoogleAny {
+            type_url: "type.googleapis.com/eve_public.character.skill.plan.api.GetActiveRequest"
+                .into(),
+            value: Vec::new(),
+        }),
         application_instance_uuid: b"app-t5-001".to_vec(),
         ..Default::default()
     };
@@ -903,7 +907,7 @@ async fn test_t5_server_dispatch_and_quasar_gateway_routing() {
         panic!("Expected KeyVal response");
     }
 
-    // 3. Quasar publicGatewaySvc: unknown payload type -> 400 Bad Request
+    // 3. Quasar publicGatewaySvc: unknown payload type -> 404 Not Found
     let uid = ctx.db.provision_player_account("pilot_t5", "pass123");
     sess.user_id = Some(uid);
     let bad_payload_req = EvePublicRequest {
@@ -943,10 +947,13 @@ async fn test_t5_server_dispatch_and_quasar_gateway_routing() {
         panic!("Expected KeyVal response");
     }
 
-    // 4. Authenticated identity service request -> 200 OK
+    // 4. Authenticated pre-character user request -> 200 OK
     let ent_req = EvePublicRequest {
         correlation_uuid: b"corr-t5-ent01".to_vec(),
-        payload: Some(GetEntitlementsRequest { user_id: None }.to_any()),
+        payload: Some(GoogleAny {
+            type_url: "type.googleapis.com/eve_public.character.GetNamesByUserRequest".into(),
+            value: Vec::new(),
+        }),
         application_instance_uuid: b"app-t5-001".to_vec(),
         ..Default::default()
     };
@@ -961,7 +968,7 @@ async fn test_t5_server_dispatch_and_quasar_gateway_routing() {
             None,
         )
         .await
-        .expect("dispatch entitlements request");
+        .expect("dispatch GetNamesByUserRequest");
 
     if let PyRep::KeyVal(entries) = ent_rep {
         let mut status = None;

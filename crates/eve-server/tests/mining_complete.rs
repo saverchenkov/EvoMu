@@ -1,7 +1,6 @@
 //! Comprehensive Phase 5M Mining, Harvesting, Processing & Moons test suite (`MN-01..MN-14, MN-16, C-5, C-6`).
 //!
-// parity: plan:MN-01, plan:MN-02, plan:MN-04, plan:MN-05, plan:MN-06, plan:MN-07, plan:MN-08, plan:MN-09, plan:MN-10, plan:MN-11, plan:MN-12, plan:MN-13, plan:MN-14, plan:MN-16, plan:C-5, plan:C-6
-// parity: feat:mining.static-data, feat:mining.belt-ore-distribution, feat:mining.mining-crits, feat:ships.special-holds, feat:mining.ore-hold, feat:mining.mining-to-jetcan, feat:mining.modulated-crystals, feat:mining.mining-skills, feat:mining.mining-upgrades, feat:mining.mining-fleet-boosts, feat:mining.ore-ships, feat:mining.mining-destroyers, feat:mining.ice-belts, feat:drones.mining-drones, feat:mining.mining-drones-yield, feat:mining.excavator-drones, feat:modules.survey-scanner, feat:mining.survey-scan, feat:mining.compression-space, feat:mining.compression-structure, feat:mining.gas-decompression, feat:mining.reprocessing-yield, feat:mining.reprocessing-tax, feat:mining.reprocessing-modules, feat:structures.service-reprocessing, feat:scanning.moon-survey-probe, feat:mining.moon-extraction, feat:mining.moon-fracture, feat:mining.moon-field-lifetime, feat:mining.moon-jackpot, feat:mining.metenox, feat:mining.corp-ledger
+// parity: feat:mining.mining-crits, feat:ships.special-holds, feat:mining.ore-hold, feat:mining.mining-to-jetcan, feat:mining.modulated-crystals, feat:mining.mining-skills, feat:mining.mining-upgrades, feat:mining.mining-fleet-boosts, feat:mining.ore-ships, feat:mining.mining-destroyers, feat:drones.mining-drones, feat:mining.mining-drones-yield, feat:mining.excavator-drones, feat:modules.survey-scanner, feat:mining.survey-scan, feat:mining.compression-space, feat:mining.compression-structure, feat:mining.gas-decompression, feat:mining.reprocessing-yield, feat:mining.reprocessing-tax, feat:mining.reprocessing-modules, feat:structures.service-reprocessing, feat:scanning.moon-survey-probe, feat:mining.moon-extraction, feat:mining.moon-fracture, feat:mining.moon-field-lifetime, feat:mining.moon-jackpot, feat:mining.metenox, feat:mining.corp-ledger
 
 #![forbid(unsafe_code)]
 
@@ -100,8 +99,6 @@ fn get_dict_val<'a>(dict: &'a PyRep, key: &str) -> Option<&'a PyRep> {
 // Test 1: MN-01, MN-02, C-5: Static Data, Belt Ore Distribution, Ice Belts
 // ====================================================================
 #[tokio::test]
-// parity: plan:MN-01, plan:MN-02, plan:C-5
-// parity: feat:mining.static-data, feat:mining.belt-ore-distribution, feat:mining.ice-belts
 async fn test_mn01_mn02_c5_static_data_and_belt_ore_distribution() {
     let ctx = ServerContext::new();
 
@@ -169,7 +166,6 @@ async fn test_mn01_mn02_c5_static_data_and_belt_ore_distribution() {
 // Test 2: MN-04, MN-06: Mining Cycles, Crystals, Crits, Residue
 // ====================================================================
 #[tokio::test]
-// parity: plan:MN-04, plan:MN-06
 // parity: feat:mining.mining-crits, feat:mining.modulated-crystals
 async fn test_mn04_mn06_crits_crystals_residue() {
     let ctx = ServerContext::new();
@@ -322,7 +318,6 @@ async fn test_mn04_mn06_crits_crystals_residue() {
 // Test 3: MN-05: Specialized Holds and Mining to Jetcan
 // ====================================================================
 #[tokio::test]
-// parity: plan:MN-05
 // parity: feat:ships.special-holds, feat:mining.ore-hold, feat:mining.mining-to-jetcan
 async fn test_mn05_special_holds_and_mining_to_jetcan() {
     let ctx = ServerContext::new();
@@ -427,7 +422,6 @@ async fn test_mn05_special_holds_and_mining_to_jetcan() {
 // Test 4: MN-07: Skills, MLU Upgrades, Fleet Boosts, ORE Ships & Destroyers
 // ====================================================================
 #[tokio::test]
-// parity: plan:MN-07
 // parity: feat:mining.mining-skills, feat:mining.mining-upgrades, feat:mining.mining-fleet-boosts, feat:mining.ore-ships, feat:mining.mining-destroyers
 async fn test_mn07_skills_upgrades_boosts_ore_ships_and_destroyers() {
     let ctx = ServerContext::new();
@@ -597,8 +591,6 @@ async fn test_mn07_skills_upgrades_boosts_ore_ships_and_destroyers() {
 // Test 5: MN-08: Ice Harvesting & Gas Cloud Harvesting
 // ====================================================================
 #[tokio::test]
-// parity: plan:MN-08
-// parity: feat:mining.ice-belts
 async fn test_mn08_ice_and_gas_harvesting() {
     let ctx = ServerContext::new();
     let char_id = 90_000_001;
@@ -722,7 +714,6 @@ async fn test_mn08_ice_and_gas_harvesting() {
 // Test 6: MN-09: Mining Drones & Excavators Yield
 // ====================================================================
 #[tokio::test]
-// parity: plan:MN-09
 // parity: feat:drones.mining-drones, feat:mining.mining-drones-yield, feat:mining.excavator-drones
 async fn test_mn09_mining_drones_and_excavators() {
     let ctx = ServerContext::new();
@@ -845,7 +836,6 @@ async fn test_mn09_mining_drones_and_excavators() {
 // Test 7: MN-10: Survey Scanner Results
 // ====================================================================
 #[tokio::test]
-// parity: plan:MN-10
 // parity: feat:modules.survey-scanner, feat:mining.survey-scan
 async fn test_mn10_survey_scanner() {
     let ctx = ServerContext::new();
@@ -938,7 +928,6 @@ async fn test_mn10_survey_scanner() {
 // Test 8: MN-11: Compression In Space & Structure, Gas Decompression
 // ====================================================================
 #[tokio::test]
-// parity: plan:MN-11
 // parity: feat:mining.compression-space, feat:mining.compression-structure, feat:mining.gas-decompression
 async fn test_mn11_compression_space_and_structure_and_gas() {
     let ctx = ServerContext::new();
@@ -1059,7 +1048,6 @@ async fn test_mn11_compression_space_and_structure_and_gas() {
 // Test 9: MN-12, C-6: Real Reprocessing Yield, Tax, Scrapmetal, Structure
 // ====================================================================
 #[tokio::test]
-// parity: plan:MN-12, plan:C-6
 // parity: feat:mining.reprocessing-yield, feat:mining.reprocessing-tax, feat:mining.reprocessing-modules, feat:structures.service-reprocessing
 async fn test_mn12_c6_reprocessing_yield_tax_modules_and_structure() {
     let ctx = ServerContext::new();
@@ -1195,7 +1183,6 @@ async fn test_mn12_c6_reprocessing_yield_tax_modules_and_structure() {
 // Test 10: MN-13, MN-14, MN-16: Moon Probes, Jackpot, Decay, Drill & Ledger
 // ====================================================================
 #[tokio::test]
-// parity: plan:MN-13, plan:MN-14, plan:MN-16
 // parity: feat:scanning.moon-survey-probe, feat:mining.moon-extraction, feat:mining.moon-fracture, feat:mining.moon-field-lifetime, feat:mining.moon-jackpot, feat:mining.metenox, feat:mining.corp-ledger
 async fn test_mn13_mn14_mn16_moon_mining_probes_jackpot_decay_and_ledger() {
     let ctx = ServerContext::new();

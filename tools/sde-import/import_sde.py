@@ -433,6 +433,8 @@ for bid, b in bloodlines_raw.iteritems():
         'bloodline_id': int(bid),
         'race_id': int(b.raceID),
         'name_id': int(b.nameID),
+        'description_id': getattr(b, 'descriptionID', None),
+        'ship_type_id': getattr(b, 'shipTypeID', None),
         'corporation_id': int(b.corporationID),
         'charisma': int(b.charisma),
         'intelligence': int(b.intelligence),
@@ -448,6 +450,8 @@ for aid, a in ancestries_raw.iteritems():
         'ancestry_id': int(aid),
         'bloodline_id': int(a.bloodlineID),
         'name_id': int(a.nameID),
+        'description_id': getattr(a, 'descriptionID', None),
+        'short_description': getattr(a, 'shortDescription', None),
         'charisma': int(a.charisma),
         'intelligence': int(a.intelligence),
         'memory': int(a.memory),
@@ -475,6 +479,7 @@ for fid, f in factions_raw.iteritems():
     factions.append({
         'faction_id': int(fid),
         'name_id': int(f.nameID),
+        'description_id': getattr(f, 'descriptionID', None),
         'corporation_id': getattr(f, 'corporationID', None),
         'militia_corporation_id': getattr(f, 'militiaCorporationID', None),
         'solar_system_id': getattr(f, 'solarSystemID', None),
@@ -1036,7 +1041,9 @@ def run_import(
             sound_id INTEGER,
             meta_group_id INTEGER,
             meta_level INTEGER,
-            tech_level INTEGER
+            tech_level INTEGER,
+            default_effect_id INTEGER,
+            description TEXT NOT NULL DEFAULT ''
         );
         CREATE TABLE sde_dogma_attributes (
             attribute_id INTEGER PRIMARY KEY,
@@ -1172,7 +1179,8 @@ def run_import(
             race_id INTEGER PRIMARY KEY,
             name TEXT NOT NULL,
             ship_type_id INTEGER,
-            skills_json TEXT NOT NULL
+            skills_json TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT ''
         );
         CREATE TABLE sde_bloodlines (
             bloodline_id INTEGER PRIMARY KEY,
@@ -1183,7 +1191,9 @@ def run_import(
             intelligence INTEGER NOT NULL,
             memory INTEGER NOT NULL,
             perception INTEGER NOT NULL,
-            willpower INTEGER NOT NULL
+            willpower INTEGER NOT NULL,
+            ship_type_id INTEGER,
+            description TEXT NOT NULL DEFAULT ''
         );
         CREATE TABLE sde_ancestries (
             ancestry_id INTEGER PRIMARY KEY,
@@ -1193,7 +1203,9 @@ def run_import(
             intelligence INTEGER NOT NULL,
             memory INTEGER NOT NULL,
             perception INTEGER NOT NULL,
-            willpower INTEGER NOT NULL
+            willpower INTEGER NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            short_description TEXT NOT NULL DEFAULT ''
         );
         CREATE TABLE sde_schools (
             school_id INTEGER PRIMARY KEY,
@@ -1214,7 +1226,8 @@ def run_import(
             militia_corporation_id INTEGER,
             solar_system_id INTEGER,
             size_factor REAL NOT NULL,
-            member_races_json TEXT NOT NULL
+            member_races_json TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT ''
         );
         CREATE TABLE sde_npc_corporations (
             corporation_id INTEGER PRIMARY KEY,
@@ -1419,6 +1432,8 @@ def run_import(
             tname = label(t["name_id"], f"Type {tid}")
             attrs_dict = {int(k): float(v) for k, v in t["attrs"]}
             eff_ids = [int(k) for k, _ in t["effs"]]
+            default_eff_id = next((int(k) for k, is_def in t["effs"] if is_def), None)
+            tdesc = label(t.get("description_id"), "")
             if cid == 11:
                 npc_types_by_group.setdefault(gid, []).append(tid)
             if gid == 988:
@@ -1460,10 +1475,12 @@ def run_import(
                     t.get("meta_group_id"),
                     t.get("meta_level"),
                     t.get("tech_level"),
+                    default_eff_id,
+                    tdesc,
                 )
             )
         conn.executemany(
-            "INSERT INTO sde_types VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO sde_types VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             type_rows,
         )
 
@@ -1661,12 +1678,13 @@ def run_import(
                     label(r["name_id"], f"Race {rid}"),
                     ship_tid,
                     json.dumps(r["skills"], separators=(",", ":")),
+                    label(r.get("description_id"), ""),
                 )
             )
-        conn.executemany("INSERT INTO sde_races VALUES (?, ?, ?, ?)", race_rows)
+        conn.executemany("INSERT INTO sde_races VALUES (?, ?, ?, ?, ?)", race_rows)
 
         conn.executemany(
-            "INSERT INTO sde_bloodlines VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO sde_bloodlines VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [
                 (
                     b["bloodline_id"],
@@ -1678,12 +1696,14 @@ def run_import(
                     b["memory"],
                     b["perception"],
                     b["willpower"],
+                    b.get("ship_type_id") or race_ship_by_id.get(b["race_id"]),
+                    label(b.get("description_id"), ""),
                 )
                 for b in fsd_data["bloodlines"]
             ],
         )
         conn.executemany(
-            "INSERT INTO sde_ancestries VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO sde_ancestries VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [
                 (
                     a["ancestry_id"],
@@ -1694,6 +1714,8 @@ def run_import(
                     a["memory"],
                     a["perception"],
                     a["willpower"],
+                    label(a.get("description_id"), ""),
+                    str(a.get("short_description") or ""),
                 )
                 for a in fsd_data["ancestries"]
             ],
@@ -1725,7 +1747,7 @@ def run_import(
         )
 
         conn.executemany(
-            "INSERT INTO sde_factions VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO sde_factions VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             [
                 (
                     f["faction_id"],
@@ -1735,6 +1757,7 @@ def run_import(
                     f["solar_system_id"],
                     f["size_factor"],
                     json.dumps(f["member_races"], separators=(",", ":")),
+                    label(f.get("description_id"), ""),
                 )
                 for f in fsd_data["factions"]
             ],

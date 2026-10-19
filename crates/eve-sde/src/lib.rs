@@ -205,6 +205,10 @@ pub struct InvType {
     #[serde(default)]
     pub tech_level: Option<u32>,
     #[serde(default)]
+    pub default_effect_id: Option<EffectId>,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
     pub effect_ids: Vec<EffectId>,
     pub default_attributes: HashMap<AttributeId, f64>,
 }
@@ -300,6 +304,8 @@ pub struct RaceInfo {
     pub corvette_type_id: Option<TypeId>,
     #[serde(default)]
     pub starter_skills: HashMap<TypeId, u8>,
+    #[serde(default)]
+    pub description: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -308,6 +314,20 @@ pub struct BloodlineInfo {
     pub race_id: u32,
     pub name: String,
     pub corporation_id: i64,
+    #[serde(default)]
+    pub ship_type_id: Option<TypeId>,
+    #[serde(default)]
+    pub charisma: i64,
+    #[serde(default)]
+    pub intelligence: i64,
+    #[serde(default)]
+    pub memory: i64,
+    #[serde(default)]
+    pub perception: i64,
+    #[serde(default)]
+    pub willpower: i64,
+    #[serde(default)]
+    pub description: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -315,6 +335,20 @@ pub struct AncestryInfo {
     pub ancestry_id: u32,
     pub bloodline_id: u32,
     pub name: String,
+    #[serde(default)]
+    pub charisma: i64,
+    #[serde(default)]
+    pub intelligence: i64,
+    #[serde(default)]
+    pub memory: i64,
+    #[serde(default)]
+    pub perception: i64,
+    #[serde(default)]
+    pub willpower: i64,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub short_description: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -422,6 +456,10 @@ pub struct FactionInfo {
     pub corporation_id: Option<i64>,
     pub militia_corporation_id: Option<i64>,
     pub solar_system_id: Option<SolarSystemId>,
+    #[serde(default)]
+    pub size_factor: f64,
+    #[serde(default)]
+    pub description: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1081,7 +1119,7 @@ impl SdeRegistry {
         let mut wrecks = HashMap::new();
         {
             let mut stmt = conn.prepare(
-                "SELECT type_id, group_id, category_id, name, mass, volume, capacity, portion_size, base_price, radius, market_group_id, race_id, faction_id, variation_parent_type_id, wreck_type_id, published, attributes_json, effects_json, description_id, icon_id, graphic_id, sound_id, meta_group_id, meta_level, tech_level FROM sde_types",
+                "SELECT type_id, group_id, category_id, name, mass, volume, capacity, portion_size, base_price, radius, market_group_id, race_id, faction_id, variation_parent_type_id, wreck_type_id, published, attributes_json, effects_json, description_id, icon_id, graphic_id, sound_id, meta_group_id, meta_level, tech_level, default_effect_id, description FROM sde_types",
             )?;
             let rows = stmt.query_map([], |r| {
                 let tid = r.get::<_, i64>(0)? as TypeId;
@@ -1107,6 +1145,10 @@ impl SdeRegistry {
                 let meta_group_id: Option<u32> = r.get::<_, Option<i64>>(22)?.map(|v| v as u32);
                 let meta_level: Option<i64> = r.get(23)?;
                 let tech_level: Option<u32> = r.get::<_, Option<i64>>(24)?.map(|v| v as u32);
+                let default_effect_id: Option<EffectId> = r
+                    .get::<_, Option<i64>>(25)?
+                    .and_then(|v| u16::try_from(v).ok());
+                let description: String = r.get::<_, Option<String>>(26)?.unwrap_or_default();
                 Ok((
                     InvType {
                         type_id: tid,
@@ -1131,6 +1173,8 @@ impl SdeRegistry {
                         meta_group_id,
                         meta_level,
                         tech_level,
+                        default_effect_id,
+                        description,
                         effect_ids,
                         default_attributes,
                     },
@@ -1413,7 +1457,7 @@ impl SdeRegistry {
         let mut factions = HashMap::new();
         {
             let mut stmt = conn.prepare(
-                "SELECT faction_id, name, corporation_id, militia_corporation_id, solar_system_id FROM sde_factions",
+                "SELECT faction_id, name, corporation_id, militia_corporation_id, solar_system_id, size_factor, description FROM sde_factions",
             )?;
             let rows = stmt.query_map([], |r| {
                 Ok(FactionInfo {
@@ -1422,6 +1466,8 @@ impl SdeRegistry {
                     corporation_id: r.get(2)?,
                     militia_corporation_id: r.get(3)?,
                     solar_system_id: r.get::<_, Option<i64>>(4)?.map(|v| v as SolarSystemId),
+                    size_factor: r.get::<_, Option<f64>>(5)?.unwrap_or(1.0),
+                    description: r.get::<_, Option<String>>(6)?.unwrap_or_default(),
                 })
             })?;
             for r in rows {
@@ -1566,8 +1612,9 @@ impl SdeRegistry {
 
         let mut races = HashMap::new();
         {
-            let mut stmt =
-                conn.prepare("SELECT race_id, name, ship_type_id, skills_json FROM sde_races")?;
+            let mut stmt = conn.prepare(
+                "SELECT race_id, name, ship_type_id, skills_json, description FROM sde_races",
+            )?;
             let rows = stmt.query_map([], |r| {
                 let skills_json: Option<String> = r.get(3).ok();
                 let starter_skills = skills_json
@@ -1583,6 +1630,7 @@ impl SdeRegistry {
                     name: r.get(1)?,
                     corvette_type_id: r.get::<_, Option<i64>>(2)?.map(|tid| tid as TypeId),
                     starter_skills,
+                    description: r.get::<_, Option<String>>(4)?.unwrap_or_default(),
                 })
             })?;
             for r in rows {
@@ -1594,7 +1642,7 @@ impl SdeRegistry {
         let mut bloodlines = HashMap::new();
         {
             let mut stmt = conn.prepare(
-                "SELECT bloodline_id, race_id, name, corporation_id FROM sde_bloodlines",
+                "SELECT bloodline_id, race_id, name, corporation_id, charisma, intelligence, memory, perception, willpower, ship_type_id, description FROM sde_bloodlines",
             )?;
             let rows = stmt.query_map([], |r| {
                 Ok(BloodlineInfo {
@@ -1602,6 +1650,13 @@ impl SdeRegistry {
                     race_id: r.get::<_, i64>(1)? as u32,
                     name: r.get(2)?,
                     corporation_id: r.get(3)?,
+                    charisma: r.get(4)?,
+                    intelligence: r.get(5)?,
+                    memory: r.get(6)?,
+                    perception: r.get(7)?,
+                    willpower: r.get(8)?,
+                    ship_type_id: r.get::<_, Option<i64>>(9)?.map(|tid| tid as TypeId),
+                    description: r.get::<_, Option<String>>(10)?.unwrap_or_default(),
                 })
             })?;
             for r in rows {
@@ -1612,13 +1667,21 @@ impl SdeRegistry {
 
         let mut ancestries = HashMap::new();
         {
-            let mut stmt =
-                conn.prepare("SELECT ancestry_id, bloodline_id, name FROM sde_ancestries")?;
+            let mut stmt = conn.prepare(
+                "SELECT ancestry_id, bloodline_id, name, charisma, intelligence, memory, perception, willpower, description, short_description FROM sde_ancestries",
+            )?;
             let rows = stmt.query_map([], |r| {
                 Ok(AncestryInfo {
                     ancestry_id: r.get::<_, i64>(0)? as u32,
                     bloodline_id: r.get::<_, i64>(1)? as u32,
                     name: r.get(2)?,
+                    charisma: r.get(3)?,
+                    intelligence: r.get(4)?,
+                    memory: r.get(5)?,
+                    perception: r.get(6)?,
+                    willpower: r.get(7)?,
+                    description: r.get::<_, Option<String>>(8)?.unwrap_or_default(),
+                    short_description: r.get::<_, Option<String>>(9)?.unwrap_or_default(),
                 })
             })?;
             for r in rows {

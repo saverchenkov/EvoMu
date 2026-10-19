@@ -8,8 +8,6 @@
 #![forbid(unsafe_code)]
 
 // parity: plan:D-1
-// parity: plan:Z-4
-// parity: sde:res:/staticdata/types.fsdbinary
 
 use eve_dogma::{
     compile_effect_to_vm, compile_modifier_spec_to_vm, DogmaDomain, DogmaEffectContext,
@@ -44,8 +42,6 @@ fn expected_single_modifier_value(base_val: f64, op: ModifierOperator) -> (f64, 
 
 #[test]
 // parity: plan:D-1
-// parity: plan:Z-4
-// parity: sde:res:/staticdata/types.fsdbinary
 fn test_client_static_resources_lossless_sweep_and_spot_checks() {
     let root = repo_root();
     let db_path = SdeRegistry::default_db_path();
@@ -362,7 +358,6 @@ fn test_client_static_resources_lossless_sweep_and_spot_checks() {
 
 #[test]
 // parity: plan:D-1
-// parity: plan:Z-4, effect:*
 fn test_sweep_all_dogma_effects_across_sde_effects_table() {
     let db_path = SdeRegistry::default_db_path();
     let sde = SdeRegistry::open(&db_path).expect("Real SDE SQLite database must open");
@@ -801,7 +796,4 @@ fn test_sweep_all_dogma_effects_across_sde_effects_table() {
     assert_eq!(func_counts[&DogmaModifierFunc::EffectStopper], 10);
 
     assert_eq!(attested_effect_rows.len(), 3_210);
-    let mut attested_refs: Vec<&str> = attested_effect_rows.iter().map(String::as_str).collect();
-    attested_refs.push("effect:*");
-    eve_testkit::attest(&attested_refs);
 }

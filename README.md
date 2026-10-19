@@ -26,7 +26,7 @@ To visualize the entire server surface area (**216 cataloged `machoNet` services
 |  +----------------------------------------------------+  |  +-----------------------------------------------------+  |
 |  | 1. Wire Protocol & Dual-Bus (eve-proto/machonet)   |  |  | 9. Destiny 1 Hz Kinematics & Bubbles (eve-destiny)  |  |
 |  |    Status: In progress                             |  |  |    Status: In progress                              |  |
-|  |    - eveMarshal 0x01-0x2C, 195-str table, RLE      |  |  |    - Sub-warp align, 4-phase warp, 250km bubbles    |  |
+|  |    - eveMarshal 0x01-0x2C, 195-str table, RLE      |  |  |    - Sub-warp align, 4-phase warp, 8000km bubbles   |  |
 |  |    - Session diffs, MachoPacket, PublicGatewayShim |  |  |    - Binary AddBalls, SystemActor 1 Hz tick         |  |
 |  +----------------------------------------------------+  |  +-----------------------------------------------------+  |
 |  | 2. Auth, Bootstrap, Cache & Slash GM               |  |  | 11. Combat, Weapons, Drones, Fighters & CrimeWatch  |  |

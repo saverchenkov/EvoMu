@@ -1,6 +1,6 @@
 //! PVE Agents, Missions, SDE Market Groups, Show-Info, Mining Sites & NPC Mining Ops Integration Tests.
 //!
-// parity: plan:D-1, plan:E-5, plan:MN-15, plan:MN-17, plan:MN-18
+// parity: plan:D-1, plan:E-5
 // parity: feat:market.market-groups, feat:ui.show-info-types, feat:pve.agent-finder, feat:pve.agent-conversation, feat:pve.mission-accept, feat:pve.mission-decline, feat:pve.mission-quit, feat:mining.gas-sites, feat:mining.ore-anomalies, feat:mining.ore-signatures, feat:mining.sov-ore-sites, feat:npc.mining-op-npc, feat:mining.npc-mining-ops, feat:pve.mission-mining, feat:mining.mining-missions, feat:mining.mining-market, feat:mining.mining-goals
 
 #![forbid(unsafe_code)]
@@ -485,7 +485,6 @@ async fn test_e5_agent_finder_and_conversation_lifecycle() {
 // MN-15: Mining Sites: Gas Sites, Ore Anomalies, Rare Signatures & Sov Ore Sites
 // ============================================================================
 #[tokio::test]
-// parity: plan:MN-15
 // parity: feat:mining.gas-sites, feat:mining.ore-anomalies, feat:mining.ore-signatures, feat:mining.sov-ore-sites
 async fn test_mn15_mining_sites_gas_anomalies_signatures_sov() {
     let ctx = ServerContext::new();
@@ -711,7 +710,6 @@ async fn test_mn15_mining_sites_gas_anomalies_signatures_sov() {
 // MN-17: NPC Mining Operations & Hauler Interactions
 // ============================================================================
 #[tokio::test]
-// parity: plan:MN-17
 // parity: feat:npc.mining-op-npc, feat:mining.npc-mining-ops
 async fn test_mn17_npc_mining_ops_and_interaction() {
     let ctx = ServerContext::new();
@@ -844,7 +842,6 @@ async fn test_mn17_npc_mining_ops_and_interaction() {
 // MN-18: Mining Missions, Ore/Mineral Market & Mining Goals from Ledger
 // ============================================================================
 #[tokio::test]
-// parity: plan:MN-18
 // parity: feat:pve.mission-mining, feat:mining.mining-missions, feat:mining.mining-market, feat:mining.mining-goals
 async fn test_mn18_mining_missions_market_and_goals() {
     let ctx = ServerContext::new();

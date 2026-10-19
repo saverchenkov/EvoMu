@@ -145,7 +145,7 @@ pub fn dispatch_fw_universe_route(
                     json!({
                         "race_id": r.race_id as i64,
                         "name": r.name,
-                        "description": format!("The {} civilization of New Eden.", r.name),
+                        "description": r.description,
                         "alliance_id": alliance_id,
                     })
                 })

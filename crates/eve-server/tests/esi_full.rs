@@ -291,7 +291,6 @@ fn setup_esi_test_environment() -> (Arc<ServerContext>, Arc<EsiRouter>, OpenApiS
 
 #[tokio::test]
 async fn test_esi5_industry_market_wallet_contracts_routes() {
-    // parity: plan:ESI-5
     // Industry, Market, Wallet, Contracts routes:
     // - /v1/industry/facilities/
     // - /v1/industry/systems/
@@ -457,7 +456,6 @@ async fn test_esi5_industry_market_wallet_contracts_routes() {
 
 #[tokio::test]
 async fn test_esi6_fleets_corporations_alliances_mail_bookmarks_routes() {
-    // parity: plan:ESI-6
     // Fleets, Corporations, Alliances, Mail, Bookmarks routes:
     // - /v1/fleets/{fleet_id}/
     // - /v1/fleets/{fleet_id}/members/
@@ -600,7 +598,6 @@ async fn test_esi6_fleets_corporations_alliances_mail_bookmarks_routes() {
 
 #[tokio::test]
 async fn test_esi7_incursions_opportunities_search_routes_planetary_interaction() {
-    // parity: plan:ESI-7
     // Incursions, Opportunities, Search, Routes, Planetary Interaction:
     // - /v1/incursions/
     // - /v1/opportunities/tasks/

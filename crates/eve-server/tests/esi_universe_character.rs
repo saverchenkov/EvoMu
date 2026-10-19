@@ -84,7 +84,6 @@ fn validate_and_json(
 
 #[tokio::test]
 async fn test_esi3_universe_status_meta_dogma_killmails_insurance_fw() {
-    // parity: plan:ESI-3
     let ctx = Arc::new(ServerContext::new());
     let router = EsiRouter::new(Arc::clone(&ctx));
     let spec = OpenApiSpec::pinned();
@@ -231,7 +230,64 @@ async fn test_esi3_universe_status_meta_dogma_killmails_insurance_fw() {
     );
     assert_eq!(rifter_detail["type_id"], json!(587));
     assert_eq!(rifter_detail["name"], json!("Rifter"));
+    assert!(
+        rifter_detail["description"]
+            .as_str()
+            .unwrap_or("")
+            .contains("very powerful combat frigate"),
+        "Rifter description must come from localized SDE (got {:?})",
+        rifter_detail["description"]
+    );
     assert!(rifter_detail["dogma_attributes"].as_array().is_some());
+
+    let autocannon_detail = validate_and_json(
+        &router,
+        &spec,
+        &EsiHttpRequest::new("GET", "/v1/universe/types/484/"),
+        200,
+    );
+    let ac_effects = autocannon_detail["dogma_effects"]
+        .as_array()
+        .expect("dogma_effects array");
+    let default_effs: Vec<_> = ac_effects
+        .iter()
+        .filter(|e| e["is_default"] == json!(true))
+        .collect();
+    assert_eq!(default_effs.len(), 1);
+    assert_eq!(default_effs[0]["effect_id"], json!(34)); // projectileFired from typedogma.fsdbinary
+
+    let factions = validate_and_json(
+        &router,
+        &spec,
+        &EsiHttpRequest::new("GET", "/v2/universe/factions/"),
+        200,
+    );
+    assert!(factions.as_array().unwrap().iter().any(|f| {
+        let desc = f["description"].as_str().unwrap_or("");
+        f["faction_id"] == json!(500_001) && desc.len() > 20 && !desc.contains("size_factor=")
+    }));
+
+    let bloodlines = validate_and_json(
+        &router,
+        &spec,
+        &EsiHttpRequest::new("GET", "/v1/universe/bloodlines/"),
+        200,
+    );
+    assert!(bloodlines.as_array().unwrap().iter().any(|b| {
+        let desc = b["description"].as_str().unwrap_or("");
+        b["bloodline_id"] == json!(1) && desc.len() > 20 && !desc.contains("CHA ")
+    }));
+
+    let ancestries = validate_and_json(
+        &router,
+        &spec,
+        &EsiHttpRequest::new("GET", "/v1/universe/ancestries/"),
+        200,
+    );
+    assert!(ancestries.as_array().unwrap().iter().any(|a| {
+        let desc = a["description"].as_str().unwrap_or("");
+        a["id"] == json!(1) && desc.len() > 20 && !desc.contains("CHA +")
+    }));
 
     validate_and_json(
         &router,
@@ -480,7 +536,6 @@ async fn test_esi3_universe_status_meta_dogma_killmails_insurance_fw() {
 
 #[tokio::test]
 async fn test_esi4_character_clones_skills_location_fittings_assets_wallet_loyalty_calendar_contacts() {
-    // parity: plan:ESI-4
     let ctx = Arc::new(ServerContext::new());
     let router = EsiRouter::new(Arc::clone(&ctx));
     let spec = OpenApiSpec::pinned();

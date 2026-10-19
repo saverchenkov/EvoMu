@@ -100,7 +100,6 @@ fn get_dict_val<'a>(dict: &'a PyRep, key: &str) -> Option<&'a PyRep> {
 
 #[tokio::test]
 async fn test_phase_5m_mn04_mining_laser_cycle_engine() {
-    // parity: plan:MN-04
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let char_id = 90_000_001;
@@ -302,7 +301,6 @@ async fn test_phase_5m_mn04_mining_laser_cycle_engine() {
 
 #[tokio::test]
 async fn test_phase_5m_mn05_specialized_holds_volume_and_stack_merging() {
-    // parity: plan:MN-05
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let char_id = 90_000_001;
@@ -467,7 +465,6 @@ async fn test_phase_5m_mn05_specialized_holds_volume_and_stack_merging() {
 
 #[tokio::test]
 async fn test_phase_5m_mn06_mining_crystals_and_residue() {
-    // parity: plan:MN-06
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let char_id = 90_000_001;
@@ -627,7 +624,6 @@ async fn test_phase_5m_mn06_mining_crystals_and_residue() {
 
 #[tokio::test]
 async fn test_phase_5m_mn07_ice_and_gas_harvesting() {
-    // parity: plan:MN-07
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let char_id = 90_000_001;
@@ -776,7 +772,6 @@ async fn test_phase_5m_mn07_ice_and_gas_harvesting() {
 
 #[tokio::test]
 async fn test_phase_5m_mn08_survey_scanner() {
-    // parity: plan:MN-08
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let char_id = 90_000_001;
@@ -902,7 +897,6 @@ async fn test_phase_5m_mn08_survey_scanner() {
 
 #[tokio::test]
 async fn test_phase_5m_mn11_space_and_structure_compression() {
-    // parity: plan:MN-11
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let char_id = 90_000_001;
@@ -1107,7 +1101,6 @@ async fn test_phase_5m_mn11_space_and_structure_compression() {
 
 #[tokio::test]
 async fn test_phase_5m_mn12_reprocessing_service() {
-    // parity: plan:MN-12
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let char_id = 90_000_001;

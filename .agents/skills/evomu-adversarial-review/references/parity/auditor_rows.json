@@ -676,8 +676,2859 @@
    "na_allowed": false,
    "attest_ok": false,
    "added_by_audit": "20261017-214922"
+  },
+  {
+   "acceptance": "Jumping through a stargate into Zarzakh asks the pilot to confirm a toll. The toll scales with ship mass, roughly 10k ISK for small hulls up to about 100M ISK for the heaviest. It is debited and journaled only on confirmation; declining aborts the jump. Characters enlisted in a pirate militia (Angel Cartel or Guristas) pay nothing.",
+   "domain": "navigation",
+   "id": "feat:navigation.zarzakh-gate-toll",
+   "plan_task": null,
+   "sources": [
+    "wiki:Zarzakh"
+   ],
+   "title": "Zarzakh gate toll",
+   "why_missing": "No navigation/stargate row covers per-system gate tolls; feat:navigation.stargate-jump only covers range, session change and cloak.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-073440"
+  },
+  {
+   "acceptance": "Entering Zarzakh by a gate locks the character to that gate for 6 hours; jumps out through any other Zarzakh gate are refused until it expires. Entering again through another gate resets the lock to the new gate. Leaving by the Deathless Shipcaster, a clone jump or a pod death is always allowed. The lock never affects entry from outside.",
+   "domain": "navigation",
+   "id": "feat:navigation.zarzakh-emanation-lock",
+   "plan_task": null,
+   "sources": [
+    "wiki:Zarzakh"
+   ],
+   "title": "Zarzakh emanation lock",
+   "why_missing": "The gate-lock timer is unique to Zarzakh and appears in no navigation or session-timer row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-073440"
+  },
+  {
+   "acceptance": "Capital-sized hulls, including freighters but not the Orca, are refused at every stargate leading into Zarzakh, with the live UserError.",
+   "domain": "navigation",
+   "id": "feat:navigation.zarzakh-capital-gate-ban",
+   "plan_task": null,
+   "sources": [
+    "wiki:Zarzakh"
+   ],
+   "title": "Zarzakh capital gate restriction",
+   "why_missing": "feat:navigation.jump-range-restrictions only covers capitals in high-sec; the Zarzakh freighter/capital gate ban has no row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-073440"
+  },
+  {
+   "acceptance": "In Zarzakh, bookmark creation and warping to bookmarks are refused, and directional scans return the disabled error or empty result the live server gives. Both work again on leaving the system.",
+   "domain": "navigation",
+   "id": "feat:navigation.zarzakh-bookmark-dscan-disabled",
+   "plan_task": null,
+   "sources": [
+    "wiki:Zarzakh"
+   ],
+   "title": "Zarzakh bookmark and d-scan suppression",
+   "why_missing": "feat:scanning.dscan and feat:bookmarks.create have no system-level disable rule.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-073440"
+  },
+  {
+   "acceptance": "Ships in Zarzakh outside the Jovian safe zones (at the stargates, The Fulcrum and the Shipcaster) take periodic hull damage. Inside a safe zone no hazard damage is applied. The damage follows the normal damage/killmail pipeline.",
+   "domain": "navigation",
+   "id": "feat:navigation.gravity-hazard-safe-zones",
+   "plan_task": null,
+   "sources": [
+    "wiki:Zarzakh"
+   ],
+   "title": "Zarzakh gravity hazard",
+   "why_missing": "No environmental hull-damage hazard is modelled anywhere in the ledger.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-073440"
+  },
+  {
+   "acceptance": "The Fulcrum refuses docking to characters enlisted in an Empire militia or carrying an active weapons or retribution timer. Neutral characters get repair, fitting, market, insurance and industry. Jump cloning needs a pirate-enlisted character, and corporation offices need a pirate-enlisted corporation. The Angel Cartel and Guristas LP stores are available there.",
+   "domain": "structures",
+   "id": "feat:structures.fulcrum-alignment-services",
+   "plan_task": null,
+   "sources": [
+    "wiki:Zarzakh",
+    "wiki:Deathless_Circle"
+   ],
+   "title": "The Fulcrum docking and alignment-gated services",
+   "why_missing": "feat:structures.npc-station-services uses station-operation services only; no row gates docking or services by militia alignment.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-073440"
+  },
+  {
+   "acceptance": "Manufacturing a sub-capital Angel Cartel or Guristas ship at The Fulcrum applies a 6% material and 70% time efficiency bonus. Pirate-enlisted characters also get a 90% SCC surcharge reduction, reflected in the job cost.",
+   "domain": "industry",
+   "id": "feat:industry.fulcrum-pirate-ship-bonus",
+   "plan_task": null,
+   "sources": [
+    "wiki:Zarzakh"
+   ],
+   "title": "Fulcrum pirate manufacturing bonuses",
+   "why_missing": "feat:industry.structure-rigs covers Upwell bonuses only; this NPC-facility, faction-specific bonus is untested.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-073440"
+  },
+  {
+   "acceptance": "Missile gate guns in Zarzakh attack capsuleers with a retribution timer and apply target painting and ECM. 'Zarzakh' and 'Outer Zarzakh' pirate NPC fleets patrol gates and stations in Zarzakh and the adjacent k-space systems, attacking non-pirate-aligned pilots and anyone with a retribution timer.",
+   "domain": "npc",
+   "id": "feat:npc.zarzakh-gate-guns-patrols",
+   "plan_task": null,
+   "sources": [
+    "wiki:Zarzakh",
+    "wiki:Insurgency"
+   ],
+   "title": "Zarzakh gate guns and Deathless patrols",
+   "why_missing": "feat:npc.sentry-guns covers criminals/low standing only; alignment-based Deathless aggression and the retribution timer trigger have no row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-073440"
+  },
+  {
+   "acceptance": "The Deathless Shipcaster in Zarzakh lets pirate-enlisted characters jump to their faction's Forward Operating Base in the current insurgency. Each warzone target has its own charge and cooldown, and non-pirate characters are refused.",
+   "domain": "navigation",
+   "id": "feat:navigation.deathless-shipcaster-fob",
+   "plan_task": null,
+   "sources": [
+    "wiki:Zarzakh",
+    "wiki:Forward_Operating_Base"
+   ],
+   "title": "Deathless Shipcaster to insurgency FOB",
+   "why_missing": "feat:navigation.shipcaster covers Empire militia landing pads only; the pirate shipcaster to the FOB is a separate destination and access rule.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-073440"
+  },
+  {
+   "acceptance": "Entry into each clade's Pochven home system needs at least 6.0 standing with the Triglavian Collective (V24 value). Lower-standing characters are refused at the gate with the live error. Internal and border systems have no standing gate.",
+   "domain": "navigation",
+   "id": "feat:navigation.pochven-home-standing-gate",
+   "plan_task": null,
+   "sources": [
+    "wiki:Pochven"
+   ],
+   "title": "Pochven home-system standing gate",
+   "why_missing": "feat:navigation.pochven-travel is a single coarse line; the standing-gated home systems are not testable from it.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-073440"
+  },
+  {
+   "acceptance": "Wormholes to and from Pochven spawn in k-space and wormhole systems. Their signature sits about 30 km from the actual wormhole, which is not deadspace. They open when scanned from the Pochven side. Guard NPCs differ by side: Triglavians outside, the Pochven NPC mix inside.",
+   "domain": "navigation",
+   "id": "feat:navigation.pochven-wormholes",
+   "plan_task": null,
+   "sources": [
+    "wiki:Pochven"
+   ],
+   "title": "Pochven entry/exit wormholes",
+   "why_missing": "Hidden inside feat:navigation.pochven-travel; the spawn and opening rules are untested.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-073440"
+  },
+  {
+   "acceptance": "A region-wide cyno jammer stops any cyno in Pochven, so jump drives can't enter. Capitals already inside may jump out. Capital ships can't use Pochven stargates, and capital manufacturing jobs in Pochven are refused.",
+   "domain": "navigation",
+   "id": "feat:navigation.pochven-capital-cyno-restrictions",
+   "plan_task": null,
+   "sources": [
+    "wiki:Pochven"
+   ],
+   "title": "Pochven capital and cyno restrictions",
+   "why_missing": "feat:modules.cyno-jammer covers sov jammers only; the region-wide one-way rule and the capital gate/manufacturing bans have no row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-073440"
+  },
+  {
+   "acceptance": "A medical clone can't be set in Pochven, and clone jumps into Pochven are refused. Clone bays in Pochven allow local clone swaps only.",
+   "domain": "clones",
+   "id": "feat:clones.pochven-clone-restrictions",
+   "plan_task": null,
+   "sources": [
+    "wiki:Pochven"
+   ],
+   "title": "Pochven clone restrictions",
+   "why_missing": "feat:clones.jump-clone-jump and feat:character.home-station have no regional exclusions.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-073440"
+  },
+  {
+   "acceptance": "Upwell structures can't be anchored in Pochven, though existing ones remain. A customs office can be anchored only by a pilot with at least 1.5 Triglavian standing.",
+   "domain": "structures",
+   "id": "feat:structures.pochven-anchoring-restrictions",
+   "plan_task": null,
+   "sources": [
+    "wiki:Pochven"
+   ],
+   "title": "Pochven anchoring rules",
+   "why_missing": "feat:structures.anchor-restrictions covers distance and sec-band limits only, not region bans or standing-gated POCO anchoring.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-073440"
+  },
+  {
+   "acceptance": "Ships destroyed in Pochven drop up to 60% of their fitted and cargo items into the wreck, instead of the usual about 50% roll, and the killmail reflects the result.",
+   "domain": "combat",
+   "id": "feat:combat.pochven-loot-drop",
+   "plan_task": null,
+   "sources": [
+    "wiki:Pochven"
+   ],
+   "title": "Pochven increased loot drop",
+   "why_missing": "feat:combat.wreck-loot fixes about 50% everywhere; the regional override has no row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-073440"
+  },
+  {
+   "acceptance": "The deployable activates 1 minute after deploy and lasts 2 days; it can't be scooped. Any ship under 1,000,000,000 kg, friendly or hostile, can use it: after a 12-second warm-up it jumps 100 km in the ship's facing direction. There is no use cooldown and no limit on concurrent users.",
+   "domain": "structures",
+   "id": "feat:structures.mobile-micro-jump-unit",
+   "plan_task": null,
+   "sources": [
+    "wiki:Mobile_structures"
+   ],
+   "title": "Mobile Micro Jump Unit",
+   "why_missing": "No row covers this deployable; the structures mobile-* rows stop at depot/tractor/cyno inhibitor/siphon/scan inhibitor/observatory.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-073440"
+  },
+  {
+   "acceptance": "Deployment needs Anchoring III and fleet membership. The beacon spools for 1 minute, then holds a cyno visible to the fleet for 60 minutes (the covert variant: 30 minutes, lower HP). It has its own HP and can be destroyed early, and it is single-use.",
+   "domain": "structures",
+   "id": "feat:structures.mobile-cyno-beacon",
+   "plan_task": null,
+   "sources": [
+    "wiki:Mobile_structures"
+   ],
+   "title": "Mobile Cynosural Beacon",
+   "why_missing": "Only ship-fitted cyno modules have rows; the deployable fleet beacon is absent.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-073440"
+  },
+  {
+   "acceptance": "The Mobile Observatory needs Anchoring III, deploys in 10 minutes and pings once deployment finishes, then every 10 minutes for up to 2 hours. Each ping gives each cloaked ship in the system that has passed its cloak stabilization timer an independent 40% chance to be decloaked. It can't be scooped, and it can't be deployed in high-sec, wormholes, deadspace or Abyssal space.",
+   "domain": "structures",
+   "id": "feat:structures.mobile-observatory-decloak-ping",
+   "plan_task": null,
+   "sources": [
+    "wiki:Mobile_structures",
+    "wiki:Cloaking"
+   ],
+   "title": "Mobile Observatory decloak pings",
+   "why_missing": "feat:structures.mobile-observatory only says it 'shows cloaked ship presence within range', which doesn't match the live ping/decloak-chance mechanic.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-073440"
+  },
+  {
+   "acceptance": "Activating a cloak starts a 15-minute stabilization timer, which the cloaked pilot can see. While it runs the ship is immune to observatory decloak pings. It resets when the ship decloaks.",
+   "domain": "modules",
+   "id": "feat:modules.cloak-stabilization-timer",
+   "plan_task": null,
+   "sources": [
+    "wiki:Mobile_structures",
+    "wiki:Cloaking"
+   ],
+   "title": "Cloak stabilization timer",
+   "why_missing": "The cloak rows cover activation, decloak proximity and covert ops only; the stabilization timer has no row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-073440"
+  },
+  {
+   "acceptance": "Deploying any mobile structure in a new-player starter or career-agent system is refused with the live 'restrictions in effect' error. Per-type distance rules apply, for example an MTU must be at least 5 km from another MTU and 50 km from stargates and stations. Attacking another pilot's mobile structure gives a suspect flag, not a criminal flag.",
+   "domain": "structures",
+   "id": "feat:structures.mobile-deploy-restrictions",
+   "plan_task": null,
+   "sources": [
+    "wiki:Mobile_structures"
+   ],
+   "title": "Mobile structure deployment restrictions",
+   "why_missing": "The individual mobile-* rows don't specify system bans, distance rules or the suspect-only crimewatch outcome.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-073440"
+  },
+  {
+   "acceptance": "An MTU tractors and loots only wrecks and containers its owner may loot, closest first, and only while the owner is in the same system. It has no reinforcement, despawns after 2 days, and drops loot like a ship when destroyed.",
+   "domain": "structures",
+   "id": "feat:structures.mobile-tractor-rules",
+   "plan_task": null,
+   "sources": [
+    "wiki:Mobile_structures"
+   ],
+   "title": "MTU ownership and operation rules",
+   "why_missing": "feat:structures.mobile-tractor only says it 'pulls wrecks and loots them'; the ownership, presence, ordering and lifetime rules are untested.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-073440"
+  },
+  {
+   "acceptance": "A deployed depot despawns with its contents after 30 days; any interaction resets the timer. It enters a 2-day reinforcement at 25% shield, but never while still anchoring. Scooping and redeploying does not repair it, so if it is still under 25% when attacked it is destroyed. Only the owner may access or scoop it.",
+   "domain": "structures",
+   "id": "feat:structures.mobile-depot-lifetime-reinforce",
+   "plan_task": null,
+   "sources": [
+    "wiki:Mobile_structures"
+   ],
+   "title": "Mobile depot lifetime and reinforcement threshold",
+   "why_missing": "feat:structures.mobile-depot covers anchor time, refit and the reinforce duration, but not the lifetime, threshold or owner-only rules.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-073440"
+  },
+  {
+   "acceptance": "A CRAB deploys only in low/null. A capital ship must link to it for 4 minutes; during the link it can't warp, cloak or tether, and it gets a 10% universal resistance bonus. Activation then runs a 10-minute scan with waves of rogue drones. On success the special loot is restricted to the deployer and becomes open to all after 2 minutes, when the beacon self-destructs.",
+   "domain": "pve",
+   "id": "feat:pve.crab-link-activation",
+   "plan_task": null,
+   "sources": [
+    "wiki:Mobile_structures"
+   ],
+   "title": "CONCORD Rogue Analysis Beacon link and scan",
+   "why_missing": "No PvE row describes the CRAB deployable site.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-073440"
+  },
+  {
+   "acceptance": "Each character has Complex Encryption Qubits (CEQ), capped at 100, enough for 3 activations. Activations consume CEQ, which regenerates to full in about 22 hours. Each system's Signal Interference rises per CRAB until linking is refused (about 12 CRABs) and decays over about 25 hours.",
+   "domain": "pve",
+   "id": "feat:pve.crab-ceq-signal-interference",
+   "plan_task": null,
+   "sources": [
+    "wiki:Mobile_structures"
+   ],
+   "title": "CRAB CEQ and system Signal Interference",
+   "why_missing": "This personal resource and the per-system throttle are server-side state with no ledger row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-073440"
+  },
+  {
+   "acceptance": "Probe results show a cosmic signature's type/group from 25% signal strength and its site name from 75%. The site becomes warpable only at 100%. Below 25% only the signature ID and deviation are shown.",
+   "domain": "scanning",
+   "id": "feat:scanning.signature-reveal-thresholds",
+   "plan_task": null,
+   "sources": [
+    "wiki:Probe_scanning"
+   ],
+   "title": "Signature reveal thresholds",
+   "why_missing": "feat:scanning.probe-scan-math covers strength and deviation but not what information is revealed at each threshold.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-073440"
+  },
+  {
+   "acceptance": "All scan probes resolve cosmic signatures. Only combat probes also resolve ships, drones and structures. Wrecks, cargo containers and cloaked ships never appear in probe results.",
+   "domain": "scanning",
+   "id": "feat:scanning.probe-target-classes",
+   "plan_task": null,
+   "sources": [
+    "wiki:Probe_scanning"
+   ],
+   "title": "Core vs combat probe target classes",
+   "why_missing": "No row defines which object classes each probe type can resolve or the exclusions.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-073440"
+  },
+  {
+   "acceptance": "Core probes scan from 0.25 to 32 AU and combat probes from 0.5 to 64 AU, in power-of-two steps. Max deviation = base deviation \u00d7 (range / base range) \u00d7 (1 \u2212 0.05\u00d7Astrometrics) \u00d7 (1 \u2212 0.05\u00d7Astrometric Pinpointing). Probes past their max flight time (RSS 16m40s, others 1h6m40s) return to cargo if there is room, otherwise they are lost.",
+   "domain": "scanning",
+   "id": "feat:scanning.probe-range-deviation",
+   "plan_task": null,
+   "sources": [
+    "wiki:Probe_scanning"
+   ],
+   "title": "Probe scan range steps and max deviation",
+   "why_missing": "The scan-math, recall and skills rows don't fix the range limits, the deviation formula or the flight-time return/loss rule.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-073440"
+  },
+  {
+   "acceptance": "Signature difficulty levels are data-driven. Level I\u2013III signatures resolve with the minimum strength of 42; Level IV needs a combined probe strength of at least 72, and Level V at least 104. Weaker probes can't reach 100% at any geometry.",
+   "domain": "scanning",
+   "id": "feat:scanning.signature-strength-levels",
+   "plan_task": null,
+   "sources": [
+    "wiki:Probe_scanning"
+   ],
+   "title": "Signature difficulty minimum probe strength",
+   "why_missing": "No row ties signature difficulty to a probe-strength floor.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-073440"
+  },
+  {
+   "acceptance": "Starting a warp consumes capacitor = warpCapacitorNeed \u00d7 ship mass \u00d7 distance, reduced by Warp Drive Operation and SDE modifiers. With insufficient capacitor the warp is handled per V24 rules (shortened or refused), and capacitor updates reach the client.",
+   "domain": "navigation",
+   "id": "feat:navigation.warp-capacitor-cost",
+   "plan_task": "SP-3",
+   "sources": [
+    "wiki:Warp_drive",
+    "wiki:Warp_mechanics"
+   ],
+   "title": "Warp capacitor cost",
+   "why_missing": "The plan (SP-3) requires a warp capacitor cost but no feat row tests it; feat:navigation.warp-to and warp-speed-formula omit capacitor.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-073440"
+  },
+  {
+   "acceptance": "Stargate jumps by carriers, dreadnoughts, FAX, supercarriers and titans are refused with the live UserError, as decided by the ship's SDE group/attributes. Freighters, jump freighters and sub-capital industrial command ships may use gates, subject to system-specific exceptions such as Zarzakh and Pochven.",
+   "domain": "navigation",
+   "id": "feat:navigation.stargate-capital-restriction",
+   "plan_task": "SP-4",
+   "sources": [
+    "wiki:Capital_ships",
+    "wiki:Stargates"
+   ],
+   "title": "Capitals cannot use stargates",
+   "why_missing": "feat:navigation.jump-range-restrictions only forbids capitals entering high-sec; the general gate ban is untested.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-073440"
+  },
+  {
+   "acceptance": "Each storm is centred on a null-sec system. Its core is the centre plus systems 1 jump away, with full effects; its periphery is systems 2\u20133 jumps away, with weaker effects. Extra storm PvE sites spawn only in the core. The centre moves one jump every 24\u201348h in a semi-random direction, avoiding retracing. Overlapping storms apply both effect sets.",
+   "domain": "pve",
+   "id": "feat:pve.metaliminal-storm-movement",
+   "plan_task": null,
+   "sources": [
+    "wiki:Metaliminal_Storms"
+   ],
+   "title": "Metaliminal storm placement and movement",
+   "why_missing": "feat:dogma.system-wide-effects only says storms apply dbuffs; the storm footprint, movement and site spawning are untested.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-073440"
+  },
+  {
+   "acceptance": "A Nosferatu cycle moves capacitor from the target to the user only when the target's capacitor is higher than the user's per the V24 comparison rule. Otherwise it moves nothing. The amount is capped by the module's drain amount and the user's free capacitor.",
+   "domain": "modules",
+   "id": "feat:modules.nosferatu-transfer-rule",
+   "plan_task": "DG-5",
+   "sources": [
+    "wiki:Capacitor_warfare"
+   ],
+   "title": "Energy Nosferatu transfer rule",
+   "why_missing": "feat:modules.energy-neutralizer bundles neutralizers and Nosferatu in one parenthetical, hiding the conditional transfer rule.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-073440"
+  },
+  {
+   "acceptance": "The target's SDE resistance attributes scale incoming effect strength: sensor dampener resistance, weapon disruption resistance, target painter resistance, stasis webifier resistance, energy warfare resistance, remote repair impedance and remote electronic assistance impedance. Bastion/siege-style immunities set them to zero.",
+   "domain": "dogma",
+   "id": "feat:dogma.ewar-resistance-attributes",
+   "plan_task": "DG-1",
+   "sources": [
+    "wiki:Electronic_warfare",
+    "wiki:Capacitor_warfare"
+   ],
+   "title": "EWAR and remote-assistance resistance",
+   "why_missing": "Each EWAR module row describes only the attacker side; no row tests target-side resistance or impedance.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-073440"
+  },
+  {
+   "acceptance": "NPCs apply webs, warp scramblers/disruptors, ECM, dampeners, tracking/guidance disruption, target painting and energy neutralizing at the strength, range, duration and chance given by their SDE entity attributes. The same target-side resistances and crimewatch-neutral rules apply.",
+   "domain": "npc",
+   "id": "feat:npc.npc-ewar-application",
+   "plan_task": "C-4",
+   "sources": [
+    "wiki:Ratting",
+    "wiki:Electronic_warfare",
+    "crucible:src/eve-server/npc"
+   ],
+   "title": "NPC EWAR from entity attributes",
+   "why_missing": "feat:npc.npc-ai-targeting folds 'weapons and EWAR' into one line with targeting and orbiting, the same coarse-row failure as the old 'mining' row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-073440"
+  },
+  {
+   "acceptance": "NPCs with entity remote-repair attributes repair damaged members of their own spawn group (shield/armor) at the amount, range and cycle their attributes specify. Repairs stop when the NPC is jammed or out of range.",
+   "domain": "npc",
+   "id": "feat:npc.npc-remote-repair",
+   "plan_task": "C-4",
+   "sources": [
+    "wiki:Sleepers",
+    "wiki:Ratting",
+    "crucible:src/eve-server/npc"
+   ],
+   "title": "NPC remote repair",
+   "why_missing": "Only feat:npc.sleepers mentions remote reps; there's no general NPC logistics row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-073440"
+  },
+  {
+   "acceptance": "NPC AI picks and periodically re-evaluates targets among hostile ships and drones on grid, per V24 rules. New arrivals and drones can draw aggression, and targets switch on loss of lock, warp-out or destruction. Aggression lists are kept per NPC.",
+   "domain": "npc",
+   "id": "feat:npc.npc-target-switching",
+   "plan_task": "C-4",
+   "sources": [
+    "wiki:Ratting",
+    "wiki:Drone_mechanics",
+    "crucible:src/eve-server/npc"
+   ],
+   "title": "NPC target selection and switching",
+   "why_missing": "Target switching is buried inside feat:npc.npc-ai-targeting with no separately testable acceptance.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-073440"
+  },
+  {
+   "acceptance": "Capital ship manufacturing jobs are accepted only in low/null-sec at structures with the required capital service (Azbel/Sotiyo class). Supercapital jobs additionally need a Sotiyo in sovereign null-sec with the Supercapital Construction Facilities sov hub upgrade online. Anywhere else, installation is refused with the live error.",
+   "domain": "industry",
+   "id": "feat:industry.capital-construction-restrictions",
+   "plan_task": "E-4",
+   "sources": [
+    "wiki:Capital_ships",
+    "wiki:Sovereignty",
+    "wiki:Manufacturing"
+   ],
+   "title": "Capital and supercapital construction rules",
+   "why_missing": "feat:industry.install-job and structure-rigs have no location/upgrade gate for capital classes.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-073440"
+  },
+  {
+   "acceptance": "Creating a corporation project with an ISK reward escrows the pool from the chosen corp wallet division (role-gated). Each contribution pays its per-unit reward to the contributor until the pool or the per-character participation limit is exhausted. Payouts are journaled on both sides.",
+   "domain": "corporation",
+   "id": "feat:corporation.corp-project-reward-pool",
+   "plan_task": null,
+   "sources": [
+    "quasar:corporationgoal"
+   ],
+   "title": "Corporation project ISK reward pool",
+   "why_missing": "feat:corporation.corp-goals is a single 'create/contribute/claim' line hiding escrow, payout and limits.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-073440"
+  },
+  {
+   "acceptance": "A project ends when its target is reached, it expires, or an authorised member closes it. Remaining escrowed ISK is refunded to the source division. Unclaimed earned rewards stay claimable per V24 rules, and further contributions are refused.",
+   "domain": "corporation",
+   "id": "feat:corporation.corp-project-close-expiry",
+   "plan_task": null,
+   "sources": [
+    "quasar:corporationgoal"
+   ],
+   "title": "Corporation project close and expiry",
+   "why_missing": "Lifecycle termination and refunds are not part of feat:corporation.corp-goals acceptance.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-073440"
+  },
+  {
+   "acceptance": "Each contribution method the V24 client offers advances project progress only from server-observed events matching the project's filters, never from client-reported counts. Examples: kill NPCs, mine ore, manufacture items, deliver items, capture FW complexes, damage ships, earn LP.",
+   "domain": "corporation",
+   "id": "feat:corporation.corp-project-contribution-methods",
+   "plan_task": null,
+   "sources": [
+    "quasar:corporationgoal",
+    "quasar:freelance"
+   ],
+   "title": "Corporation project contribution methods",
+   "why_missing": "'progress matchers' in feat:corporation.corp-goals hides every method type behind one row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-073440"
+  },
+  {
+   "acceptance": "A hacking board has a System Core, Defensive Subsystems (Firewall, Anti-Virus, Restoration Node, Virus Suppressor), Utility Subsystems (Kernel Rot, Polymorphic Shield, Secondary Vector, Self Repair) and Data Caches. Each has coherence and strength, set by difficulty and by the virus's analyzer/skill stats. Empty nodes show the distance (1\u20135) to the nearest core/utility/cache, and combat resolves per the V24 rules.",
+   "domain": "pve",
+   "id": "feat:pve.hacking-node-types",
+   "plan_task": null,
+   "sources": [
+    "wiki:Hacking",
+    "client:eve/client/script/ui/hacking/hackingUISvc.pyj"
+   ],
+   "title": "Hacking board node behaviour",
+   "why_missing": "feat:pve.hacking-minigame is a single 'node-grid game' line covering every subsystem.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-073440"
+  },
+  {
+   "acceptance": "When the virus's coherence reaches zero the hack fails: the container locks out further attempts or self-destructs as the live server does, and ghost-site containers trigger their failure effects. A successful core kill opens the container or triggers the loot spew.",
+   "domain": "pve",
+   "id": "feat:pve.hacking-failure-outcome",
+   "plan_task": null,
+   "sources": [
+    "wiki:Hacking",
+    "wiki:Exploration"
+   ],
+   "title": "Hacking failure outcome",
+   "why_missing": "No row states what happens when a regular hack fails; only ghost sites mention detonation.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-073440"
+  },
+  {
+   "acceptance": "Activating an abyssal filament leaves an Abyssal Trace at the origin, visible to others for the pocket duration. Except for PvP filaments, others can't follow. On completing the exit gate the ships return to the origin location. Pilots still inside when the timer ends are destroyed, including the capsule.",
+   "domain": "pve",
+   "id": "feat:pve.abyssal-trace",
+   "plan_task": null,
+   "sources": [
+    "wiki:Abyssal_Deadspace",
+    "client:abyss/client/abyssal_service.pyj"
+   ],
+   "title": "Abyssal trace and return",
+   "why_missing": "The abyssal rows cover rooms, weather, tiers and gate activation, but not the origin trace or the return-to-origin rule.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-073440"
+  },
+  {
+   "acceptance": "A conduit jump moves the conduit ship plus eligible fleet members within 10 km to the target cyno, for a flat isotope cost by conduit class (not mass-based).\n- Black Ops: up to 30 ships, covert-ops-cloak-capable hulls only.\n- Rorqual: up to 30 dedicated mining ships, and only while its Industrial Core is inactive.\n- T1 carriers and supercarriers: 5\u201330 ships by Capital Jump Portal Generation level; command carriers double that.\n- Eligible ships: shuttles, capsules, corvettes, frigates, destroyers, cruisers, battlecruisers and battleships.\n- Titans cannot conduit jump.\n- Members who opted out of conduit jumps are skipped.",
+   "domain": "navigation",
+   "id": "feat:navigation.conduit-jump",
+   "plan_task": null,
+   "sources": [
+    "wiki:Jump_drives"
+   ],
+   "title": "Conduit jump (Black Ops, carriers, supercarriers, Rorqual)",
+   "why_missing": "No ledger row covers conduit jumps. Only the auditor's fleet opt-in row mentions conduit at all, and jump-portal covers bridging only.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-090529"
+  },
+  {
+   "acceptance": "Range and fuel:\n- Max range per hull class follows the V24 table (e.g. dreadnought/carrier/FAX 3.5 ly, supercarrier/titan 3.0, JF/Rorqual 5.0, Black Ops 4.0); Jump Drive Calibration adds +20%/level.\n- Isotope type follows the hull faction (Helium/Nitrogen/Oxygen/Hydrogen).\n- Isotopes used = D \u00d7 fuel/ly \u00d7 (1 \u2212 0.1\u00d7JFC) \u00d7 (1 \u2212 0.1\u00d7JF skill, JF only) \u00d7 the stacking-penalised economizer terms.\n\nActivation:\n- Consumes 95% capacitor, minus 5% per Jump Drive Operation level.\n- Refused inside a warp disruption bubble or when warp core strength is below 0.\n- Alignment is not required.",
+   "domain": "navigation",
+   "id": "feat:navigation.jump-drive-range-fuel",
+   "plan_task": null,
+   "sources": [
+    "wiki:Jump_drives"
+   ],
+   "title": "Jump drive range, isotope cost and activation constraints",
+   "why_missing": "feat:navigation.jump-drive only says 'jump to a cyno within range consuming isotopes'. The range table, skill modifiers, fuel formula, capacitor cost and disruption gates are not testable from it.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-090529"
+  },
+  {
+   "acceptance": "After a jump of L effective light-years:\n- Fatigue = max(10\u00d7(1+L) min, existing fatigue\u00d7(1+L)), capped at 5 h.\n- Jump activation cooldown = max((1+L) min, pre-jump fatigue/10), capped at 30 min.\n- Fatigue decays in real time, offline included.\n\nEffective distance reductions:\n- Black Ops and the covert ships they bridge: \u221275%.\n- Capsules, shuttles, haulers, blockade runners, DSTs, freighters, JFs, capital industrials and industrial command ships: \u221290%.\n\njumpTimers.GetTimers reports both timers.",
+   "domain": "navigation",
+   "id": "feat:navigation.jump-fatigue-formula",
+   "plan_task": null,
+   "sources": [
+    "wiki:Jump_drives",
+    "wiki:Timers"
+   ],
+   "title": "Jump fatigue and activation cooldown formula",
+   "why_missing": "feat:navigation.jump-fatigue only says the timers 'grow per jump distance'. The minimum and multiplier formula, the caps and the per-class distance reductions are untested.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-090529"
+  },
+  {
+   "acceptance": "Who and where:\n- Normal cynos fit only on Force Recons and Black Ops.\n- Refused in high-sec, within 200 km of a Mobile Cynosural Inhibitor, and in systems jammed by a Tenebrex or an incursion.\n- Can be lit in wormhole space, but no jump drive can lock to it.\n\nActivation:\n- Requires fleet membership and speed below 500 m/s.\n- The cyno is visible system-wide and on the map, and only fleet members can jump to it.\n\nCycle and fuel:\n- Base cycle 10 min, halved on Recon/Black Ops (except Marshal).\n- 500 Liquid Ozone per cycle, \u221210% per Cynosural Field Theory level; Force Recons get \u221280% fuel.\n\nWhile lit:\n- The ship's nominal speed is 0.\n- It cannot dock or eject, but can self-destruct.",
+   "domain": "modules",
+   "id": "feat:modules.cyno-lighting-rules",
+   "plan_task": null,
+   "sources": [
+    "wiki:Jump_drives"
+   ],
+   "title": "Normal cynosural field lighting rules",
+   "why_missing": "feat:modules.cyno-field only says it 'lights a cyno for 5 min, consumes Liquid Ozone, fixes ship'. The location bans, hull restriction, speed and fleet gates, fuel math and dock/eject lock are not covered.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-090529"
+  },
+  {
+   "acceptance": "A covert cyno:\n- requires Cynosural Field Theory V and fits only covert-cloak-capable hulls (plus Etana/Prospect/Rabisu);\n- uses 1/10 of normal cycle time and fuel (25 LO);\n- is visible only to ships on grid;\n- can be lit in cyno-jammed systems;\n- can be jumped to or bridged only by Black Ops.",
+   "domain": "modules",
+   "id": "feat:modules.covert-cyno-rules",
+   "plan_task": null,
+   "sources": [
+    "wiki:Jump_drives"
+   ],
+   "title": "Covert cynosural field rules",
+   "why_missing": "feat:modules.cyno-covert only says 'allow Black Ops and covert portals'. The visibility, jam-immunity, fitting and fuel rules are absent.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-090529"
+  },
+  {
+   "acceptance": "Industrial cynos:\n- fit only on the Venture (50% LO role bonus), haulers, blockade runners and DSTs;\n- use 800 LO per cycle base, 400 minimum with CFT V;\n- appear on the overview;\n- can be jumped to only by jump freighters, capital industrials and Black Ops; Rorqual and Black Ops may also bridge to them.",
+   "domain": "modules",
+   "id": "feat:modules.industrial-cyno-rules",
+   "plan_task": null,
+   "sources": [
+    "wiki:Jump_drives"
+   ],
+   "title": "Industrial cynosural field rules",
+   "why_missing": "feat:modules.cyno-industrial says 'JF and Rorqual only'. It omits Black Ops, the fitting restriction and the fuel cost.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-090529"
+  },
+  {
+   "acceptance": "Titan bridges:\n- go only to normal cynos or beacons and accept any subcapital;\n- stay open 60 s, immobilise the titan, and cost 500 Strontium (modified by skill).\n\nBlack Ops bridges accept only covert-cloak-capable hulls; Rorqual bridges accept only mining ships. Both stay open 20 s and cost nothing to open.\n\nFor every bridge:\n- Each jumper must be in fleet and within 2,500 m.\n- Each jumper costs fuel = mass \u00d7 portal mass factor \u00d7 base cost \u00d7 skill modifier \u00d7 ly, taken from the bridger's fuel bay, then cargo.\n- Ships in a bubble or warp-disrupted below 0 WCS cannot take the bridge; the host itself may be bubbled.",
+   "domain": "modules",
+   "id": "feat:modules.jump-portal-bridge-rules",
+   "plan_task": null,
+   "sources": [
+    "wiki:Jump_drives"
+   ],
+   "title": "Titan, Black Ops and Rorqual bridge rules",
+   "why_missing": "feat:modules.jump-portal is one line ('bridge fleet members to a cyno with fuel cost and range'). The per-class hull filters, durations, Strontium cost, mass-based fuel formula and bubble rule are hidden.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-090529"
+  },
+  {
+   "acceptance": "Ships arriving by jump drive or bridge materialise at a random point 5 km from the cyno or beacon. If they materialise inside a structure, they are ejected with velocity. If the cyno ship dies at the moment of the jump, the jump still happens and lands at the destination system's star.",
+   "domain": "navigation",
+   "id": "feat:navigation.jump-arrival-placement",
+   "plan_task": null,
+   "sources": [
+    "wiki:Jump_drives"
+   ],
+   "title": "Jump drive arrival placement",
+   "why_missing": "Landing geometry for jump drives is not covered by any row; warp-landing-points only covers warps.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-090529"
+  },
+  {
+   "acceptance": "Activation:\n- An MJFG on a command destroyer spools for 9 s base, reduced 5% per level of Command Destroyers and of Micro Jump Drive Operation.\n- It then jumps the CMDD and up to 25 capsuleer ships within 6 km by 100 km in the CMDD's facing direction.\n\nExclusions:\n- Ships that are warp-scrambled or invulnerable (gate cloak, tether) are not moved.\n- The CMDD itself cannot activate while scrambled.",
+   "domain": "modules",
+   "id": "feat:modules.mjfg-fleet-jump",
+   "plan_task": null,
+   "sources": [
+    "wiki:Command_Destroyer"
+   ],
+   "title": "Micro Jump Field Generator (command destroyers)",
+   "why_missing": "feat:modules.micro-jump-drive mentions only a 'field variant jumps nearby ships'. The 25-ship cap, 6 km radius, spool reduction and exclusions are untested.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-090529"
+  },
+  {
+   "acceptance": "Battleship hulls with a Frigate Escape Bay can store one assembled frigate. When the battleship is destroyed, the pilot is placed into the stored frigate in space instead of a capsule. The frigate is not dropped as loot, and the killmail reflects that the frigate survived.",
+   "domain": "ships",
+   "id": "feat:ships.frigate-escape-bay",
+   "plan_task": null,
+   "sources": [
+    "wiki:Battleships"
+   ],
+   "title": "Frigate escape bay",
+   "why_missing": "No ship or combat row mentions the escape bay. combat.ship-destruction always ejects a capsule.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-090529"
+  },
+  {
+   "acceptance": "An active weapons or PvP timer does not prevent jumping a wormhole; polarization still applies. A criminal with a pending CONCORD response is refused with the live 'mysterious technology' message. Aggression timers still block docking or tethering at citadels and refitting.",
+   "domain": "navigation",
+   "id": "feat:navigation.wormhole-aggression-exemption",
+   "plan_task": "C-8",
+   "sources": [
+    "wiki:Wormholes",
+    "wiki:Timers"
+   ],
+   "title": "Wormhole jumps ignore weapons timers but not CONCORD",
+   "why_missing": "feat:dogma.weapon-timer says the timer blocks 'jumping' generically. The wormhole exemption and the CONCORD-pursuit refusal are untested.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-090529"
+  },
+  {
+   "acceptance": "Jump drives cannot target cynos in wormhole space and cannot jump from wormhole space to k-space cynos. Supercarriers and titans can never jump through any wormhole, whatever its remaining mass.",
+   "domain": "navigation",
+   "id": "feat:navigation.wormhole-cyno-supercap-restriction",
+   "plan_task": "SO-6",
+   "sources": [
+    "wiki:Wormholes",
+    "wiki:Jump_drives"
+   ],
+   "title": "Wormhole space jump drive and supercapital restrictions",
+   "why_missing": "feat:navigation.wormhole-jump only enforces per-jump max mass. The w-space jump drive ban and the absolute supercapital ban have no row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-090529"
+  },
+  {
+   "acceptance": "Show-info on a wormhole returns:\n- destination class text (C1-3, C4-5, C6, High/Low/Null, Triglavian, Drifter, Thera);\n- maximum ship size category (Small/Medium/Large/Extra large);\n- reliable lifetime bucket (<1 day, <4 h, <1 h, expired);\n- mass stability bucket (>50%, <50%, <10%).\n\nAll values are derived from live wormhole state.",
+   "domain": "navigation",
+   "id": "feat:navigation.wormhole-info-buckets",
+   "plan_task": "SO-6",
+   "sources": [
+    "wiki:Wormholes",
+    "wiki:Wormhole_attributes"
+   ],
+   "title": "Wormhole show-info text buckets",
+   "why_missing": "feat:navigation.wormhole-lifetime only says 'size/age states visible'. The exact bucket thresholds and destination text are untested.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-090529"
+  },
+  {
+   "acceptance": "After exiting warp a ship is invulnerable and untargetable for a hidden 10 s, until it moves or starts locking a target. Filament activation during this window is refused with the 'ship is invulnerable' error. The window starts only after warp exit, so smartbombs hit during deceleration.",
+   "domain": "navigation",
+   "id": "feat:navigation.warp-exit-invulnerability",
+   "plan_task": "SP-3",
+   "sources": [
+    "wiki:Timers"
+   ],
+   "title": "Post-warp invulnerability",
+   "why_missing": "No navigation or dogma row covers the warp-exit invulnerability window.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-090529"
+  },
+  {
+   "acceptance": "A 10 s session change timer starts on any of:\n- login, stargate/wormhole/jump bridge jump or jump drive use;\n- dock or undock;\n- fleet join or position change;\n- ejecting, ship loss or podding, or boarding a ship;\n- clone jump or clone swap;\n- corp join or leave, or a corp wallet division change.\n\nWhile it runs, further session-changing actions are refused or queued per the live error behaviour.",
+   "domain": "navigation",
+   "id": "feat:navigation.session-change-timer-triggers",
+   "plan_task": "SP-4",
+   "sources": [
+    "wiki:Timers"
+   ],
+   "title": "Session change timer triggers and blocking",
+   "why_missing": "feat:navigation.session-change-timer is a vague 'per V24 rules'. The 10 s duration and the trigger list are not testable from it.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-090529"
+  },
+  {
+   "acceptance": "During the 60 s post-jump cloak (stargate or wormhole), the ship:\n- is not visible on grid;\n- takes no damage from bombs, smartbombs or ECM bursts;\n- cannot be decloaked by proximity or bumped.\n\nAny action ends the cloak.",
+   "domain": "navigation",
+   "id": "feat:navigation.jump-cloak-immunities",
+   "plan_task": "SP-4",
+   "sources": [
+    "wiki:Timers"
+   ],
+   "title": "Jump cloak immunities",
+   "why_missing": "feat:navigation.gate-cloak only says '60 s cloak broken by moving'. The area-effect and proximity immunities are untested.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-090529"
+  },
+  {
+   "acceptance": "Triggers:\n- Offensive modules on capsuleers, Bastion activation and Command Burst activation start a 60 s weapons timer.\n- Cycle weapons restart it each cycle.\n- Persistent-effect modules (web, scram, damp, painter, bastion) hold it at 60 s until the effect ends.\n- Command bursts expire it at cycle end.\n\nWhile it runs, the character cannot:\n- jump gates, dock or use acceleration gates;\n- eject, store, refit or switch ships;\n- tether.",
+   "domain": "crimewatch",
+   "id": "feat:crimewatch.weapon-timer-scope",
+   "plan_task": "C-8",
+   "sources": [
+    "wiki:Timers"
+   ],
+   "title": "Weapons timer triggers and scope",
+   "why_missing": "feat:dogma.weapon-timer only covers docking and jumping. The bastion and burst triggers, the persistent-module hold and the eject/refit/tether blocks are untested.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-090529"
+  },
+  {
+   "acceptance": "Shooting or being shot by a capsuleer starts a 15 min PvP timer. Being shot after disconnecting renews it, so the ship stays in space indefinitely. The NPC timer (5 min) is not renewed after logoff. An active PvP timer blocks filament activation.",
+   "domain": "crimewatch",
+   "id": "feat:crimewatch.pvp-logoff-timer-renewal",
+   "plan_task": "C-8",
+   "sources": [
+    "wiki:Timers",
+    "wiki:Abyssal_Deadspace"
+   ],
+   "title": "Capsuleer log-off timer renewal and filament block",
+   "why_missing": "feat:crimewatch.legal-timers is 'Legal PvP aggression sets PvP timer'. The offline renewal, the asymmetry with the NPC timer and the filament block have no row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-090529"
+  },
+  {
+   "acceptance": "A ship with a criminal timer in high-sec, or jumping into high-sec with one, cannot warp, jump, dock, eject, store or switch ships until it is destroyed. The capsule may then warp. CONCORD still destroys a ship that used session-change invulnerability even if the timer expired meanwhile.",
+   "domain": "crimewatch",
+   "id": "feat:crimewatch.highsec-criminal-restrictions",
+   "plan_task": "C-8",
+   "sources": [
+    "wiki:Timers"
+   ],
+   "title": "High-sec criminal movement lock",
+   "why_missing": "feat:crimewatch.criminal-flag says only 'CONCORD and faction police respond'. The movement lock and the invulnerability-carryover rule are untested.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-090529"
+  },
+  {
+   "acceptance": "Remote assistance:\n- of suspects or outlaws is a suspect offence;\n- of criminals is a criminal offence;\n- that interferes in a war or limited engagement is criminal in high-sec and suspect in low-sec.\n\nCommand burst effects are filtered by the same legality in high-sec.",
+   "domain": "crimewatch",
+   "id": "feat:crimewatch.third-party-assistance-legality",
+   "plan_task": "C-8",
+   "sources": [
+    "wiki:Timers",
+    "wiki:Remote_assistance"
+   ],
+   "title": "Third-party assistance legality",
+   "why_missing": "feat:crimewatch.logi-timers covers only timer inheritance. The offence class per target state and security band, and the burst filtering, are untested.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-090529"
+  },
+  {
+   "acceptance": "While a character holds a criminal timer, in any security band, the wrecks and jettisoned containers they own are automatically abandoned. Others can loot them without a suspect flag.",
+   "domain": "crimewatch",
+   "id": "feat:crimewatch.criminal-wreck-auto-abandon",
+   "plan_task": "C-8",
+   "sources": [
+    "wiki:Timers"
+   ],
+   "title": "Criminal jetcans and wrecks auto-abandon",
+   "why_missing": "No row covers ownership changes caused by criminal status; wreck-loot covers only the base drop chance.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-090529"
+  },
+  {
+   "acceptance": "In low-sec:\n- attacking a capsuleer ship (including with untargeted smartbombs) gives a suspect flag, not criminal;\n- attacking a capsule gives a criminal flag;\n- neither spawns CONCORD; sentry guns respond;\n- jumping into high-sec within the 15 min criminal timer triggers CONCORD.",
+   "domain": "crimewatch",
+   "id": "feat:crimewatch.lowsec-suspect-vs-criminal",
+   "plan_task": "C-8",
+   "sources": [
+    "wiki:Timers",
+    "wiki:Security_status"
+   ],
+   "title": "Low-sec offence classification",
+   "why_missing": "suspect-flag and criminal-flag are generic one-liners. The low-sec ship-vs-pod classification and the high-sec entry consequence are untested.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-090529"
+  },
+  {
+   "acceptance": "Faction police engage capsuleers in ships when their security status is at or below a threshold that depends on system security:\n\n| System security | Threshold |\n|---|---|\n| 1.0 | \u22122.0 |\n| 0.9 | \u22122.5 |\n| 0.8 | \u22123.0 |\n| 0.7 | \u22123.5 |\n| 0.6 | \u22124.0 |\n| 0.5 | \u22124.5 |\n\nBelow the threshold, in that system:\n- the character's cloak is disabled;\n- docking or tethering in a ship is refused, while docking in a capsule is allowed;\n- capsules are not attacked.",
+   "domain": "crimewatch",
+   "id": "feat:crimewatch.faction-police-thresholds",
+   "plan_task": "C-8",
+   "sources": [
+    "wiki:Security_status"
+   ],
+   "title": "Faction police thresholds per system security",
+   "why_missing": "feat:crimewatch.faction-police says 'at \u22125', which contradicts the live per-security thresholds. The cloak, dock and pod rules are missing.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-090529"
+  },
+  {
+   "acceptance": "At security status \u22124.95 or below, a character is an outlaw:\n- anyone may attack them anywhere without CONCORD response or penalty;\n- remote assistance to them is a suspect offence, even for corp members;\n- assisting outlaws in low-sec is not an offence.",
+   "domain": "crimewatch",
+   "id": "feat:crimewatch.outlaw-status",
+   "plan_task": "C-8",
+   "sources": [
+    "wiki:Security_status",
+    "wiki:Timers"
+   ],
+   "title": "Outlaw status",
+   "why_missing": "No crimewatch row defines the outlaw state or its assistance rule.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-090529"
+  },
+  {
+   "acceptance": "Security status gains from NPC kills (belt, mission and incursion rats) stop at +5.0. Clone soldier tags cannot raise security status above 0.0. Security status is clamped to \u221210..+10.",
+   "domain": "crimewatch",
+   "id": "feat:crimewatch.sec-status-gain-caps",
+   "plan_task": "C-8",
+   "sources": [
+    "wiki:Security_status",
+    "wiki:Security_tags"
+   ],
+   "title": "Security status gain caps",
+   "why_missing": "sec-status-gain and sec-status-tags rows have no caps; the +5.0 NPC cap and the 0.0 tag cap are untested.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-090529"
+  },
+  {
+   "acceptance": "Any action that costs security status in high or low-sec makes every gate or station sentry on grid engage the offender for as long as they stay on grid. Aggression is not carried off-grid, and a new sec-loss act re-triggers it. Sentries are invulnerable and untargetable, and deal the live stats (500 km optimal).",
+   "domain": "npc",
+   "id": "feat:npc.sentry-gun-grid-aggression",
+   "plan_task": "C-4",
+   "sources": [
+    "wiki:Security_status"
+   ],
+   "title": "Sentry gun grid aggression",
+   "why_missing": "feat:npc.sentry-guns covers criminals and low standings only. The sec-loss trigger, grid reset and invulnerability are untested.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-090529"
+  },
+  {
+   "acceptance": "Each clone soldier tag turned in at a low-sec CONCORD exchange adds +0.5 security status, but only within its band:\n\n| Tag | Band |\n|---|---|\n| Trainer | \u221210 to \u22128 |\n| Recruiter | \u22128 to \u22125 |\n| Transporter | \u22125 to \u22122 |\n| Negotiator | \u22122 to 0 |\n\nA tag used outside its band is refused.",
+   "domain": "crimewatch",
+   "id": "feat:crimewatch.sec-tag-tier-bands",
+   "plan_task": "C-8",
+   "sources": [
+    "wiki:Security_tags"
+   ],
+   "title": "Security tag tier bands",
+   "why_missing": "feat:crimewatch.sec-status-tags only says tags raise sec status; the per-tag bands are untested.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-090529"
+  },
+  {
+   "acceptance": "Clone soldier NPCs spawn in low-sec asteroid belts, with the pirate faction set by region and that faction's damage and resist profile. Transporters web at 10 km and Negotiators scram at 24 km. Each always drops its tier's security tag and pays its bounty.",
+   "domain": "npc",
+   "id": "feat:npc.clone-soldier-spawns",
+   "plan_task": "C-4",
+   "sources": [
+    "wiki:Security_tags"
+   ],
+   "title": "Clone soldier NPC spawns",
+   "why_missing": "No NPC row covers clone soldiers, the only source of security tags.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-090529"
+  },
+  {
+   "acceptance": "Medium Upwell structures with an online service module enter armor reinforcement when shields are depleted. They exit at the owner's hour plus a period that depends on space, \u00b11.5 h jitter:\n\n| Space | Exit after |\n|---|---|\n| Wormhole | 2.5 d |\n| Null/low-sec | 3.5 d |\n| High-sec | 4.5 d |\n| War HQ | 24 h |\n\nLarge/XL structures exit after 24 h \u00b13 h.\n\nThese skip armor reinforcement and go straight to vulnerable armor:\n- FLEX structures;\n- abandoned structures;\n- low-power Large/XL structures.",
+   "domain": "structures",
+   "id": "feat:structures.armor-reinforce-durations",
+   "plan_task": null,
+   "sources": [
+    "wiki:Vulnerability"
+   ],
+   "title": "Upwell armor reinforcement durations",
+   "why_missing": "feat:structures.reinforce-cycle bundles everything into 'timing per structure type and sec'. The per-space table and the skip conditions are untested.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-090529"
+  },
+  {
+   "acceptance": "When armor is depleted, Large/XL structures enter hull reinforcement and exit after the owner's hour plus a period that depends on space, \u00b13 h:\n\n| Space | Exit after |\n|---|---|\n| Wormhole | 1.5 d |\n| Null/low-sec | 2.5 d |\n| High-sec | 4.5 d |\n| War HQ | 24 h |\n\nOther structure classes:\n- FLEX structures exit at the next chosen hour after 30 min \u00b130 min.\n- Medium and abandoned structures have no hull timer, so their hull is immediately vulnerable.",
+   "domain": "structures",
+   "id": "feat:structures.hull-reinforce-durations",
+   "plan_task": null,
+   "sources": [
+    "wiki:Vulnerability"
+   ],
+   "title": "Upwell hull reinforcement durations",
+   "why_missing": "Hidden inside the coarse reinforce-cycle row; medium structures having no hull timer is a key rule that is untested.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-090529"
+  },
+  {
+   "acceptance": "A damaged structure starts a repair timer: 15 min in the shield and armor phases, 30 min in the hull phase. The timer pauses only while the structure takes damage of at least 10% of its damage cap, after resists. When it reaches zero, the structure fully repairs to full shields. The same rules apply to abandoned structures.",
+   "domain": "structures",
+   "id": "feat:structures.repair-timer-pause-threshold",
+   "plan_task": null,
+   "sources": [
+    "wiki:Vulnerability"
+   ],
+   "title": "Structure repair timer pause threshold",
+   "why_missing": "feat:structures.repair-timer says '15-min ... after ADM-like delay'. The 30 min hull timer and the 10% damage-cap pause rule are absent.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-090529"
+  },
+  {
+   "acceptance": "A deployed structure has hull HP only:\n1. It anchors for 15 min (paused while it takes at least 10% of its damage cap) and can be destroyed without timers.\n2. It is then invulnerable for 24 h.\n3. Inserting a quantum core starts a 15 min onlining timer, paused the same way. The structure is again killable without timers during onlining.\n4. When onlining completes, structure, armor and shield are fully healed.",
+   "domain": "structures",
+   "id": "feat:structures.anchoring-onlining-phases",
+   "plan_task": null,
+   "sources": [
+    "wiki:Vulnerability",
+    "wiki:Quantum_Cores"
+   ],
+   "title": "Upwell anchoring and onlining phases",
+   "why_missing": "feat:structures.deploy-anchor says '24h anchoring then core', which misstates the live sequence. The pause rule and the no-timer vulnerability during anchoring and onlining are untested.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-090529"
+  },
+  {
+   "acceptance": "Exit times for reinforcement:\n- The owner sets the hour; the attacker determines the day.\n- Exit times are computed from the moment the repair timer starts, not from the fight's duration.\n- Jitter never rolls the exit over to the next day.\n- The shield fight date fixes the dates of the later armor and hull timers.",
+   "domain": "structures",
+   "id": "feat:structures.reinforce-exit-time-rules",
+   "plan_task": null,
+   "sources": [
+    "wiki:Vulnerability"
+   ],
+   "title": "Reinforcement exit-time computation",
+   "why_missing": "feat:structures.vulnerability-schedule covers only setting the hour; the exit-time computation rules have no row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-090529"
+  },
+  {
+   "acceptance": "An Upwell structure can be refitted only at full shields. Refit is refused while it is anchoring, onlining, repairing, under attack or reinforced.",
+   "domain": "structures",
+   "id": "feat:structures.fitting-state-locks",
+   "plan_task": null,
+   "sources": [
+    "wiki:Vulnerability"
+   ],
+   "title": "Structure fitting state locks",
+   "why_missing": "feat:structures.structure-fitting says only 'while not reinforced'; the full-shield and other state locks are untested.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-090529"
+  },
+  {
+   "acceptance": "Hacking an Upwell structure with a data analyzer reveals its owner-set reinforcement hour to the hacker. Without a successful hack, the hour is not exposed to non-members.",
+   "domain": "structures",
+   "id": "feat:structures.reinforce-hour-hack-reveal",
+   "plan_task": null,
+   "sources": [
+    "wiki:Vulnerability",
+    "wiki:Hacking"
+   ],
+   "title": "Reveal reinforcement hour by hacking",
+   "why_missing": "No row lets attackers learn the reinforcement hour; hacking rows cover only containers.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-090529"
+  },
+  {
+   "acceptance": "Upwell structures are unaffected by ECM, dampeners, weapon disruptors, target painters, webs, warp disruption and energy neutralisers. Activating such modules on them has no effect, per the live server.",
+   "domain": "structures",
+   "id": "feat:structures.ewar-immunity",
+   "plan_task": null,
+   "sources": [
+    "wiki:Vulnerability"
+   ],
+   "title": "Structures immune to EWAR",
+   "why_missing": "The EWAR module rows never exclude structures as targets.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-090529"
+  },
+  {
+   "acceptance": "Tethering is refused for:\n- characters without docking rights;\n- ships warp-disrupted below 0 WCS;\n- ships with a weapons timer or with fighters launched and not abandoned;\n- unpiloted ships (capsules tether immediately);\n- structures without a quantum core, or in the abandoned state.\n\nTether breaks on:\n- locking a target;\n- launching fighters;\n- leaving the 10 km-from-docking-ring range;\n- activating a burst jammer, command burst, cyno, siege, triage or bastion module.\n\nWhile tethered, smartbombs, bomb launchers and fleet ore compression are refused.",
+   "domain": "structures",
+   "id": "feat:structures.tether-eligibility-and-restrictions",
+   "plan_task": null,
+   "sources": [
+    "wiki:Tethering"
+   ],
+   "title": "Tether eligibility and blocked actions",
+   "why_missing": "feat:navigation.tether and tether-break cover invulnerability and lock or aggression breaks. The eligibility conditions (core, abandoned, fighters, unpiloted), the module-specific breaks and the blocked actions while tethered are untested.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-090529"
+  },
+  {
+   "acceptance": "Each Mercenary Den needs one level of Mercenary Den Management, so dens per character are at most the skill level. A den anchors only within 10 km of a temperate planet's Orbital Skyhook. It is owned and managed by one character, not a corporation, and the sov owner may charge a tax.",
+   "domain": "sovereignty",
+   "id": "feat:sovereignty.mercenary-den-anchoring",
+   "plan_task": null,
+   "sources": [
+    "wiki:Mercenary_Den_Guide"
+   ],
+   "title": "Mercenary Den anchoring and ownership",
+   "why_missing": "feat:sovereignty.mercenary-den is one coarse line ('anchor on skyhooks, generate infomorphs, can be attacked'). The skill cap, planet type and personal ownership are untested.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-090529"
+  },
+  {
+   "acceptance": "Development and Anarchy both rise over time on an online den. Higher Development raises the hourly Infomorph Decryption Key yield. Completing generated Mercenary Tactical Operations raises Development and lowers Anarchy. At Anarchy level 2 (about 8 days), the den siphons the host skyhook's workforce away from the sov owner.",
+   "domain": "sovereignty",
+   "id": "feat:sovereignty.mercenary-den-development-anarchy",
+   "plan_task": null,
+   "sources": [
+    "wiki:Mercenary_Den_Guide",
+    "wiki:Mercenary_Tactical_Operation"
+   ],
+   "title": "Mercenary Den development and anarchy",
+   "why_missing": "Neither the mercenary-den row nor the mercenary-tactical-ops row defines the two indices, their effects or the workforce siphon.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-090529"
+  },
+  {
+   "acceptance": "An attacked den enters a 24 h reinforcement with a 6 h window and is inaccessible while reinforced. Its shields must be repaired to 50% afterwards. On destruction, each stack of stored Infomorph Decryption Keys has a 50% drop chance.",
+   "domain": "sovereignty",
+   "id": "feat:sovereignty.mercenary-den-reinforcement-loot",
+   "plan_task": null,
+   "sources": [
+    "wiki:Mercenary_Den_Guide"
+   ],
+   "title": "Mercenary Den reinforcement and destruction loot",
+   "why_missing": "'Can be attacked' in the coarse row hides the timer, access lock, repair threshold and loot rule.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-090529"
+  },
+  {
+   "acceptance": "An abyssal filament admits one of:\n- one T1/T2/navy/pirate cruiser, but no strategic cruisers;\n- up to two destroyers, consuming 2 filaments (T3 destroyers allowed);\n- up to three frigates, consuming 3 filaments.\n\nFrigate and destroyer traces can be activated only by fleet members.",
+   "domain": "pve",
+   "id": "feat:pve.abyssal-entry-ship-limits",
+   "plan_task": null,
+   "sources": [
+    "wiki:Abyssal_Deadspace"
+   ],
+   "title": "Abyssal entry ship and filament counts",
+   "why_missing": "The abyssal rows cover rooms, tiers, weather and the trace, but not the hull-class and filament-count entry rules.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-090529"
+  },
+  {
+   "acceptance": "Filament activation is refused:\n- within 1,000 km of a gate, station, mobile depot or another Abyssal Trace;\n- inside a deadspace pocket;\n- with an active capsuleer log-off timer;\n- while post-warp invulnerable.\n\nEach refusal uses the live error.",
+   "domain": "pve",
+   "id": "feat:pve.abyssal-activation-restrictions",
+   "plan_task": null,
+   "sources": [
+    "wiki:Abyssal_Deadspace",
+    "wiki:Timers"
+   ],
+   "title": "Abyssal filament activation restrictions",
+   "why_missing": "No row lists the filament activation gates.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-090529"
+  },
+  {
+   "acceptance": "System security limits filament tiers:\n- 1.0 and 0.9 allow only T0.\n- 0.8 to 0.5 allow higher tiers without a flag up to a security-dependent tier: T3 at 0.8, T4 at 0.7, T5 at 0.6, T6 at 0.5.\n- Activating a tier above that limit in high-sec gives the activator a suspect flag.",
+   "domain": "pve",
+   "id": "feat:pve.abyssal-highsec-tier-suspect",
+   "plan_task": null,
+   "sources": [
+    "wiki:Abyssal_Deadspace"
+   ],
+   "title": "Abyssal tier by system security and suspect flag",
+   "why_missing": "feat:pve.abyssal-tiers covers difficulty and loot only; the security gating and suspect table are untested.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-090529"
+  },
+  {
+   "acceptance": "Inside an abyssal pocket:\n- no warping in or out, no cloaking and no mobile depots;\n- no Local channel; directional scan and map are disabled;\n- probes outside the pocket boundary take damage;\n- ships and capsules entering the boundary zone are destroyed.\n\nAt downtime, players in a pocket return to the origin system and drones in space are lost.",
+   "domain": "pve",
+   "id": "feat:pve.abyssal-in-pocket-restrictions",
+   "plan_task": null,
+   "sources": [
+    "wiki:Abyssal_Deadspace"
+   ],
+   "title": "Abyssal in-pocket restrictions",
+   "why_missing": "No abyssal row specifies these restrictions or the downtime handling.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-090529"
+  },
+  {
+   "acceptance": "Arrival and gate:\n- Ships arrive 35\u201370 km from the pocket gate.\n- The gate unlocks only when every NPC in the pocket is dead.\n\nNPCs:\n- Abyssal NPCs leave no wrecks, pay no bounty and cost no faction standing.\n\nLoot:\n- The Triglavian Bioadaptive Cache (300 HP) drops the pocket loot.\n- Extraction nodes and subnodes (T1+) roll their limited loot pool, and may be empty.",
+   "domain": "pve",
+   "id": "feat:pve.abyssal-pocket-clearing-rules",
+   "plan_task": null,
+   "sources": [
+    "wiki:Abyssal_Deadspace"
+   ],
+   "title": "Abyssal pocket clearing, cache and NPC rules",
+   "why_missing": "feat:pve.abyssal-gates only names the RPCs; the unlock condition, no-bounty/no-standing rule and cache loot are untested.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-090529"
+  },
+  {
+   "acceptance": "Placement:\n- New characters are placed in their school's NPC starter corp.\n- Leaving a player corporation places the character in the default NPC corp for their bloodline.\n- Enlisting in faction warfare as an individual places them in the faction's FW NPC corp.\n\nPlayers cannot apply to NPC corps, and a character that leaves its starter corp can never return to it.",
+   "domain": "corporation",
+   "id": "feat:corporation.npc-corp-placement-rules",
+   "plan_task": null,
+   "sources": [
+    "wiki:NPC_corporations"
+   ],
+   "title": "NPC corporation placement rules",
+   "why_missing": "feat:corporation.leave-corp and fw.enlist do not specify the destination NPC corp rules or the no-return rule for starter corps.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-090529"
+  },
+  {
+   "acceptance": "Overloaded modules accumulate heat in their rack (high/mid/low) per cycle; heat dissipates exponentially when no modules in the rack are overloaded; module heat damage probability and amount scale with current rack heat percentage, slot adjacency distance, and the pilot's Thermodynamics skill (-5% heat damage per level).",
+   "domain": "dogma",
+   "id": "feat:dogma.heat-rack-thermodynamics",
+   "plan_task": "DG-4",
+   "sources": [
+    "wiki:Overheating",
+    "client:eve/client/script/dogma/clientDogmaLocation.pyj"
+   ],
+   "title": "Rack heat buildup, dissipation, and Thermodynamics skill",
+   "why_missing": "feat:fitting.overheat coarsens rack heat accumulation/dissipation curves, slot-adjacency distance attenuation, and the Thermodynamics skill bonus into a single summary.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-122150"
+  },
+  {
+   "acceptance": "dogmaIM.RepairModule and StopRepairModule consume Nanite Repair Paste from the ship's cargo hold proportional to module HP repaired and module base cost, repair damaged (non-burnt-out) offline modules over time scaled by the Nanite Operation skill, and refuse to repair completely burnt-out modules.",
+   "domain": "fitting",
+   "id": "feat:fitting.nanite-repair-paste-consumption",
+   "plan_task": "DG-4",
+   "sources": [
+    "wiki:Overheating",
+    "client:eve/client/script/dogma/clientDogmaLocation.pyj"
+   ],
+   "title": "In-space module repair nanite paste consumption and repair rate",
+   "why_missing": "feat:fitting.module-damage-repair lumps station repair service and in-space nanite paste repair together without testing paste consumption formula, Nanite Operation skill scaling, or burnt-out module rejection.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-122150"
+  },
+  {
+   "acceptance": "Tech II frequency crystals, faction frequency crystals, and mining crystals with crystalVolatilityChance and crystalVolatilityDamage roll volatility damage each cycle via OnCrystalDamage, track per-crystal HP, and destroy the loaded crystal when its damage reaches 1.0 HP.",
+   "domain": "modules",
+   "id": "feat:modules.t2-crystal-volatility-destruction",
+   "plan_task": "DG-6",
+   "sources": [
+    "wiki:Crystal_damage",
+    "wiki:Laser_ammunition",
+    "client:eve/client/script/dogma/clientDogmaLocation.pyj"
+   ],
+   "title": "Tech II and faction crystal volatility and destruction",
+   "why_missing": "feat:modules.turret-laser mentions T2/faction crystal degradation alongside basic laser firing, hiding the per-crystal volatility roll, damage tracking, and crystal destruction mechanics.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-122150"
+  },
+  {
+   "acceptance": "Titan Phenomena Generators (Amarr/Caldari/Gallente/Minmatar) apply their racial system/grid-wide fleet dbuff effects to ships for the cycle duration, consume Strontium Clathrates, and prevent the Titan from warping or jumping for the duration.",
+   "domain": "modules",
+   "id": "feat:modules.phenomena-generator",
+   "plan_task": "DG-4",
+   "sources": [
+    "wiki:Titans",
+    "quasar:dogma"
+   ],
+   "title": "Titan Phenomena Generators",
+   "why_missing": "Titan Phenomena Generators have no feature row in modules.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-122150"
+  },
+  {
+   "acceptance": "superWeaponMgr.ActivateConeModule fires a Bosonic Field Generator cone doomsday along the chosen directional vector, dealing damage over ticks to all ships inside the cone geometry after the warmup delay and immobilizing/tether-blocking the Titan.",
+   "domain": "modules",
+   "id": "feat:modules.doomsday-bosonic-field",
+   "plan_task": null,
+   "sources": [
+    "wiki:Titans",
+    "client:eve/client/script/ui/inflight/positionalControl.pyj"
+   ],
+   "title": "Bosonic Field Generator cone AoE doomsday",
+   "why_missing": "feat:modules.doomsday only lists ActivateSinglePointTargetedModule and ActivateSlashModule, omitting ActivateConeModule (Bosonic Field Generator).",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-122150"
+  },
+  {
+   "acceptance": "superWeaponMgr.ActivateSpatialModule teleports ships within the target sphere to a random point in the system, and superWeaponMgr.ActivateMultiPointModule sweeps a beam path between start and end points damaging ships along the arc.",
+   "domain": "modules",
+   "id": "feat:modules.doomsday-gtfo-reaper",
+   "plan_task": null,
+   "sources": [
+    "wiki:Titans",
+    "client:eve/client/script/ui/inflight/positionalControl.pyj"
+   ],
+   "title": "Spatial Phenomena Generator (GTFO) and Reaper doomsdays",
+   "why_missing": "feat:modules.doomsday omits ActivateSpatialModule and ActivateMultiPointModule.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-122150"
+  },
+  {
+   "acceptance": "Activating a Clone Vat Bay on a Titan or Rorqual consumes Liquid Ozone, immobilizes the ship for the cycle, and allows fleet members to install or jump to clones in the ship only while the module is active.",
+   "domain": "modules",
+   "id": "feat:modules.clone-vat-bay-fuel",
+   "plan_task": null,
+   "sources": [
+    "wiki:Jump_clone_facilities",
+    "client:eve/client/script/ui/services/clonejumpsvc.pyj"
+   ],
+   "title": "Clone Vat Bay activation and Liquid Ozone consumption",
+   "why_missing": "feat:modules.clone-vat-bay and feat:clones.jump-clone-ship-bay omit the active cycle requirement, Liquid Ozone consumption, and ship immobilization.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-122150"
+  },
+  {
+   "acceptance": "Activating a Zero-Point Mass Entangler on a Heavy Interdiction Cruiser reduces the ship's mass by up to 80% for wormhole traversal while reducing maximum velocity and disabling Microwarpdrives and Micro Jump Drives while active.",
+   "domain": "modules",
+   "id": "feat:modules.zero-point-mass-entangler",
+   "plan_task": "DG-4",
+   "sources": [
+    "wiki:Heavy_Interdiction_Cruisers",
+    "wiki:Wormholes"
+   ],
+   "title": "Zero-Point Mass Entangler",
+   "why_missing": "The HIC Zero-Point Mass Entangler module for wormhole mass reduction has no feature row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-122150"
+  },
+  {
+   "acceptance": "Heavy Stasis Grapplers apply maximum velocity reduction at 0-1 km and decay effectiveness linearly across their optimal and falloff ranges down to a minimum web floor.",
+   "domain": "modules",
+   "id": "feat:modules.heavy-stasis-grappler-falloff",
+   "plan_task": "DG-5",
+   "sources": [
+    "wiki:Tackling",
+    "wiki:Electronic_warfare"
+   ],
+   "title": "Heavy Stasis Grappler distance-based effectiveness decay",
+   "why_missing": "feat:modules.stasis-webifier mentions grapplers only in passing, hiding the distance-dependent web strength falloff formula.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-122150"
+  },
+  {
+   "acceptance": "Fitting any Polarized turret or missile launcher sets all shield, armor, and hull resistances of the ship to 0% regardless of hardeners, rigs, or Damage Control modules.",
+   "domain": "modules",
+   "id": "feat:modules.polarized-weapons-zero-resists",
+   "plan_task": "DG-1",
+   "sources": [
+    "wiki:Weapons",
+    "wiki:Resistance_and_impedance"
+   ],
+   "title": "Polarized weapon resistance zeroing",
+   "why_missing": "Polarized weapons' override of ship shield/armor/hull resistances to 0% is not covered by any feature row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-122150"
+  },
+  {
+   "acceptance": "Activating a Micro Jump Field Generator on a Command Destroyer spools for 6s (reduced by Micro Jump Drive Operation), blooms signature radius, and translates up to 25 non-warp-scrambled ships (including drones, bombs, and probes) within 6 km 100 km along the Command Destroyer's heading vector.",
+   "domain": "modules",
+   "id": "feat:modules.micro-jump-field-generator",
+   "plan_task": "SP-3",
+   "sources": [
+    "wiki:Command_Destroyers",
+    "wiki:Propulsion_equipment"
+   ],
+   "title": "Micro Jump Field Generator (Command Destroyer boosh)",
+   "why_missing": "feat:modules.micro-jump-drive lumps the personal MJD and the AoE Command Destroyer MJFG together, hiding the 25-entity cap, 6 km radius, scram exclusion per ship, and bomb/probe translation.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-122150"
+  },
+  {
+   "acceptance": "Incoming remote shield/armor repair on a target scales with remote assistance impedance when multiple capital/subcapital remote repairers cycle on the same ship within the impedance window.",
+   "domain": "modules",
+   "id": "feat:modules.remote-assistance-impedance",
+   "plan_task": "DG-4",
+   "sources": [
+    "wiki:Remote_assistance",
+    "wiki:Force_Auxiliaries"
+   ],
+   "title": "Capital remote repair diminishing returns (remote assistance impedance)",
+   "why_missing": "Remote assistance impedance diminishing returns on stacked remote repairs has no feature row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-122150"
+  },
+  {
+   "acceptance": "Capital Micro Jump Drives jump a capital ship 250 km forward after spool-up, and Capital Micro Jump Field Generators on Lancer Dreadnoughts/Carriers jump up to 50 subcapital ships within 10 km 250 km forward.",
+   "domain": "modules",
+   "id": "feat:modules.capital-micro-jump-drive",
+   "plan_task": "SP-3",
+   "sources": [
+    "wiki:Capital_Ship_Modules",
+    "wiki:Carriers"
+   ],
+   "title": "Capital Micro Jump Drive and Capital Micro Jump Field Generator",
+   "why_missing": "Capital MJD and Capital MJFG (250 km jump, 50-ship cap) have no feature row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-122150"
+  },
+  {
+   "acceptance": "Support fighter squadrons apply warp disruption (Siren), stasis webification (Dromi), sensor dampening/target painting (Cenotaph), or ECM (Scarab) via fighterMgr.CmdActivateAbilitySlots, with squadron size scaling the EWAR strength.",
+   "domain": "drones",
+   "id": "feat:drones.fighter-support-cenotaph-scarab",
+   "plan_task": "S-2",
+   "sources": [
+    "wiki:Fighters",
+    "client:eve/client/script/parklife/fightersSvc.pyj"
+   ],
+   "title": "Support fighters (Scarab, Siren, Dromi, Cenotaph)",
+   "why_missing": "feat:drones.fighter-abilities lumps all fighter classes together, hiding support fighter EWAR strength scaling with remaining squadron size.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-122150"
+  },
+  {
+   "acceptance": "fighterMgr.ExecuteActivateAbilitySlotsOnPoint fires a heavy fighter's point-targeted AoE bomb ability at the specified 3D coordinate in space, consuming a bomb charge from the squadron and dealing AoE damage at detonation.",
+   "domain": "drones",
+   "id": "feat:drones.fighter-heavy-long-range-bomb",
+   "plan_task": "S-2",
+   "sources": [
+    "wiki:Fighters",
+    "client:eve/client/script/parklife/fightersSvc.pyj"
+   ],
+   "title": "Long-range heavy fighter AoE bomb ability",
+   "why_missing": "feat:drones.fighter-abilities covers target-locked abilities (CmdActivateAbilitySlots), omitting positional AoE abilities (ExecuteActivateAbilitySlotsOnPoint).",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-122150"
+  },
+  {
+   "acceptance": "Recalled fighter squadrons in carrier/supercarrier/structure fighter tubes repair damaged fighter HP, replace destroyed fighters from the fighter bay, and reload depleted ability charges over per-unit reload timers before relaunch.",
+   "domain": "drones",
+   "id": "feat:drones.fighter-refuel-rearm-repair",
+   "plan_task": "S-2",
+   "sources": [
+    "wiki:Fighters",
+    "client:eve/client/script/parklife/fightersSvc.pyj"
+   ],
+   "title": "Fighter tube refueling, rearming, and repairing",
+   "why_missing": "feat:drones.fighter-squadron-losses mentions refilling squadron size from bay, but omits tube repair time and ability charge rearming timers.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-122150"
+  },
+  {
+   "acceptance": "Immobile sentry drones (IsSentry) have zero max velocity, ignore CmdReturnHome orbit movement, and can only be returned to the drone bay when the controlling ship is within 2,500 m.",
+   "domain": "drones",
+   "id": "feat:drones.sentry-drone-scoop-distance",
+   "plan_task": "C-7",
+   "sources": [
+    "wiki:Drones",
+    "wiki:Drone_mechanics"
+   ],
+   "title": "Sentry drone 2500m scoop requirement",
+   "why_missing": "feat:drones.sentry-drones states sentries are immobile, but omits the 2,500 m proximity requirement to recall/scoop them into the drone bay.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-122150"
+  },
+  {
+   "acceptance": "Augmented/faction drones (e.g. Gecko, Praetor/Infiltrator/Valkyrie/Berserker/Wasp/Ogre/Hammerhead/Hobgoblin/Hornet/Acolyte/Warrior variants) and mutaplasmid-mutated abyssal drones apply their multi-type or mutated dogma damage, tracking, velocity, and HP attributes in combat.",
+   "domain": "drones",
+   "id": "feat:drones.gecko-augmented-mutated-drones",
+   "plan_task": "C-7",
+   "sources": [
+    "wiki:Drones",
+    "wiki:Abyssal_modules"
+   ],
+   "title": "Multi-damage, augmented, and abyssal mutated drones",
+   "why_missing": "Multi-damage/augmented and mutaplasmid-mutated drone combat attribute resolution has no dedicated row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-122150"
+  },
+  {
+   "acceptance": "Launched missiles exist as destiny balls with HP, velocity, and flight time (explosionDelay * agility/mass); missiles that exceed flight time before reaching the target or are destroyed by smartbombs/defender missiles deal zero damage.",
+   "domain": "combat",
+   "id": "feat:combat.missile-flight-physics-destruction",
+   "plan_task": "C-1",
+   "sources": [
+    "wiki:Missile_mechanics",
+    "wiki:Smartbombs"
+   ],
+   "title": "Missile ball lifetime, smartbomb destruction, and outrunning",
+   "why_missing": "feat:modules.missile-launchers and feat:modules.missile-application do not test missile flight time expiration (outrunning missiles) or smartbomb AoE destruction of in-flight missiles.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-122150"
+  },
+  {
+   "acceptance": "Void bombs neutralize capacitor in AoE, Lockbreaker bombs break target locks in AoE, and Focused Void/Scorch bombs apply capital-scaled AoE neutralization/damage with explosion radius vs target signature radius scaling.",
+   "domain": "combat",
+   "id": "feat:combat.bomb-damage-void-lockbreaker",
+   "plan_task": "C-1",
+   "sources": [
+    "wiki:Bombs",
+    "client:eve/client/script/environment/godma.pyj"
+   ],
+   "title": "Void, Lockbreaker, and Focused Void bomb effects",
+   "why_missing": "feat:modules.bomb-launcher bundles damage, Void, and Lockbreaker bombs into a single row without testing AoE capacitor neutralization, lock breaking, or bomb-to-bomb damage resistance.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-122150"
+  },
+  {
+   "acceptance": "Wreck types carry their SDE accessDifficulty modifier (frigate/cruiser/battleship/capital, Tech I vs Tech II, Sleeper); salvaging fails when the salvager module + Salvaging skill + rigs yield <= 0% access chance, and T2/Sleeper wrecks drop T2/Sleeper salvage tables.",
+   "domain": "combat",
+   "id": "feat:combat.wreck-size-salvage-difficulty",
+   "plan_task": "C-7",
+   "sources": [
+    "wiki:Salvaging",
+    "client:eve/client/script/dogma/clientDogmaLocation.pyj"
+   ],
+   "title": "Wreck salvage access difficulty and T2/Sleeper wreck requirements",
+   "why_missing": "feat:modules.salvager does not distinguish T1, T2, capital, and Sleeper wreck access difficulty or T2/Sleeper salvage loot tables.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-122150"
+  },
+  {
+   "acceptance": "Attackers who applied 0-damage EWAR (warp disruption, web, ECM, neut, damp, painter) or damage within the 15-minute aggression window before ship destruction are recorded in the killmail attackers list with their ship, weapon/module type, and damage done, while attackers older than 15 minutes are pruned.",
+   "domain": "combat",
+   "id": "feat:combat.killmail-assist-timeout-ewar",
+   "plan_task": "C-3",
+   "sources": [
+    "wiki:Killmail",
+    "quasar:killmail"
+   ],
+   "title": "Killmail EWAR participation and 15-minute aggression window",
+   "why_missing": "feat:combat.killmail-generate does not specify zero-damage EWAR participation or the 15-minute aggression expiry window.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-122150"
+  },
+  {
+   "acceptance": "ship.SelfDestruct on a capsule in space destroys the capsule after the countdown (2 minutes), destroys active implants, generates a pod killmail (if aggressed within 15 minutes), and respawns the character in their home station medical clone.",
+   "domain": "combat",
+   "id": "feat:combat.self-destruct-pod",
+   "plan_task": "C-3",
+   "sources": [
+    "wiki:Pod_saving",
+    "client:eve/client/script/dogma/clientDogmaLocation.pyj"
+   ],
+   "title": "Capsule self-destruct in space",
+   "why_missing": "feat:ships.self-destruct tests ship self-destruct, and feat:character.self-destruct-clone tests docked home_station.self_destruct_clone, leaving in-space capsule self-destruct untested.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-122150"
+  },
+  {
+   "acceptance": "An active 60s Weapons Timer prevents tethering to Upwell structures, activating any filament, refitting modules in space, boarding/ejecting ships in space, and storing ships in a Ship Maintenance Bay.",
+   "domain": "crimewatch",
+   "id": "feat:crimewatch.weapon-timer-tether-filament-block",
+   "plan_task": "C-8",
+   "sources": [
+    "wiki:Timers",
+    "client:eve/client/script/ui/crimewatch/crimewatchTimers.pyj"
+   ],
+   "title": "Weapons timer blocks tethering, filaments, refitting, and ship swap",
+   "why_missing": "feat:dogma.weapon-timer only mentions blocking docking and jumping, omitting filament activation, in-space refitting, tethering, and SMB storage.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-122150"
+  },
+  {
+   "acceptance": "Activating high-tier Abyssal filaments in high-security space (0.5-1.0) is either blocked in 0.8-1.0 or applies a 15-minute Suspect flag upon exiting the Abyssal trace per V24 security band rules.",
+   "domain": "crimewatch",
+   "id": "feat:crimewatch.abyssal-suspect-flag-tier",
+   "plan_task": "C-8",
+   "sources": [
+    "wiki:Abyssal_filaments",
+    "client:abyss/client/abyssal_service.pyj"
+   ],
+   "title": "High-sec Abyssal filament tier restrictions and suspect flag",
+   "why_missing": "High-sec Abyssal filament security band restrictions and exit suspect flagging are not covered by feat:navigation.filament-abyssal.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-122150"
+  },
+  {
+   "acceptance": "Activating an Abyssal filament spawns an Abyssal Trace ball at the entry point in the origin solar system that is scannable with combat probes, allows fleet members (for 2x/3x frigate/destroyer runs) to enter, and despawns when the run finishes or the 20-minute pocket timer expires.",
+   "domain": "navigation",
+   "id": "feat:navigation.abyssal-trace-collapse",
+   "plan_task": null,
+   "sources": [
+    "wiki:Abyssal_Deadspace",
+    "client:abyss/client/abyssal_service.pyj"
+   ],
+   "title": "Abyssal trace in-space beacon and collapse",
+   "why_missing": "feat:navigation.filament-abyssal does not cover the persistent Abyssal Trace ball in the origin system or its combat-probe scannability and collapse.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-122150"
+  },
+  {
+   "acceptance": "Entering an Abyssal trace in a Destroyer consumes 2 filaments from the fleet activation and allows up to 2 Destroyers in fleet; entering in a Frigate consumes 3 filaments and allows up to 3 Frigates, multiplying loot cache drops accordingly.",
+   "domain": "pve",
+   "id": "feat:pve.abyssal-coop-frigate-destroyer",
+   "plan_task": null,
+   "sources": [
+    "wiki:Abyssal_Deadspace",
+    "wiki:Abyssal_filaments",
+    "client:abyss/client/abyssal_service.pyj"
+   ],
+   "title": "Co-op Abyssal Deadspace (2x Destroyer / 3x Frigate filament consumption)",
+   "why_missing": "feat:navigation.filament-abyssal mentions 1-3 ships but does not specify the 2-filament Destroyer / 3-filament Frigate cost or loot multiplier.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-122150"
+  },
+  {
+   "acceptance": "Ships flying outside the spherical boundary of an Abyssal Deadspace room take escalating omni structural damage per tick until they return inside the arena or are destroyed.",
+   "domain": "pve",
+   "id": "feat:pve.abyssal-boundary-damage",
+   "plan_task": null,
+   "sources": [
+    "wiki:Abyssal_Deadspace",
+    "client:abyss/client/abyssal_service.pyj"
+   ],
+   "title": "Abyssal pocket arena boundary damage",
+   "why_missing": "Abyssal pocket out-of-bounds boundary damage is not covered in feat:pve.abyssal-pocket.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-122150"
+  },
+  {
+   "acceptance": "The Encounter Surveillance System lives behind an acceleration gate inside a 75 km intrusion bubble that blocks warping, Microwarpdrives, Micro Jump Drives, cloaking, and cyno lighting within the ESS grid.",
+   "domain": "pve",
+   "id": "feat:pve.ess-grid-warp-mwd-restrictions",
+   "plan_task": null,
+   "sources": [
+    "wiki:Encounter_Surveillance_System",
+    "client:eve/client/script/ui/shared/dynamicResource/dynamicResourceSvc.pyj"
+   ],
+   "title": "ESS deadspace grid bubble, warp, MWD, MJD, and cloak restrictions",
+   "why_missing": "feat:pve.ess covers main bank linking and theft, omitting the ESS acceleration gate and 75 km intrusion bubble restrictions.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-122150"
+  },
+  {
+   "acceptance": "Every 2h45m, if the ESS Main Bank is not currently being hacked, its accumulated ISK is automatically distributed to the wallets of the characters who contributed ratting bounties during that cycle in proportion to their contributions.",
+   "domain": "pve",
+   "id": "feat:pve.ess-main-bank-autopayout",
+   "plan_task": null,
+   "sources": [
+    "wiki:Encounter_Surveillance_System",
+    "quasar:dynamicbountysystem"
+   ],
+   "title": "ESS Main Bank 2h45m auto-payout distribution",
+   "why_missing": "feat:pve.ess mentions 'payout to owners' coarsely without specifying the proportional ratting contributor auto-payout cycle.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-122150"
+  },
+  {
+   "acceptance": "ESS Reserve Bank keys are bound to a specific null-sec quadrant and 15-minute or 45-minute unlock duration; essMgr.RequestUnlockReserveBank consumes a matching quadrant key and streams ISK payouts over the key's duration to linked ships on grid.",
+   "domain": "pve",
+   "id": "feat:pve.ess-reserve-bank-key-tiers",
+   "plan_task": null,
+   "sources": [
+    "wiki:Encounter_Surveillance_System",
+    "client:eve/client/script/ui/shared/dynamicResource/dynamicResourceSvc.pyj"
+   ],
+   "title": "ESS Reserve Bank key quadrant & duration tiers",
+   "why_missing": "feat:pve.ess-reserve omits quadrant key matching and the 15m/45m timed payout stream.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-122150"
+  },
+  {
+   "acceptance": "A job's Estimated Item Value (EIV) is computed as the sum of (base ME-0 blueprint material quantity * adjusted market price) per run from the server's adjusted price table, unaffected by blueprint ME level or structure material bonuses.",
+   "domain": "industry",
+   "id": "feat:industry.eiv-adjusted-prices",
+   "plan_task": "E-4",
+   "sources": [
+    "wiki:Industry",
+    "client:eve/client/script/industry/industrySvc.pyj"
+   ],
+   "title": "Estimated Item Value (EIV) calculation from blueprint base materials",
+   "why_missing": "feat:industry.job-cost references EIV in passing, without specifying how EIV is derived from ME-0 base materials and adjusted prices.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-122150"
+  },
+  {
+   "acceptance": "Installing an industry job charges the SCC surcharge (percentage of EIV credited to SCC) and, when the installer is in Alpha clone state, an additional Alpha clone facility tax percentage, each recorded as a separate wallet journal entry.",
+   "domain": "industry",
+   "id": "feat:industry.scc-surcharge-alpha-tax",
+   "plan_task": "E-4",
+   "sources": [
+    "wiki:Industry",
+    "wiki:Tax",
+    "client:eve/client/script/industry/industrySvc.pyj"
+   ],
+   "title": "SCC industry surcharge and Alpha clone industry tax",
+   "why_missing": "feat:industry.job-cost mentions SCC surcharge in passing and completely omits the Alpha clone industry tax.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-122150"
+  },
+  {
+   "acceptance": "Manufacturing Tech II, Faction, Capital, and Supercapital hulls consumes their SDE-defined advanced/capital components, Neurolink Protection Cells, Core Temperature Regulators, and PI/reaction intermediates without hardcoded recipes.",
+   "domain": "industry",
+   "id": "feat:industry.capital-core-temperature-components",
+   "plan_task": "E-4",
+   "sources": [
+    "wiki:Capital_ship_manufacturing",
+    "wiki:Manufacturing"
+   ],
+   "title": "Capital, T2, and faction ship multi-stage component manufacturing",
+   "why_missing": "Multi-stage capital/supercapital/faction hull manufacturing recipes from SDE blueprints.fsdbinary have no dedicated verification row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-122150"
+  },
+  {
+   "acceptance": "Standup M-Set and L-Set manufacturing, research, invention, and biochemical/composite/hybrid reactor rigs multiply their ME, TE, and cost bonuses by the solar system's security band multiplier (high-sec vs low-sec vs null-sec/WH) and reject high-sec installation for reaction rigs.",
+   "domain": "industry",
+   "id": "feat:industry.structure-standup-rig-security-multipliers",
+   "plan_task": "E-4",
+   "sources": [
+    "wiki:Upwell_structure",
+    "wiki:Reactions",
+    "client:eve/client/script/industry/facilitySvc.pyj"
+   ],
+   "title": "Upwell Standup industry/reaction rig security band multipliers",
+   "why_missing": "feat:industry.structure-rigs does not test the high/low/null security band multipliers or reaction rig high-sec restrictions.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-122150"
+  },
+  {
+   "acceptance": "Deploying a Command Center requires the matching Command Center type for the planet's type (Barren, Gas, Ice, Lava, Oceanic, Plasma, Storm, Temperate; Shattered planets forbid PI colonies), and only the 5 R0 resources native to that planet type can be extracted.",
+   "domain": "pi",
+   "id": "feat:pi.planet-type-resource-restrictions",
+   "plan_task": "E-6",
+   "sources": [
+    "wiki:Planetary_Industry",
+    "wiki:Planetary_buildings",
+    "client:eve/client/script/environment/planet/clientPlanet.pyj"
+   ],
+   "title": "Planet type Command Center matching and resource availability",
+   "why_missing": "feat:pi.command-center and feat:pi.planet-info omit planet-type Command Center matching, Shattered planet prohibition, and per-planet-type R0 resource sets.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-122150"
+  },
+  {
+   "acceptance": "planetOrbitalRegistryBroker anchors a Customs Office Gantry at an unowned non-high-sec planet, upgrades it to a Player Owned Customs Office with a Customs Office item, and enforces a single shield reinforcement timer before destruction.",
+   "domain": "pi",
+   "id": "feat:pi.customs-office-gantry-deploy-reinforce",
+   "plan_task": "E-6",
+   "sources": [
+    "wiki:Player_Owned_Customs_Office",
+    "client:eve/client/script/ui/inflight/orbitalConfiguration.pyj"
+   ],
+   "title": "Customs Office Gantry deployment, upgrade, and POCO reinforcement",
+   "why_missing": "feat:pi.customs-office and feat:pi.poco-settings cover tax rates and settings, but omit Customs Office Gantry anchoring, upgrade to POCO, and POCO reinforcement/destruction.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-122150"
+  },
+  {
+   "acceptance": "Orbital transfers via a Spaceport Launchpad allow up to 10,000 m3 both ways (import and export) at 1x POCO tax rate without cooldown, whereas Command Center launches export up to 500 m3 into an orbital container at 1.5x tax rate.",
+   "domain": "pi",
+   "id": "feat:pi.command-center-import-export-pad",
+   "plan_task": "E-6",
+   "sources": [
+    "wiki:Planetary_Industry",
+    "wiki:Player_Owned_Customs_Office"
+   ],
+   "title": "Spaceport Launchpad vs Command Center orbital transfer volume & tax",
+   "why_missing": "feat:pi.launch and feat:pi.customs-office do not distinguish Spaceport Launchpad bidirectional orbital transfer vs Command Center one-way container launch and their different volume/tax multipliers.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-122150"
+  },
+  {
+   "acceptance": "PlaceBuyOrder, PlaceMultiSellOrder, and ModifyCharOrder validate that order prices conform to EVE's 4-significant-figure tick size rule (e.g. 1234000.0 valid, 1234567.89 rejected) and reject non-conforming prices.",
+   "domain": "market",
+   "id": "feat:market.tick-size-four-significant-digits",
+   "plan_task": "E-2",
+   "sources": [
+    "wiki:Trading",
+    "client:eve/client/script/ui/services/marketsvc.pyj"
+   ],
+   "title": "Four-significant-figure market price tick validation",
+   "why_missing": "feat:market.place-buy, feat:market.place-sell, and feat:market.modify-order do not specify the 4-significant-digit price tick rule.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-122150"
+  },
+  {
+   "acceptance": "ModifyCharOrder charges the V24 relist fee equal to max(0, price_increase) * broker_fee_rate + new_order_value * relist_discount_factor * broker_fee_rate, where relist_discount_factor is reduced by the Advanced Broker Relations skill (6% per level).",
+   "domain": "market",
+   "id": "feat:market.relist-fee-formula",
+   "plan_task": "E-2",
+   "sources": [
+    "wiki:Trading",
+    "wiki:Tax",
+    "client:eve/client/script/ui/services/marketsvc.pyj"
+   ],
+   "title": "Order modification relist fee formula and Advanced Broker Relations",
+   "why_missing": "feat:market.modify-order mentions 'relist fee' without specifying the V24 relist fee formula or the Advanced Broker Relations skill reduction.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-122150"
+  },
+  {
+   "acceptance": "Corporation buy orders debit escrow/broker fees from the chosen corp wallet division and deliver filled items to the corp's Market Deliveries division at the destination station/structure; corp sell orders sell from a chosen corp hangar division and credit proceeds minus sales tax to the chosen corp wallet division.",
+   "domain": "market",
+   "id": "feat:market.corp-order-wallet-hangar-divisions",
+   "plan_task": "E-2",
+   "sources": [
+    "wiki:Trading",
+    "client:eve/client/script/ui/services/marketsvc.pyj"
+   ],
+   "title": "Corporation market order division routing and delivery",
+   "why_missing": "feat:market.corp-orders does not specify corp hangar division selection or delivery of corp buy orders to the Market Deliveries hangar flag.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-122150"
+  },
+  {
+   "acceptance": "contractMgr.GetContractInfo and SearchContracts expose blueprint copy vs original status, ME, TE, runs remaining, item damage, and abyssal dynamic item attributes for items inside a contract, and preserve those exact singleton attributes upon contract completion.",
+   "domain": "contracts",
+   "id": "feat:contracts.blueprint-singleton-preservation",
+   "plan_task": "E-3",
+   "sources": [
+    "wiki:Contracts",
+    "client:eve/client/script/ui/shared/neocom/contracts/contractPanels.pyj"
+   ],
+   "title": "Contract item singleton metadata preservation (BPC runs/ME/TE, abyssal rolls, damage)",
+   "why_missing": "feat:contracts.item-exchange and feat:contracts.search do not require preserving and exposing BPC/BPO ME/TE/runs and abyssal dynamic attributes across contract escrow.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-122150"
+  },
+  {
+   "acceptance": "Repackaging (breaking) a Courier Plastic Wrap item in a hangar extracts the wrapped items into the hauler's hangar, immediately marks the courier contract as failed, and transfers the escrowed collateral to the contract issuer.",
+   "domain": "contracts",
+   "id": "feat:contracts.courier-plastic-wrap-break",
+   "plan_task": "E-3",
+   "sources": [
+    "wiki:Contracts",
+    "client:eve/client/script/ui/services/menuSvcExtras/invItemFunctions.pyj"
+   ],
+   "title": "Courier plastic wrap repackage/break forfeits collateral",
+   "why_missing": "feat:contracts.courier-failure only covers deadline expiry, omitting manual plastic wrap breaking and immediate collateral forfeiture.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-122150"
+  },
+  {
+   "acceptance": "raffleProxy.CreateRaffle requires and consumes HyperCores proportional to the item's estimated value and chosen node count (8, 16, 48, or 512 nodes); raffles that do not sell all nodes within 72 hours expire, refunding ticket buyers' ISK and returning the item to the creator (HyperCores remain consumed).",
+   "domain": "wallet",
+   "id": "feat:wallet.hypernet-hypercore-sizing-expiry",
+   "plan_task": null,
+   "sources": [
+    "wiki:HyperNet_Relay",
+    "client:raffles/client/raffle_service.pyj"
+   ],
+   "title": "HyperNet Relay HyperCore requirement, node counts, and 3-day expiry",
+   "why_missing": "feat:wallet.hypernet-relay omits HyperCore item consumption, valid node count options (8/16/48/512), and the 72-hour unsold expiry/refund behavior.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-122150"
+  },
+  {
+   "acceptance": "Custom ship SKIN designs combining nanocoating, metallic/matte finish, and pattern elements consume Kerr-Induced Nanocoatings and PLEX/EverMarks to start a sequencing job scaled by SKINR sequencing skills (Paragon Hub skills), producing tradeable custom SKIN licenses on completion.",
+   "domain": "cosmetics",
+   "id": "feat:cosmetics.skinr-sequencing-studio",
+   "plan_task": null,
+   "sources": [
+    "wiki:SKINR",
+    "quasar:cosmetic",
+    "client:cosmetics/client/ships/ship_skin_svc.pyj"
+   ],
+   "title": "Paragon Hub SKINR custom ship SKIN sequencing and job timers",
+   "why_missing": "Existing feat:cosmetics.skinr-structure only covers structure nanocoating paint, omitting V24 custom ship SKINR studio design, sequencing jobs, and SKINR skills.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-122150"
+  },
+  {
+   "acceptance": "Sequenced custom ship SKINs can be listed for PLEX or ISK in the Paragon Hub marketplace, purchased by other players, and charged the Paragon Hub listing/sales fee (reduced by Paragon Hub skills).",
+   "domain": "cosmetics",
+   "id": "feat:cosmetics.skinr-paragon-hub-listing",
+   "plan_task": null,
+   "sources": [
+    "wiki:SKINR",
+    "quasar:cosmetic",
+    "client:cosmetics/client/ships/ship_skin_svc.pyj"
+   ],
+   "title": "Paragon Hub custom SKIN listing, purchase, and tax",
+   "why_missing": "The Paragon Hub custom ship SKIN marketplace and its fee/skill reductions have no feature row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-122150"
+  },
+  {
+   "acceptance": "An anchored Mercenary Den tracks development and anarchy levels; high unmitigated anarchy reduces the host Skyhook's planetary workforce output until the Mercenary Den owner completes Mercenary Tactical Operations or the den is destroyed.",
+   "domain": "sovereignty",
+   "id": "feat:sovereignty.mercenary-den-anarchy-evolution",
+   "plan_task": null,
+   "sources": [
+    "wiki:Mercenary_Den_Guide",
+    "wiki:Mercenary_Tactical_Operation",
+    "quasar:sovereignty"
+   ],
+   "title": "Mercenary Den anarchy & development levels and Skyhook workforce impact",
+   "why_missing": "feat:sovereignty.mercenary-den mentions anchoring and infomorph generation, omitting development/anarchy progression and its workforce penalty on the host Skyhook.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-122150"
+  },
+  {
+   "acceptance": "Lava and Ice planet Skyhooks split extracted Magmatic Gas / Superionic Ice between a secure bay and an insecure (maturing) bay; reagent theft via Skyhook hacking steals from the insecure bay while the remaining portion matures into the secure bay over the maturity cycle.",
+   "domain": "sovereignty",
+   "id": "feat:sovereignty.skyhook-reagent-maturity",
+   "plan_task": null,
+   "sources": [
+    "wiki:Orbital_Skyhook",
+    "quasar:sovereignty",
+    "client:eve/client/script/ui/services/sovereigntyResourceSvc.pyj"
+   ],
+   "title": "Orbital Skyhook reagent maturity and secure vs insecure bay split",
+   "why_missing": "feat:sovereignty.sov-reagents and feat:sovereignty.skyhook-theft omit the secure vs maturing bay split and maturity cycle.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-122150"
+  },
+  {
+   "acceptance": "FW Battlefield sites contain 3 capture zones that must be held by militia players to advance the battlefield progress bar, spawn friendly/enemy NPC waves, and award LP/standing to up to 30 militia pilots in site upon completion while heavily shifting system contested/advantage state.",
+   "domain": "fw",
+   "id": "feat:fw.battlefield-capture-rules",
+   "plan_task": null,
+   "sources": [
+    "wiki:Faction_warfare",
+    "client:eve/client/script/ui/services/fwWarzoneSvc.pyj"
+   ],
+   "title": "Faction Warfare Battlefield capture zones and payout scaling",
+   "why_missing": "feat:fw.fw-site-dungeons only checks GetFactionWarfareBattlefieldInstances list RPC, omitting the 3-capture-zone battlefield mechanics and 30-pilot LP payout.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-122150"
+  },
+  {
+   "acceptance": "Supply Caches and Supply Depots spawn in FW warzone systems; destroying enemy caches/depots or defending friendly ones adjusts system Advantage (OnSolarsystemAdvantageStateUpdated_Local) and drops militia supply items.",
+   "domain": "fw",
+   "id": "feat:fw.supply-caches-depots",
+   "plan_task": null,
+   "sources": [
+    "wiki:Faction_warfare",
+    "client:eve/client/script/ui/shared/infoPanels/infoPanelFactionalWarfare.pyj"
+   ],
+   "title": "Faction Warfare Supply Caches and Supply Depots",
+   "why_missing": "feat:fw.advantage mentions 'adjacency and structures' without covering FW Supply Caches and Supply Depots.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-122150"
+  },
+  {
+   "acceptance": "Each Pirate Insurgency campaign anchors a Pirate Forward Operating Base (FOB) in the insurgency headquarters system; as systems reach Stage 5 Corruption or Stage 5 Suppression, campaign points accrue until either the pirate FOB becomes vulnerable/destroyed or the insurgency wins and spawns the Pirate Stronghold / Zarzakh rewards.",
+   "domain": "fw",
+   "id": "feat:fw.insurgency-fob-ambition",
+   "plan_task": null,
+   "sources": [
+    "wiki:Insurgency",
+    "wiki:Corruption_and_Suppression",
+    "client:eve/client/script/ui/services/insurgencyCampaignSvc.pyj"
+   ],
+   "title": "Pirate Insurgency Forward Operating Base (FOB) and Corruption/Suppression stage thresholds",
+   "why_missing": "feat:pve.insurgency and feat:fw.fw-pirate omit the Pirate FOB lifecycle and Stage 1-5 Corruption/Suppression campaign resolution.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-122150"
+  },
+  {
+   "acceptance": "In solar systems that reach Corruption Stage 3-5 during a Pirate Insurgency, low-sec gate/station sentry guns disable, high-sec CONCORD response is suppressed at Stage 5, and warp disruption bubbles / bombs become legal to deploy in low-sec at Stage 5.",
+   "domain": "fw",
+   "id": "feat:fw.corruption-stage5-highsec-bubbles-concord",
+   "plan_task": null,
+   "sources": [
+    "wiki:Corruption_and_Suppression",
+    "client:eve/client/script/ui/services/insurgencyCampaignSvc.pyj"
+   ],
+   "title": "Corruption Stage 3-5 crimewatch and interdiction changes",
+   "why_missing": "feat:crimewatch.security-bands and feat:pve.insurgency do not test the Stage 3-5 Corruption overrides to sentry guns, CONCORD response, and bubble/bomb restrictions.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-122150"
+  },
+  {
+   "acceptance": "Stargates into Zarzakh apply the Deathless horizon/lockout timer preventing immediate back-jump to a different exit gate, enforce Zarzakh's directional-scanner range cap and ship size/bubble rules, and dock at The Fulcrum.",
+   "domain": "navigation",
+   "id": "feat:navigation.zarzakh-fulcrum-gates",
+   "plan_task": null,
+   "sources": [
+    "wiki:Zarzakh",
+    "client:eve/client/script/remote/michelle.pyj"
+   ],
+   "title": "Zarzakh Jovian stargates, horizon restriction, and Fulcrum mechanics",
+   "why_missing": "Zarzakh stargate lockout timers, d-scan range cap, and The Fulcrum rules have no feature row in navigation.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-122150"
+  },
+  {
+   "acceptance": "Shipcaster beacons in Turnur, Alsavoinon, Hikkoken and Vard allow jumping into Zarzakh via shipcasterTravelMgr with faction/capital ship restrictions and Horizon Siege timer rules.",
+   "domain": "navigation",
+   "id": "feat:navigation.deathless-shipcaster-zarzakh",
+   "plan_task": null,
+   "sources": [
+    "wiki:Shipcaster",
+    "client:eve/client/script/parklife/shipcasterSvc.pyj"
+   ],
+   "title": "Deathless Shipcaster travel to Zarzakh",
+   "why_missing": "feat:navigation.shipcaster only covers faction militia Shipcaster travel to FW landing pads (GetFactionLandingPads); the Deathless Shipcaster network into Zarzakh has no row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-131718"
+  },
+  {
+   "acceptance": "Zarzakh enforces delayed local chat, prohibits capsuleer structure anchoring and cynosural fields, and gates stargate/shipcaster access per the Fulcrum and Horizon Siege state.",
+   "domain": "navigation",
+   "id": "feat:navigation.zarzakh-local-horizon-siege",
+   "plan_task": null,
+   "sources": [
+    "wiki:Insurgency",
+    "client:eve/client/script/parklife/shipcasterSvc.pyj"
+   ],
+   "title": "Zarzakh system rules and Horizon Siege state",
+   "why_missing": "feat:social.chat-local mentions Zarzakh local chat in passing, but Zarzakh's stargate/shipcaster lockouts, structure/cyno restrictions, and Horizon Siege state have no dedicated row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-131718"
+  },
+  {
+   "acceptance": "Capital Micro Jump Drive and Capital Micro Jump Field Generator spool up (affected by Capital Micro Jump Drive skill) and jump capital/subcapital ships forward 100-250 km; warp scramblers and HIC scripts cancel activation.",
+   "domain": "navigation",
+   "id": "feat:navigation.directional-jump-drive",
+   "plan_task": "SP-3",
+   "sources": [
+    "wiki:Propulsion_equipment",
+    "wiki:Capital_Ship_Modules"
+   ],
+   "title": "Capital Micro Jump Drive and Capital Micro Jump Field Generator",
+   "why_missing": "feat:modules.micro-jump-drive only covers subcapital 100 km MJD/MJFG (12s spool); capital MJD and Capital Micro Jump Field Generator on dreadnoughts/carriers have distinct spool, range and mass rules and no row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-131718"
+  },
+  {
+   "acceptance": "Special edition hulls (e.g. Metamorphosis, Sunesis, Gnosis, Praxis) apply their role-based scanning, hacking, warp stability and specialized hold bonuses from SDE dogma effects without skill scaling.",
+   "domain": "modules",
+   "id": "feat:modules.vectored-thruster-array",
+   "plan_task": "DG-1",
+   "sources": [
+    "wiki:Special_Edition_Ships",
+    "wiki:Ships"
+   ],
+   "title": "Metamorphosis and special hull integrated role traits",
+   "why_missing": "feat:dogma.dogma-effects-ships covers standard skill-scaled hull bonuses, while special edition hulls with flat role bonuses and integrated traits have no dedicated test row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-131718"
+  },
+  {
+   "acceptance": "Micro Jump Field Generator (Command Destroyers) jumps at most 25 non-scrambled ships, drones and probes within 6 km radius 100 km forward along the caster's heading vector; tethered, sieged, triaged, bastioned or industrial-cored ships are not moved.",
+   "domain": "modules",
+   "id": "feat:modules.micro-jump-field-boosh-limit",
+   "plan_task": "SP-3",
+   "sources": [
+    "wiki:Propulsion_equipment",
+    "wiki:Command_Destroyers"
+   ],
+   "title": "Micro Jump Field Generator 25-ship cap and immobility exclusions",
+   "why_missing": "feat:modules.micro-jump-drive bundles MJD and 'field variant jumps nearby ships' into one sentence, hiding the 25-ship cap, 6 km radius, drone/probe displacement, and immobility/tether exclusions.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-131718"
+  },
+  {
+   "acceptance": "Tenebrex Cyno Jammer Flex structure requires the sovereignty upgrade online, takes 5 minutes to spool up system-wide cyno jamming (beyonce.GetCynoJammerState), and immediately ceases jamming when reinforced into armor or hull.",
+   "domain": "modules",
+   "id": "feat:modules.cynosural-field-jammer-structure",
+   "plan_task": null,
+   "sources": [
+    "wiki:Navigation_structures",
+    "client:eve/client/script/remote/michelle.pyj"
+   ],
+   "title": "Tenebrex Cyno Jammer structure spool-up and reinforcement disable",
+   "why_missing": "feat:modules.cyno-jammer and feat:sovereignty.sov-cyno-jammer-upgrade do not cover the Tenebrex structure's 5-minute activation spool-up or its deactivation when reinforced.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-131718"
+  },
+  {
+   "acceptance": "Auto Targeting System high-slot module passively adds +2/+3 maximum locked targets and when activated locks hostile targets within targeting range automatically.",
+   "domain": "modules",
+   "id": "feat:modules.auto-targeting-system",
+   "plan_task": "DG-5",
+   "sources": [
+    "wiki:Targeting",
+    "wiki:Modules"
+   ],
+   "title": "Auto Targeting System passive target cap and active auto-lock",
+   "why_missing": "No row covers the Auto Targeting System module's dual passive (+maxLockedTargets) and active (auto-lock) behavior.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-131718"
+  },
+  {
+   "acceptance": "Passive Targeter module locks a target with a lock-time penalty without sending an OnTarget targeted-by notification (yellow-box) to the locked ship.",
+   "domain": "modules",
+   "id": "feat:modules.passive-targeter",
+   "plan_task": "DG-5",
+   "sources": [
+    "wiki:Targeting",
+    "wiki:Modules"
+   ],
+   "title": "Passive Targeter stealth lock without yellow-boxing",
+   "why_missing": "feat:dogma.targeting-lock requires OnTarget notifications to the target, missing the Passive Targeter mechanic that suppresses the target's lock warning.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-131718"
+  },
+  {
+   "acceptance": "Survey Probe Launcher loads Quest/Discovery/Gaze Moon Survey Probes, launches a probe toward a targeted moon (scanMgr), and delivers OnMoonScanComplete after the probe's flight/analysis timer.",
+   "domain": "modules",
+   "id": "feat:modules.mining-survey-chipset",
+   "plan_task": "MN-13",
+   "sources": [
+    "wiki:Moon_mining",
+    "client:eve/client/script/parklife/scanSvc.pyj"
+   ],
+   "title": "Survey Probe Launcher and Moon Survey Probe analysis timers",
+   "why_missing": "feat:scanning.moon-survey-probe states the outcome (OnMoonScanComplete) without covering the Survey Probe Launcher module, probe types, and per-probe analysis timer.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-131718"
+  },
+  {
+   "acceptance": "Faction/special combat drones (Gecko, Augmented, Integrated, Subverted) deal split multi-type damage (omni or primary+secondary damage attributes) per cycle using their SDE dogma attributes and consume 50 Mbit/s (Gecko) bandwidth.",
+   "domain": "drones",
+   "id": "feat:drones.gecko-subverted-bandwidth",
+   "plan_task": "C-7",
+   "sources": [
+    "wiki:Drones",
+    "wiki:Drone_mechanics"
+   ],
+   "title": "Gecko and Augmented/Subverted multi-damage drone attacks",
+   "why_missing": "feat:drones.engage-target only checks single-damage drone attacks; multi-damage-attribute drones (Integrated/Augmented/Gecko) require summing all four EM/Thermal/Kinetic/Explosive dogma attributes on drone attack cycles.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-131718"
+  },
+  {
+   "acceptance": "Support fighter squadrons apply warp disruption (Siren), stasis webification (Dromi), energy neutralization (Cenobite), and ECM (Scarab) scaled by surviving squadron size (fighterMgr.CmdActivateAbilitySlots).",
+   "domain": "drones",
+   "id": "feat:drones.support-fighter-abilities",
+   "plan_task": "S-2",
+   "sources": [
+    "wiki:Fighters",
+    "client:eve/client/script/parklife/fightersSvc.pyj"
+   ],
+   "title": "Support fighter EWAR squadrons (Cenobite, Scarab, Siren, Dromi)",
+   "why_missing": "feat:drones.fighter-abilities lists abilities in one coarse row without testing support fighter EWAR scaling by current squadron member count.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-131718"
+  },
+  {
+   "acceptance": "Space superiority light fighters (Equite, Gram, Locust, Satyr) apply their anti-fighter missile volley and Evasive Maneuvers speed/signature reduction ability with cooldown (fighterMgr).",
+   "domain": "drones",
+   "id": "feat:drones.light-fighter-space-superiority",
+   "plan_task": "S-2",
+   "sources": [
+    "wiki:Fighters",
+    "client:eve/client/script/parklife/fightersSvc.pyj"
+   ],
+   "title": "Space superiority fighter anti-fighter bonus and evasive maneuvers",
+   "why_missing": "No row covers Space Superiority fighters' anti-fighter abilities and Evasive Maneuvers ability slot.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-131718"
+  },
+  {
+   "acceptance": "Standup Point Defense Battery on XL structures deals omni AoE pulse damage within its short-range radius around the structure (structureControl), hitting all hostile ships, drones and fighters in range.",
+   "domain": "structures",
+   "id": "feat:structures.standup-point-defense-battery",
+   "plan_task": null,
+   "sources": [
+    "wiki:Upwell_structure",
+    "client:eve/client/script/ui/services/structure/structureControl.pyj"
+   ],
+   "title": "Standup Point Defense Battery AoE pulse weapon",
+   "why_missing": "feat:structures.structure-weapons bundles all structure weapons into one coarse row without separate verification of Standup Point Defense Battery AoE mechanics.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-131718"
+  },
+  {
+   "acceptance": "Standup Guided Bomb Launcher fires light/heavy guided bombs at locked targets that detonate on impact for AoE damage scaled by target signature radius (structureControl).",
+   "domain": "structures",
+   "id": "feat:structures.standup-guided-bomb-launcher",
+   "plan_task": null,
+   "sources": [
+    "wiki:Guided_Bombs",
+    "client:eve/client/script/ui/services/structure/structureControl.pyj"
+   ],
+   "title": "Standup Guided Bomb Launcher AoE projectile",
+   "why_missing": "feat:structures.structure-weapons coarsens guided bombs, AoE neut/ECM, point defense, and missiles into one row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-131718"
+  },
+  {
+   "acceptance": "Keepstar Standup Arcing Vorton Projector fires a beam that chains massive omni damage across up to 5 targets within jump radius while immobilizing the gunner's weapon cycle (structureControl).",
+   "domain": "structures",
+   "id": "feat:structures.standup-superweapon-arcing-vorton",
+   "plan_task": null,
+   "sources": [
+    "wiki:Upwell_structure",
+    "client:eve/client/script/ui/services/structure/structureControl.pyj"
+   ],
+   "title": "Keepstar Standup Arcing Vorton Projector superweapon",
+   "why_missing": "No row covers the Keepstar-exclusive Standup Arcing Vorton Projector superweapon.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-131718"
+  },
+  {
+   "acceptance": "At most one Upwell Palatine Keepstar may be anchored across the entire cluster at any time; structureDeployment.Anchor rejects a second Palatine Keepstar while one exists.",
+   "domain": "structures",
+   "id": "feat:structures.upwell-palatine-keepstar-limit",
+   "plan_task": null,
+   "sources": [
+    "wiki:Upwell_structure",
+    "wiki:Anchoring_structures"
+   ],
+   "title": "Upwell Palatine Keepstar cluster-wide uniqueness rule",
+   "why_missing": "feat:structures.anchor-restrictions mentions per-system limits, missing the cluster-wide singleton restriction on the Upwell Palatine Keepstar.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-131718"
+  },
+  {
+   "acceptance": "Standup M-Set and L-Set reprocessing rigs on Athanor and Tatara refineries apply different base yield bonuses for Asteroid Ore, Ice, and Moon Ore scaled by high-sec (1.0x), low-sec (1.06x) and null-sec/WH (1.12x) security multipliers.",
+   "domain": "structures",
+   "id": "feat:structures.reprocessing-rig-security-multipliers",
+   "plan_task": "MN-12",
+   "sources": [
+    "wiki:Reprocessing",
+    "wiki:Upwell_structure"
+   ],
+   "title": "Refinery reprocessing rig security-band multipliers",
+   "why_missing": "feat:mining.reprocessing-yield and feat:structures.service-reprocessing do not test the security-band multiplier differences and ore/ice/moon-ore rig split on Athanor vs Tatara.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-131718"
+  },
+  {
+   "acceptance": "Capital ship blueprints (Dreadnoughts, Carriers, FAX, Rorqual, Jump Freighters) require the Standup Capital Shipyard service in low/null/WH space, and Supercarriers/Titans require a Sotiyo with Standup Supercapital Shipyard in sovereignty null-sec with the Supercapital Construction Facilities upgrade online.",
+   "domain": "industry",
+   "id": "feat:industry.capital-component-construction",
+   "plan_task": "E-4",
+   "sources": [
+    "wiki:Capital_ships",
+    "wiki:Manufacturing",
+    "client:eve/client/script/industry/industrySvc.pyj"
+   ],
+   "title": "Capital ship construction and Standup Capital/Supercapital Shipyard gating",
+   "why_missing": "feat:industry.manufacturing and feat:structures.service-industry do not cover Capital Shipyard vs Supercapital Shipyard service and sovereignty upgrade requirements.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-131718"
+  },
+  {
+   "acceptance": "A Blueprint Original (BPO) with ME > 0 or TE > 0 cannot be repackaged into a market-sellable stack unless the player explicitly confirms resetting its ME/TE research to 0 (repackagingSvc.RepackageItems).",
+   "domain": "industry",
+   "id": "feat:industry.blueprint-pack-unpack",
+   "plan_task": null,
+   "sources": [
+    "wiki:Blueprints",
+    "wiki:Assembling_and_repackaging",
+    "client:eve/client/script/ui/services/menuSvcExtras/invItemFunctions.pyj"
+   ],
+   "title": "Blueprint Original repackaging restriction when researched",
+   "why_missing": "feat:ships.repackage covers ships and modules, missing the BPO research-loss repackaging rule required before listing a BPO on the regional market.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-131718"
+  },
+  {
+   "acceptance": "marketProxy.PlaceMultiSellOrder accepts a batch of items with individual durations/prices, validates each item's market eligibility and repackaged state, and deducts individual broker fees and sales taxes atomically.",
+   "domain": "market",
+   "id": "feat:market.multisell-quote-fees",
+   "plan_task": "E-2",
+   "sources": [
+    "wiki:Trading",
+    "client:eve/client/script/ui/services/marketsvc.pyj"
+   ],
+   "title": "Multi-sell order batching and per-item fee accounting",
+   "why_missing": "feat:market.place-sell only describes listing items at a station without covering multi-item batch validation, immediate-match vs sell-order split in PlaceMultiSellOrder, and repackaged-only enforcement.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-131718"
+  },
+  {
+   "acceptance": "marketProxy.BuyMultipleItems matches requested quantities across multiple typeIDs at the station/structure against the cheapest available sell orders, returning partial/unfilled statuses per type when supply or ISK is insufficient.",
+   "domain": "market",
+   "id": "feat:market.multibuy-import-order-matching",
+   "plan_task": "E-2",
+   "sources": [
+    "wiki:Trading",
+    "client:eve/client/script/ui/services/marketsvc.pyj"
+   ],
+   "title": "Multibuy batch purchase across multiple types",
+   "why_missing": "feat:market.instant-buy does not cover multi-type batch purchasing (BuyMultipleItems) with partial availability handling.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-131718"
+  },
+  {
+   "acceptance": "Contracting BPOs and BPCs via contractProxy exposes each blueprint's copy flag, materialEfficiency, timeEfficiency and runs in GetContractInfo / SearchContracts and preserves them upon contract acceptance.",
+   "domain": "contracts",
+   "id": "feat:contracts.item-exchange-blueprints-metadata",
+   "plan_task": "E-3",
+   "sources": [
+    "wiki:Contracts",
+    "wiki:Blueprints",
+    "client:eve/client/script/ui/shared/neocom/contracts/contractPanels.pyj"
+   ],
+   "title": "Blueprint copy/original ME/TE/runs preservation in contracts",
+   "why_missing": "feat:contracts.item-exchange and feat:contracts.search do not test blueprint instance metadata (BPC vs BPO, ME, TE, remaining runs) in contract inspection and search.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-131718"
+  },
+  {
+   "acceptance": "Pirate Forward Operating Bases spawn in high/low-sec systems, launch raiding fleets and defending responses scaled to attacking player fleet composition, and drop structure loot and bounties on destruction.",
+   "domain": "pve",
+   "id": "feat:pve.pirate-fob-forward-operating-base",
+   "plan_task": null,
+   "sources": [
+    "wiki:Forward_Operating_Base",
+    "wiki:NPC_Mining_Operations"
+   ],
+   "title": "Blood Raider and Guristas Forward Operating Bases (FOB)",
+   "why_missing": "feat:mining.npc-mining-ops covers belt mining NPCs, but Pirate Forward Operating Bases (FOBs) that spawn those ops and scale defense fleets have no row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-131718"
+  },
+  {
+   "acceptance": "Activating an Abyssal filament leaves a warpable/scannable Abyssal Trace in the origin solar system until the pilot exits or dies; exiting high-tier filaments in high-sec applies a 15-minute Suspect flag per V24 tier/security rules.",
+   "domain": "pve",
+   "id": "feat:pve.abyssal-trace-suspect-flag",
+   "plan_task": null,
+   "sources": [
+    "wiki:Abyssal_Deadspace",
+    "wiki:Abyssal_filaments",
+    "client:abyss/client/abyssal_service.pyj"
+   ],
+   "title": "Abyssal trace persistence in space and high-sec suspect timer",
+   "why_missing": "feat:navigation.filament-abyssal and feat:pve.abyssal-pocket do not cover the persistent Abyssal Trace left in the origin system or the high-tier high-sec suspect flag.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-131718"
+  },
+  {
+   "acceptance": "Observatory Flashpoint sites in Pochven require fleet composition/standing access, spawn Triglavian/EDENCOM defense waves and Dreadnought/World Ark bosses, and pay collective ISK and DED/Triglavian LP to up to 15 fleet members.",
+   "domain": "pve",
+   "id": "feat:pve.triglavian-world-ark-observatory",
+   "plan_task": null,
+   "sources": [
+    "wiki:Triglavian_Invasion_special_NPCs",
+    "wiki:Getting_positive_Triglavian_and_EDENCOM_standings"
+   ],
+   "title": "Pochven Observatory Flashpoint sites and World Ark",
+   "why_missing": "feat:npc.triglavians and feat:navigation.pochven-travel do not cover Pochven's signature PvE content: Observatory Flashpoint sites and their 15-pilot payout mechanics.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-131718"
+  },
+  {
+   "acceptance": "Characters in NPC starter/school corporations pay the fixed 11% NPC corporation tax on NPC bounty ticks and agent mission ISK/LP rewards above the minimum taxable threshold (100,000 ISK), recorded in the wallet journal.",
+   "domain": "corporation",
+   "id": "feat:corporation.npc-corp-tax-rate",
+   "plan_task": "SO-3",
+   "sources": [
+    "wiki:NPC_corporations",
+    "wiki:Tax"
+   ],
+   "title": "NPC corporation 11% ISK and LP tax deduction",
+   "why_missing": "feat:corporation.corp-tax covers player-corporation tax credited to the corp master wallet, missing the 11% NPC corporation sink tax and threshold rule.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-131718"
+  },
+  {
+   "acceptance": "Chat messages containing showinfo:, fitting:, killReport:, bookmarkFolder: and overviewPreset: links preserve their payloads through chat / mailMgr and resolve via their respective server handlers when clicked by recipients.",
+   "domain": "social",
+   "id": "feat:social.chat-item-fitting-hyperlinks",
+   "plan_task": "SO-7",
+   "sources": [
+    "wiki:Neocom",
+    "client:eve/client/script/ui/services/menuSvcExtras/menuFunctions.pyj",
+    "quasar:chat"
+   ],
+   "title": "In-game chat hyperlinks for items, fittings, killmails, bookmarks and overview profiles",
+   "why_missing": "Individual services exist in scattered rows, but chat/mail hyperlink preservation and server resolution across the 5 interactive link schemes has no row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-131718"
+  },
+  {
+   "acceptance": "ESI GET /corporations/{corporation_id}/structures/ returns each owned Upwell structure's state, fuel_expires, state_timer_start/state_timer_end, reinforce_hour, next_reinforce_hour/next_reinforce_apply, and online services list reflecting live server structure state.",
+   "domain": "esi",
+   "id": "feat:esi.corporations.structures-services-timers",
+   "plan_task": null,
+   "sources": [
+    "wiki:Upwell_structure",
+    "client:eve/client/script/ui/structure/structureBrowser/reinforcementTimeWnd.pyj"
+   ],
+   "title": "ESI GET /corporations/{corporation_id}/structures state, fuel expires, and reinforcement schedule",
+   "why_missing": "esi:GET /corporations/{corporation_id}/structures has no companion feat:esi.* row verifying that structure reinforcement timers, fuel expiry, and service states match the live Upwell structure state machine.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261018-131718"
   }
  ],
  "rejected_triage": [],
- "fake_done": []
+ "fake_done": [
+  {
+   "evidence": "crates/eve-server/src/esi/character_routes.rs:290-323 maps `ch.jump_cooldown_until_unix` (jump activation cooldown) to `jump_fatigue_expire_date` (character_routes.rs:304-309) instead of computing fatigue expiry from `ch.jump_fatigue_minutes`, and maps `ch.last_clone_jump_unix` (clone jump timestamp) to both `last_jump_date` and `last_update_date` (character_routes.rs:310-320). Tested at crates/eve-server/tests/esi_routes.rs:973-975, 1148-1156.",
+   "id": "esi:GET /characters/{character_id}/fatigue",
+   "flagged_by_audit": "20261018-131718"
+  },
+  {
+   "evidence": "crates/eve-server/src/esi/character_routes.rs:1040-1089 (`get_character_mail`) ignores the `labels` and `last_mail_id` query parameters and omits `timestamp`, `is_read`, and `labels` from returned mail headers. Tested at crates/eve-server/tests/esi_routes.rs:1434-1444.",
+   "id": "esi:GET /characters/{character_id}/mail",
+   "flagged_by_audit": "20261018-131718"
+  },
+  {
+   "evidence": "crates/eve-server/src/esi/character_routes.rs:1184-1253 (`get_character_mail_id`) omits `timestamp`, `read`, and `labels` from the returned mail body object. Tested at crates/eve-server/tests/esi_routes.rs:1445-1452.",
+   "id": "esi:GET /characters/{character_id}/mail/{mail_id}",
+   "flagged_by_audit": "20261018-131718"
+  },
+  {
+   "evidence": "crates/eve-server/src/esi/character_routes.rs:598-617 returns only `json!({ \"online\": online })`, omitting `last_login`, `last_logout`, and `logins` required by the acceptance criteria (\"returns online status, last login/logout, login count\"), and treats `s.character_id.is_none()` (an account logged in without selecting `char_id`) as `online: true` for `char_id` (character_routes.rs:610-611). Tested at crates/eve-server/tests/esi_routes.rs:1243-1249.",
+   "id": "esi:GET /characters/{character_id}/online",
+   "flagged_by_audit": "20261018-131718"
+  },
+  {
+   "evidence": "crates/eve-server/src/esi/character_routes.rs:230-251 returns hardcoded external CCP Tranquility CDN strings (`https://images.evetech.net/characters/{char_id}/portrait?tenant=tranquility&size=64..512`) instead of reflecting local server portrait storage or server configuration. Tested at crates/eve-server/tests/esi_routes.rs:1126-1135.",
+   "id": "esi:GET /characters/{character_id}/portrait",
+   "flagged_by_audit": "20261018-131718"
+  },
+  {
+   "evidence": "crates/eve-server/src/esi/character_routes.rs:618-655 always sets `ship_name` to the static SDE type name (`ctx.sde.types.get(&ship.type_id).map(|t| t.name.clone())`, lines 641-645) because `InventoryItemRecord` does not store custom user-assigned ship names. Tested at crates/eve-server/tests/esi_routes.rs:1251-1259.",
+   "id": "esi:GET /characters/{character_id}/ship",
+   "flagged_by_audit": "20261018-131718"
+  },
+  {
+   "evidence": "crates/eve-server/src/esi/character_routes.rs:541-568 never populates `start_date` or `finish_date` on any skill queue entry (violating \"returns queue with start/finish dates\") and sets `\"training_start_sp\"` equal to `\"level_start_sp\"` (lines 555-556). Tested at crates/eve-server/tests/esi_routes.rs:1204-1213.",
+   "id": "esi:GET /characters/{character_id}/skillqueue",
+   "flagged_by_audit": "20261018-131718"
+  },
+  {
+   "evidence": "crates/eve-server/src/esi/character_routes.rs:481-515 hardcodes `\"active_skill_level\": s.level as i64` identical to `\"trained_skill_level\": s.level as i64` (lines 500-501), ignoring clone state (`is_omega` / Alpha skill caps). Tested at crates/eve-server/tests/esi.rs:924-930.",
+   "id": "esi:GET /characters/{character_id}/skills",
+   "flagged_by_audit": "20261018-131718"
+  },
+  {
+   "evidence": "crates/eve-server/src/esi/character_routes.rs:983-1009 hardcodes wallet divisions 2 through 7 to `0.0` (`let bal = if div == 1 { corp.master_wallet.to_wire_f64() } else { 0.0 };`, line 1000) because `CorporationRecord` only stores a single `master_wallet`. Tested at crates/eve-server/tests/esi_routes.rs:1397-1407.",
+   "id": "esi:GET /corporations/{corporation_id}/wallets",
+   "flagged_by_audit": "20261018-131718"
+  },
+  {
+   "evidence": "crates/eve-server/src/esi/sample_routes.rs:738-764 fabricates insurance costs as `base * 0.05..0.30` and payouts as `base * 0.50..1.00` from raw `t.base_price` (lines 749-759), which neither matches live EVE's insurance tier curve (Basic 10% cost / 40% payout through Platinum 30% cost / 100% payout of mineral-adjusted reference value) nor shares state with in-game `insuranceSvc`. Tested at crates/eve-server/tests/esi_routes.rs:403-416.",
+   "id": "esi:GET /insurance/prices",
+   "flagged_by_audit": "20261018-131718"
+  },
+  {
+   "evidence": "crates/eve-server/src/esi/universe_routes.rs:466-518 iterates over `snap.structures.values()` (player Upwell structures such as Astrahus type_id 35832 in crates/eve-server/tests/esi_routes.rs:197-215, 524-540) instead of Sovereignty Hubs / Territorial Claim Units, fabricates `vulnerability_occupancy_level` via a hardcoded formula `(1.0 + (s.military_index as f64 + s.industrial_index as f64 + s.strategic_index as f64) * 0.2).clamp(1.0, 6.0)` (universe_routes.rs:483-489), and fabricates `vulnerable_start_time` as `(now / 86_400) * 86_400 + 18 * 3_600` (universe_routes.rs:490-491).",
+   "id": "esi:GET /sovereignty/structures",
+   "flagged_by_audit": "20261018-131718"
+  },
+  {
+   "evidence": "crates/eve-server/src/esi/universe_routes.rs:605-657 echoes `\"description\": t.name` (line 647, returning the type's name as its description instead of the SDE description) and hardcodes `\"is_default\": false` for every entry in `dogma_effects` (line 638). Tested at crates/eve-server/tests/esi.rs:791-824.",
+   "id": "esi:GET /universe/types/{type_id}",
+   "flagged_by_audit": "20261018-131718"
+  },
+  {
+   "evidence": "crates/eve-server/src/esi/character_routes.rs:36-57 (`resolve_item_coordinates`) returns the station/structure's solar-system coordinates (`st.position`) when an item is docked in a hangar and `[0.0, 0.0, 0.0]` otherwise (`InventoryItemRecord` has no in-space position field), inverting live ESI semantics where hangar items are `(0,0,0)` and in-space assets return their actual coordinates in space. Tested at crates/eve-server/tests/esi_routes.rs:1329-1339.",
+   "id": "esi:POST /characters/{character_id}/assets/locations",
+   "flagged_by_audit": "20261018-131718"
+  },
+  {
+   "evidence": "crates/eve-server/src/esi/character_routes.rs:143-177 (`collect_asset_names`, called at lines 783-795) looks up `ctx.sde.types.get(&item.type_id)` and returns the static SDE type name (`\"Rifter\"`) for any item instead of the custom user-assigned name of singleton ships/containers. Tested at crates/eve-server/tests/esi_routes.rs:1340-1350.",
+   "id": "esi:POST /characters/{character_id}/assets/names",
+   "flagged_by_audit": "20261018-131718"
+  },
+  {
+   "evidence": "crates/eve-server/src/esi/character_routes.rs:1091-1182 (`post_character_mail`) ignores `approved_cost` and never checks or deducts CSPA charges (\"sends mail with CSPA charge\"). Tested at crates/eve-server/tests/esi_routes.rs:1422-1432.",
+   "id": "esi:POST /characters/{character_id}/mail",
+   "flagged_by_audit": "20261018-131718"
+  },
+  {
+   "evidence": "crates/eve-server/src/esi/character_routes.rs:36-57 and 882-919 (`post_corporation_assets_locations`) return the station/structure solar-system position for hangar items and `(0,0,0)` for everything else, with no in-space asset coordinate storage. Tested at crates/eve-server/tests/esi_routes.rs:1372-1384.",
+   "id": "esi:POST /corporations/{corporation_id}/assets/locations",
+   "flagged_by_audit": "20261018-131718"
+  },
+  {
+   "evidence": "crates/eve-server/src/esi/character_routes.rs:143-177 (`collect_asset_names`, called by `post_corporation_assets_names` at lines 921-958) returns static SDE type names (`ctx.sde.types.get(&item.type_id)`) instead of custom container/ship names; crates/eve-server/tests/esi_routes.rs:1385-1395 even tests it against a blueprint item (item_id 9400).",
+   "id": "esi:POST /corporations/{corporation_id}/assets/names",
+   "flagged_by_audit": "20261018-131718"
+  },
+  {
+   "evidence": "Acceptance: 'Banned or suspended accounts are refused at login with the correct ban message and expiry.' The tagged test (e2e_journeys.rs:7106-7140) tests only a timed GM /ban; suspension is never exercised. The error code 'AccountBanned' is a bridge-invented string (crates/eve-server/src/services/auth_cache.rs:73), and the test only checks substrings of a server-composed message (:7135-7139). Nothing shows it is the V24 login-failure message/UserError the client renders.",
+   "id": "feat:account.account-bans",
+   "flagged_by_audit": "20261018-073440"
+  },
+  {
+   "evidence": "Tagged test test_phase_0_s9_service_roles_bitmask_and_production_account_seed (crates/eve-server/tests/e2e_journeys.rs:6397-6500) grants privilege by mutating the in-process session directly: `sess.role |= ROLE_CONTENT` (:6445) and `sess.role |= ROLE_GML` (:6487). It never uses a persisted GM/admin account role. Acceptance asks for roles 'persisted and sent in session', but there is no restart/persistence check and no assertion that the role reaches the client (session-change payload). Only the in-memory gate is exercised.",
+   "id": "feat:account.account-roles",
+   "flagged_by_audit": "20261018-073440"
+  },
+  {
+   "evidence": "Acceptance: 'multiLoginBlocker.Login kicks or refuses a second concurrent session on the same account per V24 rules.'\n\nWhat the handler does (crates/eve-server/src/services/auth_cache.rs):\n- It decides kick vs refuse from an assumed bool argument (args[0] \u2192 allow_displace, :144). Nothing evidences that the V24 characterSelection call passes a bool.\n- It answers with bridge-invented error codes: 'AlreadyLoggedIn' and 'SessionKicked' (:168-172), and 'MultiLoginBlocked' elsewhere. None is shown to be the V24 UserError.\n- authentication.Login already grabs the online lock silently (:89-97), so the decision is not made at the V24 multiLoginBlocker call point.\n\nThe displaced client gets no notification or disconnect. It is only rejected lazily on its next RPC: the test asserts SessionKicked only after sess1 makes another call (tests/auth.rs:502-520).\n\nThe tagged test (tests/auth.rs:437-520) asserts only these invented codes. Same failure mode as the earlier feat:account.account-bans flag.",
+   "id": "feat:account.multi-login-block",
+   "flagged_by_audit": "20261018-090529"
+  },
+  {
+   "evidence": "Acceptance: 'bans/suspends an account ... enforced at next login and kicks live sessions.' In the tagged test the live session is first removed with a separate `/kick demo` (e2e_journeys.rs:7039-7049), and `/ban` runs only afterwards (:7107-7117). So the ban's own live-session kick is never exercised. The /ban handler (auth_cache.rs:262-309) only calls ban_account + release_user_bindings. Suspend is not tested.",
+   "id": "feat:admin.gm-ban",
+   "flagged_by_audit": "20261018-073440"
+  },
+  {
+   "evidence": "crates/eve-server/src/esi/character_routes.rs:304-320 conflates jump activation cooldown (`jump_cooldown_until_unix`) with jump fatigue expiry (`jump_fatigue_expire_date`), ignores `jump_fatigue_minutes`, and uses `last_clone_jump_unix` for `last_jump_date` and `last_update_date`. Tested at crates/eve-server/tests/esi_routes.rs:973-975, 1148-1156.",
+   "id": "feat:esi.character.fatigue",
+   "flagged_by_audit": "20261018-131718"
+  },
+  {
+   "evidence": "crates/eve-server/src/esi/character_routes.rs:230-251 hardcodes `https://images.evetech.net/characters/{char_id}/portrait?tenant=tranquility&size=...` URLs with no connection to server-stored character portraits. Tested at crates/eve-server/tests/esi_routes.rs:1126-1135.",
+   "id": "feat:esi.character.portrait",
+   "flagged_by_audit": "20261018-131718"
+  },
+  {
+   "evidence": "crates/eve-server/src/esi/sample_routes.rs:749-759 synthesizes insurance tier costs (`0.05..0.30 * base_price`) and payouts (`0.50..1.00 * base_price`) with no backing `insuranceSvc` pricing logic. Tested at crates/eve-server/tests/esi_routes.rs:403-416.",
+   "id": "feat:esi.insurance.prices",
+   "flagged_by_audit": "20261018-131718"
+  },
+  {
+   "evidence": "crates/eve-server/src/esi/character_routes.rs:641-645 returns the static SDE hull type name as `ship_name` rather than the ship's custom name (`SetShipName` / `SetLabel`). Tested at crates/eve-server/tests/esi_routes.rs:1251-1259.",
+   "id": "feat:esi.location.ship",
+   "flagged_by_audit": "20261018-131718"
+  },
+  {
+   "evidence": "crates/eve-server/src/esi/character_routes.rs:500-501 always sets `active_skill_level` equal to `trained_skill_level` without checking `ch.is_omega` or Alpha skill level caps. Tested at crates/eve-server/tests/esi.rs:924-930.",
+   "id": "feat:esi.skills.skills",
+   "flagged_by_audit": "20261018-131718"
+  },
+  {
+   "evidence": "crates/eve-server/src/esi/universe_routes.rs:466-518 returns Upwell structures from `snap.structures` instead of sovereignty structures, and synthesizes ADM (`vulnerability_occupancy_level`) and vulnerability window timestamps (`vulnerable_start_time` / `vulnerable_end_time`) from wall-clock `now` (universe_routes.rs:480-492); crates/eve-server/tests/esi_routes.rs:524-540 only asserts that an Astrahus (35832) is returned with `vulnerability_occupancy_level >= 1.0`.",
+   "id": "feat:esi.sovereignty.structures",
+   "flagged_by_audit": "20261018-131718"
+  },
+  {
+   "evidence": "Acceptance: 'V24 SDE/FSD static data imported and loaded at runtime (types, dogma, map, blueprints, NPCs).' The tagged test test_phase_1_d1_to_d5... (e2e_journeys.rs:6586-6596) asserts only the resource count, non-empty types/solar_systems, the market_groups count and npc_spawn_groups == 392. It has no dogma attribute/effect or blueprint assertions; those exist only in the untagged eve-sde test. The 'NPCs' clause rests on sde_npc_spawn_groups, which tools/sde-import/import_sde.py:1831 synthesizes with build_v24_npc_spawn_groups(groups, types), grouping category-11 types (:1404-1405). That is derived data presented as SDE, not imported and not labelled as derived.",
+   "id": "feat:serverops.static-data",
+   "flagged_by_audit": "20261018-073440"
+  },
+  {
+   "evidence": "crates/eve-sde/src/lib.rs:313-328, 562-658, 1185-1222, 1289, 1887-2015 \u2014 Task D-2 in action_plan.md requires: \"Add indexed lookups: types, groups, categories, dogma_attributes, dogma_effects, type_materials, blueprints, solar_systems, stargates, celestials_in_system, stations, agents, planet_schematics, schools, races, bloodlines, ancestries, factions, npc_corporations.\" SdeRegistry (crates/eve-sde/src/lib.rs:593-658) has no indexed stations lookup map (HashMap<i64, StationInfo>); stations are only nested inside SolarSystem.stations: Vec<StationInfo> (crates/eve-sde/src/lib.rs:313, 1246), requiring a linear scan across all 8,490 solar systems to look up a station by ID. Furthermore, SdeRegistry::open (crates/eve-sde/src/lib.rs:1188-1215) drops reprocessing_efficiency, reprocessing_stations_take, operation_id, constellation_id, region_id, is_conquerable, and orbit_id from sde_stations, hardcodes fallback owner_faction_id = 500001 (crates/eve-sde/src/lib.rs:1200-1203) and fallback corvette_type_id = 601 (crates/eve-sde/src/lib.rs:1289), and retains the legacy SdeSeedFile / SdeRegistry::from_json_str loader (crates/eve-sde/src/lib.rs:562-589, 1887-2015).",
+   "id": "plan:D-2",
+   "flagged_by_audit": "20261018-122150"
+  },
+  {
+   "evidence": "Done-when: 'Docs honesty \u2014 status labels follow rule 8' (action_plan.md:74).\n\nThe tagged test only checks string presence, not honesty:\n- test_phase_0_s10_doc_reconciliation_and_labels (crates/eve-server/tests/system.rs:74-131) checks that five phrase families are absent (:91-108).\n- It requires the docs to contain the literal numbers '72/580' and '158 handlers across 118 match arms' (:109-117). That pins the doc numbers instead of verifying them.\n\nThe docs remain dishonest against the authoritative parity output (rpc 0/1230 DONE, 7/5824 rows overall):\n- README.md:28/33/38/48/53/58/63/68 show 60\u201380% progress bars per subsystem, and README.md:75 shows 100%. These are not rule-8 labels.\n- PLAN.md:24 claims '72/1,230 (5.9%)'.\n- PLAN.md:115-118 presents 'Verified Exit Criteria' for an in-progress milestone.\n- PLAN.md:24 still cites `router.rs`, and PLAN.md:128 cites `router.rs` and `tests/e2e_journeys.rs`. The S-REFACTOR removed both files (claims.md:80, :83).",
+   "id": "plan:S-10",
+   "flagged_by_audit": "20261018-090529"
+  },
+  {
+   "evidence": "S-7 requires proximity/ownership/state checks for AttackStructure, ClaimSovereignty, CaptureComplex and the PI writers. The tagged test (e2e_journeys.rs:5911-6325) never calls ClaimSovereignty. Its 'planet not in the character's current system' check (comment :5961) actually passes a nonexistent ID 99_999_999 (:6012) and expects InvalidPlanetID (:6019), so the wrong-system rejection for a real planet is not exercised.",
+   "id": "plan:S-7",
+   "flagged_by_audit": "20261018-073440"
+  },
+  {
+   "evidence": "crates/eve-sde/src/lib.rs:455-462, 1530-1572; crates/eve-sde/tests/sde_sweep.rs:198-228 \u2014 FighterAbilityInfo (crates/eve-sde/src/lib.rs:455-462, 1538-1566) discards tooltipTextID, turretGraphicID, abilityNameID, and ability effect/cooldown/charge parameters from sde_fighter_abilities.data_json when populating SdeRegistry.fighter_abilities (only keeping ability_id, target_mode, disallow_in_high_sec, disallow_in_low_sec, icon_id, display_name_id), and sde.fighter_abilities is never referenced anywhere in crates/eve-server/. Moreover, sweep_fighter_abilities (crates/eve-sde/tests/sde_sweep.rs:198-228) only asserts against sde_manifest in SQLite rather than reading the client resource file.",
+   "id": "sde:res:/staticdata/fighterabilities.static",
+   "flagged_by_audit": "20261018-122150"
+  },
+  {
+   "evidence": "tools/sde-import/import_sde.py:1251-1256, 1784-1795; crates/eve-sde/src/lib.rs:555-560, 1774-1792; crates/eve-server/src/services/cosmetics_events.rs:208-350 \u2014 tools/sde-import/import_sde.py:1784-1795 drops fields from skins.static (such as allowCCPDevs, visibleSerenity, visibleTranquility, isStructureSkin, etc., storing only skin_id, internal_name, skin_material_id, types), and crates/eve-server/src/services/cosmetics_events.rs:208-350 never consults ctx.sde.skins or ctx.sde.skin_licenses at all (GiveSkin / ActivateSkinLicense / ApplySkin accept any arbitrary integer skinID without validating it against sde.skins).",
+   "id": "sde:res:/staticdata/skins.static",
+   "flagged_by_audit": "20261018-122150"
+  },
+  {
+   "evidence": "crates/eve-sde/src/lib.rs:164-188, 2235-2244; tools/sde-import/import_sde.py:236-262, 1014-1033, 1418-1443 \u2014 Acceptance requires: \"Loaded from the real client resource (md5 c0ee9c292aa113737029c9ec63503233, 9169272 bytes) by the SDE importer (no hand-written data); every record available to server logic; a test asserts record count and spot values against the client file.\" First, tools/sde-import/import_sde.py:236-262 extracts description_id, icon_id, graphic_id, sound_id, meta_group_id, meta_level, and tech_level from types.fsdbinary, and then tools/sde-import/import_sde.py:1014-1033, 1418-1443 drops all 7 fields when writing sde_types (and InvType in crates/eve-sde/src/lib.rs:164-188 omits them as well), so those fields on every record are not available to server logic. Second, test_real_sde_sqlite_open_and_counts (crates/eve-sde/src/lib.rs:2235-2244) never opens or reads the client file res:/staticdata/types.fsdbinary; it only reads the pre-recorded sde_manifest row from data/evomu_sde.sqlite and compares md5/byte_size/record_count against hardcoded test literals.",
+   "id": "sde:res:/staticdata/types.fsdbinary",
+   "flagged_by_audit": "20261018-122150"
+  }
+ ]
 }

@@ -766,8 +766,21 @@ async fn test_esi3_universe_hierarchy_celestials_stargates_structures_and_bulk_r
     let rifter_effs = rifter["dogma_effects"].as_array().expect("dogma_effects");
     assert!(!rifter_effs.is_empty());
     assert!(
-        rifter_effs.iter().any(|e| e["is_default"] == json!(true)),
-        "Rifter dogma_effects must include its default effect"
+        rifter_effs.iter().all(|e| e["is_default"] == json!(false)),
+        "Passive ship hull (Rifter 587) must have is_default=false on all effects per typedogma.fsdbinary"
+    );
+    let autocannon = validate_and_json(
+        &router,
+        &spec,
+        &EsiHttpRequest::new("GET", "/v3/universe/types/484/"),
+        200,
+    );
+    let ac_effs = autocannon["dogma_effects"].as_array().expect("484 dogma_effects");
+    assert!(
+        ac_effs
+            .iter()
+            .any(|e| e["effect_id"] == json!(34) && e["is_default"] == json!(true)),
+        "Active turret module (484) must have is_default=true on effect 34 per typedogma.fsdbinary"
     );
     validate_and_json(
         &router,

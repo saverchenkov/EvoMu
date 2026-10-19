@@ -63,7 +63,6 @@ async fn create_auth_session(ctx: &ServerContext, session_id: u64) -> SessionSta
 // MN-13: Moon Extraction Lifecycle & Fracture
 // ============================================================================
 #[tokio::test]
-// parity: plan:MN-13
 async fn test_mn13_moon_extraction_lifecycle_and_fracture() {
     let ctx = ServerContext::new();
     let kw = HashMap::new();
@@ -249,7 +248,6 @@ async fn test_mn13_moon_extraction_lifecycle_and_fracture() {
 // MN-14: Auto Moon Mining Service (Metenox Moon Drill)
 // ============================================================================
 #[tokio::test]
-// parity: plan:MN-14
 async fn test_mn14_auto_moon_mining_service() {
     let ctx = ServerContext::new();
     let kw = HashMap::new();
@@ -374,7 +372,6 @@ async fn test_mn14_auto_moon_mining_service() {
 // MN-15: Corp Mining Ledger & Observer Tracking
 // ============================================================================
 #[tokio::test]
-// parity: plan:MN-15
 async fn test_mn15_corp_mining_ledger_service_and_observer_tracking() {
     let ctx = ServerContext::new();
     let kw = HashMap::new();
@@ -457,7 +454,6 @@ async fn test_mn15_corp_mining_ledger_service_and_observer_tracking() {
 // MN-16: In-Space & Structure Compression & Decompression
 // ============================================================================
 #[tokio::test]
-// parity: plan:MN-16
 async fn test_mn16_in_space_and_structure_compression_and_decompression() {
     let ctx = ServerContext::new();
     let kw = HashMap::new();
@@ -683,7 +679,6 @@ async fn test_mn16_in_space_and_structure_compression_and_decompression() {
 // MN-17: Living World NPC Mining Ops & Market Supply Hauling
 // ============================================================================
 #[tokio::test]
-// parity: plan:MN-17
 async fn test_mn17_living_world_npc_mining_ops_and_market_hauling() {
     let ctx = ServerContext::new();
     let director = LivingWorldDirector::new();
@@ -772,7 +767,6 @@ async fn test_mn17_living_world_npc_mining_ops_and_market_hauling() {
 // MN-18: Mining Missions & Career Goals from Mining Ledger
 // ============================================================================
 #[tokio::test]
-// parity: plan:MN-18
 async fn test_mn18_mining_missions_and_career_goals_from_ledger() {
     let ctx = ServerContext::new();
     let kw = HashMap::new();

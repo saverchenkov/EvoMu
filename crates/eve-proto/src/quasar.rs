@@ -13,11 +13,9 @@
 
 pub mod envelopes;
 pub mod registry;
-pub mod services;
 pub mod types;
 pub use envelopes::*;
 pub use registry::*;
-pub use services::*;
 pub use types::*;
 
 use serde::{Deserialize, Serialize};

@@ -1,438 +1,438 @@
 {
- "C-1": {
-  "assessment": "PARTIAL",
-  "note": "Turret tracking and missile damage formulas with 4-channel resistances across shield, armor, and structure."
- },
- "C-2": {
-  "assessment": "PARTIAL",
-  "note": "CombatState initialized from ship dogma attributes, analytical passive shield/capacitor recharge, and OnDamageStateChange."
- },
- "C-3": {
-  "assessment": "PARTIAL",
-  "note": "Ship destruction at zero hull HP, physical wreck spawn, Loot Fairy cargo roll, pod ejection, pod loss, medical clone respawn, and self-destruct countdown tested."
- },
- "C-4": {
-  "assessment": "PARTIAL",
-  "note": "NPC belt rats, spawn groups, faction damage types, AI targeting and orbit, wreck loot tables, dynamic bounty payout, and sec status gain tested."
- },
- "C-5": {
-  "assessment": "DONE",
-  "note": "Superseded by Phase 5M (MN-01..MN-18) mining laser cycles, specialized holds, crystals, residue, compression, and reprocessing."
- },
- "C-6": {
-  "assessment": "DONE",
-  "note": "Superseded by MN-11 (compression) and MN-12 (reprocessing) using SDE typeMaterials, station base yield, skills, and scrapmetal processing."
- },
- "C-7": {
-  "assessment": "PARTIAL",
-  "note": "Salvager wreck consumption and salvage yield, tractor beam pull physics, drone bandwidth validation, launch, orbit, and recall tested."
- },
- "C-8": {
-  "assessment": "PARTIAL",
-  "note": "Weapon timer, aggression tracking, suspect and criminal timers, sec status penalty and gain, and highsec CONCORD retaliation response tested."
- },
- "CH-1": {
-  "assessment": "PARTIAL",
-  "note": "Skill training queue real-time tick engine, Alpha 5M SP cap, Omega 2x multiplier, level completion event, and pause/resume tested."
- },
- "CH-2": {
-  "assessment": "PARTIAL",
-  "note": "Skill queue save and retrieval, prerequisite recursive checking, skill history logging, and inventory skillbook injection tested."
- },
- "CH-3": {
-  "assessment": "PARTIAL",
-  "note": "Character creation with bloodline starter skills, starting 5,000 ISK wallet, starter corvette in home station, and random name generation tested."
- },
- "CH-4": {
-  "assessment": "PARTIAL",
-  "note": "Character public info, biography persistence, employment history, character sheet, owner notes, and neural attribute remap tested."
- },
- "CH-5": {
-  "assessment": "PARTIAL",
-  "note": "GM slash commands giveisk, giveskill, createitem, teleport tr, and heal with role verification tested."
- },
- "D-1": {
-  "assessment": "DONE",
-  "note": "Lossless client static data loaders with schema migration for 213 resources, spot-value assertions, and full type columns."
- },
- "D-2": {
-  "assessment": "DONE",
-  "note": "SdeRegistry indexed lookups implemented for all 20 required domains including O(1) stations map, full station columns, and non-empire corvette_type_id Option propagation."
- },
- "D-3": {
-  "assessment": "DONE",
-  "note": "SQLite relational world DB with WAL mode, foreign keys, concurrent connections, schema migrations, and transactional isolation verified."
- },
- "D-4": {
-  "assessment": "DONE",
-  "note": "Argon2id password hashing, account bans, role bitmasks, multi-login locks, and OAuth2 PKCE authorization and token exchange verified."
- },
- "D-5": {
-  "assessment": "DONE",
-  "note": "Server TOML configuration parsing, validation, default fallbacks, and feature flags tested."
- },
- "DG-1": {
-  "assessment": "PARTIAL",
-  "note": "Dogma modifierInfo evaluator with 6 domains, stacking penalties, weapon upgrades, propulsion & scrambler suppression, and command bursts."
- },
- "DG-2": {
-  "assessment": "DONE",
-  "note": "Module fit validation with CPU, PG, calibration, slot restrictions, rig size, and online/offline state machine with 75% capacitor requirement."
- },
- "DG-3": {
-  "assessment": "DONE",
-  "note": "Module activation cycle engine in SystemActor tick, capacitor deduction per cycle, propulsion boost, and deactivation notifications."
- },
- "DG-4": {
-  "assessment": "PARTIAL",
-  "note": "Combat target lock state machine with dynamic lock time from scan resolution, max targets from skills, and lock clearing on warp."
- },
- "DG-5": {
-  "assessment": "PARTIAL",
-  "note": "Ammunition load/unload, reload timers, damage vector arithmetic across shield, armor, and structure with resonance multipliers."
- },
- "DG-6": {
-  "assessment": "DONE",
-  "note": "Weapon grouping and module linking in charFittingMgr and shipGroupingSvc, fan-out activation, deactivation, and group ammo loading."
- },
- "E-1": {
-  "assessment": "DONE",
-  "note": "Broker fee calculation with Broker Relations and faction/corp standings discount, sales tax with Accounting discount, and escrow deduction tested."
- },
- "E-2": {
-  "assessment": "PARTIAL",
-  "note": "Limit orders, immediate buy and sell matching against order book, regional order book queries, order cancellation, and escrow refund tested."
- },
- "E-3": {
-  "assessment": "PARTIAL",
-  "note": "Item Exchange, Courier with collateral hold and delivery failure, and Auction contracts with bidding and escrow refund tested."
- },
- "E-4": {
-  "assessment": "PARTIAL",
-  "note": "Industry blueprint data, facilities lookup, job cost with facility tax, manufacturing, TE/ME research, copying, and delivery tested."
- },
- "E-5": {
-  "assessment": "PARTIAL",
-  "note": "Planetary Interaction with colony creation, command center upgrades, P0 extraction to P1 commodity processing, and hangar routing."
- },
- "E-6": {
-  "assessment": "PARTIAL",
-  "note": "Planetary Interaction planet info, command center placement, colony limit from skill, pin placement, links, and production routing tested."
- },
- "ESI-1": {
-  "assessment": "DONE",
-  "note": "OAuth2 PKCE (S256) HTTP SSO server implemented with /v2/oauth/authorize, /token, and /verify endpoints with bearer token validation and machoNet SSO token login."
- },
- "ESI-2": {
-  "assessment": "DONE",
-  "note": "ESI OpenAPI HTTP routing across version prefixes, metadata endpoints, and spec validation tested."
- },
- "ESI-3": {
-  "assessment": "DONE",
-  "note": "Universe celestials, status, meta, routes, search, incursions, insurance, sovereignty, wars, FW, dogma, and killmails ESI routes."
- },
- "ESI-4": {
-  "assessment": "DONE",
-  "note": "Character affiliation, portrait, standings, clones, implants, skills, queue, attributes, location, fittings, assets, wallet, and mail."
- },
- "ESI-5": {
-  "assessment": "DONE",
-  "note": "ESI-5 Industry, Markets, Wallet, and Contracts endpoints implemented with OAuth2 Bearer scope enforcement, regional order books, market history, and JSON schema validation."
- },
- "ESI-6": {
-  "assessment": "DONE",
-  "note": "ESI-6 Fleets, Corporations, Alliances, Mail, and Bookmarks routes implemented with CEO/corp role checks, hierarchy traversal, and member tracking."
- },
- "ESI-7": {
-  "assessment": "DONE",
-  "note": "ESI-7 Incursions, Opportunities, Search (/v2/characters/{id}/search/), Routes, and Planetary Interaction endpoints implemented with OpenAPI 3.1.0 conformance."
- },
- "MN-01": {
-  "assessment": "DONE",
-  "note": "Mining laser cycle, Dogma yield calculation (miningAmount * multiplier), residue probability calculation, and ore deposit to cargo/ore hold."
- },
- "MN-02": {
-  "assessment": "DONE",
-  "note": "Ice harvesting and gas harvesting cycles with specialized harvesting modules and specialized ice/gas holds."
- },
- "MN-03": {
-  "assessment": "DONE",
-  "note": "Mining ledger recording in database (charMiningLedger) with character, system, ore type, volume, and daily aggregation."
- },
- "MN-04": {
-  "assessment": "DONE",
-  "note": "Mining laser cycle engine with asteroid depletion, partial cycle yield, capacitor validation, and OnOreMined notifications."
- },
- "MN-05": {
-  "assessment": "DONE",
-  "note": "Specialized holds volume enforcement, flag validation, and stack merging for ore, ice, and gas inventories."
- },
- "MN-06": {
-  "assessment": "DONE",
-  "note": "Mining crystals with type matching, yield multipliers, crystal damage degradation, destruction, and residue math."
- },
- "MN-07": {
-  "assessment": "DONE",
-  "note": "Ice and gas harvesting cycles with Procurer ice hold, Venture gas harvesting bonus, and specialized holds deposits."
- },
- "MN-08": {
-  "assessment": "DONE",
-  "note": "Survey scanner RPC (miningScanMgr/surveyScanMgr) with range calculation and OnAsteroidRevealed notifications."
- },
- "MN-09": {
-  "assessment": "DONE",
-  "note": "Asteroid belt respawn and dynamic quantity depletion tracking across system restarts and mining cycles."
- },
- "MN-10": {
-  "assessment": "DONE",
-  "note": "Mining residue probability, waste multiplier calculation, and asteroid volume reduction without yield."
- },
- "MN-11": {
-  "assessment": "DONE",
-  "note": "Space compression in industrial ships and Upwell structure compression via structureCompressionMgr."
- },
- "MN-12": {
-  "assessment": "DONE",
-  "note": "Station and structure reprocessing service (reprocessingSvc) with tax, scrapmetal, and skill efficiency scaling."
- },
- "MN-13": {
-  "assessment": "PARTIAL",
-  "note": "Moon extraction schedule and explosion with chunk fractured asteroid field generation."
- },
- "MN-14": {
-  "assessment": "DONE",
-  "note": "Automatic moon mining drills (autoMoonMining) with decay cycles and daily ore deposit."
- },
- "MN-15": {
-  "assessment": "DONE",
-  "note": "Corporation mining ledger (corpMiningLedger) with tax deductions and member extractions."
- },
- "MN-16": {
-  "assessment": "DONE",
-  "note": "Industrial gas decompression and compressed ore transport logistics."
- },
- "MN-17": {
-  "assessment": "DONE",
-  "note": "Living world NPC mining operations with response fleets, defense escalation, and haulers."
- },
- "MN-18": {
-  "assessment": "DONE",
-  "note": "Mining mission progression (agentMiningMgr) with objective deposits and faction LP rewards."
- },
- "P-1": {
-  "assessment": "DONE",
-  "note": "PyPackedRow RLE codec with boolean bit-packing, null-bit tracking, trailing 0-bit STR/WSTR/BYTES columns, and corrupt RLE error propagation (OF-21)"
- },
- "P-2": {
-  "assessment": "DONE",
-  "note": "DBRow, CRowset, CIndexedRowset, and PackedRowList binary encoders matching PyRep wire layouts verified."
- },
- "P-3": {
-  "assessment": "DONE",
-  "note": "Object caching, CachedMethodCallResult, cache hash verification, and node cache invalidation verified."
- },
- "P-4": {
-  "assessment": "DONE",
-  "note": "Server config service RPCs, dynamic settings retrieval, and client configuration synchronization tested."
- },
- "P-5": {
-  "assessment": "DONE",
-  "note": "Notification emission pipelines, scope multicast, single-cast, and client dispatch verification complete."
- },
- "P-6": {
-  "assessment": "DONE",
-  "note": "Native machoNet GPSTransport 4-step crypto handshake state machine, VIP challenge exchange, session change notifications, and dual-transport listener in place."
- },
- "P-7": {
-  "assessment": "DONE",
-  "note": "Binary AddBalls/AddBalls2/SetState encoder and decoder matching DestinyStructs.h byte layouts, SlimItemMeta from SDE/DB, and DoDestinyUpdate notification push on space actions and ticks."
- },
- "Q-1": {
-  "assessment": "DONE",
-  "note": "All 1,455 Quasar FileDescriptorProto definitions loaded from client cache and validated against schema manifest."
- },
- "Q-2": {
-  "assessment": "DONE",
-  "note": "Quasar public gateway framing, RPC dispatch, status codes, tenancy, and idempotency verified."
- },
- "Q-3": {
-  "assessment": "DONE",
-  "note": "Quasar Identity & Entitlements backend services (GetEntitlements, GetIdentity, GetAccount, GetOmegaStatus, GetPlexBalance) implemented with PublicGatewayRouter dispatch."
- },
- "Q-4": {
-  "assessment": "DONE",
-  "note": "Quasar Character Progression services (GetProgression, GetDailyOpportunities, ClaimDailyOpportunity, GetAchievements, ClaimAchievement) implemented and tested."
- },
- "Q-5": {
-  "assessment": "DONE",
-  "note": "Quasar Fitting Simulation service (SimulateFitting) wired to ShipFittingEngine with Dogma calculations for CPU, powergrid, capacitor, EHP, DPS, and velocity."
- },
- "Q-6": {
-  "assessment": "DONE",
-  "note": "Quasar Market & Wallet services (GetOrders, GetMarketHistory, GetBalance, GetJournal) implemented with regional order query, price statistics, and wallet tracking."
- },
- "Q-7": {
-  "assessment": "DONE",
-  "note": "Quasar Space & Combat services (solarsystem, structure, killmail, ship, stargate, station, probe) implemented with SDE celestials and Dogma ship HP."
- },
- "Q-8": {
-  "assessment": "DONE",
-  "note": "Quasar Sovereignty, Faction Warfare, Project Discovery, and Operations services implemented with alliance sov indices, LP stats, and seasonal campaigns."
- },
- "Q-9": {
-  "assessment": "DONE",
-  "note": "Quasar Cosmetics and App Infrastructure services (cosmetic, skin, settings, paragon, ui) implemented with licensed SKINs, client settings, and UI layouts."
- },
- "S-1": {
-  "assessment": "DONE",
-  "note": ""
- },
- "S-10": {
-  "assessment": "DONE",
-  "note": "Reconciled documentation status labels, live candidate method ratios, handler and arm breakdown summaries, and relative links across project markdown files."
- },
- "S-11": {
-  "assessment": "DONE",
-  "note": ""
- },
- "S-2": {
-  "assessment": "PARTIAL",
-  "note": "Fighter tube loading, launching, recall, movement modes, ability slots execution, and abandon fighters tested."
- },
- "S-3": {
-  "assessment": "DONE",
-  "note": "Pharolux cyno beacon fleet queries, jump to beacon with light-year and isotope checks, bridge, and group jump tested."
- },
- "S-4": {
-  "assessment": "DONE",
-  "note": "Jump clone installation with clone bay fee, clone jump with cooldown timer and implant swap, and clone destruction tested."
- },
- "S-5": {
-  "assessment": "DONE",
-  "note": ""
- },
- "S-6": {
-  "assessment": "DONE",
-  "note": ""
- },
- "S-7": {
-  "assessment": "DONE",
-  "note": "Replaced hardcoded fallbacks with SDE Dogma attribute lookups; enforced in-space proximity, system match, and planet-resource validation for structures and skyhooks."
- },
- "S-8": {
-  "assessment": "DONE",
-  "note": ""
- },
- "S-9": {
-  "assessment": "DONE",
-  "note": "Player accounts receive no GM roles; CCP role bitmasks (ROLE_ADMIN, ROLE_GML, etc.) enforced on privileged commands; admin accounts configured."
- },
- "SO-1": {
-  "assessment": "PARTIAL",
-  "note": "EVE mail send, headers, body with auto-read, read/unread state, labels management, and notifications tested."
- },
- "SO-2": {
-  "assessment": "PARTIAL",
-  "note": "Fleet creation, hierarchy wings and squads, invite and join, broadcast events, member positions, and fleet warp tested."
- },
- "SO-3": {
-  "assessment": "PARTIAL",
-  "note": "Corporation creation, public info, wallet divisions, membership applications, and role bitmask enforcement tested."
- },
- "SO-4": {
-  "assessment": "PARTIAL",
-  "note": "Bookmarks creation, folders, shared corporate folders, update, delete, and cosmic signature bookmarking tested."
- },
- "SO-5": {
-  "assessment": "PARTIAL",
-  "note": "Directional scan cone filtering, cosmic probe launching, scan math convergence, and acceleration gates tested."
- },
- "SO-6": {
-  "assessment": "DONE",
-  "note": "Wormhole jump transition, polarization lockout timer, lifetime, mass exhaustion, and Thera system rules tested."
- },
- "SO-7": {
-  "assessment": "PARTIAL",
-  "note": "Chat channels join/leave, messaging, player-owned channels, private conversations, and delayed-local mode tested."
- },
- "SP-1": {
-  "assessment": "DONE",
-  "note": "SystemActor populates real SDE stars, planets, moons, asteroid belts, stargates, and stations as static Rigid balls in Ballpark and includes them in SetState."
- },
- "SP-2": {
-  "assessment": "DONE",
-  "note": "Interdiction spheres, mobile warp disruptors, warp bubble entrapment, and interdiction nullification tested."
- },
- "SP-3": {
-  "assessment": "PARTIAL",
-  "note": "Beyonce approach, keep at range, align, propulsion speed boost, and micro jump drive 100km teleportation tested."
- },
- "SP-4": {
-  "assessment": "DONE",
-  "note": "Asteroid belt entities, collision bounce physics with momentum exchange and damage, asteroid depletion and respawn cycles."
- },
- "SP-5": {
-  "assessment": "DONE",
-  "note": "Station and Upwell structure docking perimeter checks, dock delay, undock along orientation vector, and ship boarding tested."
- },
- "T-1": {
-  "assessment": "DONE",
-  "note": "Implemented eve-testkit JSONL attestation crate, parity tag documentation, and machoNet.GetTime RPC test."
- },
- "T-2": {
-  "assessment": "DONE",
-  "note": "Data-driven sweeps across all 213 SDE client resources, domain tables, record counts, and spot checks passing."
- },
- "T-3": {
-  "assessment": "DONE",
-  "note": "Comprehensive proptest fuzzing for MachoNet framing, DBRow codec, Destiny wire, Dogma VM, and Quasar envelopes with zero panics."
- },
- "T-4": {
-  "assessment": "DONE",
-  "note": "Golden wire PyRep marshaling, binary Destiny stream, and Quasar Protobuf wire format roundtrip verified."
- },
- "T-5": {
-  "assessment": "DONE",
-  "note": "Installed cargo-llvm-cov and cargo-mutants and added scripts/qa/verify_cov_and_mutants.py enforcing >= 85% coverage and mutation score."
- },
- "T-6": {
-  "assessment": "DONE",
-  "note": "Multi-client journey test harness running two simultaneous simulated clients with log hygiene verified."
- },
- "T-7": {
-  "assessment": "DONE",
-  "note": "Injectable ServerClock, tick pause, and time acceleration for simulated progression tested."
- },
- "Z-1": {
-  "assessment": "DONE",
-  "note": "Systematic RPC catalog dispatch closure across 216 services and 1,230 methods with CallRsp and ErrorResponse wire packets."
- },
- "Z-2": {
-  "assessment": "DONE",
-  "note": "Specialized notification emission pipelines across 7 families, scope multicast, and 128-entry bounded queue ring buffer."
- },
- "Z-3": {
-  "assessment": "DONE",
-  "note": "Binary ball mode payloads (Missile, Mushroom, Troll, Formation), continuous warp curves, visual handoff, WarpBubbleMgr interception, and scrambler effects."
- },
- "Z-4": {
-  "assessment": "DONE",
-  "note": "Full Dogma effects sweep across all 3,427 Dogma effects and 5,178 modifier specs evaluated across 6 domains."
- },
- "Z-5": {
-  "assessment": "DONE",
-  "note": "Closed all auditor flagged fake rows with genuine role bitmask enforcement, ban checking and auto-clear, multi-login blocking, and lossless static data verification."
- },
- "Z-6": {
-  "assessment": "DONE",
-  "note": "Client journeys automated test suites for launch_login, daily_goals_events, cosmetics_store, fitting_simulation, and market_orders."
- },
- "Z-7": {
-  "assessment": "DONE",
-  "note": "Quasar protobuf property-based testing covering all 6,741 message types across 135 domains with zero panic roundtrip fidelity."
- },
- "Z-8": {
-  "assessment": "NOT STARTED",
-  "note": ""
- }
+  "C-1": {
+    "assessment": "PARTIAL",
+    "note": "Turret tracking and missile damage formulas with 4-channel resistances across shield, armor, and structure; blocked by remaining combat features."
+  },
+  "C-2": {
+    "assessment": "PARTIAL",
+    "note": "CombatState initialized from ship dogma attributes, analytical passive shield/capacitor recharge, and OnDamageStateChange; blocked by remaining features."
+  },
+  "C-3": {
+    "assessment": "PARTIAL",
+    "note": "Ship destruction at zero hull HP, physical wreck spawn, Loot Fairy cargo roll, pod ejection, pod loss, medical clone respawn, and self-destruct countdown tested; blocked by remaining features."
+  },
+  "C-4": {
+    "assessment": "PARTIAL",
+    "note": "NPC belt rats, spawn groups, faction damage types, AI targeting and orbit, wreck loot tables, dynamic bounty payout, and sec status gain tested; blocked by remaining features."
+  },
+  "C-5": {
+    "assessment": "PARTIAL",
+    "note": "Superseded by Phase 5M (MN-01..MN-18); partial mining cycle and belt spawning in place."
+  },
+  "C-6": {
+    "assessment": "PARTIAL",
+    "note": "Superseded by MN-11 (compression) and MN-12 (reprocessing) using SDE typeMaterials, station base yield, skills, and scrapmetal processing."
+  },
+  "C-7": {
+    "assessment": "PARTIAL",
+    "note": "Salvager wreck consumption and salvage yield, tractor beam pull physics, drone bandwidth validation, launch, orbit, and recall tested; blocked by remaining features."
+  },
+  "C-8": {
+    "assessment": "PARTIAL",
+    "note": "Weapon timer, aggression tracking, suspect and criminal timers, sec status penalty and gain, and highsec CONCORD retaliation response tested; blocked by remaining features."
+  },
+  "CH-1": {
+    "assessment": "PARTIAL",
+    "note": "Skill training queue real-time tick engine, Alpha 5M SP cap, Omega 2x multiplier, level completion event, and pause/resume tested; blocked by remaining features."
+  },
+  "CH-2": {
+    "assessment": "PARTIAL",
+    "note": "Skill queue save and retrieval, prerequisite recursive checking, skill history logging, and inventory skillbook injection tested; blocked by remaining features."
+  },
+  "CH-3": {
+    "assessment": "PARTIAL",
+    "note": "Character creation with bloodline starter skills, starting 5,000 ISK wallet, starter corvette in home station, and random name generation tested; blocked by remaining features."
+  },
+  "CH-4": {
+    "assessment": "PARTIAL",
+    "note": "Character public info, biography persistence, employment history, character sheet, owner notes, and neural attribute remap tested; blocked by remaining features."
+  },
+  "CH-5": {
+    "assessment": "PARTIAL",
+    "note": "GM slash commands giveisk, giveskill, createitem, teleport tr, and heal with role verification tested; blocked by remaining features."
+  },
+  "D-1": {
+    "assessment": "PARTIAL",
+    "note": "Client static data loaders for 213 resources, localized English descriptions, default_effect_id from typedogma, and SQLite tables; 5/213 sde rows currently closed."
+  },
+  "D-2": {
+    "assessment": "PARTIAL",
+    "note": "SdeRegistry indexed lookups implemented for 20 domains including stations map, station columns, and non-empire corvette_type_id Option propagation; auditor-flagged sde rows pending clearance."
+  },
+  "D-3": {
+    "assessment": "DONE",
+    "note": "SQLite relational world DB with WAL mode, foreign keys, concurrent connections, schema migrations, and transactional isolation verified."
+  },
+  "D-4": {
+    "assessment": "PARTIAL",
+    "note": "Argon2id password hashing, account bans, role bitmasks, multi-login locks, and OAuth2 PKCE authorization and token exchange implemented; auditor-flagged account feat rows pending clearance."
+  },
+  "D-5": {
+    "assessment": "DONE",
+    "note": "Server TOML configuration parsing, validation, default fallbacks, and feature flags tested."
+  },
+  "DG-1": {
+    "assessment": "PARTIAL",
+    "note": "Dogma modifierInfo evaluator with 6 domains, stacking penalties, weapon upgrades, propulsion & scrambler suppression, and command bursts; 217 expression-only effects and remaining feat rows open."
+  },
+  "DG-2": {
+    "assessment": "DONE",
+    "note": "Module fit validation with CPU, PG, calibration, slot restrictions, hardpoints, rig size, and maxGroupFitted checks."
+  },
+  "DG-3": {
+    "assessment": "DONE",
+    "note": "SetModuleOnline and TakeModuleOffline state machine with 75% capacitor requirement, persistence, and OnModuleAttributeChanges notification."
+  },
+  "DG-4": {
+    "assessment": "PARTIAL",
+    "note": "Module activation cycle engine in SystemActor tick, capacitor deduction per cycle, reactivation delay, overheat rack heat damage, and OnGodmaShipEffect notifications; blocked by remaining features."
+  },
+  "DG-5": {
+    "assessment": "PARTIAL",
+    "note": "Combat target lock state machine with dynamic lock time from scan resolution, max targets from skills, EW jam/damp/paint/disrupt, and lock clearing on warp; blocked by remaining features."
+  },
+  "DG-6": {
+    "assessment": "PARTIAL",
+    "note": "Ammunition load/unload, reload timers, and weapon grouping (LinkWeapons/UnlinkModule) in charFittingMgr and shipGroupingSvc; blocked by remaining features."
+  },
+  "E-1": {
+    "assessment": "DONE",
+    "note": "Broker fee calculation with Broker Relations and faction/corp standings discount, sales tax with Accounting discount, and escrow deduction tested."
+  },
+  "E-2": {
+    "assessment": "PARTIAL",
+    "note": "Limit orders, immediate buy and sell matching against order book, regional order book queries, order cancellation, and escrow refund tested; blocked by remaining features."
+  },
+  "E-3": {
+    "assessment": "PARTIAL",
+    "note": "Item Exchange, Courier with collateral hold and delivery failure, and Auction contracts with bidding and escrow refund tested; blocked by remaining features."
+  },
+  "E-4": {
+    "assessment": "PARTIAL",
+    "note": "Industry blueprint data, facilities lookup, job cost with facility tax, manufacturing, TE/ME research, copying, and delivery tested; blocked by remaining features."
+  },
+  "E-5": {
+    "assessment": "PARTIAL",
+    "note": "PVE agent finder, agent conversation, mission offer/accept/decline/quit state machine, and standing calculations; blocked by remaining features."
+  },
+  "E-6": {
+    "assessment": "PARTIAL",
+    "note": "Planetary Interaction planet info, command center placement, colony limit from skill, pin placement, links, and production routing tested; blocked by remaining features."
+  },
+  "ESI-1": {
+    "assessment": "DONE",
+    "note": "OAuth2 PKCE (S256) HTTP SSO server implemented with /v2/oauth/authorize, /token, and /verify endpoints with bearer token validation and machoNet SSO token login."
+  },
+  "ESI-2": {
+    "assessment": "DONE",
+    "note": "ESI OpenAPI HTTP routing across version prefixes, metadata endpoints, and spec validation tested."
+  },
+  "ESI-3": {
+    "assessment": "PARTIAL",
+    "note": "Universe, Status, Meta, Routes, Search, Incursions, Insurance, Sovereignty, Wars, Faction Warfare, Dogma, and Killmails ESI routes partially closed; open operations remain."
+  },
+  "ESI-4": {
+    "assessment": "PARTIAL",
+    "note": "Character, Clones, Skills, Location, Fittings, Assets, Wallet, Loyalty, Calendar, Contacts, and Mail ESI routes partially closed; open operations remain."
+  },
+  "ESI-5": {
+    "assessment": "PARTIAL",
+    "note": "Corporation and Alliance ESI routes partially implemented; open operations remain."
+  },
+  "ESI-6": {
+    "assessment": "PARTIAL",
+    "note": "Market, Contracts, Industry, and Planetary Interaction ESI routes partially implemented; open operations remain."
+  },
+  "ESI-7": {
+    "assessment": "PARTIAL",
+    "note": "Fleets and User Interface ESI routes partially implemented; open operations and esi_external real-client journey remain."
+  },
+  "MN-01": {
+    "assessment": "PARTIAL",
+    "note": "SDE typeMaterials, compressible types, and ore type attributes loaded; regional ore and ice distribution tables remain open."
+  },
+  "MN-02": {
+    "assessment": "PARTIAL",
+    "note": "Asteroid belt balls spawned from SDE belt celestials using SDE ore types and derived security-band volume thresholds; regional distribution open."
+  },
+  "MN-03": {
+    "assessment": "PARTIAL",
+    "note": "Asteroid remaining quantity persistence, depletion, OnAsteroidTerminated removal, and respawn tick tracking partially implemented."
+  },
+  "MN-04": {
+    "assessment": "PARTIAL",
+    "note": "Mining laser and strip miner cycle handlers with yield calculation, asteroid depletion, and OnOreMined notifications; blocked on DG-1/DG-4/DG-5."
+  },
+  "MN-05": {
+    "assessment": "PARTIAL",
+    "note": "Specialized ore, ice, and gas hold volume enforcement, flag routing, stack merging, and jetcan output partially implemented."
+  },
+  "MN-06": {
+    "assessment": "PARTIAL",
+    "note": "Modulated mining crystals with ore-type bonuses, volatility damage, and residue probability calculation partially implemented."
+  },
+  "MN-07": {
+    "assessment": "PARTIAL",
+    "note": "Mining skills, ship bonuses, mining laser upgrades, and fleet boosts partially implemented; blocked on DG-1 closure."
+  },
+  "MN-08": {
+    "assessment": "PARTIAL",
+    "note": "Ice harvester and gas cloud harvester cycle handlers partially implemented; data-driven ice belt spawning remains open."
+  },
+  "MN-09": {
+    "assessment": "PARTIAL",
+    "note": "Mining drone and excavator drone yield and ore hold delivery partially implemented."
+  },
+  "MN-10": {
+    "assessment": "PARTIAL",
+    "note": "Survey scanner RPC (miningScanMgr.perform_scan) returning remaining asteroid quantities in range partially implemented."
+  },
+  "MN-11": {
+    "assessment": "PARTIAL",
+    "note": "In-space compression (inSpaceCompressionMgr) and structure compression/gas decompression (structureCompressionMgr) using SDE compressible types."
+  },
+  "MN-12": {
+    "assessment": "PARTIAL",
+    "note": "Station and structure reprocessing service (reprocessingSvc) using SDE typeMaterials, facility base yield, skills, and station tax."
+  },
+  "MN-13": {
+    "assessment": "PARTIAL",
+    "note": "Moon extraction scheduling, fracture, and moon asteroid field spawning (moonExtractions) partially implemented."
+  },
+  "MN-14": {
+    "assessment": "PARTIAL",
+    "note": "Automated Metenox moon drill (autoMoonMining) cycle output and fuel consumption partially implemented."
+  },
+  "MN-15": {
+    "assessment": "PARTIAL",
+    "note": "Ore anomalies, gas signatures, and sov ore sites partially implemented; full site lifecycle and ice belt respawn remain open."
+  },
+  "MN-16": {
+    "assessment": "PARTIAL",
+    "note": "Character mining ledger (characterMiningLedger) and corporation observer ledger (corpMiningLedger) partially implemented."
+  },
+  "MN-17": {
+    "assessment": "PARTIAL",
+    "note": "Living-world NPC mining operations and belt rat interactions partially implemented."
+  },
+  "MN-18": {
+    "assessment": "PARTIAL",
+    "note": "Mining agent missions, daily goal progression, and SDE ore/mineral market seeding partially implemented."
+  },
+  "P-1": {
+    "assessment": "DONE",
+    "note": "PyPackedRow RLE codec with boolean bit-packing, null-bit tracking, trailing 0-bit STR/WSTR/BYTES columns, and corrupt RLE error propagation (OF-21)"
+  },
+  "P-2": {
+    "assessment": "DONE",
+    "note": "DBRow, CRowset, CIndexedRowset, and PackedRowList binary encoders matching PyRep wire layouts verified."
+  },
+  "P-3": {
+    "assessment": "DONE",
+    "note": "Object caching, CachedMethodCallResult, cache hash verification, and node cache invalidation verified."
+  },
+  "P-4": {
+    "assessment": "DONE",
+    "note": "Server config service RPCs, dynamic settings retrieval, and client configuration synchronization tested."
+  },
+  "P-5": {
+    "assessment": "DONE",
+    "note": "Notification emission pipelines, scope multicast, single-cast, and client dispatch verification complete."
+  },
+  "P-6": {
+    "assessment": "DONE",
+    "note": "Native machoNet GPSTransport 4-step crypto handshake state machine, VIP challenge exchange, session change notifications, and dual-transport listener in place."
+  },
+  "P-7": {
+    "assessment": "DONE",
+    "note": "Binary AddBalls/AddBalls2/SetState encoder and decoder matching DestinyStructs.h byte layouts, SlimItemMeta from SDE/DB, and DoDestinyUpdate notification push on space actions and ticks."
+  },
+  "Q-1": {
+    "assessment": "DONE",
+    "note": "All 1,455 Quasar FileDescriptorProto definitions loaded from client cache and validated against schema manifest."
+  },
+  "Q-2": {
+    "assessment": "DONE",
+    "note": "Quasar public gateway framing, RPC dispatch, status codes, tenancy, and idempotency verified."
+  },
+  "Q-3": {
+    "assessment": "NOT STARTED",
+    "note": "Not started; 0/1455 quasar rows closed."
+  },
+  "Q-4": {
+    "assessment": "NOT STARTED",
+    "note": "Not started; 0/1455 quasar rows closed."
+  },
+  "Q-5": {
+    "assessment": "NOT STARTED",
+    "note": "Not started; 0/1455 quasar rows closed."
+  },
+  "Q-6": {
+    "assessment": "NOT STARTED",
+    "note": "Not started; 0/1455 quasar rows closed."
+  },
+  "Q-7": {
+    "assessment": "NOT STARTED",
+    "note": "Not started; 0/1455 quasar rows closed."
+  },
+  "Q-8": {
+    "assessment": "NOT STARTED",
+    "note": "Not started; 0/1455 quasar rows closed."
+  },
+  "Q-9": {
+    "assessment": "NOT STARTED",
+    "note": "Not started; 0/1455 quasar rows closed."
+  },
+  "S-1": {
+    "assessment": "DONE",
+    "note": ""
+  },
+  "S-10": {
+    "assessment": "PARTIAL",
+    "note": "Reconciled documentation status labels, live candidate method ratios, handler and arm breakdown summaries, and relative links across project markdown files."
+  },
+  "S-11": {
+    "assessment": "DONE",
+    "note": ""
+  },
+  "S-2": {
+    "assessment": "PARTIAL",
+    "note": "Fighter tube loading, launching, recall, movement modes, ability slots execution, and abandon fighters tested; blocked by remaining features."
+  },
+  "S-3": {
+    "assessment": "DONE",
+    "note": "Pharolux cyno beacon fleet queries, jump to beacon with light-year and isotope checks, bridge, and group jump tested."
+  },
+  "S-4": {
+    "assessment": "DONE",
+    "note": "Jump clone installation with clone bay fee, clone jump with cooldown timer and implant swap, and clone destruction tested."
+  },
+  "S-5": {
+    "assessment": "DONE",
+    "note": ""
+  },
+  "S-6": {
+    "assessment": "DONE",
+    "note": ""
+  },
+  "S-7": {
+    "assessment": "PARTIAL",
+    "note": "Replaced hardcoded fallbacks with SDE Dogma attribute lookups; enforced in-space proximity, system match, and planet-resource validation for structures and skyhooks."
+  },
+  "S-8": {
+    "assessment": "DONE",
+    "note": ""
+  },
+  "S-9": {
+    "assessment": "PARTIAL",
+    "note": "Player accounts receive no GM roles; CCP role bitmasks (ROLE_ADMIN, ROLE_GML, etc.) enforced on privileged commands; auditor-flagged account feat rows pending clearance."
+  },
+  "SO-1": {
+    "assessment": "PARTIAL",
+    "note": "EVE mail send, headers, body with auto-read, read/unread state, labels management, and notifications tested; blocked by remaining features."
+  },
+  "SO-2": {
+    "assessment": "PARTIAL",
+    "note": "Fleet creation, hierarchy wings and squads, invite and join, broadcast events, member positions, and fleet warp tested; blocked by remaining features."
+  },
+  "SO-3": {
+    "assessment": "PARTIAL",
+    "note": "Corporation creation, public info, wallet divisions, membership applications, and role bitmask enforcement tested; blocked by remaining features."
+  },
+  "SO-4": {
+    "assessment": "PARTIAL",
+    "note": "Bookmarks creation, folders, shared corporate folders, update, delete, and cosmic signature bookmarking tested; blocked by remaining features."
+  },
+  "SO-5": {
+    "assessment": "PARTIAL",
+    "note": "Directional scan cone filtering, cosmic probe launching, scan math convergence, and acceleration gates tested; blocked by remaining features."
+  },
+  "SO-6": {
+    "assessment": "PARTIAL",
+    "note": "Wormhole jump transition, polarization lockout timer, lifetime, mass exhaustion, and Thera system rules tested; blocked by remaining features."
+  },
+  "SO-7": {
+    "assessment": "PARTIAL",
+    "note": "Chat channels join/leave, messaging, player-owned channels, private conversations, and delayed-local mode tested; blocked by remaining features."
+  },
+  "SP-1": {
+    "assessment": "DONE",
+    "note": "SystemActor populates real SDE stars, planets, moons, asteroid belts, stargates, and stations as static Rigid balls in Ballpark and includes them in SetState."
+  },
+  "SP-2": {
+    "assessment": "DONE",
+    "note": "Interdiction spheres, mobile warp disruptors, warp bubble entrapment, and interdiction nullification tested."
+  },
+  "SP-3": {
+    "assessment": "PARTIAL",
+    "note": "Beyonce approach, keep at range, align, propulsion speed boost, and micro jump drive 100km teleportation tested; blocked by remaining features."
+  },
+  "SP-4": {
+    "assessment": "PARTIAL",
+    "note": "Stargate jump arrival at destination gate position, session change notification, gate cloak, and no jump fatigue on stargates partially implemented."
+  },
+  "SP-5": {
+    "assessment": "DONE",
+    "note": "Station and Upwell structure docking perimeter checks, dock delay, undock along orientation vector, and ship boarding tested."
+  },
+  "T-1": {
+    "assessment": "DONE",
+    "note": "Implemented eve-testkit JSONL attestation crate, parity tag documentation, and machoNet.GetTime RPC test."
+  },
+  "T-2": {
+    "assessment": "DONE",
+    "note": "Data-driven sweeps across all 213 SDE client resources, domain tables, record counts, and spot checks passing."
+  },
+  "T-3": {
+    "assessment": "DONE",
+    "note": "Comprehensive proptest fuzzing for MachoNet framing, DBRow codec, Destiny wire, Dogma VM, and Quasar envelopes with zero panics."
+  },
+  "T-4": {
+    "assessment": "DONE",
+    "note": "Golden wire PyRep marshaling, binary Destiny stream, and Quasar Protobuf wire format roundtrip verified."
+  },
+  "T-5": {
+    "assessment": "DONE",
+    "note": "Installed cargo-llvm-cov and cargo-mutants and added scripts/qa/verify_cov_and_mutants.py enforcing >= 85% coverage and mutation score."
+  },
+  "T-6": {
+    "assessment": "PARTIAL",
+    "note": "tools/client-harness/run_journeys script and simulated two-client harness in place; real V24 client journey execution pending."
+  },
+  "T-7": {
+    "assessment": "DONE",
+    "note": "Injectable ServerClock, tick pause, and time acceleration for simulated progression tested."
+  },
+  "Z-1": {
+    "assessment": "PARTIAL",
+    "note": "13/1230 rpc rows closed; remaining catalog methods open."
+  },
+  "Z-2": {
+    "assessment": "PARTIAL",
+    "note": "11/1311 notify rows closed; remaining notifications open."
+  },
+  "Z-3": {
+    "assessment": "PARTIAL",
+    "note": "11/52 destiny rows closed; remaining destiny actions and ball modes open."
+  },
+  "Z-4": {
+    "assessment": "PARTIAL",
+    "note": "5/213 sde rows closed and 0/1 effect rows closed (217 expression-only effects open)."
+  },
+  "Z-5": {
+    "assessment": "PARTIAL",
+    "note": "260/1354 feat rows closed; 34 auditor-flagged rows remain FLAGGED_FAKE pending next gap audit."
+  },
+  "Z-6": {
+    "assessment": "NOT STARTED",
+    "note": "0/29 real-client journeys closed; requires execution via tools/client-harness/run_journeys."
+  },
+  "Z-7": {
+    "assessment": "PARTIAL",
+    "note": "scripts/qa/verify_cov_and_mutants.py harness present; full workspace >=90% coverage and >=85% mutation gate pending."
+  },
+  "Z-8": {
+    "assessment": "NOT STARTED",
+    "note": ""
+  }
 }
