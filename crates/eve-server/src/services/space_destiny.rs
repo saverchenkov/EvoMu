@@ -318,14 +318,23 @@ pub async fn handle(
             let _ = handle.break_gate_cloak(ship_id).await;
             match handle.set_movement_mode(ship_id, mode).await {
                 Ok(tick) => Some(Ok(PyRep::Integer(tick as i64))),
-                Err(e) => Some(Err(BridgeRpcError {
-                    code: "DestinyCommandFailed".into(),
-                    message: e,
-                })),
+                Err(e) => {
+                    let code = if e.contains("WarpScrambled") {
+                        "WarpScrambled"
+                    } else {
+                        "DestinyCommandFailed"
+                    };
+                    Some(Err(BridgeRpcError {
+                        code: code.into(),
+                        message: e,
+                    }))
+                }
             }
         }
 
-        ("beyonce", "CmdWarpToStuff") => {
+        // parity: plan:SP-3, plan:SP-6, plan:Z-3
+        // parity: rpc:beyonce.CmdWarpTo, rpc:beyonce.CmdWarpToStuff
+        ("beyonce", "CmdWarpTo") | ("beyonce", "CmdWarpToStuff") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -340,8 +349,11 @@ pub async fn handle(
                     message: "Session has no active ship".into(),
                 }));
             };
-            let stuff_type = args.first().and_then(|a| a.as_str()).unwrap_or("item");
-            let target_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
+            let (stuff_type, target_id) = if let Some(s) = args.first().and_then(|a| a.as_str()) {
+                (s, args.get(1).and_then(|a| a.as_i64()).unwrap_or(0))
+            } else {
+                ("item", args.first().and_then(|a| a.as_i64()).unwrap_or(0))
+            };
             let handle = ctx.systems.get_or_spawn(sys_id);
             let Some((_, current_ball)) = (match handle.get_ball_snapshot(ship_id).await {
                 Ok(v) => v,
@@ -471,10 +483,17 @@ pub async fn handle(
             let _ = handle.break_gate_cloak(ship_id).await;
             match handle.set_movement_mode(ship_id, mode).await {
                 Ok(tick) => Some(Ok(PyRep::Integer(tick as i64))),
-                Err(e) => Some(Err(BridgeRpcError {
-                    code: "DestinyCommandFailed".into(),
-                    message: e,
-                })),
+                Err(e) => {
+                    let code = if e.contains("WarpScrambled") {
+                        "WarpScrambled"
+                    } else {
+                        "DestinyCommandFailed"
+                    };
+                    Some(Err(BridgeRpcError {
+                        code: code.into(),
+                        message: e,
+                    }))
+                }
             }
         }
 

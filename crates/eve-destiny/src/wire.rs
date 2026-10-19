@@ -867,6 +867,28 @@ pub fn encode_destiny_event(stamp: u32, event: &DestinyEvent, park: Option<&Ball
             PyRep::String("Collision".into()),
             PyRep::Tuple(vec![PyRep::Integer(*ball_a), PyRep::Integer(*ball_b)]),
         ]),
+        DestinyEvent::OnActivatingWarp { ball_id } => PyRep::Tuple(vec![
+            PyRep::String("OnActivatingWarp".into()),
+            PyRep::Tuple(vec![PyRep::Integer(*ball_id)]),
+        ]),
+        DestinyEvent::OnDeactivatingWarp { ball_id } => PyRep::Tuple(vec![
+            PyRep::String("OnDeactivatingWarp".into()),
+            PyRep::Tuple(vec![PyRep::Integer(*ball_id)]),
+        ]),
+        DestinyEvent::OnSpecialFX {
+            ball_id,
+            module_id,
+            guid,
+            is_active,
+        } => PyRep::Tuple(vec![
+            PyRep::String("OnSpecialFX".into()),
+            PyRep::Tuple(vec![
+                PyRep::Integer(*ball_id),
+                module_id.map(PyRep::Integer).unwrap_or(PyRep::None),
+                PyRep::String(guid.clone()),
+                PyRep::Bool(*is_active),
+            ]),
+        ]),
     };
 
     PyRep::Tuple(vec![PyRep::Integer(stamp as i64), action_tuple])
@@ -1230,6 +1252,18 @@ mod tests {
                 ball_id: 100_000_001,
                 destination: [1.0e9, 2.0e9, 3.0e9],
                 warp_speed_au_s: 3.0,
+            },
+            DestinyEvent::OnActivatingWarp {
+                ball_id: 100_000_001,
+            },
+            DestinyEvent::OnDeactivatingWarp {
+                ball_id: 100_000_001,
+            },
+            DestinyEvent::OnSpecialFX {
+                ball_id: 100_000_001,
+                module_id: Some(12345),
+                guid: "effects.WarpDrive".to_string(),
+                is_active: true,
             },
         ];
         let updates_pyrep = encode_destiny_updates(7, &events, Some(&park));
