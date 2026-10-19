@@ -550,6 +550,9 @@ impl ServerContext {
         ship_id: i64,
     ) -> Result<ShipFittingEngine, BridgeRpcError> {
         let skill_levels = self.character_skill_levels(char_id);
+        let active_implants = self.db.with_snapshot(|s| {
+            s.active_implants.get(&char_id).cloned().unwrap_or_default()
+        });
         if let Some(mut existing) = self
             .ship_fittings
             .read()
@@ -558,6 +561,7 @@ impl ServerContext {
             .cloned()
         {
             existing.set_character_skills(skill_levels);
+            existing.set_implants(active_implants);
             return Ok(existing);
         }
 
@@ -570,7 +574,8 @@ impl ServerContext {
         };
 
         let mut fit = ShipFittingEngine::from_sde(ship_id, ship_item.type_id, &self.sde)
-            .with_character_skills(skill_levels);
+            .with_character_skills(skill_levels)
+            .with_implants(active_implants);
 
         let online_states = self.db.with_snapshot(|s| s.module_online_states.clone());
 

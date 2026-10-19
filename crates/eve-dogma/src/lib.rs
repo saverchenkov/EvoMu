@@ -11,8 +11,9 @@
 
 #![forbid(unsafe_code)]
 
+pub use eve_sde::EffectModifierSpec;
 use eve_sde::{
-    attr_ids, AttributeId, CategoryId, DogmaEffectType, EffectId, EffectModifierSpec, GroupId,
+    attr_ids, AttributeId, CategoryId, DogmaEffectType, EffectId, GroupId,
     SdeRegistry, TypeId,
 };
 use serde::{Deserialize, Serialize};
@@ -348,6 +349,8 @@ impl DogmaExpressionNode {
 
     /// Executes a modifier-applying or modifier-removing Dogma VM expression tree against `target`,
     /// tagging added or removed modifiers with `effect_id` so multi-effect items remove individual effects cleanly.
+    /// Executes a modifier-applying or modifier-removing Dogma VM expression tree against `target`,
+    /// tagging added or removed modifiers with `effect_id` so multi-effect items remove individual effects cleanly.
     pub fn execute_on_target_with_effect(
         &self,
         source_item_id: i64,
@@ -356,24 +359,38 @@ impl DogmaExpressionNode {
         target: &mut DogmaItemState,
         sde: &SdeRegistry,
     ) {
+        self.execute_on_target_with_effect_and_scale(source_item_id, effect_id, source, target, 1.0, sde);
+    }
+
+    /// Executes a modifier-applying Dogma VM expression tree scaled by an attenuation factor (e.g. range falloff).
+    pub fn execute_on_target_with_effect_and_scale(
+        &self,
+        source_item_id: i64,
+        effect_id: Option<EffectId>,
+        source: &DogmaItemState,
+        target: &mut DogmaItemState,
+        scale: f64,
+        sde: &SdeRegistry,
+    ) {
         match self.opcode {
             DogmaVmOpcode::Combine | DogmaVmOpcode::Splice => {
                 if let Some(a1) = &self.arg1 {
-                    a1.execute_on_target_with_effect(source_item_id, effect_id, source, target, sde);
+                    a1.execute_on_target_with_effect_and_scale(source_item_id, effect_id, source, target, scale, sde);
                 }
                 if let Some(a2) = &self.arg2 {
-                    a2.execute_on_target_with_effect(source_item_id, effect_id, source, target, sde);
+                    a2.execute_on_target_with_effect_and_scale(source_item_id, effect_id, source, target, scale, sde);
                 }
             }
             DogmaVmOpcode::If => {
                 let cond = self.arg1.as_ref().map(|n| n.evaluate(source, sde)).unwrap_or(0.0);
                 if cond != 0.0 {
                     if let Some(a2) = &self.arg2 {
-                        a2.execute_on_target_with_effect(
+                        a2.execute_on_target_with_effect_and_scale(
                             source_item_id,
                             effect_id,
                             source,
                             target,
+                            scale,
                             sde,
                         );
                     }
@@ -432,12 +449,38 @@ impl DogmaExpressionNode {
                     .attribute_id
                     .or_else(|| self.arg1.as_ref().and_then(|n| n.attribute_id))
                     .unwrap_or(attr_ids::MAX_VELOCITY);
-                let val = self
+                let base_val = self
                     .arg2
                     .as_ref()
                     .map(|n| n.evaluate(source, sde))
                     .or(self.value_f64)
                     .unwrap_or(0.0);
+                let val = if (scale - 1.0).abs() < 1e-9 {
+                    base_val
+                } else {
+                    match op {
+                        ModifierOperator::PreMul | ModifierOperator::PostMul => {
+                            1.0 + (base_val - 1.0) * scale
+                        }
+                        ModifierOperator::PreDiv | ModifierOperator::PostDiv => {
+                            if base_val != 0.0 {
+                                let factor = 1.0 + ((1.0 / base_val) - 1.0) * scale;
+                                if factor != 0.0 {
+                                    1.0 / factor
+                                } else {
+                                    base_val
+                                }
+                            } else {
+                                base_val
+                            }
+                        }
+                        ModifierOperator::PostPercent
+                        | ModifierOperator::PostPercentUnNerfed
+                        | ModifierOperator::ModAdd
+                        | ModifierOperator::ModSub => base_val * scale,
+                        _ => base_val,
+                    }
+                };
                 let op_penalized = !matches!(
                     op,
                     ModifierOperator::ModAdd
@@ -559,11 +602,12 @@ impl DogmaDomain {
     }
 }
 
-/// Authoritative V24 Dogma `modifierInfo` function (`ItemModifier`, `LocationModifier`,
+/// Authoritative V24 Dogma `modifierInfo` function (`ItemModifier`, `ItemModifierWithFalloff`, `LocationModifier`,
 /// `LocationGroupModifier`, `LocationRequiredSkillModifier`, `OwnerRequiredSkillModifier`, `EffectStopper`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DogmaModifierFunc {
     ItemModifier,
+    ItemModifierWithFalloff,
     LocationModifier,
     LocationGroupModifier,
     LocationRequiredSkillModifier,
@@ -575,6 +619,7 @@ impl DogmaModifierFunc {
     pub fn from_sde_str(s: &str) -> Option<Self> {
         match s {
             "ItemModifier" => Some(Self::ItemModifier),
+            "ItemModifierWithFalloff" => Some(Self::ItemModifierWithFalloff),
             "LocationModifier" => Some(Self::LocationModifier),
             "LocationGroupModifier" => Some(Self::LocationGroupModifier),
             "LocationRequiredSkillModifier" => Some(Self::LocationRequiredSkillModifier),
@@ -606,8 +651,12 @@ pub fn compile_modifier_spec_to_vm(
 
     let op = ModifierOperator::try_from_sde_op(spec.operator)?;
     let opcode = match (func, is_remove) {
-        (DogmaModifierFunc::ItemModifier, false) => DogmaVmOpcode::AddItmMod,
-        (DogmaModifierFunc::ItemModifier, true) => DogmaVmOpcode::RmItmMod,
+        (DogmaModifierFunc::ItemModifier | DogmaModifierFunc::ItemModifierWithFalloff, false) => {
+            DogmaVmOpcode::AddItmMod
+        }
+        (DogmaModifierFunc::ItemModifier | DogmaModifierFunc::ItemModifierWithFalloff, true) => {
+            DogmaVmOpcode::RmItmMod
+        }
         (DogmaModifierFunc::LocationModifier, false) => DogmaVmOpcode::AddLocMod,
         (DogmaModifierFunc::LocationModifier, true) => DogmaVmOpcode::RmLocMod,
         (DogmaModifierFunc::LocationGroupModifier, false) => DogmaVmOpcode::AddLocGrpMod,
@@ -832,7 +881,7 @@ impl DogmaEffectContext {
         let mut applied = 0usize;
 
         match func {
-            DogmaModifierFunc::ItemModifier => {
+            DogmaModifierFunc::ItemModifier | DogmaModifierFunc::ItemModifierWithFalloff => {
                 let target_entity = self.entity_for_domain_mut(domain);
                 let before = target_entity.modifiers.len();
                 vm_node.execute_on_target_with_effect(
@@ -884,6 +933,125 @@ impl DogmaEffectContext {
         }
 
         applied
+    }
+
+    /// Applies a single [`EffectModifierSpec`] scaled by range falloff attenuation (`DG-1`):
+    ///
+    /// $$E(d) = E_0 \cdot 0.5^{\left(\frac{\max(0, d - R_{\text{opt}})}{R_{\text{falloff}}}\right)^2}$$
+    pub fn apply_modifier_spec_with_falloff(
+        &mut self,
+        source_item_id: i64,
+        effect_id: Option<EffectId>,
+        spec: &EffectModifierSpec,
+        distance: f64,
+        optimal: f64,
+        falloff: f64,
+        sde: &SdeRegistry,
+    ) -> usize {
+        let Some(domain) = DogmaDomain::from_sde_str(&spec.domain) else {
+            return 0;
+        };
+        let Some(func) = DogmaModifierFunc::from_sde_str(&spec.func) else {
+            return 0;
+        };
+        let Some(vm_node) = compile_modifier_spec_to_vm(spec, false) else {
+            return 0;
+        };
+
+        if func == DogmaModifierFunc::EffectStopper {
+            if let Some(eid) = spec.effect_id {
+                if !self.stopped_target_effects.contains(&eid) {
+                    self.stopped_target_effects.push(eid);
+                }
+                return 1;
+            }
+            return 0;
+        }
+
+        let scale = compute_falloff_attenuation(distance, optimal, falloff);
+        let source_snapshot = self.item.clone();
+        let mut applied = 0usize;
+
+        match func {
+            DogmaModifierFunc::ItemModifier | DogmaModifierFunc::ItemModifierWithFalloff => {
+                let target_entity = self.entity_for_domain_mut(domain);
+                let before = target_entity.modifiers.len();
+                vm_node.execute_on_target_with_effect_and_scale(
+                    source_item_id,
+                    effect_id,
+                    &source_snapshot,
+                    target_entity,
+                    scale,
+                    sde,
+                );
+                if target_entity.modifiers.len() > before {
+                    applied += 1;
+                }
+            }
+            DogmaModifierFunc::LocationModifier
+            | DogmaModifierFunc::LocationGroupModifier
+            | DogmaModifierFunc::LocationRequiredSkillModifier => {
+                let list = self.located_items_for_domain_mut(domain);
+                for child in list.iter_mut() {
+                    let b = child.modifiers.len();
+                    vm_node.execute_on_target_with_effect_and_scale(
+                        source_item_id,
+                        effect_id,
+                        &source_snapshot,
+                        child,
+                        scale,
+                        sde,
+                    );
+                    if child.modifiers.len() > b {
+                        applied += 1;
+                    }
+                }
+            }
+            DogmaModifierFunc::OwnerRequiredSkillModifier => {
+                for child in self.owned_items.iter_mut() {
+                    let b = child.modifiers.len();
+                    vm_node.execute_on_target_with_effect_and_scale(
+                        source_item_id,
+                        effect_id,
+                        &source_snapshot,
+                        child,
+                        scale,
+                        sde,
+                    );
+                    if child.modifiers.len() > b {
+                        applied += 1;
+                    }
+                }
+            }
+            DogmaModifierFunc::EffectStopper => unreachable!(),
+        }
+
+        applied
+    }
+
+    /// Applies all [`EffectModifierSpec`] entries on `effect` scaled by distance falloff (`DG-1`).
+    pub fn apply_effect_with_range(
+        &mut self,
+        source_item_id: i64,
+        effect: &DogmaEffectType,
+        distance: f64,
+        optimal: f64,
+        falloff: f64,
+        sde: &SdeRegistry,
+    ) -> usize {
+        let mut total = 0;
+        for spec in &effect.modifiers {
+            total += self.apply_modifier_spec_with_falloff(
+                source_item_id,
+                Some(effect.effect_id),
+                spec,
+                distance,
+                optimal,
+                falloff,
+                sde,
+            );
+        }
+        total
     }
 
     /// Applies all [`EffectModifierSpec`] entries on `effect` from `source_item_id`, tagging each with `effect.effect_id`.
@@ -966,13 +1134,26 @@ pub struct AttributeModifier {
     pub stacking_penalized: bool,
 }
 
-/// Computes EVE Online's stacking penalty factor for the `n`-th (0-indexed) module modifier:
+/// Computes the standard EVE Online range falloff attenuation factor (`DG-1`):
 ///
-/// $$S(n) = e^{-(n / 2.67)^2}$$
+/// $$\text{factor} = \begin{cases} 1.0 & \text{if } d \le R_{\text{opt}} \text{ or } R_{\text{falloff}} \le 0 \\ 0.5^{\left(\frac{d - R_{\text{opt}}}{R_{\text{falloff}}}\right)^2} & \text{if } d > R_{\text{opt}} \end{cases}$$
+#[inline]
+pub fn compute_falloff_attenuation(distance: f64, optimal: f64, falloff: f64) -> f64 {
+    if distance <= optimal || falloff <= 0.0 {
+        1.0
+    } else {
+        let excess = distance - optimal;
+        0.5_f64.powf((excess / falloff).powi(2))
+    }
+}
+
+/// Computes EVE Online's stacking penalty factor for the `n`-th (0-indexed) module modifier (`DG-1`):
+///
+/// $$S(n) = e^{-(n-1)^2 / 7.1289}$$
 #[inline]
 pub fn stacking_penalty_factor(index: usize) -> f64 {
-    let ratio = (index as f64) / 2.67;
-    (-ratio * ratio).exp()
+    let idx = index as f64;
+    (-idx * idx / 7.1289).exp()
 }
 
 /// Computes the analytical EVE passive recharge curve (used by Capacitor and Shield regeneration):
@@ -1252,6 +1433,12 @@ pub struct ShipFittingEngine {
     /// Character trained skill levels (`skill_type_id -> trained_level`) enforced during fitting.
     #[serde(default)]
     pub character_skills: HashMap<TypeId, u8>,
+    /// Active character implants (`type_id` of each implant).
+    #[serde(default)]
+    pub implants: Vec<TypeId>,
+    /// Active combat booster drugs (`type_id` of each booster).
+    #[serde(default)]
+    pub boosters: Vec<TypeId>,
 }
 
 impl ShipFittingEngine {
@@ -1261,6 +1448,8 @@ impl ShipFittingEngine {
             modules: HashMap::new(),
             rack_heat: [0.0, 0.0, 0.0],
             character_skills: HashMap::new(),
+            implants: Vec::new(),
+            boosters: Vec::new(),
         }
     }
 
@@ -1270,6 +1459,24 @@ impl ShipFittingEngine {
 
     pub fn with_character_skills(mut self, skills: HashMap<TypeId, u8>) -> Self {
         self.character_skills = skills;
+        self
+    }
+
+    pub fn set_implants(&mut self, implants: Vec<TypeId>) {
+        self.implants = implants;
+    }
+
+    pub fn with_implants(mut self, implants: Vec<TypeId>) -> Self {
+        self.implants = implants;
+        self
+    }
+
+    pub fn set_boosters(&mut self, boosters: Vec<TypeId>) {
+        self.boosters = boosters;
+    }
+
+    pub fn with_boosters(mut self, boosters: Vec<TypeId>) -> Self {
+        self.boosters = boosters;
         self
     }
 
@@ -1384,6 +1591,100 @@ impl ShipFittingEngine {
                             if spec.domain != "itemID" {
                                 ctx.apply_modifier_spec_with_effect(
                                     skill_item_id,
+                                    Some(eid),
+                                    spec,
+                                    sde,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 1b. Evaluate active character implants (`category_id == 20` or `group_id == 300`, passive effects `effect_category == 0`).
+        for (idx, &imp_tid) in self.implants.iter().enumerate() {
+            let Some(imp_type) = sde.types.get(&imp_tid) else {
+                continue;
+            };
+            let imp_item_id = -100_000 - (idx as i64);
+            let mut imp_state = DogmaItemState::from_sde(imp_item_id, imp_tid, sde);
+            for &eid in &imp_type.effect_ids {
+                if let Some(effect) = sde.effects.get(&eid) {
+                    if effect.effect_category == 0 {
+                        for spec in &effect.modifiers {
+                            if spec.domain == "itemID" {
+                                if let Some(vm) = compile_modifier_spec_to_vm(spec, false) {
+                                    let snap = imp_state.clone();
+                                    vm.execute_on_target_with_effect(
+                                        imp_item_id,
+                                        Some(eid),
+                                        &snap,
+                                        &mut imp_state,
+                                        sde,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            ctx.item = imp_state.clone();
+            ctx.char_located_items.push(imp_state);
+            for &eid in &imp_type.effect_ids {
+                if let Some(effect) = sde.effects.get(&eid) {
+                    if effect.effect_category == 0 {
+                        for spec in &effect.modifiers {
+                            if spec.domain != "itemID" {
+                                ctx.apply_modifier_spec_with_effect(
+                                    imp_item_id,
+                                    Some(eid),
+                                    spec,
+                                    sde,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 1c. Evaluate active combat booster drugs (`group_id == 303`, passive effects `effect_category == 0`).
+        for (idx, &b_tid) in self.boosters.iter().enumerate() {
+            let Some(b_type) = sde.types.get(&b_tid) else {
+                continue;
+            };
+            let b_item_id = -200_000 - (idx as i64);
+            let mut b_state = DogmaItemState::from_sde(b_item_id, b_tid, sde);
+            for &eid in &b_type.effect_ids {
+                if let Some(effect) = sde.effects.get(&eid) {
+                    if effect.effect_category == 0 {
+                        for spec in &effect.modifiers {
+                            if spec.domain == "itemID" {
+                                if let Some(vm) = compile_modifier_spec_to_vm(spec, false) {
+                                    let snap = b_state.clone();
+                                    vm.execute_on_target_with_effect(
+                                        b_item_id,
+                                        Some(eid),
+                                        &snap,
+                                        &mut b_state,
+                                        sde,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            ctx.item = b_state.clone();
+            ctx.char_located_items.push(b_state);
+            for &eid in &b_type.effect_ids {
+                if let Some(effect) = sde.effects.get(&eid) {
+                    if effect.effect_category == 0 {
+                        for spec in &effect.modifiers {
+                            if spec.domain != "itemID" {
+                                ctx.apply_modifier_spec_with_effect(
+                                    b_item_id,
                                     Some(eid),
                                     spec,
                                     sde,
@@ -1546,12 +1847,8 @@ impl ShipFittingEngine {
                         } else {
                             attr_ids::MASS
                         };
-                        let expr = DogmaExpressionNode {
-                            opcode: DogmaVmOpcode::Combine,
-                            value_f64: None,
-                            attribute_id: None,
-                            operator: None,
-                            arg1: Some(Box::new(DogmaExpressionNode {
+                        let mut nodes = vec![
+                            DogmaExpressionNode {
                                 opcode: DogmaVmOpcode::AddItmMod,
                                 value_f64: None,
                                 attribute_id: Some(attr_ids::MASS),
@@ -1565,8 +1862,8 @@ impl ShipFittingEngine {
                                     arg1: None,
                                     arg2: None,
                                 })),
-                            })),
-                            arg2: Some(Box::new(DogmaExpressionNode {
+                            },
+                            DogmaExpressionNode {
                                 opcode: DogmaVmOpcode::AddItmMod,
                                 value_f64: None,
                                 attribute_id: Some(attr_ids::MAX_VELOCITY),
@@ -1580,15 +1877,43 @@ impl ShipFittingEngine {
                                     arg1: None,
                                     arg2: None,
                                 })),
-                            })),
-                        };
-                        expr.execute_on_target_with_effect(
-                            m.item_id,
-                            Some(eid),
-                            &mod_state,
-                            &mut ctx.ship,
-                            sde,
-                        );
+                            },
+                        ];
+                        if eid == 6730 {
+                            let sig_bonus_attr = if mod_type.default_attributes.contains_key(&554) {
+                                554
+                            } else if mod_type.default_attributes.contains_key(&986) {
+                                986
+                            } else {
+                                0
+                            };
+                            if sig_bonus_attr != 0 {
+                                nodes.push(DogmaExpressionNode {
+                                    opcode: DogmaVmOpcode::AddItmMod,
+                                    value_f64: None,
+                                    attribute_id: Some(attr_ids::SIGNATURE_RADIUS),
+                                    operator: Some(ModifierOperator::PostPercent),
+                                    arg1: None,
+                                    arg2: Some(Box::new(DogmaExpressionNode {
+                                        opcode: DogmaVmOpcode::GetAttr,
+                                        value_f64: None,
+                                        attribute_id: Some(sig_bonus_attr),
+                                        operator: None,
+                                        arg1: None,
+                                        arg2: None,
+                                    })),
+                                });
+                            }
+                        }
+                        for node in nodes {
+                            node.execute_on_target_with_effect(
+                                m.item_id,
+                                Some(eid),
+                                &mod_state,
+                                &mut ctx.ship,
+                                sde,
+                            );
+                        }
                     }
                 }
             }
@@ -2106,6 +2431,17 @@ impl ShipFittingEngine {
         self.fit_module_with_state(module_item_id, module_type_id, flag_id, true, sde)
     }
 
+    /// Alias for `fit_and_online_module`.
+    pub fn fit_module(
+        &mut self,
+        module_item_id: i64,
+        module_type_id: TypeId,
+        flag_id: u16,
+        sde: &SdeRegistry,
+    ) -> Result<(), String> {
+        self.fit_and_online_module(module_item_id, module_type_id, flag_id, sde)
+    }
+
     /// Brings an offline fitted module online, checking maxGroupOnline and CPU/PG.
     pub fn set_module_online(
         &mut self,
@@ -2337,6 +2673,450 @@ pub fn roll_abyssal_attributes(
         }
     }
     out
+}
+
+/// Effective attributes resulting from propulsion module (Afterburner or MWD) activation (`DG-1`).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct PropulsionModuleStats {
+    pub max_velocity: f64,
+    pub mass: f64,
+    pub signature_radius: f64,
+    pub speed_factor: f64,
+    pub mass_addition: f64,
+    pub signature_radius_bonus: f64,
+    pub is_overloaded: bool,
+    pub is_scrambled: bool,
+    pub can_activate: bool,
+}
+
+/// Evaluates propulsion module (Afterburner / MWD) activation, mass increase, and signature radius bloom (`DG-1`).
+pub fn eval_propulsion_module(
+    ship: &DogmaItemState,
+    module: &DogmaItemState,
+    is_active: bool,
+    is_overloaded: bool,
+    is_scrambled: bool,
+    sde: &SdeRegistry,
+) -> PropulsionModuleStats {
+    let base_vel = ship.get_attribute(attr_ids::MAX_VELOCITY, sde);
+    let base_mass = ship.get_attribute(attr_ids::MASS, sde);
+    let base_sig = ship.get_attribute(attr_ids::SIGNATURE_RADIUS, sde);
+
+    let is_mwd = sde
+        .types
+        .get(&module.type_id)
+        .map(|t| t.effect_ids.contains(&6730))
+        .unwrap_or(false);
+    let can_activate = !(is_mwd && is_scrambled);
+
+    if !is_active || !can_activate {
+        return PropulsionModuleStats {
+            max_velocity: base_vel,
+            mass: base_mass,
+            signature_radius: base_sig,
+            speed_factor: 0.0,
+            mass_addition: 0.0,
+            signature_radius_bonus: 0.0,
+            is_overloaded: false,
+            is_scrambled,
+            can_activate,
+        };
+    }
+
+    let mut speed_factor = module.get_attribute(attr_ids::SPEED_FACTOR, sde);
+    if is_overloaded {
+        let ovl_bonus = module.get_attribute(1223, sde);
+        let ovl_pct = if ovl_bonus > 0.0 { ovl_bonus } else { 30.0 };
+        speed_factor *= 1.0 + (ovl_pct / 100.0);
+    }
+
+    let mass_addition = if module.base_attributes.contains_key(&796)
+        || sde
+            .types
+            .get(&module.type_id)
+            .map(|t| t.default_attributes.contains_key(&796))
+            .unwrap_or(false)
+    {
+        module.get_attribute(796, sde)
+    } else {
+        module.get_attribute(attr_ids::MASS, sde)
+    };
+
+    let effective_vel = base_vel * (1.0 + speed_factor / 100.0);
+    let effective_mass = base_mass + mass_addition;
+
+    let mut effective_sig = base_sig;
+    let mut sig_bonus = 0.0;
+    if is_mwd {
+        sig_bonus = module.get_attribute(554, sde);
+        if sig_bonus <= 0.0 {
+            sig_bonus = module.get_attribute(986, sde);
+        }
+        if sig_bonus > 0.0 {
+            effective_sig *= 1.0 + sig_bonus / 100.0;
+        }
+    }
+
+    PropulsionModuleStats {
+        max_velocity: effective_vel,
+        mass: effective_mass,
+        signature_radius: effective_sig,
+        speed_factor,
+        mass_addition,
+        signature_radius_bonus: sig_bonus,
+        is_overloaded,
+        is_scrambled,
+        can_activate,
+    }
+}
+
+/// Result of an Energy Neutralizer cycle (`DG-1`).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct EnergyNeutralizerResult {
+    pub nominal_drain: f64,
+    pub falloff_factor: f64,
+    pub actual_drain: f64,
+    pub target_remaining_cap: f64,
+}
+
+/// Helper to extract range falloff for modules (checking falloffEffectiveness attr 2044 first, then falloff attr 158).
+#[inline]
+pub fn get_module_falloff(module: &DogmaItemState, sde: &SdeRegistry) -> f64 {
+    if let Some(&f) = module.base_attributes.get(&2044) {
+        return f;
+    }
+    if let Some(t) = sde.types.get(&module.type_id) {
+        if let Some(&f) = t.default_attributes.get(&2044) {
+            return f;
+        }
+        if let Some(&f) = module.base_attributes.get(&158) {
+            return f;
+        }
+        if let Some(&f) = t.default_attributes.get(&158) {
+            return f;
+        }
+    }
+    0.0
+}
+
+/// Evaluates energy neutralizer capacitor drain with range falloff attenuation (`DG-1`).
+pub fn eval_energy_neutralizer(
+    module: &DogmaItemState,
+    distance: f64,
+    target_current_cap: f64,
+    sde: &SdeRegistry,
+) -> EnergyNeutralizerResult {
+    let nominal_drain = module.get_attribute(97, sde);
+    let optimal = module.get_attribute(attr_ids::MAX_RANGE, sde);
+    let falloff = get_module_falloff(module, sde);
+
+    let falloff_factor = compute_falloff_attenuation(distance, optimal, falloff);
+    let actual_drain = (nominal_drain * falloff_factor).min(target_current_cap.max(0.0));
+    let target_remaining_cap = (target_current_cap - actual_drain).max(0.0);
+
+    EnergyNeutralizerResult {
+        nominal_drain,
+        falloff_factor,
+        actual_drain,
+        target_remaining_cap,
+    }
+}
+
+/// Result of an Energy Nosferatu cycle (`DG-1`).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct EnergyNosferatuResult {
+    pub nominal_transfer: f64,
+    pub falloff_factor: f64,
+    pub actual_transferred: f64,
+    pub source_new_cap: f64,
+    pub target_new_cap: f64,
+}
+
+/// Evaluates energy nosferatu capacitor vampire transfer with range falloff and cap % rule (`DG-1`).
+pub fn eval_energy_nosferatu(
+    module: &DogmaItemState,
+    distance: f64,
+    source_current_cap: f64,
+    source_max_cap: f64,
+    target_current_cap: f64,
+    target_max_cap: f64,
+    sde: &SdeRegistry,
+) -> EnergyNosferatuResult {
+    let nominal_transfer = module.get_attribute(90, sde);
+    let optimal = module.get_attribute(attr_ids::MAX_RANGE, sde);
+    let falloff = get_module_falloff(module, sde);
+
+    let falloff_factor = compute_falloff_attenuation(distance, optimal, falloff);
+    let source_pct = if source_max_cap > 0.0 {
+        source_current_cap / source_max_cap
+    } else {
+        1.0
+    };
+    let target_pct = if target_max_cap > 0.0 {
+        target_current_cap / target_max_cap
+    } else {
+        0.0
+    };
+
+    let actual_transferred = if source_pct < target_pct {
+        (nominal_transfer * falloff_factor)
+            .min(target_current_cap.max(0.0))
+            .min((source_max_cap - source_current_cap).max(0.0))
+    } else {
+        0.0
+    };
+
+    EnergyNosferatuResult {
+        nominal_transfer,
+        falloff_factor,
+        actual_transferred,
+        source_new_cap: (source_current_cap + actual_transferred).min(source_max_cap),
+        target_new_cap: (target_current_cap - actual_transferred).max(0.0),
+    }
+}
+
+/// Computes ECM jam probability against a target sensor strength with range falloff (`DG-1`):
+///
+/// $$P_{\text{jam}} = \min\left(1.0, \frac{S_{\text{jam}}}{S_{\text{target\_sensor}}} \cdot 0.5^{\left(\frac{\max(0, d - R_{\text{opt}})}{R_{\text{falloff}}}\right)^2}\right)$$
+#[inline]
+pub fn compute_ecm_jam_chance(
+    jam_strength: f64,
+    target_sensor_strength: f64,
+    distance: f64,
+    optimal: f64,
+    falloff: f64,
+) -> f64 {
+    let att = compute_falloff_attenuation(distance, optimal, falloff);
+    ((jam_strength / target_sensor_strength.max(1e-6)) * att).clamp(0.0, 1.0)
+}
+
+/// Evaluates multiple Stasis Webifier modules on target velocity with range falloff and stacking penalties (`DG-1`).
+pub fn eval_stasis_webifier_stacking(
+    web_modules: &[&DogmaItemState],
+    distances: &[f64],
+    target_base_velocity: f64,
+    sde: &SdeRegistry,
+) -> f64 {
+    let mut penalties = Vec::new();
+    for (i, &m) in web_modules.iter().enumerate() {
+        let dist = distances.get(i).copied().unwrap_or(0.0);
+        let speed_factor = m.get_attribute(20, sde);
+        let optimal = m.get_attribute(attr_ids::MAX_RANGE, sde);
+        let falloff = get_module_falloff(m, sde);
+        let att = compute_falloff_attenuation(dist, optimal, falloff);
+        let delta = (speed_factor / 100.0) * att;
+        penalties.push(delta);
+    }
+    penalties.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let mut vel = target_base_velocity;
+    for (i, d) in penalties.into_iter().enumerate() {
+        vel *= 1.0 + d * stacking_penalty_factor(i);
+    }
+    vel.max(0.0)
+}
+
+/// Evaluates multiple Target Painter modules on target signature radius with range falloff and stacking penalties (`DG-1`).
+pub fn eval_target_painter_stacking(
+    painter_modules: &[&DogmaItemState],
+    distances: &[f64],
+    target_base_sig: f64,
+    sde: &SdeRegistry,
+) -> f64 {
+    let mut bonuses = Vec::new();
+    for (i, &m) in painter_modules.iter().enumerate() {
+        let dist = distances.get(i).copied().unwrap_or(0.0);
+        let sig_bonus = m.get_attribute(554, sde);
+        let optimal = m.get_attribute(attr_ids::MAX_RANGE, sde);
+        let falloff = get_module_falloff(m, sde);
+        let att = compute_falloff_attenuation(dist, optimal, falloff);
+        let delta = (sig_bonus / 100.0) * att;
+        bonuses.push(delta);
+    }
+    bonuses.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+    let mut sig = target_base_sig;
+    for (i, d) in bonuses.into_iter().enumerate() {
+        sig *= 1.0 + d * stacking_penalty_factor(i);
+    }
+    sig
+}
+
+/// Evaluates multiple Remote Sensor Dampener modules on target scan resolution and max target range (`DG-1`).
+pub fn eval_sensor_dampener_stacking(
+    damp_modules: &[&DogmaItemState],
+    distances: &[f64],
+    target_base_scan_res: f64,
+    target_base_max_range: f64,
+    sde: &SdeRegistry,
+) -> (f64, f64) {
+    let mut scan_res_penalties = Vec::new();
+    let mut range_penalties = Vec::new();
+    for (i, &m) in damp_modules.iter().enumerate() {
+        let dist = distances.get(i).copied().unwrap_or(0.0);
+        let scan_res_bonus = m.get_attribute(566, sde);
+        let range_bonus = m.get_attribute(309, sde);
+        let optimal = m.get_attribute(attr_ids::MAX_RANGE, sde);
+        let falloff = get_module_falloff(m, sde);
+        let att = compute_falloff_attenuation(dist, optimal, falloff);
+        scan_res_penalties.push((scan_res_bonus / 100.0) * att);
+        range_penalties.push((range_bonus / 100.0) * att);
+    }
+
+    scan_res_penalties.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    range_penalties.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+    let mut scan_res = target_base_scan_res;
+    for (i, d) in scan_res_penalties.into_iter().enumerate() {
+        scan_res *= 1.0 + d * stacking_penalty_factor(i);
+    }
+    let mut max_range = target_base_max_range;
+    for (i, d) in range_penalties.into_iter().enumerate() {
+        max_range *= 1.0 + d * stacking_penalty_factor(i);
+    }
+    (scan_res.max(1.0), max_range.max(1.0))
+}
+
+/// Evaluates multiple Tracking Disruptor modules on target turret tracking, optimal, and falloff (`DG-1`).
+pub fn eval_tracking_disruptor_stacking(
+    disrupt_modules: &[&DogmaItemState],
+    distances: &[f64],
+    turret_base_tracking: f64,
+    turret_base_optimal: f64,
+    turret_base_falloff: f64,
+    sde: &SdeRegistry,
+) -> (f64, f64, f64) {
+    let mut track_penalties = Vec::new();
+    let mut opt_penalties = Vec::new();
+    let mut fall_penalties = Vec::new();
+
+    for (i, &m) in disrupt_modules.iter().enumerate() {
+        let dist = distances.get(i).copied().unwrap_or(0.0);
+        let track_bonus = m.get_attribute(767, sde);
+        let opt_bonus = m.get_attribute(351, sde);
+        let fall_bonus = m.get_attribute(349, sde);
+        let optimal = m.get_attribute(attr_ids::MAX_RANGE, sde);
+        let falloff = get_module_falloff(m, sde);
+        let att = compute_falloff_attenuation(dist, optimal, falloff);
+        track_penalties.push((track_bonus / 100.0) * att);
+        opt_penalties.push((opt_bonus / 100.0) * att);
+        fall_penalties.push((fall_bonus / 100.0) * att);
+    }
+
+    track_penalties.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    opt_penalties.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    fall_penalties.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+    let mut track = turret_base_tracking;
+    for (i, d) in track_penalties.into_iter().enumerate() {
+        track *= 1.0 + d * stacking_penalty_factor(i);
+    }
+    let mut opt = turret_base_optimal;
+    for (i, d) in opt_penalties.into_iter().enumerate() {
+        opt *= 1.0 + d * stacking_penalty_factor(i);
+    }
+    let mut fall = turret_base_falloff;
+    for (i, d) in fall_penalties.into_iter().enumerate() {
+        fall *= 1.0 + d * stacking_penalty_factor(i);
+    }
+
+    (track.max(0.0), opt.max(0.0), fall.max(0.0))
+}
+
+/// Active warp scramble points and MWD suppression state on a target (`DG-1`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WarpScrambleState {
+    pub scramble_strength: i32,
+    pub blocks_mwd: bool,
+}
+
+/// Evaluates active warp disruptors and scramblers against a target (`DG-1`).
+pub fn eval_warp_scrambler_effects(
+    modules: &[&DogmaItemState],
+    distances: &[f64],
+    sde: &SdeRegistry,
+) -> WarpScrambleState {
+    let mut points = 0i32;
+    let mut blocks_mwd = false;
+
+    for (i, &m) in modules.iter().enumerate() {
+        let dist = distances.get(i).copied().unwrap_or(0.0);
+        let max_range = m.get_attribute(attr_ids::MAX_RANGE, sde);
+        if dist <= max_range {
+            let pts = {
+                let p = m.get_attribute(105, sde);
+                if p > 0.0 {
+                    p.round() as i32
+                } else {
+                    m.get_attribute(104, sde).round() as i32
+                }
+            };
+            points += pts.max(1);
+            if let Some(t) = sde.types.get(&m.type_id) {
+                for &eid in &t.effect_ids {
+                    if let Some(eff) = sde.effects.get(&eid) {
+                        for spec in &eff.modifiers {
+                            if spec.func == "EffectStopper" {
+                                blocks_mwd = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    WarpScrambleState {
+        scramble_strength: points,
+        blocks_mwd,
+    }
+
+}
+
+/// Result of a Command Burst activation (`DG-1`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CommandBurstResult {
+    pub burst_radius: f64,
+    pub duration_s: f64,
+    pub affected_fleet_count: usize,
+    pub aggregated_bonus: f64,
+}
+
+/// Evaluates a Command Burst area-of-effect buff across fleet member distances (`DG-1`).
+pub fn eval_command_burst(
+    burst_module: &DogmaItemState,
+    charge_item: Option<&DogmaItemState>,
+    fleet_distances: &[f64],
+    sde: &SdeRegistry,
+) -> CommandBurstResult {
+    let burst_radius = burst_module.get_attribute(1892, sde);
+    let effective_radius = if burst_radius > 0.0 {
+        burst_radius
+    } else {
+        35_000.0
+    };
+    let duration_ms = burst_module.get_attribute(attr_ids::DURATION, sde);
+    let duration_s = if duration_ms > 0.0 {
+        duration_ms / 1000.0
+    } else {
+        60.0
+    };
+
+    let affected_count = fleet_distances
+        .iter()
+        .filter(|&&d| d <= effective_radius)
+        .count();
+    let bonus_val = charge_item
+        .map(|c| c.get_attribute(2470, sde))
+        .filter(|&v| v > 0.0)
+        .unwrap_or(15.0);
+
+    let aggregated = aggregate_dbuff_values("Maximum", &[bonus_val]);
+
+    CommandBurstResult {
+        burst_radius: effective_radius,
+        duration_s,
+        affected_fleet_count: affected_count,
+        aggregated_bonus: aggregated,
+    }
 }
 
 fn select_dominant_assignment(values: &[f64], high_is_good: bool) -> Option<f64> {

@@ -244,7 +244,7 @@ fn test_t2_dogma_all_effects_and_modifier_info_sweep() {
                 expected_single_modifier_value(effective_base_for_item, op);
 
             match func {
-                DogmaModifierFunc::ItemModifier => {
+                DogmaModifierFunc::ItemModifier | DogmaModifierFunc::ItemModifierWithFalloff => {
                     let applied = ctx.apply_modifier_spec_with_effect(
                         source_item_id,
                         Some(eid),
