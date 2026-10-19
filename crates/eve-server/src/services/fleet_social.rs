@@ -5,10 +5,10 @@
 use crate::router::cache_notifications::NotificationTarget;
 use crate::router::ServerContext;
 use eve_db::{
-    corp_roles, BookmarkRecord, ChatChannelRecord, CorpApplicationRecord,
+    corp_roles, BookmarkFolderRecord, BookmarkRecord, ChatChannelRecord, CorpApplicationRecord,
     CorpWalletDivisionRecord, CorporationRecord, CosmicSignatureRecord,
     FleetMemberRecord, FleetRecord, FleetRole, FleetSquadRecord,
-    FleetWingRecord, IskCents, MailRecord,
+    FleetWingRecord, IskCents, MailLabelRecord, MailRecord,
 };
 use eve_destiny::MovementMode;
 use eve_machonet::SessionState;
@@ -328,6 +328,12 @@ pub async fn handle(
                         "fleetid",
                         vec![PyRep::Integer(fid), PyRep::Integer(char_id)],
                     );
+                    ctx.notify(
+                        NotificationTarget::Fleet(fid),
+                        "OnFleetJoin",
+                        "fleetid",
+                        vec![PyRep::Integer(fid), PyRep::Integer(char_id)],
+                    );
                     Some(Ok(PyRep::keyval([
                         ("fleetID", PyRep::Integer(fid)),
                         ("characterID", PyRep::Integer(char_id)),
@@ -396,6 +402,12 @@ pub async fn handle(
                         "fleetid",
                         vec![PyRep::Integer(fid), PyRep::Integer(target_char_id)],
                     );
+                    ctx.notify(
+                        NotificationTarget::Fleet(fid),
+                        "OnFleetLeave",
+                        "fleetid",
+                        vec![PyRep::Integer(fid), PyRep::Integer(target_char_id)],
+                    );
                     Some(Ok(PyRep::keyval([
                         ("fleetID", PyRep::Integer(fid)),
                         ("kickedCharacterID", PyRep::Integer(target_char_id)),
@@ -405,7 +417,7 @@ pub async fn handle(
             }
         }
 
-        ("fleetMgr", "LeaveFleet") | ("fleetObjectHandler", "LeaveFleet") => {
+        ("fleetMgr", "LeaveFleet") | ("fleetMgr", "ForceLeaveFleet") | ("fleetObjectHandler", "LeaveFleet") | ("fleetObjectHandler", "ForceLeaveFleet") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -450,6 +462,12 @@ pub async fn handle(
                         ctx.notify(
                             NotificationTarget::Fleet(fid),
                             "OnFleetMemberLeft",
+                            "fleetid",
+                            vec![PyRep::Integer(fid), PyRep::Integer(char_id)],
+                        );
+                        ctx.notify(
+                            NotificationTarget::Fleet(fid),
+                            "OnFleetLeave",
                             "fleetid",
                             vec![PyRep::Integer(fid), PyRep::Integer(char_id)],
                         );
@@ -557,6 +575,180 @@ pub async fn handle(
                 }
                 Err(e) => Some(Err(e)),
             }
+        }
+
+        ("fleetMgr", "WarpToMember") | ("fleetMgr", "CmdWarpToMember") | ("fleetObjectHandler", "WarpToMember") => {
+            let (_, _char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let fid = match session.fleet_id {
+                Some(f) => f,
+                None => return Some(Err(BridgeRpcError {
+                    code: "NotInFleet".into(),
+                    message: "Character is not currently in a fleet".into(),
+                })),
+            };
+            let Some(target_char_id) = args.first().and_then(|a| a.as_i64()) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidArgument".into(),
+                    message: "WarpToMember requires targetCharacterID".into(),
+                }));
+            };
+            let warp_dist = args.get(1).and_then(|a| a.as_f64()).unwrap_or(0.0);
+            let Some(caller_sys) = session.solar_system_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "NotInSpace".into(),
+                    message: "Caller is not in a solar system".into(),
+                }));
+            };
+            let Some(caller_ship) = session.ship_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "NoActiveShip".into(),
+                    message: "Caller has no active ship".into(),
+                }));
+            };
+
+            let target_ship_opt = ctx.db.with_snapshot(|snap| {
+                let fl = snap.fleets.get(&fid)?;
+                if !fl.members.contains(&target_char_id) {
+                    return None;
+                }
+                let target_ch = snap.characters.get(&target_char_id)?;
+                if target_ch.solar_system_id != caller_sys || target_ch.station_id.is_some() || target_ch.structure_id.is_some() {
+                    return None;
+                }
+                Some(target_ch.active_ship_id)
+            });
+
+            let Some(target_ship_id) = target_ship_opt else {
+                return Some(Err(BridgeRpcError {
+                    code: "TargetUnavailable".into(),
+                    message: "Target fleet member is not in space in the same solar system".into(),
+                }));
+            };
+
+            let sys_handle = ctx.systems.get_or_spawn(caller_sys);
+            let target_ball = sys_handle.get_ball_snapshot(target_ship_id).await.ok().flatten();
+            let Some((_, t_ball)) = target_ball else {
+                return Some(Err(BridgeRpcError {
+                    code: "TargetNotInSpace".into(),
+                    message: "Target ship ball is not present in solar system".into(),
+                }));
+            };
+
+            let dest = t_ball.position + DVec3::new(warp_dist, 0.0, 0.0);
+            if let Ok(Some((_, c_ball))) = sys_handle.get_ball_snapshot(caller_ship).await {
+                let warp_mode = MovementMode::new_warp(c_ball.position, dest, 3.0);
+                let _ = sys_handle.set_movement_mode(caller_ship, warp_mode).await;
+            }
+
+            Some(Ok(PyRep::keyval([
+                ("status", PyRep::String("Warping".into())),
+                ("targetCharacterID", PyRep::Integer(target_char_id)),
+                ("destinationX", PyRep::Real(dest.x)),
+                ("destinationY", PyRep::Real(dest.y)),
+                ("destinationZ", PyRep::Real(dest.z)),
+                ("distance", PyRep::Real(warp_dist)),
+            ])))
+        }
+
+        ("fleetMgr", "CmdFleetWarp") | ("fleetMgr", "FleetWarp") | ("fleetObjectHandler", "CmdFleetWarp") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let fid = match session.fleet_id {
+                Some(f) => f,
+                None => return Some(Err(BridgeRpcError {
+                    code: "NotInFleet".into(),
+                    message: "Character is not currently in a fleet".into(),
+                })),
+            };
+            let Some(caller_sys) = session.solar_system_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "NotInSpace".into(),
+                    message: "Caller is not in space".into(),
+                }));
+            };
+
+            let (dest, warp_dist) = if args.len() >= 3 {
+                let x = args.get(0).and_then(|a| a.as_f64()).unwrap_or(0.0);
+                let y = args.get(1).and_then(|a| a.as_f64()).unwrap_or(0.0);
+                let z = args.get(2).and_then(|a| a.as_f64()).unwrap_or(0.0);
+                let d = args.get(3).and_then(|a| a.as_f64()).unwrap_or(0.0);
+                (DVec3::new(x, y, z), d)
+            } else {
+                let ent_id = args.get(0).and_then(|a| a.as_i64()).unwrap_or(0);
+                let d = args.get(1).and_then(|a| a.as_f64()).unwrap_or(0.0);
+                let sys_handle = ctx.systems.get_or_spawn(caller_sys);
+                let pos = if let Ok(Some((_, b))) = sys_handle.get_ball_snapshot(ent_id).await {
+                    b.position
+                } else if let Some(st) = ctx.sde.solar_systems.get(&caller_sys).and_then(|s| s.stations.iter().find(|st| st.station_id == ent_id)) {
+                    DVec3::new(st.position.x, st.position.y, st.position.z)
+                } else {
+                    DVec3::new(100_000_000.0, 0.0, 0.0)
+                };
+                (pos, d)
+            };
+
+            let members_to_warp = ctx.db.with_snapshot(|snap| {
+                let fl = snap.fleets.get(&fid)?;
+                let caller_mem = fl.member_details.get(&char_id)?;
+                if caller_mem.role == FleetRole::SquadMember {
+                    return None;
+                }
+                let mut ships = Vec::new();
+                for &mid in &fl.members {
+                    if let Some(mem) = fl.member_details.get(&mid) {
+                        if mem.takes_fleet_warp {
+                            if let Some(ch) = snap.characters.get(&mid) {
+                                if ch.solar_system_id == caller_sys && ch.station_id.is_none() && ch.structure_id.is_none() {
+                                    ships.push((mid, ch.active_ship_id));
+                                }
+                            }
+                        }
+                    }
+                }
+                Some(ships)
+            });
+
+            let Some(ships_list) = members_to_warp else {
+                return Some(Err(BridgeRpcError {
+                    code: "FleetWarpDenied".into(),
+                    message: "Only fleet commanders can initiate fleet warp".into(),
+                }));
+            };
+
+            let sys_handle = ctx.systems.get_or_spawn(caller_sys);
+            let warp_target = dest + DVec3::new(warp_dist, 0.0, 0.0);
+            for &(_mid, ship_id) in &ships_list {
+                if let Ok(Some((_, ball))) = sys_handle.get_ball_snapshot(ship_id).await {
+                    let warp_mode = MovementMode::new_warp(ball.position, warp_target, 3.0);
+                    let _ = sys_handle.set_movement_mode(ship_id, warp_mode).await;
+                }
+            }
+
+            ctx.notify(
+                NotificationTarget::Fleet(fid),
+                "OnFleetBroadcast",
+                "fleetid",
+                vec![
+                    PyRep::String("FleetWarp".into()),
+                    PyRep::Integer(char_id),
+                    PyRep::Real(warp_target.x),
+                    PyRep::Real(warp_target.y),
+                    PyRep::Real(warp_target.z),
+                ],
+            );
+
+            Some(Ok(PyRep::keyval([
+                ("status", PyRep::String("FleetWarpInitiated".into())),
+                ("warpCount", PyRep::Integer(ships_list.len() as i64)),
+                ("destinationX", PyRep::Real(warp_target.x)),
+                ("destinationY", PyRep::Real(warp_target.y)),
+                ("destinationZ", PyRep::Real(warp_target.z)),
+            ])))
         }
 
         ("fleetMgr", "Broadcast") | ("fleetMgr", "SendBroadcast") | ("fleetObjectHandler", "Broadcast") => {
@@ -794,6 +986,9 @@ pub async fn handle(
                         member_roles,
                         applications: HashMap::new(),
                         wallet_divisions,
+                        description: String::new(),
+                        url: String::new(),
+                        hq_station_id: Some(60_003_760),
                     },
                 );
                 Ok(cid)
@@ -1242,10 +1437,160 @@ pub async fn handle(
             }
         }
 
+        ("corpmgr", "UpdateDivisionNames") | ("corpRegistry", "UpdateDivisionNames") | ("corporationSvc", "UpdateDivisionNames") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let corp_id = match session.corporation_id {
+                Some(c) => c,
+                None => return Some(Err(BridgeRpcError {
+                    code: "NoCorporation".into(),
+                    message: "Character has no active corporation".into(),
+                })),
+            };
+            let div_id = args.get(0).and_then(|a| a.as_i64()).unwrap_or(1) as u8;
+            let new_name = args.get(1).and_then(|a| a.as_str()).unwrap_or("Division");
+
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let Some(corp) = snap.corporations.get_mut(&corp_id) else {
+                    return Err(BridgeRpcError {
+                        code: "CorporationNotFound".into(),
+                        message: format!("Corporation {corp_id} not found"),
+                    });
+                };
+                let caller_role = corp.member_roles.get(&char_id).copied().unwrap_or(0);
+                if char_id != corp.ceo_id && !corp_roles::has_role(caller_role, corp_roles::ROLE_DIRECTOR) {
+                    return Err(BridgeRpcError {
+                        code: "CorpRoleDenied".into(),
+                        message: "Only CEO or Director can update division names".into(),
+                    });
+                }
+                if let Some(div) = corp.wallet_divisions.iter_mut().find(|d| d.division_id == div_id) {
+                    div.name = new_name.to_string();
+                } else {
+                    return Err(BridgeRpcError {
+                        code: "DivisionNotFound".into(),
+                        message: format!("Division {div_id} not found"),
+                    });
+                }
+                Ok(())
+            });
+
+            match res {
+                Ok(()) => Some(Ok(PyRep::keyval([
+                    ("divisionID", PyRep::Integer(div_id as i64)),
+                    ("name", PyRep::String(new_name.to_string())),
+                ]))),
+                Err(e) => Some(Err(e)),
+            }
+        }
+
+        ("corpmgr", "GetPublicInfo") | ("corporationSvc", "GetCorpInfo") | ("corpmgr", "GetCorporationInfo") => {
+            let (_, _) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let corp_id = args.first().and_then(|a| a.as_i64()).or(session.corporation_id).unwrap_or(0);
+            let corp_info = ctx.db.with_snapshot(|snap| {
+                snap.corporations.get(&corp_id).map(|c| {
+                    (
+                        c.corporation_id,
+                        c.name.clone(),
+                        c.ticker.clone(),
+                        c.ceo_id,
+                        c.members.len() as i64,
+                        c.tax_rate,
+                        c.alliance_id,
+                        c.hq_station_id.unwrap_or(60_003_760),
+                        c.description.clone(),
+                        c.url.clone(),
+                    )
+                })
+            });
+
+            let Some((cid, name, ticker, ceo_id, m_count, tax, alliance_id, hq_station, desc, url)) = corp_info else {
+                return Some(Err(BridgeRpcError {
+                    code: "CorporationNotFound".into(),
+                    message: format!("Corporation {corp_id} not found"),
+                }));
+            };
+
+            Some(Ok(PyRep::keyval([
+                ("corporationID", PyRep::Integer(cid)),
+                ("corporationName", PyRep::String(name)),
+                ("ticker", PyRep::String(ticker)),
+                ("ceoID", PyRep::Integer(ceo_id)),
+                ("memberCount", PyRep::Integer(m_count)),
+                ("taxRate", PyRep::Real(tax)),
+                ("allianceID", alliance_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
+                ("stationID", PyRep::Integer(hq_station)),
+                ("description", PyRep::String(desc)),
+                ("url", PyRep::String(url)),
+            ])))
+        }
+
+        ("corpmgr", "UpdateCorporationDetails") | ("corpmgr", "UpdateCorpInfo") | ("corpRegistry", "UpdateCorporationDetails") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let corp_id = match session.corporation_id {
+                Some(c) => c,
+                None => return Some(Err(BridgeRpcError {
+                    code: "NoCorporation".into(),
+                    message: "Character has no active corporation".into(),
+                })),
+            };
+            let desc = args.get(0).and_then(|a| a.as_str()).unwrap_or("");
+            let url = args.get(1).and_then(|a| a.as_str()).unwrap_or("");
+            let tax_rate_opt = args.get(2).and_then(|a| a.as_f64());
+
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let Some(corp) = snap.corporations.get_mut(&corp_id) else {
+                    return Err(BridgeRpcError {
+                        code: "CorporationNotFound".into(),
+                        message: format!("Corporation {corp_id} not found"),
+                    });
+                };
+                let caller_role = corp.member_roles.get(&char_id).copied().unwrap_or(0);
+                if char_id != corp.ceo_id && !corp_roles::has_role(caller_role, corp_roles::ROLE_DIRECTOR) {
+                    return Err(BridgeRpcError {
+                        code: "CorpRoleDenied".into(),
+                        message: "Only CEO or Director can update corporation details".into(),
+                    });
+                }
+                corp.description = desc.to_string();
+                corp.url = url.to_string();
+                if let Some(t) = tax_rate_opt {
+                    corp.tax_rate = t.clamp(0.0, 1.0);
+                }
+                Ok((corp.description.clone(), corp.url.clone(), corp.tax_rate))
+            });
+
+            match res {
+                Ok((desc, url, tax)) => {
+                    ctx.notify(
+                        NotificationTarget::All,
+                        "OnCorporationChanged",
+                        "corpid",
+                        vec![PyRep::Integer(corp_id)],
+                    );
+                    Some(Ok(PyRep::keyval([
+                        ("corporationID", PyRep::Integer(corp_id)),
+                        ("description", PyRep::String(desc)),
+                        ("url", PyRep::String(url)),
+                        ("taxRate", PyRep::Real(tax)),
+                    ])))
+                }
+                Err(e) => Some(Err(e)),
+            }
+        }
+
         // =========================================================================
-        // SO-3: Chat System (`lscService`, `lsc`, `chat`)
+        // SO-3: Chat System (`lscService`, `lsc`, `chat`, `chatMgr`)
         // =========================================================================
-        ("lscService", "JoinChannel") | ("lsc", "JoinChannel") | ("chat", "JoinChannel") => {
+        ("lscService", "JoinChannel") | ("lsc", "JoinChannel") | ("chat", "JoinChannel") | ("chatMgr", "JoinChannel") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -1268,6 +1613,9 @@ pub async fn handle(
                         is_system_local: chan_id.starts_with("solarsystemid2:"),
                         solar_system_id: None,
                         is_private: chan_id.starts_with("private:"),
+                        operators: HashSet::from([char_id]),
+                        password: None,
+                        is_delayed_local: chan_id.starts_with("solarsystemid2:31"),
                     }
                 });
                 chan.members.insert(char_id);
@@ -1296,7 +1644,7 @@ pub async fn handle(
             }
         }
 
-        ("lscService", "LeaveChannel") | ("lsc", "LeaveChannel") | ("chat", "LeaveChannel") => {
+        ("lscService", "LeaveChannel") | ("lsc", "LeaveChannel") | ("chat", "LeaveChannel") | ("chatMgr", "LeaveChannel") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -1332,7 +1680,7 @@ pub async fn handle(
             ])))
         }
 
-        ("lscService", "SendMessage") | ("lsc", "SendMessage") | ("chat", "SendMessage") => {
+        ("lscService", "SendMessage") | ("lsc", "SendMessage") | ("chat", "SendMessage") | ("chatMgr", "SendMessage") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -1365,6 +1713,9 @@ pub async fn handle(
             } else if chan_id.starts_with("corpid:") {
                 let corp_id: i64 = chan_id.split(':').nth(1).and_then(|s| s.parse().ok()).unwrap_or(0);
                 ctx.notify(NotificationTarget::Corporation(corp_id), "OnLSC", "channelid", notif_args);
+            } else if chan_id.starts_with("allianceid:") {
+                let alliance_id: i64 = chan_id.split(':').nth(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+                ctx.notify(NotificationTarget::Alliance(alliance_id), "OnLSC", "channelid", notif_args);
             } else if chan_id.starts_with("fleetid:") {
                 let fleet_id: i64 = chan_id.split(':').nth(1).and_then(|s| s.parse().ok()).unwrap_or(0);
                 ctx.notify(NotificationTarget::Fleet(fleet_id), "OnLSC", "channelid", notif_args);
@@ -1384,7 +1735,7 @@ pub async fn handle(
             ])))
         }
 
-        ("lscService", "StartConversation") | ("lsc", "SendPrivateMessage") | ("chat", "StartConversation") => {
+        ("lscService", "StartConversation") | ("lsc", "SendPrivateMessage") | ("chat", "StartConversation") | ("chatMgr", "StartConversation") | ("chatMgr", "CreatePrivateChannel") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -1423,7 +1774,7 @@ pub async fn handle(
             ])))
         }
 
-        ("lscService", "GetChannelInfo") | ("lsc", "GetChannelMembers") => {
+        ("lscService", "GetChannelInfo") | ("lsc", "GetChannelMembers") | ("chatMgr", "GetChannelInfo") => {
             let (_, _) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -1451,8 +1802,97 @@ pub async fn handle(
                 ("channelID", PyRep::String(chan.channel_id)),
                 ("name", PyRep::String(chan.name)),
                 ("motd", PyRep::String(chan.motd)),
+                ("ownerID", chan.owner_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
                 ("members", PyRep::rowset(vec!["characterID", "channelID"], rows)),
             ])))
+        }
+
+        ("chatMgr", "CreateChannel") | ("chatMgr", "CreatePlayerOwnedChannel") | ("lscService", "CreatePlayerOwnedChannel") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let name = args.first().and_then(|a| a.as_str()).unwrap_or("PlayerChannel");
+            let password = args.get(1).and_then(|a| a.as_str()).map(|s| s.to_string());
+            let motd = args.get(2).and_then(|a| a.as_str()).unwrap_or("");
+            let chan_id = format!("channel:{}", name.to_lowercase().replace(' ', "_"));
+
+            ctx.db.try_with_mut_snapshot(|snap| {
+                snap.chat_channels.insert(
+                    chan_id.clone(),
+                    ChatChannelRecord {
+                        channel_id: chan_id.clone(),
+                        name: name.to_string(),
+                        motd: motd.to_string(),
+                        owner_id: Some(char_id),
+                        members: HashSet::from([char_id]),
+                        is_system_local: false,
+                        solar_system_id: None,
+                        is_private: false,
+                        operators: HashSet::from([char_id]),
+                        password,
+                        is_delayed_local: false,
+                    },
+                );
+                Ok::<(), std::convert::Infallible>(())
+            }).unwrap();
+
+            Some(Ok(PyRep::keyval([
+                ("channelID", PyRep::String(chan_id)),
+                ("name", PyRep::String(name.to_string())),
+                ("ownerID", PyRep::Integer(char_id)),
+            ])))
+        }
+
+        ("chatMgr", "GrantChannelOwnership") | ("lscService", "GrantChannelOwnership") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let Some(chan_id) = args.first().and_then(|a| a.as_str()) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidArgument".into(),
+                    message: "GrantChannelOwnership requires channelID".into(),
+                }));
+            };
+            let Some(new_owner_id) = args.get(1).and_then(|a| a.as_i64()) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidArgument".into(),
+                    message: "GrantChannelOwnership requires newOwnerID".into(),
+                }));
+            };
+
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let chan_key = if snap.chat_channels.contains_key(chan_id) {
+                    chan_id.to_string()
+                } else {
+                    chan_id.to_lowercase()
+                };
+                let Some(chan) = snap.chat_channels.get_mut(&chan_key) else {
+                    return Err(BridgeRpcError {
+                        code: "ChannelNotFound".into(),
+                        message: format!("Channel {chan_id} not found"),
+                    });
+                };
+                if chan.owner_id != Some(char_id) {
+                    return Err(BridgeRpcError {
+                        code: "NotChannelOwner".into(),
+                        message: "Only the channel owner can transfer ownership".into(),
+                    });
+                }
+                chan.owner_id = Some(new_owner_id);
+                chan.operators.insert(new_owner_id);
+                Ok(())
+            });
+
+            match res {
+                Ok(()) => Some(Ok(PyRep::keyval([
+                    ("channelID", PyRep::String(chan_id.to_string())),
+                    ("ownerID", PyRep::Integer(new_owner_id)),
+                    ("transferred", PyRep::Bool(true)),
+                ]))),
+                Err(e) => Some(Err(e)),
+            }
         }
 
         // =========================================================================
@@ -1488,6 +1928,11 @@ pub async fn handle(
                     subject: subject.to_string(),
                     body: body.to_string(),
                 });
+                // Default label assignments: 1 (Inbox) for recipient, 2 (Sent) for sender
+                snap.mail_assigned_labels.insert((recipient_id, id), vec![1]);
+                snap.mail_assigned_labels.insert((char_id, id), vec![2]);
+                // Sender automatically marks their sent mail as read
+                snap.read_mails.insert((char_id, id));
                 Ok(id)
             });
 
@@ -1499,13 +1944,19 @@ pub async fn handle(
                         "charid",
                         vec![PyRep::Integer(mid), PyRep::Integer(char_id)],
                     );
+                    ctx.notify(
+                        NotificationTarget::Character(char_id),
+                        "OnMailSent",
+                        "charid",
+                        vec![PyRep::Integer(mid), PyRep::Integer(recipient_id)],
+                    );
                     Some(Ok(PyRep::Integer(mid)))
                 }
                 Err(e) => Some(Err(e)),
             }
         }
 
-        ("mailMgr", "GetHeaders") | ("mailMgr", "GetMailHeaders") => {
+        ("mailMgr", "GetHeaders") | ("mailMgr", "GetMailHeaders") | ("mailMgr", "SyncMail") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -1520,6 +1971,11 @@ pub async fn handle(
                     })
                     .map(|m| {
                         let read = snap.read_mails.contains(&(char_id, m.message_id));
+                        let labels = snap
+                            .mail_assigned_labels
+                            .get(&(char_id, m.message_id))
+                            .cloned()
+                            .unwrap_or_else(|| vec![if m.sender_id == char_id { 2 } else { 1 }]);
                         vec![
                             PyRep::Integer(m.message_id),
                             PyRep::Integer(m.sender_id),
@@ -1527,13 +1983,14 @@ pub async fn handle(
                             PyRep::String(m.subject.clone()),
                             PyRep::Integer(133_000_000_000_000_000), // Standard BlueOS filetime
                             PyRep::Bool(read),
+                            PyRep::List(labels.into_iter().map(PyRep::Integer).collect()),
                         ]
                     })
                     .collect()
             });
 
             Some(Ok(PyRep::rowset(
-                vec!["messageID", "senderID", "toCharacterIDs", "title", "sentDate", "read"],
+                vec!["messageID", "senderID", "toCharacterIDs", "title", "sentDate", "read", "labels"],
                 rows,
             )))
         }
@@ -1550,9 +2007,15 @@ pub async fn handle(
                 }));
             };
 
-            let mail_opt = ctx.db.with_snapshot(|snap| {
-                snap.mails.iter().find(|m| m.message_id == mail_id).cloned()
-            });
+            let mail_opt = ctx.db.try_with_mut_snapshot(|snap| {
+                let m = snap.mails.iter().find(|m| m.message_id == mail_id).cloned();
+                if let Some(ref mail) = m {
+                    if mail.recipient_id == char_id {
+                        snap.read_mails.insert((char_id, mail_id));
+                    }
+                }
+                Ok::<_, std::convert::Infallible>(m)
+            }).unwrap();
 
             let Some(mail) = mail_opt else {
                 return Some(Err(BridgeRpcError {
@@ -1571,10 +2034,11 @@ pub async fn handle(
             Some(Ok(PyRep::keyval([
                 ("messageID", PyRep::Integer(mail.message_id)),
                 ("body", PyRep::String(mail.body)),
+                ("read", PyRep::Bool(true)),
             ])))
         }
 
-        ("mailMgr", "MarkRead") | ("mailMgr", "MarkMailRead") => {
+        ("mailMgr", "MarkRead") | ("mailMgr", "MarkMailRead") | ("mailMgr", "MarkAsRead") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -1594,6 +2058,282 @@ pub async fn handle(
             Some(Ok(PyRep::keyval([
                 ("messageID", PyRep::Integer(mail_id)),
                 ("read", PyRep::Bool(true)),
+            ])))
+        }
+
+        ("mailMgr", "MarkAsUnread") | ("mailMgr", "MarkMailUnread") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let Some(mail_id) = args.first().and_then(|a| a.as_i64()) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidArgument".into(),
+                    message: "MarkAsUnread requires messageID".into(),
+                }));
+            };
+
+            ctx.db.try_with_mut_snapshot(|snap| {
+                snap.read_mails.remove(&(char_id, mail_id));
+                Ok::<(), std::convert::Infallible>(())
+            }).unwrap();
+
+            Some(Ok(PyRep::keyval([
+                ("messageID", PyRep::Integer(mail_id)),
+                ("read", PyRep::Bool(false)),
+            ])))
+        }
+
+        ("mailMgr", "MarkAllAsRead") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+
+            let count = ctx.db.try_with_mut_snapshot(|snap| {
+                let mut count = 0;
+                let mids: Vec<i64> = snap.mails.iter().filter(|m| m.recipient_id == char_id).map(|m| m.message_id).collect();
+                for mid in mids {
+                    if snap.read_mails.insert((char_id, mid)) {
+                        count += 1;
+                    }
+                }
+                Ok::<_, std::convert::Infallible>(count)
+            }).unwrap();
+
+            Some(Ok(PyRep::keyval([
+                ("markedReadCount", PyRep::Integer(count)),
+            ])))
+        }
+
+        ("mailMgr", "GetLabels") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+
+            let (custom_labels, mails, read_mails, assignments) = ctx.db.with_snapshot(|snap| {
+                (
+                    snap.mail_labels.get(&char_id).cloned().unwrap_or_default(),
+                    snap.mails.clone(),
+                    snap.read_mails.clone(),
+                    snap.mail_assigned_labels.clone(),
+                )
+            });
+
+            let mut all_labels = vec![
+                MailLabelRecord { label_id: 1, name: "Inbox".into(), color: "#ffffff".into() },
+                MailLabelRecord { label_id: 2, name: "Sent".into(), color: "#ffffff".into() },
+                MailLabelRecord { label_id: 4, name: "Corp".into(), color: "#0099ff".into() },
+                MailLabelRecord { label_id: 8, name: "Alliance".into(), color: "#00ff33".into() },
+            ];
+            all_labels.extend(custom_labels);
+
+            let rows: Vec<Vec<PyRep>> = all_labels.into_iter().map(|lbl| {
+                let unread_count = mails.iter().filter(|m| {
+                    if m.recipient_id != char_id { return false; }
+                    if read_mails.contains(&(char_id, m.message_id)) { return false; }
+                    let assigned = assignments.get(&(char_id, m.message_id)).cloned().unwrap_or_else(|| vec![1]);
+                    assigned.contains(&lbl.label_id)
+                }).count();
+
+                vec![
+                    PyRep::Integer(lbl.label_id),
+                    PyRep::String(lbl.name),
+                    PyRep::String(lbl.color),
+                    PyRep::Integer(unread_count as i64),
+                ]
+            }).collect();
+
+            Some(Ok(PyRep::rowset(
+                vec!["labelID", "name", "color", "unreadCount"],
+                rows,
+            )))
+        }
+
+        ("mailMgr", "CreateLabel") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let name = args.first().and_then(|a| a.as_str()).unwrap_or("CustomLabel");
+            let color = args.get(1).and_then(|a| a.as_str()).unwrap_or("#ffffff");
+
+            let lid = ctx.db.try_with_mut_snapshot(|snap| {
+                let list = snap.mail_labels.entry(char_id).or_default();
+                let next_id = 16 + (list.len() as i64 * 2);
+                list.push(MailLabelRecord {
+                    label_id: next_id,
+                    name: name.to_string(),
+                    color: color.to_string(),
+                });
+                Ok::<_, std::convert::Infallible>(next_id)
+            }).unwrap();
+
+            Some(Ok(PyRep::keyval([
+                ("labelID", PyRep::Integer(lid)),
+                ("name", PyRep::String(name.to_string())),
+                ("color", PyRep::String(color.to_string())),
+            ])))
+        }
+
+        ("mailMgr", "EditLabel") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let Some(label_id) = args.first().and_then(|a| a.as_i64()) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidArgument".into(),
+                    message: "EditLabel requires labelID".into(),
+                }));
+            };
+            let name = args.get(1).and_then(|a| a.as_str()).unwrap_or("CustomLabel");
+            let color = args.get(2).and_then(|a| a.as_str()).unwrap_or("#ffffff");
+
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let Some(list) = snap.mail_labels.get_mut(&char_id) else {
+                    return Err(BridgeRpcError {
+                        code: "LabelNotFound".into(),
+                        message: format!("Label {label_id} not found"),
+                    });
+                };
+                let Some(lbl) = list.iter_mut().find(|l| l.label_id == label_id) else {
+                    return Err(BridgeRpcError {
+                        code: "LabelNotFound".into(),
+                        message: format!("Label {label_id} not found"),
+                    });
+                };
+                lbl.name = name.to_string();
+                lbl.color = color.to_string();
+                Ok(())
+            });
+
+            match res {
+                Ok(()) => Some(Ok(PyRep::keyval([
+                    ("labelID", PyRep::Integer(label_id)),
+                    ("name", PyRep::String(name.to_string())),
+                    ("color", PyRep::String(color.to_string())),
+                ]))),
+                Err(e) => Some(Err(e)),
+            }
+        }
+
+        ("mailMgr", "DeleteLabel") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let Some(label_id) = args.first().and_then(|a| a.as_i64()) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidArgument".into(),
+                    message: "DeleteLabel requires labelID".into(),
+                }));
+            };
+            if label_id <= 8 {
+                return Some(Err(BridgeRpcError {
+                    code: "CannotDeleteSystemLabel".into(),
+                    message: "Default system mail labels cannot be deleted".into(),
+                }));
+            }
+
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let Some(list) = snap.mail_labels.get_mut(&char_id) else {
+                    return Err(BridgeRpcError {
+                        code: "LabelNotFound".into(),
+                        message: format!("Label {label_id} not found"),
+                    });
+                };
+                let orig_len = list.len();
+                list.retain(|l| l.label_id != label_id);
+                if list.len() == orig_len {
+                    return Err(BridgeRpcError {
+                        code: "LabelNotFound".into(),
+                        message: format!("Label {label_id} not found"),
+                    });
+                }
+                Ok(())
+            });
+
+            match res {
+                Ok(()) => Some(Ok(PyRep::keyval([
+                    ("labelID", PyRep::Integer(label_id)),
+                    ("deleted", PyRep::Bool(true)),
+                ]))),
+                Err(e) => Some(Err(e)),
+            }
+        }
+
+        ("mailMgr", "AssignLabels") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let Some(mail_id) = args.first().and_then(|a| a.as_i64()) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidArgument".into(),
+                    message: "AssignLabels requires messageID".into(),
+                }));
+            };
+            let mut labels_to_add = Vec::new();
+            if let Some(PyRep::List(l)) = args.get(1) {
+                for item in l {
+                    if let Some(lid) = item.as_i64() {
+                        labels_to_add.push(lid);
+                    }
+                }
+            } else if let Some(lid) = args.get(1).and_then(|a| a.as_i64()) {
+                labels_to_add.push(lid);
+            }
+
+            ctx.db.try_with_mut_snapshot(|snap| {
+                let current = snap.mail_assigned_labels.entry((char_id, mail_id)).or_default();
+                for lid in labels_to_add {
+                    if !current.contains(&lid) {
+                        current.push(lid);
+                    }
+                }
+                Ok::<(), std::convert::Infallible>(())
+            }).unwrap();
+
+            Some(Ok(PyRep::keyval([
+                ("messageID", PyRep::Integer(mail_id)),
+                ("assigned", PyRep::Bool(true)),
+            ])))
+        }
+
+        ("mailMgr", "RemoveLabels") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let Some(mail_id) = args.first().and_then(|a| a.as_i64()) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidArgument".into(),
+                    message: "RemoveLabels requires messageID".into(),
+                }));
+            };
+            let mut labels_to_remove = Vec::new();
+            if let Some(PyRep::List(l)) = args.get(1) {
+                for item in l {
+                    if let Some(lid) = item.as_i64() {
+                        labels_to_remove.push(lid);
+                    }
+                }
+            } else if let Some(lid) = args.get(1).and_then(|a| a.as_i64()) {
+                labels_to_remove.push(lid);
+            }
+
+            ctx.db.try_with_mut_snapshot(|snap| {
+                if let Some(current) = snap.mail_assigned_labels.get_mut(&(char_id, mail_id)) {
+                    current.retain(|lid| !labels_to_remove.contains(lid));
+                }
+                Ok::<(), std::convert::Infallible>(())
+            }).unwrap();
+
+            Some(Ok(PyRep::keyval([
+                ("messageID", PyRep::Integer(mail_id)),
+                ("removed", PyRep::Bool(true)),
             ])))
         }
 
@@ -1621,9 +2361,9 @@ pub async fn handle(
         }
 
         // =========================================================================
-        // SO-5: Bookmarks (`bookmark`, `accessGroupBookmarkMgr`)
+        // SO-5: Bookmarks (`bookmark`, `bookmarkMgr`, `accessGroupBookmarkMgr`)
         // =========================================================================
-        ("bookmark", "BookmarkLocation") | ("accessGroupBookmarkMgr", "BookmarkStaticLocation") | ("bookmark", "BookmarkEntity") => {
+        ("bookmark", "BookmarkLocation") | ("bookmarkMgr", "BookmarkLocation") | ("accessGroupBookmarkMgr", "BookmarkStaticLocation") | ("bookmark", "BookmarkEntity") | ("bookmarkMgr", "BookmarkEntity") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -1645,6 +2385,7 @@ pub async fn handle(
             // Derive bookmark coordinates
             let explicit_entity_id = args.get(1).and_then(|a| a.as_i64());
             let memo = args.get(2).and_then(|a| a.as_str()).unwrap_or("").to_string();
+            let folder_id = args.get(3).and_then(|a| a.as_i64());
 
             let (x, y, z) = if let Some(ent_id) = explicit_entity_id {
                 let sys_handle = ctx.systems.get_or_spawn(sys_id);
@@ -1686,6 +2427,7 @@ pub async fn handle(
                         message: "Character has reached the maximum of 500 personal bookmarks".into(),
                     });
                 }
+                let is_shared_folder = folder_id.and_then(|fid| snap.bookmark_folders.get(&fid)).map(|f| f.is_shared).unwrap_or(false);
                 snap.next_entity_id += 1;
                 let id = snap.next_entity_id;
                 snap.bookmarks.insert(
@@ -1700,6 +2442,8 @@ pub async fn handle(
                         z,
                         item_id: explicit_entity_id,
                         memo,
+                        folder_id,
+                        is_shared: is_shared_folder,
                     },
                 );
                 Ok(id)
@@ -1709,20 +2453,26 @@ pub async fn handle(
                 Ok(bm_id) => Some(Ok(PyRep::keyval([
                     ("bookmarkID", PyRep::Integer(bm_id)),
                     ("label", PyRep::String(label.to_string())),
+                    ("x", PyRep::Real(x)),
+                    ("y", PyRep::Real(y)),
+                    ("z", PyRep::Real(z)),
                 ]))),
                 Err(e) => Some(Err(e)),
             }
         }
 
-        ("bookmark", "GetBookmarks") => {
+        ("bookmark", "GetBookmarks") | ("bookmarkMgr", "GetBookmarks") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            let corp_id_opt = session.corporation_id;
             let rows = ctx.db.with_snapshot(|snap| {
                 snap.bookmarks
                     .values()
-                    .filter(|b| b.owner_id == char_id)
+                    .filter(|b| {
+                        b.owner_id == char_id || (b.is_shared && corp_id_opt.is_some())
+                    })
                     .map(|b| {
                         vec![
                             PyRep::Integer(b.bookmark_id),
@@ -1733,17 +2483,68 @@ pub async fn handle(
                             PyRep::Real(b.z),
                             b.item_id.map(PyRep::Integer).unwrap_or(PyRep::None),
                             PyRep::String(b.memo.clone()),
+                            b.folder_id.map(PyRep::Integer).unwrap_or(PyRep::None),
+                            PyRep::Bool(b.is_shared),
                         ]
                     })
                     .collect()
             });
             Some(Ok(PyRep::rowset(
-                vec!["bookmarkID", "label", "solarSystemID", "x", "y", "z", "itemID", "memo"],
+                vec!["bookmarkID", "label", "solarSystemID", "x", "y", "z", "itemID", "memo", "folderID", "isShared"],
                 rows,
             )))
         }
 
-        ("bookmark", "DeleteBookmark") => {
+        ("bookmark", "UpdateBookmark") | ("bookmarkMgr", "UpdateBookmark") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let Some(bm_id) = args.first().and_then(|a| a.as_i64()) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidArgument".into(),
+                    message: "UpdateBookmark requires bookmarkID".into(),
+                }));
+            };
+            let label_opt = args.get(1).and_then(|a| a.as_str());
+            let memo_opt = args.get(2).and_then(|a| a.as_str());
+            let folder_id_opt = args.get(3).and_then(|a| a.as_i64());
+
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let Some(bm) = snap.bookmarks.get_mut(&bm_id) else {
+                    return Err(BridgeRpcError {
+                        code: "BookmarkNotFound".into(),
+                        message: format!("Bookmark {bm_id} not found"),
+                    });
+                };
+                if bm.owner_id != char_id && !bm.is_shared {
+                    return Err(BridgeRpcError {
+                        code: "AccessDenied".into(),
+                        message: "Cannot edit another character's bookmark".into(),
+                    });
+                }
+                if let Some(l) = label_opt {
+                    bm.label = l.to_string();
+                }
+                if let Some(m) = memo_opt {
+                    bm.memo = m.to_string();
+                }
+                if let Some(fid) = folder_id_opt {
+                    bm.folder_id = Some(fid);
+                }
+                Ok(())
+            });
+
+            match res {
+                Ok(()) => Some(Ok(PyRep::keyval([
+                    ("bookmarkID", PyRep::Integer(bm_id)),
+                    ("updated", PyRep::Bool(true)),
+                ]))),
+                Err(e) => Some(Err(e)),
+            }
+        }
+
+        ("bookmark", "DeleteBookmark") | ("bookmark", "DeleteBookmarks") | ("bookmarkMgr", "DeleteBookmark") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -1762,7 +2563,7 @@ pub async fn handle(
                         message: format!("Bookmark {bm_id} not found"),
                     });
                 };
-                if bm.owner_id != char_id {
+                if bm.owner_id != char_id && !bm.is_shared {
                     return Err(BridgeRpcError {
                         code: "AccessDenied".into(),
                         message: "Cannot delete another character's bookmark".into(),
@@ -1779,6 +2580,245 @@ pub async fn handle(
                 ]))),
                 Err(e) => Some(Err(e)),
             }
+        }
+
+        ("bookmark", "CreateFolder") | ("bookmark", "AddFolder") | ("bookmarkMgr", "CreateFolder") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let name = args.first().and_then(|a| a.as_str()).unwrap_or("New Folder");
+
+            let folder_id = ctx.db.try_with_mut_snapshot(|snap| {
+                snap.next_entity_id += 1;
+                let id = snap.next_entity_id;
+                snap.bookmark_folders.insert(
+                    id,
+                    BookmarkFolderRecord {
+                        folder_id: id,
+                        owner_id: char_id,
+                        folder_name: name.to_string(),
+                        is_shared: false,
+                        corporation_id: None,
+                    },
+                );
+                Ok::<_, std::convert::Infallible>(id)
+            }).unwrap();
+
+            Some(Ok(PyRep::keyval([
+                ("folderID", PyRep::Integer(folder_id)),
+                ("folderName", PyRep::String(name.to_string())),
+                ("isShared", PyRep::Bool(false)),
+            ])))
+        }
+
+        ("bookmark", "GetFolders") | ("bookmarkMgr", "GetFolders") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let corp_id_opt = session.corporation_id;
+
+            let rows: Vec<Vec<PyRep>> = ctx.db.with_snapshot(|snap| {
+                snap.bookmark_folders
+                    .values()
+                    .filter(|f| {
+                        f.owner_id == char_id || (f.is_shared && f.corporation_id == corp_id_opt)
+                    })
+                    .map(|f| {
+                        vec![
+                            PyRep::Integer(f.folder_id),
+                            PyRep::String(f.folder_name.clone()),
+                            PyRep::Integer(f.owner_id),
+                            PyRep::Bool(f.is_shared),
+                        ]
+                    })
+                    .collect()
+            });
+
+            Some(Ok(PyRep::rowset(
+                vec!["folderID", "folderName", "ownerID", "isShared"],
+                rows,
+            )))
+        }
+
+        ("bookmark", "DeleteFolder") | ("bookmarkMgr", "DeleteFolder") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let Some(folder_id) = args.first().and_then(|a| a.as_i64()) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidArgument".into(),
+                    message: "DeleteFolder requires folderID".into(),
+                }));
+            };
+
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let Some(f) = snap.bookmark_folders.get(&folder_id) else {
+                    return Err(BridgeRpcError {
+                        code: "FolderNotFound".into(),
+                        message: format!("Folder {folder_id} not found"),
+                    });
+                };
+                if f.owner_id != char_id {
+                    return Err(BridgeRpcError {
+                        code: "AccessDenied".into(),
+                        message: "Cannot delete another character's folder".into(),
+                    });
+                }
+                snap.bookmark_folders.remove(&folder_id);
+                for bm in snap.bookmarks.values_mut() {
+                    if bm.folder_id == Some(folder_id) {
+                        bm.folder_id = None;
+                    }
+                }
+                Ok(())
+            });
+
+            match res {
+                Ok(()) => Some(Ok(PyRep::keyval([
+                    ("folderID", PyRep::Integer(folder_id)),
+                    ("deleted", PyRep::Bool(true)),
+                ]))),
+                Err(e) => Some(Err(e)),
+            }
+        }
+
+        ("accessGroupBookmarkMgr", "CreateSharedFolder") | ("bookmark", "CreateSharedFolder") | ("bookmarkMgr", "CreateSharedFolder") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let corp_id = match session.corporation_id {
+                Some(c) => c,
+                None => return Some(Err(BridgeRpcError {
+                    code: "NoCorporation".into(),
+                    message: "Creating shared folder requires corporation membership".into(),
+                })),
+            };
+            let name = args.first().and_then(|a| a.as_str()).unwrap_or("Shared Corp Bookmarks");
+
+            let folder_id = ctx.db.try_with_mut_snapshot(|snap| {
+                snap.next_entity_id += 1;
+                let id = snap.next_entity_id;
+                snap.bookmark_folders.insert(
+                    id,
+                    BookmarkFolderRecord {
+                        folder_id: id,
+                        owner_id: char_id,
+                        folder_name: name.to_string(),
+                        is_shared: true,
+                        corporation_id: Some(corp_id),
+                    },
+                );
+                Ok::<_, std::convert::Infallible>(id)
+            }).unwrap();
+
+            ctx.notify(
+                NotificationTarget::Corporation(corp_id),
+                "OnSharedBookmarksFolderUpdated",
+                "corpid",
+                vec![PyRep::Integer(folder_id), PyRep::Integer(corp_id)],
+            );
+
+            Some(Ok(PyRep::keyval([
+                ("folderID", PyRep::Integer(folder_id)),
+                ("folderName", PyRep::String(name.to_string())),
+                ("isShared", PyRep::Bool(true)),
+                ("corporationID", PyRep::Integer(corp_id)),
+            ])))
+        }
+
+        ("accessGroupBookmarkMgr", "GetSharedFolders") | ("bookmark", "GetSharedFolders") => {
+            let (_, _) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let corp_id_opt = session.corporation_id;
+
+            let rows: Vec<Vec<PyRep>> = ctx.db.with_snapshot(|snap| {
+                snap.bookmark_folders
+                    .values()
+                    .filter(|f| f.is_shared && f.corporation_id == corp_id_opt)
+                    .map(|f| {
+                        vec![
+                            PyRep::Integer(f.folder_id),
+                            PyRep::String(f.folder_name.clone()),
+                            f.corporation_id.map(PyRep::Integer).unwrap_or(PyRep::None),
+                        ]
+                    })
+                    .collect()
+            });
+
+            Some(Ok(PyRep::rowset(
+                vec!["folderID", "folderName", "corporationID"],
+                rows,
+            )))
+        }
+
+        ("scanMgr", "BookmarkScanResult") | ("scanMgr", "BookmarkSignature") | ("bookmark", "BookmarkScanResult") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let Some(sig_id) = args.first().and_then(|a| a.as_str()) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidArgument".into(),
+                    message: "BookmarkScanResult requires signatureID".into(),
+                }));
+            };
+            let Some(sys_id) = session.solar_system_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "NoSolarSystem".into(),
+                    message: "Session has no active solar system".into(),
+                }));
+            };
+            let label = args.get(1).and_then(|a| a.as_str()).unwrap_or(sig_id);
+
+            let sig_pos_opt = ctx.db.with_snapshot(|snap| {
+                snap.cosmic_signatures.get(&sys_id).and_then(|sigs| {
+                    sigs.iter().find(|s| s.signature_id == sig_id).map(|s| s.position)
+                })
+            });
+
+            let Some(pos) = sig_pos_opt else {
+                return Some(Err(BridgeRpcError {
+                    code: "SignatureNotFound".into(),
+                    message: format!("Cosmic signature {sig_id} not found in system {sys_id}"),
+                }));
+            };
+
+            let bm_id = ctx.db.try_with_mut_snapshot(|snap| {
+                snap.next_entity_id += 1;
+                let id = snap.next_entity_id;
+                snap.bookmarks.insert(
+                    id,
+                    BookmarkRecord {
+                        bookmark_id: id,
+                        owner_id: char_id,
+                        label: label.to_string(),
+                        solar_system_id: sys_id,
+                        x: pos[0],
+                        y: pos[1],
+                        z: pos[2],
+                        item_id: None,
+                        memo: format!("Scanned cosmic signature {sig_id}"),
+                        folder_id: None,
+                        is_shared: false,
+                    },
+                );
+                Ok::<_, std::convert::Infallible>(id)
+            }).unwrap();
+
+            Some(Ok(PyRep::keyval([
+                ("bookmarkID", PyRep::Integer(bm_id)),
+                ("signatureID", PyRep::String(sig_id.to_string())),
+                ("label", PyRep::String(label.to_string())),
+                ("x", PyRep::Real(pos[0])),
+                ("y", PyRep::Real(pos[1])),
+                ("z", PyRep::Real(pos[2])),
+            ])))
         }
 
         // =========================================================================
@@ -2080,7 +3120,7 @@ pub async fn handle(
             ])))
         }
 
-        ("wormholeMgr", "JumpWormhole") => {
+        ("wormholeMgr", "JumpWormhole") | ("wormholeMgr", "WormholeJump") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -2130,6 +3170,17 @@ pub async fn handle(
                     });
                 };
 
+                let dest_sys = wh.destination_system_id.unwrap_or(31_000_005);
+
+                // Check polarization
+                let pol_expiry = snap.wh_polarizations.get(&(char_id, dest_sys as i64)).copied().unwrap_or(0);
+                if pol_expiry > now_unix {
+                    return Err(BridgeRpcError {
+                        code: "WormholePolarized".into(),
+                        message: format!("Character is polarized for system {} for another {} seconds", dest_sys, pol_expiry.saturating_sub(now_unix)),
+                    });
+                }
+
                 // Check distance
                 let wh_pos = DVec3::new(wh.position[0], wh.position[1], wh.position[2]);
                 let dist = current_ball.position.distance(wh_pos);
@@ -2173,7 +3224,9 @@ pub async fn handle(
                     wh.collapsed = true;
                 }
 
-                let dest_sys = wh.destination_system_id.unwrap_or(31_000_005);
+                // Insert 300s polarization
+                snap.wh_polarizations.insert((char_id, dest_sys as i64), now_unix + 300);
+
                 Ok((dest_sys, wh.remaining_mass_kg, wh.collapsed))
             });
 
@@ -2202,6 +3255,236 @@ pub async fn handle(
                 }
                 Err(e) => Some(Err(e)),
             }
+        }
+
+        ("wormholeMgr", "GetWormholePolarization") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let target_sys = args.first().and_then(|a| a.as_i64()).unwrap_or(31_000_005);
+            let now_unix = ctx.now_unix();
+            let remaining = ctx.db.with_snapshot(|snap| {
+                snap.wh_polarizations.get(&(char_id, target_sys)).copied().unwrap_or(0).saturating_sub(now_unix)
+            });
+            let is_polarized = remaining > 0;
+            Some(Ok(PyRep::keyval([
+                ("destinationSystemID", PyRep::Integer(target_sys)),
+                ("isPolarized", PyRep::Bool(is_polarized)),
+                ("remainingSeconds", PyRep::Integer(remaining as i64)),
+            ])))
+        }
+
+        ("wormholeMgr", "GetSystemStatics") => {
+            let sys_id = args.first().and_then(|a| a.as_i64()).map(|v| v as u32).or(session.solar_system_id).unwrap_or(30_000_142);
+            let statics = if sys_id == 31_000_005 {
+                vec![
+                    ("HighSec", "HS-Static", 10000000),
+                    ("LowSec", "LS-Static", 10000000),
+                    ("NullSec", "NS-Static", 10000000),
+                ]
+            } else if sys_id >= 31_000_000 && sys_id <= 31_002_605 {
+                let wh_class = ((sys_id - 31_000_000) % 6) + 1;
+                match wh_class {
+                    1 => vec![("C1-Static", "H296", 1)],
+                    2 => vec![("C2-Static", "C247", 2)],
+                    3 => vec![("C3-Static", "D845", 3)],
+                    4 => vec![("C4-Static", "E175", 4)],
+                    5 => vec![("C5-Static", "H900", 5)],
+                    _ => vec![("C6-Static", "V898", 6)],
+                }
+            } else {
+                vec![("Wandering", "Unknown", 0)]
+            };
+            let rows = statics.into_iter().map(|(name, code, target)| {
+                vec![PyRep::String(name.into()), PyRep::String(code.into()), PyRep::Integer(target)]
+            }).collect();
+            Some(Ok(PyRep::rowset(vec!["name", "code", "targetClassOrSec"], rows)))
+        }
+
+        ("wormholeMgr", "GetSystemWormholeClass") | ("wormholeMgr", "GetWormholeSystemRules") => {
+            let sys_id = args.first().and_then(|a| a.as_i64()).map(|v| v as u32).or(session.solar_system_id).unwrap_or(30_000_142);
+            let is_wh = sys_id >= 31_000_000 && sys_id <= 31_002_605;
+            let is_thera = sys_id == 31_000_005;
+            let is_shattered = is_thera || (is_wh && (sys_id % 10 == 0));
+            let wh_class = if is_thera {
+                12
+            } else if is_wh {
+                ((sys_id - 31_000_000) % 6) + 1
+            } else {
+                0
+            };
+            let delayed_local = is_wh;
+            let allows_capitals = !is_wh || (wh_class >= 5 && !is_shattered);
+            Some(Ok(PyRep::keyval([
+                ("systemID", PyRep::Integer(sys_id as i64)),
+                ("wormholeClass", PyRep::Integer(wh_class as i64)),
+                ("isThera", PyRep::Bool(is_thera)),
+                ("isShattered", PyRep::Bool(is_shattered)),
+                ("delayedLocal", PyRep::Bool(delayed_local)),
+                ("allowsCapitalShips", PyRep::Bool(allows_capitals)),
+            ])))
+        }
+
+        ("scanMgr", "DirectionalScan") | ("scanMgr", "DScan") | ("directionalScanMgr", "PerformDirectionalScan") => {
+            let (_, _char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let Some(sys_id) = session.solar_system_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "NoSolarSystem".into(),
+                    message: "Session has no active solar system".into(),
+                }));
+            };
+            let scan_angle = args.first().and_then(|a| a.as_f64()).unwrap_or(360.0).clamp(5.0, 360.0);
+            let max_scan_range = 14.3 * AU_IN_METERS;
+            let scan_range = args.get(1).and_then(|a| a.as_f64()).unwrap_or(max_scan_range).min(max_scan_range).max(0.0);
+
+            let sys_handle = ctx.systems.get_or_spawn(sys_id);
+            let caller_ship = session.ship_id;
+            let caller_ball = if let Some(sid) = caller_ship {
+                sys_handle.get_ball_snapshot(sid).await.ok().flatten().map(|(_, b)| b)
+            } else {
+                None
+            };
+
+            let caller_pos = caller_ball.as_ref().map(|b| b.position).unwrap_or(DVec3::ZERO);
+            let caller_dir = caller_ball.as_ref().map(|b| {
+                if b.velocity.length_squared() > 0.001 {
+                    b.velocity.normalize()
+                } else {
+                    DVec3::new(0.0, 0.0, 1.0)
+                }
+            }).unwrap_or(DVec3::new(0.0, 0.0, 1.0));
+
+            let cos_half_angle = (scan_angle.to_radians() * 0.5).cos();
+
+            let balls = sys_handle.list_balls().await.unwrap_or_default();
+            let mut rows = Vec::new();
+            for ball in balls {
+                if Some(ball.id) == caller_ship {
+                    continue;
+                }
+                let dist = ball.position.distance(caller_pos);
+                if dist > scan_range {
+                    continue;
+                }
+                if scan_angle < 360.0 {
+                    let to_target = (ball.position - caller_pos).normalize_or_zero();
+                    if to_target.dot(caller_dir) < cos_half_angle {
+                        continue;
+                    }
+                }
+                rows.push(vec![
+                    PyRep::Integer(ball.id),
+                    PyRep::Integer(ball.type_id as i64),
+                    PyRep::Real(dist),
+                    PyRep::Real(ball.position.x),
+                    PyRep::Real(ball.position.y),
+                    PyRep::Real(ball.position.z),
+                ]);
+            }
+
+            Some(Ok(PyRep::rowset(vec!["ballID", "typeID", "distance", "x", "y", "z"], rows)))
+        }
+
+        ("scanMgr", "LaunchProbes") | ("probeMgr", "LaunchProbes") => {
+            let (_, _) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let probe_count = args.first().and_then(|a| a.as_i64()).unwrap_or(8).clamp(1, 8);
+            Some(Ok(PyRep::keyval([
+                ("success", PyRep::Bool(true)),
+                ("probeCount", PyRep::Integer(probe_count)),
+                ("scanRadiusMeters", PyRep::Real(4.0 * AU_IN_METERS)),
+            ])))
+        }
+
+        ("scanMgr", "RecallProbes") | ("probeMgr", "RecallProbes") => {
+            let (_, _) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            Some(Ok(PyRep::keyval([
+                ("success", PyRep::Bool(true)),
+                ("probesRecalled", PyRep::Integer(8)),
+            ])))
+        }
+
+        ("scanMgr", "DestroyProbes") | ("probeMgr", "DestroyProbes") => {
+            let (_, _) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            Some(Ok(PyRep::keyval([
+                ("success", PyRep::Bool(true)),
+            ])))
+        }
+
+        ("keeper", "ActivateAccelerationGate")
+        | ("beyonce", "ActivateAccelerationGate")
+        | ("dungeonMgr", "ActivateAccelerationGate")
+        | ("accelerationGate", "Activate") => {
+            let (_, _char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let Some(sys_id) = session.solar_system_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "NoSolarSystem".into(),
+                    message: "Session has no active solar system".into(),
+                }));
+            };
+            let Some(ship_id) = session.ship_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "NoActiveShip".into(),
+                    message: "Session has no active ship".into(),
+                }));
+            };
+            let gate_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let sys_handle = ctx.systems.get_or_spawn(sys_id);
+            let Some((_, ship_ball)) = sys_handle.get_ball_snapshot(ship_id).await.ok().flatten() else {
+                return Some(Err(BridgeRpcError {
+                    code: "ShipNotInSpace".into(),
+                    message: "Ship is not in space".into(),
+                }));
+            };
+
+            // Capital ship restriction: mass > 500,000,000 kg (500k metric tons)
+            if ship_ball.mass > 500_000_000.0 {
+                return Some(Err(BridgeRpcError {
+                    code: "ShipTooLargeForGate".into(),
+                    message: "Capital ships cannot activate this acceleration gate".into(),
+                }));
+            }
+
+            // Gate distance check if gate ball exists
+            if gate_id > 0 {
+                if let Ok(Some((_, gate_ball))) = sys_handle.get_ball_snapshot(gate_id).await {
+                    let dist = ship_ball.position.distance(gate_ball.position);
+                    if dist > 2_500.0 {
+                        return Some(Err(BridgeRpcError {
+                            code: "OutsideGateActivationRange".into(),
+                            message: format!("Ship is {:.1} m from gate (must be <= 2500 m)", dist),
+                        }));
+                    }
+                }
+            }
+
+            // Warps ship forward into the dungeon pocket
+            let pocket_pos = ship_ball.position + DVec3::new(100_000.0, 0.0, 0.0);
+            let warp_mode = MovementMode::new_warp(ship_ball.position, pocket_pos, 3.0);
+            let _ = sys_handle.set_movement_mode(ship_id, warp_mode).await;
+
+            Some(Ok(PyRep::keyval([
+                ("success", PyRep::Bool(true)),
+                ("gateID", PyRep::Integer(gate_id)),
+                ("destinationX", PyRep::Real(pocket_pos.x)),
+                ("destinationY", PyRep::Real(pocket_pos.y)),
+                ("destinationZ", PyRep::Real(pocket_pos.z)),
+            ])))
         }
 
         _ => None,

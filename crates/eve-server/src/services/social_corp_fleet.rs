@@ -102,6 +102,8 @@ pub async fn handle(
                         z,
                         item_id: None,
                         memo: String::new(),
+                        folder_id: None,
+                        is_shared: false,
                     },
                 );
                 Ok(id)

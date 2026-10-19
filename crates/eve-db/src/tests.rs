@@ -612,6 +612,8 @@ fn test_d3_sqlite_relational_world_db_and_concurrent_sessions() {
                 z: 300.0,
                 item_id: None,
                 memo: String::new(),
+                folder_id: None,
+                is_shared: false,
             },
         );
         snap.structures.insert(
