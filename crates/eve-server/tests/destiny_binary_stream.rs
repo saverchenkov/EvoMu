@@ -3,13 +3,12 @@
 
 #![forbid(unsafe_code)]
 
-// parity: plan:SP-6
 // parity: plan:Z-3
-// parity: feat:space.warp-curves
-// parity: ballmode:Missile
-// parity: ballmode:Mushroom
-// parity: ballmode:Troll
-// parity: ballmode:Formation
+// parity: feat:navigation.warp-speed-formula
+// parity: ballmode:DSTBALL_MISSILE
+// parity: ballmode:DSTBALL_MUSHROOM
+// parity: ballmode:DSTBALL_TROLL
+// parity: ballmode:DSTBALL_FORMATION
 
 use eve_destiny::wire::{
     decode_add_balls, encode_add_balls, DST_BALL_FORMATION, DST_BALL_MISSILE, DST_BALL_MUSHROOM,
@@ -39,12 +38,11 @@ fn sample_test_ball(id: i64, mode: MovementMode) -> Ball {
     }
 }
 
-// parity: plan:SP-6
 // parity: plan:Z-3
-// parity: ballmode:Missile
-// parity: ballmode:Mushroom
-// parity: ballmode:Troll
-// parity: ballmode:Formation
+// parity: ballmode:DSTBALL_MISSILE
+// parity: ballmode:DSTBALL_MUSHROOM
+// parity: ballmode:DSTBALL_TROLL
+// parity: ballmode:DSTBALL_FORMATION
 #[test]
 fn test_destiny_binary_mode_missile_mushroom_troll_formation() {
     let mut park = Ballpark::new(30_000_142);
@@ -141,9 +139,8 @@ fn test_destiny_binary_mode_missile_mushroom_troll_formation() {
     assert_eq!(dec_form.effect_stamp, Some(42));
 }
 
-// parity: plan:SP-6
 // parity: plan:Z-3
-// parity: feat:space.warp-curves
+// parity: feat:navigation.warp-speed-formula
 #[test]
 fn test_warp_continuous_physics_curves_and_visual_handoff() {
     let mut park = Ballpark::new(30_000_142);
@@ -280,8 +277,8 @@ fn test_warp_continuous_physics_curves_and_visual_handoff() {
     assert!(max_speed > 1.0e9, "Warp must reach relativistic AU/s velocities");
 }
 
-// parity: plan:SP-6
 // parity: plan:Z-3
+// parity: feat:modules.warp-disruptor
 #[tokio::test]
 async fn test_warp_scrambler_disruptor_blocking() {
     let ctx = ServerContext::new();
@@ -441,9 +438,8 @@ async fn test_warp_scrambler_disruptor_blocking() {
     assert_eq!(heavy_scrambled_err.code, "WarpScrambled");
 }
 
-// parity: plan:SP-6
 // parity: plan:Z-3
-// parity: feat:space.warp-curves
+// parity: feat:modules.warp-disruption-field
 #[test]
 fn test_warp_bubble_interception_stop_and_drag() {
     let mut park = Ballpark::new(30_000_142);

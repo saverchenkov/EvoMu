@@ -997,7 +997,7 @@ async fn test_ch5_neural_attribute_remap_and_cooldown() {
 
 #[tokio::test]
 async fn test_inv1_repackage_item() {
-    // parity: plan:INV-1
+    // parity: feat:ships.repackage
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let mut sess = SessionState::new(924);
@@ -1108,7 +1108,7 @@ async fn test_inv1_repackage_item() {
 
 #[tokio::test]
 async fn test_inv2_stack_split_destroy_inventory() {
-    // parity: plan:INV-2
+    // parity: feat:inventory.split-merge, feat:inventory.trash-items
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let mut sess = SessionState::new(925);
@@ -1258,7 +1258,7 @@ async fn test_inv2_stack_split_destroy_inventory() {
 
 #[test]
 fn test_inv3_dna_fitting_string_encoder_decoder() {
-    // parity: plan:INV-3
+    // parity: feat:fitting.fittings-save
     // Standard format: <ship_type_id>:<type_id_1>;<qty_1>:<type_id_2>;<qty_2>:...::
     let ship_type_id = 587; // Rifter
     let modules = vec![

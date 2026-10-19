@@ -332,7 +332,7 @@ pub async fn handle(
             }
         }
 
-        // parity: plan:SP-3, plan:SP-6, plan:Z-3
+        // parity: plan:SP-3, plan:Z-3
         // parity: rpc:beyonce.CmdWarpTo, rpc:beyonce.CmdWarpToStuff
         ("beyonce", "CmdWarpTo") | ("beyonce", "CmdWarpToStuff") => {
             let (_, char_id) = match ServerContext::require_character(session) {

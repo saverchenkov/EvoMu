@@ -16,7 +16,7 @@ use glam::DVec3;
 use std::collections::HashMap;
 
 #[tokio::test]
-// parity: plan:SP-3, feat:navigation.bubbles-grid, feat:navigation.warp-curve, destiny:AddBalls2, destiny:RemoveBalls
+// parity: plan:SP-3, feat:navigation.bubbles-grid, feat:navigation.warp-speed-formula, destiny:AddBalls2, destiny:RemoveBalls
 async fn test_sp3_spatial_grid_bubbles_dynamic_transitions_and_warp_curves() {
     let ctx = ServerContext::new();
     let jita = ctx.systems.get_or_spawn(30_000_142);
@@ -125,7 +125,7 @@ async fn test_sp3_spatial_grid_bubbles_dynamic_transitions_and_warp_curves() {
 }
 
 #[tokio::test]
-// parity: plan:SP-4, feat:physics.collision, feat:world.asteroids, destiny:Ball::Collision
+// parity: plan:SP-4, feat:mining.belts-as-balls, feat:mining.depletion, feat:mining.belt-respawn
 async fn test_sp4_asteroid_belt_entities_collision_bounce_and_respawn_cycle() {
     let ctx = ServerContext::new();
     let perim = ctx.systems.get_or_spawn(30_000_144);
@@ -222,7 +222,7 @@ async fn test_sp4_asteroid_belt_entities_collision_bounce_and_respawn_cycle() {
 }
 
 #[tokio::test]
-// parity: plan:SP-5, feat:navigation.stargate-jump, feat:combat.gate-cloak, rpc:beyonce.CmdStargateJump
+// parity: plan:SP-5, feat:navigation.stargate-jump, feat:navigation.gate-cloak
 async fn test_sp5_stargate_jumping_session_handoff_and_gate_cloak_invulnerability() {
     let ctx = ServerContext::new();
     let kw = HashMap::new();
@@ -367,7 +367,7 @@ async fn test_sp5_stargate_jumping_session_handoff_and_gate_cloak_invulnerabilit
 }
 
 #[tokio::test]
-// parity: plan:MN-01, feat:mining.laser-cycle, feat:mining.dogma-yield, feat:mining.residue, rpc:beyonce.CmdMine
+// parity: plan:MN-01, feat:mining.mining-laser-cycle, feat:mining.strip-miner, feat:mining.mining-residue
 async fn test_mn01_mining_laser_cycle_yield_residue_and_ore_hold_deposit() {
     let ctx = ServerContext::new();
     let kw = HashMap::new();
@@ -475,7 +475,7 @@ async fn test_mn01_mining_laser_cycle_yield_residue_and_ore_hold_deposit() {
 }
 
 #[tokio::test]
-// parity: plan:MN-02, feat:mining.ice-harvesting, feat:mining.gas-harvesting, rpc:beyonce.CmdMine
+// parity: plan:MN-02, feat:mining.ice-harvester, feat:mining.gas-harvesting
 async fn test_mn02_ice_harvesting_and_gas_harvesting_cycles() {
     let ctx = ServerContext::new();
     let kw = HashMap::new();
@@ -610,7 +610,7 @@ async fn test_mn02_ice_harvesting_and_gas_harvesting_cycles() {
 }
 
 #[tokio::test]
-// parity: plan:MN-03, feat:mining.ledger, db:char_mining_ledger, rpc:charMiningLedger.GetMiningLedger
+// parity: plan:MN-03, feat:mining.character-ledger
 async fn test_mn03_mining_ledger_recording_and_char_mining_ledger_service() {
     let ctx = ServerContext::new();
     let kw = HashMap::new();

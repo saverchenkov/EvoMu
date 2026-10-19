@@ -23,7 +23,7 @@ use tokio::time::MissedTickBehavior;
 // parity: feat:navigation.celestials-balls, feat:navigation.bubbles-grid
 // parity: feat:navigation.destiny-updates, feat:serverops.server-tick
 // parity: notify:DoDestinyUpdate
-// parity: destiny:AddBalls2, destiny:RemoveBalls, destiny:RemoveBall, destiny:Ball::Collision
+// parity: destiny:AddBalls2, destiny:RemoveBalls, destiny:RemoveBall
 
 /// Bounded mailbox capacity per solar system actor.
 pub const SYSTEM_MAILBOX_CAPACITY: usize = 256;

@@ -2523,7 +2523,7 @@ mod tests {
     }
 
     #[test]
-    // parity: plan:SP-4, destiny:Ball::Collision
+    // parity: plan:SP-4
     fn test_destiny_collision_bounce_physics_and_gate_cloak() {
         let mut park = Ballpark::new(30_000_142);
 

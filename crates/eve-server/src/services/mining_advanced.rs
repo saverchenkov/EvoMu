@@ -924,18 +924,25 @@ pub async fn handle(
                     let reachable = (Some(item.location_id) == session.station_id)
                         || (Some(item.location_id) == session.structure_id)
                         || (Some(item.location_id) == session.ship_id);
+                    let portion_size = ctx
+                        .sde
+                        .types
+                        .get(&item.type_id)
+                        .map(|t| t.portion_size as i32)
+                        .unwrap_or(100)
+                        .max(1);
                     if item.owner_id == char_id
                         && reachable
                         && item.flag != InventoryFlag::Locked
-                        && item.quantity >= 100
+                        && item.quantity >= portion_size
                     {
                         if let Some(&comp_type) = ctx.sde.compressible_types.get(&item.type_id) {
                             let orig_type = item.type_id;
                             let orig_loc = item.location_id;
                             let orig_flag = item.flag;
-                            let rem = item.quantity % 100;
+                            let rem = item.quantity % portion_size;
                             item.type_id = comp_type;
-                            item.quantity /= 100;
+                            item.quantity /= portion_size;
                             item.version += 1;
                             compressed_out = Some((item.item_id, item.type_id, item.quantity, rem));
                             if rem > 0 {

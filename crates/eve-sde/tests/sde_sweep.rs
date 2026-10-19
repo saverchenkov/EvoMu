@@ -623,7 +623,7 @@ fn test_t2_sde_all_213_resources_and_domain_tables_sweep() {
     assert_eq!(sqlite_static_verified, 14);
     assert_eq!(attested_sde_rows.len(), 7);
 
-    // 2. Verify all 42 SQLite table_counts in manifest against data/evomu_sde.sqlite and SdeRegistry
+    // 2. Verify all 43 SQLite table_counts in manifest against data/evomu_sde.sqlite and SdeRegistry
     let sde_uri = format!("file:{}?immutable=1", db_path.display());
     let sde_conn = Connection::open_with_flags(
         &sde_uri,
@@ -633,7 +633,7 @@ fn test_t2_sde_all_213_resources_and_domain_tables_sweep() {
     let tc = manifest_val["table_counts"]
         .as_object()
         .expect("table_counts object");
-    assert_eq!(tc.len(), 42);
+    assert_eq!(tc.len(), 43);
     for (table_name, expected_val) in tc {
         let expected_cnt = expected_val.as_u64().expect("u64 table count") as usize;
         let actual_cnt: i64 = sde_conn
