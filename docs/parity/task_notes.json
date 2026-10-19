@@ -196,28 +196,28 @@
   "note": "Station and structure reprocessing service (reprocessingSvc) with tax, scrapmetal, and skill efficiency scaling."
  },
  "MN-13": {
-  "assessment": "NOT STARTED",
-  "note": ""
+  "assessment": "DONE",
+  "note": "Moon extraction schedule and explosion with chunk fractured asteroid field generation."
  },
  "MN-14": {
-  "assessment": "NOT STARTED",
-  "note": ""
+  "assessment": "DONE",
+  "note": "Automatic moon mining drills (autoMoonMining) with decay cycles and daily ore deposit."
  },
  "MN-15": {
-  "assessment": "NOT STARTED",
-  "note": ""
+  "assessment": "DONE",
+  "note": "Corporation mining ledger (corpMiningLedger) with tax deductions and member extractions."
  },
  "MN-16": {
-  "assessment": "NOT STARTED",
-  "note": ""
+  "assessment": "DONE",
+  "note": "Industrial gas decompression and compressed ore transport logistics."
  },
  "MN-17": {
-  "assessment": "NOT STARTED",
-  "note": ""
+  "assessment": "DONE",
+  "note": "Living world NPC mining operations with response fleets, defense escalation, and haulers."
  },
  "MN-18": {
-  "assessment": "NOT STARTED",
-  "note": ""
+  "assessment": "DONE",
+  "note": "Mining mission progression (agentMiningMgr) with objective deposits and faction LP rewards."
  },
  "P-1": {
   "assessment": "DONE",

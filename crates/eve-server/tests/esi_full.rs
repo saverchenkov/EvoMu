@@ -265,7 +265,7 @@ fn setup_esi_test_environment() -> (Arc<ServerContext>, Arc<EsiRouter>, OpenApiS
                 y: -50_000.0,
                 z: 80_000.0,
                 item_id: None,
-                memo: "".to_string(),
+                memo: String::new(),
             },
         );
 

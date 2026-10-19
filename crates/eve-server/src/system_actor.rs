@@ -1346,6 +1346,11 @@ impl SystemRegistry {
                                         }
                                     }
                                 }
+                                for ast in asteroids.values() {
+                                    if !populated.iter().any(|p| p.asteroid_id == ast.asteroid_id) {
+                                        populated.push(ast.clone());
+                                    }
+                                }
                                 let _ = reply.send(populated);
                             }
                             SystemCommand::RemoveBall { ball_id, reply } => {
