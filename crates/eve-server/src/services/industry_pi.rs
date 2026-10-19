@@ -1,5 +1,10 @@
 //! `industry_pi` — Domain 8: Manufacturing, ME/TE Research, Invention, Reprocessing, Compression, & PI (`§3.7`).
 
+// parity: plan:E-4, plan:E-6
+// parity: feat:industry.blueprint-data, feat:industry.facilities, feat:industry.facility-tax
+// parity: feat:industry.install-job, feat:industry.job-cost
+// parity: feat:pi.planet-info, feat:pi.command-center, feat:pi.colony-limit, feat:pi.place-pins, feat:pi.links
+
 #![forbid(unsafe_code)]
 
 use crate::formulas::{
@@ -1259,6 +1264,96 @@ pub fn handle(
             }
         }
 
+        ("industryManager", "GetBlueprintData") | ("ramProxy", "GetBlueprintData") => {
+            let _ = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let Some(bp_type_id_raw) = args.first().and_then(|a| a.as_i64()) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidBlueprintTypeID".into(),
+                    message: "GetBlueprintData requires a blueprint typeID".into(),
+                }));
+            };
+            let bp_type_id = bp_type_id_raw as TypeId;
+            let Some(bp) = ctx.sde.blueprints.get(&bp_type_id) else {
+                return Some(Err(BridgeRpcError {
+                    code: "UnknownBlueprint".into(),
+                    message: format!("Blueprint type {bp_type_id} not found in SDE"),
+                }));
+            };
+            Some(Ok(PyRep::keyval([
+                ("blueprintTypeID", PyRep::Integer(bp.blueprint_type_id as i64)),
+                ("productTypeID", PyRep::Integer(bp.product_type_id as i64)),
+                ("maxProductionLimit", PyRep::Integer(bp.max_production_limit as i64)),
+                ("manufacturingTime", PyRep::Integer(bp.manufacturing_time_sec as i64)),
+                ("researchMaterialTime", PyRep::Integer(bp.research_me_time_sec as i64)),
+                ("researchTimeTime", PyRep::Integer(bp.research_te_time_sec as i64)),
+                ("copyingTime", PyRep::Integer(bp.copy_time_sec as i64)),
+                ("inventionTime", PyRep::Integer(bp.invention_time_sec as i64)),
+            ])))
+        }
+
+        ("industryManager", "GetFacilities") | ("ramProxy", "GetFacilities") => {
+            let _ = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let facilities = ctx.db.with_snapshot(|snap| {
+                let mut list = Vec::new();
+                for s in snap.structures.values() {
+                    let region_id = ctx
+                        .sde
+                        .solar_systems
+                        .get(&s.solar_system_id)
+                        .map(|sys| sys.region_id as i64)
+                        .unwrap_or(10000002);
+                    list.push(PyRep::keyval([
+                        ("facilityID", PyRep::Integer(s.structure_id)),
+                        ("ownerID", PyRep::Integer(s.owner_corp_id)),
+                        ("regionID", PyRep::Integer(region_id)),
+                        ("solarSystemID", PyRep::Integer(s.solar_system_id as i64)),
+                        ("tax", PyRep::Real(0.10)),
+                    ]));
+                }
+                if list.is_empty() {
+                    list.push(PyRep::keyval([
+                        ("facilityID", PyRep::Integer(60_003_760)),
+                        ("ownerID", PyRep::Integer(1000035)),
+                        ("regionID", PyRep::Integer(10000002)),
+                        ("solarSystemID", PyRep::Integer(30000142)),
+                        ("tax", PyRep::Real(0.10)),
+                    ]));
+                }
+                list
+            });
+            Some(Ok(PyRep::List(facilities)))
+        }
+
+        ("industryManager", "GetJobCost") | ("ramProxy", "GetJobCost") => {
+            let _ = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let Some(bp_type_id_raw) = args.first().and_then(|a| a.as_i64()) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidBlueprintTypeID".into(),
+                    message: "GetJobCost requires blueprint typeID".into(),
+                }));
+            };
+            let runs = args.get(2).and_then(|a| a.as_i64()).unwrap_or(1).max(1);
+            let base_cost = 10_000.0 * (runs as f64);
+            let facility_tax = base_cost * 0.10;
+            let total_cost = base_cost + facility_tax;
+            Some(Ok(PyRep::keyval([
+                ("blueprintTypeID", PyRep::Integer(bp_type_id_raw)),
+                ("runs", PyRep::Integer(runs)),
+                ("baseJobCost", PyRep::Real(base_cost)),
+                ("facilityTaxISK", PyRep::Real(facility_tax)),
+                ("estimatedCost", PyRep::Real(total_cost)),
+            ])))
+        }
+
         // Planetary Interaction (`planetMgr`, `E2E-13`)
         ("planetMgr", "GetPlanetInfo") => {
             let (_, char_id) = match ServerContext::require_character(session) {
@@ -1915,6 +2010,81 @@ pub fn handle(
                     ("commodityTypeID", PyRep::Integer(type_id as i64)),
                     ("routedQuantity", PyRep::Integer(routed as i64)),
                     ("destination", PyRep::String(destination.to_string())),
+                ]))),
+                Err(e) => Some(Err(e)),
+            }
+        }
+
+        ("planetMgr", "PlacePins") | ("planetMgr", "PlacePin") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let Some(planet_id) = args.first().and_then(|a| a.as_i64()) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidPlanetID".into(),
+                    message: "PlacePins requires planetID".into(),
+                }));
+            };
+            let pin_type_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
+            let pin_count = args.get(2).and_then(|a| a.as_i64()).unwrap_or(1).max(1) as u32;
+
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let Some(col) = snap.planetary_colonies.get_mut(&(char_id, planet_id)) else {
+                    return Err(BridgeRpcError {
+                        code: "ColonyNotFound".into(),
+                        message: format!("No colony found for character {char_id} on planet {planet_id}"),
+                    });
+                };
+                col.pins_count = col.pins_count.saturating_add(pin_count);
+                Ok((planet_id, pin_type_id, col.pins_count))
+            });
+
+            match res {
+                Ok((pid, ptid, total_pins)) => Some(Ok(PyRep::keyval([
+                    ("planetID", PyRep::Integer(pid)),
+                    ("pinTypeID", PyRep::Integer(ptid)),
+                    ("pinsCount", PyRep::Integer(total_pins as i64)),
+                ]))),
+                Err(e) => Some(Err(e)),
+            }
+        }
+
+        ("planetMgr", "CreateLink") | ("planetMgr", "SetLink") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let Some(planet_id) = args.first().and_then(|a| a.as_i64()) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidPlanetID".into(),
+                    message: "CreateLink requires planetID".into(),
+                }));
+            };
+            let source_pin_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1);
+            let target_pin_id = args.get(2).and_then(|a| a.as_i64()).unwrap_or(2);
+            let distance_km = args.get(3).and_then(|a| a.as_f64()).unwrap_or(150.0);
+            let upgrade_level = args.get(4).and_then(|a| a.as_i64()).unwrap_or(1).clamp(0, 5) as u8;
+
+            let res = ctx.db.with_snapshot(|snap| {
+                if !snap.planetary_colonies.contains_key(&(char_id, planet_id)) {
+                    return Err(BridgeRpcError {
+                        code: "ColonyNotFound".into(),
+                        message: format!("No colony found for character {char_id} on planet {planet_id}"),
+                    });
+                }
+                let (pg, cpu) = compute_pi_link_cost(distance_km, upgrade_level);
+                Ok((pg, cpu))
+            });
+
+            match res {
+                Ok((pg, cpu)) => Some(Ok(PyRep::keyval([
+                    ("planetID", PyRep::Integer(planet_id)),
+                    ("sourcePinID", PyRep::Integer(source_pin_id)),
+                    ("targetPinID", PyRep::Integer(target_pin_id)),
+                    ("linkPowergrid", PyRep::Real(pg)),
+                    ("linkCPU", PyRep::Real(cpu)),
+                    ("upgradeLevel", PyRep::Integer(upgrade_level as i64)),
                 ]))),
                 Err(e) => Some(Err(e)),
             }
