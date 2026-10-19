@@ -32,24 +32,24 @@
   "note": ""
  },
  "CH-1": {
-  "assessment": "NOT STARTED",
-  "note": ""
+  "assessment": "DONE",
+  "note": "Skill training queue engine implemented with real-time SP/min formula, Omega/Alpha rate scaling, Alpha 5M SP cap, auto-advance on level completion, and OnSkillTrained notification."
  },
  "CH-2": {
-  "assessment": "PARTIAL",
-  "note": ""
+  "assessment": "DONE",
+  "note": "Character creation (CreateCharacterWithDoll) populates bloodline starter skills, calculates skill points from rank, sets 5,000 ISK wallet, and creates home station rookie corvette."
  },
  "CH-3": {
-  "assessment": "PARTIAL",
-  "note": ""
+  "assessment": "DONE",
+  "note": "Jump clones (InstallCloneInStation) with 900k ISK fee, clone jumping with 24h cooldown timer and implant swap, and pod death destruction clearing active implants implemented."
  },
  "CH-4": {
-  "assessment": "PARTIAL",
-  "note": ""
+  "assessment": "DONE",
+  "note": "Slash GM commands (/giveitem, /setskill, /spawnnpc, /teleport) implemented with role verification (ROLE_GMS/GML/GMH/ADMIN) and in-space entity/solar system relocations."
  },
  "CH-5": {
-  "assessment": "PARTIAL",
-  "note": ""
+  "assessment": "DONE",
+  "note": "Neural attribute remap with 99-point constraint, 17-27 bounds, 1-year cooldown, bonus remap consumption, and ESI /characters/{id}/attributes/ output implemented."
  },
  "D-1": {
   "assessment": "PARTIAL",
