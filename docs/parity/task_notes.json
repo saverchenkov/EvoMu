@@ -9,11 +9,11 @@
  },
  "C-3": {
   "assessment": "DONE",
-  "note": "Canonical death pipeline: ship explosion, wreck spawning with SDE wreck type, loot fairy roll, pod ejection, insurance payout."
+  "note": "Ship destruction at zero hull HP, physical wreck spawn, Loot Fairy cargo roll, pod ejection, pod loss, medical clone respawn, and self-destruct countdown tested."
  },
  "C-4": {
   "assessment": "DONE",
-  "note": "NPC spawn groups at belts and stargates, AI state machine (Idle->Chase->Orbit->Attack), and dynamic bounties from ENTITY_KILL_BOUNTY."
+  "note": "NPC belt rats, spawn groups, faction damage types, AI targeting and orbit, wreck loot tables, dynamic bounty payout, and sec status gain tested."
  },
  "C-5": {
   "assessment": "DONE",
@@ -25,11 +25,11 @@
  },
  "C-7": {
   "assessment": "DONE",
-  "note": "Salvage cycle probability with SDE materials, tractor beam kinematics, and combat drone bandwidth validation with DroneController."
+  "note": "Salvager wreck consumption and salvage yield, tractor beam pull physics, drone bandwidth validation, launch, orbit, and recall tested."
  },
  "C-8": {
   "assessment": "DONE",
-  "note": "CrimeWatch state machine (weapon, pvp, suspect, criminal timers), CONCORD Police Commander spawning, ship execution, and kill rights."
+  "note": "Weapon timer, aggression tracking, suspect and criminal timers, sec status penalty and gain, and highsec CONCORD retaliation response tested."
  },
  "CH-1": {
   "assessment": "DONE",
