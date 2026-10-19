@@ -68,6 +68,7 @@ impl WorldStateWalDelta {
             && old.applied_ship_skins == new.applied_ship_skins
             && old.module_online_states == new.module_online_states
             && old.weapon_banks == new.weapon_banks
+            && old.asteroids == new.asteroids
             && new.wallet_journal.len() >= old.wallet_journal.len()
             && new.wallet_journal[..old.wallet_journal.len()] == old.wallet_journal[..]
             && old
@@ -358,6 +359,7 @@ impl WorldRepository {
             mining_ledger: Vec::new(),
             module_online_states: HashMap::new(),
             weapon_banks: HashMap::new(),
+            asteroids: HashMap::new(),
         };
         let mut conn = rusqlite::Connection::open_in_memory().map_err(|e| e.to_string())?;
         sqlite_store::apply_migrations(&conn)?;
@@ -657,5 +659,25 @@ impl WorldRepository {
                 Err(err)
             }
         }
+    }
+
+    pub fn get_asteroid(&self, asteroid_id: i64) -> Option<AsteroidRecord> {
+        self.with_snapshot(|snap| snap.asteroids.get(&asteroid_id).cloned())
+    }
+
+    pub fn get_asteroids_in_system(&self, solar_system_id: u32) -> Vec<AsteroidRecord> {
+        self.with_snapshot(|snap| {
+            snap.asteroids
+                .values()
+                .filter(|a| a.solar_system_id == solar_system_id)
+                .cloned()
+                .collect()
+        })
+    }
+
+    pub fn spawn_asteroid(&self, record: AsteroidRecord) {
+        self.with_mut_snapshot(|snap| {
+            snap.asteroids.insert(record.asteroid_id, record);
+        });
     }
 }

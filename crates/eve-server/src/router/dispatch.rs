@@ -60,6 +60,16 @@ impl ServerContext {
         kwargs: &HashMap<String, PyRep>,
         caller_trace: Option<&str>,
     ) -> Result<PyRep, BridgeRpcError> {
+        let initial_len = session
+            .character_id
+            .and_then(|cid| {
+                self.pending_notifications
+                    .read()
+                    .ok()
+                    .and_then(|q| q.get(&cid).map(|v| v.len()))
+            })
+            .unwrap_or(0);
+
         let res = self
             .dispatch_rpc_inner(
                 session,
@@ -73,8 +83,15 @@ impl ServerContext {
             .await;
 
         if let Some(cid) = session.character_id {
-            for notif in self.drain_notifications_for_char(cid) {
-                session.push_notification(notif.event, notif.args);
+            if let Some(notifs) = self
+                .pending_notifications
+                .read()
+                .ok()
+                .and_then(|q| q.get(&cid).cloned())
+            {
+                for notif in notifs.into_iter().skip(initial_len) {
+                    session.push_notification(notif.event, notif.args);
+                }
             }
         }
 

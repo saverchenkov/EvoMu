@@ -331,6 +331,7 @@ pub struct TableFingerprints {
     pub committed_idempotency_keys: HashSet<(i64, String)>,
     pub licensed_skins: HashMap<i64, u64>,
     pub applied_ship_skins: HashMap<i64, u32>,
+    pub asteroids: HashMap<i64, u64>,
 }
 
 /// Synchronizes only modified/inserted/deleted rows from `snap` into `tx` and updates `fp`,
@@ -434,6 +435,9 @@ pub fn compute_fingerprints(snap: &WorldStateSnapshot) -> TableFingerprints {
     }
     for (&cid, skins) in &snap.licensed_skins {
         fp.licensed_skins.insert(cid, fp_json(skins));
+    }
+    for (&id, ast) in &snap.asteroids {
+        fp.asteroids.insert(id, fp_json(ast));
     }
     fp
 }

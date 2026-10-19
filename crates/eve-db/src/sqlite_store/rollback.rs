@@ -617,5 +617,32 @@ pub fn rollback_dirty_from_sqlite(
         }
     }
 
+    // 28. asteroids
+    snap.asteroids
+        .retain(|id, _| fp.asteroids.contains_key(id));
+    for (&id, &eh) in &fp.asteroids {
+        if snap.asteroids.get(&id).map(fp_json) != Some(eh) {
+            let ast_res = conn.query_row(
+                "SELECT asteroid_id, solar_system_id, belt_id, type_id, quantity, initial_quantity, x, y, z, radius FROM asteroids WHERE asteroid_id = ?1",
+                params![id],
+                |r| {
+                    Ok(AsteroidRecord {
+                        asteroid_id: r.get(0)?,
+                        solar_system_id: r.get(1)?,
+                        belt_id: r.get(2)?,
+                        type_id: r.get(3)?,
+                        quantity: r.get(4)?,
+                        initial_quantity: r.get(5)?,
+                        position: (r.get(6)?, r.get(7)?, r.get(8)?),
+                        radius: r.get(9)?,
+                    })
+                },
+            );
+            if let Ok(ast) = ast_res {
+                snap.asteroids.insert(id, ast);
+            }
+        }
+    }
+
     Ok(())
 }

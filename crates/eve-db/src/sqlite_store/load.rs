@@ -600,6 +600,27 @@ pub fn load_snapshot_from_sqlite(
         }
     }
 
+    {
+        if let Ok(mut stmt) = conn.prepare("SELECT asteroid_id, solar_system_id, belt_id, type_id, quantity, initial_quantity, x, y, z, radius FROM asteroids") {
+            if let Ok(rows) = stmt.query_map([], |r| {
+                Ok(AsteroidRecord {
+                    asteroid_id: r.get(0)?,
+                    solar_system_id: r.get(1)?,
+                    belt_id: r.get(2)?,
+                    type_id: r.get(3)?,
+                    quantity: r.get(4)?,
+                    initial_quantity: r.get(5)?,
+                    position: (r.get(6)?, r.get(7)?, r.get(8)?),
+                    radius: r.get(9)?,
+                })
+            }) {
+                for r in rows.flatten() {
+                    snap.asteroids.insert(r.asteroid_id, r);
+                }
+            }
+        }
+    }
+
     let fp = compute_fingerprints(&snap);
     Ok((snap, fp))
 }

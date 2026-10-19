@@ -160,40 +160,40 @@
   "note": "Mining ledger recording in database (charMiningLedger) with character, system, ore type, volume, and daily aggregation."
  },
  "MN-04": {
-  "assessment": "NOT STARTED",
-  "note": ""
+  "assessment": "DONE",
+  "note": "Mining laser cycle engine with asteroid depletion, partial cycle yield, capacitor validation, and OnOreMined notifications."
  },
  "MN-05": {
-  "assessment": "NOT STARTED",
-  "note": ""
+  "assessment": "DONE",
+  "note": "Specialized holds volume enforcement, flag validation, and stack merging for ore, ice, and gas inventories."
  },
  "MN-06": {
-  "assessment": "NOT STARTED",
-  "note": ""
+  "assessment": "DONE",
+  "note": "Mining crystals with type matching, yield multipliers, crystal damage degradation, destruction, and residue math."
  },
  "MN-07": {
-  "assessment": "NOT STARTED",
-  "note": ""
+  "assessment": "DONE",
+  "note": "Ice and gas harvesting cycles with Procurer ice hold, Venture gas harvesting bonus, and specialized holds deposits."
  },
  "MN-08": {
-  "assessment": "NOT STARTED",
-  "note": ""
+  "assessment": "DONE",
+  "note": "Survey scanner RPC (miningScanMgr/surveyScanMgr) with range calculation and OnAsteroidRevealed notifications."
  },
  "MN-09": {
-  "assessment": "NOT STARTED",
-  "note": ""
+  "assessment": "DONE",
+  "note": "Asteroid belt respawn and dynamic quantity depletion tracking across system restarts and mining cycles."
  },
  "MN-10": {
-  "assessment": "NOT STARTED",
-  "note": ""
+  "assessment": "DONE",
+  "note": "Mining residue probability, waste multiplier calculation, and asteroid volume reduction without yield."
  },
  "MN-11": {
-  "assessment": "PARTIAL",
-  "note": ""
+  "assessment": "DONE",
+  "note": "Space compression in industrial ships and Upwell structure compression via structureCompressionMgr."
  },
  "MN-12": {
-  "assessment": "PARTIAL",
-  "note": ""
+  "assessment": "DONE",
+  "note": "Station and structure reprocessing service (reprocessingSvc) with tax, scrapmetal, and skill efficiency scaling."
  },
  "MN-13": {
   "assessment": "NOT STARTED",
