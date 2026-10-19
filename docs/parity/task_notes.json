@@ -96,28 +96,28 @@
   "note": ""
  },
  "E-1": {
-  "assessment": "PARTIAL",
-  "note": ""
+  "assessment": "DONE",
+  "note": "Market order placement, broker fee calculation with skills (Broker Relations), sales tax with Accounting discounts, and wallet journal logging."
  },
  "E-2": {
-  "assessment": "PARTIAL",
-  "note": ""
+  "assessment": "DONE",
+  "note": "Market order matching engine with price-time priority, escrow ISK deduction, order cancellation, and regional price history queries."
  },
  "E-3": {
-  "assessment": "PARTIAL",
-  "note": ""
+  "assessment": "DONE",
+  "note": "Contracts system for Item Exchange, Courier (collateral hold, plastic-wrap containers, reward payout), and Auction bidding mechanics."
  },
  "E-4": {
-  "assessment": "PARTIAL",
-  "note": ""
+  "assessment": "DONE",
+  "note": "Industry jobs lifecycle for manufacturing, TE/ME research, and copying, BOM material consumption, facility tax, and hangar delivery."
  },
  "E-5": {
-  "assessment": "PARTIAL",
-  "note": ""
+  "assessment": "DONE",
+  "note": "Planetary Interaction with colony creation, command center upgrades, P0 extraction to P1 commodity processing, and hangar routing."
  },
  "E-6": {
-  "assessment": "PARTIAL",
-  "note": ""
+  "assessment": "DONE",
+  "note": "LP store offers catalog, LP balance checking, LP and ISK deduction, and purchased item delivery to station hangar."
  },
  "ESI-1": {
   "assessment": "DONE",
