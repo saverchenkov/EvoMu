@@ -949,6 +949,8 @@ impl ServerContext {
             let hull = get_attr(eve_sde::attr_ids::HP_STRUCT, 350.0);
             let cap = get_attr(eve_sde::attr_ids::CAPACITOR_CAPACITY, 250.0);
             let sig = get_attr(eve_sde::attr_ids::SIGNATURE_RADIUS, 35.0);
+            let shield_rech = get_attr(eve_sde::attr_ids::SHIELD_RECHARGE_RATE, 120_000.0);
+            let cap_rech = get_attr(eve_sde::attr_ids::RECHARGE_RATE, 120_000.0);
             return eve_destiny::CombatState {
                 shield_hp: shield,
                 max_shield_hp: shield,
@@ -959,6 +961,8 @@ impl ServerContext {
                 capacitor: cap,
                 max_capacitor: cap,
                 signature_radius: sig,
+                shield_recharge_time_ms: shield_rech,
+                capacitor_recharge_time_ms: cap_rech,
                 shield_resonance: [
                     get_attr(eve_sde::attr_ids::SHIELD_EM_DAMAGE_RESONANCE, 1.0),
                     get_attr(eve_sde::attr_ids::SHIELD_THERMAL_DAMAGE_RESONANCE, 0.8),
@@ -1004,6 +1008,14 @@ impl ServerContext {
                 .get(&eve_sde::attr_ids::SIGNATURE_RADIUS)
                 .copied()
                 .unwrap_or(t.radius.max(25.0));
+            let shield_rech = a
+                .get(&eve_sde::attr_ids::SHIELD_RECHARGE_RATE)
+                .copied()
+                .unwrap_or(120_000.0);
+            let cap_rech = a
+                .get(&eve_sde::attr_ids::RECHARGE_RATE)
+                .copied()
+                .unwrap_or(120_000.0);
             return eve_destiny::CombatState {
                 shield_hp: shield,
                 max_shield_hp: shield,
@@ -1014,6 +1026,8 @@ impl ServerContext {
                 capacitor: cap,
                 max_capacitor: cap,
                 signature_radius: sig,
+                shield_recharge_time_ms: shield_rech,
+                capacitor_recharge_time_ms: cap_rech,
                 shield_resonance: [
                     a.get(&eve_sde::attr_ids::SHIELD_EM_DAMAGE_RESONANCE)
                         .copied()

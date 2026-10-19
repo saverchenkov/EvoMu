@@ -106,6 +106,7 @@ pub mod attr_ids {
     pub const HEAT_DAMAGE: AttributeId = 1196;
     pub const HEAT_GENERATION_MULTIPLIER: AttributeId = 1211;
     pub const DRONE_BANDWIDTH: AttributeId = 1271;
+    pub const DRONE_BANDWIDTH_USED: AttributeId = 1272;
     pub const CHARGE_SIZE: AttributeId = 128;
     pub const REQUIRED_SKILL_1: AttributeId = 182;
     pub const REQUIRED_SKILL_2: AttributeId = 183;
