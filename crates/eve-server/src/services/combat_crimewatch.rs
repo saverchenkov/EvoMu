@@ -1440,6 +1440,349 @@ pub async fn handle(
             )))
         }
 
+        // parity: plan:S-2, feat:drones.fighter-load-tubes
+        ("fighterMgr", "CmdLoadFighterTube") | ("fighterMgr", "LoadFighterTube") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let Some(ship_id) = session.ship_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "NoActiveShip".into(),
+                    message: "Session has no active ship".into(),
+                }));
+            };
+            let a0 = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let a1 = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
+            let (tube_idx, fighter_item_id) = if a0 < 10 {
+                (a0 as usize, a1)
+            } else {
+                (a1 as usize, a0)
+            };
+            let item_opt = ctx
+                .db
+                .with_snapshot(|snap| snap.items.get(&fighter_item_id).cloned());
+            let Some(item) = item_opt else {
+                return Some(Err(BridgeRpcError {
+                    code: "ItemNotFound".into(),
+                    message: format!("Fighter item {fighter_item_id} not found"),
+                }));
+            };
+            if item.owner_id != char_id || item.location_id != ship_id {
+                return Some(Err(BridgeRpcError {
+                    code: "OwnershipViolation".into(),
+                    message: format!("Fighter item {fighter_item_id} not in pilot's ship"),
+                }));
+            }
+            ctx.fighter_tube_loads
+                .write()
+                .unwrap()
+                .insert((ship_id, tube_idx), fighter_item_id);
+            Some(Ok(PyRep::keyval([
+                ("tubeIndex", PyRep::Integer(tube_idx as i64)),
+                ("fighterID", PyRep::Integer(fighter_item_id)),
+                ("success", PyRep::Bool(true)),
+            ])))
+        }
+
+        // parity: plan:S-2, feat:drones.fighter-load-tubes
+        ("fighterMgr", "CmdUnloadFighterTube") | ("fighterMgr", "UnloadFighterTube") => {
+            let (_, _char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let Some(ship_id) = session.ship_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "NoActiveShip".into(),
+                    message: "Session has no active ship".into(),
+                }));
+            };
+            let tube_idx = args.first().and_then(|a| a.as_i64()).unwrap_or(0) as usize;
+            let removed = ctx
+                .fighter_tube_loads
+                .write()
+                .unwrap()
+                .remove(&(ship_id, tube_idx));
+            Some(Ok(PyRep::Bool(removed.is_some())))
+        }
+
+        // parity: plan:S-2, feat:drones.fighter-launch-recall
+        ("fighterMgr", "CmdLaunchFighters") | ("fighterMgr", "LaunchFighters") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let Some(ship_id) = session.ship_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "NoActiveShip".into(),
+                    message: "Session has no active ship".into(),
+                }));
+            };
+            let Some(sys_id) = session.solar_system_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "NoSolarSystem".into(),
+                    message: "Session has no active solar system".into(),
+                }));
+            };
+            let sys_handle = ctx.systems.get_or_spawn(sys_id);
+            let Some((_, ship_ball)) = (match sys_handle.get_ball_snapshot(ship_id).await {
+                Ok(v) => v,
+                Err(e) => {
+                    return Some(Err(BridgeRpcError {
+                        code: "DestinyCommandFailed".into(),
+                        message: e,
+                    }))
+                }
+            }) else {
+                return Some(Err(BridgeRpcError {
+                    code: "ShipNotInSpace".into(),
+                    message: "Active ship is not spawned in space".into(),
+                }));
+            };
+
+            let tube_loads = ctx.fighter_tube_loads.read().unwrap().clone();
+            let mut launched_ball_ids = Vec::new();
+
+            for ((sid, tube_idx), fighter_item_id) in tube_loads {
+                if sid != ship_id {
+                    continue;
+                }
+                let item_opt = ctx
+                    .db
+                    .with_snapshot(|snap| snap.items.get(&fighter_item_id).cloned());
+                let Some(item) = item_opt else { continue };
+                let ball_id = ctx.db.with_mut_snapshot(|snap| {
+                    snap.next_entity_id += 1;
+                    snap.next_entity_id
+                });
+                let offset = DVec3::new((tube_idx as f64 + 1.0) * 50.0, 0.0, 0.0);
+                let ball = eve_destiny::Ball {
+                    id: ball_id,
+                    type_id: item.type_id,
+                    position: ship_ball.position + offset,
+                    velocity: DVec3::ZERO,
+                    max_velocity: 2_500.0,
+                    inertia: 0.5,
+                    mass: 25_000.0,
+                    radius: 20.0,
+                    speed_fraction: 1.0,
+                    mode: eve_destiny::MovementMode::Orbit {
+                        target_id: ship_id,
+                        range: 1_000.0,
+                    },
+                };
+                let cs = ctx.build_type_combat_state(item.type_id);
+                let _ = sys_handle.spawn_ball_with_combat(ball, cs).await;
+
+                let squad = crate::router::context::ActiveFighterSquadron {
+                    ball_id,
+                    item_id: fighter_item_id,
+                    type_id: item.type_id,
+                    owner_char_id: char_id,
+                    parent_ship_id: ship_id,
+                    tube_index: tube_idx,
+                    squadron_size: item.quantity as u32,
+                    target_id: None,
+                    is_abandoned: false,
+                    mwd_active: false,
+                };
+                ctx.active_fighters.write().unwrap().insert(ball_id, squad);
+                launched_ball_ids.push(PyRep::Integer(ball_id));
+            }
+            Some(Ok(PyRep::List(launched_ball_ids)))
+        }
+
+        // parity: plan:S-2, feat:drones.fighter-launch-recall
+        ("fighterMgr", "CmdRecallFighters") | ("fighterMgr", "RecallFighters") => {
+            let (_, _char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let Some(ship_id) = session.ship_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "NoActiveShip".into(),
+                    message: "Session has no active ship".into(),
+                }));
+            };
+            let Some(sys_id) = session.solar_system_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "NoSolarSystem".into(),
+                    message: "Session has no active solar system".into(),
+                }));
+            };
+            let sys_handle = ctx.systems.get_or_spawn(sys_id);
+            let fighter_ball_ids: Vec<i64> = ctx
+                .active_fighters
+                .read()
+                .unwrap()
+                .values()
+                .filter(|f| f.parent_ship_id == ship_id)
+                .map(|f| f.ball_id)
+                .collect();
+
+            let mut recalled = Vec::new();
+            for bid in fighter_ball_ids {
+                ctx.active_fighters.write().unwrap().remove(&bid);
+                let _ = sys_handle.remove_ball(bid).await;
+                recalled.push(PyRep::Integer(bid));
+            }
+            Some(Ok(PyRep::List(recalled)))
+        }
+
+        // parity: plan:S-2, feat:drones.fighter-movement
+        ("fighterMgr", "CmdMoveFighters")
+        | ("fighterMgr", "CmdGotoPosition")
+        | ("fighterMgr", "CmdOrbitTarget")
+        | ("fighterMgr", "CmdFollowTarget") => {
+            let (_, _char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let Some(sys_id) = session.solar_system_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "NoSolarSystem".into(),
+                    message: "Session has no active solar system".into(),
+                }));
+            };
+            let fighter_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let sys_handle = ctx.systems.get_or_spawn(sys_id);
+            let mode = if method == "CmdOrbitTarget" {
+                let target_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
+                let range = args.get(2).and_then(|a| a.as_f64()).unwrap_or(1_000.0);
+                eve_destiny::MovementMode::Orbit { target_id, range }
+            } else if method == "CmdFollowTarget" {
+                let target_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
+                let range = args.get(2).and_then(|a| a.as_f64()).unwrap_or(500.0);
+                eve_destiny::MovementMode::Follow { target_id, range }
+            } else {
+                let x = args.get(1).and_then(|a| a.as_f64()).unwrap_or(1.0);
+                let y = args.get(2).and_then(|a| a.as_f64()).unwrap_or(0.0);
+                let z = args.get(3).and_then(|a| a.as_f64()).unwrap_or(0.0);
+                eve_destiny::MovementMode::GotoDirection {
+                    direction: DVec3::new(x, y, z),
+                }
+            };
+            let _ = sys_handle.set_movement_mode(fighter_id, mode).await;
+            Some(Ok(PyRep::Bool(true)))
+        }
+
+        // parity: plan:S-2, feat:drones.fighter-abilities
+        ("fighterMgr", "CmdActivateAbilitySlots") | ("fighterMgr", "ActivateAbilitySlot") => {
+            let (_, _char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let Some(sys_id) = session.solar_system_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "NoSolarSystem".into(),
+                    message: "Session has no active solar system".into(),
+                }));
+            };
+            let fighter_ball_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let slot_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0) as u32;
+            let target_id = args.get(2).and_then(|a| a.as_i64());
+
+            let fighter_exists = ctx
+                .active_fighters
+                .read()
+                .unwrap()
+                .contains_key(&fighter_ball_id);
+            if !fighter_exists {
+                return Some(Err(BridgeRpcError {
+                    code: "FighterNotFound".into(),
+                    message: format!(
+                        "Fighter squadron {fighter_ball_id} not found or not launched"
+                    ),
+                }));
+            }
+
+            let sys_handle = ctx.systems.get_or_spawn(sys_id);
+            match slot_id {
+                0 => {
+                    // Slot 0: Primary Attack -> applies damage to target
+                    if let Some(tid) = target_id {
+                        let dmg = DamageVector {
+                            em: 30.0,
+                            thermal: 30.0,
+                            kinetic: 30.0,
+                            explosive: 30.0,
+                        };
+                        let _ = sys_handle.apply_damage(tid, dmg).await;
+                    }
+                }
+                1 => {
+                    // Slot 1: MWD / Afterburner speed boost
+                    let _ = sys_handle.set_speed_fraction(fighter_ball_id, 1.0).await;
+                    if let Some(f) = ctx
+                        .active_fighters
+                        .write()
+                        .unwrap()
+                        .get_mut(&fighter_ball_id)
+                    {
+                        f.mwd_active = true;
+                    }
+                }
+                2 => {
+                    // Slot 2: Secondary ability / tackle / heavy salvo
+                    if let Some(tid) = target_id {
+                        let dmg = DamageVector {
+                            em: 60.0,
+                            thermal: 60.0,
+                            kinetic: 0.0,
+                            explosive: 0.0,
+                        };
+                        let _ = sys_handle.apply_damage(tid, dmg).await;
+                    }
+                }
+                _ => {}
+            }
+
+            Some(Ok(PyRep::keyval([
+                ("fighterID", PyRep::Integer(fighter_ball_id)),
+                ("slotID", PyRep::Integer(slot_id as i64)),
+                ("success", PyRep::Bool(true)),
+            ])))
+        }
+
+        // parity: plan:S-2, feat:drones.fighter-abandon
+        ("fighterMgr", "CmdAbandonFighters") | ("fighterMgr", "AbandonFighters") => {
+            let (_, _char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let Some(ship_id) = session.ship_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "NoActiveShip".into(),
+                    message: "Session has no active ship".into(),
+                }));
+            };
+            let Some(sys_id) = session.solar_system_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "NoSolarSystem".into(),
+                    message: "Session has no active solar system".into(),
+                }));
+            };
+            let sys_handle = ctx.systems.get_or_spawn(sys_id);
+            let mut abandoned = Vec::new();
+            {
+                let mut fighters = ctx.active_fighters.write().unwrap();
+                for f in fighters.values_mut() {
+                    if f.parent_ship_id == ship_id {
+                        f.is_abandoned = true;
+                        abandoned.push(f.ball_id);
+                    }
+                }
+            }
+            for &bid in &abandoned {
+                let _ = sys_handle
+                    .set_movement_mode(bid, eve_destiny::MovementMode::Stop)
+                    .await;
+            }
+            Some(Ok(PyRep::List(
+                abandoned.into_iter().map(PyRep::Integer).collect(),
+            )))
+        }
+
         _ => None,
     }
 }

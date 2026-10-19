@@ -156,6 +156,8 @@ pub struct CombatState {
     pub active_breacher_dot: Option<(f64, f64, u32)>,
     /// Remaining ticks of gate cloak invulnerability (SP-5).
     pub gate_cloak_remaining_ticks: u32,
+    #[serde(default)]
+    pub is_interdiction_nullified: bool,
 }
 
 fn default_recharge_time_ms() -> f64 {
@@ -186,11 +188,16 @@ impl Default for CombatState {
             entropic_spool_cycles: 0,
             active_breacher_dot: None,
             gate_cloak_remaining_ticks: 0,
+            is_interdiction_nullified: false,
         }
     }
 }
 
 impl CombatState {
+    pub fn set_interdiction_nullified(&mut self, nullified: bool) {
+        self.is_interdiction_nullified = nullified;
+    }
+
     pub fn is_warp_scrambled(&self) -> bool {
         self.warp_scramble_strength > 0 && self.warp_scramble_strength >= self.warp_core_strength
     }
@@ -1048,17 +1055,105 @@ impl Ballpark {
     }
 
     pub fn is_ball_scrambled(&self, ball_id: BallId) -> bool {
+        let is_nullified = self
+            .combat_states
+            .get(&ball_id)
+            .map(|cs| cs.is_interdiction_nullified)
+            .unwrap_or(false);
         if let Some(cs) = self.combat_states.get(&ball_id) {
             if cs.is_warp_scrambled() {
                 return true;
             }
         }
-        if let Some(ball) = self.balls.get(&ball_id) {
-            if self.warp_bubble_mgr.is_scrambled_at(ball.position) {
-                return true;
+        if !is_nullified {
+            if let Some(ball) = self.balls.get(&ball_id) {
+                if self.warp_bubble_mgr.is_scrambled_at(ball.position) {
+                    return true;
+                }
             }
         }
         false
+    }
+
+    pub fn set_interdiction_nullified(&mut self, ball_id: BallId, nullified: bool) -> bool {
+        if let Some(cs) = self.combat_states.get_mut(&ball_id) {
+            cs.is_interdiction_nullified = nullified;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Deploys an interdiction sphere (e.g. from an interdictor probe or HIC bubble) (`feat:modules.interdiction-sphere`).
+    pub fn add_interdiction_sphere(&mut self, id: BallId, position: DVec3, radius: f64) -> bool {
+        let ball = Ball {
+            id,
+            type_id: 22634, // Warp Disruption Probe / Interdiction Sphere
+            position,
+            velocity: DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 1.0,
+            mass: 10_000.0,
+            radius: radius.max(1.0),
+            speed_fraction: 0.0,
+            mode: MovementMode::Field,
+        };
+        self.add_ball(ball)
+    }
+
+    /// Deploys an anchorable mobile warp disruptor (`feat:modules.mobile-warp-disruptor`).
+    pub fn add_mobile_warp_disruptor(&mut self, id: BallId, position: DVec3, radius: f64) -> bool {
+        let ball = Ball {
+            id,
+            type_id: 26888, // Mobile Warp Disruptor
+            position,
+            velocity: DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 1.0,
+            mass: 50_000.0,
+            radius: radius.max(1.0),
+            speed_fraction: 0.0,
+            mode: MovementMode::Field,
+        };
+        self.add_ball(ball)
+    }
+
+    /// Executes a Micro Jump Drive (MJD) 100km jump forward along the ship's heading (`feat:modules.micro-jump-drive`).
+    pub fn micro_jump(&mut self, ball_id: BallId, distance_meters: f64) -> Result<DVec3, String> {
+        if !self.balls.contains_key(&ball_id) {
+            return Err(format!("Ball {ball_id} not found in ballpark"));
+        }
+        if self.is_ball_scrambled(ball_id) {
+            return Err("WarpScrambled: Cannot activate micro jump drive while warp scrambled".into());
+        }
+        let (current_pos, dir) = {
+            let b = &self.balls[&ball_id];
+            let dir = if b.velocity.length_squared() > 1e-4 {
+                b.velocity.normalize()
+            } else if let MovementMode::GotoDirection { direction } = b.mode {
+                if direction.length_squared() > 1e-4 {
+                    direction.normalize()
+                } else {
+                    DVec3::X
+                }
+            } else {
+                DVec3::X
+            };
+            (b.position, dir)
+        };
+        let target_pos = current_pos + dir * distance_meters;
+        self.set_ball_position(ball_id, target_pos);
+        let ev_sfx = DestinyEvent::OnSpecialFX {
+            ball_id,
+            module_id: None,
+            guid: "effects.MicroJumpDrive".to_string(),
+            is_active: true,
+        };
+        self.pending_events.push(ev_sfx.clone());
+        if let Some(&gid) = self.ball_grid_ids.get(&ball_id) {
+            self.queue_event_for_grid_observers(gid, None, &ev_sfx);
+        }
+        Ok(target_pos)
     }
 
     /// Moves `ball_id` to `new_position` and reconciles its [`GridBubble`] membership.
@@ -1067,6 +1162,9 @@ impl Ballpark {
             return false;
         };
         ball.position = new_position;
+        if let Some(wb) = self.warp_bubble_mgr.bubbles.get_mut(&ball_id) {
+            wb.position = new_position;
+        }
         if !self.is_static_ball(ball_id) {
             let old_gid = self.ball_grid_ids.get(&ball_id).copied();
             let stay_in_old = old_gid
@@ -1111,11 +1209,18 @@ impl Ballpark {
                 ..
             } = mode
             {
-                if let Some((_bid, intercept_pos)) =
-                    self.warp_bubble_mgr.check_interception(origin, *destination)
-                {
-                    *destination = intercept_pos;
-                    *total_distance = (*destination - origin).length();
+                let is_nullified = self
+                    .combat_states
+                    .get(&ball_id)
+                    .map(|cs| cs.is_interdiction_nullified)
+                    .unwrap_or(false);
+                if !is_nullified {
+                    if let Some((_bid, intercept_pos)) =
+                        self.warp_bubble_mgr.check_interception(origin, *destination)
+                    {
+                        *destination = intercept_pos;
+                        *total_distance = (*destination - origin).length();
+                    }
                 }
                 if let Some(locks) = self.target_locks.remove(&ball_id) {
                     for l in locks {
@@ -1261,8 +1366,13 @@ impl Ballpark {
                 total_distance,
             } = ball.mode.clone()
             {
+                let is_nullified = self
+                    .combat_states
+                    .get(&ball.id)
+                    .map(|cs| cs.is_interdiction_nullified)
+                    .unwrap_or(false);
                 // In-flight warp bubble interception: if ship enters a bubble during flight, drop out of warp
-                if self.warp_bubble_mgr.is_scrambled_at(ball.position) {
+                if !is_nullified && self.warp_bubble_mgr.is_scrambled_at(ball.position) {
                     ball.velocity = DVec3::ZERO;
                     ball.speed_fraction = 0.0;
                     ball.mode = MovementMode::Stop;
@@ -2571,6 +2681,110 @@ mod tests {
         let (applied, destroyed) = cs.apply_damage(DamageVector { em: 100.0, thermal: 100.0, kinetic: 100.0, explosive: 100.0 });
         assert_eq!(applied, 0.0);
         assert!(!destroyed);
+    }
+
+    #[test]
+    // parity: plan:SP-2, feat:modules.interdiction-sphere, feat:modules.mobile-warp-disruptor, feat:modules.interdiction-nullifier, feat:modules.micro-jump-drive
+    fn test_interdiction_bubbles_trapping_nullifier_and_micro_jump() {
+        let mut park = Ballpark::new(30_000_142);
+
+        // 1. Deploy Mobile Warp Disruptor at (10,000,000 m, 0, 0) with radius 20,000 m (20 km)
+        let bubble_pos = DVec3::new(10_000_000.0, 0.0, 0.0);
+        let bubble_radius = 20_000.0;
+        assert!(park.add_mobile_warp_disruptor(5001, bubble_pos, bubble_radius));
+        assert!(park.warp_bubble_mgr.is_scrambled_at(bubble_pos));
+        assert!(park.warp_bubble_mgr.is_scrambled_at(bubble_pos + DVec3::new(15_000.0, 0.0, 0.0)));
+        assert!(!park.warp_bubble_mgr.is_scrambled_at(bubble_pos + DVec3::new(25_000.0, 0.0, 0.0)));
+
+        // 2. Deploy Interdiction Sphere (dictor bubble) at (20,000,000 m, 0, 0) with radius 20,000 m
+        let sphere_pos = DVec3::new(20_000_000.0, 0.0, 0.0);
+        assert!(park.add_interdiction_sphere(5002, sphere_pos, 20_000.0));
+        assert!(park.warp_bubble_mgr.is_scrambled_at(sphere_pos));
+
+        // 3. Trapping warp exits: ship warps from (0, 0, 0) toward (10,000,000, 0, 0) (inside the bubble)
+        let ship = Ball {
+            id: 1001,
+            type_id: 587,
+            position: DVec3::ZERO,
+            velocity: DVec3::ZERO,
+            max_velocity: 365.0,
+            inertia: 3.45,
+            mass: 1_000_000.0,
+            radius: 50.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        };
+        park.add_ball(ship);
+
+        // Normal ship warps toward destination inside bubble -> warp is intercepted at bubble perimeter
+        let warp_mode = MovementMode::new_warp(DVec3::ZERO, bubble_pos, 3.0);
+        park.set_mode(1001, warp_mode).expect("Initiate warp");
+        if let MovementMode::Warp { destination, .. } = park.balls[&1001].mode {
+            let dist_to_center = (destination - bubble_pos).length();
+            assert!(
+                (dist_to_center - bubble_radius).abs() < 1.0,
+                "Normal ship must be trapped at bubble perimeter: dist={dist_to_center}, radius={bubble_radius}"
+            );
+        } else {
+            panic!("Expected Warp mode");
+        }
+
+        // 4. Interdiction Nullifier: ship with nullifier enabled ignores bubbles
+        let ship_null = Ball {
+            id: 1002,
+            type_id: 587,
+            position: DVec3::ZERO,
+            velocity: DVec3::ZERO,
+            max_velocity: 365.0,
+            inertia: 3.45,
+            mass: 1_000_000.0,
+            radius: 50.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        };
+        park.add_ball(ship_null);
+        park.set_interdiction_nullified(1002, true);
+
+        let warp_mode_null = MovementMode::new_warp(DVec3::ZERO, bubble_pos, 3.0);
+        park.set_mode(1002, warp_mode_null).expect("Initiate warp nullified");
+        if let MovementMode::Warp { destination, .. } = park.balls[&1002].mode {
+            assert_eq!(
+                destination, bubble_pos,
+                "Interdiction nullified ship must NOT have destination intercepted by bubbles"
+            );
+        } else {
+            panic!("Expected Warp mode for nullified ship");
+        }
+
+        // Inside bubble: normal ship cannot warp out, but nullified ship can
+        park.set_ball_position(1001, bubble_pos);
+        park.set_ball_position(1002, bubble_pos);
+        assert!(park.is_ball_scrambled(1001), "Normal ship in bubble must be scrambled");
+        assert!(!park.is_ball_scrambled(1002), "Nullified ship in bubble must NOT be scrambled");
+
+        let err = park.set_mode(1001, MovementMode::new_warp(bubble_pos, DVec3::new(30_000_000.0, 0.0, 0.0), 3.0));
+        assert!(err.is_err(), "Normal ship cannot warp while in bubble");
+
+        let ok = park.set_mode(1002, MovementMode::new_warp(bubble_pos, DVec3::new(30_000_000.0, 0.0, 0.0), 3.0));
+        assert!(ok.is_ok(), "Nullified ship CAN warp while in bubble");
+
+        // 5. Micro Jump Drive (MJD): 100km jump along heading
+        let mjd_ship = Ball {
+            id: 1003,
+            type_id: 644, // Typhoon battleship
+            position: DVec3::new(50_000.0, 0.0, 0.0),
+            velocity: DVec3::new(100.0, 0.0, 0.0),
+            max_velocity: 130.0,
+            inertia: 0.12,
+            mass: 99_000_000.0,
+            radius: 350.0,
+            speed_fraction: 1.0,
+            mode: MovementMode::GotoDirection { direction: DVec3::X },
+        };
+        park.add_ball(mjd_ship);
+        let new_pos = park.micro_jump(1003, 100_000.0).expect("Micro jump");
+        assert_eq!(new_pos, DVec3::new(150_000.0, 0.0, 0.0), "MJD must jump exactly 100 km forward along heading");
+        assert_eq!(park.balls[&1003].position, DVec3::new(150_000.0, 0.0, 0.0));
     }
 }
 

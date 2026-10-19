@@ -52,11 +52,27 @@ pub struct ServerContext {
     pub ship_fittings: RwLock<HashMap<i64, ShipFittingEngine>>,
     pub weapon_cycle_state: RwLock<HashMap<i64, (Option<u64>, u32)>>,
     pub fighter_cooldown_state: RwLock<HashMap<(i64, u32), u64>>,
+    pub active_fighters: RwLock<HashMap<i64, ActiveFighterSquadron>>,
+    pub fighter_tube_loads: RwLock<HashMap<(i64, usize), i64>>,
     pub scanned_signatures: RwLock<HashSet<(i64, u32, i64)>>,
     pub invention_roll_override: RwLock<Option<f64>>,
     pub feature_flags: crate::config::FeatureFlagsConfig,
     pub esi_port: u16,
     pub esi_state: Arc<crate::esi::runtime_state::EsiRuntimeState>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ActiveFighterSquadron {
+    pub ball_id: i64,
+    pub item_id: i64,
+    pub type_id: u32,
+    pub owner_char_id: i64,
+    pub parent_ship_id: i64,
+    pub tube_index: usize,
+    pub squadron_size: u32,
+    pub target_id: Option<i64>,
+    pub is_abandoned: bool,
+    pub mwd_active: bool,
 }
 
 impl Default for ServerContext {
@@ -113,6 +129,8 @@ impl ServerContext {
             ship_fittings: RwLock::new(HashMap::new()),
             weapon_cycle_state: RwLock::new(HashMap::new()),
             fighter_cooldown_state: RwLock::new(HashMap::new()),
+            active_fighters: RwLock::new(HashMap::new()),
+            fighter_tube_loads: RwLock::new(HashMap::new()),
             scanned_signatures: RwLock::new(HashSet::new()),
             invention_roll_override: RwLock::new(None),
             feature_flags: crate::config::FeatureFlagsConfig::default(),
