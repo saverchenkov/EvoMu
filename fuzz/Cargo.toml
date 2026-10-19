@@ -1,0 +1,38 @@
+[package]
+name = "evomu-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+eve-proto = { path = "../crates/eve-proto" }
+eve-machonet = { path = "../crates/eve-machonet" }
+eve-destiny = { path = "../crates/eve-destiny" }
+
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "fuzz_marshal_decode"
+path = "fuzz_targets/fuzz_marshal_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_bridge_envelope"
+path = "fuzz_targets/fuzz_bridge_envelope.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_macho_packet"
+path = "fuzz_targets/fuzz_macho_packet.rs"
+test = false
+doc = false
+bench = false

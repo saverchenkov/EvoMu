@@ -12,3 +12,8 @@ rmp-serde.workspace = true
 thiserror.workspace = true
 flate2.workspace = true
 rusqlite.workspace = true
+
+[dev-dependencies]
+eve-testkit = { path = "../eve-testkit" }
+proptest.workspace = true
+

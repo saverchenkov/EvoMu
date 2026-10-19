@@ -384,16 +384,16 @@
   "note": "Implemented Dogma modifierInfo evaluator and effect sweep plus SDE domain and SQLite static resource sweeps; remaining FSD binary loaders and expression-only effects pending."
  },
  "T-3": {
-  "assessment": "NOT STARTED",
-  "note": ""
+  "assessment": "PARTIAL",
+  "note": "Added 10,000-case proptest round-trip suites for eve-proto (marshal opcodes, PyPackedRow/DBRow, BridgeEnvelope, synthetic GatewayFrame fixture), eve-destiny (AddBalls wire codec), and eve-db (IskCents invariants), plus cargo-fuzz targets and minimized seed corpus; 1h fuzz campaign and Q-1/Q-2 client gateway descriptors pending."
  },
  "T-4": {
   "assessment": "NOT STARTED",
   "note": ""
  },
  "T-5": {
-  "assessment": "NOT STARTED",
-  "note": ""
+  "assessment": "DONE",
+  "note": "Installed cargo-llvm-cov and cargo-mutants and added scripts/qa/verify_cov_and_mutants.py enforcing >= 85% coverage and mutation score."
  },
  "T-6": {
   "assessment": "NOT STARTED",

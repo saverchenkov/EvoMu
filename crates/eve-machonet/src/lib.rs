@@ -295,7 +295,7 @@ impl MachoPacket {
 }
 
 /// Low-level `VersionExchange` handshake parameters exchanged when a client connects on TCP 26000.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct VersionExchange {
     pub birthday: u32,
     pub macho_version: u32,
@@ -330,6 +330,82 @@ impl VersionExchange {
             PyRep::ascii_bytes(&self.project_version),
         ])
     }
+
+    pub fn from_pyrep(rep: &PyRep) -> Option<Self> {
+        let PyRep::Tuple(items) = rep else {
+            return None;
+        };
+        if items.len() != 6 {
+            return None;
+        }
+        let birthday = u32::try_from(items[0].as_i64()?).ok()?;
+        let macho_version = u32::try_from(items[1].as_i64()?).ok()?;
+        let user_count = u32::try_from(items[2].as_i64().unwrap_or(0).max(0)).ok()?;
+        let version_number = items[3].as_f64()?;
+        let build_version = u32::try_from(items[4].as_i64()?).ok()?;
+        let project_version = items[5].as_str()?.to_owned();
+        Some(Self {
+            birthday,
+            macho_version,
+            user_count,
+            version_number,
+            build_version,
+            project_version,
+        })
+    }
+}
+
+/// Extracts `(bound_id, method, args, kwargs)` from a `macho.CallReq` packet payload (`PyRep`).
+pub fn extract_macho_call_req(
+    payload: &PyRep,
+) -> (Option<u64>, String, Vec<PyRep>, HashMap<String, PyRep>) {
+    let mut bound_id = None;
+    let mut method = String::new();
+    let mut args = Vec::new();
+    let mut kwargs = HashMap::new();
+
+    let outer = match payload {
+        PyRep::Tuple(items) => items.as_slice(),
+        _ => return (bound_id, method, args, kwargs),
+    };
+    let Some(first) = outer.first() else {
+        return (bound_id, method, args, kwargs);
+    };
+    let inner_call = match first {
+        PyRep::Tuple(t) if t.len() >= 2 => {
+            bound_id = t[0].as_i64().filter(|&v| v > 0).map(|v| v as u64);
+            match &t[1] {
+                PyRep::SubStream(s) => s.as_ref(),
+                other => other,
+            }
+        }
+        PyRep::SubStream(s) => s.as_ref(),
+        other => other,
+    };
+
+    if let PyRep::Tuple(call_items) = inner_call {
+        // Support both 4-tuple `(remoteObject, method, args, kwargs)` and 3-tuple `(method, args, kwargs)`
+        let offset = if call_items.first().and_then(|v| v.as_str()).is_some() {
+            0
+        } else {
+            1
+        };
+        if let Some(m) = call_items.get(offset).and_then(|v| v.as_str()) {
+            method = m.to_owned();
+        }
+        if let Some(PyRep::Tuple(a) | PyRep::List(a)) = call_items.get(offset + 1) {
+            args = a.clone();
+        }
+        if let Some(PyRep::Dict(entries)) = call_items.get(offset + 2) {
+            for (k, v) in entries {
+                if let Some(ks) = k.as_str() {
+                    kwargs.insert(ks.to_owned(), v.clone());
+                }
+            }
+        }
+    }
+
+    (bound_id, method, args, kwargs)
 }
 
 /// Tracks a connected player's `machoNet` session attributes (`userid`, `charid`, `solarsystemid2`, `stationid`, `structureid`, `locationid`, etc.).
@@ -588,10 +664,14 @@ mod tests {
 
     #[test]
     fn test_version_exchange_and_address_marshal_roundtrip() {
-        let ver = VersionExchange::default().to_pyrep();
+        let ver_struct = VersionExchange::default();
+        let ver = ver_struct.to_pyrep();
         let encoded = marshal::encode(&ver);
         let decoded = marshal::decode(&encoded).unwrap();
         assert_eq!(ver, decoded);
+        assert_eq!(VersionExchange::from_pyrep(&decoded), Some(ver_struct));
+        assert_eq!(VersionExchange::from_pyrep(&PyRep::None), None);
+        assert_eq!(VersionExchange::from_pyrep(&PyRep::Tuple(vec![PyRep::None; 5])), None);
 
         let addr = MachoAddress::Node {
             node_id: 888444,
@@ -602,6 +682,37 @@ mod tests {
         let addr_bytes = marshal::encode(&addr);
         let addr_decoded = marshal::decode(&addr_bytes).unwrap();
         assert_eq!(addr, addr_decoded);
+
+        // Bound 4-tuple and unbound 3-tuple CallReq payload extraction
+        let bound_payload = PyRep::Tuple(vec![PyRep::Tuple(vec![
+            PyRep::Integer(77),
+            PyRep::SubStream(Box::new(PyRep::Tuple(vec![
+                PyRep::Integer(1),
+                PyRep::String("GetSolarSystemInventory".into()),
+                PyRep::Tuple(vec![PyRep::Integer(30000142)]),
+                PyRep::Dict(vec![(PyRep::String("flag".into()), PyRep::Integer(4))]),
+            ]))),
+        ])]);
+        let (b_id, method, args, kwargs) = extract_macho_call_req(&bound_payload);
+        assert_eq!(b_id, Some(77));
+        assert_eq!(method, "GetSolarSystemInventory");
+        assert_eq!(args, vec![PyRep::Integer(30000142)]);
+        assert_eq!(kwargs.get("flag"), Some(&PyRep::Integer(4)));
+
+        let unbound_payload = PyRep::Tuple(vec![PyRep::SubStream(Box::new(PyRep::Tuple(vec![
+            PyRep::String("MachoBindObject".into()),
+            PyRep::List(vec![PyRep::Integer(30000142)]),
+            PyRep::Dict(vec![]),
+        ])))]);
+        let (b_id2, method2, args2, kwargs2) = extract_macho_call_req(&unbound_payload);
+        assert_eq!(b_id2, None);
+        assert_eq!(method2, "MachoBindObject");
+        assert_eq!(args2, vec![PyRep::Integer(30000142)]);
+        assert!(kwargs2.is_empty());
+
+        let empty_call = extract_macho_call_req(&PyRep::None);
+        assert_eq!(empty_call.0, None);
+        assert!(empty_call.1.is_empty());
     }
 
     #[test]

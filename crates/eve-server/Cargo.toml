@@ -30,3 +30,4 @@ demo-seed = ["eve-db/demo-seed"]
 [dev-dependencies]
 eve-db = { path = "../eve-db", features = ["demo-seed"] }
 eve-server = { path = ".", features = ["demo-seed"] }
+eve-testkit = { path = "../eve-testkit" }

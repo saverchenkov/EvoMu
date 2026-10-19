@@ -9,3 +9,7 @@ eve-proto = { path = "../eve-proto" }
 eve-sde = { path = "../eve-sde" }
 glam.workspace = true
 serde.workspace = true
+
+[dev-dependencies]
+eve-testkit = { path = "../eve-testkit" }
+proptest.workspace = true

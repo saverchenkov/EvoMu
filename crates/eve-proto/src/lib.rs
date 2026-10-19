@@ -626,7 +626,7 @@ pub const ZLIB_HEADER_BYTE: u8 = 0x78;
 pub const SAVE_FLAG: u8 = 0x40;
 
 /// High-level envelope used by the Python Client Bridge (`evomu_bridge.py`).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum BridgeEnvelope {
     RpcRequest {
@@ -649,10 +649,298 @@ pub enum BridgeEnvelope {
     },
 }
 
+/// Validates a 4-byte little-endian frame length header (`1..=MAX_FRAME_SIZE`) before buffer allocation.
+pub fn validate_frame_length(len_buf: [u8; 4]) -> Result<usize, ProtoError> {
+    let frame_len = u32::from_le_bytes(len_buf) as usize;
+    if frame_len == 0 {
+        return Err(ProtoError::UnexpectedEof);
+    }
+    if frame_len > MAX_FRAME_SIZE {
+        return Err(ProtoError::FrameTooLarge(frame_len));
+    }
+    Ok(frame_len)
+}
+
+impl BridgeEnvelope {
+    /// Serializes a `BridgeEnvelope` as a length-prefixed (`u32` little-endian) JSON wire frame.
+    pub fn to_wire_bytes(&self) -> Result<Vec<u8>, ProtoError> {
+        let json_bytes = serde_json::to_vec(self)?;
+        if json_bytes.len() > MAX_FRAME_SIZE {
+            return Err(ProtoError::FrameTooLarge(json_bytes.len()));
+        }
+        let mut frame = Vec::with_capacity(4 + json_bytes.len());
+        frame.extend_from_slice(&(json_bytes.len() as u32).to_le_bytes());
+        frame.extend_from_slice(&json_bytes);
+        Ok(frame)
+    }
+
+    /// Decodes a length-prefixed (`u32` little-endian) or raw JSON/MessagePack `BridgeEnvelope` wire frame.
+    pub fn from_wire_bytes(input: &[u8]) -> Result<Self, ProtoError> {
+        if input.is_empty() {
+            return Err(ProtoError::UnexpectedEof);
+        }
+        if input.len() > MAX_FRAME_SIZE {
+            return Err(ProtoError::FrameTooLarge(input.len()));
+        }
+        let payload = if input.len() >= 4 {
+            let declared_len = u32::from_le_bytes([input[0], input[1], input[2], input[3]]) as usize;
+            if declared_len > 0 && declared_len + 4 == input.len() {
+                &input[4..]
+            } else {
+                input
+            }
+        } else {
+            input
+        };
+        match serde_json::from_slice::<Self>(payload) {
+            Ok(env) => Ok(env),
+            Err(json_err) => rmp_serde::from_slice::<Self>(payload).map_err(|_| ProtoError::from(json_err)),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BridgeRpcError {
     pub code: String,
     pub message: String,
+}
+/// Synthetic protobuf test fixture frame direction (`Request`, `Response`, `Notice`).
+/// Note: This is a synthetic wire-framing fixture for property/fuzz testing of protobuf primitives
+/// (varints, zigzag `sint64`, length-delimited strings/bytes); real client `eveProto` gateway
+/// schemas are tracked under `Q-1`/`Q-2`.
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GatewayFrameKind {
+    Request = 1,
+    Response = 2,
+    Notice = 3,
+}
+
+impl GatewayFrameKind {
+    pub fn from_u64(v: u64) -> Option<Self> {
+        match v {
+            1 => Some(Self::Request),
+            2 => Some(Self::Response),
+            3 => Some(Self::Notice),
+            _ => None,
+        }
+    }
+}
+
+/// Synthetic protobuf wire test fixture exercising protobuf varint, zigzag `sint64`, and
+/// length-delimited byte/string bounds (`MAX_FRAME_SIZE`, `MAX_COLLECTION_LEN`).
+/// Does not represent the authentic client `publicGatewaySvc` protobuf descriptor (see `Q-1`/`Q-2`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GatewayFrame {
+    pub kind: GatewayFrameKind,
+    pub correlation_id: u64,
+    pub type_name: String,
+    pub status_code: u32,
+    pub actor_character_id: Option<i64>,
+    pub idempotency_key: Option<String>,
+    pub payload: Vec<u8>,
+}
+
+impl GatewayFrame {
+    /// Encodes this synthetic `GatewayFrame` fixture using deterministic binary Protobuf wire framing
+    /// (field 1: `kind` varint, field 2: `correlation_id` varint, field 3: `type_name` string,
+    /// field 4: `status_code` varint, field 5: `actor_character_id` sint64 zigzag varint,
+    /// field 6: `idempotency_key` string, field 7: `payload` bytes).
+    pub fn encode_protobuf_wire(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(32 + self.type_name.len() + self.payload.len());
+        out.push(0x08);
+        write_pb_varint(&mut out, self.kind as u64);
+
+        out.push(0x10);
+        write_pb_varint(&mut out, self.correlation_id);
+
+        out.push(0x1A);
+        write_pb_varint(&mut out, self.type_name.len() as u64);
+        out.extend_from_slice(self.type_name.as_bytes());
+
+        out.push(0x20);
+        write_pb_varint(&mut out, self.status_code as u64);
+
+        if let Some(char_id) = self.actor_character_id {
+            out.push(0x28);
+            let zigzag = ((char_id << 1) ^ (char_id >> 63)) as u64;
+            write_pb_varint(&mut out, zigzag);
+        }
+
+        if let Some(ref key) = self.idempotency_key {
+            out.push(0x32);
+            write_pb_varint(&mut out, key.len() as u64);
+            out.extend_from_slice(key.as_bytes());
+        }
+
+        out.push(0x3A);
+        write_pb_varint(&mut out, self.payload.len() as u64);
+        out.extend_from_slice(&self.payload);
+        out
+    }
+
+    /// Decodes a binary Protobuf wire `GatewayFrame` with strict bounds checks.
+    pub fn decode_protobuf_wire(mut input: &[u8]) -> Result<Self, ProtoError> {
+        if input.is_empty() {
+            return Err(ProtoError::UnexpectedEof);
+        }
+        if input.len() > MAX_FRAME_SIZE {
+            return Err(ProtoError::FrameTooLarge(input.len()));
+        }
+
+        let mut kind = None;
+        let mut correlation_id = 0u64;
+        let mut type_name = String::new();
+        let mut status_code = 0u32;
+        let mut actor_character_id = None;
+        let mut idempotency_key = None;
+        let mut payload = Vec::new();
+
+        while !input.is_empty() {
+            let tag = read_pb_varint(&mut input)?;
+            let field_num = tag >> 3;
+            let wire_type = tag & 0x07;
+            match (field_num, wire_type) {
+                (1, 0) => {
+                    let v = read_pb_varint(&mut input)?;
+                    kind = Some(
+                        GatewayFrameKind::from_u64(v)
+                            .ok_or(ProtoError::UnsupportedOpcode(v as u8))?,
+                    );
+                }
+                (2, 0) => {
+                    correlation_id = read_pb_varint(&mut input)?;
+                }
+                (3, 2) => {
+                    let bytes = read_pb_bytes(&mut input)?;
+                    type_name = String::from_utf8(bytes)?;
+                }
+                (4, 0) => {
+                    let v = read_pb_varint(&mut input)?;
+                    status_code = u32::try_from(v).map_err(|_| ProtoError::UnexpectedEof)?;
+                }
+                (5, 0) => {
+                    let z = read_pb_varint(&mut input)?;
+                    let decoded = ((z >> 1) as i64) ^ (-((z & 1) as i64));
+                    actor_character_id = Some(decoded);
+                }
+                (6, 2) => {
+                    let bytes = read_pb_bytes(&mut input)?;
+                    idempotency_key = Some(String::from_utf8(bytes)?);
+                }
+                (7, 2) => {
+                    payload = read_pb_bytes(&mut input)?;
+                }
+                _ => return Err(ProtoError::UnsupportedOpcode(tag as u8)),
+            }
+        }
+
+        Ok(Self {
+            kind: kind.ok_or(ProtoError::UnexpectedEof)?,
+            correlation_id,
+            type_name,
+            status_code,
+            actor_character_id,
+            idempotency_key,
+            payload,
+        })
+    }
+
+    /// Projects this `GatewayFrame` into a `PyRep` tuple for `publicGatewaySvc` over `machoNet`.
+    pub fn to_pyrep(&self) -> PyRep {
+        PyRep::Tuple(vec![
+            PyRep::Integer(self.kind as i64),
+            PyRep::Integer(self.correlation_id as i64),
+            PyRep::String(self.type_name.clone()),
+            PyRep::Integer(self.status_code as i64),
+            self.actor_character_id
+                .map(PyRep::Integer)
+                .unwrap_or(PyRep::None),
+            self.idempotency_key
+                .as_ref()
+                .cloned()
+                .map(PyRep::String)
+                .unwrap_or(PyRep::None),
+            PyRep::Buffer(self.payload.clone()),
+        ])
+    }
+
+    /// Reconstructs a `GatewayFrame` from its `PyRep` tuple representation.
+    pub fn from_pyrep(rep: &PyRep) -> Result<Self, ProtoError> {
+        let PyRep::Tuple(items) = rep else {
+            return Err(ProtoError::UnexpectedEof);
+        };
+        if items.len() != 7 {
+            return Err(ProtoError::UnexpectedEof);
+        }
+        let kind_u64 = items[0].as_i64().ok_or(ProtoError::UnexpectedEof)? as u64;
+        let kind = GatewayFrameKind::from_u64(kind_u64)
+            .ok_or(ProtoError::UnsupportedOpcode(kind_u64 as u8))?;
+        let correlation_id = items[1].as_i64().ok_or(ProtoError::UnexpectedEof)? as u64;
+        let type_name = items[2]
+            .as_str()
+            .ok_or(ProtoError::UnexpectedEof)?
+            .to_string();
+        let status_code =
+            u32::try_from(items[3].as_i64().ok_or(ProtoError::UnexpectedEof)?)
+                .map_err(|_| ProtoError::UnexpectedEof)?;
+        let actor_character_id = match &items[4] {
+            PyRep::None => None,
+            v => Some(v.as_i64().ok_or(ProtoError::UnexpectedEof)?),
+        };
+        let idempotency_key = match &items[5] {
+            PyRep::None => None,
+            v => Some(v.as_str().ok_or(ProtoError::UnexpectedEof)?.to_string()),
+        };
+        let payload = match &items[6] {
+            PyRep::Buffer(b) | PyRep::Bytes(b) => b.clone(),
+            _ => return Err(ProtoError::UnexpectedEof),
+        };
+        Ok(Self {
+            kind,
+            correlation_id,
+            type_name,
+            status_code,
+            actor_character_id,
+            idempotency_key,
+            payload,
+        })
+    }
+}
+
+fn write_pb_varint(out: &mut Vec<u8>, mut val: u64) {
+    while val >= 0x80 {
+        out.push((val as u8) | 0x80);
+        val >>= 7;
+    }
+    out.push(val as u8);
+}
+
+fn read_pb_varint(input: &mut &[u8]) -> Result<u64, ProtoError> {
+    let mut result = 0u64;
+    let mut shift = 0u32;
+    loop {
+        if input.is_empty() || shift >= 64 {
+            return Err(ProtoError::UnexpectedEof);
+        }
+        let b = input[0];
+        *input = &input[1..];
+        result |= ((b & 0x7F) as u64) << shift;
+        if (b & 0x80) == 0 {
+            return Ok(result);
+        }
+        shift += 7;
+    }
+}
+
+fn read_pb_bytes(input: &mut &[u8]) -> Result<Vec<u8>, ProtoError> {
+    let len = read_pb_varint(input)? as usize;
+    if input.len() < len {
+        return Err(ProtoError::UnexpectedEof);
+    }
+    let out = input[..len].to_vec();
+    *input = &input[len..];
+    Ok(out)
 }
 
 #[cfg(test)]

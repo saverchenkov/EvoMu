@@ -16,3 +16,7 @@ argon2.workspace = true
 [features]
 default = []
 demo-seed = []
+
+[dev-dependencies]
+eve-testkit = { path = "../eve-testkit" }
+proptest.workspace = true
