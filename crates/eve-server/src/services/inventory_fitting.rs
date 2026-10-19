@@ -462,6 +462,102 @@ pub async fn handle(
             }
         }
 
+        ("dogmaIM", "ItemGetInfo")
+        | ("invBroker", "GetItemInfo")
+        | ("invBroker", "GetDynamicItemInfo")
+        | ("dogmaIM", "GetDynamicItemInfo") => {
+            let Some(raw_id) = args.first().and_then(|a| a.as_i64()) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidArgument".into(),
+                    message: "ItemGetInfo requires itemID or typeID".into(),
+                }));
+            };
+
+            // 1. Check if raw_id is an item in the world DB
+            let item_opt = ctx.db.with_snapshot(|snap| snap.items.get(&raw_id).cloned());
+
+            let (type_id, owner_id, dyn_attrs, location_id, qty, singleton) = if let Some(item) = item_opt {
+                (
+                    item.type_id,
+                    PyRep::Integer(item.owner_id),
+                    item.dynamic_attributes,
+                    Some(item.location_id),
+                    item.quantity,
+                    item.singleton,
+                )
+            } else {
+                // If not found in items, raw_id is treated as a TypeId
+                let tid = raw_id as TypeId;
+                (tid, PyRep::None, HashMap::new(), None, 1, false)
+            };
+
+            let Some(show_info) = ctx.sde.show_info_for_type(type_id) else {
+                return Some(Err(BridgeRpcError {
+                    code: "TypeNotFound".into(),
+                    message: format!("Type {type_id} not found in SDE"),
+                }));
+            };
+
+            // Merge default attributes with dynamic attributes
+            let mut merged_attrs = show_info.default_attributes.clone();
+            for (&attr_id, &val) in &dyn_attrs {
+                merged_attrs.insert(attr_id, val);
+            }
+
+            let mut attr_entries: Vec<(PyRep, PyRep)> = merged_attrs
+                .into_iter()
+                .map(|(k, v)| (PyRep::Integer(k as i64), PyRep::Real(v)))
+                .collect();
+            attr_entries.sort_by_key(|(k, _)| k.as_i64().unwrap_or(0));
+
+            let mut dyn_entries: Vec<(PyRep, PyRep)> = dyn_attrs
+                .into_iter()
+                .map(|(k, v)| (PyRep::Integer(k as i64), PyRep::Real(v)))
+                .collect();
+            dyn_entries.sort_by_key(|(k, _)| k.as_i64().unwrap_or(0));
+
+            let var_reps: Vec<PyRep> = show_info
+                .variations
+                .into_iter()
+                .map(|v| PyRep::Integer(v as i64))
+                .collect();
+
+            Some(Ok(PyRep::keyval([
+                ("itemID", PyRep::Integer(raw_id)),
+                ("typeID", PyRep::Integer(show_info.type_id as i64)),
+                ("typeName", PyRep::String(show_info.name)),
+                ("groupID", PyRep::Integer(show_info.group_id as i64)),
+                ("categoryID", PyRep::Integer(show_info.category_id as i64)),
+                ("ownerID", owner_id),
+                ("locationID", location_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
+                ("quantity", PyRep::Integer(qty as i64)),
+                ("singleton", PyRep::Bool(singleton)),
+                ("mass", PyRep::Real(show_info.mass)),
+                ("volume", PyRep::Real(show_info.volume)),
+                ("capacity", PyRep::Real(show_info.capacity)),
+                ("portionSize", PyRep::Integer(show_info.portion_size as i64)),
+                ("basePrice", PyRep::Real(show_info.base_price)),
+                ("published", PyRep::Bool(show_info.published)),
+                (
+                    "marketGroupID",
+                    show_info
+                        .market_group_id
+                        .map(|mg| PyRep::Integer(mg as i64))
+                        .unwrap_or(PyRep::None),
+                ),
+                (
+                    "variationParentTypeID",
+                    show_info
+                        .variation_parent_type_id
+                        .map(|vp| PyRep::Integer(vp as i64))
+                        .unwrap_or(PyRep::None),
+                ),
+                ("variations", PyRep::List(var_reps)),
+                ("dynamicAttributes", PyRep::Dict(dyn_entries)),
+                ("attributes", PyRep::Dict(attr_entries)),
+            ])))
+        }
+
         ("dogmaIM", "DestroyFitting") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,

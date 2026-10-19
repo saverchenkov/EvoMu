@@ -88,6 +88,74 @@ pub fn handle(
     }
 
     match method {
+        "GetMarketGroups" => {
+            let mut mgs: Vec<&eve_sde::MarketGroupInfo> = ctx.sde.market_groups.values().collect();
+            mgs.sort_by_key(|mg| mg.market_group_id);
+            let rows = mgs
+                .into_iter()
+                .map(|mg| {
+                    vec![
+                        PyRep::Integer(mg.market_group_id as i64),
+                        mg.parent_group_id
+                            .map(|pid| PyRep::Integer(pid as i64))
+                            .unwrap_or(PyRep::None),
+                        PyRep::String(mg.name.clone()),
+                        PyRep::String(mg.name.clone()),
+                        mg.icon_id
+                            .map(|iid| PyRep::Integer(iid as i64))
+                            .unwrap_or(PyRep::None),
+                        PyRep::Integer(i64::from(mg.has_types)),
+                    ]
+                })
+                .collect();
+            Some(Ok(PyRep::rowset(
+                vec![
+                    "marketGroupID",
+                    "parentGroupID",
+                    "marketGroupName",
+                    "description",
+                    "iconID",
+                    "hasTypes",
+                ],
+                rows,
+            )))
+        }
+
+        "GetMarketGroupTypes" | "GetTypesInMarketGroup" => {
+            let Some(mg_id) = args.first().and_then(|a| a.as_i64()).map(|v| v as u32) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidArgument".into(),
+                    message: "GetMarketGroupTypes requires marketGroupID integer".into(),
+                }));
+            };
+            let type_ids = ctx.sde.types_in_market_group(mg_id);
+            let rows = type_ids
+                .into_iter()
+                .filter_map(|tid| {
+                    let t = ctx.sde.types.get(&tid)?;
+                    Some(vec![
+                        PyRep::Integer(tid as i64),
+                        PyRep::String(t.name.clone()),
+                        PyRep::Integer(t.group_id as i64),
+                        PyRep::Integer(t.category_id as i64),
+                        PyRep::Real(t.volume),
+                        PyRep::Real(t.base_price),
+                    ])
+                })
+                .collect();
+            Some(Ok(PyRep::rowset(
+                vec![
+                    "typeID",
+                    "typeName",
+                    "groupID",
+                    "categoryID",
+                    "volume",
+                    "basePrice",
+                ],
+                rows,
+            )))
+        }
+
         "GetOrders" => {
             let _ = match ServerContext::require_character(session) {
                 Ok(v) => v,
