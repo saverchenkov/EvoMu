@@ -6,6 +6,9 @@ use eve_proto::PyRep;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+pub mod handshake;
+pub use handshake::*;
+
 /// Standard EVE `machoNet` message types (`machoPacketType`).
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -335,15 +338,23 @@ impl VersionExchange {
         let PyRep::Tuple(items) = rep else {
             return None;
         };
-        if items.len() != 6 {
+        if items.len() < 6 || items.len() > 7 {
             return None;
         }
-        let birthday = u32::try_from(items[0].as_i64()?).ok()?;
-        let macho_version = u32::try_from(items[1].as_i64()?).ok()?;
-        let user_count = u32::try_from(items[2].as_i64().unwrap_or(0).max(0)).ok()?;
-        let version_number = items[3].as_f64()?;
-        let build_version = u32::try_from(items[4].as_i64()?).ok()?;
-        let project_version = items[5].as_str()?.to_owned();
+        let birthday = items[0].as_i64()? as u32;
+        let macho_version = items[1].as_i64()? as u32;
+        let user_count = match &items[2] {
+            PyRep::Integer(i) if *i >= 0 => *i as u32,
+            PyRep::None => 0,
+            _ => return None,
+        };
+        let version_number = match &items[3] {
+            PyRep::Real(r) => *r,
+            PyRep::Integer(i) => *i as f64,
+            _ => return None,
+        };
+        let build_version = items[4].as_i64()? as u32;
+        let project_version = items[5].as_str()?.to_string();
         Some(Self {
             birthday,
             macho_version,
@@ -352,6 +363,55 @@ impl VersionExchange {
             build_version,
             project_version,
         })
+    }
+    pub fn validate_client(&self, client: &Self) -> Result<(), GPSTransportClosed> {
+        if client.birthday != self.birthday {
+            return Err(GPSTransportClosed::new(
+                format!(
+                    "Handshake Failed - Birthday Mismatch - Birthday is {} but should be {}",
+                    client.birthday, self.birthday
+                ),
+                "HANDSHAKE_INCOMPATIBLERELEASE",
+            ));
+        }
+        if client.macho_version != self.macho_version {
+            return Err(GPSTransportClosed::new(
+                format!(
+                    "Handshake Failed - Macho Version Mismatch - Macho Version is {} but should be {}",
+                    client.macho_version, self.macho_version
+                ),
+                "HANDSHAKE_INCOMPATIBLEPROTOCOL",
+            ));
+        }
+        if (client.version_number - self.version_number).abs() > 1e-4 {
+            return Err(GPSTransportClosed::new(
+                format!(
+                    "Handshake Failed - Version Mismatch - Version is {} but should be {}",
+                    client.version_number, self.version_number
+                ),
+                "HANDSHAKE_INCOMPATIBLEVERSION",
+            ));
+        }
+        if client.build_version != self.build_version {
+            return Err(GPSTransportClosed::new(
+                format!(
+                    "Handshake Failed - Build Mismatch - Build is {} but should be {}",
+                    client.build_version, self.build_version
+                ),
+                "HANDSHAKE_INCOMPATIBLEBUILD",
+            ));
+        }
+        if client.project_version != self.project_version && client.project_version != "V24.01@ccp"
+        {
+            return Err(GPSTransportClosed::new(
+                format!(
+                    "Handshake Failed - Project Version Mismatch - Project Version is {} but should be {}",
+                    client.project_version, self.project_version
+                ),
+                "HANDSHAKE_INCOMPATIBLEREGION",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -429,6 +489,9 @@ pub struct SessionState {
     pub war_faction_id: Option<i64>,
     pub role: u64,
     pub language_id: String,
+    pub address: String,
+    pub user_type: i64,
+    pub max_session_time: Option<i64>,
 }
 
 impl SessionState {
@@ -439,6 +502,9 @@ impl SessionState {
             corp_role: 0,
             role: 0,
             language_id: "EN".to_string(),
+            address: String::new(),
+            user_type: 30,
+            max_session_time: None,
             ..Default::default()
         }
     }
@@ -606,6 +672,32 @@ impl SessionState {
                 ),
             );
         }
+        if self.language_id != next.language_id {
+            changes.insert(
+                "languageID".into(),
+                (
+                    if self.language_id.is_empty() {
+                        PyRep::None
+                    } else {
+                        PyRep::ascii_bytes(&self.language_id)
+                    },
+                    PyRep::ascii_bytes(&next.language_id),
+                ),
+            );
+        }
+        if self.address != next.address && !next.address.is_empty() {
+            changes.insert(
+                "address".into(),
+                (
+                    if self.address.is_empty() {
+                        PyRep::None
+                    } else {
+                        PyRep::ascii_bytes(&self.address)
+                    },
+                    PyRep::ascii_bytes(&next.address),
+                ),
+            );
+        }
         changes
     }
 
@@ -623,6 +715,97 @@ impl SessionState {
             PyRep::Tuple(vec![PyRep::Integer(0), PyRep::Dict(dict_entries)]),
             PyRep::List(nodes_of_interest.into_iter().map(PyRep::Integer).collect()),
         ]))
+    }
+
+    /// Builds `macho.SessionInitialStateNotification` (`packet_type = 18`) establishing initial session state (`userid`, `role`, `languageID`, `address`, `userType`, `sessionID`).
+    pub fn to_initial_session_notification(&self, node_id: u64, client_id: u64) -> MachoPacket {
+        let values = PyRep::Dict(vec![
+            (
+                PyRep::ascii_bytes("userid"),
+                self.user_id
+                    .map(|u| PyRep::Integer(u as i64))
+                    .unwrap_or(PyRep::None),
+            ),
+            (
+                PyRep::ascii_bytes("role"),
+                PyRep::Integer(self.role as i64),
+            ),
+            (
+                PyRep::ascii_bytes("languageID"),
+                PyRep::ascii_bytes(&self.language_id),
+            ),
+            (
+                PyRep::ascii_bytes("userType"),
+                PyRep::Integer(self.user_type),
+            ),
+            (
+                PyRep::ascii_bytes("address"),
+                PyRep::ascii_bytes(&self.address),
+            ),
+            (
+                PyRep::ascii_bytes("sessionID"),
+                PyRep::Integer(self.session_id as i64),
+            ),
+        ]);
+        let mut named_payload = HashMap::new();
+        named_payload.insert("channel".into(), PyRep::ascii_bytes("sessionchange"));
+        MachoPacket {
+            packet_type: MachoPacketType::SessionInitialStateNotification,
+            source: MachoAddress::Node {
+                node_id,
+                service: None,
+                call_id: 0,
+            },
+            destination: MachoAddress::Client {
+                client_id,
+                call_id: 0,
+                service: None,
+            },
+            user_id: self.user_id,
+            payload: PyRep::Tuple(vec![
+                values,
+                PyRep::Integer(self.session_id as i64),
+                PyRep::List(vec![PyRep::Integer(node_id as i64)]),
+            ]),
+            named_payload,
+        }
+    }
+
+    /// Builds initial post-login `macho.SessionChangeNotification` (`packet_type = 16`) containing `(None, new_val)` for `userid`, `role`, `languageID`, `userType`, and `address`.
+    pub fn to_login_session_change_packet(&self, node_id: u64, client_id: u64) -> MachoPacket {
+        let mut base = SessionState::new(self.session_id);
+        base.language_id.clear();
+        base.address.clear();
+        let mut diff = base.compute_diff(self);
+        diff.insert(
+            "userType".into(),
+            (PyRep::None, PyRep::Integer(self.user_type)),
+        );
+        let dict_entries = diff
+            .into_iter()
+            .map(|(k, (old_v, new_v))| (PyRep::ascii_bytes(k), PyRep::Tuple(vec![old_v, new_v])))
+            .collect();
+        let mut named_payload = HashMap::new();
+        named_payload.insert("channel".into(), PyRep::ascii_bytes("sessionchange"));
+        MachoPacket {
+            packet_type: MachoPacketType::SessionChangeNotification,
+            source: MachoAddress::Node {
+                node_id,
+                service: None,
+                call_id: 0,
+            },
+            destination: MachoAddress::Client {
+                client_id,
+                call_id: 0,
+                service: None,
+            },
+            user_id: self.user_id,
+            payload: PyRep::Tuple(vec![
+                PyRep::Tuple(vec![PyRep::Integer(0), PyRep::Dict(dict_entries)]),
+                PyRep::List(vec![PyRep::Integer(node_id as i64)]),
+            ]),
+            named_payload,
+        }
     }
 
     pub fn has_gm_role(&self) -> bool {

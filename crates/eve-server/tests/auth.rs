@@ -1,11 +1,21 @@
-//! Authentication, service roles bitmasks, SSO tokens, and SDE persistence integration tests.
+//! Authentication, service roles bitmasks, native `machoNet` handshake (`P-6`),
+//! SSO OAuth2/PKCE server (`ESI-1`), and SDE persistence integration tests.
 
 #![forbid(unsafe_code)]
 
-use eve_machonet::SessionState;
+use eve_machonet::{
+    placebo_crypto_hash, CryptoChallengePacket, CryptoHandshakeAck, CryptoHandshakeResult,
+    CryptoRequestPacket, CryptoServerHandshake, GPSTransportClosed, HandshakeCommand, MachoAddress,
+    MachoPacket, MachoPacketType, SessionState, VersionExchange,
+};
 use eve_proto::PyRep;
+use eve_server::macho_listener::{handle_macho_client, read_framed_pyrep, write_framed_pyrep};
 use eve_server::router::ServerContext;
+use eve_server::sso::handle_http_connection;
 use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
 
 #[tokio::test]
 async fn test_phase_0_s9_service_roles_bitmask_and_production_account_seed() {
@@ -32,47 +42,259 @@ async fn test_phase_0_s9_service_roles_bitmask_and_production_account_seed() {
         "S-9: ServerContext::new_production() must not seed demo accounts"
     );
 
-    let ctx = ServerContext::new();
-    let mut sess = SessionState::new(909);
+    // Persist player, content, and GM/Admin accounts in a SQLite-backed WorldRepository,
+    // reopen from disk to prove durability across server restart, and verify roles are
+    // both sent in the session handshake/change wire payloads and enforced by the central role gate.
+    let tmp_roles_db =
+        std::env::temp_dir().join(format!("evomu_roles_test_{}.sqlite", std::process::id()));
+    let _ = std::fs::remove_file(&tmp_roles_db);
+    {
+        let db = eve_db::WorldRepository::new_empty_with_snapshot_path(Some(tmp_roles_db.clone()))
+            .expect("create SQLite world db for role persistence");
+        let pilot_uid = db.provision_player_account("pilot_persisted", "pilot-secret-123");
+        db.create_character(
+            pilot_uid,
+            "Pilot RoleTester",
+            1,
+            1,
+            11,
+            17,
+            &eve_sde::SdeRegistry::with_canonical_seed(),
+        )
+        .expect("create character for pilot_persisted");
+        db.provision_gm_account("gm_persisted", "gm-secret-456", 90_000_701, "ISD Polaris");
+        // Also provision a content-editor account with persisted ROLE_PLAYER_DEFAULT | ROLE_CONTENT
+        let content_uid = db.provision_player_account("content_persisted", "content-secret-789");
+        db.with_mut_snapshot(|snap| {
+            if let Some(acc) = snap.accounts.get_mut("content_persisted") {
+                acc.role = eve_machonet::service_roles::ROLE_PLAYER_DEFAULT
+                    | eve_machonet::service_roles::ROLE_CONTENT;
+            }
+            let _ = content_uid;
+        });
+    }
+
+    let reopened_db = Arc::new(
+        eve_db::WorldRepository::new_empty_with_snapshot_path(Some(tmp_roles_db.clone()))
+            .expect("reopen SQLite world db for role persistence"),
+    );
+    let ctx = Arc::new(ServerContext::with_repository(reopened_db));
+
+    // 1. Verify persisted player role over native machoNet handshake (CryptoHandshakeAck + SessionInitialStateNotification + SessionChangeNotification)
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind macho");
+    let addr = listener.local_addr().unwrap();
+    let ctx_srv = Arc::clone(&ctx);
+    let srv_task = tokio::spawn(async move {
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            if let Ok((stream, _)) = listener.accept().await {
+                let c = Arc::clone(&ctx_srv);
+                handles.push(tokio::spawn(async move {
+                    let _ = handle_macho_client(stream, c).await;
+                }));
+            }
+        }
+        for h in handles {
+            let _ = h.await;
+        }
+    });
+
+    let mut player_stream = TcpStream::connect(addr).await.expect("connect player");
+    let _srv_ver = read_framed_pyrep(&mut player_stream)
+        .await
+        .unwrap()
+        .unwrap();
+    write_framed_pyrep(&mut player_stream, &VersionExchange::default().to_pyrep())
+        .await
+        .unwrap();
+    write_framed_pyrep(
+        &mut player_stream,
+        &CryptoRequestPacket::placebo().to_pyrep(),
+    )
+    .await
+    .unwrap();
+    let _ok_cc = read_framed_pyrep(&mut player_stream)
+        .await
+        .unwrap()
+        .unwrap();
+    write_framed_pyrep(
+        &mut player_stream,
+        &CryptoChallengePacket::new_password_login("pilot_persisted", "pilot-secret-123")
+            .to_pyrep(),
+    )
+    .await
+    .unwrap();
+    let _pw_ver = read_framed_pyrep(&mut player_stream)
+        .await
+        .unwrap()
+        .unwrap();
+    let srv_hs_rep = read_framed_pyrep(&mut player_stream)
+        .await
+        .unwrap()
+        .unwrap();
+    let srv_hs = CryptoServerHandshake::from_pyrep(&srv_hs_rep).unwrap();
+    write_framed_pyrep(
+        &mut player_stream,
+        &(CryptoHandshakeResult {
+            challenge_response_hash: placebo_crypto_hash(&srv_hs.server_challenge),
+            func_output: Vec::new(),
+            func_result: PyRep::Integer(0),
+        })
+        .to_pyrep(),
+    )
+    .await
+    .unwrap();
+    let player_ack = CryptoHandshakeAck::from_pyrep(
+        &read_framed_pyrep(&mut player_stream)
+            .await
+            .unwrap()
+            .unwrap(),
+    )
+    .expect("player CryptoHandshakeAck");
+    assert_eq!(
+        player_ack.role,
+        eve_machonet::service_roles::ROLE_PLAYER_DEFAULT,
+        "S-9: Persisted player account must receive ROLE_PLAYER | ROLE_LOGIN in CryptoHandshakeAck"
+    );
+    let player_init_pkt = MachoPacket::from_pyrep(
+        &read_framed_pyrep(&mut player_stream)
+            .await
+            .unwrap()
+            .unwrap(),
+    )
+    .expect("player SessionInitialStateNotification");
+    assert_eq!(
+        player_init_pkt.packet_type,
+        MachoPacketType::SessionInitialStateNotification
+    );
+    let player_scn_pkt = MachoPacket::from_pyrep(
+        &read_framed_pyrep(&mut player_stream)
+            .await
+            .unwrap()
+            .unwrap(),
+    )
+    .expect("player SessionChangeNotification");
+    assert_eq!(
+        player_scn_pkt.packet_type,
+        MachoPacketType::SessionChangeNotification
+    );
+    drop(player_stream);
+
+    // 2. Verify persisted GM/Admin role over native machoNet handshake and inspect decoded SessionInitialStateNotification + SessionChangeNotification payloads
+    let mut gm_stream = TcpStream::connect(addr).await.expect("connect gm");
+    let _srv_ver = read_framed_pyrep(&mut gm_stream).await.unwrap().unwrap();
+    write_framed_pyrep(&mut gm_stream, &VersionExchange::default().to_pyrep())
+        .await
+        .unwrap();
+    write_framed_pyrep(&mut gm_stream, &CryptoRequestPacket::placebo().to_pyrep())
+        .await
+        .unwrap();
+    let _ok_cc = read_framed_pyrep(&mut gm_stream).await.unwrap().unwrap();
+    write_framed_pyrep(
+        &mut gm_stream,
+        &CryptoChallengePacket::new_password_login("gm_persisted", "gm-secret-456").to_pyrep(),
+    )
+    .await
+    .unwrap();
+    let _pw_ver = read_framed_pyrep(&mut gm_stream).await.unwrap().unwrap();
+    let gm_srv_hs =
+        CryptoServerHandshake::from_pyrep(&read_framed_pyrep(&mut gm_stream).await.unwrap().unwrap())
+            .unwrap();
+    write_framed_pyrep(
+        &mut gm_stream,
+        &(CryptoHandshakeResult {
+            challenge_response_hash: placebo_crypto_hash(&gm_srv_hs.server_challenge),
+            func_output: Vec::new(),
+            func_result: PyRep::Integer(0),
+        })
+        .to_pyrep(),
+    )
+    .await
+    .unwrap();
+    let gm_ack =
+        CryptoHandshakeAck::from_pyrep(&read_framed_pyrep(&mut gm_stream).await.unwrap().unwrap())
+            .expect("gm CryptoHandshakeAck");
+    assert_eq!(
+        gm_ack.role,
+        eve_machonet::service_roles::ROLE_GM_DEFAULT,
+        "S-9: Persisted GM account must receive ROLE_GM_DEFAULT bitmask in CryptoHandshakeAck"
+    );
+    let gm_init_pkt =
+        MachoPacket::from_pyrep(&read_framed_pyrep(&mut gm_stream).await.unwrap().unwrap())
+            .expect("gm SessionInitialStateNotification");
+    if let PyRep::Tuple(items) = &gm_init_pkt.payload {
+        if let Some(PyRep::Dict(entries)) = items.first() {
+            let role_val = entries
+                .iter()
+                .find(|(k, _)| k.as_str() == Some("role"))
+                .and_then(|(_, v)| v.as_i64())
+                .expect("role in SessionInitialStateNotification");
+            assert_eq!(
+                role_val as u64,
+                eve_machonet::service_roles::ROLE_GM_DEFAULT
+            );
+        } else {
+            panic!("Expected Dict in SessionInitialStateNotification payload");
+        }
+    }
+    let gm_scn_pkt =
+        MachoPacket::from_pyrep(&read_framed_pyrep(&mut gm_stream).await.unwrap().unwrap())
+            .expect("gm SessionChangeNotification");
+    if let PyRep::Tuple(outer) = &gm_scn_pkt.payload {
+        if let Some(PyRep::Tuple(inner)) = outer.first() {
+            if let Some(PyRep::Dict(changes)) = inner.get(1) {
+                let role_change = changes
+                    .iter()
+                    .find(|(k, _)| k.as_str() == Some("role"))
+                    .and_then(|(_, v)| match v {
+                        PyRep::Tuple(pair) => pair.get(1).and_then(|n| n.as_i64()),
+                        _ => None,
+                    })
+                    .expect("role in SessionChangeNotification");
+                assert_eq!(
+                    role_change as u64,
+                    eve_machonet::service_roles::ROLE_GM_DEFAULT
+                );
+            }
+        }
+    }
+    drop(gm_stream);
+    let _ = srv_task.await;
+
+    // 3. Verify privileged RPC gating using the persisted accounts (without mutating sess.role in memory)
+    let player_chars = ctx.db.get_characters_for_user(player_ack.user_id);
+    let player_cid = player_chars[0].character_id;
+    let mut sess_player = SessionState::new(909);
     ctx.dispatch_rpc(
-        &mut sess,
+        &mut sess_player,
         "authentication",
         None,
         "Login",
         &[
-            PyRep::String("demo".into()),
-            PyRep::String("demo-secret".into()),
+            PyRep::String("pilot_persisted".into()),
+            PyRep::String("pilot-secret-123".into()),
         ],
         &kw,
         None,
     )
     .await
-    .expect("Login");
+    .expect("Login pilot_persisted");
     assert_eq!(
-        sess.role,
-        eve_machonet::service_roles::ROLE_PLAYER_DEFAULT,
-        "S-9: Player login must assign 64-bit ROLE_PLAYER | ROLE_LOGIN"
+        sess_player.role,
+        eve_machonet::service_roles::ROLE_PLAYER_DEFAULT
     );
-    assert!(!sess.has_gm_role());
-
-    // Verify ROLE_CONTENT (1 << 4) does not grant GM access
-    sess.role |= eve_machonet::service_roles::ROLE_CONTENT;
-    assert!(
-        !sess.has_gm_role(),
-        "S-9: ROLE_CONTENT (1 << 4) must not be treated as a GM role"
-    );
-
+    assert!(!sess_player.has_gm_role());
     ctx.dispatch_rpc(
-        &mut sess,
+        &mut sess_player,
         "charUnboundMgr",
         None,
         "SelectCharacterID",
-        &[PyRep::Integer(90_000_001)],
+        &[PyRep::Integer(player_cid)],
         &kw,
         None,
     )
     .await
-    .expect("SelectCharacterID");
+    .expect("SelectCharacterID pilot_persisted");
 
     for (svc, mth) in [
         ("slash", "SlashCmd"),
@@ -82,7 +304,7 @@ async fn test_phase_0_s9_service_roles_bitmask_and_production_account_seed() {
     ] {
         let denied = ctx
             .dispatch_rpc(
-                &mut sess,
+                &mut sess_player,
                 svc,
                 None,
                 mth,
@@ -98,10 +320,58 @@ async fn test_phase_0_s9_service_roles_bitmask_and_production_account_seed() {
         );
     }
 
-    sess.role |= eve_machonet::service_roles::ROLE_GML;
-    assert!(sess.has_gm_role());
+    // Verify persisted ROLE_CONTENT account does NOT have GM access
+    let mut sess_content = SessionState::new(910);
     ctx.dispatch_rpc(
-        &mut sess,
+        &mut sess_content,
+        "authentication",
+        None,
+        "Login",
+        &[
+            PyRep::String("content_persisted".into()),
+            PyRep::String("content-secret-789".into()),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Login content_persisted");
+    assert!(
+        !sess_content.has_gm_role(),
+        "S-9: Persisted ROLE_CONTENT (1 << 4) account must not be treated as a GM role"
+    );
+
+    // Log in as the SQLite-persisted GM account and verify slash.SlashCmd succeeds without in-memory role mutation
+    let mut sess_gm = SessionState::new(911);
+    ctx.dispatch_rpc(
+        &mut sess_gm,
+        "authentication",
+        None,
+        "Login",
+        &[
+            PyRep::String("gm_persisted".into()),
+            PyRep::String("gm-secret-456".into()),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Login gm_persisted");
+    assert_eq!(sess_gm.role, eve_machonet::service_roles::ROLE_GM_DEFAULT);
+    assert!(sess_gm.has_gm_role());
+    ctx.dispatch_rpc(
+        &mut sess_gm,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(90_000_701)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("SelectCharacterID gm_persisted");
+    ctx.dispatch_rpc(
+        &mut sess_gm,
         "slash",
         None,
         "SlashCmd",
@@ -110,7 +380,9 @@ async fn test_phase_0_s9_service_roles_bitmask_and_production_account_seed() {
         None,
     )
     .await
-    .expect("S-9: Session with 64-bit ROLE_GML must pass GM check");
+    .expect("S-9: Persisted GM account session must pass GM check on slash.SlashCmd");
+
+    let _ = std::fs::remove_file(&tmp_roles_db);
 }
 
 #[tokio::test]
@@ -149,8 +421,12 @@ async fn test_phase_1_d1_to_d5_sde_sqlite_persistence_auth_sso_and_config() {
         "D-2: SdeRegistry::variations_of(587) must return Rifter hull variations in O(1)"
     );
 
-    // Authenticate session 1 as "demo"
+    // Authenticate session 1 as "demo" and register a live session closer channel
     let mut sess1 = SessionState::new(10_101);
+    let (sess1_close_tx, mut sess1_close_rx) =
+        tokio::sync::mpsc::unbounded_channel::<(String, String)>();
+    ctx.register_session_closer(sess1.session_id, sess1_close_tx);
+
     ctx.dispatch_rpc(
         &mut sess1,
         "authentication",
@@ -165,6 +441,22 @@ async fn test_phase_1_d1_to_d5_sde_sqlite_persistence_auth_sso_and_config() {
     )
     .await
     .expect("Login sess1");
+
+    // V24 `multiLoginBlocker.Login(computerhash)` on sess1 records computerhash and returns True
+    let mlb_sess1 = ctx
+        .dispatch_rpc(
+            &mut sess1,
+            "multiLoginBlocker",
+            None,
+            "Login",
+            &[PyRep::String("hw-hash-alpha-01".into())],
+            &kw,
+            None,
+        )
+        .await
+        .expect("multiLoginBlocker.Login(computerhash) on sess1");
+    assert_eq!(mlb_sess1, PyRep::Bool(true));
+
     ctx.dispatch_rpc(
         &mut sess1,
         "charUnboundMgr",
@@ -434,8 +726,69 @@ async fn test_phase_1_d1_to_d5_sde_sqlite_persistence_auth_sso_and_config() {
         other => panic!("Expected Tuple from MachoBindObject, got {other:?}"),
     };
 
-    // 2. D-4: Online session lock enforcement (`R34-P1-4`, `R35-P1-3`):
-    // Second concurrent session (`sess2`) logging into "demo" cannot call game RPCs or bound-object RPCs until it displaces `sess1` via `multiLoginBlocker.Login(true)`.
+    // 2. D-4: V24 `multiLoginBlocker.Login(computerhash)` + Alpha clone hardware concurrency + live session disconnect:
+    // Verify Alpha-clone hardware concurrency across different accounts (`demo` and `other` both Alpha `clone_grade = 0`):
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch1) = snap.characters.get_mut(&90_000_001) {
+            ch1.clone_grade = 0; // Alpha clone
+        }
+        if let Some(ch2) = snap.characters.get_mut(&90_000_002) {
+            ch2.clone_grade = 0; // Alpha clone
+        }
+    });
+    let mut sess_other = SessionState::new(10_199);
+    ctx.dispatch_rpc(
+        &mut sess_other,
+        "authentication",
+        None,
+        "Login",
+        &[
+            PyRep::String("other".into()),
+            PyRep::String("other-secret".into()),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Login other");
+    let alpha_same_hw = ctx
+        .dispatch_rpc(
+            &mut sess_other,
+            "multiLoginBlocker",
+            None,
+            "Login",
+            &[PyRep::String("hw-hash-alpha-01".into())],
+            &kw,
+            None,
+        )
+        .await
+        .expect("multiLoginBlocker.Login on second Alpha account with same computerhash");
+    assert_eq!(
+        alpha_same_hw,
+        PyRep::Bool(false),
+        "V24 multiLoginBlocker.Login(computerhash) must return False when another Alpha account is active on the same computerhash"
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch1) = snap.characters.get_mut(&90_000_001) {
+            ch1.clone_grade = 1;
+        }
+        if let Some(ch2) = snap.characters.get_mut(&90_000_002) {
+            ch2.clone_grade = 1;
+        }
+    });
+    ctx.dispatch_rpc(
+        &mut sess_other,
+        "authentication",
+        None,
+        "Logout",
+        &[],
+        &kw,
+        None,
+    )
+    .await
+    .unwrap();
+
+    // Second concurrent session (`sess2`) logging into "demo":
     let mut sess2 = SessionState::new(10_102);
     ctx.dispatch_rpc(
         &mut sess2,
@@ -451,6 +804,25 @@ async fn test_phase_1_d1_to_d5_sde_sqlite_persistence_auth_sso_and_config() {
     )
     .await
     .expect("Login sess2");
+
+    // V24 `multiLoginBlocker.Login(computerhash)` refuses a second concurrent session on the same account with `PyRep::Bool(false)`
+    let v24_refused = ctx
+        .dispatch_rpc(
+            &mut sess2,
+            "multiLoginBlocker",
+            None,
+            "Login",
+            &[PyRep::String("hw-hash-alpha-02".into())],
+            &kw,
+            None,
+        )
+        .await
+        .expect("V24 multiLoginBlocker.Login(computerhash) call");
+    assert_eq!(
+        v24_refused,
+        PyRep::Bool(false),
+        "V24 characterSelection._CanLogin expects multiLoginBlocker.Login(computerhash) to return False when blocked"
+    );
 
     let premature_rpc = ctx
         .dispatch_rpc(
@@ -487,20 +859,30 @@ async fn test_phase_1_d1_to_d5_sde_sqlite_persistence_auth_sso_and_config() {
         "multiLoginBlocker.Login(false) must reject a second concurrent session on the same account"
     );
 
-    ctx.dispatch_rpc(
-        &mut sess2,
-        "multiLoginBlocker",
-        None,
-        "Login",
-        &[PyRep::Bool(true)],
-        &kw,
-        None,
-    )
-    .await
-    .expect("multiLoginBlocker.Login(true) must displace the prior session");
+    // Displace `sess1` from `sess2` and verify `sess1`'s live closer channel immediately receives `ACL_DISPLACED`
+    let mlb_displace = ctx
+        .dispatch_rpc(
+            &mut sess2,
+            "multiLoginBlocker",
+            None,
+            "Login",
+            &[
+                PyRep::String("hw-hash-alpha-02".into()),
+                PyRep::Bool(true),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect("multiLoginBlocker.Login(computerhash, true) must displace the prior session");
+    assert_eq!(mlb_displace, PyRep::Bool(true));
+    let (displaced_code, displaced_reason) = sess1_close_rx
+        .try_recv()
+        .expect("Displaced live session must immediately receive GPSTransportClosed disconnect notification");
+    assert_eq!(displaced_code, "ACL_DISPLACED");
+    assert!(displaced_reason.contains("Displaced"));
 
     // R35-P1-3: Displaced sess1 must NOT be able to bypass revocation via a previously bound object
-    // even if the client spoofs service="authentication" with bound_id=Some(bound_id_sess1)
     let sess1_bound_bypass = ctx
         .dispatch_rpc(
             &mut sess1,
@@ -519,7 +901,7 @@ async fn test_phase_1_d1_to_d5_sde_sqlite_persistence_auth_sso_and_config() {
     );
     assert!(sess1.user_id.is_none());
 
-    // 3. D-4: Admin /kick, /ban, and /unban slash commands + live session revocation + ROLE_ADMIN ban hierarchy
+    // 3. D-4: Admin /kick, /ban, /unban, /suspend, and /unsuspend slash commands + live session revocation + ROLE_ADMIN ban hierarchy
     ctx.db
         .provision_gm_account("gm_d4", "gm-d4-secret", 90_000_003, "ISD Polaris");
     let mut gm_sess = SessionState::new(10_103);
@@ -621,7 +1003,6 @@ async fn test_phase_1_d1_to_d5_sde_sqlite_persistence_auth_sso_and_config() {
     .expect("/kick demo");
 
     // R36-P1-3: Kicked sess2 must NOT be able to bypass revocation via multiLoginBlocker.Login(true)
-    // and must fail both multiLoginBlocker.Login and bound-object calls with SessionKicked / Unauthorized
     let sess2_mlb_after_kick = ctx
         .dispatch_rpc(
             &mut sess2,
@@ -675,21 +1056,62 @@ async fn test_phase_1_d1_to_d5_sde_sqlite_persistence_auth_sso_and_config() {
         .await;
     assert_eq!(sess2_unbound_after_kick.unwrap_err().code, "Unauthorized");
 
-    // Ban "demo" for 3600 seconds via GM /ban command
+    // Re-login "demo" on a fresh live session (`sess_live_ban`) WITHOUT calling `/kick`, then run `/ban`
+    // to prove `/ban` itself kicks and disconnects the live session (`feat:admin.gm-ban`, `feat:account.account-bans`)!
+    let mut sess_live_ban = SessionState::new(10_104);
+    let (ban_close_tx, mut ban_close_rx) =
+        tokio::sync::mpsc::unbounded_channel::<(String, String)>();
+    ctx.register_session_closer(sess_live_ban.session_id, ban_close_tx);
     ctx.dispatch_rpc(
-        &mut gm_sess,
-        "slash",
+        &mut sess_live_ban,
+        "authentication",
         None,
-        "SlashCmd",
-        &[PyRep::String(
-            "/ban demo 3600 Automated botting violation".into(),
-        )],
+        "Login",
+        &[
+            PyRep::String("demo".into()),
+            PyRep::String("demo-secret".into()),
+        ],
         &kw,
         None,
     )
     .await
-    .expect("/ban demo 3600");
+    .expect("Re-login demo before /ban");
+    assert_eq!(
+        ctx.db.get_online_session(1).map(|s| s.session_id),
+        Some(sess_live_ban.session_id)
+    );
 
+    let ban_rsp = ctx
+        .dispatch_rpc(
+            &mut gm_sess,
+            "slash",
+            None,
+            "SlashCmd",
+            &[PyRep::String(
+                "/ban demo 3600 Automated botting violation".into(),
+            )],
+            &kw,
+            None,
+        )
+        .await
+        .expect("/ban demo 3600");
+    let PyRep::KeyVal(ban_kv) = ban_rsp else {
+        panic!("Expected KeyVal from /ban");
+    };
+    assert_eq!(
+        ban_kv.get("kickedSessionID"),
+        Some(&PyRep::Integer(sess_live_ban.session_id as i64)),
+        "/ban must directly kick and report the target account's active live session"
+    );
+    let banned_until_unix = ban_kv.get("bannedUntilUnix").unwrap().as_i64().unwrap();
+    let (ban_close_code, ban_close_msg) = ban_close_rx
+        .try_recv()
+        .expect("/ban must immediately send GPSTransportClosed disconnect notification to live session");
+    assert_eq!(ban_close_code, "AccountBanned");
+    assert!(ban_close_msg.contains("Automated botting violation"));
+    assert!(ctx.db.get_online_session(1).is_none());
+
+    // Verify banned account is refused at login with AccountBanned, reason, and expiry
     let banned_err = ctx
         .dispatch_rpc(
             &mut sess2,
@@ -708,12 +1130,15 @@ async fn test_phase_1_d1_to_d5_sde_sqlite_persistence_auth_sso_and_config() {
     assert_eq!(banned_err.code, "AccountBanned");
     assert!(
         banned_err.message.contains("Automated botting violation")
-            && banned_err.message.contains("until"),
+            && banned_err
+                .message
+                .contains(&banned_until_unix.to_string()),
         "AccountBanned error message must include ban reason and expiry timestamp: {}",
         banned_err.message
     );
 
-    // Unban "demo" via GM /unban command and verify login via OAuth2 PKCE SSO JWT access token
+    // Unban "demo" via GM /unban command, log "demo" in on a live session (`sess_live_suspend`),
+    // and test `/suspend` + `/unsuspend` (`feat:account.account-bans`, `feat:admin.gm-ban`)
     ctx.dispatch_rpc(
         &mut gm_sess,
         "slash",
@@ -725,6 +1150,94 @@ async fn test_phase_1_d1_to_d5_sde_sqlite_persistence_auth_sso_and_config() {
     )
     .await
     .expect("/unban demo");
+
+    let mut sess_live_suspend = SessionState::new(10_105);
+    let (susp_close_tx, mut susp_close_rx) =
+        tokio::sync::mpsc::unbounded_channel::<(String, String)>();
+    ctx.register_session_closer(sess_live_suspend.session_id, susp_close_tx);
+    ctx.dispatch_rpc(
+        &mut sess_live_suspend,
+        "authentication",
+        None,
+        "Login",
+        &[
+            PyRep::String("demo".into()),
+            PyRep::String("demo-secret".into()),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Login demo before /suspend");
+
+    let susp_rsp = ctx
+        .dispatch_rpc(
+            &mut gm_sess,
+            "slash",
+            None,
+            "SlashCmd",
+            &[PyRep::String(
+                "/suspend demo 1800 Account sharing investigation".into(),
+            )],
+            &kw,
+            None,
+        )
+        .await
+        .expect("/suspend demo 1800");
+    let PyRep::KeyVal(susp_kv) = susp_rsp else {
+        panic!("Expected KeyVal from /suspend");
+    };
+    assert_eq!(
+        susp_kv.get("kickedSessionID"),
+        Some(&PyRep::Integer(sess_live_suspend.session_id as i64)),
+        "/suspend must directly kick and report the target account's active live session"
+    );
+    let suspended_until_unix = susp_kv.get("suspendedUntilUnix").unwrap().as_i64().unwrap();
+    let (susp_close_code, susp_close_msg) = susp_close_rx
+        .try_recv()
+        .expect("/suspend must immediately send GPSTransportClosed disconnect notification to live session");
+    assert_eq!(susp_close_code, "AccountSuspended");
+    assert!(susp_close_msg.contains("Account sharing investigation"));
+    assert!(ctx.db.get_online_session(1).is_none());
+
+    let suspended_err = ctx
+        .dispatch_rpc(
+            &mut sess2,
+            "authentication",
+            None,
+            "Login",
+            &[
+                PyRep::String("demo".into()),
+                PyRep::String("demo-secret".into()),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Suspended account login must fail");
+    assert_eq!(suspended_err.code, "AccountSuspended");
+    assert!(
+        suspended_err
+            .message
+            .contains("Account sharing investigation")
+            && suspended_err
+                .message
+                .contains(&suspended_until_unix.to_string()),
+        "AccountSuspended error message must include suspension reason and expiry timestamp: {}",
+        suspended_err.message
+    );
+
+    ctx.dispatch_rpc(
+        &mut gm_sess,
+        "slash",
+        None,
+        "SlashCmd",
+        &[PyRep::String("/unsuspend demo".into())],
+        &kw,
+        None,
+    )
+    .await
+    .expect("/unsuspend demo");
 
     let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
     let challenge = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
@@ -934,4 +1447,584 @@ character_name = "ISD Config"
         );
     }
     let _ = std::fs::remove_file(&tmp_db);
+}
+
+#[tokio::test]
+async fn test_phase_2_p6_native_machonet_handshake_state_machine() {
+    // parity: plan:P-6, feat:account.native-handshake
+    let ctx = Arc::new(ServerContext::new());
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind macho listener");
+    let addr = listener.local_addr().unwrap();
+
+    let ctx_srv = Arc::clone(&ctx);
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            let c = Arc::clone(&ctx_srv);
+            tokio::spawn(async move {
+                let _ = handle_macho_client(stream, c).await;
+            });
+        }
+    });
+
+    // 1. Mismatched build version must be rejected with GPSTransportClosed (HANDSHAKE_INCOMPATIBLEBUILD)
+    {
+        let mut s = TcpStream::connect(addr).await.unwrap();
+        let srv_hello = read_framed_pyrep(&mut s).await.unwrap().unwrap();
+        assert_eq!(srv_hello, VersionExchange::default().to_pyrep());
+
+        let mut bad_ver = VersionExchange::default();
+        bad_ver.build_version = 9_999_999;
+        write_framed_pyrep(&mut s, &bad_ver.to_pyrep())
+            .await
+            .unwrap();
+        let err_rep = read_framed_pyrep(&mut s).await.unwrap().unwrap();
+        let closed = GPSTransportClosed::from_pyrep(&err_rep)
+            .expect("Expected GPSTransportClosed on build mismatch");
+        assert_eq!(
+            closed.reason_code.as_deref(),
+            Some("HANDSHAKE_INCOMPATIBLEBUILD")
+        );
+    }
+
+    // 2. Premature CallReq or legacy AuthenticationReq("ok") before completing handshake must be rejected with GPSTransportClosed
+    {
+        let mut s = TcpStream::connect(addr).await.unwrap();
+        let _ = read_framed_pyrep(&mut s).await.unwrap().unwrap();
+        let fake_auth_req = MachoPacket {
+            packet_type: MachoPacketType::AuthenticationReq,
+            source: MachoAddress::Client {
+                client_id: 1,
+                call_id: 1,
+                service: None,
+            },
+            destination: MachoAddress::Node {
+                node_id: 888_444,
+                service: None,
+                call_id: 1,
+            },
+            user_id: None,
+            payload: PyRep::Tuple(vec![PyRep::ascii_bytes("ok")]),
+            named_payload: HashMap::new(),
+        };
+        write_framed_pyrep(&mut s, &fake_auth_req.to_pyrep())
+            .await
+            .unwrap();
+        let err_rep = read_framed_pyrep(&mut s).await.unwrap().unwrap();
+        let closed = GPSTransportClosed::from_pyrep(&err_rep)
+            .expect("Expected GPSTransportClosed on unauthenticated AuthenticationReq('ok')");
+        assert_eq!(closed.reason_code.as_deref(), Some("HANDSHAKE_REQUIRED"));
+    }
+
+    // 3. Wrong password in Step 3 CryptoChallengePacket must be rejected with GPSTransportClosed (LoginAuthFailed)
+    {
+        let mut s = TcpStream::connect(addr).await.unwrap();
+        let _ = read_framed_pyrep(&mut s).await.unwrap().unwrap();
+        write_framed_pyrep(&mut s, &VersionExchange::default().to_pyrep())
+            .await
+            .unwrap();
+        write_framed_pyrep(&mut s, &CryptoRequestPacket::placebo().to_pyrep())
+            .await
+            .unwrap();
+        let ok_cc = read_framed_pyrep(&mut s).await.unwrap().unwrap();
+        assert_eq!(ok_cc.as_str(), Some("OK CC"));
+
+        let bad_challenge =
+            CryptoChallengePacket::new_password_login("demo", "wrong-password").to_pyrep();
+        write_framed_pyrep(&mut s, &bad_challenge).await.unwrap();
+        let err_rep = read_framed_pyrep(&mut s).await.unwrap().unwrap();
+        let closed = GPSTransportClosed::from_pyrep(&err_rep)
+            .expect("Expected GPSTransportClosed on wrong password");
+        assert_eq!(closed.reason_code.as_deref(), Some("LoginAuthFailed"));
+    }
+
+    // 4. Banned and suspended accounts must be rejected during Step 3 CryptoChallengePacket with GPSTransportClosed carrying reason and expiry
+    {
+        let now_unix = ctx.now_unix();
+        ctx.db.provision_player_account("banned_p6", "pass-p6");
+        ctx.db
+            .ban_account("banned_p6", now_unix + 7200, "RMT violation")
+            .unwrap();
+
+        let mut s = TcpStream::connect(addr).await.unwrap();
+        let _ = read_framed_pyrep(&mut s).await.unwrap().unwrap();
+        write_framed_pyrep(&mut s, &VersionExchange::default().to_pyrep())
+            .await
+            .unwrap();
+        write_framed_pyrep(&mut s, &CryptoRequestPacket::placebo().to_pyrep())
+            .await
+            .unwrap();
+        let _ = read_framed_pyrep(&mut s).await.unwrap().unwrap();
+        write_framed_pyrep(
+            &mut s,
+            &CryptoChallengePacket::new_password_login("banned_p6", "pass-p6").to_pyrep(),
+        )
+        .await
+        .unwrap();
+        let err_rep = read_framed_pyrep(&mut s).await.unwrap().unwrap();
+        let closed = GPSTransportClosed::from_pyrep(&err_rep).expect("GPSTransportClosed on ban");
+        assert_eq!(closed.reason_code.as_deref(), Some("AccountBanned"));
+        assert!(closed.reason.contains("RMT violation"));
+        assert_eq!(
+            closed.reason_args.get("expiry"),
+            Some(&PyRep::Integer((now_unix + 7200) as i64))
+        );
+
+        ctx.db.provision_player_account("suspended_p6", "pass-p6");
+        ctx.db
+            .suspend_account("suspended_p6", now_unix + 1800, "Billing hold")
+            .unwrap();
+        let mut s2 = TcpStream::connect(addr).await.unwrap();
+        let _ = read_framed_pyrep(&mut s2).await.unwrap().unwrap();
+        write_framed_pyrep(&mut s2, &VersionExchange::default().to_pyrep())
+            .await
+            .unwrap();
+        write_framed_pyrep(&mut s2, &CryptoRequestPacket::placebo().to_pyrep())
+            .await
+            .unwrap();
+        let _ = read_framed_pyrep(&mut s2).await.unwrap().unwrap();
+        write_framed_pyrep(
+            &mut s2,
+            &CryptoChallengePacket::new_password_login("suspended_p6", "pass-p6").to_pyrep(),
+        )
+        .await
+        .unwrap();
+        let err_rep2 = read_framed_pyrep(&mut s2).await.unwrap().unwrap();
+        let closed2 =
+            GPSTransportClosed::from_pyrep(&err_rep2).expect("GPSTransportClosed on suspension");
+        assert_eq!(closed2.reason_code.as_deref(), Some("AccountSuspended"));
+        assert!(closed2.reason.contains("Billing hold"));
+        assert_eq!(
+            closed2.reason_args.get("expiry"),
+            Some(&PyRep::Integer((now_unix + 1800) as i64))
+        );
+    }
+
+    // 5. Full valid 4-step V24.01 handshake (including QC, VK, 2-step passwordVersion=1 -> Attempt 2, CryptoServerHandshake, CryptoHandshakeResult, CryptoHandshakeAck, SessionInitialStateNotification, SessionChangeNotification, and authenticated CallReq)
+    {
+        let mut s = TcpStream::connect(addr).await.unwrap();
+        let srv_hello = read_framed_pyrep(&mut s).await.unwrap().unwrap();
+        let parsed_ver = VersionExchange::from_pyrep(&srv_hello).expect("server VersionExchange");
+        assert_eq!(parsed_ver.birthday, 170_472);
+        assert_eq!(parsed_ver.macho_version, 409);
+        assert!((parsed_ver.version_number - 24.01).abs() < 1e-6);
+        assert_eq!(parsed_ver.build_version, 3_619_879);
+        assert_eq!(parsed_ver.project_version, "EVE-EVE-TRANQUILITY@ccp");
+
+        // Step 1: Send VersionExchangeClient
+        write_framed_pyrep(&mut s, &VersionExchange::default().to_pyrep())
+            .await
+            .unwrap();
+
+        // Step 2a: QueueCheck (None, "QC") -> server returns queue position 1
+        write_framed_pyrep(&mut s, &HandshakeCommand::QueueCheck.to_pyrep())
+            .await
+            .unwrap();
+        let qc_pos = read_framed_pyrep(&mut s).await.unwrap().unwrap();
+        assert_eq!(qc_pos, PyRep::Integer(1));
+
+        // Step 2b: VipKey (None, "VK", "vip-key") -> accepted
+        write_framed_pyrep(
+            &mut s,
+            &HandshakeCommand::VipKey("evomu-vip".into()).to_pyrep(),
+        )
+        .await
+        .unwrap();
+
+        // Step 2c: CryptoRequestPacket ("placebo", {}) -> "OK CC"
+        write_framed_pyrep(&mut s, &CryptoRequestPacket::placebo().to_pyrep())
+            .await
+            .unwrap();
+        let ok_cc = read_framed_pyrep(&mut s).await.unwrap().unwrap();
+        assert_eq!(ok_cc.as_str(), Some("OK CC"));
+
+        // Step 3 (2-step V24 password handshake): Attempt 1 has user_password=None -> server replies passwordVersion = 1
+        let mut attempt1 = CryptoChallengePacket::new_password_login("demo", "demo-secret");
+        attempt1.user_password = None;
+        attempt1.user_language_id = "DE".into();
+        write_framed_pyrep(&mut s, &attempt1.to_pyrep())
+            .await
+            .unwrap();
+        let pw_ver = read_framed_pyrep(&mut s).await.unwrap().unwrap();
+        assert_eq!(pw_ver, PyRep::Integer(1));
+
+        // Attempt 2 includes user_password -> server replies CryptoServerHandshake directly
+        let mut attempt2 = CryptoChallengePacket::new_password_login("demo", "demo-secret");
+        attempt2.user_language_id = "DE".into();
+        write_framed_pyrep(&mut s, &attempt2.to_pyrep())
+            .await
+            .unwrap();
+        let srv_hs_rep = read_framed_pyrep(&mut s).await.unwrap().unwrap();
+        let srv_hs =
+            CryptoServerHandshake::from_pyrep(&srv_hs_rep).expect("decode CryptoServerHandshake");
+        assert_eq!(
+            srv_hs.challenge_response_hash,
+            placebo_crypto_hash(&attempt2.client_challenge)
+        );
+        assert_eq!(srv_hs.macho_version, 409);
+        assert_eq!(srv_hs.boot_build, 3_619_879);
+        assert_eq!(srv_hs.boot_codename, "EVE-EVE-TRANQUILITY");
+        assert_eq!(srv_hs.boot_region, "ccp");
+
+        // Step 4: Send CryptoHandshakeResult -> receive CryptoHandshakeAck + SessionInitialStateNotification (18) + SessionChangeNotification (16)
+        let hs_res = CryptoHandshakeResult {
+            challenge_response_hash: placebo_crypto_hash(&srv_hs.server_challenge),
+            func_output: Vec::new(),
+            func_result: PyRep::Integer(0),
+        };
+        write_framed_pyrep(&mut s, &hs_res.to_pyrep())
+            .await
+            .unwrap();
+
+        let ack_rep = read_framed_pyrep(&mut s).await.unwrap().unwrap();
+        let ack = CryptoHandshakeAck::from_pyrep(&ack_rep).expect("decode CryptoHandshakeAck");
+        assert_eq!(ack.user_id, 1);
+        assert_eq!(ack.role, eve_machonet::service_roles::ROLE_PLAYER_DEFAULT);
+        assert_eq!(ack.language_id, "DE");
+
+        let init_rep = read_framed_pyrep(&mut s).await.unwrap().unwrap();
+        let init_pkt =
+            MachoPacket::from_pyrep(&init_rep).expect("decode SessionInitialStateNotification");
+        assert_eq!(
+            init_pkt.packet_type,
+            MachoPacketType::SessionInitialStateNotification
+        );
+
+        let scn_rep = read_framed_pyrep(&mut s).await.unwrap().unwrap();
+        let scn_pkt = MachoPacket::from_pyrep(&scn_rep).expect("decode SessionChangeNotification");
+        assert_eq!(
+            scn_pkt.packet_type,
+            MachoPacketType::SessionChangeNotification
+        );
+
+        // Step 5: Execute authenticated CallReq (machoNet.GetTime)
+        let call_pkt = MachoPacket {
+            packet_type: MachoPacketType::CallReq,
+            source: MachoAddress::Client {
+                client_id: ack.client_id,
+                call_id: 7,
+                service: None,
+            },
+            destination: MachoAddress::Node {
+                node_id: 888_444,
+                service: Some("machoNet".into()),
+                call_id: 7,
+            },
+            user_id: Some(ack.user_id),
+            payload: PyRep::Tuple(vec![PyRep::SubStream(Box::new(PyRep::Tuple(vec![
+                PyRep::String("GetTime".into()),
+                PyRep::Tuple(vec![]),
+                PyRep::Dict(vec![]),
+            ])))]),
+            named_payload: HashMap::new(),
+        };
+        write_framed_pyrep(&mut s, &call_pkt.to_pyrep())
+            .await
+            .unwrap();
+        let rsp_rep = read_framed_pyrep(&mut s).await.unwrap().unwrap();
+        let rsp_pkt = MachoPacket::from_pyrep(&rsp_rep).expect("CallRsp");
+        assert_eq!(rsp_pkt.packet_type, MachoPacketType::CallRsp);
+    }
+}
+
+async fn send_raw_http_request(
+    addr: std::net::SocketAddr,
+    method: &str,
+    target: &str,
+    headers: &[(&str, &str)],
+    body: &str,
+) -> (u16, HashMap<String, String>, serde_json::Value, String) {
+    let mut stream = TcpStream::connect(addr).await.expect("connect HTTP SSO");
+    let mut req = format!(
+        "{method} {target} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Length: {}\r\n",
+        addr.port(),
+        body.len()
+    );
+    for (k, v) in headers {
+        req.push_str(&format!("{k}: {v}\r\n"));
+    }
+    req.push_str("\r\n");
+    req.push_str(body);
+    stream.write_all(req.as_bytes()).await.unwrap();
+    stream.flush().await.unwrap();
+
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).await.unwrap();
+    let text = String::from_utf8_lossy(&raw).into_owned();
+    let (head, body_str) = text.split_once("\r\n\r\n").expect("HTTP response split");
+    let mut lines = head.split("\r\n");
+    let status_line = lines.next().unwrap();
+    let status_code: u16 = status_line
+        .split_whitespace()
+        .nth(1)
+        .unwrap()
+        .parse()
+        .unwrap();
+    let mut resp_headers = HashMap::new();
+    for line in lines {
+        if let Some((k, v)) = line.split_once(':') {
+            resp_headers.insert(k.trim().to_ascii_lowercase(), v.trim().to_string());
+        }
+    }
+    let json_val = serde_json::from_str(body_str).unwrap_or(serde_json::Value::Null);
+    (status_code, resp_headers, json_val, body_str.to_string())
+}
+
+#[tokio::test]
+async fn test_phase_2_esi1_sso_oauth2_pkce_http_server_and_macho_sso_login() {
+    // parity: plan:ESI-1, feat:account.sso-login, feat:esi.core.sso-tokens
+    let ctx = Arc::new(ServerContext::new());
+
+    let http_listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind SSO HTTP listener");
+    let http_addr = http_listener.local_addr().unwrap();
+    let ctx_http = Arc::clone(&ctx);
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = http_listener.accept().await {
+            let c = Arc::clone(&ctx_http);
+            tokio::spawn(async move {
+                let _ = handle_http_connection(stream, c).await;
+            });
+        }
+    });
+
+    let macho_listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind macho listener");
+    let macho_addr = macho_listener.local_addr().unwrap();
+    let ctx_macho = Arc::clone(&ctx);
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = macho_listener.accept().await {
+            let c = Arc::clone(&ctx_macho);
+            tokio::spawn(async move {
+                let _ = handle_macho_client(stream, c).await;
+            });
+        }
+    });
+
+    // 1. OAuth2 discovery metadata & JWKS endpoint
+    let (disc_status, _, disc_json, _) = send_raw_http_request(
+        http_addr,
+        "GET",
+        "/.well-known/oauth-authorization-server",
+        &[],
+        "",
+    )
+    .await;
+    assert_eq!(disc_status, 200);
+    assert_eq!(disc_json["issuer"], "https://login.eveonline.com");
+    assert_eq!(disc_json["code_challenge_methods_supported"][0], "S256");
+
+    let (jwks_status, _, jwks_json, _) =
+        send_raw_http_request(http_addr, "GET", "/oauth/jwks", &[], "").await;
+    assert_eq!(jwks_status, 200);
+    assert_eq!(jwks_json["keys"][0]["alg"], "HS256");
+    assert_eq!(jwks_json["keys"][0]["kid"], ctx.db.jwt_key_id());
+
+    // 2. GET /v2/oauth/authorize without credentials renders HTML login/consent form;
+    //    POST /v2/oauth/authorize with PKCE S256 issues single-use authorization code and 302 redirect
+    let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    let challenge = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
+    let (html_status, _, _, html_body) = send_raw_http_request(
+        http_addr,
+        "GET",
+        &format!(
+            "/v2/oauth/authorize?response_type=code&client_id=eveLauncherTQ&redirect_uri=https://localhost/callback&code_challenge={challenge}&code_challenge_method=S256&scope=esi-wallet.read_character_wallet.v1+esi-skills.read_skills.v1&state=xyz123"
+        ),
+        &[],
+        "",
+    )
+    .await;
+    assert_eq!(html_status, 200);
+    assert!(html_body.contains("<form method=\"POST\" action=\"/v2/oauth/authorize\">"));
+
+    let (auth_status, auth_hdrs, auth_json, _) = send_raw_http_request(
+        http_addr,
+        "POST",
+        "/v2/oauth/authorize",
+        &[("Content-Type", "application/x-www-form-urlencoded")],
+        &format!(
+            "response_type=code&client_id=eveLauncherTQ&redirect_uri=https%3A%2F%2Flocalhost%2Fcallback&code_challenge={challenge}&code_challenge_method=S256&scope=esi-wallet.read_character_wallet.v1+esi-skills.read_skills.v1&state=xyz123&username=demo&password=demo-secret&character_id=90000001"
+        ),
+    )
+    .await;
+    assert_eq!(auth_status, 302);
+    let code = auth_json["code"].as_str().expect("auth code").to_string();
+    let location = auth_hdrs.get("location").expect("Location redirect header");
+    assert!(location.contains(&format!("code={code}")) && location.contains("state=xyz123"));
+
+    // 3. POST /v2/oauth/token with wrong code_verifier fails with 400 invalid_grant;
+    //    valid PKCE code_verifier on a fresh code returns signed JWT access_token + refresh_token
+    let (bad_tok_status, _, bad_tok_json, _) = send_raw_http_request(
+        http_addr,
+        "POST",
+        "/v2/oauth/token",
+        &[("Content-Type", "application/x-www-form-urlencoded")],
+        &format!(
+            "grant_type=authorization_code&client_id=eveLauncherTQ&code={code}&code_verifier=wrong_verifier"
+        ),
+    )
+    .await;
+    assert_eq!(bad_tok_status, 400);
+    assert_eq!(bad_tok_json["error"], "invalid_grant");
+
+    // Issue fresh code and exchange with valid PKCE code_verifier
+    let (_, _, auth_json2, _) = send_raw_http_request(
+        http_addr,
+        "POST",
+        "/v2/oauth/authorize",
+        &[("Content-Type", "application/x-www-form-urlencoded")],
+        &format!(
+            "response_type=code&client_id=eveLauncherTQ&redirect_uri=https%3A%2F%2Flocalhost%2Fcallback&code_challenge={challenge}&code_challenge_method=S256&scope=esi-wallet.read_character_wallet.v1+esi-skills.read_skills.v1&state=xyz123&username=demo&password=demo-secret&character_id=90000001"
+        ),
+    )
+    .await;
+    let code2 = auth_json2["code"].as_str().unwrap().to_string();
+    let (tok_status, _, tok_json, _) = send_raw_http_request(
+        http_addr,
+        "POST",
+        "/v2/oauth/token",
+        &[("Content-Type", "application/x-www-form-urlencoded")],
+        &format!(
+            "grant_type=authorization_code&client_id=eveLauncherTQ&code={code2}&code_verifier={verifier}"
+        ),
+    )
+    .await;
+    assert_eq!(tok_status, 200);
+    let access_token = tok_json["access_token"].as_str().unwrap().to_string();
+    let refresh_token = tok_json["refresh_token"].as_str().unwrap().to_string();
+    assert_eq!(tok_json["token_type"], "Bearer");
+    assert_eq!(tok_json["expires_in"], 1200);
+
+    // 4. GET /v2/oauth/verify verifies JWT signature, expiry, and route scope (200 OK vs 401 vs 403)
+    let (ver_status, _, ver_json, _) = send_raw_http_request(
+        http_addr,
+        "GET",
+        "/v2/oauth/verify?required_scope=esi-wallet.read_character_wallet.v1",
+        &[("Authorization", &format!("Bearer {access_token}"))],
+        "",
+    )
+    .await;
+    assert_eq!(ver_status, 200);
+    assert_eq!(ver_json["CharacterID"], 90_000_001);
+    assert_eq!(ver_json["CharacterName"], "Aura Capsuleer");
+    assert_eq!(
+        ver_json["Scopes"],
+        "esi-wallet.read_character_wallet.v1 esi-skills.read_skills.v1"
+    );
+
+    // Missing scope returns 403 Forbidden (insufficient_scope)
+    let (scope_err_status, _, scope_err_json, _) = send_raw_http_request(
+        http_addr,
+        "GET",
+        "/v2/oauth/verify?required_scope=esi-mail.read_mail.v1",
+        &[("Authorization", &format!("Bearer {access_token}"))],
+        "",
+    )
+    .await;
+    assert_eq!(scope_err_status, 403);
+    assert_eq!(scope_err_json["error"], "insufficient_scope");
+
+    // Tampered token signature returns 401 Unauthorized (invalid_token)
+    let (tamper_status, _, tamper_json, _) = send_raw_http_request(
+        http_addr,
+        "GET",
+        "/v2/oauth/verify",
+        &[("Authorization", &format!("Bearer {access_token}tampered"))],
+        "",
+    )
+    .await;
+    assert_eq!(tamper_status, 401);
+    assert_eq!(tamper_json["error"], "invalid_token");
+
+    // 5. Authenticate over native machoNet GPSTransport TCP using the SSO JWT (`EVE-SSO-CONNECTION`)
+    {
+        let mut s = TcpStream::connect(macho_addr).await.unwrap();
+        let _ = read_framed_pyrep(&mut s).await.unwrap().unwrap();
+        write_framed_pyrep(&mut s, &VersionExchange::default().to_pyrep())
+            .await
+            .unwrap();
+        write_framed_pyrep(&mut s, &CryptoRequestPacket::placebo().to_pyrep())
+            .await
+            .unwrap();
+        let _ = read_framed_pyrep(&mut s).await.unwrap().unwrap();
+
+        let sso_challenge = CryptoChallengePacket::new_sso_login(&access_token).to_pyrep();
+        write_framed_pyrep(&mut s, &sso_challenge).await.unwrap();
+        let pw_ver = read_framed_pyrep(&mut s).await.unwrap().unwrap();
+        assert_eq!(pw_ver, PyRep::Integer(2));
+        let srv_hs_rep = read_framed_pyrep(&mut s).await.unwrap().unwrap();
+        let srv_hs = CryptoServerHandshake::from_pyrep(&srv_hs_rep).unwrap();
+
+        let hs_res = CryptoHandshakeResult {
+            challenge_response_hash: placebo_crypto_hash(&srv_hs.server_challenge),
+            func_output: Vec::new(),
+            func_result: PyRep::Integer(0),
+        };
+        write_framed_pyrep(&mut s, &hs_res.to_pyrep())
+            .await
+            .unwrap();
+        let ack =
+            CryptoHandshakeAck::from_pyrep(&read_framed_pyrep(&mut s).await.unwrap().unwrap())
+                .expect("SSO CryptoHandshakeAck");
+        assert_eq!(ack.user_id, 1);
+        assert_eq!(ack.access_token.as_deref(), Some(access_token.as_str()));
+    }
+
+    // 6. Refresh token rotation (`grant_type=refresh_token`) and revocation (`POST /v2/oauth/revoke`)
+    let (ref_status, _, ref_json, _) = send_raw_http_request(
+        http_addr,
+        "POST",
+        "/v2/oauth/token",
+        &[("Content-Type", "application/x-www-form-urlencoded")],
+        &format!(
+            "grant_type=refresh_token&client_id=eveLauncherTQ&refresh_token={refresh_token}"
+        ),
+    )
+    .await;
+    assert_eq!(ref_status, 200);
+    let rotated_access = ref_json["access_token"].as_str().unwrap().to_string();
+    let rotated_refresh = ref_json["refresh_token"].as_str().unwrap().to_string();
+    assert_ne!(rotated_refresh, refresh_token);
+
+    // Reusing the old rotated refresh token must fail with 400 invalid_grant
+    let (reuse_status, _, reuse_json, _) = send_raw_http_request(
+        http_addr,
+        "POST",
+        "/v2/oauth/token",
+        &[("Content-Type", "application/x-www-form-urlencoded")],
+        &format!(
+            "grant_type=refresh_token&client_id=eveLauncherTQ&refresh_token={refresh_token}"
+        ),
+    )
+    .await;
+    assert_eq!(reuse_status, 400);
+    assert_eq!(reuse_json["error"], "invalid_grant");
+
+    // Revoke rotated_refresh via POST /v2/oauth/revoke -> paired rotated_access JWT is also revoked
+    let (rev_status, _, rev_json, _) = send_raw_http_request(
+        http_addr,
+        "POST",
+        "/v2/oauth/revoke",
+        &[("Content-Type", "application/x-www-form-urlencoded")],
+        &format!("token={rotated_refresh}&client_id=eveLauncherTQ"),
+    )
+    .await;
+    assert_eq!(rev_status, 200);
+    assert_eq!(rev_json["revoked"], true);
+
+    let (ver_after_rev_status, _, _, _) = send_raw_http_request(
+        http_addr,
+        "GET",
+        "/v2/oauth/verify",
+        &[("Authorization", &format!("Bearer {rotated_access}"))],
+        "",
+    )
+    .await;
+    assert_eq!(
+        ver_after_rev_status, 401,
+        "Revoking refresh token must also revoke its paired access token JTI"
+    );
 }

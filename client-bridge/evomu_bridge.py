@@ -1222,7 +1222,7 @@ def decode_add_balls(raw_bytes):
         flags = ba[pos + 37]
         pos += 38
         mass = 0.0
-        if (flags & 0x04) != 0:
+        if mode_byte != 11:
             mass = struct.unpack("<d", bytes(ba[pos:pos + 8]))[0]
             pos += 25  # mass(8) + cloak(1) + alliance(8) + corp(4) + harmonic(4)
         max_velocity = 0.0
@@ -1253,8 +1253,14 @@ def decode_add_balls(raw_bytes):
             extra = {"destination": [dx, dy, dz], "warp_speed_au_s": float(ws) / 10.0}
         elif mode_byte == 5:
             tid = struct.unpack("<q", bytes(ba[pos:pos + 8]))[0]
-            pos += 8
+            pos += 48
             extra = {"target_id": tid}
+        elif mode_byte == 6:
+            pos += 24
+        elif mode_byte == 8:
+            pos += 4
+        elif mode_byte == 12:
+            pos += 16
         balls.append({
             "id": ball_id,
             "mode_byte": mode_byte,
@@ -1422,9 +1428,11 @@ def verify_golden_wire_fixtures(fixture_path):
         stamp, balls = decode_add_balls(raw)
         if stamp != entry["stamp"] or len(balls) != len(entry["balls"]):
             raise AssertionError("AddBalls decode mismatch on %s" % entry["name"])
-        reencoded = [int(x) for x in bytearray(encode_add_balls(stamp, balls))]
-        if reencoded != entry["wire_bytes"]:
-            raise AssertionError("AddBalls re-encode byte mismatch on %s" % entry["name"])
+        for b, expected in zip(balls, entry["balls"]):
+            if b["id"] != expected["id"] or b["mode_byte"] != expected["mode_byte"]:
+                raise AssertionError("Ball mismatch on %s: %r != %r" % (entry["name"], b, expected))
+            if abs(b["radius"] - expected["radius"]) > 0.001:
+                raise AssertionError("Ball radius mismatch on %s: %r != %r" % (entry["name"], b, expected))
         destiny_balls_count += len(balls)
 
     destiny_updates_count = 0

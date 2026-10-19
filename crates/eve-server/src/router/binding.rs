@@ -6,6 +6,43 @@ use eve_proto::BridgeRpcError;
 use std::sync::atomic::Ordering;
 
 impl ServerContext {
+    /// Registers a disconnect notification channel for an active TCP client session (`session_id`).
+    pub fn register_session_closer(
+        &self,
+        session_id: u64,
+        tx: tokio::sync::mpsc::UnboundedSender<(String, String)>,
+    ) {
+        self.session_closers
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(session_id, tx);
+    }
+
+    /// Removes the disconnect notification channel for `session_id`.
+    pub fn unregister_session_closer(&self, session_id: u64) {
+        self.session_closers
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&session_id);
+    }
+
+    /// Actively signals an open TCP session (`session_id`) to send `GPSTransportClosed` and close its socket.
+    pub fn disconnect_session(&self, session_id: u64, reason_code: &str, reason: &str) -> bool {
+        self.release_session_bindings(session_id);
+        let tx = self
+            .session_closers
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&session_id);
+        if let Some(sender) = tx {
+            sender
+                .send((reason_code.to_string(), reason.to_string()))
+                .is_ok()
+        } else {
+            false
+        }
+    }
+
     /// Releases all bound objects associated with `session_id` (called on disconnect or re-login).
     pub fn release_session_bindings(&self, session_id: u64) {
         self.bound_objects

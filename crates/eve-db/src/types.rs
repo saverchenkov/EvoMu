@@ -11,6 +11,8 @@ pub enum DbError {
     InvalidCredentials,
     #[error("Account banned until {until_unix}: {reason}")]
     AccountBanned { until_unix: u64, reason: String },
+    #[error("Account suspended until {until_unix}: {reason}")]
+    AccountSuspended { until_unix: u64, reason: String },
     #[error("Account {user_id} already has an active online session ({active_session_id})")]
     AlreadyLoggedIn {
         user_id: u64,
@@ -242,6 +244,29 @@ pub struct AccountRecord {
     pub ban_reason: Option<String>,
 }
 
+impl AccountRecord {
+    /// Checks whether the account is currently banned or suspended at `now_unix`.
+    /// Suspensions are stored in `ban_reason` prefixed with `"SUSPENDED:"` so they share SQLite durability.
+    pub fn check_active_restriction(&self, now_unix: u64) -> Result<(), DbError> {
+        if let Some(until) = self.banned_until_unix {
+            if now_unix < until {
+                let raw_reason = self.ban_reason.as_deref().unwrap_or_default();
+                if let Some(susp_reason) = raw_reason.strip_prefix("SUSPENDED:") {
+                    return Err(DbError::AccountSuspended {
+                        until_unix: until,
+                        reason: susp_reason.to_string(),
+                    });
+                }
+                return Err(DbError::AccountBanned {
+                    until_unix: until,
+                    reason: raw_reason.to_string(),
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OnlineSessionRecord {
     pub user_id: u64,
@@ -249,6 +274,8 @@ pub struct OnlineSessionRecord {
     pub session_id: u64,
     pub character_id: Option<i64>,
     pub connected_at_unix: u64,
+    #[serde(default)]
+    pub computer_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -296,6 +323,8 @@ pub struct SsoRefreshTokenRecord {
     pub scopes: Vec<String>,
     pub expires_at_unix: u64,
     pub revoked: bool,
+    #[serde(default)]
+    pub last_access_token_jti: String,
 }
 
 #[derive(Debug, Clone)]
@@ -305,6 +334,7 @@ pub(crate) struct AuthRuntimeState {
     pub(crate) kicked_users: HashMap<u64, (u64, String)>,
     pub(crate) pkce_codes: HashMap<String, PkceAuthCode>,
     pub(crate) refresh_tokens: HashMap<String, SsoRefreshTokenRecord>,
+    pub(crate) revoked_jtis: HashSet<String>,
     pub(crate) jwt_signing_secret: [u8; 32],
 }
 
@@ -316,6 +346,7 @@ impl AuthRuntimeState {
             displaced_sessions: HashMap::new(),
             pkce_codes: HashMap::new(),
             refresh_tokens: HashMap::new(),
+            revoked_jtis: HashSet::new(),
             jwt_signing_secret,
         }
     }

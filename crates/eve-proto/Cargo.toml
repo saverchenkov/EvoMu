@@ -14,6 +14,8 @@ flate2.workspace = true
 rusqlite.workspace = true
 
 [dev-dependencies]
+eve-destiny = { path = "../eve-destiny" }
 eve-testkit = { path = "../eve-testkit" }
+glam.workspace = true
 proptest.workspace = true
 

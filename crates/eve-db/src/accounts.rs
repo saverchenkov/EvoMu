@@ -476,7 +476,7 @@ impl WorldRepository {
     }
 
     /// Authenticates `username` against `password_token` (or a signed SSO JWT access token) at
-    /// `now_unix`, enforcing account ban checks and constant-time Argon2id verification (`D-4`).
+    /// `now_unix`, enforcing account ban/suspension checks and constant-time Argon2id verification (`D-4`).
     pub fn authenticate_at(
         &self,
         username: &str,
@@ -494,7 +494,10 @@ impl WorldRepository {
                     return Err(DbError::InvalidCredentials);
                 }
                 let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
-                let acc = if username.is_empty() || username == "__sso__" {
+                let acc = if username.is_empty()
+                    || username == "__sso__"
+                    || username == "EVE-SSO-CONNECTION"
+                {
                     guard
                         .accounts
                         .values()
@@ -506,14 +509,7 @@ impl WorldRepository {
                         .filter(|a| a.user_id == claims.user_id)
                 }
                 .ok_or(DbError::InvalidCredentials)?;
-                if let Some(until) = acc.banned_until_unix {
-                    if now_unix < until {
-                        return Err(DbError::AccountBanned {
-                            until_unix: until,
-                            reason: acc.ban_reason.clone().unwrap_or_default(),
-                        });
-                    }
-                }
+                acc.check_active_restriction(now_unix)?;
                 return Ok(acc.clone());
             }
         }
@@ -523,14 +519,7 @@ impl WorldRepository {
             .accounts
             .get(username)
             .ok_or(DbError::InvalidCredentials)?;
-        if let Some(until) = acc.banned_until_unix {
-            if now_unix < until {
-                return Err(DbError::AccountBanned {
-                    until_unix: until,
-                    reason: acc.ban_reason.clone().unwrap_or_default(),
-                });
-            }
-        }
+        acc.check_active_restriction(now_unix)?;
         let candidate_hash = if let Some(rest) = acc.password_token.strip_prefix("$argon2id$v=19$")
         {
             let Some((params_part, tail)) = rest.split_once('$') else {
@@ -600,7 +589,36 @@ impl WorldRepository {
         Ok(user_id)
     }
 
-    /// Lifts any active ban on `username` and persists the update to SQLite (`D-4`).
+    /// Suspends an account by `username` until `suspended_until_unix` with `reason`, persists the
+    /// suspension to SQLite, revokes all SSO refresh tokens for the user, and kicks any active online session (`D-4`).
+    /// Refuses to suspend accounts holding `ROLE_ADMIN`.
+    pub fn suspend_account(
+        &self,
+        username: &str,
+        suspended_until_unix: u64,
+        reason: &str,
+    ) -> Result<u64, DbError> {
+        let clean_reason = reason.strip_prefix("SUSPENDED:").unwrap_or(reason);
+        let stored_reason = format!("SUSPENDED:{clean_reason}");
+        let user_id = self.try_with_mut_snapshot(|snap| {
+            let acc = snap
+                .accounts
+                .get_mut(username)
+                .ok_or_else(|| DbError::ValidationError(format!("Unknown account '{username}'")))?;
+            if (acc.role & service_roles::ROLE_ADMIN) != 0 {
+                return Err(DbError::ValidationError(format!(
+                    "Cannot suspend administrator account '{username}'"
+                )));
+            }
+            acc.banned_until_unix = Some(suspended_until_unix);
+            acc.ban_reason = Some(stored_reason);
+            Ok(acc.user_id)
+        })?;
+        let _ = self.kick_user(user_id, clean_reason, self.now_unix_secs());
+        Ok(user_id)
+    }
+
+    /// Lifts any active ban or suspension on `username` and persists the update to SQLite (`D-4`).
     pub fn unban_account(&self, username: &str) -> Result<u64, DbError> {
         let user_id = self.try_with_mut_snapshot(|snap| {
             let acc = snap
@@ -616,6 +634,11 @@ impl WorldRepository {
         Ok(user_id)
     }
 
+    /// Alias for lifting a suspension on `username` (`D-4`).
+    pub fn unsuspend_account(&self, username: &str) -> Result<u64, DbError> {
+        self.unban_account(username)
+    }
+
     /// Clears prior kick/displacement revocation markers ONLY when `authentication.Login` succeeds
     /// with verified credentials (`R36-P1-3`).
     pub fn clear_revocation_on_fresh_login(&self, user_id: u64, session_id: u64) {
@@ -625,15 +648,35 @@ impl WorldRepository {
     }
 
     /// Acquires the single-active-session online lock for `user_id` (`D-4`, `multiLoginBlocker`).
-    /// Returns `Err(DbError::AlreadyLoggedIn)` if a different `session_id` already holds the lock
-    /// and `allow_displace` is `false`. When `allow_displace` is `true`, displaces and returns the
-    /// previous `OnlineSessionRecord`. Refuses if `user_id` is currently kicked or `session_id` has
-    /// been displaced (`R36-P1-3`).
     pub fn acquire_online_lock(
         &self,
         user_id: u64,
         session_id: u64,
         character_id: Option<i64>,
+        allow_displace: bool,
+        now_unix: u64,
+    ) -> Result<Option<OnlineSessionRecord>, DbError> {
+        self.acquire_online_lock_with_computer_hash(
+            user_id,
+            session_id,
+            character_id,
+            None,
+            allow_displace,
+            now_unix,
+        )
+    }
+
+    /// Acquires the single-active-session online lock for `user_id` with optional `computer_hash` (`D-4`, `multiLoginBlocker`).
+    /// Returns `Err(DbError::AlreadyLoggedIn)` if a different `session_id` already holds the lock
+    /// and `allow_displace` is `false`. When `allow_displace` is `true`, displaces and returns the
+    /// previous `OnlineSessionRecord`. Refuses if `user_id` is currently kicked or `session_id` has
+    /// been displaced (`R36-P1-3`).
+    pub fn acquire_online_lock_with_computer_hash(
+        &self,
+        user_id: u64,
+        session_id: u64,
+        character_id: Option<i64>,
+        computer_hash: Option<String>,
         allow_displace: bool,
         now_unix: u64,
     ) -> Result<Option<OnlineSessionRecord>, DbError> {
@@ -644,14 +687,7 @@ impl WorldRepository {
                 .values()
                 .find(|a| a.user_id == user_id)
                 .ok_or(DbError::InvalidCredentials)?;
-            if let Some(until) = acc.banned_until_unix {
-                if now_unix < until {
-                    return Err(DbError::AccountBanned {
-                        until_unix: until,
-                        reason: acc.ban_reason.clone().unwrap_or_default(),
-                    });
-                }
-            }
+            acc.check_active_restriction(now_unix)?;
             acc.username.clone()
         };
         let mut rt = self.auth_runtime.write().unwrap_or_else(|e| e.into_inner());
@@ -673,6 +709,12 @@ impl WorldRepository {
                 });
             }
         }
+        let effective_hash = computer_hash.or_else(|| {
+            rt.online_sessions
+                .get(&user_id)
+                .filter(|prev| prev.session_id == session_id)
+                .and_then(|prev| prev.computer_hash.clone())
+        });
         let displaced = rt
             .online_sessions
             .insert(
@@ -683,6 +725,7 @@ impl WorldRepository {
                     session_id,
                     character_id,
                     connected_at_unix: now_unix,
+                    computer_hash: effective_hash,
                 },
             )
             .filter(|prev| prev.session_id != session_id);
@@ -693,6 +736,51 @@ impl WorldRepository {
             );
         }
         Ok(displaced)
+    }
+
+    /// Checks whether another active online session on the same `computer_hash` blocks `user_id` (`session_id`)
+    /// under V24 `multiLoginBlocker.Login(computerhash)` Alpha clone hardware concurrency rules.
+    pub fn has_alpha_computer_hash_conflict(
+        &self,
+        user_id: u64,
+        session_id: u64,
+        computer_hash: &str,
+    ) -> bool {
+        if computer_hash.trim().is_empty() {
+            return false;
+        }
+        let other_users: Vec<u64> = {
+            let rt = self.auth_runtime.read().unwrap_or_else(|e| e.into_inner());
+            rt.online_sessions
+                .values()
+                .filter(|s| {
+                    s.session_id != session_id
+                        && s.user_id != user_id
+                        && s.computer_hash.as_deref() == Some(computer_hash)
+                })
+                .map(|s| s.user_id)
+                .collect()
+        };
+        if other_users.is_empty() {
+            return false;
+        }
+        let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
+        let is_user_alpha = |uid: u64| -> bool {
+            let mut chars: Vec<&CharacterRecord> = guard
+                .characters
+                .values()
+                .filter(|c| c.user_id == uid)
+                .collect();
+            if chars.is_empty() {
+                return true;
+            }
+            chars.sort_by_key(|c| c.character_id);
+            chars.iter().all(|c| c.clone_grade <= 1)
+        };
+        if is_user_alpha(user_id) {
+            return true;
+        }
+        other_users.into_iter().any(is_user_alpha)
     }
 
     /// Releases the active online session lock for `user_id` if held by `session_id` (or unconditionally when `session_id == 0`).
@@ -714,13 +802,19 @@ impl WorldRepository {
         rt.online_sessions.get(&user_id).cloned()
     }
 
+    /// Returns the total number of currently active online sessions across the cluster (`P-6`).
+    pub fn online_session_count(&self) -> u32 {
+        let rt = self.auth_runtime.read().unwrap_or_else(|e| e.into_inner());
+        rt.online_sessions.len() as u32
+    }
+
     /// Looks up `user_id` for `username` (`D-4`).
     pub fn find_user_id_by_username(&self, username: &str) -> Option<u64> {
         let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
         guard.accounts.get(username).map(|a| a.user_id)
     }
 
-    /// Checks whether an active session (`user_id`, `session_id`) has been banned, kicked, displaced,
+    /// Checks whether an active session (`user_id`, `session_id`) has been banned, suspended, kicked, displaced,
     /// or blocked by an existing online lock held by another session (`D-4`, `R34-P1-4`).
     pub fn check_session_revoked(
         &self,
@@ -731,16 +825,24 @@ impl WorldRepository {
         {
             let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
             if let Some(acc) = guard.accounts.values().find(|a| a.user_id == user_id) {
-                if let Some(until) = acc.banned_until_unix {
-                    if now_unix < until {
+                match acc.check_active_restriction(now_unix) {
+                    Err(DbError::AccountBanned { until_unix, reason }) => {
                         return Some((
                             "AccountBanned".to_string(),
                             format!(
-                                "Account is banned until unix timestamp {until}: {}",
-                                acc.ban_reason.clone().unwrap_or_default()
+                                "Account is banned until unix timestamp {until_unix}: {reason}"
                             ),
                         ));
                     }
+                    Err(DbError::AccountSuspended { until_unix, reason }) => {
+                        return Some((
+                            "AccountSuspended".to_string(),
+                            format!(
+                                "Account is suspended until unix timestamp {until_unix}: {reason}"
+                            ),
+                        ));
+                    }
+                    _ => {}
                 }
             }
         }
@@ -784,10 +886,17 @@ impl WorldRepository {
         let mut rt = self.auth_runtime.write().unwrap_or_else(|e| e.into_inner());
         rt.kicked_users
             .insert(user_id, (now_unix, reason.to_string()));
+        let mut jtis_to_revoke = Vec::new();
         for rec in rt.refresh_tokens.values_mut() {
             if rec.user_id == user_id {
                 rec.revoked = true;
+                if !rec.last_access_token_jti.is_empty() {
+                    jtis_to_revoke.push(rec.last_access_token_jti.clone());
+                }
             }
+        }
+        for jti in jtis_to_revoke {
+            rt.revoked_jtis.insert(jti);
         }
         let removed = rt.online_sessions.remove(&user_id);
         if let Some(ref prev) = removed {
@@ -801,6 +910,13 @@ impl WorldRepository {
     pub fn kicked_reason(&self, user_id: u64) -> Option<String> {
         let rt = self.auth_runtime.read().unwrap_or_else(|e| e.into_inner());
         rt.kicked_users.get(&user_id).map(|(_, r)| r.clone())
+    }
+
+    /// Returns a deterministic key identifier (`kid`) for the deployment's SSO JWT signing secret (`ESI-1`).
+    pub fn jwt_key_id(&self) -> String {
+        let rt = self.auth_runtime.read().unwrap_or_else(|e| e.into_inner());
+        let digest = sha256_bytes(&rt.jwt_signing_secret);
+        base64url_encode_no_pad(&digest[..12])
     }
 
     /// Issues an OAuth2 PKCE authorization code (`S256`) for `username` and `character_id` (`D-4`, `ESI-1`).
@@ -869,7 +985,7 @@ impl WorldRepository {
             aud: vec![client_id.to_string(), "EVE Online".to_string()],
             iat: now_unix,
             exp: now_unix.saturating_add(1_200),
-            jti,
+            jti: jti.clone(),
         };
         let payload_json = serde_json::to_vec(&claims).expect("serialize SsoTokenClaims");
         let payload_b64 = base64url_encode_no_pad(&payload_json);
@@ -889,6 +1005,7 @@ impl WorldRepository {
                 scopes,
                 expires_at_unix: now_unix.saturating_add(86_400 * 30),
                 revoked: false,
+                last_access_token_jti: jti,
             },
         );
         SsoTokenBundle {
@@ -932,14 +1049,7 @@ impl WorldRepository {
                 .values()
                 .find(|a| a.user_id == pkce.user_id)
                 .ok_or(DbError::InvalidCredentials)?;
-            if let Some(until) = acc.banned_until_unix {
-                if now_unix < until {
-                    return Err(DbError::AccountBanned {
-                        until_unix: until,
-                        reason: acc.ban_reason.clone().unwrap_or_default(),
-                    });
-                }
-            }
+            acc.check_active_restriction(now_unix)?;
         }
         let ch = self.select_character_for_user(pkce.user_id, pkce.character_id)?;
         let mut rt = self.auth_runtime.write().unwrap_or_else(|e| e.into_inner());
@@ -980,14 +1090,7 @@ impl WorldRepository {
                 .values()
                 .find(|a| a.user_id == rec.user_id)
                 .ok_or(DbError::InvalidCredentials)?;
-            if let Some(until) = acc.banned_until_unix {
-                if now_unix < until {
-                    return Err(DbError::AccountBanned {
-                        until_unix: until,
-                        reason: acc.ban_reason.clone().unwrap_or_default(),
-                    });
-                }
-            }
+            acc.check_active_restriction(now_unix)?;
         }
         let ch = self.select_character_for_user(rec.user_id, rec.character_id)?;
         let mut rt = self.auth_runtime.write().unwrap_or_else(|e| e.into_inner());
@@ -1003,7 +1106,7 @@ impl WorldRepository {
     }
 
     /// Verifies a signed HS256 JWT `access_token`, checking header algorithm, signature integrity,
-    /// `iat <= now_unix < exp`, kick revocation, and account ban status (`D-4`, `ESI-1`, `R34-P0-1`).
+    /// `iat <= now_unix < exp`, kick/token revocation, and account ban/suspension status (`D-4`, `ESI-1`, `R34-P0-1`).
     pub fn verify_sso_access_token(
         &self,
         token: &str,
@@ -1041,6 +1144,7 @@ impl WorldRepository {
                 || now_unix >= parsed.exp
                 || parsed.iss != "https://login.eveonline.com"
                 || !parsed.aud.iter().any(|a| a == "EVE Online")
+                || rt.revoked_jtis.contains(&parsed.jti)
             {
                 return Err(DbError::InvalidCredentials);
             }
@@ -1057,23 +1161,40 @@ impl WorldRepository {
             .values()
             .find(|a| a.user_id == claims.user_id)
             .ok_or(DbError::InvalidCredentials)?;
-        if let Some(until) = acc.banned_until_unix {
-            if now_unix < until {
-                return Err(DbError::AccountBanned {
-                    until_unix: until,
-                    reason: acc.ban_reason.clone().unwrap_or_default(),
-                });
-            }
-        }
+        acc.check_active_restriction(now_unix)?;
         Ok(claims)
     }
 
-    /// Revokes an SSO refresh token (`D-4`, `ESI-1`).
-    pub fn revoke_sso_refresh_token(&self, refresh_token: &str) -> bool {
+    /// Revokes an SSO refresh token (or access token) (`D-4`, `ESI-1`).
+    pub fn revoke_sso_refresh_token(&self, token: &str) -> bool {
         let mut rt = self.auth_runtime.write().unwrap_or_else(|e| e.into_inner());
-        if let Some(rec) = rt.refresh_tokens.get_mut(refresh_token) {
+        let mut jti_to_revoke = None;
+        let mut found = false;
+        if let Some(rec) = rt.refresh_tokens.get_mut(token) {
             rec.revoked = true;
+            if !rec.last_access_token_jti.is_empty() {
+                jti_to_revoke = Some(rec.last_access_token_jti.clone());
+            }
+            found = true;
+        }
+        if let Some(jti) = jti_to_revoke {
+            rt.revoked_jtis.insert(jti);
+        }
+        if found {
             return true;
+        }
+        if token.matches('.').count() == 2 {
+            let mut parts = token.splitn(3, '.');
+            if let (Some(_h), Some(payload_b64), Some(_s)) =
+                (parts.next(), parts.next(), parts.next())
+            {
+                if let Ok(payload_bytes) = base64url_decode_no_pad(payload_b64) {
+                    if let Ok(parsed) = serde_json::from_slice::<SsoTokenClaims>(&payload_bytes) {
+                        rt.revoked_jtis.insert(parsed.jti);
+                        return true;
+                    }
+                }
+            }
         }
         false
     }

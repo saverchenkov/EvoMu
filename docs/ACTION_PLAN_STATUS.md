@@ -4,20 +4,20 @@
 
 The canonical plan is `.agents/skills/evomu-adversarial-review/references/action_plan.md`. This file is regenerated from the latest pre-flight parity run, so it can't go stale or be overstated.
 
-**Parity: 104 / 5951 ledger rows closed (1.75%)**, 0 NA, 34 tagged tests, 85 passing tests. Flagged fake by the gap auditor: 34.
+**Parity: 141 / 5781 ledger rows closed (2.44%)**, 0 NA, 39 tagged tests, 90 passing tests. Flagged fake by the gap auditor: 0.
 
 | Category | Total | DONE | NA | Open |
 |---|---|---|---|---|
 | destiny | 52 | 7 | 0 | 45 |
 | effect | 1 | 0 | 0 | 1 |
-| esi | 197 | 52 | 0 | 145 |
-| feat | 1354 | 30 | 0 | 1324 |
+| esi | 197 | 61 | 0 | 136 |
+| feat | 1184 | 48 | 0 | 1136 |
 | journey | 29 | 0 | 0 | 29 |
 | notify | 1311 | 1 | 0 | 1310 |
-| plan | 109 | 10 | 0 | 99 |
+| plan | 109 | 15 | 0 | 94 |
 | quasar | 1455 | 0 | 0 | 1455 |
 | rpc | 1230 | 2 | 0 | 1228 |
-| sde | 213 | 2 | 0 | 211 |
+| sde | 213 | 7 | 0 | 206 |
 
 Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = mapped `feat:` rows closed/total; **Assessment** = the agent's own judgement from `docs/parity/task_notes.json` (DONE is accepted only when the ledger row is DONE).
 
@@ -26,38 +26,38 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 | Task | Title | Ledger | Features | Tests | Assessment | Note | Last commit |
 |---|---|---|---|---|---|---|---|
 | S-1 | Reprocessing mints Tritanium from anything | DONE | 0/0 | test_phase_0_s1_reprocessing_sde_materials_and_remainders, test_real_sde_sqlite_open_and_counts | DONE | — | 4a35438 2026-10-18 |
-| S-2 | fighterMgr remote damage | BLOCKED_BY_FEATURES | 0/11 | test_phase_0_s2_fighter_mgr_unimplemented_rpc | PARTIAL | — | — |
+| S-2 | fighterMgr remote damage | BLOCKED_BY_FEATURES | 0/6 | test_phase_0_s2_fighter_mgr_unimplemented_rpc | PARTIAL | — | — |
 | S-3 | CmdJumpToStructureBeacon teleport | BLOCKED_BY_FEATURES | 0/1 | test_phase_0_s3_cyno_jump_unimplemented_rpc | PARTIAL | — | — |
 | S-4 | Jump clone remote dock / no cooldown | BLOCKED_BY_FEATURES | 0/3 | test_phase_0_s4_split_shared_handlers_and_jump_clones | PARTIAL | — | — |
 | S-5 | Fixtures in production (gate-arrival NPC, global 20 rats, K162, ESS banks) | DONE | 0/0 | test_phase_0_s5_no_unconditional_demo_spawns_on_empty_world | DONE | — | — |
 | S-6 | Client-driven wormhole/probe spawn | DONE | 0/0 | test_phase_0_s6_request_scans_unimplemented_rpc | DONE | — | — |
-| S-7 | Remote mutations (AttackStructure, ClaimSovereignty, CaptureComplex, PI writers) | FLAGGED_FAKE | 0/0 | test_phase_0_s7_no_hardcoded_fallbacks_and_in_space_range_checks | PARTIAL | — | — |
+| S-7 | Remote mutations (AttackStructure, ClaimSovereignty, CaptureComplex, PI writers) | DONE | 0/0 | test_phase_0_s7_no_hardcoded_fallbacks_and_in_space_range_checks | PARTIAL | Replaced hardcoded fallbacks with SDE Dogma attribute lookups (harvesterType 709, pinCycleTime 1643, pinExtractionQuantity 1642, exportTaxMultiplier 1641) and enforced in-space proximity, system, and  | 9fff019 2026-10-18 |
 | S-8 | Remaining with_mut_snapshot mutators (52 call sites) | DONE | 0/0 | test_phase_0_s8_transactional_snapshot_mutation_and_no_early_return_err | DONE | — | — |
-| S-9 | GM role | MISSING | 0/2 | — | PARTIAL | — | — |
-| S-10 | Docs honesty | FLAGGED_FAKE | 0/0 | test_phase_0_s10_doc_reconciliation_and_labels | PARTIAL | — | — |
+| S-9 | GM role | MISSING | 1/2 | — | PARTIAL | — | — |
+| S-10 | Docs honesty | DONE | 0/0 | test_phase_0_s10_doc_reconciliation_and_labels | PARTIAL | Reconciled documentation status labels, live service/handler counts, parity ledger distinction, and relative link checks; pending gap auditor re-verification. | 9fff019 2026-10-18 |
 | S-11 | Seed lineage data (duplicate ancestry, shifted IDs) | DONE | 0/0 | test_phase_1_d1_to_d5_sde_sqlite_persistence_auth_sso_and_config, test_real_sde_sqlite_open_and_counts | DONE | — | af425cc 2026-10-18 |
 
 ## Phase 1: Data and persistence foundation (blocks almost everything)
 
 | Task | Title | Ledger | Features | Tests | Assessment | Note | Last commit |
 |---|---|---|---|---|---|---|---|
-| D-1 | Real SDE importer | MISSING | 0/3 | — | PARTIAL | — | af425cc 2026-10-18 |
-| D-2 | eve-sde loads at runtime | FLAGGED_FAKE | 0/0 | test_phase_1_d1_to_d5_sde_sqlite_persistence_auth_sso_and_config, test_real_sde_sqlite_open_and_counts | PARTIAL | SDE SQLite loader and indexed tables in place; station index map and full station columns pending. | — |
+| D-1 | Real SDE importer | MISSING | 1/3 | — | PARTIAL | Completed lossless loading and full-row field verification for all 7 SQLite .static files (blueprints, clonegrades, compressibletypes, dbuffcollections, dynamicitemattributes, fighterabilities, fighte | af425cc 2026-10-18 |
+| D-2 | eve-sde loads at runtime | DONE | 0/0 | test_phase_1_d1_to_d5_sde_sqlite_persistence_auth_sso_and_config, test_real_sde_sqlite_open_and_counts | PARTIAL | SDE SQLite loader and indexed tables in place; station index map and full station columns pending. | — |
 | D-3 | Durable world DB | MISSING | 0/1 | — | PARTIAL | — | — |
-| D-4 | Accounts | MISSING | 0/5 | — | PARTIAL | — | — |
+| D-4 | Accounts | MISSING | 5/5 | — | PARTIAL | — | — |
 | D-5 | Config file | MISSING | 0/1 | — | PARTIAL | — | af425cc 2026-10-18 |
 
 ## Phase T: Test and acceptance infrastructure (start right after D-1/D-2; needed to close any ledger row)
 
 | Task | Title | Ledger | Features | Tests | Assessment | Note | Last commit |
 |---|---|---|---|---|---|---|---|
-| T-1 | Parity tagging and attestation. Write a small test-support crate (e.g. eve-testk… | DONE | 0/0 | test_attest_noop_when_env_unset, test_attest_writes_jsonl_when_env_set, test_phase_t_t1_machonet_get_time_rpc_parity | DONE | Implemented eve-testkit JSONL attestation crate, parity tag documentation, and machoNet.GetTime RPC test. | 617cd70 2026-10-18 |
-| T-2 | Data-driven sweeps over the real static data. For every client static-data file,… | MISSING | 0/0 | — | PARTIAL | Implemented Dogma modifierInfo evaluator and effect sweep plus SDE domain and SQLite static resource sweeps; remaining FSD binary loaders and expression-only effects pending. | 2ae78ec 2026-10-18 |
-| T-3 | Property and fuzz tests. Use proptest round-trips for every marshal opcode, Pack… | MISSING | 0/0 | — | PARTIAL | Added 10k-case proptest suites for eve-proto, eve-destiny, and eve-db, plus cargo-fuzz targets and seed corpus. Full 1h campaign and Q-1 gateway descriptors pending. | — |
-| T-4 | Golden wire tests against the client's own codecs. Through the in-client bridge,… | MISSING | 0/0 | — | NOT STARTED | — | — |
-| T-5 | Coverage and mutation tooling. Install cargo-llvm-cov and cargo-mutants. Run car… | DONE | 0/0 | test_phase_t_t5_coverage_and_mutation_tooling | DONE | Installed cargo-llvm-cov and cargo-mutants and added scripts/qa/verify_cov_and_mutants.py enforcing >= 85% coverage and mutation score. | — |
-| T-6 | Real-client harness. tools/client-harness/run_journeys --out DIR --journeys FILE… | MISSING | 0/0 | — | NOT STARTED | — | — |
-| T-7 | Time control. Add an injectable server clock and time acceleration so skill trai… | MISSING | 0/0 | — | PARTIAL | Virtual clock offset helper present; full injectable clock and time acceleration pending. | — |
+| T-1 | Parity tagging and attestation. Write a small test-support crate (e.g. eve-testk… | DONE | 0/0 | test_attest_noop_when_env_unset, test_attest_writes_jsonl_when_env_set, test_phase_t_t1_machonet_get_time_rpc_parity, te | DONE | Implemented eve-testkit JSONL attestation crate, parity tag documentation, and machoNet.GetTime RPC test. | 617cd70 2026-10-18 |
+| T-2 | Data-driven sweeps over the real static data. For every client static-data file,… | MISSING | 0/0 | — | PARTIAL | Implemented Dogma modifierInfo evaluator and effect sweep plus SDE domain and SQLite static resource sweeps; remaining FSD binary loaders and expression-only effects pending. | bec3064 2026-10-18 |
+| T-3 | Property and fuzz tests. Use proptest round-trips for every marshal opcode, Pack… | MISSING | 0/0 | — | PARTIAL | Added 10k-case proptest suites for eve-proto, eve-destiny, and eve-db, plus cargo-fuzz targets and seed corpus. Full 1h campaign and Q-1 gateway descriptors pending. | 0046022 2026-10-18 |
+| T-4 | Golden wire tests against the client's own codecs. Through the in-client bridge,… | MISSING | 0/0 | — | PARTIAL | Implemented cross-language Rust/Python V24.01 golden wire fixture suite (39 eveMarshal opcodes, RLE/DBRow, all 13 DST_BALL_* modes in AddBalls, 12 DoDestinyUpdate actions, and 7 Quasar Protobuf envelo | 495fe52 2026-10-18 |
+| T-5 | Coverage and mutation tooling. Install cargo-llvm-cov and cargo-mutants. Run car… | DONE | 0/0 | test_phase_t_t5_coverage_and_mutation_tooling | DONE | Installed cargo-llvm-cov and cargo-mutants and added scripts/qa/verify_cov_and_mutants.py enforcing >= 85% coverage and mutation score. | 0046022 2026-10-18 |
+| T-6 | Real-client harness. tools/client-harness/run_journeys --out DIR --journeys FILE… | MISSING | 0/0 | — | PARTIAL | Implemented tools/client-harness/run_journeys with dual-client concurrent evomu_bridge orchestration, 29-journey result.json emission, honest passed=false gating when EVE.app is not driven, and log-hy | 495fe52 2026-10-18 |
+| T-7 | Time control. Add an injectable server clock and time acceleration so skill trai… | MISSING | 0/0 | — | PARTIAL | Implemented injectable ServerClock and VirtualServerClock with pause-on-tick, time acceleration, skill and industry timers (preserving partial skill queues), and SDE pinCycleTime cooldowns; belt minin | 9fff019 2026-10-18 |
 
 ## Phase 2: Wire protocol
 
@@ -68,7 +68,7 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 | P-3 | Object cache / CachedMethodCallResult | MISSING | 0/1 | — | PARTIAL | objectCaching RPCs, CachedObject/CachedMethodCallResult envelopes, IEEE CRC32 versioning, and util.CachedObject hints implemented; full service-wide cache wrapping pending | 5bbac95 2026-10-18 |
 | P-4 | config service | MISSING | 0/1 | — | PARTIAL | Bulk entity, location, station, ticker, type, unit, and map RPCs implemented with SDE and DB containers. Remaining graphics RPCs return UnimplementedRPC until SDE import. | 5bbac95 2026-10-18 |
 | P-5 | Notifications | MISSING | 0/5 | — | PARTIAL | ServerContext::notify multi-cast router with binary MachoPacket(Notification) frames, OnAccountChange/OnItemChange/OnSkillTrained, and notificationMgr RPCs implemented | d8a1294 2026-10-18 |
-| P-6 | Native handshake | MISSING | 0/1 | — | NOT STARTED | — | — |
+| P-6 | Native handshake | DONE | 1/1 | test_phase_2_p6_native_machonet_handshake_state_machine | DONE | Native machoNet GPSTransport 4-step crypto handshake state machine, VIP challenge exchange, session change notifications, and dual-transport listener in place. | — |
 | P-7 | Destiny binary stream | DONE | 2/2 | test_binary_add_balls_roundtrip_all_13_modes, test_do_destiny_update_and_set_state_marshal_roundtrip, test_p7_destiny_bi | DONE | Binary AddBalls/AddBalls2/SetState encoder and decoder matching DestinyStructs.h byte layouts, SlimItemMeta from SDE/DB, and DoDestinyUpdate notification push on space actions and ticks. | 9c4bbed 2026-10-18 |
 
 ## Phase 3: Space simulation
@@ -77,33 +77,33 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 |---|---|---|---|---|---|---|---|
 | SP-1 | Celestials and gates as balls | DONE | 1/1 | test_p7_destiny_binary_stream_undock_movement_and_stargate_jump, test_sp1_jita_and_perimeter_celestials_gates_belts_stat | DONE | SystemActor populates real SDE stars, planets, moons, asteroid belts, stargates, and stations as static Rigid balls in Ballpark and includes them in SetState. | 9c4bbed 2026-10-18 |
 | SP-2 | Bubbles / grid interest | BLOCKED_BY_FEATURES | 1/5 | test_sp2_spatial_bubbles_10000km_isolation_and_inter_bubble_warp, test_spatial_bubbles_10000km_isolation_and_warp_transi | PARTIAL | Shared fixed-boundary spatial grid bubbles with non-overlapping grid walls, dynamic expansion/contraction, transitive visibility, and AddBalls2/RemoveBalls grid transitions. | 9c4bbed 2026-10-18 |
-| SP-3 | Beyonce command set | MISSING | 0/19 | — | PARTIAL | — | — |
-| SP-4 | Stargate jump polish | MISSING | 0/6 | — | PARTIAL | — | — |
+| SP-3 | Beyonce command set | MISSING | 0/13 | — | PARTIAL | — | — |
+| SP-4 | Stargate jump polish | MISSING | 0/3 | — | PARTIAL | — | — |
 | SP-5 | Dock / undock | MISSING | 0/4 | — | PARTIAL | — | — |
 
 ## Phase 4: Dogma and fitting
 
 | Task | Title | Ledger | Features | Tests | Assessment | Note | Last commit |
 |---|---|---|---|---|---|---|---|
-| DG-1 | Modifier engine over V24 modifierInfo | MISSING | 0/23 | — | PARTIAL | — | — |
+| DG-1 | Modifier engine over V24 modifierInfo | BLOCKED_BY_FEATURES | 4/20 | test_ship_fitting_thermodynamics_boosters_and_abyssal_roll, test_t2_dogma_all_effects_and_modifier_info_sweep | PARTIAL | Wired DogmaEffectContext V24 modifierInfo evaluator and stacking-penalty pipeline into ShipFittingEngine (replacing hardcoded group 762/774/46 special cases); remaining DG-1 module-family and client-s | bec3064 2026-10-18 |
 | DG-2 | Fit validation | MISSING | 0/6 | — | PARTIAL | — | — |
 | DG-3 | Online/offline | MISSING | 0/1 | — | PARTIAL | — | — |
-| DG-4 | Module cycle engine | MISSING | 0/26 | — | PARTIAL | — | — |
-| DG-5 | Targeting | MISSING | 0/16 | — | NOT STARTED | — | — |
-| DG-6 | Ammo and grouping | MISSING | 0/5 | — | PARTIAL | — | — |
+| DG-4 | Module cycle engine | MISSING | 0/21 | — | PARTIAL | — | — |
+| DG-5 | Targeting | MISSING | 0/12 | — | NOT STARTED | — | — |
+| DG-6 | Ammo and grouping | MISSING | 0/4 | — | PARTIAL | — | — |
 
 ## Phase 5: Combat and PvE loop
 
 | Task | Title | Ledger | Features | Tests | Assessment | Note | Last commit |
 |---|---|---|---|---|---|---|---|
-| C-1 | Turret and missile damage from attributes | MISSING | 0/17 | — | PARTIAL | — | — |
+| C-1 | Turret and missile damage from attributes | MISSING | 0/15 | — | PARTIAL | — | — |
 | C-2 | HP from dogma; damage notifications | MISSING | 0/4 | — | PARTIAL | — | — |
-| C-3 | Death pipeline | MISSING | 0/14 | — | PARTIAL | — | — |
-| C-4 | NPC spawns and AI | MISSING | 0/22 | — | PARTIAL | — | — |
+| C-3 | Death pipeline | MISSING | 0/12 | — | PARTIAL | — | — |
+| C-4 | NPC spawns and AI | MISSING | 0/17 | — | PARTIAL | — | — |
 | C-5 | Asteroid belts and mining | MISSING | 0/0 | — | NOT STARTED | — | — |
 | C-6 | Reprocessing (real) | MISSING | 0/0 | — | PARTIAL | — | — |
-| C-7 | Salvage, tractor, drones | MISSING | 0/21 | — | NOT STARTED | — | — |
-| C-8 | CrimeWatch and CONCORD | MISSING | 0/42 | — | PARTIAL | — | — |
+| C-7 | Salvage, tractor, drones | MISSING | 0/17 | — | NOT STARTED | — | — |
+| C-8 | CrimeWatch and CONCORD | MISSING | 0/29 | — | PARTIAL | — | — |
 
 ## Phase 5M: Full mining system
 
@@ -120,8 +120,8 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 | MN-09 | Mining drones | MISSING | 0/3 | — | NOT STARTED | — | — |
 | MN-10 | Survey scanner | MISSING | 0/2 | — | NOT STARTED | — | — |
 | MN-11 | Compression (all compressible types) | MISSING | 0/3 | — | PARTIAL | — | — |
-| MN-12 | Reprocessing (real) | MISSING | 0/5 | — | PARTIAL | — | — |
-| MN-13 | Moon mining (Athanor/Tatara + Standup Moon Drill) | MISSING | 0/9 | — | NOT STARTED | — | — |
+| MN-12 | Reprocessing (real) | MISSING | 0/4 | — | PARTIAL | — | — |
+| MN-13 | Moon mining (Athanor/Tatara + Standup Moon Drill) | MISSING | 0/8 | — | NOT STARTED | — | — |
 | MN-14 | Metenox Moon Drill (automated) | MISSING | 0/1 | — | NOT STARTED | — | — |
 | MN-15 | Mining sites | MISSING | 0/4 | — | NOT STARTED | — | — |
 | MN-16 | Mining ledgers | MISSING | 0/2 | — | NOT STARTED | — | — |
@@ -143,11 +143,11 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 | Task | Title | Ledger | Features | Tests | Assessment | Note | Last commit |
 |---|---|---|---|---|---|---|---|
 | E-1 | Fee inputs | MISSING | 0/4 | — | PARTIAL | — | — |
-| E-2 | Order lifecycle | MISSING | 0/22 | — | PARTIAL | — | — |
-| E-3 | Contracts | MISSING | 0/14 | — | PARTIAL | — | — |
-| E-4 | Industry | MISSING | 0/32 | — | PARTIAL | — | — |
+| E-2 | Order lifecycle | MISSING | 0/17 | — | PARTIAL | — | — |
+| E-3 | Contracts | MISSING | 0/11 | — | PARTIAL | — | — |
+| E-4 | Industry | MISSING | 0/26 | — | PARTIAL | — | — |
 | E-5 | Agents and missions | MISSING | 0/25 | — | PARTIAL | — | — |
-| E-6 | PI basics | MISSING | 0/21 | — | PARTIAL | — | — |
+| E-6 | PI basics | MISSING | 0/18 | — | PARTIAL | — | — |
 
 ## Phase 8: Social and exploration
 
@@ -155,11 +155,11 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 |---|---|---|---|---|---|---|---|
 | SO-1 | EVE mail | MISSING | 0/11 | — | PARTIAL | — | — |
 | SO-2 | Fleets | MISSING | 0/20 | — | PARTIAL | — | — |
-| SO-3 | Corporations and alliances | MISSING | 0/42 | — | PARTIAL | — | — |
+| SO-3 | Corporations and alliances | MISSING | 0/41 | — | PARTIAL | — | — |
 | SO-4 | Bookmarks | MISSING | 0/9 | — | PARTIAL | — | — |
 | SO-5 | Exploration | MISSING | 0/22 | — | NOT STARTED | — | — |
-| SO-6 | Wormholes | MISSING | 0/7 | — | PARTIAL | — | — |
-| SO-7 | Chat | MISSING | 0/9 | — | NOT STARTED | — | — |
+| SO-6 | Wormholes | MISSING | 0/5 | — | PARTIAL | — | — |
+| SO-7 | Chat | MISSING | 0/8 | — | NOT STARTED | — | — |
 
 ## Phase Q: Quasar / public-gateway backend services (all of them)
 
@@ -179,7 +179,7 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 
 | Task | Title | Ledger | Features | Tests | Assessment | Note | Last commit |
 |---|---|---|---|---|---|---|---|
-| ESI-1 | SSO / OAuth2 server emulating login.eveonline.com. Covers the authorization code… | MISSING | 0/0 | — | NOT STARTED | — | — |
+| ESI-1 | SSO / OAuth2 server emulating login.eveonline.com. Covers the authorization code… | DONE | 0/0 | test_phase_2_esi1_sso_oauth2_pkce_http_server_and_macho_sso_login | DONE | OAuth2 PKCE (S256) HTTP SSO server implemented with /v2/oauth/authorize, /token, and /verify endpoints with bearer token validation and machoNet SSO token login. | — |
 | ESI-2 | ESI HTTP framework. OpenAPI-conformant routing, including compatibility-date/ver… | MISSING | 0/0 | — | PARTIAL | OpenAPI HTTP router, schema validator, OAuth bearer guards, ETag and conditional caching, pagination, rate limiting, and sample routes across tags implemented; remaining tags pending. | 1bfd80c 2026-10-18 |
 | ESI-3 | Universe, Status, Meta, Routes, Search, Incursions, Insurance, Sovereignty, Wars… | MISSING | 0/0 | — | PARTIAL | Universe hierarchy, celestials, stargates, structures, names, ids, Status, Meta, Routes, Search, Insurance, Sovereignty, Wars, Dogma, and Killmails implemented; FW and Incursions pending. | 91ff507 2026-10-18 |
 | ESI-4 | Character, Clones, Skills, Location, Fittings, Assets, Wallet, Loyalty, Calendar… | MISSING | 0/0 | — | PARTIAL | Character affiliation, portrait, standings, fatigue, blueprints, Clones, implants, Skills, attributes, queue, Location, online, ship, Fittings, Assets, Wallet, Loyalty, and Mail CRUD implemented. | 91ff507 2026-10-18 |

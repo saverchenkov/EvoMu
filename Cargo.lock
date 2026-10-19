@@ -276,8 +276,10 @@ name = "eve-proto"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "eve-destiny",
  "eve-testkit",
  "flate2",
+ "glam",
  "proptest",
  "rmp-serde",
  "rusqlite",

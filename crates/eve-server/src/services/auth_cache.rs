@@ -71,6 +71,7 @@ pub fn handle(
                     .map_err(|e| BridgeRpcError {
                         code: match e {
                             eve_db::DbError::AccountBanned { .. } => "AccountBanned".into(),
+                            eve_db::DbError::AccountSuspended { .. } => "AccountSuspended".into(),
                             _ => "AuthenticationFailed".into(),
                         },
                         message: e.to_string(),
@@ -117,6 +118,21 @@ pub fn handle(
             ])))
         }
 
+        ("authentication", "SetLanguageID") => {
+            let _ = match ServerContext::require_auth(session) {
+                Ok(u) => u,
+                Err(e) => return Some(Err(e)),
+            };
+            let Some(lang) = args.first().and_then(|a| a.as_str()).map(str::trim).filter(|s| !s.is_empty()) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidLanguageID".into(),
+                    message: "SetLanguageID requires a non-empty language code".into(),
+                }));
+            };
+            session.language_id = lang.to_string();
+            Some(Ok(PyRep::None))
+        }
+
         ("authentication", "Logout") => {
             if let Some(uid) = session.user_id {
                 ctx.db.release_online_lock(uid, session.session_id);
@@ -141,39 +157,98 @@ pub fn handle(
                 Ok(u) => u,
                 Err(e) => return Some(Err(e)),
             };
-            let allow_displace = args.first().and_then(|a| a.as_bool()).unwrap_or(false);
-            match ctx.db.acquire_online_lock(
-                uid,
-                session.session_id,
-                session.character_id,
-                allow_displace,
-                ctx.now_unix(),
-            ) {
-                Ok(displaced) => {
-                    if let Some(ref d) = displaced {
-                        ctx.release_session_bindings(d.session_id);
-                    }
-                    Some(Ok(PyRep::keyval([
-                        ("userID", PyRep::Integer(uid as i64)),
-                        ("sessionID", PyRep::Integer(session.session_id as i64)),
-                        (
-                            "displacedSessionID",
-                            displaced
-                                .map(|d| PyRep::Integer(d.session_id as i64))
-                                .unwrap_or(PyRep::None),
-                        ),
-                    ])))
+            let now_unix = ctx.now_unix();
+            // V24 client `characterSelection.pyj` (`_CanLogin`) passes `computerhash` as `args[0]` (str/bytes)
+            // and expects a boolean `True` (allowed) or `False` (blocked -> opens `MultiLoginBlockedWindow`).
+            let computer_hash_arg: Option<String> = match args.first() {
+                Some(PyRep::String(s)) => Some(s.clone()),
+                Some(PyRep::Bytes(b)) => Some(String::from_utf8_lossy(b).into_owned()),
+                _ => None,
+            };
+            if let Some(computer_hash) = computer_hash_arg {
+                let allow_displace = args
+                    .get(1)
+                    .and_then(|a| a.as_bool())
+                    .or_else(|| _kwargs.get("displace").and_then(|a| a.as_bool()))
+                    .unwrap_or(false);
+                if ctx
+                    .db
+                    .has_alpha_computer_hash_conflict(uid, session.session_id, &computer_hash)
+                {
+                    return Some(Ok(PyRep::Bool(false)));
                 }
-                Err(e) => {
-                    let code = match e {
-                        eve_db::DbError::AccountBanned { .. } => "AccountBanned",
-                        eve_db::DbError::ValidationError(_) => "SessionKicked",
-                        _ => "AlreadyLoggedIn",
-                    };
-                    Some(Err(BridgeRpcError {
-                        code: code.into(),
-                        message: e.to_string(),
-                    }))
+                match ctx.db.acquire_online_lock_with_computer_hash(
+                    uid,
+                    session.session_id,
+                    session.character_id,
+                    Some(computer_hash),
+                    allow_displace,
+                    now_unix,
+                ) {
+                    Ok(displaced) => {
+                        if let Some(ref d) = displaced {
+                            ctx.disconnect_session(
+                                d.session_id,
+                                "ACL_DISPLACED",
+                                "Displaced by concurrent login on same account",
+                            );
+                        }
+                        Some(Ok(PyRep::Bool(true)))
+                    }
+                    Err(eve_db::DbError::AlreadyLoggedIn { .. }) => Some(Ok(PyRep::Bool(false))),
+                    Err(e) => {
+                        let code = match e {
+                            eve_db::DbError::AccountBanned { .. } => "AccountBanned",
+                            eve_db::DbError::AccountSuspended { .. } => "AccountSuspended",
+                            eve_db::DbError::ValidationError(_) => "SessionKicked",
+                            _ => "AlreadyLoggedIn",
+                        };
+                        Some(Err(BridgeRpcError {
+                            code: code.into(),
+                            message: e.to_string(),
+                        }))
+                    }
+                }
+            } else {
+                let allow_displace = args.first().and_then(|a| a.as_bool()).unwrap_or(false);
+                match ctx.db.acquire_online_lock(
+                    uid,
+                    session.session_id,
+                    session.character_id,
+                    allow_displace,
+                    now_unix,
+                ) {
+                    Ok(displaced) => {
+                        if let Some(ref d) = displaced {
+                            ctx.disconnect_session(
+                                d.session_id,
+                                "ACL_DISPLACED",
+                                "Displaced by concurrent login on same account",
+                            );
+                        }
+                        Some(Ok(PyRep::keyval([
+                            ("userID", PyRep::Integer(uid as i64)),
+                            ("sessionID", PyRep::Integer(session.session_id as i64)),
+                            (
+                                "displacedSessionID",
+                                displaced
+                                    .map(|d| PyRep::Integer(d.session_id as i64))
+                                    .unwrap_or(PyRep::None),
+                            ),
+                        ])))
+                    }
+                    Err(e) => {
+                        let code = match e {
+                            eve_db::DbError::AccountBanned { .. } => "AccountBanned",
+                            eve_db::DbError::AccountSuspended { .. } => "AccountSuspended",
+                            eve_db::DbError::ValidationError(_) => "SessionKicked",
+                            _ => "AlreadyLoggedIn",
+                        };
+                        Some(Err(BridgeRpcError {
+                            code: code.into(),
+                            message: e.to_string(),
+                        }))
+                    }
                 }
             }
         }
@@ -294,15 +369,32 @@ pub fn handle(
                     .filter(|s| !s.is_empty())
                     .unwrap_or("Banned by GM");
                 let until_unix = ctx.now_unix().saturating_add(duration_secs);
+                let live_sess = ctx
+                    .db
+                    .with_snapshot(|s| s.accounts.get(username).map(|a| a.user_id))
+                    .and_then(|uid| ctx.db.get_online_session(uid));
                 match ctx.db.ban_account(username, until_unix, reason) {
                     Ok(uid) => {
                         ctx.release_user_bindings(uid);
+                        if let Some(ref s) = live_sess {
+                            ctx.disconnect_session(
+                                s.session_id,
+                                "AccountBanned",
+                                &format!("Account banned until unix={until_unix}: {reason}"),
+                            );
+                        }
                         Some(Ok(PyRep::keyval([
                             ("command", PyRep::String(cmd.to_string())),
                             ("username", PyRep::String(username.to_string())),
                             ("userID", PyRep::Integer(uid as i64)),
                             ("bannedUntilUnix", PyRep::Integer(until_unix as i64)),
                             ("reason", PyRep::String(reason.to_string())),
+                            (
+                                "kickedSessionID",
+                                live_sess
+                                    .map(|s| PyRep::Integer(s.session_id as i64))
+                                    .unwrap_or(PyRep::None),
+                            ),
                         ])))
                     }
                     Err(e) => Some(Err(BridgeRpcError {
@@ -327,6 +419,91 @@ pub fn handle(
                     ]))),
                     Err(e) => Some(Err(BridgeRpcError {
                         code: "UnbanFailed".into(),
+                        message: e.to_string(),
+                    })),
+                }
+            } else if let Some(rest) = cmd.strip_prefix("/suspend ") {
+                let mut parts = rest.trim().splitn(3, ' ');
+                let Some(username) = parts.next().map(str::trim).filter(|s| !s.is_empty()) else {
+                    return Some(Err(BridgeRpcError {
+                        code: "InvalidSlashArgument".into(),
+                        message: "Usage: /suspend <username> <duration_seconds> [reason]".into(),
+                    }));
+                };
+                let Some(dur_str) = parts.next().map(str::trim) else {
+                    return Some(Err(BridgeRpcError {
+                        code: "InvalidSlashArgument".into(),
+                        message: "Usage: /suspend <username> <duration_seconds> [reason]".into(),
+                    }));
+                };
+                let Ok(duration_secs) = dur_str.parse::<u64>() else {
+                    return Some(Err(BridgeRpcError {
+                        code: "InvalidSlashArgument".into(),
+                        message: "Duration for /suspend must be a positive integer in seconds".into(),
+                    }));
+                };
+                if duration_secs == 0 {
+                    return Some(Err(BridgeRpcError {
+                        code: "InvalidSlashArgument".into(),
+                        message: "Duration for /suspend must be greater than zero".into(),
+                    }));
+                }
+                let reason = parts
+                    .next()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("Suspended by GM");
+                let until_unix = ctx.now_unix().saturating_add(duration_secs);
+                let live_sess = ctx
+                    .db
+                    .with_snapshot(|s| s.accounts.get(username).map(|a| a.user_id))
+                    .and_then(|uid| ctx.db.get_online_session(uid));
+                match ctx.db.suspend_account(username, until_unix, reason) {
+                    Ok(uid) => {
+                        ctx.release_user_bindings(uid);
+                        if let Some(ref s) = live_sess {
+                            ctx.disconnect_session(
+                                s.session_id,
+                                "AccountSuspended",
+                                &format!("Account suspended until unix={until_unix}: {reason}"),
+                            );
+                        }
+                        Some(Ok(PyRep::keyval([
+                            ("command", PyRep::String(cmd.to_string())),
+                            ("username", PyRep::String(username.to_string())),
+                            ("userID", PyRep::Integer(uid as i64)),
+                            ("suspendedUntilUnix", PyRep::Integer(until_unix as i64)),
+                            ("reason", PyRep::String(reason.to_string())),
+                            (
+                                "kickedSessionID",
+                                live_sess
+                                    .map(|s| PyRep::Integer(s.session_id as i64))
+                                    .unwrap_or(PyRep::None),
+                            ),
+                        ])))
+                    }
+                    Err(e) => Some(Err(BridgeRpcError {
+                        code: "SuspendFailed".into(),
+                        message: e.to_string(),
+                    })),
+                }
+            } else if let Some(rest) = cmd.strip_prefix("/unsuspend ") {
+                let username = rest.trim();
+                if username.is_empty() {
+                    return Some(Err(BridgeRpcError {
+                        code: "InvalidSlashArgument".into(),
+                        message: "Usage: /unsuspend <username>".into(),
+                    }));
+                }
+                match ctx.db.unsuspend_account(username) {
+                    Ok(uid) => Some(Ok(PyRep::keyval([
+                        ("command", PyRep::String(cmd.to_string())),
+                        ("username", PyRep::String(username.to_string())),
+                        ("userID", PyRep::Integer(uid as i64)),
+                        ("unsuspended", PyRep::Bool(true)),
+                    ]))),
+                    Err(e) => Some(Err(BridgeRpcError {
+                        code: "UnsuspendFailed".into(),
                         message: e.to_string(),
                     })),
                 }
@@ -364,6 +541,9 @@ pub fn handle(
                 }
                 let kicked_sess = ctx.db.kick_user(uid, reason, ctx.now_unix());
                 ctx.release_user_bindings(uid);
+                if let Some(ref s) = kicked_sess {
+                    ctx.disconnect_session(s.session_id, "SessionKicked", reason);
+                }
                 Some(Ok(PyRep::keyval([
                     ("command", PyRep::String(cmd.to_string())),
                     ("username", PyRep::String(username.to_string())),

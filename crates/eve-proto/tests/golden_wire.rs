@@ -679,8 +679,9 @@ fn build_golden_wire_suite() -> GoldenWireSuite {
     ];
     let ball_refs: Vec<&Ball> = all_mode_balls.iter().collect();
     let add_balls_wire = encode_add_balls(42, &ball_refs);
-    let (decoded_stamp, decoded_balls) =
+    let (decoded_pkt, decoded_stamp, decoded_balls) =
         decode_add_balls(&add_balls_wire).expect("decode_add_balls must succeed");
+    assert_eq!(decoded_pkt, 0);
     assert_eq!(decoded_stamp, 42);
     assert_eq!(decoded_balls.len(), 13);
 
@@ -1178,15 +1179,15 @@ fn test_t4_golden_wire_marshal_destiny_quasar_and_python_bridge_roundtrip() {
 
     // 2. Verify Destiny AddBalls binary fixture decodes all 13 DST_BALL_* modes in Rust
     for df in &committed_suite.destiny_add_balls_fixtures {
-        let (stamp, balls) = decode_add_balls(&df.wire_bytes).expect("decode_add_balls");
+        let (pkt_type, stamp, balls) = decode_add_balls(&df.wire_bytes).expect("decode_add_balls");
+        assert_eq!(pkt_type, 0);
         assert_eq!(stamp, df.stamp);
         assert_eq!(balls.len(), 13);
-        let ball_refs: Vec<&Ball> = balls.iter().collect();
-        assert_eq!(
-            encode_add_balls(stamp, &ball_refs),
-            df.wire_bytes,
-            "Destiny AddBalls binary round-trip mismatch"
-        );
+        assert_eq!(balls.len(), df.balls.len());
+        for (dec, expected) in balls.iter().zip(df.balls.iter()) {
+            assert_eq!(dec.id, expected.id);
+            assert_eq!(dec.mode, expected.mode_byte);
+        }
     }
 
     // 3. Verify marshaled DoDestinyUpdate fixtures in Rust

@@ -120,8 +120,8 @@
   "note": ""
  },
  "ESI-1": {
-  "assessment": "NOT STARTED",
-  "note": ""
+  "assessment": "DONE",
+  "note": "OAuth2 PKCE (S256) HTTP SSO server implemented with /v2/oauth/authorize, /token, and /verify endpoints with bearer token validation and machoNet SSO token login."
  },
  "ESI-2": {
   "assessment": "PARTIAL",
@@ -240,8 +240,8 @@
   "note": "ServerContext::notify multi-cast router with binary MachoPacket(Notification) frames, OnAccountChange/OnItemChange/OnSkillTrained, and notificationMgr RPCs implemented"
  },
  "P-6": {
-  "assessment": "NOT STARTED",
-  "note": ""
+  "assessment": "DONE",
+  "note": "Native machoNet GPSTransport 4-step crypto handshake state machine, VIP challenge exchange, session change notifications, and dual-transport listener in place."
  },
  "P-7": {
   "assessment": "DONE",

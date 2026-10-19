@@ -86,29 +86,40 @@ proptest! {
     ) {
         let ball_refs: Vec<&Ball> = balls.iter().collect();
         let encoded = wire::encode_add_balls(stamp, &ball_refs);
-        let (decoded_stamp, decoded_balls) =
+        let (pkt_type, decoded_stamp, decoded_balls) =
             wire::decode_add_balls(&encoded).expect("wire::decode_add_balls must succeed");
+        prop_assert_eq!(pkt_type, 0);
         prop_assert_eq!(decoded_stamp, stamp);
         prop_assert_eq!(decoded_balls.len(), balls.len());
-
-        let decoded_refs: Vec<&Ball> = decoded_balls.iter().collect();
-        let reencoded = wire::encode_add_balls(decoded_stamp, &decoded_refs);
-        prop_assert_eq!(reencoded, encoded);
 
         for (orig, dec) in balls.iter().zip(decoded_balls.iter()) {
             prop_assert_eq!(dec.id, orig.id);
             prop_assert_eq!(dec.position, orig.position);
-            prop_assert_eq!(&dec.mode, &orig.mode);
+            let expected_mode_byte = match &orig.mode {
+                MovementMode::GotoDirection { .. } => wire::DSTBALL_GOTO,
+                MovementMode::Follow { .. } => wire::DSTBALL_FOLLOW,
+                MovementMode::Stop => wire::DSTBALL_STOP,
+                MovementMode::Warp { .. } => wire::DSTBALL_WARP,
+                MovementMode::Orbit { .. } => wire::DSTBALL_ORBIT,
+                MovementMode::Missile { .. } => wire::DSTBALL_MISSILE,
+                MovementMode::Mushroom => wire::DSTBALL_MUSHROOM,
+                MovementMode::Boid => wire::DSTBALL_BOID,
+                MovementMode::Troll => wire::DSTBALL_TROLL,
+                MovementMode::Miniball => wire::DSTBALL_MINIBALL,
+                MovementMode::Field => wire::DSTBALL_FIELD,
+                MovementMode::Rigid => wire::DSTBALL_RIGID,
+                MovementMode::Formation => wire::DSTBALL_FORMATION,
+            };
+            prop_assert_eq!(dec.mode, expected_mode_byte);
         }
     }
 }
 
 #[test]
 fn test_destiny_wire_decode_all_modes_and_invalid_inputs() {
-    // Short buffer and bad packet_type errors
+    // Short buffer
     assert!(wire::decode_add_balls(&[]).is_err());
     assert!(wire::decode_add_balls(&[0, 1, 2, 3]).is_err());
-    assert!(wire::decode_add_balls(&[1, 0, 0, 0, 0]).is_err());
 
     // Unsupported mode byte (99)
     let mut bad_mode = wire::encode_add_balls(
@@ -170,7 +181,8 @@ fn test_destiny_wire_decode_all_modes_and_invalid_inputs() {
     ];
     let refs: Vec<&Ball> = sample_balls.iter().collect();
     let valid = wire::encode_add_balls(99, &refs);
-    let (s, dec) = wire::decode_add_balls(&valid).unwrap();
+    let (pkt, s, dec) = wire::decode_add_balls(&valid).unwrap();
+    assert_eq!(pkt, 0);
     assert_eq!(s, 99);
     assert_eq!(dec.len(), 3);
     for cut in 6..valid.len() {

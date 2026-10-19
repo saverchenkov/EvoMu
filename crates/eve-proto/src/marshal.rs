@@ -915,7 +915,104 @@ pub(crate) fn read_size_ex(input: &mut &[u8]) -> Result<usize, ProtoError> {
     }
 }
 
+/// Constructs a `PyRep::DBRow` (`Op_PyPackedRow` `0x2A`) from `(column_name, dbtype, value)` definitions,
+/// packing fixed-width columns widest-first (`64-bit, 32-bit, 16-bit, 8-bit, 1-bit`) into `raw_rle`
+/// and preserving variable-length object columns (`dbtype == 129/130`) as trailing stream elements.
+pub fn pack_dbrow(cols: &[(&str, i64, PyRep)]) -> PyRep {
+    let descriptor_cols: Vec<PyRep> = cols
+        .iter()
+        .map(|(name, dt, _)| {
+            PyRep::Tuple(vec![PyRep::String((*name).to_string()), PyRep::Integer(*dt)])
+        })
+        .collect();
+    let header = PyRep::ObjectEx {
+        is_type_2: false,
+        header: Box::new(PyRep::Tuple(vec![
+            PyRep::Token("blue.DBRowDescriptor".into()),
+            PyRep::Tuple(vec![PyRep::Tuple(descriptor_cols)]),
+        ])),
+        list: vec![],
+        dict: vec![],
+    };
+
+    let mut indexed: Vec<(usize, &str, i64, &PyRep)> = cols
+        .iter()
+        .enumerate()
+        .map(|(idx, (n, dt, v))| (idx, *n, *dt, v))
+        .collect();
+    indexed.sort_by(|(ia, _, dta, _), (ib, _, dtb, _)| {
+        dbtype_bit_width(*dtb)
+            .cmp(&dbtype_bit_width(*dta))
+            .then_with(|| ia.cmp(ib))
+    });
+
+    let mut raw_bytes = Vec::new();
+    let mut bool_bits: Vec<bool> = Vec::new();
+    for (_, _, dt, val) in &indexed {
+        match *dt {
+            20 | 21 | 64 | 6 => {
+                raw_bytes.extend_from_slice(&val.as_i64().unwrap_or(0).to_le_bytes());
+            }
+            5 => {
+                raw_bytes.extend_from_slice(&val.as_f64().unwrap_or(0.0).to_le_bytes());
+            }
+            3 => {
+                raw_bytes
+                    .extend_from_slice(&(val.as_i64().unwrap_or(0) as i32).to_le_bytes());
+            }
+            19 => {
+                raw_bytes
+                    .extend_from_slice(&(val.as_i64().unwrap_or(0) as u32).to_le_bytes());
+            }
+            4 => {
+                raw_bytes
+                    .extend_from_slice(&(val.as_f64().unwrap_or(0.0) as f32).to_le_bytes());
+            }
+            2 => {
+                raw_bytes
+                    .extend_from_slice(&(val.as_i64().unwrap_or(0) as i16).to_le_bytes());
+            }
+            18 => {
+                raw_bytes
+                    .extend_from_slice(&(val.as_i64().unwrap_or(0) as u16).to_le_bytes());
+            }
+            16 => {
+                raw_bytes.push((val.as_i64().unwrap_or(0) as i8) as u8);
+            }
+            17 => {
+                raw_bytes.push(val.as_i64().unwrap_or(0) as u8);
+            }
+            11 => {
+                bool_bits.push(val.as_bool().unwrap_or(false));
+            }
+            _ => {}
+        }
+    }
+    if !bool_bits.is_empty() {
+        let mut bool_bytes = vec![0u8; bool_bits.len().div_ceil(8)];
+        for (bit_idx, b) in bool_bits.into_iter().enumerate() {
+            if b {
+                bool_bytes[bit_idx / 8] |= 1u8 << (bit_idx % 8);
+            }
+        }
+        raw_bytes.extend_from_slice(&bool_bytes);
+    }
+
+    let raw_rle = encode_rle(&raw_bytes);
+    let columns = cols
+        .iter()
+        .map(|(n, _, v)| ((*n).to_string(), v.clone()))
+        .collect();
+
+    PyRep::DBRow {
+        header: Box::new(header),
+        columns,
+        raw_rle,
+    }
+}
+
 #[allow(dead_code)]
 fn _keep_extract_col_defs_ref() {
     let _ = extract_dbrow_col_defs;
 }
+
