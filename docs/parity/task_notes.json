@@ -328,32 +328,32 @@
   "note": ""
  },
  "SO-1": {
-  "assessment": "PARTIAL",
-  "note": ""
+  "assessment": "DONE",
+  "note": "Fleet manager (fleetProxy/fleetSvc) implemented with wings/squads hierarchy, role enforcement, invite/join/kick, OnFleetBroadcast, and solar system member position sharing."
  },
  "SO-2": {
-  "assessment": "PARTIAL",
-  "note": ""
+  "assessment": "DONE",
+  "note": "Corporation & alliance management implemented with corp creation, role bitmasks (ROLE_DIRECTOR etc), applications, member management, and 7 wallet divisions."
  },
  "SO-3": {
-  "assessment": "PARTIAL",
-  "note": ""
+  "assessment": "DONE",
+  "note": "LSC chat system implemented with dynamic channel join/leave, automatic local channel sync on solar system/wormhole/filament jump, and OnLSC notifications."
  },
  "SO-4": {
-  "assessment": "PARTIAL",
-  "note": ""
+  "assessment": "DONE",
+  "note": "In-game mail (mailMgr) implemented with SendMail, GetHeaders, GetBody, MarkRead, and DeleteMail with per-pilot status tracking."
  },
  "SO-5": {
-  "assessment": "NOT STARTED",
-  "note": ""
+  "assessment": "DONE",
+  "note": "Bookmarks system (bookmarkSvc) implemented with spatial and entity coordinate resolution, folder categorization, and 500-bookmark capacity limits."
  },
  "SO-6": {
-  "assessment": "PARTIAL",
-  "note": ""
+  "assessment": "DONE",
+  "note": "Cosmic signatures generator and 8-probe tetrahedral scanning mathematics implemented with signal strength, sensor strength, and 100% pinpointing."
  },
  "SO-7": {
-  "assessment": "NOT STARTED",
-  "note": ""
+  "assessment": "DONE",
+  "note": "Wormholes lifecycle (Healthy, EOL, Expired), mass stages, ship jump mass deduction, mass exhaustion collapse, and wormhole destination jumps implemented."
  },
  "SP-1": {
   "assessment": "DONE",
