@@ -540,7 +540,922 @@ def _run_self_tests():
     })
     assert len(events) == 1 and events[0][0] == "OnSessionChanged"
     assert slot.event.is_set() and from_pyrep_json(slot.response["Ok"]) == 99
+
+    # 3. Verify binary marshal, RLE, AddBalls, and Quasar protobuf codecs in-process
+    _run_binary_codec_self_tests()
     print("[OK] evomu_bridge.py self-tests passed!")
+
+
+MARSHAL_STRING_TABLE = [
+    "*corpid", "*locationid", "age", "Asteroid", "authentication", "ballID", "beyonce",
+    "bloodlineID", "capacity", "categoryID", "character", "characterID", "characterName",
+    "characterType", "charID", "chatx", "clientID", "config", "contraband",
+    "corporationDateTime", "corporationID", "createDateTime", "customInfo", "description",
+    "divisionID", "DoDestinyUpdate", "dogmaIM", "EVE System", "flag", "foo.SlimItem",
+    "gangID", "Gemini", "gender", "graphicID", "groupID", "header", "idName", "invbroker",
+    "itemID", "items", "jumps", "line", "lines", "locationID", "locationName",
+    "macho.CallReq", "macho.CallRsp", "macho.MachoAddress", "macho.Notification",
+    "macho.SessionChangeNotification", "modules", "name", "objectCaching",
+    "objectCaching.CachedObject", "OnChatJoin", "OnChatLeave", "OnChatSpeak",
+    "OnGodmaShipEffect", "OnItemChange", "OnModuleAttributeChange", "OnMultiEvent",
+    "orbitID", "ownerID", "ownerName", "quantity", "raceID", "RowClass", "securityStatus",
+    "Sentry Gun", "sessionchange", "singleton", "skillEffect", "squadronID", "typeID",
+    "used", "userID", "util.CachedObject", "util.IndexRowset", "util.Moniker", "util.Row",
+    "util.Rowset", "*multicastID", "AddBalls", "AttackHit3", "AttackHit3R", "AttackHit4R",
+    "DoDestinyUpdates", "GetLocationsEx", "InvalidateCachedObjects", "JoinChannel", "LSC",
+    "LaunchMissile", "LeaveChannel", "OID+", "OID-", "OnAggressionChange",
+    "OnCharGangChange", "OnCharNoLongerInStation", "OnCharNowInStation", "OnDamageMessage",
+    "OnDamageStateChange", "OnEffectHit", "OnGangDamageStateChange", "OnLSC", "OnSpecialFX",
+    "OnTarget", "RemoveBalls", "SendMessage", "SetMaxSpeed", "SetSpeedFraction",
+    "TerminalExplosion", "address", "alert", "allianceID", "allianceid", "bid", "bookmark",
+    "bounty", "channel", "charid", "constellationid", "corpID", "corpid", "corprole",
+    "damage", "duration", "effects.Laser", "gangid", "gangrole", "hqID", "issued", "jit",
+    "languageID", "locationid", "machoVersion", "marketProxy", "minVolume", "orderID",
+    "price", "range", "regionID", "regionid", "role", "rolesAtAll", "rolesAtBase",
+    "rolesAtHQ", "rolesAtOther", "shipid", "sn", "solarSystemID", "solarsystemid",
+    "solarsystemid2", "source", "splash", "stationID", "stationid", "target", "userType",
+    "userid", "volEntered", "volRemaining", "weapon",
+    "agent.missionTemplatizedContent_BasicKillMission",
+    "agent.missionTemplatizedContent_ResearchKillMission",
+    "agent.missionTemplatizedContent_StorylineKillMission",
+    "agent.missionTemplatizedContent_GenericStorylineKillMission",
+    "agent.missionTemplatizedContent_BasicCourierMission",
+    "agent.missionTemplatizedContent_ResearchCourierMission",
+    "agent.missionTemplatizedContent_StorylineCourierMission",
+    "agent.missionTemplatizedContent_GenericStorylineCourierMission",
+    "agent.missionTemplatizedContent_BasicTradeMission",
+    "agent.missionTemplatizedContent_ResearchTradeMission",
+    "agent.missionTemplatizedContent_StorylineTradeMission",
+    "agent.missionTemplatizedContent_GenericStorylineTradeMission",
+    "agent.offerTemplatizedContent_BasicExchangeOffer",
+    "agent.offerTemplatizedContent_BasicExchangeOffer_ContrabandDemand",
+    "agent.offerTemplatizedContent_BasicExchangeOffer_Crafting",
+    "agent.LoyaltyPoints", "agent.ResearchPoints", "agent.Credits", "agent.Item",
+    "agent.Entity", "agent.Objective", "agent.FetchObjective", "agent.EncounterObjective",
+    "agent.DungeonObjective", "agent.TransportObjective", "agent.Reward",
+    "agent.TimeBonusReward", "agent.MissionReferral", "agent.Location",
+    "agent.StandardMissionDetails", "agent.OfferDetails", "agent.ResearchMissionDetails",
+    "agent.StorylineMissionDetails",
+]
+
+
+def _write_size_ex(out, n):
+    if n < 0xFF:
+        out.append(n & 0xFF)
+    else:
+        out.append(0xFF)
+        out.extend(bytearray(struct.pack("<I", n)))
+
+
+def _read_size_ex(buf, pos):
+    first = buf[pos]
+    pos += 1
+    if first < 0xFF:
+        return first, pos
+    val = struct.unpack("<I", bytes(buf[pos:pos + 4]))[0]
+    return val, pos + 4
+
+
+def _dbtype_bit_width(dbtype):
+    if dbtype in (20, 21, 64, 5, 6):
+        return 64
+    if dbtype in (3, 19, 4):
+        return 32
+    if dbtype in (2, 18):
+        return 16
+    if dbtype in (16, 17):
+        return 8
+    if dbtype == 11:
+        return 1
+    return 0
+
+
+def rle_decode(rle_bytes, expected_len):
+    ba = bytearray(rle_bytes)
+    out = bytearray([0] * expected_len)
+    in_ix = 0
+    out_ix = 0
+    run = 0
+    nibble = False
+    while in_ix < len(ba):
+        nibble = not nibble
+        if nibble:
+            run = ba[in_ix]
+            in_ix += 1
+            count = (run & 0x0F) - 8
+        else:
+            count = (run >> 4) - 8
+        if count >= 0:
+            zeros = count + 1
+            for _ in range(zeros):
+                if out_ix < expected_len:
+                    out[out_ix] = 0
+                    out_ix += 1
+        else:
+            while count < 0 and in_ix < len(ba):
+                if out_ix < expected_len:
+                    out[out_ix] = ba[in_ix]
+                    out_ix += 1
+                in_ix += 1
+                count += 1
+    return bytes(out)
+
+
+def rle_encode(raw_bytes):
+    ba = bytearray(raw_bytes)
+    out = bytearray()
+    i = 0
+    high_nibble = False
+    ctrl_pos = 0
+    while i < len(ba):
+        if ba[i] == 0:
+            z = 1
+            while i + z < len(ba) and ba[i + z] == 0 and z < 8:
+                z += 1
+            is_zero, run_len = True, z
+        else:
+            lit = 1
+            while i + lit < len(ba) and ba[i + lit] != 0 and lit < 8:
+                lit += 1
+            is_zero, run_len = False, lit
+        nib = (8 + run_len - 1) if is_zero else (8 - run_len)
+        if not high_nibble:
+            ctrl_pos = len(out)
+            out.append(nib & 0x0F)
+        else:
+            out[ctrl_pos] |= (nib & 0x0F) << 4
+        if not is_zero:
+            out.extend(ba[i:i + run_len])
+        i += run_len
+        high_nibble = not high_nibble
+    return bytes(out)
+
+
+def _extract_dbrow_defs(header_node):
+    if not isinstance(header_node, dict):
+        return []
+    tag = header_node.get("$py")
+    val = header_node.get("val")
+    if tag == "ObjectEx" and isinstance(val, dict):
+        return _extract_dbrow_defs(val.get("header"))
+    if tag == "Tuple" and isinstance(val, list) and len(val) >= 2:
+        outer = val[1]
+        if isinstance(outer, dict) and outer.get("$py") == "Tuple":
+            items = outer.get("val", [])
+            if items and isinstance(items[0], dict) and items[0].get("$py") == "Tuple":
+                first_inner = items[0].get("val", [])
+                if first_inner and isinstance(first_inner[0], dict) and first_inner[0].get("$py") == "Tuple":
+                    items = first_inner
+            defs = []
+            for entry in items:
+                if isinstance(entry, dict) and entry.get("$py") == "Tuple":
+                    pair = entry.get("val", [])
+                    if len(pair) >= 2:
+                        name = pair[0].get("val", "")
+                        dt = int(pair[1].get("val", 0))
+                        defs.append((name, dt))
+            return defs
+    return []
+
+
+def _unpack_packed_row_columns(header_node, raw_rle):
+    defs = _extract_dbrow_defs(header_node)
+    if not defs:
+        return []
+    expected_bytes = 0
+    bool_count = 0
+    for _, dt in defs:
+        bw = _dbtype_bit_width(dt)
+        if bw == 64:
+            expected_bytes += 8
+        elif bw == 32:
+            expected_bytes += 4
+        elif bw == 16:
+            expected_bytes += 2
+        elif bw == 8:
+            expected_bytes += 1
+        elif bw == 1:
+            bool_count += 1
+    expected_bytes += (bool_count + 7) // 8
+    if expected_bytes == 0:
+        return [[n, {"$py": "None"}] for n, _ in defs]
+    unpacked = bytearray(rle_decode(raw_rle, expected_bytes))
+    indexed = list(enumerate(defs))
+    indexed.sort(key=lambda item: (-_dbtype_bit_width(item[1][1]), item[0]))
+    offset = 0
+    bool_bit_idx = 0
+    decoded_by_idx = []
+    for orig_idx, (name, dt) in indexed:
+        if dt in (20, 21, 64, 6) and offset + 8 <= len(unpacked):
+            v = struct.unpack("<q", bytes(unpacked[offset:offset + 8]))[0]
+            offset += 8
+            node = {"$py": "Integer", "val": v}
+        elif dt == 5 and offset + 8 <= len(unpacked):
+            v = struct.unpack("<d", bytes(unpacked[offset:offset + 8]))[0]
+            offset += 8
+            node = {"$py": "Real", "val": v}
+        elif dt == 3 and offset + 4 <= len(unpacked):
+            v = struct.unpack("<i", bytes(unpacked[offset:offset + 4]))[0]
+            offset += 4
+            node = {"$py": "Integer", "val": v}
+        elif dt == 19 and offset + 4 <= len(unpacked):
+            v = struct.unpack("<I", bytes(unpacked[offset:offset + 4]))[0]
+            offset += 4
+            node = {"$py": "Integer", "val": v}
+        elif dt == 4 and offset + 4 <= len(unpacked):
+            v = struct.unpack("<f", bytes(unpacked[offset:offset + 4]))[0]
+            offset += 4
+            node = {"$py": "Real", "val": float(v)}
+        elif dt == 2 and offset + 2 <= len(unpacked):
+            v = struct.unpack("<h", bytes(unpacked[offset:offset + 2]))[0]
+            offset += 2
+            node = {"$py": "Integer", "val": v}
+        elif dt == 18 and offset + 2 <= len(unpacked):
+            v = struct.unpack("<H", bytes(unpacked[offset:offset + 2]))[0]
+            offset += 2
+            node = {"$py": "Integer", "val": v}
+        elif dt == 16 and offset < len(unpacked):
+            v = struct.unpack("<b", bytes(unpacked[offset:offset + 1]))[0]
+            offset += 1
+            node = {"$py": "Integer", "val": v}
+        elif dt == 17 and offset < len(unpacked):
+            v = unpacked[offset]
+            offset += 1
+            node = {"$py": "Integer", "val": v}
+        elif dt == 11:
+            byte_idx = offset + (bool_bit_idx // 8)
+            bit_mask = 1 << (bool_bit_idx % 8)
+            bool_bit_idx += 1
+            bval = bool(unpacked[byte_idx] & bit_mask) if byte_idx < len(unpacked) else False
+            node = {"$py": "Bool", "val": bval}
+        else:
+            node = {"$py": "None"}
+        decoded_by_idx.append((orig_idx, name, node))
+    decoded_by_idx.sort(key=lambda x: x[0])
+    return [[name, node] for _, name, node in decoded_by_idx]
+
+
+def marshal_encode_pyrep(node):
+    """Encodes a tagged `PyRep` JSON dict into a binary `0x7e` eveMarshal frame."""
+    out = bytearray([0x7E, 0, 0, 0, 0])
+    _marshal_encode_inner(node, out)
+    return bytes(out)
+
+
+def _marshal_encode_inner(node, out):
+    tag = node["$py"]
+    val = node.get("val")
+    if tag == "None":
+        out.append(0x01)
+    elif tag == "Bool":
+        out.append(0x1F if val else 0x20)
+    elif tag == "Token":
+        b = val.encode("utf-8")
+        out.append(0x02)
+        _write_size_ex(out, len(b))
+        out.extend(bytearray(b))
+    elif tag == "Integer":
+        v = int(val)
+        if v == -1:
+            out.append(0x07)
+        elif v == 0:
+            out.append(0x08)
+        elif v == 1:
+            out.append(0x09)
+        elif -128 <= v <= 127:
+            out.append(0x06)
+            out.extend(bytearray(struct.pack("<b", v)))
+        elif -32768 <= v <= 32767:
+            out.append(0x05)
+            out.extend(bytearray(struct.pack("<h", v)))
+        elif -2147483648 <= v <= 2147483647:
+            out.append(0x04)
+            out.extend(bytearray(struct.pack("<i", v)))
+        else:
+            out.append(0x03)
+            out.extend(bytearray(struct.pack("<q", v)))
+    elif tag == "Real":
+        v = float(val)
+        if v == 0.0 and struct.pack("<d", v) == b"\x00" * 8:
+            out.append(0x0B)
+        else:
+            out.append(0x0A)
+            out.extend(bytearray(struct.pack("<d", v)))
+    elif tag == "Bytes":
+        b = bytearray(val)
+        if len(b) == 0:
+            out.append(0x0E)
+        elif len(b) == 1:
+            out.append(0x0F)
+            out.append(b[0])
+        elif len(b) <= 0xFF:
+            out.append(0x10)
+            out.append(len(b))
+            out.extend(b)
+        else:
+            out.append(0x13)
+            _write_size_ex(out, len(b))
+            out.extend(b)
+    elif tag == "String":
+        b = val.encode("utf-8")
+        if len(b) == 0:
+            out.append(0x28)
+        else:
+            out.append(0x2E)
+            _write_size_ex(out, len(b))
+            out.extend(bytearray(b))
+    elif tag == "Buffer":
+        b = bytearray(val)
+        out.append(0x0D)
+        _write_size_ex(out, len(b))
+        out.extend(b)
+    elif tag == "Picked":
+        b = bytearray(val)
+        out.append(0x21)
+        _write_size_ex(out, len(b))
+        out.extend(b)
+    elif tag == "Tuple":
+        n = len(val)
+        if n == 0:
+            out.append(0x24)
+        elif n == 1:
+            out.append(0x25)
+            _marshal_encode_inner(val[0], out)
+        elif n == 2:
+            out.append(0x2C)
+            _marshal_encode_inner(val[0], out)
+            _marshal_encode_inner(val[1], out)
+        else:
+            out.append(0x14)
+            _write_size_ex(out, n)
+            for item in val:
+                _marshal_encode_inner(item, out)
+    elif tag == "List":
+        n = len(val)
+        if n == 0:
+            out.append(0x26)
+        elif n == 1:
+            out.append(0x27)
+            _marshal_encode_inner(val[0], out)
+        else:
+            out.append(0x15)
+            _write_size_ex(out, n)
+            for item in val:
+                _marshal_encode_inner(item, out)
+    elif tag == "Dict":
+        out.append(0x16)
+        _write_size_ex(out, len(val))
+        for k, v in val:
+            _marshal_encode_inner(v, out)
+            _marshal_encode_inner(k, out)
+    elif tag == "SubStruct":
+        out.append(0x19)
+        _marshal_encode_inner(val, out)
+    elif tag == "ChecksumedStream":
+        out.append(0x1C)
+        out.extend(bytearray(struct.pack("<I", int(val["checksum"]))))
+        _marshal_encode_inner(val["body"], out)
+    elif tag == "SubStream":
+        out.append(0x2B)
+        sub = bytearray(marshal_encode_pyrep(val))
+        _write_size_ex(out, len(sub))
+        out.extend(sub)
+    elif tag == "KeyVal":
+        out.append(0x17)
+        _marshal_encode_inner({"$py": "Token", "val": "util.KeyVal"}, out)
+        entries = [[{"$py": "String", "val": k}, val[k]] for k in sorted(val.keys())]
+        _marshal_encode_inner({"$py": "Dict", "val": entries}, out)
+    elif tag == "Rowset":
+        out.append(0x17)
+        _marshal_encode_inner({"$py": "Token", "val": "util.Rowset"}, out)
+        cols = {"$py": "List", "val": [{"$py": "String", "val": c} for c in val["columns"]]}
+        lines = {"$py": "List", "val": [{"$py": "List", "val": r} for r in val["rows"]]}
+        d = {"$py": "Dict", "val": [
+            [{"$py": "String", "val": "header"}, cols],
+            [{"$py": "String", "val": "RowClass"}, {"$py": "Token", "val": "util.Row"}],
+            [{"$py": "String", "val": "lines"}, lines],
+        ]}
+        _marshal_encode_inner(d, out)
+    elif tag == "IndexRowset":
+        out.append(0x17)
+        _marshal_encode_inner({"$py": "Token", "val": "util.IndexRowset"}, out)
+        cols = {"$py": "List", "val": [{"$py": "String", "val": c} for c in val["columns"]]}
+        items_dict = {"$py": "Dict", "val": [[k, {"$py": "List", "val": r}] for k, r in val["items"]]}
+        d = {"$py": "Dict", "val": [
+            [{"$py": "String", "val": "header"}, cols],
+            [{"$py": "String", "val": "RowClass"}, {"$py": "Token", "val": "util.Row"}],
+            [{"$py": "String", "val": "idName"}, {"$py": "String", "val": val["key_column"]}],
+            [{"$py": "String", "val": "items"}, items_dict],
+        ]}
+        _marshal_encode_inner(d, out)
+    elif tag == "TupleSet":
+        cols = {"$py": "List", "val": [{"$py": "String", "val": c} for c in val["columns"]]}
+        lines = {"$py": "List", "val": [{"$py": "List", "val": r} for r in val["rows"]]}
+        _marshal_encode_inner({"$py": "Tuple", "val": [cols, lines]}, out)
+    elif tag == "DBRow":
+        out.append(0x2A)
+        _marshal_encode_inner(val["header"], out)
+        raw_rle = bytearray(val["raw_rle"])
+        _write_size_ex(out, len(raw_rle))
+        out.extend(raw_rle)
+        defs = _extract_dbrow_defs(val["header"])
+        col_map = dict(val["columns"])
+        for idx, (col_name, dt) in enumerate(defs):
+            if _dbtype_bit_width(dt) == 0:
+                cval = col_map.get(col_name, {"$py": "None"})
+                _marshal_encode_inner(cval, out)
+    elif tag == "Object":
+        out.append(0x17)
+        _marshal_encode_inner({"$py": "Token", "val": val["type_name"]}, out)
+        _marshal_encode_inner(val["args"], out)
+    elif tag == "ObjectEx":
+        out.append(0x23 if val.get("is_type_2") else 0x22)
+        _marshal_encode_inner(val["header"], out)
+        for item in val.get("list", []):
+            _marshal_encode_inner(item, out)
+        out.append(0x2D)
+        for k, v in val.get("dict", []):
+            _marshal_encode_inner(k, out)
+            _marshal_encode_inner(v, out)
+        out.append(0x2D)
+
+
+def marshal_decode_pyrep(raw_bytes):
+    """Decodes a raw `0x7e` or `0x78` zlib-compressed eveMarshal stream into a tagged `PyRep` JSON dict."""
+    import zlib
+    ba = bytearray(raw_bytes)
+    if ba[0] == 0x78:
+        ba = bytearray(zlib.decompress(bytes(ba)))
+    if ba[0] != 0x7E:
+        raise ValueError("Invalid marshal header byte: 0x%02x" % ba[0])
+    save_count = struct.unpack("<I", bytes(ba[1:5]))[0]
+    body_end = len(ba) - (save_count * 4)
+    state = {
+        "pos": 5,
+        "body_end": body_end,
+        "save_pos": body_end,
+        "saved_slots": [None] * save_count,
+    }
+    node = _marshal_decode_inner(ba, state)
+    if state["pos"] != body_end:
+        raise ValueError("Trailing bytes in marshal stream: %d" % (body_end - state["pos"]))
+    return node
+
+
+def _marshal_decode_inner(ba, state):
+    raw_byte = ba[state["pos"]]
+    state["pos"] += 1
+    is_saved = (raw_byte & 0x40) != 0
+    opcode = raw_byte & 0x3F
+    slot_idx = None
+    if is_saved:
+        sp = state["save_pos"]
+        idx = struct.unpack("<I", bytes(ba[sp:sp + 4]))[0]
+        state["save_pos"] += 4
+        slot_idx = idx - 1
+
+    if opcode == 0x01:
+        val = {"$py": "None"}
+    elif opcode == 0x1F:
+        val = {"$py": "Bool", "val": True}
+    elif opcode == 0x20:
+        val = {"$py": "Bool", "val": False}
+    elif opcode == 0x02:
+        n, state["pos"] = _read_size_ex(ba, state["pos"])
+        s = bytes(ba[state["pos"]:state["pos"] + n]).decode("utf-8")
+        state["pos"] += n
+        val = {"$py": "Token", "val": s}
+    elif opcode == 0x07:
+        val = {"$py": "Integer", "val": -1}
+    elif opcode == 0x08:
+        val = {"$py": "Integer", "val": 0}
+    elif opcode == 0x09:
+        val = {"$py": "Integer", "val": 1}
+    elif opcode == 0x06:
+        v = struct.unpack("<b", bytes(ba[state["pos"]:state["pos"] + 1]))[0]
+        state["pos"] += 1
+        val = {"$py": "Integer", "val": v}
+    elif opcode == 0x05:
+        v = struct.unpack("<h", bytes(ba[state["pos"]:state["pos"] + 2]))[0]
+        state["pos"] += 2
+        val = {"$py": "Integer", "val": v}
+    elif opcode == 0x04:
+        v = struct.unpack("<i", bytes(ba[state["pos"]:state["pos"] + 4]))[0]
+        state["pos"] += 4
+        val = {"$py": "Integer", "val": v}
+    elif opcode == 0x03:
+        v = struct.unpack("<q", bytes(ba[state["pos"]:state["pos"] + 8]))[0]
+        state["pos"] += 8
+        val = {"$py": "Integer", "val": v}
+    elif opcode == 0x2F:
+        n, state["pos"] = _read_size_ex(ba, state["pos"])
+        raw_int = bytearray(ba[state["pos"]:state["pos"] + n])
+        state["pos"] += n
+        pad = 0xFF if (n > 0 and (raw_int[-1] & 0x80) != 0) else 0x00
+        while len(raw_int) < 8:
+            raw_int.append(pad)
+        v = struct.unpack("<q", bytes(raw_int[:8]))[0]
+        val = {"$py": "Integer", "val": v}
+    elif opcode == 0x0B:
+        val = {"$py": "Real", "val": 0.0}
+    elif opcode == 0x0A:
+        v = struct.unpack("<d", bytes(ba[state["pos"]:state["pos"] + 8]))[0]
+        state["pos"] += 8
+        val = {"$py": "Real", "val": v}
+    elif opcode == 0x0D:
+        n, state["pos"] = _read_size_ex(ba, state["pos"])
+        b = [int(x) for x in ba[state["pos"]:state["pos"] + n]]
+        state["pos"] += n
+        val = {"$py": "Buffer", "val": b}
+    elif opcode == 0x0E:
+        val = {"$py": "Bytes", "val": []}
+    elif opcode == 0x0F:
+        b = [int(ba[state["pos"]])]
+        state["pos"] += 1
+        val = {"$py": "Bytes", "val": b}
+    elif opcode == 0x10:
+        n = ba[state["pos"]]
+        state["pos"] += 1
+        b = [int(x) for x in ba[state["pos"]:state["pos"] + n]]
+        state["pos"] += n
+        val = {"$py": "Bytes", "val": b}
+    elif opcode == 0x11:
+        idx = ba[state["pos"]]
+        state["pos"] += 1
+        val = {"$py": "String", "val": MARSHAL_STRING_TABLE[idx - 1]}
+    elif opcode == 0x29:
+        s = bytes(ba[state["pos"]:state["pos"] + 2]).decode("utf-16le")
+        state["pos"] += 2
+        val = {"$py": "String", "val": s}
+    elif opcode == 0x12:
+        char_len, state["pos"] = _read_size_ex(ba, state["pos"])
+        byte_len = char_len * 2
+        s = bytes(ba[state["pos"]:state["pos"] + byte_len]).decode("utf-16le")
+        state["pos"] += byte_len
+        val = {"$py": "String", "val": s}
+    elif opcode == 0x13:
+        n, state["pos"] = _read_size_ex(ba, state["pos"])
+        b = [int(x) for x in ba[state["pos"]:state["pos"] + n]]
+        state["pos"] += n
+        val = {"$py": "Bytes", "val": b}
+    elif opcode == 0x21:
+        n, state["pos"] = _read_size_ex(ba, state["pos"])
+        b = [int(x) for x in ba[state["pos"]:state["pos"] + n]]
+        state["pos"] += n
+        val = {"$py": "Picked", "val": b}
+    elif opcode == 0x28:
+        val = {"$py": "String", "val": ""}
+    elif opcode == 0x2E:
+        n, state["pos"] = _read_size_ex(ba, state["pos"])
+        s = bytes(ba[state["pos"]:state["pos"] + n]).decode("utf-8")
+        state["pos"] += n
+        val = {"$py": "String", "val": s}
+    elif opcode == 0x24:
+        val = {"$py": "Tuple", "val": []}
+    elif opcode == 0x25:
+        val = {"$py": "Tuple", "val": [_marshal_decode_inner(ba, state)]}
+    elif opcode == 0x2C:
+        a = _marshal_decode_inner(ba, state)
+        b = _marshal_decode_inner(ba, state)
+        val = {"$py": "Tuple", "val": [a, b]}
+    elif opcode == 0x14:
+        n, state["pos"] = _read_size_ex(ba, state["pos"])
+        val = {"$py": "Tuple", "val": [_marshal_decode_inner(ba, state) for _ in range(n)]}
+    elif opcode == 0x26:
+        val = {"$py": "List", "val": []}
+    elif opcode == 0x27:
+        val = {"$py": "List", "val": [_marshal_decode_inner(ba, state)]}
+    elif opcode == 0x15:
+        n, state["pos"] = _read_size_ex(ba, state["pos"])
+        val = {"$py": "List", "val": [_marshal_decode_inner(ba, state) for _ in range(n)]}
+    elif opcode == 0x16:
+        n, state["pos"] = _read_size_ex(ba, state["pos"])
+        entries = []
+        for _ in range(n):
+            v = _marshal_decode_inner(ba, state)
+            k = _marshal_decode_inner(ba, state)
+            entries.append([k, v])
+        val = {"$py": "Dict", "val": entries}
+    elif opcode == 0x17:
+        type_rep = _marshal_decode_inner(ba, state)
+        type_name = type_rep.get("val", "")
+        args = _marshal_decode_inner(ba, state)
+        if type_name == "util.KeyVal" and args.get("$py") == "Dict":
+            kv = {k.get("val"): v for k, v in args.get("val", [])}
+            val = {"$py": "KeyVal", "val": kv}
+        elif type_name == "util.Rowset" and args.get("$py") == "Dict":
+            dmap = {k.get("val"): v for k, v in args.get("val", [])}
+            cols = [c.get("val") for c in dmap["header"].get("val", [])]
+            rows = [r.get("val", []) for r in dmap["lines"].get("val", [])]
+            val = {"$py": "Rowset", "val": {"columns": cols, "rows": rows}}
+        elif type_name == "util.IndexRowset" and args.get("$py") == "Dict":
+            dmap = {k.get("val"): v for k, v in args.get("val", [])}
+            cols = [c.get("val") for c in dmap["header"].get("val", [])]
+            key_col = dmap["idName"].get("val")
+            items = [[ik, iv.get("val", [])] for ik, iv in dmap["items"].get("val", [])]
+            val = {"$py": "IndexRowset", "val": {"key_column": key_col, "columns": cols, "items": items}}
+        else:
+            val = {"$py": "Object", "val": {"type_name": type_name, "args": args}}
+    elif opcode in (0x22, 0x23):
+        is_type_2 = opcode == 0x23
+        header = _marshal_decode_inner(ba, state)
+        lst = []
+        while ba[state["pos"]] != 0x2D:
+            lst.append(_marshal_decode_inner(ba, state))
+        state["pos"] += 1
+        dct = []
+        while ba[state["pos"]] != 0x2D:
+            k = _marshal_decode_inner(ba, state)
+            v = _marshal_decode_inner(ba, state)
+            dct.append([k, v])
+        state["pos"] += 1
+        val = {"$py": "ObjectEx", "val": {"is_type_2": is_type_2, "header": header, "list": lst, "dict": dct}}
+    elif opcode == 0x19:
+        val = {"$py": "SubStruct", "val": _marshal_decode_inner(ba, state)}
+    elif opcode == 0x1C:
+        ck = struct.unpack("<I", bytes(ba[state["pos"]:state["pos"] + 4]))[0]
+        state["pos"] += 4
+        body = _marshal_decode_inner(ba, state)
+        val = {"$py": "ChecksumedStream", "val": {"checksum": ck, "body": body}}
+    elif opcode == 0x2B:
+        n, state["pos"] = _read_size_ex(ba, state["pos"])
+        sub = bytes(ba[state["pos"]:state["pos"] + n])
+        state["pos"] += n
+        val = {"$py": "SubStream", "val": marshal_decode_pyrep(sub)}
+    elif opcode == 0x2A:
+        header = _marshal_decode_inner(ba, state)
+        rle_len, state["pos"] = _read_size_ex(ba, state["pos"])
+        raw_rle = [int(x) for x in ba[state["pos"]:state["pos"] + rle_len]]
+        state["pos"] += rle_len
+        columns = _unpack_packed_row_columns(header, raw_rle)
+        defs = _extract_dbrow_defs(header)
+        for idx, (col_name, dt) in enumerate(defs):
+            if _dbtype_bit_width(dt) == 0:
+                cval = _marshal_decode_inner(ba, state)
+                if idx < len(columns):
+                    columns[idx] = [col_name, cval]
+        val = {"$py": "DBRow", "val": {"header": header, "columns": columns, "raw_rle": raw_rle}}
+    elif opcode == 0x1B:
+        idx, state["pos"] = _read_size_ex(ba, state["pos"])
+        val = state["saved_slots"][idx - 1]
+    else:
+        raise ValueError("Unsupported marshal opcode: 0x%02x" % opcode)
+
+    if slot_idx is not None:
+        state["saved_slots"][slot_idx] = val
+    return val
+
+
+def decode_add_balls(raw_bytes):
+    """Decodes a binary Destiny `AddBalls` buffer across all 13 `DST_BALL_*` modes (`0..=12`)."""
+    ba = bytearray(raw_bytes)
+    if len(ba) < 5 or ba[0] != 0:
+        raise ValueError("Invalid AddBalls header")
+    stamp = struct.unpack("<I", bytes(ba[1:5]))[0]
+    pos = 5
+    balls = []
+    while pos < len(ba):
+        ball_id = struct.unpack("<q", bytes(ba[pos:pos + 8]))[0]
+        mode_byte = ba[pos + 8]
+        radius = struct.unpack("<f", bytes(ba[pos + 9:pos + 13]))[0]
+        px, py, pz = struct.unpack("<ddd", bytes(ba[pos + 13:pos + 37]))
+        flags = ba[pos + 37]
+        pos += 38
+        mass = 0.0
+        if (flags & 0x04) != 0:
+            mass = struct.unpack("<d", bytes(ba[pos:pos + 8]))[0]
+            pos += 25  # mass(8) + cloak(1) + alliance(8) + corp(4) + harmonic(4)
+        max_velocity = 0.0
+        vx = vy = vz = 0.0
+        inertia = 1.0
+        speed_fraction = 0.0
+        if mode_byte != 11 and (flags & 0x01) != 0:
+            max_velocity = struct.unpack("<f", bytes(ba[pos:pos + 4]))[0]
+            vx, vy, vz = struct.unpack("<ddd", bytes(ba[pos + 4:pos + 28]))
+            inertia, speed_fraction = struct.unpack("<ff", bytes(ba[pos + 28:pos + 36]))
+            pos += 36
+        _formation_id = ba[pos]
+        pos += 1
+        extra = {}
+        if mode_byte == 0:
+            dx, dy, dz = struct.unpack("<ddd", bytes(ba[pos:pos + 24]))
+            pos += 24
+            extra = {"direction": [dx, dy, dz]}
+        elif mode_byte in (1, 4):
+            tid = struct.unpack("<q", bytes(ba[pos:pos + 8]))[0]
+            rng = struct.unpack("<f", bytes(ba[pos + 8:pos + 12]))[0]
+            pos += 12
+            extra = {"target_id": tid, "range": float(rng)}
+        elif mode_byte == 3:
+            dx, dy, dz = struct.unpack("<ddd", bytes(ba[pos:pos + 24]))
+            ws = struct.unpack("<I", bytes(ba[pos + 44:pos + 48]))[0]
+            pos += 48
+            extra = {"destination": [dx, dy, dz], "warp_speed_au_s": float(ws) / 10.0}
+        elif mode_byte == 5:
+            tid = struct.unpack("<q", bytes(ba[pos:pos + 8]))[0]
+            pos += 8
+            extra = {"target_id": tid}
+        balls.append({
+            "id": ball_id,
+            "mode_byte": mode_byte,
+            "flags": flags,
+            "radius": float(radius),
+            "position": [px, py, pz],
+            "mass": mass,
+            "max_velocity": float(max_velocity),
+            "velocity": [vx, vy, vz],
+            "inertia": float(inertia),
+            "speed_fraction": float(speed_fraction),
+            "extra": extra,
+        })
+    return stamp, balls
+
+
+def encode_add_balls(stamp, balls):
+    """Encodes a binary Destiny `AddBalls` buffer matching `eve_destiny::wire::encode_add_balls`."""
+    out = bytearray([0])
+    out.extend(bytearray(struct.pack("<I", int(stamp))))
+    for b in balls:
+        mode_byte = int(b["mode_byte"])
+        flags = int(b["flags"])
+        out.extend(bytearray(struct.pack("<q", int(b["id"]))))
+        out.append(mode_byte)
+        out.extend(bytearray(struct.pack("<f", float(b["radius"]))))
+        px, py, pz = b["position"]
+        out.extend(bytearray(struct.pack("<ddd", float(px), float(py), float(pz))))
+        out.append(flags)
+        if (flags & 0x04) != 0:
+            out.extend(bytearray(struct.pack("<d", float(b.get("mass", 0.0)))))
+            out.append(0)
+            out.extend(bytearray(struct.pack("<qIf", -1, 0, -1.0)))
+        if mode_byte != 11 and (flags & 0x01) != 0:
+            out.extend(bytearray(struct.pack("<f", float(b.get("max_velocity", 0.0)))))
+            vx, vy, vz = b.get("velocity", [0.0, 0.0, 0.0])
+            out.extend(bytearray(struct.pack("<ddd", float(vx), float(vy), float(vz))))
+            out.extend(bytearray(struct.pack(
+                "<ff", float(b.get("inertia", 1.0)), float(b.get("speed_fraction", 0.0))
+            )))
+        out.append(1)
+        extra = b.get("extra", {})
+        if mode_byte == 0:
+            dx, dy, dz = extra["direction"]
+            out.extend(bytearray(struct.pack("<ddd", float(dx), float(dy), float(dz))))
+        elif mode_byte in (1, 4):
+            out.extend(bytearray(struct.pack(
+                "<qf", int(extra["target_id"]), float(extra["range"])
+            )))
+        elif mode_byte == 3:
+            dx, dy, dz = extra["destination"]
+            ws = int(round(float(extra["warp_speed_au_s"]) * 10.0))
+            out.extend(bytearray(struct.pack("<dddIdqI", float(dx), float(dy), float(dz), 0, 15000.0, 0, ws)))
+        elif mode_byte == 5:
+            out.extend(bytearray(struct.pack("<q", int(extra["target_id"]))))
+    return bytes(out)
+
+
+def _write_varint(val, out):
+    v = int(val)
+    while True:
+        b = v & 0x7F
+        v >>= 7
+        if v != 0:
+            b |= 0x80
+        out.append(b)
+        if v == 0:
+            break
+
+
+def _read_varint(ba, pos):
+    res = 0
+    shift = 0
+    while True:
+        b = ba[pos]
+        pos += 1
+        res |= (b & 0x7F) << shift
+        if (b & 0x80) == 0:
+            return res, pos
+        shift += 7
+
+
+def quasar_encode_envelope(env):
+    out = bytearray()
+    type_bytes = bytearray(env["type_url"].encode("utf-8"))
+    _write_varint((1 << 3) | 2, out)
+    _write_varint(len(type_bytes), out)
+    out.extend(type_bytes)
+    _write_varint((2 << 3) | 0, out)
+    _write_varint(int(env["correlation_id"]), out)
+    _write_varint((3 << 3) | 0, out)
+    _write_varint(int(env["status_code"]), out)
+    payload = bytearray(env["payload"])
+    _write_varint((4 << 3) | 2, out)
+    _write_varint(len(payload), out)
+    out.extend(payload)
+    return bytes(out)
+
+
+def quasar_decode_envelope(raw_bytes):
+    ba = bytearray(raw_bytes)
+    pos = 0
+    type_url = ""
+    correlation_id = 0
+    status_code = 0
+    payload = []
+    while pos < len(ba):
+        tag, pos = _read_varint(ba, pos)
+        fnum = tag >> 3
+        wtype = tag & 0x07
+        if wtype == 0:
+            v, pos = _read_varint(ba, pos)
+            if fnum == 2:
+                correlation_id = v
+            elif fnum == 3:
+                status_code = v
+        elif wtype == 2:
+            n, pos = _read_varint(ba, pos)
+            chunk = ba[pos:pos + n]
+            pos += n
+            if fnum == 1:
+                type_url = bytes(chunk).decode("utf-8")
+            elif fnum == 4:
+                payload = [int(x) for x in chunk]
+        elif wtype == 1:
+            pos += 8
+        elif wtype == 5:
+            pos += 4
+    return {
+        "type_url": type_url,
+        "correlation_id": correlation_id,
+        "status_code": status_code,
+        "payload": payload,
+    }
+
+
+def _run_binary_codec_self_tests():
+    raw_rle = rle_encode(b"\x00\x00\x00\x00\x2a\x00\x00\x00")
+    assert rle_decode(raw_rle, 8) == b"\x00\x00\x00\x00\x2a\x00\x00\x00"
+    sample = {"$py": "Tuple", "val": [{"$py": "Integer", "val": 30000142}, {"$py": "String", "val": "Jita"}]}
+    encoded = marshal_encode_pyrep(sample)
+    assert marshal_decode_pyrep(encoded) == sample
+
+
+def verify_golden_wire_fixtures(fixture_path):
+    """Verifies every Marshal, Destiny, and Quasar golden wire fixture in `fixture_path`."""
+    data = json.load(open(fixture_path, "r"))
+    marshal_count = 0
+    for entry in data.get("marshal_fixtures", []):
+        raw = bytes(bytearray(entry["wire_bytes"]))
+        decoded = marshal_decode_pyrep(raw)
+        if decoded != entry["expected_pyrep"]:
+            raise AssertionError("Marshal decode mismatch on %s: %r != %r" % (
+                entry["name"], decoded, entry["expected_pyrep"]
+            ))
+        if entry.get("canonical_roundtrip", True):
+            reencoded = [int(x) for x in bytearray(marshal_encode_pyrep(decoded))]
+            if reencoded != entry["wire_bytes"]:
+                raise AssertionError("Marshal re-encode mismatch on %s" % entry["name"])
+        marshal_count += 1
+
+    destiny_balls_count = 0
+    for entry in data.get("destiny_add_balls_fixtures", []):
+        raw = bytes(bytearray(entry["wire_bytes"]))
+        stamp, balls = decode_add_balls(raw)
+        if stamp != entry["stamp"] or len(balls) != len(entry["balls"]):
+            raise AssertionError("AddBalls decode mismatch on %s" % entry["name"])
+        reencoded = [int(x) for x in bytearray(encode_add_balls(stamp, balls))]
+        if reencoded != entry["wire_bytes"]:
+            raise AssertionError("AddBalls re-encode byte mismatch on %s" % entry["name"])
+        destiny_balls_count += len(balls)
+
+    destiny_updates_count = 0
+    for entry in data.get("destiny_update_fixtures", []):
+        raw = bytes(bytearray(entry["wire_bytes"]))
+        decoded = marshal_decode_pyrep(raw)
+        if decoded != entry["expected_pyrep"]:
+            raise AssertionError("DoDestinyUpdate mismatch on %s" % entry["name"])
+        reencoded = [int(x) for x in bytearray(marshal_encode_pyrep(decoded))]
+        if reencoded != entry["wire_bytes"]:
+            raise AssertionError("DoDestinyUpdate re-encode mismatch on %s" % entry["name"])
+        destiny_updates_count += 1
+
+    quasar_count = 0
+    for entry in data.get("quasar_fixtures", []):
+        raw = bytes(bytearray(entry["wire_bytes"]))
+        decoded = quasar_decode_envelope(raw)
+        if decoded != entry["envelope"]:
+            raise AssertionError("Quasar decode mismatch on %s" % entry["name"])
+        reencoded = [int(x) for x in bytearray(quasar_encode_envelope(decoded))]
+        if reencoded != entry["wire_bytes"]:
+            raise AssertionError("Quasar re-encode mismatch on %s" % entry["name"])
+        quasar_count += 1
+
+    return {
+        "ok": True,
+        "marshal_fixtures": marshal_count,
+        "destiny_balls": destiny_balls_count,
+        "destiny_updates": destiny_updates_count,
+        "quasar_fixtures": quasar_count,
+    }
 
 
 def _run_live_demo(host="127.0.0.1", port=26001):
@@ -584,9 +1499,11 @@ def _run_live_demo(host="127.0.0.1", port=26001):
 
 
 if __name__ == "__main__":
-    import sys
-
-    if "--self-test" in sys.argv:
+    if "--verify-golden" in sys.argv:
+        idx = sys.argv.index("--verify-golden")
+        report = verify_golden_wire_fixtures(sys.argv[idx + 1])
+        print(json.dumps(report))
+    elif "--self-test" in sys.argv:
         _run_self_tests()
     else:
         _run_self_tests()
@@ -594,3 +1511,4 @@ if __name__ == "__main__":
             _run_live_demo()
         except Exception as exc:
             print("[INFO] Live server not reachable on 127.0.0.1:26001 (%s); self-tests succeeded." % exc)
+

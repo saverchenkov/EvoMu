@@ -431,19 +431,19 @@ impl ServerContext {
                         total_sp_gained += gained_sp;
                         let current_lvl =
                             skills_map.get(&q.type_id).map(|s| s.level).unwrap_or(0);
-                        let Some(rank) = sde.types.get(&q.type_id).and_then(|t| {
+                        let mut achieved_lvl = current_lvl;
+                        if let Some(rank) = sde.types.get(&q.type_id).and_then(|t| {
                             t.default_attributes
                                 .get(&eve_sde::attr_ids::SKILL_TIME_CONSTANT)
                                 .copied()
-                        }) else {
-                            continue;
-                        };
-                        let mut achieved_lvl = current_lvl;
-                        for lvl in (current_lvl + 1)..=q.target_level {
-                            if q.start_sp + 0.5 >= crate::formulas::sp_for_skill_level(rank, lvl) {
-                                achieved_lvl = lvl;
-                            } else {
-                                break;
+                        }) {
+                            for lvl in (current_lvl + 1)..=q.target_level {
+                                if q.start_sp + 0.5 >= crate::formulas::sp_for_skill_level(rank, lvl)
+                                {
+                                    achieved_lvl = lvl;
+                                } else {
+                                    break;
+                                }
                             }
                         }
                         skills_map.insert(

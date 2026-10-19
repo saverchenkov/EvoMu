@@ -25,13 +25,14 @@ const ATTR_PIN_EXTRACTION_QUANTITY: u16 = 1642;
 const ATTR_PIN_CYCLE_TIME: u16 = 1643;
 
 /// Resolves the raw P0 planetary resource (`harvesterType` attribute `709`), base pin extraction
-/// cycle duration (`pinCycleTime` attribute `1643` = `300`s, used as the vertical-slice cooldown
-/// until Phase 7 `E-5` dynamic ECU program durations land), base pin extraction quantity
+/// cycle duration (`pinCycleTime` attribute `1643` = `300`s), base pin extraction quantity
 /// (`pinExtractionQuantity` attribute `1642` = `1000` units), and R0 export tax base
 /// (`exportTaxMultiplier` attribute `1641` = `5.0` ISK per `Planetary_Industry.md:248`) for an
 /// SDE planet celestial (`group_id == 7`) via SDE extractor pins (`group_id == 1026`, linked by
-/// `planetRestriction` attribute `1632`). Supports selecting any of the planet's 5 SDE raw P0
-/// resources via `requested_resource_or_pin`, rejecting any non-planet resource or schematic ID.
+/// `planetRestriction` attribute `1632`). Note: pin count (`cc_level + 1`), batch yield scaling
+/// (`pinExtractionQuantity * (pins_count - 1)`), `pinCycleTime` cooldown, and combined extraction/POCO
+/// export in `Flush` are vertical-slice approximations until Phase 7 `E-5` pin-graph and customs-office
+/// state land. Supports selecting any of the planet's 5 SDE raw P0 resources via `requested_resource_or_pin`.
 fn resolve_sde_planet_p0_extraction(
     ctx: &ServerContext,
     solar_system_id: u32,

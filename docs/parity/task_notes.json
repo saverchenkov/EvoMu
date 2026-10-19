@@ -317,7 +317,7 @@
  },
  "S-7": {
   "assessment": "PARTIAL",
-  "note": "Replaced hardcoded fallbacks with SDE Dogma attribute lookups and enforced in-space proximity, system, and planet-resource checks across structure, planet, FW, and sov RPCs."
+  "note": "Replaced hardcoded fallbacks with SDE Dogma attribute lookups (harvesterType 709, pinCycleTime 1643, pinExtractionQuantity 1642, exportTaxMultiplier 1641) and enforced in-space proximity, system, and planet-resource checks; derived PI pin count (cc_level + 1) and combined extraction/export remain vertical-slice approximations until E-5."
  },
  "S-8": {
   "assessment": "DONE",
@@ -388,20 +388,20 @@
   "note": "Added 10k-case proptest suites for eve-proto, eve-destiny, and eve-db, plus cargo-fuzz targets and seed corpus. Full 1h campaign and Q-1 gateway descriptors pending."
  },
  "T-4": {
-  "assessment": "NOT STARTED",
-  "note": ""
+  "assessment": "PARTIAL",
+  "note": "Implemented cross-language Rust/Python V24.01 golden wire fixture suite (39 eveMarshal opcodes, RLE/DBRow, all 13 DST_BALL_* modes in AddBalls, 12 DoDestinyUpdate actions, and 7 Quasar Protobuf envelopes); remaining 40 destiny actions and full 1,455 Quasar schema captures pending."
  },
  "T-5": {
   "assessment": "DONE",
   "note": "Installed cargo-llvm-cov and cargo-mutants and added scripts/qa/verify_cov_and_mutants.py enforcing >= 85% coverage and mutation score."
  },
  "T-6": {
-  "assessment": "NOT STARTED",
-  "note": ""
+  "assessment": "PARTIAL",
+  "note": "Implemented tools/client-harness/run_journeys with dual-client concurrent evomu_bridge orchestration, 29-journey result.json emission, honest passed=false gating when EVE.app is not driven, and log-hygiene scanning; native P-6 machoNet and ESI-1 SSO real-client automation pending."
  },
  "T-7": {
   "assessment": "PARTIAL",
-  "note": "Implemented injectable ServerClock and VirtualServerClock with pause-on-tick, time acceleration, skill and industry timers, and SDE pinCycleTime cooldowns; belt mining and PI pin graphs pending."
+  "note": "Implemented injectable ServerClock and VirtualServerClock with pause-on-tick, time acceleration, skill and industry timers (preserving partial skill queues), and SDE pinCycleTime cooldowns; belt mining and PI pin graphs pending."
  },
  "Z-1": {
   "assessment": "PARTIAL",
