@@ -444,6 +444,8 @@ impl WorldRepository {
             committed_idempotency_keys: HashSet::new(),
             licensed_skins: HashMap::new(),
             applied_ship_skins: HashMap::new(),
+            module_online_states: HashMap::new(),
+            weapon_banks: HashMap::new(),
         };
         let mut conn = rusqlite::Connection::open_in_memory()
             .expect("open in-memory SQLite connection for WorldRepository");

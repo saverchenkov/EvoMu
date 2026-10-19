@@ -181,6 +181,10 @@ pub enum InventoryFlag {
     RigSlot1 = 93,
     RigSlot2 = 94,
     SubSystemSlot0 = 125,
+    SubSystemSlot1 = 126,
+    SubSystemSlot2 = 127,
+    SubSystemSlot3 = 128,
+    SubSystemSlot4 = 129,
     FighterBay = 158,
     Deliveries = 173,
 }
@@ -225,6 +229,10 @@ impl InventoryFlag {
             93 => Self::RigSlot1,
             94 => Self::RigSlot2,
             125 => Self::SubSystemSlot0,
+            126 => Self::SubSystemSlot1,
+            127 => Self::SubSystemSlot2,
+            128 => Self::SubSystemSlot3,
+            129 => Self::SubSystemSlot4,
             158 => Self::FighterBay,
             173 => Self::Deliveries,
             _ => Self::None,
@@ -805,6 +813,10 @@ pub struct WorldStateSnapshot {
     pub licensed_skins: HashMap<i64, Vec<u32>>,
     #[serde(default)]
     pub applied_ship_skins: HashMap<i64, u32>,
+    #[serde(default)]
+    pub module_online_states: HashMap<i64, bool>,
+    #[serde(default)]
+    pub weapon_banks: HashMap<i64, HashMap<i64, Vec<i64>>>,
 }
 
 impl WorldStateSnapshot {

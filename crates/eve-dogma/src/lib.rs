@@ -993,6 +993,29 @@ pub fn compute_passive_recharge(
     (max_capacity * term * term).clamp(0.0, max_capacity)
 }
 
+/// Simulates one time step of the EVE Online capacitor differential equation (`DG-2`):
+///
+/// $$\frac{dC}{dt} = \frac{10}{T} \left(\sqrt{\frac{C}{C_{\max}}} - \frac{C}{C_{\max}}\right) C_{\max}$$
+pub fn simulate_capacitor(current: f64, cap_max: f64, recharge_time: f64, dt: f64) -> f64 {
+    if cap_max <= 0.0 || recharge_time <= 0.0 {
+        return current;
+    }
+    let c = current.clamp(0.0, cap_max);
+    let c_ratio = (c / cap_max).clamp(0.0, 1.0);
+    let c_dot = (10.0 / recharge_time) * (c_ratio.sqrt() - c_ratio) * cap_max;
+    (c + c_dot * dt).clamp(0.0, cap_max)
+}
+
+/// Instantaneous capacitor recharge rate $\dot{C} = \frac{10}{T} (\sqrt{\frac{C}{C_{\max}}} - \frac{C}{C_{\max}}) C_{\max}$ (`DG-2`).
+pub fn capacitor_c_dot(current: f64, cap_max: f64, recharge_time: f64) -> f64 {
+    if cap_max <= 0.0 || recharge_time <= 0.0 {
+        return 0.0;
+    }
+    let c = current.clamp(0.0, cap_max);
+    let c_ratio = (c / cap_max).clamp(0.0, 1.0);
+    (10.0 / recharge_time) * (c_ratio.sqrt() - c_ratio) * cap_max
+}
+
 /// Module activation state machine (`Offline`, `Online`, `Active`, `Overloaded`, `Reactivating`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ModuleState {
@@ -1275,8 +1298,31 @@ impl ShipFittingEngine {
             dummy,
         );
         for m in &sorted_modules {
-            ctx.ship_located_items
-                .push(DogmaItemState::from_sde(m.item_id, m.type_id, sde));
+            let mut mod_state = DogmaItemState::from_sde(m.item_id, m.type_id, sde);
+            if let Some(ctid) = m.charge_type_id {
+                if let Some(charge_type) = sde.types.get(&ctid) {
+                    let charge_state = DogmaItemState::from_sde(0, ctid, sde);
+                    for &eid in &charge_type.effect_ids {
+                        if let Some(effect) = sde.effects.get(&eid) {
+                            for spec in &effect.modifiers {
+                                if spec.domain == "otherID" {
+                                    if let Some(vm) = compile_modifier_spec_to_vm(spec, false) {
+                                        let snap = charge_state.clone();
+                                        vm.execute_on_target_with_effect(
+                                            0,
+                                            Some(eid),
+                                            &snap,
+                                            &mut mod_state,
+                                            sde,
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            ctx.ship_located_items.push(mod_state);
         }
 
         // 1. Evaluate trained character skills (`category_id == 16`, passive effects `effect_category == 0`).
@@ -1556,6 +1602,49 @@ impl ShipFittingEngine {
     /// and fitted module passive/online/active/overload effects through [`DogmaEffectContext`]
     /// over real V24.01 SDE `modifierInfo` records (`DG-1`, `OF-31`).
     pub fn recalculate_stats(&mut self, sde: &SdeRegistry) {
+        let mut hi_mod = 0.0;
+        let mut med_mod = 0.0;
+        let mut low_mod = 0.0;
+        let mut tur_mod = 0.0;
+        let mut lch_mod = 0.0;
+        for m in self.modules.values() {
+            if (125..=128).contains(&m.flag_id) {
+                if let Some(t) = sde.types.get(&m.type_id) {
+                    if let Some(&v) = t.default_attributes.get(&1374) {
+                        hi_mod += v;
+                    }
+                    if let Some(&v) = t.default_attributes.get(&1375) {
+                        med_mod += v;
+                    }
+                    if let Some(&v) = t.default_attributes.get(&1376) {
+                        low_mod += v;
+                    }
+                    if let Some(&v) = t.default_attributes.get(&1368) {
+                        tur_mod += v;
+                    }
+                    if let Some(&v) = t.default_attributes.get(&1369) {
+                        lch_mod += v;
+                    }
+                }
+            }
+        }
+        let hull_group = sde
+            .types
+            .get(&self.ship.type_id)
+            .map(|t| t.group_id)
+            .unwrap_or(0);
+        if hull_group == 963 {
+            self.ship.base_attributes.insert(attr_ids::HI_SLOTS, hi_mod);
+            self.ship.base_attributes.insert(attr_ids::MED_SLOTS, med_mod);
+            self.ship.base_attributes.insert(attr_ids::LOW_SLOTS, low_mod);
+            self.ship
+                .base_attributes
+                .insert(attr_ids::TURRET_SLOTS_LEFT, tur_mod);
+            self.ship
+                .base_attributes
+                .insert(attr_ids::LAUNCHER_SLOTS_LEFT, lch_mod);
+        }
+
         let ctx = self.evaluated_context(sde);
         self.ship = ctx.ship;
     }
@@ -1569,13 +1658,59 @@ impl ShipFittingEngine {
             .find(|m| m.item_id == module_item_id)
     }
 
-    /// Fits and brings a module online, validating slot effects, hull slot counts, turret/launcher
-    /// hardpoints, hull/group restrictions, rig/charge size classes, character skills, and CPU/PG/Calibration.
-    pub fn fit_and_online_module(
+    /// Returns the effective evaluated [`DogmaItemState`] of a module (fitted or hypothetical),
+    /// including character skill bonuses, overload bonuses, and any loaded charge/script modifiers (`DG-5`, `DG-6`).
+    pub fn build_effective_module_state(
+        &self,
+        module_item_id: i64,
+        module_type_id: TypeId,
+        _overloaded: bool,
+        sde: &SdeRegistry,
+    ) -> DogmaItemState {
+        if let Some(state) = self.module_state(module_item_id, sde) {
+            return state;
+        }
+        let mut state = DogmaItemState::from_sde(module_item_id, module_type_id, sde);
+
+        let charge_type_id = self
+            .modules
+            .get(&module_item_id)
+            .and_then(|m| m.charge_type_id);
+
+        if let Some(ctid) = charge_type_id {
+            if let Some(charge_type) = sde.types.get(&ctid) {
+                let charge_state = DogmaItemState::from_sde(0, ctid, sde);
+                for &eid in &charge_type.effect_ids {
+                    if let Some(effect) = sde.effects.get(&eid) {
+                        for spec in &effect.modifiers {
+                            if spec.domain == "otherID" {
+                                if let Some(vm) = compile_modifier_spec_to_vm(spec, false) {
+                                    let snap = charge_state.clone();
+                                    vm.execute_on_target_with_effect(
+                                        0,
+                                        Some(eid),
+                                        &snap,
+                                        &mut state,
+                                        sde,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        state
+    }
+
+    /// Fits a module into a slot with the specified online state (`online == true` checks CPU & PG,
+    /// `online == false` fits into `ModuleState::Offline` without CPU/PG checks).
+    pub fn fit_module_with_state(
         &mut self,
         module_item_id: i64,
         module_type_id: TypeId,
         flag_id: u16,
+        online: bool,
         sde: &SdeRegistry,
     ) -> Result<(), String> {
         let mod_type = sde
@@ -1606,6 +1741,17 @@ impl ShipFittingEngine {
             .any(|m| m.flag_id == flag_id && m.item_id != module_item_id)
         {
             return Err(format!("Fitting slot {flag_id} is already occupied"));
+        }
+
+        // Validate subsystem slot (attribute 1366: subSystemSlot)
+        if let Some(&req_slot_f) = mod_type.default_attributes.get(&1366) {
+            let req_slot = req_slot_f as u16;
+            if flag_id != req_slot {
+                return Err(format!(
+                    "SubsystemSlotMismatch: subsystem {} (type {}) requires slot {req_slot}, cannot fit to flag {flag_id}",
+                    mod_type.name, module_type_id
+                ));
+            }
         }
 
         // Unconditionally validate module slot-type effect against target flag range
@@ -1705,26 +1851,92 @@ impl ShipFittingEngine {
             }
         }
 
-        // Validate hull group/type restrictions (canFitShipGroup01..03, canFitShipType1..2)
-        let allowed_groups: Vec<u32> = [
-            attr_ids::CAN_FIT_SHIP_GROUP_01,
-            attr_ids::CAN_FIT_SHIP_GROUP_02,
-            attr_ids::CAN_FIT_SHIP_GROUP_03,
-        ]
-        .into_iter()
-        .filter_map(|aid| mod_type.default_attributes.get(&aid).copied())
-        .filter(|&v| v > 0.0)
-        .map(|v| v as u32)
-        .collect();
-        let allowed_types: Vec<TypeId> = [
-            attr_ids::CAN_FIT_SHIP_TYPE_1,
-            attr_ids::CAN_FIT_SHIP_TYPE_2,
-        ]
-        .into_iter()
-        .filter_map(|aid| mod_type.default_attributes.get(&aid).copied())
-        .filter(|&v| v > 0.0)
-        .map(|v| v as TypeId)
-        .collect();
+        // Validate maxGroupFitted (attribute 1544)
+        if let Some(&limit_f) = mod_type.default_attributes.get(&1544) {
+            let limit = limit_f as usize;
+            let group_fitted = self
+                .modules
+                .values()
+                .filter(|m| m.item_id != module_item_id)
+                .filter(|m| {
+                    sde.types
+                        .get(&m.type_id)
+                        .map(|t| t.group_id == mod_type.group_id)
+                        .unwrap_or(false)
+                })
+                .count();
+            if group_fitted >= limit {
+                return Err(format!(
+                    "MaxGroupFittedExceeded: module {} (group {}) limit is {limit}, already fitted {group_fitted}",
+                    mod_type.name, mod_type.group_id
+                ));
+            }
+        }
+
+        // Validate maxTypeFitted (attribute 2431)
+        if let Some(&limit_f) = mod_type.default_attributes.get(&2431) {
+            let limit = limit_f as usize;
+            let type_fitted = self
+                .modules
+                .values()
+                .filter(|m| m.item_id != module_item_id && m.type_id == module_type_id)
+                .count();
+            if type_fitted >= limit {
+                return Err(format!(
+                    "MaxTypeFittedExceeded: module {} (type {}) limit is {limit}, already fitted {type_fitted}",
+                    mod_type.name, module_type_id
+                ));
+            }
+        }
+
+        // Validate maxGroupOnline (attribute 978 or group 46) if online
+        if online {
+            let max_group_online = mod_type
+                .default_attributes
+                .get(&978)
+                .copied()
+                .or_else(|| if mod_type.group_id == 46 { Some(1.0) } else { None });
+            if let Some(limit) = max_group_online {
+                let online_count = self
+                    .modules
+                    .values()
+                    .filter(|m| m.item_id != module_item_id && m.state != ModuleState::Offline)
+                    .filter(|m| {
+                        sde.types
+                            .get(&m.type_id)
+                            .map(|t| t.group_id == mod_type.group_id)
+                            .unwrap_or(false)
+                    })
+                    .count();
+                if (online_count as f64) >= limit {
+                    return Err(format!(
+                        "MaxGroupOnlineExceeded: module {} (group {}) limit is {limit}",
+                        mod_type.name, mod_type.group_id
+                    ));
+                }
+            }
+        }
+
+        // Validate hull group/type restrictions (canFitShipGroup01..20, canFitShipType1..12)
+        let group_attrs = [
+            1298_u16, 1299, 1300, 1301, 1872, 1879, 1880, 1881, 2065, 2396, 2476, 2477, 2478,
+            2479, 2480, 2481, 2482, 2483, 2484, 2485,
+        ];
+        let type_attrs = [
+            1302_u16, 1303, 1304, 1305, 1944, 2103, 2463, 2486, 2487, 2488, 2758, 5948,
+        ];
+        let allowed_groups: Vec<u32> = group_attrs
+            .into_iter()
+            .filter_map(|aid| mod_type.default_attributes.get(&aid).copied())
+            .filter(|&v| v > 0.0)
+            .map(|v| v as u32)
+            .collect();
+        let allowed_types: Vec<TypeId> = type_attrs
+            .into_iter()
+            .filter_map(|aid| mod_type.default_attributes.get(&aid).copied())
+            .filter(|&v| v > 0.0)
+            .map(|v| v as TypeId)
+            .collect();
         if (!allowed_groups.is_empty() || !allowed_types.is_empty())
             && !allowed_groups.contains(&hull_type.group_id)
             && !allowed_types.contains(&self.ship.type_id)
@@ -1789,11 +2001,142 @@ impl ShipFittingEngine {
             }
         }
 
-        // Prevent duplicate online modifiers if already fitted
+        // Validate calibration (for rigs)
+        let cal_need = mod_type
+            .default_attributes
+            .get(&attr_ids::UPGRADE_COST)
+            .copied()
+            .unwrap_or(0.0);
+        if cal_need > 0.0 {
+            let current_cal_used: f64 = self
+                .modules
+                .values()
+                .filter(|m| m.item_id != module_item_id && (92..=94).contains(&m.flag_id))
+                .filter_map(|m| {
+                    sde.types
+                        .get(&m.type_id)?
+                        .default_attributes
+                        .get(&attr_ids::UPGRADE_COST)
+                        .copied()
+                })
+                .sum();
+            let cal_capacity = self.ship.get_attribute(attr_ids::UPGRADE_CAPACITY, sde);
+            if current_cal_used + cal_need > cal_capacity + 1e-6 {
+                return Err(format!(
+                    "Insufficient Calibration: need {cal_need}, available {}",
+                    cal_capacity - current_cal_used
+                ));
+            }
+        }
+
+        // Prevent duplicate modifiers if already fitted
         if self.modules.contains_key(&module_item_id) {
             self.modules.remove(&module_item_id);
         }
         self.recalculate_stats(sde);
+
+        if online {
+            let cpu_need = mod_type
+                .default_attributes
+                .get(&attr_ids::CPU)
+                .copied()
+                .unwrap_or(0.0);
+            let pg_need = mod_type
+                .default_attributes
+                .get(&attr_ids::POWER)
+                .copied()
+                .unwrap_or(0.0);
+
+            let cpu_avail = self.ship.get_attribute(attr_ids::CPU_OUTPUT, sde)
+                - self.ship.get_attribute(attr_ids::CPU_LOAD, sde);
+            let pg_avail = self.ship.get_attribute(attr_ids::POWER_OUTPUT, sde)
+                - self.ship.get_attribute(attr_ids::POWER_LOAD, sde);
+
+            if cpu_need > cpu_avail + 1e-6 {
+                return Err(format!("Insufficient CPU: need {cpu_need}, available {cpu_avail}"));
+            }
+            if pg_need > pg_avail + 1e-6 {
+                return Err(format!(
+                    "Insufficient Powergrid: need {pg_need}, available {pg_avail}"
+                ));
+            }
+        }
+
+        self.modules.insert(
+            module_item_id,
+            FittedModule {
+                item_id: module_item_id,
+                type_id: module_type_id,
+                flag_id,
+                state: if online {
+                    ModuleState::Online
+                } else {
+                    ModuleState::Offline
+                },
+                damage_hp: 0.0,
+                max_hp: 40.0,
+                charge_type_id: None,
+                charge_quantity: 0,
+            },
+        );
+        self.recalculate_stats(sde);
+        Ok(())
+    }
+
+    /// Fits and brings a module online, validating slot effects, hull slot counts, turret/launcher
+    /// hardpoints, hull/group restrictions, rig/charge size classes, character skills, and CPU/PG/Calibration.
+    pub fn fit_and_online_module(
+        &mut self,
+        module_item_id: i64,
+        module_type_id: TypeId,
+        flag_id: u16,
+        sde: &SdeRegistry,
+    ) -> Result<(), String> {
+        self.fit_module_with_state(module_item_id, module_type_id, flag_id, true, sde)
+    }
+
+    /// Brings an offline fitted module online, checking maxGroupOnline and CPU/PG.
+    pub fn set_module_online(
+        &mut self,
+        module_item_id: i64,
+        sde: &SdeRegistry,
+    ) -> Result<(), String> {
+        let (mod_type_id, _flag_id) = {
+            let m = self
+                .modules
+                .get(&module_item_id)
+                .ok_or_else(|| format!("Module {module_item_id} is not fitted"))?;
+            (m.type_id, m.flag_id)
+        };
+        let mod_type = sde
+            .types
+            .get(&mod_type_id)
+            .ok_or_else(|| format!("Unknown module type {mod_type_id}"))?;
+
+        let max_group_online = mod_type
+            .default_attributes
+            .get(&978)
+            .copied()
+            .or_else(|| if mod_type.group_id == 46 { Some(1.0) } else { None });
+        if let Some(limit) = max_group_online {
+            let online_count = self
+                .modules
+                .values()
+                .filter(|m| m.item_id != module_item_id && m.state != ModuleState::Offline)
+                .filter(|m| {
+                    sde.types
+                        .get(&m.type_id)
+                        .map(|t| t.group_id == mod_type.group_id)
+                        .unwrap_or(false)
+                })
+                .count();
+            if (online_count as f64) >= limit {
+                return Err(format!(
+                    "MaxGroupOnlineExceeded: module {} (group {}) limit is {limit}",
+                    mod_type.name, mod_type.group_id
+                ));
+            }
+        }
 
         let cpu_need = mod_type
             .default_attributes
@@ -1805,17 +2148,11 @@ impl ShipFittingEngine {
             .get(&attr_ids::POWER)
             .copied()
             .unwrap_or(0.0);
-        let cal_need = mod_type
-            .default_attributes
-            .get(&attr_ids::UPGRADE_COST)
-            .copied()
-            .unwrap_or(0.0);
 
         let cpu_avail = self.ship.get_attribute(attr_ids::CPU_OUTPUT, sde)
             - self.ship.get_attribute(attr_ids::CPU_LOAD, sde);
         let pg_avail = self.ship.get_attribute(attr_ids::POWER_OUTPUT, sde)
             - self.ship.get_attribute(attr_ids::POWER_LOAD, sde);
-        let cal_avail = self.ship.get_attribute(attr_ids::UPGRADE_CAPACITY, sde);
 
         if cpu_need > cpu_avail + 1e-6 {
             return Err(format!("Insufficient CPU: need {cpu_need}, available {cpu_avail}"));
@@ -1825,25 +2162,25 @@ impl ShipFittingEngine {
                 "Insufficient Powergrid: need {pg_need}, available {pg_avail}"
             ));
         }
-        if cal_need > 0.0 && cal_need > cal_avail + 1e-6 {
-            return Err(format!(
-                "Insufficient Calibration: need {cal_need}, available {cal_avail}"
-            ));
-        }
 
-        self.modules.insert(
-            module_item_id,
-            FittedModule {
-                item_id: module_item_id,
-                type_id: module_type_id,
-                flag_id,
-                state: ModuleState::Online,
-                damage_hp: 0.0,
-                max_hp: 40.0,
-                charge_type_id: None,
-                charge_quantity: 0,
-            },
-        );
+        if let Some(m) = self.modules.get_mut(&module_item_id) {
+            m.state = ModuleState::Online;
+        }
+        self.recalculate_stats(sde);
+        Ok(())
+    }
+
+    /// Takes an online fitted module offline, removing its CPU/PG and online effects.
+    pub fn take_module_offline(
+        &mut self,
+        module_item_id: i64,
+        sde: &SdeRegistry,
+    ) -> Result<(), String> {
+        let m = self
+            .modules
+            .get_mut(&module_item_id)
+            .ok_or_else(|| format!("Module {module_item_id} is not fitted"))?;
+        m.state = ModuleState::Offline;
         self.recalculate_stats(sde);
         Ok(())
     }

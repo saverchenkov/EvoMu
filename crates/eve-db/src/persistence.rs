@@ -66,6 +66,8 @@ impl WorldStateWalDelta {
             && old.structures == new.structures
             && old.licensed_skins == new.licensed_skins
             && old.applied_ship_skins == new.applied_ship_skins
+            && old.module_online_states == new.module_online_states
+            && old.weapon_banks == new.weapon_banks
             && new.wallet_journal.len() >= old.wallet_journal.len()
             && new.wallet_journal[..old.wallet_journal.len()] == old.wallet_journal[..]
             && old
@@ -349,6 +351,8 @@ impl WorldRepository {
             committed_idempotency_keys: HashSet::new(),
             licensed_skins: HashMap::new(),
             applied_ship_skins: HashMap::new(),
+            module_online_states: HashMap::new(),
+            weapon_banks: HashMap::new(),
         };
         let mut conn = rusqlite::Connection::open_in_memory().map_err(|e| e.to_string())?;
         sqlite_store::apply_migrations(&conn)?;

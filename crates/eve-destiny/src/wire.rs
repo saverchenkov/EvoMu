@@ -863,6 +863,18 @@ pub fn encode_destiny_event(stamp: u32, event: &DestinyEvent, park: Option<&Ball
                 PyRep::Integer(*wreck_ball_id),
             ]),
         ]),
+        DestinyEvent::OnTarget {
+            mode,
+            source_id,
+            target_id,
+        } => PyRep::Tuple(vec![
+            PyRep::String("OnTarget".into()),
+            PyRep::Tuple(vec![
+                PyRep::String(mode.clone()),
+                PyRep::Integer(*source_id),
+                PyRep::Integer(*target_id),
+            ]),
+        ]),
     };
 
     PyRep::Tuple(vec![PyRep::Integer(stamp as i64), action_tuple])
