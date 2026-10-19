@@ -156,6 +156,9 @@ pub struct CombatState {
     pub active_breacher_dot: Option<(f64, f64, u32)>,
     /// Remaining ticks of gate cloak invulnerability (SP-5).
     pub gate_cloak_remaining_ticks: u32,
+    /// Remaining seconds of active ECM jam suppression (`feat:modules.ecm`, `DG-5`).
+    #[serde(default)]
+    pub ecm_jammed_remaining_s: f64,
 }
 
 fn default_recharge_time_ms() -> f64 {
@@ -186,6 +189,7 @@ impl Default for CombatState {
             entropic_spool_cycles: 0,
             active_breacher_dot: None,
             gate_cloak_remaining_ticks: 0,
+            ecm_jammed_remaining_s: 0.0,
         }
     }
 }
@@ -390,6 +394,8 @@ pub struct TargetLock {
     pub lock_time_ms: f64,
     pub remaining_lock_ms: f64,
     pub locked: bool,
+    #[serde(default)]
+    pub max_range_m: Option<f64>,
 }
 
 // parity: plan:SP-1, feat:navigation.celestials-balls, plan:SP-2, feat:navigation.bubbles-grid
@@ -1009,6 +1015,7 @@ impl Ballpark {
             armor_ratio: a_ratio,
             structure_ratio: h_ratio,
         };
+        self.pending_events.push(ev.clone());
         if let Some(gid) = grid_id {
             self.queue_event_for_grid_observers(gid, None, &ev);
         } else {
@@ -1596,6 +1603,12 @@ impl Ballpark {
             }
         }
 
+        for cs in self.combat_states.values_mut() {
+            if cs.ecm_jammed_remaining_s > 0.0 {
+                cs.ecm_jammed_remaining_s = (cs.ecm_jammed_remaining_s - dt).max(0.0);
+            }
+        }
+
         // Advance target locks and validate lock breaks (`DG-4`, `DG-5`).
         let mut lost_events = Vec::new();
         let mut completed_events = Vec::new();
@@ -1603,12 +1616,14 @@ impl Ballpark {
 
         for (&source_id, locks) in &self.target_locks {
             let source_ball = self.balls.get(&source_id);
-            let source_cloaked = self.combat_states.get(&source_id).is_some_and(|c| c.is_cloaked);
+            let source_cs = self.combat_states.get(&source_id);
+            let source_cloaked = source_cs.is_some_and(|c| c.is_cloaked);
+            let source_jammed = source_cs.is_some_and(|c| c.ecm_jammed_remaining_s > 0.0);
             let source_warping = source_ball
                 .map(|b| matches!(b.mode, MovementMode::Warp { .. }))
                 .unwrap_or(true);
 
-            if source_ball.is_none() || source_cloaked || source_warping {
+            if source_ball.is_none() || source_cloaked || source_warping || source_jammed {
                 for lock in locks {
                     lost_events.push((source_id, lock.target_id));
                 }
@@ -1625,8 +1640,13 @@ impl Ballpark {
                 let target_warping = target_ball
                     .map(|b| matches!(b.mode, MovementMode::Warp { .. }))
                     .unwrap_or(true);
+                let out_of_range = if let (Some(sb), Some(tb), Some(max_r)) = (source_ball, target_ball, lock.max_range_m) {
+                    (sb.position - tb.position).length() > max_r
+                } else {
+                    false
+                };
 
-                if target_ball.is_none() || target_cloaked || target_warping {
+                if target_ball.is_none() || target_cloaked || target_warping || out_of_range {
                     lost_events.push((source_id, lock.target_id));
                 } else {
                     if !lock.locked {
@@ -1698,6 +1718,41 @@ impl Ballpark {
         } else {
             0
         }
+    }
+
+    /// Applies an ECM jam to `target_id`, clearing all existing locked targets and preventing
+    /// target locking for `duration_s` seconds (`feat:modules.ecm`, `DG-5`).
+    pub fn apply_ecm_jam(&mut self, target_id: BallId, duration_s: f64) {
+        if let Some(cs) = self.combat_states.get_mut(&target_id) {
+            cs.ecm_jammed_remaining_s = duration_s;
+        }
+        self.clear_target_locks(target_id);
+    }
+
+    /// Applies an ECM burst AoE around `source_id`, jamming all valid target balls within `burst_radius_m`
+    /// for which `jam_chance_test(target_id)` succeeds (`feat:modules.ecm`, `DG-5`).
+    pub fn apply_ecm_burst<F>(&mut self, source_id: BallId, burst_radius_m: f64, mut jam_test: F) -> Vec<BallId>
+    where
+        F: FnMut(BallId) -> bool,
+    {
+        let Some(source_pos) = self.balls.get(&source_id).map(|b| b.position) else {
+            return Vec::new();
+        };
+        let candidates: Vec<BallId> = self
+            .balls
+            .iter()
+            .filter(|(&id, b)| id != source_id && (b.position - source_pos).length() <= burst_radius_m)
+            .map(|(&id, _)| id)
+            .collect();
+
+        let mut jammed = Vec::new();
+        for cid in candidates {
+            if jam_test(cid) {
+                self.apply_ecm_jam(cid, 20.0);
+                jammed.push(cid);
+            }
+        }
+        jammed
     }
 
     pub fn get_target_locks(&self, source_id: BallId) -> Vec<TargetLock> {

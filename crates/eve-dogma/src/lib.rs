@@ -2580,6 +2580,107 @@ impl ShipFittingEngine {
         self.recalculate_stats(sde);
         Ok(())
     }
+
+    /// Steps thermodynamics for an overloaded module cycle in a rack (`0 = High, 1 = Med, 2 = Low`).
+    /// Generates heat, applies heat damage to the module, rolls damage probability to adjacent modules
+    /// in the same rack, and sets burned modules to `ModuleState::Offline` (`feat:fitting.overheat`, `DG-4`).
+    pub fn apply_heat_cycle(
+        &mut self,
+        module_id: i64,
+        heat_gen_rate: f64,
+        dissipation_rate: f64,
+        cycle_duration_s: f64,
+        roll_u: f64,
+        sde: &SdeRegistry,
+    ) -> Result<HeatDamageReport, String> {
+        let (flag_id, rack_idx, base_heat_dmg) = {
+            let m = self.modules.get(&module_id).ok_or_else(|| format!("Module {module_id} not found"))?;
+            let r_idx = match m.flag_id {
+                27..=34 => 0, // High
+                19..=26 => 1, // Med
+                11..=18 => 2, // Low
+                _ => return Err(format!("Module on flag {} is not in a heat rack", m.flag_id)),
+            };
+            let mod_state = self.build_effective_module_state(module_id, m.type_id, true, sde);
+            let heat_dmg = mod_state.get_attribute(1211, sde);
+            let eff_heat_dmg = if heat_dmg > 0.0 { heat_dmg } else { 5.0 };
+            (m.flag_id, r_idx, eff_heat_dmg)
+        };
+
+        // 1. Advance rack heat
+        self.rack_heat[rack_idx] = thermodynamics::step_rack_heat(
+            self.rack_heat[rack_idx],
+            heat_gen_rate,
+            dissipation_rate,
+            cycle_duration_s,
+        );
+        let current_rack_heat = self.rack_heat[rack_idx];
+
+        // 2. Compute effective heat damage to active module
+        let thermo_lvl = self.character_skills.get(&28164).copied().unwrap_or(0); // 28164 = Thermodynamics
+        let applied_mod_dmg = thermodynamics::effective_heat_damage(base_heat_dmg, thermo_lvl);
+
+        let mut module_burned = false;
+        if let Some(m) = self.modules.get_mut(&module_id) {
+            m.damage_hp += applied_mod_dmg;
+            if m.damage_hp >= m.max_hp {
+                m.damage_hp = m.max_hp;
+                m.state = ModuleState::Offline;
+                module_burned = true;
+            }
+        }
+
+        // 3. Roll damage to adjacent modules in the same rack
+        let mut adjacent_reports = Vec::new();
+        let other_modules: Vec<(i64, u16)> = self
+            .modules
+            .values()
+            .filter(|m| m.item_id != module_id)
+            .filter(|m| match (rack_idx, m.flag_id) {
+                (0, 27..=34) => true,
+                (1, 19..=26) => true,
+                (2, 11..=18) => true,
+                _ => false,
+            })
+            .map(|m| (m.item_id, m.flag_id))
+            .collect();
+
+        for (adj_id, adj_flag) in other_modules {
+            let slot_dist = (adj_flag as isize - flag_id as isize).unsigned_abs();
+            let prob = thermodynamics::heat_damage_probability(current_rack_heat, slot_dist, 0.5);
+            if roll_u < prob {
+                let adj_dmg = thermodynamics::effective_heat_damage(base_heat_dmg * 0.5, thermo_lvl);
+                let mut adj_burned = false;
+                if let Some(am) = self.modules.get_mut(&adj_id) {
+                    am.damage_hp += adj_dmg;
+                    if am.damage_hp >= am.max_hp {
+                        am.damage_hp = am.max_hp;
+                        am.state = ModuleState::Offline;
+                        adj_burned = true;
+                    }
+                }
+                adjacent_reports.push((adj_id, adj_dmg, adj_burned));
+            }
+        }
+
+        self.recalculate_stats(sde);
+
+        Ok(HeatDamageReport {
+            rack_heat: current_rack_heat,
+            module_damage: applied_mod_dmg,
+            module_burned,
+            adjacent_damaged_modules: adjacent_reports,
+        })
+    }
+}
+
+/// Report returned when applying heat cycle damage to a rack and its fitted modules (`feat:fitting.overheat`, `DG-4`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HeatDamageReport {
+    pub rack_heat: f64,
+    pub module_damage: f64,
+    pub module_burned: bool,
+    pub adjacent_damaged_modules: Vec<(i64, f64, bool)>,
 }
 
 /// Thermodynamics formulas (`#29`–`#34`):
@@ -3117,6 +3218,242 @@ pub fn eval_command_burst(
         affected_fleet_count: affected_count,
         aggregated_bonus: aggregated,
     }
+}
+
+/// Local shield booster or armor repairer cycle recovery result (`feat:modules.shield-booster`, `DG-4`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LocalRepairCycleResult {
+    pub shield_boost_amount: f64,
+    pub armor_repair_amount: f64,
+    pub capacitor_need: f64,
+    pub duration_s: f64,
+}
+
+/// Computes shield booster or armor repairer cycle healing amounts and capacitor need (`feat:modules.shield-booster`, `DG-4`).
+pub fn compute_local_repair_cycle(
+    module: &DogmaItemState,
+    overload: bool,
+    sde: &SdeRegistry,
+) -> LocalRepairCycleResult {
+    let duration_ms = module.get_attribute(attr_ids::DURATION, sde);
+    let duration_s = if duration_ms > 0.0 { duration_ms / 1000.0 } else { 1.0 };
+    let cap_need = module.get_attribute(attr_ids::CAPACITOR_NEED, sde);
+
+    let raw_shield = module.get_attribute(68, sde); // shieldBonus
+    let raw_armor = module.get_attribute(84, sde);  // armorDamageAmount
+
+    let overload_mult = if overload { 1.20 } else { 1.0 };
+
+    LocalRepairCycleResult {
+        shield_boost_amount: raw_shield * overload_mult,
+        armor_repair_amount: raw_armor * overload_mult,
+        capacitor_need: cap_need,
+        duration_s,
+    }
+}
+
+/// EVE Online racial sensor strength types (`feat:dogma.targeting-ships-sensor-strength`, `DG-5`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ShipSensorType {
+    Radar,          // Amarr (attribute 208)
+    Ladar,          // Minmatar (attribute 209)
+    Magnetometric,  // Gallente (attribute 210)
+    Gravimetric,    // Caldari (attribute 211)
+}
+
+impl ShipSensorType {
+    pub fn attribute_id(&self) -> AttributeId {
+        match self {
+            Self::Radar => 208,
+            Self::Ladar => 209,
+            Self::Magnetometric => 210,
+            Self::Gravimetric => 211,
+        }
+    }
+}
+
+/// Identifies the dominant racial sensor type and strength of a ship hull (`feat:dogma.targeting-ships-sensor-strength`, `DG-5`).
+pub fn get_ship_sensor_strength(ship: &DogmaItemState, sde: &SdeRegistry) -> (ShipSensorType, f64) {
+    let radar = ship.get_attribute(208, sde);
+    let ladar = ship.get_attribute(209, sde);
+    let mag = ship.get_attribute(210, sde);
+    let grav = ship.get_attribute(211, sde);
+
+    let candidates = [
+        (ShipSensorType::Radar, radar),
+        (ShipSensorType::Ladar, ladar),
+        (ShipSensorType::Magnetometric, mag),
+        (ShipSensorType::Gravimetric, grav),
+    ];
+    candidates
+        .into_iter()
+        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+        .unwrap_or((ShipSensorType::Gravimetric, 10.0))
+}
+
+/// Computes ECM jam chance matching racial sensor strength against target ship hull (`feat:modules.ecm`, `DG-5`).
+pub fn compute_ecm_jam_against_ship(
+    ecm_module: &DogmaItemState,
+    target_ship: &DogmaItemState,
+    distance: f64,
+    sde: &SdeRegistry,
+) -> f64 {
+    let (sensor_type, target_strength) = get_ship_sensor_strength(target_ship, sde);
+    let jam_strength = match sensor_type {
+        ShipSensorType::Radar => ecm_module.get_attribute(241, sde), // scanRadarStrengthBonus
+        ShipSensorType::Ladar => ecm_module.get_attribute(239, sde), // scanLadarStrengthBonus
+        ShipSensorType::Magnetometric => ecm_module.get_attribute(240, sde), // scanMagnetometricStrengthBonus
+        ShipSensorType::Gravimetric => ecm_module.get_attribute(238, sde), // scanGravimetricStrengthBonus
+    };
+    let optimal = ecm_module.get_attribute(attr_ids::MAX_RANGE, sde);
+    let falloff = get_module_falloff(ecm_module, sde);
+    compute_ecm_jam_chance(jam_strength, target_strength, distance, optimal, falloff)
+}
+
+/// Evaluates Remote Sensor Dampener multipliers with optional scripting (`feat:modules.sensor-dampener`, `DG-5`).
+/// Returns `(scan_resolution_multiplier, max_target_range_multiplier)`.
+pub fn eval_scripted_sensor_dampener(
+    damp_module: &DogmaItemState,
+    script_type_id: Option<u32>,
+    distance: f64,
+    sde: &SdeRegistry,
+) -> (f64, f64) {
+    let optimal = damp_module.get_attribute(attr_ids::MAX_RANGE, sde);
+    let falloff = get_module_falloff(damp_module, sde);
+    let att = compute_falloff_attenuation(distance, optimal, falloff);
+
+    let base_scan_res = damp_module.get_attribute(566, sde); // scanResolutionBonus (negative)
+    let base_range = damp_module.get_attribute(309, sde);    // maxTargetRangeBonus (negative)
+
+    // Script 29013 = Scan Resolution Dampening Script (doubles scan res dampening, zeroes range dampening)
+    // Script 29015 = Targeting Range Dampening Script (doubles range dampening, zeroes scan res dampening)
+    let (eff_scan_pct, eff_range_pct) = match script_type_id {
+        Some(29013) => (base_scan_res * 2.0, 0.0),
+        Some(29015) => (0.0, base_range * 2.0),
+        _ => (base_scan_res, base_range),
+    };
+
+    let scan_res_mult = (1.0 + (eff_scan_pct / 100.0) * att).clamp(0.01, 1.0);
+    let range_mult = (1.0 + (eff_range_pct / 100.0) * att).clamp(0.01, 1.0);
+    (scan_res_mult, range_mult)
+}
+
+/// Evaluates Tracking Disruptor multipliers with optional scripting (`feat:modules.tracking-disruptor`, `DG-5`).
+/// Returns `(tracking_speed_multiplier, optimal_multiplier, falloff_multiplier)`.
+pub fn eval_scripted_tracking_disruptor(
+    disrupt_module: &DogmaItemState,
+    script_type_id: Option<u32>,
+    distance: f64,
+    sde: &SdeRegistry,
+) -> (f64, f64, f64) {
+    let optimal = disrupt_module.get_attribute(attr_ids::MAX_RANGE, sde);
+    let falloff = get_module_falloff(disrupt_module, sde);
+    let att = compute_falloff_attenuation(distance, optimal, falloff);
+
+    let base_track = disrupt_module.get_attribute(767, sde); // trackingSpeedBonus (negative)
+    let base_opt = disrupt_module.get_attribute(351, sde);   // maxRangeBonus (negative)
+    let base_fall = disrupt_module.get_attribute(349, sde);  // falloffBonus (negative)
+
+    // Script 29007 = Tracking Speed Disruption Script (doubles tracking disruption, zeroes range)
+    // Script 29005 = Optimal Range Disruption Script (doubles range disruption, zeroes tracking)
+    let (eff_track, eff_opt, eff_fall) = match script_type_id {
+        Some(29007) => (base_track * 2.0, 0.0, 0.0),
+        Some(29005) => (0.0, base_opt * 2.0, base_fall * 2.0),
+        _ => (base_track, base_opt, base_fall),
+    };
+
+    let track_mult = (1.0 + (eff_track / 100.0) * att).clamp(0.01, 1.0);
+    let opt_mult = (1.0 + (eff_opt / 100.0) * att).clamp(0.01, 1.0);
+    let fall_mult = (1.0 + (eff_fall / 100.0) * att).clamp(0.01, 1.0);
+    (track_mult, opt_mult, fall_mult)
+}
+
+/// Evaluates Target Painter signature radius multiplier with optional overload (`feat:modules.target-painter`, `DG-5`).
+pub fn eval_target_painter_with_overload(
+    painter_module: &DogmaItemState,
+    overload: bool,
+    distance: f64,
+    sde: &SdeRegistry,
+) -> f64 {
+    let optimal = painter_module.get_attribute(attr_ids::MAX_RANGE, sde);
+    let falloff = get_module_falloff(painter_module, sde);
+    let att = compute_falloff_attenuation(distance, optimal, falloff);
+
+    let base_sig = painter_module.get_attribute(554, sde); // signatureRadiusBonus
+    let overload_bonus = if overload {
+        let ov = painter_module.get_attribute(1937, sde);
+        if ov > 0.0 { ov / 100.0 } else { 0.20 }
+    } else {
+        0.0
+    };
+    let eff_bonus = base_sig * (1.0 + overload_bonus);
+    1.0 + (eff_bonus / 100.0) * att
+}
+
+/// Evaluates capacitor stability and steady-state recharge rate (`feat:dogma.capacitor-stable`, `DG-4`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CapacitorStabilityReport {
+    pub max_capacitor: f64,
+    pub recharge_time_s: f64,
+    pub peak_recharge_per_sec: f64,
+    pub total_draw_per_sec: f64,
+    pub is_stable: bool,
+    pub stable_level_pct: Option<f64>,
+    pub depletion_time_s: Option<f64>,
+}
+
+pub fn evaluate_capacitor_stability(
+    max_capacitor: f64,
+    recharge_time_s: f64,
+    total_draw_per_sec: f64,
+) -> CapacitorStabilityReport {
+    let peak = 2.5 * max_capacitor / recharge_time_s.max(1e-3);
+    if total_draw_per_sec <= peak {
+        let rate_norm = total_draw_per_sec / (10.0 * max_capacitor / recharge_time_s.max(1e-3));
+        let stable_pct = if rate_norm < 0.25 {
+            let root = 0.5 + (0.25 - rate_norm).max(0.0).sqrt();
+            (root * root * 100.0).clamp(25.0, 100.0)
+        } else {
+            25.0
+        };
+        CapacitorStabilityReport {
+            max_capacitor,
+            recharge_time_s,
+            peak_recharge_per_sec: peak,
+            total_draw_per_sec,
+            is_stable: true,
+            stable_level_pct: Some(stable_pct),
+            depletion_time_s: None,
+        }
+    } else {
+        let net_loss = total_draw_per_sec - (peak * 0.5);
+        let time = if net_loss > 0.0 { max_capacitor / net_loss } else { 0.0 };
+        CapacitorStabilityReport {
+            max_capacitor,
+            recharge_time_s,
+            peak_recharge_per_sec: peak,
+            total_draw_per_sec,
+            is_stable: false,
+            stable_level_pct: None,
+            depletion_time_s: Some(time),
+        }
+    }
+}
+
+/// Computes target lock duration from scan resolution and target signature radius (`DG-5`).
+pub fn compute_target_lock_time(scan_resolution: f64, target_signature_radius: f64) -> f64 {
+    let denom = scan_resolution.max(1.0) * target_signature_radius.max(1.0).asinh().powi(2);
+    (40_000.0 / denom).max(0.1)
+}
+
+/// Computes effective max locked targets with hull and character skills (`DG-5`).
+pub fn compute_effective_max_locked_targets(
+    hull_max_targets: usize,
+    target_management_level: u8,
+    adv_target_management_level: u8,
+) -> usize {
+    let char_max = 2 + (target_management_level.min(5) as usize) + (adv_target_management_level.min(5) as usize);
+    hull_max_targets.min(char_max).clamp(1, 12)
 }
 
 fn select_dominant_assignment(values: &[f64], high_is_good: bool) -> Option<f64> {
