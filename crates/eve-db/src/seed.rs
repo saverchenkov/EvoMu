@@ -448,6 +448,7 @@ impl WorldRepository {
             cosmic_signatures: HashMap::new(),
             read_mails: HashSet::new(),
             deleted_mails: HashSet::new(),
+            mining_ledger: Vec::new(),
         };
         let mut conn = rusqlite::Connection::open_in_memory()
             .expect("open in-memory SQLite connection for WorldRepository");

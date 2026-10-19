@@ -353,6 +353,7 @@ impl WorldRepository {
             cosmic_signatures: HashMap::new(),
             read_mails: HashSet::new(),
             deleted_mails: HashSet::new(),
+            mining_ledger: Vec::new(),
         };
         let mut conn = rusqlite::Connection::open_in_memory().map_err(|e| e.to_string())?;
         sqlite_store::apply_migrations(&conn)?;

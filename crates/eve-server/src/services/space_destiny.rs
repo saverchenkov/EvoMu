@@ -4,6 +4,7 @@
 
 use crate::formulas::compute_jump_fatigue_and_cooldown_minutes;
 use crate::router::{BoundObjectEntry, ServerContext};
+use eve_db::types::InventoryFlag;
 use eve_destiny::{Ball, MovementMode};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
@@ -41,6 +42,7 @@ pub async fn handle(
             let dz = args.get(2).and_then(|a| a.as_f64()).unwrap_or(0.0);
 
             let handle = ctx.systems.get_or_spawn(sys_id);
+            let _ = handle.break_gate_cloak(ship_id).await;
             match handle
                 .set_movement_mode(
                     ship_id,
@@ -106,6 +108,9 @@ pub async fn handle(
                 }));
             }
             let handle = ctx.systems.get_or_spawn(sys_id);
+            if fraction > 0.0 {
+                let _ = handle.break_gate_cloak(ship_id).await;
+            }
             match handle.set_speed_fraction(ship_id, fraction).await {
                 Ok(tick) => Some(Ok(PyRep::Integer(tick as i64))),
                 Err(e) => Some(Err(BridgeRpcError {
@@ -138,6 +143,7 @@ pub async fn handle(
                 MovementMode::Follow { target_id, range }
             };
             let handle = ctx.systems.get_or_spawn(sys_id);
+            let _ = handle.break_gate_cloak(ship_id).await;
             match handle.set_movement_mode(ship_id, mode).await {
                 Ok(tick) => Some(Ok(PyRep::Integer(tick as i64))),
                 Err(e) => Some(Err(BridgeRpcError {
@@ -309,6 +315,7 @@ pub async fn handle(
 
             let mode =
                 MovementMode::new_warp(current_ball.position, dest_pos, warp_speed);
+            let _ = handle.break_gate_cloak(ship_id).await;
             match handle.set_movement_mode(ship_id, mode).await {
                 Ok(tick) => Some(Ok(PyRep::Integer(tick as i64))),
                 Err(e) => Some(Err(BridgeRpcError {
@@ -461,6 +468,7 @@ pub async fn handle(
                 .unwrap_or(3.0);
 
             let mode = MovementMode::new_warp(current_ball.position, dest_pos, warp_speed);
+            let _ = handle.break_gate_cloak(ship_id).await;
             match handle.set_movement_mode(ship_id, mode).await {
                 Ok(tick) => Some(Ok(PyRep::Integer(tick as i64))),
                 Err(e) => Some(Err(BridgeRpcError {
@@ -710,8 +718,11 @@ pub async fn handle(
             new_ball.velocity = DVec3::ZERO;
             new_ball.speed_fraction = 0.0;
             new_ball.mode = MovementMode::Stop;
-            let combat_state = ctx.build_ship_combat_state(char_id, ship_id, new_ball.type_id);
-            let slim_meta = ctx.build_ship_slim_meta(char_id, new_ball.type_id);
+            let mut combat_state = ctx.build_ship_combat_state(char_id, ship_id, new_ball.type_id);
+            combat_state.is_cloaked = true;
+            combat_state.gate_cloak_remaining_ticks = 60;
+            let mut slim_meta = ctx.build_ship_slim_meta(char_id, new_ball.type_id);
+            slim_meta.is_cloaked = true;
             let _ = new_handle
                 .spawn_ball_with_meta(new_ball, combat_state, slim_meta)
                 .await;
@@ -1093,6 +1104,188 @@ pub async fn handle(
                 })
                 .collect();
             Some(Ok(PyRep::List(matches)))
+        }
+
+        ("beyonce", "CmdMine")
+        | ("dogmaIM", "Mine")
+        | ("miningMgr", "Mine")
+        | ("miningMgr", "MineAsteroid") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let sys_id = match ServerContext::require_bound_system(bound_entry, "beyonce")
+                .or_else(|_| session.solar_system_id.ok_or_else(|| BridgeRpcError {
+                    code: "NoSolarSystem".into(),
+                    message: "Session has no active solarSystemID".into(),
+                }))
+            {
+                Ok(s) => s,
+                Err(e) => return Some(Err(e)),
+            };
+            let Some(ship_id) = session.ship_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "NoActiveShip".into(),
+                    message: "Session has no active ship".into(),
+                }));
+            };
+
+            let asteroid_id = args
+                .first()
+                .and_then(|a| a.as_i64())
+                .or_else(|| _kwargs.get("asteroidID").and_then(|v| v.as_i64()))
+                .or_else(|| _kwargs.get("targetID").and_then(|v| v.as_i64()))
+                .unwrap_or(0);
+            if asteroid_id == 0 {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidArgument".into(),
+                    message: "CmdMine requires target asteroidID".into(),
+                }));
+            }
+            let module_id = args
+                .get(1)
+                .and_then(|a| a.as_i64())
+                .or_else(|| _kwargs.get("moduleID").and_then(|v| v.as_i64()));
+
+            let handle = ctx.systems.get_or_spawn(sys_id);
+            let Some((_, ship_ball)) = handle.get_ball_snapshot(ship_id).await.ok().flatten() else {
+                return Some(Err(BridgeRpcError {
+                    code: "ShipNotInSpace".into(),
+                    message: "Active ship is not spawned in Ballpark".into(),
+                }));
+            };
+
+            let Some(ast_state) = handle.get_asteroid_state(asteroid_id).await.ok().flatten() else {
+                return Some(Err(BridgeRpcError {
+                    code: "AsteroidNotFound".into(),
+                    message: format!("Asteroid {asteroid_id} not found in system {sys_id}"),
+                }));
+            };
+
+            if ast_state.remaining_units == 0 || ast_state.depleted {
+                return Some(Err(BridgeRpcError {
+                    code: "AsteroidDepleted".into(),
+                    message: format!("Asteroid {asteroid_id} is depleted"),
+                }));
+            }
+
+            // Target range validation
+            if let Some((_, ast_ball)) = handle.get_ball_snapshot(asteroid_id).await.ok().flatten() {
+                let surface_dist = (ship_ball.position.distance(ast_ball.position) - ship_ball.radius - ast_ball.radius).max(0.0);
+                let max_range = 15_000.0;
+                if surface_dist > max_range {
+                    return Some(Err(BridgeRpcError {
+                        code: "OutOfRange".into(),
+                        message: format!("Asteroid {asteroid_id} is {surface_dist:.1} m away (max range {max_range} m)"),
+                    }));
+                }
+            }
+
+            // Dogma yield & residue calculation via ShipFittingEngine (`MN-01`, `MN-02`)
+            let fit = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).ok();
+            let (yield_m3, waste_prob) = if let (Some(fit), Some(mod_id)) = (&fit, module_id) {
+                let y = fit.get_module_effective_attribute(mod_id, 77, &ctx.sde);
+                let w = fit.get_module_effective_attribute(mod_id, 3154, &ctx.sde);
+                (y, w)
+            } else if let Some(fit) = &fit {
+                let m = fit.modules.values().find(|m| {
+                    ctx.sde.types.get(&m.type_id).map(|t| matches!(t.group_id, 54 | 464 | 483 | 737)).unwrap_or(false)
+                });
+                if let Some(m) = m {
+                    let y = fit.get_module_effective_attribute(m.item_id, 77, &ctx.sde);
+                    let w = fit.get_module_effective_attribute(m.item_id, 3154, &ctx.sde);
+                    (y, w)
+                } else {
+                    (40.0, 0.0)
+                }
+            } else {
+                (40.0, 0.0)
+            };
+
+            let unit_vol = ast_state.unit_volume.max(0.001);
+            let requested_units = ((yield_m3 / unit_vol).floor() as u64).max(1);
+
+            let extraction = match handle.mine_asteroid(asteroid_id, requested_units, waste_prob).await {
+                Ok(e) => e,
+                Err(e) => {
+                    return Some(Err(BridgeRpcError {
+                        code: "MiningFailed".into(),
+                        message: e,
+                    }));
+                }
+            };
+
+            // Determine target hold: SpecializedOreHold (133), SpecializedGasHold (134), SpecializedIceHold (181), or Cargo (5)
+            let ore_type_rec = ctx.sde.types.get(&extraction.ore_type_id);
+            let ore_group_id = ore_type_rec.map(|t| t.group_id).unwrap_or(0);
+            let ore_category_id = ore_type_rec.map(|t| t.category_id).unwrap_or(0);
+
+            let ship_type_id = ship_ball.type_id;
+            let ship_attrs = ctx.sde.types.get(&ship_type_id).map(|t| &t.default_attributes);
+            let has_ore_hold = ship_attrs.is_some_and(|a| a.get(&1556).copied().unwrap_or(0.0) > 0.0 || a.get(&3227).copied().unwrap_or(0.0) > 0.0);
+            let has_gas_hold = ship_attrs.is_some_and(|a| a.get(&1557).copied().unwrap_or(0.0) > 0.0);
+            let has_ice_hold = ship_attrs.is_some_and(|a| a.get(&3136).copied().unwrap_or(0.0) > 0.0);
+
+            let target_flag = if ore_group_id == 465 && has_ice_hold {
+                InventoryFlag::SpecializedIceHold
+            } else if ore_group_id == 711 && has_gas_hold {
+                InventoryFlag::SpecializedGasHold
+            } else if ore_category_id == 25 && has_ore_hold {
+                InventoryFlag::SpecializedOreHold
+            } else {
+                InventoryFlag::Cargo
+            };
+
+            if extraction.mined_units > 0 {
+                let _ = ctx.db.add_or_stack_item(
+                    char_id,
+                    ship_id,
+                    target_flag,
+                    extraction.ore_type_id,
+                    extraction.mined_units as i64,
+                );
+                let now_unix = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                let _ = ctx.db.record_mining_ledger_entry(
+                    char_id,
+                    sys_id,
+                    extraction.ore_type_id,
+                    extraction.mined_units as i64,
+                    now_unix,
+                );
+            }
+
+            Some(Ok(PyRep::keyval([
+                ("asteroidID", PyRep::Integer(asteroid_id)),
+                ("typeID", PyRep::Integer(extraction.ore_type_id as i64)),
+                ("minedUnits", PyRep::Integer(extraction.mined_units as i64)),
+                ("wastedUnits", PyRep::Integer(extraction.wasted_units as i64)),
+                ("remainingUnits", PyRep::Integer(extraction.remaining_units as i64)),
+                ("flagID", PyRep::Integer(target_flag as i64)),
+                ("depleted", PyRep::Integer(if extraction.depleted { 1 } else { 0 })),
+            ])))
+        }
+
+        ("charMiningLedger", "GetMiningLedger") | ("charMiningLedger", "GetLedger") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let records = ctx.db.get_mining_ledger(char_id);
+            let items: Vec<PyRep> = records
+                .into_iter()
+                .map(|r| {
+                    PyRep::keyval([
+                        ("date", PyRep::String(r.date)),
+                        ("solarSystemID", PyRep::Integer(r.solar_system_id as i64)),
+                        ("typeID", PyRep::Integer(r.type_id as i64)),
+                        ("quantity", PyRep::Integer(r.quantity as i64)),
+                    ])
+                })
+                .collect();
+            Some(Ok(PyRep::List(items)))
         }
 
         _ => None,

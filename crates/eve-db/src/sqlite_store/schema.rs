@@ -321,6 +321,16 @@ CREATE TABLE IF NOT EXISTS applied_ship_skins (
     ship_id INTEGER PRIMARY KEY,
     skin_id INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS char_mining_ledger (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    character_id INTEGER NOT NULL,
+    solar_system_id INTEGER NOT NULL,
+    type_id INTEGER NOT NULL,
+    quantity INTEGER NOT NULL,
+    date TEXT NOT NULL,
+    timestamp_unix INTEGER NOT NULL
+);
 "#;
 
 pub fn apply_migrations(conn: &Connection) -> Result<(), String> {
