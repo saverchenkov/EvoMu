@@ -27,11 +27,11 @@ use thiserror::Error;
 /// Maximum allowed wire frame size (4 MiB) to prevent memory exhaustion on untrusted input.
 pub const MAX_FRAME_SIZE: usize = 4 * 1024 * 1024;
 /// Maximum collection element count decoded from a single container opcode.
-pub const MAX_COLLECTION_LEN: usize = 32_768;
+pub const MAX_COLLECTION_LEN: usize = 131_072;
 /// Maximum recursion depth for nested `PyRep` containers and sub-streams.
 pub const MAX_RECURSION_DEPTH: usize = 64;
 /// Maximum total AST nodes constructed during a single `marshal::decode` call (stops reference bombs).
-pub const MAX_DECODED_NODES: usize = 65_536;
+pub const MAX_DECODED_NODES: usize = 1_048_576;
 
 #[derive(Debug, Error, PartialEq)]
 pub enum ProtoError {
