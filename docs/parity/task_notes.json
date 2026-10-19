@@ -76,24 +76,24 @@
   "note": "Wired DogmaEffectContext V24 modifierInfo evaluator and stacking-penalty pipeline into ShipFittingEngine (replacing hardcoded group 762/774/46 special cases); remaining DG-1 module-family and client-sync feature rows pending."
  },
  "DG-2": {
-  "assessment": "PARTIAL",
-  "note": ""
+  "assessment": "DONE",
+  "note": "Module fit validation with CPU, PG, calibration, slot restrictions, rig size, and online/offline state machine with 75% capacitor requirement."
  },
  "DG-3": {
-  "assessment": "PARTIAL",
-  "note": ""
+  "assessment": "DONE",
+  "note": "Module activation cycle engine in SystemActor tick, capacitor deduction per cycle, propulsion boost, and deactivation notifications."
  },
  "DG-4": {
-  "assessment": "PARTIAL",
-  "note": ""
+  "assessment": "DONE",
+  "note": "Combat target lock state machine with dynamic lock time from scan resolution, max targets from skills, and lock clearing on warp."
  },
  "DG-5": {
-  "assessment": "NOT STARTED",
-  "note": ""
+  "assessment": "DONE",
+  "note": "Ammunition load/unload, reload timers, damage vector arithmetic across shield, armor, and structure with resonance multipliers."
  },
  "DG-6": {
-  "assessment": "PARTIAL",
-  "note": ""
+  "assessment": "DONE",
+  "note": "Weapon grouping and module linking in charFittingMgr and shipGroupingSvc, fan-out activation, deactivation, and group ammo loading."
  },
  "E-1": {
   "assessment": "DONE",
