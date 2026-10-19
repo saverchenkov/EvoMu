@@ -329,8 +329,19 @@ dependencies = [
 name = "eve-testkit"
 version = "0.1.0"
 dependencies = [
+ "bytes",
+ "eve-db",
+ "eve-destiny",
+ "eve-dogma",
+ "eve-machonet",
+ "eve-proto",
+ "eve-sde",
+ "eve-server",
+ "glam",
+ "proptest",
  "serde",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]
