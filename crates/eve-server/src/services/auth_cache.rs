@@ -593,12 +593,12 @@ pub async fn handle(
                     ),
                     ("reason", PyRep::String(reason.to_string())),
                 ])))
-            } else if let Some(rest) = cmd.strip_prefix("/giveitem ") {
+            } else if let Some(rest) = cmd.strip_prefix("/giveitem ").or_else(|| cmd.strip_prefix("/createitem ")) {
                 let mut parts = rest.trim().split_whitespace();
                 let Some(type_id_str) = parts.next() else {
                     return Some(Err(BridgeRpcError {
                         code: "InvalidSlashArgument".into(),
-                        message: "Usage: /giveitem <type_id> [quantity]".into(),
+                        message: "Usage: /giveitem <type_id> [quantity] or /createitem <type_id> <quantity>".into(),
                     }));
                 };
                 let Ok(type_id) = type_id_str.parse::<u32>() else {
@@ -661,12 +661,12 @@ pub async fn handle(
                     ]))),
                     Err(e) => Some(Err(e)),
                 }
-            } else if let Some(rest) = cmd.strip_prefix("/setskill ") {
+            } else if let Some(rest) = cmd.strip_prefix("/setskill ").or_else(|| cmd.strip_prefix("/giveskill ")) {
                 let mut parts = rest.trim().split_whitespace();
                 let Some(skill_id_str) = parts.next() else {
                     return Some(Err(BridgeRpcError {
                         code: "InvalidSlashArgument".into(),
-                        message: "Usage: /setskill <skill_id> <level>".into(),
+                        message: "Usage: /setskill <skill_id> <level> or /giveskill <skill_id> <level>".into(),
                     }));
                 };
                 let Ok(skill_id) = skill_id_str.parse::<u32>() else {
@@ -812,12 +812,12 @@ pub async fn handle(
                     ("typeID", PyRep::Integer(type_id as i64)),
                     ("solarSystemID", PyRep::Integer(sys_id as i64)),
                 ])))
-            } else if let Some(rest) = cmd.strip_prefix("/teleport ") {
+            } else if let Some(rest) = cmd.strip_prefix("/teleport ").or_else(|| cmd.strip_prefix("/tr ")) {
                 let sys_id_str = rest.trim();
                 let Ok(dest_sys_id) = sys_id_str.parse::<u32>() else {
                     return Some(Err(BridgeRpcError {
                         code: "InvalidSlashArgument".into(),
-                        message: "Usage: /teleport <solar_system_id>".into(),
+                        message: "Usage: /teleport <solar_system_id> or /tr <solar_system_id>".into(),
                     }));
                 };
                 if !ctx.sde.solar_systems.contains_key(&dest_sys_id) {
@@ -873,6 +873,22 @@ pub async fn handle(
                     ("solarSystemID", PyRep::Integer(dest_sys_id as i64)),
                     ("constellationID", PyRep::Integer(updated_ch.constellation_id as i64)),
                     ("regionID", PyRep::Integer(updated_ch.region_id as i64)),
+                ])))
+            } else if cmd == "/heal" || cmd.starts_with("/heal ") {
+                let (sys_id, ship_id) = ctx.db.with_snapshot(|snap| {
+                    snap.characters.get(&cid).map(|c| (c.solar_system_id, c.active_ship_id))
+                }).unwrap_or((30000142, 0));
+
+                if ship_id > 0 {
+                    let handle = ctx.systems.get_or_spawn(sys_id);
+                    let _ = handle.heal_combat_state(ship_id).await;
+                }
+
+                Some(Ok(PyRep::keyval([
+                    ("command", PyRep::String(cmd.to_string())),
+                    ("characterID", PyRep::Integer(cid)),
+                    ("shipID", PyRep::Integer(ship_id)),
+                    ("healed", PyRep::Bool(true)),
                 ])))
             } else {
                 Some(Err(BridgeRpcError {

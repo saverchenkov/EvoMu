@@ -143,6 +143,43 @@ pub fn handle(
             Some(Ok(PyRep::Bool(valid)))
         }
 
+        ("charUnboundMgr", "GetValidRandomName") => {
+            let _ = match ServerContext::require_auth(session) {
+                Ok(u) => u,
+                Err(e) => return Some(Err(e)),
+            };
+            let first_names = [
+                "Alexander", "Kael", "Lyra", "Vesper", "Toran", "Rhea", "Darius", "Mira",
+                "Orion", "Selene", "Caelum", "Aethel", "Bren", "Talia", "Corin", "Sari",
+                "Valen", "Nesta", "Jarek", "Elena",
+            ];
+            let last_names = [
+                "Vander", "Chen", "Kallio", "Stark", "Holloway", "Kruger", "Sarkis", "Novak",
+                "Artemis", "Blackwood", "Mercer", "Solari", "Tash-Murkon", "Kor-Azor", "Saraki",
+                "Ravan", "Vandermeer", "O'Neill", "Lindqvist", "Kouris",
+            ];
+            let seed = ctx.now_unix() ^ (session.session_id as u64);
+            let mut chosen = String::new();
+            for i in 0..100 {
+                let f_idx = ((seed + i) as usize) % first_names.len();
+                let l_idx = (((seed / 7) + i * 3) as usize) % last_names.len();
+                let candidate = format!("{} {}", first_names[f_idx], last_names[l_idx]);
+                let exists = ctx.db.with_snapshot(|s| {
+                    s.characters
+                        .values()
+                        .any(|c| c.name.eq_ignore_ascii_case(&candidate))
+                });
+                if !exists {
+                    chosen = candidate;
+                    break;
+                }
+            }
+            if chosen.is_empty() {
+                chosen = format!("Pilot {}", ctx.now_unix() % 1_000_000);
+            }
+            Some(Ok(PyRep::String(chosen)))
+        }
+
         ("charUnboundMgr", "CreateCharacterWithDoll") | ("charUnboundMgr", "CreateCharacter") => {
             let user_id = match ServerContext::require_auth(session) {
                 Ok(u) => u,
@@ -306,55 +343,52 @@ pub fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let (raw_skill_type_opt, raw_target_level) = match args.first() {
-                Some(PyRep::List(items) | PyRep::Tuple(items)) => match items.first() {
-                    Some(PyRep::Tuple(pair) | PyRep::List(pair)) => (
-                        pair.first().and_then(|a| a.as_i64()),
-                        pair.get(1).and_then(|a| a.as_i64()).unwrap_or(1),
-                    ),
-                    Some(first_num) => (
-                        first_num.as_i64(),
-                        items.get(1).and_then(|a| a.as_i64()).unwrap_or(1),
-                    ),
-                    None => (None, 1),
-                },
-                _ => (
-                    args.first().and_then(|a| a.as_i64()),
-                    args.get(1).and_then(|a| a.as_i64()).unwrap_or(1),
-                ),
-            };
-            let Some(raw_skill_type) = raw_skill_type_opt else {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidSkillType".into(),
-                    message: "SaveSkillQueue/AddToEndOfSkillQueue requires an explicit skill typeID".into(),
-                }));
-            };
-            let Ok(skill_type_id) = TypeId::try_from(raw_skill_type) else {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidSkillType".into(),
-                    message: format!("Invalid skill type ID {raw_skill_type}"),
-                }));
-            };
-            let Some(skill_type) = ctx.sde.types.get(&skill_type_id) else {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidSkillType".into(),
-                    message: format!("Skill type {skill_type_id} not found in SDE"),
-                }));
-            };
-            if skill_type.category_id != 16 {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidSkillType".into(),
-                    message: format!("Type {skill_type_id} is not a skill (category 16)"),
-                }));
-            }
-            let target_level = raw_target_level.clamp(1, 5) as u8;
+            let is_add_to_end = method == "AddToEndOfSkillQueue";
 
-            let rank = skill_type
-                .default_attributes
-                .get(&attr_ids::SKILL_TIME_CONSTANT)
-                .copied()
-                .unwrap_or(1.0);
-            let end_sp = sp_for_skill_level(rank, target_level);
+            let mut skills_to_queue: Vec<(TypeId, u8)> = Vec::new();
+            match args.first() {
+                Some(PyRep::List(items) | PyRep::Tuple(items)) => {
+                    for it in items {
+                        match it {
+                            PyRep::Tuple(pair) | PyRep::List(pair) => {
+                                if let Some(tid) = pair.first().and_then(|a| a.as_i64()) {
+                                    let lvl = pair.get(1).and_then(|a| a.as_i64()).unwrap_or(1);
+                                    skills_to_queue.push((tid as TypeId, lvl.clamp(1, 5) as u8));
+                                }
+                            }
+                            single_val => {
+                                if let Some(tid) = single_val.as_i64() {
+                                    let lvl = items.get(1).and_then(|a| a.as_i64()).unwrap_or(1);
+                                    skills_to_queue.push((tid as TypeId, lvl.clamp(1, 5) as u8));
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    if let Some(tid) = args.first().and_then(|a| a.as_i64()) {
+                        let lvl = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1);
+                        skills_to_queue.push((tid as TypeId, lvl.clamp(1, 5) as u8));
+                    }
+                }
+            }
+
+            if skills_to_queue.is_empty() {
+                if !is_add_to_end {
+                    ctx.db.with_mut_snapshot(|snap| {
+                        snap.skill_queues.insert(char_id, Vec::new());
+                        snap.paused_skill_queues.insert(char_id);
+                    });
+                    let _ = ctx.notify_skill_queue_paused(char_id);
+                    return Some(Ok(PyRep::List(vec![])));
+                } else {
+                    return Some(Err(BridgeRpcError {
+                        code: "InvalidSkillType".into(),
+                        message: "AddToEndOfSkillQueue requires an explicit skill typeID".into(),
+                    }));
+                }
+            }
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(ch) = snap.characters.get(&char_id).cloned() else {
@@ -364,140 +398,174 @@ pub fn handle(
                     });
                 };
 
-                // Enforce skill prerequisites (`requiredSkill1..3` and `requiredSkill1..3Level`)
-                // against trained skills or earlier entries in the character's skill queue.
-                for (skill_attr, level_attr) in [
-                    (attr_ids::REQUIRED_SKILL_1, attr_ids::REQUIRED_SKILL_1_LEVEL),
-                    (attr_ids::REQUIRED_SKILL_2, attr_ids::REQUIRED_SKILL_2_LEVEL),
-                    (attr_ids::REQUIRED_SKILL_3, attr_ids::REQUIRED_SKILL_3_LEVEL),
-                ] {
-                    if let Some(&req_skill_f) = skill_type.default_attributes.get(&skill_attr) {
-                        let req_skill_id = req_skill_f as TypeId;
-                        if req_skill_id > 0 {
-                            let req_lvl = skill_type
-                                .default_attributes
-                                .get(&level_attr)
-                                .copied()
-                                .unwrap_or(1.0)
-                                .max(1.0) as u8;
-                            let trained_lvl = snap
-                                .skills
-                                .get(&char_id)
-                                .and_then(|m| m.get(&req_skill_id))
-                                .map(|s| s.level)
-                                .unwrap_or(0);
-                            let queued_lvl = snap
-                                .skill_queues
-                                .get(&char_id)
-                                .and_then(|q| {
-                                    q.iter()
-                                        .filter(|e| e.type_id == req_skill_id)
-                                        .map(|e| e.target_level)
-                                        .max()
-                                })
-                                .unwrap_or(0);
-                            if trained_lvl.max(queued_lvl) < req_lvl {
-                                return Err(BridgeRpcError {
-                                    code: "SkillPrerequisiteNotMet".into(),
-                                    message: format!(
-                                        "Skill {} (type {skill_type_id}) requires prerequisite skill {req_skill_id} at level {req_lvl}",
-                                        skill_type.name
-                                    ),
-                                });
+                if !is_add_to_end {
+                    snap.skill_queues.insert(char_id, Vec::new());
+                    snap.paused_skill_queues.remove(&char_id);
+                }
+
+                let mut last_ret = (0 as TypeId, 1 as u8, 0.0, 0.0);
+
+                for (skill_type_id, target_level) in skills_to_queue {
+                    let Some(skill_type) = ctx.sde.types.get(&skill_type_id) else {
+                        return Err(BridgeRpcError {
+                            code: "InvalidSkillType".into(),
+                            message: format!("Skill type {skill_type_id} not found in SDE"),
+                        });
+                    };
+                    if skill_type.category_id != 16 {
+                        return Err(BridgeRpcError {
+                            code: "InvalidSkillType".into(),
+                            message: format!("Type {skill_type_id} is not a skill (category 16)"),
+                        });
+                    }
+
+                    let rank = skill_type
+                        .default_attributes
+                        .get(&attr_ids::SKILL_TIME_CONSTANT)
+                        .copied()
+                        .unwrap_or(1.0);
+                    let end_sp = sp_for_skill_level(rank, target_level);
+
+                    // Enforce skill prerequisites
+                    for (skill_attr, level_attr) in [
+                        (attr_ids::REQUIRED_SKILL_1, attr_ids::REQUIRED_SKILL_1_LEVEL),
+                        (attr_ids::REQUIRED_SKILL_2, attr_ids::REQUIRED_SKILL_2_LEVEL),
+                        (attr_ids::REQUIRED_SKILL_3, attr_ids::REQUIRED_SKILL_3_LEVEL),
+                    ] {
+                        if let Some(&req_skill_f) = skill_type.default_attributes.get(&skill_attr) {
+                            let req_skill_id = req_skill_f as TypeId;
+                            if req_skill_id > 0 {
+                                let req_lvl = skill_type
+                                    .default_attributes
+                                    .get(&level_attr)
+                                    .copied()
+                                    .unwrap_or(1.0)
+                                    .max(1.0) as u8;
+                                let trained_lvl = snap
+                                    .skills
+                                    .get(&char_id)
+                                    .and_then(|m| m.get(&req_skill_id))
+                                    .map(|s| s.level)
+                                    .unwrap_or(0);
+                                let queued_lvl = snap
+                                    .skill_queues
+                                    .get(&char_id)
+                                    .and_then(|q| {
+                                        q.iter()
+                                            .filter(|e| e.type_id == req_skill_id)
+                                            .map(|e| e.target_level)
+                                            .max()
+                                    })
+                                    .unwrap_or(0);
+                                if trained_lvl.max(queued_lvl) < req_lvl {
+                                    return Err(BridgeRpcError {
+                                        code: "SkillPrerequisiteNotMet".into(),
+                                        message: format!(
+                                            "Skill {} (type {skill_type_id}) requires prerequisite skill {req_skill_id} at level {req_lvl}",
+                                            skill_type.name
+                                        ),
+                                    });
+                                }
                             }
                         }
                     }
-                }
 
-                let current_lvl = snap
-                    .skills
-                    .get(&char_id)
-                    .and_then(|m| m.get(&skill_type_id))
-                    .map(|s| s.level)
-                    .unwrap_or(0);
-                let (max_queued_lvl, max_queued_sp) = snap
-                    .skill_queues
-                    .get(&char_id)
-                    .and_then(|q| {
-                        q.iter()
-                            .filter(|e| e.type_id == skill_type_id)
-                            .max_by_key(|e| e.target_level)
-                            .map(|e| (e.target_level, Some(e.end_sp)))
-                    })
-                    .unwrap_or((0, None));
-                let effective_base_lvl = current_lvl.max(max_queued_lvl);
-                if target_level <= effective_base_lvl {
-                    return Err(BridgeRpcError {
-                        code: "SkillAlreadyTrained".into(),
-                        message: format!(
-                            "Skill {} (type {skill_type_id}) is already trained or queued to level {effective_base_lvl}",
-                            skill_type.name
-                        ),
-                    });
-                }
-
-                let start_sp = max_queued_sp.unwrap_or_else(|| {
-                    snap.skills
+                    let current_lvl = snap
+                        .skills
                         .get(&char_id)
                         .and_then(|m| m.get(&skill_type_id))
-                        .map(|s| s.skill_points)
-                        .unwrap_or(0.0)
-                });
-                let sp_delta = (end_sp - start_sp).max(0.0);
-                let queued_sp: f64 = snap
-                    .skill_queues
-                    .get(&char_id)
-                    .map(|q| q.iter().map(|e| (e.end_sp - e.start_sp).max(0.0)).sum())
-                    .unwrap_or(0.0);
-                // Enforce 5,000,000 SP Alpha Clone cap (grade 1) using incremental SP delta
-                if ch.clone_grade == 1 && ch.skill_points + queued_sp + sp_delta > 5_000_000.0 {
-                    return Err(BridgeRpcError {
-                        code: "AlphaCloneSpCapExceeded".into(),
-                        message: "Alpha clones cannot queue skills beyond 5,000,000 SP".into(),
+                        .map(|s| s.level)
+                        .unwrap_or(0);
+                    let (max_queued_lvl, max_queued_sp) = snap
+                        .skill_queues
+                        .get(&char_id)
+                        .and_then(|q| {
+                            q.iter()
+                                .filter(|e| e.type_id == skill_type_id)
+                                .max_by_key(|e| e.target_level)
+                                .map(|e| (e.target_level, Some(e.end_sp)))
+                        })
+                        .unwrap_or((0, None));
+                    let effective_base_lvl = current_lvl.max(max_queued_lvl);
+                    if target_level <= effective_base_lvl {
+                        return Err(BridgeRpcError {
+                            code: "SkillAlreadyTrained".into(),
+                            message: format!(
+                                "Skill {} (type {skill_type_id}) is already trained or queued to level {effective_base_lvl}",
+                                skill_type.name
+                            ),
+                        });
+                    }
+
+                    let start_sp = max_queued_sp.unwrap_or_else(|| {
+                        snap.skills
+                            .get(&char_id)
+                            .and_then(|m| m.get(&skill_type_id))
+                            .map(|s| s.skill_points)
+                            .unwrap_or(0.0)
                     });
-                }
-                let primary_attr_id = skill_type
-                    .default_attributes
-                    .get(&eve_sde::attr_ids::PRIMARY_ATTRIBUTE)
-                    .copied()
-                    .map(|v| v as u32)
-                    .unwrap_or(eve_sde::attr_ids::PERCEPTION as u32);
-                let secondary_attr_id = skill_type
-                    .default_attributes
-                    .get(&eve_sde::attr_ids::SECONDARY_ATTRIBUTE)
-                    .copied()
-                    .map(|v| v as u32)
-                    .unwrap_or(eve_sde::attr_ids::WILLPOWER as u32);
-                let primary_attr = ch.neural.get_attribute_by_id(primary_attr_id);
-                let secondary_attr = ch.neural.get_attribute_by_id(secondary_attr_id);
-                let clone_mult = if ch.clone_grade == 2 { 1.0 } else { 0.5 };
-                let duration_sec = skill_training_time_seconds(
-                    start_sp,
-                    end_sp,
-                    primary_attr,
-                    secondary_attr,
-                    clone_mult,
-                );
-                snap.skill_queues
-                    .entry(char_id)
-                    .or_default()
-                    .push(SkillQueueEntry {
-                        type_id: skill_type_id,
-                        target_level,
+                    let sp_delta = (end_sp - start_sp).max(0.0);
+                    let queued_sp: f64 = snap
+                        .skill_queues
+                        .get(&char_id)
+                        .map(|q| q.iter().map(|e| (e.end_sp - e.start_sp).max(0.0)).sum())
+                        .unwrap_or(0.0);
+
+                    // Enforce 5,000,000 SP Alpha Clone cap (grade 1) using incremental SP delta
+                    if ch.clone_grade == 1 && ch.skill_points + queued_sp + sp_delta > 5_000_000.0 {
+                        return Err(BridgeRpcError {
+                            code: "AlphaCloneSpCapExceeded".into(),
+                            message: "Alpha clones cannot queue skills beyond 5,000,000 SP".into(),
+                        });
+                    }
+
+                    let primary_attr_id = skill_type
+                        .default_attributes
+                        .get(&eve_sde::attr_ids::PRIMARY_ATTRIBUTE)
+                        .copied()
+                        .map(|v| v as u32)
+                        .unwrap_or(eve_sde::attr_ids::PERCEPTION as u32);
+                    let secondary_attr_id = skill_type
+                        .default_attributes
+                        .get(&eve_sde::attr_ids::SECONDARY_ATTRIBUTE)
+                        .copied()
+                        .map(|v| v as u32)
+                        .unwrap_or(eve_sde::attr_ids::WILLPOWER as u32);
+                    let primary_attr = ch.neural.get_attribute_by_id(primary_attr_id);
+                    let secondary_attr = ch.neural.get_attribute_by_id(secondary_attr_id);
+                    let clone_mult = if ch.clone_grade == 2 { 1.0 } else { 0.5 };
+                    let duration_sec = skill_training_time_seconds(
                         start_sp,
                         end_sp,
-                        duration_seconds: duration_sec,
-                    });
-                Ok(duration_sec)
+                        primary_attr,
+                        secondary_attr,
+                        clone_mult,
+                    );
+                    snap.skill_queues
+                        .entry(char_id)
+                        .or_default()
+                        .push(SkillQueueEntry {
+                            type_id: skill_type_id,
+                            target_level,
+                            start_sp,
+                            end_sp,
+                            duration_seconds: duration_sec,
+                        });
+                    last_ret = (skill_type_id, target_level, end_sp, duration_sec);
+                }
+                Ok(last_ret)
             });
 
             match res {
-                Ok(dur) => Some(Ok(PyRep::keyval([
-                    ("typeID", PyRep::Integer(skill_type_id as i64)),
-                    ("targetLevel", PyRep::Integer(target_level as i64)),
-                    ("endSP", PyRep::Real(end_sp)),
-                    ("durationSeconds", PyRep::Real(dur)),
-                ]))),
+                Ok((tid, lvl, esp, dur)) => {
+                    let _ = ctx.notify_skill_queue_changed(char_id);
+                    Some(Ok(PyRep::keyval([
+                        ("typeID", PyRep::Integer(tid as i64)),
+                        ("targetLevel", PyRep::Integer(lvl as i64)),
+                        ("endSP", PyRep::Real(esp)),
+                        ("durationSeconds", PyRep::Real(dur)),
+                    ])))
+                }
                 Err(e) => Some(Err(e)),
             }
         }
@@ -658,6 +726,396 @@ pub fn handle(
                 Ok(yielded) => Some(Ok(PyRep::Real(yielded))),
                 Err(e) => Some(Err(e)),
             }
+        }
+
+        ("skillMgr2", "PauseSkillQueue")
+        | ("skillMgr2", "CharStopTrainingSkill")
+        | ("skillMgr2", "PauseTraining") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            ctx.db.with_mut_snapshot(|snap| {
+                snap.paused_skill_queues.insert(char_id);
+            });
+            let _ = ctx.notify_skill_queue_paused(char_id);
+            Some(Ok(PyRep::Bool(true)))
+        }
+
+        ("skillMgr2", "ResumeSkillQueue")
+        | ("skillMgr2", "CharStartTrainingSkill")
+        | ("skillMgr2", "ResumeTraining") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            ctx.db.with_mut_snapshot(|snap| {
+                snap.paused_skill_queues.remove(&char_id);
+            });
+            let _ = ctx.notify_skill_queue_changed(char_id);
+            Some(Ok(PyRep::Bool(true)))
+        }
+
+        ("skillMgr2", "GetSkillHistory") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let rows = ctx.db.with_snapshot(|snap| {
+                snap.skills
+                    .get(&char_id)
+                    .map(|m| {
+                        m.values()
+                            .map(|s| {
+                                vec![
+                                    PyRep::Integer(1704067200),
+                                    PyRep::Integer(s.type_id as i64),
+                                    PyRep::Integer(s.level as i64),
+                                    PyRep::Real(s.skill_points),
+                                ]
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            });
+            Some(Ok(PyRep::rowset(
+                vec!["logDate", "skillTypeID", "skillLevel", "absolutePoints"],
+                rows,
+            )))
+        }
+
+        ("skillMgr2", "InjectSkillIntoBrain") | ("skillMgr2", "InjectSkill") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let current_dock = session.station_id.or(session.structure_id);
+            let current_ship = session.ship_id;
+            let raw_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            if raw_id <= 0 {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidArgument".into(),
+                    message: "InjectSkillIntoBrain requires itemID or skill typeID".into(),
+                }));
+            }
+
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let (item_id_opt, skill_type_id) = if let Some(item) = snap.items.get(&raw_id) {
+                    if !snap.is_item_consumable_by(item, char_id, current_dock, current_ship) {
+                        return Err(BridgeRpcError {
+                            code: "ItemNotReachable".into(),
+                            message: format!("Skillbook item {raw_id} is not reachable by character"),
+                        });
+                    }
+                    (Some(item.item_id), item.type_id)
+                } else if let Some(inv_item) = snap.items.values().find(|i| {
+                    i.type_id == raw_id as u32
+                        && i.owner_id == char_id
+                        && snap.is_item_consumable_by(i, char_id, current_dock, current_ship)
+                }) {
+                    (Some(inv_item.item_id), inv_item.type_id)
+                } else if ctx.sde.types.contains_key(&(raw_id as u32)) {
+                    (None, raw_id as u32)
+                } else {
+                    return Err(BridgeRpcError {
+                        code: "ItemNotFound".into(),
+                        message: format!("Skillbook item or type {raw_id} not found"),
+                    });
+                };
+
+                let Some(skill_type) = ctx.sde.types.get(&skill_type_id) else {
+                    return Err(BridgeRpcError {
+                        code: "SkillNotFound".into(),
+                        message: format!("Skill type {skill_type_id} not found in SDE"),
+                    });
+                };
+                if skill_type.category_id != 16 {
+                    return Err(BridgeRpcError {
+                        code: "InvalidSkillType".into(),
+                        message: format!("Type {skill_type_id} is not a skill (category 16)"),
+                    });
+                }
+
+                // Check prerequisites
+                for (skill_attr, level_attr) in [
+                    (attr_ids::REQUIRED_SKILL_1, attr_ids::REQUIRED_SKILL_1_LEVEL),
+                    (attr_ids::REQUIRED_SKILL_2, attr_ids::REQUIRED_SKILL_2_LEVEL),
+                    (attr_ids::REQUIRED_SKILL_3, attr_ids::REQUIRED_SKILL_3_LEVEL),
+                ] {
+                    if let Some(&req_skill_f) = skill_type.default_attributes.get(&skill_attr) {
+                        let req_skill_id = req_skill_f as TypeId;
+                        if req_skill_id > 0 {
+                            let req_lvl = skill_type
+                                .default_attributes
+                                .get(&level_attr)
+                                .copied()
+                                .unwrap_or(1.0)
+                                .max(1.0) as u8;
+                            let trained_lvl = snap
+                                .skills
+                                .get(&char_id)
+                                .and_then(|m| m.get(&req_skill_id))
+                                .map(|s| s.level)
+                                .unwrap_or(0);
+                            if trained_lvl < req_lvl {
+                                return Err(BridgeRpcError {
+                                    code: "SkillPrerequisiteNotMet".into(),
+                                    message: format!(
+                                        "Skill {} (type {skill_type_id}) requires prerequisite skill {req_skill_id} at level {req_lvl}",
+                                        skill_type.name
+                                    ),
+                                });
+                            }
+                        }
+                    }
+                }
+
+                let skills_map = snap.skills.entry(char_id).or_default();
+                if skills_map.contains_key(&skill_type_id) {
+                    return Err(BridgeRpcError {
+                        code: "SkillAlreadyInjected".into(),
+                        message: format!("Skill {} is already known to character", skill_type.name),
+                    });
+                }
+
+                if let Some(iid) = item_id_opt {
+                    if let Some(item) = snap.items.get_mut(&iid) {
+                        if item.quantity > 1 {
+                            item.quantity -= 1;
+                            item.version += 1;
+                        } else {
+                            snap.items.remove(&iid);
+                        }
+                    }
+                }
+
+                skills_map.insert(
+                    skill_type_id,
+                    TrainedSkillRecord {
+                        type_id: skill_type_id,
+                        level: 0,
+                        skill_points: 0.0,
+                    },
+                );
+
+                Ok(skill_type_id)
+            });
+
+            match res {
+                Ok(tid) => Some(Ok(PyRep::keyval([
+                    ("typeID", PyRep::Integer(tid as i64)),
+                    ("injected", PyRep::Bool(true)),
+                ]))),
+                Err(e) => Some(Err(e)),
+            }
+        }
+
+        ("charMgr", "GetPublicInfo") | ("charMgr", "GetPublicInfo3") => {
+            let target_char_id = args
+                .first()
+                .and_then(|a| a.as_i64())
+                .or(session.character_id);
+            let Some(cid) = target_char_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "CharacterNotSelected".into(),
+                    message: "GetPublicInfo requires an explicit charID or selected character".into(),
+                }));
+            };
+            let res = ctx.db.with_snapshot(|snap| {
+                snap.characters.get(&cid).cloned()
+            });
+            let Some(c) = res else {
+                return Some(Err(BridgeRpcError {
+                    code: "CharacterNotFound".into(),
+                    message: format!("Character {cid} not found"),
+                }));
+            };
+            Some(Ok(PyRep::keyval([
+                ("characterID", PyRep::Integer(c.character_id)),
+                ("characterName", PyRep::String(c.name)),
+                ("corporationID", PyRep::Integer(c.corporation_id)),
+                ("allianceID", c.alliance_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
+                ("raceID", PyRep::Integer(c.race_id as i64)),
+                ("bloodlineID", PyRep::Integer(c.bloodline_id as i64)),
+                ("ancestryID", PyRep::Integer(c.ancestry_id as i64)),
+                ("securityStatus", PyRep::Real(c.security_status)),
+                ("description", PyRep::String(c.description)),
+                ("gender", PyRep::Integer(c.gender as i64)),
+                ("createDateTime", PyRep::Integer(c.create_date_unix as i64)),
+            ])))
+        }
+
+        ("charMgr", "GetCharacterDescription") => {
+            let target_char_id = args
+                .first()
+                .and_then(|a| a.as_i64())
+                .or(session.character_id);
+            let Some(cid) = target_char_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "CharacterNotSelected".into(),
+                    message: "GetCharacterDescription requires charID or selected character".into(),
+                }));
+            };
+            let desc = ctx.db.with_snapshot(|snap| {
+                snap.characters.get(&cid).map(|c| c.description.clone())
+            }).unwrap_or_default();
+            Some(Ok(PyRep::String(desc)))
+        }
+
+        ("charMgr", "SetCharacterDescription") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let desc = args.first().and_then(|a| a.as_str()).unwrap_or("");
+            if desc.len() > 5000 {
+                return Some(Err(BridgeRpcError {
+                    code: "DescriptionTooLong".into(),
+                    message: "Character description exceeds 5000 characters limit".into(),
+                }));
+            }
+            ctx.db.with_mut_snapshot(|snap| {
+                if let Some(ch) = snap.characters.get_mut(&char_id) {
+                    ch.description = desc.to_string();
+                }
+            });
+            Some(Ok(PyRep::None))
+        }
+
+        ("corporationSvc", "GetEmployementRecordAndCharacterTransfers")
+        | ("charMgr", "GetEmployementRecordAndCharacterTransfers") => {
+            let target_char_id = args
+                .first()
+                .and_then(|a| a.as_i64())
+                .or(session.character_id);
+            let Some(cid) = target_char_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "CharacterNotSelected".into(),
+                    message: "GetEmployementRecordAndCharacterTransfers requires charID or selected character".into(),
+                }));
+            };
+            let rows = ctx.db.with_snapshot(|snap| {
+                snap.characters.get(&cid).map(|c| {
+                    vec![vec![
+                        PyRep::Integer(1),
+                        PyRep::Integer(c.corporation_id),
+                        PyRep::Integer(c.create_date_unix as i64),
+                    ]]
+                }).unwrap_or_default()
+            });
+            Some(Ok(PyRep::rowset(
+                vec!["recordID", "corporationID", "startDate"],
+                rows,
+            )))
+        }
+
+        ("charMgr", "AddOwnerNote") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let target_id = args.first().and_then(|a| a.as_i64()).unwrap_or(char_id);
+            let label = args.get(1).and_then(|a| a.as_str()).unwrap_or("Default").to_string();
+            let note = args.get(2).and_then(|a| a.as_str()).unwrap_or("").to_string();
+            let now_unix = ctx.now_unix();
+            let note_id = ctx.db.with_mut_snapshot(|snap| {
+                snap.next_entity_id += 1;
+                let id = snap.next_entity_id;
+                snap.owner_notes.insert(id, eve_db::OwnerNoteRecord {
+                    note_id: id,
+                    character_id: char_id,
+                    item_id: target_id,
+                    label,
+                    note,
+                    timestamp_unix: now_unix,
+                });
+                id
+            });
+            Some(Ok(PyRep::Integer(note_id)))
+        }
+
+        ("charMgr", "GetOwnerNote") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let target_id = args.first().and_then(|a| a.as_i64()).unwrap_or(char_id);
+            let rows = ctx.db.with_snapshot(|snap| {
+                snap.owner_notes
+                    .values()
+                    .filter(|n| n.character_id == char_id && n.item_id == target_id)
+                    .map(|n| {
+                        vec![
+                            PyRep::Integer(n.note_id),
+                            PyRep::Integer(n.item_id),
+                            PyRep::String(n.label.clone()),
+                            PyRep::String(n.note.clone()),
+                            PyRep::Integer(n.timestamp_unix as i64),
+                        ]
+                    })
+                    .collect()
+            });
+            Some(Ok(PyRep::rowset(
+                vec!["noteID", "itemID", "label", "note", "timestamp"],
+                rows,
+            )))
+        }
+
+        ("charMgr", "EditOwnerNote") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let note_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let label = args.get(1).and_then(|a| a.as_str());
+            let note = args.get(2).and_then(|a| a.as_str());
+            let updated = ctx.db.with_mut_snapshot(|snap| {
+                if let Some(n) = snap.owner_notes.get_mut(&note_id) {
+                    if n.character_id == char_id {
+                        if let Some(l) = label { n.label = l.to_string(); }
+                        if let Some(nt) = note { n.note = nt.to_string(); }
+                        n.timestamp_unix = ctx.now_unix();
+                        return true;
+                    }
+                }
+                false
+            });
+            Some(Ok(PyRep::Bool(updated)))
+        }
+
+        ("charMgr", "RemoveOwnerNote") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let note_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let removed = ctx.db.with_mut_snapshot(|snap| {
+                if let Some(n) = snap.owner_notes.get(&note_id) {
+                    if n.character_id == char_id {
+                        snap.owner_notes.remove(&note_id);
+                        return true;
+                    }
+                }
+                false
+            });
+            Some(Ok(PyRep::Bool(removed)))
+        }
+
+        ("charMgr", "GetOwnerNoteLabels") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let labels = ctx.db.with_snapshot(|snap| {
+                let mut set = std::collections::BTreeSet::new();
+                for n in snap.owner_notes.values() {
+                    if n.character_id == char_id {
+                        set.insert(n.label.clone());
+                    }
+                }
+                set.into_iter().map(PyRep::String).collect()
+            });
+            Some(Ok(PyRep::List(labels)))
         }
 
         ("charUnboundMgr", "ApplyNeuralRemap")

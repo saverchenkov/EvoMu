@@ -422,6 +422,9 @@ impl ServerContext {
                 .map(|(&cid, _)| cid)
                 .collect();
             for char_id in char_ids {
+                if snap.paused_skill_queues.contains(&char_id) {
+                    continue;
+                }
                 let Some(ch) = snap.characters.get(&char_id).cloned() else {
                     continue;
                 };

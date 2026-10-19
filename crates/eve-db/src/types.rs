@@ -468,8 +468,26 @@ pub struct CharacterRecord {
     pub jump_fatigue_minutes: f64,
     #[serde(default)]
     pub jump_cooldown_until_unix: u64,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub gender: u32,
+    #[serde(default)]
+    pub create_date_unix: u64,
     pub version: u64,
     pub system_epoch: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OwnerNoteRecord {
+    pub note_id: i64,
+    pub character_id: i64,
+    pub item_id: i64,
+    pub label: String,
+    pub note: String,
+    pub timestamp_unix: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1117,6 +1135,10 @@ pub struct WorldStateSnapshot {
     pub auto_moon_miners: HashMap<i64, AutoMoonMinerRecord>,
     #[serde(default)]
     pub observer_mining_ledger: HashMap<i64, Vec<ObserverMiningRecord>>,
+    #[serde(default)]
+    pub owner_notes: HashMap<i64, OwnerNoteRecord>,
+    #[serde(default)]
+    pub paused_skill_queues: HashSet<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

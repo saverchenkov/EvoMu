@@ -221,6 +221,10 @@ pub enum SystemCommand {
         capacitor: f64,
         reply: oneshot::Sender<Result<(), String>>,
     },
+    HealCombatState {
+        ball_id: BallId,
+        reply: oneshot::Sender<Result<CombatState, String>>,
+    },
     GetCombatState {
         ball_id: BallId,
         reply: oneshot::Sender<Option<CombatState>>,
@@ -716,6 +720,15 @@ impl SystemHandle {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
             .send(SystemCommand::SetCapacitor { ball_id, capacitor, reply: tx })
+            .await
+            .map_err(|_| "Solar system actor stopped".to_string())?;
+        rx.await.map_err(|_| "Solar system reply dropped".to_string())?
+    }
+
+    pub async fn heal_combat_state(&self, ball_id: BallId) -> Result<CombatState, String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SystemCommand::HealCombatState { ball_id, reply: tx })
             .await
             .map_err(|_| "Solar system actor stopped".to_string())?;
         rx.await.map_err(|_| "Solar system reply dropped".to_string())?
@@ -1602,6 +1615,14 @@ impl SystemRegistry {
                                 let cs = ballpark.combat_states.entry(ball_id).or_default();
                                 cs.capacitor = capacitor;
                                 let _ = reply.send(Ok(()));
+                            }
+                            SystemCommand::HealCombatState { ball_id, reply } => {
+                                let cs = ballpark.combat_states.entry(ball_id).or_default();
+                                cs.shield_hp = cs.max_shield_hp;
+                                cs.armor_hp = cs.max_armor_hp;
+                                cs.structure_hp = cs.max_structure_hp;
+                                cs.capacitor = cs.max_capacitor;
+                                let _ = reply.send(Ok(cs.clone()));
                             }
                             SystemCommand::GetCombatState { ball_id, reply } => {
                                 let cs = ballpark.combat_states.get(&ball_id).cloned();

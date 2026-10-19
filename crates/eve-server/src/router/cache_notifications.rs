@@ -872,6 +872,26 @@ impl ServerContext {
         )
     }
 
+    /// Emits an `OnSkillQueuePaused` notification to character (`feat:skills.queue-pause`).
+    pub fn notify_skill_queue_paused(&self, char_id: i64) -> Vec<PendingMachoNotification> {
+        self.notify(
+            NotificationTarget::Character(char_id),
+            "OnSkillQueuePaused",
+            "charid",
+            vec![],
+        )
+    }
+
+    /// Emits an `OnSkillQueueChanged` notification to character.
+    pub fn notify_skill_queue_changed(&self, char_id: i64) -> Vec<PendingMachoNotification> {
+        self.notify(
+            NotificationTarget::Character(char_id),
+            "OnSkillQueueChanged",
+            "charid",
+            vec![],
+        )
+    }
+
     /// Creates a persistent notification in `self.notification_records` and pushes an `OnNotificationReceived`
     /// `MachoPacket` notification to `receiver_id`.
     pub fn create_character_notification(
