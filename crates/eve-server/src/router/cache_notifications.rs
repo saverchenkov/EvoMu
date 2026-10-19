@@ -1087,6 +1087,9 @@ impl ServerContext {
                     is_system_local: true,
                     solar_system_id: Some(new_sys),
                     is_private: false,
+                    operators: std::collections::HashSet::new(),
+                    password: None,
+                    is_delayed_local: new_sys >= 31_000_000,
                 });
             chan.members.insert(char_id);
             Ok::<(), std::convert::Infallible>(())

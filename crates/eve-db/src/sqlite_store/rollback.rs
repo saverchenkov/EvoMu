@@ -411,6 +411,8 @@ pub fn rollback_dirty_from_sqlite(
                             z: r.get(6)?,
                             item_id: None,
                             memo: String::new(),
+                            folder_id: None,
+                            is_shared: false,
                         })
                     },
                 )

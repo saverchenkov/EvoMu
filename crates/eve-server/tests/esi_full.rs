@@ -126,6 +126,9 @@ fn setup_esi_test_environment() -> (Arc<ServerContext>, Arc<EsiRouter>, OpenApiS
                 member_roles: HashMap::new(),
                 applications: HashMap::new(),
                 wallet_divisions: Vec::new(),
+                description: String::new(),
+                url: String::new(),
+                hq_station_id: None,
             },
         );
 
@@ -266,6 +269,8 @@ fn setup_esi_test_environment() -> (Arc<ServerContext>, Arc<EsiRouter>, OpenApiS
                 z: 80_000.0,
                 item_id: None,
                 memo: String::new(),
+                folder_id: None,
+                is_shared: false,
             },
         );
 

@@ -708,6 +708,28 @@ pub struct BookmarkRecord {
     pub item_id: Option<i64>,
     #[serde(default)]
     pub memo: String,
+    #[serde(default)]
+    pub folder_id: Option<i64>,
+    #[serde(default)]
+    pub is_shared: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MailLabelRecord {
+    pub label_id: i64,
+    pub name: String,
+    pub color: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BookmarkFolderRecord {
+    pub folder_id: i64,
+    pub owner_id: i64,
+    pub folder_name: String,
+    #[serde(default)]
+    pub is_shared: bool,
+    #[serde(default)]
+    pub corporation_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -845,6 +867,12 @@ pub struct CorporationRecord {
     pub applications: HashMap<i64, CorpApplicationRecord>,
     #[serde(default)]
     pub wallet_divisions: Vec<CorpWalletDivisionRecord>,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub hq_station_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -857,6 +885,12 @@ pub struct ChatChannelRecord {
     pub is_system_local: bool,
     pub solar_system_id: Option<SolarSystemId>,
     pub is_private: bool,
+    #[serde(default)]
+    pub operators: HashSet<i64>,
+    #[serde(default)]
+    pub password: Option<String>,
+    #[serde(default)]
+    pub is_delayed_local: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1104,6 +1138,14 @@ pub struct WorldStateSnapshot {
     pub read_mails: HashSet<(i64, i64)>,
     #[serde(default)]
     pub deleted_mails: HashSet<(i64, i64)>,
+    #[serde(default)]
+    pub mail_labels: HashMap<i64, Vec<MailLabelRecord>>,
+    #[serde(default, with = "tuple_map_serde")]
+    pub mail_assigned_labels: HashMap<(i64, i64), Vec<i64>>,
+    #[serde(default)]
+    pub bookmark_folders: HashMap<i64, BookmarkFolderRecord>,
+    #[serde(default, with = "tuple_map_serde")]
+    pub wh_polarizations: HashMap<(i64, i64), u64>,
     #[serde(default)]
     pub mining_ledger: Vec<MiningLedgerRecord>,
     pub module_online_states: HashMap<i64, bool>,
