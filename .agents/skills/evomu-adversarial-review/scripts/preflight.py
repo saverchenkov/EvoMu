@@ -140,11 +140,119 @@ def lint_claims(root, claims_text, evidence_text, parity_rows):
     return problems
 
 
+def find_base(root):
+    st = rl.load_state(root)
+    for r in reversed(st.get("reviews", [])):
+        h = r.get("head")
+        if h and subprocess.run(["git", "merge-base", "--is-ancestor", h, "HEAD"], cwd=root, capture_output=True).returncode == 0:
+            return h
+    if subprocess.run(["git", "rev-parse", "--verify", "-q", "main"], cwd=root, capture_output=True).returncode == 0:
+        mb = subprocess.run(["git", "merge-base", "main", "HEAD"], cwd=root, capture_output=True, text=True).stdout.strip()
+        if mb:
+            return mb
+    return None
+
+
+def collect_added_lines(root, base):
+    added = {}  # file -> set of line numbers or None for whole file
+    def collect(diff_args):
+        cur = None
+        for ln in sh(["git", "diff", "-U0"] + diff_args, root)[1].splitlines():
+            if ln.startswith("+++ "):
+                cur = ln[6:] if ln.startswith("+++ b/") else None
+            elif ln.startswith("@@") and cur:
+                m = re.search(r"\+(\d+)(?:,(\d+))?", ln)
+                if m:
+                    a0, n = int(m.group(1)), int(m.group(2) or 1)
+                    added.setdefault(cur, set()).update(range(a0, a0 + n))
+    if base:
+        collect([base])
+    collect(["HEAD"])
+    for f in sh(["git", "ls-files", "--others", "--exclude-standard"], root)[1].split():
+        if f.endswith(".rs") and os.path.exists(os.path.join(root, f)):
+            added[f] = None
+    return added
+
+
+def run_early_gate(root, base, added, claims_path):
+    violations = []
+
+    # 1. RPC-name check (names must exist in the real client)
+    all_viol, have_client = rpc_names.run()
+    hard_all = [v for v in all_viol if v["kind"] == "NOT_IN_CLIENT"]
+    rpc_block = [v for v in hard_all if v["file"] in added and (added[v["file"]] is None or v["line"] in added[v["file"]])]
+    for v in rpc_block:
+        violations.append(("NOT_IN_CLIENT_RPC", "Unknown/invented RPC name '%s' in %s" % (v["name"], v["what"]),
+                           v["file"], v["line"]))
+
+    # 2. Hollow Assertion & Metric Gaming anti-patterns
+    hollow_patterns = [
+        (re.compile(r"fn\s+check_handled\b|!e\.code\S*contains\(\"unimplemented\"\)|\bcheck_handled\s*\(&"),
+         "Hollow error filter accepts arbitrary runtime errors as passes"),
+        (re.compile(r"status_code\s*==\s*(?:200|201)\s*\|\|.*(?:400|401|403|404|500)"),
+         "Permissive status code assertion accepts client/server error codes as success"),
+    ]
+
+    for fpath, lset in added.items():
+        if not fpath.endswith(".rs") or "/tests/" not in fpath:
+            continue
+        full_path = os.path.join(root, fpath)
+        if not os.path.exists(full_path):
+            continue
+        try:
+            flines = open(full_path, errors="replace").read().splitlines()
+        except OSError:
+            continue
+        is_descriptor_test = "descriptor" in fpath.lower()
+        for idx, line in enumerate(flines, 1):
+            if lset is not None and idx not in lset:
+                continue
+            for pat, desc in hollow_patterns:
+                if pat.search(line):
+                    violations.append(("HOLLOW_ASSERTION", desc, fpath, idx))
+            if is_descriptor_test and ("// parity: quasar:" in line or ("attest" in line and "quasar:" in line)):
+                violations.append(("QUASAR_SWEEP_GATE",
+                                   "quasar:* rows require live public gateway backend handlers; descriptor sweeps cannot close them",
+                                   fpath, idx))
+
+    # 3. Claims citations & quotes check (if draft claims provided)
+    if claims_path and os.path.exists(claims_path):
+        claims_text = open(claims_path, errors="replace").read()
+        refs = re.findall(r"([A-Za-z0-9_./\-]+\.(?:rs|py|md|toml|json|sql|c|sh|txt)):(\d+)(?:[-–](\d+))?", claims_text)
+        for path, a, b in refs:
+            full = os.path.join(root, path)
+            if not os.path.exists(full):
+                violations.append(("CLAIMS_CITED_PATH_MISSING", "Cited path does not exist: %s" % path, None, None))
+            else:
+                try:
+                    num_lines = len(open(full, errors="replace").read().splitlines())
+                    hi = int(b or a)
+                    if int(a) < 1 or hi > num_lines:
+                        violations.append(("CLAIMS_LINE_OUT_OF_RANGE",
+                                           "Line range %s-%s out of range in %s (has %d lines)" % (a, b or a, path, num_lines),
+                                           path, int(a)))
+                except OSError:
+                    pass
+        for q in re.findall(r"[\"“]([^\"”\n]{12,200})[\"”]", claims_text):
+            if ROW_RE.search(q):
+                continue
+            rc, _ = sh(["git", "grep", "-F", "-q", "--untracked", "-e", q, "--", ".", ":(exclude).evomu-reviews"], root)
+            if rc != 0:
+                violations.append(("CLAIMS_FABRICATED_QUOTE", "Quote not found verbatim anywhere in repo: \"%s\"" % q[:80],
+                                   None, None))
+
+    return rpc_block, hard_all, all_viol, have_client, violations
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--claims", help="draft claims file to lint")
     ap.add_argument("--no-tests", action="store_true", help="reuse the last pre-flight test output")
     ap.add_argument("--no-status", action="store_true", help="don't regenerate docs/ACTION_PLAN_STATUS.md")
+    ap.add_argument("--skip-early-fail", action="store_true",
+                    help="Warn but do not exit early on P0 static lint failures (also EVOMU_PREFLIGHT_SKIP_EARLY_FAIL=1)")
+    ap.add_argument("--early-only", action="store_true",
+                    help="Run only the early static lint checks in <1s and exit immediately")
     ap.add_argument("--test-timeout", type=int, default=7200)
     a = ap.parse_args()
 
@@ -158,6 +266,30 @@ def main():
     os.makedirs(pdir, exist_ok=True)
     tests_txt = os.path.join(pdir, "tests.txt")
     attest = os.path.join(pdir, "attest")
+
+    # Early Sanity Gate: detect P0 violations in < 1 second BEFORE running 30+ minutes of cargo test
+    base = find_base(root)
+    added = collect_added_lines(root, base)
+    rpc_block, hard_all, all_viol, have_client, early_violations = run_early_gate(root, base, added, a.claims)
+    skip_early = a.skip_early_fail or bool(os.environ.get("EVOMU_PREFLIGHT_SKIP_EARLY_FAIL"))
+
+    if early_violations:
+        print("\n" + "=" * 76)
+        print("[preflight] %d BLOCKING P0 ISSUE(S) DETECTED IN DIFF (BEFORE RUNNING TESTS):" % len(early_violations))
+        for cat, vmsg, fpath, lno in early_violations:
+            loc = (" (%s:%s)" % (fpath, lno)) if fpath else ""
+            print("  - [%s] %s%s" % (cat, vmsg, loc))
+        print("=" * 76)
+        if not skip_early:
+            print("\n[preflight] EARLY FAIL: Aborting test execution to save 30-60 minutes.")
+            print("            Fix the issues above, or rerun with --skip-early-fail")
+            print("            (or EVOMU_PREFLIGHT_SKIP_EARLY_FAIL=1) to run the full test suite anyway.\n")
+            return 1
+        else:
+            print("\n[preflight] WARNING: Early fail overridden by --skip-early-fail. Proceeding to tests...\n")
+    elif a.early_only:
+        print("[preflight] Early static checks: CLEAN (0 P0 issues found in diff).")
+        return 0
 
     if not a.no_tests:
         shutil.rmtree(attest, ignore_errors=True)
@@ -236,35 +368,6 @@ def main():
     L += ["", "## Diffstat vs HEAD", "```", diffstat.strip() or "(clean)", "```"]
     if untracked.strip():
         L += ["", "## Untracked files", "```", untracked.strip()[:4000], "```"]
-    # RPC-name check: names must exist in the real client (blocking for files changed since the last review)
-    st = rl.load_state(root)
-    base = None
-    for r in reversed(st.get("reviews", [])):
-        h = r.get("head")
-        if h and subprocess.run(["git", "merge-base", "--is-ancestor", h, "HEAD"], cwd=root).returncode == 0:
-            base = h
-            break
-    added = {}  # file -> set of added/modified line numbers (new code must be clean; legacy lines are reported)
-
-    def collect(diff_args):
-        cur = None
-        for ln in sh(["git", "diff", "-U0"] + diff_args, root)[1].splitlines():
-            if ln.startswith("+++ "):
-                cur = ln[6:] if ln.startswith("+++ b/") else None
-            elif ln.startswith("@@") and cur:
-                m = re.search(r"\+(\d+)(?:,(\d+))?", ln)
-                if m:
-                    a0, n = int(m.group(1)), int(m.group(2) or 1)
-                    added.setdefault(cur, set()).update(range(a0, a0 + n))
-    if base:
-        collect([base])
-    collect(["HEAD"])
-    for f in sh(["git", "ls-files", "--others", "--exclude-standard"], root)[1].split():
-        if f.endswith(".rs") and os.path.exists(os.path.join(root, f)):
-            added[f] = None  # whole new file
-    all_viol, have_client = rpc_names.run()
-    hard_all = [v for v in all_viol if v["kind"] == "NOT_IN_CLIENT"]
-    rpc_block = [v for v in hard_all if v["file"] in added and (added[v["file"]] is None or v["line"] in added[v["file"]])]
     L += ["", "## RPC-name check (names must exist in the real V24 client)",
           "- Repo-wide: **%d NOT_IN_CLIENT**, %d NOT_IN_CATALOG (informational)%s" % (
               len(hard_all), len(all_viol) - len(hard_all),
