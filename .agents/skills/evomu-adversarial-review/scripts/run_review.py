@@ -476,8 +476,9 @@ def main():
     write(os.path.join(ctx, "git_status.txt"), sh(["git", "status", "--short"], root)[1])
     write(os.path.join(ctx, "diffstat.txt"), sh(["git", "diff", "--stat", base, "--", ".", ":(exclude).agents"], root)[1])
     write(os.path.join(ctx, "diff.patch"), sh(["git", "diff", base, "--", ".", ":(exclude).agents", ":(exclude)docs/index/*.json"], root)[1])
+    agents_ref = "main" if subprocess.run(["git", "rev-parse", "--verify", "-q", "main"], cwd=root, capture_output=True).returncode == 0 else base
     write(os.path.join(ctx, "agents_dir_diff.txt"),
-          sh(["git", "diff", "--stat", base, "--", ".agents", ":(exclude)%s" % rl.AUDITOR_ROWS_REL], root)[1]
+          sh(["git", "diff", "--stat", agents_ref, "--", ".agents", ":(exclude)%s" % rl.AUDITOR_ROWS_REL], root)[1]
           or "(no changes under .agents/ other than auditor_rows.json)")
     write(os.path.join(ctx, "env_audit.txt"), env_audit(root))
 
