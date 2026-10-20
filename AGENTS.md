@@ -106,7 +106,7 @@
 - **Subagent reports to you are claims, not facts.** Verify them with pre-flight and the review before recording anything in `docs/ACTION_PLAN_STATUS.md`.
 
 ## Reviewer unavailable (quota or capacity outages)
-- **How the orchestrator handles quota errors.** `run_review.py` tries the primary reviewer (Opus) first, then the fallbacks `fable-5.1-high` and `gemini-3.1-pro-high` (`EVOMU_REVIEW_FALLBACK_MODELS`).
+- **How the orchestrator handles quota errors.** `run_review.py` tries the primary reviewer (`gemini-launch-candidate-high`, Gemini 4 Argon High) first, then the fallbacks `gemini-3.1-pro-high`, `fable-5.1-high` and `opus-5.5-high` (`EVOMU_REVIEW_FALLBACK_MODELS`).
   - A fallback verdict is a real review and gates commits normally. The report says which model reviewed.
   - The final gate still needs a PASS from the primary model.
 - **If every model is out, the review returns `UNAVAILABLE` (exit code 4).** Nothing was reviewed, so never treat it as a pass. Also don't treat a user instruction to "keep developing while the reviewer is down" as permission to skip the gate. While the reviewer is unavailable:
