@@ -74,6 +74,7 @@
   - The only escape is `rpc-lint: allow <reason>` on that line or the line above. The reviewer checks every such reason.
   - Repo-wide there are about 610 legacy violations (see `metrics_rpc_names.txt` in each review's context). Rows whose tests depend on them are suspect; remove or replace them as you touch those areas.
 - **Don't start a review until pre-flight prints `OK`.** Every lint problem must be fixed or explicitly explained in the claims. For example, a row you mention as still open, or a number about removed code that you cite with its commit hash.
+- **Early Sanity Gate (< 2 seconds).** Pre-flight runs static checks *before* `cargo test` (RPC names, hollow assertion anti-patterns like `check_handled`, permissive status codes, fake Quasar descriptor sweeps, and claims citations). It aborts immediately on P0 violations. To override and run the full test suite anyway, pass `--skip-early-fail` (or `EVOMU_PREFLIGHT_SKIP_EARLY_FAIL=1`). Run `preflight.py --early-only` to test diff sanity in 1 second without running tests.
 - Pre-flight also lists the rows newly closed since the last review, with their acceptance text. Re-check that every clause is really tested before claiming them.
 
 ## Code layout: split the monoliths (one-time, right after Phase 1 commits)
