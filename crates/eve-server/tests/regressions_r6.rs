@@ -88,7 +88,7 @@ async fn test_review_r6_np0_np1_regressions() {
             id,
             eve_db::InventoryItemRecord {
                 item_id: id,
-                type_id: 2254,
+                type_id: 2534,
                 owner_id: 90_000_001,
                 location_id: s1_ship_id,
                 flag: eve_db::InventoryFlag::Cargo,
@@ -109,7 +109,7 @@ async fn test_review_r6_np0_np1_regressions() {
             PyRep::List(vec![PyRep::Tuple(vec![
                 PyRep::Integer(1),
                 PyRep::Integer(1),
-                PyRep::Integer(2254),
+                PyRep::Integer(2534),
                 PyRep::Real(0.1),
                 PyRep::Real(0.2),
             ])]),
@@ -168,6 +168,58 @@ async fn test_review_r6_np0_np1_regressions() {
     .await
     .unwrap();
 
+    let (cour_item_1, cour_item_amarr, cour_item_2) = ctx.db.with_mut_snapshot(|snap| {
+        snap.next_entity_id += 1;
+        let i1 = snap.next_entity_id;
+        snap.items.insert(
+            i1,
+            eve_db::InventoryItemRecord {
+                item_id: i1,
+                type_id: 34,
+                owner_id: 90_000_002,
+                location_id: 60_003_760,
+                flag: eve_db::InventoryFlag::Hangar,
+                quantity: 10,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.next_entity_id += 1;
+        let ia = snap.next_entity_id;
+        snap.items.insert(
+            ia,
+            eve_db::InventoryItemRecord {
+                item_id: ia,
+                type_id: 34,
+                owner_id: 90_000_002,
+                location_id: 60_008_494,
+                flag: eve_db::InventoryFlag::Hangar,
+                quantity: 10,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.next_entity_id += 1;
+        let i2 = snap.next_entity_id;
+        snap.items.insert(
+            i2,
+            eve_db::InventoryItemRecord {
+                item_id: i2,
+                type_id: 34,
+                owner_id: 90_000_001,
+                location_id: 60_003_760,
+                flag: eve_db::InventoryFlag::Hangar,
+                quantity: 10,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        (i1, ia, i2)
+    });
+
     // s2 (starts docked at 60003760) creates Courier contract 60003760 -> 60008494
     let c_res = ctx
         .dispatch_rpc(
@@ -188,6 +240,7 @@ async fn test_review_r6_np0_np1_regressions() {
                 PyRep::Real(25_000.0),
                 PyRep::String("".into()),
                 PyRep::String("".into()),
+                PyRep::List(vec![PyRep::Integer(cour_item_1)]),
             ],
             &kw,
             None,
@@ -245,6 +298,7 @@ async fn test_review_r6_np0_np1_regressions() {
                 PyRep::Real(25_000.0),
                 PyRep::String("".into()),
                 PyRep::String("".into()),
+                PyRep::List(vec![PyRep::Integer(cour_item_amarr)]),
             ],
             &kw,
             None,
@@ -301,6 +355,7 @@ async fn test_review_r6_np0_np1_regressions() {
                 PyRep::Real(25_000.0),
                 PyRep::String("".into()),
                 PyRep::String("".into()),
+                PyRep::List(vec![PyRep::Integer(cour_item_2)]),
             ],
             &kw,
             None,
@@ -465,14 +520,30 @@ async fn test_review_r6_np0_np1_regressions() {
     .await
     .unwrap();
     let jita_h = ctx.systems.get_or_spawn(30_000_142);
+    let PyRep::Tuple(beyonce_bind) = ctx
+        .dispatch_rpc(
+            &mut s1,
+            "beyonce",
+            None,
+            "MachoBindObject",
+            &[PyRep::Integer(30_000_142), PyRep::None],
+            &kw,
+            None,
+        )
+        .await
+        .expect("bind beyonce in Jita")
+    else {
+        panic!("Expected bind tuple");
+    };
+    let beyonce_oid = beyonce_bind[0].as_i64().unwrap() as u64;
     let mut ikv = HashMap::new();
-    for shot in 0..10 {
+    for shot in 0..25 {
         if shot > 0 {
             for _ in 0..4 {
                 let _ = jita_h.step_manual(1.0).await.unwrap();
             }
         }
-        let interdict = ctx
+        let interdict = match ctx
             .dispatch_rpc(
                 &mut s1,
                 "dogmaIM",
@@ -483,7 +554,28 @@ async fn test_review_r6_np0_np1_regressions() {
                 None,
             )
             .await
-            .unwrap();
+        {
+            Ok(v) => v,
+            // The convoy keeps travelling; close back in to weapon range and keep shooting
+            Err(e) if e.code == "TargetOutOfRange" => {
+                ctx.dispatch_rpc(
+                    &mut s1,
+                    "beyonce",
+                    Some(beyonce_oid),
+                    "CmdFollowBall",
+                    &[PyRep::Integer(800_000_001), PyRep::Real(5_000.0)],
+                    &kw,
+                    None,
+                )
+                .await
+                .expect("CmdFollowBall toward convoy");
+                for _ in 0..20 {
+                    let _ = jita_h.step_manual(1.0).await.unwrap();
+                }
+                continue;
+            }
+            Err(e) => panic!("FireWeapon failed: {e:?}"),
+        };
         let PyRep::KeyVal(kv) = interdict else {
             panic!("Expected convoy combat destruction KeyVal");
         };

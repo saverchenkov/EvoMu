@@ -64,6 +64,12 @@ pub async fn handle(
         }
 
         ("authentication", "Login") => {
+            if args.len() != 2 {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidLoginArguments".into(),
+                    message: "authentication.Login expects (username, password)".into(),
+                }));
+            }
             let username = args.first().and_then(|a| a.as_str()).unwrap_or("");
             let token = args.get(1).and_then(|a| a.as_str()).unwrap_or("");
             let now_unix = ctx.now_unix();
@@ -83,12 +89,6 @@ pub async fn handle(
                 Err(e) => return Some(Err(e)),
             };
 
-            let allow_displace = args
-                .get(2)
-                .and_then(|a| a.as_bool())
-                .or_else(|| _kwargs.get("displace").and_then(|a| a.as_bool()))
-                .unwrap_or(false);
-
             if let Some(prev_uid) = session.user_id {
                 if prev_uid != acc.user_id {
                     ctx.db.release_online_lock(prev_uid, session.session_id);
@@ -98,29 +98,19 @@ pub async fn handle(
             ctx.db
                 .clear_revocation_on_fresh_login(acc.user_id, session.session_id);
 
-            if ctx.db.get_online_session(acc.user_id).is_none() {
-                let _ = ctx.db.acquire_online_lock(
-                    acc.user_id,
-                    session.session_id,
-                    None,
-                    false,
-                    now_unix,
+            if let Ok(Some(displaced)) = ctx.db.acquire_online_lock(
+                acc.user_id,
+                session.session_id,
+                None,
+                true,
+                now_unix,
+            ) {
+                ctx.disconnect_session(
+                    displaced.session_id,
+                    "ACL_DISPLACED",
+                    "Displaced by concurrent login on same account",
                 );
-            } else if allow_displace {
-                if let Ok(Some(displaced)) = ctx.db.acquire_online_lock(
-                    acc.user_id,
-                    session.session_id,
-                    None,
-                    true,
-                    now_unix,
-                ) {
-                    ctx.disconnect_session(
-                        displaced.session_id,
-                        "ACL_DISPLACED",
-                        "Displaced by concurrent login on same account",
-                    );
-                    ctx.release_session_bindings(displaced.session_id);
-                }
+                ctx.release_session_bindings(displaced.session_id);
             }
             let prev_role = session.role;
             session.user_id = Some(acc.user_id);
@@ -201,100 +191,53 @@ pub async fn handle(
                 Err(e) => return Some(Err(e)),
             };
             let now_unix = ctx.now_unix();
+            if args.len() != 1 {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidComputerHash".into(),
+                    message: "multiLoginBlocker.Login expects a single computerhash argument".into(),
+                }));
+            }
             // V24 client `characterSelection.pyj` (`_CanLogin`) passes `computerhash` as `args[0]` (str/bytes)
             // and expects a boolean `True` (allowed) or `False` (blocked -> opens `MultiLoginBlockedWindow`).
-            let computer_hash_arg: Option<String> = match args.first() {
-                Some(PyRep::String(s)) => Some(s.clone()),
-                Some(PyRep::Bytes(b)) => Some(String::from_utf8_lossy(b).into_owned()),
-                _ => None,
+            let computer_hash = match args.first() {
+                Some(PyRep::String(s)) if !s.trim().is_empty() => s.clone(),
+                Some(PyRep::Bytes(b)) if !b.is_empty() => String::from_utf8_lossy(b).into_owned(),
+                _ => {
+                    return Some(Err(BridgeRpcError {
+                        code: "InvalidComputerHash".into(),
+                        message: "multiLoginBlocker.Login requires a non-empty computerhash string"
+                            .into(),
+                    }))
+                }
             };
-            if let Some(computer_hash) = computer_hash_arg {
-                let allow_displace = args
-                    .get(1)
-                    .and_then(|a| a.as_bool())
-                    .or_else(|| _kwargs.get("displace").and_then(|a| a.as_bool()))
-                    .unwrap_or(false);
-                if ctx
-                    .db
-                    .has_alpha_computer_hash_conflict(uid, session.session_id, &computer_hash)
-                {
-                    return Some(Ok(PyRep::Bool(false)));
-                }
-                match ctx.db.acquire_online_lock_with_computer_hash(
-                    uid,
-                    session.session_id,
-                    session.character_id,
-                    Some(computer_hash),
-                    allow_displace,
-                    now_unix,
-                ) {
-                    Ok(displaced) => {
-                        if let Some(ref d) = displaced {
-                            ctx.disconnect_session(
-                                d.session_id,
-                                "ACL_DISPLACED",
-                                "Displaced by concurrent login on same account",
-                            );
-                            ctx.release_session_bindings(d.session_id);
-                        }
-                        Some(Ok(PyRep::Bool(true)))
-                    }
-                    Err(eve_db::DbError::AlreadyLoggedIn { .. }) => Some(Ok(PyRep::Bool(false))),
-                    Err(e) => {
-                        let code = match e {
-                            eve_db::DbError::AccountBanned { .. } => "UserBanned",
-                            eve_db::DbError::AccountSuspended { .. } => "AccountSuspended",
-                            eve_db::DbError::ValidationError(_) => "SessionKicked",
-                            _ => "AlreadyLoggedIn",
-                        };
-                        Some(Err(BridgeRpcError {
-                            code: code.into(),
-                            message: e.to_string(),
-                        }))
-                    }
-                }
-            } else {
-                let allow_displace = args.first().and_then(|a| a.as_bool()).unwrap_or(false);
-                match ctx.db.acquire_online_lock(
-                    uid,
-                    session.session_id,
-                    session.character_id,
-                    allow_displace,
-                    now_unix,
-                ) {
-                    Ok(displaced) => {
-                        if let Some(ref d) = displaced {
-                            ctx.disconnect_session(
-                                d.session_id,
-                                "ACL_DISPLACED",
-                                "Displaced by concurrent login on same account",
-                            );
-                            ctx.release_session_bindings(d.session_id);
-                        }
-                        Some(Ok(PyRep::keyval([
-                            ("userID", PyRep::Integer(uid as i64)),
-                            ("sessionID", PyRep::Integer(session.session_id as i64)),
-                            (
-                                "displacedSessionID",
-                                displaced
-                                    .map(|d| PyRep::Integer(d.session_id as i64))
-                                    .unwrap_or(PyRep::None),
-                            ),
-                        ])))
-                    }
-                    Err(e) => {
-                        let code = match e {
-                            eve_db::DbError::AccountBanned { .. } => "UserBanned",
-                            eve_db::DbError::AccountSuspended { .. } => "AccountSuspended",
-                            eve_db::DbError::ValidationError(_) => "SessionKicked",
-                            _ => "AlreadyLoggedIn",
-                        };
-                        Some(Err(BridgeRpcError {
-                            code: code.into(),
-                            message: e.to_string(),
-                        }))
-                    }
-                }
+            if ctx
+                .db
+                .has_alpha_computer_hash_conflict(uid, session.session_id, &computer_hash)
+            {
+                return Some(Ok(PyRep::Bool(false)));
+            }
+            match ctx.db.acquire_online_lock_with_computer_hash(
+                uid,
+                session.session_id,
+                session.character_id,
+                Some(computer_hash),
+                false,
+                now_unix,
+            ) {
+                Ok(_) => Some(Ok(PyRep::Bool(true))),
+                Err(eve_db::DbError::AccountBanned { .. }) => Some(Err(BridgeRpcError {
+                    code: "UserBanned".into(),
+                    message: "Account is banned".into(),
+                })),
+                Err(eve_db::DbError::AccountSuspended { .. }) => Some(Err(BridgeRpcError {
+                    code: "AccountSuspended".into(),
+                    message: "Account is suspended".into(),
+                })),
+                Err(eve_db::DbError::ValidationError(msg)) => Some(Err(BridgeRpcError {
+                    code: "SessionKicked".into(),
+                    message: msg,
+                })),
+                Err(_) => Some(Ok(PyRep::Bool(false))),
             }
         }
 

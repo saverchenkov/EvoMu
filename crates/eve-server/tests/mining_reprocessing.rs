@@ -401,7 +401,7 @@ async fn test_phase_5m_mn05_specialized_holds_volume_and_stack_merging() {
         &mut sess,
         "invbroker",
         None,
-        "MoveItem",
+        "Add",
         &[
             PyRep::Integer(item_a),
             PyRep::Integer(venture_id),
@@ -423,7 +423,7 @@ async fn test_phase_5m_mn05_specialized_holds_volume_and_stack_merging() {
         &mut sess,
         "invbroker",
         None,
-        "MoveItem",
+        "Add",
         &[
             PyRep::Integer(item_b),
             PyRep::Integer(venture_id),
@@ -447,7 +447,7 @@ async fn test_phase_5m_mn05_specialized_holds_volume_and_stack_merging() {
             &mut sess,
             "invbroker",
             None,
-            "MoveItem",
+            "Add",
             &[
                 PyRep::Integer(item_c),
                 PyRep::Integer(venture_id),
@@ -904,17 +904,56 @@ async fn test_phase_5m_mn11_space_and_structure_compression() {
 
     let station_id = 60_003_760;
 
-    // 1. Structure compression while docked
-    // Insert 350 units of Veldspar (portion size 100 -> compresses to type 62516)
+    // 1. Structure compression while docked in NPC station must fail with MustBeInStructure,
+    // and succeed 1:1 losslessly when docked in an Upwell structure (`docs/eve-wiki/Compression.md:27,48`)
+    let npc_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "structureCompressionMgr",
+            None,
+            "CompressItemInStructure",
+            &[PyRep::Integer(100_000_850)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("NPC station must reject CompressItemInStructure");
+    assert_eq!(npc_err.code, "MustBeInStructure");
+
+    let structure_id = 1_000_000_009_001i64;
     let ore_item_id = 100_000_850;
     ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(
+            structure_id,
+            eve_db::UpwellStructureRecord {
+                structure_id,
+                owner_corp_id: 1000001,
+                type_id: 35835, // Athanor
+                name: "Perimeter Reprocessing Hub".into(),
+                solar_system_id: 30000144,
+                position: [0.0, 0.0, 0.0],
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 1000,
+                shield_hp: 1000.0,
+                armor_hp: 1000.0,
+                hull_hp: 1000.0,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+            },
+        );
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = None;
+            ch.structure_id = Some(structure_id);
+        }
         snap.items.insert(
             ore_item_id,
             InventoryItemRecord {
                 item_id: ore_item_id,
-                type_id: 1230, // Veldspar (portion_size = 100)
+                type_id: 1230, // Veldspar (1:1 lossless compression to 62516)
                 owner_id: char_id,
-                location_id: station_id,
+                location_id: structure_id,
                 flag: InventoryFlag::Hangar,
                 quantity: 350,
                 singleton: false,
@@ -927,6 +966,8 @@ async fn test_phase_5m_mn11_space_and_structure_compression() {
             },
         );
     });
+    sess.station_id = None;
+    sess.structure_id = Some(structure_id);
 
     let comp_res = ctx
         .dispatch_rpc(
@@ -952,22 +993,15 @@ async fn test_phase_5m_mn11_space_and_structure_compression() {
         .expect("remainderUnits");
 
     assert_eq!(comp_type, 62516); // Compressed Veldspar
-    assert_eq!(comp_qty, 3);
-    assert_eq!(comp_rem, 50);
+    assert_eq!(comp_qty, 350);
+    assert_eq!(comp_rem, 0);
 
-    // Verify original item was converted and remainder item was created
+    // Verify original item was converted 1:1 in-place
     let item_after = ctx.db.get_item(ore_item_id).expect("item_after");
     assert_eq!(item_after.type_id, 62516);
-    assert_eq!(item_after.quantity, 3);
+    assert_eq!(item_after.quantity, 350);
 
-    let hangar_items = ctx.db.get_items_for_character(char_id);
-    let rem_item = hangar_items
-        .iter()
-        .find(|i| i.location_id == station_id && i.type_id == 1230 && i.item_id != 100_000_012 && i.item_id != ore_item_id);
-    assert!(rem_item.is_some());
-    assert_eq!(rem_item.unwrap().quantity, 50);
-
-    // Ice compression: Clear Icicle (16262, portion size 1 -> compresses to 28434)
+    // Ice compression: Clear Icicle (16262 -> compresses 1:1 to 28434)
     let ice_item_id = 100_000_851;
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(
@@ -976,7 +1010,7 @@ async fn test_phase_5m_mn11_space_and_structure_compression() {
                 item_id: ice_item_id,
                 type_id: 16262, // Clear Icicle
                 owner_id: char_id,
-                location_id: station_id,
+                location_id: structure_id,
                 flag: InventoryFlag::Hangar,
                 quantity: 7,
                 singleton: false,
@@ -1032,6 +1066,14 @@ async fn test_phase_5m_mn11_space_and_structure_compression() {
     assert_eq!(space_comp_err.unwrap_err().code, "MustBeInSpace");
 
     // 2. In-space compression while undocked
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = Some(station_id);
+            ch.structure_id = None;
+        }
+    });
+    sess.station_id = Some(station_id);
+    sess.structure_id = None;
     ctx.dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None)
         .await
         .expect("Undock");
@@ -1052,9 +1094,66 @@ async fn test_phase_5m_mn11_space_and_structure_compression() {
         .await;
     assert_eq!(struct_comp_err.unwrap_err().code, "NotDocked");
 
-    // In-space compression of Scordite (1228, portion size 100 -> compresses to 62520) in ship cargo
+    // In-space compression of Scordite (1228 -> compresses 1:1 to 62520) in SpecializedOreHold
+    // on an Orca (28606) with an active Large Industrial Core I (58945) and Large Asteroid Ore Compressor I (62625)
     let space_ore_id = 100_000_852;
+    let comp_mod_id = 100_000_853;
+    let core_mod_id = 100_000_854;
     ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ship_it) = snap.items.get_mut(&ship_id) {
+            ship_it.type_id = 28606; // Orca
+        }
+        // Unfit the starter ship's modules so the compressor and core get free high slots
+        snap.items.retain(|_, item| item.location_id != ship_id);
+        // Train the SDE skill prerequisites (requiredSkill1..3 / level) of the compressor and the core
+        for tid in [62625_u32, 58945] {
+            let t = &ctx.sde.types[&tid];
+            for (sk_attr, lvl_attr) in [(182_u16, 277_u16), (183, 278), (184, 279)] {
+                if let Some(&sk) = t.default_attributes.get(&sk_attr) {
+                    let lvl = t.default_attributes.get(&lvl_attr).copied().unwrap_or(1.0) as u8;
+                    snap.skills.entry(char_id).or_default().insert(
+                        sk as u32,
+                        eve_db::TrainedSkillRecord { type_id: sk as u32, level: lvl.max(1), skill_points: 256_000.0 },
+                    );
+                }
+            }
+        }
+        snap.items.insert(
+            comp_mod_id,
+            InventoryItemRecord {
+                item_id: comp_mod_id,
+                type_id: 62625, // Large Asteroid Ore Compressor I
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                dynamic_attributes: HashMap::new(),
+                source_mutaplasmid_id: None,
+                insured_payout_isk: 0.0,
+                is_blueprint_copy: false,
+                blueprint_runs_remaining: None,
+            },
+        );
+        snap.items.insert(
+            core_mod_id,
+            InventoryItemRecord {
+                item_id: core_mod_id,
+                type_id: 58945, // Large Industrial Core I
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot1,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                dynamic_attributes: HashMap::new(),
+                source_mutaplasmid_id: None,
+                insured_payout_isk: 0.0,
+                is_blueprint_copy: false,
+                blueprint_runs_remaining: None,
+            },
+        );
         snap.items.insert(
             space_ore_id,
             InventoryItemRecord {
@@ -1062,7 +1161,7 @@ async fn test_phase_5m_mn11_space_and_structure_compression() {
                 type_id: 1228, // Scordite
                 owner_id: char_id,
                 location_id: ship_id,
-                flag: InventoryFlag::Cargo,
+                flag: InventoryFlag::SpecializedOreHold,
                 quantity: 500,
                 singleton: false,
                 version: 1,
@@ -1074,6 +1173,22 @@ async fn test_phase_5m_mn11_space_and_structure_compression() {
             },
         );
     });
+
+    // Activate the core, then the compressor (attribute 3265 requires an active Industrial Core)
+    ctx.ship_fittings.write().unwrap().remove(&ship_id);
+    for (module_id, effect) in [(core_mod_id, "industrialCore"), (comp_mod_id, "compressor")] {
+        ctx.dispatch_rpc(
+            &mut sess,
+            "dogmaIM",
+            None,
+            "Activate",
+            &[PyRep::Integer(module_id), PyRep::String(effect.into())],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("Activate {module_id}: {e:?}"));
+    }
 
     let space_comp_res = ctx
         .dispatch_rpc(
@@ -1096,7 +1211,7 @@ async fn test_phase_5m_mn11_space_and_structure_compression() {
         .expect("quantity");
 
     assert_eq!(space_comp_type, 62520); // Compressed Scordite
-    assert_eq!(space_comp_qty, 5);
+    assert_eq!(space_comp_qty, 500);
 }
 
 #[tokio::test]

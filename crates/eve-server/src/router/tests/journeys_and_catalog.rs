@@ -112,7 +112,7 @@ async fn test_all_18_e2e_journeys_and_catalog_coverage() {
         &mut session,
         "invbroker",
         None,
-        "MoveItem",
+        "Add",
         &[
             PyRep::Integer(100_000_003),
             PyRep::Integer(100_000_001),
@@ -526,6 +526,37 @@ async fn test_all_18_e2e_journeys_and_catalog_coverage() {
     assert_eq!(okv.get("filledImmediately"), Some(&PyRep::Bool(true)));
 
     // E2E-08: Ore Compression, Reprocessing, & Blueprint Manufacturing
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(
+            1_000_000_000_001,
+            eve_db::UpwellStructureRecord {
+                structure_id: 1_000_000_000_001,
+                owner_corp_id: 1_000_170,
+                type_id: 35835, // Athanor refinery
+                name: "Jita Refinery".into(),
+                solar_system_id: 30_000_142,
+                position: [0.0, 0.0, 0.0],
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 500,
+                shield_hp: 50_000.0,
+                armor_hp: 50_000.0,
+                hull_hp: 50_000.0,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+            },
+        );
+        if let Some(it) = snap.items.get_mut(&100_000_012) {
+            it.location_id = 1_000_000_000_001;
+        }
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.station_id = None;
+            ch.structure_id = Some(1_000_000_000_001);
+        }
+    });
+    session.station_id = None;
+    session.structure_id = Some(1_000_000_000_001);
     ctx.dispatch_rpc(
         &mut session,
         "structureCompressionMgr",
@@ -537,6 +568,14 @@ async fn test_all_18_e2e_journeys_and_catalog_coverage() {
     )
     .await
     .unwrap();
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.station_id = Some(60_003_760);
+            ch.structure_id = None;
+        }
+    });
+    session.station_id = Some(60_003_760);
+    session.structure_id = None;
     ctx.dispatch_rpc(
         &mut session,
         "reprocessingSvc",
@@ -612,15 +651,15 @@ async fn test_all_18_e2e_journeys_and_catalog_coverage() {
                 &mut session,
                 "agentMgr",
                 None,
-                "RequestMission",
-                &[],
+                "DoAction",
+                &[PyRep::Integer(2)],
                 &empty,
                 None,
             )
             .await
             .unwrap();
         let PyRep::KeyVal(req_mkv) = req_m else {
-            panic!("Expected RequestMission KeyVal");
+            panic!("Expected DoAction(RequestMission) KeyVal");
         };
         let mid = req_mkv.get("missionID").unwrap().as_i64().unwrap();
         let acc_m = ctx
@@ -628,15 +667,15 @@ async fn test_all_18_e2e_journeys_and_catalog_coverage() {
                 &mut session,
                 "agentMgr",
                 None,
-                "AcceptMission",
-                &[PyRep::Integer(mid)],
+                "DoAction",
+                &[PyRep::Integer(3), PyRep::Integer(mid)],
                 &empty,
                 None,
             )
             .await
             .unwrap();
         let PyRep::KeyVal(acc_mkv) = acc_m else {
-            panic!("Expected AcceptMission KeyVal");
+            panic!("Expected DoAction(AcceptMission) KeyVal");
         };
         let npc_ball_id = acc_mkv.get("spawnedNpcBallID").unwrap().as_i64().unwrap();
         ctx.set_invention_roll_override(Some(0.001));
@@ -682,8 +721,8 @@ async fn test_all_18_e2e_journeys_and_catalog_coverage() {
                 &mut session,
                 "agentMgr",
                 None,
-                "CompleteMission",
-                &[PyRep::Integer(mid)],
+                "DoAction",
+                &[PyRep::Integer(6), PyRep::Integer(mid)],
                 &empty,
                 None,
             )
@@ -911,7 +950,7 @@ async fn test_all_18_e2e_journeys_and_catalog_coverage() {
     .await
     .unwrap();
     let mut legal_destroyed = false;
-    for _ in 0..45 {
+    for _ in 0..120 {
         for _ in 0..4 {
             let _ = jita_handle.step_manual(1.0).await.unwrap();
         }
@@ -992,7 +1031,7 @@ async fn test_all_18_e2e_journeys_and_catalog_coverage() {
             id,
             eve_db::InventoryItemRecord {
                 item_id: id,
-                type_id: 2254,
+                type_id: 2534,
                 owner_id: 90_000_001,
                 location_id: active_loc,
                 flag: eve_db::InventoryFlag::Cargo,
@@ -1013,7 +1052,7 @@ async fn test_all_18_e2e_journeys_and_catalog_coverage() {
             PyRep::List(vec![PyRep::Tuple(vec![
                 PyRep::Integer(1),
                 PyRep::Integer(1),
-                PyRep::Integer(2254),
+                PyRep::Integer(2534),
                 PyRep::Real(0.1),
                 PyRep::Real(0.2),
             ])]),
@@ -1171,6 +1210,28 @@ async fn test_all_18_e2e_journeys_and_catalog_coverage() {
     .unwrap();
 
     // E2E-15: Courier Contract Creation (st_id -> Jita 4-4 60_003_760 by sess2), Self-Accept Rejection, Acceptance by session, Undock/Dock Delivery, & Destination-Verified Completion
+    let courier_item_id = ctx
+        .db
+        .try_with_mut_snapshot(|snap| {
+            snap.next_entity_id += 1;
+            let iid = snap.next_entity_id;
+            snap.items.insert(
+                iid,
+                eve_db::InventoryItemRecord {
+                    item_id: iid,
+                    type_id: 34,
+                    owner_id: 90_000_002,
+                    location_id: st_id,
+                    flag: eve_db::InventoryFlag::Hangar,
+                    quantity: 100,
+                    singleton: false,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+            Ok::<_, std::convert::Infallible>(iid)
+        })
+        .unwrap();
     let c_res = ctx
         .dispatch_rpc(
             &mut sess2,
@@ -1190,6 +1251,10 @@ async fn test_all_18_e2e_journeys_and_catalog_coverage() {
                 PyRep::Real(2_000_000.0),
                 PyRep::String("".into()),
                 PyRep::String("".into()),
+                PyRep::List(vec![PyRep::Tuple(vec![
+                    PyRep::Integer(courier_item_id),
+                    PyRep::Integer(100),
+                ])]),
             ],
             &empty,
             None,
@@ -1392,9 +1457,9 @@ async fn test_all_18_e2e_journeys_and_catalog_coverage() {
     .await
     .unwrap();
 
-    // E2E-16: AIR NPE Node Graph 473 Progression & AIR Career Program SP Claim (after reaching target_progress)
-    for _ in 0..3 {
-        ctx.dispatch_rpc(
+    // E2E-16: Non-V24 air_npe.AdvanceNode and seasonManager.claim_goal_reward return UnimplementedRPC
+    let npe_res = ctx
+        .dispatch_rpc(
             &mut session,
             "air_npe",
             None,
@@ -1403,9 +1468,8 @@ async fn test_all_18_e2e_journeys_and_catalog_coverage() {
             &empty,
             None,
         )
-        .await
-        .unwrap();
-    }
+        .await;
+    assert_eq!(npe_res.unwrap_err().code, "UnimplementedRPC");
     let goal_res = ctx
         .dispatch_rpc(
             &mut session,

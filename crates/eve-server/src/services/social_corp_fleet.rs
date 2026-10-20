@@ -180,7 +180,9 @@ pub async fn handle(
             }
         }
 
-        ("fleetMgr", "CreateFleet") | ("fleetObjectHandler", "CreateFleet") => {
+        ("fleetMgr", "CreateFleet")
+        | ("fleetObjectHandler", "CreateFleet")
+        | ("fleetSvc", "InitFleet") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),

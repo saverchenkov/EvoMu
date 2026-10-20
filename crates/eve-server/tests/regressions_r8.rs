@@ -252,6 +252,25 @@ async fn test_review_r8_regressions() {
     .unwrap();
 
     // 3. R8-P1-2 & R9-P1-1: Expired contract settlement for both Outstanding and InProgress Courier contracts
+    let exp_cour_item_id = ctx.db.with_mut_snapshot(|snap| {
+        snap.next_entity_id += 1;
+        let id = snap.next_entity_id;
+        snap.items.insert(
+            id,
+            eve_db::InventoryItemRecord {
+                item_id: id,
+                type_id: 34,
+                owner_id: 90_000_001,
+                location_id: 60_003_760,
+                flag: InventoryFlag::Hangar,
+                quantity: 10,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        id
+    });
     let s1_bal_pre = ctx.db.get_character(90_000_001).unwrap().balance.0;
     let c_exp = ctx
         .dispatch_rpc(
@@ -272,6 +291,7 @@ async fn test_review_r8_regressions() {
                 PyRep::Real(20_000.0),
                 PyRep::String("".into()),
                 PyRep::String("".into()),
+                PyRep::List(vec![PyRep::Integer(exp_cour_item_id)]),
             ],
             &kw,
             None,
@@ -409,7 +429,7 @@ async fn test_review_r8_regressions() {
     let mut s1_npcs = Vec::new();
     for _ in 0..2 {
         let rm = ctx
-            .dispatch_rpc(&mut s1, "agentMgr", None, "RequestMission", &[], &kw, None)
+            .dispatch_rpc(&mut s1, "agentMgr", None, "DoAction", &[PyRep::Integer(2)], &kw, None)
             .await
             .unwrap();
         let PyRep::KeyVal(rm_kv) = rm else {
@@ -422,8 +442,8 @@ async fn test_review_r8_regressions() {
                 &mut s1,
                 "agentMgr",
                 None,
-                "AcceptMission",
-                &[PyRep::Integer(mid)],
+                "DoAction",
+                &[PyRep::Integer(3), PyRep::Integer(mid)],
                 &kw,
                 None,
             )
@@ -436,7 +456,7 @@ async fn test_review_r8_regressions() {
     }
     assert_ne!(s1_mids[0], s1_mids[1]);
     let rm_s2 = ctx
-        .dispatch_rpc(&mut s2, "agentMgr", None, "RequestMission", &[], &kw, None)
+        .dispatch_rpc(&mut s2, "agentMgr", None, "DoAction", &[PyRep::Integer(2)], &kw, None)
         .await
         .unwrap();
     let PyRep::KeyVal(rms2_kv) = rm_s2 else {
@@ -448,8 +468,8 @@ async fn test_review_r8_regressions() {
             &mut s2,
             "agentMgr",
             None,
-            "AcceptMission",
-            &[PyRep::Integer(s2_mid_1)],
+            "DoAction",
+            &[PyRep::Integer(3), PyRep::Integer(s2_mid_1)],
             &kw,
             None,
         )
@@ -599,8 +619,8 @@ async fn test_review_r8_regressions() {
             &mut s1,
             "agentMgr",
             None,
-            "CompleteMission",
-            &[PyRep::Integer(s1_mids[1])],
+            "DoAction",
+            &[PyRep::Integer(6), PyRep::Integer(s1_mids[1])],
             &kw,
             None,
         )
@@ -648,8 +668,8 @@ async fn test_review_r8_regressions() {
         &mut s1,
         "agentMgr",
         None,
-        "CompleteMission",
-        &[PyRep::Integer(s1_mids[1])],
+        "DoAction",
+        &[PyRep::Integer(6), PyRep::Integer(s1_mids[1])],
         &kw,
         None,
     )
@@ -700,8 +720,8 @@ async fn test_review_r8_regressions() {
         &mut s2,
         "agentMgr",
         None,
-        "CompleteMission",
-        &[PyRep::Integer(s2_mid_1)],
+        "DoAction",
+        &[PyRep::Integer(6), PyRep::Integer(s2_mid_1)],
         &kw,
         None,
     )
@@ -710,7 +730,7 @@ async fn test_review_r8_regressions() {
 
     // Mission abandon/decline via RemoveOfferFromJournal despawns the pocket NPC and clears the journal entry
     let rm_1003 = ctx
-        .dispatch_rpc(&mut s1, "agentMgr", None, "RequestMission", &[], &kw, None)
+        .dispatch_rpc(&mut s1, "agentMgr", None, "DoAction", &[PyRep::Integer(2)], &kw, None)
         .await
         .unwrap();
     let PyRep::KeyVal(rm1003_kv) = rm_1003 else {
@@ -722,8 +742,8 @@ async fn test_review_r8_regressions() {
             &mut s1,
             "agentMgr",
             None,
-            "AcceptMission",
-            &[PyRep::Integer(s1_mid_3)],
+            "DoAction",
+            &[PyRep::Integer(3), PyRep::Integer(s1_mid_3)],
             &kw,
             None,
         )
@@ -755,7 +775,7 @@ async fn test_review_r8_regressions() {
         .unwrap()
         .is_none());
 
-    // N1, N2 & R36-P1-7: Cannot abandon an already completed or already quit mission, cannot re-accept either, and client cannot supply mission_id to RequestMission
+    // N1, N2 & R36-P1-7: Cannot abandon an already completed or already quit mission, cannot re-accept either, and client cannot supply mission_id to DoAction(RequestMission)
     let quit_completed = ctx
         .dispatch_rpc(
             &mut s1,
@@ -785,8 +805,8 @@ async fn test_review_r8_regressions() {
             &mut s1,
             "agentMgr",
             None,
-            "AcceptMission",
-            &[PyRep::Integer(s1_mids[1])],
+            "DoAction",
+            &[PyRep::Integer(3), PyRep::Integer(s1_mids[1])],
             &kw,
             None,
         )
@@ -797,8 +817,8 @@ async fn test_review_r8_regressions() {
             &mut s1,
             "agentMgr",
             None,
-            "RequestMission",
-            &[PyRep::Integer(s1_mids[1])],
+            "DoAction",
+            &[PyRep::Integer(2), PyRep::Integer(s1_mids[1])],
             &kw,
             None,
         )
@@ -811,7 +831,7 @@ async fn test_review_r8_regressions() {
             &mut s1,
             "invbroker",
             None,
-            "MoveItem",
+            "Add",
             &[
                 PyRep::Integer(100_000_003),
                 PyRep::Integer(100_000_001),
@@ -945,7 +965,7 @@ async fn test_review_r8_regressions() {
         "multiLoginBlocker",
         None,
         "Login",
-        &[PyRep::Bool(true)],
+        &[PyRep::String("hw-r8-other".into())],
         &kw,
         None,
     )
@@ -995,7 +1015,7 @@ async fn test_review_r8_regressions() {
             &mut s2,
             "invbroker",
             None,
-            "MoveItem",
+            "Add",
             &[
                 PyRep::Integer(100_009_901),
                 PyRep::Integer(100_000_002),
@@ -1013,7 +1033,7 @@ async fn test_review_r8_regressions() {
         &mut s2,
         "invbroker",
         None,
-        "MoveItem",
+        "Add",
         &[
             PyRep::Integer(100_009_902),
             PyRep::Integer(100_000_002),
@@ -1028,7 +1048,7 @@ async fn test_review_r8_regressions() {
         &mut s2,
         "invbroker",
         None,
-        "MoveItem",
+        "Add",
         &[
             PyRep::Integer(100_009_903),
             PyRep::Integer(100_000_002),
@@ -1044,7 +1064,7 @@ async fn test_review_r8_regressions() {
             &mut s2,
             "invbroker",
             None,
-            "MoveItem",
+            "Add",
             &[
                 PyRep::Integer(100_009_904),
                 PyRep::Integer(100_000_002),
@@ -1172,7 +1192,7 @@ async fn test_review_r8_regressions() {
             &mut s2,
             "invbroker",
             None,
-            "MoveItem",
+            "Add",
             &[
                 PyRep::Integer(100_009_901),
                 PyRep::Integer(100_000_002),
@@ -1206,7 +1226,7 @@ async fn test_review_r8_regressions() {
         &mut s2,
         "invbroker",
         None,
-        "MoveItem",
+        "Add",
         &[
             PyRep::Integer(100_009_901),
             PyRep::Integer(100_000_002),
@@ -1840,7 +1860,7 @@ async fn test_review_r8_regressions() {
         &mut s2,
         "invbroker",
         None,
-        "MoveItem",
+        "Add",
         &[
             PyRep::Integer(100_009_951),
             PyRep::Integer(100_009_950),
@@ -1979,16 +1999,32 @@ async fn test_review_r8_regressions() {
     // and attempting a 2nd colony on Jita 40009077 fails with MaxColoniesReached
     ctx.db.with_mut_snapshot(|snap| {
         snap.next_entity_id += 1;
-        let id = snap.next_entity_id;
+        let id1 = snap.next_entity_id;
         snap.items.insert(
-            id,
+            id1,
             eve_db::InventoryItemRecord {
-                item_id: id,
-                type_id: 2254,
+                item_id: id1,
+                type_id: 2534,
                 owner_id: 90_000_002,
                 location_id: 100_009_950,
                 flag: InventoryFlag::Cargo,
-                quantity: 2,
+                quantity: 1,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.next_entity_id += 1;
+        let id2 = snap.next_entity_id;
+        snap.items.insert(
+            id2,
+            eve_db::InventoryItemRecord {
+                item_id: id2,
+                type_id: 2524,
+                owner_id: 90_000_002,
+                location_id: 100_009_950,
+                flag: InventoryFlag::Cargo,
+                quantity: 1,
                 singleton: false,
                 version: 1,
                 ..Default::default()
@@ -2005,7 +2041,7 @@ async fn test_review_r8_regressions() {
             PyRep::List(vec![PyRep::Tuple(vec![
                 PyRep::Integer(1),
                 PyRep::Integer(1),
-                PyRep::Integer(2254),
+                PyRep::Integer(2534),
                 PyRep::Real(0.1),
                 PyRep::Real(0.2),
             ])]),
@@ -2026,7 +2062,7 @@ async fn test_review_r8_regressions() {
                 PyRep::List(vec![PyRep::Tuple(vec![
                     PyRep::Integer(1),
                     PyRep::Integer(1),
-                    PyRep::Integer(2254),
+                    PyRep::Integer(2524),
                     PyRep::Real(0.1),
                     PyRep::Real(0.2),
                 ])]),
@@ -2270,18 +2306,20 @@ async fn test_review_r8_regressions() {
             ch.station_id = Some(60_003_754);
         }
     });
+    s2.solar_system_id = Some(30_000_144);
+    s2.station_id = Some(60_003_754);
     let rm_decline = ctx
         .dispatch_rpc(
             &mut s2,
             "agentMgr",
             None,
-            "RequestMission",
-            &[PyRep::Integer(3_012_018)],
+            "DoAction",
+            &[PyRep::Integer(2), PyRep::Integer(3_012_018)],
             &kw,
             None,
         )
         .await
-        .expect("RequestMission for s2 decline");
+        .expect("DoAction(RequestMission) for s2 decline");
     let PyRep::KeyVal(rm_dec_kv) = rm_decline else {
         panic!("Expected rm_dec_kv");
     };
@@ -2312,9 +2350,9 @@ async fn test_review_r8_regressions() {
     assert_eq!(extract_rowset_rows(&st_tx_after_decline).len(), 0);
 
     let rm_quit = ctx
-        .dispatch_rpc(&mut s2, "agentMgr", None, "RequestMission", &[], &kw, None)
+        .dispatch_rpc(&mut s2, "agentMgr", None, "DoAction", &[PyRep::Integer(2)], &kw, None)
         .await
-        .expect("RequestMission for s2 quit");
+        .expect("DoAction(RequestMission) for s2 quit");
     let PyRep::KeyVal(rm_quit_kv) = rm_quit else {
         panic!("Expected rm_quit_kv");
     };
@@ -2323,24 +2361,24 @@ async fn test_review_r8_regressions() {
         &mut s2,
         "agentMgr",
         None,
-        "AcceptMission",
-        &[PyRep::Integer(s2_quit_mid)],
+        "DoAction",
+        &[PyRep::Integer(3), PyRep::Integer(s2_quit_mid)],
         &kw,
         None,
     )
     .await
-    .expect("AcceptMission for s2 quit");
+    .expect("DoAction(AcceptMission) for s2 quit");
     ctx.dispatch_rpc(
         &mut s2,
         "agentMgr",
         None,
-        "QuitMission",
-        &[PyRep::Integer(s2_quit_mid)],
+        "DoAction",
+        &[PyRep::Integer(11), PyRep::Integer(s2_quit_mid)],
         &kw,
         None,
     )
     .await
-    .expect("QuitMission for s2");
+    .expect("DoAction(QuitMission) for s2");
     let st_tx_after_quit = ctx
         .dispatch_rpc(
             &mut s2,

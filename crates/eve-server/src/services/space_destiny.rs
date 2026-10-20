@@ -155,11 +155,8 @@ pub async fn handle(
             }
         }
 
-        // parity: plan:SP-3, feat:navigation.approach, feat:dogma.velocity-agility, feat:modules.micro-jump-drive
-        ("beyonce", "CmdOrbit")
-        | ("beyonce", "CmdFollowBall")
-        | ("beyonce", "CmdApproach")
-        | ("beyonce", "CmdKeepAtRange") => {
+        // parity: plan:SP-3, feat:navigation.approach, feat:dogma.velocity-agility
+        ("beyonce", "CmdOrbit") | ("beyonce", "CmdFollowBall") => {
             let _ = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -175,10 +172,8 @@ pub async fn handle(
                 }));
             };
             let target_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let default_range = if method == "CmdApproach" {
+            let default_range = if method == "CmdFollowBall" {
                 0.0
-            } else if method == "CmdKeepAtRange" {
-                1_000.0
             } else {
                 2_500.0
             };
@@ -199,7 +194,7 @@ pub async fn handle(
             }
         }
 
-        ("beyonce", "CmdAlign") | ("beyonce", "CmdAlignTo") => {
+        ("beyonce", "CmdAlignTo") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -281,44 +276,6 @@ pub async fn handle(
                     code: "DestinyCommandFailed".into(),
                     message: e,
                 })),
-            }
-        }
-
-        ("beyonce", "CmdMicroJump") => {
-            let _ = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let sys_id = match ServerContext::require_bound_system(bound_entry, "beyonce") {
-                Ok(s) => s,
-                Err(e) => return Some(Err(e)),
-            };
-            let Some(ship_id) = session.ship_id else {
-                return Some(Err(BridgeRpcError {
-                    code: "NoActiveShip".into(),
-                    message: "Session has no active ship".into(),
-                }));
-            };
-            let dist = args.first().and_then(|a| a.as_f64()).unwrap_or(100_000.0);
-            let handle = ctx.systems.get_or_spawn(sys_id);
-            let _ = handle.break_gate_cloak(ship_id).await;
-            match handle.micro_jump(ship_id, dist).await {
-                Ok(new_pos) => Some(Ok(PyRep::keyval([
-                    ("x", PyRep::Real(new_pos.x)),
-                    ("y", PyRep::Real(new_pos.y)),
-                    ("z", PyRep::Real(new_pos.z)),
-                ]))),
-                Err(e) => {
-                    let code = if e.contains("WarpScrambled") {
-                        "WarpScrambled"
-                    } else {
-                        "DestinyCommandFailed"
-                    };
-                    Some(Err(BridgeRpcError {
-                        code: code.into(),
-                        message: e,
-                    }))
-                }
             }
         }
 
@@ -1284,7 +1241,7 @@ pub async fn handle(
             ])))
         }
 
-        ("structureCynoBeaconMgr", "GetBeaconFleet") => {
+        ("structureCynoBeaconMgr", "GetMyAccessibleOnlineCynoBeaconStructures") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -1315,7 +1272,7 @@ pub async fn handle(
             Some(Ok(PyRep::List(beacons)))
         }
 
-        // parity: plan:S-3, feat:navigation.pharolux-beacon
+        // parity: plan:S-3, feat:navigation.pharolux-beacon, feat:esi.character.fatigue
         ("structureCynoBeaconMgr", "CmdJumpToStructureBeacon") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
@@ -1460,9 +1417,21 @@ pub async fn handle(
                 }));
             }
 
-            // Fuel check & consumption
+            let now = ctx.now_unix();
+            // Fuel & Jump Reactivation Cooldown check & consumption
             let fuel_needed = (dist_ly * 150.0).round().max(50.0) as i32;
             let fuel_deduct_res = ctx.db.try_with_mut_snapshot(|snap| {
+                if let Some(ch) = snap.characters.get(&char_id) {
+                    if ch.jump_cooldown_until_unix > now {
+                        return Err(BridgeRpcError {
+                            code: "JumpReactivationCooldown".into(),
+                            message: format!(
+                                "Jump drive reactivation delay active for {} more seconds",
+                                ch.jump_cooldown_until_unix - now
+                            ),
+                        });
+                    }
+                }
                 let fuel_items: Vec<i64> = snap
                     .items
                     .values()
@@ -1512,17 +1481,30 @@ pub async fn handle(
             }
 
             // Fatigue & Cooldown calculation
-            let cur_fatigue = ctx
-                .db
-                .with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.jump_fatigue_minutes).unwrap_or(0.0));
+            let cur_fatigue = ctx.db.with_snapshot(|snap| {
+                snap.characters
+                    .get(&char_id)
+                    .map(|c| {
+                        if c.jump_fatigue_until_unix > now {
+                            ((c.jump_fatigue_until_unix - now) as f64 / 60.0)
+                                .max(c.jump_fatigue_minutes)
+                        } else {
+                            0.0
+                        }
+                    })
+                    .unwrap_or(0.0)
+            });
             let (cd_min, fat_min) =
                 compute_jump_fatigue_and_cooldown_minutes(cur_fatigue, dist_ly, 0.0);
-            let now = ctx.now_unix();
+            let cd_secs = ((cd_min * 60.0).round() as u64).max(1);
+            let fat_secs = ((fat_min * 60.0).round() as u64).max(cd_secs + 1);
+            let cooldown_until = now.saturating_add(cd_secs);
+            let fatigue_until = now.saturating_add(fat_secs);
             ctx.db.with_mut_snapshot(|snap| {
                 if let Some(ch) = snap.characters.get_mut(&char_id) {
                     ch.jump_fatigue_minutes = fat_min;
-                    ch.jump_cooldown_until_unix = now + (cd_min * 60.0).round() as u64;
-                    ch.jump_fatigue_until_unix = now + (fat_min * 60.0).round() as u64;
+                    ch.jump_cooldown_until_unix = cooldown_until;
+                    ch.jump_fatigue_until_unix = fatigue_until;
                     ch.solar_system_id = target_sys_id;
                 }
                 snap.character_last_jump_unix.insert(char_id, now);
@@ -1562,6 +1544,9 @@ pub async fn handle(
                 ("beyonceBoundID", PyRep::Integer(new_beyonce_id as i64)),
                 ("jumpFatigueMinutes", PyRep::Real(fat_min)),
                 ("jumpCooldownMinutes", PyRep::Real(cd_min)),
+                ("lastUpdateUnix", PyRep::Integer(now as i64)),
+                ("jumpCooldownUntilUnix", PyRep::Integer(cooldown_until as i64)),
+                ("jumpFatigueUntilUnix", PyRep::Integer(fatigue_until as i64)),
                 ("distanceLY", PyRep::Real(dist_ly)),
             ])))
         }
@@ -1894,13 +1879,7 @@ pub async fn handle(
             Some(Ok(PyRep::List(matches)))
         }
 
-        ("beyonce", "CmdMine")
-        | ("beyonce", "CmdMineRepeatedly")
-        | ("dogmaIM", "Mine")
-        | ("droneMgr", "Mine")
-        | ("droneMgr", "MineAsteroid")
-        | ("miningMgr", "Mine")
-        | ("miningMgr", "MineAsteroid") => {
+        ("entity", "CmdMineRepeatedly") | ("beyonce", "CmdMineRepeatedly") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -1921,23 +1900,75 @@ pub async fn handle(
                 }));
             };
 
-            let asteroid_id = args
-                .first()
-                .and_then(|a| a.as_i64())
-                .or_else(|| _kwargs.get("asteroidID").and_then(|v| v.as_i64()))
-                .or_else(|| _kwargs.get("targetID").and_then(|v| v.as_i64()))
-                .unwrap_or(0);
+            // Parse canonical `(droneIDs, targetID)` or `(targetID, droneID)` arguments
+            let mut drone_ids: Vec<i64> = Vec::new();
+            let mut asteroid_id: i64 = 0;
+
+            if let Some(first) = args.first() {
+                match first {
+                    PyRep::List(list) | PyRep::Tuple(list) => {
+                        for el in list {
+                            if let Some(id) = el.as_i64() {
+                                drone_ids.push(id);
+                            }
+                        }
+                        asteroid_id = args
+                            .get(1)
+                            .and_then(|a| a.as_i64())
+                            .or_else(|| _kwargs.get("targetID").and_then(|v| v.as_i64()))
+                            .or_else(|| _kwargs.get("asteroidID").and_then(|v| v.as_i64()))
+                            .unwrap_or(0);
+                    }
+                    _ => {
+                        if let Some(first_id) = first.as_i64() {
+                            let second_id = args.get(1).and_then(|a| a.as_i64());
+                            let first_is_drone = ctx.db.with_snapshot(|snap| {
+                                snap.items
+                                    .get(&first_id)
+                                    .and_then(|i| ctx.sde.types.get(&i.type_id))
+                                    .is_some_and(|t| t.group_id == 101)
+                            });
+                            if first_is_drone && second_id.is_some() {
+                                drone_ids.push(first_id);
+                                asteroid_id = second_id.unwrap_or(0);
+                            } else {
+                                asteroid_id = first_id;
+                                if let Some(sec) = second_id {
+                                    drone_ids.push(sec);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if asteroid_id == 0 {
+                asteroid_id = _kwargs
+                    .get("asteroidID")
+                    .or_else(|| _kwargs.get("targetID"))
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0);
+            }
+            if drone_ids.is_empty() {
+                if let Some(did) = _kwargs
+                    .get("droneID")
+                    .or_else(|| _kwargs.get("moduleID"))
+                    .and_then(|v| v.as_i64())
+                {
+                    drone_ids.push(did);
+                } else if let Some(PyRep::List(list) | PyRep::Tuple(list)) = _kwargs.get("droneIDs") {
+                    for el in list {
+                        if let Some(id) = el.as_i64() {
+                            drone_ids.push(id);
+                        }
+                    }
+                }
+            }
             if asteroid_id == 0 {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
-                    message: "CmdMine requires target asteroidID".into(),
+                    message: "CmdMineRepeatedly requires target asteroidID".into(),
                 }));
             }
-            let module_id = args
-                .get(1)
-                .and_then(|a| a.as_i64())
-                .or_else(|| _kwargs.get("moduleID").and_then(|v| v.as_i64()))
-                .or_else(|| _kwargs.get("droneID").and_then(|v| v.as_i64()));
 
             let handle = ctx.systems.get_or_spawn(sys_id);
             let Some((_, ship_ball)) = handle.get_ball_snapshot(ship_id).await.ok().flatten() else {
@@ -1947,7 +1978,46 @@ pub async fn handle(
                 }));
             };
 
-            let Some(ast_state) = handle.get_asteroid_state(asteroid_id).await.ok().flatten() else {
+            let mut ast_state_opt = handle.get_asteroid_state(asteroid_id).await.ok().flatten();
+            if ast_state_opt.is_none() {
+                if let Some(db_ast) = ctx.db.get_asteroid(asteroid_id) {
+                    let unit_vol = ctx
+                        .sde
+                        .types
+                        .get(&db_ast.type_id)
+                        .map(|t| t.volume.max(0.001))
+                        .unwrap_or(0.1);
+                    let pos = glam::DVec3::new(db_ast.position.0, db_ast.position.1, db_ast.position.2);
+                    let _ = handle
+                        .spawn_asteroid(
+                            crate::system_actor::AsteroidState {
+                                asteroid_id,
+                                belt_id: db_ast.belt_id,
+                                type_id: db_ast.type_id,
+                                initial_units: db_ast.initial_quantity.max(0) as u64,
+                                remaining_units: db_ast.quantity.max(0) as u64,
+                                unit_volume: unit_vol,
+                                depleted: false,
+                                respawn_at_tick: None,
+                            },
+                            eve_destiny::Ball {
+                                id: asteroid_id,
+                                type_id: db_ast.type_id,
+                                position: pos,
+                                velocity: glam::DVec3::ZERO,
+                                max_velocity: 0.0,
+                                inertia: 0.0,
+                                mass: 1.0e10,
+                                radius: db_ast.radius,
+                                speed_fraction: 0.0,
+                                mode: eve_destiny::MovementMode::Stop,
+                            },
+                        )
+                        .await;
+                    ast_state_opt = handle.get_asteroid_state(asteroid_id).await.ok().flatten();
+                }
+            }
+            let Some(ast_state) = ast_state_opt else {
                 return Some(Err(BridgeRpcError {
                     code: "AsteroidNotFound".into(),
                     message: format!("Asteroid {asteroid_id} not found in system {sys_id}"),
@@ -1964,7 +2034,7 @@ pub async fn handle(
             // Target range validation
             if let Some((_, ast_ball)) = handle.get_ball_snapshot(asteroid_id).await.ok().flatten() {
                 let surface_dist = (ship_ball.position.distance(ast_ball.position) - ship_ball.radius - ast_ball.radius).max(0.0);
-                let max_range = 15_000.0;
+                let max_range = 35_000.0;
                 if surface_dist > max_range {
                     return Some(Err(BridgeRpcError {
                         code: "OutOfRange".into(),
@@ -1973,27 +2043,130 @@ pub async fn handle(
                 }
             }
 
-            // Check if this extraction is from a mining drone or excavator drone
-            let drone_item = module_id.and_then(|mid| ctx.db.get_item(mid));
-            let is_drone = drone_item.as_ref().map(|i| {
-                ctx.sde.types.get(&i.type_id).map(|t| t.group_id == 101).unwrap_or(false)
-            }).unwrap_or(false) || _kwargs.get("isDrone").and_then(|v| v.as_bool()).unwrap_or(false);
-
-            // Dogma yield & residue calculation via ShipFittingEngine (`MN-01`, `MN-02`)
-            let fit = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).ok();
-            let (base_yield_m3, waste_prob) = if is_drone {
-                let drone_type_id = drone_item.as_ref().map(|i| i.type_id).unwrap_or(2173);
-                let drone_t = ctx.sde.types.get(&drone_type_id);
-                let d_yield = drone_t.and_then(|t| t.default_attributes.get(&77).copied()).unwrap_or(25.0);
-                let (drone_op_lvl, drone_int_lvl) = ctx.db.with_snapshot(|snap| {
-                    let sk = snap.skills.get(&char_id);
-                    let op = sk.and_then(|m| m.get(&3439)).map(|s| s.level).unwrap_or(0);
-                    let int = sk.and_then(|m| m.get(&3436)).map(|s| s.level).unwrap_or(0);
-                    (op, int)
+            // If no explicit drone/module ID was passed, check if the character has launched mining drones in space
+            if drone_ids.is_empty() {
+                drone_ids = ctx.db.with_snapshot(|snap| {
+                    snap.items
+                        .values()
+                        .filter(|i| {
+                            i.owner_id == char_id
+                                && i.location_id == sys_id as i64
+                                && i.flag == InventoryFlag::None
+                                && ctx.sde.types.get(&i.type_id).is_some_and(|t| t.group_id == 101)
+                        })
+                        .map(|i| i.item_id)
+                        .collect()
                 });
-                let drone_mult = (1.0 + 0.05 * (drone_op_lvl as f64)) * (1.0 + 0.10 * (drone_int_lvl as f64));
-                (d_yield * drone_mult, 0.0)
-            } else if let (Some(fit), Some(mod_id)) = (&fit, module_id) {
+            }
+
+            let primary_id = drone_ids.first().copied();
+            let drone_items: Vec<eve_db::InventoryItemRecord> = drone_ids
+                .iter()
+                .filter_map(|&did| ctx.db.get_item(did))
+                .filter(|i| ctx.sde.types.get(&i.type_id).is_some_and(|t| t.group_id == 101))
+                .collect();
+            let is_drone = !drone_items.is_empty();
+
+            let ship_type_id = ctx
+                .db
+                .get_item(ship_id)
+                .map(|i| i.type_id)
+                .unwrap_or(ship_ball.type_id);
+
+            let fit = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).ok();
+
+            let (base_yield_m3, waste_prob) = if is_drone {
+                for d_item in &drone_items {
+                    if d_item.location_id != sys_id as i64 || d_item.flag != InventoryFlag::None {
+                        return Some(Err(BridgeRpcError {
+                            code: "DroneNotInSpace".into(),
+                            message: format!(
+                                "Mining drone {} must be launched into space before mining",
+                                d_item.item_id
+                            ),
+                        }));
+                    }
+                    // 'Excavator' Mining Drone (41030) / 'Excavator' Ice Harvesting Drone (41031) requires Rorqual (28352) + active Industrial Core (group 515)
+                    if d_item.type_id == 41030 || d_item.type_id == 41031 {
+                        if ship_type_id != 28352 {
+                            return Some(Err(BridgeRpcError {
+                                code: "InvalidShipForExcavator".into(),
+                                message: "Excavator mining drones can only be operated by a Rorqual (28352)".into(),
+                            }));
+                        }
+                        let has_active_ind_core = ctx.db.with_snapshot(|snap| {
+                            snap.items.values().any(|it| {
+                                it.location_id == ship_id
+                                    && (27..=34).contains(&(it.flag as u16))
+                                    && ctx.sde.types.get(&it.type_id).is_some_and(|t| t.group_id == 515)
+                                    && snap.module_active_states.contains(&it.item_id)
+                            })
+                        }) || fit.as_ref().is_some_and(|f| {
+                            f.modules.values().any(|m| {
+                                ctx.sde.types.get(&m.type_id).is_some_and(|t| t.group_id == 515)
+                                    && m.state == eve_dogma::ModuleState::Active
+                            })
+                        });
+                        if !has_active_ind_core {
+                            return Some(Err(BridgeRpcError {
+                                code: "IndustrialCoreRequired".into(),
+                                message: "Excavator mining drones require an active Capital Industrial Core on the Rorqual".into(),
+                            }));
+                        }
+                    }
+                }
+
+                let (drone_op_lvl, drone_int_lvl, drone_spec_lvl, rig_mult) = ctx.db.with_snapshot(|snap| {
+                    let sk = snap.skills.get(&char_id);
+                    let op3438 = sk.and_then(|m| m.get(&3438)).map(|s| s.level).unwrap_or(0);
+                    let op3439 = sk.and_then(|m| m.get(&3439)).map(|s| s.level).unwrap_or(0);
+                    let op = op3438.max(op3439);
+                    let int = sk.and_then(|m| m.get(&3436)).map(|s| s.level).unwrap_or(0);
+                    let spec = sk.and_then(|m| m.get(&22541)).map(|s| s.level).unwrap_or(0);
+
+                    // Drone Mining Augmentor rigs (`group_id == 778`, attr `434` miningUpgradeAmount)
+                    let mut rig_bonuses: Vec<f64> = snap
+                        .items
+                        .values()
+                        .filter(|i| i.location_id == ship_id && (92..=94).contains(&(i.flag as u16)))
+                        .filter_map(|i| ctx.sde.types.get(&i.type_id))
+                        .filter(|t| t.group_id == 778)
+                        .filter_map(|t| t.default_attributes.get(&434).copied())
+                        .map(|b| b / 100.0)
+                        .collect();
+                    rig_bonuses.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+                    let mut r_mult = 1.0;
+                    for (idx, &b) in rig_bonuses.iter().enumerate() {
+                        r_mult *= 1.0 + b * eve_dogma::stacking_penalty_factor(idx);
+                    }
+                    (op, int, spec, r_mult)
+                });
+
+                let mut total_drone_yield = 0.0;
+                let mut max_waste_prob = 0.0_f64;
+                for d_item in &drone_items {
+                    let drone_t = ctx.sde.types.get(&d_item.type_id);
+                    let d_yield = drone_t
+                        .and_then(|t| t.default_attributes.get(&77).copied())
+                        .unwrap_or(25.0);
+                    let d_waste = drone_t
+                        .and_then(|t| t.default_attributes.get(&3154).copied())
+                        .unwrap_or(0.0);
+                    max_waste_prob = max_waste_prob.max(d_waste);
+                    let spec_factor = if d_item.type_id == 10250 || d_item.type_id == 41030 {
+                        1.0 + 0.02 * (drone_spec_lvl as f64)
+                    } else {
+                        1.0
+                    };
+                    let drone_mult = (1.0 + 0.05 * (drone_op_lvl as f64))
+                        * (1.0 + 0.10 * (drone_int_lvl as f64))
+                        * spec_factor
+                        * rig_mult;
+                    let stack_qty = (d_item.quantity.max(1)) as f64;
+                    total_drone_yield += d_yield * drone_mult * stack_qty;
+                }
+                (total_drone_yield, max_waste_prob)
+            } else if let (Some(fit), Some(mod_id)) = (&fit, primary_id) {
                 let y = fit.get_module_effective_attribute(mod_id, 77, &ctx.sde);
                 let w = fit.get_module_effective_attribute(mod_id, 3154, &ctx.sde);
                 (y, w)
@@ -2012,22 +2185,8 @@ pub async fn handle(
                 (40.0, 0.0)
             };
 
-            // Mining crits check (dogma attrs 5967 / 5969)
-            let crit_chance = fit.as_ref()
-                .and_then(|f| module_id.map(|mid| f.get_module_effective_attribute(mid, 5967, &ctx.sde)))
-                .unwrap_or(0.01);
-            let crit_bonus = fit.as_ref()
-                .and_then(|f| module_id.map(|mid| f.get_module_effective_attribute(mid, 5969, &ctx.sde)))
-                .filter(|&b| b > 0.0)
-                .unwrap_or(2.0);
-            let force_crit = _kwargs.get("forceCrit").and_then(|v| v.as_bool())
-                .or_else(|| _kwargs.get("crit").and_then(|v| v.as_bool()))
-                .unwrap_or(false);
-            let is_crit = force_crit || (crit_chance > 0.0 && ((asteroid_id + module_id.unwrap_or(1)) % 100 == 0));
-            let yield_m3 = if is_crit { base_yield_m3 * crit_bonus } else { base_yield_m3 };
-
             let unit_vol = ast_state.unit_volume.max(0.001);
-            let requested_units = ((yield_m3 / unit_vol).floor() as u64).max(1);
+            let requested_units = ((base_yield_m3 / unit_vol).floor() as u64).max(1);
 
             let extraction = match handle.mine_asteroid(asteroid_id, requested_units, waste_prob).await {
                 Ok(e) => e,
@@ -2039,16 +2198,60 @@ pub async fn handle(
                 }
             };
 
-            // Determine target hold: SpecializedOreHold (133), SpecializedGasHold (134), SpecializedIceHold (181), or Cargo (5)
+            let ast_pos_opt = ctx.db.with_mut_snapshot(|snap| {
+                let mut pos_opt = None;
+                if let Some(ast) = snap.asteroids.get_mut(&asteroid_id) {
+                    ast.quantity = extraction.remaining_units as i64;
+                    pos_opt = Some(DVec3::new(ast.position.0, ast.position.1, ast.position.2));
+                }
+                if extraction.depleted {
+                    if let Some(ast_pos) = pos_opt {
+                        let mut newly_cleared_ids = Vec::new();
+                        if let Some(anoms) = snap.cosmic_anomalies.get_mut(&sys_id) {
+                            for anom in anoms.iter_mut() {
+                                if !anom.cleared {
+                                    let anom_pos = DVec3::from_array(anom.position);
+                                    if anom_pos.distance(ast_pos) <= 50_000.0 {
+                                        let any_remaining = snap.asteroids.values().any(|a| {
+                                            a.solar_system_id == sys_id
+                                                && a.quantity > 0
+                                                && DVec3::new(
+                                                    a.position.0,
+                                                    a.position.1,
+                                                    a.position.2,
+                                                )
+                                                .distance(anom_pos)
+                                                    <= 50_000.0
+                                        });
+                                        if !any_remaining {
+                                            anom.cleared = true;
+                                            anom.remaining_volume = 0.0;
+                                            newly_cleared_ids.push(anom.anomaly_id.clone());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if !newly_cleared_ids.is_empty() {
+                            if let Some(sigs) = snap.cosmic_signatures.get_mut(&sys_id) {
+                                for s in sigs.iter_mut() {
+                                    if newly_cleared_ids.contains(&s.signature_id) {
+                                        s.collapsed = true;
+                                        s.signal_strength = 0.0;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                pos_opt
+            });
+
+            // Determine target hold: SpecializedOreHold (134), SpecializedGasHold (135), SpecializedIceHold (181), or Cargo (5)
             let ore_type_rec = ctx.sde.types.get(&extraction.ore_type_id);
             let ore_group_id = ore_type_rec.map(|t| t.group_id).unwrap_or(0);
             let ore_category_id = ore_type_rec.map(|t| t.category_id).unwrap_or(0);
 
-            let ship_type_id = ctx
-                .db
-                .get_item(ship_id)
-                .map(|i| i.type_id)
-                .unwrap_or(ship_ball.type_id);
             let ship_attrs = ctx.sde.types.get(&ship_type_id).map(|t| &t.default_attributes);
             let has_ore_hold = ship_attrs.is_some_and(|a| a.get(&1556).copied().unwrap_or(0.0) > 0.0 || a.get(&3227).copied().unwrap_or(0.0) > 0.0);
             let has_gas_hold = ship_attrs.is_some_and(|a| a.get(&1557).copied().unwrap_or(0.0) > 0.0);
@@ -2064,81 +2267,16 @@ pub async fn handle(
                 InventoryFlag::Cargo
             };
 
-            let to_jetcan = _kwargs.get("mineToJetcan").and_then(|v| v.as_bool())
-                .or_else(|| _kwargs.get("toJetcan").and_then(|v| v.as_bool()))
-                .unwrap_or(false);
-
-            let mut jetcan_id = 0i64;
             if extraction.mined_units > 0 {
-                if to_jetcan {
-                    jetcan_id = ctx.db.with_mut_snapshot(|snap| {
-                        let existing = snap.items.values().find(|i| {
-                            i.owner_id == char_id && i.type_id == 23 && i.flag == InventoryFlag::None
-                        }).map(|i| i.item_id);
+                let _ = ctx.db.add_or_stack_item(
+                    char_id,
+                    ship_id,
+                    target_flag,
+                    extraction.ore_type_id,
+                    extraction.mined_units as i64,
+                );
 
-                        let cid = match existing {
-                            Some(c) => c,
-                            None => {
-                                snap.next_entity_id += 1;
-                                let new_c = snap.next_entity_id;
-                                snap.items.insert(
-                                    new_c,
-                                    eve_db::InventoryItemRecord {
-                                        item_id: new_c,
-                                        type_id: 23,
-                                        owner_id: char_id,
-                                        location_id: sys_id as i64,
-                                        flag: InventoryFlag::None,
-                                        quantity: 1,
-                                        singleton: true,
-                                        version: 1,
-                                        ..Default::default()
-                                    },
-                                );
-                                new_c
-                            }
-                        };
-
-                        let existing_ore = snap.items.values_mut().find(|i| {
-                            i.location_id == cid && i.type_id == extraction.ore_type_id && !i.singleton
-                        });
-                        if let Some(existing_ore) = existing_ore {
-                            existing_ore.quantity += extraction.mined_units as i32;
-                            existing_ore.version += 1;
-                        } else {
-                            snap.next_entity_id += 1;
-                            let new_id = snap.next_entity_id;
-                            snap.items.insert(
-                                new_id,
-                                eve_db::InventoryItemRecord {
-                                    item_id: new_id,
-                                    type_id: extraction.ore_type_id,
-                                    owner_id: char_id,
-                                    location_id: cid,
-                                    flag: InventoryFlag::Cargo,
-                                    quantity: extraction.mined_units as i32,
-                                    singleton: false,
-                                    version: 1,
-                                    ..Default::default()
-                                },
-                            );
-                        }
-                        cid
-                    });
-                } else {
-                    let _ = ctx.db.add_or_stack_item(
-                        char_id,
-                        ship_id,
-                        target_flag,
-                        extraction.ore_type_id,
-                        extraction.mined_units as i64,
-                    );
-                }
-
-                let now_unix = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
+                let now_unix = ctx.now_unix_secs();
                 let _ = ctx.db.record_mining_ledger_entry(
                     char_id,
                     sys_id,
@@ -2146,21 +2284,103 @@ pub async fn handle(
                     extraction.mined_units as i64,
                     now_unix,
                 );
+
+                // In low-sec (< 0.45) or wormhole space, harvesting a gas cloud (group 711) triggers an SDE NPC ambush wave
+                if ore_group_id == 711 {
+                    let sys_sec = ctx
+                        .sde
+                        .solar_systems
+                        .get(&sys_id)
+                        .map(|s| s.security_status)
+                        .unwrap_or(0.5);
+                    let is_wh_or_lowsec =
+                        (31_000_000..=31_002_605).contains(&sys_id) || sys_sec < 0.45;
+                    if is_wh_or_lowsec {
+                        let gas_pos = ast_pos_opt.unwrap_or(DVec3::ZERO);
+                        let existing_balls = handle.list_balls().await.unwrap_or_default();
+                        let npc_already_present = existing_balls.iter().any(|b| {
+                            ctx.sde
+                                .types
+                                .get(&b.type_id)
+                                .is_some_and(|t| t.category_id == 11)
+                                && b.position.distance(gas_pos) <= 50_000.0
+                        });
+                        if !npc_already_present {
+                            let npc_tid = ctx
+                                .sde
+                                .npc_spawn_groups
+                                .values()
+                                .flat_map(|g| g.npc_type_ids.iter().copied())
+                                .find(|tid| {
+                                    ctx.sde.types.get(tid).is_some_and(|t| {
+                                        t.category_id == 11
+                                            && t.default_attributes.contains_key(
+                                                &eve_sde::attr_ids::ENTITY_KILL_BOUNTY,
+                                            )
+                                            && t.radius >= 25.0
+                                    })
+                                })
+                                .or_else(|| {
+                                    ctx.sde
+                                        .types
+                                        .values()
+                                        .filter(|t| {
+                                            t.category_id == 11
+                                                && t.default_attributes.contains_key(
+                                                    &eve_sde::attr_ids::ENTITY_KILL_BOUNTY,
+                                                )
+                                                && t.radius >= 25.0
+                                        })
+                                        .map(|t| t.type_id)
+                                        .min()
+                                });
+                            if let Some(npc_type_id) = npc_tid {
+                                let npc_ball_id = ctx.db.with_mut_snapshot(|snap| {
+                                    snap.next_entity_id += 1;
+                                    snap.next_entity_id
+                                });
+                                let npc_rec = ctx.sde.types.get(&npc_type_id);
+                                let npc_radius = npc_rec.map(|t| t.radius.max(25.0)).unwrap_or(45.0);
+                                let npc_mass =
+                                    npc_rec.map(|t| t.mass.max(10_000.0)).unwrap_or(1_200_000.0);
+                                let _ = handle
+                                    .spawn_ball_with_combat(
+                                        Ball {
+                                            id: npc_ball_id,
+                                            type_id: npc_type_id,
+                                            position: DVec3::new(
+                                                gas_pos.x + 4_500.0,
+                                                gas_pos.y,
+                                                gas_pos.z,
+                                            ),
+                                            velocity: DVec3::ZERO,
+                                            max_velocity: 320.0,
+                                            inertia: 2.0,
+                                            mass: npc_mass,
+                                            radius: npc_radius,
+                                            speed_fraction: 0.0,
+                                            mode: MovementMode::Stop,
+                                        },
+                                        ctx.build_type_combat_state(npc_type_id),
+                                    )
+                                    .await;
+                            }
+                        }
+                    }
+                }
             }
 
             Some(Ok(PyRep::keyval([
                 ("asteroidID", PyRep::Integer(asteroid_id)),
                 ("typeID", PyRep::Integer(extraction.ore_type_id as i64)),
                 ("minedUnits", PyRep::Integer(extraction.mined_units as i64)),
+                ("yieldUnits", PyRep::Integer(extraction.mined_units as i64)),
+                ("yieldVolume", PyRep::Real(extraction.mined_units as f64 * unit_vol)),
                 ("wastedUnits", PyRep::Integer(extraction.wasted_units as i64)),
                 ("remainingUnits", PyRep::Integer(extraction.remaining_units as i64)),
-                ("flagID", PyRep::Integer(if to_jetcan { InventoryFlag::None as i64 } else { target_flag as i64 })),
+                ("flagID", PyRep::Integer(target_flag as i64)),
                 ("depleted", PyRep::Integer(if extraction.depleted { 1 } else { 0 })),
-                ("isCrit", PyRep::Bool(is_crit)),
-                ("critYieldMultiplier", PyRep::Real(if is_crit { crit_bonus } else { 1.0 })),
                 ("isDrone", PyRep::Bool(is_drone)),
-                ("toJetcan", PyRep::Bool(to_jetcan)),
-                ("jetcanID", PyRep::Integer(jetcan_id)),
             ])))
         }
 
@@ -2371,7 +2591,8 @@ pub async fn ensure_system_signatures_and_anomalies(
     let (sigs, anomalies) = ctx
         .db
         .try_with_mut_snapshot(|snap| {
-            let list = snap.cosmic_signatures.entry(sys_id).or_insert_with(|| {
+            let list = snap.cosmic_signatures.entry(sys_id).or_default();
+            if !list.iter().any(|s| s.sig_group == "Wormhole") {
                 let mut v = static_wormhole_template(ctx, sys_id, now_unix, 0);
                 v.extend([
                     CosmicSignatureRecord {
@@ -2455,8 +2676,8 @@ pub async fn ensure_system_signatures_and_anomalies(
                         collapsed: false,
                     },
                 ]);
-                v
-            });
+                list.extend(v);
+            }
             let sigs_clone = list.clone();
             let anoms = snap
                 .cosmic_anomalies

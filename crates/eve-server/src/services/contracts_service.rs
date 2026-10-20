@@ -250,15 +250,11 @@ pub fn handle(
                 .get(4)
                 .and_then(|a| a.as_i64())
                 .filter(|&d| d > 0)
-                .map(|d| (d as u32).clamp(1, 28))
+                .map(|d| d.clamp(1, 28) as u32)
                 .unwrap_or(1);
-            let duration_secs = if let Some(ds) = kwargs
-                .get("durationSeconds")
-                .and_then(|v| v.as_i64())
-                .filter(|&d| d > 0)
+            let duration_secs = if let Some(exp_min) =
+                args.get(3).and_then(|a| a.as_i64()).filter(|&m| m > 0)
             {
-                (ds as u64).min(2_419_200)
-            } else if let Some(exp_min) = args.get(3).and_then(|a| a.as_i64()).filter(|&m| m > 0) {
                 ((exp_min as u64).saturating_mul(60)).clamp(60, 2_419_200)
             } else {
                 86_400
@@ -551,27 +547,10 @@ pub fn handle(
                 }
 
                 if escrowed_items.is_empty() && contract_type == "Courier" {
-                    snap.next_entity_id += 1;
-                    let wrap_id = snap.next_entity_id;
-                    snap.items.insert(
-                        wrap_id,
-                        InventoryItemRecord {
-                            item_id: wrap_id,
-                            type_id: 24445, // Courier Plastic Wrap
-                            owner_id: char_id,
-                            location_id: id,
-                            flag: InventoryFlag::Locked,
-                            quantity: 1,
-                            singleton: true,
-                            version: 1,
-                            dynamic_attributes: HashMap::new(),
-                            source_mutaplasmid_id: None,
-                            insured_payout_isk: 0.0,
-                            is_blueprint_copy: false,
-                            blueprint_runs_remaining: None,
-                        },
-                    );
-                    escrowed_items.push(wrap_id);
+                    return Err(BridgeRpcError {
+                        code: "CourierContractRequiresItems".into(),
+                        message: "Courier contracts must contain at least one item to wrap".into(),
+                    });
                 }
 
                 let exp_unix = now_unix.saturating_add(duration_secs);
@@ -834,13 +813,33 @@ pub fn handle(
                         c_mut.acceptor_id = Some(char_id);
                         c_mut.status = "Completed".into();
                     }
-                    return Ok(("Completed", c.expiration_unix));
+                    return Ok(("Completed", c.expiration_unix, None));
                 }
 
                 let ship_id = caller_ship.unwrap();
+                snap.next_entity_id += 1;
+                let wrap_id = snap.next_entity_id;
+                snap.items.insert(
+                    wrap_id,
+                    InventoryItemRecord {
+                        item_id: wrap_id,
+                        type_id: 3468, // SDE Plastic Wrap (group 649)
+                        owner_id: char_id,
+                        location_id: ship_id,
+                        flag: InventoryFlag::Cargo,
+                        quantity: 1,
+                        singleton: true,
+                        version: 1,
+                        dynamic_attributes: HashMap::new(),
+                        source_mutaplasmid_id: None,
+                        insured_payout_isk: 0.0,
+                        is_blueprint_copy: false,
+                        blueprint_runs_remaining: None,
+                    },
+                );
                 for iid in &c.item_ids {
                     if let Some(item) = snap.items.get_mut(iid) {
-                        item.location_id = ship_id;
+                        item.location_id = wrap_id;
                         item.flag = InventoryFlag::Locked;
                         item.version += 1;
                     }
@@ -852,14 +851,20 @@ pub fn handle(
                     c_mut.status = "InProgress".into();
                     c_mut.expiration_unix = delivery_deadline;
                 }
-                Ok(("InProgress", delivery_deadline))
+                Ok(("InProgress", delivery_deadline, Some(wrap_id)))
             });
             match res {
-                Ok((new_status, exp_unix)) => Some(Ok(PyRep::keyval([
-                    ("contractID", PyRep::Integer(cid)),
-                    ("status", PyRep::String(new_status.into())),
-                    ("expirationUnix", PyRep::Integer(exp_unix as i64)),
-                ]))),
+                Ok((new_status, exp_unix, wrap_id_opt)) => {
+                    let mut fields = vec![
+                        ("contractID", PyRep::Integer(cid)),
+                        ("status", PyRep::String(new_status.into())),
+                        ("expirationUnix", PyRep::Integer(exp_unix as i64)),
+                    ];
+                    if let Some(wid) = wrap_id_opt {
+                        fields.push(("courierPackageID", PyRep::Integer(wid)));
+                    }
+                    Some(Ok(PyRep::keyval(fields)))
+                }
                 Err(e) => Some(Err(e)),
             }
         }
@@ -906,7 +911,7 @@ pub fn handle(
                         code: "InvalidContractType".into(),
                         message: format!("Contract {cid} is not an Auction"),
                     });
-                }
+                };
                 if c.status != "Outstanding" {
                     return Err(BridgeRpcError {
                         code: "InvalidContractState".into(),
@@ -1141,38 +1146,50 @@ pub fn handle(
                         ),
                     });
                 }
+                let mut wraps_to_remove = Vec::new();
                 for iid in &c.item_ids {
                     let present = snap
                         .items
                         .get(iid)
                         .map(|item| {
-                            item.location_id == ship_id || item.location_id == c.end_station_id
+                            if item.location_id == ship_id || item.location_id == c.end_station_id {
+                                return true;
+                            }
+                            if let Some(wrap_item) = snap
+                                .items
+                                .get(&item.location_id)
+                                .filter(|w| w.type_id == 3468 && w.owner_id == char_id)
+                            {
+                                if wrap_item.location_id == ship_id
+                                    || wrap_item.location_id == c.end_station_id
+                                {
+                                    wraps_to_remove.push(wrap_item.item_id);
+                                    return true;
+                                }
+                            }
+                            false
                         })
                         .unwrap_or(false);
                     if !present {
                         return Err(BridgeRpcError {
                             code: "CourierPackageMissing".into(),
                             message: format!(
-                                "Courier item {iid} is not present in active ship {ship_id} or destination station {}",
+                                "Courier Plastic Wrap package for item {iid} is not present in active ship {ship_id} or destination station {}",
                                 c.end_station_id
                             ),
                         });
                     }
                 }
                 for iid in &c.item_ids {
-                    let is_temp_wrap = snap
-                        .items
-                        .get(iid)
-                        .map(|item| item.type_id == 24445)
-                        .unwrap_or(false);
-                    if is_temp_wrap {
-                        snap.items.remove(iid);
-                    } else if let Some(item) = snap.items.get_mut(iid) {
+                    if let Some(item) = snap.items.get_mut(iid) {
                         item.owner_id = c.issuer_id;
                         item.location_id = c.end_station_id;
                         item.flag = InventoryFlag::Hangar;
                         item.version += 1;
                     }
+                }
+                for wid in wraps_to_remove {
+                    snap.items.remove(&wid);
                 }
                 if let Some(c_mut) = snap.contracts.get_mut(&cid) {
                     c_mut.status = "Completed".into();
@@ -1232,14 +1249,7 @@ pub fn handle(
                         }
                     }
                     for iid in &c.item_ids {
-                        let is_temp_wrap = snap
-                            .items
-                            .get(iid)
-                            .map(|item| item.type_id == 24445)
-                            .unwrap_or(false);
-                        if is_temp_wrap {
-                            snap.items.remove(iid);
-                        } else if let Some(item) = snap.items.get_mut(iid) {
+                        if let Some(item) = snap.items.get_mut(iid) {
                             item.owner_id = c.issuer_id;
                             item.location_id = c.start_station_id;
                             item.flag = InventoryFlag::Hangar;
@@ -1282,14 +1292,7 @@ pub fn handle(
                         }
                     }
                     for iid in &c.item_ids {
-                        let is_temp_wrap = snap
-                            .items
-                            .get(iid)
-                            .map(|item| item.type_id == 24445)
-                            .unwrap_or(false);
-                        if is_temp_wrap {
-                            snap.items.remove(iid);
-                        } else if let Some(item) = snap.items.get_mut(iid) {
+                        if let Some(item) = snap.items.get_mut(iid) {
                             item.owner_id = c.issuer_id;
                             item.location_id = c.start_station_id;
                             item.flag = InventoryFlag::Hangar;

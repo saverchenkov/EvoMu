@@ -314,6 +314,19 @@ impl ServerContext {
                 }
             };
             let bid = self.bind_object(session, effective_service, obj_id)?;
+            if effective_service == "beyonce" {
+                let requested_sys = u32::try_from(obj_id)
+                    .ok()
+                    .filter(|&id| self.sde.solar_systems.contains_key(&id));
+                if let Some(sys_id) = session.solar_system_id {
+                    if requested_sys.is_none_or(|req_id| req_id == sys_id) {
+                        crate::services::sov_fw_insurgency::seed_system_mining_sites_from_sde(
+                            self, sys_id,
+                        )
+                        .await;
+                    }
+                }
+            }
 
             let call_result = match args.get(1) {
                 Some(PyRep::Tuple(call_tuple)) if !call_tuple.is_empty() => {

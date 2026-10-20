@@ -936,8 +936,8 @@ impl WorldRepository {
         Ok(displaced)
     }
 
-    /// Checks whether another active online session on the same `computer_hash` blocks `user_id` (`session_id`)
-    /// under V24 `multiLoginBlocker.Login(computerhash)` Alpha clone hardware concurrency rules.
+    /// Checks whether another active online session blocks `user_id` (`session_id`)
+    /// under V24 `multiLoginBlocker.Login(computerhash)` Alpha clone concurrency rules.
     pub fn has_alpha_computer_hash_conflict(
         &self,
         user_id: u64,

@@ -1388,7 +1388,7 @@ async fn test_e5_planetary_interaction_lifecycle() {
             id,
             InventoryItemRecord {
                 item_id: id,
-                type_id: 2254,
+                type_id: 2534,
                 owner_id: 90_000_001,
                 location_id: s1_ship_id,
                 flag: InventoryFlag::Cargo,
@@ -1410,7 +1410,7 @@ async fn test_e5_planetary_interaction_lifecycle() {
                 PyRep::List(vec![PyRep::Tuple(vec![
                     PyRep::Integer(1),
                     PyRep::Integer(1),
-                    PyRep::Integer(2254),
+                    PyRep::Integer(2534),
                     PyRep::Real(0.1),
                     PyRep::Real(0.2),
                 ])]),

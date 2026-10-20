@@ -473,7 +473,7 @@ pub fn dispatch_universe_and_nav(
                     .values()
                     .filter(|st| {
                         st.state != "Destroyed"
-                            && (st.type_id == 32458 || st.type_id == 35841)
+                            && (st.type_id == 32226 || st.type_id == 32458)
                             && ctx
                                 .sde
                                 .solar_systems

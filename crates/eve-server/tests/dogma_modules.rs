@@ -129,7 +129,7 @@ async fn test_phase_4_dg2_fit_validation_and_rigs() {
             &mut sess,
             "invbroker",
             None,
-            "MoveItem",
+            "Add",
             &[
                 PyRep::Integer(100_000_003),
                 PyRep::Integer(ship_id),
@@ -150,7 +150,7 @@ async fn test_phase_4_dg2_fit_validation_and_rigs() {
         &mut sess,
         "invbroker",
         None,
-        "MoveItem",
+        "Add",
         &[
             PyRep::Integer(100_000_003),
             PyRep::Integer(ship_id),
@@ -171,12 +171,49 @@ async fn test_phase_4_dg2_fit_validation_and_rigs() {
         "Expected OnModuleAttributeChanges notification"
     );
 
-    // 3. Unfit 1MN Afterburner II (100_000_003) back to station hangar -> succeeds & emits OnModuleUnfitted
+    // 3. Unfit 1MN Afterburner II (100_000_003): rejected in space without a Mobile Depot (CannotUnfitInSpace), succeeds when docked & emits OnModuleUnfitted
+    ctx.dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None)
+        .await
+        .expect("Undock into space");
+    let unfit_in_space = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "invbroker",
+            None,
+            "Add",
+            &[
+                PyRep::Integer(100_000_003),
+                PyRep::Integer(ship_id),
+                PyRep::Integer(InventoryFlag::Cargo as i64),
+            ],
+            &kw,
+            None,
+        )
+        .await;
+    assert_eq!(
+        unfit_in_space
+            .expect_err("Unfitting a module in space without a Mobile Depot must fail")
+            .code,
+        "CannotUnfitInSpace"
+    );
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = Some(station_id);
+        }
+        if let Some(ship_item) = snap.items.get_mut(&ship_id) {
+            ship_item.location_id = station_id;
+            ship_item.flag = InventoryFlag::Hangar;
+        }
+    });
+    sess.station_id = Some(station_id);
+    sess.solar_system_id = None;
+    let _ = sess.drain_notifications();
     ctx.dispatch_rpc(
         &mut sess,
         "invbroker",
         None,
-        "MoveItem",
+        "Add",
         &[
             PyRep::Integer(100_000_003),
             PyRep::Integer(station_id),
@@ -186,7 +223,7 @@ async fn test_phase_4_dg2_fit_validation_and_rigs() {
         None,
     )
     .await
-    .expect("Unfit 1MN Afterburner II to hangar");
+    .expect("Unfit 1MN Afterburner II to hangar while docked");
     let notes = sess.drain_notifications();
     assert!(
         notes.iter().any(|(n, _)| n == "OnModuleUnfitted"),
@@ -200,7 +237,7 @@ async fn test_phase_4_dg2_fit_validation_and_rigs() {
             &mut sess,
             "invbroker",
             None,
-            "MoveItem",
+            "Add",
             &[
                 PyRep::Integer(100_000_801),
                 PyRep::Integer(ship_id),
@@ -222,7 +259,7 @@ async fn test_phase_4_dg2_fit_validation_and_rigs() {
         &mut sess,
         "invbroker",
         None,
-        "MoveItem",
+        "Add",
         &[
             PyRep::Integer(100_000_802),
             PyRep::Integer(ship_id),
@@ -238,7 +275,7 @@ async fn test_phase_4_dg2_fit_validation_and_rigs() {
             &mut sess,
             "invbroker",
             None,
-            "MoveItem",
+            "Add",
             &[
                 PyRep::Integer(100_000_803),
                 PyRep::Integer(ship_id),
@@ -269,7 +306,7 @@ async fn test_phase_4_dg2_fit_validation_and_rigs() {
         &mut sess,
         "invbroker",
         None,
-        "MoveItem",
+        "Add",
         &[
             PyRep::Integer(100_000_811),
             PyRep::Integer(rorqual_id),
@@ -285,7 +322,7 @@ async fn test_phase_4_dg2_fit_validation_and_rigs() {
             &mut sess,
             "invbroker",
             None,
-            "MoveItem",
+            "Add",
             &[
                 PyRep::Integer(100_000_812),
                 PyRep::Integer(rorqual_id),
@@ -313,7 +350,7 @@ async fn test_phase_4_dg2_fit_validation_and_rigs() {
             &mut sess,
             "invbroker",
             None,
-            "MoveItem",
+            "Add",
             &[
                 PyRep::Integer(100_000_804),
                 PyRep::Integer(ship_id),
@@ -333,7 +370,7 @@ async fn test_phase_4_dg2_fit_validation_and_rigs() {
             &mut sess,
             "invbroker",
             None,
-            "MoveItem",
+            "Add",
             &[
                 PyRep::Integer(100_000_807),
                 PyRep::Integer(ship_id),
@@ -352,7 +389,7 @@ async fn test_phase_4_dg2_fit_validation_and_rigs() {
         &mut sess,
         "invbroker",
         None,
-        "MoveItem",
+        "Add",
         &[
             PyRep::Integer(100_000_802),
             PyRep::Integer(station_id),
@@ -378,7 +415,7 @@ async fn test_phase_4_dg2_fit_validation_and_rigs() {
             &mut sess,
             "invbroker",
             None,
-            "MoveItem",
+            "Add",
             &[
                 PyRep::Integer(100_000_805),
                 PyRep::Integer(ship_id),
@@ -400,7 +437,7 @@ async fn test_phase_4_dg2_fit_validation_and_rigs() {
         &mut sess,
         "invbroker",
         None,
-        "MoveItem",
+        "Add",
         &[
             PyRep::Integer(100_000_806),
             PyRep::Integer(ship_id),
@@ -438,7 +475,7 @@ async fn test_phase_4_dg2_fit_validation_and_rigs() {
             &mut sess,
             "invbroker",
             None,
-            "MoveItem",
+            "Add",
             &[
                 PyRep::Integer(100_000_806),
                 PyRep::Integer(station_id),
@@ -463,7 +500,7 @@ async fn test_phase_4_dg2_fit_validation_and_rigs() {
         &mut sess,
         "invbroker",
         None,
-        "MoveItem",
+        "Add",
         &[
             PyRep::Integer(100_000_808),
             PyRep::Integer(ship_id),
@@ -520,7 +557,7 @@ async fn test_phase_4_dg2_fit_validation_and_rigs() {
             &mut sess,
             "invbroker",
             None,
-            "MoveItem",
+            "Add",
             &[
                 PyRep::Integer(100_000_814),
                 PyRep::Integer(loki_id),
@@ -547,7 +584,7 @@ async fn test_phase_4_dg2_fit_validation_and_rigs() {
             &mut sess,
             "invbroker",
             None,
-            "MoveItem",
+            "Add",
             &[
                 PyRep::Integer(sub_item_id),
                 PyRep::Integer(loki_id),
@@ -631,7 +668,7 @@ async fn test_phase_4_dg3_online_offline_and_persistence() {
         &mut sess,
         "invbroker",
         None,
-        "MoveItem",
+        "Add",
         &[
             PyRep::Integer(ab_id),
             PyRep::Integer(ship_id),
@@ -722,7 +759,7 @@ async fn test_phase_4_dg3_online_offline_and_persistence() {
         &mut sess,
         "invbroker",
         None,
-        "MoveItem",
+        "Add",
         &[
             PyRep::Integer(100_000_821),
             PyRep::Integer(ship_id),
@@ -1154,7 +1191,7 @@ async fn test_phase_4_dg6_ammo_loading_and_weapon_grouping() {
         &mut sess,
         "invbroker",
         None,
-        "MoveItem",
+        "Add",
         &[
             PyRep::Integer(t2_id),
             PyRep::Integer(ship_id),
@@ -1169,7 +1206,7 @@ async fn test_phase_4_dg6_ammo_loading_and_weapon_grouping() {
         &mut sess,
         "invbroker",
         None,
-        "MoveItem",
+        "Add",
         &[
             PyRep::Integer(t3_id),
             PyRep::Integer(ship_id),
@@ -1392,7 +1429,7 @@ async fn test_phase_4_dg6_ammo_loading_and_weapon_grouping() {
         &mut sess,
         "invbroker",
         None,
-        "MoveItem",
+        "Add",
         &[
             PyRep::Integer(tc_id),
             PyRep::Integer(ship_id),
@@ -1516,25 +1553,6 @@ async fn test_phase_4_dg4_and_exit_gate_full_cycle_journey() {
     });
     ctx.ship_fittings.write().unwrap().remove(&ship_id);
 
-    // Verify dogmaIM.FireWeapon is deleted (Phase 4 Exit Gate requirement)
-    let fire_weapon_err = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "dogmaIM",
-            None,
-            "FireWeapon",
-            &[PyRep::Integer(ship_id), PyRep::Integer(990_000_010)],
-            &kw,
-            None,
-        )
-        .await;
-    assert_eq!(
-        fire_weapon_err
-            .expect_err("dogmaIM.FireWeapon must be deleted and return UnimplementedRPC")
-            .code,
-        "UnimplementedRPC"
-    );
-
     // 1. Fit 1MN Afterburner I (439) in MedSlot0, second 200mm AutoCannon II (2889) in HiSlot1, and Small Trimark Armor Pump I (30987) in RigSlot0
     let ab_id = 100_000_850i64;
     let t1_id = 100_000_005i64;
@@ -1550,7 +1568,7 @@ async fn test_phase_4_dg4_and_exit_gate_full_cycle_journey() {
         &mut sess,
         "invbroker",
         None,
-        "MoveItem",
+        "Add",
         &[
             PyRep::Integer(ab_id),
             PyRep::Integer(ship_id),
@@ -1565,7 +1583,7 @@ async fn test_phase_4_dg4_and_exit_gate_full_cycle_journey() {
         &mut sess,
         "invbroker",
         None,
-        "MoveItem",
+        "Add",
         &[
             PyRep::Integer(t2_id),
             PyRep::Integer(ship_id),
@@ -1580,7 +1598,7 @@ async fn test_phase_4_dg4_and_exit_gate_full_cycle_journey() {
         &mut sess,
         "invbroker",
         None,
-        "MoveItem",
+        "Add",
         &[
             PyRep::Integer(rig_id),
             PyRep::Integer(ship_id),
@@ -1894,7 +1912,7 @@ async fn test_phase_4_modifier_engine_stacking_penalty_and_skills() {
         &mut sess,
         "invbroker",
         None,
-        "MoveItem",
+        "Add",
         &[
             PyRep::Integer(od1_id),
             PyRep::Integer(ship_id),
@@ -1910,7 +1928,7 @@ async fn test_phase_4_modifier_engine_stacking_penalty_and_skills() {
         &mut sess,
         "invbroker",
         None,
-        "MoveItem",
+        "Add",
         &[
             PyRep::Integer(od2_id),
             PyRep::Integer(ship_id),

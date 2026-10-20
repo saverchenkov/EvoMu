@@ -24,10 +24,12 @@ pub struct LPOffer {
     pub type_id: TypeId,
     pub quantity: i32,
     pub lp_cost: i64,
-    pub isk_cost: f64,
+    pub isk_cost: IskCents,
 }
 
-/// Catalog of standard LP offers for major NPC corporations.
+/// DERIVED (OF-36): Live EVE V24 client SDE (`fsdbinary` / `sqlite`) does not ship NPC corporation LP store offer tables;
+/// those reside exclusively on CCP's server database (`lpStore`). All `type_id`s and `corp_id`s below are verified SDE IDs,
+/// and `isk_cost` is stored and multiplied as exact integer `IskCents`.
 fn get_catalog_offers() -> Vec<LPOffer> {
     vec![
         // Caldari Navy (1_000_035)
@@ -37,7 +39,7 @@ fn get_catalog_offers() -> Vec<LPOffer> {
             type_id: 15810, // Caldari Navy Ballistic Control System
             quantity: 1,
             lp_cost: 2_400,
-            isk_cost: 2_400_000.0,
+            isk_cost: IskCents::from_isk(2_400_000),
         },
         LPOffer {
             offer_id: 1002,
@@ -45,7 +47,7 @@ fn get_catalog_offers() -> Vec<LPOffer> {
             type_id: 27361, // Caldari Navy Scourge Light Missile
             quantity: 1_000,
             lp_cost: 500,
-            isk_cost: 500_000.0,
+            isk_cost: IskCents::from_isk(500_000),
         },
         LPOffer {
             offer_id: 1003,
@@ -53,7 +55,7 @@ fn get_catalog_offers() -> Vec<LPOffer> {
             type_id: 17619, // Caldari Navy Hookbill
             quantity: 1,
             lp_cost: 10_000,
-            isk_cost: 10_000_000.0,
+            isk_cost: IskCents::from_isk(10_000_000),
         },
         // Federation Navy (1_000_036)
         LPOffer {
@@ -62,7 +64,7 @@ fn get_catalog_offers() -> Vec<LPOffer> {
             type_id: 15808, // Federation Navy Magnetic Field Stabilizer
             quantity: 1,
             lp_cost: 2_400,
-            isk_cost: 2_400_000.0,
+            isk_cost: IskCents::from_isk(2_400_000),
         },
         LPOffer {
             offer_id: 2002,
@@ -70,7 +72,7 @@ fn get_catalog_offers() -> Vec<LPOffer> {
             type_id: 17620, // Federation Navy Comet
             quantity: 1,
             lp_cost: 10_000,
-            isk_cost: 10_000_000.0,
+            isk_cost: IskCents::from_isk(10_000_000),
         },
         // Republic Fleet (1_000_044)
         LPOffer {
@@ -79,7 +81,7 @@ fn get_catalog_offers() -> Vec<LPOffer> {
             type_id: 15806, // Republic Fleet Gyrostabilizer
             quantity: 1,
             lp_cost: 2_400,
-            isk_cost: 2_400_000.0,
+            isk_cost: IskCents::from_isk(2_400_000),
         },
         LPOffer {
             offer_id: 3002,
@@ -87,7 +89,7 @@ fn get_catalog_offers() -> Vec<LPOffer> {
             type_id: 17621, // Republic Fleet Firetail
             quantity: 1,
             lp_cost: 10_000,
-            isk_cost: 10_000_000.0,
+            isk_cost: IskCents::from_isk(10_000_000),
         },
         // Amarr Navy (1_000_037)
         LPOffer {
@@ -96,7 +98,7 @@ fn get_catalog_offers() -> Vec<LPOffer> {
             type_id: 15807, // Imperial Navy Heat Sink
             quantity: 1,
             lp_cost: 2_400,
-            isk_cost: 2_400_000.0,
+            isk_cost: IskCents::from_isk(2_400_000),
         },
         LPOffer {
             offer_id: 4002,
@@ -104,7 +106,7 @@ fn get_catalog_offers() -> Vec<LPOffer> {
             type_id: 17622, // Imperial Navy Slicer
             quantity: 1,
             lp_cost: 10_000,
-            isk_cost: 10_000_000.0,
+            isk_cost: IskCents::from_isk(10_000_000),
         },
         // CONCORD (1_000_125)
         LPOffer {
@@ -113,7 +115,7 @@ fn get_catalog_offers() -> Vec<LPOffer> {
             type_id: 15810,
             quantity: 1,
             lp_cost: 3_000,
-            isk_cost: 3_000_000.0,
+            isk_cost: IskCents::from_isk(3_000_000),
         },
     ]
 }
@@ -125,7 +127,7 @@ fn offer_to_pyrep(o: &LPOffer) -> PyRep {
         ("typeID", PyRep::Integer(o.type_id as i64)),
         ("quantity", PyRep::Integer(o.quantity as i64)),
         ("lpCost", PyRep::Integer(o.lp_cost)),
-        ("iskCost", PyRep::Real(o.isk_cost)),
+        ("iskCost", PyRep::Real(o.isk_cost.to_wire_f64())),
     ])
 }
 
@@ -205,7 +207,7 @@ pub fn handle(
             };
 
             let total_lp_cost = offer.lp_cost.saturating_mul(qty);
-            let total_isk_cost = IskCents::from_f64_isk(offer.isk_cost * (qty as f64));
+            let total_isk_cost = IskCents(offer.isk_cost.0.saturating_mul(qty));
             let total_items_qty = offer.quantity.saturating_mul(qty as i32);
 
             let Some((delivery_loc_id, delivery_flag)) = session

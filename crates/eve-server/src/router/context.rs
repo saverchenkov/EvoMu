@@ -50,6 +50,7 @@ pub struct ServerContext {
     pub map_landmarks: RwLock<Vec<(i64, String, f64, f64, f64)>>,
     pub session_closers: RwLock<HashMap<u64, tokio::sync::mpsc::UnboundedSender<(String, String)>>>,
     pub ship_fittings: RwLock<HashMap<i64, ShipFittingEngine>>,
+    pub projected_ewar: RwLock<HashMap<i64, Vec<eve_dogma::ProjectedEwarEffect>>>,
     pub weapon_cycle_state: RwLock<HashMap<i64, (Option<u64>, u32)>>,
     pub fighter_cooldown_state: RwLock<HashMap<(i64, u32), u64>>,
     pub fighter_charge_state: RwLock<HashMap<(i64, u32), u32>>,
@@ -144,6 +145,7 @@ impl ServerContext {
             map_landmarks: RwLock::new(Vec::new()),
             session_closers: RwLock::new(HashMap::new()),
             ship_fittings: RwLock::new(HashMap::new()),
+            projected_ewar: RwLock::new(HashMap::new()),
             weapon_cycle_state: RwLock::new(HashMap::new()),
             fighter_cooldown_state: RwLock::new(HashMap::new()),
             fighter_charge_state: RwLock::new(HashMap::new()),
@@ -403,16 +405,77 @@ impl ServerContext {
         self.now_unix_secs()
     }
 
-    /// Advances virtual server time by `secs` seconds and runs time-driven skill queue progression (`T-7`).
+    /// Advances virtual server time by `secs` seconds and runs time-driven skill queue,
+    /// jetcan despawn (3600s lifetime), and moon field natural decay progression (`T-7`).
     pub fn advance_secs(&self, secs: u64) {
         self.clock().advance_secs(secs);
         if secs > 0 {
             self.advance_skill_queues(secs as f64);
+            let now = self.now_unix_secs();
+            let mut balls_to_remove: Vec<(u32, i64)> = Vec::new();
+            self.db.with_mut_snapshot(|snap| {
+                // Despawn Cargo Containers (`type_id = 23`) in space (`InventoryFlag::None`) after 3600s (`feat:mining.jetcan-mining`).
+                let expired_jetcans: Vec<(i64, u32)> = snap
+                    .items
+                    .values()
+                    .filter(|item| {
+                        item.type_id == 23
+                            && item.flag == eve_db::InventoryFlag::None
+                            && (30_000_000..=33_000_000).contains(&item.location_id)
+                            && item
+                                .dynamic_attributes
+                                .get(&9999)
+                                .is_some_and(|&created| now >= (created as u64).saturating_add(3600))
+                    })
+                    .map(|item| (item.item_id, item.location_id as u32))
+                    .collect();
+
+                for (jetcan_id, sys_id) in expired_jetcans {
+                    snap.items.remove(&jetcan_id);
+                    snap.items.retain(|_, item| item.location_id != jetcan_id);
+                    balls_to_remove.push((sys_id, jetcan_id));
+                }
+
+                // Expire moon extractions that have passed `natural_decay_unix` (`feat:mining.moon-field-decay`).
+                for ext in snap.moon_extractions.values_mut() {
+                    if ext.status != "Decayed"
+                        && ext.status != "Cancelled"
+                        && now >= ext.natural_decay_unix
+                    {
+                        let struct_sys = snap
+                            .structures
+                            .get(&ext.structure_id)
+                            .map(|s| s.solar_system_id);
+                        for &ast_id in &ext.spawned_asteroid_ids {
+                            let ast_sys = snap
+                                .asteroids
+                                .remove(&ast_id)
+                                .map(|a| a.solar_system_id)
+                                .or(struct_sys);
+                            if let Some(sys_id) = ast_sys {
+                                balls_to_remove.push((sys_id, ast_id));
+                            }
+                        }
+                        ext.spawned_asteroid_ids.clear();
+                        ext.status = "Decayed".to_string();
+                    }
+                }
+            });
+
+            for (sys_id, ball_id) in balls_to_remove {
+                let handle = self.systems.get_or_spawn(sys_id);
+                handle.try_remove_ball(ball_id);
+            }
         }
     }
 
     /// Advances the virtual server clock by `secs` seconds (`T-7`).
     pub fn advance_virtual_clock(&self, secs: u64) {
+        self.advance_secs(secs);
+    }
+
+    /// Alias for [`Self::advance_secs`] (`T-7`).
+    pub fn advance_time_seconds(&self, secs: u64) {
         self.advance_secs(secs);
     }
 
@@ -656,6 +719,58 @@ impl ServerContext {
             .insert(ship_id, fit);
     }
 
+    pub fn upsert_projected_ewar_on_ship(
+        &self,
+        target_ship_id: i64,
+        effect: eve_dogma::ProjectedEwarEffect,
+    ) {
+        {
+            let mut guard = self.projected_ewar.write().unwrap_or_else(|e| e.into_inner());
+            let list = guard.entry(target_ship_id).or_default();
+            if let Some(existing) = list
+                .iter_mut()
+                .find(|e| e.source_module_id == effect.source_module_id)
+            {
+                *existing = effect.clone();
+            } else {
+                list.push(effect.clone());
+            }
+        }
+        if let Some(fit) = self
+            .ship_fittings
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_mut(&target_ship_id)
+        {
+            fit.upsert_projected_ewar(effect, &self.sde);
+        }
+    }
+
+    pub fn remove_projected_ewar_by_module(&self, source_module_id: i64) {
+        let mut affected_ships = Vec::new();
+        {
+            let mut guard = self.projected_ewar.write().unwrap_or_else(|e| e.into_inner());
+            for (&ship_id, list) in guard.iter_mut() {
+                let before = list.len();
+                list.retain(|e| e.source_module_id != source_module_id);
+                if list.len() < before {
+                    affected_ships.push(ship_id);
+                }
+            }
+        }
+        if !affected_ships.is_empty() {
+            let mut fit_guard = self
+                .ship_fittings
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            for ship_id in affected_ships {
+                if let Some(fit) = fit_guard.get_mut(&ship_id) {
+                    fit.remove_projected_ewar(source_module_id, &self.sde);
+                }
+            }
+        }
+    }
+
     pub fn get_or_rebuild_ship_fitting(
         &self,
         char_id: i64,
@@ -665,6 +780,13 @@ impl ServerContext {
         let active_implants = self.db.with_snapshot(|s| {
             s.active_implants.get(&char_id).cloned().unwrap_or_default()
         });
+        let active_projected = self
+            .projected_ewar
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&ship_id)
+            .cloned()
+            .unwrap_or_default();
         if let Some(mut existing) = self
             .ship_fittings
             .read()
@@ -674,6 +796,10 @@ impl ServerContext {
         {
             existing.set_character_skills(skill_levels);
             existing.set_implants(active_implants);
+            if existing.projected_ewar != active_projected {
+                existing.projected_ewar = active_projected;
+                existing.recalculate_stats(&self.sde);
+            }
             return Ok(existing);
         }
 
@@ -688,8 +814,15 @@ impl ServerContext {
         let mut fit = ShipFittingEngine::from_sde(ship_id, ship_item.type_id, &self.sde)
             .with_character_skills(skill_levels)
             .with_implants(active_implants);
+        fit.projected_ewar = active_projected;
 
-        let online_states = self.db.with_snapshot(|s| s.module_online_states.clone());
+        let (online_states, active_states, active_charges) = self.db.with_snapshot(|s| {
+            (
+                s.module_online_states.clone(),
+                s.module_active_states.clone(),
+                s.module_active_charges.clone(),
+            )
+        });
 
         let mut fittable_items: Vec<_> = items
             .iter()
@@ -721,6 +854,15 @@ impl ServerContext {
                 online,
                 &self.sde,
             );
+            if online && active_states.contains(&item.item_id) {
+                let _ = fit.activate_module(item.item_id, false, &self.sde);
+            }
+            if let Some(&active_charge) = active_charges.get(&item.item_id) {
+                if let Some(m) = fit.modules.get_mut(&item.item_id) {
+                    m.charge_type_id = Some(active_charge);
+                    m.charge_quantity = m.charge_quantity.max(1);
+                }
+            }
         }
 
         // Attach loaded charges / scripts
@@ -766,10 +908,19 @@ impl ServerContext {
                         .unwrap_or(1.0)
                         .round()
                         .clamp(1.0, 5.0) as u8;
-                    let trained = char_skills
+                    let mut trained = char_skills
                         .and_then(|m| m.get(&skill_id))
                         .map(|r| r.level)
                         .unwrap_or(0);
+                    if trained < req_lvl && (12180..=12199).contains(&skill_id) {
+                        for alt_skill in [60377_u32, 60378, 60379, 60380, 60381] {
+                            let alt_lvl = char_skills
+                                .and_then(|m| m.get(&alt_skill))
+                                .map(|r| r.level)
+                                .unwrap_or(0);
+                            trained = trained.max(alt_lvl);
+                        }
+                    }
                     if trained < req_lvl {
                         return Err(BridgeRpcError {
                             code: "SkillPrerequisitesNotMet".into(),
@@ -792,17 +943,21 @@ impl ServerContext {
         if charge_type.category_id != 8 {
             return false;
         }
-        let group_ok = [604_u16, 605, 606, 609, 610].iter().any(|attr_id| {
-            weapon_type
+        let mining_crystal_ok = matches!(weapon_type.group_id, 54 | 464 | 483)
+            && matches!(charge_type.group_id, 482 | 663);
+        let group_ok = mining_crystal_ok
+            || [604_u16, 605, 606, 609, 610].iter().any(|attr_id| {
+                weapon_type
+                    .default_attributes
+                    .get(attr_id)
+                    .map(|g| (*g as u32) == charge_type.group_id)
+                    .unwrap_or(false)
+            })
+            || charge_type
                 .default_attributes
-                .get(attr_id)
-                .map(|g| (*g as u32) == charge_type.group_id)
-                .unwrap_or(false)
-        }) || charge_type
-            .default_attributes
-            .get(&137)
-            .map(|lg| *lg as u32 == weapon_type.group_id)
-            .unwrap_or(false);
+                .get(&137)
+                .map(|lg| *lg as u32 == weapon_type.group_id)
+                .unwrap_or(false);
         let size_ok = match (
             weapon_type.default_attributes.get(&128).copied(),
             charge_type.default_attributes.get(&128).copied(),
@@ -838,7 +993,7 @@ impl ServerContext {
         charge_item_id: i64,
         current_dock: Option<i64>,
     ) -> Result<(i64, u32, i32, u64), BridgeRpcError> {
-        self.db.try_with_mut_snapshot(|snap| {
+        let res = self.db.try_with_mut_snapshot(|snap| {
             self.load_charge_into_weapon_slot_in_snapshot(
                 snap,
                 char_id,
@@ -847,7 +1002,11 @@ impl ServerContext {
                 charge_item_id,
                 current_dock,
             )
-        })
+        });
+        if res.is_ok() {
+            self.invalidate_ship_fitting(ship_id);
+        }
+        res
     }
 
     pub fn load_charge_into_weapon_slot_in_snapshot(
@@ -860,11 +1019,11 @@ impl ServerContext {
         current_dock: Option<i64>,
     ) -> Result<(i64, u32, i32, u64), BridgeRpcError> {
         let flag_u16 = flag as u16;
-        if !(27..=34).contains(&flag_u16) {
+        if !(11..=34).contains(&flag_u16) {
             return Err(BridgeRpcError {
                 code: "InvalidWeaponSlot".into(),
                 message: format!(
-                    "Charges can only be loaded into high weapon slots 27..=34 (got {flag_u16})"
+                    "Charges/scripts can only be loaded into module slots 11..=34 (got {flag_u16})"
                 ),
             });
         }

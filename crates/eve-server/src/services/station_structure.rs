@@ -90,6 +90,7 @@ pub async fn handle(
             }
         }
 
+        // parity: feat:navigation.undock
         ("stationSvc", "Undock") | ("structureDocking", "Undock") => {
             let (user_id, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
@@ -105,22 +106,6 @@ pub async fn handle(
                 }
             };
 
-            let spawn_pos = if station_id >= 1_000_000_000_000 {
-                ctx.db
-                    .with_snapshot(|snap| {
-                        snap.structures
-                            .get(&station_id)
-                            .map(|st| DVec3::from_array(st.position) + DVec3::new(1_500.0, 0.0, 0.0))
-                    })
-                    .unwrap_or_else(|| DVec3::new(51_500.0, 0.0, 0.0))
-            } else {
-                ctx.sde
-                    .stations
-                    .get(&station_id)
-                    .map(|st| st.position + DVec3::new(1_500.0, 0.0, 0.0))
-                    .unwrap_or_else(|| DVec3::new(100_000.0, 0.0, 0.0))
-            };
-
             ctx.invalidate_ship_fitting(ship.item_id);
             let Some(ship_type) = ctx.sde.types.get(&ship.type_id) else {
                 return Some(Err(BridgeRpcError {
@@ -128,6 +113,62 @@ pub async fn handle(
                     message: format!("Active ship type {} not found in SDE", ship.type_id),
                 }));
             };
+
+            let (spawn_pos, undock_dir) = if station_id >= 1_000_000_000_000 {
+                ctx.db
+                    .with_snapshot(|snap| {
+                        snap.structures.get(&station_id).map(|st| {
+                            let st_pos = DVec3::from_array(st.position);
+                            let dir = if st_pos.length_squared() > 1.0 {
+                                st_pos.normalize()
+                            } else {
+                                DVec3::X
+                            };
+                            let st_radius = ctx
+                                .sde
+                                .types
+                                .get(&st.type_id)
+                                .map(|t| t.radius)
+                                .unwrap_or(5_000.0);
+                            let offset = (st_radius * 0.15 + ship_type.radius).clamp(500.0, 2_000.0);
+                            (st_pos + dir * offset, dir)
+                        })
+                    })
+                    .unwrap_or_else(|| (DVec3::new(51_500.0, 0.0, 0.0), DVec3::X))
+            } else {
+                ctx.sde
+                    .stations
+                    .get(&station_id)
+                    .map(|st| {
+                        let dir = st
+                            .orbit_id
+                            .and_then(|oid| {
+                                ctx.sde
+                                    .celestials_in_system(ch.solar_system_id)
+                                    .into_iter()
+                                    .find(|c| c.celestial_id == oid)
+                            })
+                            .and_then(|cel| {
+                                let delta = st.position - cel.position;
+                                (delta.length_squared() > 1.0).then(|| delta.normalize())
+                            })
+                            .or_else(|| {
+                                (st.position.length_squared() > 1.0)
+                                    .then(|| st.position.normalize())
+                            })
+                            .unwrap_or(DVec3::X);
+                        let st_radius = ctx
+                            .sde
+                            .types
+                            .get(&st.station_type_id)
+                            .map(|t| t.radius)
+                            .unwrap_or(30_000.0);
+                        let offset = (st_radius * 0.015 + ship_type.radius).clamp(500.0, 2_000.0);
+                        (st.position + dir * offset, dir)
+                    })
+                    .unwrap_or_else(|| (DVec3::new(100_000.0, 0.0, 0.0), DVec3::X))
+            };
+
             let max_vel = ctx
                 .get_or_rebuild_ship_fitting(char_id, ship.item_id)
                 .ok()
@@ -151,18 +192,19 @@ pub async fn handle(
                 id: ship.item_id,
                 type_id: ship.type_id,
                 position: spawn_pos,
-                velocity: DVec3::new(max_vel * 0.5, 0.0, 0.0),
+                velocity: undock_dir * (max_vel * 0.5),
                 max_velocity: max_vel,
                 inertia,
                 mass,
                 radius,
                 speed_fraction: 1.0,
                 mode: MovementMode::GotoDirection {
-                    direction: DVec3::X,
+                    direction: undock_dir,
                 },
             };
 
-            let combat_state = ctx.build_ship_combat_state(char_id, ship.item_id, ship.type_id);
+            let mut combat_state = ctx.build_ship_combat_state(char_id, ship.item_id, ship.type_id);
+            combat_state.undock_invulnerable_remaining_ticks = 30;
             let slim_meta = ctx.build_ship_slim_meta(char_id, ship.type_id);
             let sys_handle = ctx.systems.get_or_spawn(ch.solar_system_id);
             let tick = match sys_handle
@@ -198,6 +240,15 @@ pub async fn handle(
                 ("shipID", PyRep::Integer(ship.item_id)),
                 ("beyonceBoundID", PyRep::Integer(beyonce_bound_id as i64)),
                 ("spawnTick", PyRep::Integer(tick as i64)),
+                ("undockInvulnerabilityTicks", PyRep::Integer(30)),
+                (
+                    "undockDirection",
+                    PyRep::Tuple(vec![
+                        PyRep::Real(undock_dir.x),
+                        PyRep::Real(undock_dir.y),
+                        PyRep::Real(undock_dir.z),
+                    ]),
+                ),
             ])))
         }
 
@@ -224,13 +275,13 @@ pub async fn handle(
                     message: "Dock requires an explicit station or structure ID argument".into(),
                 }));
             };
-            let is_structure = service == "structureDocking" || dock_id >= 1_000_000_000_000;
             let Some(sys_id) = session.solar_system_id else {
                 return Some(Err(BridgeRpcError {
                     code: "NoSolarSystem".into(),
                     message: "Session has no active solarSystemID".into(),
                 }));
             };
+            let is_structure = service == "structureDocking" || dock_id >= 1_000_000_000_000;
 
             let target_pos = if is_structure {
                 let st_opt = ctx
@@ -1022,8 +1073,199 @@ pub async fn handle(
             }
         }
 
+        // parity: feat:modules.mobile-warp-disruptor
+        ("posMgr", "AnchorStructure") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let Some(sys_id) = session.solar_system_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "NoSolarSystem".into(),
+                    message: "Session has no active solarSystemID".into(),
+                }));
+            };
+            let (_, is_thera, is_shattered, _) =
+                crate::services::space_destiny::system_wormhole_profile(sys_id);
+            if is_thera || is_shattered {
+                return Some(Err(BridgeRpcError {
+                    code: "AnchoringDisallowedInTheraOrShattered".into(),
+                    message: format!(
+                        "Anchoring starbases or deployables is disallowed in Thera or shattered wormhole system {sys_id}"
+                    ),
+                }));
+            }
+            if session.station_id.is_some() || session.structure_id.is_some() {
+                return Some(Err(BridgeRpcError {
+                    code: "NotInSpace".into(),
+                    message: "Cannot anchor a structure while docked".into(),
+                }));
+            }
+            let Some(ship_id) = session.ship_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "NoActiveShip".into(),
+                    message: "Cannot anchor a structure without an active ship in space".into(),
+                }));
+            };
+            let Some(item_id) = args.first().and_then(|a| a.as_i64()) else {
+                return Some(Err(BridgeRpcError {
+                    code: "MissingArgument".into(),
+                    message: "AnchorStructure requires an itemID".into(),
+                }));
+            };
+            let item = match ctx.db.with_snapshot(|snap| snap.items.get(&item_id).cloned()) {
+                Some(it) => it,
+                None => {
+                    return Some(Err(BridgeRpcError {
+                        code: "ItemNotFound".into(),
+                        message: format!("Item {item_id} does not exist"),
+                    }))
+                }
+            };
+            if item.owner_id != char_id {
+                return Some(Err(BridgeRpcError {
+                    code: "NotItemOwner".into(),
+                    message: format!("Character {char_id} does not own item {item_id}"),
+                }));
+            }
+            if item.location_id != ship_id && item.location_id != sys_id as i64 {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidItemLocation".into(),
+                    message: format!(
+                        "Item {item_id} must be in active ship cargo or unanchored in space in system {sys_id}"
+                    ),
+                }));
+            }
+            let Some(item_type) = ctx.sde.types.get(&item.type_id) else {
+                return Some(Err(BridgeRpcError {
+                    code: "UnknownType".into(),
+                    message: format!("Type {} not found in SDE", item.type_id),
+                }));
+            };
+
+            let skill_levels = ctx.character_skill_levels(char_id);
+            for &(skill_attr, lvl_attr) in &[
+                (182u16, 277u16),
+                (183, 278),
+                (184, 279),
+                (1285, 1286),
+                (1289, 1290),
+                (1291, 1292),
+            ] {
+                if let Some(&req_skill_f) = item_type.default_attributes.get(&skill_attr) {
+                    let req_skill_id = req_skill_f as u32;
+                    let req_lvl = item_type
+                        .default_attributes
+                        .get(&lvl_attr)
+                        .copied()
+                        .unwrap_or(1.0) as u8;
+                    let have_lvl = skill_levels.get(&req_skill_id).copied().unwrap_or(0);
+                    if req_skill_id > 0 && have_lvl < req_lvl {
+                        return Some(Err(BridgeRpcError {
+                            code: "SkillMissing".into(),
+                            message: format!(
+                                "Character {char_id} lacks required skill {req_skill_id} level {req_lvl} (has {have_lvl})"
+                            ),
+                        }));
+                    }
+                }
+            }
+
+            let sys_sec = ctx
+                .sde
+                .solar_systems
+                .get(&sys_id)
+                .map(|s| s.security_status)
+                .unwrap_or(1.0);
+            if item_type.group_id == 361 && sys_sec > 0.0 {
+                return Some(Err(BridgeRpcError {
+                    code: "CantAnchorInEmpire".into(),
+                    message: format!(
+                        "Mobile Warp Disruptor cannot be anchored in high-sec or low-sec system {sys_id} (security {sys_sec:.2} > 0.0)"
+                    ),
+                }));
+            }
+
+            let sys_handle = ctx.systems.get_or_spawn(sys_id);
+            let Some((_, ship_ball)) = (match sys_handle.get_ball_snapshot(ship_id).await {
+                Ok(v) => v,
+                Err(e) => {
+                    return Some(Err(BridgeRpcError {
+                        code: "SystemActorError".into(),
+                        message: e,
+                    }))
+                }
+            }) else {
+                return Some(Err(BridgeRpcError {
+                    code: "ShipNotInSpace".into(),
+                    message: "Active ship is not spawned in space".into(),
+                }));
+            };
+
+            let requested_pos = args.get(1).and_then(|p| match p {
+                PyRep::Tuple(coords) | PyRep::List(coords) if coords.len() == 3 => {
+                    Some(DVec3::new(
+                        coords[0].as_f64()?,
+                        coords[1].as_f64()?,
+                        coords[2].as_f64()?,
+                    ))
+                }
+                _ => None,
+            });
+            let anchor_pos = match requested_pos {
+                Some(p) if (p - ship_ball.position).length() <= 5_000.0 => p,
+                _ => ship_ball.position + DVec3::new(250.0, 0.0, 0.0),
+            };
+
+            let bubble_radius = item_type
+                .default_attributes
+                .get(&103)
+                .copied()
+                .unwrap_or(5_000.0);
+            let anchoring_delay_s = (item_type
+                .default_attributes
+                .get(&556)
+                .copied()
+                .unwrap_or(120_000.0)
+                / 1_000.0)
+                .max(1.0);
+
+            ctx.db.with_mut_snapshot(|snap| {
+                if let Some(it) = snap.items.get_mut(&item_id) {
+                    it.location_id = sys_id as i64;
+                    it.flag = InventoryFlag::Hangar;
+                    it.singleton = true;
+                }
+            });
+
+            if let Err(e) = sys_handle
+                .schedule_mobile_warp_disruptor(
+                    item_id,
+                    item.type_id,
+                    anchor_pos,
+                    bubble_radius,
+                    anchoring_delay_s,
+                )
+                .await
+            {
+                return Some(Err(BridgeRpcError {
+                    code: "SystemActorError".into(),
+                    message: e,
+                }));
+            }
+
+            Some(Ok(PyRep::keyval([
+                ("itemID", PyRep::Integer(item_id)),
+                ("typeID", PyRep::Integer(item.type_id as i64)),
+                ("solarSystemID", PyRep::Integer(sys_id as i64)),
+                ("state", PyRep::String("Anchoring".into())),
+                ("anchoringDelaySeconds", PyRep::Real(anchoring_delay_s)),
+                ("bubbleRadius", PyRep::Real(bubble_radius)),
+            ])))
+        }
+
         _ => {
-            if service == "posMgr" && matches!(method, "AnchorStructure" | "AnchorOrbital") {
+            if service == "posMgr" && method == "AnchorOrbital" {
                 let _ = match ServerContext::require_character(session) {
                     Ok(v) => v,
                     Err(e) => return Some(Err(e)),

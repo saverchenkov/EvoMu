@@ -70,6 +70,53 @@ fn grant_skills(ctx: &ServerContext, char_id: i64, skills: &[(u32, u8)]) {
     });
 }
 
+fn grant_all_required_skills_for_type(ctx: &ServerContext, char_id: i64, type_id: u32) {
+    let Some(t) = ctx.sde.types.get(&type_id) else {
+        return;
+    };
+    let pairs = [
+        (eve_sde::attr_ids::REQUIRED_SKILL_1, eve_sde::attr_ids::REQUIRED_SKILL_1_LEVEL),
+        (eve_sde::attr_ids::REQUIRED_SKILL_2, eve_sde::attr_ids::REQUIRED_SKILL_2_LEVEL),
+        (eve_sde::attr_ids::REQUIRED_SKILL_3, eve_sde::attr_ids::REQUIRED_SKILL_3_LEVEL),
+    ];
+    ctx.db.with_mut_snapshot(|snap| {
+        let entry = snap.skills.entry(char_id).or_default();
+        for (s_attr, l_attr) in pairs {
+            if let Some(&sid_f) = t.default_attributes.get(&s_attr) {
+                let sid = sid_f as u32;
+                if sid > 0 {
+                    let lvl = t
+                        .default_attributes
+                        .get(&l_attr)
+                        .copied()
+                        .unwrap_or(5.0)
+                        .max(5.0) as u8;
+                    entry.insert(
+                        sid,
+                        eve_db::TrainedSkillRecord {
+                            type_id: sid,
+                            level: lvl,
+                            skill_points: 256_000.0,
+                        },
+                    );
+                }
+            }
+        }
+    });
+}
+
+fn extract_item_attr(info_rep: &PyRep, attr_id: i64) -> f64 {
+    let attrs = info_rep.dict_get("attributes").expect("attributes dict in ItemGetInfo");
+    if let PyRep::Dict(entries) = attrs {
+        for (k, v) in entries {
+            if k.as_i64() == Some(attr_id) {
+                return v.as_f64().unwrap_or(0.0);
+            }
+        }
+    }
+    0.0
+}
+
 #[tokio::test]
 async fn test_dg4_module_cycle_capacitor_and_shield_booster() {
     // parity: plan:DG-4, feat:dogma.capacitor-recharge, feat:dogma.capacitor-stable, feat:modules.shield-booster
@@ -189,7 +236,7 @@ async fn test_dg4_module_cycle_capacitor_and_shield_booster() {
         &mut sess,
         "invbroker",
         None,
-        "MoveItem",
+        "Add",
         &[
             PyRep::Integer(booster_item_id),
             PyRep::Integer(ship_id),
@@ -370,7 +417,7 @@ async fn test_dg4_overheat_heat_damage_and_reactivation_delay() {
         &mut sess,
         "invbroker",
         None,
-        "MoveItem",
+        "Add",
         &[
             PyRep::Integer(wcs_item_id),
             PyRep::Integer(ship_id),
@@ -491,8 +538,28 @@ async fn test_dg5_targeting_state_machine_sensor_strength_and_ewar() {
     .await
     .expect("SelectCharacterID");
 
-    let _char_id = 90_000_001i64;
-    let _ship_id = 100_000_001i64;
+    let char_id = 90_000_001i64;
+    let ship_id = 100_000_001i64;
+    let station_id = 60_003_760i64;
+
+    // Upgrade attacker hull to Scorpion (640, group 27 Battleship, 8 MedSlots) while docked
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ship_item) = snap.items.get_mut(&ship_id) {
+            ship_item.type_id = 640;
+        }
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+    for tid in [640u32, 1957, 580, 2108, 37543, 29005, 29007, 40334, 40335, 2889, 499, 210] {
+        grant_all_required_skills_for_type(&ctx, char_id, tid);
+    }
+    grant_skills(&ctx, char_id, &[
+        (3426, 5), // CPU Management
+        (3413, 5), // Power Grid Management
+        (3418, 5), // Capacitor Management
+        (3417, 5), // Capacitor Systems Operation
+        (3427, 5), // Electronic Warfare
+        (3435, 5), // Weapon Disruption
+    ]);
 
     // 1. Verify Racial Sensor Strengths across all 4 factions (feat:dogma.targeting-ships-sensor-strength)
     // Caldari Merlin (603): Gravimetric (211) = 11.0
@@ -519,102 +586,730 @@ async fn test_dg5_targeting_state_machine_sensor_strength_and_ewar() {
     assert_eq!(e_type, ShipSensorType::Radar);
     assert_eq!(e_strength, 8.0);
 
-    // 2. Verify ECM Jammer chance formula and lock breaking (feat:modules.ecm)
-    // Multispectral ECM I (1957): scanGravimetricStrengthBonus = 2.2, optimal = 19,200m, falloff = 18,000m
+    // 2. Verify ECM Jammer & Burst Jammer fitting and activation via dogmaIM.Activate (feat:modules.ecm)
     let ecm_item = DogmaItemState::from_sde(5, 1957, &ctx.sde);
-    // Jam chance against Merlin at optimal: 2.2 / 11.0 = 0.20 (20%)
     let jam_opt = compute_ecm_jam_against_ship(&ecm_item, &merlin_state, 10_000.0, &ctx.sde);
     assert!((jam_opt - 0.20).abs() < 1e-4);
-
-    // Jam chance at optimal + 1 falloff (37,200m): 0.20 * 0.5^1 = 0.10 (10%)
     let jam_falloff = compute_ecm_jam_against_ship(&ecm_item, &merlin_state, 19_200.0 + 18_000.0, &ctx.sde);
     assert!((jam_falloff - 0.10).abs() < 1e-4);
 
-    // Test Ballpark ECM Jam & Break: when jammed, target loses locks and cannot lock for 20s
-    let mut ballpark = eve_destiny::Ballpark::new(30_000_142);
-    let victim_id = 990_000_030i64;
-    ballpark.add_ball(Ball {
+    // Fit Multispectral ECM I (1957), Burst Jammer I (580), Tracking Disruptor I (2108), and Guidance Disruptor I (37543) via invbroker.Add
+    let ecm_mod_id = 100_000_931i64;
+    let burst_mod_id = 100_000_932i64;
+    let td_mod_id = 100_000_933i64;
+    let gd_mod_id = 100_000_934i64;
+    seed_test_item(&ctx, ecm_mod_id, 1957, char_id, station_id, InventoryFlag::Hangar, 1);
+    seed_test_item(&ctx, burst_mod_id, 580, char_id, station_id, InventoryFlag::Hangar, 1);
+    seed_test_item(&ctx, td_mod_id, 2108, char_id, station_id, InventoryFlag::Hangar, 1);
+    seed_test_item(&ctx, gd_mod_id, 37543, char_id, station_id, InventoryFlag::Hangar, 1);
+
+    let opt_script_id = 100_000_935i64;
+    let trk_script_id = 100_000_936i64;
+    let m_rng_script_id = 100_000_937i64;
+    let m_prec_script_id = 100_000_938i64;
+    seed_test_item(&ctx, opt_script_id, 29005, char_id, ship_id, InventoryFlag::Cargo, 1);
+    seed_test_item(&ctx, trk_script_id, 29007, char_id, ship_id, InventoryFlag::Cargo, 1);
+    seed_test_item(&ctx, m_rng_script_id, 40334, char_id, ship_id, InventoryFlag::Cargo, 1);
+    seed_test_item(&ctx, m_prec_script_id, 40335, char_id, ship_id, InventoryFlag::Cargo, 1);
+
+    for (mid, flag) in [
+        (ecm_mod_id, InventoryFlag::MedSlot0),
+        (burst_mod_id, InventoryFlag::MedSlot1),
+        (td_mod_id, InventoryFlag::MedSlot2),
+        (gd_mod_id, InventoryFlag::MedSlot3),
+    ] {
+        ctx.dispatch_rpc(
+            &mut sess,
+            "invbroker",
+            None,
+            "Add",
+            &[
+                PyRep::Integer(mid),
+                PyRep::Integer(ship_id),
+                PyRep::Integer(flag as i64),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect("Fit EWAR module into MedSlot via invbroker.Add");
+    }
+
+    // Undock into solar system 30_000_142
+    ctx.dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None)
+        .await
+        .expect("Undock");
+
+    let sys_id = sess.solar_system_id.expect("solar_system_id after Undock");
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    let (_, ship_ball) = sys
+        .get_ball_snapshot(ship_id)
+        .await
+        .unwrap()
+        .expect("ship ball in space");
+
+    // Seed target ship (victim_id) fitted with 200mm AutoCannon II (2889) and Light Missile Launcher I (499) + Scourge Light Missile (210)
+    let target_char_id = 90_000_002i64;
+    for tid in [587u32, 2889, 499, 210] {
+        grant_all_required_skills_for_type(&ctx, target_char_id, tid);
+    }
+    grant_skills(&ctx, target_char_id, &[
+        (3426, 5), // CPU Management
+        (3413, 5), // Power Grid Management
+    ]);
+    let victim_id = 100_000_940i64;
+    let target_turret_id = 100_000_941i64;
+    let target_launcher_id = 100_000_942i64;
+    let target_missile_id = 100_000_943i64;
+    seed_test_item(&ctx, victim_id, 587, target_char_id, sys_id as i64, InventoryFlag::None, 1);
+    seed_test_item(&ctx, target_turret_id, 2889, target_char_id, victim_id, InventoryFlag::HiSlot0, 1);
+    seed_test_item(&ctx, target_launcher_id, 499, target_char_id, victim_id, InventoryFlag::HiSlot1, 1);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            target_missile_id,
+            InventoryItemRecord {
+                item_id: target_missile_id,
+                type_id: 210, // Scourge Light Missile
+                owner_id: target_char_id,
+                location_id: victim_id,
+                flag: InventoryFlag::HiSlot1,
+                quantity: 40,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+
+    // Spawn victim_id at 5 km (inside 10 km Burst Jammer range) and far_id at 25 km (outside 10 km Burst Jammer range)
+    let far_id = 100_000_945i64;
+    sys.spawn_ball(Ball {
         id: victim_id,
         type_id: 587,
-        position: DVec3::ZERO,
+        position: ship_ball.position + DVec3::new(5_000.0, 0.0, 0.0),
         velocity: DVec3::ZERO,
-        max_velocity: 300.0,
+        max_velocity: 365.0,
         inertia: 3.2,
         mass: 1_350_000.0,
         radius: 35.0,
         speed_fraction: 0.0,
         mode: MovementMode::Stop,
-    });
-    ballpark.combat_states.insert(victim_id, CombatState::default());
-    ballpark.add_target_lock(victim_id, TargetLock {
-        target_id: 990_000_031,
-        lock_time_ms: 1000.0,
-        remaining_lock_ms: 0.0,
-        locked: true,
-        max_range_m: Some(50_000.0),
-    });
-    assert_eq!(ballpark.get_target_locks(victim_id).len(), 1);
-
-    // Apply ECM jam
-    ballpark.apply_ecm_jam(victim_id, 20.0);
-    assert_eq!(ballpark.get_target_locks(victim_id).len(), 0, "ECM jam must clear all target locks");
-    assert_eq!(ballpark.combat_states.get(&victim_id).unwrap().ecm_jammed_remaining_s, 20.0);
-
-    // Test ECM Burst AoE
-    let burst_source = 990_000_032i64;
-    ballpark.add_ball(Ball {
-        id: burst_source,
-        type_id: 603,
-        position: DVec3::ZERO,
+    })
+    .await
+    .expect("spawn victim ball");
+    sys.spawn_ball(Ball {
+        id: far_id,
+        type_id: 587,
+        position: ship_ball.position + DVec3::new(25_000.0, 0.0, 0.0),
         velocity: DVec3::ZERO,
-        max_velocity: 300.0,
+        max_velocity: 365.0,
         inertia: 3.2,
         mass: 1_350_000.0,
         radius: 35.0,
         speed_fraction: 0.0,
         mode: MovementMode::Stop,
-    });
-    ballpark.combat_states.insert(burst_source, CombatState::default());
-    let jammed_by_burst = ballpark.apply_ecm_burst(burst_source, 10_000.0, |_| true);
-    assert!(jammed_by_burst.contains(&victim_id), "ECM Burst AoE must jam targets in radius");
+    })
+    .await
+    .expect("spawn far ball");
+
+    // Lock victim_id from attacker ship_id, and give victim_id a lock on ship_id
+    sys.add_target_lock(
+        ship_id,
+        TargetLock {
+            target_id: victim_id,
+            lock_time_ms: 1000.0,
+            remaining_lock_ms: 0.0,
+            locked: true,
+            max_range_m: Some(50_000.0),
+        },
+    )
+    .await
+    .unwrap();
+    sys.add_target_lock(
+        victim_id,
+        TargetLock {
+            target_id: ship_id,
+            lock_time_ms: 1000.0,
+            remaining_lock_ms: 0.0,
+            locked: true,
+            max_range_m: Some(50_000.0),
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(sys.get_target_locks(victim_id).await.unwrap().len(), 1);
+
+    // Activate Multispectral ECM I (1957) on victim_id via dogmaIM.Activate until probabilistic CSPRNG jam roll lands
+    let mut ecm_jammed = false;
+    for _ in 0..100 {
+        ctx.dispatch_rpc(
+            &mut sess,
+            "dogmaIM",
+            None,
+            "Activate",
+            &[
+                PyRep::Integer(ecm_mod_id),
+                PyRep::String("targetHostile".into()),
+                PyRep::Integer(victim_id),
+                PyRep::Integer(1),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect("Activate Multispectral ECM I via dogmaIM.Activate");
+        let jammed_s = sys
+            .get_combat_state(victim_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .ecm_jammed_remaining_s;
+        ctx.dispatch_rpc(
+            &mut sess,
+            "dogmaIM",
+            None,
+            "Deactivate",
+            &[
+                PyRep::Integer(ecm_mod_id),
+                PyRep::String("targetHostile".into()),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect("Deactivate Multispectral ECM I");
+        if jammed_s > 0.0 {
+            ecm_jammed = true;
+            break;
+        }
+    }
+    assert!(
+        ecm_jammed,
+        "Victim must be ECM-jammed after Multispectral ECM I activation"
+    );
+    assert_eq!(
+        sys.get_target_locks(victim_id).await.unwrap().len(),
+        0,
+        "Targeted Multispectral ECM I activation must break all target locks on victim"
+    );
+
+    // Clear victim's initial jam timer, then re-lock from both victim_id (5 km) and far_id (25 km)
+    let _ = sys.apply_ecm_jam(victim_id, 0.0).await;
+    sys.add_target_lock(
+        victim_id,
+        TargetLock {
+            target_id: ship_id,
+            lock_time_ms: 1000.0,
+            remaining_lock_ms: 0.0,
+            locked: true,
+            max_range_m: Some(50_000.0),
+        },
+    )
+    .await
+    .unwrap();
+    sys.add_target_lock(
+        far_id,
+        TargetLock {
+            target_id: ship_id,
+            lock_time_ms: 1000.0,
+            remaining_lock_ms: 0.0,
+            locked: true,
+            max_range_m: Some(50_000.0),
+        },
+    )
+    .await
+    .unwrap();
+
+    // Activate Burst Jammer I (580, ecmBurstRange = 10,000m) via dogmaIM.Activate until probabilistic CSPRNG jam roll lands on victim_id (5 km)
+    let mut burst_jammed = false;
+    for _ in 0..100 {
+        ctx.dispatch_rpc(
+            &mut sess,
+            "dogmaIM",
+            None,
+            "Activate",
+            &[
+                PyRep::Integer(burst_mod_id),
+                PyRep::String("ecmBurst".into()),
+                PyRep::None,
+                PyRep::Integer(1),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect("Activate Burst Jammer I via dogmaIM.Activate");
+        assert_eq!(
+            sys.get_target_locks(far_id).await.unwrap().len(),
+            1,
+            "Burst Jammer I must NOT break locks on targets outside its 10km ecmBurstRange (far_id at 25km)"
+        );
+        assert_eq!(
+            sys.get_combat_state(far_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .ecm_jammed_remaining_s,
+            0.0,
+            "far_id at 25km must not be jammed by 10km Burst Jammer I"
+        );
+        let jammed_s = sys
+            .get_combat_state(victim_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .ecm_jammed_remaining_s;
+        ctx.dispatch_rpc(
+            &mut sess,
+            "dogmaIM",
+            None,
+            "Deactivate",
+            &[
+                PyRep::Integer(burst_mod_id),
+                PyRep::String("ecmBurst".into()),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect("Deactivate Burst Jammer I");
+        if jammed_s > 0.0 {
+            burst_jammed = true;
+            break;
+        }
+    }
+    assert!(
+        burst_jammed,
+        "Victim at 5km must be jammed by Burst Jammer I"
+    );
+    assert_eq!(
+        sys.get_target_locks(victim_id).await.unwrap().len(),
+        0,
+        "Burst Jammer I must break locks on targets within its 10km ecmBurstRange (victim at 5km)"
+    );
 
     // 3. Verify Remote Sensor Dampener & Scripts (feat:modules.sensor-dampener)
-    // Remote Sensor Dampener I (1968): scanResolutionBonus = -13.7%, maxTargetRangeBonus = -13.7%
     let damp_item = DogmaItemState::from_sde(6, 1968, &ctx.sde);
-    // Unscripted: reduces both scan res and target range
     let (damp_scan_un, damp_range_un) = eval_scripted_sensor_dampener(&damp_item, None, 10_000.0, &ctx.sde);
     assert!(damp_scan_un < 1.0 && damp_range_un < 1.0);
     assert!((damp_scan_un - (1.0 - 0.137)).abs() < 1e-4);
     assert!((damp_range_un - (1.0 - 0.137)).abs() < 1e-4);
 
-    // Scripted with Scan Resolution Dampening Script (29013): 100% focused on scan res, range penalty is 0
     let (damp_scan_scr, damp_range_scr) = eval_scripted_sensor_dampener(&damp_item, Some(29013), 10_000.0, &ctx.sde);
     assert!(damp_scan_scr < damp_scan_un, "Scripted scan dampening must double scan resolution reduction");
     assert_eq!(damp_range_scr, 1.0, "Scan resolution script zeroes range reduction");
 
-    // Scripted with Targeting Range Dampening Script (29015): 100% focused on range, scan res penalty is 0
     let (damp_scan_rng, damp_range_rng) = eval_scripted_sensor_dampener(&damp_item, Some(29015), 10_000.0, &ctx.sde);
     assert_eq!(damp_scan_rng, 1.0, "Targeting range script zeroes scan res reduction");
     assert!(damp_range_rng < damp_range_un, "Scripted range dampening must double range reduction");
 
-    // 4. Verify Tracking Disruptor & Scripts (feat:modules.tracking-disruptor)
-    // Tracking Disruptor I (2108): trackingSpeedBonus = -15.3%, maxRangeBonus = -15.3%, falloffBonus = -15.3%
-    let td_item = DogmaItemState::from_sde(7, 2108, &ctx.sde);
-    // Unscripted: reduces tracking, optimal, falloff
-    let (t_mult, o_mult, f_mult) = eval_scripted_tracking_disruptor(&td_item, None, 10_000.0, &ctx.sde);
-    assert!(t_mult < 1.0 && o_mult < 1.0 && f_mult < 1.0);
+    // 4. Verify Tracking Disruptor & Guidance Disruptor with Scripts via dogmaIM.Activate (feat:modules.tracking-disruptor)
+    // Baseline target turret (2889 200mm AutoCannon II) and missile launcher (499 Light Missile Launcher I + 210 Scourge Light Missile) attributes
+    let base_turret_info = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "dogmaIM",
+            None,
+            "ItemGetInfo",
+            &[PyRep::Integer(target_turret_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("ItemGetInfo baseline turret");
+    let base_optimal = extract_item_attr(&base_turret_info, 54);
+    let base_falloff = extract_item_attr(&base_turret_info, 158);
+    let base_tracking = extract_item_attr(&base_turret_info, 160);
+    assert!(base_optimal > 0.0 && base_falloff > 0.0 && base_tracking > 0.0);
 
-    // Scripted with Tracking Speed Disruption Script (29007): 100% focused on tracking
-    let (t_scr, o_scr, f_scr) = eval_scripted_tracking_disruptor(&td_item, Some(29007), 10_000.0, &ctx.sde);
-    assert!(t_scr < t_mult, "Scripted tracking disruption doubles tracking speed penalty");
-    assert_eq!(o_scr, 1.0);
-    assert_eq!(f_scr, 1.0);
+    let base_launcher_info = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "dogmaIM",
+            None,
+            "ItemGetInfo",
+            &[PyRep::Integer(target_launcher_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("ItemGetInfo baseline launcher");
+    let base_missile_vel = extract_item_attr(&base_launcher_info, 37);
+    let base_flight_time = extract_item_attr(&base_launcher_info, 281);
+    let base_exp_vel = extract_item_attr(&base_launcher_info, 653);
+    let base_exp_radius = extract_item_attr(&base_launcher_info, 654);
+    assert!(
+        base_missile_vel > 0.0
+            && base_flight_time > 0.0
+            && base_exp_vel > 0.0
+            && base_exp_radius > 0.0
+    );
 
-    // Scripted with Optimal Range Disruption Script (29005): 100% focused on range
-    let (t_rng, o_rng, f_rng) = eval_scripted_tracking_disruptor(&td_item, Some(29005), 10_000.0, &ctx.sde);
-    assert_eq!(t_rng, 1.0);
-    assert!(o_rng < o_mult);
-    assert!(f_rng < f_mult);
+    // 4a. Unscripted Tracking Disruptor I (2108) -> reduces turret optimal (54), falloff (158), and trackingSpeed (160)
+    ctx.dispatch_rpc(
+        &mut sess,
+        "dogmaIM",
+        None,
+        "Activate",
+        &[
+            PyRep::Integer(td_mod_id),
+            PyRep::String("shipModuleTrackingDisruptor".into()),
+            PyRep::Integer(victim_id),
+            PyRep::Integer(1),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Activate unscripted Tracking Disruptor I");
+    let td_unscripted_info = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "dogmaIM",
+            None,
+            "ItemGetInfo",
+            &[PyRep::Integer(target_turret_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("ItemGetInfo under unscripted Tracking Disruptor I");
+    let td_un_opt = extract_item_attr(&td_unscripted_info, 54);
+    let td_un_fall = extract_item_attr(&td_unscripted_info, 158);
+    let td_un_trk = extract_item_attr(&td_unscripted_info, 160);
+    assert!(td_un_opt < base_optimal, "Unscripted TD must reduce target turret optimal range");
+    assert!(td_un_fall < base_falloff, "Unscripted TD must reduce target turret falloff");
+    assert!(td_un_trk < base_tracking, "Unscripted TD must reduce target turret tracking speed");
+    ctx.dispatch_rpc(
+        &mut sess,
+        "dogmaIM",
+        None,
+        "Deactivate",
+        &[
+            PyRep::Integer(td_mod_id),
+            PyRep::String("shipModuleTrackingDisruptor".into()),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Deactivate Tracking Disruptor I");
+
+    // 4b. Tracking Disruptor I loaded with Optimal Range Disruption Script (29005) -> doubles range/falloff penalty, zeroes tracking penalty
+    ctx.dispatch_rpc(
+        &mut sess,
+        "invbroker",
+        None,
+        "Add",
+        &[
+            PyRep::Integer(opt_script_id),
+            PyRep::Integer(ship_id),
+            PyRep::Integer(InventoryFlag::MedSlot2 as i64),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Load Optimal Range Disruption Script into Tracking Disruptor I");
+    ctx.dispatch_rpc(
+        &mut sess,
+        "dogmaIM",
+        None,
+        "Activate",
+        &[
+            PyRep::Integer(td_mod_id),
+            PyRep::String("shipModuleTrackingDisruptor".into()),
+            PyRep::Integer(victim_id),
+            PyRep::Integer(1),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Activate Optimal Range scripted Tracking Disruptor I");
+    let td_opt_info = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "dogmaIM",
+            None,
+            "ItemGetInfo",
+            &[PyRep::Integer(target_turret_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("ItemGetInfo under Optimal Range scripted TD");
+    let td_opt_opt = extract_item_attr(&td_opt_info, 54);
+    let td_opt_fall = extract_item_attr(&td_opt_info, 158);
+    let td_opt_trk = extract_item_attr(&td_opt_info, 160);
+    assert!(td_opt_opt < td_un_opt, "Optimal Range Disruption Script must double optimal range reduction");
+    assert!(td_opt_fall < td_un_fall, "Optimal Range Disruption Script must double falloff reduction");
+    assert!((td_opt_trk - base_tracking).abs() < 1e-4, "Optimal Range Disruption Script must leave tracking speed unpenalized");
+    ctx.dispatch_rpc(
+        &mut sess,
+        "dogmaIM",
+        None,
+        "Deactivate",
+        &[
+            PyRep::Integer(td_mod_id),
+            PyRep::String("shipModuleTrackingDisruptor".into()),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Deactivate Optimal Range scripted TD");
+
+    // 4c. Tracking Disruptor I loaded with Tracking Speed Disruption Script (29007) -> doubles tracking penalty, zeroes range/falloff penalty
+    ctx.dispatch_rpc(
+        &mut sess,
+        "invbroker",
+        None,
+        "Add",
+        &[
+            PyRep::Integer(trk_script_id),
+            PyRep::Integer(ship_id),
+            PyRep::Integer(InventoryFlag::MedSlot2 as i64),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Load Tracking Speed Disruption Script into Tracking Disruptor I");
+    ctx.dispatch_rpc(
+        &mut sess,
+        "dogmaIM",
+        None,
+        "Activate",
+        &[
+            PyRep::Integer(td_mod_id),
+            PyRep::String("shipModuleTrackingDisruptor".into()),
+            PyRep::Integer(victim_id),
+            PyRep::Integer(1),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Activate Tracking Speed scripted Tracking Disruptor I");
+    let td_trk_info = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "dogmaIM",
+            None,
+            "ItemGetInfo",
+            &[PyRep::Integer(target_turret_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("ItemGetInfo under Tracking Speed scripted TD");
+    let td_trk_opt = extract_item_attr(&td_trk_info, 54);
+    let td_trk_fall = extract_item_attr(&td_trk_info, 158);
+    let td_trk_trk = extract_item_attr(&td_trk_info, 160);
+    assert!((td_trk_opt - base_optimal).abs() < 1e-4, "Tracking Speed Disruption Script must leave optimal range unpenalized");
+    assert!((td_trk_fall - base_falloff).abs() < 1e-4, "Tracking Speed Disruption Script must leave falloff unpenalized");
+    assert!(td_trk_trk < td_un_trk, "Tracking Speed Disruption Script must double tracking speed reduction");
+    ctx.dispatch_rpc(
+        &mut sess,
+        "dogmaIM",
+        None,
+        "Deactivate",
+        &[
+            PyRep::Integer(td_mod_id),
+            PyRep::String("shipModuleTrackingDisruptor".into()),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Deactivate Tracking Speed scripted TD");
+
+    // 4d. Unscripted Guidance Disruptor I (37543) -> reduces missile velocity (37), flight time (281), explosion velocity (653), and expands explosion radius (654)
+    ctx.dispatch_rpc(
+        &mut sess,
+        "dogmaIM",
+        None,
+        "Activate",
+        &[
+            PyRep::Integer(gd_mod_id),
+            PyRep::String("shipModuleGuidanceDisruptor".into()),
+            PyRep::Integer(victim_id),
+            PyRep::Integer(1),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Activate unscripted Guidance Disruptor I");
+    let gd_un_info = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "dogmaIM",
+            None,
+            "ItemGetInfo",
+            &[PyRep::Integer(target_launcher_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("ItemGetInfo under unscripted Guidance Disruptor I");
+    let gd_un_vel = extract_item_attr(&gd_un_info, 37);
+    let gd_un_time = extract_item_attr(&gd_un_info, 281);
+    let gd_un_exp_vel = extract_item_attr(&gd_un_info, 653);
+    let gd_un_exp_rad = extract_item_attr(&gd_un_info, 654);
+    assert!(gd_un_vel < base_missile_vel, "Unscripted Guidance Disruptor must reduce target missile velocity");
+    assert!(gd_un_time < base_flight_time, "Unscripted Guidance Disruptor must reduce target missile flight time");
+    assert!(gd_un_exp_vel < base_exp_vel, "Unscripted Guidance Disruptor must reduce target missile explosion velocity");
+    assert!(gd_un_exp_rad > base_exp_radius, "Unscripted Guidance Disruptor must increase target missile explosion radius");
+    ctx.dispatch_rpc(
+        &mut sess,
+        "dogmaIM",
+        None,
+        "Deactivate",
+        &[
+            PyRep::Integer(gd_mod_id),
+            PyRep::String("shipModuleGuidanceDisruptor".into()),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Deactivate unscripted Guidance Disruptor I");
+
+    // 4e. Guidance Disruptor I loaded with Missile Range Disruption Script (40334) -> doubles velocity/flight-time penalty, zeroes precision penalty
+    ctx.dispatch_rpc(
+        &mut sess,
+        "invbroker",
+        None,
+        "Add",
+        &[
+            PyRep::Integer(m_rng_script_id),
+            PyRep::Integer(ship_id),
+            PyRep::Integer(InventoryFlag::MedSlot3 as i64),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Load Missile Range Disruption Script into Guidance Disruptor I");
+    ctx.dispatch_rpc(
+        &mut sess,
+        "dogmaIM",
+        None,
+        "Activate",
+        &[
+            PyRep::Integer(gd_mod_id),
+            PyRep::String("shipModuleGuidanceDisruptor".into()),
+            PyRep::Integer(victim_id),
+            PyRep::Integer(1),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Activate Missile Range scripted Guidance Disruptor I");
+    let gd_rng_info = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "dogmaIM",
+            None,
+            "ItemGetInfo",
+            &[PyRep::Integer(target_launcher_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("ItemGetInfo under Missile Range scripted GD");
+    let gd_rng_vel = extract_item_attr(&gd_rng_info, 37);
+    let gd_rng_time = extract_item_attr(&gd_rng_info, 281);
+    let gd_rng_exp_vel = extract_item_attr(&gd_rng_info, 653);
+    let gd_rng_exp_rad = extract_item_attr(&gd_rng_info, 654);
+    assert!(gd_rng_vel < gd_un_vel, "Missile Range Disruption Script must double missile velocity reduction");
+    assert!(gd_rng_time < gd_un_time, "Missile Range Disruption Script must double missile flight time reduction");
+    assert!((gd_rng_exp_vel - base_exp_vel).abs() < 1e-4, "Missile Range Disruption Script must leave explosion velocity unpenalized");
+    assert!((gd_rng_exp_rad - base_exp_radius).abs() < 1e-4, "Missile Range Disruption Script must leave explosion radius unpenalized");
+    ctx.dispatch_rpc(
+        &mut sess,
+        "dogmaIM",
+        None,
+        "Deactivate",
+        &[
+            PyRep::Integer(gd_mod_id),
+            PyRep::String("shipModuleGuidanceDisruptor".into()),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Deactivate Missile Range scripted GD");
+
+    // 4f. Guidance Disruptor I loaded with Missile Precision Disruption Script (40335) -> doubles explosion velocity/radius penalty, zeroes range penalty
+    ctx.dispatch_rpc(
+        &mut sess,
+        "invbroker",
+        None,
+        "Add",
+        &[
+            PyRep::Integer(m_prec_script_id),
+            PyRep::Integer(ship_id),
+            PyRep::Integer(InventoryFlag::MedSlot3 as i64),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Load Missile Precision Disruption Script into Guidance Disruptor I");
+    ctx.dispatch_rpc(
+        &mut sess,
+        "dogmaIM",
+        None,
+        "Activate",
+        &[
+            PyRep::Integer(gd_mod_id),
+            PyRep::String("shipModuleGuidanceDisruptor".into()),
+            PyRep::Integer(victim_id),
+            PyRep::Integer(1),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Activate Missile Precision scripted Guidance Disruptor I");
+    let gd_prec_info = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "dogmaIM",
+            None,
+            "ItemGetInfo",
+            &[PyRep::Integer(target_launcher_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("ItemGetInfo under Missile Precision scripted GD");
+    let gd_prec_vel = extract_item_attr(&gd_prec_info, 37);
+    let gd_prec_time = extract_item_attr(&gd_prec_info, 281);
+    let gd_prec_exp_vel = extract_item_attr(&gd_prec_info, 653);
+    let gd_prec_exp_rad = extract_item_attr(&gd_prec_info, 654);
+    assert!((gd_prec_vel - base_missile_vel).abs() < 1e-4, "Missile Precision Disruption Script must leave missile velocity unpenalized");
+    assert!((gd_prec_time - base_flight_time).abs() < 1e-4, "Missile Precision Disruption Script must leave missile flight time unpenalized");
+    assert!(gd_prec_exp_vel < gd_un_exp_vel, "Missile Precision Disruption Script must double explosion velocity reduction");
+    assert!(gd_prec_exp_rad > gd_un_exp_rad, "Missile Precision Disruption Script must double explosion radius expansion");
+    ctx.dispatch_rpc(
+        &mut sess,
+        "dogmaIM",
+        None,
+        "Deactivate",
+        &[
+            PyRep::Integer(gd_mod_id),
+            PyRep::String("shipModuleGuidanceDisruptor".into()),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Deactivate Missile Precision scripted GD");
 
     // 5. Verify Target Painter with Overload (feat:modules.target-painter)
     // Target Painter I (12709): signatureRadiusBonus = 25.0%
@@ -656,6 +1351,7 @@ async fn test_dg5_targeting_state_machine_sensor_strength_and_ewar() {
     assert_eq!(max_t3, 10);
 
     // Lock break on range: target moves beyond maxTargetRange
+    let mut ballpark = eve_destiny::Ballpark::new(30_000_142);
     let src_ball_id = 990_000_040i64;
     let tgt_ball_id = 990_000_041i64;
     ballpark.add_ball(Ball {

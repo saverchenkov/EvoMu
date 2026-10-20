@@ -41,7 +41,10 @@ pub async fn handle(
         // =========================================================================
         // SO-1: Fleet Manager (`fleetMgr`, `fleetObjectHandler`, `fleetProxy`)
         // =========================================================================
-        ("fleetMgr", "CreateFleet") | ("fleetObjectHandler", "CreateFleet") | ("fleetProxy", "CreateFleet") => {
+        ("fleetMgr", "CreateFleet")
+        | ("fleetObjectHandler", "CreateFleet")
+        | ("fleetProxy", "CreateFleet")
+        | ("fleetSvc", "InitFleet") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -3155,8 +3158,9 @@ pub async fn handle(
             let now_unix = ctx.now_unix();
 
             let signatures = ctx.db.try_with_mut_snapshot(|snap| {
-                let list = snap.cosmic_signatures.entry(sys_id).or_insert_with(|| {
-                    vec![
+                let list = snap.cosmic_signatures.entry(sys_id).or_default();
+                if !list.iter().any(|s| s.sig_group == "Wormhole") {
+                    list.extend([
                         CosmicSignatureRecord {
                             signature_id: format!("JMM-{}", 100 + (sys_id % 900)),
                             solar_system_id: sys_id,
@@ -3253,8 +3257,8 @@ pub async fn handle(
                             max_jump_mass_kg: 0.0,
                             collapsed: false,
                         },
-                    ]
-                });
+                    ]);
+                }
                 Ok::<_, std::convert::Infallible>(list.clone())
             }).unwrap();
 

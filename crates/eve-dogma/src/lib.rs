@@ -1121,7 +1121,7 @@ impl DogmaEffectContext {
 }
 
 /// Represents an active modifier applied to an entity's Dogma attribute.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct AttributeModifier {
     pub source_item_id: i64,
     #[serde(default)]
@@ -1221,7 +1221,7 @@ pub struct FittedModule {
 }
 
 /// Stateful Dogma container for a ship or item entity.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DogmaItemState {
     pub item_id: i64,
     pub type_id: TypeId,
@@ -1423,6 +1423,17 @@ impl DogmaItemState {
     }
 }
 
+/// A hostile projected EWAR module cycle active against a target ship (`feat:modules.tracking-disruptor`, `DG-5`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProjectedEwarEffect {
+    pub source_module_id: i64,
+    pub source_module_type_id: TypeId,
+    pub charge_type_id: Option<TypeId>,
+    pub distance: f64,
+    pub overloaded: bool,
+    pub effective_module: DogmaItemState,
+}
+
 /// Complete Ship Fitting, Thermodynamics, and Module Activation Engine.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShipFittingEngine {
@@ -1439,6 +1450,9 @@ pub struct ShipFittingEngine {
     /// Active combat booster drugs (`type_id` of each booster).
     #[serde(default)]
     pub boosters: Vec<TypeId>,
+    /// Active hostile EWAR modules projected onto this ship (`feat:modules.tracking-disruptor`, `DG-5`).
+    #[serde(default)]
+    pub projected_ewar: Vec<ProjectedEwarEffect>,
 }
 
 impl ShipFittingEngine {
@@ -1450,6 +1464,7 @@ impl ShipFittingEngine {
             character_skills: HashMap::new(),
             implants: Vec::new(),
             boosters: Vec::new(),
+            projected_ewar: Vec::new(),
         }
     }
 
@@ -1508,7 +1523,15 @@ impl ShipFittingEngine {
             let mut mod_state = DogmaItemState::from_sde(m.item_id, m.type_id, sde);
             if let Some(ctid) = m.charge_type_id {
                 if let Some(charge_type) = sde.types.get(&ctid) {
-                    let charge_state = DogmaItemState::from_sde(0, ctid, sde);
+                    let charge_state = DogmaItemState::from_sde(m.item_id, ctid, sde);
+                    // Propagate missile flight & explosion base attributes onto launcher module state
+                    // and register the loaded charge in `ctx.owned_items`.
+                    for missile_attr in [37_u16, 281, 653, 654] {
+                        if let Some(&val) = charge_type.default_attributes.get(&missile_attr) {
+                            mod_state.base_attributes.entry(missile_attr).or_insert(val);
+                        }
+                    }
+                    ctx.owned_items.push(charge_state.clone());
                     for &eid in &charge_type.effect_ids {
                         if let Some(effect) = sde.effects.get(&eid) {
                             for spec in &effect.modifiers {
@@ -1920,7 +1943,155 @@ impl ShipFittingEngine {
             ctx.ship_located_items[idx] = ctx.item.clone();
         }
 
+        // 5. Evaluate active hostile EWAR modules projected onto this ship (`feat:modules.tracking-disruptor`, `DG-5`).
+        for proj in &self.projected_ewar {
+            let optimal = proj.effective_module.get_attribute(attr_ids::MAX_RANGE, sde);
+            let falloff = get_module_falloff(&proj.effective_module, sde);
+            let att = compute_falloff_attenuation(proj.distance, optimal, falloff);
+            let proj_type = sde.types.get(&proj.source_module_type_id);
+
+            let is_tracking_disruptor = proj_type
+                .is_some_and(|t| t.effect_ids.contains(&6424))
+                || proj.effective_module.base_attributes.contains_key(&767);
+            if is_tracking_disruptor {
+                let opt_bonus = proj.effective_module.get_attribute(351, sde) * att;
+                let fall_bonus = proj.effective_module.get_attribute(349, sde) * att;
+                let track_bonus = proj.effective_module.get_attribute(767, sde) * att;
+                for (target_attr_id, bonus_pct) in [
+                    (attr_ids::MAX_RANGE, opt_bonus),
+                    (attr_ids::FALLOFF, fall_bonus),
+                    (attr_ids::TRACKING_SPEED, track_bonus),
+                ] {
+                    if bonus_pct.abs() > 1e-9 {
+                        let m = AttributeModifier {
+                            source_item_id: proj.source_module_id,
+                            effect_id: Some(6424),
+                            target_attribute_id: target_attr_id,
+                            operator: ModifierOperator::PostPercent,
+                            value: bonus_pct,
+                            stacking_penalized: true,
+                        };
+                        ctx.ship.modifiers.push(m);
+                        for loc_item in &mut ctx.ship_located_items {
+                            loc_item.modifiers.push(m);
+                        }
+                    }
+                }
+            }
+
+            let is_guidance_disruptor = proj_type
+                .is_some_and(|t| t.effect_ids.contains(&6423))
+                || proj.effective_module.base_attributes.contains_key(&848);
+            if is_guidance_disruptor {
+                let vel_bonus = proj.effective_module.get_attribute(547, sde) * att;
+                let delay_bonus = proj.effective_module.get_attribute(596, sde) * att;
+                let aoe_vel_bonus = proj.effective_module.get_attribute(847, sde) * att;
+                let aoe_cloud_bonus = proj.effective_module.get_attribute(848, sde) * att;
+                for (target_attr_id, bonus_pct) in [
+                    (attr_ids::MAX_VELOCITY, vel_bonus),
+                    (281u16, delay_bonus),
+                    (653u16, aoe_vel_bonus),
+                    (654u16, aoe_cloud_bonus),
+                ] {
+                    if bonus_pct.abs() > 1e-9 {
+                        let m = AttributeModifier {
+                            source_item_id: proj.source_module_id,
+                            effect_id: Some(6423),
+                            target_attribute_id: target_attr_id,
+                            operator: ModifierOperator::PostPercent,
+                            value: bonus_pct,
+                            stacking_penalized: true,
+                        };
+                        for loc_item in &mut ctx.ship_located_items {
+                            loc_item.modifiers.push(m);
+                        }
+                        for owned_item in &mut ctx.owned_items {
+                            owned_item.modifiers.push(m);
+                        }
+                    }
+                }
+            }
+
+            let is_sensor_dampener = proj_type.is_some_and(|t| t.group_id == 208)
+                || proj.effective_module.base_attributes.contains_key(&566);
+            if is_sensor_dampener {
+                let scan_res_bonus = proj.effective_module.get_attribute(566, sde) * att;
+                let range_bonus = proj.effective_module.get_attribute(309, sde) * att;
+                for (target_attr_id, bonus_pct) in [
+                    (attr_ids::SCAN_RESOLUTION, scan_res_bonus),
+                    (attr_ids::MAX_TARGET_RANGE, range_bonus),
+                ] {
+                    if bonus_pct.abs() > 1e-9 {
+                        ctx.ship.modifiers.push(AttributeModifier {
+                            source_item_id: proj.source_module_id,
+                            effect_id: None,
+                            target_attribute_id: target_attr_id,
+                            operator: ModifierOperator::PostPercent,
+                            value: bonus_pct,
+                            stacking_penalized: true,
+                        });
+                    }
+                }
+            }
+
+            let is_target_painter = proj_type.is_some_and(|t| t.group_id == 379);
+            if is_target_painter {
+                let sig_bonus = proj.effective_module.get_attribute(554, sde) * att;
+                if sig_bonus.abs() > 1e-9 {
+                    ctx.ship.modifiers.push(AttributeModifier {
+                        source_item_id: proj.source_module_id,
+                        effect_id: None,
+                        target_attribute_id: attr_ids::SIGNATURE_RADIUS,
+                        operator: ModifierOperator::PostPercent,
+                        value: sig_bonus,
+                        stacking_penalized: true,
+                    });
+                }
+            }
+
+            let is_stasis_webifier = proj_type.is_some_and(|t| t.group_id == 65);
+            if is_stasis_webifier {
+                let speed_bonus = proj.effective_module.get_attribute(20, sde) * att;
+                if speed_bonus.abs() > 1e-9 {
+                    ctx.ship.modifiers.push(AttributeModifier {
+                        source_item_id: proj.source_module_id,
+                        effect_id: None,
+                        target_attribute_id: attr_ids::MAX_VELOCITY,
+                        operator: ModifierOperator::PostPercent,
+                        value: speed_bonus,
+                        stacking_penalized: true,
+                    });
+                }
+            }
+        }
+
         ctx
+    }
+
+    /// Inserts or updates a hostile projected EWAR effect on this ship and recalculates stats.
+    pub fn upsert_projected_ewar(&mut self, effect: ProjectedEwarEffect, sde: &SdeRegistry) {
+        if let Some(existing) = self
+            .projected_ewar
+            .iter_mut()
+            .find(|e| e.source_module_id == effect.source_module_id)
+        {
+            *existing = effect;
+        } else {
+            self.projected_ewar.push(effect);
+        }
+        self.recalculate_stats(sde);
+    }
+
+    /// Removes a hostile projected EWAR effect by `source_module_id` and recalculates stats.
+    pub fn remove_projected_ewar(&mut self, source_module_id: i64, sde: &SdeRegistry) -> bool {
+        let before = self.projected_ewar.len();
+        self.projected_ewar
+            .retain(|e| e.source_module_id != source_module_id);
+        let removed = self.projected_ewar.len() < before;
+        if removed {
+            self.recalculate_stats(sde);
+        }
+        removed
     }
 
     /// Evaluates the ship's passive hull effects, character skill effects (`category_id == 16`),
@@ -1994,15 +2165,46 @@ impl ShipFittingEngine {
             .unwrap_or(0.0)
     }
 
+    /// Returns the evaluated dogma attribute for a charge loaded in `launcher_module_id` (such as a missile affected by skills and Guidance Disruptors).
+    pub fn get_charge_effective_attribute(
+        &self,
+        launcher_module_id: i64,
+        attr_id: AttributeId,
+        sde: &SdeRegistry,
+    ) -> f64 {
+        let ctx = self.evaluated_context(sde);
+        if let Some(ch) = ctx.owned_items.iter().find(|c| c.item_id == launcher_module_id) {
+            let val = ch.get_attribute(attr_id, sde);
+            if val != 0.0 || ch.base_attributes.contains_key(&attr_id) {
+                return val;
+            }
+        }
+        self.get_module_effective_attribute(launcher_module_id, attr_id, sde)
+    }
+
     /// Returns the effective evaluated [`DogmaItemState`] of a module (fitted or hypothetical),
     /// including character skill bonuses, overload bonuses, and any loaded charge/script modifiers (`DG-5`, `DG-6`).
     pub fn build_effective_module_state(
         &self,
         module_item_id: i64,
         module_type_id: TypeId,
-        _overloaded: bool,
+        overloaded: bool,
         sde: &SdeRegistry,
     ) -> DogmaItemState {
+        if overloaded
+            && self
+                .modules
+                .get(&module_item_id)
+                .is_some_and(|m| m.state != ModuleState::Overloaded)
+        {
+            let mut tmp = self.clone();
+            if let Some(m) = tmp.modules.get_mut(&module_item_id) {
+                m.state = ModuleState::Overloaded;
+            }
+            if let Some(state) = tmp.module_state(module_item_id, sde) {
+                return state;
+            }
+        }
         if let Some(state) = self.module_state(module_item_id, sde) {
             return state;
         }

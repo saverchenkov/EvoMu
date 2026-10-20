@@ -1299,6 +1299,12 @@ pub struct WorldStateSnapshot {
     #[serde(default)]
     pub mining_ledger: Vec<MiningLedgerRecord>,
     pub module_online_states: HashMap<i64, bool>,
+    /// Fitted modules currently cycling, set by `dogmaIM.Activate` and cleared by `dogmaIM.Deactivate`.
+    #[serde(default)]
+    pub module_active_states: HashSet<i64>,
+    /// Charge type loaded into an active burst module when it was activated (`dogmaIM.Activate`).
+    #[serde(default)]
+    pub module_active_charges: HashMap<i64, u32>,
     #[serde(default)]
     pub weapon_banks: HashMap<i64, HashMap<i64, Vec<i64>>>,
     #[serde(default)]
@@ -1524,14 +1530,7 @@ impl WorldStateSnapshot {
                     }
                 }
                 for iid in &c.item_ids {
-                    let is_temp_wrap = self
-                        .items
-                        .get(iid)
-                        .map(|item| item.type_id == 24445)
-                        .unwrap_or(false);
-                    if is_temp_wrap {
-                        self.items.remove(iid);
-                    } else if let Some(item) = self.items.get_mut(iid) {
+                    if let Some(item) = self.items.get_mut(iid) {
                         item.owner_id = c.issuer_id;
                         item.location_id = c.start_station_id;
                         item.flag = InventoryFlag::Hangar;
@@ -1554,20 +1553,26 @@ impl WorldStateSnapshot {
                             .unwrap_or(issuer.balance);
                     }
                 }
+                let mut wraps_to_remove = Vec::new();
                 for iid in &c.item_ids {
-                    let is_temp_wrap = self
+                    let parent_loc = self.items.get(iid).map(|it| it.location_id).unwrap_or(0);
+                    let wrap_parent_loc = self
                         .items
-                        .get(iid)
-                        .map(|item| item.type_id == 24445)
-                        .unwrap_or(false);
+                        .get(&parent_loc)
+                        .filter(|p| p.type_id == 3468)
+                        .map(|p| p.location_id);
+                    if let Some(wloc) = wrap_parent_loc {
+                        wraps_to_remove.push(parent_loc);
+                        if let Some(item) = self.items.get_mut(iid) {
+                            item.location_id = wloc;
+                        }
+                    }
                     let in_ship_container = self
                         .items
                         .get(iid)
                         .map(|item| self.items.contains_key(&item.location_id))
                         .unwrap_or(false);
-                    if is_temp_wrap {
-                        self.items.remove(iid);
-                    } else if let Some(item) = self.items.get_mut(iid) {
+                    if let Some(item) = self.items.get_mut(iid) {
                         if c.collateral.0 > 0 {
                             item.owner_id = c.acceptor_id.unwrap_or(c.issuer_id);
                             item.flag = if in_ship_container {
@@ -1582,6 +1587,9 @@ impl WorldStateSnapshot {
                         }
                         item.version += 1;
                     }
+                }
+                for wid in wraps_to_remove {
+                    self.items.remove(&wid);
                 }
                 if let Some(c_mut) = self.contracts.get_mut(&contract_id) {
                     c_mut.status = "Failed".into();
@@ -1635,20 +1643,26 @@ impl WorldStateSnapshot {
                     .unwrap_or(issuer.balance);
             }
         }
+        let mut wraps_to_remove = Vec::new();
         for iid in &c.item_ids {
-            let is_temp_wrap = self
+            let parent_loc = self.items.get(iid).map(|it| it.location_id).unwrap_or(0);
+            let wrap_parent_loc = self
                 .items
-                .get(iid)
-                .map(|item| item.type_id == 24445)
-                .unwrap_or(false);
+                .get(&parent_loc)
+                .filter(|p| p.type_id == 3468)
+                .map(|p| p.location_id);
+            if let Some(wloc) = wrap_parent_loc {
+                wraps_to_remove.push(parent_loc);
+                if let Some(item) = self.items.get_mut(iid) {
+                    item.location_id = wloc;
+                }
+            }
             let in_ship_container = self
                 .items
                 .get(iid)
                 .map(|item| self.items.contains_key(&item.location_id))
                 .unwrap_or(false);
-            if is_temp_wrap {
-                self.items.remove(iid);
-            } else if let Some(item) = self.items.get_mut(iid) {
+            if let Some(item) = self.items.get_mut(iid) {
                 if c.collateral.0 > 0 {
                     item.owner_id = c.acceptor_id.unwrap_or(c.issuer_id);
                     item.flag = if in_ship_container {
@@ -1663,6 +1677,9 @@ impl WorldStateSnapshot {
                 }
                 item.version += 1;
             }
+        }
+        for wid in wraps_to_remove {
+            self.items.remove(&wid);
         }
         if let Some(c_mut) = self.contracts.get_mut(&contract_id) {
             c_mut.status = "Failed".into();

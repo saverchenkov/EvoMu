@@ -251,9 +251,6 @@ fn cc_upgrade_cost_isk(current_level: u8, desired_level: u8) -> f64 {
 }
 
 fn is_command_center_type(ctx: &ServerContext, type_id: TypeId) -> bool {
-    if type_id == 2254 || (2524..=2551).contains(&type_id) {
-        return true;
-    }
     ctx.sde
         .types
         .get(&type_id)
@@ -1101,107 +1098,6 @@ pub fn handle(
                 quotes
             });
             Some(Ok(PyRep::List(res)))
-        }
-
-        ("structureCompressionMgr", "CompressItemInStructure")
-        | ("inSpaceCompressionMgr", "CompressItemInSpace") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            if method == "CompressItemInStructure"
-                && session.station_id.is_none()
-                && session.structure_id.is_none()
-            {
-                return Some(Err(BridgeRpcError {
-                    code: "NotDocked".into(),
-                    message: "CompressItemInStructure requires being docked".into(),
-                }));
-            }
-            if method == "CompressItemInSpace"
-                && (session.station_id.is_some() || session.structure_id.is_some())
-            {
-                return Some(Err(BridgeRpcError {
-                    code: "MustBeInSpace".into(),
-                    message: "CompressItemInSpace requires being undocked in space".into(),
-                }));
-            }
-            let Some(item_id) = args.first().and_then(|a| a.as_i64()) else {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidArgument".into(),
-                    message: "Compression requires an explicit integer itemID".into(),
-                }));
-            };
-            let res = ctx.db.try_with_mut_snapshot(|snap| {
-                let mut remainder_record = None;
-                let mut compressed_out = None;
-                if let Some(item) = snap.items.get_mut(&item_id) {
-                    let reachable = (Some(item.location_id) == session.station_id)
-                        || (Some(item.location_id) == session.structure_id)
-                        || (Some(item.location_id) == session.ship_id);
-                    let portion_size = ctx
-                        .sde
-                        .types
-                        .get(&item.type_id)
-                        .map(|t| t.portion_size as i32)
-                        .unwrap_or(100)
-                        .max(1);
-                    if item.owner_id == char_id
-                        && reachable
-                        && item.flag != InventoryFlag::Locked
-                        && item.quantity >= portion_size
-                    {
-                        if let Some(&comp_type) = ctx.sde.compressible_types.get(&item.type_id) {
-                            let orig_type = item.type_id;
-                            let orig_loc = item.location_id;
-                            let orig_flag = item.flag;
-                            let rem = item.quantity % portion_size;
-                            item.type_id = comp_type;
-                            item.quantity /= portion_size;
-                            item.version += 1;
-                            compressed_out = Some((item.item_id, item.type_id, item.quantity, rem));
-                            if rem > 0 {
-                                remainder_record = Some((orig_type, orig_loc, orig_flag, rem));
-                            }
-                        }
-                    }
-                }
-                if let Some((orig_type, orig_loc, orig_flag, rem)) = remainder_record {
-                    snap.next_entity_id += 1;
-                    let rem_id = snap.next_entity_id;
-                    snap.items.insert(
-                        rem_id,
-                        InventoryItemRecord {
-                            item_id: rem_id,
-                            type_id: orig_type,
-                            owner_id: char_id,
-                            location_id: orig_loc,
-                            flag: orig_flag,
-                            quantity: rem,
-                            singleton: false,
-                            version: 1,
-                            dynamic_attributes: HashMap::new(),
-                            source_mutaplasmid_id: None,
-                            insured_payout_isk: 0.0,
-                            is_blueprint_copy: false,
-                            blueprint_runs_remaining: None,
-                        },
-                    );
-                }
-                compressed_out.ok_or_else(|| BridgeRpcError {
-                    code: "CompressionFailed".into(),
-                    message: "Item cannot be compressed (invalid type, <100 units, locked, or unreachable location)".into(),
-                })
-            });
-            match res {
-                Ok((iid, ctype, qty, rem)) => Some(Ok(PyRep::keyval([
-                    ("itemID", PyRep::Integer(iid)),
-                    ("compressedTypeID", PyRep::Integer(ctype as i64)),
-                    ("quantity", PyRep::Integer(qty as i64)),
-                    ("remainderUnits", PyRep::Integer(rem as i64)),
-                ]))),
-                Err(e) => Some(Err(e)),
-            }
         }
 
         ("industryManager", "InstallJob") => {
@@ -3285,6 +3181,19 @@ pub fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            let planet_restriction_type_id = ctx
+                .sde
+                .celestials_in_system(sys_id)
+                .into_iter()
+                .find(|c| c.celestial_id == planet_id && c.group_id == 7)
+                .and_then(|cel| {
+                    ctx.sde
+                        .types
+                        .get(&cel.type_id)
+                        .map(|pt| pt.variation_parent_type_id.unwrap_or(pt.type_id))
+                        .or(Some(cel.type_id))
+                })
+                .unwrap_or(0);
             let Some(commands) = cmd_list_opt else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidCommandStream".into(),
@@ -3429,6 +3338,25 @@ pub fn handle(
                                             "Maximum of {max_colonies} planetary colonies reached (Interplanetary Consolidation level {ipc_level})"
                                         ),
                                     });
+                                }
+                                if let Some(cc_sde_type) = ctx.sde.types.get(&pin_type_id) {
+                                    if let Some(&req_planet_type) =
+                                        cc_sde_type.default_attributes.get(&ATTR_PLANET_RESTRICTION)
+                                    {
+                                        let req_planet_type_id = req_planet_type as u32;
+                                        if req_planet_type_id > 0
+                                            && planet_restriction_type_id > 0
+                                            && req_planet_type_id != planet_restriction_type_id
+                                        {
+                                            return Err(BridgeRpcError {
+                                                code: "IncompatibleCommandCenterPlanetType".into(),
+                                                message: format!(
+                                                    "Command Center {} (type {pin_type_id}) requires planet type {req_planet_type_id} (SDE planetRestriction 1632), but planet {planet_id} is planet type {planet_restriction_type_id}",
+                                                    cc_sde_type.name
+                                                ),
+                                            });
+                                        }
+                                    }
                                 }
                                 if pin_id_raw > 0 && client_to_server_pin_id.contains_key(&pin_id_raw) {
                                     return Err(BridgeRpcError {
@@ -4104,7 +4032,7 @@ pub fn handle(
             let now_unix = ctx.now_unix();
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {
-                let (cc_level, pins_count, col_sys_id) = {
+                let (_cc_level, pins_count, col_sys_id) = {
                     let Some(col) = snap.planetary_colonies.get(&(char_id, planet_id)) else {
                         return Err(BridgeRpcError {
                             code: "ColonyNotFound".into(),
@@ -4163,8 +4091,33 @@ pub fn handle(
                     }
                 }
 
+                let customs_code_expertise_level = snap
+                    .skills
+                    .get(&char_id)
+                    .and_then(|m| m.get(&33467))
+                    .map(|s| s.level.clamp(0, 5))
+                    .unwrap_or(0);
+                // High-sec systems (security >= 0.45) levy a 10% NPC (CONCORD/InterBus) customs tax reduced by
+                // 10% per level of Customs Code Expertise (type 33467); low/null/WH levy 0% NPC customs tax.
+                // Player POCO owner tax rate defaults to 5% (DERIVED while feat:pi.customs-office / feat:pi.poco-settings remain open).
+                let npc_customs_tax_rate = if ctx
+                    .sde
+                    .solar_systems
+                    .get(&col_sys_id)
+                    .map(|s| s.security_status >= 0.45)
+                    .unwrap_or(true)
+                {
+                    0.10
+                } else {
+                    0.0
+                };
                 let tax_base = p0_unit_tax_value * (produced_qty as f64);
-                let export_tax = compute_poco_export_tax(tax_base, 0.10, cc_level, 0.05);
+                let export_tax = compute_poco_export_tax(
+                    tax_base,
+                    npc_customs_tax_rate,
+                    customs_code_expertise_level,
+                    0.05,
+                );
                 let tax_cents = IskCents::from_f64_isk(export_tax);
                 if let Some(ch) = snap.characters.get_mut(&char_id) {
                     let new_bal =
@@ -4491,9 +4444,20 @@ pub fn handle(
                     let customs_lvl = snap
                         .skills
                         .get(&char_id)
-                        .and_then(|m| m.get(&2497))
-                        .map(|s| s.level)
+                        .and_then(|m| m.get(&33467))
+                        .map(|s| s.level.clamp(0, 5))
                         .unwrap_or(0);
+                    let npc_customs_tax_rate = if ctx
+                        .sde
+                        .solar_systems
+                        .get(&col.solar_system_id)
+                        .map(|s| s.security_status >= 0.45)
+                        .unwrap_or(true)
+                    {
+                        0.10
+                    } else {
+                        0.0
+                    };
                     let unit_base = ctx
                         .sde
                         .types
@@ -4502,7 +4466,7 @@ pub fn handle(
                         .unwrap_or(400.0);
                     export_tax_isk = compute_poco_export_tax(
                         unit_base * (qty as f64),
-                        0.10,
+                        npc_customs_tax_rate,
                         customs_lvl,
                         0.05,
                     );

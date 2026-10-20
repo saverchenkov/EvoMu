@@ -4524,6 +4524,162 @@
    "na_allowed": false,
    "attest_ok": false,
    "added_by_audit": "20261019-145905"
+  },
+  {
+   "acceptance": "Crystal groups:\n- asteroid crystals by ore tier: Simple, Coherent, Variegated, Complex, Abyssal, Mercoxit;\n- moon crystals by class: Ubiquitous, Common, Uncommon, Rare, Exceptional.\n\nA loaded crystal adds its yield bonus only when the target ore belongs to the crystal's tier or class. The match is resolved from SDE type/group data, not names. On any other ore it gives no benefit: base modulated yield, no penalty. Mission-unique ores never match.\n\nCrystals load only into modulated (T2) ore miners and the ORE deep core laser, and need the matching resource-processing skill.",
+   "domain": "mining",
+   "id": "feat:mining.crystal-tier-ore-compatibility",
+   "sources": [
+    "wiki:Mining_crystals"
+   ],
+   "title": "Mining crystal ore-tier compatibility",
+   "why_missing": "feat:mining.modulated-crystals only says 'matching ore type', which reflects the pre-19.11 per-ore crystals. No row defines the tier/class mapping or the 'no benefit, no penalty' rule. The implementation matches crystals to ores by name substring and applies an invented 0.25x penalty (crates/eve-server/src/services/inventory_fitting.rs:3065-3080).",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261019-222106"
+  },
+  {
+   "acceptance": "Type A, B and C crystals (T1 and T2) apply their SDE yield modifier, cycle-duration multiplier, residue probability and residue multiplier, matching the wiki table. Examples: Type B I has 0.9x duration and Type B II 0.8x; Type C has high residue. Each attribute changes the per-cycle result and composes correctly with skills and bursts.",
+   "domain": "mining",
+   "id": "feat:mining.crystal-type-abc-modifiers",
+   "sources": [
+    "wiki:Mining_crystals"
+   ],
+   "title": "Crystal Type A/B/C yield and duration modifiers",
+   "why_missing": "feat:mining.mining-residue covers only residue. No row covers a crystal's cycle-duration multiplier or its per-type yield modifier. The current implementation never applies a crystal duration multiplier (crates/eve-server/src/services/inventory_fitting.rs:3182-3191).",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261019-222106"
+  },
+  {
+   "acceptance": "Reprocessing in an Upwell structure uses that structure type's base yield before skills, implants and rigs:\n- Citadels and Engineering Complexes: 50%;\n- Athanor: 51%;\n- Tatara: 52%.\n\nThe value comes from SDE data. reprocessingSvc quotes report it, and the reprocessed output reflects it.",
+   "domain": "mining",
+   "id": "feat:mining.upwell-refinery-base-yield",
+   "sources": [
+    "wiki:Reprocessing"
+   ],
+   "title": "Upwell structure base reprocessing yield by type",
+   "why_missing": "feat:structures.service-reprocessing is coarse, and its test asserts Athanor = 52% (crates/eve-server/tests/mining_complete.rs:2392), contradicting the wiki. The auditor rows mining.npc-reprocessing-equipment-and-tax-curve and structures.reprocessing-rig-security-multipliers cover NPC stations and rigs only.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261019-222106"
+  },
+  {
+   "acceptance": "Each Mining Foreman Burst charge applies only its own dbuff to fleet members within burst range:\n- Mining Laser Optimization: mining module duration and capacitor use, base -15%;\n- Mining Laser Field Enhancement: mining and survey module range bonus;\n- Mining Laser Efficiency: lower residue probability and higher mining critical-success chance.\n\nStrength scales with:\n- T2 module (+25%);\n- Mining Director (+10%/level);\n- mindlink and industrial core.\n\nDuration scales with Mining Foreman (+10%/level). A burst loaded with one charge type grants none of the other charges' effects.",
+   "domain": "mining",
+   "id": "feat:mining.foreman-burst-charge-effects",
+   "sources": [
+    "wiki:Command_Bursts"
+   ],
+   "title": "Mining Foreman Burst per-charge effects",
+   "why_missing": "feat:mining.mining-fleet-boosts is one line ('increase yield/reduce cycle/increase range'). The implementation applies a flat 0.85 duration and 0.70 waste multiplier for any group-1771 charge (crates/eve-server/src/services/inventory_fitting.rs:3093-3153). The auditor rows command-burst-strength-formula, command-burst-range and command-burst-duration-reload are generic.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261019-222106"
+  },
+  {
+   "acceptance": "moonExtractions.StartNewExtraction accepts a player-chosen duration from 6 to 56 days, and the chunk arrives at start + duration. Chunk volume = 30,000 m\u00b3 per hour of extraction, split by the moon's survey composition fractions. CancelExtraction before arrival stops the extraction and produces no chunk.",
+   "domain": "mining",
+   "id": "feat:mining.moon-extraction-duration-yield",
+   "sources": [
+    "wiki:Moon_mining"
+   ],
+   "title": "Moon extraction duration and chunk volume",
+   "why_missing": "feat:mining.moon-extraction only says 'schedules chunk arrival'. The tagged test passes no duration and assumes a fixed 6-day arrival (crates/eve-server/tests/mining_complete.rs:2542-2581). No row ties chunk volume to duration and composition.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261019-222106"
+  },
+  {
+   "acceptance": "If the owner does not fracture an arrived chunk, it detonates automatically about 3 hours after arrival and spawns the same moon ore field. Refinery rigs can change that delay. FractureChunkWithStructure before arrival is refused.",
+   "domain": "mining",
+   "id": "feat:mining.moon-chunk-auto-fracture",
+   "sources": [
+    "wiki:Moon_mining"
+   ],
+   "title": "Automatic moon chunk detonation",
+   "why_missing": "feat:mining.moon-fracture mentions 'or auto-fracture' only as an alternative. No row specifies the 3-hour auto-detonation or its rig modifier, and no test exercises it.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261019-222106"
+  },
+  {
+   "acceptance": "Launcher:\n- Survey Probe Launcher, one per ship, needs no hardpoint;\n- does not auto-repeat, but auto-reloads.\n\nLaunching:\n- the probe must be launched aligned at a moon within 100,000 km;\n- a probe that misses returns no result;\n- probes are consumed and cannot be recalled.\n\nResults:\n- arrive after the probe's flight time (T2 launcher -10%);\n- the pilot must stay undocked in the system;\n- each moon product is reported with its fraction, type ID and moon ID.",
+   "domain": "scanning",
+   "id": "feat:scanning.moon-survey-probe-launch-rules",
+   "sources": [
+    "wiki:Moon_mining"
+   ],
+   "title": "Survey probe launch, alignment and flight time",
+   "why_missing": "feat:scanning.moon-survey-probe is FLAGGED_FAKE. The implementation targets a moon ID through dogmaIM.Activate and returns the composition instantly (crates/eve-server/tests/mining_complete.rs:2516-2539). No row specifies alignment, range, misses or flight time.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261019-222106"
+  },
+  {
+   "acceptance": "High-sec and wormhole moons contain only R4/Ubiquitous ores; low-sec and null-sec moons may contain R4-R64. A fractured field mixes the basic and improved (+15%) quality of each ore, unless the fracture is a jackpot.",
+   "domain": "mining",
+   "id": "feat:mining.moon-ore-class-by-security",
+   "sources": [
+    "wiki:Moon_mining"
+   ],
+   "title": "Moon ore class distribution by security and quality mix",
+   "why_missing": "feat:mining.moon-resources is a query row and feat:mining.moon-jackpot covers only the excellent variant. Neither the security-band class restriction nor the improved-quality mix is in any row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261019-222106"
+  },
+  {
+   "acceptance": "In J-space systems, Local lists a pilot only after they speak. Once listed, they stay until every pilot who saw them has left the system or logged off. Simply entering or leaving does not add or remove members. K-space Local is unchanged.",
+   "domain": "social",
+   "id": "feat:social.wormhole-local-chat-delayed",
+   "sources": [
+    "wiki:Wormhole_space"
+   ],
+   "title": "Wormhole space delayed Local",
+   "why_missing": "feat:social.chat-local (FLAGGED_FAKE) covers k-space Local only. No social, chat or wormhole row specifies J-space delayed Local.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261019-222106"
+  },
+  {
+   "acceptance": "Each harvesting module activates only on its own target type, determined from SDE effect and target-group data:\n- mining lasers and strip miners: asteroid or moon ore;\n- ice harvesters: ice;\n- gas cloud harvesters: gas clouds.\n\nA target-type mismatch, or a target beyond the module's max range, is refused with the live UserError and no cycle starts.",
+   "domain": "mining",
+   "id": "feat:mining.mining-module-target-validity",
+   "sources": [
+    "wiki:Mining",
+    "wiki:Ice_harvesting",
+    "wiki:Gas_cloud_harvesting"
+   ],
+   "title": "Mining module target-type and range validation",
+   "why_missing": "Only the Mercoxit restriction exists (auditor row feat:mining.mercoxit-deep-core-restriction). The implementation identifies ice harvesters by type ID or by the name containing 'Ice' (crates/eve-server/src/services/inventory_fitting.rs:3180). No row requires target-type validation.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261019-222106"
+  },
+  {
+   "acceptance": "W-space ore anomalies (Frontier, Perimeter and Core Deposits, per the class site lists) spawn according to wormhole class, can contain ores from every security band, and are lightly guarded by Sleepers.",
+   "domain": "mining",
+   "id": "feat:mining.wormhole-ore-sites",
+   "sources": [
+    "wiki:Wormhole_space"
+   ],
+   "title": "Wormhole ore anomalies",
+   "why_missing": "feat:mining.ore-anomalies is generic. This tree's claims state that wormhole space gets no modelled ore site, and no row requires J-space ore sites.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261019-222106"
   }
  ],
  "rejected_triage": [],
@@ -4642,6 +4798,21 @@
    "evidence": "crates/eve-server/tests/social_fleets_corps.rs:347-360 calls corpmgr.CreateCorporation and asserts is_keyval plus sess.corporation_id only. Creation cost, the skill requirement and starting divisions are not asserted.",
    "id": "feat:corporation.create-corp",
    "flagged_by_audit": "20261019-110620"
+  },
+  {
+   "evidence": "Acceptance: 'Max velocity, inertia and mass determine acceleration and align time.' crates/eve-server/tests/space_navigation_cyno.rs:679-693 reads SDE attributes and computes tau = inertia*mass/1e6 and the align time inside the test itself, which is a tautology. No production acceleration or align computation is asserted.",
+   "id": "feat:dogma.velocity-agility",
+   "flagged_by_audit": "20261019-222106"
+  },
+  {
+   "evidence": "Acceptance: CmdActivateAbilitySlots: attack, missile salvo, ECM, web, point and bomb abilities with charges and cooldowns; server-validated range. crates/eve-server/tests/space_navigation_cyno.rs:1707-1825 covers only the slot-0 attack damage, its cooldown, the slot-1 MWD flag and the high/low-sec bans. Missile salvo, ECM, web, warp point and bomb abilities, and charge consumption, are never exercised.",
+   "id": "feat:drones.fighter-abilities",
+   "flagged_by_audit": "20261019-222106"
+  },
+  {
+   "evidence": "Acceptance: ExecuteMovementCommandOnFighters supports orbit, approach, move-to-point and the MWD/MJD abilities. crates/eve-server/tests/space_navigation_cyno.rs:1557-1595 asserts only a Bool(true) return for GOTO_POINT and ORBIT. No fighter ball position or mode is checked, and approach and MJD are untested.",
+   "id": "feat:drones.fighter-movement",
+   "flagged_by_audit": "20261019-222106"
   },
   {
    "evidence": "mining_complete.rs:779-796 calls droneMgr.Mine with a `droneID` kwarg on a drone that sits in the drone bay and is never launched. The droneMgr service is NOT_IN_CLIENT (metrics: mining_complete.rs:784). The asserted minedUnits and isDrone fields are an invented return shape.",
@@ -4784,9 +4955,9 @@
    "flagged_by_audit": "20261019-110620"
   },
   {
-   "evidence": "Acceptance: inSpaceCompressionMgr.CompressItemInSpace via an Orca/Rorqual compressor with industrial core. mining_complete.rs:944-978 compresses from the default undocked ship with no compressor module and no core, and the call succeeds.",
-   "id": "feat:mining.compression-space",
-   "flagged_by_audit": "20261019-145905"
+   "evidence": "Acceptance: characterMiningLedger.GetCharacterLogs returns per-day, per-type quantities over a 30-day window. The tagged test (crates/eve-server/tests/space_mining.rs:707-737) instead calls charMiningLedger.GetMiningLedger, a different service and method, and checks a single entry's typeID, solarSystemID and quantity. Neither per-day aggregation nor the 30-day window is tested.",
+   "id": "feat:mining.character-ledger",
+   "flagged_by_audit": "20261019-222106"
   },
   {
    "evidence": "Acceptance: structureCompressionMgr.CompressItemInStructure at Athanor/Tatara. mining_complete.rs:1031-1044 only calls DecompressGasInStructure; CompressItemInStructure is never exercised.",
@@ -4794,9 +4965,19 @@
    "flagged_by_audit": "20261019-145905"
   },
   {
+   "evidence": "Acceptance: 'corpMiningLedger.GetObserversWithMiningEvents/GetObserverLedger with roles.'\n\n- crates/eve-server/tests/mining_complete.rs:2706-2743 asserts only is_crowset() on both RPCs.\n- Contents are checked through the internal DB snapshot (observer_mining_ledger), not the RPC result.\n- No role check is exercised.\n- The entries come from Metenox automatic output, not from pilots mining at an observer.",
+   "id": "feat:mining.corp-ledger",
+   "flagged_by_audit": "20261019-222106"
+  },
+  {
    "evidence": "Acceptance: Rorqual excavator drones while the industrial core is active. mining_complete.rs:817-832 calls droneMgr.MineAsteroid (NOT_IN_CLIENT :822) from the default undocked ship, with no Rorqual and no core, and asserts only exc_mined > mined_units.",
    "id": "feat:mining.excavator-drones",
    "flagged_by_audit": "20261019-145905"
+  },
+  {
+   "evidence": "Acceptance: DecompressGasInStructure with efficiency (GetMyGasDecompressionEfficiency). crates/eve-server/tests/mining_complete.rs:2241-2257 only asserts that decompressedUnits falls in 160..=200. GetMyGasDecompressionEfficiency is never called and the efficiency is not asserted.",
+   "id": "feat:mining.gas-decompression",
+   "flagged_by_audit": "20261019-222106"
   },
   {
    "evidence": "Acceptance: gas cloud harvesters in gas sites, wormhole gas and nebulae. mining_complete.rs:660-710 spawns Fullerite as an AsteroidRecord in a Jita belt (belt_id 40000001) and asserts gas_units >= 10. Gas sites, wormhole gas and nebulae are not exercised.",
@@ -4811,11 +4992,6 @@
   {
    "evidence": "mining_complete.rs:1294-1325 queries autoMoonMining on structure 1_000_000_001_003, created at :1198-1203 as an Athanor (type 35835), not a Metenox Moon Drill. Output is asserted as the constant 2*500*0.40 = 400.",
    "id": "feat:mining.metenox",
-   "flagged_by_audit": "20261019-145905"
-  },
-  {
-   "evidence": "Acceptance: each cycle rolls a crit chance and bonus ore goes to the hold. crates/eve-server/tests/mining_complete.rs:294-314 forces the crit with a test-only `forceCrit` kwarg on dogmaIM.Activate; the client never sends it, so it is a test hook in production code. Only isCrit and critYieldMultiplier in an invented return dict are asserted; no roll probability, and no bonus ore in the hold.",
-   "id": "feat:mining.mining-crits",
    "flagged_by_audit": "20261019-145905"
   },
   {
@@ -4834,9 +5010,19 @@
    "flagged_by_audit": "20261019-145905"
   },
   {
+   "evidence": "Acceptance: 'yields m3 per cycle into ore hold; partial cycles yield proportional; full-hold stops'.\n\n- The only tagged test (crates/eve-server/tests/space_mining.rs:376-482) calls beyonce.CmdMineRepeatedly once. It asserts only minedUnits>0, remaining==5000-mined and flag Cargo/OreHold (:465-470).\n- No partial cycle and no full hold are exercised.\n- Ore is extracted synchronously on the call (crates/eve-server/src/services/space_destiny.rs:2188-2199) rather than at cycle end, and the cycle never repeats.",
+   "id": "feat:mining.mining-laser-cycle",
+   "flagged_by_audit": "20261019-222106"
+  },
+  {
    "evidence": "Same test_mn18, which uses the NOT_IN_CLIENT agentMgr.AcceptMission/CompleteMission (mining_advanced.rs:806, 837, 875 per metrics_rpc_names.txt).",
    "id": "feat:mining.mining-missions",
    "flagged_by_audit": "20261019-145905"
+  },
+  {
+   "evidence": "Acceptance: Type A/B/C crystal residue chance and multiplier.\n\n- The chance is never rolled. crates/eve-server/src/services/inventory_fitting.rs:3210-3216 computes residue = floor(units * attr 3153) on every cycle whenever attr 3154 (the probability) is > 0. The probability is used only as a gate, and it is clamped to 0..1 although it is a percentage.\n- Tagged test_mn01 (space_mining.rs:376-482) never asserts residue.\n- mining_complete.rs:384 asserts only residue_units>0 on a single cycle, which is consistent with the deterministic bug.",
+   "id": "feat:mining.mining-residue",
+   "flagged_by_audit": "20261019-222106"
   },
   {
    "evidence": "Acceptance: Mining, Astrogeology, ore specializations, barge skills, implants and MLUs applied via dogma. mining_complete.rs:489-505 sets all skills to V in setup (:48-76) and asserts a single `yield_vol > 20.0`. No per-skill delta, no specialization and no implant.",
@@ -4854,9 +5040,14 @@
    "flagged_by_audit": "20261019-145905"
   },
   {
-   "evidence": "mining_complete.rs:1276-1292 calls moonExtractions.ExpireMoonField with a test-only `force` kwarg. The method is NOT_IN_CLIENT (metrics :1284), so no time-based decay is tested.",
-   "id": "feat:mining.moon-field-lifetime",
-   "flagged_by_audit": "20261019-145905"
+   "evidence": "crates/eve-server/src/services/inventory_fitting.rs:3065-3080:\n- treats a crystal as matching if the last word of the lower-cased ore name appears in the crystal name;\n- falls back to a hardcoded 1.5x yield and 0.025 volatility;\n- applies an invented 0.25x penalty on a mismatch.\n\nwiki:Mining_crystals says crystals are per ore tier and give 'no benefit when mining another kind of ore'. mining_complete.rs:386-408 asserts the invented 0.25 penalty, using legacy per-ore crystals 18066/18618.",
+   "id": "feat:mining.modulated-crystals",
+   "flagged_by_audit": "20261019-222106"
+  },
+  {
+   "evidence": "Acceptance: moonExtractions.StartNewExtraction/CancelExtraction schedules chunk arrival. crates/eve-server/tests/mining_complete.rs:2542-2581 calls StartNewExtraction(structureID) with no duration and assumes a fixed 6-day arrival (advance 518,400 s). CancelExtraction is never called.",
+   "id": "feat:mining.moon-extraction",
+   "flagged_by_audit": "20261019-222106"
   },
   {
    "evidence": "mining_complete.rs:1256-1274 forces the jackpot with a test-only `jackpot: true` kwarg on FractureChunkWithStructure. No roll, and no jackpot ore variant in the field is checked.",
@@ -4884,9 +5075,39 @@
    "flagged_by_audit": "20261019-145905"
   },
   {
+   "evidence": "Acceptance: modules reprocess via Scrapmetal Processing into typeMaterials scaled by yield. crates/eve-server/tests/mining_complete.rs:2312-2344 asserts only yieldRate>0.50 for a Miner II. The output materials and quantities are never compared with typeMaterials.",
+   "id": "feat:mining.reprocessing-modules",
+   "flagged_by_audit": "20261019-222106"
+  },
+  {
+   "evidence": "Acceptance: 'Reprocessing tax depends on NPC standings or structure owner setting and is journaled.' crates/eve-server/tests/mining_complete.rs:2307-2310 asserts only stationTaxRate <= 0.05. There is no standings variation, no structure-owner setting and no journal entry (wiki:Reprocessing: 5% at 0 standing, falling to 0% at 6.67).",
+   "id": "feat:mining.reprocessing-tax",
+   "flagged_by_audit": "20261019-222106"
+  },
+  {
+   "evidence": "Acceptance: yield = facility base x Reprocessing x Reprocessing Efficiency x ore skill x implant; partial batches returned. crates/eve-server/tests/mining_complete.rs:2274-2310 reprocesses exactly 10 portions (1,000 Veldspar) and asserts only yieldRate>0.65 and Tritanium>2,500. The partial-batch return and the implant factor are never exercised, and the formula is not asserted.",
+   "id": "feat:mining.reprocessing-yield",
+   "flagged_by_audit": "20261019-222106"
+  },
+  {
    "evidence": "Same test_mn15 uses sovMgr.InstallProspectingUpgrade and sovMgr.GetSovOreSites, both NOT_IN_CLIENT (metrics pve_mining_sites.rs:672,693). The sov hub mechanics they depend on (feat:sovereignty.sov-hub-upgrades) are MISSING.",
    "id": "feat:mining.sov-ore-sites",
    "flagged_by_audit": "20261019-145905"
+  },
+  {
+   "evidence": "Acceptance: strip miners on barges/exhumers yield their m3 per longer cycle with barge bonuses. The only tagged test, test_mn01 (crates/eve-server/tests/space_mining.rs:376-482), fits no strip miner and mines from the default undocked ship. No barge, no cycle duration and no bonus is asserted.",
+   "id": "feat:mining.strip-miner",
+   "flagged_by_audit": "20261019-222106"
+  },
+  {
+   "evidence": "Acceptance: miningScanMgr.perform_scan returns quantities of asteroids within survey range. crates/eve-server/tests/mining_complete.rs:1784-1878 spawns both asteroids 300 m and 500 m from the ship and none outside range, so range filtering is never exercised; an implementation returning every asteroid would pass. The dogmaIM.Activate('surveyScan') step asserts an invented asteroidCount field (:1843-1850).",
+   "id": "feat:mining.survey-scan",
+   "flagged_by_audit": "20261019-222106"
+  },
+  {
+   "evidence": "Acceptance: 'Increase max velocity; mass additive.' crates/eve-server/tests/space_navigation_cyno.rs:695-702 only evaluates the library eval_propulsion_module for a 1MN Afterburner II. No AB is fitted or activated on a ship, whereas the MWD is activated through dogmaIM at :717-752.",
+   "id": "feat:modules.afterburner",
+   "flagged_by_audit": "20261019-222106"
   },
   {
    "evidence": "dogma_combat.rs:522-579 computes jam chance with a library function. Lock breaking calls ballpark.apply_ecm_jam directly, and the burst AoE uses the filter `|_| true` (:578). No ECM module is activated against a target through dogma.",
@@ -4919,9 +5140,14 @@
    "flagged_by_audit": "20261019-145905"
   },
   {
-   "evidence": "Acceptance: tracking disruptors and guidance disruptors reduce turret and missile stats per script. dogma_combat.rs:600-617 only calls the library function eval_scripted_tracking_disruptor for a Tracking Disruptor. No guidance disruptor is tested and no module is applied to a target.",
-   "id": "feat:modules.tracking-disruptor",
-   "flagged_by_audit": "20261019-145905"
+   "evidence": "Acceptance: 'Reduce target lock range or scan resolution per script.' crates/eve-server/tests/dogma_combat.rs:891-904 only calls the library function eval_scripted_sensor_dampener on a DogmaItemState. No dampener is fitted or activated, and no target's lock range or scan resolution is read. In the same test, ECM and TD/GD are activated through dogmaIM.Activate, but the dampener is not.",
+   "id": "feat:modules.sensor-dampener",
+   "flagged_by_audit": "20261019-222106"
+  },
+  {
+   "evidence": "Acceptance: 'Increase target signature radius.' crates/eve-server/tests/dogma_combat.rs:1314-1322 only calls eval_target_painter_with_overload on a DogmaItemState. No painter is activated on a target and no target signature radius is read.",
+   "id": "feat:modules.target-painter",
+   "flagged_by_audit": "20261019-222106"
   },
   {
    "evidence": "Acceptance: 'HIC infinite point/bubble mode with penalties.' tests/destiny_binary_stream.rs:437-574 only adds generic ballpark bubbles (add_warp_bubble). There is no HIC module, no infinite point and no penalties.",
@@ -4939,9 +5165,14 @@
    "flagged_by_audit": "20261019-110620"
   },
   {
-   "evidence": "Acceptance: 'CmdFollowBall moves toward an object until in range'. space_navigation_cyno.rs:226-238 calls beyonce.CmdApproach, which is NOT_IN_CLIENT (metrics :231), and asserts only that an Integer is returned. No movement is checked.",
-   "id": "feat:navigation.approach",
-   "flagged_by_audit": "20261019-145905"
+   "evidence": "Acceptance: 'Dock within docking range; docking refused with weapons timer/criminal in some cases.' crates/eve-server/tests/space_navigation_cyno.rs:1179-1218 tests only range (refused at 50 km, accepted at 1 km). The weapons-timer and criminal refusals are never exercised.",
+   "id": "feat:navigation.dock-station",
+   "flagged_by_audit": "20261019-222106"
+  },
+  {
+   "evidence": "Acceptance: 'structureDocking.Dock/Undock respects docking ACL and ship size restrictions.' crates/eve-server/tests/space_navigation_cyno.rs:1220-1268 docks at an Astrahus owned by NPC corp 1000001 with no ACL and no size check. It asserts only a KeyVal and session.structure_id, and undocking from the structure is not tested.",
+   "id": "feat:navigation.dock-structure",
+   "flagged_by_audit": "20261019-222106"
   },
   {
    "evidence": "crates/eve-server/tests/social_fleets_corps.rs:298-310 calls fleetMgr.CmdFleetWarp and asserts only is_keyval. Nothing checks that fleet members on grid warp together.",
@@ -5059,11 +5290,6 @@
    "flagged_by_audit": "20261018-073440"
   },
   {
-   "evidence": "Acceptance: 'ship.Board makes the ship active, updates session shipid and fires ProcessActiveShipChanged'. space_navigation_cyno.rs:347-360 boards the already-active ship 100_000_001 and asserts only that a KeyVal is returned. Neither the session ship change nor the notification is checked.",
-   "id": "feat:ships.board-ship",
-   "flagged_by_audit": "20261019-145905"
-  },
-  {
    "evidence": "Acceptance: 'refuses fitted/damaged items.' tests/character_progression.rs:1010-1119 tests only the active-ship and not-docked refusals; fitted and damaged items are never exercised.",
    "id": "feat:ships.repackage",
    "flagged_by_audit": "20261019-053529"
@@ -5127,6 +5353,11 @@
    "evidence": "crates/eve-server/tests/social_fleets_corps.rs:84-100 calls mailMgr.SendMail(int recipient, subject, body). The real signature is SendMail(toCharacterIDs list, listID, toCorpOrAllianceID, title, body, isReplyTo, isForwardedFrom), per crucible:src/eve-server/mail/MailMgrService.cpp:66.",
    "id": "feat:social.mail-send",
    "flagged_by_audit": "20261019-110620"
+  },
+  {
+   "evidence": "crates/eve-server/tests/mining_complete.rs:2346-2392 asserts that the Athanor (35835) base reprocessing yield is 0.52. wiki:Reprocessing gives Athanor 51%, Tatara 52% and citadels/Engineering Complexes 50%, so the test pins wrong data. No reprocessing is actually run in the structure; only GetQuotes is called.",
+   "id": "feat:structures.service-reprocessing",
+   "flagged_by_audit": "20261019-222106"
   },
   {
    "evidence": "crates/eve-server/tests/social_fleets_corps.rs:363-382 asserts only is_rowset on GetWalletDivisions and is_keyval on UpdateDivisionNames. The new division name is never read back and balances are never checked.",

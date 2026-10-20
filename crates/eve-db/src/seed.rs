@@ -488,6 +488,8 @@ impl WorldRepository {
             wh_polarizations: HashMap::new(),
             mining_ledger: Vec::new(),
             module_online_states: HashMap::new(),
+            module_active_states: HashSet::new(),
+            module_active_charges: HashMap::new(),
             weapon_banks: HashMap::new(),
             asteroids: HashMap::new(),
             moon_extractions: HashMap::new(),

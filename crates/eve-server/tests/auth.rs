@@ -460,6 +460,22 @@ async fn test_phase_1_d1_to_d5_sde_sqlite_persistence_auth_sso_and_config() {
         ctx.sde.blueprints.contains_key(&691),
         "Rifter Blueprint (691) must be present in SdeRegistry::blueprints"
     );
+    assert!(
+        ctx.sde.factions.len() >= 20 && ctx.sde.factions.contains_key(&500001),
+        "SDE factions table must be imported from V24 client resources"
+    );
+    assert!(
+        ctx.sde.npc_corporations.len() >= 200 && ctx.sde.npc_corporations.contains_key(&1000035),
+        "SDE npc_corporations table must be imported from V24 client resources"
+    );
+    assert!(
+        ctx.sde.agents.len() >= 1000,
+        "SDE agents table must be imported from V24 client resources"
+    );
+    assert!(
+        ctx.sde.types.values().filter(|t| t.category_id == 11).count() > 1000,
+        "SDE types table must contain imported category-11 NPC entity types"
+    );
     assert_eq!(
         ctx.sde.npc_spawn_groups.len(),
         392,
@@ -542,13 +558,13 @@ async fn test_phase_1_d1_to_d5_sde_sqlite_persistence_auth_sso_and_config() {
             &mut sess1,
             "agentMgr",
             None,
-            "RequestMission",
-            &[PyRep::Integer(3_012_018)],
+            "DoAction",
+            &[PyRep::Integer(2), PyRep::Integer(3_012_018)],
             &kw,
             None,
         )
         .await
-        .expect_err("RequestMission for remote Maurasi agent from Jita must fail");
+        .expect_err("DoAction(RequestMission) for remote Maurasi agent from Jita must fail");
     assert_eq!(remote_err.code, "AgentNotCoLocated");
 
     // Storyline agents (agentType 7 = 3_009_966, agentType 6 = 3_017_107) must be rejected even when co-located
@@ -558,13 +574,15 @@ async fn test_phase_1_d1_to_d5_sde_sqlite_persistence_auth_sso_and_config() {
             ch.station_id = Some(60_011_920);
         }
     });
+    sess1.solar_system_id = Some(30_004_969);
+    sess1.station_id = Some(60_011_920);
     let storyline_t7_err = ctx
         .dispatch_rpc(
             &mut sess1,
             "agentMgr",
             None,
-            "RequestMission",
-            &[PyRep::Integer(3_009_966)],
+            "DoAction",
+            &[PyRep::Integer(2), PyRep::Integer(3_009_966)],
             &kw,
             None,
         )
@@ -578,13 +596,15 @@ async fn test_phase_1_d1_to_d5_sde_sqlite_persistence_auth_sso_and_config() {
             ch.station_id = Some(60_002_647);
         }
     });
+    sess1.solar_system_id = Some(30_003_041);
+    sess1.station_id = Some(60_002_647);
     let storyline_t6_err = ctx
         .dispatch_rpc(
             &mut sess1,
             "agentMgr",
             None,
-            "RequestMission",
-            &[PyRep::Integer(3_017_107)],
+            "DoAction",
+            &[PyRep::Integer(2), PyRep::Integer(3_017_107)],
             &kw,
             None,
         )
@@ -600,13 +620,15 @@ async fn test_phase_1_d1_to_d5_sde_sqlite_persistence_auth_sso_and_config() {
             ch.standings.clear();
         }
     });
+    sess1.solar_system_id = Some(30_000_144);
+    sess1.station_id = Some(60_003_754);
     let l2_standing_err = ctx
         .dispatch_rpc(
             &mut sess1,
             "agentMgr",
             None,
-            "RequestMission",
-            &[PyRep::Integer(3_016_842)],
+            "DoAction",
+            &[PyRep::Integer(2), PyRep::Integer(3_016_842)],
             &kw,
             None,
         )
@@ -616,22 +638,22 @@ async fn test_phase_1_d1_to_d5_sde_sqlite_persistence_auth_sso_and_config() {
         );
     assert_eq!(l2_standing_err.code, "InsufficientAgentStanding");
 
-    // Default (no-arg) RequestMission in Maurasi (60_003_754) selects co-located L1 Security agent 3_012_018
+    // Default (no-arg) DoAction in Maurasi (60_003_754) selects co-located L1 Security agent 3_012_018
     // and draws a BasicKillMission from that agent's division pool
     let maurasi_offer = ctx
         .dispatch_rpc(
             &mut sess1,
             "agentMgr",
             None,
-            "RequestMission",
+            "DoAction",
             &[],
             &kw,
             None,
         )
         .await
-        .expect("Default RequestMission in Maurasi must select co-located L1 agent");
+        .expect("Default DoAction in Maurasi must select co-located L1 agent");
     let PyRep::KeyVal(maurasi_kv) = maurasi_offer else {
-        panic!("Expected KeyVal from RequestMission");
+        panic!("Expected KeyVal from DoAction");
     };
     assert_eq!(maurasi_kv.get("agentID"), Some(&PyRep::Integer(3_012_018)));
     let offered_mid = maurasi_kv.get("missionID").unwrap().as_i64().unwrap() as u32;
@@ -657,20 +679,22 @@ async fn test_phase_1_d1_to_d5_sde_sqlite_persistence_auth_sso_and_config() {
             ch.station_id = Some(60_012_607);
         }
     });
+    sess1.solar_system_id = Some(30_005_001);
+    sess1.station_id = Some(60_012_607);
     let epic_arc_offer = ctx
         .dispatch_rpc(
             &mut sess1,
             "agentMgr",
             None,
-            "RequestMission",
-            &[PyRep::Integer(3_019_356)],
+            "DoAction",
+            &[PyRep::Integer(2), PyRep::Integer(3_019_356)],
             &kw,
             None,
         )
         .await
         .expect("Epic Arc agent 3_019_356 (type 10) must offer an EpicArc mission");
     let PyRep::KeyVal(epic_kv) = epic_arc_offer else {
-        panic!("Expected KeyVal from Epic Arc RequestMission");
+        panic!("Expected KeyVal from Epic Arc DoAction");
     };
     let epic_mid = epic_kv.get("missionID").unwrap().as_i64().unwrap() as u32;
     let epic_tmpl = ctx
@@ -693,13 +717,15 @@ async fn test_phase_1_d1_to_d5_sde_sqlite_persistence_auth_sso_and_config() {
             ch.station_id = Some(60_007_702);
         }
     });
+    sess1.solar_system_id = Some(30_001_672);
+    sess1.station_id = Some(60_007_702);
     let aura_err = ctx
         .dispatch_rpc(
             &mut sess1,
             "agentMgr",
             None,
-            "RequestMission",
-            &[PyRep::Integer(3_019_486)],
+            "DoAction",
+            &[PyRep::Integer(2), PyRep::Integer(3_019_486)],
             &kw,
             None,
         )
@@ -714,6 +740,8 @@ async fn test_phase_1_d1_to_d5_sde_sqlite_persistence_auth_sso_and_config() {
             ch.station_id = Some(60_003_760);
         }
     });
+    sess1.solar_system_id = Some(30_000_142);
+    sess1.station_id = Some(60_003_760);
     let no_standing_mid = *ctx
         .sde
         .missions
@@ -741,15 +769,15 @@ async fn test_phase_1_d1_to_d5_sde_sqlite_persistence_auth_sso_and_config() {
             &mut sess1,
             "agentMgr",
             None,
-            "CompleteMission",
-            &[PyRep::Integer(no_standing_mid as i64)],
+            "DoAction",
+            &[PyRep::Integer(6), PyRep::Integer(no_standing_mid as i64)],
             &kw,
             None,
         )
         .await
-        .expect("CompleteMission for non-standing mission");
+        .expect("DoAction(Complete) for non-standing mission");
     let PyRep::KeyVal(comp_no_st_kv) = comp_no_st else {
-        panic!("Expected KeyVal from CompleteMission");
+        panic!("Expected KeyVal from DoAction(Complete)");
     };
     assert_eq!(
         comp_no_st_kv.get("missionTally"),
@@ -817,6 +845,23 @@ async fn test_phase_1_d1_to_d5_sde_sqlite_persistence_auth_sso_and_config() {
         PyRep::Bool(false),
         "V24 multiLoginBlocker.Login(computerhash) must return False when another Alpha account is active on the same computerhash"
     );
+    let alpha_diff_hw = ctx
+        .dispatch_rpc(
+            &mut sess_other,
+            "multiLoginBlocker",
+            None,
+            "Login",
+            &[PyRep::String("hw-hash-alpha-02".into())],
+            &kw,
+            None,
+        )
+        .await
+        .expect("multiLoginBlocker.Login on second Alpha account with distinct computerhash");
+    assert_eq!(
+        alpha_diff_hw,
+        PyRep::Bool(true),
+        "V24 multiLoginBlocker.Login(computerhash) must return True when another Alpha account logs in from a distinct computerhash"
+    );
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch1) = snap.characters.get_mut(&90_000_001) {
             ch1.clone_grade = 1;
@@ -852,7 +897,8 @@ async fn test_phase_1_d1_to_d5_sde_sqlite_persistence_auth_sso_and_config() {
     .await
     .unwrap();
 
-    // Second concurrent session (`sess2`) logging into "demo":
+    // Second concurrent session (`sess2`) logging into "demo" via canonical 2-arg `authentication.Login(username, password)`:
+    // Immediately displaces/kicks the prior active session (`sess1`) on the same account with `OnSessionTerminate`
     let mut sess2 = SessionState::new(10_102);
     ctx.dispatch_rpc(
         &mut sess2,
@@ -867,10 +913,24 @@ async fn test_phase_1_d1_to_d5_sde_sqlite_persistence_auth_sso_and_config() {
         None,
     )
     .await
-    .expect("Login sess2");
+    .expect("Login sess2 immediately displaces sess1");
 
-    // V24 `multiLoginBlocker.Login(computerhash)` refuses a second concurrent session on the same account with `PyRep::Bool(false)`
-    let v24_refused = ctx
+    let (displaced_code, displaced_reason) = sess1_close_rx
+        .try_recv()
+        .expect("Displaced live session must immediately receive disconnect notification on second login");
+    assert_eq!(displaced_code, "ACL_DISPLACED");
+    assert!(
+        displaced_reason.contains("Displaced"),
+        "Displacement reason must reference concurrent login displacement, got {displaced_reason}"
+    );
+    assert_eq!(
+        ctx.db.get_online_session(1).map(|s| s.session_id),
+        Some(sess2.session_id),
+        "Prior session must be removed from active online_sessions and replaced by sess2"
+    );
+
+    // Canonical 1-arg `multiLoginBlocker.Login(computerhash)` succeeds for `sess2`
+    let mlb_sess2 = ctx
         .dispatch_rpc(
             &mut sess2,
             "multiLoginBlocker",
@@ -881,70 +941,8 @@ async fn test_phase_1_d1_to_d5_sde_sqlite_persistence_auth_sso_and_config() {
             None,
         )
         .await
-        .expect("V24 multiLoginBlocker.Login(computerhash) call");
-    assert_eq!(
-        v24_refused,
-        PyRep::Bool(false),
-        "V24 characterSelection._CanLogin expects multiLoginBlocker.Login(computerhash) to return False when blocked"
-    );
-
-    let premature_rpc = ctx
-        .dispatch_rpc(
-            &mut sess2,
-            "charUnboundMgr",
-            None,
-            "SelectCharacterID",
-            &[PyRep::Integer(90_000_001)],
-            &kw,
-            None,
-        )
-        .await;
-    assert_eq!(
-        premature_rpc.unwrap_err().code,
-        "MultiLoginBlocked",
-        "R34-P1-4: Second session without online lock must be rejected with MultiLoginBlocked on game RPCs"
-    );
-    assert_eq!(sess2.user_id, Some(1));
-
-    let dup_blocked = ctx
-        .dispatch_rpc(
-            &mut sess2,
-            "multiLoginBlocker",
-            None,
-            "Login",
-            &[PyRep::Bool(false)],
-            &kw,
-            None,
-        )
-        .await;
-    assert_eq!(
-        dup_blocked.unwrap_err().code,
-        "AlreadyLoggedIn",
-        "multiLoginBlocker.Login(false) must reject a second concurrent session on the same account"
-    );
-
-    // Displace `sess1` from `sess2` and verify `sess1`'s live closer channel immediately receives `ACL_DISPLACED`
-    let mlb_displace = ctx
-        .dispatch_rpc(
-            &mut sess2,
-            "multiLoginBlocker",
-            None,
-            "Login",
-            &[
-                PyRep::String("hw-hash-alpha-02".into()),
-                PyRep::Bool(true),
-            ],
-            &kw,
-            None,
-        )
-        .await
-        .expect("multiLoginBlocker.Login(computerhash, true) must displace the prior session");
-    assert_eq!(mlb_displace, PyRep::Bool(true));
-    let (displaced_code, displaced_reason) = sess1_close_rx
-        .try_recv()
-        .expect("Displaced live session must immediately receive GPSTransportClosed disconnect notification");
-    assert_eq!(displaced_code, "ACL_DISPLACED");
-    assert!(displaced_reason.contains("Displaced"));
+        .expect("V24 multiLoginBlocker.Login(computerhash) on sess2");
+    assert_eq!(mlb_sess2, PyRep::Bool(true));
 
     // R35-P1-3: Displaced sess1 must NOT be able to bypass revocation via a previously bound object
     let sess1_bound_bypass = ctx
@@ -1066,14 +1064,14 @@ async fn test_phase_1_d1_to_d5_sde_sqlite_persistence_auth_sso_and_config() {
     .await
     .expect("/kick demo");
 
-    // R36-P1-3: Kicked sess2 must NOT be able to bypass revocation via multiLoginBlocker.Login(true)
+    // R36-P1-3: Kicked sess2 must NOT be able to bypass revocation via multiLoginBlocker.Login(computerhash)
     let sess2_mlb_after_kick = ctx
         .dispatch_rpc(
             &mut sess2,
             "multiLoginBlocker",
             None,
             "Login",
-            &[PyRep::Bool(true)],
+            &[PyRep::String("hw-hash-alpha-02".into())],
             &kw,
             None,
         )
@@ -1081,7 +1079,7 @@ async fn test_phase_1_d1_to_d5_sde_sqlite_persistence_auth_sso_and_config() {
     assert_eq!(
         sess2_mlb_after_kick.unwrap_err().code,
         "SessionKicked",
-        "R36-P1-3: Kicked session calling multiLoginBlocker.Login(true) must be rejected with SessionKicked"
+        "R36-P1-3: Kicked session calling multiLoginBlocker.Login(computerhash) must be rejected with SessionKicked"
     );
     assert!(
         sess2.user_id.is_none(),
@@ -1844,7 +1842,17 @@ async fn send_raw_http_request(
     headers: &[(&str, &str)],
     body: &str,
 ) -> (u16, HashMap<String, String>, serde_json::Value, String) {
-    let mut stream = TcpStream::connect(addr).await.expect("connect HTTP SSO");
+    let mut stream = None;
+    for _ in 0..5 {
+        if let Ok(Ok(s)) =
+            tokio::time::timeout(std::time::Duration::from_secs(2), TcpStream::connect(addr)).await
+        {
+            stream = Some(s);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    let mut stream = stream.expect("connect HTTP SSO");
     let mut req = format!(
         "{method} {target} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Length: {}\r\n",
         addr.port(),
@@ -1880,7 +1888,7 @@ async fn send_raw_http_request(
     (status_code, resp_headers, json_val, body_str.to_string())
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_phase_2_esi1_sso_oauth2_pkce_http_server_and_macho_sso_login() {
     // parity: plan:ESI-1, feat:account.sso-login, feat:esi.core.sso-tokens
     let ctx = Arc::new(ServerContext::new());

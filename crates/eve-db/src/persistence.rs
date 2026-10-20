@@ -67,6 +67,8 @@ impl WorldStateWalDelta {
             && old.licensed_skins == new.licensed_skins
             && old.applied_ship_skins == new.applied_ship_skins
             && old.module_online_states == new.module_online_states
+            && old.module_active_states == new.module_active_states
+            && old.module_active_charges == new.module_active_charges
             && old.weapon_banks == new.weapon_banks
             && old.asteroids == new.asteroids
             && old.owner_notes == new.owner_notes
@@ -373,6 +375,8 @@ impl WorldRepository {
             wh_polarizations: HashMap::new(),
             mining_ledger: Vec::new(),
             module_online_states: HashMap::new(),
+            module_active_states: HashSet::new(),
+            module_active_charges: HashMap::new(),
             weapon_banks: HashMap::new(),
             asteroids: HashMap::new(),
             moon_extractions: HashMap::new(),
@@ -709,7 +713,7 @@ impl WorldRepository {
 
     pub fn spawn_asteroid(&self, record: AsteroidRecord) {
         self.with_mut_snapshot(|snap| {
-            snap.asteroids.insert(record.asteroid_id, record);
+            snap.asteroids.entry(record.asteroid_id).or_insert(record);
         });
     }
 }

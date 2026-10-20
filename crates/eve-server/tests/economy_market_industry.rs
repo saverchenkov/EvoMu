@@ -2022,7 +2022,8 @@ async fn test_contracts_auction_and_courier() {
 
     let s2_bal_before_courier = ctx.db.get_character(90_000_002).unwrap().balance;
 
-    // Pilot 2 accepts the courier contract -> collateral debited and delivery deadline set to now + 3 * 86,400s
+    // Pilot 2 accepts the courier contract -> collateral debited, items wrapped in Plastic Wrap (3468), and delivery deadline set to now + 3 * 86,400s
+    let s2_ship_id = s2.ship_id.unwrap();
     let accept_ts = ctx.now_unix() as i64;
     let accept_cour = ctx
         .dispatch_rpc(
@@ -2048,6 +2049,20 @@ async fn test_contracts_auction_and_courier() {
         accept_ts + 3 * 86_400,
         "AcceptContract for a courier must set delivery deadline to now + duration_days * 86400 (3 days = 259,200s)"
     );
+    let wrap_id = acc_cour_kv
+        .get("courierPackageID")
+        .and_then(|v| v.as_i64())
+        .expect("AcceptContract for courier must return courierPackageID");
+    let wrap_item = ctx.db.get_item(wrap_id).expect("Plastic Wrap item must exist");
+    assert_eq!(wrap_item.type_id, 3468, "Courier package must be SDE Plastic Wrap (type_id 3468)");
+    assert_eq!(wrap_item.owner_id, 90_000_002);
+    assert_eq!(wrap_item.location_id, s2_ship_id);
+    assert_eq!(wrap_item.flag, InventoryFlag::Cargo);
+    assert_eq!(
+        ctx.db.get_item(cour_item_id).unwrap().location_id,
+        wrap_id,
+        "Contracted courier item must be placed inside the Plastic Wrap container"
+    );
 
     let s2_bal_after_accept_cour = ctx.db.get_character(90_000_002).unwrap().balance;
     assert_eq!(
@@ -2071,8 +2086,7 @@ async fn test_contracts_auction_and_courier() {
         .unwrap_err();
     assert_eq!(wrong_st_err.code, "CourierNotAtDestinationStation");
 
-    // Move Pilot 2 and active ship to destination station 60003766 and complete contract
-    let s2_ship_id = s2.ship_id.unwrap();
+    // If Pilot 2 and active ship dock at destination station 60003766 without the Plastic Wrap package at the destination, CompleteContract must fail with CourierPackageMissing
     s2.station_id = Some(dest_station_id);
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&90_000_002) {
@@ -2080,6 +2094,29 @@ async fn test_contracts_auction_and_courier() {
         }
         if let Some(sh) = snap.items.get_mut(&s2_ship_id) {
             sh.location_id = dest_station_id;
+        }
+        if let Some(wrap) = snap.items.get_mut(&wrap_id) {
+            wrap.location_id = JITA_STATION_ID;
+        }
+    });
+    let missing_pkg_err = ctx
+        .dispatch_rpc(
+            &mut s2,
+            "contractProxy",
+            None,
+            "CompleteContract",
+            &[PyRep::Integer(cour_cid)],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(missing_pkg_err.code, "CourierPackageMissing");
+
+    // Put the Plastic Wrap back into Pilot 2's active ship at destination station 60003766 and complete contract
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(wrap) = snap.items.get_mut(&wrap_id) {
+            wrap.location_id = s2_ship_id;
         }
     });
 
@@ -2100,6 +2137,10 @@ async fn test_contracts_auction_and_courier() {
         s2_bal_after_complete_cour.0 - s2_bal_before_courier.0,
         5_000_000,
         "Collateral refunded and reward (50,000 ISK) paid to courier runner"
+    );
+    assert!(
+        ctx.db.get_item(wrap_id).is_none(),
+        "Plastic Wrap container must be unwrapped and removed upon courier completion"
     );
     let delivered_cour_item = ctx.db.with_snapshot(|snap| {
         snap.items
@@ -2124,6 +2165,73 @@ async fn test_contracts_auction_and_courier() {
     });
 
     // 3. Courier Contract Failure & Deadline Expiry (feat:contracts.courier-failure)
+    let empty_cour_err = ctx
+        .dispatch_rpc(
+            &mut s1,
+            "contractProxy",
+            None,
+            "CreateContract",
+            &[
+                PyRep::Integer(3),
+                PyRep::Integer(0),
+                PyRep::Integer(0),
+                PyRep::Integer(20160),
+                PyRep::Integer(1),
+                PyRep::Integer(JITA_STATION_ID),
+                PyRep::Integer(dest_station_id),
+                PyRep::Real(0.0),
+                PyRep::Real(50_000.0),
+                PyRep::Real(300_000.0),
+                PyRep::String("Empty Courier".into()),
+                PyRep::String("Should fail".into()),
+                PyRep::List(vec![]),
+                PyRep::Integer(4),
+                PyRep::List(vec![]),
+                PyRep::Bool(false),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(empty_cour_err.code, "CourierContractRequiresItems");
+
+    let (fail_item_id, exp_item_id) = ctx.db.with_mut_snapshot(|snap| {
+        snap.next_entity_id += 1;
+        let i1 = snap.next_entity_id;
+        snap.items.insert(
+            i1,
+            InventoryItemRecord {
+                item_id: i1,
+                type_id: 34,
+                owner_id: 90_000_001,
+                location_id: JITA_STATION_ID,
+                flag: InventoryFlag::Hangar,
+                quantity: 100,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.next_entity_id += 1;
+        let i2 = snap.next_entity_id;
+        snap.items.insert(
+            i2,
+            InventoryItemRecord {
+                item_id: i2,
+                type_id: 34,
+                owner_id: 90_000_001,
+                location_id: JITA_STATION_ID,
+                flag: InventoryFlag::Hangar,
+                quantity: 100,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        (i1, i2)
+    });
+
     let c_fail_courier = ctx
         .dispatch_rpc(
             &mut s1,
@@ -2143,7 +2251,7 @@ async fn test_contracts_auction_and_courier() {
                 PyRep::Real(300_000.0),          // collateral
                 PyRep::String("Courier To Fail".into()),
                 PyRep::String("Failure test".into()),
-                PyRep::List(vec![]),
+                PyRep::List(vec![PyRep::Integer(fail_item_id)]),
                 PyRep::Integer(4),
                 PyRep::List(vec![]),
                 PyRep::Bool(false),
@@ -2221,7 +2329,7 @@ async fn test_contracts_auction_and_courier() {
                 PyRep::Real(100_000.0),
                 PyRep::String("Overdue Courier".into()),
                 PyRep::String("Deadline expiry test".into()),
-                PyRep::List(vec![]),
+                PyRep::List(vec![PyRep::Integer(exp_item_id)]),
                 PyRep::Integer(4),
                 PyRep::List(vec![]),
                 PyRep::Bool(false),
@@ -2792,7 +2900,7 @@ async fn test_pi_colony_command_center_pins_and_links() {
                 PyRep::List(vec![PyRep::Tuple(vec![
                     PyRep::Integer(1), // COMMAND_CREATEPIN
                     PyRep::Tuple(vec![PyRep::Integer(0), PyRep::Integer(1)]),
-                    PyRep::Integer(2254), // Temperate Command Center
+                    PyRep::Integer(2534), // Gas Command Center
                     PyRep::Real(0.35),
                     PyRep::Real(-1.10),
                 ])]),
@@ -2826,7 +2934,7 @@ async fn test_pi_colony_command_center_pins_and_links() {
                 PyRep::List(vec![PyRep::Tuple(vec![
                     PyRep::Integer(1), // COMMAND_CREATEPIN
                     PyRep::Tuple(vec![PyRep::Integer(0), PyRep::Integer(1)]),
-                    PyRep::Integer(2254), // Temperate Command Center
+                    PyRep::Integer(2534), // Gas Command Center
                     PyRep::Real(0.35),
                     PyRep::Real(-1.10),
                 ])]),
@@ -2838,7 +2946,34 @@ async fn test_pi_colony_command_center_pins_and_links() {
         .unwrap_err();
     assert_eq!(missing_cc_err.code, "CommandCenterItemRequired");
 
-    // Seed 2x Temperate Command Center (2254) in pilot's active ship cargo hold while undocked in space
+    // R69-P1-2: Attempting to place a Temperate Command Center (2254, planetRestriction = 11) on Jita IV (40009082, Planet (Gas) = 13) must fail with IncompatibleCommandCenterPlanetType
+    let mismatch_cc_err = ctx
+        .dispatch_rpc(
+            &mut s1,
+            "planetMgr",
+            None,
+            "UserUpdateNetwork",
+            &[
+                PyRep::Integer(JITA_PLANET_ID),
+                PyRep::List(vec![PyRep::Tuple(vec![
+                    PyRep::Integer(1), // COMMAND_CREATEPIN
+                    PyRep::Tuple(vec![PyRep::Integer(0), PyRep::Integer(1)]),
+                    PyRep::Integer(2254), // Temperate Command Center on Gas planet
+                    PyRep::Real(0.35),
+                    PyRep::Real(-1.10),
+                ])]),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        mismatch_cc_err.code, "IncompatibleCommandCenterPlanetType",
+        "Deploying a Temperate Command Center (2254) on a Gas planet (40009082) must be rejected"
+    );
+
+    // Seed 2x Gas Command Center (2534) in pilot's active ship cargo hold while undocked in space
     let cc_item_id = ctx.db.with_mut_snapshot(|snap| {
         snap.next_entity_id += 1;
         let id = snap.next_entity_id;
@@ -2846,7 +2981,7 @@ async fn test_pi_colony_command_center_pins_and_links() {
             id,
             InventoryItemRecord {
                 item_id: id,
-                type_id: 2254,
+                type_id: 2534,
                 owner_id: 90_000_001,
                 location_id: s1_ship_id,
                 flag: InventoryFlag::Cargo,
@@ -2870,7 +3005,7 @@ async fn test_pi_colony_command_center_pins_and_links() {
                 PyRep::List(vec![PyRep::Tuple(vec![
                     PyRep::Integer(1), // COMMAND_CREATEPIN
                     PyRep::Tuple(vec![PyRep::Integer(0), PyRep::Integer(1)]), // (0, 1) command center pin ID
-                    PyRep::Integer(2254), // Temperate Command Center
+                    PyRep::Integer(2534), // Gas Command Center
                     PyRep::Real(0.35),    // latitude (radians)
                     PyRep::Real(-1.10),   // longitude (radians)
                 ])]),
@@ -2905,8 +3040,8 @@ async fn test_pi_colony_command_center_pins_and_links() {
 
     // 3. Colony limit enforcement (feat:pi.colony-limit)
     // Pilot has Interplanetary Consolidation (2495) level 0 -> limit is 1 colony
-    // Attempting to place a Command Center on a second planet must fail with MaxColoniesReached
-    let second_planet_id = 40_009_098; // Jita V
+    // Attempting to place a Command Center on a second planet (Jita V = 40009098, Gas) must fail with MaxColoniesReached
+    let second_planet_id = 40_009_098; // Jita V (Planet (Gas))
     ctx.db.with_mut_snapshot(|snap| {
         snap.skills
             .entry(90_000_001)
@@ -2925,7 +3060,7 @@ async fn test_pi_colony_command_center_pins_and_links() {
                 PyRep::List(vec![PyRep::Tuple(vec![
                     PyRep::Integer(1), // COMMAND_CREATEPIN
                     PyRep::Tuple(vec![PyRep::Integer(0), PyRep::Integer(1)]),
-                    PyRep::Integer(2254),
+                    PyRep::Integer(2534),
                     PyRep::Real(0.10),
                     PyRep::Real(0.20),
                 ])]),
@@ -3076,6 +3211,7 @@ async fn test_pi_colony_command_center_pins_and_links() {
     // Place an Extractor Control Unit (2848: 400 TF, 2600 MW) as client temp pin 2,
     // two Basic Industry Facilities (2469: 200 TF, 800 MW each) as client temp pins 3 and 4,
     // create spherical surface links (cc_pin_id -> 2) and (2 -> 3), and upgrade link (cc_pin_id -> 2) to level 2
+    let bal_before_pins_links = ctx.db.get_character(90_000_001).unwrap().balance;
     let net_res = ctx
         .dispatch_rpc(
             &mut s1,
@@ -3137,6 +3273,20 @@ async fn test_pi_colony_command_center_pins_and_links() {
     };
     assert_eq!(net_kv.get("pinsCount"), Some(&PyRep::Integer(4)));
     assert_eq!(net_kv.get("linksCount"), Some(&PyRep::Integer(2)));
+    let bal_after_pins_links = ctx.db.get_character(90_000_001).unwrap().balance;
+    let isk_spent_reported = net_kv
+        .get("totalCostISK")
+        .and_then(|v| v.as_f64())
+        .expect("totalCostISK in UserUpdateNetwork");
+    assert!(
+        isk_spent_reported > 100_000.0,
+        "Placing 1 ECU + 2 Basic Industry Facilities + 2 links must charge pin construction ISK ({isk_spent_reported})"
+    );
+    assert_eq!(
+        bal_before_pins_links.0 - bal_after_pins_links.0,
+        IskCents::from_f64_isk(isk_spent_reported).0,
+        "Wallet balance debit must equal exact pin + link construction cost"
+    );
     let Some(PyRep::List(net_pins)) = net_kv.get("pins") else {
         panic!("Expected pins list in UserUpdateNetwork response");
     };
@@ -3150,11 +3300,35 @@ async fn test_pi_colony_command_center_pins_and_links() {
         })
         .expect("Server-allocated Basic Industry Facility pinID");
     assert!(proc_pin_id > cc_pin_id);
+
+    // Verify exact spherical link distance and link CPU/PG cost formula (feat:pi.links)
+    let Some(PyRep::List(net_links)) = net_kv.get("links") else {
+        panic!("Expected links list in UserUpdateNetwork response");
+    };
+    assert_eq!(net_links.len(), 2);
+    let mut total_link_cpu = 0.0;
+    let mut total_link_pg = 0.0;
+    for link_rep in net_links {
+        let PyRep::KeyVal(lkv) = link_rep else {
+            panic!("Expected KeyVal for link");
+        };
+        let lvl = lkv.get("level").and_then(|v| v.as_i64()).unwrap() as u8;
+        let len_km = lkv.get("lengthKm").and_then(|v| v.as_f64()).unwrap();
+        let l_cpu = lkv.get("cpuUsage").and_then(|v| v.as_f64()).unwrap();
+        let l_pg = lkv.get("powergridUsage").and_then(|v| v.as_f64()).unwrap();
+        let l_bw = lkv.get("bandwidth").and_then(|v| v.as_f64()).unwrap();
+        let (expected_pg, expected_cpu) = eve_server::formulas::compute_pi_link_cost(len_km, lvl);
+        assert!((l_cpu - expected_cpu).abs() < 1e-6, "Link CPU must match compute_pi_link_cost({len_km}, {lvl})");
+        assert!((l_pg - expected_pg).abs() < 1e-6, "Link PG must match compute_pi_link_cost({len_km}, {lvl})");
+        assert!((l_bw - 1_250.0 * 2.0_f64.powi(lvl as i32)).abs() < 1e-6);
+        total_link_cpu += l_cpu;
+        total_link_pg += l_pg;
+    }
     let cpu_used = net_kv.get("cpuUsed").and_then(|v| v.as_f64()).unwrap();
     let power_used = net_kv.get("powerUsed").and_then(|v| v.as_f64()).unwrap();
-    // Base pin CPU = 400 + 200 + 200 = 800 TF; Base pin PG = 2600 + 800 + 800 = 4200 MW; plus positive spherical link overhead
-    assert!(cpu_used > 800.0 && cpu_used <= 17215.0, "Colony cpuUsed ({cpu_used}) must include pins + links");
-    assert!(power_used > 4200.0 && power_used <= 15000.0, "Colony powerUsed ({power_used}) must include pins + links");
+    // Base pin CPU = 400 + 200 + 200 = 800 TF; Base pin PG = 2600 + 800 + 800 = 4200 MW; plus exact spherical link overhead
+    assert!((cpu_used - (800.0 + total_link_cpu)).abs() < 1e-5, "Colony cpuUsed ({cpu_used}) must equal 800.0 + {total_link_cpu}");
+    assert!((power_used - (4200.0 + total_link_pg)).abs() < 1e-5, "Colony powerUsed ({power_used}) must equal 4200.0 + {total_link_pg}");
 
     // Verify exceeding Command Center Powergrid/CPU budget (15,000 MW at L3) is rejected with InsufficientColonyCpuOrPowergrid
     let budget_err = ctx
@@ -3245,6 +3419,11 @@ async fn test_pi_colony_command_center_pins_and_links() {
 
     // 6. Resource depletion on extraction, schematic cycle time & invalid schematic rejection,
     // storage capacity enforcement, and launchpad customs export tax (feat:pi.colony, feat:pi.pins-links)
+    // R69-P1-1: Command Center is at level 3, but Customs Code Expertise (33467) is untrained (level 0),
+    // so Flush must charge the full 15% tax (10% NPC + 5% POCO) = 5.0 * producedQuantity * 0.15
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.skills.entry(90_000_001).or_default().remove(&33467);
+    });
     let flush_res = ctx
         .dispatch_rpc(
             &mut s1,
@@ -3261,6 +3440,12 @@ async fn test_pi_colony_command_center_pins_and_links() {
         panic!("Expected KeyVal from Flush");
     };
     let extracted_type_id = fl_kv.get("producedTypeID").and_then(|v| v.as_i64()).unwrap();
+    let produced_qty = fl_kv.get("producedQuantity").and_then(|v| v.as_i64()).unwrap() as f64;
+    let flush_tax_isk = fl_kv.get("pocoExportTaxISK").and_then(|v| v.as_f64()).unwrap();
+    assert!(
+        (flush_tax_isk - (5.0 * produced_qty * 0.15)).abs() < 1e-4,
+        "R69-P1-1: pocoExportTaxISK ({flush_tax_isk}) must use Customs Code Expertise (33467, level 0 -> 15% rate), not Command Center level 3"
+    );
 
     // Verify resource quality depletion after extraction
     let res_after = ctx
@@ -3376,11 +3561,20 @@ async fn test_pi_colony_command_center_pins_and_links() {
         .unwrap_err();
     assert_eq!(cap_err.code, "PinStorageFull");
 
-    // Seed P1 Water (3645) and verify UserLaunchCommodities to CustomsOffice deducts CustomOfficeTax
+    // Seed P1 Water (3645), train Customs Code Expertise (33467) to level 4 (-40% NPC tax -> 6% NPC + 5% POCO = 11%),
+    // and verify UserLaunchCommodities to CustomsOffice deducts CustomOfficeTax at 11%
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(col) = snap.planetary_colonies.get_mut(&(90_000_001, JITA_PLANET_ID)) {
             col.extracted_commodities.insert(3645, 500);
         }
+        snap.skills.entry(90_000_001).or_default().insert(
+            33467,
+            TrainedSkillRecord {
+                type_id: 33467,
+                level: 4,
+                skill_points: 135_765.0,
+            },
+        );
     });
     let bal_before_launch = ctx.db.get_character(90_000_001).unwrap().balance;
     let launch_res = ctx
@@ -3404,9 +3598,13 @@ async fn test_pi_colony_command_center_pins_and_links() {
         panic!("Expected KeyVal from UserLaunchCommodities");
     };
     let launch_tax = ln_kv.get("exportTaxISK").and_then(|v| v.as_f64()).unwrap();
-    assert!(launch_tax > 0.0, "Launching commodities through CustomsOffice must charge positive export tax");
+    let water_base = ctx.sde.types.get(&3645).map(|t| t.base_price.max(400.0)).unwrap_or(400.0);
+    assert!(
+        (launch_tax - (water_base * 200.0 * 0.11)).abs() < 1e-4,
+        "R69-P1-1: Launching commodities with Customs Code Expertise L4 must charge 11% export tax, got {launch_tax}"
+    );
     let bal_after_launch = ctx.db.get_character(90_000_001).unwrap().balance;
-    assert!(bal_after_launch.0 < bal_before_launch.0);
+    assert_eq!(bal_before_launch.0 - bal_after_launch.0, IskCents::from_f64_isk(launch_tax).0);
     let has_poco_journal = ctx.db.with_snapshot(|snap| {
         snap.wallet_journal
             .iter()

@@ -21,6 +21,7 @@ pub mod lp_store;
 pub mod market_contracts;
 pub mod market_trading;
 pub mod mining_advanced;
+pub mod mining_sites;
 pub mod social_corp_fleet;
 pub mod sov_fw_insurgency;
 pub mod space_destiny;

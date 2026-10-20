@@ -193,8 +193,8 @@ async fn test_esi3_dogma_insurance_killmails_sovereignty_routes_and_wars() {
                 ess_linked_character_id: None,
                 ess_link_started_tick: None,
                 sov_alliance_id: Some(alliance_id),
-                military_index: 3,
-                industrial_index: 2,
+                military_index: 2,
+                industrial_index: 1,
                 strategic_index: 5,
                 fw_contested_pct: 0.0,
                 insurgency_corruption_stage: 0,
@@ -269,13 +269,6 @@ async fn test_esi3_dogma_insurance_killmails_sovereignty_routes_and_wars() {
                 last_damage_unix: 0,
             },
         );
-        snap.structure_vulnerability_windows.insert(
-            sov_tcu_id,
-            (
-                1_781_546_400, // 2026-06-15T18:00:00Z
-                1_781_560_800, // 2026-06-15T22:00:00Z
-            ),
-        );
         snap.structures.insert(
             unallied_tcu_id,
             UpwellStructureRecord {
@@ -304,8 +297,29 @@ async fn test_esi3_dogma_insurance_killmails_sovereignty_routes_and_wars() {
                 type_id: 32226,
                 owner_corp_id: corp_id,
                 solar_system_id: nullsec_sys_id,
-                name: "Legacy TCU".to_string(),
+                name: "Territorial Claim Unit".to_string(),
                 position: [0.0, 0.0, 0.0],
+                state: "ShieldVulnerable".to_string(),
+                quantum_core_installed: true,
+                fuel_blocks: 500,
+                shield_hp: 5000.0,
+                armor_hp: 5000.0,
+                hull_hp: 5000.0,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+            },
+        );
+        let ansiblex_gate_id = 1_030_000_005_888;
+        snap.structures.insert(
+            ansiblex_gate_id,
+            UpwellStructureRecord {
+                structure_id: ansiblex_gate_id,
+                type_id: 35841,
+                owner_corp_id: corp_id,
+                solar_system_id: nullsec_sys_id,
+                name: "Ansiblex Jump Gate".to_string(),
+                position: [1000.0, 1000.0, 1000.0],
                 state: "ShieldVulnerable".to_string(),
                 quantum_core_installed: true,
                 fuel_blocks: 500,
@@ -623,6 +637,61 @@ async fn test_esi3_dogma_insurance_killmails_sovereignty_routes_and_wars() {
         sov_map.as_array().expect("sov map").len(),
         ctx.sde.solar_systems.len()
     );
+    // Claim/update sovereignty via `sovMgr.AcquireSkyhooks` so vulnerability windows are populated by the sov mechanic
+    let sov_ship_id = ctx
+        .db
+        .with_snapshot(|snap| snap.characters.get(&90_000_001).map(|c| c.active_ship_id).unwrap_or(100_000_001));
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.solar_system_id = nullsec_sys_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+        }
+    });
+    let nullsec_handle = ctx.systems.get_or_spawn(nullsec_sys_id);
+    nullsec_handle
+        .spawn_ball(eve_destiny::Ball {
+            id: sov_ship_id,
+            type_id: 587,
+            position: glam::DVec3::ZERO,
+            velocity: glam::DVec3::ZERO,
+            max_velocity: 350.0,
+            inertia: 2.5,
+            mass: 1_067_000.0,
+            radius: 38.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        })
+        .await
+        .expect("spawn ship in nullsec_sys_id");
+    let mut sov_sess = eve_machonet::SessionState::new(77_501);
+    sov_sess.user_id = Some(1);
+    sov_sess.character_id = Some(90_000_001);
+    sov_sess.corporation_id = Some(corp_id);
+    sov_sess.alliance_id = Some(alliance_id);
+    sov_sess.ship_id = Some(sov_ship_id);
+    sov_sess.solar_system_id = Some(nullsec_sys_id);
+    let _ = ctx
+        .db
+        .acquire_online_lock(1, sov_sess.session_id, Some(90_000_001), true, now);
+    ctx.dispatch_rpc(
+        &mut sov_sess,
+        "sovMgr",
+        None,
+        "AcquireSkyhooks",
+        &[],
+        &HashMap::new(),
+        None,
+    )
+    .await
+    .expect("sovMgr.AcquireSkyhooks must populate sovereignty structure vulnerability windows");
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.solar_system_id = 30_000_142;
+            ch.station_id = Some(60_003_760);
+        }
+    });
+
     let sov_structs = validate_and_json(
         &router,
         &spec,
@@ -638,26 +707,36 @@ async fn test_esi3_dogma_insurance_killmails_sovereignty_routes_and_wars() {
         !sov_arr.iter().any(|s| s["structure_id"] == json!(unallied_tcu_id)),
         "Unallied structure must not be attributed to system sov_alliance_id"
     );
+    assert!(
+        !sov_arr.iter().any(|s| s["structure_type_id"] == json!(35841)),
+        "Ansiblex Jump Gate (type 35841) must be excluded from /sovereignty/structures"
+    );
     let sov_st = sov_arr
         .iter()
         .find(|s| s["structure_id"] == json!(sov_tcu_id))
-        .expect("null-sec Hub in sov structures");
+        .expect("null-sec Infrastructure/Sovereignty Hub (32458) in sov structures");
     assert_eq!(sov_st["alliance_id"], json!(alliance_id));
     assert_eq!(sov_st["solar_system_id"], json!(nullsec_sys_id as i64));
     assert_eq!(sov_st["structure_type_id"], json!(32458));
     assert_eq!(sov_st["vulnerability_occupancy_level"], json!(4.9));
-    assert_eq!(
-        sov_st["vulnerable_start_time"],
-        json!("2026-06-15T18:00:00Z")
-    );
-    assert_eq!(
-        sov_st["vulnerable_end_time"],
-        json!("2026-06-15T22:00:00Z")
-    );
+    let hub_v_start = sov_st["vulnerable_start_time"]
+        .as_str()
+        .expect("populated vulnerable_start_time");
+    let hub_v_end = sov_st["vulnerable_end_time"]
+        .as_str()
+        .expect("populated vulnerable_end_time");
     assert!(
-        !sov_arr.iter().any(|s| s["structure_type_id"] == json!(32226)),
-        "Legacy TCU (type 32226) must be excluded from /sovereignty/structures"
+        hub_v_start < hub_v_end,
+        "vulnerable_start_time must precede vulnerable_end_time"
     );
+    let tcu_st = sov_arr
+        .iter()
+        .find(|s| s["structure_type_id"] == json!(32226))
+        .expect("Territorial Claim Unit (type 32226) must be included in /sovereignty/structures");
+    assert_eq!(tcu_st["alliance_id"], json!(alliance_id));
+    assert_eq!(tcu_st["vulnerability_occupancy_level"], json!(4.9));
+    assert!(tcu_st["vulnerable_start_time"].as_str().is_some());
+    assert!(tcu_st["vulnerable_end_time"].as_str().is_some());
 
     // 9. Wars detail & war killmails
     let war_detail = validate_and_json(
@@ -1131,15 +1210,9 @@ async fn test_esi4_character_clones_skills_location_fittings_assets_wallet_loyal
             ch.war_faction_id = Some(500_001);
             ch.clone_grade = 1; // Alpha clone to verify active_skill_level clamping
             ch.last_clone_jump_unix = now.saturating_sub(3600);
-            ch.jump_cooldown_until_unix = now + 1800;
-            ch.jump_fatigue_minutes = 30.0;
-            ch.jump_fatigue_until_unix = now + 1800;
             ch.loyalty_points.insert(1_000_035, 12_500);
             ch.standings.insert(1_000_035, 5.25);
         }
-        // Distinct jump drive timestamp (never last_clone_jump_unix)
-        snap.character_last_jump_unix
-            .insert(90_000_001, now.saturating_sub(900));
         // Persisted login/logout stats
         snap.character_login_stats.insert(
             90_000_001,
@@ -1419,17 +1492,150 @@ async fn test_esi4_character_clones_skills_location_fittings_assets_wallet_loyal
         .iter()
         .any(|s| s["from_id"] == json!(1_000_035) && s["standing"] == json!(5.25)));
 
+    // Trigger jump fatigue via an actual capital ship jump (`structureCynoBeaconMgr.CmdJumpToStructureBeacon`)
+    let jump_beacon_id = 1_040_000_007_701_i64;
+    let jump_fuel_item_id = 990_007_701_i64;
+    let jump_dest_sys_id = 30_000_204_u32; // Ohkunen (0.38 low-sec, 4.80 LY from Jita)
+    let jump_ship_id = ctx.db.with_snapshot(|snap| {
+        snap.characters
+            .get(&90_000_001)
+            .map(|c| c.active_ship_id)
+            .unwrap_or(100_000_001)
+    });
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.solar_system_id = 30_000_142;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.jump_cooldown_until_unix = 0;
+            ch.jump_fatigue_until_unix = 0;
+            ch.jump_fatigue_minutes = 0.0;
+        }
+        snap.structures.insert(
+            jump_beacon_id,
+            UpwellStructureRecord {
+                structure_id: jump_beacon_id,
+                type_id: 35840, // Pharolux Cyno Beacon
+                owner_corp_id: corp_id,
+                solar_system_id: jump_dest_sys_id,
+                name: "Ohkunen Pharolux Cyno Beacon".to_string(),
+                position: [15_000.0, 0.0, 0.0],
+                state: "ShieldVulnerable".to_string(),
+                quantum_core_installed: true,
+                fuel_blocks: 50,
+                shield_hp: 50_000.0,
+                armor_hp: 50_000.0,
+                hull_hp: 50_000.0,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+            },
+        );
+        snap.items.insert(
+            jump_fuel_item_id,
+            InventoryItemRecord {
+                item_id: jump_fuel_item_id,
+                type_id: 16274, // Helium Isotopes
+                owner_id: 90_000_001,
+                location_id: jump_ship_id,
+                flag: InventoryFlag::SpecializedFuelBay,
+                quantity: 5_000,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+    });
+    let jita_handle = ctx.systems.get_or_spawn(30_000_142);
+    jita_handle
+        .spawn_ball(eve_destiny::Ball {
+            id: jump_ship_id,
+            type_id: 23757, // Archon carrier
+            position: glam::DVec3::ZERO,
+            velocity: glam::DVec3::ZERO,
+            max_velocity: 85.0,
+            inertia: 0.04,
+            mass: 1_230_000_000.0,
+            radius: 1_600.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        })
+        .await
+        .expect("spawn capital ship in Jita for beacon jump");
+    let mut jump_sess = eve_machonet::SessionState::new(42);
+    jump_sess.user_id = Some(1);
+    jump_sess.character_id = Some(90_000_001);
+    jump_sess.corporation_id = Some(corp_id);
+    jump_sess.alliance_id = Some(alliance_id);
+    jump_sess.ship_id = Some(jump_ship_id);
+    jump_sess.solar_system_id = Some(30_000_142);
+    ctx.dispatch_rpc(
+        &mut jump_sess,
+        "structureCynoBeaconMgr",
+        None,
+        "CmdJumpToStructureBeacon",
+        &[
+            eve_proto::PyRep::Integer(jump_dest_sys_id as i64),
+            eve_proto::PyRep::Integer(jump_beacon_id),
+        ],
+        &HashMap::new(),
+        None,
+    )
+    .await
+    .expect("CmdJumpToStructureBeacon must compute and record jump fatigue & cooldown");
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.solar_system_id = 30_000_142;
+            ch.station_id = Some(60_003_760);
+        }
+        snap.items.remove(&jump_fuel_item_id);
+    });
+
+    let (last_update_unix, jump_cooldown_until_unix, jump_fatigue_until_unix) =
+        ctx.db.with_snapshot(|snap| {
+            let last_jump = snap
+                .character_last_jump_unix
+                .get(&90_000_001)
+                .copied()
+                .unwrap_or(0);
+            let ch = snap.characters.get(&90_000_001).expect("char 90_000_001");
+            (
+                last_jump,
+                ch.jump_cooldown_until_unix,
+                ch.jump_fatigue_until_unix,
+            )
+        });
+    assert!(
+        last_update_unix < jump_cooldown_until_unix
+            && jump_cooldown_until_unix < jump_fatigue_until_unix,
+        "Capital jump must record last_update_unix ({last_update_unix}) < jump_cooldown_until_unix ({jump_cooldown_until_unix}) < jump_fatigue_until_unix ({jump_fatigue_until_unix})"
+    );
+
     let fatigue = validate_and_json(
         &router,
         &spec,
         &EsiHttpRequest::new("GET", "/v1/characters/90000001/fatigue/").with_bearer_token(&token),
         200,
     );
-    assert!(fatigue["jump_fatigue_expire_date"].as_str().is_some());
-    assert!(fatigue["last_jump_date"].as_str().is_some());
-    assert!(fatigue["last_update_date"].as_str().is_some());
+    let last_jump_date = fatigue["last_jump_date"].as_str().expect("last_jump_date");
+    let last_update_date = fatigue["last_update_date"]
+        .as_str()
+        .expect("last_update_date");
+    let jump_fatigue_expire_date = fatigue["jump_fatigue_expire_date"]
+        .as_str()
+        .expect("jump_fatigue_expire_date");
+    let cooldown_iso =
+        eve_server::esi::sample_routes::format_iso8601_utc(jump_cooldown_until_unix);
+    assert_eq!(
+        last_update_date, last_jump_date,
+        "last_update_date must be the jump timestamp, never jump_cooldown_until_unix"
+    );
+    assert!(
+        last_update_date < cooldown_iso.as_str()
+            && cooldown_iso.as_str() < jump_fatigue_expire_date,
+        "Must satisfy last_update_date ({last_update_date}) < jump_cooldown_until_unix ({cooldown_iso}) < jump_fatigue_expire_date ({jump_fatigue_expire_date})"
+    );
 
-    // When fatigue expires or is 0, jump_fatigue_expire_date must be omitted while last_update_date remains
+    // When fatigue expires or is 0, jump_fatigue_expire_date must be omitted while last_update_date remains the jump timestamp (never jump_cooldown_until_unix)
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&90_000_001) {
             ch.jump_fatigue_until_unix = 0;
@@ -1447,9 +1653,17 @@ async fn test_esi4_character_clones_skills_location_fittings_assets_wallet_loyal
         fatigue_zero.get("jump_fatigue_expire_date").is_none(),
         "Must NOT fall back to jump_cooldown_until_unix when fatigue is 0"
     );
-    assert!(
-        fatigue_zero["last_update_date"].as_str().is_some(),
-        "last_update_date must still be emitted from cooldown"
+    assert_eq!(
+        fatigue_zero["last_update_date"].as_str(),
+        Some(last_update_date),
+        "last_update_date must remain the jump timestamp, never jump_cooldown_until_unix"
+    );
+    assert_ne!(
+        fatigue_zero["last_update_date"],
+        json!(eve_server::esi::sample_routes::format_iso8601_utc(
+            now + 900
+        )),
+        "last_update_date must NEVER equal jump_cooldown_until_unix"
     );
 
     let bps = validate_and_json(

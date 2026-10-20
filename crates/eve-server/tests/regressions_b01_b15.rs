@@ -198,16 +198,11 @@ async fn test_blocking_findings_b01_to_b15_regressions() {
     .await
     .expect("SelectCharacterID");
 
-    // R-P1-06: air_npe.AdvanceNode does not mutate career_goal_progress and gates node 3 (DestroySeekers) on actual NPC kill
-    for _ in 0..2 {
-        ctx.dispatch_rpc(&mut sess, "air_npe", None, "AdvanceNode", &[], &kw, None)
-            .await
-            .expect("AdvanceNode to node 3");
-    }
+    // R-P1-06: non-V24 air_npe.AdvanceNode is removed and returns UnimplementedRPC
     let npe_gate_err = ctx
         .dispatch_rpc(&mut sess, "air_npe", None, "AdvanceNode", &[], &kw, None)
         .await;
-    assert_eq!(npe_gate_err.unwrap_err().code, "NodeObjectiveNotMet");
+    assert_eq!(npe_gate_err.unwrap_err().code, "UnimplementedRPC");
 
     // ApplySkinToShip rejects unlicensed SKIN before ActivateSkinLicense, and ActivateSkinLicense consumes item 100_000_027
     let unlicensed = ctx
@@ -420,7 +415,7 @@ async fn test_blocking_findings_b01_to_b15_regressions() {
             id,
             eve_db::InventoryItemRecord {
                 item_id: id,
-                type_id: 2254,
+                type_id: 2534,
                 owner_id: 90_000_001,
                 location_id: ship_id,
                 flag: eve_db::InventoryFlag::Cargo,
@@ -441,7 +436,7 @@ async fn test_blocking_findings_b01_to_b15_regressions() {
             PyRep::List(vec![PyRep::Tuple(vec![
                 PyRep::Integer(1),
                 PyRep::Integer(1),
-                PyRep::Integer(2254),
+                PyRep::Integer(2534),
                 PyRep::Real(0.1),
                 PyRep::Real(0.2),
             ])]),
@@ -1325,7 +1320,7 @@ async fn test_blocking_findings_b01_to_b15_regressions() {
             &mut sess2,
             "invbroker",
             None,
-            "MoveItem",
+            "Add",
             &[
                 PyRep::Integer(100_000_959),
                 PyRep::Integer(100_000_950),
@@ -1343,7 +1338,7 @@ async fn test_blocking_findings_b01_to_b15_regressions() {
             &mut sess2,
             "invbroker",
             None,
-            "MoveItem",
+            "Add",
             &[
                 PyRep::Integer(mod_id),
                 PyRep::Integer(100_000_950),

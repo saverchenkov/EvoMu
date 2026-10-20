@@ -157,6 +157,9 @@ pub struct CombatState {
     /// Remaining ticks of gate cloak invulnerability (SP-5).
     #[serde(default)]
     pub gate_cloak_remaining_ticks: u32,
+    /// Remaining ticks of 30s station undock invulnerability (`feat:navigation.undock`).
+    #[serde(default)]
+    pub undock_invulnerable_remaining_ticks: u32,
     #[serde(default)]
     pub is_interdiction_nullified: bool,
     /// Remaining seconds of active ECM jam suppression (`feat:modules.ecm`, `DG-5`).
@@ -198,6 +201,7 @@ impl Default for CombatState {
             entropic_spool_cycles: 0,
             active_breacher_dot: None,
             gate_cloak_remaining_ticks: 0,
+            undock_invulnerable_remaining_ticks: 0,
             is_interdiction_nullified: false,
             ecm_jammed_remaining_s: 0.0,
             is_mwd_mjd_disabled: false,
@@ -218,7 +222,10 @@ impl CombatState {
     /// 4-channel `[EM, Thermal, Kinetic, Explosive]` resonance profile.
     /// Returns `(total_applied_damage, destroyed)`.
     pub fn apply_damage(&mut self, dmg: DamageVector) -> (f64, bool) {
-        if self.is_tethered || self.gate_cloak_remaining_ticks > 0 {
+        if self.is_tethered
+            || self.gate_cloak_remaining_ticks > 0
+            || self.undock_invulnerable_remaining_ticks > 0
+        {
             return (0.0, false);
         }
         let mut rem_vec = DamageVector {
@@ -523,7 +530,7 @@ impl WarpBubble {
 
     /// Checks if a point is inside the bubble.
     pub fn contains(&self, point: DVec3) -> bool {
-        self.position.distance(point) <= self.radius
+        self.position.distance(point) <= self.radius + 1e-3
     }
 
     /// Checks if a warp path from `origin` to `destination` intersects this bubble.
@@ -1264,6 +1271,10 @@ impl Ballpark {
             }
         }
 
+        if let Some(cs) = self.combat_states.get_mut(&ball_id) {
+            cs.undock_invulnerable_remaining_ticks = 0;
+        }
+
         let mut emitted_event: Option<DestinyEvent> = None;
         let ball = self.balls.get_mut(&ball_id).unwrap();
         match &mode {
@@ -1410,6 +1421,7 @@ impl Ballpark {
                     continue;
                 }
 
+                let pos_before = ball.position;
                 let exited = step_warp_ball(
                     ball,
                     dt,
@@ -1420,6 +1432,26 @@ impl Ballpark {
                     &mut phase,
                     &mut elapsed_warp_time,
                 );
+                if !is_nullified {
+                    if let Some((_bid, intercept_pos)) =
+                        self.warp_bubble_mgr.check_interception(pos_before, ball.position)
+                    {
+                        ball.position = intercept_pos;
+                        ball.velocity = DVec3::ZERO;
+                        ball.speed_fraction = 0.0;
+                        ball.mode = MovementMode::Stop;
+                        warp_exit_stops.push(ball.id);
+                        continue;
+                    }
+                    if exited {
+                        if let Some((_bid, intercept_pos)) =
+                            self.warp_bubble_mgr.check_interception(origin, destination)
+                        {
+                            ball.position = intercept_pos;
+                            ball.velocity = DVec3::ZERO;
+                        }
+                    }
+                }
                 if exited {
                     warp_exit_stops.push(ball.id);
                 }
@@ -1448,7 +1480,12 @@ impl Ballpark {
                     continue;
                 }
 
-                // Celestial spheres, stargates, and stations do not have elastic bounce collision physics
+                // Celestial spheres, stargates, stations, and intangible field bubbles do not have elastic bounce collision physics
+                if matches!(self.balls[&id_a].mode, MovementMode::Field)
+                    || matches!(self.balls[&id_b].mode, MovementMode::Field)
+                {
+                    continue;
+                }
                 let group_a = self.ball_group_ids.get(&id_a).copied().unwrap_or(0);
                 let group_b = self.ball_group_ids.get(&id_b).copied().unwrap_or(0);
                 if matches!(group_a, 6 | 7 | 8 | 9 | 10 | 15) || matches!(group_b, 6 | 7 | 8 | 9 | 10 | 15) {
@@ -1558,6 +1595,10 @@ impl Ballpark {
                         cs.is_cloaked = true;
                     }
                 }
+            }
+            if cs.undock_invulnerable_remaining_ticks > 0 {
+                cs.undock_invulnerable_remaining_ticks =
+                    cs.undock_invulnerable_remaining_ticks.saturating_sub(1);
             }
         }
 
@@ -1874,7 +1915,12 @@ impl Ballpark {
         let candidates: Vec<BallId> = self
             .balls
             .iter()
-            .filter(|(&id, b)| id != source_id && (b.position - source_pos).length() <= burst_radius_m)
+            .filter(|(&id, b)| {
+                id != source_id
+                    && !self.is_static_ball(id)
+                    && self.combat_states.contains_key(&id)
+                    && (b.position - source_pos).length() <= burst_radius_m
+            })
             .map(|(&id, _)| id)
             .collect();
 
@@ -2160,7 +2206,17 @@ fn compute_subwarp_goal_velocity(ball: &Ball, positions: &BTreeMap<BallId, (DVec
                 let delta = target_pos - ball.position;
                 let dist = delta.length();
                 let desired_dist = ball.radius + target_radius + *range;
-                if dist > desired_dist + 1.0 {
+                if *range > 0.0 {
+                    let err = dist - desired_dist;
+                    if err.abs() > 1.0 {
+                        let max_spd = ball.max_velocity * ball.speed_fraction;
+                        let decel_dist = (max_spd * ball.time_constant().max(1.0)).max(50.0);
+                        let factor = (err / decel_dist).clamp(-1.0, 1.0);
+                        delta.normalize_or_zero() * (max_spd * factor)
+                    } else {
+                        DVec3::ZERO
+                    }
+                } else if dist > desired_dist + 1.0 {
                     delta.normalize_or_zero() * (ball.max_velocity * ball.speed_fraction)
                 } else {
                     DVec3::ZERO

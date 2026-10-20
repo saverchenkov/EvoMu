@@ -154,7 +154,7 @@ async fn test_e2e_01_to_18_integration_journeys() {
         &mut sess,
         "invbroker",
         None,
-        "MoveItem",
+        "Add",
         &[
             PyRep::Integer(100_000_003),
             PyRep::Integer(100_000_001),

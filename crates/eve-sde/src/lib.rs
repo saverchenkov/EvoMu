@@ -696,6 +696,44 @@ pub struct DungeonTemplate {
     pub difficulty: Option<u32>,
 }
 
+/// One row of the client's `res:/staticdata/asteroidcountbytypeidroomiddungeonid.static`:
+/// `asteroid_count` asteroids of `type_id` are placed in dungeon room `room_id`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DungeonAsteroidEntry {
+    pub room_id: u32,
+    pub type_id: TypeId,
+    pub asteroid_count: u32,
+}
+
+/// A client type list (`res:/staticdata/typelist.fsdbinary`), referenced by dogma attributes such as
+/// `3255` (`compressibleItemsTypeList`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TypeListInfo {
+    pub type_list_id: u32,
+    pub name: String,
+    pub included_category_ids: Vec<CategoryId>,
+    pub included_group_ids: Vec<GroupId>,
+    pub included_type_ids: Vec<TypeId>,
+    pub excluded_category_ids: Vec<CategoryId>,
+    pub excluded_group_ids: Vec<GroupId>,
+    pub excluded_type_ids: Vec<TypeId>,
+}
+
+impl TypeListInfo {
+    /// Returns `true` when `ty` is matched by an inclusion rule (type, group or category) and by
+    /// no exclusion rule. DERIVED: the client stores only the six include/exclude ID lists; the
+    /// "union of includes minus union of excludes" evaluation is inferred from those field names.
+    pub fn contains(&self, ty: &InvType) -> bool {
+        let included = self.included_type_ids.contains(&ty.type_id)
+            || self.included_group_ids.contains(&ty.group_id)
+            || self.included_category_ids.contains(&ty.category_id);
+        let excluded = self.excluded_type_ids.contains(&ty.type_id)
+            || self.excluded_group_ids.contains(&ty.group_id)
+            || self.excluded_category_ids.contains(&ty.category_id);
+        included && !excluded
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EpicArcTemplate {
     pub epic_arc_id: u32,
@@ -829,6 +867,12 @@ pub struct SdeRegistry {
     pub fighter_abilities_by_type: HashMap<TypeId, Vec<FighterAbilitySlot>>,
     pub wrecks: HashMap<TypeId, TypeId>,
     pub compressible_types: HashMap<TypeId, TypeId>,
+    #[serde(default)]
+    pub type_lists: HashMap<u32, TypeListInfo>,
+    #[serde(default)]
+    pub dungeon_asteroids: HashMap<u32, Vec<DungeonAsteroidEntry>>,
+    #[serde(default)]
+    pub dungeon_gas_types: HashMap<u32, Vec<TypeId>>,
     #[serde(default)]
     pub type_materials: HashMap<TypeId, Vec<TypeMaterialEntry>>,
     pub dynamic_item_attributes: HashMap<TypeId, MutaplasmidInfo>,
@@ -2013,6 +2057,65 @@ impl SdeRegistry {
             }
         }
 
+        let mut type_lists = HashMap::new();
+        {
+            let mut stmt = conn.prepare(
+                "SELECT type_list_id, name, included_category_ids_json, included_group_ids_json, included_type_ids_json, excluded_category_ids_json, excluded_group_ids_json, excluded_type_ids_json FROM sde_type_lists",
+            )?;
+            let parse_ids = |s: String| -> Vec<u32> { serde_json::from_str(&s).unwrap_or_default() };
+            let rows = stmt.query_map([], |r| {
+                Ok(TypeListInfo {
+                    type_list_id: r.get::<_, i64>(0)? as u32,
+                    name: r.get(1)?,
+                    included_category_ids: parse_ids(r.get(2)?),
+                    included_group_ids: parse_ids(r.get(3)?),
+                    included_type_ids: parse_ids(r.get(4)?),
+                    excluded_category_ids: parse_ids(r.get(5)?),
+                    excluded_group_ids: parse_ids(r.get(6)?),
+                    excluded_type_ids: parse_ids(r.get(7)?),
+                })
+            })?;
+            for r in rows {
+                let tl = r?;
+                type_lists.insert(tl.type_list_id, tl);
+            }
+        }
+
+        let mut dungeon_asteroids: HashMap<u32, Vec<DungeonAsteroidEntry>> = HashMap::new();
+        {
+            let mut stmt = conn.prepare(
+                "SELECT dungeon_id, room_id, type_id, asteroid_count FROM sde_dungeon_asteroid_counts ORDER BY dungeon_id, room_id, type_id",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, i64>(0)? as u32,
+                    DungeonAsteroidEntry {
+                        room_id: r.get::<_, i64>(1)? as u32,
+                        type_id: r.get::<_, i64>(2)? as TypeId,
+                        asteroid_count: r.get::<_, i64>(3)? as u32,
+                    },
+                ))
+            })?;
+            for r in rows {
+                let (did, entry) = r?;
+                dungeon_asteroids.entry(did).or_default().push(entry);
+            }
+        }
+
+        let mut dungeon_gas_types: HashMap<u32, Vec<TypeId>> = HashMap::new();
+        {
+            let mut stmt = conn.prepare(
+                "SELECT dungeon_id, type_id FROM sde_dungeon_gas_types ORDER BY dungeon_id, type_id",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok((r.get::<_, i64>(0)? as u32, r.get::<_, i64>(1)? as TypeId))
+            })?;
+            for r in rows {
+                let (did, tid) = r?;
+                dungeon_gas_types.entry(did).or_default().push(tid);
+            }
+        }
+
         let mut dynamic_item_attributes = HashMap::new();
         {
             let mut stmt = conn.prepare(
@@ -2302,6 +2405,9 @@ impl SdeRegistry {
             fighter_abilities_by_type,
             wrecks,
             compressible_types,
+            type_lists,
+            dungeon_asteroids,
+            dungeon_gas_types,
             type_materials,
             dynamic_item_attributes,
             space_components_by_type,
@@ -2433,6 +2539,23 @@ mod tests {
         assert_eq!(sde.dbuff_collections.len(), 277);
         assert_eq!(sde.dynamic_item_attributes.len(), 441);
         assert_eq!(sde.compressible_types.len(), 212);
+        assert_eq!(sde.type_lists.len(), 469);
+        assert_eq!(
+            sde.dungeon_asteroids.values().map(|v| v.len()).sum::<usize>(),
+            3054
+        );
+        assert_eq!(
+            sde.dungeon_gas_types.values().map(|v| v.len()).sum::<usize>(),
+            92
+        );
+        // Small Kernite and Omber Deposit (dungeon 1347): 4 Kernite (20) and 7 Omber (1227) asteroids
+        let skod = sde.dungeon_asteroids.get(&1347).expect("dungeon 1347 asteroid layout");
+        assert!(skod.contains(&DungeonAsteroidEntry { room_id: 19522, type_id: 20, asteroid_count: 4 }));
+        assert!(skod.contains(&DungeonAsteroidEntry { room_id: 19522, type_id: 1227, asteroid_count: 7 }));
+        // Type list 334 (Compression ALL Asteroid Ore) includes Veldspar (1230) but not Mercoxit (11396)
+        let tl334 = sde.type_lists.get(&334).expect("type list 334");
+        assert!(tl334.contains(sde.types.get(&1230).unwrap()));
+        assert!(!tl334.contains(sde.types.get(&11396).unwrap()));
         assert_eq!(sde.clone_grades.len(), 4);
         assert_eq!(sde.dungeons.len(), 5516);
         assert_eq!(sde.missions.len(), 2892);

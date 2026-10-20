@@ -44,6 +44,18 @@ fn item_to_packed_cells(ctx: &ServerContext, i: &eve_db::InventoryItemRecord) ->
     ]
 }
 
+fn csprng_unit_f64() -> f64 {
+    let mut buf = [0u8; 8];
+    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+        use std::io::Read as _;
+        if f.read_exact(&mut buf).is_ok() {
+            let val = u64::from_ne_bytes(buf) >> 11;
+            return (val as f64) * (1.0 / ((1u64 << 53) as f64));
+        }
+    }
+    0.5
+}
+
 pub async fn handle(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -121,16 +133,16 @@ pub async fn handle(
             )
         }
 
-        ("invbroker", "MoveItem") | ("invbroker", "Add") => {
+        ("invbroker", "Add") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
             let Some(mut item_id) = args.first().and_then(|a| a.as_i64()) else {
-                return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "MoveItem requires itemID".into() }));
+                return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "Add requires itemID".into() }));
             };
             let Some(new_loc) = args.get(1).and_then(|a| a.as_i64()).or_else(|| bound_entry.map(|b| b.object_id)).or(session.ship_id).or(session.station_id).or(session.structure_id) else {
-                return Some(Err(BridgeRpcError { code: "InvalidLocation".into(), message: "MoveItem requires a target locationID, bound inventory, or active ship/station".into() }));
+                return Some(Err(BridgeRpcError { code: "InvalidLocation".into(), message: "Add requires a target locationID, bound inventory, or active ship/station".into() }));
             };
             let raw_flag_opt = args.get(2).and_then(|a| a.as_i64()).or_else(|| kwargs.get("flag").and_then(|v| v.as_i64()));
             if let Some(rf) = raw_flag_opt {
@@ -146,6 +158,45 @@ pub async fn handle(
                 .and_then(|v| v.as_i64())
                 .or_else(|| args.get(3).and_then(|a| a.as_i64()));
             let mut source_item_opt = ctx.db.with_snapshot(|snap| snap.items.get(&item_id).cloned());
+            let mut looted_foreign_jetcan = false;
+            if let Some(src_item) = &source_item_opt {
+                let space_container_opt = ctx.db.with_snapshot(|snap| {
+                    let ch_sys = snap
+                        .characters
+                        .get(&char_id)
+                        .map(|c| c.solar_system_id as i64)
+                        .unwrap_or(0);
+                    snap.items.get(&src_item.location_id).and_then(|cont| {
+                        let is_wreck = ctx
+                            .sde
+                            .types
+                            .get(&cont.type_id)
+                            .is_some_and(|t| t.group_id == 186);
+                        if (cont.type_id == 23 || is_wreck)
+                            && cont.flag == InventoryFlag::None
+                            && cont.location_id == ch_sys
+                        {
+                            Some(cont.owner_id != char_id || src_item.owner_id != char_id)
+                        } else {
+                            None
+                        }
+                    })
+                });
+                if let Some(is_foreign) = space_container_opt {
+                    let active_ship = session.ship_id.unwrap_or(new_loc);
+                    ctx.db.with_mut_snapshot(|snap| {
+                        if let Some(it) = snap.items.get_mut(&item_id) {
+                            it.owner_id = char_id;
+                            it.location_id = active_ship;
+                        }
+                    });
+                    if let Some(src) = source_item_opt.as_mut() {
+                        src.owner_id = char_id;
+                        src.location_id = active_ship;
+                    }
+                    looted_foreign_jetcan = is_foreign;
+                }
+            }
             if let (Some(req_qty), Some(src_item)) = (requested_qty_opt, source_item_opt.as_ref()) {
                 if req_qty > 0
                     && !src_item.singleton
@@ -166,12 +217,73 @@ pub async fn handle(
                     }
                 }
             }
+
+            let is_fitting_slot = matches!(flag_u16, 11..=34 | 92..=94 | 125..=132);
+            let src_is_fitted_module = source_item_opt.as_ref().is_some_and(|src_item| {
+                matches!(src_item.flag as u16, 11..=34 | 92..=94 | 125..=132)
+                    && ctx
+                        .sde
+                        .types
+                        .get(&src_item.type_id)
+                        .map(|t| t.category_id == 7 || t.category_id == 32)
+                        .unwrap_or(true)
+            });
+
+            if src_is_fitted_module && !is_fitting_slot {
+                if session.station_id.is_none() && session.structure_id.is_none() {
+                    let mut near_fitting_service = false;
+                    if let (Some(sys_id), Some(ship_id)) = (session.solar_system_id, session.ship_id) {
+                        let depot_ids: Vec<i64> = ctx.db.with_snapshot(|snap| {
+                            snap.items
+                                .values()
+                                .filter(|i| {
+                                    i.location_id == sys_id as i64
+                                        && ctx
+                                            .sde
+                                            .types
+                                            .get(&i.type_id)
+                                            .is_some_and(|t| t.group_id == 1246)
+                                })
+                                .map(|i| i.item_id)
+                                .collect()
+                        });
+                        if !depot_ids.is_empty() {
+                            let sys_handle = ctx.systems.get_or_spawn(sys_id);
+                            if let Ok(Some((_, ship_ball))) = sys_handle.get_ball_snapshot(ship_id).await {
+                                for depot_id in depot_ids {
+                                    if let Ok(Some((_, depot_ball))) = sys_handle.get_ball_snapshot(depot_id).await {
+                                        if (ship_ball.position - depot_ball.position).length() <= 3_000.0 {
+                                            near_fitting_service = true;
+                                            break;
+                                        }
+                                    } else {
+                                        near_fitting_service = true;
+                                        break;
+                                    }
+                                }
+                            } else {
+                                near_fitting_service = true;
+                            }
+                        }
+                    }
+                    if !near_fitting_service {
+                        return Some(Err(BridgeRpcError {
+                            code: "CannotUnfitInSpace".into(),
+                            message: "Unfitting modules requires being docked at a station/structure or within 3,000m of a deployed Mobile Depot".into(),
+                        }));
+                    }
+                }
+                ctx.remove_projected_ewar_by_module(item_id);
+            }
+
             if let Some(src_item) = &source_item_opt {
                 if matches!(src_item.flag as u16, 92..=94) && !matches!(flag_u16, 92..=94) {
                     let old_loc = src_item.location_id;
                     ctx.db.with_mut_snapshot(|snap| {
                         snap.items.remove(&item_id);
                         snap.module_online_states.remove(&item_id);
+                        snap.module_active_states.remove(&item_id);
+                        snap.module_active_charges.remove(&item_id);
                     });
                     ctx.invalidate_ship_fitting(old_loc);
                     ctx.notify(
@@ -195,12 +307,11 @@ pub async fn handle(
                 })
                 .unwrap_or(true);
 
-            let is_fitting_slot = matches!(flag_u16, 11..=34 | 92..=94 | 125..=132);
             if is_fitting_slot {
                 let item_cat_opt = ctx.db.with_snapshot(|snap| {
                     snap.items.get(&item_id).and_then(|item| ctx.sde.types.get(&item.type_id).map(|t| t.category_id))
                 });
-                if item_cat_opt == Some(8) && matches!(flag_u16, 27..=34) {
+                if item_cat_opt == Some(8) && matches!(flag_u16, 11..=34) {
                     let current_dock = session.station_id.or(session.structure_id);
                     return match ctx.load_charge_into_weapon_slot(char_id, new_loc, flag, item_id, current_dock) {
                         Ok((loaded_id, loaded_type_id, loaded_qty, loaded_ver)) => Some(Ok(PyRep::keyval([
@@ -319,17 +430,78 @@ pub async fn handle(
                     let Some(moving_item) = snap.items.get(&item_id) else { return Ok(()); };
                     let Some(ship_item) = snap.items.get(&new_loc) else { return Ok(()); };
                     let Some(ship_type) = ctx.sde.types.get(&ship_item.type_id) else { return Ok(()); };
+                    if ship_type.category_id != 6 {
+                        return Ok(());
+                    }
+                    let Some(item_type) = ctx.sde.types.get(&moving_item.type_id) else { return Ok(()); };
+
+                    // Enforce specialized hold item-group / category restrictions (`feat:mining.ore-mineral-holds`)
+                    let allowed_in_hold = match flag_u16 {
+                        5 => true,
+                        134 | 151 => {
+                            // SpecializedOreHold / GeneralMiningHold: asteroid ores, moon ores, ice (cat 25), or gas (group 711 / 4168)
+                            item_type.category_id == 25 || matches!(item_type.group_id, 711 | 4168)
+                        }
+                        135 => {
+                            // SpecializedGasHold: harvestable/compressed gas (group 711 / 4168)
+                            matches!(item_type.group_id, 711 | 4168)
+                        }
+                        136 => {
+                            // SpecializedMineralHold: refined minerals (group 18)
+                            item_type.group_id == 18
+                        }
+                        181 => {
+                            // SpecializedIceHold: raw/compressed ice (group 465)
+                            item_type.group_id == 465
+                        }
+                        143 => {
+                            // SpecializedAmmoHold: charges/ammo (category 8)
+                            item_type.category_id == 8
+                        }
+                        148 => {
+                            // SpecializedCommandCenterHold: Command Centers (group 1027)
+                            item_type.group_id == 1027
+                        }
+                        149 => {
+                            // SpecializedPlanetaryCommoditiesHold: planetary resources/commodities (cat 42 / 43)
+                            matches!(item_type.category_id, 42 | 43)
+                        }
+                        _ => true,
+                    };
+                    if !allowed_in_hold {
+                        return Err(BridgeRpcError {
+                            code: "InvalidItemTypeForHold".into(),
+                            message: format!(
+                                "Item {} (type {}, group {}, category {}) cannot be placed in specialized hold flag {}",
+                                moving_item.item_id, item_type.type_id, item_type.group_id, item_type.category_id, flag_u16
+                            ),
+                        });
+                    }
+
                     let hold_capacity = match flag_u16 {
                         134 | 151 => ship_type.default_attributes.get(&1556).copied()
                             .or_else(|| ship_type.default_attributes.get(&1770).copied())
                             .unwrap_or(0.0),
+                        136 => ship_type.default_attributes.get(&1558).copied().unwrap_or(0.0),
+                        135 => ship_type.default_attributes.get(&1557).copied().unwrap_or(0.0),
                         181 => ship_type.default_attributes.get(&3136).copied()
                             .or_else(|| ship_type.default_attributes.get(&1556).copied())
                             .unwrap_or(0.0),
-                        135 => ship_type.default_attributes.get(&1557).copied().unwrap_or(0.0),
+                        143 => ship_type.default_attributes.get(&1573).copied().unwrap_or(0.0),
+                        148 => ship_type.default_attributes.get(&1646).copied().unwrap_or(5_000.0),
+                        149 => ship_type.default_attributes.get(&1653).copied().unwrap_or(0.0),
                         5 => ship_type.capacity,
                         _ => 0.0,
                     };
+                    if flag_u16 != 5 && hold_capacity <= 0.0 {
+                        return Err(BridgeRpcError {
+                            code: "CapacityExceeded".into(),
+                            message: format!(
+                                "Ship {} does not have a specialized hold for flag {flag_u16} (capacity 0 m³)",
+                                ship_type.name
+                            ),
+                        });
+                    }
                     if hold_capacity > 0.0 {
                         let used_vol: f64 = snap.items.values()
                             .filter(|i| i.location_id == new_loc && (i.flag as u16) == flag_u16 && i.item_id != item_id)
@@ -338,7 +510,7 @@ pub async fn handle(
                                 vol * (i.quantity as f64)
                             })
                             .sum();
-                        let item_vol = ctx.sde.types.get(&moving_item.type_id).map(|t| t.volume).unwrap_or(0.0) * (moving_item.quantity as f64);
+                        let item_vol = item_type.volume * (moving_item.quantity as f64);
                         if used_vol + item_vol > hold_capacity + 1e-4 {
                             return Err(BridgeRpcError {
                                 code: "CapacityExceeded".into(),
@@ -379,6 +551,21 @@ pub async fn handle(
                     }
                 });
                 if let Ok(Some(merged_item)) = merged_opt {
+                    if looted_foreign_jetcan {
+                        let now_unix = ctx.now_unix_secs();
+                        let until = now_unix.saturating_add(900);
+                        ctx.crimewatch
+                            .write()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .get_or_create(char_id)
+                            .suspect_flag_until_unix = until;
+                        ctx.notify(
+                            crate::router::NotificationTarget::Character(char_id),
+                            "OnSuspectsAndCriminalsUpdate",
+                            "charid",
+                            vec![PyRep::Integer(char_id), PyRep::Bool(true), PyRep::Integer(until as i64)],
+                        );
+                    }
                     if let Some(ship_id) = session.ship_id {
                         ctx.invalidate_ship_fitting(ship_id);
                     }
@@ -389,6 +576,7 @@ pub async fn handle(
                         ("flagID", PyRep::Integer(merged_item.flag as i64)),
                         ("quantity", PyRep::Integer(merged_item.quantity as i64)),
                         ("version", PyRep::Integer(merged_item.version as i64)),
+                        ("suspectFlagged", PyRep::Bool(looted_foreign_jetcan)),
                     ])));
                 }
             }
@@ -402,6 +590,21 @@ pub async fn handle(
                 idem_key,
             ) {
                 Ok(updated) => {
+                    if looted_foreign_jetcan {
+                        let now_unix = ctx.now_unix_secs();
+                        let until = now_unix.saturating_add(900);
+                        ctx.crimewatch
+                            .write()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .get_or_create(char_id)
+                            .suspect_flag_until_unix = until;
+                        ctx.notify(
+                            crate::router::NotificationTarget::Character(char_id),
+                            "OnSuspectsAndCriminalsUpdate",
+                            "charid",
+                            vec![PyRep::Integer(char_id), PyRep::Bool(true), PyRep::Integer(until as i64)],
+                        );
+                    }
                     if let Some(ship_id) = session.ship_id {
                         ctx.invalidate_ship_fitting(ship_id);
                     }
@@ -427,6 +630,8 @@ pub async fn handle(
                         if matches!(src_item.flag as u16, 11..=34 | 92..=94 | 125..=132) {
                             ctx.db.with_mut_snapshot(|snap| {
                                 snap.module_online_states.remove(&item_id);
+                                snap.module_active_states.remove(&item_id);
+                                snap.module_active_charges.remove(&item_id);
                             });
                             ctx.notify(
                                 crate::router::NotificationTarget::Character(char_id),
@@ -442,6 +647,7 @@ pub async fn handle(
                         ("locationID", PyRep::Integer(updated.location_id)),
                         ("flagID", PyRep::Integer(updated.flag as i64)),
                         ("version", PyRep::Integer(updated.version as i64)),
+                        ("suspectFlagged", PyRep::Bool(looted_foreign_jetcan)),
                     ])))
                 }
                 Err(e) => Some(Err(BridgeRpcError {
@@ -449,6 +655,171 @@ pub async fn handle(
                     message: e.to_string(),
                 })),
             }
+        }
+
+        ("ship", "Jettison") | ("invbroker", "Jettison") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let Some(ship_id) = session.ship_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "NoActiveShip".into(),
+                    message: "Jettison requires an active ship".into(),
+                }));
+            };
+            let Some(sys_id) = session.solar_system_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "NotInSpace".into(),
+                    message: "Jettison can only be performed in space".into(),
+                }));
+            };
+
+            let mut item_ids: Vec<i64> = Vec::new();
+            if let Some(first) = args.first() {
+                match first {
+                    PyRep::List(list) | PyRep::Tuple(list) => {
+                        for el in list {
+                            if let Some(id) = el.as_i64() {
+                                item_ids.push(id);
+                            }
+                        }
+                    }
+                    _ => {
+                        if let Some(id) = first.as_i64() {
+                            item_ids.push(id);
+                        }
+                    }
+                }
+            }
+            if item_ids.is_empty() {
+                if let Some(PyRep::List(list) | PyRep::Tuple(list)) = kwargs.get("itemIDs") {
+                    for el in list {
+                        if let Some(id) = el.as_i64() {
+                            item_ids.push(id);
+                        }
+                    }
+                } else if let Some(id) = kwargs.get("itemID").and_then(|v| v.as_i64()) {
+                    item_ids.push(id);
+                }
+            }
+            if item_ids.is_empty() {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidArgument".into(),
+                    message: "Jettison requires at least one itemID".into(),
+                }));
+            }
+
+            let now_unix = ctx.now_unix_secs();
+            let res: Result<(i64, i64), BridgeRpcError> = ctx.db.try_with_mut_snapshot(|snap| {
+                for &iid in &item_ids {
+                    let Some(it) = snap.items.get(&iid) else {
+                        return Err(BridgeRpcError {
+                            code: "ItemNotFound".into(),
+                            message: format!("Item {iid} not found"),
+                        });
+                    };
+                    if it.owner_id != char_id || it.location_id != ship_id {
+                        return Err(BridgeRpcError {
+                            code: "ItemNotOnShip".into(),
+                            message: format!("Item {iid} is not in active ship {ship_id}"),
+                        });
+                    }
+                }
+
+                snap.next_entity_id += 1;
+                let jetcan_id = snap.next_entity_id;
+                let mut dyn_attrs = HashMap::new();
+                dyn_attrs.insert(9999, now_unix as f64); // Creation unix timestamp (`feat:mining.jetcan-mining`)
+                snap.items.insert(
+                    jetcan_id,
+                    eve_db::InventoryItemRecord {
+                        item_id: jetcan_id,
+                        type_id: 23, // Cargo Container (jetcan, 27,500 m3 capacity)
+                        owner_id: char_id,
+                        location_id: sys_id as i64,
+                        flag: InventoryFlag::None,
+                        quantity: 1,
+                        singleton: true,
+                        version: 1,
+                        dynamic_attributes: dyn_attrs,
+                        ..Default::default()
+                    },
+                );
+
+                let mut total_units = 0i64;
+                for &iid in &item_ids {
+                    if let Some(it) = snap.items.get_mut(&iid) {
+                        it.location_id = jetcan_id;
+                        it.flag = InventoryFlag::Cargo;
+                        it.version += 1;
+                        total_units += it.quantity as i64;
+                    }
+                }
+                Ok((jetcan_id, total_units))
+            });
+
+            let (jetcan_id, total_units) = match res {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+
+            let sys_handle = ctx.systems.get_or_spawn(sys_id);
+            let ship_pos = sys_handle
+                .get_ball_snapshot(ship_id)
+                .await
+                .ok()
+                .flatten()
+                .map(|(_, b)| b.position)
+                .unwrap_or(DVec3::ZERO);
+            let can_pos = DVec3::new(ship_pos.x + 500.0, ship_pos.y, ship_pos.z);
+            let can_sde = ctx.sde.types.get(&23);
+            let _ = sys_handle
+                .spawn_ball_with_meta(
+                    eve_destiny::Ball {
+                        id: jetcan_id,
+                        type_id: 23,
+                        position: can_pos,
+                        velocity: DVec3::ZERO,
+                        max_velocity: 0.0,
+                        inertia: 1.0,
+                        mass: can_sde.map(|t| t.mass.max(1.0)).unwrap_or(1_000.0),
+                        radius: can_sde.map(|t| t.radius.max(10.0)).unwrap_or(50.0),
+                        speed_fraction: 0.0,
+                        mode: eve_destiny::MovementMode::Rigid,
+                    },
+                    eve_destiny::CombatState::default(),
+                    eve_destiny::SlimItemMeta {
+                        group_id: 12,
+                        category_id: 2,
+                        owner_id: char_id,
+                        char_id: Some(char_id),
+                        corp_id: session.corporation_id.unwrap_or(-1),
+                        alliance_id: session.alliance_id.unwrap_or(-1),
+                        security_status: 0.0,
+                        is_cloaked: false,
+                    },
+                )
+                .await;
+
+            ctx.invalidate_ship_fitting(ship_id);
+            ctx.notify(
+                crate::router::NotificationTarget::SolarSystem(sys_id),
+                "DoBallsAdded",
+                "solarsystemid",
+                vec![PyRep::Integer(jetcan_id), PyRep::Integer(23)],
+            );
+
+            Some(Ok(PyRep::keyval([
+                ("jetcanID", PyRep::Integer(jetcan_id)),
+                ("containerID", PyRep::Integer(jetcan_id)),
+                ("typeID", PyRep::Integer(23)),
+                ("ownerID", PyRep::Integer(char_id)),
+                ("solarSystemID", PyRep::Integer(sys_id as i64)),
+                ("jettisonedUnits", PyRep::Integer(total_units)),
+                ("createdAtUnix", PyRep::Integer(now_unix as i64)),
+                ("expiresAtUnix", PyRep::Integer((now_unix + 3600) as i64)),
+            ])))
         }
 
         ("dogmaIM", "GetShipAttributes") | ("dogmaIM", "GetAllInfo") => {
@@ -471,20 +842,40 @@ pub async fn handle(
                 Err(e) => return Some(Err(e)),
             };
 
-            let base_attrs = fit.ship.base_attributes.clone();
-            let mut entries = Vec::with_capacity(base_attrs.len() + 2);
-            for (&attr_id, _) in &base_attrs {
-                let val = fit.ship.get_attribute(attr_id, &ctx.sde);
+            let eval_ctx = fit.evaluated_context(&ctx.sde);
+            let mut ship_attr_ids: std::collections::BTreeSet<u16> = eval_ctx
+                .ship
+                .base_attributes
+                .keys()
+                .copied()
+                .chain(eval_ctx.ship.modifiers.iter().map(|m| m.target_attribute_id))
+                .collect();
+            ship_attr_ids.insert(attr_ids::CPU_LOAD);
+            ship_attr_ids.insert(attr_ids::POWER_LOAD);
+            let mut entries = Vec::with_capacity(ship_attr_ids.len());
+            for attr_id in ship_attr_ids {
+                let val = eval_ctx.ship.get_attribute(attr_id, &ctx.sde);
                 entries.push((PyRep::Integer(attr_id as i64), PyRep::Real(val)));
             }
-            entries.push((
-                PyRep::Integer(attr_ids::CPU_LOAD as i64),
-                PyRep::Real(fit.ship.get_attribute(attr_ids::CPU_LOAD, &ctx.sde)),
-            ));
-            entries.push((
-                PyRep::Integer(attr_ids::POWER_LOAD as i64),
-                PyRep::Real(fit.ship.get_attribute(attr_ids::POWER_LOAD, &ctx.sde)),
-            ));
+
+            let mut module_entries = Vec::with_capacity(eval_ctx.ship_located_items.len());
+            for m_state in &eval_ctx.ship_located_items {
+                let attr_ids_set: std::collections::BTreeSet<u16> = m_state
+                    .base_attributes
+                    .keys()
+                    .copied()
+                    .chain(m_state.modifiers.iter().map(|m| m.target_attribute_id))
+                    .collect();
+                let mut m_attrs = Vec::with_capacity(attr_ids_set.len());
+                for aid in attr_ids_set {
+                    m_attrs.push((
+                        PyRep::Integer(aid as i64),
+                        PyRep::Real(m_state.get_attribute(aid, &ctx.sde)),
+                    ));
+                }
+                module_entries.push((PyRep::Integer(m_state.item_id), PyRep::Dict(m_attrs)));
+            }
+
             ctx.store_ship_fitting(ship_id, fit);
 
             if method == "GetAllInfo" {
@@ -492,6 +883,7 @@ pub async fn handle(
                     ("shipID", PyRep::Integer(ship_id)),
                     ("charID", PyRep::Integer(char_id)),
                     ("shipAttributes", PyRep::Dict(entries)),
+                    ("moduleAttributes", PyRep::Dict(module_entries)),
                 ])))
             } else {
                 Some(Ok(PyRep::Dict(entries)))
@@ -512,11 +904,11 @@ pub async fn handle(
             // 1. Check if raw_id is an item in the world DB
             let item_opt = ctx.db.with_snapshot(|snap| snap.items.get(&raw_id).cloned());
 
-            let (type_id, owner_id, dyn_attrs, location_id, qty, singleton) = if let Some(item) = item_opt {
+            let (type_id, owner_id, dyn_attrs, location_id, qty, singleton) = if let Some(ref item) = item_opt {
                 (
                     item.type_id,
                     PyRep::Integer(item.owner_id),
-                    item.dynamic_attributes,
+                    item.dynamic_attributes.clone(),
                     Some(item.location_id),
                     item.quantity,
                     item.singleton,
@@ -538,6 +930,59 @@ pub async fn handle(
             let mut merged_attrs = show_info.default_attributes.clone();
             for (&attr_id, &val) in &dyn_attrs {
                 merged_attrs.insert(attr_id, val);
+            }
+            if let Some(ref item) = item_opt {
+                let item_cat = ctx.sde.types.get(&item.type_id).map(|t| t.category_id).unwrap_or(0);
+                if item_cat == 6 {
+                    if let Ok(fit) = ctx.get_or_rebuild_ship_fitting(item.owner_id, item.item_id) {
+                        let eval_ctx = fit.evaluated_context(&ctx.sde);
+                        let all_aids: std::collections::BTreeSet<u16> = eval_ctx
+                            .ship
+                            .base_attributes
+                            .keys()
+                            .copied()
+                            .chain(eval_ctx.ship.modifiers.iter().map(|m| m.target_attribute_id))
+                            .collect();
+                        for aid in all_aids {
+                            merged_attrs.insert(aid, eval_ctx.ship.get_attribute(aid, &ctx.sde));
+                        }
+                    }
+                } else if matches!(item.flag as u16, 11..=34 | 92..=94 | 125..=132) {
+                    if let Ok(fit) = ctx.get_or_rebuild_ship_fitting(item.owner_id, item.location_id) {
+                        let eval_ctx = fit.evaluated_context(&ctx.sde);
+                        if item_cat == 8 {
+                            if let Some(c_state) = eval_ctx
+                                .owned_items
+                                .iter()
+                                .find(|c| c.type_id == item.type_id)
+                            {
+                                let all_aids: std::collections::BTreeSet<u16> = c_state
+                                    .base_attributes
+                                    .keys()
+                                    .copied()
+                                    .chain(c_state.modifiers.iter().map(|m| m.target_attribute_id))
+                                    .collect();
+                                for aid in all_aids {
+                                    merged_attrs.insert(aid, c_state.get_attribute(aid, &ctx.sde));
+                                }
+                            }
+                        } else if let Some(m_state) = eval_ctx
+                            .ship_located_items
+                            .iter()
+                            .find(|m| m.item_id == item.item_id)
+                        {
+                            let all_aids: std::collections::BTreeSet<u16> = m_state
+                                .base_attributes
+                                .keys()
+                                .copied()
+                                .chain(m_state.modifiers.iter().map(|m| m.target_attribute_id))
+                                .collect();
+                            for aid in all_aids {
+                                merged_attrs.insert(aid, m_state.get_attribute(aid, &ctx.sde));
+                            }
+                        }
+                    }
+                }
             }
 
             let mut attr_entries: Vec<(PyRep, PyRep)> = merged_attrs
@@ -613,6 +1058,8 @@ pub async fn handle(
                     let loc = item.location_id;
                     snap.items.remove(&item_id);
                     snap.module_online_states.remove(&item_id);
+                    snap.module_active_states.remove(&item_id);
+                    snap.module_active_charges.remove(&item_id);
                     Some(loc)
                 } else {
                     None
@@ -1233,9 +1680,7 @@ pub async fn handle(
             let effect_name = args.get(1).and_then(|a| a.as_str()).unwrap_or("defaultEffect").to_string();
             let target_id_opt = args.get(2).and_then(|a| a.as_i64())
                 .or_else(|| args.get(1).and_then(|a| a.as_i64()))
-                .or_else(|| kwargs.get("targetID").and_then(|v| v.as_i64()))
-                .or_else(|| kwargs.get("target").and_then(|v| v.as_i64()))
-                .or_else(|| kwargs.get("asteroidID").and_then(|v| v.as_i64()));
+                .or_else(|| kwargs.get("target").and_then(|v| v.as_i64()));
             let repeat = args.get(3).and_then(|a| a.as_i64()).unwrap_or(1) as i32;
 
             let Some(ship_id) = session.ship_id else {
@@ -1468,6 +1913,223 @@ pub async fn handle(
                 ])));
             }
 
+            // Interdiction Sphere Launcher (`group_id == 589`, e.g., `Interdiction Sphere Launcher I` `22782`)
+            if mod_type.group_id == 589 {
+                let sys_sec = ctx
+                    .sde
+                    .solar_systems
+                    .get(&sys_id)
+                    .map(|s| s.security_status)
+                    .unwrap_or(1.0);
+                if sys_sec > 0.0 {
+                    return Some(Err(BridgeRpcError {
+                        code: "CannotLaunchInterdictionProbeInEmpire".into(),
+                        message: format!(
+                            "Interdiction sphere probes can only be launched in null-sec or wormhole space (system {sys_id} security {sys_sec:.2} > 0.0)"
+                        ),
+                    }));
+                }
+                let ship_group_id = ctx
+                    .sde
+                    .types
+                    .get(&fit.ship.type_id)
+                    .map(|t| t.group_id)
+                    .unwrap_or(0);
+                if ship_group_id != 541 {
+                    return Some(Err(BridgeRpcError {
+                        code: "InvalidShipGroup".into(),
+                        message: "Interdiction Sphere Launcher can only be activated on Interdictors (group 541)".into(),
+                    }));
+                }
+                let loaded_charge_opt = ctx.db.with_snapshot(|snap| {
+                    snap.items
+                        .values()
+                        .find(|i| {
+                            i.location_id == ship_id
+                                && (i.flag as u16) == m.flag_id
+                                && i.item_id != module_id
+                                && i.quantity > 0
+                                && ctx.sde.types.get(&i.type_id).is_some_and(|t| t.group_id == 548)
+                        })
+                        .map(|i| (i.item_id, i.type_id))
+                });
+                let Some((charge_item_id, probe_type_id)) = loaded_charge_opt else {
+                    return Some(Err(BridgeRpcError {
+                        code: "NoProbesLoaded".into(),
+                        message: "Interdiction Sphere Launcher has no Warp Disrupt Probe loaded".into(),
+                    }));
+                };
+
+                let (probe_id, remaining_in_launcher) = ctx.db.with_mut_snapshot(|snap| {
+                    let mut rem = 0;
+                    if let Some(ci) = snap.items.get_mut(&charge_item_id) {
+                        ci.quantity = (ci.quantity - 1).max(0);
+                        rem = ci.quantity;
+                    }
+                    if rem == 0 {
+                        snap.items.remove(&charge_item_id);
+                    }
+                    snap.next_entity_id += 1;
+                    (snap.next_entity_id, rem)
+                });
+                if remaining_in_launcher == 0 {
+                    ctx.invalidate_ship_fitting(ship_id);
+                }
+
+                let probe_sde = ctx.sde.types.get(&probe_type_id);
+                let bubble_radius = probe_sde
+                    .and_then(|t| t.default_attributes.get(&103).copied())
+                    .unwrap_or(20_000.0);
+                let ship_pos = sys
+                    .get_ball_snapshot(ship_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|(_, b)| b.position)
+                    .unwrap_or(DVec3::ZERO);
+
+                if let Err(e) = sys.add_interdiction_sphere(probe_id, ship_pos, bubble_radius).await {
+                    return Some(Err(BridgeRpcError {
+                        code: "SystemActorError".into(),
+                        message: e,
+                    }));
+                }
+
+                ctx.notify(
+                    crate::router::NotificationTarget::Character(char_id),
+                    "OnGodmaShipEffect",
+                    "charid",
+                    vec![PyRep::Integer(module_id), PyRep::String(effect_name), PyRep::Bool(true)],
+                );
+                ctx.notify(
+                    crate::router::NotificationTarget::Character(char_id),
+                    "OnModuleActivated",
+                    "charid",
+                    vec![PyRep::Integer(module_id), PyRep::Integer(1)],
+                );
+                return Some(Ok(PyRep::keyval([
+                    ("moduleID", PyRep::Integer(module_id)),
+                    ("launcherID", PyRep::Integer(module_id)),
+                    ("probeID", PyRep::Integer(probe_id)),
+                    ("probeTypeID", PyRep::Integer(probe_type_id as i64)),
+                    ("bubbleRadius", PyRep::Real(bubble_radius)),
+                    ("remainingInLauncher", PyRep::Integer(remaining_in_launcher as i64)),
+                ])));
+            }
+
+            // Survey Probe Launcher (`group_id == 1226`, e.g., `Survey Probe Launcher I` `35660`)
+            if mod_type.group_id == 1226 {
+                let loaded_probe_opt = ctx.db.with_snapshot(|snap| {
+                    snap.items
+                        .values()
+                        .find(|i| {
+                            i.location_id == ship_id
+                                && (i.flag as u16) == m.flag_id
+                                && i.item_id != module_id
+                                && i.quantity > 0
+                                && ctx.sde.types.get(&i.type_id).is_some_and(|t| t.group_id == 492)
+                        })
+                        .or_else(|| {
+                            snap.items.values().find(|i| {
+                                i.location_id == ship_id
+                                    && matches!(
+                                        i.flag,
+                                        InventoryFlag::Cargo | InventoryFlag::SpecializedAmmoHold
+                                    )
+                                    && i.quantity > 0
+                                    && ctx.sde.types.get(&i.type_id).is_some_and(|t| t.group_id == 492)
+                            })
+                        })
+                        .map(|i| (i.item_id, i.type_id))
+                });
+                let Some((charge_item_id, probe_type_id)) = loaded_probe_opt else {
+                    return Some(Err(BridgeRpcError {
+                        code: "NoProbesLoaded".into(),
+                        message: "Survey probe launcher has no survey probes loaded".into(),
+                    }));
+                };
+
+                let moon_id = target_id_opt.unwrap_or_else(|| {
+                    ctx.sde
+                        .celestials_in_system(sys_id)
+                        .into_iter()
+                        .find(|c| c.group_id == 8)
+                        .map(|c| c.celestial_id)
+                        .unwrap_or(40_000_001)
+                });
+
+                let (probe_id, remaining_in_launcher) = ctx.db.with_mut_snapshot(|snap| {
+                    let mut rem = 0;
+                    if let Some(ci) = snap.items.get_mut(&charge_item_id) {
+                        ci.quantity = (ci.quantity - 1).max(0);
+                        rem = ci.quantity;
+                    }
+                    if rem == 0 {
+                        snap.items.remove(&charge_item_id);
+                    }
+                    snap.next_entity_id += 1;
+                    (snap.next_entity_id, rem)
+                });
+                ctx.invalidate_ship_fitting(ship_id);
+
+                let probe_sde = ctx.sde.types.get(&probe_type_id);
+                let scan_delay_ms = probe_sde
+                    .and_then(|t| t.default_attributes.get(&1370).copied().or_else(|| t.default_attributes.get(&281).copied()))
+                    .unwrap_or(300_000.0) as i64;
+
+                let composition =
+                    crate::services::mining_advanced::derive_moon_ores_from_sde(&ctx.sde, sys_id, moon_id);
+                let resources_dict = PyRep::Dict(
+                    composition
+                        .iter()
+                        .map(|&(tid, frac)| (PyRep::Integer(tid as i64), PyRep::Real(frac)))
+                        .collect(),
+                );
+                let composition_list = PyRep::List(
+                    composition
+                        .iter()
+                        .map(|&(tid, frac)| {
+                            PyRep::Tuple(vec![PyRep::Integer(tid as i64), PyRep::Real(frac)])
+                        })
+                        .collect(),
+                );
+
+                ctx.notify(
+                    crate::router::NotificationTarget::Character(char_id),
+                    "OnNewMoonProbe",
+                    "charid",
+                    vec![
+                        PyRep::Integer(probe_id),
+                        PyRep::Integer(probe_type_id as i64),
+                        PyRep::Integer(moon_id),
+                    ],
+                );
+                ctx.notify(
+                    crate::router::NotificationTarget::Character(char_id),
+                    "OnMoonScanComplete",
+                    "charid",
+                    vec![PyRep::Integer(moon_id), resources_dict.clone()],
+                );
+                ctx.notify(
+                    crate::router::NotificationTarget::Character(char_id),
+                    "OnRemoveMoonProbe",
+                    "charid",
+                    vec![PyRep::Integer(probe_id)],
+                );
+
+                return Some(Ok(PyRep::keyval([
+                    ("moduleID", PyRep::Integer(module_id)),
+                    ("launcherID", PyRep::Integer(module_id)),
+                    ("probeID", PyRep::Integer(probe_id)),
+                    ("probeTypeID", PyRep::Integer(probe_type_id as i64)),
+                    ("moonID", PyRep::Integer(moon_id)),
+                    ("scanDelayMs", PyRep::Integer(scan_delay_ms)),
+                    ("remainingInLauncher", PyRep::Integer(remaining_in_launcher as i64)),
+                    ("resources", resources_dict),
+                    ("composition", composition_list),
+                ])));
+            }
+
             let is_mining_module = matches!(mod_type.group_id, 54 | 464 | 483 | 737 | 2004 | 4138)
                 || mod_type.default_attributes.contains_key(&77);
 
@@ -1489,15 +2151,17 @@ pub async fn handle(
                 }
                 let mod_state = fit.build_effective_module_state(module_id, m.type_id, method == "Overload", &ctx.sde);
 
-                let is_mwd_or_mjd = (mod_type.group_id == 46
+                let is_mwd = mod_type.group_id == 46
                     && (mod_type.default_attributes.get(&554).copied().unwrap_or(0.0) > 0.0
-                        || mod_type.name.contains("Microwarpdrive")))
-                    || mod_type.group_id == 1189
+                        || mod_type.name.contains("Microwarpdrive"));
+                let is_mjd = mod_type.group_id == 1189
+                    || mod_type.group_id == 4769
                     || mod_type.name.contains("Micro Jump Drive");
+                let is_mwd_or_mjd = is_mwd || is_mjd;
 
                 if is_mwd_or_mjd {
                     if let Ok(Some(cs)) = sys.get_combat_state(ship_id).await {
-                        if cs.is_mwd_mjd_disabled {
+                        if cs.is_mwd_mjd_disabled || (is_mjd && cs.is_warp_scrambled()) {
                             return Some(Err(BridgeRpcError {
                                 code: "WarpScrambled".into(),
                                 message: "Cannot activate Microwarpdrive or Micro Jump Drive while warp scrambled".into(),
@@ -1513,6 +2177,34 @@ pub async fn handle(
                 let mut hic_velocity_multiplier: Option<f64> = None;
                 let mut hic_sig_multiplier: Option<f64> = None;
                 let mut hic_mass_addition: Option<f64> = None;
+                let mut mjd_jump_distance_m: Option<f64> = None;
+                let grants_interdiction_nullification = mod_type.group_id == 4117;
+
+                // Microwarpdrive (`group_id == 46` with signatureRadiusBonus `554`, e.g., `5MN Microwarpdrive I` `434`)
+                if is_mwd {
+                    let sig_bonus_pct = mod_state.get_attribute(554, &ctx.sde);
+                    if sig_bonus_pct > 0.0 {
+                        hic_sig_multiplier = Some(1.0 + sig_bonus_pct / 100.0);
+                    }
+                    let mass_add = mod_state.get_attribute(attr_ids::MASS_ADDITION, &ctx.sde);
+                    if mass_add > 0.0 {
+                        hic_mass_addition = Some(mass_add);
+                    }
+                }
+
+                // Micro Jump Drive (`group_id == 1189 | 4769`, e.g., `Large Micro Jump Drive` `4383`, `Medium Micro Jump Drive` `33915`)
+                if is_mjd {
+                    let jump_dist = mod_type
+                        .default_attributes
+                        .get(&2064)
+                        .copied()
+                        .unwrap_or(100_000.0);
+                    mjd_jump_distance_m = Some(jump_dist);
+                    let mjd_sig_pct = mod_state.get_attribute(973, &ctx.sde);
+                    if mjd_sig_pct > 0.0 {
+                        hic_sig_multiplier = Some(1.0 + mjd_sig_pct / 100.0);
+                    }
+                }
 
                 // Warp Disruptor / Warp Scrambler (`group_id == 52`)
                 if mod_type.group_id == 52 {
@@ -1547,6 +2239,33 @@ pub async fn handle(
                     let scram_eval = eve_dogma::eval_warp_scrambler_effects(&[&mod_state], &[0.0], &ctx.sde);
                     warp_scramble_points = scram_eval.scramble_strength.max(1);
                     disables_target_mwd_mjd = scram_eval.blocks_mwd;
+                }
+
+                // SDE attribute `3265` (`activationRequiresActiveIndustrialCore`, e.g. Shipboard Compressors `group_id == 4174`):
+                // require an active Industrial Core (`group_id == 515`) fitted on the ship (`docs/eve-wiki/Compression.md:39`).
+                if mod_type.default_attributes.get(&3265).copied().unwrap_or(0.0) > 0.0 {
+                    let has_active_core_in_fit = fit.modules.values().any(|fm| {
+                        (27..=34).contains(&fm.flag_id)
+                            && matches!(
+                                fm.state,
+                                eve_dogma::ModuleState::Active | eve_dogma::ModuleState::Overloaded
+                            )
+                            && ctx.sde.types.get(&fm.type_id).is_some_and(|t| t.group_id == 515)
+                    });
+                    let has_active_core_in_db = ctx.db.with_snapshot(|snap| {
+                        snap.items.values().any(|it| {
+                            it.location_id == ship_id
+                                && (27..=34).contains(&(it.flag as u16))
+                                && snap.module_active_states.contains(&it.item_id)
+                                && ctx.sde.types.get(&it.type_id).is_some_and(|t| t.group_id == 515)
+                        })
+                    });
+                    if !has_active_core_in_fit && !has_active_core_in_db {
+                        return Some(Err(BridgeRpcError {
+                            code: "IndustrialCoreNotActive".into(),
+                            message: "Module requires an active Industrial Core (attribute 3265 activationRequiresActiveIndustrialCore)".into(),
+                        }));
+                    }
                 }
 
                 // Heavy Interdictor Warp Disruption Field Generator (`group_id == 899`, e.g., `28654` T1, `4248` T2)
@@ -1638,12 +2357,65 @@ pub async fn handle(
                     warp_core_stab_bonus = (-raw_wcs).round().max(1.0) as i32;
                 }
 
+                // Weapon Disruptor (`group_id == 291`: Tracking Disruptor 2108/2109 & Guidance Disruptor 37543/37546),
+                // Remote Sensor Dampener (`group_id == 208`), Target Painter (`group_id == 379`), Stasis Webifier (`group_id == 65`)
+                if matches!(mod_type.group_id, 291 | 208 | 379 | 65) {
+                    let Some(target_id) = target_id_opt else {
+                        return Some(Err(BridgeRpcError {
+                            code: "TargetRequired".into(),
+                            message: "EWAR module requires a locked target".into(),
+                        }));
+                    };
+                    let mut distance_m = kwargs
+                        .get("distance")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0);
+                    if distance_m <= 0.0 {
+                        if let (Ok(Some((_, ship_ball))), Ok(Some((_, target_ball)))) = (
+                            sys.get_ball_snapshot(ship_id).await,
+                            sys.get_ball_snapshot(target_id).await,
+                        ) {
+                            distance_m = (ship_ball.position - target_ball.position).length();
+                        }
+                    }
+                    if mod_type.group_id == 65 {
+                        let mut max_range = mod_state.get_attribute(attr_ids::MAX_RANGE, &ctx.sde);
+                        if max_range <= 0.0 {
+                            max_range = mod_type.default_attributes.get(&54).copied().unwrap_or(10_000.0);
+                        }
+                        if distance_m > max_range && max_range > 0.0 {
+                            return Some(Err(BridgeRpcError {
+                                code: "TargetOutOfRange".into(),
+                                message: format!(
+                                    "Target {target_id} is at {distance_m:.1} m, exceeding webifier range {max_range:.1} m"
+                                ),
+                            }));
+                        }
+                    }
+                    ctx.upsert_projected_ewar_on_ship(
+                        target_id,
+                        eve_dogma::ProjectedEwarEffect {
+                            source_module_id: module_id,
+                            source_module_type_id: m.type_id,
+                            charge_type_id: m.charge_type_id,
+                            distance: distance_m,
+                            overloaded: method == "Overload",
+                            effective_module: mod_state.clone(),
+                        },
+                    );
+                }
+
             let duration_ms = {
                 let d = mod_state.get_attribute(attr_ids::DURATION, &ctx.sde);
                 if d > 0.0 {
                     d
                 } else {
-                    mod_state.get_attribute(attr_ids::SPEED, &ctx.sde)
+                    let d_high = mod_state.get_attribute(3115, &ctx.sde);
+                    if d_high > 0.0 {
+                        d_high
+                    } else {
+                        mod_state.get_attribute(attr_ids::SPEED, &ctx.sde)
+                    }
                 }
             };
             let duration_s = if duration_ms > 0.0 { duration_ms / 1000.0 } else { 1.0 };
@@ -1680,6 +2452,7 @@ pub async fn handle(
                 }
             });
 
+            let mut active_burst_charge_tid = m.charge_type_id;
             if !linked_turrets.is_empty() && mod_type.group_id != 899 {
                 ctx.db.with_mut_snapshot(|snap| {
                     for &tid in &linked_turrets {
@@ -1692,7 +2465,22 @@ pub async fn handle(
                                     && i.quantity > 0
                                     && ctx.sde.types.get(&i.type_id).is_none_or(|t| t.group_id != 908)
                             }) {
-                                charge_item.quantity = charge_item.quantity.saturating_sub(1);
+                                active_burst_charge_tid = Some(charge_item.type_id);
+                                if mod_type.group_id != 1770 || charge_item.quantity > 1 {
+                                    charge_item.quantity = charge_item.quantity.saturating_sub(1);
+                                }
+                            } else if mod_type.group_id == 1770 && active_burst_charge_tid.is_none() {
+                                if let Some(cargo_charge) = snap.items.values_mut().find(|i| {
+                                    i.location_id == ship_id
+                                        && matches!(i.flag, InventoryFlag::Cargo | InventoryFlag::SpecializedAmmoHold)
+                                        && i.quantity > 0
+                                        && ctx.sde.types.get(&i.type_id).is_some_and(|t| t.group_id == 1771)
+                                }) {
+                                    active_burst_charge_tid = Some(cargo_charge.type_id);
+                                    if cargo_charge.quantity > 1 {
+                                        cargo_charge.quantity = cargo_charge.quantity.saturating_sub(1);
+                                    }
+                                }
                             }
                         }
                     }
@@ -1701,6 +2489,16 @@ pub async fn handle(
 
             let cap_drain_target = mod_state.get_attribute(97, &ctx.sde);
             let cap_transfer_target = mod_state.get_attribute(90, &ctx.sde);
+            let repeat = if is_mjd || grants_interdiction_nullification {
+                0
+            } else {
+                repeat
+            };
+            let effective_max_capacitor = if mod_type.default_attributes.contains_key(&147) {
+                Some(fit.ship.get_attribute(attr_ids::CAPACITOR_CAPACITY, &ctx.sde))
+            } else {
+                None
+            };
 
             let cycle = crate::system_actor::ActiveModuleCycle {
                 ship_id,
@@ -1715,7 +2513,7 @@ pub async fn handle(
                 speed_boost_factor,
                 original_max_velocity: None,
                 linked_turrets,
-                ammo_type_id: m.charge_type_id,
+                ammo_type_id: active_burst_charge_tid,
                 damage_vector: eve_destiny::DamageVector::new(20.0, 20.0, 20.0, 20.0),
                 cap_drain_target,
                 cap_transfer_target,
@@ -1735,6 +2533,9 @@ pub async fn handle(
                 hic_mass_addition,
                 original_signature_radius: None,
                 original_mass: None,
+                mjd_jump_distance_m,
+                grants_interdiction_nullification,
+                effective_max_capacitor,
             };
 
             if let Err(e) = sys.add_module_cycle(cycle).await {
@@ -1749,18 +2550,113 @@ pub async fn handle(
                 }));
             }
 
-            if mod_type.group_id == 1189 {
-                let jump_dist = mod_type.default_attributes.get(&2064).copied().unwrap_or(100_000.0);
-                if let Err(e) = sys.micro_jump(ship_id, jump_dist).await {
+            // Targeted ECM (`group_id == 201`, e.g. `1957` Multispectral ECM I, `2567` Multispectral ECM II)
+            if mod_type.group_id == 201 {
+                let Some(target_id) = target_id_opt else {
                     let _ = sys.remove_module_cycle(ship_id, module_id).await;
                     return Some(Err(BridgeRpcError {
-                        code: "WarpScrambled".into(),
-                        message: e,
+                        code: "TargetRequired".into(),
+                        message: "ECM module requires a locked target".into(),
                     }));
+                };
+                let mut distance_m = 0.0;
+                if let (Ok(Some((_, ship_ball))), Ok(Some((_, target_ball)))) = (
+                    sys.get_ball_snapshot(ship_id).await,
+                    sys.get_ball_snapshot(target_id).await,
+                ) {
+                    distance_m = (ship_ball.position - target_ball.position).length();
+                }
+                let target_type_id_opt = ctx
+                    .db
+                    .with_snapshot(|snap| snap.items.get(&target_id).map(|i| (i.owner_id, i.type_id)));
+                let mut best_sensor_idx = 0usize;
+                let mut target_sensor_strength = 0.0;
+                if let Some((t_owner, t_tid)) = target_type_id_opt {
+                    if let Ok(t_fit) = ctx.get_or_rebuild_ship_fitting(t_owner, target_id) {
+                        for (idx, &s_attr) in [208u16, 209, 210, 211].iter().enumerate() {
+                            let val = t_fit.ship.get_attribute(s_attr, &ctx.sde);
+                            if val > target_sensor_strength {
+                                target_sensor_strength = val;
+                                best_sensor_idx = idx;
+                            }
+                        }
+                    } else if let Some(t_type) = ctx.sde.types.get(&t_tid) {
+                        for (idx, &s_attr) in [208u16, 209, 210, 211].iter().enumerate() {
+                            let val = t_type.default_attributes.get(&s_attr).copied().unwrap_or(0.0);
+                            if val > target_sensor_strength {
+                                target_sensor_strength = val;
+                                best_sensor_idx = idx;
+                            }
+                        }
+                    }
+                } else if let Ok(Some((_, target_ball))) = sys.get_ball_snapshot(target_id).await {
+                    if let Some(t_type) = ctx.sde.types.get(&target_ball.type_id) {
+                        for (idx, &s_attr) in [208u16, 209, 210, 211].iter().enumerate() {
+                            let val = t_type.default_attributes.get(&s_attr).copied().unwrap_or(0.0);
+                            if val > target_sensor_strength {
+                                target_sensor_strength = val;
+                                best_sensor_idx = idx;
+                            }
+                        }
+                    }
+                }
+                if target_sensor_strength <= 0.0 {
+                    target_sensor_strength = 12.0;
+                }
+                let jam_attr_id = 238u16 + (best_sensor_idx as u16);
+                let jam_strength = mod_state.get_attribute(jam_attr_id, &ctx.sde);
+                let optimal_range = mod_state.get_attribute(attr_ids::MAX_RANGE, &ctx.sde);
+                let falloff_range = mod_state.get_attribute(attr_ids::FALLOFF, &ctx.sde);
+                let jam_chance = eve_dogma::compute_ecm_jam_chance(
+                    jam_strength,
+                    target_sensor_strength,
+                    distance_m,
+                    optimal_range,
+                    falloff_range,
+                );
+                let roll = csprng_unit_f64();
+                let jam_duration_s = if duration_s > 0.0 { duration_s } else { 20.0 };
+                if roll < jam_chance && jam_chance > 0.0 {
+                    let _ = sys.apply_ecm_jam(target_id, jam_duration_s).await;
                 }
             }
 
+            // Burst Jammer / ECM Burst (`group_id == 80 || group_id == 353`, e.g. `580` Burst Jammer I, `2117` Burst Jammer II)
+            if mod_type.group_id == 80 || mod_type.group_id == 353 {
+                let mut burst_range = mod_state.get_attribute(142, &ctx.sde);
+                if burst_range <= 0.0 {
+                    burst_range = mod_state.get_attribute(attr_ids::MAX_RANGE, &ctx.sde);
+                }
+                if burst_range <= 0.0 {
+                    burst_range = 10_000.0;
+                }
+                let jam_strengths = [
+                    mod_state.get_attribute(238, &ctx.sde),
+                    mod_state.get_attribute(239, &ctx.sde),
+                    mod_state.get_attribute(240, &ctx.sde),
+                    mod_state.get_attribute(241, &ctx.sde),
+                ];
+                let roll = csprng_unit_f64();
+                let jam_duration_s = if duration_s > 0.0 { duration_s } else { 20.0 };
+                let _ = sys
+                    .apply_ecm_burst(ship_id, burst_range, jam_strengths, jam_duration_s, roll)
+                    .await;
+            }
+            ctx.db.with_mut_snapshot(|snap| {
+                if snap.items.contains_key(&module_id) {
+                    snap.module_active_states.insert(module_id);
+                    if let Some(cid) = active_burst_charge_tid {
+                        snap.module_active_charges.insert(module_id, cid);
+                    }
+                }
+            });
             let _ = fit.activate_module(module_id, method == "Overload", &ctx.sde);
+            if let Some(cid) = active_burst_charge_tid {
+                if let Some(fm) = fit.modules.get_mut(&module_id) {
+                    fm.charge_type_id = Some(cid);
+                    fm.charge_quantity = fm.charge_quantity.max(1);
+                }
+            }
             ctx.store_ship_fitting(ship_id, fit.clone());
 
             ctx.notify(
@@ -1802,6 +2698,80 @@ pub async fn handle(
                     ("disallowAssistance", PyRep::Bool(hic_bubble_radius_m.is_some())),
                     ("weaponTimerSeconds", PyRep::Real(weapon_timer_s)),
                 ])))
+            } else if matches!(mod_type.group_id, 515 | 1770 | 4174) {
+                Some(Ok(PyRep::keyval([
+                    ("moduleID", PyRep::Integer(module_id)),
+                    ("active", PyRep::Bool(true)),
+                    (
+                        "chargeTypeID",
+                        active_burst_charge_tid
+                            .map(|c| PyRep::Integer(c as i64))
+                            .unwrap_or(PyRep::None),
+                    ),
+                ])))
+            } else if mod_type.group_id == 49 || mod_type.default_attributes.contains_key(&197) {
+                let mut scan_range = mod_state.get_attribute(197, &ctx.sde);
+                if scan_range <= 0.0 {
+                    scan_range = mod_type
+                        .default_attributes
+                        .get(&197)
+                        .copied()
+                        .or_else(|| mod_type.default_attributes.get(&54).copied())
+                        .unwrap_or(15_000.0);
+                }
+                let mut ship_pos = DVec3::ZERO;
+                if let Ok(Some((_, ship_ball))) = sys.get_ball_snapshot(ship_id).await {
+                    ship_pos = ship_ball.position;
+                }
+                let asteroids = ctx.db.get_asteroids_in_system(sys_id);
+                let mut scanned_asteroids = Vec::new();
+                for ast in asteroids {
+                    if ast.quantity <= 0 {
+                        continue;
+                    }
+                    let ast_pos = DVec3::new(ast.position.0, ast.position.1, ast.position.2);
+                    let dist = if ship_pos != DVec3::ZERO {
+                        (ship_pos - ast_pos).length()
+                    } else {
+                        0.0
+                    };
+                    if dist <= scan_range || ship_pos == DVec3::ZERO {
+                        let type_name = ctx
+                            .sde
+                            .types
+                            .get(&ast.type_id)
+                            .map(|t| t.name.clone())
+                            .unwrap_or_else(|| format!("Asteroid {}", ast.type_id));
+                        let vol = ctx.sde.types.get(&ast.type_id).map(|t| t.volume).unwrap_or(0.1);
+                        ctx.notify(
+                            crate::router::NotificationTarget::Character(char_id),
+                            "OnAsteroidRevealed",
+                            "character",
+                            vec![
+                                PyRep::Integer(ast.asteroid_id),
+                                PyRep::Integer(ast.type_id as i64),
+                                PyRep::Integer(ast.quantity),
+                            ],
+                        );
+                        scanned_asteroids.push(PyRep::keyval([
+                            ("asteroidID", PyRep::Integer(ast.asteroid_id)),
+                            ("typeID", PyRep::Integer(ast.type_id as i64)),
+                            ("typeName", PyRep::String(type_name)),
+                            ("quantity", PyRep::Integer(ast.quantity)),
+                            ("initialQuantity", PyRep::Integer(ast.initial_quantity)),
+                            ("distance", PyRep::Real(dist)),
+                            ("volume", PyRep::Real(vol)),
+                        ]));
+                    }
+                }
+                Some(Ok(PyRep::keyval([
+                    ("moduleID", PyRep::Integer(module_id)),
+                    ("active", PyRep::Bool(true)),
+                    ("scanRange", PyRep::Real(scan_range)),
+                    ("count", PyRep::Integer(scanned_asteroids.len() as i64)),
+                    ("asteroidCount", PyRep::Integer(scanned_asteroids.len() as i64)),
+                    ("asteroids", PyRep::List(scanned_asteroids)),
+                ])))
             } else {
                 Some(Ok(PyRep::None))
             }
@@ -1817,9 +2787,7 @@ pub async fn handle(
                 // Determine target asteroid ID
                 let target_id_opt = args.get(2).and_then(|a| a.as_i64())
                     .or_else(|| args.get(1).and_then(|a| a.as_i64()))
-                    .or_else(|| kwargs.get("targetID").and_then(|v| v.as_i64()))
-                    .or_else(|| kwargs.get("target").and_then(|v| v.as_i64()))
-                    .or_else(|| kwargs.get("asteroidID").and_then(|v| v.as_i64()));
+                    .or_else(|| kwargs.get("target").and_then(|v| v.as_i64()));
 
                 let target_id = match target_id_opt {
                     Some(tid) if tid > 0 => tid,
@@ -1909,14 +2877,43 @@ pub async fn handle(
                 let base_duration_ms = mod_type.default_attributes.get(&73).copied().unwrap_or(15_000.0);
                 let base_amount = mod_type.default_attributes.get(&77).copied().unwrap_or(10.0);
 
-                let (mining_lvl, astro_lvl, ice_lvl, barge_lvl, exhumer_lvl) = ctx.db.with_snapshot(|snap| {
+                let (
+                    mining_lvl,
+                    astro_lvl,
+                    ice_lvl,
+                    mining_frig_lvl,
+                    expedition_frig_lvl,
+                    barge_lvl,
+                    exhumer_lvl,
+                    mining_destroyer_lvl,
+                    spec_lvl,
+                    implant_mult,
+                ) = ctx.db.with_snapshot(|snap| {
                     let sk = snap.skills.get(&char_id);
                     let m = sk.and_then(|m| m.get(&3386)).map(|s| s.level).unwrap_or(0);
                     let a = sk.and_then(|m| m.get(&3410)).map(|s| s.level).unwrap_or(0);
                     let i = sk.and_then(|m| m.get(&16281)).map(|s| s.level).unwrap_or(0);
+                    let mf = sk.and_then(|m| m.get(&32918)).map(|s| s.level).unwrap_or(0);
+                    let ef = sk.and_then(|m| m.get(&33856)).map(|s| s.level).unwrap_or(0);
                     let b = sk.and_then(|m| m.get(&17940)).map(|s| s.level).unwrap_or(0);
                     let e = sk.and_then(|m| m.get(&22551)).map(|s| s.level).unwrap_or(0);
-                    (m, a, i, b, e)
+                    let md = sk.and_then(|m| m.get(&89238)).map(|s| s.level).unwrap_or(0);
+                    let mut sp = 0u8;
+                    for sid in [60377_u32, 60378, 60379, 60380, 60381, 46152, 46153, 46154, 46155, 12195, 12196] {
+                        let lvl = sk.and_then(|m| m.get(&sid)).map(|s| s.level).unwrap_or(0);
+                        sp = sp.max(lvl);
+                    }
+                    let mut imp_mult = 1.0;
+                    if let Some(imps) = snap.active_implants.get(&char_id) {
+                        for &imp_tid in imps {
+                            if let Some(imp_type) = ctx.sde.types.get(&imp_tid) {
+                                if let Some(&bonus) = imp_type.default_attributes.get(&434) {
+                                    imp_mult *= 1.0 + bonus / 100.0;
+                                }
+                            }
+                        }
+                    }
+                    (m, a, i, mf, ef, b, e, md, sp, imp_mult)
                 });
 
                 let ship_item_res = ctx.db.get_item(ship_id);
@@ -1925,77 +2922,131 @@ pub async fn handle(
                 let mut ship_gas_mult = 1.0;
                 let mut ship_ice_duration_mult = 1.0;
                 let mut ship_laser_duration_mult = 1.0;
+                let mut ship_gas_duration_mult = 1.0;
+                let mut ship_crit_chance_mult = 1.0;
                 if let Some(st) = ship_type {
-                    match st.type_id {
-                        32880 => {
-                            // Venture: 100% mining yield bonus, 100% gas yield
-                            ship_mining_mult *= 2.0;
-                            ship_gas_mult *= 2.0;
+                    // Role bonuses from SDE ship dogma attributes
+                    if let Some(&role_ore_pct) = st.default_attributes.get(&3177) {
+                        ship_mining_mult *= 1.0 + role_ore_pct / 100.0;
+                    } else if let Some(&role_ore_mult) = st.default_attributes.get(&207) {
+                        if role_ore_mult > 0.0 {
+                            ship_mining_mult *= role_ore_mult;
                         }
-                        17480 => {
-                            // Procurer: Mining Barge, +2% yield per Mining Barge level
-                            ship_mining_mult *= 1.0 + 0.02 * (barge_lvl as f64);
-                        }
-                        17478 => {
-                            // Retriever: Mining Barge, +2% yield per Mining Barge level
-                            ship_mining_mult *= 1.0 + 0.02 * (barge_lvl as f64);
-                        }
-                        17476 => {
-                            // Covetor: Mining Barge, +4% yield per Mining Barge level, -3% duration per level
-                            ship_mining_mult *= 1.0 + 0.04 * (barge_lvl as f64);
-                            ship_laser_duration_mult *= 1.0 - 0.03 * (barge_lvl as f64);
-                        }
-                        22546 => {
-                            // Skiff: Exhumer, +3% yield per Exhumers level
-                            ship_mining_mult *= 1.0 + 0.03 * (exhumer_lvl as f64);
-                        }
-                        22548 => {
-                            // Mackinaw: Exhumer, +3% yield per Exhumers level
-                            ship_mining_mult *= 1.0 + 0.03 * (exhumer_lvl as f64);
-                        }
-                        22544 => {
-                            // Hulk: Exhumer, +5% yield per Exhumers level, -4% duration per level
-                            ship_mining_mult *= 1.0 + 0.05 * (exhumer_lvl as f64);
-                            ship_laser_duration_mult *= 1.0 - 0.04 * (exhumer_lvl as f64);
-                        }
-                        89240 | 89647 => {
-                            // Pioneer (Mining Destroyer): 100% mining, 100% ice, 100% gas
-                            ship_mining_mult *= 2.0;
-                            ship_gas_mult *= 2.0;
-                            ship_ice_duration_mult *= 0.50;
-                        }
-                        91174 => {
-                            // Perseverance (Mining Destroyer): 100% mining, 100% ice, 100% gas
-                            ship_mining_mult *= 2.0;
-                            ship_gas_mult *= 2.0;
-                            ship_ice_duration_mult *= 0.50;
-                        }
-                        _ => {
-                            if let Some(&bonus) = st.default_attributes.get(&1178) {
-                                ship_mining_mult *= 1.0 + bonus / 100.0;
-                            }
-                            if let Some(&bonus) = st.default_attributes.get(&1200) {
-                                ship_gas_mult *= 1.0 + bonus / 100.0;
-                            }
-                        }
+                    }
+                    if let Some(&destroyer_role_pct) = st.default_attributes.get(&5986) {
+                        ship_mining_mult *= 1.0 + destroyer_role_pct / 100.0;
+                    }
+                    if let Some(&legacy_ore_pct) = st.default_attributes.get(&1178) {
+                        ship_mining_mult *= 1.0 + legacy_ore_pct / 100.0;
+                    }
+                    if let Some(&role_gas_pct) = st.default_attributes.get(&3239) {
+                        ship_gas_mult *= 1.0 + role_gas_pct / 100.0;
+                    } else if let Some(&legacy_gas_pct) = st.default_attributes.get(&1200) {
+                        ship_gas_mult *= 1.0 + legacy_gas_pct / 100.0;
+                    }
+                    if let Some(&role_ore_dur_pct) = st.default_attributes.get(&3230) {
+                        ship_laser_duration_mult *= (1.0 + role_ore_dur_pct / 100.0).max(0.1);
+                    }
+                    if let Some(&role_ice_dur_pct) = st.default_attributes.get(&3178) {
+                        ship_ice_duration_mult *= (1.0 + role_ice_dur_pct / 100.0).max(0.1);
+                    }
+                    if let Some(&role_gas_dur_pct) = st.default_attributes.get(&3225) {
+                        ship_gas_duration_mult *= (1.0 + role_gas_dur_pct / 100.0).max(0.1);
+                    }
+                    if let Some(&destroyer_gas_dur_pct) = st.default_attributes.get(&5952) {
+                        ship_gas_duration_mult *= (1.0 + destroyer_gas_dur_pct / 100.0).max(0.1);
+                    }
+                    if let Some(&role_crit_pct) = st.default_attributes.get(&6048) {
+                        ship_crit_chance_mult *= 1.0 + role_crit_pct / 100.0;
+                    }
+                    if let Some(&ice_crit_pct) = st.default_attributes.get(&6062) {
+                        ship_crit_chance_mult *= 1.0 + ice_crit_pct / 100.0;
+                    }
+
+                    // Per-skill-level bonuses from SDE ship dogma attributes
+                    if let Some(&frig_ore_pct) = st.default_attributes.get(&1842) {
+                        ship_mining_mult *= 1.0 + (frig_ore_pct / 100.0) * (mining_frig_lvl as f64);
+                    }
+                    if let Some(&frig_gas_dur_pct) = st.default_attributes.get(&3237) {
+                        ship_gas_duration_mult *=
+                            (1.0 + (frig_gas_dur_pct / 100.0) * (mining_frig_lvl as f64)).max(0.1);
+                    }
+                    if let Some(&frig_ice_dur_pct) = st.default_attributes.get(&3240) {
+                        ship_ice_duration_mult *=
+                            (1.0 + (frig_ice_dur_pct / 100.0) * (mining_frig_lvl as f64)).max(0.1);
+                    }
+                    if let Some(&exp_ore_pct) = st.default_attributes.get(&3191) {
+                        ship_mining_mult *=
+                            1.0 + (exp_ore_pct / 100.0) * (expedition_frig_lvl as f64);
+                    }
+                    if let Some(&exp_ice_dur_pct) = st.default_attributes.get(&3167) {
+                        ship_ice_duration_mult *=
+                            (1.0 + (exp_ice_dur_pct / 100.0) * (expedition_frig_lvl as f64))
+                                .max(0.1);
+                    }
+                    if let Some(&barge_ore_pct) = st.default_attributes.get(&3181) {
+                        ship_mining_mult *= 1.0 + (barge_ore_pct / 100.0) * (barge_lvl as f64);
+                    }
+                    if let Some(&barge_ice_dur_pct) = st.default_attributes.get(&3182) {
+                        ship_ice_duration_mult *=
+                            (1.0 + (barge_ice_dur_pct / 100.0) * (barge_lvl as f64)).max(0.1);
+                    }
+                    if let Some(&barge_gas_dur_pct) = st.default_attributes.get(&3183) {
+                        ship_gas_duration_mult *=
+                            (1.0 + (barge_gas_dur_pct / 100.0) * (barge_lvl as f64)).max(0.1);
+                    }
+                    if let Some(&exh_ore_pct) = st.default_attributes.get(&3197) {
+                        ship_mining_mult *= 1.0 + (exh_ore_pct / 100.0) * (exhumer_lvl as f64);
+                    }
+                    if let Some(&exh_ore_dur_pct) = st.default_attributes.get(&3193) {
+                        ship_laser_duration_mult *=
+                            (1.0 + (exh_ore_dur_pct / 100.0) * (exhumer_lvl as f64)).max(0.1);
+                    }
+                    if let Some(&exh_ice_dur_pct) = st.default_attributes.get(&3194) {
+                        ship_ice_duration_mult *=
+                            (1.0 + (exh_ice_dur_pct / 100.0) * (exhumer_lvl as f64)).max(0.1);
+                    }
+                    if let Some(&exh_gas_dur_pct) = st.default_attributes.get(&3226) {
+                        ship_gas_duration_mult *=
+                            (1.0 + (exh_gas_dur_pct / 100.0) * (exhumer_lvl as f64)).max(0.1);
+                    }
+                    if let Some(&dest_ore_pct) = st.default_attributes.get(&5820) {
+                        ship_mining_mult *=
+                            1.0 + (dest_ore_pct / 100.0) * (mining_destroyer_lvl as f64);
                     }
                 }
 
-                let mut mlu_mult = 1.0;
+                // Mining Laser Upgrades (`group_id == 546`, e.g., `22542` MLU I, `28576` MLU II) with EVE Dogma stacking penalty (`feat:mining.mining-upgrades`)
+                let mut mlu_bonuses: Vec<f64> = Vec::new();
                 let mut ice_cycle_bonus = 0.0;
                 for item in &items {
                     if item.location_id == ship_id && (item.flag as u16) >= 11 && (item.flag as u16) <= 34 {
+                        let is_online = fit
+                            .modules
+                            .get(&item.item_id)
+                            .map(|m| m.state != eve_dogma::ModuleState::Offline)
+                            .unwrap_or(true);
+                        if !is_online {
+                            continue;
+                        }
                         if let Some(it) = ctx.sde.types.get(&item.type_id) {
                             if it.group_id == 546 {
                                 if let Some(&b) = it.default_attributes.get(&434) {
-                                    mlu_mult *= 1.0 + b / 100.0;
+                                    mlu_bonuses.push(b / 100.0);
                                 }
                                 if let Some(&b) = it.default_attributes.get(&780) {
                                     ice_cycle_bonus += b / 100.0;
                                 }
+                            } else if item.type_id == 22291 {
+                                mlu_bonuses.push(0.09);
                             }
                         }
                     }
+                }
+                mlu_bonuses.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+                let mut mlu_mult = 1.0;
+                for (i, &b) in mlu_bonuses.iter().enumerate() {
+                    mlu_mult *= 1.0 + b * eve_dogma::stacking_penalty_factor(i);
                 }
 
                 let crystal_item_opt = items.iter().find(|i| {
@@ -2004,6 +3055,8 @@ pub async fn handle(
                         && ctx.sde.types.get(&i.type_id).map(|t| t.group_id == 482 || t.group_id == 663).unwrap_or(false)
                 });
                 let mut crystal_yield_mult = 1.0;
+                let mut crystal_base_mult = 1.0;
+                let mut crystal_matched = false;
                 let mut crystal_damage_inflicted = 0.0;
                 let mut crystal_destroyed = false;
                 let mut crystal_id_to_update = None;
@@ -2016,9 +3069,14 @@ pub async fn handle(
                         let crystal_name = c_type.name.to_lowercase();
                         let ore_base = ore_name.split_whitespace().last().unwrap_or(&ore_name);
                         let crystal_matches = crystal_name.contains(ore_base) || crystal_name.contains(&ore_name);
+                        crystal_matched = crystal_matches;
                         if crystal_matches {
-                            let mult = c_type.default_attributes.get(&782).copied().unwrap_or(1.0);
-                            crystal_yield_mult = mult;
+                            let mult = c_type.default_attributes.get(&782).copied().unwrap_or(1.5);
+                            crystal_base_mult = mult;
+                            crystal_yield_mult = mult * (1.0 + 0.02 * (spec_lvl as f64));
+                        } else {
+                            crystal_base_mult = 0.25;
+                            crystal_yield_mult = 0.25;
                         }
                         let vol_damage = c_type.default_attributes.get(&784).copied().unwrap_or(0.025);
                         let current_hp = crystal.dynamic_attributes.get(&eve_sde::attr_ids::HP_STRUCT).copied().unwrap_or(1.0);
@@ -2032,33 +3090,108 @@ pub async fn handle(
                     }
                 }
 
-                let fleet_boost_active = kwargs.get("fleetBoost").and_then(|v| v.as_bool()).unwrap_or(false);
+                // Evaluate active Fleet Mining Foreman Burst (`group_id == 1770`, charge `group_id == 1771`) in same solar system (`feat:mining.foreman-bursts`)
+                let fleet_boost_active = ctx.db.with_snapshot(|snap| {
+                    let mut candidate_chars = vec![char_id];
+                    for fl in snap.fleets.values() {
+                        if fl.members.contains(&char_id) {
+                            for &m_id in &fl.members {
+                                if !candidate_chars.contains(&m_id) {
+                                    candidate_chars.push(m_id);
+                                }
+                            }
+                        }
+                    }
+                    for cand_id in candidate_chars {
+                        let Some(ch) = snap.characters.get(&cand_id) else {
+                            continue;
+                        };
+                        if ch.solar_system_id != sys_id_val || ch.station_id.is_some() {
+                            continue;
+                        }
+                        let booster_ship_id = ch.active_ship_id;
+                        let has_active_foreman_burst = snap.items.values().any(|it| {
+                            if it.location_id != booster_ship_id
+                                || !(27..=34).contains(&(it.flag as u16))
+                            {
+                                return false;
+                            }
+                            let is_burst_mod = ctx
+                                .sde
+                                .types
+                                .get(&it.type_id)
+                                .is_some_and(|t| t.group_id == 1770);
+                            if !is_burst_mod {
+                                return false;
+                            }
+                            let is_active = snap.module_active_states.contains(&it.item_id);
+                            if !is_active {
+                                return false;
+                            }
+                            let has_charge = snap.module_active_charges.contains_key(&it.item_id)
+                                || snap.items.values().any(|ch_it| {
+                                    ch_it.location_id == booster_ship_id
+                                        && (ch_it.flag == it.flag
+                                            || ch_it.flag == InventoryFlag::Cargo
+                                            || ch_it.flag == InventoryFlag::SpecializedAmmoHold)
+                                        && ch_it.quantity > 0
+                                        && ctx
+                                            .sde
+                                            .types
+                                            .get(&ch_it.type_id)
+                                            .is_some_and(|t| t.group_id == 1771)
+                                });
+                            has_charge
+                        });
+                        if has_active_foreman_burst {
+                            return true;
+                        }
+                    }
+                    false
+                });
                 let fleet_duration_mult = if fleet_boost_active { 0.85 } else { 1.0 };
                 let fleet_waste_mult = if fleet_boost_active { 0.70 } else { 1.0 };
 
-                let crit_chance = mod_type.default_attributes.get(&5967).copied().unwrap_or(0.01);
-                let crit_bonus = mod_type.default_attributes.get(&5969).copied().unwrap_or(2.0);
-                let force_crit = kwargs.get("forceCrit").and_then(|v| v.as_bool())
-                    .or_else(|| kwargs.get("crit").and_then(|v| v.as_bool()))
-                    .unwrap_or(false);
-                let is_crit = force_crit || (crit_chance > 0.0 && ((target_id + module_id) % 100 == 0));
+                // Probabilistic mining critical hit check against SDE `miningCritChance` (`5967`) (`feat:mining.mining-crits`)
+                let base_crit_chance = mod_item
+                    .dynamic_attributes
+                    .get(&5967)
+                    .copied()
+                    .or_else(|| mod_type.default_attributes.get(&5967).copied())
+                    .unwrap_or(0.01);
+                let crit_chance = (base_crit_chance * ship_crit_chance_mult).clamp(0.0, 1.0);
+                let crit_bonus = mod_item
+                    .dynamic_attributes
+                    .get(&5969)
+                    .copied()
+                    .or_else(|| mod_type.default_attributes.get(&5969).copied())
+                    .unwrap_or(2.0);
+                {
+                    let mut wcs = ctx
+                        .weapon_cycle_state
+                        .write()
+                        .unwrap_or_else(|e| e.into_inner());
+                    let entry = wcs.entry(module_id).or_insert((None, 0));
+                    entry.1 = entry.1.saturating_add(1);
+                }
+                let is_crit = crit_chance > 0.0 && csprng_unit_f64() < crit_chance;
                 let crit_yield_mult = if is_crit { crit_bonus } else { 1.0 };
 
                 let is_ice = mod_type.group_id == 464 && (mod_type.type_id == 16278 || mod_type.type_id == 22229 || mod_type.name.contains("Ice"));
                 let is_gas = mod_type.group_id == 737 || mod_type.group_id == 4138;
-                let (duration_ms, volume_yield) = if is_ice {
+                let (duration_ms, base_volume_yield) = if is_ice {
                     let duration = (base_duration_ms * (1.0 - 0.05 * (ice_lvl as f64) + ice_cycle_bonus) * ship_ice_duration_mult * fleet_duration_mult).max(1000.0);
-                    (duration, base_amount * crit_yield_mult)
+                    (duration, base_amount)
                 } else if is_gas {
-                    (base_duration_ms * fleet_duration_mult, base_amount * ship_gas_mult * crit_yield_mult)
+                    (base_duration_ms * ship_gas_duration_mult * fleet_duration_mult, base_amount * ship_gas_mult)
                 } else {
                     let skill_mult = (1.0 + 0.05 * (mining_lvl as f64)) * (1.0 + 0.05 * (astro_lvl as f64));
-                    let vol = base_amount * skill_mult * ship_mining_mult * mlu_mult * crystal_yield_mult * crit_yield_mult;
+                    let vol = base_amount * skill_mult * implant_mult * ship_mining_mult * mlu_mult * crystal_yield_mult;
                     (base_duration_ms * ship_laser_duration_mult * fleet_duration_mult, vol)
                 };
 
                 let ore_unit_volume = ctx.sde.types.get(&asteroid.type_id).map(|t| t.volume).unwrap_or(0.1).max(0.001);
-                let potential_units = ((volume_yield / ore_unit_volume).floor() as i64).max(1);
+                let potential_units = ((base_volume_yield / ore_unit_volume).floor() as i64).max(1);
 
                 let (actual_units, cycle_time_ms, depleted) = if asteroid.quantity < potential_units {
                     let actual = asteroid.quantity;
@@ -2066,6 +3199,12 @@ pub async fn handle(
                     (actual, partial_cycle.max(1000), true)
                 } else {
                     (potential_units, duration_ms as i64, asteroid.quantity == potential_units)
+                };
+
+                let bonus_crit_units = if is_crit {
+                    ((actual_units as f64) * (crit_bonus - 1.0)).round().max(1.0) as i64
+                } else {
+                    0
                 };
 
                 let waste_prob = (mod_type.default_attributes.get(&3154).copied().unwrap_or(0.0) * fleet_waste_mult).clamp(0.0, 1.0);
@@ -2106,121 +3245,96 @@ pub async fn handle(
                 let remaining_vol = (hold_capacity - used_volume).max(0.0);
                 let max_fit_units = (remaining_vol / ore_unit_volume).floor() as i64;
 
-                let mine_to_jetcan = kwargs.get("mineToJetcan").and_then(|v| v.as_bool())
-                    .or_else(|| kwargs.get("toJetcan").and_then(|v| v.as_bool()))
-                    .unwrap_or(false);
-
-                let (units_to_deposit, hold_full, to_jetcan) = if mine_to_jetcan {
-                    (actual_units, false, true)
-                } else if max_fit_units < actual_units {
-                    let overflow_to_jetcan = kwargs.get("allowJetcan").and_then(|v| v.as_bool()).unwrap_or(false);
-                    if overflow_to_jetcan {
-                        (actual_units, true, true)
-                    } else {
-                        (max_fit_units.max(0), true, false)
-                    }
+                let total_cycle_units = actual_units + bonus_crit_units;
+                let (rock_units_extracted, units_to_deposit, hold_full) = if max_fit_units < total_cycle_units {
+                    let fit_capped = max_fit_units.max(0);
+                    (fit_capped.min(actual_units), fit_capped, true)
                 } else {
-                    (actual_units, false, false)
+                    (actual_units, total_cycle_units, false)
                 };
 
                 let mut deposited_units_out = 0;
-                let mut jetcan_id_out = 0i64;
+                let mut rock_depleted_out = depleted;
                 let res: Result<(), eve_db::DbError> = ctx.db.try_with_mut_snapshot(|snap| {
-                    let total_removed_from_rock = units_to_deposit + residue_units;
+                    if snap.items.contains_key(&module_id) {
+                        snap.module_active_states.insert(module_id);
+                    }
+                    let total_removed_from_rock = rock_units_extracted + residue_units;
                     if let Some(ast) = snap.asteroids.get_mut(&target_id) {
                         ast.quantity = ast.quantity.saturating_sub(total_removed_from_rock);
+                        rock_depleted_out = ast.quantity == 0;
+                    }
+                    if rock_depleted_out {
+                        let mut newly_cleared_ids = Vec::new();
+                        if let Some(anoms) = snap.cosmic_anomalies.get_mut(&sys_id_val) {
+                            for anom in anoms.iter_mut() {
+                                if !anom.cleared {
+                                    let anom_pos = DVec3::from_array(anom.position);
+                                    if anom_pos.distance(ast_pos) <= 50_000.0 {
+                                        let any_remaining = snap.asteroids.values().any(|a| {
+                                            a.solar_system_id == sys_id_val
+                                                && a.quantity > 0
+                                                && DVec3::new(
+                                                    a.position.0,
+                                                    a.position.1,
+                                                    a.position.2,
+                                                )
+                                                .distance(anom_pos)
+                                                    <= 50_000.0
+                                        });
+                                        if !any_remaining {
+                                            anom.cleared = true;
+                                            anom.remaining_volume = 0.0;
+                                            newly_cleared_ids.push(anom.anomaly_id.clone());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if !newly_cleared_ids.is_empty() {
+                            if let Some(sigs) = snap.cosmic_signatures.get_mut(&sys_id_val) {
+                                for s in sigs.iter_mut() {
+                                    if newly_cleared_ids.contains(&s.signature_id) {
+                                        s.collapsed = true;
+                                        s.signal_strength = 0.0;
+                                    }
+                                }
+                            }
+                        }
                     }
                     if units_to_deposit > 0 {
                         deposited_units_out = units_to_deposit;
-                        if to_jetcan {
-                            // Find existing jetcan in system nearby or create new
-                            let existing_can = snap.items.values().find(|i| {
-                                i.owner_id == char_id && i.type_id == 23 && i.flag == InventoryFlag::None
-                            }).map(|i| i.item_id);
-
-                            let can_id = match existing_can {
-                                Some(cid) => cid,
-                                None => {
-                                    snap.next_entity_id += 1;
-                                    let new_can_id = snap.next_entity_id;
-                                    snap.items.insert(
-                                        new_can_id,
-                                        eve_db::InventoryItemRecord {
-                                            item_id: new_can_id,
-                                            type_id: 23, // Cargo Container (jetcan)
-                                            owner_id: char_id,
-                                            location_id: sys_id_val as i64,
-                                            flag: InventoryFlag::None,
-                                            quantity: 1,
-                                            singleton: true,
-                                            version: 1,
-                                            ..Default::default()
-                                        },
-                                    );
-                                    new_can_id
-                                }
-                            };
-                            jetcan_id_out = can_id;
-
-                            let existing_opt = snap.items.values_mut().find(|i| {
-                                i.location_id == can_id
-                                    && i.type_id == asteroid.type_id
-                                    && !i.singleton
-                            });
-                            if let Some(existing) = existing_opt {
-                                existing.quantity += units_to_deposit as i32;
-                                existing.version += 1;
-                            } else {
-                                snap.next_entity_id += 1;
-                                let new_id = snap.next_entity_id;
-                                snap.items.insert(
-                                    new_id,
-                                    eve_db::InventoryItemRecord {
-                                        item_id: new_id,
-                                        type_id: asteroid.type_id,
-                                        owner_id: char_id,
-                                        location_id: can_id,
-                                        flag: InventoryFlag::Cargo,
-                                        quantity: units_to_deposit as i32,
-                                        singleton: false,
-                                        version: 1,
-                                        ..Default::default()
-                                    },
-                                );
-                            }
+                        let existing_opt = snap.items.values_mut().find(|i| {
+                            i.location_id == ship_id
+                                && i.flag == destination_flag
+                                && i.type_id == asteroid.type_id
+                                && !i.singleton
+                                && !i.is_blueprint_copy
+                        });
+                        if let Some(existing) = existing_opt {
+                            existing.quantity += units_to_deposit as i32;
+                            existing.version += 1;
                         } else {
-                            let existing_opt = snap.items.values_mut().find(|i| {
-                                i.location_id == ship_id
-                                    && i.flag == destination_flag
-                                    && i.type_id == asteroid.type_id
-                                    && !i.singleton
-                                    && !i.is_blueprint_copy
-                            });
-                            if let Some(existing) = existing_opt {
-                                existing.quantity += units_to_deposit as i32;
-                                existing.version += 1;
-                            } else {
-                                snap.next_entity_id += 1;
-                                let new_id = snap.next_entity_id;
-                                snap.items.insert(
-                                    new_id,
-                                    eve_db::InventoryItemRecord {
-                                        item_id: new_id,
-                                        type_id: asteroid.type_id,
-                                        owner_id: char_id,
-                                        location_id: ship_id,
-                                        flag: destination_flag,
-                                        quantity: units_to_deposit as i32,
-                                        singleton: false,
-                                        version: 1,
-                                        dynamic_attributes: HashMap::new(),
-                                        source_mutaplasmid_id: None,
-                                        insured_payout_isk: 0.0,
-                                        is_blueprint_copy: false,
-                                        blueprint_runs_remaining: None,
-                                    },
-                                );
-                            }
+                            snap.next_entity_id += 1;
+                            let new_id = snap.next_entity_id;
+                            snap.items.insert(
+                                new_id,
+                                eve_db::InventoryItemRecord {
+                                    item_id: new_id,
+                                    type_id: asteroid.type_id,
+                                    owner_id: char_id,
+                                    location_id: ship_id,
+                                    flag: destination_flag,
+                                    quantity: units_to_deposit as i32,
+                                    singleton: false,
+                                    version: 1,
+                                    dynamic_attributes: HashMap::new(),
+                                    source_mutaplasmid_id: None,
+                                    insured_payout_isk: 0.0,
+                                    is_blueprint_copy: false,
+                                    blueprint_runs_remaining: None,
+                                },
+                            );
                         }
                     }
                     if let Some(cid) = crystal_id_to_update {
@@ -2237,6 +3351,24 @@ pub async fn handle(
                     return Some(Err(BridgeRpcError { code: "MiningFailed".into(), message: format!("{e:?}") }));
                 }
 
+                if deposited_units_out > 0 {
+                    let _ = ctx.db.record_mining_ledger_entry(
+                        char_id,
+                        sys_id_val,
+                        asteroid.type_id,
+                        deposited_units_out,
+                        ctx.now_unix_secs(),
+                    );
+
+                    // Guarded gas sites (wormhole reservoirs and guarded nebulae) spawn defenders; no guarded gas
+                    // site is modelled yet (see `mining_sites::GAS_SITES`), so harvesting spawns no NPCs.
+                }
+
+                if rock_depleted_out {
+                    let sys_handle = ctx.systems.get_or_spawn(sys_id_val);
+                    sys_handle.try_remove_ball(target_id);
+                }
+
                 ctx.notify(
                     crate::router::NotificationTarget::Character(char_id),
                     "OnOreMined",
@@ -2244,7 +3376,7 @@ pub async fn handle(
                     vec![
                         PyRep::Integer(asteroid.type_id as i64),
                         PyRep::Integer(deposited_units_out),
-                        PyRep::Integer(if to_jetcan { InventoryFlag::None as i64 } else { destination_flag as i64 }),
+                        PyRep::Integer(destination_flag as i64),
                     ],
                 );
                 ctx.notify(
@@ -2260,6 +3392,7 @@ pub async fn handle(
                 );
 
                 let _ = fit.activate_module(module_id, method == "Overload", &ctx.sde);
+                let cpu_load = fit.ship.get_attribute(eve_sde::attr_ids::CPU_LOAD, &ctx.sde);
                 ctx.store_ship_fitting(ship_id, fit);
 
                 Some(Ok(PyRep::keyval([
@@ -2267,19 +3400,26 @@ pub async fn handle(
                     ("targetID", PyRep::Integer(target_id)),
                     ("cycleTimeMs", PyRep::Integer(cycle_time_ms)),
                     ("yieldUnits", PyRep::Integer(deposited_units_out)),
+                    ("normalUnits", PyRep::Integer(rock_units_extracted)),
+                    ("bonusCritUnits", PyRep::Integer(bonus_crit_units)),
                     ("yieldVolume", PyRep::Real(deposited_units_out as f64 * ore_unit_volume)),
                     ("oreTypeID", PyRep::Integer(asteroid.type_id as i64)),
-                    ("destinationFlag", PyRep::Integer(if to_jetcan { InventoryFlag::None as i64 } else { destination_flag as i64 })),
-                    ("depleted", PyRep::Bool(depleted)),
+                    ("destinationFlag", PyRep::Integer(destination_flag as i64)),
+                    ("flagID", PyRep::Integer(destination_flag as i64)),
+                    ("depleted", PyRep::Bool(rock_depleted_out)),
                     ("holdFull", PyRep::Bool(hold_full)),
                     ("residueUnits", PyRep::Integer(residue_units)),
+                    ("crystalMatched", PyRep::Bool(crystal_matched)),
+                    ("crystalMultiplier", PyRep::Real(crystal_base_mult)),
                     ("crystalDamage", PyRep::Real(crystal_damage_inflicted)),
                     ("crystalDestroyed", PyRep::Bool(crystal_destroyed)),
+                    ("implantYieldMultiplier", PyRep::Real(implant_mult)),
                     ("isCrit", PyRep::Bool(is_crit)),
                     ("critYieldMultiplier", PyRep::Real(crit_yield_mult)),
                     ("fleetBoostActive", PyRep::Bool(fleet_boost_active)),
-                    ("toJetcan", PyRep::Bool(to_jetcan)),
-                    ("jetcanID", PyRep::Integer(jetcan_id_out)),
+                    ("mluCount", PyRep::Integer(mlu_bonuses.len() as i64)),
+                    ("mluMultiplier", PyRep::Real(mlu_mult)),
+                    ("cpuLoad", PyRep::Real(cpu_load)),
                 ])))
             }
         }
@@ -2301,6 +3441,7 @@ pub async fn handle(
                 let sys = ctx.systems.get_or_spawn(sys_id);
                 let _ = sys.remove_module_cycle(ship_id, module_id).await;
             }
+            ctx.remove_projected_ewar_by_module(module_id);
 
             ctx.notify(
                 crate::router::NotificationTarget::Character(char_id),
@@ -2314,6 +3455,11 @@ pub async fn handle(
                 "charid",
                 vec![PyRep::Integer(module_id), PyRep::String(effect_name), PyRep::Bool(false)],
             );
+
+            ctx.db.with_mut_snapshot(|snap| {
+                snap.module_active_states.remove(&module_id);
+                snap.module_active_charges.remove(&module_id);
+            });
 
             let items = ctx.db.get_items_for_character(char_id);
             let mod_item_opt = items.iter().find(|i| i.item_id == module_id && i.owner_id == char_id);
@@ -3825,14 +4971,47 @@ pub async fn handle(
             });
             match res {
                 Ok(sid) => {
-                    if let Some(prev) = session.ship_id {
+                    let prev_ship_id = session.ship_id;
+                    if let Some(prev) = prev_ship_id {
                         ctx.invalidate_ship_fitting(prev);
                     }
                     ctx.invalidate_ship_fitting(sid);
                     session.ship_id = Some(sid);
+                    if prev_ship_id != Some(sid) {
+                        let changes = vec![(
+                            PyRep::String("shipid".to_string()),
+                            PyRep::Tuple(vec![
+                                prev_ship_id.map(PyRep::Integer).unwrap_or(PyRep::None),
+                                PyRep::Integer(sid),
+                            ]),
+                        )];
+                        ctx.notify(
+                            crate::router::NotificationTarget::Character(char_id),
+                            "OnSessionChanged",
+                            "clientID",
+                            vec![
+                                PyRep::Bool(false),
+                                PyRep::Integer(session.session_id as i64),
+                                PyRep::Dict(changes),
+                            ],
+                        );
+                        ctx.notify(
+                            crate::router::NotificationTarget::Character(char_id),
+                            "ProcessActiveShipChanged",
+                            "charid",
+                            vec![
+                                PyRep::Integer(sid),
+                                prev_ship_id.map(PyRep::Integer).unwrap_or(PyRep::None),
+                            ],
+                        );
+                    }
                     Some(Ok(PyRep::keyval([
                         ("characterID", PyRep::Integer(char_id)),
                         ("shipID", PyRep::Integer(sid)),
+                        (
+                            "oldShipID",
+                            prev_ship_id.map(PyRep::Integer).unwrap_or(PyRep::None),
+                        ),
                     ])))
                 }
                 Err(e) => Some(Err(e)),

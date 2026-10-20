@@ -115,7 +115,21 @@ async fn test_mn13_moon_extraction_lifecycle_and_fracture() {
     };
     assert_eq!(ore_list.len(), 3, "Expected 3 moon ore types in composition");
 
-    // 2. Start new extraction
+    // 2. Start new extraction (verify < 6d duration is rejected, then start 6d = 518,400s extraction)
+    let short_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "moonExtractions",
+            None,
+            "StartNewExtraction",
+            &[PyRep::Integer(structure_id), PyRep::Integer(86_400)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Duration < 6d must be rejected");
+    assert_eq!(short_err.code, "InvalidExtractionDuration");
+
     let now = ctx.now_unix();
     let start_res = ctx
         .dispatch_rpc(
@@ -125,9 +139,7 @@ async fn test_mn13_moon_extraction_lifecycle_and_fracture() {
             "StartNewExtraction",
             &[
                 PyRep::Integer(structure_id),
-                PyRep::Integer(now as i64),
-                PyRep::Integer((now + 86_400) as i64),
-                PyRep::Integer((now + 172_800) as i64),
+                PyRep::Integer((now + 518_400) as i64),
             ],
             &kw,
             None,
@@ -140,6 +152,21 @@ async fn test_mn13_moon_extraction_lifecycle_and_fracture() {
     };
     assert_eq!(start_kv["status"].as_str(), Some("Started"));
     assert_eq!(start_kv["structureID"].as_i64(), Some(structure_id));
+
+    // Starting a second extraction while one is already active must fail
+    let active_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "moonExtractions",
+            None,
+            "StartNewExtraction",
+            &[PyRep::Integer(structure_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("StartNewExtraction while Started must fail");
+    assert_eq!(active_err.code, "ExtractionAlreadyActive");
 
     // 3. Query active extraction details
     let ext_details = ctx
@@ -216,6 +243,24 @@ async fn test_mn13_moon_extraction_lifecycle_and_fracture() {
     .await
     .expect("Restart StartNewExtraction");
 
+    // Fracturing before chunk arrival must be rejected
+    let early_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "moonExtractions",
+            None,
+            "FractureChunkWithStructure",
+            &[PyRep::Integer(structure_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Fracture before chunk arrival must fail");
+    assert_eq!(early_err.code, "ChunkNotReadyToFracture");
+
+    // Advance virtual clock to chunk arrival (6d = 518,400s)
+    ctx.advance_secs(518_400);
+
     let frac_res = ctx
         .dispatch_rpc(
             &mut sess,
@@ -229,47 +274,69 @@ async fn test_mn13_moon_extraction_lifecycle_and_fracture() {
         .await
         .expect("FractureChunkWithStructure RPC");
 
+    // Repeating FractureChunkWithStructure on an already-fractured extraction must fail
+    let dup_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "moonExtractions",
+            None,
+            "FractureChunkWithStructure",
+            &[PyRep::Integer(structure_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Repeated FractureChunkWithStructure must fail");
+    assert_eq!(dup_err.code, "ExtractionAlreadyFractured");
+
     let PyRep::KeyVal(frac_kv) = frac_res else {
         panic!("Expected KeyVal from FractureChunkWithStructure");
     };
     assert_eq!(frac_kv["fractured"], PyRep::Bool(true));
     assert_eq!(frac_kv["status"].as_str(), Some("Fractured"));
     assert_eq!(frac_kv["asteroidCount"].as_i64(), Some(3));
+    let PyRep::List(ast_id_list) = &frac_kv["asteroidIDs"] else {
+        panic!("Expected asteroidIDs list");
+    };
+    let spawned_ast_id = ast_id_list[0].as_i64().unwrap();
 
     // Verify spawned asteroid entities exist in system
     let handle = ctx.systems.get_or_spawn(system_id);
-    let spawned_ast_id = 950_000_000 + structure_id % 100_000 * 100 + 1;
     let ast_state = handle.get_asteroid_state(spawned_ast_id).await.unwrap();
     assert!(ast_state.is_some(), "Spawned moon asteroid entity must exist in solar system");
-    assert_eq!(ast_state.unwrap().remaining_units, 5_000);
+    assert!(ast_state.unwrap().remaining_units >= 500);
 }
 
 // ============================================================================
 // MN-14: Auto Moon Mining Service (Metenox Moon Drill)
 // ============================================================================
 #[tokio::test]
+// parity: feat:mining.metenox
 async fn test_mn14_auto_moon_mining_service() {
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let mut sess = create_auth_session(&ctx, 1401).await;
 
+    let highsec_structure_id = 1_040_000_000_140_i64;
     let structure_id = 1_040_000_000_141_i64;
+    let gas_item_id = 710_000_141_i64;
     let corp_id = 1_000_170_i64;
-    let system_id = 30_000_142_u32;
+    let highsec_system_id = 30_000_142_u32; // Jita (High-Sec 0.95)
+    let lowsec_system_id = 30_000_012_u32; // Asabona (Low-Sec 0.32)
 
     ctx.db.with_mut_snapshot(|snap| {
         snap.structures.insert(
-            structure_id,
+            highsec_structure_id,
             UpwellStructureRecord {
-                structure_id,
-                type_id: 81824, // Metenox Moon Drill
+                structure_id: highsec_structure_id,
+                type_id: 81826, // Metenox Moon Drill
                 owner_corp_id: corp_id,
-                solar_system_id: system_id,
-                name: "Jita Auto Moon Drill".into(),
+                solar_system_id: highsec_system_id,
+                name: "Highsec Invalid Moon Drill".into(),
                 position: [200_000.0, 0.0, -100_000.0],
                 state: "ShieldVulnerable".into(),
                 quantum_core_installed: true,
-                fuel_blocks: 1_000,
+                fuel_blocks: 100,
                 shield_hp: 50_000.0,
                 armor_hp: 50_000.0,
                 hull_hp: 50_000.0,
@@ -278,24 +345,75 @@ async fn test_mn14_auto_moon_mining_service() {
                 last_damage_unix: 0,
             },
         );
+        snap.structures.insert(
+            structure_id,
+            UpwellStructureRecord {
+                structure_id,
+                type_id: 81826, // Metenox Moon Drill
+                owner_corp_id: corp_id,
+                solar_system_id: lowsec_system_id,
+                name: "Asabona Auto Moon Drill".into(),
+                position: [200_000.0, 0.0, -100_000.0],
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 100,
+                shield_hp: 50_000.0,
+                armor_hp: 50_000.0,
+                hull_hp: 50_000.0,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+            },
+        );
+        // Seed actual Magmatic Gas (type 81143) item in the Low-Sec Metenox structure inventory
+        snap.items.insert(
+            gas_item_id,
+            InventoryItemRecord {
+                item_id: gas_item_id,
+                type_id: 81143, // Magmatic Gas
+                owner_id: corp_id,
+                location_id: structure_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 50,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
 
+        // Seed a stale record with inflated `magmatic_gas_remaining: 999` to verify authoritative inventory sync
         snap.auto_moon_miners.insert(
             structure_id,
             AutoMoonMinerRecord {
                 structure_id,
-                fuel_units_remaining: 100,
-                magmatic_gas_remaining: 50,
-                efficiency: 0.40, // 40% efficiency
+                fuel_units_remaining: 999,
+                magmatic_gas_remaining: 999,
+                efficiency: 0.40,
                 cycle_duration_seconds: 3600,
                 last_cycle_unix: ctx.now_unix(),
-                ore_type_id: 45492, // Bitumens
+                ore_type_id: 16633,
                 hourly_yield: 500,
-                status: "Online".into(),
+                status: "Active".into(),
             },
         );
     });
 
-    // 1. RequestMiningDetails
+    // 0. High-Sec Metenox Moon Drill must be rejected (`InvalidSystemSecurity`)
+    let hs_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "autoMoonMining",
+            None,
+            "RequestMiningDetails",
+            &[PyRep::Integer(highsec_structure_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Metenox Moon Drill in High-Sec must be rejected");
+    assert_eq!(hs_err.code, "InvalidSystemSecurity");
+
+    // 1. RequestMiningDetails in Low-Sec (`Asabona`)
     let details_res = ctx
         .dispatch_rpc(
             &mut sess,
@@ -312,11 +430,37 @@ async fn test_mn14_auto_moon_mining_service() {
     let PyRep::KeyVal(det_kv) = details_res else {
         panic!("Expected KeyVal from RequestMiningDetails");
     };
-    assert_eq!(det_kv["status"].as_str(), Some("Online"));
-    assert_eq!(det_kv["hourlyYield"].as_i64(), Some(500));
+    assert_eq!(det_kv["status"].as_str(), Some("Active"));
+    // Authoritative inventory sync must overwrite stale 999 with actual 100 fuel and 50 gas
     assert_eq!(det_kv["fuelRemaining"].as_i64(), Some(100));
     assert_eq!(det_kv["magmaticGasRemaining"].as_i64(), Some(50));
     assert_eq!(det_kv["efficiency"].as_f64(), Some(0.40));
+    let hourly_yield = det_kv["hourlyYield"].as_i64().unwrap();
+    assert!(hourly_yield > 0, "Hourly moon material yield must be positive");
+    let primary_mat_tid = det_kv["primaryMaterialTypeID"].as_i64().unwrap() as u32;
+    assert_eq!(
+        ctx.sde.types.get(&primary_mat_tid).map(|t| t.group_id),
+        Some(427),
+        "Metenox primary output type {primary_mat_tid} must be a Moon Material (group 427)"
+    );
+
+    // Requesting output before any cycle has elapsed must fail with CycleNotComplete
+    let early_cycle_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "autoMoonMining",
+            None,
+            "RequestMiningCycleOutput",
+            &[PyRep::Integer(structure_id), PyRep::Integer(2)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("RequestMiningCycleOutput before cycle completion must fail");
+    assert_eq!(early_cycle_err.code, "CycleNotComplete");
+
+    // Advance virtual clock by 2 hours (7,200s) for 2 hourly cycles
+    ctx.advance_secs(7_200);
 
     // 2. RequestMiningCycleOutput (2 cycles)
     let cycle_res = ctx
@@ -335,29 +479,40 @@ async fn test_mn14_auto_moon_mining_service() {
     let PyRep::KeyVal(cyc_kv) = cycle_res else {
         panic!("Expected KeyVal from RequestMiningCycleOutput");
     };
-    // Expected output: 500 yield * 0.40 efficiency * 2 cycles = 400 units
+    let units_produced = cyc_kv["unitsProduced"].as_i64().unwrap();
     assert_eq!(cyc_kv["cyclesProcessed"].as_i64(), Some(2));
-    assert_eq!(cyc_kv["unitsProduced"].as_i64(), Some(400));
-    assert_eq!(cyc_kv["oreTypeID"].as_i64(), Some(45492));
+    assert!(units_produced > 0, "2 Metenox cycles must produce moon materials");
     assert_eq!(cyc_kv["fuelConsumed"].as_i64(), Some(10));
     assert_eq!(cyc_kv["magmaticGasConsumed"].as_i64(), Some(20));
     assert_eq!(cyc_kv["fuelRemaining"].as_i64(), Some(90));
 
-    // 3. Verify deposit into structure hangar
-    let items_in_hangar = ctx.db.with_snapshot(|snap| {
+    // Verify actual Magmatic Gas item (type 81143) was deducted from 50 -> 30
+    let rem_gas_qty = ctx.db.with_snapshot(|snap| {
+        snap.items
+            .get(&gas_item_id)
+            .map(|it| it.quantity)
+            .unwrap_or(0)
+    });
+    assert_eq!(rem_gas_qty, 30, "Magmatic Gas item quantity must be deducted from 50 to 30");
+
+    // 3. Verify Moon Materials (group 427) deposited into structure hangar
+    let moon_mats_in_hangar = ctx.db.with_snapshot(|snap| {
         snap.items
             .values()
             .filter(|it| {
                 it.location_id == structure_id
                     && it.flag == InventoryFlag::Hangar
-                    && it.type_id == 45492
+                    && ctx.sde.types.get(&it.type_id).is_some_and(|t| t.group_id == 427)
             })
-            .map(|it| it.quantity)
-            .sum::<i32>()
+            .map(|it| it.quantity as i64)
+            .sum::<i64>()
     });
-    assert_eq!(items_in_hangar, 400, "Structure hangar must receive 400 units of moon ore");
+    assert_eq!(
+        moon_mats_in_hangar, units_produced,
+        "Structure hangar must receive exact harvested Moon Materials (group 427)"
+    );
 
-    // 4. Verify automatic entry logged in observer mining ledger
+    // 4. Verify automatic entries logged in observer mining ledger
     let ledger_entries = ctx.db.with_snapshot(|snap| {
         snap.observer_mining_ledger
             .get(&structure_id)
@@ -365,7 +520,8 @@ async fn test_mn14_auto_moon_mining_service() {
             .unwrap_or_default()
     });
     assert!(!ledger_entries.is_empty(), "Observer mining ledger must record automated extraction");
-    assert_eq!(ledger_entries.last().unwrap().quantity, 400);
+    let ledger_sum: i64 = ledger_entries.iter().map(|e| e.quantity).sum();
+    assert_eq!(ledger_sum, units_produced);
 }
 
 // ============================================================================
@@ -454,6 +610,7 @@ async fn test_mn15_corp_mining_ledger_service_and_observer_tracking() {
 // MN-16: In-Space & Structure Compression & Decompression
 // ============================================================================
 #[tokio::test]
+// parity: feat:mining.compression-space, feat:mining.compression-structure, feat:mining.gas-decompression
 async fn test_mn16_in_space_and_structure_compression_and_decompression() {
     let ctx = ServerContext::new();
     let kw = HashMap::new();
@@ -498,9 +655,43 @@ async fn test_mn16_in_space_and_structure_compression_and_decompression() {
     let PyRep::KeyVal(undock_kv) = undock else { panic!("Expected undock kv") };
     let ship_id = undock_kv["shipID"].as_i64().unwrap();
 
-    // Place 1,045 units of Veldspar (type 1230) in ship cargo
+    // Place 1,045 units of Veldspar (type 1230) in ship cargo on an Orca (28606) with active Compressor (62625)
     let item_in_space = 710_000_001_i64;
+    let comp_mod_id = 710_000_002_i64;
+    let core_mod_id = 710_000_099_i64;
     ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ship_it) = snap.items.get_mut(&ship_id) {
+            ship_it.type_id = 28606; // Orca
+        }
+        // Unfit the starter ship's modules so the compressor and core get free high slots
+        snap.items.retain(|_, item| item.location_id != ship_id);
+        // Train the SDE skill prerequisites (requiredSkill1..3 / level) of the compressor and the core
+        for tid in [62625_u32, 58945] {
+            let t = &ctx.sde.types[&tid];
+            for (sk_attr, lvl_attr) in [(182_u16, 277_u16), (183, 278), (184, 279)] {
+                if let Some(&sk) = t.default_attributes.get(&sk_attr) {
+                    let lvl = t.default_attributes.get(&lvl_attr).copied().unwrap_or(1.0) as u8;
+                    snap.skills.entry(char_id).or_default().insert(
+                        sk as u32,
+                        eve_db::TrainedSkillRecord { type_id: sk as u32, level: lvl.max(1), skill_points: 256_000.0 },
+                    );
+                }
+            }
+        }
+        snap.items.insert(
+            comp_mod_id,
+            InventoryItemRecord {
+                item_id: comp_mod_id,
+                type_id: 62625, // Large Asteroid Ore Compressor I
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
         snap.items.insert(
             item_in_space,
             InventoryItemRecord {
@@ -516,6 +707,120 @@ async fn test_mn16_in_space_and_structure_compression_and_decompression() {
             },
         );
     });
+
+    // Item in general Cargo hold must be rejected (`NotInMiningHold`)
+    let cargo_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "inSpaceCompressionMgr",
+            None,
+            "CompressItemInSpace",
+            &[PyRep::Integer(item_in_space)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("CompressItemInSpace from general Cargo must fail");
+    assert_eq!(cargo_err.code, "NotInMiningHold");
+
+    // Move item into the ship's Mining Hold (`SpecializedOreHold`)
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(it) = snap.items.get_mut(&item_in_space) {
+            it.flag = InventoryFlag::SpecializedOreHold;
+        }
+    });
+
+    ctx.ship_fittings.write().unwrap().remove(&ship_id);
+
+    // A fitted but inactive compressor can't compress
+    let inactive_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "inSpaceCompressionMgr",
+            None,
+            "CompressItemInSpace",
+            &[PyRep::Integer(item_in_space)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("CompressItemInSpace with an inactive compressor must fail");
+    assert_eq!(inactive_err.code, "NoActiveCompressorInRange");
+
+    // Without an active Industrial Core (`58945` Large Industrial Core I, group 515),
+    // compressor module `62625` (`3265` activationRequiresActiveIndustrialCore = 1.0) can't be activated
+    let no_core_act_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "dogmaIM",
+            None,
+            "Activate",
+            &[PyRep::Integer(comp_mod_id), PyRep::String("compressor".into())],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Activating the compressor without an active Industrial Core must fail");
+    assert_eq!(no_core_act_err.code, "IndustrialCoreNotActive");
+    let no_core_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "inSpaceCompressionMgr",
+            None,
+            "CompressItemInSpace",
+            &[PyRep::Integer(item_in_space)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("CompressItemInSpace without active Industrial Core must fail");
+    assert_eq!(no_core_err.code, "NoActiveCompressorInRange");
+
+    // Fit Large Industrial Core I (type 58945, group 515, canFitShipType1 = 28606) on the Orca, then
+    // activate the core and the compressor through dogmaIM.Activate
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            core_mod_id,
+            InventoryItemRecord {
+                item_id: core_mod_id,
+                type_id: 58945, // Large Industrial Core I
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot1,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+    ctx.ship_fittings.write().unwrap().remove(&ship_id);
+    ctx.dispatch_rpc(
+        &mut sess,
+        "dogmaIM",
+        None,
+        "Activate",
+        &[PyRep::Integer(core_mod_id), PyRep::String("industrialCore".into())],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Activate Large Industrial Core I");
+    ctx.dispatch_rpc(
+        &mut sess,
+        "dogmaIM",
+        None,
+        "Activate",
+        &[PyRep::Integer(comp_mod_id), PyRep::String("compressor".into())],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Activate Large Asteroid Ore Compressor I");
+    assert!(ctx.db.with_snapshot(|snap| {
+        snap.module_active_states.contains(&core_mod_id)
+            && snap.module_active_states.contains(&comp_mod_id)
+    }));
 
     let comp_space_res = ctx
         .dispatch_rpc(
@@ -539,19 +844,18 @@ async fn test_mn16_in_space_and_structure_compression_and_decompression() {
 
     let expected_comp_tid = *ctx.sde.compressible_types.get(&1230).unwrap();
     assert_eq!(compressed_tid, expected_comp_tid, "Compressed Veldspar type ID matches SDE");
-    assert_eq!(compressed_qty, 10, "1,045 units / 100 = 10 compressed units");
-    assert_eq!(rem_qty, 45, "1,045 % 100 = 45 remainder units");
+    assert_eq!(compressed_qty, 1_045, "V24 1:1 compression converts all 1,045 units");
+    assert_eq!(rem_qty, 0, "V24 1:1 compression leaves 0 remainder units");
 
-    // Verify remainder item was preserved in cargo hold
-    let cargo_items = ctx.db.with_snapshot(|snap| {
+    // Verify compressed item in mining hold
+    let hold_items = ctx.db.with_snapshot(|snap| {
         snap.items
             .values()
             .filter(|it| it.location_id == ship_id && it.owner_id == char_id)
             .map(|it| (it.type_id, it.quantity))
             .collect::<Vec<_>>()
     });
-    assert!(cargo_items.contains(&(expected_comp_tid, 10)), "Cargo must contain compressed units");
-    assert!(cargo_items.contains(&(1230, 45)), "Cargo must contain remainder units");
+    assert!(hold_items.contains(&(expected_comp_tid, 1_045)), "Mining hold must contain 1,045 compressed units");
 
     // ------------------------------------------------------------------------
     // B. Structure Compression
@@ -566,7 +870,8 @@ async fn test_mn16_in_space_and_structure_compression_and_decompression() {
     sess.station_id = None;
     sess.structure_id = Some(structure_id);
 
-    let item_in_struct = 710_000_002_i64;
+    let item_in_struct = 710_000_004_i64;
+    let moon_ore_in_struct = 710_000_005_i64;
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(
             item_in_struct,
@@ -582,7 +887,36 @@ async fn test_mn16_in_space_and_structure_compression_and_decompression() {
                 ..Default::default()
             },
         );
+        snap.items.insert(
+            moon_ore_in_struct,
+            InventoryItemRecord {
+                item_id: moon_ore_in_struct,
+                type_id: 45492, // Bitumens (Moon Ore, group 1884)
+                owner_id: char_id,
+                location_id: structure_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 500,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
     });
+
+    // Moon Ore cannot be compressed in a structure (`StructureCannotCompressType`)
+    let moon_comp_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "structureCompressionMgr",
+            None,
+            "CompressItemInStructure",
+            &[PyRep::Integer(structure_id), PyRep::Integer(moon_ore_in_struct)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Moon Ore compression in structure must be rejected");
+    assert_eq!(moon_comp_err.code, "StructureCannotCompressType");
 
     let struct_comp_res = ctx
         .dispatch_rpc(
@@ -600,12 +934,38 @@ async fn test_mn16_in_space_and_structure_compression_and_decompression() {
     let PyRep::KeyVal(str_kv) = struct_comp_res else {
         panic!("Expected KeyVal from CompressItemInStructure");
     };
-    assert_eq!(str_kv["quantity"].as_i64(), Some(5)); // 500 / 100 = 5
+    assert_eq!(str_kv["quantity"].as_i64(), Some(500)); // V24 1:1 compression
 
     // ------------------------------------------------------------------------
     // C. Structure Gas Decompression
     // ------------------------------------------------------------------------
-    // Query decompression efficiency
+    // Query decompression efficiency untrained on Athanor (0.80 base + 0.04 Athanor = 0.84)
+    let eff_untrained = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "structureCompressionMgr",
+            None,
+            "GetMyGasDecompressionEfficiency",
+            &[PyRep::Integer(structure_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("GetMyGasDecompressionEfficiency untrained RPC");
+    assert_eq!(eff_untrained.as_f64(), Some(0.84));
+
+    // Train Gas Decompression Efficiency (type 62452) to level 5 (+5% -> 0.89 on Athanor)
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.skills.entry(char_id).or_default().insert(
+            62452,
+            eve_db::TrainedSkillRecord {
+                type_id: 62452,
+                level: 5,
+                skill_points: 512_000.0,
+            },
+        );
+    });
+
     let eff_res = ctx
         .dispatch_rpc(
             &mut sess,
@@ -618,26 +978,143 @@ async fn test_mn16_in_space_and_structure_compression_and_decompression() {
         )
         .await
         .expect("GetMyGasDecompressionEfficiency RPC");
-    assert_eq!(eff_res.as_f64(), Some(0.90));
+    assert_eq!(eff_res.as_f64(), Some(0.89));
 
-    // Place compressed item in hangar to decompress (e.g. 10 units of Compressed Veldspar 28388)
+    // Compressed ore (non-gas) must be rejected by DecompressGasInStructure (`NotCompressedGas`)
+    let non_gas_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "structureCompressionMgr",
+            None,
+            "DecompressGasInStructure",
+            &[PyRep::Integer(structure_id), PyRep::Integer(item_in_struct)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Decompressing non-gas compressed ore must fail");
+    assert_eq!(non_gas_err.code, "NotCompressedGas");
+
+    // Place 100 units of Compressed Fullerite-C50 (type 62399, raw type 30370 in group 711) in hangar,
+    // plus a remote stack at another station (`60_003_760`) and a courier-escrowed stack (`InventoryFlag::Locked`)
     let comp_gas_item = 710_000_003_i64;
+    let remote_gas_item = 710_000_006_i64;
+    let courier_locked_gas_item = 710_000_007_i64;
+    let other_structure_id = 1_040_000_000_169_i64;
     ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(
+            other_structure_id,
+            UpwellStructureRecord {
+                structure_id: other_structure_id,
+                type_id: 35836, // Tatara (+10% bonus)
+                owner_corp_id: corp_id,
+                solar_system_id: system_id,
+                name: "Remote Tatara".into(),
+                position: [50_000.0, 0.0, 0.0],
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 500,
+                shield_hp: 50_000.0,
+                armor_hp: 50_000.0,
+                hull_hp: 50_000.0,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+            },
+        );
         snap.items.insert(
             comp_gas_item,
             InventoryItemRecord {
                 item_id: comp_gas_item,
-                type_id: expected_comp_tid, // Compressed Veldspar
+                type_id: 62399, // Compressed Fullerite-C50
                 owner_id: char_id,
                 location_id: structure_id,
                 flag: InventoryFlag::Hangar,
-                quantity: 10,
+                quantity: 100,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            remote_gas_item,
+            InventoryItemRecord {
+                item_id: remote_gas_item,
+                type_id: 62399, // Compressed Fullerite-C50 at remote station
+                owner_id: char_id,
+                location_id: 60_003_760,
+                flag: InventoryFlag::Hangar,
+                quantity: 100,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            courier_locked_gas_item,
+            InventoryItemRecord {
+                item_id: courier_locked_gas_item,
+                type_id: 62399, // Compressed Fullerite-C50 locked in courier wrap
+                owner_id: char_id,
+                location_id: 990_000_001, // courier wrap_id
+                flag: InventoryFlag::Locked,
+                quantity: 100,
                 singleton: false,
                 version: 1,
                 ..Default::default()
             },
         );
     });
+
+    // Spoofing another structure ID (Tatara 35836) while docked at Athanor must fail (`InvalidStructure`)
+    let spoof_struct_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "structureCompressionMgr",
+            None,
+            "DecompressGasInStructure",
+            &[PyRep::Integer(other_structure_id), PyRep::Integer(comp_gas_item)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("DecompressGasInStructure with spoofed structure_id must fail");
+    assert_eq!(spoof_struct_err.code, "InvalidStructure");
+
+    // Decompressing an owned compressed gas item at a remote location must fail (`ItemNotInStructureHangar`)
+    let remote_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "structureCompressionMgr",
+            None,
+            "DecompressGasInStructure",
+            &[PyRep::Integer(structure_id), PyRep::Integer(remote_gas_item)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("DecompressGasInStructure on remote item must fail");
+    assert_eq!(remote_err.code, "ItemNotInStructureHangar");
+
+    // Decompressing an owned compressed gas item locked in courier escrow must fail (`ItemLocked`)
+    let locked_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "structureCompressionMgr",
+            None,
+            "DecompressGasInStructure",
+            &[PyRep::Integer(structure_id), PyRep::Integer(courier_locked_gas_item)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("DecompressGasInStructure on courier-locked item must fail");
+    assert_eq!(locked_err.code, "ItemLocked");
+    assert_eq!(
+        ctx.db.with_snapshot(|snap| snap.items.get(&courier_locked_gas_item).map(|i| i.quantity)),
+        Some(100),
+        "Courier-locked item must remain untouched"
+    );
 
     let decomp_res = ctx
         .dispatch_rpc(
@@ -655,24 +1132,24 @@ async fn test_mn16_in_space_and_structure_compression_and_decompression() {
     let PyRep::KeyVal(dec_kv) = decomp_res else {
         panic!("Expected KeyVal from DecompressGasInStructure");
     };
-    // 10 compressed * 100 * 0.90 efficiency = 900 decompressed units
-    assert_eq!(dec_kv["decompressedTypeID"].as_i64(), Some(1230));
-    assert_eq!(dec_kv["decompressedQuantity"].as_i64(), Some(900));
-    assert_eq!(dec_kv["efficiency"].as_f64(), Some(0.90));
+    // 100 compressed gas * 0.89 efficiency = 89 decompressed raw Fullerite-C50 units
+    assert_eq!(dec_kv["decompressedTypeID"].as_i64(), Some(30370));
+    assert_eq!(dec_kv["decompressedQuantity"].as_i64(), Some(89));
+    assert_eq!(dec_kv["efficiency"].as_f64(), Some(0.89));
 
-    // Verify decompressed item in hangar
+    // Verify decompressed gas item in hangar
     let hangar_raw = ctx.db.with_snapshot(|snap| {
         snap.items
             .values()
             .find(|it| {
                 it.location_id == structure_id
                     && it.owner_id == char_id
-                    && it.type_id == 1230
-                    && it.quantity == 900
+                    && it.type_id == 30370
+                    && it.quantity == 89
             })
             .cloned()
     });
-    assert!(hangar_raw.is_some(), "Hangar must contain decompressed raw item with 900 units");
+    assert!(hangar_raw.is_some(), "Hangar must contain decompressed raw Fullerite-C50 with 89 units");
 }
 
 // ============================================================================
@@ -773,69 +1250,162 @@ async fn test_mn18_mining_missions_and_career_goals_from_ledger() {
     let mut sess = create_auth_session(&ctx, 1801).await;
 
     let char_id = 90_000_001_i64;
-    let system_id = 30_000_142_u32;
-    let mission_id = 1957_u32; // "Ore Harvesting (1 of 3)"
     let now = ctx.now_unix();
 
     // ------------------------------------------------------------------------
-    // A. Mining Mission with Pocket Asteroid Belt Spawning & Delivery
+    // A. Mining Mission with Pocket Asteroid Belt Spawning, Mining & Delivery
     // ------------------------------------------------------------------------
-    // Offer mission to character
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.active_missions.insert(
-            (char_id, mission_id),
-            eve_db::ActiveMissionRecord {
-                mission_id,
-                agent_id: 3011400,
-                character_id: char_id,
-                state: "Offered".into(),
-                current_room_id: 1,
-                npcs_remaining: 0,
-                spawned_npc_ball_ids: Vec::new(),
-                solar_system_id: system_id,
-            },
-        );
-    });
-
-    // Accept mission -> spawns pocket asteroid belt in mission room
-    let accept_res = ctx
+    // 1. Find a Level 1 Mining (divisionID = 23) agent via agentMgr.GetAgents
+    let agents_rep = ctx
         .dispatch_rpc(
             &mut sess,
             "agentMgr",
             None,
-            "AcceptMission",
-            &[PyRep::Integer(mission_id as i64)],
+            "GetAgents",
+            &[PyRep::Integer(1), PyRep::Integer(23)],
             &kw,
             None,
         )
         .await
-        .expect("AcceptMission RPC");
-
-    let PyRep::KeyVal(accept_kv) = accept_res else {
-        panic!("Expected KeyVal from AcceptMission");
+        .expect("agentMgr.GetAgents for L1 Mining");
+    let PyRep::Rowset {
+        rows: agent_rows, ..
+    } = agents_rep
+    else {
+        panic!("Expected Rowset from agentMgr.GetAgents");
     };
-    assert_eq!(accept_kv["state"].as_str(), Some("Accepted"));
+    assert!(!agent_rows.is_empty(), "L1 Mining agents must exist in SDE");
+    let mining_agent = &agent_rows[0];
+    let mining_agent_id = mining_agent[0].as_i64().unwrap();
+    let system_id = mining_agent[5].as_i64().unwrap() as u32;
+    let station_id = mining_agent[6].as_i64().unwrap_or(60_003_760);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = system_id;
+            ch.station_id = Some(station_id);
+        }
+    });
+    sess.solar_system_id = Some(system_id);
+    sess.station_id = Some(station_id);
+
+    // 2. Bind to the mining agent moniker via MachoBindObject on agentMgr
+    let bind_res = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "agentMgr",
+            None,
+            "MachoBindObject",
+            &[PyRep::Integer(mining_agent_id), PyRep::None],
+            &kw,
+            None,
+        )
+        .await
+        .expect("MachoBindObject on agentMgr");
+    let PyRep::Tuple(bind_tuple) = bind_res else {
+        panic!("Expected Tuple from MachoBindObject");
+    };
+    let agent_oid = bind_tuple[0].as_i64().unwrap() as u64;
+
+    // 3. Request mining mission via bound agentMgr.DoAction(2) (agentDialogueButtonRequestMission)
+    let offer_res = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "agentMgr",
+            Some(agent_oid),
+            "DoAction",
+            &[PyRep::Integer(2)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("agentMgr.DoAction(RequestMission)");
+    let mission_id = offer_res
+        .dict_get("missionID")
+        .and_then(|v| v.as_i64())
+        .expect("missionID from DoAction offer") as u32;
+    assert_eq!(
+        offer_res.dict_get("state").and_then(|v| v.as_str()),
+        Some("Offered")
+    );
+
+    // 4. Accept mission via bound agentMgr.DoAction(3) (agentDialogueButtonAccept) -> spawns pocket asteroid
+    let accept_res = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "agentMgr",
+            Some(agent_oid),
+            "DoAction",
+            &[PyRep::Integer(3)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("agentMgr.DoAction(Accept)");
+    assert_eq!(
+        accept_res.dict_get("state").and_then(|v| v.as_str()),
+        Some("Accepted")
+    );
+    let bookmark_id = accept_res
+        .dict_get("bookmarkID")
+        .and_then(|v| v.as_i64())
+        .expect("bookmarkID on accept");
+
+    // Verify mission journal via agentMgr.GetMyJournalDetails
+    let journal_res = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "agentMgr",
+            None,
+            "GetMyJournalDetails",
+            &[],
+            &kw,
+            None,
+        )
+        .await
+        .expect("agentMgr.GetMyJournalDetails");
+    let PyRep::Tuple(journal_tuple) = journal_res else {
+        panic!("Expected (missions, research) Tuple from GetMyJournalDetails");
+    };
+    let PyRep::List(journal_missions) = &journal_tuple[0] else {
+        panic!("Expected List of active missions");
+    };
+    assert!(
+        journal_missions
+            .iter()
+            .any(|m| m.dict_get("missionID").and_then(|v| v.as_i64()) == Some(mission_id as i64)
+                && m.dict_get("missionState").and_then(|v| v.as_i64()) == Some(2)),
+        "Accepted mining mission must appear in GetMyJournalDetails with missionState=2"
+    );
 
     // Verify pocket asteroid was spawned in the system
     let pocket_ast_id = 910_000_000 + (mission_id as i64) * 1000 + 1;
     let handle = ctx.systems.get_or_spawn(system_id);
     let pocket_ast = handle.get_asteroid_state(pocket_ast_id).await.unwrap();
-    assert!(pocket_ast.is_some(), "Pocket asteroid must be spawned in mission room");
+    assert!(
+        pocket_ast.is_some(),
+        "Pocket asteroid must be spawned in mission room"
+    );
     assert_eq!(pocket_ast.unwrap().type_id, 1230); // Veldspar
+    assert!(
+        ctx.db.with_snapshot(|snap| snap.bookmarks.contains_key(&bookmark_id)),
+        "Mission pocket bookmark must exist"
+    );
 
     // Clear any starter Veldspar from character inventory to test incomplete delivery
     ctx.db.with_mut_snapshot(|snap| {
-        snap.items.retain(|_, it| !(it.owner_id == char_id && it.type_id == 1230));
+        snap.items
+            .retain(|_, it| !(it.owner_id == char_id && it.type_id == 1230));
     });
 
-    // Try completing mission before mining/delivering required ore -> must fail
+    // Try completing mission via DoAction(6) before mining/delivering required ore -> must fail
     let incomplete_res = ctx
         .dispatch_rpc(
             &mut sess,
             "agentMgr",
-            None,
-            "CompleteMission",
-            &[PyRep::Integer(mission_id as i64)],
+            Some(agent_oid),
+            "DoAction",
+            &[PyRep::Integer(6)],
             &kw,
             None,
         )
@@ -847,7 +1417,7 @@ async fn test_mn18_mining_missions_and_career_goals_from_ledger() {
     );
     assert_eq!(incomplete_res.err().unwrap().code, "MissionIncomplete");
 
-    // Provide required ore (500 units of Veldspar) into character inventory
+    // Provide required ore (500 units of Veldspar) into character station hangar
     let ore_item_id = 710_000_018_i64;
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(
@@ -856,7 +1426,7 @@ async fn test_mn18_mining_missions_and_career_goals_from_ledger() {
                 item_id: ore_item_id,
                 type_id: 1230,
                 owner_id: char_id,
-                location_id: 60_003_760, // Docked station
+                location_id: station_id,
                 flag: InventoryFlag::Hangar,
                 quantity: 500,
                 singleton: false,
@@ -866,58 +1436,69 @@ async fn test_mn18_mining_missions_and_career_goals_from_ledger() {
         );
     });
 
-    // Complete mission -> succeeds, consumes ore, pays rewards
+    // Complete mission via DoAction(6) (agentDialogueButtonComplete) -> succeeds, consumes ore, pays rewards
     let complete_res = ctx
         .dispatch_rpc(
             &mut sess,
             "agentMgr",
-            None,
-            "CompleteMission",
-            &[PyRep::Integer(mission_id as i64)],
+            Some(agent_oid),
+            "DoAction",
+            &[PyRep::Integer(6)],
             &kw,
             None,
         )
         .await
-        .expect("CompleteMission RPC");
+        .expect("agentMgr.DoAction(Complete) RPC");
 
-    let PyRep::KeyVal(comp_kv) = complete_res else {
-        panic!("Expected KeyVal from CompleteMission");
-    };
-    assert_eq!(comp_kv["missionID"].as_i64(), Some(mission_id as i64));
+    assert_eq!(
+        complete_res.dict_get("missionID").and_then(|v| v.as_i64()),
+        Some(mission_id as i64)
+    );
     let m_state = ctx.db.with_snapshot(|snap| {
-        snap.active_missions.get(&(char_id, mission_id)).map(|m| m.state.clone())
+        snap.active_missions
+            .get(&(char_id, mission_id))
+            .map(|m| m.state.clone())
     });
     assert_eq!(m_state.as_deref(), Some("Completed"));
 
     // Verify ore was consumed from inventory
     let remaining_ore = ctx.db.with_snapshot(|snap| {
-        snap.items.get(&ore_item_id).map(|it| it.quantity).unwrap_or(0)
+        snap.items
+            .get(&ore_item_id)
+            .map(|it| it.quantity)
+            .unwrap_or(0)
     });
-    assert_eq!(remaining_ore, 0, "Mission delivery must consume the 500 units of ore");
+    assert_eq!(
+        remaining_ore, 0,
+        "Mission delivery must consume the 500 units of ore"
+    );
 
     // ------------------------------------------------------------------------
     // B. Career Progression Verified from Mining Ledger
     // ------------------------------------------------------------------------
-    // Record ledger mining events
-    let _ = ctx.db.record_mining_ledger_entry(char_id, system_id, 1230, 3_500, now);
-    let _ = ctx.db.record_mining_ledger_entry(char_id, system_id, 1228, 1_500, now);
+    let _ = ctx
+        .db
+        .record_mining_ledger_entry(char_id, system_id, 1230, 3_500, now);
+    let _ = ctx
+        .db
+        .record_mining_ledger_entry(char_id, system_id, 1228, 1_500, now);
 
-    // Query career goal progress (e.g. goalID = 2 "Mine Ore")
+    // Query career goal progress via V24 seasonManager.get_character_progress_by_character_id
     let goal_res = ctx
         .dispatch_rpc(
             &mut sess,
-            "careerGoals",
+            "seasonManager",
             None,
-            "GetMiningCareerProgress",
+            "get_character_progress_by_character_id",
             &[PyRep::Integer(2)],
             &kw,
             None,
         )
         .await
-        .expect("GetMiningCareerProgress RPC");
+        .expect("seasonManager.get_character_progress_by_character_id RPC");
 
     let PyRep::KeyVal(goal_kv) = goal_res else {
-        panic!("Expected KeyVal from GetMiningCareerProgress");
+        panic!("Expected KeyVal from get_character_progress_by_character_id");
     };
     assert_eq!(goal_kv["goalID"].as_i64(), Some(2));
     assert_eq!(

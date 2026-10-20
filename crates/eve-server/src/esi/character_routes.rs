@@ -372,18 +372,8 @@ pub fn dispatch_character_routes(
                     .unwrap_or(0);
                 if last_jump_unix > 0 {
                     let ts = format_iso8601_utc(last_jump_unix);
-                    obj.insert("last_jump_date".into(), json!(ts));
-                }
-                if ch.jump_cooldown_until_unix > 0 {
-                    obj.insert(
-                        "last_update_date".into(),
-                        json!(format_iso8601_utc(ch.jump_cooldown_until_unix)),
-                    );
-                } else if last_jump_unix > 0 {
-                    obj.insert(
-                        "last_update_date".into(),
-                        json!(format_iso8601_utc(last_jump_unix)),
-                    );
+                    obj.insert("last_jump_date".into(), json!(ts.clone()));
+                    obj.insert("last_update_date".into(), json!(ts));
                 }
                 let fatigue_until = if ch.jump_fatigue_until_unix > 0 {
                     Some(ch.jump_fatigue_until_unix)

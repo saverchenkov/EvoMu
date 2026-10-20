@@ -294,8 +294,8 @@ async fn test_multi_login_block_enforcement() {
     let ctx = ServerContext::new();
     let kw = HashMap::new();
 
-    // 1. Two sessions both call authentication.Login before either claims multiLoginBlocker.Login:
-    //    whichever session calls multiLoginBlocker.Login first wins the lock, and the other gets False.
+    // 1. Two sessions both call authentication.Login on the same account:
+    //    the second session immediately displaces the first session.
     ctx.db.provision_player_account("mlb_race_pilot", "race-pass");
     let mut race_s1 = SessionState::new(20_290);
     let mut race_s2 = SessionState::new(20_291);
@@ -326,7 +326,7 @@ async fn test_multi_login_block_enforcement() {
         None,
     )
     .await
-    .expect("race_s2 authentication.Login");
+    .expect("race_s2 authentication.Login displaces race_s1");
 
     let race_s2_claim = ctx
         .dispatch_rpc(
@@ -339,10 +339,10 @@ async fn test_multi_login_block_enforcement() {
             None,
         )
         .await
-        .expect("race_s2 claims multiLoginBlocker.Login first");
+        .expect("race_s2 claims multiLoginBlocker.Login");
     assert_eq!(race_s2_claim, PyRep::Bool(true));
 
-    let race_s1_late = ctx
+    let race_s1_displaced = ctx
         .dispatch_rpc(
             &mut race_s1,
             "multiLoginBlocker",
@@ -353,8 +353,8 @@ async fn test_multi_login_block_enforcement() {
             None,
         )
         .await
-        .expect("race_s1 calls multiLoginBlocker.Login second");
-    assert_eq!(race_s1_late, PyRep::Bool(false));
+        .expect_err("displaced race_s1 must be rejected with SessionKicked");
+    assert_eq!(race_s1_displaced.code, "SessionKicked");
 
     // 2. Session 1 logs in and acquires online lock on "demo"
     let mut sess1 = SessionState::new(20_301);
@@ -394,59 +394,11 @@ async fn test_multi_login_block_enforcement() {
         Some(sess1.session_id)
     );
 
-    // 3. Concurrent Session 2 attempts to login to the same account
+    // 3. Concurrent Session 2 logs into the same account via canonical 2-arg authentication.Login:
+    //    Immediately displaces Session 1 with OnSessionTerminate
     let mut sess2 = SessionState::new(20_302);
     common::login_pilot(&ctx, &mut sess2, "demo", "demo-secret").await;
 
-    // Without displace, multiLoginBlocker.Login returns False
-    let mlb_refused = ctx
-        .dispatch_rpc(
-            &mut sess2,
-            "multiLoginBlocker",
-            None,
-            "Login",
-            &[PyRep::String("hw-blocker-02".into())],
-            &kw,
-            None,
-        )
-        .await
-        .expect("multiLoginBlocker.Login without displace on sess2");
-    assert_eq!(mlb_refused, PyRep::Bool(false));
-
-    // Calling game RPC on sess2 fails with MultiLoginBlocked
-    let char_err = ctx
-        .dispatch_rpc(
-            &mut sess2,
-            "charUnboundMgr",
-            None,
-            "SelectCharacterID",
-            &[PyRep::Integer(90_000_001)],
-            &kw,
-            None,
-        )
-        .await
-        .expect_err("Concurrent session without lock must be rejected with MultiLoginBlocked");
-    assert_eq!(char_err.code, "MultiLoginBlocked");
-
-    // 4. Displace Session 1 from Session 2
-    let mlb_displaced = ctx
-        .dispatch_rpc(
-            &mut sess2,
-            "multiLoginBlocker",
-            None,
-            "Login",
-            &[
-                PyRep::String("hw-blocker-02".into()),
-                PyRep::Bool(true),
-            ],
-            &kw,
-            None,
-        )
-        .await
-        .expect("multiLoginBlocker.Login with displace=true");
-    assert_eq!(mlb_displaced, PyRep::Bool(true));
-
-    // Session 1 closer receives immediate ACL_DISPLACED
     let (displaced_code, displaced_msg) = sess1_closer_rx
         .try_recv()
         .expect("Displaced session must receive immediate disconnect notification");
@@ -468,11 +420,24 @@ async fn test_multi_login_block_enforcement() {
         .expect_err("Displaced session must be rejected");
     assert_eq!(kicked_err.code, "SessionKicked");
 
-    // Session 2 now holds the online lock and can proceed
+    // Session 2 now holds the online lock, completes 1-arg multiLoginBlocker.Login(computerhash), and can proceed
     assert_eq!(
         ctx.db.get_online_session(1).map(|s| s.session_id),
         Some(sess2.session_id)
     );
+    let mlb_sess2 = ctx
+        .dispatch_rpc(
+            &mut sess2,
+            "multiLoginBlocker",
+            None,
+            "Login",
+            &[PyRep::String("hw-blocker-02".into())],
+            &kw,
+            None,
+        )
+        .await
+        .expect("multiLoginBlocker.Login(computerhash) on sess2");
+    assert_eq!(mlb_sess2, PyRep::Bool(true));
     ctx.dispatch_rpc(
         &mut sess2,
         "charUnboundMgr",
@@ -1160,19 +1125,19 @@ async fn test_z5_auditor_flagged_rows_closure_suite() {
 
     let mut s2 = SessionState::new(20_904);
     common::login_pilot(&ctx, &mut s2, "z5_pilot", "z5_secret").await;
-    // Displace s1 from s2
+    // s2 logging into z5_pilot displaces s1 immediately; s2 then calls 1-arg multiLoginBlocker.Login(computerhash)
     let mlb_res = ctx
         .dispatch_rpc(
             &mut s2,
             "multiLoginBlocker",
             None,
             "Login",
-            &[PyRep::String("hw-z5".into()), PyRep::Bool(true)],
+            &[PyRep::String("hw-z5".into())],
             &kw,
             None,
         )
         .await
-        .expect("displace login");
+        .expect("multiLoginBlocker.Login(computerhash)");
     assert_eq!(mlb_res, PyRep::Bool(true));
     let (d_code, _) = s1_close_rx.try_recv().expect("s1 disconnected");
     assert_eq!(d_code, "ACL_DISPLACED");

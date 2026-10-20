@@ -71,7 +71,11 @@ fn select_seeded_market_types(sde: &SdeRegistry) -> Vec<TypeId> {
     let mut type_ids = Vec::new();
     for (group_id, mut tids) in by_group {
         tids.sort_unstable();
-        let cap = if group_id == 18 { tids.len() } else { 1 };
+        let cap = if group_id == 18 || group_id == 1027 {
+            tids.len()
+        } else {
+            1
+        };
         type_ids.extend(tids.into_iter().take(cap));
     }
     type_ids.sort_unstable();

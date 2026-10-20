@@ -657,7 +657,7 @@ fn test_t2_sde_all_213_resources_and_domain_tables_sweep() {
     assert_eq!(sqlite_static_verified, 14);
     assert_eq!(attested_sde_rows.len(), 7);
 
-    // 2. Verify all 43 SQLite table_counts in manifest against data/evomu_sde.sqlite and SdeRegistry
+    // 2. Verify all 46 SQLite table_counts in manifest against data/evomu_sde.sqlite and SdeRegistry
     let sde_uri = format!("file:{}?immutable=1", db_path.display());
     let sde_conn = Connection::open_with_flags(
         &sde_uri,
@@ -667,7 +667,7 @@ fn test_t2_sde_all_213_resources_and_domain_tables_sweep() {
     let tc = manifest_val["table_counts"]
         .as_object()
         .expect("table_counts object");
-    assert_eq!(tc.len(), 43);
+    assert_eq!(tc.len(), 46);
     for (table_name, expected_val) in tc {
         let expected_cnt = expected_val.as_u64().expect("u64 table count") as usize;
         let actual_cnt: i64 = sde_conn
@@ -680,6 +680,21 @@ fn test_t2_sde_all_213_resources_and_domain_tables_sweep() {
             "SQLite table count mismatch for {table_name}"
         );
     }
+
+    // Client type lists, per-dungeon asteroid layouts and gas-site gas types load into SdeRegistry 1:1
+    assert_eq!(sde.type_lists.len(), tc["sde_type_lists"].as_u64().unwrap() as usize);
+    assert_eq!(
+        sde.type_lists.len(),
+        sde.resources["res:/staticdata/typelist.fsdbinary"].record_count
+    );
+    assert_eq!(
+        sde.dungeon_asteroids.values().map(|v| v.len()).sum::<usize>(),
+        tc["sde_dungeon_asteroid_counts"].as_u64().unwrap() as usize
+    );
+    assert_eq!(
+        sde.dungeon_gas_types.values().map(|v| v.len()).sum::<usize>(),
+        tc["sde_dungeon_gas_types"].as_u64().unwrap() as usize
+    );
 
     // Verify exact 1:1 correspondence between client resource record_counts and SdeRegistry domain tables
     assert_eq!(

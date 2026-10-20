@@ -121,6 +121,18 @@ pub struct ActiveModuleCycle {
     pub hic_mass_addition: Option<f64>,
     pub original_signature_radius: Option<f64>,
     pub original_mass: Option<f64>,
+    pub mjd_jump_distance_m: Option<f64>,
+    pub grants_interdiction_nullification: bool,
+    pub effective_max_capacitor: Option<f64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PendingAnchoringDisruptor {
+    pub id: BallId,
+    pub type_id: u32,
+    pub position: DVec3,
+    pub radius: f64,
+    pub remaining_s: f64,
 }
 
 pub enum SystemCommand {
@@ -313,6 +325,27 @@ pub enum SystemCommand {
         radius: f64,
         reply: oneshot::Sender<bool>,
     },
+    ApplyEcmJam {
+        target_id: BallId,
+        duration_s: f64,
+        reply: oneshot::Sender<bool>,
+    },
+    ApplyEcmBurst {
+        source_id: BallId,
+        burst_radius_m: f64,
+        jam_strengths: [f64; 4],
+        duration_s: f64,
+        roll: f64,
+        reply: oneshot::Sender<Vec<BallId>>,
+    },
+    ScheduleMobileWarpDisruptor {
+        id: BallId,
+        type_id: u32,
+        position: DVec3,
+        radius: f64,
+        anchoring_delay_s: f64,
+        reply: oneshot::Sender<bool>,
+    },
 }
 
 #[derive(Clone)]
@@ -462,6 +495,10 @@ impl SystemHandle {
     }
 
     pub async fn remove_ball(&self, ball_id: BallId) -> Option<Ball> {
+        self.ball_positions
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&ball_id);
         let (tx, rx) = oneshot::channel();
         let _ = self
             .cmd_tx
@@ -471,6 +508,18 @@ impl SystemHandle {
             })
             .await;
         rx.await.ok().flatten()
+    }
+
+    pub fn try_remove_ball(&self, ball_id: BallId) {
+        self.ball_positions
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&ball_id);
+        let (tx, _rx) = oneshot::channel();
+        let _ = self.cmd_tx.try_send(SystemCommand::RemoveBall {
+            ball_id,
+            reply: tx,
+        });
     }
 
     pub async fn set_movement_mode(
@@ -872,6 +921,65 @@ impl SystemHandle {
             .map_err(|_| "Solar system actor stopped".to_string())?;
         rx.await.map_err(|_| "Solar system reply dropped".to_string())
     }
+
+    pub async fn apply_ecm_jam(&self, target_id: BallId, duration_s: f64) -> Result<bool, String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SystemCommand::ApplyEcmJam {
+                target_id,
+                duration_s,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| "Solar system actor stopped".to_string())?;
+        rx.await.map_err(|_| "Solar system reply dropped".to_string())
+    }
+
+    pub async fn apply_ecm_burst(
+        &self,
+        source_id: BallId,
+        burst_radius_m: f64,
+        jam_strengths: [f64; 4],
+        duration_s: f64,
+        roll: f64,
+    ) -> Result<Vec<BallId>, String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SystemCommand::ApplyEcmBurst {
+                source_id,
+                burst_radius_m,
+                jam_strengths,
+                duration_s,
+                roll,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| "Solar system actor stopped".to_string())?;
+        rx.await.map_err(|_| "Solar system reply dropped".to_string())
+    }
+
+    pub async fn schedule_mobile_warp_disruptor(
+        &self,
+        id: BallId,
+        type_id: u32,
+        position: DVec3,
+        radius: f64,
+        anchoring_delay_s: f64,
+    ) -> Result<bool, String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SystemCommand::ScheduleMobileWarpDisruptor {
+                id,
+                type_id,
+                position,
+                radius,
+                anchoring_delay_s,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| "Solar system actor stopped".to_string())?;
+        rx.await.map_err(|_| "Solar system reply dropped".to_string())
+    }
 }
 
 /// Populates a solar system's `Ballpark` with its real SDE stars, planets, moons, asteroid belts,
@@ -1138,7 +1246,7 @@ fn roll_probability(prob: f64) -> bool {
             return frac < prob;
         }
     }
-    true
+    false
 }
 
 fn ensure_default_slim_meta(
@@ -1273,6 +1381,7 @@ impl SystemRegistry {
 fn step_cycles_and_capacitor(
     ballpark: &mut Ballpark,
     active_module_cycles: &mut Vec<ActiveModuleCycle>,
+    pending_anchoring_disruptors: &mut Vec<PendingAnchoringDisruptor>,
     base_scramble_strengths: &HashMap<BallId, i32>,
     base_core_strengths: &HashMap<BallId, i32>,
     db_opt: &Option<Arc<eve_db::WorldRepository>>,
@@ -1282,10 +1391,27 @@ fn step_cycles_and_capacitor(
         cs.capacitor = eve_dogma::simulate_capacitor(cs.capacitor, cs.max_capacitor, 250.0, dt);
     }
 
+    let mut idx_d = 0;
+    while idx_d < pending_anchoring_disruptors.len() {
+        pending_anchoring_disruptors[idx_d].remaining_s -= dt;
+        if pending_anchoring_disruptors[idx_d].remaining_s <= 1e-6 {
+            let done = pending_anchoring_disruptors.remove(idx_d);
+            if let Some(ball) = ballpark.balls.get_mut(&done.id) {
+                ball.mode = MovementMode::Field;
+                ball.radius = done.radius.max(1.0);
+            } else {
+                let _ = ballpark.add_mobile_warp_disruptor(done.id, done.position, done.radius);
+            }
+            ballpark.add_warp_bubble(done.id, done.position, done.radius);
+        } else {
+            idx_d += 1;
+        }
+    }
+
     let mut finished_indices = Vec::new();
     for (idx, cycle) in active_module_cycles.iter_mut().enumerate() {
         cycle.elapsed_s += dt;
-        if cycle.elapsed_s >= cycle.duration_s {
+        if cycle.elapsed_s + 1e-6 >= cycle.duration_s {
             // 1. Local shield boost & armor repair healing (`feat:modules.shield-booster`, `DG-4`)
             if let Some(cs) = ballpark.combat_states.get_mut(&cycle.ship_id) {
                 if cycle.shield_boost_amount > 0.0 {
@@ -1293,6 +1419,18 @@ fn step_cycles_and_capacitor(
                 }
                 if cycle.armor_repair_amount > 0.0 {
                     cs.armor_hp = (cs.armor_hp + cycle.armor_repair_amount).min(cs.max_armor_hp);
+                }
+            }
+
+            // 1b. Micro Jump Drive 100 km translation upon spool-up completion (`feat:modules.micro-jump-drive`)
+            if let Some(jump_dist) = cycle.mjd_jump_distance_m {
+                let scrambled = ballpark.is_ball_scrambled(cycle.ship_id)
+                    || ballpark
+                        .combat_states
+                        .get(&cycle.ship_id)
+                        .is_some_and(|cs| cs.is_mwd_mjd_disabled);
+                if !scrambled {
+                    let _ = ballpark.micro_jump(cycle.ship_id, jump_dist);
                 }
             }
 
@@ -1384,6 +1522,9 @@ fn cleanup_removed_module_cycle(ballpark: &mut Ballpark, removed: &ActiveModuleC
     if removed.hic_bubble_radius_m.is_some() {
         ballpark.remove_warp_bubble(removed.module_id);
     }
+    if removed.grants_interdiction_nullification {
+        ballpark.set_interdiction_nullified(removed.ship_id, false);
+    }
 }
 
 fn reconcile_tackle_and_bubbles(
@@ -1404,21 +1545,6 @@ fn reconcile_tackle_and_bubbles(
         }
     }
 
-    // Immediately shut down any active MWD or MJD cycle on scrambled targets
-    if !mwd_disabled_targets.is_empty() {
-        let mut idx = 0;
-        while idx < active_module_cycles.len() {
-            if active_module_cycles[idx].is_mwd_or_mjd
-                && mwd_disabled_targets.contains(&active_module_cycles[idx].ship_id)
-            {
-                let shut_down = active_module_cycles.remove(idx);
-                cleanup_removed_module_cycle(ballpark, &shut_down);
-            } else {
-                idx += 1;
-            }
-        }
-    }
-
     // 2. Sync HIC unscripted warp disruption bubbles to the HIC ship's current position
     for cycle in active_module_cycles.iter() {
         if let Some(radius) = cycle.hic_bubble_radius_m {
@@ -1428,7 +1554,7 @@ fn reconcile_tackle_and_bubbles(
         }
     }
 
-    // 3. Recompute warp_scramble_strength, warp_core_strength, is_mwd_mjd_disabled, and disallow_assistance for all balls
+    // 3. Recompute warp_scramble_strength, warp_core_strength, is_mwd_mjd_disabled, disallow_assistance, and is_interdiction_nullified for all balls
     let ball_ids: Vec<BallId> = ballpark.combat_states.keys().copied().collect();
     for ball_id in ball_ids {
         let base_scram = base_scramble_strengths.get(&ball_id).copied().unwrap_or(0);
@@ -1450,12 +1576,34 @@ fn reconcile_tackle_and_bubbles(
         let disallow_assist = active_module_cycles
             .iter()
             .any(|c| c.ship_id == ball_id && c.hic_bubble_radius_m.is_some());
+        let nullified_by_mod = active_module_cycles
+            .iter()
+            .any(|c| c.ship_id == ball_id && c.grants_interdiction_nullification);
 
         if let Some(cs) = ballpark.combat_states.get_mut(&ball_id) {
             cs.warp_scramble_strength = base_scram + mod_scram;
             cs.warp_core_strength = base_core + mod_core;
             cs.is_mwd_mjd_disabled = mwd_disabled;
             cs.disallow_assistance = disallow_assist;
+            if nullified_by_mod {
+                cs.is_interdiction_nullified = true;
+            }
+        }
+    }
+
+    // 4. Immediately shut down any active MWD or MJD cycle on scrambled targets (or MJD spool on any bubble/point-scrambled ship)
+    let mut idx = 0;
+    while idx < active_module_cycles.len() {
+        let ship_id = active_module_cycles[idx].ship_id;
+        let stop_mwd_or_mjd = active_module_cycles[idx].is_mwd_or_mjd
+            && mwd_disabled_targets.contains(&ship_id);
+        let stop_mjd_from_scram = active_module_cycles[idx].mjd_jump_distance_m.is_some()
+            && ballpark.is_ball_scrambled(ship_id);
+        if stop_mwd_or_mjd || stop_mjd_from_scram {
+            let shut_down = active_module_cycles.remove(idx);
+            cleanup_removed_module_cycle(ballpark, &shut_down);
+        } else {
+            idx += 1;
         }
     }
 }
@@ -1615,6 +1763,7 @@ impl SystemRegistry {
 
         tokio::spawn(async move {
             let mut active_module_cycles: Vec<ActiveModuleCycle> = Vec::new();
+            let mut pending_anchoring_disruptors: Vec<PendingAnchoringDisruptor> = Vec::new();
             let mut base_scramble_strengths: HashMap<BallId, i32> = HashMap::new();
             let mut base_core_strengths: HashMap<BallId, i32> = HashMap::new();
             let mut ticker = tokio::time::interval_at(
@@ -1646,6 +1795,7 @@ impl SystemRegistry {
                             step_cycles_and_capacitor(
                                 &mut ballpark,
                                 &mut active_module_cycles,
+                                &mut pending_anchoring_disruptors,
                                 &base_scramble_strengths,
                                 &base_core_strengths,
                                 &db_opt,
@@ -1708,8 +1858,9 @@ impl SystemRegistry {
                             }
                             SystemCommand::SpawnAsteroid { asteroid, ball, reply } => {
                                 let ball_id = asteroid.asteroid_id;
-                                if ballpark.balls.contains_key(&ball_id) {
-                                    let _ = ballpark.remove_ball(ball_id);
+                                if asteroids.contains_key(&ball_id) {
+                                    let _ = reply.send(Ok(ball_id));
+                                    continue;
                                 }
                                 let (group_id, category_id) = sde_opt
                                     .as_ref()
@@ -1848,6 +1999,7 @@ impl SystemRegistry {
                             SystemCommand::RemoveBall { ball_id, reply } => {
                                 base_scramble_strengths.remove(&ball_id);
                                 base_core_strengths.remove(&ball_id);
+                                asteroids.remove(&ball_id);
                                 let removed = ballpark.remove_ball(ball_id);
                                 sync_ball_positions(&ballpark, &ball_positions_actor);
                                 let _ = reply.send(removed);
@@ -2019,6 +2171,7 @@ impl SystemRegistry {
                                 step_cycles_and_capacitor(
                                     &mut ballpark,
                                     &mut active_module_cycles,
+                                    &mut pending_anchoring_disruptors,
                                     &base_scramble_strengths,
                                     &base_core_strengths,
                                     &db_opt,
@@ -2034,6 +2187,9 @@ impl SystemRegistry {
                                 let _ = reply.send(locks);
                             }
                             SystemCommand::AddTargetLock { source_id, lock, reply } => {
+                                if let Some(cs) = ballpark.combat_states.get_mut(&source_id) {
+                                    cs.undock_invulnerable_remaining_ticks = 0;
+                                }
                                 ballpark.add_target_lock(source_id, lock);
                                 let _ = reply.send(Ok(()));
                             }
@@ -2075,16 +2231,27 @@ impl SystemRegistry {
                                 let _ = reply.send(cs);
                             }
                             SystemCommand::AddModuleCycle { mut cycle, reply } => {
+                                if let Some(cs) = ballpark.combat_states.get_mut(&cycle.ship_id) {
+                                    cs.undock_invulnerable_remaining_ticks = 0;
+                                }
                                 if cycle.is_mwd_or_mjd {
-                                    if ballpark
+                                    let disabled = ballpark
                                         .combat_states
                                         .get(&cycle.ship_id)
                                         .is_some_and(|cs| cs.is_mwd_mjd_disabled)
-                                    {
+                                        || (cycle.mjd_jump_distance_m.is_some()
+                                            && ballpark.is_ball_scrambled(cycle.ship_id));
+                                    if disabled {
                                         let _ = reply.send(Err(
-                                            "WarpScrambled: Propulsion module disabled by warp scrambler or focused warp disruption script".to_string(),
+                                            "WarpScrambled: Propulsion module disabled by warp scrambler or warp disruption bubble".to_string(),
                                         ));
                                         continue;
+                                    }
+                                }
+                                if let Some(eff_cap_max) = cycle.effective_max_capacitor {
+                                    if let Some(cs) = ballpark.combat_states.get_mut(&cycle.ship_id) {
+                                        cs.max_capacitor = eff_cap_max;
+                                        cs.capacitor = cs.capacitor.min(cs.max_capacitor);
                                     }
                                 }
                                 if cycle.cap_need_per_cycle > 0.0 {
@@ -2129,6 +2296,9 @@ impl SystemRegistry {
                                         cs.signature_radius *= sig_mult;
                                     }
                                 }
+                                if cycle.grants_interdiction_nullification {
+                                    ballpark.set_interdiction_nullified(cycle.ship_id, true);
+                                }
                                 active_module_cycles.push(cycle);
                                 reconcile_tackle_and_bubbles(
                                     &mut ballpark,
@@ -2166,11 +2336,134 @@ impl SystemRegistry {
                             }
                             SystemCommand::AddInterdictionSphere { id, position, radius, reply } => {
                                 let ok = ballpark.add_interdiction_sphere(id, position, radius);
+                                reconcile_tackle_and_bubbles(
+                                    &mut ballpark,
+                                    &mut active_module_cycles,
+                                    &base_scramble_strengths,
+                                    &base_core_strengths,
+                                );
+                                sync_ball_positions(&ballpark, &ball_positions_actor);
                                 let _ = reply.send(ok);
                             }
                             SystemCommand::AddMobileWarpDisruptor { id, position, radius, reply } => {
                                 let ok = ballpark.add_mobile_warp_disruptor(id, position, radius);
+                                reconcile_tackle_and_bubbles(
+                                    &mut ballpark,
+                                    &mut active_module_cycles,
+                                    &base_scramble_strengths,
+                                    &base_core_strengths,
+                                );
+                                sync_ball_positions(&ballpark, &ball_positions_actor);
                                 let _ = reply.send(ok);
+                            }
+                            SystemCommand::ScheduleMobileWarpDisruptor {
+                                id,
+                                type_id,
+                                position,
+                                radius,
+                                anchoring_delay_s,
+                                reply,
+                            } => {
+                                let ball = Ball {
+                                    id,
+                                    type_id,
+                                    position,
+                                    velocity: DVec3::ZERO,
+                                    max_velocity: 0.0,
+                                    inertia: 1.0,
+                                    mass: 50_000.0,
+                                    radius: 70.0,
+                                    speed_fraction: 0.0,
+                                    mode: MovementMode::Stop,
+                                };
+                                let ok = ballpark.add_ball(ball);
+                                pending_anchoring_disruptors.push(PendingAnchoringDisruptor {
+                                    id,
+                                    type_id,
+                                    position,
+                                    radius,
+                                    remaining_s: anchoring_delay_s.max(1.0),
+                                });
+                                sync_ball_positions(&ballpark, &ball_positions_actor);
+                                let _ = reply.send(ok);
+                            }
+                            SystemCommand::ApplyEcmJam {
+                                target_id,
+                                duration_s,
+                                reply,
+                            } => {
+                                let exists = ballpark.combat_states.contains_key(&target_id);
+                                if exists {
+                                    ballpark.apply_ecm_jam(target_id, duration_s);
+                                }
+                                let _ = reply.send(exists);
+                            }
+                            SystemCommand::ApplyEcmBurst {
+                                source_id,
+                                burst_radius_m,
+                                jam_strengths,
+                                duration_s,
+                                roll,
+                                reply,
+                            } => {
+                                let source_pos = ballpark
+                                    .balls
+                                    .get(&source_id)
+                                    .map(|b| b.position)
+                                    .unwrap_or(DVec3::ZERO);
+                                let ball_meta: HashMap<BallId, (u32, f64)> = ballpark
+                                    .balls
+                                    .iter()
+                                    .map(|(&id, b)| (id, (b.type_id, (b.position - source_pos).length())))
+                                    .collect();
+                                let jammed = ballpark.apply_ecm_burst(
+                                    source_id,
+                                    burst_radius_m,
+                                    |cid| {
+                                        let Some(&(target_type_id, dist)) = ball_meta.get(&cid) else {
+                                            return false;
+                                        };
+                                        if dist > burst_radius_m {
+                                            return false;
+                                        }
+                                        let (sensor_idx, sensor_str) = sde_opt
+                                            .as_ref()
+                                            .and_then(|sde| sde.types.get(&target_type_id))
+                                            .map(|t| {
+                                                let grav = t.default_attributes.get(&211).copied().unwrap_or(0.0);
+                                                let ladar = t.default_attributes.get(&209).copied().unwrap_or(0.0);
+                                                let mag = t.default_attributes.get(&210).copied().unwrap_or(0.0);
+                                                let radar = t.default_attributes.get(&208).copied().unwrap_or(0.0);
+                                                if grav >= ladar && grav >= mag && grav >= radar && grav > 0.0 {
+                                                    (0usize, grav)
+                                                } else if ladar >= mag && ladar >= radar && ladar > 0.0 {
+                                                    (1usize, ladar)
+                                                } else if mag >= radar && mag > 0.0 {
+                                                    (2usize, mag)
+                                                } else if radar > 0.0 {
+                                                    (3usize, radar)
+                                                } else {
+                                                    (0usize, 10.0)
+                                                }
+                                            })
+                                            .unwrap_or((0usize, 10.0));
+                                        let jam_str = jam_strengths[sensor_idx];
+                                        let chance = eve_dogma::compute_ecm_jam_chance(
+                                            jam_str,
+                                            sensor_str,
+                                            dist,
+                                            burst_radius_m,
+                                            0.0,
+                                        );
+                                        chance > 0.0 && roll < chance
+                                    },
+                                );
+                                for &cid in &jammed {
+                                    if let Some(cs) = ballpark.combat_states.get_mut(&cid) {
+                                        cs.ecm_jammed_remaining_s = duration_s;
+                                    }
+                                }
+                                let _ = reply.send(jammed);
                             }
                         }
                     }

@@ -255,7 +255,7 @@ async fn test_t7_injectable_server_clock_time_acceleration_and_pause_on_tick() {
             id,
             eve_db::InventoryItemRecord {
                 item_id: id,
-                type_id: 2254,
+                type_id: 2524, // Barren Command Center (matches Jita I planet 40009077, Barren 2016)
                 owner_id: 90_000_001,
                 location_id: ship_id,
                 flag: eve_db::InventoryFlag::Cargo,
@@ -276,7 +276,7 @@ async fn test_t7_injectable_server_clock_time_acceleration_and_pause_on_tick() {
             PyRep::List(vec![PyRep::Tuple(vec![
                 PyRep::Integer(1),
                 PyRep::Integer(1),
-                PyRep::Integer(2254),
+                PyRep::Integer(2524),
                 PyRep::Real(0.1),
                 PyRep::Real(0.2),
             ])]),

@@ -15,6 +15,8 @@
     "sde_dbuff_collections": 277,
     "sde_dogma_attributes": 2871,
     "sde_dogma_effects": 3427,
+    "sde_dungeon_asteroid_counts": 3054,
+    "sde_dungeon_gas_types": 92,
     "sde_dungeons": 5516,
     "sde_dynamic_item_attributes": 441,
     "sde_epic_arcs": 21,
@@ -43,6 +45,7 @@
     "sde_station_operations": 69,
     "sde_station_services": 27,
     "sde_stations": 5210,
+    "sde_type_lists": 469,
     "sde_type_materials": 9866,
     "sde_types": 53288,
     "sde_wormhole_types": 132

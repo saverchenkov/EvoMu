@@ -637,6 +637,46 @@ for tid, sc in sc_raw.iteritems():
 ct_raw = load_fsd('compressibletypes')
 compressible_types = [{'type_id': int(k), 'compressed_type_id': int(v)} for k, v in ct_raw.iteritems()]
 
+# Client type lists (`res:/staticdata/typelist.fsdbinary`): inclusion/exclusion rules referenced by
+# dogma attributes such as `3255` (compressibleItemsTypeList) on shipboard compressors.
+tl_raw = load_fsd('typelist')
+type_lists = []
+for tlid, tl in tl_raw.iteritems():
+    def _ids(attr):
+        v = getattr(tl, attr, None)
+        return sorted(int(x) for x in v) if v is not None else []
+    type_lists.append({
+        'type_list_id': int(tlid),
+        'name': str(getattr(tl, 'name', '') or ''),
+        'included_category_ids': _ids('includedCategoryIDs'),
+        'included_group_ids': _ids('includedGroupIDs'),
+        'included_type_ids': _ids('includedTypeIDs'),
+        'excluded_category_ids': _ids('excludedCategoryIDs'),
+        'excluded_group_ids': _ids('excludedGroupIDs'),
+        'excluded_type_ids': _ids('excludedTypeIDs'),
+    })
+
+# Per-dungeon asteroid layout (`res:/staticdata/asteroidcountbytypeidroomiddungeonid.static`):
+# dungeonID -> roomID -> asteroid typeID -> number of asteroids of that type in the room.
+ac_raw = binaryLoader.LoadFromString(open(os.path.join(res_dir, cat_map['res:/staticdata/asteroidcountbytypeidroomiddungeonid.static']), 'rb').read())
+dungeon_asteroid_counts = []
+for did, rooms in ac_raw.iteritems():
+    for rid, tcounts in rooms.iteritems():
+        for tid, cnt in tcounts.iteritems():
+            dungeon_asteroid_counts.append({
+                'dungeon_id': int(did),
+                'room_id': int(rid),
+                'type_id': int(tid),
+                'asteroid_count': int(cnt),
+            })
+
+# Gas cloud types per gas-site dungeon (`res:/staticdata/gastypesbydungeonid.static`).
+gt_raw = binaryLoader.LoadFromString(open(os.path.join(res_dir, cat_map['res:/staticdata/gastypesbydungeonid.static']), 'rb').read())
+dungeon_gas_types = []
+for did, tids in gt_raw.iteritems():
+    for tid in tids:
+        dungeon_gas_types.append({'dungeon_id': int(did), 'type_id': int(tid)})
+
 dia_raw = load_fsd('dynamicitemattributes')
 dynamic_item_attributes = []
 for mid, d in dia_raw.iteritems():
@@ -687,6 +727,9 @@ out = {
     'node_graphs': node_graphs,
     'space_components': space_components,
     'compressible_types': compressible_types,
+    'type_lists': type_lists,
+    'dungeon_asteroid_counts': dungeon_asteroid_counts,
+    'dungeon_gas_types': dungeon_gas_types,
     'dynamic_item_attributes': dynamic_item_attributes,
 }
 json.dump(out, open(out_json_path, 'wb'))
@@ -1366,6 +1409,28 @@ def run_import(
             type_id INTEGER PRIMARY KEY,
             compressed_type_id INTEGER NOT NULL
         );
+        CREATE TABLE sde_type_lists (
+            type_list_id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL,
+            included_category_ids_json TEXT NOT NULL,
+            included_group_ids_json TEXT NOT NULL,
+            included_type_ids_json TEXT NOT NULL,
+            excluded_category_ids_json TEXT NOT NULL,
+            excluded_group_ids_json TEXT NOT NULL,
+            excluded_type_ids_json TEXT NOT NULL
+        );
+        CREATE TABLE sde_dungeon_asteroid_counts (
+            dungeon_id INTEGER NOT NULL,
+            room_id INTEGER NOT NULL,
+            type_id INTEGER NOT NULL,
+            asteroid_count INTEGER NOT NULL,
+            PRIMARY KEY (dungeon_id, room_id, type_id)
+        );
+        CREATE TABLE sde_dungeon_gas_types (
+            dungeon_id INTEGER NOT NULL,
+            type_id INTEGER NOT NULL,
+            PRIMARY KEY (dungeon_id, type_id)
+        );
         CREATE TABLE sde_dynamic_item_attributes (
             mutaplasmid_type_id INTEGER PRIMARY KEY,
             mappings_json TEXT NOT NULL,
@@ -1982,6 +2047,33 @@ def run_import(
         conn.executemany(
             "INSERT INTO sde_compressible_types VALUES (?, ?)",
             [(ct["type_id"], ct["compressed_type_id"]) for ct in fsd_data["compressible_types"]],
+        )
+        conn.executemany(
+            "INSERT INTO sde_type_lists VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                (
+                    tl["type_list_id"],
+                    tl["name"],
+                    json.dumps(tl["included_category_ids"], separators=(",", ":")),
+                    json.dumps(tl["included_group_ids"], separators=(",", ":")),
+                    json.dumps(tl["included_type_ids"], separators=(",", ":")),
+                    json.dumps(tl["excluded_category_ids"], separators=(",", ":")),
+                    json.dumps(tl["excluded_group_ids"], separators=(",", ":")),
+                    json.dumps(tl["excluded_type_ids"], separators=(",", ":")),
+                )
+                for tl in fsd_data["type_lists"]
+            ],
+        )
+        conn.executemany(
+            "INSERT INTO sde_dungeon_asteroid_counts VALUES (?, ?, ?, ?)",
+            [
+                (r["dungeon_id"], r["room_id"], r["type_id"], r["asteroid_count"])
+                for r in fsd_data["dungeon_asteroid_counts"]
+            ],
+        )
+        conn.executemany(
+            "INSERT INTO sde_dungeon_gas_types VALUES (?, ?)",
+            [(r["dungeon_id"], r["type_id"]) for r in fsd_data["dungeon_gas_types"]],
         )
         conn.executemany(
             "INSERT INTO sde_dynamic_item_attributes VALUES (?, ?, ?)",

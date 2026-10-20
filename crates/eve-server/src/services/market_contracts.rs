@@ -46,7 +46,7 @@ pub fn handle(
             Some(Ok(PyRep::Real(bal)))
         }
 
-        ("account", "GetJournal") | ("account", "GetTransactions") => {
+        ("account", "GetTransactions") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -54,7 +54,7 @@ pub fn handle(
             let rows = ctx.db.with_snapshot(|snap| {
                 snap.wallet_journal
                     .iter()
-                    .filter(|j| j.character_id == char_id)
+                    .filter(|j| j.character_id == char_id && j.entry_type == "MarketTransaction")
                     .map(|j| {
                         vec![
                             PyRep::Integer(j.entry_id),
@@ -67,7 +67,13 @@ pub fn handle(
                     .collect()
             });
             Some(Ok(PyRep::rowset(
-                vec!["entryID", "entryType", "amount", "balance", "reason"],
+                vec![
+                    "transactionID",
+                    "entryType",
+                    "amount",
+                    "balance",
+                    "description",
+                ],
                 rows,
             )))
         }
