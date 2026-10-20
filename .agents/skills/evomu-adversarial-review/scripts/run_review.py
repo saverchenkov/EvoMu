@@ -2,7 +2,7 @@
 """EvoMu independent adversarial review orchestrator.
 
 Collects evidence (git diff, honest test run, metrics, toolchain audit), then launches a
-headless Jetski/Antigravity CLI reviewer (`agy -p ... --model gemini-launch-candidate-high --effort high`)
+headless Jetski/Antigravity CLI reviewer (`agy -p ... --model gemini-flash-next --effort high`)
 with a structured-output schema, validates that the reviewer did not touch the workspace,
 and records the verdict in <repo>/.evomu-reviews/ (gitignored).
 
@@ -41,7 +41,7 @@ UNAVAILABLE_EXIT = 4  # every reviewer model was out of quota/capacity: NOTHING 
 QUOTA_RE = re.compile(r"RESOURCE_EXHAUSTED|[Qq]uota|rate.?limit|\b429\b|No capacity|UNAVAILABLE \(code 503\)|"
                       r"\b503\b|overloaded|insufficient (?:credits|balance)|usage limit", re.I)
 FALLBACK_MODELS = [m.strip() for m in os.environ.get(
-    "EVOMU_REVIEW_FALLBACK_MODELS", "gemini-3.1-pro-high,fable-5.1-high,opus-5.5-high").split(",") if m.strip()]
+    "EVOMU_REVIEW_FALLBACK_MODELS", "gemini-launch-candidate-high,gemini-3.1-pro-high,fable-5.1-high,opus-5.5-high").split(",") if m.strip()]
 CONTINUE_PROMPT = (
     "Continue the EvoMu review exactly where you left off. Do not restart and do not summarize progress. "
     "Keep using file-reading/search tools silently (no prose between tool calls) until every step of the "
@@ -439,7 +439,7 @@ def main():
     ap.add_argument("--base", help="Base ref for the diff (default: last reviewed HEAD, else root commit)")
     ap.add_argument("--mode", choices=["claims", "gap-audit"], default="claims",
                     help="claims = precision review of the change; gap-audit = recall audit of the parity ledger")
-    ap.add_argument("--model", default=os.environ.get("EVOMU_REVIEW_MODEL", "gemini-launch-candidate-high"))
+    ap.add_argument("--model", default=os.environ.get("EVOMU_REVIEW_MODEL", "gemini-flash-next"))
     ap.add_argument("--effort", default=os.environ.get("EVOMU_REVIEW_EFFORT", "high"))
     ap.add_argument("--reviewer-timeout", default=os.environ.get("EVOMU_REVIEW_TIMEOUT", "0s"),
                     help="agy --print-timeout (0s = wait for completion)")
@@ -517,7 +517,7 @@ def main():
     if a.launcher == "jetski-chat":
         cmd = ["jetski", "chat", "-m", "agent", "-a", BRIEF, "-a", OPEN_FINDINGS,
                "Act as the reviewer described in the attached brief. Context directory: %s. "
-               "Select the model 'Gemini 4 Argon (High)' before running. Do not modify files." % ctx]
+               "Select the model 'Gemini Flash Next' before running. Do not modify files." % ctx]
         print("[review] jetski chat cannot pin a model or return structured output; launching interactive session:")
         print("  " + " ".join(cmd))
         if not a.dry_run:
