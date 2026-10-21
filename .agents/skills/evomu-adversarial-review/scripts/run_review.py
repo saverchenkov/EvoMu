@@ -42,6 +42,9 @@ QUOTA_RE = re.compile(r"RESOURCE_EXHAUSTED|[Qq]uota|rate.?limit|\b429\b|No capac
                       r"\b503\b|overloaded|insufficient (?:credits|balance)|usage limit", re.I)
 FALLBACK_MODELS = [m.strip() for m in os.environ.get(
     "EVOMU_REVIEW_FALLBACK_MODELS", "auto,gemini-launch-candidate-high,gemini-flash-next,fable-5.1-high,opus-5.5-high").split(",") if m.strip()]
+# Models whose agy selection has no effort levels (passing --effort makes agy refuse to start).
+NO_EFFORT_MODELS = {m.strip() for m in os.environ.get("EVOMU_REVIEW_NO_EFFORT_MODELS", "auto,gemini-flash-next").split(",") if m.strip()}
+MODEL_UNUSABLE_RE = re.compile(r"invalid model selection|not recognized as a known model|is not supported for model", re.I)
 CONTINUE_PROMPT = (
     "Continue the EvoMu review exactly where you left off. Do not restart and do not summarize progress. "
     "Keep using file-reading/search tools silently (no prose between tool calls) until every step of the "
@@ -234,9 +237,15 @@ def launch_reviewer(first_cmd, root, sdir, run_dir, tree_before, ts, valid_verdi
     for n, model in enumerate(models):
         cmd = list(first_cmd)
         cmd[i + 1] = model
+        if model in NO_EFFORT_MODELS and "--effort" in cmd:
+            j = cmd.index("--effort")
+            del cmd[j:j + 2]  # agy rejects --effort for these models ("--effort is not supported for model ...")
         pfx = prefix if n == 0 else "%sfb%d_" % (prefix, n)
         verdict, so, conv, quota = _launch_one(cmd, root, sdir, run_dir, tree_before, ts, valid_verdicts, pfx,
                                                lock_name, check_tree)
+        if not quota and verdict not in valid_verdicts and verdict != "INVALID" and \
+                MODEL_UNUSABLE_RE.search(so.get("summary", "") + so.get("report_markdown", "")):
+            quota = True  # the model can't be launched at all (bad selection/flags): fall through to the next one
         if not quota or verdict in valid_verdicts or verdict == "INVALID":
             if n:
                 so["summary"] = ("(Reviewed by FALLBACK model %s because %s %s out of quota/capacity.) "
