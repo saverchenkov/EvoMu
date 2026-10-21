@@ -1,16 +1,31 @@
-//! `esi::economy_routes` — `ESI-6` routes for `Market`, `Contracts`, `Industry`, and
-//! `Planetary Interaction` (`ESI-6`).
+//! `esi::economy_routes` — `ESI-6` routes for `Market` and `Contracts` (`ESI-6`), delegating
+//! `Industry` and `Planetary Interaction` to `esi::economy_industry_routes`.
 
 #![forbid(unsafe_code)]
 
-use crate::esi::sample_routes::{format_iso8601_utc, RouteExecutionResult};
+// parity: esi:GET /markets/groups, esi:GET /markets/groups/{market_group_id}
+// parity: esi:GET /markets/prices, esi:GET /markets/{region_id}/types
+// parity: esi:GET /characters/{character_id}/contracts
+// parity: esi:GET /characters/{character_id}/contracts/{contract_id}/bids
+// parity: esi:GET /characters/{character_id}/contracts/{contract_id}/items
+// parity: esi:GET /contracts/public/{region_id}
+// parity: esi:GET /contracts/public/bids/{contract_id}
+// parity: esi:GET /contracts/public/items/{contract_id}
+// parity: esi:GET /corporations/{corporation_id}/contracts
+// parity: esi:GET /corporations/{corporation_id}/contracts/{contract_id}/bids
+// parity: esi:GET /corporations/{corporation_id}/contracts/{contract_id}/items
+// parity: feat:esi.market.groups, feat:esi.market.prices, feat:esi.market.types
+// parity: feat:esi.contracts.char-list, feat:esi.contracts.char-items-bids
+// parity: feat:esi.contracts.corp, feat:esi.contracts.public
+
+use crate::esi::sample_routes::{format_iso8601_utc, paginate_slice, RouteExecutionResult};
 use crate::esi::universe_routes::character_has_structure_acl_access;
 use crate::router::ServerContext;
 use eve_db::SsoTokenClaims;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 
-fn parse_path_i64(
+pub(super) fn parse_path_i64(
     path_params: &HashMap<String, String>,
     name: &str,
 ) -> Result<i64, RouteExecutionResult> {
@@ -37,31 +52,120 @@ fn map_contract_type(ctype: &str) -> &'static str {
         "ItemExchange" | "item_exchange" => "item_exchange",
         "Courier" | "courier" => "courier",
         "Auction" | "auction" => "auction",
-        _ => "item_exchange",
+        "Loan" | "loan" => "loan",
+        _ => "unknown",
     }
 }
 
 fn map_contract_status(status: &str) -> &'static str {
     match status {
-        "Outstanding" => "outstanding",
-        "InProgress" => "in_progress",
-        "Completed" => "finished",
-        "Failed" => "failed",
-        "Expired" => "deleted",
+        "Outstanding" | "outstanding" => "outstanding",
+        "InProgress" | "in_progress" => "in_progress",
+        "Completed" | "finished" => "finished",
+        "Failed" | "failed" => "failed",
+        "Expired" | "Deleted" | "deleted" => "deleted",
+        "Rejected" | "rejected" => "rejected",
+        "Reversed" | "reversed" => "reversed",
+        "Cancelled" | "cancelled" => "cancelled",
         _ => "outstanding",
     }
 }
 
-fn map_job_status(status: &str) -> &'static str {
-    match status {
-        "Active" => "active",
-        "Delivered" => "delivered",
-        "Cancelled" => "cancelled",
-        _ => "active",
+fn map_contract_availability(avail: &str) -> &'static str {
+    if avail.eq_ignore_ascii_case("personal") {
+        "personal"
+    } else if avail.eq_ignore_ascii_case("corporation") {
+        "corporation"
+    } else if avail.eq_ignore_ascii_case("alliance") {
+        "alliance"
+    } else {
+        "public"
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+fn contract_in_region(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    c: &eve_db::ContractRecord,
+    reg_u32: u32,
+) -> bool {
+    if let Some(st) = ctx.sde.stations.get(&c.start_station_id) {
+        return st.region_id == reg_u32;
+    }
+    if let Some(upwell) = snap.structures.get(&c.start_station_id) {
+        return ctx
+            .sde
+            .solar_systems
+            .get(&upwell.solar_system_id)
+            .is_some_and(|sys| sys.region_id == reg_u32);
+    }
+    false
+}
+
+/// Contract item rows from live state: items the issuer put in escrow (`is_included: true`, only
+/// those still present in the item table) followed by items the issuer asks for
+/// (`is_included: false`). `public` selects the public-contract schema (with `item_id`) versus the
+/// character/corporation schema (with `is_singleton`).
+fn contract_item_rows(
+    snap: &eve_db::WorldStateSnapshot,
+    c: &eve_db::ContractRecord,
+    public: bool,
+) -> Vec<Value> {
+    let mut out = Vec::new();
+    for iid in &c.item_ids {
+        let Some(item) = snap.items.get(iid) else {
+            continue;
+        };
+        let mut row = json!({
+            "record_id": *iid,
+            "type_id": item.type_id as i64,
+            "quantity": item.quantity as i64,
+            "is_included": true,
+        });
+        if public {
+            row["item_id"] = json!(*iid);
+        } else {
+            row["is_singleton"] = json!(item.singleton);
+        }
+        out.push(row);
+    }
+    for (type_id, qty) in &c.requested_items {
+        // DERIVED: requested_items stores (type_id, quantity) tuples without distinct item_id or singleton flag
+        let mut row = json!({
+            "record_id": out.len() as i64 + 1,
+            "type_id": *type_id as i64,
+            "quantity": i64::from(*qty),
+            "is_included": false,
+        });
+        if !public {
+            row["is_singleton"] = json!(false);
+        }
+        out.push(row);
+    }
+    out
+}
+
+fn contract_bid_rows(c: &eve_db::ContractRecord, include_bidder: bool) -> Vec<Value> {
+    c.bid_history
+        .iter()
+        .enumerate()
+        .rev()
+        .map(|(idx, &(bidder_id, amount, ts))| {
+            // DERIVED: bid_history stores (bidder_id, amount, timestamp_unix); 1-based index is used as bid_id
+            let mut row = json!({
+                "bid_id": (idx as i64) + 1,
+                "date_bid": format_iso8601_utc(ts),
+                "amount": amount.to_wire_f64(),
+            });
+            if include_bidder {
+                row["bidder_id"] = json!(bidder_id);
+            }
+            row
+        })
+        .collect()
+}
+
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 pub fn dispatch_economy_route(
     ctx: &ServerContext,
     method: &str,
@@ -100,6 +204,7 @@ pub fn dispatch_economy_route(
                 .map(|t| t.type_id as i64)
                 .collect();
             types.sort_unstable();
+            // DERIVED: sde_market_groups stores group name only (no separate description column in SDE)
             let mut obj = json!({
                 "market_group_id": mg.market_group_id as i64,
                 "name": mg.name,
@@ -115,36 +220,37 @@ pub fn dispatch_economy_route(
         }
 
         ("GET", "/markets/prices") => Some(ctx.db.with_snapshot(|snap| {
-            let mut price_by_type: HashMap<u32, f64> = HashMap::new();
+            let mut sum_count_by_type: HashMap<u32, (f64, usize)> = HashMap::new();
             for ord in snap.market_orders.values() {
                 if ord.vol_remaining > 0 {
-                    price_by_type
-                        .entry(ord.type_id)
-                        .or_insert_with(|| ord.price.to_wire_f64());
+                    let entry = sum_count_by_type.entry(ord.type_id).or_insert((0.0, 0));
+                    entry.0 += ord.price.to_wire_f64();
+                    entry.1 += 1;
                 }
             }
-            if price_by_type.is_empty() {
-                price_by_type.insert(34, 5.0);
-                price_by_type.insert(587, 350_000.0);
-            }
-            let mut tids: Vec<u32> = price_by_type.keys().copied().collect();
+            let mut tids: Vec<u32> = sum_count_by_type.keys().copied().collect();
             tids.sort_unstable();
             let out: Vec<Value> = tids
                 .into_iter()
-                .take(500)
-                .map(|tid| {
-                    let avg = price_by_type.get(&tid).copied().unwrap_or(100.0);
+                .filter_map(|tid| {
+                    let (sum, cnt) = sum_count_by_type.get(&tid).copied()?;
+                    if cnt == 0 {
+                        return None;
+                    }
+                    let avg = sum / (cnt as f64);
+                    // DERIVED: adjusted_price uses SDE base_price when positive, falling back to active-order average_price
                     let adj = ctx
                         .sde
                         .types
                         .get(&tid)
-                        .map(|t| t.base_price.max(1.0))
+                        .map(|t| t.base_price)
+                        .filter(|&bp| bp > 0.0)
                         .unwrap_or(avg);
-                    json!({
+                    Some(json!({
                         "type_id": tid as i64,
                         "average_price": avg,
                         "adjusted_price": adj,
-                    })
+                    }))
                 })
                 .collect();
             RouteExecutionResult::ok_json(json!(out), 3600)
@@ -309,7 +415,12 @@ pub fn dispatch_economy_route(
                     .collect();
                 tids.sort_unstable();
                 tids.dedup();
-                RouteExecutionResult::ok_paginated_json(json!(tids), 600, 1)
+                match paginate_slice(&tids, page, 1000) {
+                    Ok((page_rows, total_pages)) => {
+                        RouteExecutionResult::ok_paginated(json!(page_rows), 600, total_pages)
+                    }
+                    Err(e) => e,
+                }
             }))
         }
 
@@ -667,39 +778,54 @@ pub fn dispatch_economy_route(
                 let mut contracts: Vec<_> = snap
                     .contracts
                     .values()
-                    .filter(|c| c.issuer_id == char_id || c.acceptor_id == Some(char_id))
+                    .filter(|c| {
+                        c.issuer_id == char_id
+                            || c.acceptor_id == Some(char_id)
+                            || c.assignee_id == char_id
+                    })
                     .collect();
                 contracts.sort_by_key(|c| c.contract_id);
-                let out: Vec<Value> = contracts
+                let rows: Vec<Value> = contracts
                     .into_iter()
                     .map(|c| {
-                        let issuer_corp = snap
-                            .characters
-                            .get(&c.issuer_id)
-                            .map(|ch| ch.corporation_id)
-                            .unwrap_or(1_000_009);
+                        // DERIVED: fall back to issuer character's corporation_id when ContractRecord.issuer_corp_id is 0
+                        let issuer_corp = if c.issuer_corp_id > 0 {
+                            c.issuer_corp_id
+                        } else {
+                            snap.characters
+                                .get(&c.issuer_id)
+                                .map(|ch| ch.corporation_id)
+                                .unwrap_or(0)
+                        };
                         json!({
                             "contract_id": c.contract_id,
                             "issuer_id": c.issuer_id,
                             "issuer_corporation_id": issuer_corp,
-                            "assignee_id": c.acceptor_id.unwrap_or(0),
+                            "assignee_id": c.assignee_id,
                             "acceptor_id": c.acceptor_id.unwrap_or(0),
                             "start_location_id": c.start_station_id,
                             "end_location_id": c.end_station_id,
                             "type": map_contract_type(&c.contract_type),
                             "status": map_contract_status(&c.status),
-                            "title": "Capsuleer Contract",
-                            "for_corporation": false,
-                            "availability": "public",
-                            "date_issued": format_iso8601_utc(now.saturating_sub(3600)),
-                            "date_expired": format_iso8601_utc(c.expiration_unix.max(now + 86400)),
+                            "title": c.title,
+                            "for_corporation": c.for_corp,
+                            "availability": map_contract_availability(&c.availability),
+                            "date_issued": format_iso8601_utc(c.date_issued_unix),
+                            "date_expired": format_iso8601_utc(c.expiration_unix),
+                            "days_to_complete": c.num_days as i64,
                             "price": c.price.to_wire_f64(),
                             "reward": c.reward.to_wire_f64(),
                             "collateral": c.collateral.to_wire_f64(),
+                            "buyout": c.buyout.to_wire_f64(),
                         })
                     })
                     .collect();
-                RouteExecutionResult::ok_paginated_json(json!(out), 300, 1)
+                match paginate_slice(&rows, page, 1000) {
+                    Ok((page_rows, total_pages)) => {
+                        RouteExecutionResult::ok_paginated(json!(page_rows), 300, total_pages)
+                    }
+                    Err(e) => e,
+                }
             }))
         }
 
@@ -725,34 +851,16 @@ pub fn dispatch_economy_route(
                         format!("Contract {contract_id} not found"),
                     );
                 };
-                if c.issuer_id != char_id && c.acceptor_id != Some(char_id) {
+                if c.issuer_id != char_id
+                    && c.acceptor_id != Some(char_id)
+                    && c.assignee_id != char_id
+                {
                     return RouteExecutionResult::error(
                         403,
                         format!("Character {char_id} is not a party to contract {contract_id}"),
                     );
                 }
-                let mut items = Vec::new();
-                for &iid in &c.item_ids {
-                    if let Some(it) = snap.items.get(&iid) {
-                        items.push(json!({
-                            "record_id": it.item_id,
-                            "type_id": it.type_id as i64,
-                            "quantity": it.quantity as i64,
-                            "is_singleton": it.singleton,
-                            "is_included": true,
-                        }));
-                    }
-                }
-                if items.is_empty() {
-                    items.push(json!({
-                        "record_id": 1,
-                        "type_id": 34,
-                        "quantity": 100,
-                        "is_singleton": false,
-                        "is_included": true,
-                    }));
-                }
-                RouteExecutionResult::ok_json(json!(items), 300)
+                RouteExecutionResult::ok_json(json!(contract_item_rows(snap, c, false)), 300)
             }))
         }
 
@@ -778,19 +886,16 @@ pub fn dispatch_economy_route(
                         format!("Contract {contract_id} not found"),
                     );
                 };
-                if c.issuer_id != char_id && c.acceptor_id != Some(char_id) {
+                if c.issuer_id != char_id
+                    && c.acceptor_id != Some(char_id)
+                    && c.assignee_id != char_id
+                {
                     return RouteExecutionResult::error(
                         403,
                         format!("Character {char_id} is not a party to contract {contract_id}"),
                     );
                 }
-                let out = vec![json!({
-                    "bid_id": 1,
-                    "bidder_id": c.acceptor_id.unwrap_or(char_id),
-                    "date_bid": format_iso8601_utc(now),
-                    "amount": c.price.to_wire_f64().max(1000.0),
-                })];
-                RouteExecutionResult::ok_json(json!(out), 300)
+                RouteExecutionResult::ok_json(json!(contract_bid_rows(c, true)), 300)
             }))
         }
 
@@ -815,17 +920,26 @@ pub fn dispatch_economy_route(
                 let mut contracts: Vec<_> = snap
                     .contracts
                     .values()
-                    .filter(|c| c.status == "Outstanding")
+                    .filter(|c| {
+                        c.status == "Outstanding"
+                            && (c.availability.is_empty()
+                                || c.availability.eq_ignore_ascii_case("Public"))
+                            && contract_in_region(ctx, snap, c, reg_u32)
+                    })
                     .collect();
                 contracts.sort_by_key(|c| c.contract_id);
-                let out: Vec<Value> = contracts
+                let rows: Vec<Value> = contracts
                     .into_iter()
                     .map(|c| {
-                        let issuer_corp = snap
-                            .characters
-                            .get(&c.issuer_id)
-                            .map(|ch| ch.corporation_id)
-                            .unwrap_or(1_000_009);
+                        // DERIVED: fall back to issuer character's corporation_id when ContractRecord.issuer_corp_id is 0
+                        let issuer_corp = if c.issuer_corp_id > 0 {
+                            c.issuer_corp_id
+                        } else {
+                            snap.characters
+                                .get(&c.issuer_id)
+                                .map(|ch| ch.corporation_id)
+                                .unwrap_or(0)
+                        };
                         json!({
                             "contract_id": c.contract_id,
                             "issuer_id": c.issuer_id,
@@ -833,16 +947,24 @@ pub fn dispatch_economy_route(
                             "start_location_id": c.start_station_id,
                             "end_location_id": c.end_station_id,
                             "type": map_contract_type(&c.contract_type),
-                            "date_issued": format_iso8601_utc(now.saturating_sub(3600)),
-                            "date_expired": format_iso8601_utc(c.expiration_unix.max(now + 86400)),
-                            "for_corporation": false,
+                            "date_issued": format_iso8601_utc(c.date_issued_unix),
+                            "date_expired": format_iso8601_utc(c.expiration_unix),
+                            "for_corporation": c.for_corp,
+                            "title": c.title,
+                            "days_to_complete": c.num_days as i64,
                             "price": c.price.to_wire_f64(),
                             "reward": c.reward.to_wire_f64(),
                             "collateral": c.collateral.to_wire_f64(),
+                            "buyout": c.buyout.to_wire_f64(),
                         })
                     })
                     .collect();
-                RouteExecutionResult::ok_paginated_json(json!(out), 1800, 1)
+                match paginate_slice(&rows, page, 1000) {
+                    Ok((page_rows, total_pages)) => {
+                        RouteExecutionResult::ok_paginated(json!(page_rows), 1800, total_pages)
+                    }
+                    Err(e) => e,
+                }
             }))
         }
 
@@ -852,37 +974,21 @@ pub fn dispatch_economy_route(
                 Err(e) => return Some(e),
             };
             Some(ctx.db.with_snapshot(|snap| {
-                let Some(c) = snap.contracts.get(&contract_id) else {
+                let Some(c) = snap.contracts.get(&contract_id).filter(|c| {
+                    c.availability.is_empty() || c.availability.eq_ignore_ascii_case("Public")
+                }) else {
                     return RouteExecutionResult::error(
                         404,
-                        format!("Contract {contract_id} not found"),
+                        format!("Public contract {contract_id} not found"),
                     );
                 };
-                let out: Vec<Value> = c
-                    .item_ids
-                    .iter()
-                    .enumerate()
-                    .map(|(idx, iid)| {
-                        let type_id = snap
-                            .items
-                            .get(iid)
-                            .map(|i| i.type_id as i64)
-                            .unwrap_or(34);
-                        let qty = snap
-                            .items
-                            .get(iid)
-                            .map(|i| i.quantity.max(1) as i64)
-                            .unwrap_or(1);
-                        json!({
-                            "record_id": (idx as i64) + 1,
-                            "item_id": *iid,
-                            "type_id": type_id,
-                            "quantity": qty,
-                            "is_included": true,
-                        })
-                    })
-                    .collect();
-                RouteExecutionResult::ok_paginated_json(json!(out), 3600, 1)
+                let rows = contract_item_rows(snap, c, true);
+                match paginate_slice(&rows, page, 1000) {
+                    Ok((page_rows, total_pages)) => {
+                        RouteExecutionResult::ok_paginated(json!(page_rows), 3600, total_pages)
+                    }
+                    Err(e) => e,
+                }
             }))
         }
 
@@ -892,18 +998,21 @@ pub fn dispatch_economy_route(
                 Err(e) => return Some(e),
             };
             Some(ctx.db.with_snapshot(|snap| {
-                let Some(c) = snap.contracts.get(&contract_id) else {
+                let Some(c) = snap.contracts.get(&contract_id).filter(|c| {
+                    c.availability.is_empty() || c.availability.eq_ignore_ascii_case("Public")
+                }) else {
                     return RouteExecutionResult::error(
                         404,
-                        format!("Contract {contract_id} not found"),
+                        format!("Public contract {contract_id} not found"),
                     );
                 };
-                let out = vec![json!({
-                    "bid_id": 1,
-                    "date_bid": format_iso8601_utc(now),
-                    "amount": c.price.to_wire_f64().max(1000.0),
-                })];
-                RouteExecutionResult::ok_paginated_json(json!(out), 300, 1)
+                let rows = contract_bid_rows(c, false);
+                match paginate_slice(&rows, page, 1000) {
+                    Ok((page_rows, total_pages)) => {
+                        RouteExecutionResult::ok_paginated(json!(page_rows), 300, total_pages)
+                    }
+                    Err(e) => e,
+                }
             }))
         }
 
@@ -923,36 +1032,51 @@ pub fn dispatch_economy_route(
                     .contracts
                     .values()
                     .filter(|c| {
-                        c.issuer_id == corp_id
+                        c.issuer_corp_id == corp_id
+                            || c.assignee_id == corp_id
+                            || c.acceptor_id == Some(corp_id)
                             || corp.members.contains(&c.issuer_id)
-                            || c.issuer_id == corp.ceo_id
                     })
                     .collect();
                 contracts.sort_by_key(|c| c.contract_id);
-                let out: Vec<Value> = contracts
+                let rows: Vec<Value> = contracts
                     .into_iter()
                     .map(|c| {
+                        // DERIVED: fall back to corp_id when ContractRecord.issuer_corp_id is 0
+                        let issuer_corp = if c.issuer_corp_id > 0 {
+                            c.issuer_corp_id
+                        } else {
+                            corp_id
+                        };
                         json!({
                             "contract_id": c.contract_id,
                             "issuer_id": c.issuer_id,
-                            "issuer_corporation_id": corp_id,
-                            "assignee_id": c.acceptor_id.unwrap_or(0),
+                            "issuer_corporation_id": issuer_corp,
+                            "assignee_id": c.assignee_id,
                             "acceptor_id": c.acceptor_id.unwrap_or(0),
                             "start_location_id": c.start_station_id,
                             "end_location_id": c.end_station_id,
                             "type": map_contract_type(&c.contract_type),
                             "status": map_contract_status(&c.status),
-                            "for_corporation": true,
-                            "availability": "corporation",
-                            "date_issued": format_iso8601_utc(now.saturating_sub(3600)),
-                            "date_expired": format_iso8601_utc(c.expiration_unix.max(now + 86400)),
+                            "title": c.title,
+                            "for_corporation": c.for_corp,
+                            "availability": map_contract_availability(&c.availability),
+                            "date_issued": format_iso8601_utc(c.date_issued_unix),
+                            "date_expired": format_iso8601_utc(c.expiration_unix),
+                            "days_to_complete": c.num_days as i64,
                             "price": c.price.to_wire_f64(),
                             "reward": c.reward.to_wire_f64(),
                             "collateral": c.collateral.to_wire_f64(),
+                            "buyout": c.buyout.to_wire_f64(),
                         })
                     })
                     .collect();
-                RouteExecutionResult::ok_paginated_json(json!(out), 300, 1)
+                match paginate_slice(&rows, page, 1000) {
+                    Ok((page_rows, total_pages)) => {
+                        RouteExecutionResult::ok_paginated(json!(page_rows), 300, total_pages)
+                    }
+                    Err(e) => e,
+                }
             }))
         }
 
@@ -966,43 +1090,24 @@ pub fn dispatch_economy_route(
                 Err(e) => return Some(e),
             };
             Some(ctx.db.with_snapshot(|snap| {
-                if !snap.corporations.contains_key(&corp_id) {
+                let Some(corp) = snap.corporations.get(&corp_id) else {
                     return RouteExecutionResult::error(
                         404,
                         format!("Corporation {corp_id} not found"),
                     );
-                }
-                let Some(c) = snap.contracts.get(&contract_id) else {
+                };
+                let Some(c) = snap.contracts.get(&contract_id).filter(|c| {
+                    c.issuer_corp_id == corp_id
+                        || c.assignee_id == corp_id
+                        || c.acceptor_id == Some(corp_id)
+                        || corp.members.contains(&c.issuer_id)
+                }) else {
                     return RouteExecutionResult::error(
                         404,
-                        format!("Contract {contract_id} not found"),
+                        format!("Contract {contract_id} not found for corporation {corp_id}"),
                     );
                 };
-                let out: Vec<Value> = c
-                    .item_ids
-                    .iter()
-                    .enumerate()
-                    .map(|(idx, iid)| {
-                        let type_id = snap
-                            .items
-                            .get(iid)
-                            .map(|i| i.type_id as i64)
-                            .unwrap_or(34);
-                        let qty = snap
-                            .items
-                            .get(iid)
-                            .map(|i| i.quantity.max(1) as i64)
-                            .unwrap_or(1);
-                        json!({
-                            "record_id": (idx as i64) + 1,
-                            "type_id": type_id,
-                            "quantity": qty,
-                            "is_singleton": false,
-                            "is_included": true,
-                        })
-                    })
-                    .collect();
-                RouteExecutionResult::ok_json(json!(out), 3600)
+                RouteExecutionResult::ok_json(json!(contract_item_rows(snap, c, false)), 3600)
             }))
         }
 
@@ -1022,19 +1127,24 @@ pub fn dispatch_economy_route(
                         format!("Corporation {corp_id} not found"),
                     );
                 };
-                let Some(c) = snap.contracts.get(&contract_id) else {
+                let Some(c) = snap.contracts.get(&contract_id).filter(|c| {
+                    c.issuer_corp_id == corp_id
+                        || c.assignee_id == corp_id
+                        || c.acceptor_id == Some(corp_id)
+                        || corp.members.contains(&c.issuer_id)
+                }) else {
                     return RouteExecutionResult::error(
                         404,
-                        format!("Contract {contract_id} not found"),
+                        format!("Contract {contract_id} not found for corporation {corp_id}"),
                     );
                 };
-                let out = vec![json!({
-                    "bid_id": 1,
-                    "bidder_id": c.acceptor_id.unwrap_or(corp.ceo_id),
-                    "date_bid": format_iso8601_utc(now),
-                    "amount": c.price.to_wire_f64().max(1000.0),
-                })];
-                RouteExecutionResult::ok_paginated_json(json!(out), 3600, 1)
+                let rows = contract_bid_rows(c, true);
+                match paginate_slice(&rows, page, 1000) {
+                    Ok((page_rows, total_pages)) => {
+                        RouteExecutionResult::ok_paginated(json!(page_rows), 3600, total_pages)
+                    }
+                    Err(e) => e,
+                }
             }))
         }
 
@@ -1114,249 +1224,6 @@ pub fn dispatch_economy_route(
                 .collect();
             RouteExecutionResult::ok_json(json!(out), 3600)
         })),
-
-        ("GET", "/characters/{character_id}/industry/jobs") => {
-            let char_id = match parse_path_i64(path_params, "character_id") {
-                Ok(v) => v,
-                Err(e) => return Some(e),
-            };
-            Some(ctx.db.with_snapshot(|snap| {
-                if !snap.characters.contains_key(&char_id) {
-                    return RouteExecutionResult::error(
-                        404,
-                        format!("Character {char_id} not found"),
-                    );
-                }
-                let mut jobs: Vec<_> = snap
-                    .industry_jobs
-                    .values()
-                    .filter(|j| j.installer_id == char_id)
-                    .collect();
-                jobs.sort_by_key(|j| j.job_id);
-                let out: Vec<Value> = jobs
-                    .into_iter()
-                    .map(|j| {
-                        let start_ts = if j.start_unix > 0 { j.start_unix } else { now };
-                        let end_ts = start_ts + j.duration_seconds;
-                        json!({
-                            "job_id": j.job_id,
-                            "installer_id": j.installer_id,
-                            "facility_id": j.facility_id,
-                            "station_id": j.facility_id,
-                            "activity_id": j.activity_id as i64,
-                            "blueprint_id": j.blueprint_item_id,
-                            "blueprint_type_id": j.blueprint_type_id as i64,
-                            "blueprint_location_id": j.facility_id,
-                            "output_location_id": j.facility_id,
-                            "runs": j.runs as i64,
-                            "product_type_id": j.product_type_id as i64,
-                            "status": map_job_status(&j.status),
-                            "duration": j.duration_seconds as i64,
-                            "start_date": format_iso8601_utc(start_ts),
-                            "end_date": format_iso8601_utc(end_ts),
-                        })
-                    })
-                    .collect();
-                RouteExecutionResult::ok_json(json!(out), 300)
-            }))
-        }
-
-        ("GET", "/characters/{character_id}/mining") => {
-            let char_id = match parse_path_i64(path_params, "character_id") {
-                Ok(v) => v,
-                Err(e) => return Some(e),
-            };
-            Some(ctx.db.with_snapshot(|snap| {
-                let Some(ch) = snap.characters.get(&char_id) else {
-                    return RouteExecutionResult::error(
-                        404,
-                        format!("Character {char_id} not found"),
-                    );
-                };
-                let out = vec![json!({
-                    "date": "2025-12-15",
-                    "solar_system_id": ch.solar_system_id as i64,
-                    "type_id": 1230, // Veldspar
-                    "quantity": 1000,
-                })];
-                RouteExecutionResult::ok_paginated_json(json!(out), 600, 1)
-            }))
-        }
-
-        ("GET", "/corporations/{corporation_id}/industry/jobs") => {
-            let corp_id = match parse_path_i64(path_params, "corporation_id") {
-                Ok(v) => v,
-                Err(e) => return Some(e),
-            };
-            Some(ctx.db.with_snapshot(|snap| {
-                let Some(corp) = snap.corporations.get(&corp_id) else {
-                    return RouteExecutionResult::error(
-                        404,
-                        format!("Corporation {corp_id} not found"),
-                    );
-                };
-                let mut jobs: Vec<_> = snap
-                    .industry_jobs
-                    .values()
-                    .filter(|j| {
-                        j.installer_id == corp_id
-                            || corp.members.contains(&j.installer_id)
-                            || j.installer_id == corp.ceo_id
-                    })
-                    .collect();
-                jobs.sort_by_key(|j| j.job_id);
-                let out: Vec<Value> = jobs
-                    .into_iter()
-                    .map(|j| {
-                        let start_ts = if j.start_unix > 0 { j.start_unix } else { now };
-                        let end_ts = start_ts + j.duration_seconds;
-                        json!({
-                            "job_id": j.job_id,
-                            "installer_id": j.installer_id,
-                            "facility_id": j.facility_id,
-                            "location_id": j.facility_id,
-                            "activity_id": j.activity_id as i64,
-                            "blueprint_id": j.blueprint_item_id,
-                            "blueprint_type_id": j.blueprint_type_id as i64,
-                            "blueprint_location_id": j.facility_id,
-                            "output_location_id": j.facility_id,
-                            "runs": j.runs as i64,
-                            "product_type_id": j.product_type_id as i64,
-                            "status": map_job_status(&j.status),
-                            "duration": j.duration_seconds as i64,
-                            "start_date": format_iso8601_utc(start_ts),
-                            "end_date": format_iso8601_utc(end_ts),
-                        })
-                    })
-                    .collect();
-                RouteExecutionResult::ok_paginated_json(json!(out), 300, 1)
-            }))
-        }
-
-        ("GET", "/corporation/{corporation_id}/mining/extractions") => {
-            let corp_id = match parse_path_i64(path_params, "corporation_id") {
-                Ok(v) => v,
-                Err(e) => return Some(e),
-            };
-            Some(ctx.db.with_snapshot(|snap| {
-                if !snap.corporations.contains_key(&corp_id) {
-                    return RouteExecutionResult::error(
-                        404,
-                        format!("Corporation {corp_id} not found"),
-                    );
-                }
-                let structure_id = snap
-                    .structures
-                    .values()
-                    .find(|s| s.owner_corp_id == corp_id)
-                    .map(|s| s.structure_id)
-                    .unwrap_or(1_000_000_000_001);
-                let out = vec![json!({
-                    "structure_id": structure_id,
-                    "moon_id": 40_009_082,
-                    "extraction_start_time": format_iso8601_utc(now.saturating_sub(3600)),
-                    "chunk_arrival_time": format_iso8601_utc(now + 86400),
-                    "natural_decay_time": format_iso8601_utc(now + 97200),
-                })];
-                RouteExecutionResult::ok_json(json!(out), 1800)
-            }))
-        }
-
-        ("GET", "/corporation/{corporation_id}/mining/observers") => {
-            let corp_id = match parse_path_i64(path_params, "corporation_id") {
-                Ok(v) => v,
-                Err(e) => return Some(e),
-            };
-            Some(ctx.db.with_snapshot(|snap| {
-                if !snap.corporations.contains_key(&corp_id) {
-                    return RouteExecutionResult::error(
-                        404,
-                        format!("Corporation {corp_id} not found"),
-                    );
-                }
-                let observer_id = snap
-                    .structures
-                    .values()
-                    .find(|s| s.owner_corp_id == corp_id)
-                    .map(|s| s.structure_id)
-                    .unwrap_or(1_000_000_000_001);
-                let out = vec![json!({
-                    "observer_id": observer_id,
-                    "observer_type": "structure",
-                    "last_updated": "2025-12-15",
-                })];
-                RouteExecutionResult::ok_paginated_json(json!(out), 3600, 1)
-            }))
-        }
-
-        ("GET", "/corporation/{corporation_id}/mining/observers/{observer_id}") => {
-            let corp_id = match parse_path_i64(path_params, "corporation_id") {
-                Ok(v) => v,
-                Err(e) => return Some(e),
-            };
-            let _observer_id = match parse_path_i64(path_params, "observer_id") {
-                Ok(v) => v,
-                Err(e) => return Some(e),
-            };
-            Some(ctx.db.with_snapshot(|snap| {
-                let Some(corp) = snap.corporations.get(&corp_id) else {
-                    return RouteExecutionResult::error(
-                        404,
-                        format!("Corporation {corp_id} not found"),
-                    );
-                };
-                let out = vec![json!({
-                    "character_id": corp.ceo_id,
-                    "recorded_corporation_id": corp_id,
-                    "type_id": 45492,
-                    "quantity": 500,
-                    "last_updated": "2025-12-15",
-                })];
-                RouteExecutionResult::ok_paginated_json(json!(out), 3600, 1)
-            }))
-        }
-
-        // 4. Planetary Interaction Routes (ESI-6)
-        ("GET", "/characters/{character_id}/planets") => {
-            let char_id = match parse_path_i64(path_params, "character_id") {
-                Ok(v) => v,
-                Err(e) => return Some(e),
-            };
-            Some(ctx.db.with_snapshot(|snap| {
-                if !snap.characters.contains_key(&char_id) {
-                    return RouteExecutionResult::error(
-                        404,
-                        format!("Character {char_id} not found"),
-                    );
-                }
-                let mut colonies: Vec<_> = snap
-                    .planetary_colonies
-                    .values()
-                    .filter(|c| c.owner_id == char_id)
-                    .collect();
-                colonies.sort_by_key(|c| c.planet_id);
-                let out: Vec<Value> = colonies
-                    .into_iter()
-                    .map(|c| {
-                        let ts = if c.last_extracted_unix > 0 {
-                            c.last_extracted_unix
-                        } else {
-                            now
-                        };
-                        json!({
-                            "solar_system_id": c.solar_system_id as i64,
-                            "planet_id": c.planet_id,
-                            "owner_id": c.owner_id,
-                            "upgrade_level": c.command_center_level as i64,
-                            "num_pins": c.pins_count as i64,
-                            "last_update": format_iso8601_utc(ts),
-                            "planet_type": "barren",
-                        })
-                    })
-                    .collect();
-                RouteExecutionResult::ok_json(json!(out), 600)
-            }))
-        }
 
         ("GET", "/characters/{character_id}/planets/{planet_id}") => {
             let char_id = match parse_path_i64(path_params, "character_id") {
@@ -1455,6 +1322,15 @@ pub fn dispatch_economy_route(
             }))
         }
 
-        _ => None,
+        // 4. Industry & Planetary Interaction Routes (`esi::economy_industry_routes`)
+        _ => super::economy_industry_routes::dispatch_economy_industry_route(
+            ctx,
+            method,
+            path,
+            path_params,
+            query_params,
+            claims,
+            page,
+        ),
     }
 }

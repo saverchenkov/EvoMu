@@ -1013,3 +1013,179 @@ async fn test_sp2_spatial_bubbles_10000km_isolation_and_inter_bubble_warp() {
         "Ship 3 must receive RemoveBalls when Ship 1 warps out of its grid"
     );
 }
+
+#[tokio::test]
+async fn test_p7_on_slim_item_change_when_pilot_in_space_changes_corp() {
+    // parity: destiny:OnSlimItemChange
+    eve_testkit::attest(&["destiny:OnSlimItemChange"]);
+
+    let ctx = ServerContext::new();
+    let kw = HashMap::new();
+
+    // Pilot 1 (90_000_001) logs in, selects character, and undocks in Jita (30000142)
+    let mut sess1 = SessionState::new(981);
+    ctx.dispatch_rpc(
+        &mut sess1,
+        "authentication",
+        None,
+        "Login",
+        &[
+            PyRep::String("demo".into()),
+            PyRep::String("demo-secret".into()),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Login pilot 1");
+    ctx.dispatch_rpc(
+        &mut sess1,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(90_000_001)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("SelectCharacterID pilot 1");
+    let undock1 = ctx
+        .dispatch_rpc(&mut sess1, "stationSvc", None, "Undock", &[], &kw, None)
+        .await
+        .expect("Undock pilot 1");
+    let PyRep::KeyVal(undock1_kv) = &undock1 else {
+        panic!("Expected KeyVal from Undock pilot 1");
+    };
+    let ship1_id = undock1_kv["shipID"].as_i64().unwrap();
+
+    // Pilot 2 (90_000_002) logs in, selects character, and undocks on the same Jita grid
+    let mut sess2 = SessionState::new(982);
+    ctx.dispatch_rpc(
+        &mut sess2,
+        "authentication",
+        None,
+        "Login",
+        &[
+            PyRep::String("other".into()),
+            PyRep::String("other-secret".into()),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Login pilot 2");
+    ctx.dispatch_rpc(
+        &mut sess2,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(90_000_002)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("SelectCharacterID pilot 2");
+    let undock2 = ctx
+        .dispatch_rpc(&mut sess2, "stationSvc", None, "Undock", &[], &kw, None)
+        .await
+        .expect("Undock pilot 2");
+    let PyRep::KeyVal(undock2_kv) = &undock2 else {
+        panic!("Expected KeyVal from Undock pilot 2");
+    };
+    let ship2_id = undock2_kv["shipID"].as_i64().unwrap();
+    assert_ne!(ship1_id, ship2_id);
+
+    let jita_handle = ctx.systems.get_or_spawn(30_000_142);
+    // Drain initial undock/spawn observer updates for both ships on grid
+    let _ = jita_handle
+        .drain_observer_updates(ship1_id)
+        .await
+        .expect("drain initial ship 1");
+    let _ = jita_handle
+        .drain_observer_updates(ship2_id)
+        .await
+        .expect("drain initial ship 2");
+
+    // While undocked in space, Pilot 1 creates a new corporation via real V24 client RPC corpRegistry.AddCorporation
+    let create_corp = ctx
+        .dispatch_rpc(
+            &mut sess1,
+            "corpRegistry",
+            None,
+            "AddCorporation",
+            &[
+                PyRep::String("Grid Observer Slim Corp".into()),
+                PyRep::String("GOSC".into()),
+                PyRep::Real(0.05),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect("corpRegistry.AddCorporation while in space");
+    let PyRep::KeyVal(corp_kv) = &create_corp else {
+        panic!("Expected KeyVal from AddCorporation");
+    };
+    let new_corp_id = corp_kv["corporationID"].as_i64().expect("corporationID");
+    assert!(new_corp_id >= 98_000_001);
+
+    // Observer Pilot 2 drains DoDestinyUpdate notifications and must receive OnSlimItemChange(ship1_id, foo.SlimItem)
+    let (_tick, evs2, pyrep_updates2) = jita_handle
+        .drain_observer_updates(ship2_id)
+        .await
+        .expect("drain observer updates for pilot 2 after pilot 1 corp change");
+    assert!(
+        evs2.iter()
+            .any(|e| matches!(e, DestinyEvent::OnSlimItemChange { ball_id } if *ball_id == ship1_id)),
+        "Observer ship on grid must receive DestinyEvent::OnSlimItemChange for ship1_id"
+    );
+
+    let marshaled = eve_proto::marshal::encode(&pyrep_updates2);
+    let decoded = eve_proto::marshal::decode(&marshaled)
+        .expect("DoDestinyUpdate OnSlimItemChange must roundtrip through marshal");
+    assert_eq!(decoded, pyrep_updates2);
+
+    let PyRep::List(entries) = &pyrep_updates2 else {
+        panic!("Expected List of DoDestinyUpdate entries");
+    };
+    let slim_change_entry = entries
+        .iter()
+        .find_map(|entry| {
+            let PyRep::Tuple(outer) = entry else {
+                return None;
+            };
+            let PyRep::Tuple(action) = outer.get(1)? else {
+                return None;
+            };
+            if action.first()?.as_str() == Some("OnSlimItemChange") {
+                let PyRep::Tuple(args) = action.get(1)? else {
+                    return None;
+                };
+                Some(args.as_slice())
+            } else {
+                None
+            }
+        })
+        .expect("DoDestinyUpdate wire list must contain OnSlimItemChange action");
+    assert_eq!(slim_change_entry.len(), 2);
+    assert_eq!(slim_change_entry[0], PyRep::Integer(ship1_id));
+    let slim_obj = &slim_change_entry[1];
+    let PyRep::Object { type_name, args } = slim_obj else {
+        panic!("Expected foo.SlimItem Object as second argument of OnSlimItemChange");
+    };
+    assert_eq!(type_name, "foo.SlimItem");
+    assert!(matches!(args.as_ref(), PyRep::Dict(_)));
+    assert_eq!(
+        slim_obj.dict_get("itemID").and_then(PyRep::as_i64),
+        Some(ship1_id)
+    );
+    assert_eq!(
+        slim_obj.dict_get("charID").and_then(PyRep::as_i64),
+        Some(90_000_001)
+    );
+    assert_eq!(
+        slim_obj.dict_get("corpID").and_then(PyRep::as_i64),
+        Some(new_corp_id)
+    );
+}
+
