@@ -41,7 +41,7 @@ UNAVAILABLE_EXIT = 4  # every reviewer model was out of quota/capacity: NOTHING 
 QUOTA_RE = re.compile(r"RESOURCE_EXHAUSTED|[Qq]uota|rate.?limit|\b429\b|No capacity|UNAVAILABLE \(code 503\)|"
                       r"\b503\b|overloaded|insufficient (?:credits|balance)|usage limit", re.I)
 FALLBACK_MODELS = [m.strip() for m in os.environ.get(
-    "EVOMU_REVIEW_FALLBACK_MODELS", "gemini-launch-candidate-high,gemini-flash-next,fable-5.1-high,opus-5.5-high").split(",") if m.strip()]
+    "EVOMU_REVIEW_FALLBACK_MODELS", "auto,gemini-launch-candidate-high,gemini-flash-next,fable-5.1-high,opus-5.5-high").split(",") if m.strip()]
 CONTINUE_PROMPT = (
     "Continue the EvoMu review exactly where you left off. Do not restart and do not summarize progress. "
     "Keep using file-reading/search tools silently (no prose between tool calls) until every step of the "
