@@ -558,10 +558,13 @@ fn handle_nes_intro_skip(ctx: &ServerContext, session: &mut SessionState) -> Res
 fn handle_crate_open(ctx: &ServerContext, session: &mut SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
     let crate_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+    if crate_id <= 0 {
+        return Err(err("CrateNotFound", "Valid crate item ID required"));
+    }
     let now_unix = ctx.now_unix();
     ctx.db.try_with_mut_snapshot(|snap| {
-        let has_crate = snap.items.get(&crate_id).map(|i| i.owner_id == char_id).unwrap_or(false);
-        if !has_crate && crate_id != 0 {
+        let has_crate = snap.items.get(&crate_id).is_some_and(|i| i.owner_id == char_id);
+        if !has_crate {
             return Err(err("CrateNotFound", format!("Crate {crate_id} not found in inventory")));
         }
         let mut ext = load_cosmetics_ui_state(snap);
@@ -606,6 +609,7 @@ fn handle_crate_claim_loot(ctx: &ServerContext, session: &mut SessionState, args
             return Err(err("LootAlreadyClaimed", format!("Loot from crate {crate_id} has already been claimed")));
         }
         claimed.push(crate_id);
+        ext.opened_crates.remove(&crate_id);
         snap.items.remove(&crate_id);
 
         let dest_id = snap
@@ -650,12 +654,19 @@ fn handle_crate_claim_skill_bundle(ctx: &ServerContext, session: &mut SessionSta
         if !ext.opened_crates.contains_key(&crate_id) {
             return Err(err("CrateNotOpened", format!("Crate {crate_id} has not been opened")));
         }
+        let crate_owner = snap.items.get(&crate_id).map(|i| i.owner_id);
+        if crate_owner != Some(char_id) {
+            return Err(err("CrateNotFound", format!("Crate {crate_id} not owned by character")));
+        }
         let claimed = ext.claimed_crate_loot.entry(char_id).or_default();
         let key = crate_id * 1000 + bundle_id;
-        if claimed.contains(&key) {
+        if claimed.contains(&key) || claimed.contains(&crate_id) {
             return Err(err("SkillBundleAlreadyClaimed", format!("Skill bundle {bundle_id} from crate {crate_id} already claimed")));
         }
         claimed.push(key);
+        claimed.push(crate_id);
+        ext.opened_crates.remove(&crate_id);
+        snap.items.remove(&crate_id);
         let ch = snap.characters.get_mut(&char_id).ok_or_else(|| err("CharacterNotFound", format!("Character {char_id} not found")))?;
         ch.free_skill_points += 25_000.0;
         let new_sp = ch.free_skill_points;

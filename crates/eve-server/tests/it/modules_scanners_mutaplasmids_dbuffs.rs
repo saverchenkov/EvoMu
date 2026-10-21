@@ -427,6 +427,24 @@ async fn test_command_bursts_dbuff_aggregation_and_system_wide_effects() {
         .expect("GetMappedDbuffsForItem");
 
     // Apply a weaker overlapping dbuff 12 (+4%) and a stronger overlapping dbuff 12 (+15%) to verify Maximum aggregation
+    let unpriv_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "dogmaIM",
+            None,
+            "ApplyBuffsToItems",
+            &[
+                PyRep::List(vec![PyRep::Integer(ship_id)]),
+                PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(12), PyRep::Real(4.0)])]),
+                PyRep::Real(120.0),
+            ],
+            &kw,
+            None,
+        )
+        .await;
+    assert!(unpriv_err.is_err(), "Unprivileged ApplyBuffsToItems must be rejected");
+    sess.role |= eve_machonet::service_roles::ROLE_GMH;
+
     ctx.dispatch_rpc(
         &mut sess,
         "dogmaIM",

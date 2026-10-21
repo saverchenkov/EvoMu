@@ -148,7 +148,7 @@ pub(crate) async fn is_near_in_space_fitting_service(
     false
 }
 
-fn can_character_access_ship_bay(
+pub(crate) fn can_character_access_ship_bay(
     ctx: &ServerContext,
     char_id: i64,
     host_ship_id: i64,
@@ -597,6 +597,12 @@ pub(crate) async fn handle_containers_ships_and_fitting(
                 .and_then(|a| a.as_i64())
                 .or_else(|| bound_entry.map(|b| b.object_id))
                 .unwrap_or(0);
+            if container_id <= 0 {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidContainer".into(),
+                    message: "Valid containerID required for ALSC lock/unlock".into(),
+                }));
+            }
             let item_ids: Vec<i64> = match args.get(1).or_else(|| args.first()) {
                 Some(PyRep::List(v) | PyRep::Tuple(v)) => {
                     v.iter().filter_map(|x| x.as_i64()).collect()
@@ -612,6 +618,49 @@ pub(crate) async fn handle_containers_ships_and_fitting(
                     })
                     .unwrap_or_default(),
             };
+            let auth_check = ctx.db.with_snapshot(|snap| {
+                let Some(cont) = snap.items.get(&container_id) else {
+                    return Err(BridgeRpcError {
+                        code: "ContainerNotFound".into(),
+                        message: format!("Container {container_id} not found"),
+                    });
+                };
+                let corp_id = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
+                let ch_loc = snap
+                    .characters
+                    .get(&char_id)
+                    .and_then(|c| c.station_id.or(c.structure_id).or(Some(c.solar_system_id as i64)))
+                    .unwrap_or(0);
+                let ch_ship = snap.characters.get(&char_id).map(|c| c.active_ship_id).unwrap_or(0);
+                if cont.owner_id != char_id
+                    && cont.owner_id != corp_id
+                    && cont.location_id != ch_loc
+                    && cont.location_id != ch_ship
+                {
+                    return Err(BridgeRpcError {
+                        code: "ALSCAccessDenied".into(),
+                        message: format!("Not authorized to lock/unlock items in container {container_id}"),
+                    });
+                }
+                for &iid in &item_ids {
+                    let Some(it) = snap.items.get(&iid) else {
+                        return Err(BridgeRpcError {
+                            code: "ItemNotFound".into(),
+                            message: format!("Item {iid} not found"),
+                        });
+                    };
+                    if it.location_id != container_id {
+                        return Err(BridgeRpcError {
+                            code: "ItemNotInContainer".into(),
+                            message: format!("Item {iid} is not located inside container {container_id}"),
+                        });
+                    }
+                }
+                Ok(())
+            });
+            if let Err(e) = auth_check {
+                return Some(Err(e));
+            }
             let now_unix = ctx.now_unix_secs();
             let mut st = container_ship_state().write().unwrap_or_else(|e| e.into_inner());
             if let Some(req_pw) = st.container_passwords.get(&container_id).cloned() {

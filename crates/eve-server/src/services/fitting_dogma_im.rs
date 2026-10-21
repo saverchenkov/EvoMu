@@ -400,6 +400,13 @@ pub(crate) async fn handle_dogma_im(
             };
             let ship_id = args.first().and_then(|a| a.as_i64()).or(session.ship_id).unwrap_or(0);
             let module_id = args.get(1).and_then(|a| a.as_i64()).or_else(|| args.first().and_then(|a| a.as_i64())).unwrap_or(0);
+            let owns_ship = ctx.db.with_snapshot(|s| s.items.get(&ship_id).is_some_and(|sh| sh.owner_id == char_id));
+            if !owns_ship {
+                return Some(Err(BridgeRpcError {
+                    code: "ShipOwnershipViolation".into(),
+                    message: format!("Ship {ship_id} is not owned by character {char_id}"),
+                }));
+            }
 
             if session.station_id.is_none() && session.structure_id.is_none() {
                 if let Some(sys_id) = session.solar_system_id {
@@ -450,6 +457,13 @@ pub(crate) async fn handle_dogma_im(
             };
             let ship_id = args.first().and_then(|a| a.as_i64()).or(session.ship_id).unwrap_or(0);
             let module_id = args.get(1).and_then(|a| a.as_i64()).or_else(|| args.first().and_then(|a| a.as_i64())).unwrap_or(0);
+            let owns_ship = ctx.db.with_snapshot(|s| s.items.get(&ship_id).is_some_and(|sh| sh.owner_id == char_id));
+            if !owns_ship {
+                return Some(Err(BridgeRpcError {
+                    code: "ShipOwnershipViolation".into(),
+                    message: format!("Ship {ship_id} is not owned by character {char_id}"),
+                }));
+            }
 
             let mut fit = match ctx.get_or_rebuild_ship_fitting(char_id, ship_id) {
                 Ok(f) => f,
@@ -678,25 +692,46 @@ pub(crate) async fn handle_dogma_im(
             Some(Ok(PyRep::None))
         }
 
-        ("dogmaIM" | "charFittingMgr", "LinkWeapons") => {
+        ("dogmaIM", "LinkWeapons") | ("charFittingMgr", "LinkWeapons") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             let ship_id = args.first().and_then(|a| a.as_i64()).or(session.ship_id).unwrap_or(0);
             let master_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
             let slave_id = args.get(2).and_then(|a| a.as_i64()).unwrap_or(0);
-            ctx.db.with_mut_snapshot(|snap| {
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
+                if !snap.items.get(&ship_id).is_some_and(|s| s.owner_id == char_id) {
+                    return Err(BridgeRpcError {
+                        code: "ShipOwnershipViolation".into(),
+                        message: format!("Ship {ship_id} is not owned by {char_id}"),
+                    });
+                }
                 let banks = snap.weapon_banks.entry(ship_id).or_default();
                 let bank = banks.entry(master_id).or_insert_with(|| vec![master_id]);
                 if !bank.contains(&slave_id) {
                     bank.push(slave_id);
                 }
+                Ok(PyRep::None)
             });
-            Some(Ok(PyRep::None))
+            Some(res)
         }
 
-        ("dogmaIM" | "charFittingMgr", "PeelAndLink") => {
+        ("dogmaIM", "PeelAndLink") | ("charFittingMgr", "PeelAndLink") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             let ship_id = args.first().and_then(|a| a.as_i64()).or(session.ship_id).unwrap_or(0);
             let new_mod_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
             let target_bank_mod_id = args.get(2).and_then(|a| a.as_i64()).unwrap_or(0);
-            ctx.db.with_mut_snapshot(|snap| {
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
+                if !snap.items.get(&ship_id).is_some_and(|s| s.owner_id == char_id) {
+                    return Err(BridgeRpcError {
+                        code: "ShipOwnershipViolation".into(),
+                        message: format!("Ship {ship_id} is not owned by {char_id}"),
+                    });
+                }
                 let banks = snap.weapon_banks.entry(ship_id).or_default();
                 let mut found_master = None;
                 for (&m, list) in banks.iter() {
@@ -710,15 +745,26 @@ pub(crate) async fn handle_dogma_im(
                 if !list.contains(&new_mod_id) {
                     list.push(new_mod_id);
                 }
+                Ok(PyRep::None)
             });
-            Some(Ok(PyRep::None))
+            Some(res)
         }
 
-        ("dogmaIM" | "charFittingMgr", "MergeModuleGroups") => {
+        ("dogmaIM", "MergeModuleGroups") | ("charFittingMgr", "MergeModuleGroups") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             let ship_id = args.first().and_then(|a| a.as_i64()).or(session.ship_id).unwrap_or(0);
             let master_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
             let other_master_id = args.get(2).and_then(|a| a.as_i64()).unwrap_or(0);
-            ctx.db.with_mut_snapshot(|snap| {
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
+                if !snap.items.get(&ship_id).is_some_and(|s| s.owner_id == char_id) {
+                    return Err(BridgeRpcError {
+                        code: "ShipOwnershipViolation".into(),
+                        message: format!("Ship {ship_id} is not owned by {char_id}"),
+                    });
+                }
                 let banks = snap.weapon_banks.entry(ship_id).or_default();
                 let other_modules = banks.remove(&other_master_id).unwrap_or_else(|| vec![other_master_id]);
                 let master_list = banks.entry(master_id).or_insert_with(|| vec![master_id]);
@@ -727,38 +773,71 @@ pub(crate) async fn handle_dogma_im(
                         master_list.push(id);
                     }
                 }
+                Ok(PyRep::None)
             });
-            Some(Ok(PyRep::None))
+            Some(res)
         }
 
-        ("dogmaIM" | "charFittingMgr", "UnlinkModule") => {
+        ("dogmaIM", "UnlinkModule") | ("charFittingMgr", "UnlinkModule") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             let ship_id = args.first().and_then(|a| a.as_i64()).or(session.ship_id).unwrap_or(0);
             let mod_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
-            ctx.db.with_mut_snapshot(|snap| {
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
+                if !snap.items.get(&ship_id).is_some_and(|s| s.owner_id == char_id) {
+                    return Err(BridgeRpcError {
+                        code: "ShipOwnershipViolation".into(),
+                        message: format!("Ship {ship_id} is not owned by {char_id}"),
+                    });
+                }
                 if let Some(banks) = snap.weapon_banks.get_mut(&ship_id) {
                     for list in banks.values_mut() {
                         list.retain(|&id| id != mod_id);
                     }
                     banks.retain(|k, v| *k != mod_id && v.len() > 1);
                 }
+                Ok(PyRep::None)
             });
-            Some(Ok(PyRep::None))
+            Some(res)
         }
 
-        ("dogmaIM" | "charFittingMgr", "DestroyWeaponBank") => {
+        ("dogmaIM", "DestroyWeaponBank") | ("charFittingMgr", "DestroyWeaponBank") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             let ship_id = args.first().and_then(|a| a.as_i64()).or(session.ship_id).unwrap_or(0);
             let master_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
-            ctx.db.with_mut_snapshot(|snap| {
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
+                if !snap.items.get(&ship_id).is_some_and(|s| s.owner_id == char_id) {
+                    return Err(BridgeRpcError {
+                        code: "ShipOwnershipViolation".into(),
+                        message: format!("Ship {ship_id} is not owned by {char_id}"),
+                    });
+                }
                 if let Some(banks) = snap.weapon_banks.get_mut(&ship_id) {
                     banks.remove(&master_id);
                 }
+                Ok(PyRep::None)
             });
-            Some(Ok(PyRep::None))
+            Some(res)
         }
 
-        ("dogmaIM" | "charFittingMgr", "LinkAllWeapons") => {
+        ("dogmaIM", "LinkAllWeapons") | ("charFittingMgr", "LinkAllWeapons") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             let ship_id = args.first().and_then(|a| a.as_i64()).or(session.ship_id).unwrap_or(0);
-            ctx.db.with_mut_snapshot(|snap| {
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
+                if !snap.items.get(&ship_id).is_some_and(|s| s.owner_id == char_id) {
+                    return Err(BridgeRpcError {
+                        code: "ShipOwnershipViolation".into(),
+                        message: format!("Ship {ship_id} is not owned by {char_id}"),
+                    });
+                }
                 let mut weapons: Vec<i64> = snap
                     .items
                     .values()
@@ -774,16 +853,28 @@ pub(crate) async fn handle_dogma_im(
                     let banks = snap.weapon_banks.entry(ship_id).or_default();
                     banks.insert(master, weapons);
                 }
+                Ok(PyRep::None)
             });
-            Some(Ok(PyRep::None))
+            Some(res)
         }
 
-        ("dogmaIM" | "charFittingMgr", "UnlinkAllModules") => {
+        ("dogmaIM", "UnlinkAllModules") | ("charFittingMgr", "UnlinkAllModules") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             let ship_id = args.first().and_then(|a| a.as_i64()).or(session.ship_id).unwrap_or(0);
-            ctx.db.with_mut_snapshot(|snap| {
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
+                if !snap.items.get(&ship_id).is_some_and(|s| s.owner_id == char_id) {
+                    return Err(BridgeRpcError {
+                        code: "ShipOwnershipViolation".into(),
+                        message: format!("Ship {ship_id} is not owned by {char_id}"),
+                    });
+                }
                 snap.weapon_banks.remove(&ship_id);
+                Ok(PyRep::None)
             });
-            Some(Ok(PyRep::None))
+            Some(res)
         }
 
         ("dogmaIM", "LoadAmmo") => {
@@ -792,6 +883,13 @@ pub(crate) async fn handle_dogma_im(
                 Err(e) => return Some(Err(e)),
             };
             let ship_id = args.first().and_then(|a| a.as_i64()).or(session.ship_id).unwrap_or(0);
+            let owns_ship = ctx.db.with_snapshot(|s| s.items.get(&ship_id).is_some_and(|sh| sh.owner_id == char_id));
+            if !owns_ship {
+                return Some(Err(BridgeRpcError {
+                    code: "ShipOwnershipViolation".into(),
+                    message: format!("Ship {ship_id} is not owned by character {char_id}"),
+                }));
+            }
             let requested_module_ids: Vec<i64> = match args.get(1) {
                 Some(PyRep::List(v) | PyRep::Tuple(v)) => v.iter().filter_map(|x| x.as_i64()).collect(),
                 Some(v) => v.as_i64().into_iter().collect(),
@@ -811,14 +909,20 @@ pub(crate) async fn handle_dogma_im(
             };
 
             let charge_info_opt = ctx.db.with_snapshot(|snap| {
-                snap.items.get(&first_charge_id).map(|i| (i.type_id, i.quantity))
+                snap.items.get(&first_charge_id).map(|i| (i.type_id, i.quantity, i.owner_id))
             });
-            let Some((charge_type_id, avail_qty)) = charge_info_opt else {
+            let Some((charge_type_id, avail_qty, charge_owner_id)) = charge_info_opt else {
                 return Some(Err(BridgeRpcError {
                     code: "ItemNotFound".into(),
                     message: format!("Charge item {first_charge_id} not found"),
                 }));
             };
+            if charge_owner_id != char_id {
+                return Some(Err(BridgeRpcError {
+                    code: "ItemOwnershipViolation".into(),
+                    message: format!("Charge item {first_charge_id} is not owned by character {char_id}"),
+                }));
+            }
 
             let charge_vol = ctx.sde.types.get(&charge_type_id).map(|t| t.volume.max(0.0001)).unwrap_or(0.0025);
 
@@ -948,11 +1052,18 @@ pub(crate) async fn handle_dogma_im(
         }
 
         ("dogmaIM", "UnloadAmmo") => {
-            let (_, _char_id) = match ServerContext::require_character(session) {
+            let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
             let ship_id = args.first().and_then(|a| a.as_i64()).or(session.ship_id).unwrap_or(0);
+            let owns_ship = ctx.db.with_snapshot(|s| s.items.get(&ship_id).is_some_and(|sh| sh.owner_id == char_id));
+            if !owns_ship {
+                return Some(Err(BridgeRpcError {
+                    code: "ShipOwnershipViolation".into(),
+                    message: format!("Ship {ship_id} is not owned by character {char_id}"),
+                }));
+            }
             let requested_module_ids: Vec<i64> = match args.get(1) {
                 Some(PyRep::List(v) | PyRep::Tuple(v)) => v.iter().filter_map(|x| x.as_i64()).collect(),
                 Some(v) => v.as_i64().into_iter().collect(),
