@@ -213,10 +213,10 @@ async fn test_esi5_alliance_and_corporation_public_identity() {
     let al_ids = alliances_list.as_array().expect("alliances array");
     assert!(al_ids.contains(&json!(alliance_id)));
 
-    // Unbacked GET /alliances/{alliance_id} must return 501 Not Implemented (no fabricated date_founded/creator_id)
+    // GET /alliances/{alliance_id} without stored alliance_lifecycle_meta returns 404 (no fabricated date_founded/creator_id)
     let al_detail_resp =
         router.handle_request(&EsiHttpRequest::new("GET", format!("/v1/alliances/{alliance_id}/")));
-    assert_eq!(al_detail_resp.status_code, 501);
+    assert_eq!(al_detail_resp.status_code, 404);
 
     // 2. GET /alliances/{alliance_id}/corporations (`esi:GET /alliances/{alliance_id}/corporations`, `feat:esi.alliance.corporations`)
     let al_corps_initial = check_cached_get(
@@ -575,7 +575,7 @@ async fn test_esi5_corporation_membership_tracking_limit_and_roles() {
         &EsiHttpRequest::new("GET", format!("/v1/corporations/{corp_id}/members/limit/"))
             .with_bearer_token(&token),
     );
-    assert_eq!(limit_resp.status_code, 501);
+    assert_eq!(limit_resp.status_code, 200);
 
     // 2. Member Tracking (`GET /corporations/{id}/membertracking`, `feat:esi.corporation.membertracking`)
     let tracking = check_cached_get(
@@ -796,12 +796,12 @@ async fn test_esi5_corporation_divisions_blueprints_and_standings() {
         json!(404)
     );
 
-    // 2. Divisions (`GET /corporations/{id}/divisions` — unimplemented 501 until separate hangar_divisions exist)
+    // 2. Divisions (`GET /corporations/{id}/divisions` — separate hangar_divisions vs wallet_divisions)
     let divs_resp = router.handle_request(
         &EsiHttpRequest::new("GET", format!("/v1/corporations/{corp_id}/divisions/"))
             .with_bearer_token(&token),
     );
-    assert_eq!(divs_resp.status_code, 501);
+    assert_eq!(divs_resp.status_code, 200);
 
     // 3. Standings (`GET /corporations/{id}/standings`, `feat:esi.corporation.standings`)
     let standings = check_cached_get(

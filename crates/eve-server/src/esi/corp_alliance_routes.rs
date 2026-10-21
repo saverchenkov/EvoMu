@@ -51,19 +51,6 @@ fn map_upwell_state(state: &str) -> &'static str {
     }
 }
 
-const CORP_ROLE_TABLE: &[(u64, &str)] = &[
-    (eve_db::corp_roles::ROLE_DIRECTOR, "Director"),
-    (eve_db::corp_roles::ROLE_ACCOUNTANT, "Accountant"),
-    (eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT, "Junior_Accountant"),
-    (eve_db::corp_roles::ROLE_CONFIG_EQUIPMENT, "Config_Equipment"),
-    (eve_db::corp_roles::ROLE_DIPLOMAT, "Diplomat"),
-    (eve_db::corp_roles::ROLE_FACTORY_MANAGER, "Factory_Manager"),
-    (eve_db::corp_roles::ROLE_PERSONNEL_MANAGER, "Personnel_Manager"),
-    (eve_db::corp_roles::ROLE_SECURITY_OFFICER, "Security_Officer"),
-    (eve_db::corp_roles::ROLE_STATION_MANAGER, "Station_Manager"),
-    (eve_db::corp_roles::ROLE_AUDITOR, "Auditor"),
-];
-
 #[allow(clippy::too_many_lines)]
 pub fn dispatch_corp_alliance_route(
     ctx: &ServerContext,
@@ -427,16 +414,68 @@ pub fn dispatch_corp_alliance_route(
                 member_ids.sort_unstable();
                 let mut out = Vec::new();
                 for cid in member_ids {
-                    let mask = corp.member_roles.get(&cid).copied().unwrap_or(0);
-                    let roles: Vec<&str> = CORP_ROLE_TABLE
-                        .iter()
-                        .filter_map(|&(bit, name)| ((mask & bit) != 0).then_some(name))
-                        .collect();
-                    if !roles.is_empty() {
-                        out.push(json!({
-                            "character_id": cid,
-                            "roles": roles,
-                        }));
+                    let assigned = snap.corp_role_assignments.get(&(corp_id, cid));
+                    let roles_mask = assigned
+                        .map(|a| a.roles)
+                        .unwrap_or_else(|| corp.member_roles.get(&cid).copied().unwrap_or(0));
+                    let grantable_mask = assigned.map(|a| a.grantable_roles).unwrap_or(0);
+                    let hq_mask = assigned.map(|a| a.roles_at_hq).unwrap_or(0);
+                    let grantable_hq_mask = assigned.map(|a| a.grantable_roles_at_hq).unwrap_or(0);
+                    let base_mask = assigned.map(|a| a.roles_at_base).unwrap_or(0);
+                    let grantable_base_mask =
+                        assigned.map(|a| a.grantable_roles_at_base).unwrap_or(0);
+                    let other_mask = assigned.map(|a| a.roles_at_other).unwrap_or(0);
+                    let grantable_other_mask =
+                        assigned.map(|a| a.grantable_roles_at_other).unwrap_or(0);
+
+                    let roles = super::corp_governance_routes::decode_corp_roles(roles_mask);
+                    let grantable =
+                        super::corp_governance_routes::decode_corp_roles(grantable_mask);
+                    let at_hq = super::corp_governance_routes::decode_corp_roles(hq_mask);
+                    let grantable_hq =
+                        super::corp_governance_routes::decode_corp_roles(grantable_hq_mask);
+                    let at_base = super::corp_governance_routes::decode_corp_roles(base_mask);
+                    let grantable_base =
+                        super::corp_governance_routes::decode_corp_roles(grantable_base_mask);
+                    let at_other = super::corp_governance_routes::decode_corp_roles(other_mask);
+                    let grantable_other =
+                        super::corp_governance_routes::decode_corp_roles(grantable_other_mask);
+
+                    if !roles.is_empty()
+                        || !grantable.is_empty()
+                        || !at_hq.is_empty()
+                        || !grantable_hq.is_empty()
+                        || !at_base.is_empty()
+                        || !grantable_base.is_empty()
+                        || !at_other.is_empty()
+                        || !grantable_other.is_empty()
+                    {
+                        let mut obj = json!({ "character_id": cid });
+                        if !roles.is_empty() {
+                            obj["roles"] = json!(roles);
+                        }
+                        if !grantable.is_empty() {
+                            obj["grantable_roles"] = json!(grantable);
+                        }
+                        if !at_hq.is_empty() {
+                            obj["roles_at_hq"] = json!(at_hq);
+                        }
+                        if !grantable_hq.is_empty() {
+                            obj["grantable_roles_at_hq"] = json!(grantable_hq);
+                        }
+                        if !at_base.is_empty() {
+                            obj["roles_at_base"] = json!(at_base);
+                        }
+                        if !grantable_base.is_empty() {
+                            obj["grantable_roles_at_base"] = json!(grantable_base);
+                        }
+                        if !at_other.is_empty() {
+                            obj["roles_at_other"] = json!(at_other);
+                        }
+                        if !grantable_other.is_empty() {
+                            obj["grantable_roles_at_other"] = json!(grantable_other);
+                        }
+                        out.push(obj);
                     }
                 }
                 RouteExecutionResult::ok_json(json!(out), 3600)
@@ -609,36 +648,63 @@ pub fn dispatch_corp_alliance_route(
                         let services: Vec<Value> =
                             fitted_services.into_iter().map(|(_, v)| v).collect();
 
-                        // DERIVED: profile_id = 1 represents the structure's active ACL profile.
+                        let timer_meta = snap.structure_esi_timer_meta.get(&s.structure_id);
+                        let profile_id = timer_meta.map(|m| m.profile_id).unwrap_or(0);
                         let mut obj = json!({
                             "structure_id": s.structure_id,
                             "type_id": s.type_id as i64,
                             "corporation_id": s.owner_corp_id,
                             "system_id": s.solar_system_id as i64,
-                            "profile_id": 1,
+                            "profile_id": profile_id,
                             "name": s.name,
                             "state": map_upwell_state(&s.state),
                             "services": services,
                         });
 
-                        if s.last_damage_unix > 0 {
-                            obj["state_timer_start"] =
-                                json!(format_iso8601_utc(s.last_damage_unix));
+                        if let Some(fe) = timer_meta.and_then(|m| m.fuel_expires_unix).filter(|&t| t > 0) {
+                            obj["fuel_expires"] = json!(format_iso8601_utc(fe));
                         }
-                        if s.reinforced_until_unix > 0 {
-                            obj["state_timer_end"] =
-                                json!(format_iso8601_utc(s.reinforced_until_unix));
+                        if let Some(ts) = timer_meta
+                            .and_then(|m| m.state_timer_start_unix)
+                            .or_else(|| (s.last_damage_unix > 0).then_some(s.last_damage_unix))
+                            .filter(|&t| t > 0)
+                        {
+                            obj["state_timer_start"] = json!(format_iso8601_utc(ts));
+                        }
+                        if let Some(te) = timer_meta
+                            .and_then(|m| m.state_timer_end_unix)
+                            .or_else(|| (s.reinforced_until_unix > 0).then_some(s.reinforced_until_unix))
+                            .filter(|&t| t > 0)
+                        {
+                            obj["state_timer_end"] = json!(format_iso8601_utc(te));
+                        }
+                        if let Some(ua) = timer_meta.and_then(|m| m.unanchors_at_unix).filter(|&t| t > 0) {
+                            obj["unanchors_at"] = json!(format_iso8601_utc(ua));
                         }
                         if let Some(&(ws, we)) =
                             snap.structure_vulnerability_windows.get(&s.structure_id)
                         {
                             let reinforce_hour = ((ws / 3600) % 24) as i64;
-                            let next_reinforce_hour = ((we / 3600) % 24) as i64;
                             obj["reinforce_hour"] = json!(reinforce_hour);
-                            obj["next_reinforce_hour"] = json!(next_reinforce_hour);
                             if we > 0 {
-                                obj["next_reinforce_apply"] = json!(format_iso8601_utc(we));
+                                let next_reinforce_hour = timer_meta
+                                    .and_then(|m| m.next_reinforce_hour)
+                                    .unwrap_or(((we / 3600) % 24) as i64);
+                                let next_apply = timer_meta
+                                    .and_then(|m| m.next_reinforce_apply_unix)
+                                    .unwrap_or(we);
+                                obj["next_reinforce_hour"] = json!(next_reinforce_hour);
+                                obj["next_reinforce_apply"] = json!(format_iso8601_utc(next_apply));
                             }
+                        }
+                        if let Some(nrh) = timer_meta.and_then(|m| m.next_reinforce_hour) {
+                            obj["next_reinforce_hour"] = json!(nrh);
+                        }
+                        if let Some(nra) = timer_meta
+                            .and_then(|m| m.next_reinforce_apply_unix)
+                            .filter(|&t| t > 0)
+                        {
+                            obj["next_reinforce_apply"] = json!(format_iso8601_utc(nra));
                         }
                         obj
                     })
@@ -652,6 +718,12 @@ pub fn dispatch_corp_alliance_route(
             }))
         }
 
-        _ => None,
+        _ => super::corp_governance_routes::dispatch_corp_governance_route(
+            ctx,
+            method,
+            path,
+            path_params,
+            query_params,
+        ),
     }
 }

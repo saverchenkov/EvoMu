@@ -6,6 +6,7 @@ pub mod char_social_routes;
 pub mod character_mail_routes;
 pub mod character_routes;
 pub mod corp_alliance_routes;
+pub mod corp_governance_routes;
 pub mod economy_industry_routes;
 pub mod economy_routes;
 pub mod fleet_routes;

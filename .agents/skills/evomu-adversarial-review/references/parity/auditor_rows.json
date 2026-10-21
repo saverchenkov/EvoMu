@@ -4680,6 +4680,664 @@
    "na_allowed": false,
    "attest_ok": false,
    "added_by_audit": "20261019-222106"
+  },
+  {
+   "acceptance": "Fleet Watchlist window allows adding up to 15 fleet members (governed by Fleet Commander / Wing Commander / Squad Commander skills); client receives real-time updates for shield, armor, and structure percentages of watched pilots; clicking an active target broadcast on a watchlist entry initiates target locking; members leaving fleet or grid are updated or grayed out.",
+   "domain": "fleet",
+   "id": "feat:fleet.watchlist-broadcast-tracking",
+   "plan_task": null,
+   "sources": [
+    "wiki:Fleet_interface",
+    "client:eve/client/script/ui/fleet/fleetWatchlist.pyj"
+   ],
+   "title": "Fleet Watchlist member tracking and broadcast targeting",
+   "why_missing": "Coarse fleet rows (feat:fleet.create-fleet, feat:fleet.invite-accept) do not cover the watchlist sub-system, member limits, health synchronization, or broadcast targeting interactions.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261020-230707"
+  },
+  {
+   "acceptance": "Fleet commanders set broadcast permissions and scopes (Entire Fleet, Current Wing, Current Squad); supported broadcast types (Need Shield, Need Armor, Need Capacitor, Target, In Position, Warp To, Align To) are delivered only to eligible hierarchy levels; members lacking broadcast rights receive live UserError CannotBroadcastInFleet when attempting restricted broadcasts; broadcast spam cooldowns (2s) are enforced.",
+   "domain": "fleet",
+   "id": "feat:fleet.broadcast-scope-and-filter",
+   "plan_task": null,
+   "sources": [
+    "wiki:Fleet_broadcasts",
+    "client:eve/client/script/parklife/fleetSvc.pyj"
+   ],
+   "title": "Fleet broadcast scope permissions and event filtering",
+   "why_missing": "No existing ledger row covers broadcast scope delegation, permission restrictions, or cooldown enforcement across fleet hierarchy levels.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261020-230707"
+  },
+  {
+   "acceptance": "Fleet commanders select a fleet formation shape (Point, Arrow, Sphere, Wall, Diamond) via fleetObjectHandler.SetFleetFormation; initiating a fleet warp positions landing ships at deterministic grid offsets relative to the fleet commander's landing vector and radius, avoiding ship collision bumps while keeping ships within command burst radius.",
+   "domain": "fleet",
+   "id": "feat:fleet.stored-formations-and-warp-shapes",
+   "plan_task": null,
+   "sources": [
+    "wiki:Fleet_formations",
+    "client:eve/client/script/ui/fleet/fleetFormations.pyj"
+   ],
+   "title": "Fleet warp formation layouts and spatial offsets",
+   "why_missing": "feat:navigation.fleet-warp only checks that members warp; stored formations and spatial landing offset calculations are absent from the ledger.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261020-230707"
+  },
+  {
+   "acceptance": "Individual fleet members toggle their takesFleetWarp setting via fleetObjectHandler.SetTakesFleetWarp(bool); when disabled, incoming fleet, wing, or squad warp commands leave the member in their current movement mode without initiating warp, and notify the commander that the member ignored fleet warp.",
+   "domain": "fleet",
+   "id": "feat:fleet.takes-fleet-warp-toggle",
+   "plan_task": null,
+   "sources": [
+    "wiki:Fleet_interface",
+    "client:eve/client/script/parklife/fleetSvc.pyj"
+   ],
+   "title": "Individual member takes-fleet-warp toggle",
+   "why_missing": "No row models the individual opt-out flag from fleet warp, which is critical for scouts, cyno ships, and logistics anchors.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261020-230707"
+  },
+  {
+   "acceptance": "Unprovoked aggression against non-suspect capsuleers in high-sec triggers CONCORD intervention with system security response delays: 0.5 = 19s (\u00b11s), 0.6 = 14s, 0.7 = 11s, 0.8 = 8s, 0.9 = 6s, 1.0 = 6s; CONCORD ships spawn on grid, apply 100% web, warp scramble, capacitor drain, and ECM jam, and destroy the criminal ship; CONCORD hulls are completely invulnerable to damage.",
+   "domain": "crimewatch",
+   "id": "feat:crimewatch.concord-response-scaling",
+   "plan_task": null,
+   "sources": [
+    "wiki:CONCORD",
+    "wiki:Suicide_ganking"
+   ],
+   "title": "CONCORD response delay scaling by system security and combat suite",
+   "why_missing": "feat:crimewatch.concord-response is a 1-line coarse row that omits exact security-tier delay timings and CONCORD's combat electronic warfare suite.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261020-230707"
+  },
+  {
+   "acceptance": "Activating any offensive module (turret, missile launcher, offensive electronic warfare, energy neutralizer, smartbomb, bomb launcher) or issuing offensive drone attack commands initiates a 60-second Weapons Timer; while active, attempting to dock at stations/structures, jump stargates/wormholes, or eject/swap ships is refused with live UserError CannotDockWithWeaponsTimer or CannotJumpWithWeaponsTimer.",
+   "domain": "crimewatch",
+   "id": "feat:crimewatch.weapons-timer-dock-jump-gate",
+   "plan_task": null,
+   "sources": [
+    "wiki:Timers",
+    "client:eve/client/script/ui/crimewatch/crimewatchTimers.pyj"
+   ],
+   "title": "Weapons timer 60s dock, gate-jump, and ship-eject lockout",
+   "why_missing": "Only docking mentions weapons timer incidentally; the central 60s timer and its jump/eject/dock lockout gates lack a dedicated testable row in feat:crimewatch.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261020-230707"
+  },
+  {
+   "acceptance": "Looting an unowned yellow wreck or cargo container, taking items from another player's unanchored mobile tractor unit, or linking to an Encounter Surveillance System (ESS) Main Bank hack activates a 15-minute Suspect Timer; any other capsuleer in space may freely attack the suspect without CONCORD retaliation or security status penalty.",
+   "domain": "crimewatch",
+   "id": "feat:crimewatch.suspect-timer-looting-ess",
+   "plan_task": null,
+   "sources": [
+    "wiki:Timers",
+    "wiki:Can_flipping",
+    "wiki:Encounter_Surveillance_System"
+   ],
+   "title": "Suspect timer 15-minute flag from unowned loot and ESS theft",
+   "why_missing": "Existing feat:crimewatch.suspect-flag is coarse and omits ESS main bank interaction, MTU looting, and free engagement rules.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261020-230707"
+  },
+  {
+   "acceptance": "Returning fire against a suspect or criminal attacker, or accepting a direct duel challenge via crimewatch.SendDuelChallenge, creates a 5-minute Limited Engagement between the two characters; each subsequent offensive action between the participants resets the timer to 5 minutes; allows combat anywhere in high-sec without sentry gun or CONCORD interference.",
+   "domain": "crimewatch",
+   "id": "feat:crimewatch.limited-engagement-duel",
+   "plan_task": null,
+   "sources": [
+    "wiki:Timers",
+    "wiki:Duels",
+    "client:eve/client/script/ui/services/crimewatchSvc.pyj"
+   ],
+   "title": "Limited engagement mutual combat timer and duel lifecycle",
+   "why_missing": "feat:crimewatch.limited-engagements is a single sentence lacking duel handshake, refresh-on-attack, and sentry gun exclusion semantics.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261020-230707"
+  },
+  {
+   "acceptance": "Server strictly enforces character safety setting (Green, Yellow, Red); Green blocks offensive module activation against non-criminals, looting yellow containers, and activating AOE ECM/smartbombs in empire space with UserError CantDoInCurrentSafetyLevel; Yellow permits suspect actions but blocks criminal actions in high-sec; Red permits all actions.",
+   "domain": "crimewatch",
+   "id": "feat:crimewatch.safety-setting-action-block",
+   "plan_task": null,
+   "sources": [
+    "wiki:Safety_settings",
+    "client:eve/client/script/ui/services/crimewatchSvc.pyj"
+   ],
+   "title": "Safety switch level server-side validation and action refusal",
+   "why_missing": "Existing feat:crimewatch.safety-settings only mentions SetSafetyLevel RPC; server-side refusal of illegal module activations and looting under safety rules is not specified.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261020-230707"
+  },
+  {
+   "acceptance": "Entering an Abyssal pocket applies the storm weather dogma effects across all player and NPC ships: Electrical (-50% EM shield resist, +50% EM armor resist, +50% cap recharge rate); Dark (+50% ship velocity, -50% turret optimal & falloff); Exotic (-50% Kinetic shield resist, +50% Kinetic armor resist, +50% scan resolution); Firestorm (+50% armor HP, -50% thermal resist); Gamma (+50% shield HP, -50% explosive resist).",
+   "domain": "abyssal",
+   "id": "feat:abyssal.weather-effects-and-penalties",
+   "plan_task": null,
+   "sources": [
+    "wiki:Abyssal_Deadspace"
+   ],
+   "title": "Abyssal Deadspace weather dogma modifiers",
+   "why_missing": "feat:pve.abyssal-weather only mentions weather generically; the exact 5 pairs of resistance and performance modifiers applied to all pocket grids are unspecified.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261020-230707"
+  },
+  {
+   "acceptance": "Entering the radius of spatial clouds in an Abyssal pocket applies environmental status effects: Tachyon Cloud (+300% max velocity, +300% signature radius bloom); Bioluminescent Cloud (-300% signature radius, -50% velocity); Filament Cloud (-40% shield booster duration and cycle time); effects expire immediately upon leaving the cloud boundary.",
+   "domain": "abyssal",
+   "id": "feat:abyssal.spatial-hazard-clouds",
+   "plan_task": null,
+   "sources": [
+    "wiki:Abyssal_Deadspace"
+   ],
+   "title": "Abyssal Deadspace environmental cloud hazards",
+   "why_missing": "No ledger row defines the environmental cloud hazards that dictate piloting trajectories in Abyssal Deadspace.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261020-230707"
+  },
+  {
+   "acceptance": "Automata Suppressors and Multibody Tracking Pylons pulse periodic area-of-effect impacts: Suppressors deal explosive damage to all missiles, drones, and small craft within range (Small: 15 km, Medium: 25 km, Large: 40 km); Tracking Pylons grant a tracking speed bonus to all ships and sentries within their radius.",
+   "domain": "abyssal",
+   "id": "feat:abyssal.automated-pylons",
+   "plan_task": null,
+   "sources": [
+    "wiki:Abyssal_Deadspace"
+   ],
+   "title": "Abyssal automated pylons and missile/drone suppression",
+   "why_missing": "Pylon combat interactions and small-craft suppression are completely omitted from the ledger.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261020-230707"
+  },
+  {
+   "acceptance": "Every Abyssal Deadspace instance enforces an immutable 20-minute countdown timer starting from initial gate transit; if the character does not exit through the origin gate in the 3rd room before expiration, the pocket collapses, instantly destroying the ship and capsule clone with no insurance payout and logging death to Abyssal Environment.",
+   "domain": "abyssal",
+   "id": "feat:abyssal.timer-collapse-death",
+   "plan_task": null,
+   "sources": [
+    "wiki:Abyssal_Deadspace"
+   ],
+   "title": "Abyssal 20-minute countdown collapse and destruction",
+   "why_missing": "Neither abyssal-pocket nor abyssal-tiers tests the fatal expiration consequence of the 20-minute timer.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261020-230707"
+  },
+  {
+   "acceptance": "Each Abyssal room contains a Bioadaptive Cache or Triglavian Extraction Sub-node; destroying the cache produces a container with tier-appropriate rewards: mutaplasmids (Decayed/Gravid/Unstable), Triglavian survey databases, filaments, and zero-point condensate; caches in higher tiers (T5/T6) have higher hull HP and require high-DPS application.",
+   "domain": "abyssal",
+   "id": "feat:abyssal.bioadaptive-cache-rewards",
+   "plan_task": null,
+   "sources": [
+    "wiki:Abyssal_Deadspace"
+   ],
+   "title": "Abyssal Bioadaptive Cache destruction and loot drop",
+   "why_missing": "No ledger row defines the cache entity, its destruction gate, or its mutaplasmid loot distribution.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261020-230707"
+  },
+  {
+   "acceptance": "The Triglavian Transfer Conduit leading to the next room or origin space spawns in a locked, invulnerable state; defeating every hostile NPC entity on grid triggers a room clear event that unlocks the conduit; activating the unlocked gate transitions the session to the next room pocket.",
+   "domain": "abyssal",
+   "id": "feat:abyssal.gate-unlock-on-clear",
+   "plan_task": null,
+   "sources": [
+    "wiki:Abyssal_Deadspace",
+    "client:eve/client/script/parklife/spaceMgr.pyj"
+   ],
+   "title": "Abyssal Triglavian gate unlocking upon room completion",
+   "why_missing": "feat:pve.abyssal-gates does not specify the locking mechanic or the requirement that every NPC must be destroyed to unlock transit.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261020-230707"
+  },
+  {
+   "acceptance": "FW systems dynamically calculate operational status based on warzone graph adjacency: Frontline (directly borders an enemy-held system, 100% LP/VP payouts, spawns all site tiers); Command Operation (adjacent to a Frontline, 75% LP/VP); Rearguard (borders only friendly/allied systems, 50% LP/VP, site capture counts reduced).",
+   "domain": "fw",
+   "id": "feat:fw.frontline-system-designation",
+   "plan_task": null,
+   "sources": [
+    "wiki:Faction_Warfare",
+    "wiki:Frontlines"
+   ],
+   "title": "Faction Warfare Frontline, Command Operation, and Rearguard system states",
+   "why_missing": "The V24.01 Frontlines system hierarchy is completely absent from existing feat:fw.* rows.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261020-230707"
+  },
+  {
+   "acceptance": "FW complex acceleration gates enforce hull class restrictions: Novice (T1 and Navy Frigates only; Pirate/T2 frigates rejected); Small (Frigates and Destroyers); Medium (Cruisers and below); Large (Battleships and below); Open (all ships); attempting to activate with an ineligible hull returns live UserError ShipTooLargeForGate or ShipTypeNotAllowedInComplex.",
+   "domain": "fw",
+   "id": "feat:fw.complex-ship-size-gating",
+   "plan_task": null,
+   "sources": [
+    "wiki:Faction_Warfare"
+   ],
+   "title": "Faction Warfare complex acceleration gate ship restrictions",
+   "why_missing": "Existing feat:fw.fw-capture does not model ship restriction tiers across Novice, Small, Medium, Large, and Open complexes.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261020-230707"
+  },
+  {
+   "acceptance": "System advantage (0..100%) modifies contested point acquisition for each militia; completing Supply Caches, Listening Posts, and Propaganda Communication sites increases friendly advantage; higher advantage proportionally reduces the number of complex captures required to push a system into vulnerability.",
+   "domain": "fw",
+   "id": "feat:fw.advantage-mechanics",
+   "plan_task": null,
+   "sources": [
+    "wiki:Faction_Warfare",
+    "wiki:Advantage"
+   ],
+   "title": "Faction Warfare system advantage modifier progression",
+   "why_missing": "The Advantage system introduced in Uprising/V24 is completely absent from all ledger rows.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261020-230707"
+  },
+  {
+   "acceptance": "When a FW system reaches 100% contested, its Infrastructure Hub (I-Hub) becomes vulnerable to direct attack; destroying the I-Hub transfers system sovereignty to the capturing faction; militia pilots donate LP to the I-Hub to upgrade the system Tier (1 to 5), applying proportional market tax reductions and station facility bonuses.",
+   "domain": "fw",
+   "id": "feat:fw.ihub-capture-and-tier-scaling",
+   "plan_task": null,
+   "sources": [
+    "wiki:Faction_Warfare",
+    "wiki:Infrastructure_Hub"
+   ],
+   "title": "Faction Warfare Infrastructure Hub capture and system upgrade tiers",
+   "why_missing": "No row models the I-Hub vulnerability trigger at 100% contested, sovereignty flipping, or LP tier upgrade progression.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261020-230707"
+  },
+  {
+   "acceptance": "Each wormhole jump reduces the wormhole's remaining mass by the exact ship mass (including propulsion module mass additions); wormhole state displays 'This wormhole has not yet had its stability significantly disrupted' (>50% mass remaining); transitions to 'This wormhole has had its stability reduced by ships passing through it' (10-50%); transitions to 'This wormhole has had its stability critically disrupted' (<10%); collapses immediately if a jump exceeds remaining mass.",
+   "domain": "wormholes",
+   "id": "feat:wormholes.mass-reduction-and-destabilization",
+   "plan_task": null,
+   "sources": [
+    "wiki:Wormhole_mechanics"
+   ],
+   "title": "Wormhole mass limit reduction and stability state transitions",
+   "why_missing": "feat:navigation.wormhole-jump (FLAGGED_FAKE) only tests calling JumpWormhole; mass reduction math, stability transitions, and mass collapse lack a dedicated testable row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261020-230707"
+  },
+  {
+   "acceptance": "Wormholes track elapsed time against total lifespan (16h, 24h, 36h, 48h per type); show-info reports: 'This wormhole is beginning to decay, and probably won't last another day' (>24h), 'This wormhole is not yet beginning to decay' (4h-24h), 'This wormhole is reaching the end of its natural lifetime' (<4h); upon timer expiration, both wormhole entrance and exit balls despawn.",
+   "domain": "wormholes",
+   "id": "feat:wormholes.lifetime-decay-stages",
+   "plan_task": null,
+   "sources": [
+    "wiki:Wormhole_mechanics"
+   ],
+   "title": "Wormhole natural lifespan stages and collapse",
+   "why_missing": "Wormhole temporal lifespan progression and natural collapse are not represented in any ledger row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261020-230707"
+  },
+  {
+   "acceptance": "Wormhole systems with special phenomena apply Dogma modifiers across all ships in the solar system based on system class: Wolf-Rayet (armor HP bonus, small turret damage bonus, signature reduction, shield resist penalty); Pulsar (shield capacity bonus, signature radius penalty, armor resist penalty, capacitor recharge penalty); Magnetar (damage multiplier bonus, missile explosion radius penalty, tracking penalty); Cataclysmic Variable (remote repair bonus, local repair penalty, capacitor recharge penalty).",
+   "domain": "wormholes",
+   "id": "feat:wormholes.system-phenomena-bonuses",
+   "plan_task": null,
+   "sources": [
+    "wiki:Wormhole_space",
+    "wiki:Wormhole_attributes"
+   ],
+   "title": "Wormhole system environmental phenomena Dogma modifiers",
+   "why_missing": "feat:dogma.system-wide-effects is a generic query row; the specific class-scaled environmental effects for Wolf-Rayet, Pulsar, Magnetar, and Cataclysmic Variable are absent.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261020-230707"
+  },
+  {
+   "acceptance": "Every wormhole solar system has assigned static connection types defined in SDE; when a static wormhole collapses due to mass or time exhaustion, a new cosmic signature of the identical static wormhole type immediately spawns at a random celestial location in the system, maintaining persistent topological connectivity.",
+   "domain": "wormholes",
+   "id": "feat:wormholes.static-wormhole-respawn",
+   "plan_task": null,
+   "sources": [
+    "wiki:Wormhole_space"
+   ],
+   "title": "Static wormhole connection automatic respawn upon collapse",
+   "why_missing": "No row models static wormhole replenishment upon collapse.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261020-230707"
+  },
+  {
+   "acceptance": "Initiating a hack on a relic or data container generates a hexagonal node grid; exploring adjacent unvisited nodes reveals contents: empty nodes, defensive subroutines (Firewall, Anti-Virus, Core), or utility elements (Self-Repair, Polarity Inversion, Secondary Vector); undiscovered nodes provide distance-indicator clues to the System Core.",
+   "domain": "exploration",
+   "id": "feat:exploration.hacking-node-network",
+   "plan_task": null,
+   "sources": [
+    "wiki:Hacking",
+    "client:eve/client/script/ui/hacking/hackingUISvc.pyj"
+   ],
+   "title": "Relic and Data hacking hexagonal node network generation",
+   "why_missing": "feat:pve.hacking-minigame is a 1-line row; the node generation, distance clue heuristics, and network traversal lack a testable row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261020-230707"
+  },
+  {
+   "acceptance": "Player virus coherence (health) and virus strength (attack) scale from analyzer module stats (T1: 20 strength / 40-60 coherence; T2: 30 strength / 80-100 coherence) plus Hacking / Archaeology skills (+10 coherence per level); attacking a defensive node subtracts player virus strength from node coherence while node attack subtracts from player coherence; hack fails if player coherence reaches 0.",
+   "domain": "exploration",
+   "id": "feat:exploration.hacking-coherence-and-strength",
+   "plan_task": null,
+   "sources": [
+    "wiki:Hacking"
+   ],
+   "title": "Hacking coherence and virus strength combat calculations",
+   "why_missing": "The combat math between virus strength/coherence and defensive nodes is completely omitted from the ledger.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261020-230707"
+  },
+  {
+   "acceptance": "Failing a hack attempt twice on a relic or data site container in null-sec, low-sec, or wormhole space triggers container self-destruction; all contained loot items are destroyed, and an explosive blast inflicts 2,000-5,000 HP area-of-effect damage to any ship within 5,000 meters.",
+   "domain": "exploration",
+   "id": "feat:exploration.hack-failure-container-explosion",
+   "plan_task": null,
+   "sources": [
+    "wiki:Exploration",
+    "wiki:Hacking"
+   ],
+   "title": "Exploration container self-destruction on repeated hack failure",
+   "why_missing": "No ledger row specifies the 2-failure container detonation and area-of-effect damage mechanics.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261020-230707"
+  },
+  {
+   "acceptance": "Installing a Blueprint Copying job on a BPO creates Blueprint Copies (BPCs) with specified runs up to the blueprint's max runs per copy; job duration and cost scale with base copy time, character Science and Industry skills, and facility bonuses; original BPO remains locked until job delivery.",
+   "domain": "industry",
+   "id": "feat:industry.blueprint-copying-runs",
+   "plan_task": null,
+   "sources": [
+    "wiki:Blueprint_copying"
+   ],
+   "title": "Blueprint copying job installation and BPC output",
+   "why_missing": "Existing industry rows cover manufacturing and facilities, but Blueprint Copying (creating BPCs from BPOs) has no testable row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261020-230707"
+  },
+  {
+   "acceptance": "Installing Material Efficiency (ME) research improves blueprint ME level from 0 up to 10; each ME level reduces required base manufacturing materials by 1% (up to 10% maximum reduction); job installation cost and duration scale with laboratory facility bonuses and system research cost index.",
+   "domain": "industry",
+   "id": "feat:industry.blueprint-me-research",
+   "plan_task": null,
+   "sources": [
+    "wiki:Research"
+   ],
+   "title": "Blueprint Material Efficiency research levels 1 to 10",
+   "why_missing": "feat:industry.install-job does not specify ME research levels, cost index integration, or the 1..10% material reduction curve.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261020-230707"
+  },
+  {
+   "acceptance": "Installing Time Efficiency (TE) research improves blueprint TE level from 0 up to 20 (in steps of 2%); each TE level reduces base manufacturing job duration by 2% (up to 20% maximum reduction); job installation cost and duration scale with laboratory facility bonuses and system research cost index.",
+   "domain": "industry",
+   "id": "feat:industry.blueprint-te-research",
+   "plan_task": null,
+   "sources": [
+    "wiki:Research"
+   ],
+   "title": "Blueprint Time Efficiency research levels 1 to 20",
+   "why_missing": "TE research levels and the 2..20% duration reduction curve are absent from all industry rows.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261020-230707"
+  },
+  {
+   "acceptance": "Installing an Invention job consumes a Tech I BPC, two Datacore types matching the item's science groups, and an optional Decryptor; success chance is computed from base hull probability (Frigates 40%, Cruisers 34%, Battleships 30%), character science skills, and decryptor modifier; successful invention delivers a Tech II BPC with calculated runs, ME, and TE.",
+   "domain": "industry",
+   "id": "feat:industry.invention-success-roll",
+   "plan_task": null,
+   "sources": [
+    "wiki:Invention"
+   ],
+   "title": "Tech II Invention probability, datacores, and decryptor modifiers",
+   "why_missing": "Tech II Invention (the core mechanism for T2 production in EVE) has no row in feat:industry.*.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261020-230707"
+  },
+  {
+   "acceptance": "Applying an Abyssal Mutaplasmid (Decayed, Gravid, Unstable) to an eligible module type consumes the mutaplasmid and rolls each mutable Dogma attribute independently within the mutaplasmid's defined percentile bounds; creates an un-repackageable dynamic singleton item with custom attribute mappings and unique type ID.",
+   "domain": "industry",
+   "id": "feat:industry.mutaplasmid-stat-roll",
+   "plan_task": null,
+   "sources": [
+    "wiki:Mutaplasmid",
+    "client:eve/client/script/ui/shared/dynamicAttributes.pyj"
+   ],
+   "title": "Abyssal Mutaplasmid dynamic item mutation",
+   "why_missing": "Mutaplasmid item mutation (Abyssal rolling) is completely missing from all module, industry, and dogma rows.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261020-230707"
+  },
+  {
+   "acceptance": "Deploying a Command Center on a planet establishes baseline CPU and Power Grid; training Command Center Upgrades permits upgrading the CC level (1 to 6), expanding available grid/CPU budget; installing pins (extractors, factories, storage, spaceports, links) deducts from this budget and refuses placement if budget is exceeded.",
+   "domain": "pi",
+   "id": "feat:pi.command-center-cpu-power-budget",
+   "plan_task": null,
+   "sources": [
+    "wiki:Planetary_Industry",
+    "wiki:Colony_management"
+   ],
+   "title": "Planetary command center level CPU and power grid budget",
+   "why_missing": "feat:pi.pins only mentions placing pins; the Command Center upgrade progression (levels 1-6) and CPU/Powergrid budget enforcement are not covered.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261020-230707"
+  },
+  {
+   "acceptance": "Installing an Extractor Control Unit (ECU) program deploys up to 10 heads across a planet's resource density map; extraction yield per cycle scales with the local resource density under each head and chosen program length (1 hour to 14 days); output displays a characteristic time-decay curve with higher hourly yield on shorter programs.",
+   "domain": "pi",
+   "id": "feat:pi.extractor-head-placement-and-decay",
+   "plan_task": null,
+   "sources": [
+    "wiki:Planetary_Industry",
+    "client:eve/client/script/environment/planet/clientPlanet.pyj"
+   ],
+   "title": "Extractor Control Unit head survey density and output decay",
+   "why_missing": "feat:pi.extractor-program does not model the 10 extractor heads, spatial hotspot density overlaps, or program-duration decay curves.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261020-230707"
+  },
+  {
+   "acceptance": "Basic, Advanced, and High-Tech factories require installing a matching schematic (P0->P1, P1->P2, P2->P3, P3->P4); input commodities must be explicitly routed from storage/extractors to factory inputs, and output commodities routed to storage or launchpads; factories idle with UserError if inputs are depleted or output destination is full.",
+   "domain": "pi",
+   "id": "feat:pi.schematic-input-output-routing",
+   "plan_task": null,
+   "sources": [
+    "wiki:Planetary_Industry",
+    "wiki:Planetary_Commodities"
+   ],
+   "title": "Planetary factory schematic routing and commodities production",
+   "why_missing": "feat:pi.factory-cycles only checks that cycles run; explicit commodity route configuration, schematic assignment, and buffer blockage rules are not specified.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261020-230707"
+  },
+  {
+   "acceptance": "Transferring commodities between a planetary launchpad and a Planetary Customs Office (POCO) assesses export/import taxes: tax = commodity base market value * quantity * tax rate; NPC POCO applies 10% base tax; player-owned POCO applies corporation tax rate with standing discounts; transfers fail if character cannot pay required ISK.",
+   "domain": "pi",
+   "id": "feat:pi.poco-customs-office-tax-rates",
+   "plan_task": null,
+   "sources": [
+    "wiki:Player_Owned_Customs_Office",
+    "client:eve/client/script/ui/inflight/orbitalConfiguration.pyj"
+   ],
+   "title": "Planetary Customs Office import and export taxation",
+   "why_missing": "feat:pi.customs-office only mentions tax rate lookup; the actual tax formula based on commodity tier base values and transfer execution is absent.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261020-230707"
+  },
+  {
+   "acceptance": "Activating a Cynosural Field Generator consumes Liquid Ozone fuel based on ship hull and Cynosural Field Theory skill; creates a celestial cynosural beacon ball visible system-wide on the overview; the activating ship is completely immobilized (speed 0 m/s) and cannot dock, jump, or cloak for the 5-minute cycle duration.",
+   "domain": "ships",
+   "id": "feat:ships.cynosural-beacon-spawning",
+   "plan_task": null,
+   "sources": [
+    "wiki:Cynosural_field"
+   ],
+   "title": "Cynosural Field Generator beacon spawning and ship immobilization",
+   "why_missing": "No row models cynosural beacon ball creation, Liquid Ozone consumption, or the 5-minute immobilization lock.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261020-230707"
+  },
+  {
+   "acceptance": "Covert Cynosural Field Generators activate on Stealth Bombers, Force Recons, Blockade Runners, and Black Ops hulls without consuming Liquid Ozone; creates a covert cynosural beacon visible only to fleet members; duration is 1 minute; permits jumping and bridging by Black Ops and Covert Jump Portals.",
+   "domain": "ships",
+   "id": "feat:ships.covert-cyno-beacon",
+   "plan_task": null,
+   "sources": [
+    "wiki:Cynosural_field",
+    "wiki:Black_Ops"
+   ],
+   "title": "Covert Cynosural Field beacon generation for Black Ops",
+   "why_missing": "Covert cyno mechanics (zero fuel, fleet-only visibility, 1-minute cycle, covert portal targeting) are completely missing from the ledger.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261020-230707"
+  },
+  {
+   "acceptance": "Activating jump drive consumes racial isotope fuel per light-year jumped based on ship type and Jump Fuel Conservation skill; jump activation adds a Jump Activation Cooldown timer and scales Jump Fatigue minutes: fatigue = (current fatigue * 0.1 max 10 min + 1) * (1 + distance_ly * ship_fatigue_multiplier); jump is refused if jump range exceeds ship maximum.",
+   "domain": "ships",
+   "id": "feat:ships.jump-drive-fatigue-accumulation",
+   "plan_task": null,
+   "sources": [
+    "wiki:Jump_drive",
+    "wiki:Jump_fatigue"
+   ],
+   "title": "Capital ship jump drive fuel consumption and fatigue accumulation",
+   "why_missing": "feat:ships.jump-drive is a generic query row; the exact isotope consumption math and the exponential Jump Fatigue formula are not in any testable row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261020-230707"
+  },
+  {
+   "acceptance": "Activating a Jump Portal Generator on a Titan or Black Ops battleship targeting a fleet cynosural beacon opens a spatial jump portal bridge; consumes isotope fuel per jumping fleet ship based on ship mass and distance; subcapital fleet members within 2,500m of the bridge ship can activate the portal to jump directly to the beacon.",
+   "domain": "ships",
+   "id": "feat:ships.titan-jump-portal-bridge",
+   "plan_task": null,
+   "sources": [
+    "wiki:Jump_portal_generator",
+    "wiki:Titan_bridge"
+   ],
+   "title": "Titan and Black Ops Jump Portal bridging",
+   "why_missing": "Jump Portal bridging mechanics (bridge generation, per-passenger mass fuel consumption, 2,500m bridge proximity) have no ledger row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261020-230707"
+  },
+  {
+   "acceptance": "An anchored Upwell structure requires installing a Quantum Core item matching its hull type (Astrahus, Fortizar, Keepstar, Raitaru, Azbel, Sotiyo, Athanor, Tatara) into its dedicated core room; service modules cannot be brought online without a core installed; upon structure destruction, the Quantum Core drops with 100% certainty in the structure wreck.",
+   "domain": "structures",
+   "id": "feat:structures.quantum-core-gate",
+   "plan_task": null,
+   "sources": [
+    "wiki:Quantum_Cores"
+   ],
+   "title": "Upwell structure Quantum Core onlining gate and guaranteed drop",
+   "why_missing": "feat:structures.quantum-core is a 1-line row; the service module onlining dependency and guaranteed 100% wreck drop are not specified.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261020-230707"
+  },
+  {
+   "acceptance": "Items entering Asset Safety wrap into an asset safety container and start a 20-day transit timer to the nearest NPC station (or same-system NPC station); claiming delivered items in the same system charges a 0.5% estimated item value fee; claiming items after lowsec transit charges a 15% item value fee; items in wormhole structures drop as loot instead of entering asset safety.",
+   "domain": "structures",
+   "id": "feat:structures.asset-safety-recovery-delay-and-fee",
+   "plan_task": null,
+   "sources": [
+    "wiki:Asset_safety",
+    "client:eve/client/script/ui/shared/assets/assetSafetyDeliverWindow.pyj"
+   ],
+   "title": "Asset safety transit timer and ISK recovery fees",
+   "why_missing": "feat:structures.asset-safety-auto is coarse; the 20-day timer, the 0.5% same-system fee, and the 15% remote fee are not testable in any existing row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261020-230707"
+  },
+  {
+   "acceptance": "When an Upwell structure enters an armor or hull vulnerability window, an uninterrupted 15-minute repair timer begins; if attackers fail to apply damage exceeding the damage cap threshold to pause the timer, the repair timer counts down to 0, repairing all shields and armor back to 100% and returning the structure to Shield Vulnerable status.",
+   "domain": "structures",
+   "id": "feat:structures.vulnerability-repair-window",
+   "plan_task": null,
+   "sources": [
+    "wiki:Vulnerability",
+    "wiki:Upwell_structure"
+   ],
+   "title": "Upwell structure 15-minute vulnerability repair window",
+   "why_missing": "feat:structures.repair-timer mentions repair vaguely; the damage pause threshold, the 15-minute countdown, and the full shield/armor restoration are not specified.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261020-230707"
   }
  ],
  "rejected_triage": [],
@@ -4960,11 +5618,6 @@
    "flagged_by_audit": "20261019-222106"
   },
   {
-   "evidence": "Acceptance: structureCompressionMgr.CompressItemInStructure at Athanor/Tatara. mining_complete.rs:1031-1044 only calls DecompressGasInStructure; CompressItemInStructure is never exercised.",
-   "id": "feat:mining.compression-structure",
-   "flagged_by_audit": "20261019-145905"
-  },
-  {
    "evidence": "Acceptance: 'corpMiningLedger.GetObserversWithMiningEvents/GetObserverLedger with roles.'\n\n- crates/eve-server/tests/mining_complete.rs:2706-2743 asserts only is_crowset() on both RPCs.\n- Contents are checked through the internal DB snapshot (observer_mining_ledger), not the RPC result.\n- No role check is exercised.\n- The entries come from Metenox automatic output, not from pilots mining at an observer.",
    "id": "feat:mining.corp-ledger",
    "flagged_by_audit": "20261019-222106"
@@ -4975,11 +5628,6 @@
    "flagged_by_audit": "20261019-145905"
   },
   {
-   "evidence": "Acceptance: DecompressGasInStructure with efficiency (GetMyGasDecompressionEfficiency). crates/eve-server/tests/mining_complete.rs:2241-2257 only asserts that decompressedUnits falls in 160..=200. GetMyGasDecompressionEfficiency is never called and the efficiency is not asserted.",
-   "id": "feat:mining.gas-decompression",
-   "flagged_by_audit": "20261019-222106"
-  },
-  {
    "evidence": "Acceptance: gas cloud harvesters in gas sites, wormhole gas and nebulae. mining_complete.rs:660-710 spawns Fullerite as an AsteroidRecord in a Jita belt (belt_id 40000001) and asserts gas_units >= 10. Gas sites, wormhole gas and nebulae are not exercised.",
    "id": "feat:mining.gas-harvesting",
    "flagged_by_audit": "20261019-145905"
@@ -4987,11 +5635,6 @@
   {
    "evidence": "Same test_mn15 (pve_mining_sites.rs:496-545) uses NOT_IN_CLIENT scanMgr.GetSystemSignatures/GetGasSiteDetails and reads the site from snap.cosmic_signatures (:517-523). The site is in Jita, and the 'NPCs spawn after a delay' clause is untested.",
    "id": "feat:mining.gas-sites",
-   "flagged_by_audit": "20261019-145905"
-  },
-  {
-   "evidence": "mining_complete.rs:1294-1325 queries autoMoonMining on structure 1_000_000_001_003, created at :1198-1203 as an Athanor (type 35835), not a Metenox Moon Drill. Output is asserted as the constant 2*500*0.40 = 400.",
-   "id": "feat:mining.metenox",
    "flagged_by_audit": "20261019-145905"
   },
   {
@@ -5183,11 +5826,6 @@
    "evidence": "Acceptance: undock at the station's undock point with velocity, session change and invulnerability. space_navigation_cyno.rs:381-391 asserts a hardcoded station_pos + (1500,0,0) and GotoDirection X for any station rather than the station type's undock point and direction. Undock invulnerability is not asserted.",
    "id": "feat:navigation.undock",
    "flagged_by_audit": "20261019-145905"
-  },
-  {
-   "evidence": "Acceptance: warp time follows the accel/decel formula per ship class. tests/destiny_binary_stream.rs:140-275 uses a fixed 3 AU/s Rifter ball and checks only monotonic acceleration, cruise speed within 5% and landing within 2,500 m. No warp time or class-dependent deceleration is asserted.",
-   "id": "feat:navigation.warp-speed-formula",
-   "flagged_by_audit": "20261019-053529"
   },
   {
    "evidence": "crates/eve-server/tests/social_fleets_corps.rs:291-295 calls fleetMgr.WarpToMember and asserts only is_keyval. No warp is started and no landing position near the member is verified.",

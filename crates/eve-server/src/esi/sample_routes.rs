@@ -499,6 +499,16 @@ pub fn dispatch_operation(
         return res;
     }
 
+    if let Some(res) = super::corp_alliance_routes::dispatch_corp_alliance_route(
+        ctx,
+        method,
+        path_pattern,
+        path_params,
+        query_params,
+    ) {
+        return res;
+    }
+
     if let Some(res) = super::char_social_routes::dispatch_char_social_route(
         ctx,
         method,
@@ -517,16 +527,6 @@ pub fn dispatch_operation(
         path_params,
         claims,
         req_body,
-    ) {
-        return res;
-    }
-
-    if let Some(res) = super::corp_alliance_routes::dispatch_corp_alliance_route(
-        ctx,
-        method,
-        path_pattern,
-        path_params,
-        query_params,
     ) {
         return res;
     }

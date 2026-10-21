@@ -136,8 +136,8 @@
     "note": "Character, Clones, Skills, Location, Fittings, Assets, Wallet, Loyalty, Calendar, Contacts, and Mail ESI routes partially closed; open operations remain."
   },
   "ESI-5": {
-    "assessment": "PARTIAL",
-    "note": "State-backed Alliance and Corporation ESI routes (alliances list, corporations, icons, public info, npc corps, blueprints, facilities, members, tracking, standings, starbases) closed; remaining routes open."
+    "assessment": "DONE",
+    "note": "All 28 Alliance and Corporation ESI routes and 12 governance/lifecycle domain features closed with state-backed tests in esi_corp_alliance.rs and esi_corp_governance.rs."
   },
   "ESI-6": {
     "assessment": "PARTIAL",

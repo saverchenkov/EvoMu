@@ -135,6 +135,135 @@ pub struct KillmailDetailRecord {
     pub attackers: Vec<KillmailAttackerDetail>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AllianceLifecycleMeta {
+    pub creator_id: i64,
+    pub creator_corporation_id: i64,
+    pub date_founded_unix: u64,
+    pub faction_id: Option<i64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StructureEsiTimerMeta {
+    pub profile_id: i64,
+    pub fuel_expires_unix: Option<u64>,
+    pub state_timer_start_unix: Option<u64>,
+    pub state_timer_end_unix: Option<u64>,
+    pub unanchors_at_unix: Option<u64>,
+    pub next_reinforce_hour: Option<i64>,
+    pub next_reinforce_apply_unix: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CorpAllianceHistoryEntry {
+    pub record_id: i64,
+    pub alliance_id: Option<i64>,
+    pub start_date_unix: u64,
+    pub is_deleted: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CorpContainerLogEntry {
+    pub logged_at_unix: u64,
+    pub container_id: i64,
+    pub container_type_id: i32,
+    pub character_id: i64,
+    pub location_id: i64,
+    pub location_flag: String,
+    pub action: String,
+    pub password_type: Option<String>,
+    pub type_id: Option<i32>,
+    pub quantity: Option<i32>,
+    pub old_config_bitmask: Option<i32>,
+    pub new_config_bitmask: Option<i32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CorpMedalEntry {
+    pub medal_id: i64,
+    pub title: String,
+    pub description: String,
+    pub creator_id: i64,
+    pub created_at_unix: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CorpIssuedMedalEntry {
+    pub medal_id: i64,
+    pub character_id: i64,
+    pub reason: String,
+    pub status: String,
+    pub issuer_id: i64,
+    pub issued_at_unix: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CorpTitleEntry {
+    pub title_id: i64,
+    pub name: String,
+    pub roles: Vec<String>,
+    pub grantable_roles: Vec<String>,
+    pub roles_at_hq: Vec<String>,
+    pub grantable_roles_at_hq: Vec<String>,
+    pub roles_at_base: Vec<String>,
+    pub grantable_roles_at_base: Vec<String>,
+    pub roles_at_other: Vec<String>,
+    pub grantable_roles_at_other: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CorpMemberRoleAssignment {
+    pub character_id: i64,
+    pub roles: u64,
+    pub grantable_roles: u64,
+    pub roles_at_hq: u64,
+    pub grantable_roles_at_hq: u64,
+    pub roles_at_base: u64,
+    pub grantable_roles_at_base: u64,
+    pub roles_at_other: u64,
+    pub grantable_roles_at_other: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CorpRoleHistoryEntry {
+    pub character_id: i64,
+    pub changed_at_unix: u64,
+    pub issuer_id: i64,
+    pub role_type: String,
+    pub old_roles: Vec<String>,
+    pub new_roles: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CorpShareholderEntry {
+    pub shareholder_id: i64,
+    pub shareholder_type: String,
+    pub share_count: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StarbaseDetailSettings {
+    pub allow_corporation_members: bool,
+    pub allow_alliance_members: bool,
+    pub use_alliance_standings: bool,
+    pub attack_if_other_security_status_dropping: bool,
+    pub attack_if_at_war: bool,
+    pub fuel_bay_view: String,
+    pub fuel_bay_take: String,
+    pub anchor: String,
+    pub unanchor: String,
+    pub online: String,
+    pub offline: String,
+    pub attack_standing_threshold: Option<f64>,
+    pub attack_security_status_threshold: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CorpProjectContributorEntry {
+    pub character_id: i64,
+    pub contributed_quantity: u64,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct WorldStateSnapshot {
     pub next_entity_id: i64,
@@ -265,6 +394,36 @@ pub struct WorldStateSnapshot {
     pub killmail_details: HashMap<i64, KillmailDetailRecord>,
     #[serde(default)]
     pub station_office_rental_costs: HashMap<i64, f64>,
+    #[serde(default)]
+    pub alliance_lifecycle_meta: HashMap<i64, AllianceLifecycleMeta>,
+    #[serde(default)]
+    pub corp_hangar_divisions: HashMap<i64, HashMap<u8, String>>,
+    #[serde(default)]
+    pub structure_esi_timer_meta: HashMap<i64, StructureEsiTimerMeta>,
+    #[serde(default)]
+    pub corp_alliance_history: HashMap<i64, Vec<CorpAllianceHistoryEntry>>,
+    #[serde(default)]
+    pub corp_container_logs: HashMap<i64, Vec<CorpContainerLogEntry>>,
+    #[serde(default)]
+    pub corp_medals: HashMap<i64, Vec<CorpMedalEntry>>,
+    #[serde(default)]
+    pub corp_issued_medals: HashMap<i64, Vec<CorpIssuedMedalEntry>>,
+    #[serde(default)]
+    pub corp_member_limits: HashMap<i64, i64>,
+    #[serde(default)]
+    pub corp_titles: HashMap<i64, Vec<CorpTitleEntry>>,
+    #[serde(default, with = "tuple_map_serde")]
+    pub corp_member_titles: HashMap<(i64, i64), Vec<i64>>,
+    #[serde(default, with = "tuple_map_serde")]
+    pub corp_role_assignments: HashMap<(i64, i64), CorpMemberRoleAssignment>,
+    #[serde(default)]
+    pub corp_role_history: HashMap<i64, Vec<CorpRoleHistoryEntry>>,
+    #[serde(default)]
+    pub corp_shareholders: HashMap<i64, Vec<CorpShareholderEntry>>,
+    #[serde(default)]
+    pub starbase_settings: HashMap<i64, StarbaseDetailSettings>,
+    #[serde(default)]
+    pub corp_project_contributors: HashMap<i64, Vec<CorpProjectContributorEntry>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
