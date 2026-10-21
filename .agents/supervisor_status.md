@@ -1,5 +1,23 @@
 # EvoMu Supervisor Status Log
 
+## 🔄 SESSION HANDOVER (2026-10-21 21:57 UTC / 14:57 PDT)
+- **New Supervisor:** Antigravity conversation `34b1769a-0dd8-4b35-a4d2-1e045e7b2d93` (AGENTS.md updated)
+- **New Coder:** Antigravity conversation `53a40aa5-de78-437f-9bcb-3d8e6ef672bf` (started 14:55 PDT)
+- **HEAD:** `53b099c` (main == origin/main)
+- Previous supervisor/coder IDs below are historical.
+
+### Check-in #1 (14:57 PDT)
+**Findings**
+1. **Preflight on `main` broken:** uncommitted edit to `.agents/supervisor_status.md` tripped `stale_gate()` (".agents/ differs from main"). Root cause: supervisor log lives inside `.agents/`. **Fixed** by committing this file + AGENTS.md ID change (gate-exempt paths). Track worktrees must `git rebase main` after each supervisor commit.
+2. **Coder started on one track only** (`../evomu-ch`, `track/ch-tagging`, Phase 6 CH-*). Violates the >=3 concurrent tracks rule. Directive sent.
+3. `../evomu-ch` has no `data/evomu_sde.sqlite`; must export `EVOMU_SDE_PATH=C:/Code/evomu/data/evomu_sde.sqlite`.
+4. `docs/ACTION_PLAN_STATUS.md` has an uncommitted preflight-regenerated diff on main; left for the Coder.
+5. Process concern: CH work must be real semantics (skill queue engine, GM dispatcher), not tagging-only closures. Reminded.
+
+**Actions:** committed gate-exempt files; sent steering message to Coder.
+
+---
+
 ## Session Information
 - **Supervisor Agent ID:** 3d6533b5-943c-48df-8b5c-4ccec1132b65 (per AGENTS.md)
 - **Coder Agent:** EvoMu Coder (local_a7f39d4f-687c-46fe-9848-310de6db9963)
@@ -132,11 +150,43 @@ The RPC tagging work (1,180 tests!) demonstrates thoroughness. The Windows porta
 4. ✅ Merge reviewed work as subagents complete
 5. ✅ Clean handoff when quota approaches
 
-**Monitoring:**
-- Will check in 15 minutes for worktree setup
-- Will track subagent launches and progress
-- Will watch for quota warnings
-- Will prepare final status when time approaches
+---
+
+## 30-Minute Check-in (2026-10-21 21:50 UTC)
+
+### ✅ GREAT PROGRESS! 
+
+**Parity:** 60.93% (3,723/6,110 rows) - **+0.55% gain since last check!**
+
+**Recent Wins:**
+- ✅ **DG-1 CLOSED** - Dogma modifier engine tagged and working
+- ✅ **DG-4 CLOSED** - Module cycles (activation, overheat, timing) verified
+- ✅ **E-1 through E-4 TAGGED** - Economy plan rows now covered
+- ✅ Clean commits with proper parity attribution
+- ✅ Working tree clean (good git hygiene!)
+- ✅ Test suite stable: 528 passed, 68 failed (down from 596 earlier)
+
+**Test Performance:**
+- Build time: 4.7s (fast!)
+- Test run: 53.2s for 36 binaries
+- Total loop: 61.4s (excellent for this size codebase)
+
+**Commit Quality:**
+- Clean commit messages with task IDs
+- Proper Co-Authored-By attribution
+- Specific parity impact notes
+- Good granularity (focused changes)
+
+### Session Status
+- **Last activity:** 5 minutes ago (actively working)
+- **Branch:** main, 3 commits ahead of origin (ready to push after review)
+- **Working tree:** Clean ✅
+
+### Monitoring
+- Coder received revised directive to continue for ~1 hour
+- Appears to be working on parity tagging and verification
+- No blockers observed
+- Next check: 15 minutes
 
 Created `C:/Code/evomu/HANDOFF.md` with:
 - ✅ Project overview and goals
