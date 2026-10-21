@@ -144,10 +144,18 @@ impl CrimeWatchDirector {
         st.weapon_timer_until_unix = now_unix.saturating_add(60);
     }
 
-    /// Triggers a 15-minute Suspect flag (e.g. exiting T4–T6 Abyssal Deadspace or stealing from a container).
+    /// Triggers a 15-minute (900s) Suspect flag on a character.
     pub fn trigger_suspect_flag(&mut self, character_id: i64, now_unix: u64) {
         let st = self.get_or_create(character_id);
         st.suspect_flag_until_unix = now_unix.saturating_add(900);
+    }
+
+    /// Checks if a character currently has an active Suspect flag.
+    pub fn is_suspect(&self, character_id: i64, now_unix: u64) -> bool {
+        self.states
+            .get(&character_id)
+            .map(|s| s.is_suspect(now_unix))
+            .unwrap_or(false)
     }
 
     /// Evaluates aggression against another pilot:

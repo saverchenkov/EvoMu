@@ -126,12 +126,20 @@ pub async fn execute_death_pipeline(
         let mut dropped = Vec::new();
         let mut destroyed = Vec::new();
 
+        let is_pochven = ctx
+            .sde
+            .solar_systems
+            .get(&sys_id)
+            .map(|s| s.region_id == 10_000_070)
+            .unwrap_or(false);
+        let drop_threshold = if is_pochven { 0.60 } else { 0.50 };
+
         for iid in child_item_ids {
-            // Deterministic 50% Loot Fairy roll: roll < 0.5 drops, >= 0.5 destroyed
+            // Deterministic Loot Fairy roll: roll < threshold drops, >= threshold destroyed (`feat:combat.pochven-loot-drop`)
             let roll = ((rng_seed ^ (iid as u64)).wrapping_mul(6364136223846793005) >> 32)
                 as f64
                 / 4294967296.0;
-            if roll < 0.50 {
+            if roll < drop_threshold {
                 // Item survives and is moved into the wreck
                 if let Some(item) = snap.items.get_mut(&iid) {
                     item.location_id = wreck_id;
