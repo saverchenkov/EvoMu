@@ -1,9 +1,4 @@
 //! Integration tests for Combat Systems, Death Pipeline, NPCs & CrimeWatch (`C-3, C-4, C-7, C-8`).
-//!
-// parity: plan:C-3, plan:C-4, plan:C-7, plan:C-8
-// parity: feat:attributes.implants-pod-death, feat:clones.medical-clone-respawn, feat:ships.self-destruct, feat:combat.ship-destruction, feat:combat.pod-destruction, feat:combat.bounty-payout-npc, feat:npc.belt-rats, feat:npc.npc-ai-targeting, feat:npc.npc-damage-types, feat:npc.npc-loot, feat:modules.salvager, feat:modules.tractor-beam, feat:drones.launch-drones, feat:drones.recall-drones, feat:drones.return-orbit, feat:dogma.weapon-timer, feat:combat.aggression-tracking, feat:crimewatch.security-status, feat:crimewatch.sec-status-loss, feat:crimewatch.sec-status-gain
-
-#![forbid(unsafe_code)]
 
 use crate::common;
 
@@ -30,11 +25,16 @@ use std::collections::HashMap;
 
 #[tokio::test]
 async fn test_c3_death_pipeline_ship_and_pod_destruction_medical_respawn_and_implants_lost() {
-    // parity: plan:C-3
     // parity: feat:combat.ship-destruction
     // parity: feat:combat.pod-destruction
     // parity: feat:attributes.implants-pod-death
     // parity: feat:clones.medical-clone-respawn
+    eve_testkit::attest(&[
+        "feat:combat.ship-destruction",
+        "feat:combat.pod-destruction",
+        "feat:attributes.implants-pod-death",
+        "feat:clones.medical-clone-respawn",
+    ]);
 
     let ctx = ServerContext::new();
     let char_id = 90_000_001;
@@ -222,8 +222,8 @@ async fn test_c3_death_pipeline_ship_and_pod_destruction_medical_respawn_and_imp
 
 #[tokio::test]
 async fn test_c3_ship_and_pod_self_destruct() {
-    // parity: plan:C-3
     // parity: feat:ships.self-destruct
+    eve_testkit::attest(&["feat:ships.self-destruct"]);
 
     let ctx = ServerContext::new();
     let char_id = 90_000_001;
@@ -321,12 +321,18 @@ async fn test_c3_ship_and_pod_self_destruct() {
 
 #[tokio::test]
 async fn test_c4_npc_spawn_groups_aggro_targeting_damage_types_loot_and_bounties() {
-    // parity: plan:C-4
     // parity: feat:npc.belt-rats
     // parity: feat:npc.npc-ai-targeting
     // parity: feat:npc.npc-damage-types
     // parity: feat:npc.npc-loot
     // parity: feat:combat.bounty-payout-npc
+    eve_testkit::attest(&[
+        "feat:npc.belt-rats",
+        "feat:npc.npc-ai-targeting",
+        "feat:npc.npc-damage-types",
+        "feat:npc.npc-loot",
+        "feat:combat.bounty-payout-npc",
+    ]);
 
     let ctx = ServerContext::new();
     let sys_id = 30_000_142; // Jita
@@ -458,12 +464,18 @@ async fn test_c4_npc_spawn_groups_aggro_targeting_damage_types_loot_and_bounties
 
 #[tokio::test]
 async fn test_c7_salvager_tractor_beam_and_drones() {
-    // parity: plan:C-7
     // parity: feat:modules.salvager
     // parity: feat:modules.tractor-beam
     // parity: feat:drones.launch-drones
     // parity: feat:drones.recall-drones
     // parity: feat:drones.return-orbit
+    eve_testkit::attest(&[
+        "feat:modules.salvager",
+        "feat:modules.tractor-beam",
+        "feat:drones.launch-drones",
+        "feat:drones.recall-drones",
+        "feat:drones.return-orbit",
+    ]);
 
     let ctx = ServerContext::new();
     let sys_id = 30_000_142;
@@ -642,12 +654,18 @@ async fn test_c7_salvager_tractor_beam_and_drones() {
 
 #[tokio::test]
 async fn test_c8_crimewatch_concord_timers_and_security_status() {
-    // parity: plan:C-8
     // parity: feat:dogma.weapon-timer
     // parity: feat:combat.aggression-tracking
     // parity: feat:crimewatch.security-status
     // parity: feat:crimewatch.sec-status-loss
     // parity: feat:crimewatch.sec-status-gain
+    eve_testkit::attest(&[
+        "feat:dogma.weapon-timer",
+        "feat:combat.aggression-tracking",
+        "feat:crimewatch.security-status",
+        "feat:crimewatch.sec-status-loss",
+        "feat:crimewatch.sec-status-gain",
+    ]);
 
     let ctx = ServerContext::new();
     let char_id = 90_000_001;

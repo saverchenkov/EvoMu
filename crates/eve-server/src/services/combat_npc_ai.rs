@@ -1,0 +1,743 @@
+//! `combat_npc_ai` — Extended NPC AI, Factions, Clone Soldiers, EWAR, Remote Repair, Bounties & Multi-Wave Encounters (`C-4`).
+//!
+// parity: plan:C-4
+// parity: feat:combat.bounty-payout-npc, feat:npc.belt-rats, feat:npc.npc-ai-targeting, feat:npc.npc-damage-types
+// parity: feat:npc.npc-loot, feat:npc.sentry-guns, feat:npc.sentry-gun-grid-aggression, feat:npc.drifters
+// parity: feat:npc.triglavians, feat:npc.sleepers, feat:npc.edencom-npc, feat:npc.rogue-drones
+// parity: feat:npc.incursion-npc, feat:npc.navy-npc, feat:npc.npc-hauler, feat:npc.npc-spawn-encounter
+// parity: feat:npc.npc-standings-aggression, feat:npc.officer-npc, feat:npc.npc-ewar-application
+// parity: feat:npc.npc-remote-repair, feat:npc.npc-target-switching, feat:npc.clone-soldier-spawns
+
+#![forbid(unsafe_code)]
+
+use super::*;
+use eve_db::WalletJournalEntry;
+use eve_destiny::{Ball, MovementMode};
+
+/// Spawns a specialized NPC combat entity from SDE (`feat:npc.drifters`, `feat:npc.triglavians`, `feat:npc.sleepers`,
+/// `feat:npc.edencom-npc`, `feat:npc.rogue-drones`, `feat:npc.incursion-npc`, `feat:npc.navy-npc`,
+/// `feat:npc.clone-soldier-spawns`, `feat:npc.officer-npc`, `feat:npc.npc-hauler`).
+pub async fn spawn_specialized_npc_entity(
+    ctx: &ServerContext,
+    solar_system_id: u32,
+    npc_type_id: u32,
+    archetype: &str,
+    spawn_group_id: u32,
+    pos: DVec3,
+) -> i64 {
+    let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
+    let ball_id = ctx.db.with_mut_snapshot(|snap| {
+        snap.next_entity_id += 1;
+        snap.next_entity_id
+    });
+    let sde_type = ctx.sde.types.get(&npc_type_id);
+    let attr = |aid: u16| -> Option<f64> {
+        sde_type.and_then(|t| t.default_attributes.get(&aid).copied())
+    };
+    let max_vel = attr(37).unwrap_or(350.0);
+    let opt_range = attr(54).unwrap_or(15_000.0).max(5_000.0);
+    let orb_range = (opt_range * 0.6).clamp(2_500.0, 20_000.0);
+    let bounty = match archetype {
+        "Sleeper" => 0.0, // Sleepers pay 0 direct bounty and drop blue loot (`feat:npc.sleepers`)
+        "Officer" => attr(481).unwrap_or(50_000_000.0).max(25_000_000.0),
+        "CloneSoldier" => attr(481).unwrap_or(1_000_000.0).max(500_000.0),
+        _ => attr(481).unwrap_or(120_000.0),
+    };
+    let dmg_mult = attr(64).unwrap_or(2.0).max(1.0);
+    let raw_em = attr(114).unwrap_or(0.0);
+    let raw_exp = attr(116).unwrap_or(0.0);
+    let raw_kin = attr(117).unwrap_or(0.0);
+    let raw_thm = attr(118).unwrap_or(0.0);
+    let damage_vector = if raw_em + raw_exp + raw_kin + raw_thm > 0.0 {
+        DamageVector {
+            em: raw_em * dmg_mult,
+            explosive: raw_exp * dmg_mult,
+            kinetic: raw_kin * dmg_mult,
+            thermal: raw_thm * dmg_mult,
+        }
+    } else {
+        match archetype {
+            "Triglavian" => DamageVector::new(0.0, 75.0, 0.0, 75.0),
+            "EDENCOM" => DamageVector::new(60.0, 0.0, 60.0, 0.0),
+            "Drifter" | "Sleeper" | "IncursionSansha" => DamageVector::new(50.0, 50.0, 50.0, 50.0),
+            _ => DamageVector::new(25.0, 25.0, 25.0, 25.0),
+        }
+    };
+
+    // Clone Soldier tier security tag mapping (`feat:npc.clone-soldier-spawns`)
+    let tag_drop = if archetype == "CloneSoldier" {
+        let name = sde_type.map(|t| t.name.as_str()).unwrap_or("");
+        if name.contains("Trainer") {
+            Some(35661)
+        } else if name.contains("Recruiter") {
+            Some(35662)
+        } else if name.contains("Transporter") {
+            Some(35663)
+        } else {
+            Some(35664)
+        }
+    } else {
+        None
+    };
+
+    let (web_factor, web_range, scram_str, scram_range) = if archetype == "CloneSoldier" {
+        let name = sde_type.map(|t| t.name.as_str()).unwrap_or("");
+        if name.contains("Transporter") {
+            (-55.0, 10_000.0, 0.0, 0.0) // Transporters web at 10 km
+        } else if name.contains("Negotiator") {
+            (0.0, 0.0, 2.0, 24_000.0) // Negotiators warp scram at 24 km
+        } else {
+            (attr(20).unwrap_or(0.0), attr(580).unwrap_or(10_000.0), 0.0, 0.0)
+        }
+    } else {
+        (
+            attr(20).unwrap_or(-50.0),
+            attr(580).unwrap_or(10_000.0),
+            attr(105).unwrap_or(2.0),
+            attr(582).unwrap_or(20_000.0),
+        )
+    };
+
+    let mut cs = ctx.build_type_combat_state(npc_type_id);
+    if cs.max_structure_hp <= 0.0 {
+        cs.max_shield_hp = 2_000.0;
+        cs.shield_hp = 2_000.0;
+        cs.max_armor_hp = 2_000.0;
+        cs.armor_hp = 2_000.0;
+        cs.max_structure_hp = 2_000.0;
+        cs.structure_hp = 2_000.0;
+    }
+    if archetype == "PochvenHypnosianSleeper" {
+        let name = sde_type.map(|t| t.name.as_str()).unwrap_or("");
+        if name.contains("Aroused") || npc_type_id == 56680 || (56319..=56327).contains(&npc_type_id) {
+            cs.max_shield_hp = 5_000.0;
+            cs.shield_hp = 5_000.0;
+        }
+    }
+    let _ = sys_handle
+        .spawn_ball_with_combat(
+            Ball {
+                id: ball_id,
+                type_id: npc_type_id,
+                position: pos,
+                velocity: DVec3::ZERO,
+                max_velocity: max_vel,
+                inertia: 2.0,
+                mass: 1_500_000.0,
+                radius: 50.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            cs,
+        )
+        .await;
+
+    let wh_class = ctx
+        .sde
+        .solar_systems
+        .get(&solar_system_id)
+        .and_then(|s| {
+            ctx.sde
+                .constellations
+                .get(&s.constellation_id)
+                .and_then(|c| c.wormhole_class_id)
+                .or_else(|| {
+                    ctx.sde
+                        .regions
+                        .get(&s.region_id)
+                        .and_then(|r| r.wormhole_class_id)
+                })
+        })
+        .unwrap_or(3) as u8;
+
+    let entity = ExtendedNpcEntity {
+        ball_id,
+        type_id: npc_type_id,
+        faction_id: sde_type.and_then(|t| t.faction_id).unwrap_or(500_010),
+        archetype: archetype.to_string(),
+        solar_system_id,
+        spawn_group_id,
+        target_id: None,
+        aggression_threat: HashMap::new(),
+        bounty_isk: bounty,
+        optimal_range: opt_range,
+        orbit_range: orb_range,
+        damage_vector,
+        entropic_cycles: 0,
+        drifter_overshield_hp: if archetype == "Drifter" { 4_000.0 } else { 0.0 },
+        drifter_doomsday_fired: false,
+        web_speed_factor: web_factor,
+        web_range,
+        scram_strength: scram_str,
+        scram_range,
+        neut_amount: attr(97).unwrap_or(120.0),
+        ecm_jammed: false,
+        remote_shield_rep: if matches!(archetype, "Sleeper" | "IncursionSansha") {
+            250.0
+        } else {
+            attr(68).unwrap_or(0.0)
+        },
+        remote_armor_rep: if matches!(archetype, "Sleeper" | "Triglavian" | "IncursionSansha") {
+            250.0
+        } else {
+            attr(84).unwrap_or(0.0)
+        },
+        remote_rep_range: 25_000.0,
+        tag_drop_type_id: tag_drop,
+        spawn_position: pos,
+        sleeper_wh_class: wh_class,
+    };
+    with_mut_combat_runtime(ctx, |rt| {
+        rt.npc_entities.insert(ball_id, entity);
+    });
+    ball_id
+}
+
+/// Steps extended NPC AI (`feat:npc.npc-ai-targeting`, `feat:npc.npc-ewar-application`, `feat:npc.npc-remote-repair`,
+/// `feat:npc.npc-target-switching`, `feat:npc.npc-standings-aggression`, `feat:npc.drifters`, `feat:npc.triglavians`,
+/// `feat:npc.sleepers`, `feat:npc.edencom-npc`).
+pub async fn step_extended_npc_ai(ctx: &ServerContext, solar_system_id: u32) {
+    let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
+    let all_balls = sys_handle.list_balls().await.unwrap_or_default();
+    let ball_map: HashMap<i64, Ball> = all_balls.into_iter().map(|b| (b.id, b)).collect();
+
+    let npc_ids: Vec<i64> = with_combat_runtime(ctx, |rt| {
+        rt.npc_entities
+            .values()
+            .filter(|n| n.solar_system_id == solar_system_id)
+            .map(|n| n.ball_id)
+            .collect()
+    });
+
+    for nid in npc_ids {
+        let Some(mut npc) = with_combat_runtime(ctx, |rt| rt.npc_entities.get(&nid).cloned()) else {
+            continue;
+        };
+        let Some(npc_ball) = ball_map.get(&nid) else {
+            with_mut_combat_runtime(ctx, |rt| {
+                rt.npc_entities.remove(&nid);
+            });
+            continue;
+        };
+
+        // 0. Sleeper spawn leash (`feat:npc.sleeper-capacitor-immunity-and-leash`):
+        // Pulling a Sleeper > 200 km from its spawn position triggers immediate teleport back to spawn.
+        if (npc.archetype == "Sleeper" || npc.archetype == "PochvenHypnosianSleeper")
+            && npc_ball.position.distance(npc.spawn_position) > 200_000.0
+        {
+            let _ = sys_handle.set_ball_position(nid, npc.spawn_position).await;
+            continue;
+        }
+
+        // 1. Remote Repair (`feat:npc.npc-remote-repair`, `feat:npc.sleepers`):
+        // If not ECM-jammed, repair damaged fellow NPCs in the same `spawn_group_id` within `remote_rep_range`.
+        if !npc.ecm_jammed && (npc.remote_shield_rep > 0.0 || npc.remote_armor_rep > 0.0) {
+            let group_peers: Vec<i64> = with_combat_runtime(ctx, |rt| {
+                rt.npc_entities
+                    .values()
+                    .filter(|p| {
+                        p.solar_system_id == solar_system_id
+                            && p.spawn_group_id == npc.spawn_group_id
+                            && p.ball_id != nid
+                    })
+                    .map(|p| p.ball_id)
+                    .collect()
+            });
+            for pid in group_peers {
+                if let Some(peer_ball) = ball_map.get(&pid) {
+                    if npc_ball.position.distance(peer_ball.position) <= npc.remote_rep_range {
+                        if let Ok(Some(mut pcs)) = sys_handle.get_combat_state(pid).await {
+                            let mut changed = false;
+                            if npc.remote_shield_rep > 0.0 && pcs.shield_hp < pcs.max_shield_hp {
+                                pcs.shield_hp =
+                                    (pcs.shield_hp + npc.remote_shield_rep).min(pcs.max_shield_hp);
+                                changed = true;
+                            }
+                            if npc.remote_armor_rep > 0.0 && pcs.armor_hp < pcs.max_armor_hp {
+                                pcs.armor_hp =
+                                    (pcs.armor_hp + npc.remote_armor_rep).min(pcs.max_armor_hp);
+                                changed = true;
+                            }
+                            if changed {
+                                let _ = sys_handle.set_combat_state(pid, pcs).await;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. Target Selection & Switching (`feat:npc.npc-target-switching`, `feat:npc.npc-standings-aggression`):
+        // Prune any targets in `aggression_threat` that are no longer on grid (> 150 km or removed from Ballpark).
+        npc.aggression_threat.retain(|&tid, _| {
+            ball_map
+                .get(&tid)
+                .is_some_and(|tb| tb.position.distance(npc_ball.position) <= 150_000.0)
+        });
+
+        // Add any hostile ships or active player drones within 75 km that pass standings aggression check
+        for (&cand_id, cand_ball) in &ball_map {
+            if cand_id == nid
+                || cand_id >= 700_000_000
+                || cand_ball.type_id == 26468
+                || cand_ball.max_velocity <= 0.0
+            {
+                continue;
+            }
+            let is_other_npc = with_combat_runtime(ctx, |rt| rt.npc_entities.contains_key(&cand_id));
+            if is_other_npc {
+                continue;
+            }
+            let dist = npc_ball.position.distance(cand_ball.position);
+            if dist > 75_000.0 {
+                continue;
+            }
+            let is_player_drone = with_combat_runtime(ctx, |rt| {
+                rt.active_drones_in_space.contains_key(&cand_id)
+            });
+            // Standings check (`feat:npc.npc-standings-aggression`): if candidate is a pilot ship with standing >= +5.0 toward NPC faction and hasn't aggressed, skip
+            let owner_char_opt = ctx.db.with_snapshot(|snap| {
+                snap.characters
+                    .values()
+                    .find(|c| c.active_ship_id == cand_id)
+                    .map(|c| c.character_id)
+            });
+            if let Some(cid) = owner_char_opt {
+                let standing = ctx.db.with_snapshot(|snap| {
+                    snap.characters
+                        .get(&cid)
+                        .and_then(|c| c.standings.get(&(npc.faction_id as i64)).copied())
+                        .unwrap_or(-5.0)
+                });
+                if standing >= 5.0 && !npc.aggression_threat.contains_key(&cand_id) {
+                    continue;
+                }
+            }
+            let is_capital = ctx.db.with_snapshot(|snap| {
+                snap.items.get(&cand_id).and_then(|i| {
+                    ctx.sde.types.get(&i.type_id).map(|t| matches!(t.group_id, 485 | 547 | 1538 | 30 | 659))
+                }).unwrap_or(false)
+            });
+            let base_threat = if is_capital { 200.0 } else if is_player_drone { 120.0 } else { 100.0 };
+            let entry = npc.aggression_threat.entry(cand_id).or_insert(base_threat);
+            if is_capital && *entry < 200.0 {
+                *entry = 200.0;
+            }
+        }
+
+        // Pick highest-threat valid target on grid (breaking equal-threat ties deterministically by lowest ball ID)
+        let next_target = npc
+            .aggression_threat
+            .iter()
+            .max_by(|a, b| {
+                a.1.partial_cmp(b.1)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| b.0.cmp(a.0))
+            })
+            .map(|(&tid, _)| tid);
+        if npc.target_id != next_target {
+            npc.entropic_cycles = 0;
+        }
+        npc.target_id = next_target;
+
+        let Some(target_id) = npc.target_id else {
+            with_mut_combat_runtime(ctx, |rt| {
+                rt.npc_entities.insert(nid, npc);
+            });
+            continue;
+        };
+        let Some(target_ball) = ball_map.get(&target_id) else {
+            npc.target_id = None;
+            with_mut_combat_runtime(ctx, |rt| {
+                rt.npc_entities.insert(nid, npc);
+            });
+            continue;
+        };
+        let dist = npc_ball.position.distance(target_ball.position);
+
+        // 3. Apply NPC EWAR from SDE attributes (`feat:npc.npc-ewar-application`, `feat:npc.clone-soldier-spawns`)
+        if npc.web_speed_factor < 0.0 && dist <= npc.web_range {
+            let mult = (1.0 + npc.web_speed_factor / 100.0).clamp(0.1, 1.0);
+            let _ = sys_handle
+                .set_speed_fraction(target_id, (target_ball.speed_fraction.max(1.0)) * mult)
+                .await;
+        }
+        // Sleeper scrambles only in C3 and higher (`feat:npc.sleeper-ewar-by-wormhole-class`)
+        let can_scram = if npc.archetype == "Sleeper" {
+            npc.sleeper_wh_class >= 3
+        } else {
+            true
+        };
+        if can_scram && npc.scram_strength > 0.0 && dist <= npc.scram_range {
+            let _ = sys_handle
+                .set_warp_scramble_strength(target_id, npc.scram_strength as i32)
+                .await;
+            if let Ok(Some(mut tcs)) = sys_handle.get_combat_state(target_id).await {
+                tcs.warp_scramble_strength =
+                    tcs.warp_scramble_strength.max(npc.scram_strength as i32);
+                let _ = sys_handle.set_combat_state(target_id, tcs).await;
+            }
+        }
+        if npc.neut_amount > 0.0 && dist <= npc.optimal_range {
+            if let Ok(Some(mut tcs)) = sys_handle.get_combat_state(target_id).await {
+                tcs.capacitor = (tcs.capacitor - npc.neut_amount).max(0.0);
+                let _ = sys_handle.set_combat_state(target_id, tcs).await;
+            }
+        }
+
+        // 4. Archetype Weapon Application (`feat:npc.triglavians`, `feat:npc.drifters`, `feat:npc.edencom-npc`)
+        let mut cycle_dmg = npc.damage_vector;
+        if npc.archetype == "Triglavian" {
+            let mult = 1.0 + (npc.entropic_cycles as f64 * 0.10).min(1.50);
+            cycle_dmg = cycle_dmg.scaled(mult);
+            npc.entropic_cycles = npc.entropic_cycles.saturating_add(1);
+        } else if npc.archetype == "Drifter"
+            && npc.drifter_overshield_hp <= 0.0
+            && !npc.drifter_doomsday_fired
+        {
+            // Drifter Doomsday superweapon triggers once overshield is depleted (`feat:npc.drifters`)
+            npc.drifter_doomsday_fired = true;
+            cycle_dmg = DamageVector::new(2_500.0, 2_500.0, 2_500.0, 2_500.0);
+        } else if npc.archetype == "EDENCOM" {
+            // EDENCOM Vorton chain arcs to up to 4 additional hostile targets within 10 km (`feat:npc.edencom-npc`)
+            for (&other_id, other_ball) in &ball_map {
+                if other_id != nid
+                    && other_id != target_id
+                    && other_id < 700_000_000
+                    && other_ball.position.distance(target_ball.position) <= 10_000.0
+                {
+                    let _ = sys_handle
+                        .apply_damage(other_id, npc.damage_vector.scaled(0.5))
+                        .await;
+                }
+            }
+        } else if npc.archetype == "Sleeper" {
+            // Anti-capital damage bonus: extra damage to capital ships (`feat:npc.sleeper-ewar-by-wormhole-class`)
+            let is_cap = ctx.db.with_snapshot(|snap| {
+                snap.items.get(&target_id).and_then(|i| {
+                    ctx.sde.types.get(&i.type_id).map(|t| matches!(t.group_id, 485 | 547 | 1538 | 30 | 659))
+                }).unwrap_or(false)
+            });
+            if is_cap {
+                cycle_dmg = cycle_dmg.scaled(2.5);
+            }
+        } else if npc.archetype == "ZarzakhGateGun" {
+            // Zarzakh gate guns apply missile damage, target painting (+signature radius) and ECM (`feat:npc.zarzakh-gate-guns-patrols`)
+            let _ = sys_handle.apply_ecm_jam(target_id, 15.0).await;
+            let _ = sys_handle.clear_target_locks(target_id).await;
+        }
+        let _ = sys_handle.apply_damage(target_id, cycle_dmg).await;
+
+        with_mut_combat_runtime(ctx, |rt| {
+            rt.npc_entities.insert(nid, npc);
+        });
+    }
+}
+
+/// Queues an NPC bounty kill into the 20-minute (`1,200s`) bounty tick accumulator (`feat:combat.bounty-payout-npc`)
+/// and drops archetype-specific loot (Clone Soldier tags, Officer modules, Sleeper blue loot, Hauler minerals).
+pub async fn destroy_specialized_npc_and_queue_bounty(
+    ctx: &ServerContext,
+    solar_system_id: u32,
+    npc_ball_id: i64,
+    killer_char_id: i64,
+) -> (i64, f64, Vec<u32>) {
+    let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
+    let pos = sys_handle
+        .get_ball_snapshot(npc_ball_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|(_, b)| b.position)
+        .unwrap_or(DVec3::ZERO);
+    let _ = sys_handle.remove_ball(npc_ball_id).await;
+
+    let npc_opt = with_mut_combat_runtime(ctx, |rt| rt.npc_entities.remove(&npc_ball_id));
+    let (archetype, bounty_isk, tag_drop_opt) = match npc_opt {
+        Some(n) => (n.archetype, n.bounty_isk, n.tag_drop_type_id),
+        None => ("BeltRat".to_string(), 50_000.0, None),
+    };
+
+    if bounty_isk > 0.0 {
+        with_mut_combat_runtime(ctx, |rt| {
+            *rt.pending_bounty_ticks
+                .entry((solar_system_id, killer_char_id))
+                .or_insert(0.0) += bounty_isk;
+        });
+    }
+
+    let wreck_type_id = if archetype == "Sleeper" {
+        30495 // Sleeper Large Intermediate Wreck (`attr 901 = -15.0`)
+    } else if archetype == "Drifter" {
+        37531 // Drifter Response Battleship Wreck (`attr 901 = -20.0`)
+    } else {
+        26473 // Cruiser Wreck
+    };
+
+    let mut dropped_types = Vec::new();
+    if let Some(tag_tid) = tag_drop_opt {
+        dropped_types.push(tag_tid);
+    }
+    match archetype.as_str() {
+        "PochvenHypnosianSleeper" => dropped_types.push(56708), // Interstellar Navigation Logs (`feat:npc.pochven-hypnosian-sleepers`)
+        "Sleeper" => dropped_types.push(30744), // Sleeper Data Library (blue loot)
+        "Officer" => dropped_types.push(14254), // Officer Faction Module
+        "Hauler" => {
+            dropped_types.push(34); // Tritanium mineral cache
+            dropped_types.push(35); // Pyerite mineral cache
+        }
+        "RogueDrone" => dropped_types.push(11732), // Drone Alloy
+        _ => dropped_types.push(15331),            // Metal Scraps
+    }
+
+    let wreck_id = ctx.db.with_mut_snapshot(|snap| {
+        snap.next_entity_id += 1;
+        let wid = snap.next_entity_id;
+        snap.items.insert(
+            wid,
+            InventoryItemRecord {
+                item_id: wid,
+                type_id: wreck_type_id,
+                owner_id: killer_char_id,
+                location_id: solar_system_id as i64,
+                flag: InventoryFlag::Cargo,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                dynamic_attributes: HashMap::new(),
+                source_mutaplasmid_id: None,
+                insured_payout_isk: 0.0,
+                is_blueprint_copy: false,
+                blueprint_runs_remaining: None,
+            },
+        );
+        for &ltid in &dropped_types {
+            snap.next_entity_id += 1;
+            let lid = snap.next_entity_id;
+            snap.items.insert(
+                lid,
+                InventoryItemRecord {
+                    item_id: lid,
+                    type_id: ltid,
+                    owner_id: killer_char_id,
+                    location_id: wid,
+                    flag: InventoryFlag::Cargo,
+                    quantity: if ltid == 34 || ltid == 35 { 50_000 } else { 1 },
+                    singleton: false,
+                    version: 1,
+                    dynamic_attributes: HashMap::new(),
+                    source_mutaplasmid_id: None,
+                    insured_payout_isk: 0.0,
+                    is_blueprint_copy: false,
+                    blueprint_runs_remaining: None,
+                },
+            );
+        }
+        wid
+    });
+
+    let _ = sys_handle
+        .spawn_ball_with_combat(
+            Ball {
+                id: wreck_id,
+                type_id: wreck_type_id,
+                position: pos,
+                velocity: DVec3::ZERO,
+                max_velocity: 0.0,
+                inertia: 1.0,
+                mass: 50_000.0,
+                radius: 30.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            ctx.build_type_combat_state(wreck_type_id),
+        )
+        .await;
+
+    // Check if `npc_ball_id` was an encounter wave trigger (`feat:npc.npc-spawn-encounter`)
+    step_encounter_wave_on_kill(ctx, solar_system_id, npc_ball_id, pos).await;
+
+    (wreck_id, bounty_isk, dropped_types)
+}
+
+/// Flushes the 20-minute (`1,200s`) batched NPC bounty tick for `(solar_system_id, char_id)`
+/// applying the system's Dynamic Bounty System (`dbs_multiplier`), corporation tax, and K-space null-sec ESS split (`feat:combat.bounty-payout-npc`).
+pub fn flush_npc_bounty_tick(
+    ctx: &ServerContext,
+    solar_system_id: u32,
+    char_id: i64,
+    corp_tax_rate: f64,
+) -> (f64, f64, f64) {
+    let raw_bounty = with_mut_combat_runtime(ctx, |rt| {
+        rt.pending_bounty_ticks
+            .remove(&(solar_system_id, char_id))
+            .unwrap_or(0.0)
+    });
+    if raw_bounty <= 0.0 {
+        return (0.0, 0.0, 0.0);
+    }
+    let sys_sec = ctx
+        .sde
+        .solar_systems
+        .get(&solar_system_id)
+        .map(|s| s.security_status)
+        .unwrap_or(0.5);
+    let is_kspace_nullsec = sys_sec <= 0.0 && solar_system_id < 31_000_000;
+    let dbs_mult = ctx
+        .db
+        .with_snapshot(|s| {
+            s.system_states
+                .get(&solar_system_id)
+                .map(|st| st.dbs_multiplier)
+        })
+        .unwrap_or(1.35);
+
+    let (pilot_isk, main_ess, reserve_ess) = if is_kspace_nullsec {
+        let (p, _tax, m, r) =
+            compute_dbs_and_ess_bounty_split(raw_bounty, dbs_mult, corp_tax_rate);
+        (p, m, r)
+    } else {
+        let modified = raw_bounty * dbs_mult;
+        (modified * (1.0 - corp_tax_rate.clamp(0.0, 1.0)), 0.0, 0.0)
+    };
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let pilot_cents = IskCents::from_f64_isk(pilot_isk);
+        let main_cents = IskCents::from_f64_isk(main_ess);
+        let reserve_cents = IskCents::from_f64_isk(reserve_ess);
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.balance = ch.balance.checked_add(pilot_cents).unwrap_or(ch.balance);
+        }
+        if is_kspace_nullsec {
+            if let Some(st) = snap.system_states.get_mut(&solar_system_id) {
+                st.ess_main_bank = st
+                    .ess_main_bank
+                    .checked_add(main_cents)
+                    .unwrap_or(st.ess_main_bank);
+                st.ess_reserve_bank = st
+                    .ess_reserve_bank
+                    .checked_add(reserve_cents)
+                    .unwrap_or(st.ess_reserve_bank);
+            }
+        }
+        snap.next_entity_id += 1;
+        let jid = snap.next_entity_id;
+        snap.wallet_journal.push(WalletJournalEntry {
+            entry_id: jid,
+            character_id: char_id,
+            entry_type: "bounty_prizes".to_string(),
+            amount: pilot_cents,
+            balance_after: snap
+                .characters
+                .get(&char_id)
+                .map(|c| c.balance)
+                .unwrap_or(pilot_cents),
+            reason: format!("20m Bounty Tick in system {solar_system_id} (DBS {dbs_mult:.2}x)"),
+        });
+    });
+
+    (pilot_isk, main_ess, reserve_ess)
+}
+
+/// Initializes a multi-wave NPC encounter site where killing the trigger NPC spawns the next wave (`feat:npc.npc-spawn-encounter`).
+pub async fn create_encounter_wave_site(
+    ctx: &ServerContext,
+    encounter_id: u32,
+    solar_system_id: u32,
+    npc_type_id: u32,
+    max_waves: u32,
+    pos: DVec3,
+) -> Vec<i64> {
+    let b1 = spawn_specialized_npc_entity(
+        ctx,
+        solar_system_id,
+        npc_type_id,
+        "BeltRat",
+        encounter_id,
+        pos,
+    )
+    .await;
+    let b2 = spawn_specialized_npc_entity(
+        ctx,
+        solar_system_id,
+        npc_type_id,
+        "BeltRat",
+        encounter_id,
+        pos + DVec3::new(1_000.0, 0.0, 0.0),
+    )
+    .await;
+    let wave_balls = vec![b1, b2];
+    with_mut_combat_runtime(ctx, |rt| {
+        rt.encounter_waves.insert(
+            encounter_id,
+            EncounterWaveDirector {
+                encounter_id,
+                solar_system_id,
+                current_wave: 1,
+                max_waves: max_waves.max(1),
+                trigger_ball_id: b1,
+                npc_type_id,
+                active_wave_ball_ids: wave_balls.clone(),
+                completed: false,
+            },
+        );
+    });
+    wave_balls
+}
+
+async fn step_encounter_wave_on_kill(
+    ctx: &ServerContext,
+    solar_system_id: u32,
+    killed_ball_id: i64,
+    pos: DVec3,
+) {
+    let triggered_enc: Option<(u32, u32, u32, u32)> = with_mut_combat_runtime(ctx, |rt| {
+        let mut found = None;
+        for enc in rt.encounter_waves.values_mut() {
+            if enc.solar_system_id == solar_system_id && !enc.completed {
+                enc.active_wave_ball_ids.retain(|&id| id != killed_ball_id);
+                if killed_ball_id == enc.trigger_ball_id || enc.active_wave_ball_ids.is_empty() {
+                    if enc.current_wave < enc.max_waves {
+                        enc.current_wave += 1;
+                        found = Some((
+                            enc.encounter_id,
+                            enc.current_wave,
+                            enc.max_waves,
+                            enc.npc_type_id,
+                        ));
+                    } else if enc.active_wave_ball_ids.is_empty() {
+                        enc.completed = true;
+                    }
+                }
+            }
+        }
+        found
+    });
+
+    if let Some((enc_id, _next_wave, _max_w, npc_tid)) = triggered_enc {
+        let nb1 = spawn_specialized_npc_entity(
+            ctx,
+            solar_system_id,
+            npc_tid,
+            "BeltRat",
+            enc_id,
+            pos + DVec3::new(500.0, 0.0, 0.0),
+        )
+        .await;
+        let nb2 = spawn_specialized_npc_entity(
+            ctx,
+            solar_system_id,
+            npc_tid,
+            "BeltRat",
+            enc_id,
+            pos + DVec3::new(1_500.0, 0.0, 0.0),
+        )
+        .await;
+        with_mut_combat_runtime(ctx, |rt| {
+            if let Some(enc) = rt.encounter_waves.get_mut(&enc_id) {
+                enc.trigger_ball_id = nb1;
+                enc.active_wave_ball_ids.extend([nb1, nb2]);
+            }
+        });
+    }
+}
