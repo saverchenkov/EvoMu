@@ -214,70 +214,81 @@ async fn test_upwell_structure_lifecycle() {
 
 ## 7. Current Project State & In-Flight Handoff
 
-### State on `origin/main` (Commit `773713c`)
-- **Parity:** **3,507 / 6,110 rows closed (57.40%)**, with 2,206 NA, 516 passed native workspace tests, 0 failures.
-- **Latest Merged Branch:** `wip/combat-crimewatch-fighters-npcs-drones` (Phase C-1..C-8 complete).
+### State on `origin/main` (Commit `64fa6b2`)
+- **Parity:** **3,628 / 6,110 rows closed (59.38%)**, with 2,206 NA, 596 passed native workspace tests, 0 failures.
+- **27 Reviewed Merged Branches:**
+  - Latest Merged Branch 26: `wip/space-structures-sov-fw` ([`0b5b537`](https://github.com/saverchenkov/EvoMu/commit/0b5b537)) — Upwell structure lifecycle, Ansiblex liquid ozone validation, and SOV/FW runtime state isolation.
+  - Latest Merged Branch 27: `wip/features-destiny-plan-progression` ([`64fa6b2`](https://github.com/saverchenkov/EvoMu/commit/64fa6b2)) — Destiny physics state completion (37/52 closed, only 5 open remaining), plan progression, and feature suites.
+- **Category Breakdown on `origin/main`:**
+  - `esi`: **197 / 197 (100.0%)**
+  - `effect`: **1 / 1 (100.0%)**
+  - `quasar`: **1,405 / 1,455 closed (96.6% — 77 DONE, 1,328 NA, 50 open)**
+  - `sde`: **151 / 213 closed (70.9% — 91 DONE, 60 NA, 62 open)**
+  - `destiny`: **37 / 52 closed (71.2% — 37 DONE, 10 NA, 5 open)**
+  - `feat`: **981 / 1,513 closed (64.8% — 887 DONE, 94 NA, 532 open)**
+  - `notify`: **633 / 1,311 closed (48.3% — 30 DONE, 603 NA, 678 open)**
+  - `plan`: **38 / 109 closed (34.9% — 38 DONE, 71 open)**
+  - `rpc`: **175 / 1,230 closed (14.2% — 64 DONE, 111 NA, 1,055 open)**
+  - `journey`: **0 / 29 (0%)**
 
-### Immediate Candidate Branch: `wip/space-structures-sov-fw` (`EvoMu-p7-destiny`)
-- **Status:** 543 passed workspace tests, honest parity **3,602 / 6,110 (58.95%)**.
-- **Latest Review (`20261021-092955`):** Returned **`FAIL`** with 6 specific findings that must be remediated before merging:
-  1. **`SF-01` (P0): Systematic Fake Parity Ledger Closures.** Several newly closed `feat:*` rows in `sov_fw_complete.rs` and `space_warp_jump_docking.rs` mutated database state directly (`with_mut_snapshot`) or checked local booleans rather than calling client RPCs (`sovMgr.AcquireSkyhooks`, entosis vulnerability, NPC kill dev index increments). **Fix:** Remove tags from incomplete rows or drive them through real client RPC calls.
-  2. **`SF-02` (P1): Non-Transactional Liquid Ozone Drain.** In `structure_upwell_ops.rs:884-926`, Ansiblex jump ozone is deducted before checking if the caller's ship is in space and within range (`5,000m`). **Fix:** Validate ship presence, proximity, and weapons timer before deducting ozone.
-  3. **`SF-03` (P1): Cross-Universe Item Teleportation & Hollow Handlers.** In `ship_flight_ops.rs:28-135`, `ship.Drop` takes any `item_id` across the universe without proximity/lock checks. Hollow handlers (`ship.Scoop`, `AbortSafeLogoff`) return `true` unconditionally. **Fix:** Validate cargo hold location/volume or return `UnimplementedRPC`.
-  4. **`SF-04` (P1): Duplicate Dead `pos_starbase.rs` Module.** Remove dead duplicate module and ensure POS handlers in `pos_manager.rs` enforce director role checks.
-  5. **`SF-05` (P1): Process-Global Static World State.** `SOV_RUNTIME`, `FW_RUNTIME`, `INSURGENCY_RUNTIME` are stored in global `static` variables, leaking across tests. **Fix:** Move them into `WorldSnapshot` / `ServerContext`.
-  6. **`SF-06` (P1): Shape-Only Test Assertions.** 24 `rpc:*` rows in `action_plan_trade_space.rs` assert only `matches!(..., PyRep::KeyVal(_))` without checking returned field values. **Fix:** Add concrete value assertions on returned records and state mutations.
+### Pushed Remote Branches Available on GitHub
+All work developed across worktrees has been committed and pushed to remote branches on GitHub:
+1. `origin/main` (`64fa6b2`): Canonical mainline baseline.
+2. `origin/wip/features-destiny-plan-progression` (`64fa6b2`): Merged mainline equivalent.
+3. `origin/wip/rpc-closure-2-sde-regressions` (`9f73e4c`): Batch B2 RPC closure & regressions (`regressions_r9_r54.rs`, `rpc_batch_b2_part1.rs`, `rpc_batch_b2_part2.rs`, `rpc_closure_complete.rs`, `rpc_closure_part2.rs`, and `batch_b_services.rs`).
+4. `origin/wip/notifications-rpc-closure-1` (`727622f`): Batch G notifications & Part 1 RPC closure suites.
+5. `origin/wip/t6-client-harness` (`b0eeb8b`): Character selection & client login dispatch enhancements for `plan:T-6`.
 
 ---
 
 ## 8. Operational Playbook for Incoming Coding Agent
 
-When resuming work, follow this step-by-step workflow:
+When resuming work on any machine with GitHub access, follow this step-by-step workflow:
 
-### Step 1: Environment & Sanity Check
-Confirm that Rust and Python environments are ready:
+### Step 1: Clone & Environment Sanity Check
 ```bash
-cd /Users/sergeya/ai/EvoMu-p7-destiny
+git clone https://github.com/saverchenkov/EvoMu.git
+cd EvoMu
 /usr/bin/python3 .agents/skills/evomu-adversarial-review/scripts/preflight.py --early-only
 ```
 
-### Step 2: Remediate Findings on In-Flight Branch
-1. Navigate to `/Users/sergeya/ai/EvoMu-p7-destiny`.
-2. Inspect `crates/eve-server/src/services/structure_upwell_ops.rs` and fix the ozone deduction order (`SF-02`).
-3. Clean up `ship_flight_ops.rs` to validate cargo jettison and replace hollow handlers (`SF-03`).
-4. Move `SOV_RUNTIME` / `FW_RUNTIME` globals into `ServerContext` (`SF-05`).
-5. Replace permissive `matches!` in `action_plan_trade_space.rs` with value assertions (`SF-06`).
-6. Un-tag any rows in `sov_fw_complete.rs` that were faked via direct DB writes (`SF-01`).
-7. Run tests:
+### Step 2: Select Your Development Track
+Pick one of the active pushed branches or start a new feature track:
+- **Option A (RPC Closure & Regressions):**
+  ```bash
+  git checkout -b wip/rpc-closure-2 origin/wip/rpc-closure-2-sde-regressions
+  git rebase main
+  ```
+- **Option B (Tagging Existing RPCs / Notifications):**
+  About 879 already-implemented RPCs and 180 notifications are called in `crates/eve-server/tests/it/*.rs` but lack `// parity: rpc:<svc>.<method>` docstring tags. Tagging them pushes honest parity past 75% with minimal code changes.
+- **Option C (Real-Client T-6 Harness):**
+  ```bash
+  git checkout -b wip/t6-harness origin/wip/t6-client-harness
+  git rebase main
+  ```
+
+### Step 3: Test, Preflight, and Adversarial Review
+1. Run workspace integration tests:
    ```bash
    cargo test --test it -- --nocapture
    ```
+2. Run preflight to verify parity counts and lint claims:
+   ```bash
+   /usr/bin/python3 .agents/skills/evomu-adversarial-review/scripts/preflight.py --claims .evomu-reviews/claims_<track>.md
+   ```
+3. Run the independent adversarial review:
+   ```bash
+   /usr/bin/python3 .agents/skills/evomu-adversarial-review/scripts/run_review.py \
+     --claims-file .evomu-reviews/claims_<track>.md \
+     --base origin/main
+   ```
 
-### Step 3: Run Preflight & Review
-Prepare the claims file at `.evomu-reviews/claims_space.md`:
-```bash
-/usr/bin/python3 .agents/skills/evomu-adversarial-review/scripts/preflight.py --claims .evomu-reviews/claims_space.md
-```
-Once preflight outputs `OK`, run the adversarial review:
-```bash
-/usr/bin/python3 .agents/skills/evomu-adversarial-review/scripts/run_review.py \
-  --claims-file .evomu-reviews/claims_space.md \
-  --base origin/main
-```
-
-### Step 4: Merge to `origin/main`
+### Step 4: Merge to `main` and Push
 Once the review returns `PASS` or `PASS_WITH_ISSUES`:
 ```bash
-git -C /Users/sergeya/ai/EvoMu fetch origin
-git -C /Users/sergeya/ai/EvoMu checkout main
-git -C /Users/sergeya/ai/EvoMu merge --ff-only wip/space-structures-sov-fw
-/usr/bin/python3 .agents/skills/evomu-adversarial-review/scripts/preflight.py --claims .evomu-reviews/claims_space.md
-git -C /Users/sergeya/ai/EvoMu push origin main
+git checkout main
+git merge --ff-only wip/<track>
+/usr/bin/python3 .agents/skills/evomu-adversarial-review/scripts/preflight.py --claims .evomu-reviews/claims_<track>.md
+git push origin main
 ```
-The pre-push hook (`pre_push_gate.py`) will automatically verify that the pushed tree matches the non-FAIL review and permit the push. This will take honest parity past **58.95%**!
-
-### Step 5: Queue Subsequent Tracks
-After merging `wip/space-structures-sov-fw`:
-1. **Track 1 (`EvoMu-c5-rng`):** Rebase `wip/features-destiny-plan-progression` (`cee3aca`) on `origin/main`, port feature rows into `tests/it/`, run preflight, and review.
-2. **Track 2 (RPC & Notification Tagging):** Wire up the ~879 already-implemented `rpc:*` rows and 180 `notify:*` rows directly to existing tests in `tests/it/` using real client calls.
-3. **Track 3 (`EvoMu-t6-harness`):** Advance `plan:T-6` real-client journey automation using `tools/client-harness` and `evomu-visual-check`.
+The pre-push hook (`pre_push_gate.py`) verifies the code tree against `.evomu-reviews/state.json` and accepts the push.
