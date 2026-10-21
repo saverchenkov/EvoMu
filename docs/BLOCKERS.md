@@ -20,3 +20,12 @@
 - **Blocker:** the installed client's `start.ini` sets `cryptoPack = CryptoAPI`, so `evecrypto.cryptoapi` encrypts the handshake session key with CCP's embedded RSA public key (`blue.crypto.GetSharedAsymmetricCipher`) and verifies the server's handshake function with it. After `"OK CC"` every handshake frame is AES-encrypted with a key only CCP's private key can recover, so no third-party server can read the login request. EvoMu implements the `Placebo` crypto pack.
 - **Working local procedure (scratch only, nothing committed, `SharedCache` untouched):** copy the client `build/` directory byte-for-byte into a plain directory, add `common.ini` with `[main]` / `cryptoPack = Placebo` (`eveprefs.Init` merges `common.ini` over `start.ini`; this is the same client setting evemu_Crucible requires), and run that copy's `bin64/exefile /server:127.0.0.1 /port:<macho_port> /login:<user>:<password>` with the copy as working directory. Adding the file inside an `.app` copy breaks its code-signature seal (Gatekeeper refuses it), and symlinked copies fail the client's manifest/executable-path verification.
 - **Open decision for the user:** whether `run_journeys` may build such a Placebo-configured copy automatically. Until then the harness launches the stock client, which stops at the CryptoAPI step.
+
+## 4. Compressed SDE Archive Out of Date (Windows/Cross-Platform Fresh Checkout)
+
+- **Context:** The tracked compressed SDE archive (`data/evomu_sde.sqlite.xz`, 16 MB) was created at commit `f23bd1d` before celestials data (stars, planets, moons, asteroid belts) was imported. Commit `5ea6e74` later added the `GET /universe/stars/{star_id}` ESI endpoint and the full celestials sweep, but the archive was never regenerated.
+- **Symptoms:** Test `esi_universe_fw_complete::test_esi_universe_celestials_stations_structures_and_jumps_kills` fails with `Star 40000001 not found` because the unpacked SDE (84 MB) is missing celestials data that exists in the macOS agent's live SDE (~100 MB).
+- **Root Cause:** The compressed archive predates the celestials import and needs to be regenerated from the full, current macOS SDE.
+- **Impact:** 1 ESI test fails on Windows and any fresh checkout that unpacks from the archive. The macOS agent with the live SDE passes all tests.
+- **Required Action:** User needs to regenerate `data/evomu_sde.sqlite.xz` from the current macOS SDE and commit it, OR mark the celestials test as `#[ignore]` until the archive is updated.
+- **Status:** Awaiting user decision on whether to update the archive or skip the test on Windows.
