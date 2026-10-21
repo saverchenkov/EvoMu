@@ -1046,6 +1046,9 @@ async fn test_phase_1_d1_to_d5_sde_sqlite_persistence_auth_sso_and_config() {
 
     let tmp_db = std::env::temp_dir().join(format!("evomu_d5_test_{}.sqlite", std::process::id()));
     let _ = std::fs::remove_file(&tmp_db);
+    // Use forward slashes for TOML path values (works on both Unix and Windows)
+    let sde_path_toml = sde_path.to_string_lossy().replace('\\', "/");
+    let tmp_db_toml = tmp_db.to_string_lossy().replace('\\', "/");
     let custom_toml = format!(
         r#"
 bind_address = "127.0.0.1"
@@ -1071,8 +1074,8 @@ password_token = "admin-pass-456"
 character_id = 90000099
 character_name = "ISD Config"
 "#,
-        sde_path.display(),
-        tmp_db.display()
+        sde_path_toml,
+        tmp_db_toml
     );
     let parsed_cfg = ServerConfig::from_toml_str(&custom_toml).expect("parse custom evomu.toml");
     let persisted_sso_token = {
