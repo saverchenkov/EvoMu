@@ -9,8 +9,9 @@ use glam::DVec3;
 use std::collections::HashMap;
 
 use super::fleet_social_fleets::{
-    ensure_fleet_channel_member, role_to_i64, FleetAdvertState, FLEET_EXTRAS,
+    ensure_fleet_channel_member, role_to_i64, FleetAdvertState,
 };
+use super::fleet_social_notify as notify;
 use super::parse_dest_id;
 
 const WARP_MIN_DISTANCE_M: f64 = 150_000.0;
@@ -43,53 +44,56 @@ pub(super) async fn handle_fleet_ops(
                     }))
                 }
             };
+            // Client (FleetSvc.SendGlobal/System/BubbleBroadcast): `(name, broadcastScope, itemID, typeID)`;
+            // the RPC method picks the location scope, `broadcastScope` the command-chain group.
             let broadcast_name = args.first().and_then(|a| a.as_str()).unwrap_or("Target");
-            let scope = if method == "BroadcastToBubble" {
-                2
-            } else if method == "BroadcastToSystem" {
-                1
-            } else {
-                args.get(1).and_then(|a| a.as_i64()).unwrap_or(0)
+            let scope = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
+            let location = match method {
+                "BroadcastToBubble" => 2,
+                "BroadcastToSystem" => 1,
+                _ => 0,
             };
-            let item_id = args
-                .get(2)
-                .and_then(|a| a.as_i64())
-                .or_else(|| args.get(1).and_then(|a| a.as_i64()))
-                .unwrap_or(0);
+            let item_id = args.get(2).and_then(|a| a.as_i64());
+            let type_id = args.get(3).and_then(|a| a.as_i64());
 
             let sender_sys = session.solar_system_id.unwrap_or(30_000_142);
             let members_info: Vec<(i64, u32, i64)> = ctx.db.with_snapshot(|snap| {
                 let Some(fleet) = snap.fleets.get(&fleet_id) else {
                     return Vec::new();
                 };
+                let Some(sender) = fleet.member_details.get(&char_id) else {
+                    return Vec::new();
+                };
                 fleet
-                    .members
-                    .iter()
-                    .map(|&m_id| {
-                        let ch = snap.characters.get(&m_id);
+                    .member_details
+                    .values()
+                    .filter(|m| notify::broadcast_group_allows(scope, sender, m))
+                    .map(|m| {
+                        let ch = snap.characters.get(&m.character_id);
                         (
-                            m_id,
+                            m.character_id,
                             ch.map(|c| c.solar_system_id).unwrap_or(sender_sys),
                             ch.map(|c| c.active_ship_id).unwrap_or(0),
                         )
                     })
                     .collect()
             });
+            // FleetSvc.OnFleetBroadcast(name, scope, charID, solarSystemID, itemID, typeID)
+            let opt = |v: Option<i64>| v.map(PyRep::Integer).unwrap_or(PyRep::None);
             let payload = vec![
                 PyRep::String(broadcast_name.to_string()),
                 PyRep::Integer(scope),
                 PyRep::Integer(char_id),
-                PyRep::Integer(item_id),
+                PyRep::Integer(sender_sys as i64),
+                opt(item_id),
+                opt(type_id),
             ];
             let mut recipient_ids = Vec::new();
-            if scope == 0 {
-                ctx.notify(
-                    NotificationTarget::Fleet(fleet_id),
-                    "OnFleetBroadcast",
-                    "fleetid",
-                    payload,
-                );
-                recipient_ids = members_info.iter().map(|(id, _, _)| *id).collect();
+            if location == 0 {
+                for (m_id, _, _) in &members_info {
+                    recipient_ids.push(*m_id);
+                    ctx.notify(NotificationTarget::Character(*m_id), "OnFleetBroadcast", "charid", payload.clone());
+                }
             } else {
                 let sys = ctx.systems.get_or_spawn(sender_sys);
                 let sender_ship = session.ship_id.unwrap_or(0);
@@ -103,7 +107,7 @@ pub(super) async fn handle_fleet_ops(
                     if m_sys != sender_sys {
                         continue;
                     }
-                    if scope == 2 && m_id != char_id {
+                    if location == 2 && m_id != char_id {
                         if let Some(s_pos) = sender_pos {
                             let in_bubble = sys
                                 .get_ball_snapshot(m_ship)
@@ -131,9 +135,9 @@ pub(super) async fn handle_fleet_ops(
                 ("broadcast", PyRep::String(broadcast_name.to_string())),
                 ("broadcastType", PyRep::String(broadcast_name.to_string())),
                 ("senderID", PyRep::Integer(char_id)),
-                ("targetID", PyRep::Integer(item_id)),
+                ("targetID", opt(item_id)),
                 ("scope", PyRep::Integer(scope)),
-                ("itemID", PyRep::Integer(item_id)),
+                ("itemID", opt(item_id)),
                 (
                     "recipientIDs",
                     PyRep::List(recipient_ids.into_iter().map(PyRep::Integer).collect()),
@@ -430,19 +434,6 @@ pub(super) async fn handle_fleet_ops(
                 }
             }
 
-            ctx.notify(
-                NotificationTarget::Fleet(fleet_id),
-                "OnFleetBroadcast",
-                "fleetid",
-                vec![
-                    PyRep::String("FleetWarp".into()),
-                    PyRep::Integer(char_id),
-                    PyRep::Real(dest_pos.x),
-                    PyRep::Real(dest_pos.y),
-                    PyRep::Real(dest_pos.z),
-                ],
-            );
-
             Some(Ok(PyRep::keyval([
                 ("status", PyRep::String("FleetWarpInitiated".into())),
                 ("fleetID", PyRep::Integer(fleet_id)),
@@ -499,12 +490,7 @@ pub(super) async fn handle_fleet_ops(
             });
             match res {
                 Ok(()) => {
-                    ctx.notify(
-                        NotificationTarget::Fleet(fleet_id),
-                        "OnFleetMotdChanged",
-                        "fleetid",
-                        vec![PyRep::String(motd.clone())],
-                    );
+                    notify::emit_motd(ctx, NotificationTarget::Fleet(fleet_id), &motd, true);
                     Some(Ok(PyRep::keyval([
                         ("fleetID", PyRep::Integer(fleet_id)),
                         ("motd", PyRep::String(motd)),
@@ -575,20 +561,18 @@ pub(super) async fn handle_fleet_ops(
                         message: "Only Fleet Boss can change fleet options".into(),
                     });
                 }
+                let old = (fleet.free_move, fleet.is_registered);
                 fleet.free_move = is_free_move;
                 if let Some(reg) = is_registered {
                     fleet.is_registered = reg;
                 }
-                Ok(fleet.is_registered)
+                Ok((old, fleet.is_registered))
             });
             match res {
-                Ok(reg) => {
-                    ctx.notify(
-                        NotificationTarget::Fleet(fleet_id),
-                        "OnFleetOptionsChanged",
-                        "fleetid",
-                        vec![PyRep::Bool(is_free_move), PyRep::Bool(reg)],
-                    );
+                Ok(((old_free, old_reg), reg)) => {
+                    let auto = ctx.fleet_extras.lock().unwrap().auto_join_squads.get(&fleet_id).copied().flatten();
+                    let old = notify::options_keyval(old_free, old_reg, auto);
+                    notify::emit_options_changed(ctx, fleet_id, old, notify::options_keyval(is_free_move, reg, auto));
                     Some(Ok(PyRep::keyval([
                         ("isFreeMove", PyRep::Bool(is_free_move)),
                         ("isRegistered", PyRep::Bool(reg)),
@@ -618,15 +602,13 @@ pub(super) async fn handle_fleet_ops(
                         message: "Only Fleet Boss can set auto-join squad".into(),
                     });
                 }
-                Ok(())
+                Ok((fleet.free_move, fleet.is_registered))
             });
             match res {
-                Ok(()) => {
-                    FLEET_EXTRAS
-                        .lock()
-                        .unwrap()
-                        .auto_join_squads
-                        .insert(fleet_id, squad_id);
+                Ok((free, reg)) => {
+                    let old_auto = ctx.fleet_extras.lock().unwrap().auto_join_squads.insert(fleet_id, squad_id).flatten();
+                    let old = notify::options_keyval(free, reg, old_auto);
+                    notify::emit_options_changed(ctx, fleet_id, old, notify::options_keyval(free, reg, squad_id));
                     Some(Ok(PyRep::keyval([(
                         "autoJoinSquadID",
                         squad_id.map(PyRep::Integer).unwrap_or(PyRep::None),
@@ -664,7 +646,7 @@ pub(super) async fn handle_fleet_ops(
             });
             match res {
                 Ok(()) => {
-                    FLEET_EXTRAS
+                    ctx.fleet_extras
                         .lock()
                         .unwrap()
                         .max_sizes
@@ -684,7 +666,7 @@ pub(super) async fn handle_fleet_ops(
                 Err(e) => return Some(Err(e)),
             };
             let fleet_id = session.fleet_id.unwrap_or(0);
-            let max_size = FLEET_EXTRAS
+            let max_size = ctx.fleet_extras
                 .lock()
                 .unwrap()
                 .max_sizes
@@ -782,34 +764,21 @@ pub(super) async fn handle_fleet_ops(
                     });
                 }
                 fleet.motd = new_motd.to_string();
+                let old = (fleet.free_move, fleet.is_registered);
                 fleet.free_move = is_free_move;
-                Ok(())
+                Ok((old, fleet.is_registered))
             });
             match res {
-                Ok(()) => {
+                Ok(((old_free, old_reg), reg)) => {
                     {
-                        let mut ex = FLEET_EXTRAS.lock().unwrap();
+                        let mut ex = ctx.fleet_extras.lock().unwrap();
                         ex.fleet_names.insert(fleet_id, setup_name.to_string());
                         ex.max_sizes.insert(fleet_id, max_size);
                     }
-                    ctx.notify(
-                        NotificationTarget::Fleet(fleet_id),
-                        "OnFleetSetupChanged",
-                        "fleetid",
-                        vec![PyRep::String(setup_name.to_string())],
-                    );
-                    ctx.notify(
-                        NotificationTarget::Fleet(fleet_id),
-                        "OnFleetMotdChanged",
-                        "fleetid",
-                        vec![PyRep::String(new_motd.to_string())],
-                    );
-                    ctx.notify(
-                        NotificationTarget::Fleet(fleet_id),
-                        "OnFleetOptionsChanged",
-                        "fleetid",
-                        vec![PyRep::Bool(is_free_move), PyRep::Bool(true)],
-                    );
+                    notify::emit_motd(ctx, NotificationTarget::Fleet(fleet_id), new_motd, true);
+                    let auto = ctx.fleet_extras.lock().unwrap().auto_join_squads.get(&fleet_id).copied().flatten();
+                    let old = notify::options_keyval(old_free, old_reg, auto);
+                    notify::emit_options_changed(ctx, fleet_id, old, notify::options_keyval(is_free_move, reg, auto));
                     Some(Ok(PyRep::keyval([
                         ("fleetID", PyRep::Integer(fleet_id)),
                         ("setupName", PyRep::String(setup_name.to_string())),
@@ -954,7 +923,7 @@ pub(super) async fn handle_fleet_ops(
             let target_id = args.first().and_then(|a| a.as_i64()).unwrap_or(char_id);
             let watched = method != "RemoveFromWatchlist";
             {
-                let mut ex = FLEET_EXTRAS.lock().unwrap();
+                let mut ex = ctx.fleet_extras.lock().unwrap();
                 let set = ex.watchlist.entry(char_id).or_default();
                 if watched {
                     set.insert(target_id);
@@ -1025,7 +994,7 @@ pub(super) async fn handle_fleet_ops(
                         }
                     }
                 }
-                if let Some(ad) = FLEET_EXTRAS.lock().unwrap().adverts.get_mut(&fleet_id) {
+                if let Some(ad) = ctx.fleet_extras.lock().unwrap().adverts.get_mut(&fleet_id) {
                     ad.allowed_entities = entities.clone();
                 }
                 return Some(Ok(PyRep::keyval([
@@ -1066,7 +1035,7 @@ pub(super) async fn handle_fleet_ops(
                 })
                 .unwrap();
 
-            FLEET_EXTRAS.lock().unwrap().adverts.insert(
+            ctx.fleet_extras.lock().unwrap().adverts.insert(
                 fleet_id,
                 FleetAdvertState {
                     fleet_id,
@@ -1107,7 +1076,7 @@ pub(super) async fn handle_fleet_ops(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let ads: Vec<FleetAdvertState> = FLEET_EXTRAS
+            let ads: Vec<FleetAdvertState> = ctx.fleet_extras
                 .lock()
                 .unwrap()
                 .adverts
@@ -1199,7 +1168,7 @@ pub(super) async fn handle_fleet_ops(
                 Err(e) => return Some(Err(e)),
             };
             let fleet_id = session.fleet_id.unwrap_or(0);
-            FLEET_EXTRAS.lock().unwrap().adverts.remove(&fleet_id);
+            ctx.fleet_extras.lock().unwrap().adverts.remove(&fleet_id);
             ctx.db
                 .try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
                     if let Some(f) = snap.fleets.get_mut(&fleet_id) {
@@ -1226,7 +1195,7 @@ pub(super) async fn handle_fleet_ops(
                 }));
             };
             let (advert, auto_join, max_size, auto_squad) = {
-                let ex = FLEET_EXTRAS.lock().unwrap();
+                let ex = ctx.fleet_extras.lock().unwrap();
                 let ad = ex.adverts.get(&fleet_id).cloned();
                 let aj = ad.as_ref().map(|a| a.auto_join).unwrap_or(true);
                 let ms = ex.max_sizes.get(&fleet_id).copied().unwrap_or(256);
@@ -1324,36 +1293,22 @@ pub(super) async fn handle_fleet_ops(
                 Ok((joined, wid, sid, boss_id, motd)) => {
                     if joined {
                         session.fleet_id = Some(fleet_id);
-                        ctx.notify(
-                            NotificationTarget::Fleet(fleet_id),
-                            "OnFleetJoin",
-                            "fleetid",
-                            vec![
-                                PyRep::Integer(char_id),
-                                PyRep::Integer(wid),
-                                PyRep::Integer(sid),
-                                PyRep::Integer(4),
-                            ],
-                        );
+                        notify::emit_join(ctx, fleet_id, char_id);
                         if !motd.is_empty() {
-                            ctx.notify(
-                                NotificationTarget::Character(char_id),
-                                "OnFleetMotdChanged",
-                                "charid",
-                                vec![PyRep::String(motd)],
-                            );
+                            notify::emit_motd(ctx, NotificationTarget::Character(char_id), &motd, false);
                         }
                     } else {
-                        FLEET_EXTRAS.lock().unwrap().invite_details.insert(
+                        ctx.fleet_extras.lock().unwrap().invite_details.insert(
                             (fleet_id, char_id),
-                            (wid, sid, FleetRole::SquadMember),
+                            (wid, sid, FleetRole::SquadMember, boss_id),
                         );
-                        ctx.notify(
-                            NotificationTarget::Character(boss_id),
-                            "OnFleetJoinRequest",
-                            "charid",
-                            vec![PyRep::Integer(char_id), PyRep::Integer(fleet_id)],
-                        );
+                        // FleetSvc.OnFleetJoinRequest(info): reads `info.charID` and `info.corpID`.
+                        let corp_id = ctx.db.with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.corporation_id));
+                        let info = PyRep::keyval([
+                            ("charID", PyRep::Integer(char_id)),
+                            ("corpID", corp_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
+                        ]);
+                        ctx.notify(NotificationTarget::Character(boss_id), "OnFleetJoinRequest", "charid", vec![info]);
                     }
                     Some(Ok(PyRep::keyval([
                         ("fleetID", PyRep::Integer(fleet_id)),

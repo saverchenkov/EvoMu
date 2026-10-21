@@ -19,9 +19,11 @@ pub(crate) mod fleet_social_corps;
 #[path = "fleet_social_fleet_ops.rs"]
 mod fleet_social_fleet_ops;
 #[path = "fleet_social_fleets.rs"]
-mod fleet_social_fleets;
+pub(crate) mod fleet_social_fleets;
 #[path = "fleet_social_mail.rs"]
 mod fleet_social_mail;
+#[path = "fleet_social_notify.rs"]
+mod fleet_social_notify;
 #[path = "fleet_social_scanning.rs"]
 mod fleet_social_scanning;
 
@@ -492,7 +494,7 @@ pub async fn handle(
         });
         return match res {
             Ok(()) => {
-                if let Some(ad) = fleet_social_fleets::FLEET_EXTRAS
+                if let Some(ad) = ctx.fleet_extras
                     .lock()
                     .unwrap()
                     .adverts
@@ -563,7 +565,7 @@ pub(super) fn handle_get_init_state(
         }
     };
     let (fleet_name, max_size) = {
-        let ex = fleet_social_fleets::FLEET_EXTRAS.lock().unwrap();
+        let ex = ctx.fleet_extras.lock().unwrap();
         (
             ex.fleet_names
                 .get(&fleet_id)
@@ -706,30 +708,41 @@ pub(super) fn handle_fleet_ops_tail(
             Some(Ok(PyRep::rowset(vec!["characterID", "fleetID"], rows)))
         }
         ("fleetObjectHandler", "RejectJoinRequest") => {
-            let _ = match ServerContext::require_character(session) {
+            let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
             let fleet_id = session.fleet_id.unwrap_or(0);
             let applicant_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            fleet_social_fleets::FLEET_EXTRAS
-                .lock()
-                .unwrap()
-                .invite_details
-                .remove(&(fleet_id, applicant_id));
-            ctx.db
-                .try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
-                    if let Some(f) = snap.fleets.get_mut(&fleet_id) {
-                        f.invites.remove(&applicant_id);
-                    }
-                    Ok(())
-                })
-                .unwrap();
+            let res = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
+                let Some(f) = snap.fleets.get_mut(&fleet_id) else {
+                    return Err(BridgeRpcError { code: "FleetNotFound".into(), message: format!("Fleet {fleet_id} not found") });
+                };
+                if f.boss_id != char_id {
+                    return Err(BridgeRpcError {
+                        code: "FleetPermissionDenied".into(),
+                        message: "Only the Fleet Boss can reject join requests".into(),
+                    });
+                }
+                if !f.invites.remove(&applicant_id) {
+                    return Err(BridgeRpcError {
+                        code: "FleetJoinRequestNotFound".into(),
+                        message: format!("No pending join request from {applicant_id}"),
+                    });
+                }
+                Ok(())
+            });
+            if let Err(e) = res {
+                return Some(Err(e));
+            }
+            ctx.fleet_extras.lock().unwrap().invite_details.remove(&(fleet_id, applicant_id));
+            // FleetSvc.OnFleetJoinRejected(charID): the 'FleetJoinRequestRejected' dialog names the
+            // rejecting character (`UE_OWNERID, charID`).
             ctx.notify(
                 NotificationTarget::Character(applicant_id),
                 "OnFleetJoinRejected",
                 "charid",
-                vec![PyRep::Integer(fleet_id)],
+                vec![PyRep::Integer(char_id)],
             );
             Some(Ok(PyRep::keyval([
                 ("characterID", PyRep::Integer(applicant_id)),

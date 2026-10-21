@@ -76,6 +76,7 @@ mod modules_advanced_tactical;
 mod modules_cyno_portal;
 mod modules_scanners_mutaplasmids_dbuffs;
 mod navigation_pve_closure;
+mod notify_fleet_emission;
 mod pve_agency_events_complete;
 mod pve_exploration_complete;
 mod pve_mining_sites;
