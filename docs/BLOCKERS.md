@@ -30,7 +30,26 @@
 - **Required Action:** User needs to regenerate `data/evomu_sde.sqlite.xz` from the current macOS SDE and commit it, OR mark the celestials test as `#[ignore]` until the archive is updated.
 - **Status:** Awaiting user decision on whether to update the archive or skip the test on Windows.
 
-## 4. ~~Python Preflight Unicode Encoding~~ [RESOLVED]
+## 5. Windows Review Gate Blocked by macOS Client Dependencies (B-5)
+
+- **Context:** The mandatory review gate requires `preflight.py` to print `OK` (zero test failures) before `run_review.py` can execute. On Windows, 68 tests fail because they depend on macOS-only client data and tools that cannot be reproduced on Windows without violating the licensing constraints in BLOCKERS#2.
+- **Failed Test Categories:**
+  - `data/quasar_descriptors.sqlite` (macOS client extraction via B-1)
+  - Raw client files under `~/Library/Application Support/EVE Online/` (macOS-only paths)
+  - `cargo-fuzz` (requires macOS client for corpus generation)
+  - Client harness tests (require real V24.01 client with Placebo crypto, B-2)
+  - Stale SDE archive (B-3)
+- **Impact:** Windows development is blocked from running reviews, which blocks all commits to `main` and `track/*` branches per AGENTS.md. Track agents can commit only to local `wip/*` branches until this is resolved.
+- **Baseline:** 528 tests pass, 68 fail (stable baseline as of commit 53b099c). No regressions from macOS baseline.
+- **Proposed Solution:** Platform-specific review gate exception that allows Windows reviews when:
+  1. All failures match the known blockers list (data/tools from macOS client)
+  2. Pass count is stable or improving (≥528 passed)
+  3. RPC name checks pass (no invented client RPCs)
+  4. All other early-gate checks pass (no P0 violations)
+  5. Claims document acknowledges the platform limitation
+- **Status:** Awaiting user decision on whether to implement platform-specific gate, or require all review work to happen on macOS.
+
+## 6. ~~Python Preflight Unicode Encoding~~ [RESOLVED]
 
 - **Context:** Windows console (cmd.exe, PowerShell) may use encodings like CP1252 or CP437 that don't support all Unicode characters. When `preflight.py` prints parity reports containing Unicode characters (file paths, test names), it crashed with `UnicodeEncodeError`.
 - **Symptoms:** `UnicodeEncodeError: 'charmap' codec can't encode character '…' in position 1234: character maps to <undefined>`
