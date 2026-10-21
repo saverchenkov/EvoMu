@@ -250,6 +250,7 @@ dependencies = [
  "glam",
  "proptest",
  "serde",
+ "tokio",
 ]
 
 [[package]]

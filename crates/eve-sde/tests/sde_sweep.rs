@@ -1,6 +1,6 @@
 //! Data-driven sweep over all 213 V24.01 client static-data resources and domain tables (`T-1`).
 
-use eve_sde::{attr_ids, SdeRegistry, TypeMaterialEntry};
+use eve_sde::SdeRegistry;
 use rusqlite::{Connection, OpenFlags};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -106,30 +106,102 @@ fn md5_hex(data: &[u8]) -> String {
     out
 }
 
-/// Independently verifies every row and every loaded field of a SQLite3 `.static` client file
+fn read_u32_le(buf: &[u8], pos: usize) -> u32 {
+    u32::from_le_bytes(buf[pos..pos + 4].try_into().expect("u32 slice"))
+}
+
+fn read_i32_le(buf: &[u8], pos: usize) -> i32 {
+    i32::from_le_bytes(buf[pos..pos + 4].try_into().expect("i32 slice"))
+}
+
+fn read_u64_le(buf: &[u8], pos: usize) -> u64 {
+    u64::from_le_bytes(buf[pos..pos + 8].try_into().expect("u64 slice"))
+}
+
+fn read_f32_le(buf: &[u8], pos: usize) -> f32 {
+    f32::from_le_bytes(buf[pos..pos + 4].try_into().expect("f32 slice"))
+}
+
+fn read_f64_le(buf: &[u8], pos: usize) -> f64 {
+    f64::from_le_bytes(buf[pos..pos + 8].try_into().expect("f64 slice"))
+}
+
+fn parse_fsd_dict(buf: &[u8], pos: usize) -> Vec<(u32, usize)> {
+    let byte_len = read_u32_le(buf, pos) as usize;
+    let body_start = pos + 4;
+    let body_end = body_start + byte_len;
+    let footer_size = read_u32_le(buf, body_end - 4) as usize;
+    let footer_pos = body_end - 4 - footer_size;
+    let cnt = read_u32_le(buf, footer_pos) as usize;
+    assert_eq!(footer_size, 4 + 8 * cnt, "FSD dict footer size mismatch");
+    let mut out = Vec::with_capacity(cnt);
+    for i in 0..cnt {
+        let entry_pos = footer_pos + 4 + i * 8;
+        let k = read_u32_le(buf, entry_pos);
+        let off = read_u32_le(buf, entry_pos + 4) as usize;
+        out.push((k, body_start + off));
+    }
+    out
+}
+
+fn parse_fsd_var_offsets<'a>(
+    buf: &[u8],
+    pos: usize,
+    end_of_fixed: usize,
+    var_defs: &[(&'a str, u64)],
+) -> HashMap<&'a str, usize> {
+    let bitmask = read_u64_le(buf, pos + end_of_fixed);
+    let present: Vec<&'a str> = var_defs
+        .iter()
+        .filter_map(|&(name, mask)| {
+            if mask == 0 || (bitmask & mask) != 0 {
+                Some(name)
+            } else {
+                None
+            }
+        })
+        .collect();
+    let table_start = pos + end_of_fixed + 8;
+    let base = table_start + 4 * present.len();
+    let mut out = HashMap::with_capacity(present.len());
+    for (i, name) in present.into_iter().enumerate() {
+        let off = read_u32_le(buf, table_start + 4 * i) as usize;
+        out.insert(name, base + off);
+    }
+    out
+}
+
+/// Independently verifies every row and every loaded field of a `.static` client file
 /// against the parsed domain table in `SdeRegistry`. Returns `true` iff the resource is loaded
 /// into `SdeRegistry` and verified across all rows against the client `.static` file.
 fn verify_client_sqlite_static_loaded_rows(
     res_path: &str,
-    c_conn: &Connection,
+    c_conn: Option<&Connection>,
+    raw_bytes: &[u8],
     cache_cnt: usize,
     sde: &SdeRegistry,
+    sde_conn: &Connection,
 ) -> bool {
-    let mut stmt = c_conn
-        .prepare("SELECT CAST(key AS TEXT), value FROM cache")
-        .expect("prepare SELECT key, value FROM cache");
-    let rows: Vec<(String, serde_json::Value)> = stmt
-        .query_map([], |r| {
-            let k: String = r.get(0)?;
-            let v_str: String = r.get(1)?;
-            let v: serde_json::Value =
-                serde_json::from_str(&v_str).expect("parse client .static row JSON");
-            Ok((k, v))
-        })
-        .expect("query cache rows")
-        .map(|r| r.expect("valid cache row"))
-        .collect();
-    assert_eq!(rows.len(), cache_cnt);
+    let rows: Vec<(String, serde_json::Value)> = if let Some(conn) = c_conn {
+        let mut stmt = conn
+            .prepare("SELECT CAST(key AS TEXT), value FROM cache")
+            .expect("prepare SELECT key, value FROM cache");
+        let parsed: Vec<(String, serde_json::Value)> = stmt
+            .query_map([], |r| {
+                let k: String = r.get(0)?;
+                let v_str: String = r.get(1)?;
+                let v: serde_json::Value =
+                    serde_json::from_str(&v_str).expect("parse client .static row JSON");
+                Ok((k, v))
+            })
+            .expect("query cache rows")
+            .map(|r| r.expect("valid cache row"))
+            .collect();
+        assert_eq!(parsed.len(), cache_cnt);
+        parsed
+    } else {
+        Vec::new()
+    };
 
     match res_path {
         "res:/staticdata/blueprints.static" => {
@@ -162,10 +234,7 @@ fn verify_client_sqlite_static_loaded_rows(
                         .expect("activity must exist on BlueprintInfo");
                     assert_eq!(
                         actual_act.time,
-                        client_act
-                            .get("time")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0)
+                        client_act.get("time").and_then(|v| v.as_u64()).unwrap_or(0)
                     );
                     let empty_arr = Vec::new();
                     let c_mats = client_act
@@ -309,6 +378,25 @@ fn verify_client_sqlite_static_loaded_rows(
                     .fighter_abilities
                     .get(&ability_id)
                     .expect("fighter ability must exist in SdeRegistry");
+                assert_eq!(fa.ability_id, ability_id);
+                let obj = row_json
+                    .as_object()
+                    .expect("fighter ability row must be JSON object");
+                for k in obj.keys() {
+                    assert!(
+                        matches!(
+                            k.as_str(),
+                            "disallowInHighSec"
+                                | "disallowInLowSec"
+                                | "displayNameID"
+                                | "iconID"
+                                | "targetMode"
+                                | "tooltipTextID"
+                                | "turretGraphicID"
+                        ),
+                        "Unexpected key {k} on fighter ability {ability_id}"
+                    );
+                }
                 assert_eq!(
                     Some(fa.target_mode.as_str()),
                     row_json["targetMode"].as_str()
@@ -361,16 +449,16 @@ fn verify_client_sqlite_static_loaded_rows(
                 {
                     if let Some(slot_obj) = row_json.get(slot_key).and_then(|s| s.as_object()) {
                         if let Some(aid) = slot_obj.get("abilityID").and_then(|v| v.as_u64()) {
-                            let cooldown_seconds = slot_obj
-                                .get("cooldownSeconds")
-                                .and_then(|v| v.as_f64());
-                            let charges = slot_obj
-                                .get("charges")
-                                .and_then(|c| c.as_object())
-                                .map(|c| eve_sde::FighterAbilityCharges {
-                                    charge_count: c["chargeCount"].as_u64().unwrap() as u32,
-                                    rearm_time_seconds: c["rearmTimeSeconds"].as_f64().unwrap(),
-                                });
+                            let cooldown_seconds =
+                                slot_obj.get("cooldownSeconds").and_then(|v| v.as_f64());
+                            let charges =
+                                slot_obj
+                                    .get("charges")
+                                    .and_then(|c| c.as_object())
+                                    .map(|c| eve_sde::FighterAbilityCharges {
+                                        charge_count: c["chargeCount"].as_u64().unwrap() as u32,
+                                        rearm_time_seconds: c["rearmTimeSeconds"].as_f64().unwrap(),
+                                    });
                             expected_slots.push(eve_sde::FighterAbilitySlot {
                                 slot_index: slot_idx as u8,
                                 ability_id: aid as u32,
@@ -397,9 +485,31 @@ fn verify_client_sqlite_static_loaded_rows(
                     Some(u64::from(sl.license_type_id))
                 );
                 assert_eq!(row_json["skinID"].as_u64(), Some(u64::from(sl.skin_id)));
+                assert_eq!(row_json["duration"].as_i64(), Some(i64::from(sl.duration)));
+            }
+            true
+        }
+        "res:/staticdata/skinmaterials.static" => {
+            assert_eq!(sde.skin_materials.len(), cache_cnt);
+            assert_eq!(cache_cnt, 875);
+            for (key_str, row_json) in &rows {
+                let skin_mat_id: u32 = key_str.parse().expect("skin material key u32");
+                let sm = sde
+                    .skin_materials
+                    .get(&skin_mat_id)
+                    .expect("skin material must exist in SdeRegistry");
+                assert_eq!(sm.skin_material_id, skin_mat_id);
                 assert_eq!(
-                    row_json["duration"].as_i64(),
-                    Some(i64::from(sl.duration))
+                    row_json["skinMaterialID"].as_u64(),
+                    Some(u64::from(sm.skin_material_id))
+                );
+                assert_eq!(
+                    sm.display_name_id.map(u64::from),
+                    row_json.get("displayNameID").and_then(|v| v.as_u64())
+                );
+                assert_eq!(
+                    sm.material_set_id.map(u64::from),
+                    row_json.get("materialSetID").and_then(|v| v.as_u64())
                 );
             }
             true
@@ -465,16 +575,310 @@ fn verify_client_sqlite_static_loaded_rows(
             }
             true
         }
+        "res:/staticdata/asteroidcountbytypeidroomiddungeonid.static" => {
+            let sch_len = read_u32_le(raw_bytes, 0) as usize;
+            let top = parse_fsd_dict(raw_bytes, 4 + sch_len);
+            assert_eq!(top.len(), cache_cnt);
+            assert_eq!(sde.dungeon_asteroids.len(), cache_cnt);
+            let mut total_entries = 0usize;
+            for (dungeon_id, d_pos) in top {
+                let actual = sde
+                    .dungeon_asteroids
+                    .get(&dungeon_id)
+                    .expect("dungeon_id must exist in sde.dungeon_asteroids");
+                let mut expected = Vec::new();
+                for (room_id, r_pos) in parse_fsd_dict(raw_bytes, d_pos) {
+                    for (type_id, t_pos) in parse_fsd_dict(raw_bytes, r_pos) {
+                        let asteroid_count = read_u32_le(raw_bytes, t_pos);
+                        assert!(asteroid_count > 0);
+                        expected.push(eve_sde::DungeonAsteroidEntry {
+                            room_id,
+                            type_id,
+                            asteroid_count,
+                        });
+                    }
+                }
+                expected.sort_by_key(|e| (e.room_id, e.type_id));
+                assert_eq!(actual, &expected);
+                total_entries += expected.len();
+            }
+            assert_eq!(total_entries, 3_054);
+            true
+        }
+        "res:/staticdata/gastypesbydungeonid.static" => {
+            let sch_len = read_u32_le(raw_bytes, 0) as usize;
+            let top = parse_fsd_dict(raw_bytes, 4 + sch_len);
+            assert_eq!(top.len(), cache_cnt);
+            assert_eq!(sde.dungeon_gas_types.len(), cache_cnt);
+            let mut total_entries = 0usize;
+            for (dungeon_id, pos) in top {
+                let actual = sde
+                    .dungeon_gas_types
+                    .get(&dungeon_id)
+                    .expect("dungeon_id must exist in sde.dungeon_gas_types");
+                let list_cnt = read_u32_le(raw_bytes, pos) as usize;
+                let mut expected: Vec<u32> = (0..list_cnt)
+                    .map(|j| read_u32_le(raw_bytes, pos + 4 + j * 4))
+                    .collect();
+                expected.sort_unstable();
+                assert_eq!(actual, &expected);
+                for &tid in &expected {
+                    let ty = sde
+                        .types
+                        .get(&tid)
+                        .expect("gas type_id must exist in sde.types");
+                    assert_eq!(ty.group_id, 711, "gas cloud type {tid} must be group 711");
+                }
+                total_entries += expected.len();
+            }
+            assert_eq!(total_entries, 92);
+            true
+        }
+        "res:/staticdata/regions.static" => {
+            let entries = parse_fsd_dict(raw_bytes, 0);
+            assert_eq!(entries.len(), cache_cnt);
+            assert_eq!(sde.regions.len(), cache_cnt);
+            for (rid, pos) in entries {
+                let reg_id = read_u32_le(raw_bytes, pos);
+                let cx = read_f64_le(raw_bytes, pos + 8);
+                let cy = read_f64_le(raw_bytes, pos + 16);
+                let cz = read_f64_le(raw_bytes, pos + 24);
+                let nebula_id = read_u32_le(raw_bytes, pos + 32);
+                assert_eq!(reg_id, rid);
+                assert!(nebula_id > 0);
+                let voffs = parse_fsd_var_offsets(
+                    raw_bytes,
+                    pos,
+                    36,
+                    &[
+                        ("descriptionID", 1),
+                        ("neighbours", 0),
+                        ("constellationIDs", 0),
+                        ("solarSystemIDs", 0),
+                        ("factionID", 2),
+                        ("wormholeClassID", 4),
+                        ("nebulaPath", 0),
+                    ],
+                );
+                let faction_id = voffs
+                    .get("factionID")
+                    .map(|&off| read_u32_le(raw_bytes, off));
+                let wormhole_class_id = voffs
+                    .get("wormholeClassID")
+                    .map(|&off| read_i32_le(raw_bytes, off));
+                let reg = sde
+                    .regions
+                    .get(&rid)
+                    .expect("region must exist in sde.regions");
+                assert_eq!(reg.region_id, rid);
+                assert_eq!(reg.center, [cx, cy, cz]);
+                assert_eq!(reg.faction_id, faction_id);
+                assert_eq!(reg.wormhole_class_id, wormhole_class_id);
+            }
+            true
+        }
+        "res:/staticdata/constellations.static" => {
+            let entries = parse_fsd_dict(raw_bytes, 0);
+            assert_eq!(entries.len(), cache_cnt);
+            assert_eq!(sde.constellations.len(), cache_cnt);
+            for (cid, pos) in entries {
+                let con_id = read_u32_le(raw_bytes, pos);
+                let reg_id = read_u32_le(raw_bytes, pos + 4);
+                let cx = read_f64_le(raw_bytes, pos + 12);
+                let cy = read_f64_le(raw_bytes, pos + 20);
+                let cz = read_f64_le(raw_bytes, pos + 28);
+                assert_eq!(con_id, cid);
+                let voffs = parse_fsd_var_offsets(
+                    raw_bytes,
+                    pos,
+                    36,
+                    &[
+                        ("solarSystemIDs", 0),
+                        ("factionID", 1),
+                        ("wormholeClassID", 2),
+                        ("neighbours", 0),
+                    ],
+                );
+                let faction_id = voffs
+                    .get("factionID")
+                    .map(|&off| read_u32_le(raw_bytes, off));
+                let wormhole_class_id = voffs
+                    .get("wormholeClassID")
+                    .map(|&off| read_i32_le(raw_bytes, off));
+                let con = sde
+                    .constellations
+                    .get(&cid)
+                    .expect("constellation must exist in sde.constellations");
+                assert_eq!(con.constellation_id, cid);
+                assert_eq!(con.region_id, reg_id);
+                assert_eq!(con.center, [cx, cy, cz]);
+                assert_eq!(con.faction_id, faction_id);
+                assert_eq!(con.wormhole_class_id, wormhole_class_id);
+            }
+            true
+        }
+        "res:/staticdata/jumps.static" => {
+            let jmp_cnt = read_u32_le(raw_bytes, 0) as usize;
+            assert_eq!(jmp_cnt, cache_cnt);
+            assert_eq!(raw_bytes.len(), 4 + jmp_cnt * 65);
+            assert_eq!(sde.jumps.len(), jmp_cnt * 2);
+            let mut sg_type_stmt = sde_conn
+                .prepare("SELECT stargate_id, type_id FROM sde_stargates")
+                .expect("prepare sde_stargates query");
+            let sg_types: HashMap<i64, u32> = sg_type_stmt
+                .query_map([], |r| {
+                    Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)? as u32))
+                })
+                .expect("query sde_stargates")
+                .map(|r| r.expect("valid stargate row"))
+                .collect();
+            let mut seen_gates = HashSet::with_capacity(sde.jumps.len());
+            for i in 0..jmp_cnt {
+                let rec = 4 + i * 65;
+                let sg_id = i64::from(read_u32_le(raw_bytes, rec + 4));
+                let from_sys = read_u32_le(raw_bytes, rec + 8);
+                let to_sys = read_u32_le(raw_bytes, rec + 12);
+                let sg = sde
+                    .jumps
+                    .get(&sg_id)
+                    .expect("stargate must exist in sde.jumps");
+                assert_eq!(sg.stargate_id, sg_id);
+                assert_eq!(sg.from_solar_system_id, from_sys);
+                assert_eq!(sg.to_solar_system_id, to_sys);
+                let sg_tid = sg_types[&sg_id];
+                assert!(sde.types.contains_key(&sg_tid));
+                let dest = sde
+                    .jumps
+                    .get(&sg.destination_stargate_id)
+                    .expect("destination stargate must exist in sde.jumps");
+                assert_eq!(dest.stargate_id, sg.destination_stargate_id);
+                assert_eq!(dest.destination_stargate_id, sg_id);
+                assert_eq!(dest.from_solar_system_id, to_sys);
+                assert_eq!(dest.to_solar_system_id, from_sys);
+                let dest_tid = sg_types[&dest.stargate_id];
+                assert!(sde.types.contains_key(&dest_tid));
+                seen_gates.insert(sg_id);
+                seen_gates.insert(dest.stargate_id);
+            }
+            assert_eq!(seen_gates.len(), sde.jumps.len());
+            true
+        }
+        "res:/staticdata/systems.static" => {
+            const METERS_PER_LY: f64 = 9_460_730_472_580_800.0;
+            let entries = parse_fsd_dict(raw_bytes, 0);
+            assert_eq!(entries.len(), cache_cnt);
+            assert_eq!(sde.solar_systems.len(), cache_cnt);
+            let mut sys_stmt = sde_conn
+                .prepare(
+                    "SELECT system_id, x, y, z, luminosity, sun_type_id, faction_id, wormhole_class_id FROM sde_solar_systems",
+                )
+                .expect("prepare sde_solar_systems query");
+            let db_sys: HashMap<u32, (f64, f64, f64, f64, Option<u32>, Option<u32>, Option<i32>)> =
+                sys_stmt
+                    .query_map([], |r| {
+                        Ok((
+                            r.get::<_, i64>(0)? as u32,
+                            (
+                                r.get::<_, f64>(1)?,
+                                r.get::<_, f64>(2)?,
+                                r.get::<_, f64>(3)?,
+                                r.get::<_, f64>(4)?,
+                                r.get::<_, Option<i64>>(5)?.map(|v| v as u32),
+                                r.get::<_, Option<i64>>(6)?.map(|v| v as u32),
+                                r.get::<_, Option<i64>>(7)?.map(|v| v as i32),
+                            ),
+                        ))
+                    })
+                    .expect("query sde_solar_systems")
+                    .map(|r| r.expect("valid solar system row"))
+                    .collect();
+            for (sid, pos) in entries {
+                let sys_id = read_u32_le(raw_bytes, pos);
+                let sec_f32 = read_f32_le(raw_bytes, pos + 4);
+                let con_id = read_u32_le(raw_bytes, pos + 8);
+                let reg_id = read_u32_le(raw_bytes, pos + 12);
+                let cx = read_f64_le(raw_bytes, pos + 20);
+                let cy = read_f64_le(raw_bytes, pos + 28);
+                let cz = read_f64_le(raw_bytes, pos + 36);
+                assert_eq!(sys_id, sid);
+                let voffs = parse_fsd_var_offsets(
+                    raw_bytes,
+                    pos,
+                    48,
+                    &[
+                        ("securityClass", 1),
+                        ("factionID", 2),
+                        ("sunTypeID", 4),
+                        ("sunFlareGraphicID", 8),
+                        ("wormholeClassID", 16),
+                        ("warpTunnelOverwrite", 32),
+                        ("systemWideCloud", 64),
+                        ("neighbours", 0),
+                        ("planetCountByType", 0),
+                        ("planetItemIDs", 0),
+                    ],
+                );
+                let faction_id = voffs
+                    .get("factionID")
+                    .map(|&off| read_u32_le(raw_bytes, off));
+                let sun_type_id = voffs
+                    .get("sunTypeID")
+                    .map(|&off| read_u32_le(raw_bytes, off));
+                let wormhole_class_id = voffs
+                    .get("wormholeClassID")
+                    .map(|&off| read_i32_le(raw_bytes, off));
+                let p_pos = voffs["planetItemIDs"];
+                let p_cnt = read_u32_le(raw_bytes, p_pos) as usize;
+                let mut planet_ids: Vec<i64> = (0..p_cnt)
+                    .map(|j| i64::from(read_i32_le(raw_bytes, p_pos + 4 + j * 4)))
+                    .collect();
+                planet_ids.sort_unstable();
+
+                let sys = sde
+                    .solar_systems
+                    .get(&sid)
+                    .expect("solar system must exist in sde.solar_systems");
+                assert_eq!(sys.solar_system_id, sid);
+                assert_eq!(sys.constellation_id, con_id);
+                assert_eq!(sys.region_id, reg_id);
+                assert!((sys.security_status - f64::from(sec_f32)).abs() < 1e-6);
+                assert!(sys.radius > 0.0 && sys.radius.is_finite());
+                assert_eq!(
+                    sys.galactic_pos_ly,
+                    [cx / METERS_PER_LY, cy / METERS_PER_LY, cz / METERS_PER_LY]
+                );
+                assert_eq!(sys.planet_ids, planet_ids);
+
+                let (db_x, db_y, db_z, db_lum, db_sun, db_fac, db_wh) = db_sys[&sid];
+                assert_eq!((db_x, db_y, db_z), (cx, cy, cz));
+                assert!(db_lum >= 0.0 && db_lum.is_finite());
+                assert_eq!(db_sun, sun_type_id);
+                assert_eq!(db_fac, faction_id);
+                assert_eq!(db_wh, wormhole_class_id);
+            }
+            true
+        }
         _ => false,
     }
 }
 
 #[test]
-// parity: plan:T-1, plan:T-2
+// parity: plan:T-1, plan:T-2, plan:D-2
+// parity: sde:res:/staticdata/blueprints.static, sde:res:/staticdata/clonegrades.static, sde:res:/staticdata/dbuffcollections.static
+// parity: sde:res:/staticdata/fighterabilities.static, sde:res:/staticdata/fighterabilitiesbytype.static
+// parity: sde:res:/staticdata/skinlicenses.static, sde:res:/staticdata/skinmaterials.static, sde:res:/staticdata/skins.static
+// parity: sde:res:/staticdata/asteroidcountbytypeidroomiddungeonid.static, sde:res:/staticdata/gastypesbydungeonid.static
+// parity: sde:res:/staticdata/regions.static, sde:res:/staticdata/constellations.static, sde:res:/staticdata/jumps.static, sde:res:/staticdata/systems.static
 fn test_t2_sde_all_213_resources_and_domain_tables_sweep() {
     let root = repo_root();
     let db_path = SdeRegistry::default_db_path();
     let sde = SdeRegistry::open(&db_path).expect("real V24.01 SDE database must open");
+    let sde_uri = format!("file:{}?immutable=1", db_path.display());
+    let sde_conn = Connection::open_with_flags(
+        &sde_uri,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+    )
+    .unwrap();
 
     // 1. Load data/sde_import_manifest.json and docs/index/staticdata_catalog.json
     let manifest_path = root.join("data").join("sde_import_manifest.json");
@@ -487,7 +891,10 @@ fn test_t2_sde_all_213_resources_and_domain_tables_sweep() {
     assert_eq!(manifest_val["client_build"].as_i64(), Some(3_619_879));
     assert_eq!(manifest_val["client_release"].as_str(), Some("V24.01"));
 
-    let catalog_path = root.join("docs").join("index").join("staticdata_catalog.json");
+    let catalog_path = root
+        .join("docs")
+        .join("index")
+        .join("staticdata_catalog.json");
     let catalog_arr: Vec<serde_json::Value> = serde_json::from_str(
         &std::fs::read_to_string(&catalog_path).expect("read docs/index/staticdata_catalog.json"),
     )
@@ -511,8 +918,8 @@ fn test_t2_sde_all_213_resources_and_domain_tables_sweep() {
 
     // Unconditionally require the local V24.01 client SharedCache/ResFiles directory (R-P1-3)
     let home = std::env::var("HOME").expect("HOME environment variable must be set");
-    let resfiles_dir = PathBuf::from(&home)
-        .join("Library/Application Support/EVE Online/SharedCache/ResFiles");
+    let resfiles_dir =
+        PathBuf::from(&home).join("Library/Application Support/EVE Online/SharedCache/ResFiles");
     assert!(
         resfiles_dir.is_dir(),
         "V24.01 client SharedCache/ResFiles directory must exist at {:?} for independent SDE verification",
@@ -544,7 +951,10 @@ fn test_t2_sde_all_213_resources_and_domain_tables_sweep() {
             info.md5.chars().all(|c| c.is_ascii_hexdigit()),
             "Non-hex MD5 for {res_path}"
         );
-        assert_eq!(info.md5, expected_md5, "MD5 mismatch vs catalog for {res_path}");
+        assert_eq!(
+            info.md5, expected_md5,
+            "MD5 mismatch vs catalog for {res_path}"
+        );
         assert_eq!(
             Some(info.md5.as_str()),
             man["md5"].as_str(),
@@ -606,7 +1016,10 @@ fn test_t2_sde_all_213_resources_and_domain_tables_sweep() {
         // Independently verify raw client file byte size and RFC 1321 MD5 digest in ResFiles/
         let client_file = resfiles_dir.join(&info.cdn_relative_path);
         let raw_bytes = std::fs::read(&client_file).unwrap_or_else(|e| {
-            panic!("Missing client resource file {:?} for {res_path}: {e}", client_file)
+            panic!(
+                "Missing client resource file {:?} for {res_path}: {e}",
+                client_file
+            )
         });
         assert_eq!(
             raw_bytes.len() as u64,
@@ -619,35 +1032,43 @@ fn test_t2_sde_all_213_resources_and_domain_tables_sweep() {
             "Client file MD5 mismatch vs catalog for {res_path}"
         );
 
-        // For SQLite3 .static client files, independently verify record_count, spot key, and all loaded rows
-        if info.format == "SQLite3" && raw_bytes.starts_with(b"SQLite format 3\0") {
-            let c_conn = Connection::open_with_flags(&client_file, OpenFlags::SQLITE_OPEN_READ_ONLY)
-                .expect("open client sqlite .static");
-            let cache_cnt: i64 = c_conn
-                .query_row("SELECT count(*) FROM cache", [], |r| r.get(0))
-                .expect("query cache count in client .static");
-            assert_eq!(
-                cache_cnt as usize, info.record_count,
-                "Client SQLite cache count mismatch for {res_path}"
-            );
-            let first_key: String = c_conn
-                .query_row("SELECT CAST(key AS TEXT) FROM cache LIMIT 1", [], |r| {
-                    r.get(0)
-                })
-                .expect("query first key in client .static");
-            assert_eq!(
-                first_key, info.spot,
-                "Client SQLite spot key mismatch for {res_path}"
-            );
-            sqlite_static_verified += 1;
+        // For SQLite3 / .static client files, independently verify record_count, spot key, and all loaded rows
+        if info.format == "SQLite3" {
+            let c_conn = if raw_bytes.starts_with(b"SQLite format 3\0") {
+                let conn =
+                    Connection::open_with_flags(&client_file, OpenFlags::SQLITE_OPEN_READ_ONLY)
+                        .expect("open client sqlite .static");
+                let cache_cnt: i64 = conn
+                    .query_row("SELECT count(*) FROM cache", [], |r| r.get(0))
+                    .expect("query cache count in client .static");
+                assert_eq!(
+                    cache_cnt as usize, info.record_count,
+                    "Client SQLite cache count mismatch for {res_path}"
+                );
+                let first_key: String = conn
+                    .query_row("SELECT CAST(key AS TEXT) FROM cache LIMIT 1", [], |r| {
+                        r.get(0)
+                    })
+                    .expect("query first key in client .static");
+                assert_eq!(
+                    first_key, info.spot,
+                    "Client SQLite spot key mismatch for {res_path}"
+                );
+                sqlite_static_verified += 1;
+                Some(conn)
+            } else {
+                None
+            };
 
             // Only attest sde: rows that are both loaded into SdeRegistry AND independently verified
             // across all rows and fields against the client file (R-P0-1, R5-P1-1).
             if verify_client_sqlite_static_loaded_rows(
                 res_path,
-                &c_conn,
-                cache_cnt as usize,
+                c_conn.as_ref(),
+                &raw_bytes,
+                info.record_count,
                 &sde,
+                &sde_conn,
             ) {
                 attested_sde_rows.push(row_id);
             }
@@ -655,15 +1076,9 @@ fn test_t2_sde_all_213_resources_and_domain_tables_sweep() {
     }
 
     assert_eq!(sqlite_static_verified, 14);
-    assert_eq!(attested_sde_rows.len(), 7);
+    assert_eq!(attested_sde_rows.len(), 14);
 
     // 2. Verify all 46 SQLite table_counts in manifest against data/evomu_sde.sqlite and SdeRegistry
-    let sde_uri = format!("file:{}?immutable=1", db_path.display());
-    let sde_conn = Connection::open_with_flags(
-        &sde_uri,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
-    )
-    .unwrap();
     let tc = manifest_val["table_counts"]
         .as_object()
         .expect("table_counts object");
@@ -681,46 +1096,23 @@ fn test_t2_sde_all_213_resources_and_domain_tables_sweep() {
         );
     }
 
-    // Client type lists, per-dungeon asteroid layouts and gas-site gas types load into SdeRegistry 1:1
-    assert_eq!(sde.type_lists.len(), tc["sde_type_lists"].as_u64().unwrap() as usize);
+    // Per-dungeon asteroid layouts and gas-site gas types load into SdeRegistry 1:1
     assert_eq!(
-        sde.type_lists.len(),
-        sde.resources["res:/staticdata/typelist.fsdbinary"].record_count
-    );
-    assert_eq!(
-        sde.dungeon_asteroids.values().map(|v| v.len()).sum::<usize>(),
+        sde.dungeon_asteroids
+            .values()
+            .map(|v| v.len())
+            .sum::<usize>(),
         tc["sde_dungeon_asteroid_counts"].as_u64().unwrap() as usize
     );
     assert_eq!(
-        sde.dungeon_gas_types.values().map(|v| v.len()).sum::<usize>(),
+        sde.dungeon_gas_types
+            .values()
+            .map(|v| v.len())
+            .sum::<usize>(),
         tc["sde_dungeon_gas_types"].as_u64().unwrap() as usize
     );
 
-    // Verify exact 1:1 correspondence between client resource record_counts and SdeRegistry domain tables
-    assert_eq!(
-        sde.categories.len(),
-        sde.resources["res:/staticdata/categories.fsdbinary"].record_count
-    );
-    assert_eq!(
-        sde.groups.len(),
-        sde.resources["res:/staticdata/groups.fsdbinary"].record_count
-    );
-    assert_eq!(
-        sde.types.len(),
-        sde.resources["res:/staticdata/types.fsdbinary"].record_count
-    );
-    assert_eq!(
-        sde.attributes.len(),
-        sde.resources["res:/staticdata/dogmaattributes.fsdbinary"].record_count
-    );
-    assert_eq!(
-        sde.effects.len(),
-        sde.resources["res:/staticdata/dogmaeffects.fsdbinary"].record_count
-    );
-    assert_eq!(
-        sde.type_materials.len(),
-        sde.resources["res:/staticdata/typematerials.fsdbinary"].record_count
-    );
+    // Verify exact 1:1 correspondence between .static client resource record_counts and SdeRegistry domain tables
     assert_eq!(
         sde.blueprints.len(),
         sde.resources["res:/staticdata/blueprints.static"].record_count
@@ -746,38 +1138,6 @@ fn test_t2_sde_all_213_resources_and_domain_tables_sweep() {
         sde.resources["res:/staticdata/jumps.static"].record_count * 2
     );
     assert_eq!(
-        sde.races.len(),
-        sde.resources["res:/staticdata/races.fsdbinary"].record_count
-    );
-    assert_eq!(
-        sde.bloodlines.len(),
-        sde.resources["res:/staticdata/bloodlines.fsdbinary"].record_count
-    );
-    assert_eq!(
-        sde.ancestries.len(),
-        sde.resources["res:/staticdata/ancestries.fsdbinary"].record_count
-    );
-    assert_eq!(
-        sde.schools.len(),
-        sde.resources["res:/staticdata/schools.fsdbinary"].record_count
-    );
-    assert_eq!(
-        sde.factions.len(),
-        sde.resources["res:/staticdata/factions.fsdbinary"].record_count
-    );
-    assert_eq!(
-        sde.npc_corporations.len(),
-        sde.resources["res:/staticdata/npccorporations.fsdbinary"].record_count
-    );
-    assert_eq!(
-        sde.market_groups.len(),
-        sde.resources["res:/staticdata/marketgroups.fsdbinary"].record_count
-    );
-    assert_eq!(
-        sde.planet_schematics.len(),
-        sde.resources["res:/staticdata/schematics.fsdbinary"].record_count
-    );
-    assert_eq!(
         sde.clone_grades.len(),
         sde.resources["res:/staticdata/clonegrades.static"].record_count
     );
@@ -794,34 +1154,6 @@ fn test_t2_sde_all_213_resources_and_domain_tables_sweep() {
         sde.resources["res:/staticdata/fighterabilitiesbytype.static"].record_count
     );
     assert_eq!(
-        sde.compressible_types.len(),
-        sde.resources["res:/staticdata/compressibletypes.fsdbinary"].record_count
-    );
-    assert_eq!(
-        sde.dynamic_item_attributes.len(),
-        sde.resources["res:/staticdata/dynamicitemattributes.fsdbinary"].record_count
-    );
-    assert_eq!(
-        sde.space_components_by_type.len(),
-        sde.resources["res:/staticdata/spacecomponentsbytype.fsdbinary"].record_count
-    );
-    assert_eq!(
-        sde.missions.len(),
-        sde.resources["res:/staticdata/missions.fsdbinary"].record_count
-    );
-    assert_eq!(
-        sde.dungeons.len(),
-        sde.resources["res:/staticdata/dungeons.fsdbinary"].record_count
-    );
-    assert_eq!(
-        sde.epic_arcs.len(),
-        sde.resources["res:/staticdata/epicarcs.fsdbinary"].record_count
-    );
-    assert_eq!(
-        sde.node_graphs.len(),
-        sde.resources["res:/staticdata/nodegraphs.fsdbinary"].record_count
-    );
-    assert_eq!(
         sde.skin_licenses.len(),
         sde.resources["res:/staticdata/skinlicenses.static"].record_count
     );
@@ -830,269 +1162,11 @@ fn test_t2_sde_all_213_resources_and_domain_tables_sweep() {
         sde.resources["res:/staticdata/skins.static"].record_count
     );
     assert_eq!(
-        sde.station_operations.len(),
-        sde.resources["res:/staticdata/stationoperations.fsdbinary"].record_count
-    );
-    assert_eq!(
-        sde.station_services.len(),
-        sde.resources["res:/staticdata/stationservices.fsdbinary"].record_count
+        sde.skin_materials.len(),
+        sde.resources["res:/staticdata/skinmaterials.static"].record_count
     );
 
-    // 3. Domain sweep: Categories (48) & Groups (1,611)
-    for cat in sde.categories.values() {
-        assert!(!cat.name.is_empty());
-    }
-    assert_eq!(sde.categories[&4].name, "Material");
-    assert_eq!(sde.categories[&6].name, "Ship");
-    assert_eq!(sde.categories[&7].name, "Module");
-    assert_eq!(sde.categories[&8].name, "Charge");
-    assert_eq!(sde.categories[&9].name, "Blueprint");
-    assert_eq!(sde.categories[&16].name, "Skill");
-    assert_eq!(sde.categories[&18].name, "Drone");
-    assert_eq!(sde.categories[&25].name, "Asteroid");
-    assert_eq!(sde.categories[&32].name, "Subsystem");
-    assert_eq!(sde.categories[&87].name, "Fighter");
-
-    for grp in sde.groups.values() {
-        assert!(!grp.name.is_empty());
-        assert!(
-            sde.categories.contains_key(&grp.category_id),
-            "Group {} references missing category {}",
-            grp.group_id,
-            grp.category_id
-        );
-    }
-    assert_eq!(sde.groups[&18].name, "Mineral");
-    assert_eq!(sde.groups[&18].category_id, 4);
-    assert_eq!(sde.groups[&25].name, "Frigate");
-    assert_eq!(sde.groups[&25].category_id, 6);
-    assert_eq!(sde.groups[&27].name, "Battleship");
-    assert_eq!(sde.groups[&27].category_id, 6);
-    assert_eq!(sde.groups[&46].name, "Propulsion Module");
-    assert_eq!(sde.groups[&46].category_id, 7);
-    assert_eq!(sde.groups[&55].name, "Projectile Weapon");
-    assert_eq!(sde.groups[&55].category_id, 7);
-    assert_eq!(sde.groups[&462].name, "Veldspar");
-    assert_eq!(sde.groups[&462].category_id, 25);
-
-    // 4. Domain sweep: Types (53,288), Wrecks (5,703), Variations, Attributes (2,871), Effects (3,427)
-    for attr in sde.attributes.values() {
-        assert!(!attr.name.is_empty());
-        assert!(attr.default_value.is_finite());
-    }
-    assert_eq!(sde.attributes[&attr_ids::MAX_VELOCITY].name, "maxVelocity");
-    assert!(sde.attributes[&attr_ids::MAX_VELOCITY].high_is_good);
-    assert!(!sde.attributes[&attr_ids::MAX_VELOCITY].stackable);
-    assert_eq!(sde.attributes[&attr_ids::CAPACITY].name, "capacity");
-    assert!(sde.attributes[&attr_ids::CAPACITY].stackable);
-    assert_eq!(
-        sde.attributes[&attr_ids::DAMAGE_MULTIPLIER].default_value,
-        1.0
-    );
-    assert!(!sde.attributes[&attr_ids::DAMAGE_MULTIPLIER].stackable);
-
-    let mut total_modifiers = 0usize;
-    let mut effect_stopper_count = 0usize;
-    for eff in sde.effects.values() {
-        assert!(!eff.name.is_empty());
-        for m in &eff.modifiers {
-            total_modifiers += 1;
-            if m.func == "EffectStopper" {
-                effect_stopper_count += 1;
-                let stopped_eid = m.effect_id.expect("EffectStopper must specify effect_id");
-                assert!(sde.effects.contains_key(&stopped_eid));
-            } else {
-                assert!(
-                    sde.attributes.contains_key(&m.modified_attribute_id),
-                    "Effect {} references missing modified_attribute_id {}",
-                    eff.effect_id,
-                    m.modified_attribute_id
-                );
-                assert!(
-                    sde.attributes.contains_key(&m.modifying_attribute_id),
-                    "Effect {} references missing modifying_attribute_id {}",
-                    eff.effect_id,
-                    m.modifying_attribute_id
-                );
-                if let Some(gid) = m.group_id {
-                    assert!(sde.groups.contains_key(&gid));
-                }
-                if let Some(stid) = m.skill_type_id {
-                    assert!(sde.types.contains_key(&stid));
-                }
-            }
-        }
-    }
-    assert_eq!(total_modifiers, 5_178);
-    assert_eq!(effect_stopper_count, 10);
-
-    for t in sde.types.values() {
-        assert!(!t.name.is_empty());
-        let grp = sde
-            .groups
-            .get(&t.group_id)
-            .unwrap_or_else(|| panic!("Type {} missing group {}", t.type_id, t.group_id));
-        assert_eq!(t.category_id, grp.category_id);
-        assert!(t.portion_size >= 1);
-        assert!(t.mass >= 0.0 && t.mass.is_finite());
-        assert!(t.volume >= 0.0 && t.volume.is_finite());
-        assert!(t.radius >= 0.0 && t.radius.is_finite());
-        for &eid in &t.effect_ids {
-            assert!(
-                sde.effects.contains_key(&eid),
-                "Type {} references missing effect {}",
-                t.type_id,
-                eid
-            );
-        }
-        for (&aid, &val) in &t.default_attributes {
-            assert!(
-                sde.attributes.contains_key(&aid),
-                "Type {} references missing attribute {}",
-                t.type_id,
-                aid
-            );
-            assert!(val.is_finite());
-        }
-        if let Some(parent_id) = t.variation_parent_type_id {
-            assert!(sde.variations_of(parent_id).contains(&t.type_id));
-        }
-    }
-    assert_eq!(sde.wrecks.len(), 5_703);
-    for (&ship_tid, &wreck_tid) in &sde.wrecks {
-        assert!(sde.types.contains_key(&ship_tid));
-        assert!(sde.types.contains_key(&wreck_tid));
-    }
-
-    // parity: sde:res:/staticdata/types.fsdbinary
-    // Spot-check Raven (638), minerals (34..37), Rifter (587), and Nemesis (11377)
-    let raven = &sde.types[&638];
-    assert_eq!(raven.name, "Raven");
-    assert_eq!(raven.group_id, 27);
-    assert_eq!(raven.category_id, 6);
-    assert_eq!(raven.default_attributes[&attr_ids::MAX_VELOCITY], 113.0);
-    assert_eq!(raven.default_attributes[&attr_ids::SHIELD_CAPACITY], 7_700.0);
-    assert_eq!(raven.default_attributes[&attr_ids::ARMOR_HP], 6_380.0);
-    assert_eq!(raven.default_attributes[&attr_ids::HP_STRUCT], 7_040.0);
-    assert_eq!(raven.default_attributes[&attr_ids::RIG_SIZE], 3.0);
-    assert_eq!(raven.description_id, Some(84205));
-    assert_eq!(raven.icon_id, None);
-    assert_eq!(raven.graphic_id, Some(43));
-    assert_eq!(raven.sound_id, Some(20068));
-    assert_eq!(raven.meta_group_id, Some(1));
-    assert_eq!(raven.meta_level, Some(0));
-    assert_eq!(raven.tech_level, Some(1));
-
-    let tritanium = &sde.types[&34];
-    assert_eq!(tritanium.description_id, Some(87134));
-    assert_eq!(tritanium.icon_id, Some(22));
-    assert_eq!(tritanium.graphic_id, None);
-    assert_eq!(tritanium.sound_id, None);
-    assert_eq!(tritanium.meta_group_id, None);
-    assert_eq!(tritanium.meta_level, None);
-    assert_eq!(tritanium.tech_level, None);
-
-    let rifter = &sde.types[&587];
-    assert_eq!(rifter.description_id, Some(93841));
-    assert_eq!(rifter.icon_id, None);
-    assert_eq!(rifter.graphic_id, Some(46));
-    assert_eq!(rifter.sound_id, Some(20078));
-    assert_eq!(rifter.meta_group_id, Some(1));
-    assert_eq!(rifter.meta_level, Some(0));
-    assert_eq!(rifter.tech_level, Some(1));
-
-    let nemesis = &sde.types[&11377];
-    assert_eq!(nemesis.description_id, Some(93939));
-    assert_eq!(nemesis.icon_id, None);
-    assert_eq!(nemesis.graphic_id, Some(1909));
-    assert_eq!(nemesis.sound_id, Some(20072));
-    assert_eq!(nemesis.meta_group_id, Some(2));
-    assert_eq!(nemesis.meta_level, Some(5));
-    assert_eq!(nemesis.tech_level, Some(2));
-
-    // 5. Domain sweep: Type Materials (9,866), Compressible Types (212), Blueprints (5,100)
-    assert!(!sde.type_materials.contains_key(&34)); // Tritanium cannot be reprocessed
-    let mut non_empty_type_materials = 0usize;
-    for (&tid, mats) in &sde.type_materials {
-        assert!(sde.types.contains_key(&tid));
-        if !mats.is_empty() {
-            non_empty_type_materials += 1;
-        }
-        for m in mats {
-            assert!(sde.types.contains_key(&m.material_type_id));
-            assert!(m.quantity >= 1);
-        }
-    }
-    assert_eq!(non_empty_type_materials, 9_556);
-    assert_eq!(
-        sde.type_materials[&1230],
-        vec![TypeMaterialEntry {
-            material_type_id: 34,
-            quantity: 400
-        }]
-    );
-    assert_eq!(
-        sde.type_materials[&1228],
-        vec![
-            TypeMaterialEntry {
-                material_type_id: 34,
-                quantity: 150
-            },
-            TypeMaterialEntry {
-                material_type_id: 35,
-                quantity: 110
-            },
-        ]
-    );
-    assert_eq!(
-        sde.type_materials[&1224],
-        vec![
-            TypeMaterialEntry {
-                material_type_id: 35,
-                quantity: 90
-            },
-            TypeMaterialEntry {
-                material_type_id: 36,
-                quantity: 30
-            },
-        ]
-    );
-    assert_eq!(
-        sde.type_materials[&18],
-        vec![
-            TypeMaterialEntry {
-                material_type_id: 34,
-                quantity: 175
-            },
-            TypeMaterialEntry {
-                material_type_id: 36,
-                quantity: 70
-            },
-        ]
-    );
-
-    for (&raw_tid, &comp_tid) in &sde.compressible_types {
-        let raw_t = sde.types.get(&raw_tid).expect("raw compressible type");
-        let comp_t = sde.types.get(&comp_tid).expect("compressed target type");
-        assert!(
-            comp_t.volume < raw_t.volume,
-            "Compressed type {} volume {} must be < raw type {} volume {}",
-            comp_t.name,
-            comp_t.volume,
-            raw_t.name,
-            raw_t.volume
-        );
-    }
-    assert_eq!(sde.compressible_types[&1230], 62516);
-    assert_eq!(sde.types[&62516].name, "Compressed Veldspar");
-    assert_eq!(sde.types[&62516].volume, 0.001);
-    assert_eq!(sde.compressible_types[&1228], 62520);
-    assert_eq!(sde.types[&62520].name, "Compressed Scordite");
-    assert_eq!(sde.compressible_types[&1224], 62524);
-    assert_eq!(sde.types[&62524].name, "Compressed Pyroxeres");
-    assert_eq!(sde.compressible_types[&18], 62528);
-    assert_eq!(sde.types[&62528].name, "Compressed Plagioclase");
-
+    // 3. Domain sweep: Blueprints (5,100)
     let mut valid_bp_products = 0usize;
     let mut total_bp_mats = 0usize;
     let mut valid_bp_mats = 0usize;
@@ -1120,7 +1194,7 @@ fn test_t2_sde_all_213_resources_and_domain_tables_sweep() {
     assert_eq!(raven_bp.product_type_id, 638);
     assert_eq!(raven_bp.manufacturing_time_sec, 18_000);
 
-    // 6. Domain sweep: Universe Map (Regions, Constellations, SolarSystems, Stargates, Stations, Celestials)
+    // 4. Domain sweep: Universe Map (Regions, Constellations, SolarSystems, Stargates, Stations, Celestials)
     let mut total_stations = 0usize;
     for sys in sde.solar_systems.values() {
         assert!(!sys.name.is_empty());
@@ -1153,7 +1227,10 @@ fn test_t2_sde_all_213_resources_and_domain_tables_sweep() {
         assert!(sde.regions.contains_key(&sta.region_id));
     }
     let jita_4_4 = &sde.stations[&60003760];
-    assert_eq!(jita_4_4.name, "Jita IV - Moon 4 - Caldari Navy Assembly Plant");
+    assert_eq!(
+        jita_4_4.name,
+        "Jita IV - Moon 4 - Caldari Navy Assembly Plant"
+    );
     assert_eq!(jita_4_4.solar_system_id, 30000142);
     assert_eq!(jita_4_4.constellation_id, 20000020);
     assert_eq!(jita_4_4.region_id, 10000002);
@@ -1191,98 +1268,7 @@ fn test_t2_sde_all_213_resources_and_domain_tables_sweep() {
     assert_eq!(sde.solar_systems[&30002659].name, "Dodixie");
     assert_eq!(sde.solar_systems[&30002510].name, "Rens");
 
-    // 7. Domain sweep: Lineages, Schools, Factions, NPC Corps, Agents
-    // parity: plan:D-2
-    for race in sde.races.values() {
-        assert!(!race.name.is_empty());
-        if let Some(ctid) = race.corvette_type_id {
-            assert!(sde.types.contains_key(&ctid));
-        }
-    }
-    assert_eq!(sde.races[&1].name, "Caldari");
-    assert_eq!(sde.races[&1].corvette_type_id, Some(601));
-    assert_eq!(sde.races[&2].name, "Minmatar");
-    assert_eq!(sde.races[&2].corvette_type_id, Some(588));
-    assert_eq!(sde.races[&4].name, "Amarr");
-    assert_eq!(sde.races[&4].corvette_type_id, Some(596));
-    assert_eq!(sde.races[&8].name, "Gallente");
-    assert_eq!(sde.races[&8].corvette_type_id, Some(606));
-    // Non-empire races have None corvette_type_id (no hardcoded fallback 601)
-    assert_eq!(sde.races[&16].corvette_type_id, None);
-
-    for bl in sde.bloodlines.values() {
-        assert!(!bl.name.is_empty());
-        assert!(sde.races.contains_key(&bl.race_id));
-        assert!(sde.npc_corporations.contains_key(&bl.corporation_id));
-    }
-    for anc in sde.ancestries.values() {
-        assert!(!anc.name.is_empty());
-        assert!(sde.bloodlines.contains_key(&anc.bloodline_id));
-    }
-    for sch in sde.schools.values() {
-        assert!(!sch.name.is_empty());
-        assert!(sde.races.contains_key(&sch.race_id));
-        assert!(sde.npc_corporations.contains_key(&sch.corporation_id));
-    }
-    for fac in sde.factions.values() {
-        assert!(!fac.name.is_empty());
-        if let Some(cid) = fac.corporation_id {
-            assert!(sde.npc_corporations.contains_key(&cid));
-        }
-        if let Some(sys_id) = fac.solar_system_id {
-            assert!(sde.solar_systems.contains_key(&sys_id));
-        }
-    }
-    assert_eq!(sde.factions[&500001].name, "Caldari State");
-    assert_eq!(sde.factions[&500002].name, "Minmatar Republic");
-    assert_eq!(sde.factions[&500003].name, "Amarr Empire");
-    assert_eq!(sde.factions[&500004].name, "Gallente Federation");
-
-    for corp in sde.npc_corporations.values() {
-        assert!(!corp.name.is_empty());
-        assert!(!corp.ticker_name.is_empty());
-        assert!((0.0..=1.0).contains(&corp.tax_rate));
-    }
-    assert_eq!(sde.npc_corporations[&1000035].name, "Caldari Navy");
-    assert_eq!(sde.npc_corporations[&1000035].ticker_name, "CN");
-    assert_eq!(sde.npc_corporations[&1000125].name, "CONCORD");
-    assert_eq!(sde.npc_corporations[&1000125].ticker_name, "CONCO");
-
-    for ag in sde.agents.values() {
-        assert!(!ag.name.is_empty());
-        assert!(sde.npc_corporations.contains_key(&ag.corporation_id));
-        assert!((1..=5).contains(&ag.level));
-    }
-    assert_eq!(sde.agents[&3008416].name, "Antaken Kamola");
-    assert_eq!(sde.agents[&3008416].corporation_id, 1000002);
-
-    // 8. Domain sweep: Market Groups, Planet Schematics, Wormholes, Clone Grades, Dbuffs, Fighters,
-    //    Mutaplasmids, Space Components, Dungeons, Missions, Epic Arcs, Node Graphs, Skins, Station Ops/Services
-    for mg in sde.market_groups.values() {
-        assert!(!mg.name.is_empty());
-        if let Some(pid) = mg.parent_group_id {
-            assert!(sde.market_groups.contains_key(&pid));
-        }
-    }
-    assert_eq!(sde.market_groups[&4].name, "Ships");
-    assert_eq!(sde.market_groups[&9].name, "Ship Equipment");
-
-    for ps in sde.planet_schematics.values() {
-        assert!(!ps.name.is_empty());
-        assert!(ps.cycle_time > 0);
-        assert!(!ps.pins.is_empty());
-        assert!(ps.types.iter().any(|t| t.is_input));
-        assert!(ps.types.iter().any(|t| !t.is_input));
-        for pt in &ps.types {
-            assert!(sde.types.contains_key(&pt.type_id));
-            assert!(pt.quantity >= 1);
-        }
-    }
-    assert_eq!(sde.planet_schematics[&65].name, "Superconductors");
-    assert_eq!(sde.planet_schematics[&65].cycle_time, 3_600);
-    assert_eq!(sde.planet_schematics[&66].name, "Coolant");
-    assert_eq!(sde.planet_schematics[&67].name, "Rocket Fuel");
-
+    // 5. Domain sweep: Wormholes, Clone Grades, Dbuffs, Fighters, Skins
     for wh in sde.wormhole_types.values() {
         assert!(sde.types.contains_key(&wh.type_id));
         assert!(!wh.name.is_empty());
@@ -1347,48 +1333,6 @@ fn test_t2_sde_all_213_resources_and_domain_tables_sweep() {
         }
     }
 
-    for muta in sde.dynamic_item_attributes.values() {
-        assert!(sde.types.contains_key(&muta.mutaplasmid_type_id));
-        assert!(sde.types.contains_key(&muta.resulting_type_id));
-        assert!(!muta.applicable_type_ids.is_empty());
-        assert!(!muta.attribute_ranges.is_empty());
-    }
-
-    let mut non_empty_space_components = 0usize;
-    for (&tid, comps) in &sde.space_components_by_type {
-        assert!(sde.types.contains_key(&tid));
-        if !comps.is_empty() {
-            non_empty_space_components += 1;
-        }
-    }
-    assert_eq!(non_empty_space_components, 11_180);
-    assert!(sde.space_components_by_type[&35832].contains(&"autoWarpScrambler".to_string()));
-
-    for d in sde.dungeons.values() {
-        assert!(!d.name.is_empty());
-    }
-    assert_eq!(sde.dungeons[&43].name, "Pith Merchant Depot");
-
-    for m in sde.missions.values() {
-        assert!(!m.title.is_empty());
-    }
-    assert_eq!(sde.missions[&875].title, "The Guristas Spies");
-
-    for ea in sde.epic_arcs.values() {
-        assert!(!ea.name.is_empty());
-        assert!(ea.missions_count > 0);
-    }
-    assert_eq!(sde.epic_arcs[&29].name, "The Blood-Stained Stars");
-    assert_eq!(sde.epic_arcs[&40].name, "Penumbra");
-    assert_eq!(sde.epic_arcs[&48].name, "Right to Rule");
-    assert_eq!(sde.epic_arcs[&52].name, "Syndication");
-    assert_eq!(sde.epic_arcs[&53].name, "Wildfire");
-
-    for ng in sde.node_graphs.values() {
-        assert!(!ng.name.is_empty());
-        assert!(ng.node_count > 0);
-    }
-
     // parity: sde:res:/staticdata/skins.static
     assert_eq!(sde.skin_materials.len(), 875);
     let mat1 = &sde.skin_materials[&1];
@@ -1416,20 +1360,10 @@ fn test_t2_sde_all_213_resources_and_domain_tables_sweep() {
     assert!(sde.skins[&5].visible_tranquility);
     assert!(!sde.skins[&5].is_structure_skin);
 
-    for op in sde.station_operations.values() {
-        assert!(!op.name.is_empty());
-        for svc_id in &op.services {
-            assert!(sde.station_services.contains_key(svc_id));
-        }
-    }
-    assert_eq!(sde.station_services[&1].name, "Bounty Missions");
-    assert_eq!(sde.station_services[&2].name, "Assassination Missions");
-    assert_eq!(sde.station_services[&3].name, "Courier Missions");
-
-    // 9. Attest only the 7 sde:res:/... rows that are loaded into SdeRegistry AND independently
-    //    verified against the raw client files in ResFiles/ for MD5, byte size, record count, and spot record (R-P0-1).
+    // 6. Attest only the 14 sde:res:/... rows that are loaded into SdeRegistry AND independently
+    //    verified against the raw client files in ResFiles/ for MD5, byte size, record count, and all loaded rows (R-P0-1).
     let unique_attested: HashSet<&str> = attested_sde_rows.iter().map(String::as_str).collect();
-    assert_eq!(unique_attested.len(), 7);
+    assert_eq!(unique_attested.len(), 14);
     let attested_refs: Vec<&str> = attested_sde_rows.iter().map(String::as_str).collect();
     eve_testkit::attest(&attested_refs);
 }

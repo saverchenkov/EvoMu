@@ -595,14 +595,20 @@ pub fn encode_damage_state_tuple(cs: Option<&CombatState>, stamp: u32) -> PyRep 
     } else {
         (1.0, 1.0, 1.0)
     };
+    let tau_ms = cs.map(|c| c.shield_recharge_time_ms).unwrap_or(120_000.0);
+    damage_state_wire(s, tau_ms, a, st, stamp)
+}
+
+/// `DoDestinyDamageState` wire layout `((shield_ratio, shield_recharge_ms, stamp), armor_ratio, structure_ratio)`.
+fn damage_state_wire(shield: f64, tau_ms: f64, armor: f64, structure: f64, stamp: u32) -> PyRep {
     PyRep::Tuple(vec![
         PyRep::Tuple(vec![
-            PyRep::Real(s),
-            PyRep::Real(400_000.0),
+            PyRep::Real(shield),
+            PyRep::Real(tau_ms),
             PyRep::Integer(stamp as i64),
         ]),
-        PyRep::Real(a),
-        PyRep::Real(st),
+        PyRep::Real(armor),
+        PyRep::Real(structure),
     ])
 }
 
@@ -708,6 +714,9 @@ pub fn encode_set_state_payload(park: &Ballpark, observer_ball_id: BallId) -> Py
         ("allianceBridges", PyRep::List(vec![])),
         ("droneState", drone_state),
         ("solItem", sol_item),
+        ("industryLevel", PyRep::Integer(0)),
+        ("researchLevel", PyRep::Integer(0)),
+        ("dbuffState", PyRep::List(vec![])),
     ])
 }
 
@@ -724,19 +733,58 @@ pub fn encode_set_state_update(park: &Ballpark, observer_ball_id: BallId) -> PyR
     ])
 }
 
+fn encode_ball_extra_list(balls: &[&Ball], park: Option<&Ballpark>, stamp: u32) -> Vec<PyRep> {
+    balls
+        .iter()
+        .map(|ball| {
+            let meta = resolve_slim_item_meta(park, ball);
+            let slim = encode_slim_item_with_meta(ball, &meta);
+            let dmg = encode_damage_state_tuple(
+                park.and_then(|p| p.combat_states.get(&ball.id)),
+                stamp,
+            );
+            PyRep::Tuple(vec![slim, dmg])
+        })
+        .collect()
+}
+
+/// Encodes an `AddBall` `DoDestinyUpdate` action tuple `(stamp, ("AddBall", (extra_data, is_global)))`.
+pub fn encode_add_ball_action(stamp: u32, ball: &Ball, park: Option<&Ballpark>) -> PyRep {
+    let meta = resolve_slim_item_meta(park, ball);
+    let slim = encode_slim_item_with_meta(ball, &meta);
+    let dmg = encode_damage_state_tuple(
+        park.and_then(|p| p.combat_states.get(&ball.id)),
+        stamp,
+    );
+    PyRep::Tuple(vec![
+        PyRep::Integer(stamp as i64),
+        PyRep::Tuple(vec![
+            PyRep::String("AddBall".into()),
+            PyRep::Tuple(vec![PyRep::Tuple(vec![slim, dmg]), PyRep::Bool(false)]),
+        ]),
+    ])
+}
+
+/// Encodes an `AddBalls` `DoDestinyUpdate` action tuple `(stamp, ("AddBalls", ((state_bytes, extra_ball_data_list),)))`.
+pub fn encode_add_balls_action(stamp: u32, balls: &[&Ball], park: Option<&Ballpark>) -> PyRep {
+    let state_bytes = encode_add_balls_with_park(0, stamp, balls, park);
+    let extra_data = encode_ball_extra_list(balls, park, stamp);
+    PyRep::Tuple(vec![
+        PyRep::Integer(stamp as i64),
+        PyRep::Tuple(vec![
+            PyRep::String("AddBalls".into()),
+            PyRep::Tuple(vec![PyRep::Tuple(vec![
+                PyRep::Bytes(state_bytes),
+                PyRep::List(extra_data),
+            ])]),
+        ]),
+    ])
+}
+
 /// Encodes an `AddBalls2` `DoDestinyUpdate` action tuple `(stamp, ("AddBalls2", ((state_bytes, extra_ball_data_list),)))`.
 pub fn encode_add_balls2_action(stamp: u32, balls: &[&Ball], park: Option<&Ballpark>) -> PyRep {
     let state_bytes = encode_add_balls_with_park(1, stamp, balls, park);
-    let mut extra_data = Vec::with_capacity(balls.len());
-    for ball in balls {
-        let meta = resolve_slim_item_meta(park, ball);
-        let slim = encode_slim_item_with_meta(ball, &meta);
-        let dmg = encode_damage_state_tuple(
-            park.and_then(|p| p.combat_states.get(&ball.id)),
-            stamp,
-        );
-        extra_data.push(PyRep::Tuple(vec![slim, dmg]));
-    }
+    let extra_data = encode_ball_extra_list(balls, park, stamp);
     PyRep::Tuple(vec![
         PyRep::Integer(stamp as i64),
         PyRep::Tuple(vec![
@@ -765,7 +813,11 @@ pub fn encode_destiny_event(stamp: u32, event: &DestinyEvent, park: Option<&Ball
             ])
         }
         DestinyEvent::AddBall { ball } => {
-            return encode_add_balls2_action(stamp, &[ball], park);
+            return encode_add_ball_action(stamp, ball, park);
+        }
+        DestinyEvent::AddBalls { balls } => {
+            let refs: Vec<&Ball> = balls.iter().collect();
+            return encode_add_balls_action(stamp, &refs, park);
         }
         DestinyEvent::AddBalls2 { balls } => {
             let refs: Vec<&Ball> = balls.iter().collect();
@@ -846,11 +898,15 @@ pub fn encode_destiny_event(stamp: u32, event: &DestinyEvent, park: Option<&Ball
             PyRep::String("OnDamageStateChange".into()),
             PyRep::Tuple(vec![
                 PyRep::Integer(*ball_id),
-                PyRep::Tuple(vec![
-                    PyRep::Real(*shield_ratio),
-                    PyRep::Real(*armor_ratio),
-                    PyRep::Real(*structure_ratio),
-                ]),
+                damage_state_wire(
+                    *shield_ratio,
+                    park.and_then(|p| p.combat_states.get(ball_id))
+                        .map(|c| c.shield_recharge_time_ms)
+                        .unwrap_or(120_000.0),
+                    *armor_ratio,
+                    *structure_ratio,
+                    stamp,
+                ),
             ]),
         ]),
         DestinyEvent::TerminalExplosion {
@@ -894,11 +950,278 @@ pub fn encode_destiny_event(stamp: u32, event: &DestinyEvent, park: Option<&Ball
             is_active,
         } => PyRep::Tuple(vec![
             PyRep::String("OnSpecialFX".into()),
+            // V24 14-arg layout (`michelle.py:2087`, `spaceMgr.py:605`):
+            // (shipID, moduleID, moduleTypeID, targetID, otherTypeID, guid, isOffensive,
+            //  start, active, duration, repeat, startTime, timeFromStart, graphicInfo).
             PyRep::Tuple(vec![
                 PyRep::Integer(*ball_id),
                 module_id.map(PyRep::Integer).unwrap_or(PyRep::None),
+                PyRep::None,
+                PyRep::None,
+                PyRep::None,
                 PyRep::String(guid.clone()),
-                PyRep::Bool(*is_active),
+                PyRep::Bool(false),
+                PyRep::Integer(i64::from(*is_active)),
+                PyRep::Integer(i64::from(*is_active)),
+                PyRep::Integer(-1),
+                PyRep::None,
+                PyRep::None,
+                PyRep::Integer(0),
+                PyRep::None,
+            ]),
+        ]),
+        DestinyEvent::CloakBall { ball_id, cloaked } => PyRep::Tuple(vec![
+            PyRep::String("CloakBall".into()),
+            PyRep::Tuple(vec![PyRep::Integer(*ball_id), PyRep::Integer(i64::from(*cloaked))]),
+        ]),
+        DestinyEvent::GotoPoint { ball_id, point } => PyRep::Tuple(vec![
+            PyRep::String("GotoPoint".into()),
+            PyRep::Tuple(vec![
+                PyRep::Integer(*ball_id),
+                PyRep::Real(point[0]),
+                PyRep::Real(point[1]),
+                PyRep::Real(point[2]),
+            ]),
+        ]),
+        DestinyEvent::OnClientControllerEvent {
+            ball_id,
+            target_id,
+            event_name,
+            value,
+            delay,
+        } => PyRep::Tuple(vec![
+            PyRep::String("OnClientControllerEvent".into()),
+            PyRep::Tuple(vec![
+                PyRep::Integer(*ball_id),
+                target_id.map(PyRep::Integer).unwrap_or(PyRep::None),
+                PyRep::String(event_name.clone()),
+                PyRep::Integer(*value),
+                delay.map(PyRep::Real).unwrap_or(PyRep::None),
+            ]),
+        ]),
+        DestinyEvent::OnDbuffUpdated { ball_id, dbuffs } => PyRep::Tuple(vec![
+            PyRep::String("OnDbuffUpdated".into()),
+            PyRep::Tuple(vec![
+                PyRep::Integer(*ball_id),
+                PyRep::List(
+                    dbuffs
+                        .iter()
+                        .map(|&(id, val, exp)| {
+                            PyRep::Tuple(vec![
+                                PyRep::Integer(id),
+                                PyRep::Tuple(vec![PyRep::Real(val), PyRep::Integer(exp)]),
+                            ])
+                        })
+                        .collect(),
+                ),
+            ]),
+        ]),
+        DestinyEvent::OnDotVictimUpdated {
+            ball_id,
+            flat_dps,
+            pct_dps,
+            remaining_ticks,
+        } => {
+            let apps = if *remaining_ticks > 0 {
+                vec![PyRep::keyval([
+                    ("attackerID", PyRep::Integer(0)),
+                    ("targetID", PyRep::Integer(*ball_id)),
+                    ("weaponTypeID", PyRep::Integer(84_115)),
+                    ("expiryTime", PyRep::Integer((stamp as i64 + *remaining_ticks as i64) * 10_000_000)),
+                    ("maxDamage", PyRep::Real(*flat_dps)),
+                    ("maxHPNormalizedRatio", PyRep::Real(*pct_dps)),
+                    ("activityState", PyRep::Integer(1)),
+                ])]
+            } else {
+                Vec::new()
+            };
+            PyRep::Tuple(vec![
+                PyRep::String("OnDotVictimUpdated".into()),
+                PyRep::Tuple(vec![PyRep::Integer(*ball_id), PyRep::List(apps)]),
+            ])
+        }
+        DestinyEvent::OnDroneStateChange {
+            drone_id,
+            owner_id,
+            controller_id,
+            activity_state,
+            type_id,
+            controller_owner_id,
+            target_id,
+        } => PyRep::Tuple(vec![
+            PyRep::String("OnDroneStateChange".into()),
+            PyRep::Tuple(vec![
+                PyRep::Integer(*drone_id),
+                PyRep::Integer(*owner_id),
+                PyRep::Integer(*controller_id),
+                PyRep::Integer(*activity_state),
+                PyRep::Integer(*type_id as i64),
+                PyRep::Integer(*controller_owner_id),
+                target_id.map(PyRep::Integer).unwrap_or(PyRep::None),
+            ]),
+        ]),
+        DestinyEvent::OnFleetDamageStateChange {
+            ball_id,
+            shield_ratio,
+            armor_ratio,
+            structure_ratio,
+        } => PyRep::Tuple(vec![
+            PyRep::String("OnFleetDamageStateChange".into()),
+            PyRep::Tuple(vec![
+                PyRep::Integer(*ball_id),
+                damage_state_wire(
+                    *shield_ratio,
+                    park.and_then(|p| p.combat_states.get(ball_id))
+                        .map(|c| c.shield_recharge_time_ms)
+                        .unwrap_or(120_000.0),
+                    *armor_ratio,
+                    *structure_ratio,
+                    stamp,
+                ),
+            ]),
+        ]),
+        DestinyEvent::OnShipStateUpdate { module_states } => PyRep::Tuple(vec![
+            PyRep::String("OnShipStateUpdate".into()),
+            PyRep::Tuple(vec![PyRep::Dict(
+                module_states
+                    .iter()
+                    .map(|&(owner_id, item_id, attr_id, time_ft, new_val, old_val)| {
+                        (
+                            PyRep::Integer(item_id),
+                            PyRep::Tuple(vec![
+                                PyRep::Integer(owner_id),
+                                PyRep::Integer(item_id),
+                                PyRep::Integer(attr_id as i64),
+                                PyRep::Integer(time_ft),
+                                PyRep::Real(new_val),
+                                PyRep::Real(old_val),
+                            ]),
+                        )
+                    })
+                    .collect(),
+            )]),
+        ]),
+        DestinyEvent::OnSlimItemChange { ball_id } => {
+            let slim = park
+                .and_then(|p| p.balls.get(ball_id).map(|b| (b, resolve_slim_item_meta(Some(p), b))))
+                .map(|(b, m)| encode_slim_item_with_meta(b, &m))
+                .unwrap_or_else(|| PyRep::keyval([("itemID", PyRep::Integer(*ball_id))]));
+            PyRep::Tuple(vec![
+                PyRep::String("OnSlimItemChange".into()),
+                PyRep::Tuple(vec![PyRep::Integer(*ball_id), slim]),
+            ])
+        }
+        DestinyEvent::OnSovereigntyChanged { solar_system_id, alliance_id } => PyRep::Tuple(vec![
+            PyRep::String("OnSovereigntyChanged".into()),
+            PyRep::Tuple(vec![PyRep::Integer(*solar_system_id as i64), PyRep::Integer(*alliance_id)]),
+        ]),
+        DestinyEvent::PackagedAction { actions_bytes } => PyRep::Tuple(vec![
+            PyRep::String("PackagedAction".into()),
+            PyRep::Bytes(actions_bytes.clone()),
+        ]),
+        DestinyEvent::SetBallFree { ball_id, is_free } => PyRep::Tuple(vec![
+            PyRep::String("SetBallFree".into()),
+            PyRep::Tuple(vec![PyRep::Integer(*ball_id), PyRep::Integer(i64::from(*is_free))]),
+        ]),
+        DestinyEvent::SetBallHarmonic { ball_id, harmonic } => PyRep::Tuple(vec![
+            PyRep::String("SetBallHarmonic".into()),
+            PyRep::Tuple(vec![PyRep::Integer(*ball_id), PyRep::Integer(*harmonic as i64)]),
+        ]),
+        DestinyEvent::SetBallInteractive { ball_id, is_interactive } => PyRep::Tuple(vec![
+            PyRep::String("SetBallInteractive".into()),
+            PyRep::Tuple(vec![PyRep::Integer(*ball_id), PyRep::Integer(i64::from(*is_interactive))]),
+        ]),
+        DestinyEvent::SetBallRadius { ball_id, radius } => PyRep::Tuple(vec![
+            PyRep::String("SetBallRadius".into()),
+            PyRep::Tuple(vec![PyRep::Integer(*ball_id), PyRep::Real(*radius)]),
+        ]),
+        DestinyEvent::OnAudioActivated => PyRep::Tuple(vec![
+            PyRep::String("OnAudioActivated".into()),
+            PyRep::Tuple(Vec::new()),
+        ]),
+        DestinyEvent::OnDockingAccepted {
+            start_pos,
+            end_pos,
+            station_id,
+        } => PyRep::Tuple(vec![
+            PyRep::String("OnDockingAccepted".into()),
+            PyRep::Tuple(vec![
+                PyRep::Tuple(vec![
+                    PyRep::Real(start_pos[0]),
+                    PyRep::Real(start_pos[1]),
+                    PyRep::Real(start_pos[2]),
+                ]),
+                PyRep::Tuple(vec![
+                    PyRep::Real(end_pos[0]),
+                    PyRep::Real(end_pos[1]),
+                    PyRep::Real(end_pos[2]),
+                ]),
+                PyRep::Integer(*station_id),
+            ]),
+        ]),
+        DestinyEvent::OnDroneActivityChange {
+            drone_id,
+            activity_state,
+        } => PyRep::Tuple(vec![
+            PyRep::String("OnDroneActivityChange".into()),
+            PyRep::Tuple(vec![PyRep::Integer(*drone_id), PyRep::Integer(*activity_state)]),
+        ]),
+        DestinyEvent::OnDroneControlLost { drone_id } => PyRep::Tuple(vec![
+            PyRep::String("OnDroneControlLost".into()),
+            PyRep::Tuple(vec![PyRep::Integer(*drone_id)]),
+        ]),
+        DestinyEvent::OnDroneStateChange2 {
+            drone_id,
+            owner_id,
+            controller_id,
+            activity_state,
+            type_id,
+            controller_owner_id,
+            target_id,
+        } => PyRep::Tuple(vec![
+            PyRep::String("OnDroneStateChange2".into()),
+            PyRep::Tuple(vec![
+                PyRep::Integer(*drone_id),
+                PyRep::Integer(*owner_id),
+                PyRep::Integer(*controller_id),
+                PyRep::Integer(*activity_state),
+                PyRep::Integer(*type_id as i64),
+                PyRep::Integer(*controller_owner_id),
+                target_id.map(PyRep::Integer).unwrap_or(PyRep::None),
+            ]),
+        ]),
+        DestinyEvent::OnFleetStateChange {
+            fleet_id,
+            member_id,
+            fleet_state,
+        } => PyRep::Tuple(vec![
+            PyRep::String("OnFleetStateChange".into()),
+            PyRep::Tuple(vec![
+                PyRep::Integer(*fleet_id),
+                PyRep::Integer(*member_id),
+                PyRep::Integer(*fleet_state),
+            ]),
+        ]),
+        DestinyEvent::ScatterEwars {
+            ball_id,
+            effect_states,
+        } => PyRep::Tuple(vec![
+            PyRep::String("ScatterEwars".into()),
+            PyRep::Tuple(vec![
+                PyRep::Integer(*ball_id),
+                PyRep::Bytes(effect_states.clone()),
+            ]),
+        ]),
+        DestinyEvent::SetControllerVariableOnBall {
+            ball_id,
+            var_name,
+            value,
+        } => PyRep::Tuple(vec![
+            PyRep::String("SetControllerVariableOnBall".into()),
+            PyRep::Tuple(vec![
+                PyRep::Integer(*ball_id),
+                PyRep::String(var_name.clone()),
+                PyRep::Integer(*value),
             ]),
         ]),
     };
@@ -918,370 +1241,4 @@ pub fn encode_destiny_updates(
             .map(|ev| encode_destiny_event(stamp, ev, park))
             .collect(),
     )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::AU_METERS;
-
-    fn sample_ball(id: BallId, mode: MovementMode) -> Ball {
-        Ball {
-            id,
-            type_id: 587,
-            position: DVec3::new(1_000.0 * (id as f64), -2_500.0, 500.0),
-            velocity: DVec3::new(120.0, -30.0, 10.0),
-            max_velocity: 365.0,
-            inertia: 3.45,
-            mass: 1_067_000.0,
-            radius: 37.0,
-            speed_fraction: 0.85,
-            mode,
-        }
-    }
-
-    #[test]
-    // parity: plan:P-7, feat:navigation.destiny-updates, destiny:AddBalls2
-    fn test_binary_add_balls_roundtrip_all_13_modes() {
-        let balls = vec![
-            sample_ball(
-                1001,
-                MovementMode::GotoDirection {
-                    direction: DVec3::new(0.6, 0.8, 0.0),
-                },
-            ),
-            sample_ball(
-                1002,
-                MovementMode::Follow {
-                    target_id: 40_009_076,
-                    range: 2_500.0,
-                },
-            ),
-            sample_ball(1003, MovementMode::Stop),
-            sample_ball(
-                1004,
-                MovementMode::new_warp(
-                    DVec3::ZERO,
-                    DVec3::new(2.0 * AU_METERS, 1.0e8, -5.0e7),
-                    3.0,
-                ),
-            ),
-            sample_ball(
-                1005,
-                MovementMode::Orbit {
-                    target_id: 60_003_760,
-                    range: 5_000.0,
-                },
-            ),
-            sample_ball(1006, MovementMode::Missile { target_id: 1001 }),
-            sample_ball(1007, MovementMode::Mushroom),
-            sample_ball(1008, MovementMode::Boid),
-            sample_ball(1009, MovementMode::Troll),
-            sample_ball(1010, MovementMode::Miniball),
-            sample_ball(1011, MovementMode::Field),
-            sample_ball(1012, MovementMode::Rigid),
-            sample_ball(1013, MovementMode::Formation),
-        ];
-        let refs: Vec<&Ball> = balls.iter().collect();
-        let bytes = encode_add_balls(42, &refs);
-        let (pkt_type, stamp, decoded) =
-            decode_add_balls(&bytes).expect("decode_add_balls must succeed");
-        assert_eq!(pkt_type, 0);
-        assert_eq!(stamp, 42);
-        assert_eq!(decoded.len(), 13);
-
-        let expected_modes = [
-            DSTBALL_GOTO,
-            DSTBALL_FOLLOW,
-            DSTBALL_STOP,
-            DSTBALL_WARP,
-            DSTBALL_ORBIT,
-            DSTBALL_MISSILE,
-            DSTBALL_MUSHROOM,
-            DSTBALL_BOID,
-            DSTBALL_TROLL,
-            DSTBALL_MINIBALL,
-            DSTBALL_FIELD,
-            DSTBALL_RIGID,
-            DSTBALL_FORMATION,
-        ];
-        // Exact total byte sizes per ball:
-        // Header (38) + MassSector (25, except Rigid) + DataSector (36, except Field/Rigid) + ModeTail
-        let expected_ball_sizes = [
-            38 + 25 + 36 + 25, // GOTO (124)
-            38 + 25 + 36 + 13, // FOLLOW (112)
-            38 + 25 + 36 + 1,  // STOP (100)
-            38 + 25 + 36 + 49, // WARP (148)
-            38 + 25 + 36 + 13, // ORBIT (112)
-            38 + 25 + 36 + 49, // MISSILE (148)
-            38 + 25 + 36 + 25, // MUSHROOM (124)
-            38 + 25 + 36 + 1,  // BOID (100)
-            38 + 25 + 36 + 5,  // TROLL (104)
-            38 + 25 + 36 + 1,  // MINIBALL (100)
-            38 + 25 + 1,       // FIELD (64)
-            38 + 1,            // RIGID (39)
-            38 + 25 + 36 + 17, // FORMATION (116)
-        ];
-        for (i, dec) in decoded.iter().enumerate() {
-            assert_eq!(dec.id, balls[i].id);
-            assert_eq!(dec.mode, expected_modes[i]);
-            assert!((dec.position - balls[i].position).length() < 1e-6);
-            assert!((dec.radius - (balls[i].radius as f32)).abs() < 1e-3);
-            let mut mode_buf = Vec::new();
-            encode_single_ball_with_meta(&mut mode_buf, &balls[i], 42, None);
-            assert_eq!(
-                mode_buf.len(),
-                expected_ball_sizes[i],
-                "mode {} ball byte length must match DestinyStructs.h",
-                expected_modes[i]
-            );
-        }
-
-        // Verify MassSector layout (`DestinyStructs.h:106-112`): mass, cloak, allianceID, corporationID, harmonic
-        let mut single_buf = Vec::new();
-        let meta = SlimItemMeta {
-            group_id: 27,
-            category_id: 6,
-            owner_id: 90_000_001,
-            char_id: Some(90_000_001),
-            corp_id: 1_000_125,
-            alliance_id: 99_000_001,
-            security_status: 2.5,
-            is_cloaked: false,
-        };
-        encode_single_ball_with_meta(&mut single_buf, &balls[2], 42, Some(&meta));
-        // BallHeader is 38 bytes (8 + 1 + 4 + 24 + 1); MassSector starts at offset 38:
-        // [38..46] mass (f64), [46] cloak (u8), [47..55] allianceID (i64), [55..59] corporationID (i32), [59..63] harmonic (i32)
-        assert_eq!(
-            i64::from_le_bytes(single_buf[47..55].try_into().unwrap()),
-            99_000_001
-        );
-        assert_eq!(
-            i32::from_le_bytes(single_buf[55..59].try_into().unwrap()),
-            1_000_125
-        );
-        assert_eq!(
-            i32::from_le_bytes(single_buf[59..63].try_into().unwrap()),
-            -1
-        );
-
-        // Verify exact mode-tail byte offsets at offset 99 (38 Header + 25 MassSector + 36 DataSector)
-        let mut orbit_buf = Vec::new();
-        encode_single_ball_with_meta(&mut orbit_buf, &balls[4], 42, Some(&meta));
-        assert_eq!(orbit_buf[99], 0xFF);
-        assert_eq!(
-            u32::from_le_bytes(orbit_buf[100..104].try_into().unwrap()),
-            60_003_760
-        );
-        assert_eq!(
-            f64::from_le_bytes(orbit_buf[104..112].try_into().unwrap()),
-            5_000.0
-        );
-
-        let mut warp_buf = Vec::new();
-        encode_single_ball_with_meta(&mut warp_buf, &balls[3], 42, Some(&meta));
-        assert_eq!(warp_buf[99], 0xFF);
-        assert_eq!(
-            i32::from_le_bytes(warp_buf[124..128].try_into().unwrap()),
-            42
-        );
-        assert_eq!(
-            i64::from_le_bytes(warp_buf[128..136].try_into().unwrap()),
-            (-1.0f64).to_bits() as i64
-        );
-        assert_eq!(
-            i64::from_le_bytes(warp_buf[136..144].try_into().unwrap()),
-            15_000.0f64.to_bits() as i64
-        );
-        assert_eq!(
-            i32::from_le_bytes(warp_buf[144..148].try_into().unwrap()),
-            30
-        );
-
-        let mut missile_buf = Vec::new();
-        encode_single_ball_with_meta(&mut missile_buf, &balls[5], 42, Some(&meta));
-        assert_eq!(
-            i64::from_le_bytes(missile_buf[100..108].try_into().unwrap()),
-            1001
-        );
-        assert_eq!(
-            i64::from_le_bytes(missile_buf[112..120].try_into().unwrap()),
-            90_000_001
-        );
-        assert_eq!(
-            i32::from_le_bytes(missile_buf[120..124].try_into().unwrap()),
-            42
-        );
-
-        let mut mushroom_buf = Vec::new();
-        encode_single_ball_with_meta(&mut mushroom_buf, &balls[6], 42, Some(&meta));
-        assert_eq!(
-            i32::from_le_bytes(mushroom_buf[112..116].try_into().unwrap()),
-            42
-        );
-        assert_eq!(
-            i64::from_le_bytes(mushroom_buf[116..124].try_into().unwrap()),
-            90_000_001
-        );
-
-        let mut troll_buf = Vec::new();
-        encode_single_ball_with_meta(&mut troll_buf, &balls[8], 42, Some(&meta));
-        assert_eq!(
-            u32::from_le_bytes(troll_buf[100..104].try_into().unwrap()),
-            42
-        );
-
-        let mut form_buf = Vec::new();
-        encode_single_ball_with_meta(&mut form_buf, &balls[12], 42, Some(&meta));
-        assert_eq!(
-            i32::from_le_bytes(form_buf[112..116].try_into().unwrap()),
-            42
-        );
-
-        // Check mode-specific decoded fields (`DestinyStructs.h:170-209`)
-        assert_eq!(decoded[0].direction, Some(DVec3::new(0.6, 0.8, 0.0)));
-        assert_eq!(decoded[1].target_id, Some(40_009_076));
-        assert_eq!(decoded[1].follow_range, Some(2_500.0));
-        assert_eq!(
-            decoded[3].warp_destination,
-            Some(DVec3::new(2.0 * AU_METERS, 1.0e8, -5.0e7))
-        );
-        assert_eq!(decoded[3].warp_speed_tenth_au_s, Some(30));
-        assert_eq!(decoded[4].target_id, Some(60_003_760));
-        assert_eq!(decoded[4].follow_range, Some(5_000.0));
-        assert_eq!(decoded[5].target_id, Some(1001));
-        assert_eq!(decoded[5].owner_id, Some(1));
-        assert_eq!(decoded[5].effect_stamp, Some(42));
-        assert_eq!(decoded[6].owner_id, Some(1));
-        assert_eq!(decoded[6].effect_stamp, Some(42));
-        assert_eq!(decoded[8].effect_stamp, Some(42));
-        assert_eq!(decoded[12].effect_stamp, Some(42));
-        assert!(decoded[11].velocity.is_none(), "Rigid ball has no velocity sector");
-        assert!(decoded[11].mass.is_none(), "Rigid ball has no MassSector");
-    }
-
-    #[test]
-    // parity: plan:P-7, feat:navigation.destiny-updates, notify:DoDestinyUpdate
-    // parity: destiny:AddBalls2, destiny:RemoveBalls, destiny:RemoveBall
-    // parity: destiny:GotoDirection, destiny:FollowBall, destiny:Orbit, destiny:Stop
-    fn test_do_destiny_update_and_set_state_marshal_roundtrip() {
-        let mut park = Ballpark::new(30_000_142);
-        park.add_static_ball(
-            Ball {
-                id: 40_009_076,
-                type_id: 3802,
-                position: DVec3::ZERO,
-                velocity: DVec3::ZERO,
-                max_velocity: 0.0,
-                inertia: 0.0,
-                mass: 1.0e30,
-                radius: 513_100_000.0,
-                speed_fraction: 0.0,
-                mode: MovementMode::Rigid,
-            },
-            6,
-        );
-        let ship = sample_ball(100_000_001, MovementMode::Stop);
-        park.add_ball(ship.clone());
-        park.set_ball_slim_meta(
-            100_000_001,
-            SlimItemMeta {
-                group_id: 25,
-                category_id: 6,
-                owner_id: 90_000_001,
-                char_id: Some(90_000_001),
-                corp_id: 1_000_125,
-                alliance_id: 99_000_001,
-                security_status: 1.75,
-                is_cloaked: false,
-            },
-        );
-
-        let set_state_update = encode_set_state_update(&park, 100_000_001);
-        let marshaled = eve_proto::marshal::encode(&set_state_update);
-        assert_eq!(marshaled[0], 0x7E, "Must start with 0x7E EVE marshal magic");
-        let unmarshaled =
-            eve_proto::marshal::decode(&marshaled).expect("SetState marshal roundtrip");
-        assert_eq!(unmarshaled, set_state_update);
-
-        // Extract the binary state buffer from SetState and decode it
-        let PyRep::Tuple(top) = &unmarshaled else {
-            panic!("Expected outer (stamp, action) tuple");
-        };
-        let PyRep::Tuple(action) = &top[1] else {
-            panic!("Expected (action_name, args) tuple");
-        };
-        assert_eq!(action[0].as_str(), Some("SetState"));
-        let PyRep::Tuple(args) = &action[1] else {
-            panic!("Expected args tuple");
-        };
-        let state_bytes = match &args[0] {
-            PyRep::KeyVal(map) => map.get("state").and_then(|v| match v {
-                PyRep::Bytes(b) | PyRep::Buffer(b) => Some(b.as_slice()),
-                _ => None,
-            }),
-            _ => None,
-        }
-        .expect("SetState KeyVal must contain PyRep::Bytes under 'state'");
-        let (pkt_type, _, dec_balls) =
-            decode_add_balls(state_bytes).expect("SetState state bytes must decode");
-        assert_eq!(pkt_type, 0);
-        assert_eq!(dec_balls.len(), 2);
-        assert_eq!(dec_balls[0].id, 40_009_076);
-        assert_eq!(dec_balls[1].id, 100_000_001);
-        assert_eq!(dec_balls[1].corp_id, Some(1_000_125));
-        assert_eq!(dec_balls[1].alliance_id, Some(99_000_001));
-
-        // Also test all DoDestinyUpdate action tuples marshal roundtrip
-        let events = vec![
-            DestinyEvent::AddBalls2 {
-                balls: vec![ship.clone()],
-            },
-            DestinyEvent::RemoveBalls {
-                ball_ids: vec![100_000_001],
-            },
-            DestinyEvent::RemoveBall {
-                ball_id: 100_000_001,
-            },
-            DestinyEvent::GotoDirection {
-                ball_id: 100_000_001,
-                direction: [1.0, 0.0, 0.0],
-            },
-            DestinyEvent::Follow {
-                ball_id: 100_000_001,
-                target_id: 40_009_076,
-                range: 2_500.0,
-            },
-            DestinyEvent::Orbit {
-                ball_id: 100_000_001,
-                target_id: 40_009_076,
-                range: 5_000.0,
-            },
-            DestinyEvent::Stop {
-                ball_id: 100_000_001,
-            },
-            DestinyEvent::WarpTo {
-                ball_id: 100_000_001,
-                destination: [1.0e9, 2.0e9, 3.0e9],
-                warp_speed_au_s: 3.0,
-            },
-            DestinyEvent::OnActivatingWarp {
-                ball_id: 100_000_001,
-            },
-            DestinyEvent::OnDeactivatingWarp {
-                ball_id: 100_000_001,
-            },
-            DestinyEvent::OnSpecialFX {
-                ball_id: 100_000_001,
-                module_id: Some(12345),
-                guid: "effects.WarpDrive".to_string(),
-                is_active: true,
-            },
-        ];
-        let updates_pyrep = encode_destiny_updates(7, &events, Some(&park));
-        let updates_bytes = eve_proto::marshal::encode(&updates_pyrep);
-        let decoded_updates =
-            eve_proto::marshal::decode(&updates_bytes).expect("DoDestinyUpdate list roundtrip");
-        assert_eq!(decoded_updates, updates_pyrep);
-    }
 }

@@ -11,8 +11,7 @@
 
 use eve_dogma::{
     compile_effect_to_vm, compile_modifier_spec_to_vm, DogmaDomain, DogmaEffectContext,
-    DogmaItemState, DogmaModifierFunc, DogmaVmOpcode, ModifierOperator,
-    REQUIRED_SKILL_ATTR_IDS,
+    DogmaItemState, DogmaModifierFunc, DogmaVmOpcode, ModifierOperator, REQUIRED_SKILL_ATTR_IDS,
 };
 use eve_sde::{attr_ids, SdeRegistry, TypeId};
 use rusqlite::Connection;
@@ -55,7 +54,10 @@ fn test_client_static_resources_lossless_sweep_and_spot_checks() {
     .expect("parse data/sde_import_manifest.json");
     assert_eq!(manifest_val["client_release"].as_str(), Some("V24.01"));
 
-    let catalog_path = root.join("docs").join("index").join("staticdata_catalog.json");
+    let catalog_path = root
+        .join("docs")
+        .join("index")
+        .join("staticdata_catalog.json");
     let catalog_arr: Vec<serde_json::Value> = serde_json::from_str(
         &std::fs::read_to_string(&catalog_path).expect("read docs/index/staticdata_catalog.json"),
     )
@@ -231,7 +233,10 @@ fn test_client_static_resources_lossless_sweep_and_spot_checks() {
     assert_eq!(raven.meta_level, Some(0));
     assert_eq!(raven.tech_level, Some(1));
     assert_eq!(raven.default_attributes[&attr_ids::MAX_VELOCITY], 113.0);
-    assert_eq!(raven.default_attributes[&attr_ids::SHIELD_CAPACITY], 7_700.0);
+    assert_eq!(
+        raven.default_attributes[&attr_ids::SHIELD_CAPACITY],
+        7_700.0
+    );
     assert_eq!(raven.default_attributes[&attr_ids::ARMOR_HP], 6_380.0);
     assert_eq!(raven.default_attributes[&attr_ids::HP_STRUCT], 7_040.0);
     assert_eq!(raven.default_attributes[&attr_ids::RIG_SIZE], 3.0);
@@ -554,13 +559,12 @@ fn test_sweep_all_dogma_effects_across_sde_effects_table() {
 
             match func {
                 DogmaModifierFunc::ItemModifier | DogmaModifierFunc::ItemModifierWithFalloff => {
-                    let applied = ctx.apply_modifier_spec_with_effect(
-                        source_item_id,
-                        Some(eid),
-                        spec,
-                        &sde,
+                    let applied =
+                        ctx.apply_modifier_spec_with_effect(source_item_id, Some(eid), spec, &sde);
+                    assert_eq!(
+                        applied, 1,
+                        "Effect {eid} mod {idx} ItemModifier applied != 1"
                     );
-                    assert_eq!(applied, 1, "Effect {eid} mod {idx} ItemModifier applied != 1");
                     let actual = ctx
                         .entity_for_domain(domain)
                         .get_attribute(spec.modified_attribute_id, &sde);
@@ -609,12 +613,8 @@ fn test_sweep_all_dogma_effects_across_sde_effects_table() {
                     ctx.located_items_for_domain_mut(other_domain)
                         .push(isolated_child);
 
-                    let applied = ctx.apply_modifier_spec_with_effect(
-                        source_item_id,
-                        Some(eid),
-                        spec,
-                        &sde,
-                    );
+                    let applied =
+                        ctx.apply_modifier_spec_with_effect(source_item_id, Some(eid), spec, &sde);
                     assert_eq!(applied, 1);
                     let actual = ctx.located_items_for_domain(domain)[0]
                         .get_attribute(spec.modified_attribute_id, &sde);
@@ -662,12 +662,8 @@ fn test_sweep_all_dogma_effects_across_sde_effects_table() {
                     list.push(matching_child);
                     list.push(non_matching_child);
 
-                    let applied = ctx.apply_modifier_spec_with_effect(
-                        source_item_id,
-                        Some(eid),
-                        spec,
-                        &sde,
-                    );
+                    let applied =
+                        ctx.apply_modifier_spec_with_effect(source_item_id, Some(eid), spec, &sde);
                     assert_eq!(applied, 1);
                     let actual = ctx.located_items_for_domain(domain)[0]
                         .get_attribute(spec.modified_attribute_id, &sde);
@@ -706,12 +702,8 @@ fn test_sweep_all_dogma_effects_across_sde_effects_table() {
                     list.push(matching_child);
                     list.push(non_matching_child);
 
-                    let applied = ctx.apply_modifier_spec_with_effect(
-                        source_item_id,
-                        Some(eid),
-                        spec,
-                        &sde,
-                    );
+                    let applied =
+                        ctx.apply_modifier_spec_with_effect(source_item_id, Some(eid), spec, &sde);
                     assert_eq!(applied, 1);
                     let actual = ctx.located_items_for_domain(domain)[0]
                         .get_attribute(spec.modified_attribute_id, &sde);
@@ -749,22 +741,16 @@ fn test_sweep_all_dogma_effects_across_sde_effects_table() {
                     ctx.owned_items.push(matching_child);
                     ctx.owned_items.push(non_matching_child);
 
-                    let applied = ctx.apply_modifier_spec_with_effect(
-                        source_item_id,
-                        Some(eid),
-                        spec,
-                        &sde,
-                    );
+                    let applied =
+                        ctx.apply_modifier_spec_with_effect(source_item_id, Some(eid), spec, &sde);
                     assert_eq!(applied, 1);
-                    let actual = ctx.owned_items[0]
-                        .get_attribute(spec.modified_attribute_id, &sde);
+                    let actual = ctx.owned_items[0].get_attribute(spec.modified_attribute_id, &sde);
                     assert!(
                         (actual - expected_val).abs() < 1e-6,
                         "Effect {eid} mod {idx} OwnerRequiredSkillModifier: got {actual}, expected {expected_val}"
                     );
                     assert_eq!(
-                        ctx.owned_items[1]
-                            .get_attribute(spec.modified_attribute_id, &sde),
+                        ctx.owned_items[1].get_attribute(spec.modified_attribute_id, &sde),
                         base_val
                     );
                 }
@@ -791,8 +777,14 @@ fn test_sweep_all_dogma_effects_across_sde_effects_table() {
     assert_eq!(func_counts[&DogmaModifierFunc::ItemModifier], 1_800);
     assert_eq!(func_counts[&DogmaModifierFunc::LocationModifier], 29);
     assert_eq!(func_counts[&DogmaModifierFunc::LocationGroupModifier], 805);
-    assert_eq!(func_counts[&DogmaModifierFunc::LocationRequiredSkillModifier], 1_611);
-    assert_eq!(func_counts[&DogmaModifierFunc::OwnerRequiredSkillModifier], 923);
+    assert_eq!(
+        func_counts[&DogmaModifierFunc::LocationRequiredSkillModifier],
+        1_611
+    );
+    assert_eq!(
+        func_counts[&DogmaModifierFunc::OwnerRequiredSkillModifier],
+        923
+    );
     assert_eq!(func_counts[&DogmaModifierFunc::EffectStopper], 10);
 
     assert_eq!(attested_effect_rows.len(), 3_210);

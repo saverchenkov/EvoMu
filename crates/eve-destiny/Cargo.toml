@@ -13,3 +13,4 @@ serde.workspace = true
 [dev-dependencies]
 eve-testkit = { path = "../eve-testkit" }
 proptest.workspace = true
+tokio = { workspace = true }
