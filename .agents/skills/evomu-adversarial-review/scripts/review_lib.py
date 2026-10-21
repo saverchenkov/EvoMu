@@ -73,6 +73,9 @@ def reviewed_trees(state, verdicts=None):
 
 
 GATE_PATHS = (".agents", "AGENTS.md")  # supervisor-owned; excluded from the code fingerprint
+# Local client-derived data symlinks/files that must never be committed (public repo). They can sit untracked in a
+# reviewed working tree, so they are excluded when comparing a reviewed tree with the committed tree.
+LOCAL_DATA_PATHS = ("data/quasar_core_golden.json", "data/quasar_descriptors.sqlite", "data/evomu_sde.sqlite")
 
 
 def code_tree_of(root, tree, _cache={}):
@@ -96,7 +99,7 @@ def code_tree_of(root, tree, _cache={}):
         env = dict(os.environ, GIT_INDEX_FILE=os.path.join(d, "index"))
         if subprocess.run(["git", "read-tree", tree], cwd=root, env=env, capture_output=True).returncode:
             return ""
-        subprocess.run(["git", "rm", "-r", "-q", "--cached", "--ignore-unmatch", "--"] + list(GATE_PATHS),
+        subprocess.run(["git", "rm", "-r", "-f", "-q", "--cached", "--ignore-unmatch", "--"] + list(GATE_PATHS) + list(LOCAL_DATA_PATHS),
                        cwd=root, env=env, capture_output=True)
         out = subprocess.run(["git", "write-tree"], cwd=root, env=env, capture_output=True, text=True).stdout.strip()
     _cache[tree] = out
@@ -143,12 +146,9 @@ def gate_matches_main(root):
     return working_paths_match_main(root, GATE_PATHS)
 
 
-def reviewed_by_code(root, verdicts=("PASS", "PASS_WITH_ISSUES"), mode="claims", models=None, tree=None):
-    """Latest review (in ANY worktree of this repo) whose reviewed tree has the same code tree as this working
-    tree, provided this tree's gate files equal `main`. Returns the review dict (plus 'worktree') or None."""
-    if not gate_matches_main(root):
-        return None
-    mine = code_tree_of(root, tree or worktree_fingerprint(root))
+def review_covering_tree(root, tree, verdicts=("PASS", "PASS_WITH_ISSUES"), mode="claims", models=None):
+    """Latest review in any worktree whose reviewed tree has the same code tree (gate paths excluded) as `tree`."""
+    mine = code_tree_of(root, tree)
     if not mine:
         return None
     best = None
@@ -168,6 +168,14 @@ def reviewed_by_code(root, verdicts=("PASS", "PASS_WITH_ISSUES"), mode="claims",
             if code_tree_of(root, r.get("tree")) == mine and (best is None or r.get("timestamp", "") > best.get("timestamp", "")):
                 best = dict(r, worktree=wt)
     return best
+
+
+def reviewed_by_code(root, verdicts=("PASS", "PASS_WITH_ISSUES"), mode="claims", models=None, tree=None):
+    """Latest review (in ANY worktree of this repo) whose reviewed tree has the same code tree as this working
+    tree, provided this tree's gate files equal `main`. Returns the review dict (plus 'worktree') or None."""
+    if not gate_matches_main(root):
+        return None
+    return review_covering_tree(root, tree or worktree_fingerprint(root), verdicts, mode, models)
 
 
 def stale_gate(root):
