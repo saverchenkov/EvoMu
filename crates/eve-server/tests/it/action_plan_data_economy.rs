@@ -502,6 +502,7 @@ async fn test_plan_dg1_dogma_modifier_engine_rifter_overdrives() {
 // ====================================================================
 // Test 4: E-1 & E-2: Market Fees, Order Lifecycle, Escrow Management
 // ====================================================================
+// plan: E-1, plan: E-2
 #[tokio::test]
 async fn test_plan_e1_e2_market_fees_order_lifecycle_escrow() {
     let ctx = ServerContext::new();
@@ -697,6 +698,7 @@ async fn test_plan_e1_e2_market_fees_order_lifecycle_escrow() {
 // ====================================================================
 // Test 5: E-3: Contracts Lifecycle, ItemExchange and Courier
 // ====================================================================
+// plan: E-3
 #[tokio::test]
 async fn test_plan_e3_contracts_item_exchange_and_courier() {
     let ctx = ServerContext::new();

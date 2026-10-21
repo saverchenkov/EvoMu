@@ -65,7 +65,7 @@ async fn rpc(
 
 #[tokio::test]
 async fn test_e1_broker_fee_and_sales_tax_skill_discounts() {
-    // parity: feat:market.broker-fee, feat:market.sales-tax
+    // parity: feat:market.broker-fee, feat:market.sales-tax, plan:E-1
     eve_testkit::attest(&["feat:market.broker-fee", "feat:market.sales-tax"]);
     let ctx = ServerContext::new();
     let mut s1 = setup_pilot(&ctx, 101, "demo", "demo-secret", 90_000_001).await;
@@ -295,7 +295,7 @@ async fn test_e1_broker_fee_and_sales_tax_skill_discounts() {
 
 #[tokio::test]
 async fn test_e2_market_order_matching_queries_and_cancellation() {
-    // parity: feat:market.cancel-order, feat:market.price-history
+    // parity: feat:market.cancel-order, feat:market.price-history, plan:E-2
     eve_testkit::attest(&["feat:market.cancel-order", "feat:market.price-history"]);
     let ctx = ServerContext::new();
     let mut s1 = setup_pilot(&ctx, 201, "demo", "demo-secret", 90_000_001).await;

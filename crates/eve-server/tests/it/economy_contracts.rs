@@ -53,7 +53,7 @@ async fn rpc(
 
 #[tokio::test]
 async fn test_e3_contracts_lifecycle_item_exchange_courier_auction() {
-    // parity: feat:contracts.item-exchange, feat:contracts.courier, feat:contracts.auction
+    // parity: feat:contracts.item-exchange, feat:contracts.courier, feat:contracts.auction, plan:E-3
     eve_testkit::attest(&["feat:contracts.item-exchange", "feat:contracts.courier", "feat:contracts.auction"]);
     let ctx = ServerContext::new();
     let mut s1 = setup_pilot(&ctx, 301, "demo", "demo-secret", 90_000_001).await;

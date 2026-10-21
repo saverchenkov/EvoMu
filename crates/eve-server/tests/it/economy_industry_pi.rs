@@ -59,7 +59,7 @@ async fn rpc(
 
 #[tokio::test]
 async fn test_e4_industry_jobs_lifecycle_manufacturing_research_and_copying() {
-    // parity: feat:industry.manufacturing, feat:industry.research-me, feat:industry.research-te, feat:industry.copying
+    // parity: feat:industry.manufacturing, feat:industry.research-me, feat:industry.research-te, feat:industry.copying, plan:E-4
     eve_testkit::attest(&["feat:industry.manufacturing", "feat:industry.research-me", "feat:industry.research-te", "feat:industry.copying"]);
     let ctx = ServerContext::new();
     let mut s1 = setup_pilot(&ctx, 401, "demo", "demo-secret", 90_000_001).await;
