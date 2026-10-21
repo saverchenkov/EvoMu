@@ -10,7 +10,7 @@ use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 pub type TypeId = u32;
 pub type GroupId = u32;
@@ -894,7 +894,11 @@ pub struct SdeRegistry {
     pub skins: HashMap<u32, SkinInfo>,
 }
 
-pub(crate) static SDE_CACHE: OnceLock<Mutex<HashMap<(PathBuf, u64), SdeRegistry>>> =
+/// Per-(path, size) slot. The outer map lock is held only to find/insert the slot; the slot's
+/// own lock is held for the whole load, so concurrent first `open` calls for the same database
+/// wait for a single load instead of each reading the SQLite file.
+pub(crate) type SdeCacheSlot = Arc<Mutex<Option<SdeRegistry>>>;
+pub(crate) static SDE_CACHE: OnceLock<Mutex<HashMap<(PathBuf, u64), SdeCacheSlot>>> =
     OnceLock::new();
 
 #[derive(Deserialize)]

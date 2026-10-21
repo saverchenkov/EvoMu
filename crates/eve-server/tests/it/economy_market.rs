@@ -10,7 +10,7 @@
 
 #![forbid(unsafe_code)]
 
-mod common;
+use crate::common;
 
 use eve_db::{
     AccountRecord, InventoryFlag, InventoryItemRecord, IskCents, TrainedSkillRecord,

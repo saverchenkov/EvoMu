@@ -2,7 +2,7 @@
 
 #![forbid(unsafe_code)]
 
-mod common;
+use crate::common;
 
 use eve_db::{InventoryFlag, InventoryItemRecord};
 use eve_destiny::{Ball, CombatState, DVec3, MovementMode};

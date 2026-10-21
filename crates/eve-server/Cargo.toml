@@ -3,6 +3,7 @@ name = "eve-server"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+autotests = false
 
 [dependencies]
 eve-proto = { path = "../eve-proto" }
@@ -31,3 +32,7 @@ demo-seed = ["eve-db/demo-seed"]
 eve-db = { path = "../eve-db", features = ["demo-seed"] }
 eve-server = { path = ".", features = ["demo-seed"] }
 eve-testkit = { path = "../eve-testkit" }
+
+[[test]]
+name = "it"
+path = "tests/it/main.rs"

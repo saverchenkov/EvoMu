@@ -4,7 +4,7 @@
 
 #![forbid(unsafe_code)]
 
-mod common;
+use crate::common;
 
 use eve_db::corp_roles;
 use eve_destiny::{Ball, MovementMode};

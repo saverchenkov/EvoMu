@@ -2,7 +2,7 @@
 
 #![forbid(unsafe_code)]
 
-mod common;
+use crate::common;
 
 use eve_machonet::{MachoPacket, MachoPacketType, SessionState};
 use eve_proto::{marshal, PyRep};

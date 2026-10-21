@@ -2,8 +2,6 @@
 
 #![forbid(unsafe_code)]
 
-mod common;
-
 use eve_db::{InventoryFlag, InventoryItemRecord, IskCents};
 use eve_destiny::{Ball, DamageVector, DestinyEvent, MovementMode};
 use eve_server::combat::crimewatch::{AggressionEvaluation, CrimeWatchDirector};

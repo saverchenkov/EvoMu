@@ -19,12 +19,21 @@ impl SdeRegistry {
         let cache_key = (canon.clone(), meta.len());
 
         let cache = SDE_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-        if let Ok(guard) = cache.lock() {
-            if let Some(existing) = guard.get(&cache_key) {
-                return Ok(existing.clone());
-            }
+        let slot: SdeCacheSlot = {
+            let mut map = cache.lock().unwrap_or_else(|e| e.into_inner());
+            Arc::clone(map.entry(cache_key).or_default())
+        };
+        let mut entry = slot.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(existing) = entry.as_ref() {
+            return Ok(existing.clone());
         }
+        let registry = Self::load_uncached(canon)?;
+        *entry = Some(registry.clone());
+        Ok(registry)
+    }
 
+    /// Loads the SDE from `canon` without consulting the process-wide cache (`D-2`).
+    fn load_uncached(canon: PathBuf) -> Result<Self, SdeError> {
         let uri = format!("file:{}?immutable=1", canon.display());
         let conn = Connection::open_with_flags(
             &uri,
@@ -1312,10 +1321,6 @@ impl SdeRegistry {
             skin_materials,
             skins,
         };
-
-        if let Ok(mut guard) = cache.lock() {
-            guard.insert(cache_key, registry.clone());
-        }
 
         Ok(registry)
     }

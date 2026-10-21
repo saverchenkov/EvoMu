@@ -1,5 +1,4 @@
-mod common;
-use common::*;
+use crate::common::*;
 use eve_db::{ServerClock, VirtualServerClock};
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
