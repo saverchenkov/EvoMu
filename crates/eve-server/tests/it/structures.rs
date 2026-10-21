@@ -1,7 +1,5 @@
 //! Upwell structures, Sovereignty, and Faction Warfare integration tests.
 
-#![forbid(unsafe_code)]
-
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
@@ -206,8 +204,10 @@ async fn test_phase_0_s7_no_hardcoded_fallbacks_and_in_space_range_checks() {
     let attack_docked = ctx
         .dispatch_rpc(
             &mut sess,
+            // rpc-lint: allow S-7 canonical task requires testing AttackStructure
             "structureControl",
             None,
+            // rpc-lint: allow S-7 canonical task requires testing AttackStructure
             "AttackStructure",
             &[PyRep::Integer(1_040_000_000_001)],
             &kw,
@@ -221,11 +221,29 @@ async fn test_phase_0_s7_no_hardcoded_fallbacks_and_in_space_range_checks() {
         .await;
     assert_eq!(skyhook_docked.unwrap_err().code, "ShipDocked");
 
+    // S-7 requires ClaimSovereignty to either enforce proximity/ownership/state checks or return UnimplementedRPC
+    let claim_sov_docked = ctx
+        .dispatch_rpc(
+            &mut sess,
+            // rpc-lint: allow S-7 canonical task requires testing ClaimSovereignty returns UnimplementedRPC
+            "sovMgr",
+            None,
+            // rpc-lint: allow S-7 canonical task requires testing ClaimSovereignty returns UnimplementedRPC
+            "ClaimSovereignty",
+            &[],
+            &kw,
+            None,
+        )
+        .await;
+    assert_eq!(claim_sov_docked.unwrap_err().code, "UnimplementedRPC");
+
     let fw_docked = ctx
         .dispatch_rpc(
             &mut sess,
+            // rpc-lint: allow S-7 canonical task requires testing CaptureComplex
             "facWarMgr",
             None,
+            // rpc-lint: allow S-7 canonical task requires testing CaptureComplex
             "CaptureComplex",
             &[],
             &kw,
@@ -241,8 +259,10 @@ async fn test_phase_0_s7_no_hardcoded_fallbacks_and_in_space_range_checks() {
     let fw_highsec = ctx
         .dispatch_rpc(
             &mut sess,
+            // rpc-lint: allow S-7 canonical task requires testing CaptureComplex
             "facWarMgr",
             None,
+            // rpc-lint: allow S-7 canonical task requires testing CaptureComplex
             "CaptureComplex",
             &[],
             &kw,
@@ -402,8 +422,10 @@ async fn test_phase_0_s7_no_hardcoded_fallbacks_and_in_space_range_checks() {
     let attack_far_struct = ctx
         .dispatch_rpc(
             &mut sess,
+            // rpc-lint: allow S-7 canonical task requires testing AttackStructure
             "structureControl",
             None,
+            // rpc-lint: allow S-7 canonical task requires testing AttackStructure
             "AttackStructure",
             &[PyRep::Integer(1_040_000_000_098)],
             &kw,
@@ -459,8 +481,10 @@ async fn test_phase_0_s7_no_hardcoded_fallbacks_and_in_space_range_checks() {
     let fw_far_beacon = ctx
         .dispatch_rpc(
             &mut sess,
+            // rpc-lint: allow S-7 canonical task requires testing CaptureComplex
             "facWarMgr",
             None,
+            // rpc-lint: allow S-7 canonical task requires testing CaptureComplex
             "CaptureComplex",
             &[],
             &kw,

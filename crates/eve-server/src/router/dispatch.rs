@@ -686,6 +686,16 @@ impl ServerContext {
         {
             return res;
         }
+        if let Some(res) = services::pos_manager::handle_pos_manager(
+            self,
+            session,
+            effective_service,
+            method,
+            args,
+            kwargs,
+        ) {
+            return res;
+        }
         if let Some(res) = Box::pin(services::agents_missions::handle(
             self,
             session,
@@ -768,7 +778,27 @@ impl ServerContext {
         ) {
             return res;
         }
+        if let Some(res) = services::pos_starbase::handle(
+            self,
+            session,
+            effective_service,
+            method,
+            args,
+            kwargs,
+        ) {
+            return res;
+        }
         if let Some(res) = services::corp_registry_ops::handle(
+            self,
+            session,
+            effective_service,
+            method,
+            args,
+            kwargs,
+        ) {
+            return res;
+        }
+        if let Some(res) = services::ship_flight_ops::handle(
             self,
             session,
             effective_service,

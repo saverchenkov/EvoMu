@@ -264,6 +264,16 @@ pub enum SystemCommand {
         position: glam::DVec3,
         reply: oneshot::Sender<bool>,
     },
+    EmitDestinyEvent {
+        ball_id: BallId,
+        event: DestinyEvent,
+        reply: oneshot::Sender<bool>,
+    },
+    GotoPoint {
+        ball_id: BallId,
+        point: glam::DVec3,
+        reply: oneshot::Sender<Result<u64, String>>,
+    },
     PushSetState {
         observer_ball_id: BallId,
         reply: oneshot::Sender<Result<u64, String>>,
@@ -864,6 +874,26 @@ impl SystemRegistry {
                                 let updated = ballpark.set_ball_position(ball_id, position);
                                 sync_ball_positions(&ballpark, &ball_positions_actor);
                                 let _ = reply.send(updated);
+                            }
+                            SystemCommand::EmitDestinyEvent { ball_id, event, reply } => {
+                                let known = ballpark.balls.contains_key(&ball_id)
+                                    || matches!(event, DestinyEvent::OnSovereigntyChanged { .. });
+                                if known {
+                                    if let DestinyEvent::OnSlimItemChange { ball_id: slim_id } = &event {
+                                        if let Some(meta) = ballpark.ball_slim_meta.get_mut(slim_id) {
+                                            meta.char_id = (*slim_id == ball_id).then_some(meta.owner_id);
+                                        }
+                                    }
+                                    let scope = ballpark.balls.contains_key(&ball_id).then_some(ball_id);
+                                    ballpark.emit_event(scope, event);
+                                }
+                                let _ = reply.send(known);
+                            }
+                            SystemCommand::GotoPoint { ball_id, point, reply } => {
+                                let res = ballpark
+                                    .goto_point(ball_id, point)
+                                    .map(|()| ballpark.current_tick);
+                                let _ = reply.send(res);
                             }
                             SystemCommand::PushSetState {
                                 observer_ball_id,
