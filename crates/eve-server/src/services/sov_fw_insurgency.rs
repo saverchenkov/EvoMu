@@ -14,7 +14,12 @@ use eve_sde::TypeId;
 use std::collections::HashMap;
 use tracing::warn;
 
-const AU_METERS: f64 = 149_597_870_700.0;
+pub(crate) const AU_METERS: f64 = 149_597_870_700.0;
+
+
+#[path = "fw_insurgency.rs"]
+pub mod fw_insurgency;
+pub use fw_insurgency::*;
 
 pub fn derive_system_site_position_from_sde(
     ctx: &ServerContext,
@@ -51,6 +56,234 @@ pub fn derive_system_site_position_from_sde(
     [pos.x, pos.y, pos.z]
 }
 
+/// Evaluates server-clock respawn timers for depleted Sovereignty Hub prospecting deposits in `sys_id`.
+///
+/// Each upgrade level's deposit has a wiki-sourced respawn duration (`SovDepositDef::respawn_seconds`,
+/// e.g. `36_000`s = 10h for `Large Veldspar Deposit` per `eve-wiki/articles/Asteroids_and_ore.md:242`).
+/// When all asteroids of an active `SovOre` deposit are mined out, it transitions to `cleared = true`
+/// with `created_unix = now` and `lifetime_seconds = respawn_seconds`. Once the server clock passes
+/// `created_unix + lifetime_seconds` and the Sovereignty Hub still has the prospecting upgrade installed
+/// in `SubSystemSlot0`, a fresh replacement deposit is spawned.
+pub async fn tick_sov_prospecting_deposit_respawn(ctx: &ServerContext, sys_id: u32) {
+    let has_sov_anom = ctx.db.with_snapshot(|snap| {
+        snap.cosmic_anomalies
+            .get(&sys_id)
+            .is_some_and(|list| list.iter().any(|a| a.anomaly_type == "SovOre"))
+    });
+    if !has_sov_anom {
+        return;
+    }
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let sov_asteroid_ids: Vec<i64> = ctx.db.with_snapshot(|snap| {
+        snap.asteroids
+            .values()
+            .filter(|a| a.solar_system_id == sys_id && a.belt_id == 0)
+            .map(|a| a.asteroid_id)
+            .collect()
+    });
+    let mut live_ast_states = Vec::with_capacity(sov_asteroid_ids.len());
+    for aid in sov_asteroid_ids {
+        if let Ok(Some(st)) = sys_handle.get_asteroid_state(aid).await {
+            live_ast_states.push((aid, if st.depleted { 0_i64 } else { st.remaining_units as i64 }));
+        }
+    }
+
+    let mut modelled: HashMap<TypeId, (u64, mining_sites::ResolvedOreSite)> = HashMap::new();
+    for def in mining_sites::SOV_PROSPECTING_DEPOSITS {
+        if let Ok(site) = mining_sites::resolve_ore_site(&ctx.sde, &def.site) {
+            if site.asteroids.iter().all(|a| ctx.sde.types.contains_key(&a.type_id)) {
+                modelled.insert(def.upgrade_type_id, (def.respawn_seconds, site));
+            }
+        }
+    }
+    let type_vol_rad = |tid: u32| -> (f64, f64) {
+        ctx.sde
+            .types
+            .get(&tid)
+            .map(|t| (t.volume.max(0.001), t.radius.max(50.0)))
+            .unwrap_or((0.001, 50.0))
+    };
+    let sov_pos = derive_system_site_position_from_sde(ctx, sys_id, 3, 5.0);
+    let now = ctx.now_unix();
+
+    let newly_spawned = ctx.db.with_mut_snapshot(|snap| {
+        for &(aid, rem) in &live_ast_states {
+            if let Some(ast) = snap.asteroids.get_mut(&aid) {
+                ast.quantity = rem;
+            }
+        }
+
+        let installed_upgrade = snap
+            .structures
+            .values()
+            .filter(|s| s.solar_system_id == sys_id)
+            .find_map(|s| {
+                snap.items.values().find_map(|it| {
+                    if it.location_id == s.structure_id
+                        && it.flag == eve_db::InventoryFlag::SubSystemSlot0
+                    {
+                        modelled.get(&it.type_id)
+                    } else {
+                        None
+                    }
+                })
+            });
+        let default_respawn_secs = installed_upgrade.map(|(r, _)| *r).unwrap_or(36_000);
+
+        let mut newly_cleared_anom_ids = Vec::new();
+        if let Some(anoms) = snap.cosmic_anomalies.get_mut(&sys_id) {
+            for anom in anoms.iter_mut().filter(|a| a.anomaly_type == "SovOre") {
+                let anom_pos = DVec3::from_array(anom.position);
+                let any_remaining = snap.asteroids.values().any(|a| {
+                    a.solar_system_id == sys_id
+                        && a.quantity > 0
+                        && DVec3::new(a.position.0, a.position.1, a.position.2).distance(anom_pos)
+                            <= 50_000.0
+                });
+                if !any_remaining {
+                    if !anom.cleared {
+                        anom.cleared = true;
+                        anom.remaining_volume = 0.0;
+                        anom.created_unix = now;
+                        anom.lifetime_seconds = default_respawn_secs;
+                        newly_cleared_anom_ids.push(anom.anomaly_id.clone());
+                    } else if anom.lifetime_seconds == 0 {
+                        anom.created_unix = now;
+                        anom.lifetime_seconds = default_respawn_secs;
+                    }
+                }
+            }
+        }
+        if !newly_cleared_anom_ids.is_empty() {
+            if let Some(sigs) = snap.cosmic_signatures.get_mut(&sys_id) {
+                for s in sigs.iter_mut() {
+                    if newly_cleared_anom_ids.contains(&s.signature_id) {
+                        s.collapsed = true;
+                        s.signal_strength = 0.0;
+                    }
+                }
+            }
+        }
+
+        let Some((respawn_secs, site)) = installed_upgrade else {
+            return Vec::new();
+        };
+        let has_uncleared = snap
+            .cosmic_anomalies
+            .get(&sys_id)
+            .is_some_and(|list| list.iter().any(|a| a.anomaly_type == "SovOre" && !a.cleared));
+        let ready_to_respawn = !has_uncleared
+            && snap.cosmic_anomalies.get(&sys_id).is_some_and(|list| {
+                list.iter().any(|a| {
+                    a.anomaly_type == "SovOre"
+                        && a.cleared
+                        && now >= a.created_unix.saturating_add(a.lifetime_seconds.max(*respawn_secs))
+                })
+            });
+        if !ready_to_respawn {
+            return Vec::new();
+        }
+
+        let sov_pos_vec = DVec3::from_array(sov_pos);
+        snap.asteroids.retain(|_, a| {
+            !(a.solar_system_id == sys_id
+                && a.belt_id == 0
+                && DVec3::new(a.position.0, a.position.1, a.position.2).distance(sov_pos_vec)
+                    <= 50_000.0)
+        });
+        if let Some(anoms) = snap.cosmic_anomalies.get_mut(&sys_id) {
+            anoms.retain(|a| a.anomaly_type != "SovOre");
+        }
+        if let Some(sigs) = snap.cosmic_signatures.get_mut(&sys_id) {
+            sigs.retain(|s| s.sig_group != "SovOre");
+        }
+
+        snap.next_entity_id += 1;
+        let anom_id = format!("DNG-{}-{}", site.dungeon_id, snap.next_entity_id);
+        let mut volume = 0.0_f64;
+        let mut spawned = Vec::with_capacity(site.asteroids.len());
+        for (i, a) in site.asteroids.iter().enumerate() {
+            let off = mining_sites::asteroid_offset(i);
+            let pos = [sov_pos[0] + off[0], sov_pos[1] + off[1], sov_pos[2] + off[2]];
+            let (uvol, rad) = type_vol_rad(a.type_id);
+            volume += a.units as f64 * uvol;
+            snap.next_entity_id += 1;
+            let aid = snap.next_entity_id;
+            snap.asteroids.insert(
+                aid,
+                AsteroidRecord {
+                    asteroid_id: aid,
+                    solar_system_id: sys_id,
+                    belt_id: 0,
+                    type_id: a.type_id,
+                    quantity: a.units,
+                    initial_quantity: a.units,
+                    position: (pos[0], pos[1], pos[2]),
+                    radius: rad,
+                },
+            );
+            spawned.push((aid, a.type_id, a.units as u64, uvol, rad, DVec3::from_array(pos)));
+        }
+        snap.cosmic_anomalies.entry(sys_id).or_default().push(CosmicAnomalyRecord {
+            anomaly_id: anom_id.clone(),
+            solar_system_id: sys_id,
+            name: site.name.clone(),
+            anomaly_type: "SovOre".into(),
+            position: sov_pos,
+            signal_strength: 1.0,
+            ore_types: site.ore_types(),
+            remaining_volume: volume,
+            created_unix: now,
+            lifetime_seconds: 0,
+            cleared: false,
+        });
+        snap.cosmic_signatures.entry(sys_id).or_default().push(CosmicSignatureRecord {
+            signature_id: anom_id,
+            solar_system_id: sys_id,
+            sig_group: "SovOre".into(),
+            type_name: site.name.clone(),
+            position: sov_pos,
+            signal_strength: 1.0,
+            wormhole_type_id: None,
+            destination_system_id: None,
+            created_unix: now,
+            lifetime_seconds: 0,
+            max_mass_kg: 0.0,
+            remaining_mass_kg: 0.0,
+            max_jump_mass_kg: 0.0,
+            collapsed: false,
+        });
+        spawned
+    });
+
+    for (aid, tid, units, uvol, rad, pos) in newly_spawned {
+        let ball = Ball {
+            id: aid,
+            type_id: tid,
+            position: pos,
+            velocity: DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 1.0,
+            mass: 80_000.0,
+            radius: rad,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        };
+        let st = AsteroidState {
+            asteroid_id: aid,
+            belt_id: 0,
+            type_id: tid,
+            initial_units: units,
+            remaining_units: units,
+            unit_volume: uvol,
+            depleted: false,
+            respawn_at_tick: None,
+        };
+        let _ = sys_handle.spawn_asteroid(st, ball).await;
+    }
+}
+
 /// Seeds the cosmic ore anomaly, hidden ore signature and gas site for `sys_id`, once per system.
 ///
 /// Which sites spawn depends on the system's displayed security band (and, for gas sites, its region);
@@ -62,7 +295,9 @@ pub fn derive_system_site_position_from_sde(
 pub async fn seed_system_mining_sites_from_sde(ctx: &ServerContext, sys_id: u32) {
     use mining_sites::{SiteKind, COSMIC_ORE_SITES, GAS_SITES};
 
-    let Some(true_sec) = ctx.sde.solar_systems.get(&sys_id).map(|s| s.security_status) else {
+    tick_sov_prospecting_deposit_respawn(ctx, sys_id).await;
+
+    let Some(sys) = ctx.sde.solar_systems.get(&sys_id) else {
         return;
     };
     let region = mining_sites::region_name(&ctx.sde, sys_id).map(str::to_owned);
@@ -74,7 +309,7 @@ pub async fn seed_system_mining_sites_from_sde(ctx: &ServerContext, sys_id: u32)
     let mut planned: Vec<Planned> = Vec::new();
     for def in COSMIC_ORE_SITES
         .iter()
-        .filter(|d| d.band.matches(sys_id, true_sec))
+        .filter(|d| d.band.matches_system(sys))
     {
         match mining_sites::resolve_ore_site(&ctx.sde, def) {
             Ok(site) if site.asteroids.iter().all(|a| ctx.sde.types.contains_key(&a.type_id)) => {
@@ -88,7 +323,7 @@ pub async fn seed_system_mining_sites_from_sde(ctx: &ServerContext, sys_id: u32)
         }
     }
     if let Some(def) = GAS_SITES.iter().find(|d| {
-        d.band.matches(sys_id, true_sec)
+        d.band.matches_system(sys)
             && region
                 .as_deref()
                 .is_some_and(|r| d.region_names.contains(&r))
@@ -271,9 +506,20 @@ pub async fn handle(
     args: &[PyRep],
     kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
+    if let Some(res) = crate::services::fw_enlistment::handle(ctx, session, service, method, args) {
+        return Some(res);
+    }
+    if let Some(res) = crate::services::sov_services::handle(ctx, session, service, method, args, kwargs).await {
+        return Some(res);
+    }
+    if let Some(res) = crate::services::fw_services::handle(ctx, session, service, method, args, kwargs).await {
+        return Some(res);
+    }
+    if let Some(res) = crate::services::insurgency_services::handle(ctx, session, service, method, args, kwargs).await {
+        return Some(res);
+    }
     match (service, method) {
-        ("facWarMgr", "JoinFactionAsCharacter")
-        | ("fwCharacterEnlistmentMgr", "CreateMyDirectEnlistment") => {
+        ("facWarMgr", "JoinFactionAsCharacter") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -284,10 +530,8 @@ pub async fn handle(
                     message: "Joining Factional Warfare requires an explicit integer factionID".into(),
                 }));
             };
-            if !matches!(
-                faction_id,
-                500_001 | 500_002 | 500_003 | 500_004 | 500_010 | 500_011
-            ) {
+            // Militia factions are derived from the SDE (factions with a militia corporation).
+            if !crate::services::fw_enlistment::is_militia_faction(ctx, faction_id) {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidWarFaction".into(),
                     message: format!("Faction {faction_id} is not a valid FW/Insurgency militia faction"),
@@ -307,6 +551,7 @@ pub async fn handle(
             ])))
         }
 
+        // rpc-lint: allow legacy B-09 regression handler kept for regressions_b01_b15.rs; not a V24 client RPC (live capture is server-driven) and closes no feat:fw rows
         ("facWarMgr", "CaptureComplex") | ("fwWarzoneSolarsystem", "CaptureComplex") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
@@ -671,6 +916,15 @@ pub async fn handle(
 
             match res {
                 Ok((alliance_id, primary_hub_id, mil_idx, ind_idx, adm, vuln_start, vuln_end)) => {
+                    let _ = sys_handle
+                        .emit_destiny_event(
+                            ship_id,
+                            eve_destiny::DestinyEvent::OnSovereigntyChanged {
+                                solar_system_id: sys_id,
+                                alliance_id,
+                            },
+                        )
+                        .await;
                     Some(Ok(PyRep::keyval([
                         ("solarSystemID", PyRep::Integer(sys_id as i64)),
                         ("allianceID", PyRep::Integer(alliance_id)),
@@ -932,831 +1186,6 @@ pub async fn handle(
             ])))
         }
 
-        ("sovHubSvc", "SaveUpgradeConfiguration") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let Some(sys_id) = session.solar_system_id else {
-                return Some(Err(BridgeRpcError {
-                    code: "NoSolarSystem".into(),
-                    message: "Session has no active solar system".into(),
-                }));
-            };
-            let sys_sec = ctx
-                .sde
-                .solar_systems
-                .get(&sys_id)
-                .map(|s| s.security_status)
-                .unwrap_or(1.0);
-            if sys_sec > 0.0 {
-                return Some(Err(BridgeRpcError {
-                    code: "NotNullSecSystem".into(),
-                    message: format!(
-                        "Sovereignty Hub prospecting upgrades can only be installed in null-sec systems (system {sys_id} has sec {sys_sec:.2})"
-                    ),
-                }));
-            }
-
-            // Requested upgrade type: kwargs `typeID`/`upgradeTypeID`, an `upgrades`/`configuration` list of
-            // `{typeID: ...}` dicts or `(typeID, ...)` tuples, or a positional integer. Only SDE group-4768
-            // Sovereignty Hub upgrades are accepted. The deposit level comes from the upgrade type itself.
-            let is_sov_upgrade_type = |tid: u32| -> bool {
-                ctx.sde.types.get(&tid).is_some_and(|t| t.group_id == 4768)
-            };
-            let type_from_rep = |v: &PyRep| -> Option<u32> {
-                v.dict_get("typeID")
-                    .or_else(|| v.dict_get("upgradeTypeID"))
-                    .and_then(|x| x.as_i64())
-                    .or_else(|| match v {
-                        PyRep::Tuple(t) => t.first().and_then(|x| x.as_i64()),
-                        _ => v.as_i64(),
-                    })
-                    .and_then(|x| u32::try_from(x).ok())
-                    .filter(|&tid| is_sov_upgrade_type(tid))
-            };
-            let mut requested_upgrade_type: Option<u32> = kwargs
-                .get("typeID")
-                .or_else(|| kwargs.get("upgradeTypeID"))
-                .and_then(|v| v.as_i64())
-                .and_then(|v| u32::try_from(v).ok())
-                .filter(|&tid| is_sov_upgrade_type(tid));
-            if requested_upgrade_type.is_none() {
-                if let Some(PyRep::List(items) | PyRep::Tuple(items)) =
-                    kwargs.get("upgrades").or_else(|| kwargs.get("configuration"))
-                {
-                    requested_upgrade_type = items.iter().find_map(type_from_rep);
-                }
-            }
-            if requested_upgrade_type.is_none() {
-                requested_upgrade_type = args.iter().find_map(|a| match a {
-                    PyRep::List(items) | PyRep::Tuple(items) => items.iter().find_map(type_from_rep),
-                    other => type_from_rep(other),
-                });
-            }
-
-            // Resolve every modelled prospecting deposit up front (client layout + wiki quantities).
-            let mut modelled: HashMap<u32, (u8, mining_sites::ResolvedOreSite)> = HashMap::new();
-            for def in mining_sites::SOV_PROSPECTING_DEPOSITS {
-                match mining_sites::resolve_ore_site(&ctx.sde, &def.site) {
-                    Ok(site) => {
-                        modelled.insert(def.upgrade_type_id, (def.level, site));
-                    }
-                    Err(e) => warn!(
-                        upgrade_type_id = def.upgrade_type_id,
-                        error = e,
-                        "prospecting deposit not resolvable"
-                    ),
-                }
-            }
-
-            let sov_pos = derive_system_site_position_from_sde(ctx, sys_id, 3, 5.0);
-            let type_vol_rad = |tid: u32| -> (f64, f64) {
-                ctx.sde
-                    .types
-                    .get(&tid)
-                    .map(|t| (t.volume.max(0.001), t.radius.max(60.0)))
-                    .unwrap_or((0.001, 60.0))
-            };
-            let now = ctx.now_unix();
-            let active_ship_id = session.ship_id;
-
-            let res = ctx.db.try_with_mut_snapshot(|snap| {
-                let (caller_corp_id, caller_alliance_id, caller_roles) = snap
-                    .characters
-                    .get(&char_id)
-                    .map(|c| {
-                        (
-                            c.corporation_id,
-                            c.alliance_id.or(session.alliance_id),
-                            session.corp_role,
-                        )
-                    })
-                    .unwrap_or((
-                        session.corporation_id.unwrap_or(0),
-                        session.alliance_id,
-                        session.corp_role,
-                    ));
-                let held_alliance = snap
-                    .system_states
-                    .get(&sys_id)
-                    .and_then(|st| st.sov_alliance_id);
-                let Some(caller_aid) = caller_alliance_id else {
-                    return Err(BridgeRpcError {
-                        code: "SovereigntyNotClaimed".into(),
-                        message: format!(
-                            "Caller must belong to the sovereignty-holding alliance in system {sys_id}"
-                        ),
-                    });
-                };
-                if held_alliance != Some(caller_aid) {
-                    return Err(BridgeRpcError {
-                        code: "SovereigntyNotClaimed".into(),
-                        message: format!(
-                            "System {sys_id} sovereignty is not held by caller's alliance {caller_aid}"
-                        ),
-                    });
-                }
-
-                // Verify an online friendly sovereignty structure exists in sys_id and caller has director/station-manager/CEO role
-                let corp_rec = snap.corporations.get(&caller_corp_id);
-                let is_ceo = corp_rec.is_some_and(|c| c.ceo_id == char_id);
-                let member_role = corp_rec
-                    .and_then(|c| c.member_roles.get(&char_id).copied())
-                    .unwrap_or(caller_roles);
-                if !is_ceo && (member_role & (1 | 128 | 1024)) == 0 {
-                    return Err(BridgeRpcError {
-                        code: "InsufficientCorporationRole".into(),
-                        message: "Configuring Sovereignty Hub upgrades requires Director or Station Manager role".into(),
-                    });
-                }
-
-                // Lowest qualifying structure ID, so the hub is deterministic when several qualify.
-                let hub_struct = snap
-                    .structures
-                    .values()
-                    .filter(|s| {
-                        let same_corp = s.owner_corp_id == caller_corp_id;
-                        let same_alliance = snap
-                            .corporations
-                            .get(&s.owner_corp_id)
-                            .and_then(|c| c.alliance_id)
-                            == Some(caller_aid);
-                        s.solar_system_id == sys_id
-                            && (same_corp || same_alliance)
-                            && s.state == "ShieldVulnerable"
-                            && s.quantum_core_installed
-                            && s.fuel_blocks > 0
-                    })
-                    .map(|s| s.structure_id)
-                    .min();
-                let Some(hub_id) = hub_struct else {
-                    return Err(BridgeRpcError {
-                        code: "NoFriendlySovStructureInSystem".into(),
-                        message: format!(
-                            "Configuring Sovereignty Hub upgrades in system {sys_id} requires an online structure owned by alliance {caller_aid}"
-                        ),
-                    });
-                };
-
-                // The upgrade item (SDE group 4768) must be owned by the caller or their corporation (or already
-                // installed in the hub), sit in the hub itself or the caller's active ship, and be unlocked.
-                let mut found_locked_local = false;
-                let mut upgrade_item_id: Option<i64> = None;
-                for it in snap.items.values() {
-                    if it.quantity <= 0 || !is_sov_upgrade_type(it.type_id) {
-                        continue;
-                    }
-                    if !requested_upgrade_type.map_or(true, |rt| it.type_id == rt) {
-                        continue;
-                    }
-                    let owned_or_installed = it.owner_id == char_id
-                        || it.owner_id == caller_corp_id
-                        || it.location_id == hub_id;
-                    let colocated =
-                        it.location_id == hub_id || active_ship_id == Some(it.location_id);
-                    if !owned_or_installed || !colocated {
-                        continue;
-                    }
-                    if it.flag == eve_db::InventoryFlag::Locked
-                        || snap.is_item_locked_in_contract_or_job(it.item_id)
-                    {
-                        found_locked_local = true;
-                        continue;
-                    }
-                    upgrade_item_id =
-                        Some(upgrade_item_id.map_or(it.item_id, |cur| cur.min(it.item_id)));
-                }
-
-                let Some(up_iid) = upgrade_item_id else {
-                    if found_locked_local {
-                        return Err(BridgeRpcError {
-                            code: "UpgradeItemLocked".into(),
-                            message: "Sovereignty Hub upgrade item is locked in a contract or escrow".into(),
-                        });
-                    }
-                    return Err(BridgeRpcError {
-                        code: "UpgradeItemNotFound".into(),
-                        message: "SaveUpgradeConfiguration requires an unlocked Sovereignty Hub upgrade item (group 4768) in the hub structure or your active ship".into(),
-                    });
-                };
-                let up_tid = snap.items.get(&up_iid).map(|i| i.type_id).unwrap_or(0);
-                let Some((level, site)) = modelled.get(&up_tid) else {
-                    return Err(BridgeRpcError {
-                        code: "ProspectingDepositNotModelled".into(),
-                        message: format!(
-                            "Sovereignty Hub upgrade type {up_tid} has no modelled prospecting deposit"
-                        ),
-                    });
-                };
-
-                if let Some(up_it) = snap.items.get_mut(&up_iid) {
-                    up_it.location_id = hub_id;
-                    up_it.flag = eve_db::InventoryFlag::SubSystemSlot0;
-                }
-                snap.sov_prospecting_levels.insert(sys_id, u32::from(*level));
-                if let Some(st) = snap.system_states.get_mut(&sys_id) {
-                    st.industrial_index = st.industrial_index.max(*level);
-                }
-
-                // Idempotent across repeat calls: an uncleared SovOre deposit already in sys_id is reused.
-                let existing_sov_anoms: Vec<String> = snap
-                    .cosmic_anomalies
-                    .get(&sys_id)
-                    .map(|list| {
-                        list.iter()
-                            .filter(|a| a.anomaly_type == "SovOre" && !a.cleared)
-                            .map(|a| a.anomaly_id.clone())
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                if !existing_sov_anoms.is_empty() {
-                    return Ok((hub_id, *level, i64::from(up_tid), site.clone(), existing_sov_anoms, Vec::new()));
-                }
-
-                snap.next_entity_id += 1;
-                let anom_id = format!("DNG-{}-{}", site.dungeon_id, snap.next_entity_id);
-                let mut volume = 0.0_f64;
-                let mut newly_spawned = Vec::with_capacity(site.asteroids.len());
-                for (i, a) in site.asteroids.iter().enumerate() {
-                    let off = mining_sites::asteroid_offset(i);
-                    let pos = [sov_pos[0] + off[0], sov_pos[1] + off[1], sov_pos[2] + off[2]];
-                    let (uvol, rad) = type_vol_rad(a.type_id);
-                    volume += a.units as f64 * uvol;
-                    snap.next_entity_id += 1;
-                    let aid = snap.next_entity_id;
-                    snap.asteroids.insert(
-                        aid,
-                        AsteroidRecord {
-                            asteroid_id: aid,
-                            solar_system_id: sys_id,
-                            belt_id: 0,
-                            type_id: a.type_id,
-                            quantity: a.units,
-                            initial_quantity: a.units,
-                            position: (pos[0], pos[1], pos[2]),
-                            radius: rad,
-                        },
-                    );
-                    newly_spawned.push((aid, a.type_id, a.units as u64, uvol, rad, DVec3::from_array(pos)));
-                }
-                snap.cosmic_anomalies.entry(sys_id).or_default().push(CosmicAnomalyRecord {
-                    anomaly_id: anom_id.clone(),
-                    solar_system_id: sys_id,
-                    name: site.name.clone(),
-                    anomaly_type: "SovOre".into(),
-                    position: sov_pos,
-                    signal_strength: 1.0,
-                    ore_types: site.ore_types(),
-                    remaining_volume: volume,
-                    created_unix: now,
-                    lifetime_seconds: 0,
-                    cleared: false,
-                });
-                snap.cosmic_signatures.entry(sys_id).or_default().push(CosmicSignatureRecord {
-                    signature_id: anom_id.clone(),
-                    solar_system_id: sys_id,
-                    sig_group: "SovOre".into(),
-                    type_name: site.name.clone(),
-                    position: sov_pos,
-                    signal_strength: 1.0,
-                    wormhole_type_id: None,
-                    destination_system_id: None,
-                    created_unix: now,
-                    lifetime_seconds: 0,
-                    max_mass_kg: 0.0,
-                    remaining_mass_kg: 0.0,
-                    max_jump_mass_kg: 0.0,
-                    collapsed: false,
-                });
-
-                Ok((hub_id, *level, i64::from(up_tid), site.clone(), vec![anom_id], newly_spawned))
-            });
-
-            let (hub_id, level, upgrade_type_id, site, anom_ids, newly_spawned) = match res {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-
-            if !newly_spawned.is_empty() {
-                let handle = ctx.systems.get_or_spawn(sys_id);
-                for (aid, tid, units, uvol, rad, pos) in newly_spawned {
-                    let ball = Ball {
-                        id: aid,
-                        type_id: tid,
-                        position: pos,
-                        velocity: DVec3::ZERO,
-                        max_velocity: 0.0,
-                        inertia: 1.0,
-                        mass: 80_000.0,
-                        radius: rad,
-                        speed_fraction: 0.0,
-                        mode: MovementMode::Stop,
-                    };
-                    let st = AsteroidState {
-                        asteroid_id: aid,
-                        belt_id: 0,
-                        type_id: tid,
-                        initial_units: units,
-                        remaining_units: units,
-                        unit_volume: uvol,
-                        depleted: false,
-                        respawn_at_tick: None,
-                    };
-                    let _ = handle.spawn_asteroid(st, ball).await;
-                }
-            }
-
-            Some(Ok(PyRep::keyval([
-                ("hubID", PyRep::Integer(hub_id)),
-                ("solarSystemID", PyRep::Integer(sys_id as i64)),
-                ("prospectingLevel", PyRep::Integer(i64::from(level))),
-                ("upgradeTypeID", PyRep::Integer(upgrade_type_id)),
-                ("online", PyRep::Bool(true)),
-                (
-                    "spawnedAnomalies",
-                    PyRep::List(anom_ids.into_iter().map(PyRep::String).collect()),
-                ),
-                (
-                    "oreTypes",
-                    PyRep::List(
-                        site.ore_types()
-                            .into_iter()
-                            .map(|tid| PyRep::Integer(i64::from(tid)))
-                            .collect(),
-                    ),
-                ),
-            ])))
-        }
-
-        ("sovHubSvc", "GetInstalledUpgradesLocal")
-        | ("sovHubSvc", "GetInstalledUpgradesForHub") => {
-            let _ = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let Some(sys_id) = session.solar_system_id else {
-                return Some(Err(BridgeRpcError {
-                    code: "NoSolarSystem".into(),
-                    message: "Session has no active solar system".into(),
-                }));
-            };
-            let arg_hub_id = args.first().and_then(|a| a.as_i64());
-            let (hub_id, lvl, sov_anoms, installed) = ctx.db.with_snapshot(|snap| {
-                let resolved_hub = arg_hub_id.or_else(|| {
-                    snap.structures
-                        .values()
-                        .filter(|s| s.solar_system_id == sys_id)
-                        .map(|s| s.structure_id)
-                        .min()
-                });
-                // Installed upgrades: SDE group-4768 items moved into the hub by SaveUpgradeConfiguration.
-                let mut installed: Vec<u32> = resolved_hub
-                    .map(|hid| {
-                        snap.items
-                            .values()
-                            .filter(|it| {
-                                it.location_id == hid
-                                    && it.flag == eve_db::InventoryFlag::SubSystemSlot0
-                                    && ctx.sde.types.get(&it.type_id).is_some_and(|t| t.group_id == 4768)
-                            })
-                            .map(|it| it.type_id)
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                installed.sort_unstable();
-                let l = snap.sov_prospecting_levels.get(&sys_id).copied().unwrap_or(0);
-                let list: Vec<PyRep> = snap
-                    .cosmic_anomalies
-                    .get(&sys_id)
-                    .map(|anoms| {
-                        anoms
-                            .iter()
-                            .filter(|a| a.anomaly_type == "SovOre" && !a.cleared)
-                            .map(|a| {
-                                PyRep::keyval([
-                                    ("anomalyID", PyRep::String(a.anomaly_id.clone())),
-                                    ("siteName", PyRep::String(a.name.clone())),
-                                    ("siteType", PyRep::String(a.anomaly_type.clone())),
-                                    ("signalStrength", PyRep::Real(1.0)),
-                                    ("x", PyRep::Real(a.position[0])),
-                                    ("y", PyRep::Real(a.position[1])),
-                                    ("z", PyRep::Real(a.position[2])),
-                                    (
-                                        "oreTypes",
-                                        PyRep::List(
-                                            a.ore_types
-                                                .iter()
-                                                .map(|&tid| PyRep::Integer(tid as i64))
-                                                .collect(),
-                                        ),
-                                    ),
-                                ])
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                (resolved_hub, l, list, installed)
-            });
-            let upgrades: Vec<PyRep> = installed
-                .into_iter()
-                .map(|tid| {
-                    PyRep::keyval([
-                        ("typeID", PyRep::Integer(i64::from(tid))),
-                        ("online", PyRep::Bool(true)),
-                    ])
-                })
-                .collect();
-            Some(Ok(PyRep::keyval([
-                ("hubID", hub_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
-                ("solarSystemID", PyRep::Integer(sys_id as i64)),
-                ("prospectingLevel", PyRep::Integer(lvl as i64)),
-                ("upgrades", PyRep::List(upgrades)),
-                ("anomalies", PyRep::List(sov_anoms)),
-            ])))
-        }
-
-        ("scanSvc", "GetSystemScanMgr")
-        | ("scanSvc", "GetScanResults")
-        | ("scanMgr", "GetScanResults") => {
-            let _ = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let Some(sys_id) = session.solar_system_id else {
-                return Some(Err(BridgeRpcError {
-                    code: "NoSolarSystem".into(),
-                    message: "Session has no active solar system".into(),
-                }));
-            };
-            let handle = ctx.systems.get_or_spawn(sys_id);
-            let live_balls = handle.list_balls().await.unwrap_or_default();
-
-            let (anom_list, sig_list, gas_npc_ball_id) = ctx.db.with_snapshot(|snap| {
-                let mut found_gas_npc_id: Option<i64> = None;
-
-                let anoms: Vec<PyRep> = snap
-                    .cosmic_anomalies
-                    .get(&sys_id)
-                    .map(|list| {
-                        list.iter()
-                            .filter(|a| !a.cleared)
-                            .map(|a| {
-                                let anom_pos = DVec3::from_array(a.position);
-                                let mut site_asts: Vec<&AsteroidRecord> = snap
-                                    .asteroids
-                                    .values()
-                                    .filter(|ast| {
-                                        ast.solar_system_id == sys_id
-                                            && ast.quantity > 0
-                                            && DVec3::new(
-                                                ast.position.0,
-                                                ast.position.1,
-                                                ast.position.2,
-                                            )
-                                            .distance(anom_pos)
-                                                <= 50_000.0
-                                    })
-                                    .collect();
-                                site_asts.sort_by_key(|ast| ast.asteroid_id);
-                                let asteroid_ids: Vec<PyRep> = site_asts
-                                    .iter()
-                                    .map(|ast| PyRep::Integer(ast.asteroid_id))
-                                    .collect();
-                                let ore_types: Vec<PyRep> = a
-                                    .ore_types
-                                    .iter()
-                                    .map(|&tid| PyRep::Integer(tid as i64))
-                                    .collect();
-                                PyRep::keyval([
-                                    ("id", PyRep::String(a.anomaly_id.clone())),
-                                    ("anomalyID", PyRep::String(a.anomaly_id.clone())),
-                                    ("siteType", PyRep::String(a.anomaly_type.clone())),
-                                    ("siteName", PyRep::String(a.name.clone())),
-                                    ("signalStrength", PyRep::Real(1.0)),
-                                    ("probeRequired", PyRep::Bool(false)),
-                                    ("cleared", PyRep::Bool(a.cleared)),
-                                    ("x", PyRep::Real(a.position[0])),
-                                    ("y", PyRep::Real(a.position[1])),
-                                    ("z", PyRep::Real(a.position[2])),
-                                    ("oreTypes", PyRep::List(ore_types)),
-                                    ("asteroidBallIDs", PyRep::List(asteroid_ids)),
-                                ])
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default();
-
-                let sigs: Vec<PyRep> = snap
-                    .cosmic_signatures
-                    .get(&sys_id)
-                    .map(|list| {
-                        list.iter()
-                            .filter(|s| {
-                                !s.collapsed
-                                    && !matches!(s.sig_group.as_str(), "OreAnomaly" | "SovOre")
-                            })
-                            .map(|s| {
-                                let revealed = s.signal_strength >= 1.0;
-                                let pos_known = s.signal_strength >= 0.25;
-                                let sig_pos = DVec3::from_array(s.position);
-
-                                if s.sig_group == "Gas" {
-                                    if let Some(npc_ball) = live_balls.iter().find(|b| {
-                                        ctx.sde
-                                            .types
-                                            .get(&b.type_id)
-                                            .is_some_and(|t| t.category_id == 11)
-                                            && b.position.distance(sig_pos) <= 50_000.0
-                                    }) {
-                                        found_gas_npc_id = Some(npc_ball.id);
-                                    }
-                                }
-
-                                let (ore_types, ball_ids) = if revealed
-                                    && matches!(s.sig_group.as_str(), "Ore" | "Gas")
-                                {
-                                    let mut site_asts: Vec<&AsteroidRecord> = snap
-                                        .asteroids
-                                        .values()
-                                        .filter(|ast| {
-                                            ast.solar_system_id == sys_id
-                                                && ast.quantity > 0
-                                                && DVec3::new(
-                                                    ast.position.0,
-                                                    ast.position.1,
-                                                    ast.position.2,
-                                                )
-                                                .distance(sig_pos)
-                                                    <= 50_000.0
-                                        })
-                                        .collect();
-                                    site_asts.sort_by_key(|ast| ast.asteroid_id);
-                                    let tids: Vec<PyRep> = site_asts
-                                        .iter()
-                                        .map(|ast| PyRep::Integer(ast.type_id as i64))
-                                        .collect();
-                                    let bids: Vec<PyRep> = site_asts
-                                        .iter()
-                                        .map(|ast| PyRep::Integer(ast.asteroid_id))
-                                        .collect();
-                                    (tids, bids)
-                                } else {
-                                    (vec![], vec![])
-                                };
-                                PyRep::keyval([
-                                    ("id", PyRep::String(s.signature_id.clone())),
-                                    ("signatureID", PyRep::String(s.signature_id.clone())),
-                                    ("sigGroup", PyRep::String(s.sig_group.clone())),
-                                    (
-                                        "siteType",
-                                        if revealed {
-                                            PyRep::String(s.sig_group.clone())
-                                        } else {
-                                            PyRep::String("Unknown".into())
-                                        },
-                                    ),
-                                    (
-                                        "siteName",
-                                        if revealed {
-                                            PyRep::String(s.type_name.clone())
-                                        } else {
-                                            PyRep::String("Unidentified Cosmic Signature".into())
-                                        },
-                                    ),
-                                    ("signalStrength", PyRep::Real(s.signal_strength)),
-                                    ("warpable", PyRep::Bool(revealed)),
-                                    (
-                                        "x",
-                                        if pos_known {
-                                            PyRep::Real(s.position[0])
-                                        } else {
-                                            PyRep::None
-                                        },
-                                    ),
-                                    (
-                                        "y",
-                                        if pos_known {
-                                            PyRep::Real(s.position[1])
-                                        } else {
-                                            PyRep::None
-                                        },
-                                    ),
-                                    (
-                                        "z",
-                                        if pos_known {
-                                            PyRep::Real(s.position[2])
-                                        } else {
-                                            PyRep::None
-                                        },
-                                    ),
-                                    ("oreTypes", PyRep::List(ore_types)),
-                                    ("siteBallIDs", PyRep::List(ball_ids)),
-                                    (
-                                        "gasSiteNpcBallID",
-                                        if s.sig_group == "Gas" {
-                                            found_gas_npc_id
-                                                .map(PyRep::Integer)
-                                                .unwrap_or(PyRep::None)
-                                        } else {
-                                            PyRep::None
-                                        },
-                                    ),
-                                ])
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default();
-
-                (anoms, sigs, found_gas_npc_id)
-            });
-
-            Some(Ok(PyRep::keyval([
-                ("solarSystemID", PyRep::Integer(sys_id as i64)),
-                ("anomalies", PyRep::List(anom_list)),
-                ("signatures", PyRep::List(sig_list)),
-                ("gasSiteNpcSpawned", PyRep::Bool(gas_npc_ball_id.is_some())),
-                (
-                    "gasSiteNpcBallID",
-                    gas_npc_ball_id.map(PyRep::Integer).unwrap_or(PyRep::None),
-                ),
-            ])))
-        }
-
-        ("scanSvc", "RequestScans") => {
-            let _ = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let Some(sys_id) = session.solar_system_id else {
-                return Some(Err(BridgeRpcError {
-                    code: "NoSolarSystem".into(),
-                    message: "Session has no active solar system".into(),
-                }));
-            };
-            seed_system_mining_sites_from_sde(ctx, sys_id).await;
-
-            let mut probes: Vec<(DVec3, f64)> = Vec::new();
-            if let Some(PyRep::List(probe_list)) = args.first() {
-                for p in probe_list {
-                    if let PyRep::Tuple(coords) | PyRep::List(coords) = p {
-                        if coords.len() >= 4 {
-                            let px = coords[0].as_f64().unwrap_or(0.0);
-                            let py = coords[1].as_f64().unwrap_or(0.0);
-                            let pz = coords[2].as_f64().unwrap_or(0.0);
-                            let pr = coords[3].as_f64().unwrap_or(AU_METERS * 4.0);
-                            probes.push((DVec3::new(px, py, pz), pr));
-                        }
-                    } else if let Some(px) = p.dict_get("x").and_then(|v| v.as_f64()) {
-                        let py = p.dict_get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                        let pz = p.dict_get("z").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                        let pr = p
-                            .dict_get("radius")
-                            .and_then(|v| v.as_f64())
-                            .unwrap_or(AU_METERS * 4.0);
-                        probes.push((DVec3::new(px, py, pz), pr));
-                    }
-                }
-            }
-
-            let rows = ctx.db.with_mut_snapshot(|snap| {
-                let sigs = snap.cosmic_signatures.entry(sys_id).or_default();
-                let mut out_rows = Vec::new();
-                for s in sigs.iter_mut() {
-                    if s.collapsed || matches!(s.sig_group.as_str(), "OreAnomaly" | "SovOre") {
-                        continue;
-                    }
-                    let sig_pos = DVec3::from_array(s.position);
-                    if !probes.is_empty() {
-                        let mut covering_probes = 0usize;
-                        let mut total_contrib = 0.0_f64;
-                        for &(p_pos, radius) in &probes {
-                            let dist = sig_pos.distance(p_pos);
-                            if dist <= radius * 2.0 {
-                                covering_probes += 1;
-                                let dist_factor = (1.0 - (dist / (radius * 2.0))).clamp(0.05, 1.0);
-                                let radius_factor = ((8.0 * AU_METERS)
-                                    / radius.max(0.25 * AU_METERS))
-                                .clamp(0.15, 2.5);
-                                total_contrib += 0.32 * dist_factor * radius_factor;
-                            }
-                        }
-                        let tri_mult = if covering_probes >= 4 {
-                            1.0
-                        } else {
-                            (covering_probes as f64) * 0.18
-                        };
-                        let computed = (total_contrib * tri_mult).clamp(0.0, 1.0);
-                        if computed > s.signal_strength {
-                            s.signal_strength = computed;
-                        }
-                    }
-
-                    let revealed = s.signal_strength >= 1.0;
-                    out_rows.push(vec![
-                        PyRep::String(s.signature_id.clone()),
-                        PyRep::String(s.signature_id.clone()),
-                        PyRep::String(s.sig_group.clone()),
-                        if revealed {
-                            PyRep::String(s.sig_group.clone())
-                        } else {
-                            PyRep::String("Unknown".into())
-                        },
-                        if revealed {
-                            PyRep::String(s.type_name.clone())
-                        } else {
-                            PyRep::String("Unidentified Cosmic Signature".into())
-                        },
-                        PyRep::Real(s.signal_strength),
-                        if s.signal_strength >= 0.25 {
-                            PyRep::Real(s.position[0])
-                        } else {
-                            PyRep::None
-                        },
-                        if s.signal_strength >= 0.25 {
-                            PyRep::Real(s.position[1])
-                        } else {
-                            PyRep::None
-                        },
-                        if s.signal_strength >= 0.25 {
-                            PyRep::Real(s.position[2])
-                        } else {
-                            PyRep::None
-                        },
-                    ]);
-                }
-                out_rows
-            });
-
-            Some(Ok(PyRep::rowset(
-                vec![
-                    "id",
-                    "signatureID",
-                    "sigGroup",
-                    "siteType",
-                    "siteName",
-                    "signalStrength",
-                    "x",
-                    "y",
-                    "z",
-                ],
-                rows,
-            )))
-        }
-
-        ("scanSvc", "ConeScan") => {
-            let _ = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let Some(sys_id) = session.solar_system_id else {
-                return Some(Err(BridgeRpcError {
-                    code: "NoSolarSystem".into(),
-                    message: "Session has no active solar system".into(),
-                }));
-            };
-            let max_range = args
-                .get(1)
-                .and_then(|a| a.as_f64())
-                .unwrap_or(14.4 * AU_METERS);
-            let handle = ctx.systems.get_or_spawn(sys_id);
-            let ship_pos = if let Some(ship_id) = session.ship_id {
-                handle
-                    .get_ball_snapshot(ship_id)
-                    .await
-                    .ok()
-                    .flatten()
-                    .map(|(_, b)| b.position)
-                    .unwrap_or(DVec3::ZERO)
-            } else {
-                DVec3::ZERO
-            };
-
-            let all_balls = handle.list_balls().await.unwrap_or_default();
-            let mut results = Vec::new();
-            for b in all_balls {
-                if Some(b.id) == session.ship_id {
-                    continue;
-                }
-                let dist = ship_pos.distance(b.position);
-                if dist <= max_range {
-                    let group_id = ctx
-                        .sde
-                        .types
-                        .get(&b.type_id)
-                        .map(|t| t.group_id as i64)
-                        .unwrap_or(0);
-                    results.push(PyRep::keyval([
-                        ("itemID", PyRep::Integer(b.id)),
-                        ("typeID", PyRep::Integer(b.type_id as i64)),
-                        ("groupID", PyRep::Integer(group_id)),
-                        ("distance", PyRep::Real(dist)),
-                    ]));
-                }
-            }
-            Some(Ok(PyRep::List(results)))
-        }
-
-        _ => None,
+        _ => fw_insurgency::handle_hub_and_scan(ctx, session, service, method, args, kwargs).await,
     }
 }

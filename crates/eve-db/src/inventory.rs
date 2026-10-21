@@ -57,10 +57,16 @@ impl WorldRepository {
             let active_ship_colocated =
                 guard.is_ship_colocated_with_character(character_id, ch.active_ship_id, dock_id);
 
-            // Authorize destination: must be the character's current station, structure, or co-located active ship
+            // Authorize destination: must be the character's current station, structure, co-located active ship,
+            // or a live structure's fuel bay in the character's current solar system.
+            let valid_structure_fuel_bay = new_flag == InventoryFlag::SpecializedFuelBay
+                && guard.structures.get(&new_location_id).is_some_and(|st| {
+                    st.solar_system_id == ch.solar_system_id && st.state != "Destroyed"
+                });
             let valid_dest = (Some(new_location_id) == ch.station_id)
                 || (Some(new_location_id) == ch.structure_id)
-                || (active_ship_colocated && new_location_id == ch.active_ship_id);
+                || (active_ship_colocated && new_location_id == ch.active_ship_id)
+                || valid_structure_fuel_bay;
             if !valid_dest {
                 return Err(DbError::InvalidDestinationLocation {
                     character_id,

@@ -1,8 +1,6 @@
 //! Space physics, cyno jumps, scans, SDE celestials as balls (`SP-1`), spatial bubbles (`SP-2`),
 //! and binary Destiny streams (`P-7`) integration tests.
 
-#![forbid(unsafe_code)]
-
 use eve_destiny::wire::decode_add_balls;
 use eve_destiny::{Ball, DestinyEvent, MovementMode};
 use eve_machonet::SessionState;
@@ -429,7 +427,7 @@ async fn test_p7_destiny_binary_stream_undock_movement_and_stargate_jump() {
     assert_eq!(star_slim.dict_get("groupID").and_then(PyRep::as_i64), Some(6));
     assert_eq!(star_slim.dict_get("categoryID").and_then(PyRep::as_i64), Some(2));
 
-    // 3. Verify beyonce.GetFormations and invented beyonce.GetState return UnimplementedRPC
+    // 3. Verify unimplemented beyonce.GetFormations and invented beyonce.GetState return UnimplementedRPC
     let formations_err = ctx
         .dispatch_rpc(
             &mut sess,
@@ -441,7 +439,7 @@ async fn test_p7_destiny_binary_stream_undock_movement_and_stargate_jump() {
             None,
         )
         .await
-        .expect_err("GetFormations must return UnimplementedRPC");
+        .expect_err("Unimplemented beyonce.GetFormations must return UnimplementedRPC");
     assert_eq!(formations_err.code, "UnimplementedRPC");
 
     let get_state_err = ctx

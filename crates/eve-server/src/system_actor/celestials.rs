@@ -327,6 +327,31 @@ impl SystemHandle {
         rx.await.unwrap_or(false)
     }
 
+    /// Queues `event` for all grid observers of `ball_id`; returns `false` if the ball is unknown.
+    pub async fn emit_destiny_event(&self, ball_id: BallId, event: DestinyEvent) -> bool {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(SystemCommand::EmitDestinyEvent { ball_id, event, reply: tx })
+            .await
+            .is_err()
+        {
+            return false;
+        }
+        rx.await.unwrap_or(false)
+    }
+
+    /// Steers `ball_id` toward `point` (`beyonce.CmdGotoPoint`) and returns the current tick.
+    pub async fn goto_point(&self, ball_id: BallId, point: glam::DVec3) -> Result<u64, String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SystemCommand::GotoPoint { ball_id, point, reply: tx })
+            .await
+            .map_err(|_| "Solar system actor stopped".to_string())?;
+        rx.await
+            .map_err(|_| "Solar system reply dropped".to_string())?
+    }
+
     /// Queues a `SetState` destiny update for `observer_ball_id` (`P-7`).
     pub async fn push_set_state(&self, observer_ball_id: BallId) -> Result<u64, String> {
         let (tx, rx) = oneshot::channel();
