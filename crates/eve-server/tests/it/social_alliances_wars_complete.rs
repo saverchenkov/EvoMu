@@ -274,6 +274,8 @@ async fn test_wars_declaration_hq_eligibility_mutual_peace_allies_and_stats() {
     ]);
 
     let ctx = ServerContext::new();
+    // Fixed virtual clock: invite timestamps are compared with ctx.now_unix() and must not race the host wall clock.
+    ctx.set_clock(std::sync::Arc::new(eve_db::VirtualServerClock::with_fixed_base(1_800_000_000)));
     let mut sess1 = SessionState::new(911);
     common::login_pilot(&ctx, &mut sess1, "demo", "demo-secret").await;
     call(&ctx, &mut sess1, "charUnboundMgr", "SelectCharacterID", vec![PyRep::Integer(90_000_001)]).await.unwrap();
