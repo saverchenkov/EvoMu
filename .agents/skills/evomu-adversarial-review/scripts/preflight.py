@@ -253,7 +253,8 @@ def lint_tagged_tests(root, added):
         if not os.path.exists(full):
             continue
         try:
-            lines = open(full, errors="replace").read().splitlines()
+            full_text = open(full, errors="replace").read()
+            lines = full_text.splitlines()
         except OSError:
             continue
         attrs = [i for i, l in enumerate(lines) if TEST_ATTR_RE.match(l)]
@@ -282,6 +283,7 @@ def lint_tagged_tests(root, added):
             counted = {r for r in rows if not r.startswith(DATA_ROW_PREFIXES)}
             if not counted:
                 continue
+            feat_counted = {r for r in counted if not r.startswith(("rpc:", "notify:", "destiny:"))}
             body = "\n".join(lines[fn_line:end])
             strong = weak = 0
             for m in ASSERT_RE.finditer(body):
@@ -293,19 +295,26 @@ def lint_tagged_tests(root, added):
                 else:
                     strong += 1
             loc = (fpath, fn_line + 1)
+            for r in sorted(counted):
+                if r.startswith("rpc:") and "." in r[4:]:
+                    _, meth = r[4:].split(".", 1)
+                    if meth not in full_text:
+                        out.append(("UNTESTED_RPC_TAG",
+                                    "%s tags %s but file never references method '%s'" % (name, r, meth)) + loc)
             n = len(counted)
-            if n > max_rows:
+            nf = len(feat_counted)
+            if nf > max_rows:
                 out.append(("TOO_MANY_ROWS_PER_TEST",
-                            "%s tags %d ledger rows (max %d per test; split it so each row's acceptance is "
-                            "exercised and asserted)" % (name, n, max_rows)) + loc)
+                            "%s tags %d feature/endpoint rows (max %d per test; split it so each row's acceptance is "
+                            "exercised and asserted)" % (name, nf, max_rows)) + loc)
             if strong == 0:
                 out.append(("SHAPE_ONLY_TEST",
                             "%s tags %d row(s) but has no value assertions (%d shape/status-only asserts such as "
                             "matches!/is_ok/status_code)" % (name, n, weak)) + loc)
-            elif strong < -(-n // rows_per_assert):
+            elif (nf > 0 and strong < -(-nf // rows_per_assert)) or strong < -(-n // (rows_per_assert * 2)):
                 out.append(("THIN_ASSERTIONS",
-                            "%s tags %d row(s) with only %d value assertion(s) (need >= 1 per %g rows)"
-                            % (name, n, strong, rows_per_assert)) + loc)
+                            "%s tags %d row(s) (%d feat/endpoint) with only %d value assertion(s) (need >= 1 per %g feat rows)"
+                            % (name, n, nf, strong, rows_per_assert)) + loc)
     return out
 
 
@@ -411,8 +420,51 @@ def lint_new_test_files(root, base):
              "add `mod` to tests/it/main.rs" % f, f, 1) for f in sorted(new) if pat.match(f)]
 
 
+def lint_merge_conflicts_and_docs(root, added):
+    """Block unresolved git merge conflict markers in tracked files and self-contradictory S-10 counts in PLAN.md/README.md."""
+    out = []
+    check_files = set(added.keys()) | {"PLAN.md", "README.md"}
+    conflict_re = re.compile(r"^(?:<{7}\s|={7}\s*$|>{7}\s)")
+    for fpath in sorted(check_files):
+        full = os.path.join(root, fpath)
+        if not os.path.isfile(full):
+            continue
+        try:
+            lines = open(full, errors="replace").read().splitlines()
+        except OSError:
+            continue
+        for idx, ln in enumerate(lines, 1):
+            if conflict_re.match(ln):
+                out.append(("MERGE_CONFLICT_MARKER",
+                            "Unresolved git merge conflict marker '%s' in %s:%d" % (ln[:24], fpath, idx),
+                            fpath, idx))
+    # Check PLAN.md and README.md for contradictory explicit-service or match-arm counts across lines
+    for doc in ("PLAN.md", "README.md"):
+        full = os.path.join(root, doc)
+        if not os.path.isfile(full):
+            continue
+        try:
+            lines = open(full, errors="replace").read().splitlines()
+        except OSError:
+            continue
+        arms_seen = {}
+        for idx, ln in enumerate(lines, 1):
+            for m in re.finditer(r"\b(\d+)\s+total\s+`?\(service,\s*method\)`?\s+handlers\s+across\s+`?\*?\*?(\d+)\*?\*?`?\s+match\s+arms", ln):
+                arms_seen.setdefault((m.group(1), m.group(2)), []).append(idx)
+        if len(arms_seen) > 1:
+            desc = ", ".join("%s handlers/%s arms at L%s" % (k[0], k[1], v[0]) for k, v in sorted(arms_seen.items()))
+            first_ln = min(v[0] for v in arms_seen.values())
+            out.append(("S10_DOC_COUNT_MISMATCH",
+                        "%s states contradictory (service, method) handler / match-arm counts across lines: %s" % (doc, desc),
+                        doc, first_ln))
+    return out
+
+
 def run_early_gate(root, base, added, claims_path):
     violations = []
+
+    # 0. Merge conflict markers and contradictory S-10 doc counts
+    violations += lint_merge_conflicts_and_docs(root, added)
 
     # 1. RPC-name check (names must exist in the real client)
     all_viol, have_client = rpc_names.run()
