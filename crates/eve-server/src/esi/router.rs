@@ -593,6 +593,7 @@ impl EsiRouter {
             &op.method,
             &op.path_pattern,
             &matched.path_params,
+            &query_params,
             verified_claims.as_ref(),
             &req.body,
         )

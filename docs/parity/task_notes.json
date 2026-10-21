@@ -145,7 +145,7 @@
   },
   "ESI-7": {
     "assessment": "PARTIAL",
-    "note": "Fleets and User Interface ESI routes partially implemented; open operations and esi_external real-client journey remain."
+    "note": "All 24 Fleets and User Interface ESI routes implemented and tested; esi_external real-client journey and 2 flagged-fake ESI rows remain open."
   },
   "MN-01": {
     "assessment": "PARTIAL",

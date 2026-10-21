@@ -858,10 +858,7 @@ pub fn dispatch_char_social_route(
             };
             Some(ctx.db.with_snapshot(|snap| {
                 if !snap.characters.contains_key(&char_id) {
-                    return RouteExecutionResult::error(
-                        404,
-                        format!("Character {char_id} not found"),
-                    );
+                    return RouteExecutionResult::error(404, format!("Character {char_id} not found"));
                 }
                 let mut bms: Vec<_> = snap
                     .bookmarks
@@ -872,15 +869,19 @@ pub fn dispatch_char_social_route(
                 let out: Vec<Value> = bms
                     .into_iter()
                     .map(|b| {
-                        json!({
+                        let mut obj = json!({
                             "bookmark_id": b.bookmark_id,
                             "creator_id": b.owner_id,
                             "created": format_iso8601_utc(now),
                             "label": b.label,
-                            "notes": "",
+                            "notes": b.memo,
                             "location_id": b.solar_system_id as i64,
                             "coordinates": { "x": b.x, "y": b.y, "z": b.z },
-                        })
+                        });
+                        if let Some(fid) = b.folder_id {
+                            obj["folder_id"] = json!(fid);
+                        }
+                        obj
                     })
                     .collect();
                 RouteExecutionResult::ok_json(json!(out), 3600)
@@ -894,15 +895,39 @@ pub fn dispatch_char_social_route(
             };
             Some(ctx.db.with_snapshot(|snap| {
                 if !snap.characters.contains_key(&char_id) {
-                    return RouteExecutionResult::error(
-                        404,
-                        format!("Character {char_id} not found"),
-                    );
+                    return RouteExecutionResult::error(404, format!("Character {char_id} not found"));
                 }
-                RouteExecutionResult::ok_json(
-                    json!([{ "folder_id": 1, "name": "Personal Locations" }]),
-                    3600,
-                )
+                let mut folders: Vec<_> = snap
+                    .bookmark_folders
+                    .values()
+                    .filter(|f| f.owner_id == char_id && f.corporation_id.is_none())
+                    .collect();
+                folders.sort_by_key(|f| f.folder_id);
+                let mut out: Vec<Value> = folders
+                    .into_iter()
+                    .map(|f| json!({ "folder_id": f.folder_id, "name": f.folder_name }))
+                    .collect();
+                let mut known_fids: Vec<i64> = snap
+                    .bookmark_folders
+                    .values()
+                    .filter(|f| f.owner_id == char_id && f.corporation_id.is_none())
+                    .map(|f| f.folder_id)
+                    .collect();
+                let mut bm_fids: Vec<i64> = snap
+                    .bookmarks
+                    .values()
+                    .filter(|b| b.owner_id == char_id)
+                    .filter_map(|b| b.folder_id)
+                    .collect();
+                bm_fids.sort_unstable();
+                bm_fids.dedup();
+                for fid in bm_fids {
+                    if !known_fids.contains(&fid) {
+                        known_fids.push(fid);
+                        out.push(json!({ "folder_id": fid, "name": format!("Folder {fid}") }));
+                    }
+                }
+                RouteExecutionResult::ok_json(json!(out), 3600)
             }))
         }
 
@@ -913,10 +938,7 @@ pub fn dispatch_char_social_route(
             };
             Some(ctx.db.with_snapshot(|snap| {
                 if !snap.corporations.contains_key(&corp_id) {
-                    return RouteExecutionResult::error(
-                        404,
-                        format!("Corporation {corp_id} not found"),
-                    );
+                    return RouteExecutionResult::error(404, format!("Corporation {corp_id} not found"));
                 }
                 let mut bms: Vec<_> = snap
                     .bookmarks
@@ -934,15 +956,19 @@ pub fn dispatch_char_social_route(
                 let out: Vec<Value> = bms
                     .into_iter()
                     .map(|b| {
-                        json!({
+                        let mut obj = json!({
                             "bookmark_id": b.bookmark_id,
                             "creator_id": b.owner_id,
                             "created": format_iso8601_utc(now),
                             "label": b.label,
-                            "notes": "",
+                            "notes": b.memo,
                             "location_id": b.solar_system_id as i64,
                             "coordinates": { "x": b.x, "y": b.y, "z": b.z },
-                        })
+                        });
+                        if let Some(fid) = b.folder_id {
+                            obj["folder_id"] = json!(fid);
+                        }
+                        obj
                     })
                     .collect();
                 RouteExecutionResult::ok_json(json!(out), 3600)
@@ -956,15 +982,39 @@ pub fn dispatch_char_social_route(
             };
             Some(ctx.db.with_snapshot(|snap| {
                 if !snap.corporations.contains_key(&corp_id) {
-                    return RouteExecutionResult::error(
-                        404,
-                        format!("Corporation {corp_id} not found"),
-                    );
+                    return RouteExecutionResult::error(404, format!("Corporation {corp_id} not found"));
                 }
-                RouteExecutionResult::ok_json(
-                    json!([{ "folder_id": 1, "name": "Corporation Tactical Bookmarks", "creator_id": corp_id }]),
-                    3600,
-                )
+                let mut folders: Vec<_> = snap
+                    .bookmark_folders
+                    .values()
+                    .filter(|f| f.owner_id == corp_id || f.corporation_id == Some(corp_id))
+                    .collect();
+                folders.sort_by_key(|f| f.folder_id);
+                let mut out: Vec<Value> = folders
+                    .into_iter()
+                    .map(|f| json!({ "folder_id": f.folder_id, "name": f.folder_name, "creator_id": f.owner_id }))
+                    .collect();
+                let mut known_fids: Vec<i64> = snap
+                    .bookmark_folders
+                    .values()
+                    .filter(|f| f.owner_id == corp_id || f.corporation_id == Some(corp_id))
+                    .map(|f| f.folder_id)
+                    .collect();
+                let mut bm_fids: Vec<i64> = snap
+                    .bookmarks
+                    .values()
+                    .filter(|b| b.owner_id == corp_id)
+                    .filter_map(|b| b.folder_id)
+                    .collect();
+                bm_fids.sort_unstable();
+                bm_fids.dedup();
+                for fid in bm_fids {
+                    if !known_fids.contains(&fid) {
+                        known_fids.push(fid);
+                        out.push(json!({ "folder_id": fid, "name": format!("Corp Folder {fid}"), "creator_id": corp_id }));
+                    }
+                }
+                RouteExecutionResult::ok_json(json!(out), 3600)
             }))
         }
 
@@ -975,10 +1025,7 @@ pub fn dispatch_char_social_route(
             };
             Some(ctx.db.with_snapshot(|snap| {
                 if !snap.corporations.contains_key(&corp_id) {
-                    return RouteExecutionResult::error(
-                        404,
-                        format!("Corporation {corp_id} not found"),
-                    );
+                    return RouteExecutionResult::error(404, format!("Corporation {corp_id} not found"));
                 }
                 let mut projs: Vec<_> = snap
                     .corp_projects
@@ -1006,18 +1053,19 @@ pub fn dispatch_char_social_route(
 
         ("GET", "/opportunities/groups") => {
             let mut ids: Vec<i64> = ctx.sde.career_goals.keys().map(|&id| id as i64).collect();
-            if ids.is_empty() {
-                ids.push(100);
-            }
+            ids.extend(
+                ctx.sde
+                    .node_graphs
+                    .values()
+                    .filter_map(|ng| ng.parent_graph_id.map(|pid| pid as i64)),
+            );
             ids.sort_unstable();
+            ids.dedup();
             Some(RouteExecutionResult::ok_json(json!(ids), 3600))
         }
 
         ("GET", "/opportunities/tasks") => {
             let mut ids: Vec<i64> = ctx.sde.node_graphs.keys().map(|&id| id as i64).collect();
-            if ids.is_empty() {
-                ids.push(1);
-            }
             ids.sort_unstable();
             Some(RouteExecutionResult::ok_json(json!(ids), 3600))
         }
@@ -1029,25 +1077,18 @@ pub fn dispatch_char_social_route(
             };
             Some(ctx.db.with_snapshot(|snap| {
                 if !snap.characters.contains_key(&char_id) {
-                    return RouteExecutionResult::error(
-                        404,
-                        format!("Character {char_id} not found"),
-                    );
+                    return RouteExecutionResult::error(404, format!("Character {char_id} not found"));
                 }
                 let mut out = Vec::new();
                 if let Some(npe) = snap.npe_progress.get(&char_id) {
-                    for &gid in &npe.claimed_goals {
+                    let mut gids: Vec<u32> = npe.claimed_goals.iter().copied().collect();
+                    gids.sort_unstable();
+                    for gid in gids {
                         out.push(json!({
                             "task_id": gid as i64,
                             "completed_at": format_iso8601_utc(now),
                         }));
                     }
-                }
-                if out.is_empty() {
-                    out.push(json!({
-                        "task_id": 1,
-                        "completed_at": format_iso8601_utc(now),
-                    }));
                 }
                 RouteExecutionResult::ok_json(json!(out), 3600)
             }))

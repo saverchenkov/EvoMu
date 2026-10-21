@@ -4,8 +4,10 @@
 use crate::esi::sample_routes::{
     open_sde_sqlite, paginate_slice, parse_path_i64, RouteExecutionResult,
 };
+use crate::router::cache_notifications::NotificationTarget;
 use crate::router::ServerContext;
 use eve_db::{SsoTokenClaims, UpwellStructureRecord, WorldStateSnapshot};
+use eve_proto::PyRep;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -1297,55 +1299,66 @@ pub fn dispatch_universe_and_nav(
         // 5. User Interface tag (ESI-7)
         ("POST", "/ui/autopilot/waypoint") => {
             let Some(dest_str) = query_params.get("destination_id") else {
-                return RouteExecutionResult::error(
-                    400,
-                    "Missing required query parameter 'destination_id'",
-                );
+                return RouteExecutionResult::error(400, "Missing required query parameter 'destination_id'");
             };
-            let Ok(destination_id) = dest_str.parse::<i64>() else {
-                return RouteExecutionResult::error(
-                    400,
-                    format!("Invalid integer destination_id '{dest_str}'"),
-                );
+            let Some(destination_id) = dest_str.parse::<i64>().ok().filter(|&id| id > 0) else {
+                return RouteExecutionResult::error(400, format!("Invalid integer destination_id '{dest_str}'"));
             };
-            let _add_to_beginning = match query_params.get("add_to_beginning").map(|s| s.as_str()) {
+            let add_to_beginning = match query_params.get("add_to_beginning").map(String::as_str) {
                 Some("true") => true,
                 Some("false") => false,
-                _ => {
-                    return RouteExecutionResult::error(
-                        400,
-                        "Missing or invalid boolean query parameter 'add_to_beginning'",
-                    );
-                }
+                _ => return RouteExecutionResult::error(400, "Missing or invalid boolean query parameter 'add_to_beginning'"),
             };
-            let _clear_other_waypoints =
-                match query_params.get("clear_other_waypoints").map(|s| s.as_str()) {
-                    Some("true") => true,
-                    Some("false") => false,
-                    _ => {
-                        return RouteExecutionResult::error(
-                            400,
-                            "Missing or invalid boolean query parameter 'clear_other_waypoints'",
-                        );
-                    }
-                };
+            let clear_other_waypoints = match query_params.get("clear_other_waypoints").map(String::as_str) {
+                Some("true") => true,
+                Some("false") => false,
+                _ => return RouteExecutionResult::error(400, "Missing or invalid boolean query parameter 'clear_other_waypoints'"),
+            };
             let is_known_destination = u32::try_from(destination_id)
                 .ok()
                 .is_some_and(|sid| ctx.sde.solar_systems.contains_key(&sid))
                 || ctx.sde.stations.contains_key(&destination_id)
-                || ctx
-                    .db
-                    .with_snapshot(|snap| snap.structures.contains_key(&destination_id));
+                || ctx.db.with_snapshot(|snap| snap.structures.contains_key(&destination_id));
             if !is_known_destination {
                 return RouteExecutionResult::error(
                     404,
                     format!("Destination {destination_id} is not a known solar system, station, or structure"),
                 );
             }
-            RouteExecutionResult::error(
-                501,
-                "Live client UI session routing for /ui/autopilot/waypoint is not active (ESI-7)",
-            )
+            let caller_id = claims.map(|c| c.character_id).unwrap_or(0);
+            let is_online = ctx
+                .db
+                .with_snapshot(|snap| snap.characters.get(&caller_id).map(|ch| ch.user_id))
+                .is_some_and(|uid| ctx.db.get_online_session(uid).is_some());
+            if !is_online {
+                return RouteExecutionResult::error(
+                    501,
+                    "Live client UI session routing for /ui/autopilot/waypoint is not active (ESI-7)",
+                );
+            }
+            ctx.esi_state.update_autopilot_waypoint(
+                caller_id,
+                destination_id,
+                add_to_beginning,
+                clear_other_waypoints,
+            );
+            ctx.notify(
+                NotificationTarget::Character(caller_id),
+                "OnAutopilotUpdated",
+                "charid",
+                vec![
+                    PyRep::Integer(destination_id),
+                    PyRep::Bool(add_to_beginning),
+                    PyRep::Bool(clear_other_waypoints),
+                ],
+            );
+            ctx.notify(
+                NotificationTarget::Character(caller_id),
+                "OnDestinationSet",
+                "charid",
+                vec![PyRep::Integer(destination_id)],
+            );
+            RouteExecutionResult::no_content(0)
         }
 
         // Any other defined OpenAPI operation returns 501 Not Implemented until ESI-5..ESI-7.

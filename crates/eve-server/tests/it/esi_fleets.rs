@@ -455,7 +455,7 @@ async fn test_esi_fleets_settings_members_invite_move_and_kick_roundtrip() {
         403,
     );
 
-    // Negative POST /fleets/{fleet_id}/members checks
+    // Negative POST /fleets/{fleet_id}/members checks (including R-ESI7-P1-03 wing/squad validation)
     call(
         &router,
         EsiHttpRequest::new("POST", format!("/v1/fleets/{fleet_id}/members/"))
@@ -470,8 +470,61 @@ async fn test_esi_fleets_settings_members_invite_move_and_kick_roundtrip() {
             .with_body(br#"{"character_id":99999999,"role":"squad_member"}"#.to_vec()),
         404,
     );
+    call(
+        &router,
+        EsiHttpRequest::new("POST", format!("/v1/fleets/{fleet_id}/members/"))
+            .with_bearer_token(&boss_token)
+            .with_body(
+                serde_json::to_vec(&json!({
+                    "character_id": wingman_id,
+                    "role": "squad_member",
+                    "wing_id": 99999,
+                    "squad_id": 1,
+                }))
+                .unwrap(),
+            ),
+        404,
+    );
+    call(
+        &router,
+        EsiHttpRequest::new("POST", format!("/v1/fleets/{fleet_id}/members/"))
+            .with_bearer_token(&boss_token)
+            .with_body(
+                serde_json::to_vec(&json!({
+                    "character_id": wingman_id,
+                    "role": "squad_member",
+                    "wing_id": 1,
+                    "squad_id": 99999,
+                }))
+                .unwrap(),
+            ),
+        404,
+    );
 
     // 4. PUT /fleets/{fleet_id}/members/{member_id} & DELETE /fleets/{fleet_id}/members/{member_id}
+    // R-ESI7-P1-03: moving to wing_commander without wing_id or squad_member without wing_id/squad_id -> 400; nonexistent wing/squad -> 404
+    call(
+        &router,
+        EsiHttpRequest::new("PUT", format!("/v1/fleets/{fleet_id}/members/{wingman_id}/"))
+            .with_bearer_token(&boss_token)
+            .with_body(br#"{"role":"wing_commander"}"#.to_vec()),
+        400,
+    );
+    call(
+        &router,
+        EsiHttpRequest::new("PUT", format!("/v1/fleets/{fleet_id}/members/{wingman_id}/"))
+            .with_bearer_token(&boss_token)
+            .with_body(br#"{"role":"squad_member","wing_id":1}"#.to_vec()),
+        400,
+    );
+    call(
+        &router,
+        EsiHttpRequest::new("PUT", format!("/v1/fleets/{fleet_id}/members/{wingman_id}/"))
+            .with_bearer_token(&boss_token)
+            .with_body(br#"{"role":"wing_commander","wing_id":99999}"#.to_vec()),
+        404,
+    );
+
     call(
         &router,
         EsiHttpRequest::new(
@@ -502,6 +555,48 @@ async fn test_esi_fleets_settings_members_invite_move_and_kick_roundtrip() {
     assert_eq!(
         moved_wingman["join_time"],
         json!(format_iso8601_utc(invite_unix))
+    );
+
+    // R-ESI7-P1-01 & R-ESI7-P1-02: Wing commander cannot mutate fleet settings, create/delete wings, or move/kick the fleet boss
+    call(
+        &router,
+        EsiHttpRequest::new("PUT", format!("/v1/fleets/{fleet_id}/"))
+            .with_bearer_token(&wingman_token)
+            .with_body(br#"{"motd":"wc cannot set motd"}"#.to_vec()),
+        403,
+    );
+    call(
+        &router,
+        EsiHttpRequest::new("POST", format!("/v1/fleets/{fleet_id}/wings/"))
+            .with_bearer_token(&wingman_token)
+            .with_body(b"{}".to_vec()),
+        403,
+    );
+    call(
+        &router,
+        EsiHttpRequest::new("DELETE", format!("/v1/fleets/{fleet_id}/wings/1/"))
+            .with_bearer_token(&wingman_token),
+        403,
+    );
+    call(
+        &router,
+        EsiHttpRequest::new("PUT", format!("/v1/fleets/{fleet_id}/members/{boss_id}/"))
+            .with_bearer_token(&wingman_token)
+            .with_body(br#"{"role":"squad_member","wing_id":1,"squad_id":1}"#.to_vec()),
+        403,
+    );
+    call(
+        &router,
+        EsiHttpRequest::new("DELETE", format!("/v1/fleets/{fleet_id}/members/{boss_id}/"))
+            .with_bearer_token(&wingman_token),
+        403,
+    );
+    // R-ESI7-P1-02: Even the boss cannot DELETE /fleets/{fleet_id}/members/{boss_id} without transferring leadership
+    call(
+        &router,
+        EsiHttpRequest::new("DELETE", format!("/v1/fleets/{fleet_id}/members/{boss_id}/"))
+            .with_bearer_token(&boss_token),
+        403,
     );
 
     // Kick member via DELETE /fleets/{fleet_id}/members/{member_id}
@@ -680,6 +775,23 @@ async fn test_esi_fleets_wings_and_squads_hierarchy_lifecycle() {
     );
     let sq2_id = created_sq2["squad_id"].as_i64().expect("squad_id 2");
     assert!(sq2_id > sq1_id);
+
+    // R-ESI7-P1-03: Inviting or moving a member with a squad_id that belongs to new_wing_id while specifying wing_id=1 returns 400
+    call(
+        &router,
+        EsiHttpRequest::new("POST", format!("/v1/fleets/{fleet_id}/members/"))
+            .with_bearer_token(&boss_token)
+            .with_body(
+                serde_json::to_vec(&json!({
+                    "character_id": 90_000_002,
+                    "role": "squad_member",
+                    "wing_id": 1,
+                    "squad_id": sq1_id,
+                }))
+                .unwrap(),
+            ),
+        400,
+    );
 
     // 5. Rename squad 1 via PUT /fleets/{fleet_id}/squads/{squad_id} -> 204 No Content
     call(

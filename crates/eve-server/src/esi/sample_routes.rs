@@ -526,6 +526,7 @@ pub fn dispatch_operation(
         method,
         path_pattern,
         path_params,
+        query_params,
         claims,
         req_body,
     ) {

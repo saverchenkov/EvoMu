@@ -31,6 +31,7 @@ mod esi_fleets;
 mod esi_full;
 mod esi_market_industry_pi;
 mod esi_routes;
+mod esi_ui_and_features;
 mod esi_universe_character;
 mod esi_universe_fw_complete;
 mod esi_universe_sov_complete;
