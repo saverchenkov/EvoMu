@@ -409,8 +409,19 @@ pub fn handle(
                     format!("Invalid surveyID {survey_id}"),
                 )));
             }
-            // Award survey reward: 10,000 unallocated skill points
+            let now = ctx.now_unix();
+            // Award survey reward: 10,000 unallocated skill points only if survey_id is currently active for caller
             let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let mut store = load_store(snap);
+                let rec = store.by_character.entry(char_id).or_default();
+                if rec.active_survey_id != Some(survey_id) {
+                    return Err(rpc_err(
+                        "SurveyNotActive",
+                        format!("Survey {survey_id} is not active or has already been claimed"),
+                    ));
+                }
+                rec.active_survey_id = None;
+                save_store(snap, &store, now);
                 let ch = snap
                     .characters
                     .get_mut(&char_id)

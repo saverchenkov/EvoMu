@@ -420,10 +420,24 @@ pub(super) async fn handle_bookmarks(
             let is_move = method.starts_with("Move");
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {
-                let is_shared_target = target_folder_id
-                    .and_then(|fid| snap.bookmark_folders.get(&fid))
-                    .map(|f| f.is_shared)
-                    .unwrap_or(false);
+                let is_shared_target = if let Some(fid) = target_folder_id {
+                    let Some(tf) = snap.bookmark_folders.get(&fid) else {
+                        return Err(BridgeRpcError { code: "FolderNotFound".into(), message: format!("Bookmark folder {fid} not found") });
+                    };
+                    if tf.owner_id != char_id && !tf.is_shared {
+                        return Err(BridgeRpcError { code: "BookmarkFolderAccessDenied".into(), message: "No write access to target bookmark folder".into() });
+                    }
+                    tf.is_shared
+                } else {
+                    false
+                };
+                if !is_move {
+                    let current_in_folder = snap.bookmarks.values().filter(|b| b.folder_id == target_folder_id && (is_shared_target || b.owner_id == char_id)).count();
+                    if current_in_folder + bm_ids.len() > 500 {
+                        let code = if is_shared_target { "MaxSharedFolderBookmarksReached" } else { "MaxBookmarksReached" };
+                        return Err(BridgeRpcError { code: code.into(), message: "Bookmark folder capacity (500) exceeded".into() });
+                    }
+                }
                 let mut out_ids = Vec::new();
                 for &bm_id in &bm_ids {
                     let Some(orig) = snap.bookmarks.get(&bm_id).cloned() else {
@@ -432,6 +446,12 @@ pub(super) async fn handle_bookmarks(
                             message: format!("Bookmark {bm_id} not found"),
                         });
                     };
+                    if orig.owner_id != char_id && !orig.is_shared {
+                        return Err(BridgeRpcError {
+                            code: "BookmarkAccessDenied".into(),
+                            message: format!("No access to bookmark {bm_id}"),
+                        });
+                    }
                     if is_move {
                         if let Some(bm) = snap.bookmarks.get_mut(&bm_id) {
                             bm.folder_id = target_folder_id;

@@ -129,6 +129,7 @@ pub struct SpewedLootCan {
 
 #[derive(Default)]
 pub struct PveExplorationRegistry {
+    pub db_weak: std::sync::Weak<eve_db::WorldRepository>,
     pub seeded_systems: HashMap<SolarSystemId, bool>,
     pub sites_by_system: HashMap<SolarSystemId, Vec<PveSiteInstance>>,
     pub escalations_by_char: HashMap<CharacterId, Vec<EscalatingPathEntry>>,
@@ -150,7 +151,11 @@ pub fn with_pve_exploration_reg<R>(
     f: impl FnOnce(&mut PveExplorationRegistry) -> R,
 ) -> R {
     let mut map = PVE_EXPLORATION_STATE.lock().unwrap();
-    let reg = map.entry(ctx_pve_key(ctx)).or_default();
+    map.retain(|_, v| v.db_weak.strong_count() > 0);
+    let reg = map.entry(ctx_pve_key(ctx)).or_insert_with(|| PveExplorationRegistry {
+        db_weak: std::sync::Arc::downgrade(&ctx.db),
+        ..Default::default()
+    });
     f(reg)
 }
 
@@ -605,7 +610,48 @@ pub async fn advance_site_wave_or_complete(
     site_id: &str,
 ) -> Result<PyRep, BridgeRpcError> {
     let char_id = session.character_id.unwrap_or(90_000_001);
+    if session.solar_system_id != Some(solar_system_id) {
+        return Err(BridgeRpcError {
+            code: "NotInSiteSystem".into(),
+            message: format!("Caller must be in solar system {solar_system_id} to advance site {site_id}"),
+        });
+    }
     ensure_system_pve_sites_seeded(ctx, solar_system_id).await;
+
+    let (current_balls, is_sleeper_cache_stabilized) = with_pve_exploration_reg(ctx, |reg| {
+        let sites = reg.sites_by_system.entry(solar_system_id).or_default();
+        let Some(site) = sites
+            .iter()
+            .find(|s| s.site_id == site_id || s.dungeon_id.to_string() == site_id)
+        else {
+            return Err(BridgeRpcError {
+                code: "SiteNotFound".into(),
+                message: format!("PvE site {site_id} not found in system {solar_system_id}"),
+            });
+        };
+        if site.cleared {
+            return Err(BridgeRpcError {
+                code: "SiteAlreadyCleared".into(),
+                message: format!("PvE site {site_id} is already cleared"),
+            });
+        }
+        Ok((
+            site.active_npc_ball_ids.clone(),
+            site.site_category == "SleeperCache" && site.sleeper_rift_stabilized,
+        ))
+    })?;
+
+    let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
+    if !is_sleeper_cache_stabilized {
+        for &bid in &current_balls {
+            if sys_handle.get_ball_snapshot(bid).await.ok().flatten().is_some() {
+                return Err(BridgeRpcError {
+                    code: "WaveNpcsRemaining".into(),
+                    message: format!("Cannot advance site {site_id}: wave NPC ball {bid} has not been destroyed"),
+                });
+            }
+        }
+    }
 
     let (
         dungeon_id,
@@ -650,7 +696,6 @@ pub async fn advance_site_wave_or_complete(
         ))
     })?;
 
-    let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
     for bid in old_balls {
         let _ = sys_handle.remove_ball(bid).await;
     }
@@ -1040,6 +1085,18 @@ pub async fn handle_pve_exploration(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            if let Some(instance_id) = args.first().and_then(|a| a.as_i64()) {
+                let fleet_count = args.get(1).and_then(|a| a.as_i64()).unwrap_or(5).clamp(1, 10) as usize;
+                return Some(
+                    crate::services::pve_special_sites::complete_special_dungeon_instance(
+                        ctx,
+                        session,
+                        instance_id,
+                        fleet_count,
+                    )
+                    .await,
+                );
+            }
             let sys_id = session.solar_system_id.unwrap_or(30_000_142);
             ensure_system_pve_sites_seeded(ctx, sys_id).await;
             let site_id = args.first().and_then(|a| a.as_str()).unwrap_or("").to_string();

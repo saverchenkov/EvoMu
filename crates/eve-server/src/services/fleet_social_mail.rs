@@ -193,7 +193,12 @@ pub(super) fn handle_mail_and_calendar(
                             message: format!("Recipient {rec_id} has blocked you"),
                         }));
                     }
-                    if let Some(&charge) = s.cspa_charges.get(&rec_id) {
+                    if let Some(charge) = s
+                        .cspa_charges
+                        .get(&rec_id)
+                        .copied()
+                        .or_else(|| ctx.db.with_snapshot(|snap| snap.character_cspa_charges.get(&rec_id).copied()))
+                    {
                         if charge.0 > 0 && !friendly_contact && target_label == 1 {
                             total_cspa = total_cspa.checked_add(charge).unwrap_or(total_cspa);
                         }
@@ -275,14 +280,7 @@ pub(super) fn handle_mail_and_calendar(
         }
 
         ("mailMgr", "PrimeOwners") => {
-            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            if let Some(PyRep::Real(isk)) = args.first() {
-                SOCIAL_EXTRAS
-                    .lock()
-                    .unwrap()
-                    .cspa_charges
-                    .insert(char_id, IskCents::from_f64_isk(isk.clamp(0.0, 1_000_000.0)));
-            }
+            let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let ids = extract_id_list(args.first());
             let rows: Vec<Vec<PyRep>> = ctx.db.with_snapshot(|snap| {
                 ids.into_iter()

@@ -226,6 +226,15 @@ pub(super) fn handle_wars(
     let now = ctx.now_unix();
     sync_wars(ctx);
     let arg_i64 = |i: usize| args.get(i).and_then(|a| a.as_i64());
+    let has_war_director_role = ctx.db.with_snapshot(|snap| {
+        snap.corporations.get(&my_corp).is_none_or(|c| {
+            c.ceo_id == char_id
+                || eve_db::corp_roles::has_role(
+                    c.member_roles.get(&char_id).copied().unwrap_or(0),
+                    eve_db::corp_roles::ROLE_DIRECTOR,
+                )
+        })
+    });
 
     match (service, method) {
         ("corpRegistry", "DeclareWarAgainst") | ("warRegistry", "DeclareWarAgainst") => {
@@ -328,6 +337,9 @@ pub(super) fn handle_wars(
         }
 
         ("warsInfoMgr", "CreateSurrenderNegotiation") | ("warsInfoMgr", "CreateWarAllyOffer") => {
+            if !has_war_director_role {
+                return err("CorpRoleDenied", "War negotiations require CEO or Director role");
+            }
             let war_id = arg_i64(0).unwrap_or(0);
             let isk = args.get(1).and_then(|a| a.as_f64()).unwrap_or(0.0);
             let message = args.get(2).and_then(|a| a.as_str()).unwrap_or("").to_string();
@@ -374,6 +386,9 @@ pub(super) fn handle_wars(
         }
 
         ("warsInfoMgr", "AcceptSurrender") | ("warsInfoMgr", "DeclineSurrender") | ("warsInfoMgr", "AcceptAllyNegotiation") | ("warsInfoMgr", "DeclineAllyOffer") | ("warsInfoMgr", "RetractWarAllyOffer") => {
+            if !has_war_director_role {
+                return err("CorpRoleDenied", "Acting on war negotiations requires CEO or Director role");
+            }
             let neg_id = arg_i64(0).unwrap_or(0);
             let mut st = WAR_STATE.lock().unwrap();
             let Some(idx) = st.negotiations.iter().position(|n| n.id == neg_id && n.status == "Offered") else {
@@ -442,6 +457,9 @@ pub(super) fn handle_wars(
         }
 
         ("warsInfoMgr", "RetractMutualWar") => {
+            if !has_war_director_role {
+                return err("CorpRoleDenied", "Retracting mutual war requires CEO or Director role");
+            }
             let war_id = arg_i64(0).unwrap_or(0);
             let Some(w) = ctx.db.with_snapshot(|snap| snap.wars.get(&war_id).cloned()) else {
                 return err("WarNotFound", format!("War {war_id} not found"));
@@ -459,6 +477,9 @@ pub(super) fn handle_wars(
         }
 
         ("warsInfoMgr", "SetOpenForAllies") => {
+            if !has_war_director_role {
+                return err("CorpRoleDenied", "Opening a war for allies requires CEO or Director role");
+            }
             let war_id = arg_i64(0).unwrap_or(0);
             let open = matches!(args.get(1), Some(PyRep::Bool(true)) | Some(PyRep::Integer(1)));
             let Some(w) = ctx.db.with_snapshot(|snap| snap.wars.get(&war_id).cloned()) else {
@@ -508,6 +529,9 @@ pub(super) fn handle_wars(
         }
 
         ("mutualWarInviteMgr", "SetInvitesBlockedByPlayer") => {
+            if !has_war_director_role {
+                return err("CorpRoleDenied", "Changing mutual war invite settings requires CEO or Director role");
+            }
             let blocked = matches!(args.first(), Some(PyRep::Bool(true)) | Some(PyRep::Integer(1)));
             let _ = ctx.db.with_snapshot(|snap| snap.corporations.contains_key(&my_corp));
             WAR_STATE
@@ -519,6 +543,9 @@ pub(super) fn handle_wars(
         }
 
         ("mutualWarInviteMgr", "SendInviteByPlayer") => {
+            if !has_war_director_role {
+                return err("CorpRoleDenied", "Sending mutual war invites requires CEO or Director role");
+            }
             let to_corp = arg_i64(0).unwrap_or(0);
             let valid = ctx.db.with_snapshot(|snap| snap.corporations.contains_key(&my_corp) && snap.corporations.contains_key(&to_corp) && to_corp != my_corp);
             if !valid {
@@ -537,12 +564,18 @@ pub(super) fn handle_wars(
         }
 
         ("mutualWarInviteMgr", "WithdrawInviteByPlayer") => {
+            if !has_war_director_role {
+                return err("CorpRoleDenied", "Withdrawing mutual war invites requires CEO or Director role");
+            }
             let to_corp = arg_i64(0).unwrap_or(0);
             let removed = WAR_STATE.lock().unwrap().mutual_invites.remove(&(my_corp, to_corp)).is_some();
             Some(Ok(PyRep::Bool(removed)))
         }
 
         ("mutualWarInviteMgr", "RespondToInviteByPlayer") => {
+            if !has_war_director_role {
+                return err("CorpRoleDenied", "Responding to mutual war invites requires CEO or Director role");
+            }
             let from_corp = arg_i64(0).unwrap_or(0);
             let accept = match args.get(1) {
                 Some(PyRep::Bool(b)) => *b,

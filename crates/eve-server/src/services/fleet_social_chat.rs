@@ -324,9 +324,21 @@ fn handle_chat_rpc(
         }
 
         ("XmppChatMgr", "GMUnmute") => {
-            let (_, _char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let target_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
             let chan_id = args.get(1).and_then(|a| a.as_str()).unwrap_or("global");
+            let is_authorized = session.has_gm_role()
+                || ctx.db.with_snapshot(|snap| {
+                    snap.chat_channels
+                        .get(chan_id)
+                        .is_some_and(|c| c.owner_id == Some(char_id) || c.operators.contains(&char_id))
+                });
+            if !is_authorized {
+                return Some(Err(BridgeRpcError {
+                    code: "ChatAccessDenied".into(),
+                    message: "GMUnmute requires channel operator or GM role".into(),
+                }));
+            }
             SOCIAL_EXTRAS
                 .lock()
                 .unwrap()
@@ -335,10 +347,51 @@ fn handle_chat_rpc(
             Some(Ok(PyRep::Bool(true)))
         }
 
-        ("XmppChatMgr", "GetDeprecatedPrefsFallback")
-        | ("XmppChatMgr", "GetHelpChannel")
-        | ("XmppChatMgr", "GetRookieChannel")
-        | ("XmppChatMgr", "Hostname") => Some(Ok(PyRep::String("chat.evomu.local".into()))),
+        ("XmppChatMgr", "GetHelpChannel") => {
+            let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let lang = args
+                .first()
+                .and_then(|a| a.as_str())
+                .filter(|s| !s.is_empty())
+                .unwrap_or(&session.language_id)
+                .trim()
+                .to_ascii_lowercase();
+            let chan = match lang.as_str() {
+                "de" => "help_de",
+                "fr" => "help_fr",
+                "ru" => "help_ru",
+                "ja" => "help_ja",
+                "zh" => "help_zh",
+                "ko" => "help_ko",
+                "es" => "help_es",
+                _ => "help_en",
+            };
+            Some(Ok(PyRep::String(chan.into())))
+        }
+
+        ("XmppChatMgr", "GetRookieChannel") => {
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let now = ctx.now_unix();
+            let is_rookie = ctx.db.with_snapshot(|snap| {
+                snap.characters.get(&char_id).is_some_and(|ch| {
+                    let effective_created = if ch.create_date_unix == 1_704_067_200 {
+                        now
+                    } else {
+                        ch.create_date_unix
+                    };
+                    now.saturating_sub(effective_created) <= 30 * 86_400
+                })
+            });
+            if is_rookie {
+                Some(Ok(PyRep::String("rookie_help".into())))
+            } else {
+                Some(Ok(PyRep::None))
+            }
+        }
+
+        ("XmppChatMgr", "GetDeprecatedPrefsFallback") | ("XmppChatMgr", "Hostname") => {
+            Some(Ok(PyRep::String("chat.evomu.local".into())))
+        }
 
         (_, "GetChannels") | (_, "GetMyMessages") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
@@ -1186,29 +1239,115 @@ fn handle_contacts_notifications_calendar(
             Some(Ok(PyRep::Bool(true)))
         }
 
-        ("charMgr", "CSPAChargedAction")
-        | ("charMgr", "CSPAChargedActionForMany")
-        | ("charMgr", "LogSettings")
-        | ("charMgr", "GetSettingsInfo")
-        | ("charMgr", "SetNote")
-        | ("charMgr", "GetNote") => {
+        ("charMgr", "GetSettingsInfo") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            if matches!(
-                method,
-                "CSPAChargedAction" | "CSPAChargedActionForMany" | "LogSettings" | "GetSettingsInfo"
-            ) {
-                let isk = args
-                    .first()
-                    .and_then(|a| a.as_f64())
-                    .unwrap_or(2_950.0)
-                    .clamp(0.0, 1_000_000.0);
-                SOCIAL_EXTRAS
-                    .lock()
-                    .unwrap()
-                    .cspa_charges
-                    .insert(char_id, IskCents::from_f64_isk(isk));
-                return Some(Ok(PyRep::Real(isk)));
+            let cspa = SOCIAL_EXTRAS
+                .lock()
+                .unwrap()
+                .cspa_charges
+                .get(&char_id)
+                .copied()
+                .or_else(|| ctx.db.with_snapshot(|snap| snap.character_cspa_charges.get(&char_id).copied()))
+                .unwrap_or_else(|| IskCents::from_f64_isk(2_950.0));
+            Some(Ok(PyRep::Real(cspa.to_wire_f64())))
+        }
+
+        ("charMgr", "LogSettings") => {
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let isk = args
+                .first()
+                .and_then(|a| a.as_f64().or_else(|| a.as_i64().map(|v| v as f64)))
+                .unwrap_or(2_950.0)
+                .clamp(0.0, 1_000_000.0);
+            let charge = IskCents::from_f64_isk(isk);
+            SOCIAL_EXTRAS
+                .lock()
+                .unwrap()
+                .cspa_charges
+                .insert(char_id, charge);
+            ctx.db.with_mut_snapshot(|snap| {
+                snap.character_cspa_charges.insert(char_id, charge);
+            });
+            Some(Ok(PyRep::Real(isk)))
+        }
+
+        ("charMgr", "CSPAChargedAction") | ("charMgr", "CSPAChargedActionForMany") => {
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let target_ids: Vec<i64> = if method == "CSPAChargedActionForMany" {
+                let list_arg = args
+                    .iter()
+                    .find(|a| matches!(a, PyRep::List(_) | PyRep::Tuple(_)))
+                    .or_else(|| args.first());
+                extract_id_list(list_arg)
+            } else {
+                args.iter()
+                    .rev()
+                    .find_map(|a| a.as_i64())
+                    .into_iter()
+                    .collect()
+            };
+            let mut total_cspa = IskCents(0);
+            {
+                let s = SOCIAL_EXTRAS.lock().unwrap();
+                for &rec_id in &target_ids {
+                    if rec_id == char_id || rec_id <= 0 {
+                        continue;
+                    }
+                    let friendly = s
+                        .contacts
+                        .get(&rec_id)
+                        .and_then(|m| m.get(&char_id))
+                        .is_some_and(|&(st, _, _)| st > 0.0)
+                        || ctx.db.with_snapshot(|snap| {
+                            let c1 = snap.characters.get(&char_id);
+                            let c2 = snap.characters.get(&rec_id);
+                            match (c1, c2) {
+                                (Some(a), Some(b)) => {
+                                    a.corporation_id == b.corporation_id
+                                        || (a.alliance_id.is_some() && a.alliance_id == b.alliance_id)
+                                }
+                                _ => false,
+                            }
+                        });
+                    if !friendly {
+                        let charge = s
+                            .cspa_charges
+                            .get(&rec_id)
+                            .copied()
+                            .or_else(|| {
+                                ctx.db
+                                    .with_snapshot(|snap| snap.character_cspa_charges.get(&rec_id).copied())
+                            })
+                            .unwrap_or_else(|| IskCents::from_f64_isk(2_950.0));
+                        if charge.0 > 0 {
+                            total_cspa = total_cspa.checked_add(charge).unwrap_or(total_cspa);
+                        }
+                    }
+                }
             }
+            if total_cspa.0 > 0 {
+                let res = ctx.db.try_with_mut_snapshot(|snap| {
+                    let Some(ch) = snap.characters.get_mut(&char_id) else {
+                        return Err(BridgeRpcError {
+                            code: "CharacterNotFound".into(),
+                            message: format!("Character {char_id} not found"),
+                        });
+                    };
+                    ch.balance = ch.balance.checked_sub(total_cspa).ok_or_else(|| BridgeRpcError {
+                        code: "InsufficientFundsForCSPA".into(),
+                        message: "Insufficient ISK to pay recipient CSPA charge".into(),
+                    })?;
+                    Ok(())
+                });
+                if let Err(e) = res {
+                    return Some(Err(e));
+                }
+            }
+            Some(Ok(PyRep::Real(total_cspa.to_wire_f64())))
+        }
+
+        ("charMgr", "SetNote") | ("charMgr", "GetNote") => {
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let item_id = args.first().and_then(|a| a.as_i64()).unwrap_or(char_id);
             if method == "SetNote" {
                 let note = args.get(1).and_then(|a| a.as_str()).unwrap_or("");

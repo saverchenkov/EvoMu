@@ -568,13 +568,38 @@ pub async fn handle_pve_hacking(
             Some(res)
         }
 
+        ("hackingMgr", "GetMyHackProgress") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let container_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let res = with_pve_exploration_reg(ctx, |reg| {
+                if let Some(game) = reg.hacking_games.get(&(char_id, container_id)) {
+                    PyRep::keyval([
+                        ("containerID", PyRep::Integer(container_id)),
+                        ("status", PyRep::String(game.status.clone())),
+                        ("virusCoherence", PyRep::Integer(game.virus_coherence as i64)),
+                    ])
+                } else {
+                    PyRep::keyval([
+                        ("containerID", PyRep::Integer(container_id)),
+                        ("status", PyRep::String("NotStarted".into())),
+                        ("virusCoherence", PyRep::Integer(0)),
+                    ])
+                }
+            });
+            Some(Ok(res))
+        }
+
         // parity: feat:pve.loot-spew
-        ("hackingMgr", "HackContainer") | ("hackingMgr", "GetMyHackProgress") => {
+        ("hackingMgr", "HackContainer") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
             let can_item_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let caller_sys = session.solar_system_id;
             let scoop_res = with_pve_exploration_reg(ctx, |reg| {
                 let now = now_sec(reg);
                 let Some(can) = reg.spewed_cans.get_mut(&can_item_id) else {
@@ -583,6 +608,18 @@ pub async fn handle_pve_hacking(
                         message: format!("Spewed mini-container {can_item_id} not found"),
                     });
                 };
+                if caller_sys != Some(can.solar_system_id) {
+                    return Err(BridgeRpcError {
+                        code: "NotInSiteSystem".into(),
+                        message: "Caller must be in the container's solar system to scoop spewed loot".into(),
+                    });
+                }
+                if can.scooped {
+                    return Err(BridgeRpcError {
+                        code: "SpewedCanAlreadyScooped".into(),
+                        message: format!("Spewed mini-container {can_item_id} has already been scooped"),
+                    });
+                }
                 if now >= can.despawn_at_sec {
                     reg.spewed_cans.remove(&can_item_id);
                     return Err(BridgeRpcError {

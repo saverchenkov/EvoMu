@@ -1258,9 +1258,11 @@ async fn test_so_social_corp_mail_mailing_lists_cspa_calendar_and_chat_features(
     assert!(corp_mail_id.as_i64().is_some());
     assert!(ctx.drain_notifications_for_char(90_000_002).iter().any(|n| n.event == "OnNewMailReceived"), "Corp mail must reach all corp members");
 
-    // CSPA (`feat:social.cspa`): Pilot 3 sets 50,000 ISK CSPA charge; Pilot 2 with 100 ISK is blocked with InsufficientFundsForCSPA; with 100,000 ISK the 50,000 ISK CSPA fee is deducted
-    ctx.dispatch_rpc(&mut sess3, "mailMgr", None, "PrimeOwners", &[PyRep::Real(50_000.0)], &kw, None).await.unwrap();
+    // CSPA (`feat:social.cspa`): Pilot 3 configures 50,000 ISK CSPA charge via `charMgr.LogSettings`; `GetSettingsInfo` reads it without mutating; `CSPAChargedAction` & `mailMgr.SendMail` enforce and debit CSPA
+    ctx.dispatch_rpc(&mut sess3, "charMgr", None, "LogSettings", &[PyRep::Real(50_000.0)], &kw, None).await.unwrap();
+    assert_eq!(ctx.dispatch_rpc(&mut sess3, "charMgr", None, "GetSettingsInfo", &[], &kw, None).await.unwrap(), PyRep::Real(50_000.0));
     ctx.db.with_mut_snapshot(|snap| snap.characters.get_mut(&90_000_002).unwrap().balance = eve_db::IskCents::from_isk(100));
+    assert_eq!(ctx.dispatch_rpc(&mut sess2, "charMgr", None, "CSPAChargedAction", &[PyRep::Integer(p3_char)], &kw, None).await.unwrap_err().code, "InsufficientFundsForCSPA");
     assert_eq!(ctx.dispatch_rpc(&mut sess2, "mailMgr", None, "SendMail", &[PyRep::Integer(p3_char), PyRep::String("Hi".into()), PyRep::String("Body".into())], &kw, None).await.unwrap_err().code, "InsufficientFundsForCSPA");
     ctx.db.with_mut_snapshot(|snap| snap.characters.get_mut(&90_000_002).unwrap().balance = eve_db::IskCents::from_isk(100_000));
     ctx.dispatch_rpc(&mut sess2, "mailMgr", None, "SendMail", &[PyRep::Integer(p3_char), PyRep::String("Paid CSPA".into()), PyRep::String("Body".into())], &kw, None).await.unwrap();
@@ -1303,17 +1305,25 @@ async fn test_so_social_corp_mail_mailing_lists_cspa_calendar_and_chat_features(
     ctx.dispatch_rpc(&mut sess1, "calendarMgr", None, "DeleteEvent", &[PyRep::Integer(pers_ev_id)], &kw, None).await.unwrap();
 
     // Chat: Rookie Help, MOTD & GM Mute enforcement (`feat:social.chat-help-rookie`, `feat:social.chat-motd`, `feat:social.chat-gm-mute`)
-    assert_eq!(ctx.dispatch_rpc(&mut sess1, "XmppChatMgr", None, "GetRookieChannel", &[], &kw, None).await.unwrap(), PyRep::String("chat.evomu.local".into()));
-    assert_eq!(ctx.dispatch_rpc(&mut sess1, "XmppChatMgr", None, "GetHelpChannel", &[], &kw, None).await.unwrap(), PyRep::String("chat.evomu.local".into()));
+    let now_u = ctx.now_unix();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&90_000_001).unwrap().create_date_unix = now_u - 5 * 86_400;
+        snap.characters.get_mut(&90_000_002).unwrap().create_date_unix = now_u - 45 * 86_400;
+    });
+    assert_eq!(ctx.dispatch_rpc(&mut sess1, "XmppChatMgr", None, "GetRookieChannel", &[], &kw, None).await.unwrap(), PyRep::String("rookie_help".into()));
+    assert_eq!(ctx.dispatch_rpc(&mut sess2, "XmppChatMgr", None, "GetRookieChannel", &[], &kw, None).await.unwrap(), PyRep::None);
+    assert_eq!(ctx.dispatch_rpc(&mut sess1, "XmppChatMgr", None, "GetHelpChannel", &[], &kw, None).await.unwrap(), PyRep::String("help_en".into()));
+    assert_eq!(ctx.dispatch_rpc(&mut sess1, "XmppChatMgr", None, "GetHelpChannel", &[PyRep::String("de".into())], &kw, None).await.unwrap(), PyRep::String("help_de".into()));
 
     ctx.dispatch_rpc(&mut sess1, "LSC", None, "JoinChannel", &[PyRep::String("channel:moderation_test".into())], &kw, None).await.unwrap();
     ctx.dispatch_rpc(&mut sess2, "LSC", None, "JoinChannel", &[PyRep::String("channel:moderation_test".into())], &kw, None).await.unwrap();
     let set_motd = ctx.dispatch_rpc(&mut sess1, "XmppChatMgr", None, "SetMotd", &[PyRep::String("channel:moderation_test".into()), PyRep::String("Be polite in chat".into())], &kw, None).await.unwrap();
     assert_eq!(set_motd.dict_get("motd"), Some(&PyRep::String("Be polite in chat".into())));
 
-    // Non-operator/non-GM Pilot 2 cannot GMMute
+    // Non-operator/non-GM Pilot 2 cannot GMMute or GMUnmute
     assert_eq!(ctx.dispatch_rpc(&mut sess2, "XmppChatMgr", None, "GMMute", &[PyRep::Integer(90_000_001), PyRep::String("channel:moderation_test".into()), PyRep::Integer(600), PyRep::String("Noop".into())], &kw, None).await.unwrap_err().code, "ChatAccessDenied");
     ctx.dispatch_rpc(&mut sess1, "XmppChatMgr", None, "GMMute", &[PyRep::Integer(90_000_002), PyRep::String("channel:moderation_test".into()), PyRep::Integer(600), PyRep::String("Spamming".into())], &kw, None).await.unwrap();
+    assert_eq!(ctx.dispatch_rpc(&mut sess2, "XmppChatMgr", None, "GMUnmute", &[PyRep::Integer(90_000_002), PyRep::String("channel:moderation_test".into())], &kw, None).await.unwrap_err().code, "ChatAccessDenied");
     let muted_err = ctx.dispatch_rpc(&mut sess2, "LSC", None, "SendMessage", &[PyRep::String("channel:moderation_test".into()), PyRep::String("Can anyone hear me?".into())], &kw, None).await.expect_err("Muted user must be blocked from sending chat messages");
     assert_eq!(muted_err.code, "MutedInChannel");
     ctx.dispatch_rpc(&mut sess1, "XmppChatMgr", None, "GMUnmute", &[PyRep::Integer(90_000_002), PyRep::String("channel:moderation_test".into())], &kw, None).await.unwrap();

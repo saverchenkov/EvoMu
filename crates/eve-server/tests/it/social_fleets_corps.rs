@@ -494,15 +494,15 @@ async fn test_so1_mail_lifecycle_labels_mailing_lists_cspa_and_calendar() {
     // 9. CSPA charge & Mailing Lists & Calendar Events
     ctx.dispatch_rpc(
         &mut sess2,
-        "mailMgr",
+        "charMgr",
         None,
-        "PrimeOwners",
+        "LogSettings",
         &[PyRep::Real(5_000.0)],
         &kw,
         None,
     )
     .await
-    .expect("PrimeOwners CSPA");
+    .expect("charMgr.LogSettings CSPA");
     let ml_rep = ctx
         .dispatch_rpc(
             &mut sess1,

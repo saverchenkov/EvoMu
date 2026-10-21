@@ -1174,41 +1174,12 @@ pub(super) fn handle_corps(
                 Err(e) => return Some(Err(e)),
             };
             let corp_id = session.corporation_id.unwrap_or(0);
-            let execute_ready = matches!(args.first(), Some(PyRep::Bool(true)));
             let pending: Vec<(i64, u64)> = CORP_GOV
                 .lock()
                 .unwrap()
                 .get(&corp_id)
                 .map(|g| g.pending_auto_kicks.iter().map(|(&k, &v)| (k, v)).collect())
                 .unwrap_or_default();
-            if execute_ready {
-                for &(tid, _) in &pending {
-                    let _ = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
-                        if let Some(corp) = snap.corporations.get_mut(&corp_id) {
-                            corp.members.remove(&tid);
-                            corp.member_roles.remove(&tid);
-                        }
-                        if let Some(ch) = snap.characters.get_mut(&tid) {
-                            ch.corporation_id = 1_000_009;
-                            ch.alliance_id = None;
-                        }
-                        Ok(())
-                    });
-                    ctx.notify(
-                        NotificationTarget::Character(tid),
-                        "OnCorporationMemberChanged",
-                        "charid",
-                        vec![
-                            PyRep::Integer(corp_id),
-                            PyRep::Integer(tid),
-                            PyRep::Integer(1_000_009),
-                        ],
-                    );
-                }
-                if let Some(g) = CORP_GOV.lock().unwrap().get_mut(&corp_id) {
-                    g.pending_auto_kicks.clear();
-                }
-            }
             let rows: Vec<Vec<PyRep>> = pending
                 .into_iter()
                 .map(|(cid, ts)| vec![PyRep::Integer(cid), PyRep::Integer(ts as i64)])

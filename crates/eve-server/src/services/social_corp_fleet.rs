@@ -689,7 +689,14 @@ pub async fn handle(
                 let Some(item) = snap.items.get_mut(&item_id) else {
                     return Err(BridgeRpcError { code: "ItemNotFound".into(), message: format!("Item {item_id} not found") });
                 };
-                if item.owner_id == corp_id && corp.ceo_id != char_id && !corp_roles::has_role(caller_roles, corp_roles::ROLE_ACCOUNTANT) {
+                if item.owner_id != char_id && item.owner_id != corp_id {
+                    return Err(BridgeRpcError { code: "ItemNotOwned".into(), message: "Cannot deliver an item not owned by caller or corporation".into() });
+                }
+                if item.owner_id == corp_id
+                    && (method == "DeliverToCorpMember" || item.flag != InventoryFlag::Hangar)
+                    && corp.ceo_id != char_id
+                    && !corp_roles::has_role(caller_roles, corp_roles::ROLE_ACCOUNTANT)
+                {
                     return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Delivering items from corporation hangars requires Accountant or Director role".into() });
                 }
                 if method == "DeliverToCorpHangar" {
@@ -766,15 +773,36 @@ pub async fn handle(
 
         ("corporationSvc", "CloseCorpProject") | ("corporationSvc", "DeleteCorpProject") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let corp_id = session.corporation_id.unwrap_or(0);
             let pid = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let _ = ctx.db.try_with_mut_snapshot(|snap| {
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let Some(proj_corp_id) = snap.corp_projects.get(&pid).map(|p| p.corporation_id) else {
+                    return Err(BridgeRpcError { code: "ProjectNotFound".into(), message: format!("Corporation project {pid} not found") });
+                };
+                if proj_corp_id != corp_id {
+                    return Err(BridgeRpcError { code: "AccessDenied".into(), message: "Cannot close or delete a project belonging to another corporation".into() });
+                }
+                if let Some(corp) = snap.corporations.get(&corp_id) {
+                    let caller_roles = corp.member_roles.get(&char_id).copied().unwrap_or(0);
+                    if corp.ceo_id != char_id && !corp_roles::has_role(caller_roles, corp_roles::ROLE_ACCOUNTANT) {
+                        return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Closing or deleting corporation projects requires Accountant or Director role".into() });
+                    }
+                }
                 if let Some(proj) = snap.corp_projects.remove(&pid) {
-                    if let Some(ch) = snap.characters.get_mut(&char_id) {
+                    if let Some(corp) = snap.corporations.get_mut(&corp_id) {
+                        if let Some(div0) = corp.wallet_divisions.first_mut() {
+                            div0.balance = div0.balance.checked_add(proj.escrow_remaining).unwrap_or(div0.balance);
+                        }
+                        corp.master_wallet = corp.master_wallet.checked_add(proj.escrow_remaining).unwrap_or(corp.master_wallet);
+                    } else if let Some(ch) = snap.characters.get_mut(&char_id) {
                         ch.balance = ch.balance.checked_add(proj.escrow_remaining).unwrap_or(ch.balance);
                     }
                 }
-                Ok::<_, std::convert::Infallible>(())
+                Ok(())
             });
+            if let Err(e) = res {
+                return Some(Err(e));
+            }
             ctx.notify(NotificationTarget::Character(char_id), "OnGoalDeleted", "charid", vec![PyRep::Integer(pid)]);
             Some(Ok(PyRep::keyval([("projectID", PyRep::Integer(pid)), ("deleted", PyRep::Bool(true))])))
         }

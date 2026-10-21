@@ -211,6 +211,15 @@ pub(super) fn handle_corp_gov(
     };
     let corp_id = session.corporation_id.unwrap_or(1_000_009);
     let now_unix = ctx.now_unix();
+    let (has_director, has_comms) = ctx.db.with_snapshot(|snap| {
+        snap.corporations.get(&corp_id).map_or((true, true), |c| {
+            let r = c.member_roles.get(&char_id).copied().unwrap_or(0);
+            let dir = c.ceo_id == char_id || corp_roles::has_role(r, corp_roles::ROLE_DIRECTOR);
+            let comms = dir || corp_roles::has_role(r, corp_roles::ROLE_PERSONNEL_MANAGER);
+            (dir, comms)
+        })
+    });
+    let deny_role = |msg: &str| Some(Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: msg.into() }));
 
     match (service, method) {
         ("corpRegistry", "MoveCompanyShares") | ("corpRegistry", "MovePrivateShares") => {
@@ -377,16 +386,11 @@ pub(super) fn handle_corp_gov(
         }
 
         ("corpRegistry", "UpdateTitle") | ("corpRegistry", "UpdateTitles") => {
+            if !has_director { return deny_role("Updating corporation titles requires CEO or Director role"); }
             let title_id = args.first().and_then(|a| a.as_i64()).unwrap_or(1).clamp(1, 16);
             let title_name = args.get(1).and_then(|a| a.as_str()).unwrap_or("Squad Leader");
             let roles_mask = args.get(2).and_then(|a| a.as_i64()).unwrap_or(0) as u64;
-            CORP_GOV
-                .lock()
-                .unwrap()
-                .entry(corp_id)
-                .or_default()
-                .titles
-                .insert(title_id, (title_name.to_string(), roles_mask));
+            CORP_GOV.lock().unwrap().entry(corp_id).or_default().titles.insert(title_id, (title_name.to_string(), roles_mask));
             Some(Ok(PyRep::keyval([
                 ("titleID", PyRep::Integer(title_id)),
                 ("titleName", PyRep::String(title_name.to_string())),
@@ -395,35 +399,19 @@ pub(super) fn handle_corp_gov(
         }
 
         ("corpRegistry", "GetTitles") => {
-            let rows: Vec<Vec<PyRep>> = CORP_GOV
-                .lock()
-                .unwrap()
-                .get(&corp_id)
-                .map(|g| {
-                    g.titles
-                        .iter()
-                        .map(|(&tid, (tname, rmask))| {
-                            vec![
-                                PyRep::Integer(tid),
-                                PyRep::String(tname.clone()),
-                                PyRep::Integer(*rmask as i64),
-                            ]
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
+            let rows: Vec<Vec<PyRep>> = CORP_GOV.lock().unwrap().get(&corp_id).map(|g| {
+                g.titles.iter().map(|(&tid, (tname, rmask))| vec![PyRep::Integer(tid), PyRep::String(tname.clone()), PyRep::Integer(*rmask as i64)]).collect()
+            }).unwrap_or_default();
             Some(Ok(PyRep::rowset(vec!["titleID", "titleName", "roles"], rows)))
         }
 
         ("corpRegistry", "DeleteTitle") => {
+            if !has_director { return deny_role("Deleting corporation titles requires CEO or Director role"); }
             let title_id = args.first().and_then(|a| a.as_i64()).unwrap_or(1);
             if let Some(g) = CORP_GOV.lock().unwrap().get_mut(&corp_id) {
                 g.titles.remove(&title_id);
             }
-            Some(Ok(PyRep::keyval([
-                ("titleID", PyRep::Integer(title_id)),
-                ("deleted", PyRep::Bool(true)),
-            ])))
+            Some(Ok(PyRep::keyval([("titleID", PyRep::Integer(title_id)), ("deleted", PyRep::Bool(true))])))
         }
 
         ("corpRegistry", "ResignFromCEO") => {
@@ -573,22 +561,37 @@ pub(super) fn handle_corp_gov(
         }
 
         ("voteManager", "ActivateSanctionedAction") => {
+            if !has_director { return deny_role("Activating sanctioned actions requires CEO or Director role"); }
             let case_id = args.first().and_then(|a| a.as_i64()).unwrap_or(1);
-            let mut target_info = None;
-            {
+            let act_res = {
                 let mut g = CORP_GOV.lock().unwrap();
-                if let Some(state) = g.get_mut(&corp_id) {
-                    if let Some(vc) = state.vote_cases.iter_mut().find(|c| c.0 == case_id) {
-                        vc.6 = true;
-                        target_info = Some((vc.3, vc.4));
-                    }
-                    if let Some((5, extra_shares)) = target_info {
-                        state.company_shares += extra_shares;
-                        *state.shares.entry(char_id).or_insert(0) += extra_shares;
-                    }
+                let Some(state) = g.get_mut(&corp_id) else {
+                    return Some(Err(BridgeRpcError { code: "VoteCaseNotFound".into(), message: format!("Vote case {case_id} not found") }));
+                };
+                let yes_votes: i64 = state.votes.iter().filter(|&(&(vc, _), &(opt, _))| vc == case_id && opt == 1).map(|(_, &(_, w))| w).sum();
+                let no_votes: i64 = state.votes.iter().filter(|&(&(vc, _), &(opt, _))| vc == case_id && opt != 1).map(|(_, &(_, w))| w).sum();
+                let Some(vc) = state.vote_cases.iter_mut().find(|c| c.0 == case_id) else {
+                    return Some(Err(BridgeRpcError { code: "VoteCaseNotFound".into(), message: format!("Vote case {case_id} not found") }));
+                };
+                if vc.6 {
+                    return Some(Err(BridgeRpcError { code: "VoteAlreadyActivated".into(), message: "Sanctioned action has already been activated".into() }));
                 }
-            }
-            if let Some((0, new_ceo_id)) = target_info {
+                if now_unix < vc.5 {
+                    return Some(Err(BridgeRpcError { code: "VoteStillOpen".into(), message: "Cannot activate sanctioned action before voting closes".into() }));
+                }
+                if yes_votes <= no_votes || yes_votes == 0 {
+                    return Some(Err(BridgeRpcError { code: "VoteDidNotPass".into(), message: "Sanctioned action did not pass shareholder vote".into() }));
+                }
+                vc.6 = true;
+                let info = (vc.3, vc.4);
+                if info.0 == 5 {
+                    state.company_shares += info.1;
+                    *state.shares.entry(char_id).or_insert(0) += info.1;
+                }
+                info
+            };
+            if act_res.0 == 0 {
+                let new_ceo_id = act_res.1;
                 let _ = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
                     if let Some(corp) = snap.corporations.get_mut(&corp_id) {
                         corp.ceo_id = new_ceo_id;
@@ -596,17 +599,9 @@ pub(super) fn handle_corp_gov(
                     }
                     Ok(())
                 });
-                ctx.notify(
-                    NotificationTarget::Corporation(corp_id),
-                    "OnCorporationChanged",
-                    "corpid",
-                    vec![PyRep::Integer(corp_id), PyRep::Integer(new_ceo_id)],
-                );
+                ctx.notify(NotificationTarget::Corporation(corp_id), "OnCorporationChanged", "corpid", vec![PyRep::Integer(corp_id), PyRep::Integer(new_ceo_id)]);
             }
-            Some(Ok(PyRep::keyval([
-                ("voteCaseID", PyRep::Integer(case_id)),
-                ("activated", PyRep::Bool(true)),
-            ])))
+            Some(Ok(PyRep::keyval([("voteCaseID", PyRep::Integer(case_id)), ("activated", PyRep::Bool(true))])))
         }
 
         ("corporationSvc", "CreateMedal") => {
@@ -805,20 +800,15 @@ pub(super) fn handle_corp_gov(
         }
 
         ("corpRegistry", "AddBulletin") | ("corpRegistry", "UpdateBulletinOrder") => {
+            if !has_comms { return deny_role("Managing corporation bulletins requires Communications Officer or Director role"); }
             let title = args.first().and_then(|a| a.as_str()).unwrap_or("Corporation Bulletin");
             let body = args.get(1).and_then(|a| a.as_str()).unwrap_or("All hands on deck");
             let is_alliance = matches!(args.get(2), Some(PyRep::Bool(true)));
-            let owner_key = if is_alliance {
-                session.alliance_id.unwrap_or(corp_id)
-            } else {
-                corp_id
-            };
+            let owner_key = if is_alliance { session.alliance_id.unwrap_or(corp_id) } else { corp_id };
             let mut g = CORP_GOV.lock().unwrap();
             let state = g.entry(owner_key).or_default();
             let bid = (state.bulletins.len() as i64) + 1;
-            state
-                .bulletins
-                .push((bid, title.to_string(), body.to_string(), char_id, now_unix));
+            state.bulletins.push((bid, title.to_string(), body.to_string(), char_id, now_unix));
             Some(Ok(PyRep::keyval([
                 ("bulletinID", PyRep::Integer(bid)),
                 ("title", PyRep::String(title.to_string())),
@@ -828,40 +818,21 @@ pub(super) fn handle_corp_gov(
 
         ("corpRegistry", "GetBulletins") => {
             let owner_key = args.first().and_then(|a| a.as_i64()).unwrap_or(corp_id);
-            let rows: Vec<Vec<PyRep>> = CORP_GOV
-                .lock()
-                .unwrap()
-                .get(&owner_key)
-                .map(|s| {
-                    s.bulletins
-                        .iter()
-                        .map(|(bid, title, body, aid, ts)| {
-                            vec![
-                                PyRep::Integer(*bid),
-                                PyRep::String(title.clone()),
-                                PyRep::String(body.clone()),
-                                PyRep::Integer(*aid),
-                                PyRep::Integer(*ts as i64),
-                            ]
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-            Some(Ok(PyRep::rowset(
-                vec!["bulletinID", "title", "body", "editCharacterID", "editDateTime"],
-                rows,
-            )))
+            let rows: Vec<Vec<PyRep>> = CORP_GOV.lock().unwrap().get(&owner_key).map(|s| {
+                s.bulletins.iter().map(|(bid, title, body, aid, ts)| {
+                    vec![PyRep::Integer(*bid), PyRep::String(title.clone()), PyRep::String(body.clone()), PyRep::Integer(*aid), PyRep::Integer(*ts as i64)]
+                }).collect()
+            }).unwrap_or_default();
+            Some(Ok(PyRep::rowset(vec!["bulletinID", "title", "body", "editCharacterID", "editDateTime"], rows)))
         }
 
         ("corpRegistry", "DeleteBulletin") => {
+            if !has_comms { return deny_role("Deleting corporation bulletins requires Communications Officer or Director role"); }
             let bid = args.first().and_then(|a| a.as_i64()).unwrap_or(1);
             if let Some(s) = CORP_GOV.lock().unwrap().get_mut(&corp_id) {
                 s.bulletins.retain(|b| b.0 != bid);
             }
-            Some(Ok(PyRep::keyval([
-                ("bulletinID", PyRep::Integer(bid)),
-                ("deleted", PyRep::Bool(true)),
-            ])))
+            Some(Ok(PyRep::keyval([("bulletinID", PyRep::Integer(bid)), ("deleted", PyRep::Bool(true))])))
         }
 
         ("corpRecProxy", "CreateRecruitmentAd") | ("corpRecProxy", "UpdateRecruitmentAd") => {
@@ -1238,28 +1209,12 @@ pub(super) fn handle_corp_gov(
         }
 
         ("corpRegistry", "SetCorpWelcomeMail") => {
+            if !has_comms { return deny_role("Setting corporation welcome mail requires Communications Officer or Director role"); }
             let subject = args.first().and_then(|a| a.as_str()).unwrap_or("Welcome to the Corp");
             let body = args.get(1).and_then(|a| a.as_str()).unwrap_or("Fly safe o7");
-            let enabled = args
-                .get(2)
-                .and_then(|a| match a {
-                    PyRep::Bool(b) => Some(*b),
-                    PyRep::Integer(i) => Some(*i != 0),
-                    _ => None,
-                })
-                .unwrap_or(true);
-            CORP_GOV
-                .lock()
-                .unwrap()
-                .entry(corp_id)
-                .or_default()
-                .welcome_mail = (enabled, subject.to_string(), body.to_string());
-            ctx.notify(
-                NotificationTarget::Corporation(corp_id),
-                "OnCorporationWelcomeMailChanged",
-                "corpid",
-                vec![PyRep::Integer(corp_id), PyRep::Bool(enabled)],
-            );
+            let enabled = args.get(2).and_then(|a| match a { PyRep::Bool(b) => Some(*b), PyRep::Integer(i) => Some(*i != 0), _ => None }).unwrap_or(true);
+            CORP_GOV.lock().unwrap().entry(corp_id).or_default().welcome_mail = (enabled, subject.to_string(), body.to_string());
+            ctx.notify(NotificationTarget::Corporation(corp_id), "OnCorporationWelcomeMailChanged", "corpid", vec![PyRep::Integer(corp_id), PyRep::Bool(enabled)]);
             Some(Ok(PyRep::keyval([
                 ("enabled", PyRep::Bool(enabled)),
                 ("subject", PyRep::String(subject.to_string())),
@@ -1268,12 +1223,7 @@ pub(super) fn handle_corp_gov(
         }
 
         ("corpRegistry", "GetCorpWelcomeMail") => {
-            let (enabled, subject, body) = CORP_GOV
-                .lock()
-                .unwrap()
-                .get(&corp_id)
-                .map(|s| s.welcome_mail.clone())
-                .unwrap_or((false, String::new(), String::new()));
+            let (enabled, subject, body) = CORP_GOV.lock().unwrap().get(&corp_id).map(|s| s.welcome_mail.clone()).unwrap_or((false, String::new(), String::new()));
             Some(Ok(PyRep::keyval([
                 ("enabled", PyRep::Bool(enabled)),
                 ("subject", PyRep::String(subject)),
@@ -1282,66 +1232,35 @@ pub(super) fn handle_corp_gov(
         }
 
         ("corpRegistry", "RegisterNewCorpMailRestrictionSettings") => {
+            if !has_comms { return deny_role("Updating corporation mail restriction settings requires Communications Officer or Director role"); }
             let restricted = matches!(args.first(), Some(PyRep::Bool(true)) | Some(PyRep::Integer(1)));
-            CORP_GOV
-                .lock()
-                .unwrap()
-                .entry(corp_id)
-                .or_default()
-                .restrict_corp_mails = restricted;
-            ctx.notify(
-                NotificationTarget::Corporation(corp_id),
-                "OnCorporationChanged",
-                "corpid",
-                vec![PyRep::Integer(corp_id), PyRep::Bool(restricted)],
-            );
+            CORP_GOV.lock().unwrap().entry(corp_id).or_default().restrict_corp_mails = restricted;
+            ctx.notify(NotificationTarget::Corporation(corp_id), "OnCorporationChanged", "corpid", vec![PyRep::Integer(corp_id), PyRep::Bool(restricted)]);
             Some(Ok(PyRep::Bool(restricted)))
         }
 
         ("corpRegistry", "DoesCorpRestrictCorpMails") => {
-            let restricted = CORP_GOV
-                .lock()
-                .unwrap()
-                .get(&corp_id)
-                .is_some_and(|s| s.restrict_corp_mails);
+            let restricted = CORP_GOV.lock().unwrap().get(&corp_id).is_some_and(|s| s.restrict_corp_mails);
             Some(Ok(PyRep::Bool(restricted)))
         }
 
         ("corpRegistry", "RegisterNewAcceptStructureSettings") => {
+            if !has_director { return deny_role("Updating corporation structure transfer settings requires CEO or Director role"); }
             let accept = matches!(args.first(), Some(PyRep::Bool(true)) | Some(PyRep::Integer(1)));
-            CORP_GOV
-                .lock()
-                .unwrap()
-                .entry(corp_id)
-                .or_default()
-                .accept_structures = accept;
-            ctx.notify(
-                NotificationTarget::Corporation(corp_id),
-                "OnCorporationChanged",
-                "corpid",
-                vec![PyRep::Integer(corp_id), PyRep::Bool(accept)],
-            );
+            CORP_GOV.lock().unwrap().entry(corp_id).or_default().accept_structures = accept;
+            ctx.notify(NotificationTarget::Corporation(corp_id), "OnCorporationChanged", "corpid", vec![PyRep::Integer(corp_id), PyRep::Bool(accept)]);
             Some(Ok(PyRep::Bool(accept)))
         }
 
         ("corpRegistry", "DoesMyCorpAcceptStructures") => {
-            let accept = CORP_GOV
-                .lock()
-                .unwrap()
-                .get(&corp_id)
-                .map(|s| s.accept_structures)
-                .unwrap_or(true);
+            let accept = CORP_GOV.lock().unwrap().get(&corp_id).map(|s| s.accept_structures).unwrap_or(true);
             Some(Ok(PyRep::Bool(accept)))
         }
 
         ("corpRegistry", "SetStructureReinforceDefault") => {
+            if !has_director { return deny_role("Setting corporation structure reinforcement default requires CEO or Director role"); }
             let hour = args.first().and_then(|a| a.as_i64()).unwrap_or(18).clamp(0, 23) as u8;
-            CORP_GOV
-                .lock()
-                .unwrap()
-                .entry(corp_id)
-                .or_default()
-                .reinforce_hour = hour;
+            CORP_GOV.lock().unwrap().entry(corp_id).or_default().reinforce_hour = hour;
             Some(Ok(PyRep::Integer(hour as i64)))
         }
 

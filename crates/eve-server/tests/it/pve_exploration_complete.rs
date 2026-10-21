@@ -14,10 +14,25 @@ use eve_server::services::pve_exploration::{
     advance_pve_exploration_clock, with_pve_exploration_reg,
 };
 use eve_server::services::pve_special_sites::{
-    advance_pve_special_clock, classify_abyssal_filament, AbyssalWeatherKind,
+    advance_pve_special_clock, classify_abyssal_filament, record_system_interference_activity,
+    with_pve_special_reg, AbyssalWeatherKind,
 };
 use glam::DVec3;
 use std::collections::HashMap;
+
+async fn clear_site_wave_npcs(ctx: &ServerContext, solar_system_id: u32, site_id: &str) {
+    let ball_ids: Vec<i64> = with_pve_exploration_reg(ctx, |reg| {
+        reg.sites_by_system
+            .get(&solar_system_id)
+            .and_then(|list| list.iter().find(|s| s.site_id == site_id))
+            .map(|s| s.active_npc_ball_ids.clone())
+            .unwrap_or_default()
+    });
+    let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
+    for bid in ball_ids {
+        let _ = sys_handle.remove_ball(bid).await;
+    }
+}
 
 async fn create_in_space_session(
     ctx: &ServerContext,
@@ -192,35 +207,18 @@ async fn test_pve_combat_anomalies_waves_and_escalations() {
         "Null-sec must spawn Sanctum anomalies: {ns_names:?}"
     );
 
-    // 2. Enter High-Sec Angel Hideaway (2 waves) and clear Wave 1 -> Wave 2 -> Complete + Escalate
+    // 2. Enter High-Sec Angel Hideaway (2 waves): verify WaveNpcsRemaining when hostiles are alive, then destroy Wave 1 -> Wave 2 -> Complete + Escalate
     let site_id = "PVE-ANOM-30000142-1";
-    let wave2_rep = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "scanSvc",
-            None,
-            "EnterCombatAnomaly",
-            &[PyRep::String(site_id.into()), PyRep::Bool(true)],
-            &kw,
-            None,
-        )
-        .await
-        .expect("Advance to Wave 2");
+    let alive_err = ctx.dispatch_rpc(&mut sess, "scanSvc", None, "EnterCombatAnomaly", &[PyRep::String(site_id.into()), PyRep::Bool(true)], &kw, None).await.expect_err("Cannot advance wave while NPCs are alive");
+    assert_eq!(alive_err.code, "WaveNpcsRemaining");
+
+    clear_site_wave_npcs(&ctx, 30_000_142, site_id).await;
+    let wave2_rep = ctx.dispatch_rpc(&mut sess, "scanSvc", None, "EnterCombatAnomaly", &[PyRep::String(site_id.into()), PyRep::Bool(true)], &kw, None).await.expect("Advance to Wave 2");
     assert_eq!(wave2_rep.dict_get("currentWave").and_then(|v| v.as_i64()), Some(2));
     assert_eq!(wave2_rep.dict_get("completed").and_then(|v| v.as_bool()), Some(false));
 
-    let done_rep = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "scanSvc",
-            None,
-            "EnterCombatAnomaly",
-            &[PyRep::String(site_id.into()), PyRep::Bool(true)],
-            &kw,
-            None,
-        )
-        .await
-        .expect("Clear final Wave 2");
+    clear_site_wave_npcs(&ctx, 30_000_142, site_id).await;
+    let done_rep = ctx.dispatch_rpc(&mut sess, "scanSvc", None, "EnterCombatAnomaly", &[PyRep::String(site_id.into()), PyRep::Bool(true)], &kw, None).await.expect("Clear final Wave 2");
     assert_eq!(done_rep.dict_get("completed").and_then(|v| v.as_bool()), Some(true));
     assert_eq!(done_rep.dict_get("escalated").and_then(|v| v.as_bool()), Some(true));
 
@@ -445,26 +443,15 @@ async fn test_pve_combat_signatures_and_ded_complexes_restrictions_and_loot() {
     });
     sess.ship_id = Some(710_001_002);
     for wave in 1..=3 {
-        let step_rep = ctx
-            .dispatch_rpc(
-                &mut sess,
-                "keeper",
-                None,
-                "EnterNextDungeonRoom",
-                &[PyRep::String("DED-30000142-3".into())],
-                &kw,
-                None,
-            )
-            .await
-            .expect("EnterNextDungeonRoom in Rifter");
+        clear_site_wave_npcs(&ctx, 30_000_142, "DED-30000142-3").await;
+        let step_rep = ctx.dispatch_rpc(&mut sess, "keeper", None, "EnterNextDungeonRoom", &[PyRep::String("DED-30000142-3".into())], &kw, None).await.expect("EnterNextDungeonRoom in Rifter");
         if wave == 3 {
             assert_eq!(step_rep.dict_get("completed").and_then(|v| v.as_bool()), Some(true));
             let PyRep::List(loot) = step_rep.dict_get("droppedLoot").expect("droppedLoot") else {
                 panic!("Expected List of droppedLoot");
             };
             assert!(
-                loot.iter()
-                    .any(|item| item.dict_get("typeID").and_then(|v| v.as_i64()) == Some(19_405)),
+                loot.iter().any(|item| item.dict_get("typeID").and_then(|v| v.as_i64()) == Some(19_405)),
                 "Completing DED 3/10 must drop 6th Tier Overseer's Personal Effects (19405)"
             );
         }
@@ -621,22 +608,18 @@ async fn test_pve_data_relic_hacking_minigame_and_loot_spew() {
     }
     assert!(!won_spew.is_empty(), "Winning hack must scatter loot spew mini-containers");
 
-    // Scoop first spewed mini-container into ship cargo before expiry
+    // Verify GetMyHackProgress is read-only and reports Won
+    let prog_rep = ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "GetMyHackProgress", &[PyRep::Integer(relic_can_id)], &kw, None).await.expect("GetMyHackProgress");
+    assert_eq!(prog_rep.dict_get("status").and_then(|v| v.as_str()), Some("Won"));
+
+    // Scoop first spewed mini-container into ship cargo before expiry, and verify scooping it twice fails
     let first_spew_id = won_spew[0].dict_get("canItemID").unwrap().as_i64().unwrap();
     let second_spew_id = won_spew[1].dict_get("canItemID").unwrap().as_i64().unwrap();
-    let scoop_rep = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "hackingMgr",
-            None,
-            "HackContainer",
-            &[PyRep::Integer(first_spew_id)],
-            &kw,
-            None,
-        )
-        .await
-        .expect("Scoop spewed loot container");
+    let scoop_rep = ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "HackContainer", &[PyRep::Integer(first_spew_id)], &kw, None).await.expect("Scoop spewed loot container");
     assert_eq!(scoop_rep.dict_get("scooped").and_then(|v| v.as_bool()), Some(true));
+
+    let dup_err = ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "HackContainer", &[PyRep::Integer(first_spew_id)], &kw, None).await.expect_err("Cannot scoop same spewed can twice");
+    assert_eq!(dup_err.code, "SpewedCanAlreadyScooped");
 
     // Also verify Data Can hack spews Datacores/Decryptors
     ctx.dispatch_rpc(
@@ -838,34 +821,16 @@ async fn test_pve_ghost_sites_sleeper_caches_and_wormhole_sites() {
 
     let mut blue_loot_dropped = false;
     for _ in 0..4 {
-        let step = ctx
-            .dispatch_rpc(
-                &mut sess,
-                "scanSvc",
-                None,
-                "EnterCombatAnomaly",
-                &[PyRep::String(wh_site_id.clone()), PyRep::Bool(true)],
-                &kw,
-                None,
-            )
-            .await
-            .expect("Advance C5 Sleeper wave");
+        clear_site_wave_npcs(&ctx, 31_000_005, &wh_site_id).await;
+        let step = ctx.dispatch_rpc(&mut sess, "scanSvc", None, "EnterCombatAnomaly", &[PyRep::String(wh_site_id.clone()), PyRep::Bool(true)], &kw, None).await.expect("Advance C5 Sleeper wave");
         if step.dict_get("completed").and_then(|v| v.as_bool()) == Some(true) {
             if let Some(PyRep::List(loot)) = step.dict_get("droppedLoot") {
-                blue_loot_dropped = loot.iter().any(|l| {
-                    matches!(
-                        l.dict_get("typeID").and_then(|v| v.as_i64()),
-                        Some(30_744..=30_747)
-                    )
-                });
+                blue_loot_dropped = loot.iter().any(|l| matches!(l.dict_get("typeID").and_then(|v| v.as_i64()), Some(30_744..=30_747)));
             }
             break;
         }
     }
-    assert!(
-        blue_loot_dropped,
-        "Completing Wormhole Sleeper combat site must drop Sleeper Blue Loot (30744..=30747)"
-    );
+    assert!(blue_loot_dropped, "Completing Wormhole Sleeper combat site must drop Sleeper Blue Loot (30744..=30747)");
 }
 
 // ============================================================================
@@ -882,98 +847,43 @@ async fn test_pve_incursions_payouts_and_mothership_finale() {
 
     let ctx = ServerContext::new();
     let kw = HashMap::new();
-    let mut sess = create_in_space_session(&ctx, 8105, 30_000_142, 710_001_005, 587).await;
+    let mut sess = create_in_space_session(&ctx, 8105, 30_000_145, 710_001_005, 587).await;
 
     // 1. Query active constellation incursion and verify Mothership HQ site is locked at high influence (1.0)
-    let inc_rep = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "incursion",
-            None,
-            "GetAllIncursionSites",
-            &[PyRep::Integer(20_000_020)],
-            &kw,
-            None,
-        )
-        .await
-        .expect("GetAllIncursionSites");
+    let inc_rep = ctx.dispatch_rpc(&mut sess, "incursion", None, "GetAllIncursionSites", &[PyRep::Integer(20_000_020)], &kw, None).await.expect("GetAllIncursionSites");
     assert_eq!(inc_rep.dict_get("influence").and_then(|v| v.as_f64()), Some(1.0));
-    assert_eq!(
-        inc_rep.dict_get("mothershipSpawned").and_then(|v| v.as_bool()),
-        Some(false)
-    );
+    assert_eq!(inc_rep.dict_get("mothershipSpawned").and_then(|v| v.as_bool()), Some(false));
 
-    let locked_err = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "incursion",
-            None,
-            "UpdateIncursionLPLog",
-            &[PyRep::String("INC-MS-5158".into())],
-            &kw,
-            None,
-        )
-        .await
-        .expect_err("Mothership site must be locked while influence > 0.25");
+    let locked_err = ctx.dispatch_rpc(&mut sess, "incursion", None, "UpdateIncursionLPLog", &[PyRep::String("INC-MS-5158".into())], &kw, None).await.expect_err("Mothership site must be locked while influence > 0.25");
     assert_eq!(locked_err.code, "MothershipSiteLocked");
 
+    // Verify UpdateIncursionLPLog rejects when HQ boss NPC ball is still alive in space
+    let npcs_alive_err = ctx.dispatch_rpc(&mut sess, "incursion", None, "UpdateIncursionLPLog", &[PyRep::String("INC-HQ-5175".into())], &kw, None).await.expect_err("Cannot claim incursion payout before destroying site boss NPC");
+    assert_eq!(npcs_alive_err.code, "IncursionSiteNpcsRemaining");
+
     // 2. Complete HQ sites (`INC-HQ-5175`, -0.25 influence each) 3 times to drop influence from 1.0 -> 0.25 and unlock Mothership
+    let hq_sys = ctx.systems.get_or_spawn(30_000_145);
     for _ in 0..3 {
-        let hq_pay = ctx
-            .dispatch_rpc(
-                &mut sess,
-                "incursion",
-                None,
-                "UpdateIncursionLPLog",
-                &[
-                    PyRep::String("INC-HQ-5175".into()),
-                    PyRep::List(vec![PyRep::Integer(90_000_001)]),
-                ],
-                &kw,
-                None,
-            )
-            .await
-            .expect("Complete HQ incursion site");
-        assert_eq!(
-            hq_pay.dict_get("iskPerPilot").and_then(|v| v.as_i64()),
-            Some(31_500_000)
-        );
-        assert_eq!(
-            hq_pay.dict_get("concordLpPerPilot").and_then(|v| v.as_i64()),
-            Some(7_000)
-        );
+        let boss_bid = with_pve_special_reg(&ctx, |reg| {
+            reg.incursions[&20_000_020].sites.iter().find(|s| s.site_id == "INC-HQ-5175").unwrap().boss_npc_ball_id
+        });
+        let _ = hq_sys.remove_ball(boss_bid).await;
+        let hq_pay = ctx.dispatch_rpc(&mut sess, "incursion", None, "UpdateIncursionLPLog", &[PyRep::String("INC-HQ-5175".into()), PyRep::List(vec![PyRep::Integer(90_000_001)])], &kw, None).await.expect("Complete HQ incursion site");
+        assert_eq!(hq_pay.dict_get("iskPerPilot").and_then(|v| v.as_i64()), Some(31_500_000));
+        assert_eq!(hq_pay.dict_get("concordLpPerPilot").and_then(|v| v.as_i64()), Some(7_000));
     }
 
-    // 3. Mothership (`INC-MS-5158`, The Kundalini Manifest) is now unlocked at influence <= 0.25; complete it to end the incursion
-    let ms_pay = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "incursion",
-            None,
-            "UpdateIncursionLPLog",
-            &[
-                PyRep::String("INC-MS-5158".into()),
-                PyRep::List(vec![PyRep::Integer(90_000_001)]),
-            ],
-            &kw,
-            None,
-        )
-        .await
-        .expect("Complete Mothership HQ site");
-    assert_eq!(
-        ms_pay.dict_get("iskPerPilot").and_then(|v| v.as_i64()),
-        Some(63_000_000)
-    );
-    assert_eq!(
-        ms_pay.dict_get("concordLpPerPilot").and_then(|v| v.as_i64()),
-        Some(14_000)
-    );
+    // 3. Mothership (`INC-MS-5158`, The Kundalini Manifest) is now unlocked at influence <= 0.25; destroy boss and complete it to end the incursion
+    let ms_boss_bid = with_pve_special_reg(&ctx, |reg| {
+        reg.incursions[&20_000_020].sites.iter().find(|s| s.site_id == "INC-MS-5158").unwrap().boss_npc_ball_id
+    });
+    let _ = hq_sys.remove_ball(ms_boss_bid).await;
+    let ms_pay = ctx.dispatch_rpc(&mut sess, "incursion", None, "UpdateIncursionLPLog", &[PyRep::String("INC-MS-5158".into()), PyRep::List(vec![PyRep::Integer(90_000_001)])], &kw, None).await.expect("Complete Mothership HQ site");
+    assert_eq!(ms_pay.dict_get("iskPerPilot").and_then(|v| v.as_i64()), Some(63_000_000));
+    assert_eq!(ms_pay.dict_get("concordLpPerPilot").and_then(|v| v.as_i64()), Some(14_000));
     assert_eq!(ms_pay.dict_get("influence").and_then(|v| v.as_f64()), Some(0.0));
     assert_eq!(ms_pay.dict_get("state").and_then(|v| v.as_str()), Some("Ended"));
-    assert_eq!(
-        ms_pay.dict_get("incursionEnded").and_then(|v| v.as_bool()),
-        Some(true)
-    );
+    assert_eq!(ms_pay.dict_get("incursionEnded").and_then(|v| v.as_bool()), Some(true));
 
     let concord_lp = ctx.db.with_snapshot(|snap| {
         snap.characters
@@ -1193,177 +1103,75 @@ async fn test_pve_homefront_storms_drifter_hives_triglavian_and_interference() {
     let kw = HashMap::new();
     let mut sess = create_in_space_session(&ctx, 8107, 30_000_142, 710_001_007, 587).await;
 
-    // 1. Homefront Operations (`dungeonInstanceCacheMgr.GetHomefrontSiteInstances`)
-    let hf_rep = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "dungeonInstanceCacheMgr",
-            None,
-            "GetHomefrontSiteInstances",
-            &[
-                PyRep::Integer(30_000_142),
-                PyRep::Integer(710_001),
-                PyRep::Integer(5),
-            ],
-            &kw,
-            None,
-        )
-        .await
-        .expect("GetHomefrontSiteInstances and complete");
-    let PyRep::List(hf_list) = &hf_rep else {
-        panic!("Expected List");
-    };
-    assert_eq!(
-        hf_list[0].dict_get("completed").and_then(|v| v.as_bool()),
-        Some(true)
-    );
-    assert_eq!(
-        hf_list[0]
-            .dict_get("rewardPaidIsk")
-            .and_then(|v| v.as_i64()),
-        Some(17_230_000)
-    );
+    // 1. Homefront Operations (`dungeonInstanceCacheMgr.GetHomefrontSiteInstances` is read-only; completion via `keeper.EnterNextDungeonRoom`)
+    let hf_initial = ctx.dispatch_rpc(&mut sess, "dungeonInstanceCacheMgr", None, "GetHomefrontSiteInstances", &[PyRep::Integer(30_000_142)], &kw, None).await.expect("GetHomefrontSiteInstances read-only");
+    let PyRep::List(hf_init_list) = &hf_initial else { panic!("Expected List") };
+    assert_eq!(hf_init_list[0].dict_get("completed").and_then(|v| v.as_bool()), Some(false));
 
-    // 2. Metaliminal Roaming Storms (`map.GetAllRoamingWeatherSystems`)
-    let storms_before = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "map",
-            None,
-            "GetAllRoamingWeatherSystems",
-            &[PyRep::Bool(false)],
-            &kw,
-            None,
-        )
-        .await
-        .expect("GetAllRoamingWeatherSystems initial");
-    let PyRep::List(sb_list) = &storms_before else {
-        panic!("Expected List");
-    };
-    let center_before = sb_list[0]
-        .dict_get("centerSolarSystemID")
-        .and_then(|v| v.as_i64())
-        .unwrap();
+    let jita_sys = ctx.systems.get_or_spawn(30_000_142);
+    let _ = jita_sys.remove_ball(1_897_710_001).await;
+    ctx.dispatch_rpc(&mut sess, "keeper", None, "EnterNextDungeonRoom", &[PyRep::Integer(710_001), PyRep::Integer(5)], &kw, None).await.expect("Complete Homefront site 710_001");
 
-    let storms_after = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "map",
-            None,
-            "GetAllRoamingWeatherSystems",
-            &[PyRep::Bool(true)],
-            &kw,
-            None,
-        )
-        .await
-        .expect("GetAllRoamingWeatherSystems after movement");
-    let PyRep::List(sa_list) = &storms_after else {
-        panic!("Expected List");
-    };
-    let center_after = sa_list[0]
-        .dict_get("centerSolarSystemID")
-        .and_then(|v| v.as_i64())
-        .unwrap();
-    assert_ne!(
-        center_before, center_after,
-        "Roaming Metaliminal storm center must move between connected stargate systems"
-    );
+    let hf_rep = ctx.dispatch_rpc(&mut sess, "dungeonInstanceCacheMgr", None, "GetHomefrontSiteInstances", &[PyRep::Integer(30_000_142)], &kw, None).await.expect("GetHomefrontSiteInstances after completion");
+    let PyRep::List(hf_list) = &hf_rep else { panic!("Expected List") };
+    assert_eq!(hf_list[0].dict_get("completed").and_then(|v| v.as_bool()), Some(true));
+    assert_eq!(hf_list[0].dict_get("rewardPaidIsk").and_then(|v| v.as_i64()), Some(17_230_000));
+
+    // 2. Metaliminal Roaming Storms (`map.GetAllRoamingWeatherSystems` read-only; moved by `advance_pve_special_clock`)
+    let storms_before = ctx.dispatch_rpc(&mut sess, "map", None, "GetAllRoamingWeatherSystems", &[], &kw, None).await.expect("GetAllRoamingWeatherSystems initial");
+    let PyRep::List(sb_list) = &storms_before else { panic!("Expected List") };
+    let center_before = sb_list[0].dict_get("centerSolarSystemID").and_then(|v| v.as_i64()).unwrap();
+
+    advance_pve_special_clock(&ctx, 3_600);
+    let storms_after = ctx.dispatch_rpc(&mut sess, "map", None, "GetAllRoamingWeatherSystems", &[], &kw, None).await.expect("GetAllRoamingWeatherSystems after clock step");
+    let PyRep::List(sa_list) = &storms_after else { panic!("Expected List") };
+    let center_after = sa_list[0].dict_get("centerSolarSystemID").and_then(|v| v.as_i64()).unwrap();
+    assert_ne!(center_before, center_after, "Roaming Metaliminal storm center must move between connected stargate systems");
 
     // 3. Wormhole Drifter Hives (`31_000_001` Barbican Hive 5648 -> drops Barbican Element 34557)
-    let hive_rep = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "dungeonInstanceCacheMgr",
-            None,
-            "GetTriglavianSiteInstances",
-            &[PyRep::Integer(31_000_001), PyRep::Integer(1)],
-            &kw,
-            None,
-        )
-        .await
-        .expect("Complete Barbican Drifter Hive");
-    assert_eq!(
-        hive_rep.dict_get("dungeonName").and_then(|v| v.as_str()),
-        Some("Barbican Hive")
-    );
-    assert_eq!(
-        hive_rep.dict_get("elementTypeID").and_then(|v| v.as_i64()),
-        Some(34_557)
-    );
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.solar_system_id = 31_000_001;
+        }
+    });
+    sess.solar_system_id = Some(31_000_001);
+    let wh_sys = ctx.systems.get_or_spawn(31_000_001);
+    let _ = wh_sys.remove_ball(1_898_005_648).await;
+    ctx.dispatch_rpc(&mut sess, "keeper", None, "EnterNextDungeonRoom", &[PyRep::Integer(31_000_001)], &kw, None).await.expect("Complete Barbican Drifter Hive");
+    let hive_rep = ctx.dispatch_rpc(&mut sess, "dungeonInstanceCacheMgr", None, "GetTriglavianSiteInstances", &[PyRep::Integer(31_000_001)], &kw, None).await.expect("GetTriglavianSiteInstances for Drifter Hive");
+    assert_eq!(hive_rep.dict_get("dungeonName").and_then(|v| v.as_str()), Some("Barbican Hive"));
+    assert_eq!(hive_rep.dict_get("elementTypeID").and_then(|v| v.as_i64()), Some(34_557));
     assert_eq!(hive_rep.dict_get("cleared").and_then(|v| v.as_bool()), Some(true));
 
     // 4. Triglavian Pochven / EDENCOM Flashpoint Sites (`8922` Observatory Flashpoint -> dual standings delta)
-    let trig_rep = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "dungeonInstanceCacheMgr",
-            None,
-            "GetTriglavianSiteInstances",
-            &[PyRep::Integer(30_000_142), PyRep::Integer(720_001)],
-            &kw,
-            None,
-        )
-        .await
-        .expect("Complete Observatory Flashpoint");
-    let PyRep::List(trig_list) = &trig_rep else {
-        panic!("Expected List");
-    };
-    assert_eq!(
-        trig_list[0].dict_get("completed").and_then(|v| v.as_bool()),
-        Some(true)
-    );
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.solar_system_id = 30_000_142;
+        }
+    });
+    sess.solar_system_id = Some(30_000_142);
+    let _ = jita_sys.remove_ball(1_897_720_001).await;
+    ctx.dispatch_rpc(&mut sess, "keeper", None, "EnterNextDungeonRoom", &[PyRep::Integer(720_001)], &kw, None).await.expect("Complete Observatory Flashpoint");
+    let trig_rep = ctx.dispatch_rpc(&mut sess, "dungeonInstanceCacheMgr", None, "GetTriglavianSiteInstances", &[PyRep::Integer(30_000_142)], &kw, None).await.expect("GetTriglavianSiteInstances");
+    let PyRep::List(trig_list) = &trig_rep else { panic!("Expected List") };
+    assert_eq!(trig_list[0].dict_get("completed").and_then(|v| v.as_bool()), Some(true));
     let (trig_standing, edencom_standing) = ctx.db.with_snapshot(|snap| {
         let ch = &snap.characters[&90_000_001];
-        (
-            ch.standings.get(&500_026).copied().unwrap_or(0.0),
-            ch.standings.get(&500_027).copied().unwrap_or(0.0),
-        )
+        (ch.standings.get(&500_026).copied().unwrap_or(0.0), ch.standings.get(&500_027).copied().unwrap_or(0.0))
     });
     assert!(trig_standing > 0.0 && edencom_standing < 0.0);
 
-    // 5. Solar System Interference (`solarsystemInterferenceMgr.GetLocalInterferenceState`)
-    let int_low = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "solarsystemInterferenceMgr",
-            None,
-            "GetLocalInterferenceState",
-            &[PyRep::Integer(30_000_142), PyRep::Real(0.0)],
-            &kw,
-            None,
-        )
-        .await
-        .expect("GetLocalInterferenceState initial Low");
-    assert_eq!(
-        int_low.dict_get("interferenceBand").and_then(|v| v.as_i64()),
-        Some(1)
-    );
+    // 5. Solar System Interference (`solarsystemInterferenceMgr.GetLocalInterferenceState` read-only; mutated by server activity)
+    let int_low = ctx.dispatch_rpc(&mut sess, "solarsystemInterferenceMgr", None, "GetLocalInterferenceState", &[PyRep::Integer(30_000_142)], &kw, None).await.expect("GetLocalInterferenceState initial Low");
+    assert_eq!(int_low.dict_get("interferenceBand").and_then(|v| v.as_i64()), Some(1));
 
-    let int_high = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "solarsystemInterferenceMgr",
-            None,
-            "GetLocalInterferenceState",
-            &[PyRep::Integer(30_000_142), PyRep::Real(0.75)],
-            &kw,
-            None,
-        )
-        .await
-        .expect("GetLocalInterferenceState after CRAB/cyno activity");
-    assert_eq!(
-        int_high.dict_get("interferenceBand").and_then(|v| v.as_i64()),
-        Some(3)
-    );
-    assert_eq!(
-        int_high.dict_get("bandLabel").and_then(|v| v.as_str()),
-        Some("High")
-    );
+    record_system_interference_activity(&ctx, &mut sess, 30_000_142, 0.75);
+    let int_high = ctx.dispatch_rpc(&mut sess, "solarsystemInterferenceMgr", None, "GetLocalInterferenceState", &[PyRep::Integer(30_000_142)], &kw, None).await.expect("GetLocalInterferenceState after CRAB/cyno activity");
+    assert_eq!(int_high.dict_get("interferenceBand").and_then(|v| v.as_i64()), Some(3));
+    assert_eq!(int_high.dict_get("bandLabel").and_then(|v| v.as_str()), Some("High"));
     let notifs = sess.drain_notifications();
     assert!(
-        notifs
-            .iter()
-            .any(|n| n.0 == "OnSolarsystemInterferenceChanged"),
+        notifs.iter().any(|n| n.0 == "OnSolarsystemInterferenceChanged"),
         "Crossing interference band threshold must emit OnSolarsystemInterferenceChanged"
     );
 }

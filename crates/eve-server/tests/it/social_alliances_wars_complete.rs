@@ -629,13 +629,18 @@ async fn test_corporation_deliveries_goals_freelance_fittings_assets_and_close()
     ctx.dispatch_rpc(&mut sess1, "corpRecProxy", None, "UpdateRecruitmentAd", &[PyRep::Integer(ad_id), PyRep::Integer(12), PyRep::String("Updated PvP".into()), PyRep::String("Updated".into())], &kw, None).await.unwrap();
     ctx.dispatch_rpc(&mut sess1, "corpRecProxy", None, "DeleteRecruitmentAd", &[PyRep::Integer(ad_id)], &kw, None).await.unwrap();
 
-    // 7. Corporation projects: activity matchers cannot be progressed by client self-report.
+    // 7. Corporation projects: activity matchers cannot be progressed by client self-report; closing requires role and refunds corp wallet.
     let goal_rep = ctx.dispatch_rpc(&mut sess1, "corporationSvc", None, "CreateGoalSubmit", &[PyRep::String("Kill 10 Pirates".into()), PyRep::Integer(10), PyRep::Real(100_000.0), PyRep::String("DamageNPCShips".into()), PyRep::Bool(true)], &kw, None).await.unwrap();
     let goal_id = goal_rep.dict_get("projectID").and_then(|v| v.as_i64()).unwrap();
     let self_report = ctx.dispatch_rpc(&mut sess1, "corporationSvc", None, "GoalProgress", &[PyRep::Integer(goal_id), PyRep::Integer(10)], &kw, None).await.expect_err("client cannot self-report kills");
     assert_eq!(self_report.code, "ServerTrackedMatcher");
     let (fcols, frows) = rows(&ctx.dispatch_rpc(&mut sess2, "corporationSvc", None, "GetActiveFreelanceProjectId", &[], &kw, None).await.unwrap());
     assert!(frows.iter().any(|r| r[col(&fcols, "projectID")] == PyRep::Integer(goal_id)), "freelance project visible outside the corp");
+    assert_eq!(ctx.dispatch_rpc(&mut sess2, "corporationSvc", None, "CloseCorpProject", &[PyRep::Integer(goal_id)], &kw, None).await.unwrap_err().code, "CorpRoleDenied");
+    assert_eq!(ctx.dispatch_rpc(&mut sess2, "corpRegistry", None, "UpdateTitle", &[PyRep::Integer(1), PyRep::String("Unauth".into()), PyRep::Integer(0)], &kw, None).await.unwrap_err().code, "CorpRoleDenied");
+    let cw_before_close = corp_wallet(&ctx, corp_id);
+    ctx.dispatch_rpc(&mut sess1, "corporationSvc", None, "CloseCorpProject", &[PyRep::Integer(goal_id)], &kw, None).await.unwrap();
+    assert!(corp_wallet(&ctx, corp_id) > cw_before_close, "CloseCorpProject must refund remaining escrow to corporation wallet");
 
     // 8. Employment Records (`feat:corporation.corp-employment-records`) & Corporation Closure (`feat:corporation.corp-close`)
     // Kick Pilot 2 -> employment record has start/end timestamps; CEO as last member cannot close corp while an active war exists (`ActiveWarsPreventClosure`), then closes corp once war is inactive

@@ -199,7 +199,14 @@ async fn test_dungeon_instance_cache_returns_current_per_system_instances() {
     });
     let victim_iid = registry_instance_id(&victim_site);
     assert!(hek_combat[&victim_did].contains(&victim_iid));
+    let hek_sys = ctx.systems.get_or_spawn(HEK);
     for _ in 0..10 {
+        let wave_bids: Vec<i64> = with_pve_exploration_reg(&ctx, |reg| {
+            reg.sites_by_system[&HEK].iter().find(|s| s.site_id == victim_site).map(|s| s.active_npc_ball_ids.clone()).unwrap_or_default()
+        });
+        for bid in wave_bids {
+            let _ = hek_sys.remove_ball(bid).await;
+        }
         advance_site_wave_or_complete(&ctx, &mut hek, HEK, &victim_site).await.expect("advance");
         let cleared = with_pve_exploration_reg(&ctx, |reg| {
             reg.sites_by_system[&HEK].iter().any(|s| s.site_id == victim_site && s.cleared)
