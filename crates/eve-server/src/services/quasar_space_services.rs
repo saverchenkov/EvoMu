@@ -487,4 +487,26 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
             }),
         );
     }
+
+    // 13. Stargate lock API & AI assistant chat query
+    for (req_name, rsp_name) in [
+        (
+            "eve_public.stargate.lock.api.GetRequest",
+            "eve_public.stargate.lock.api.GetResponse",
+        ),
+        (
+            "eve_public.stargate.lock.api.GetRestrictedSystemsRequest",
+            "eve_public.stargate.lock.api.GetRestrictedSystemsResponse",
+        ),
+        (
+            "eve_public.ai.assistant.chat.api.QueryRequest",
+            "eve_public.ai.assistant.chat.api.QueryResponse",
+        ),
+    ] {
+        let d = Arc::clone(&desc);
+        router.register_handler(
+            req_name,
+            Arc::new(move |_ctx, _any, _dyn_msg| build_dynamic_response(&d, rsp_name, |_resp| {})),
+        );
+    }
 }

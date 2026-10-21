@@ -114,22 +114,19 @@ impl ServerContext {
         let catalog_map: HashMap<String, serde_json::Value> =
             serde_json::from_str(EMBEDDED_RPC_CATALOG_JSON).unwrap_or_default();
         let cataloged_services: HashSet<String> = catalog_map.into_keys().collect();
-
         let quasar_map: HashMap<String, serde_json::Value> =
             serde_json::from_str(EMBEDDED_QUASAR_CATALOG_JSON).unwrap_or_default();
         let quasar_domains: HashSet<String> = quasar_map.into_keys().collect();
         let (notify_tx, _) = tokio::sync::broadcast::channel(256);
-
         let mechanic_rng = Arc::new(crate::rng::MechanicRng::os());
         let systems = Arc::new(
             SystemRegistry::with_sde_and_db(sde.clone(), Arc::clone(&db))
                 .with_mechanic_rng(Arc::clone(&mechanic_rng)),
         );
-        let quasar_descriptors =
-            eve_proto::quasar::QuasarDescriptorRegistry::open_default_or_empty();
         let quasar_gateway = Arc::new(crate::quasar_gateway::PublicGatewayRouter::new(
-            quasar_descriptors,
+            eve_proto::quasar::QuasarDescriptorRegistry::open_default_or_empty(),
             Arc::clone(&db),
+            Arc::clone(&sde),
         ));
 
         Self {

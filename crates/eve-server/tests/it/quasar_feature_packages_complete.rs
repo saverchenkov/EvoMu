@@ -376,16 +376,6 @@ async fn test_quasar_service_routing_batch1a() {
 
     register_dynamic_handler(
         &ctx.quasar_gateway,
-        "eve_public.auth.AuthenticateUsernameRequest",
-        "eve_public.auth.AuthenticateUsernameResponse",
-    );
-    register_dynamic_handler(
-        &ctx.quasar_gateway,
-        "eve.cdn.api.SignURLRequest",
-        "eve.cdn.api.SignURLResponse",
-    );
-    register_dynamic_handler(
-        &ctx.quasar_gateway,
         "eve.client.host.GetRequest",
         "eve.client.host.GetResponse",
     );
@@ -448,37 +438,6 @@ async fn test_quasar_service_routing_batch1b() {
     let reg = &ctx.quasar_gateway.descriptors;
     let mut sess = make_session(30_011, 101, 90_000_101, 98_000_001);
 
-    register_dynamic_handler(
-        &ctx.quasar_gateway,
-        "eve.entitlement.user.api.GrantRequest",
-        "eve.entitlement.user.api.GrantResponse",
-    );
-    register_dynamic_handler(
-        &ctx.quasar_gateway,
-        "eve.fulfillment.api.DeliverItemRequest",
-        "eve.fulfillment.api.DeliverItemResponse",
-    );
-    register_dynamic_handler(
-        &ctx.quasar_gateway,
-        "eve.isk.wallet.api.TransferByOwnerRequest",
-        "eve.isk.wallet.api.TransferByOwnerResponse",
-    );
-    register_dynamic_handler(
-        &ctx.quasar_gateway,
-        "eve.legal.agreement.api.GetLatestRequest",
-        "eve.legal.agreement.api.GetLatestResponse",
-    );
-    register_dynamic_handler(
-        &ctx.quasar_gateway,
-        "eve.localization.message.api.GetLocalizedTextRequest",
-        "eve.localization.message.api.GetLocalizedTextResponse",
-    );
-    register_dynamic_handler(
-        &ctx.quasar_gateway,
-        "eve_public.payment.token.api.GetQuickPayRequest",
-        "eve_public.payment.token.api.GetQuickPayResponse",
-    );
-
     ctx.quasar_gateway.subscribe_session(&sess, Vec::new(), ctx.now_unix());
 
     // 10. Entitlement (17 files)
@@ -537,11 +496,7 @@ async fn test_quasar_service_routing_batch2a() {
     let reg = &ctx.quasar_gateway.descriptors;
     let mut sess = make_session(30_002, 102, 90_000_102, 98_000_002);
 
-    register_dynamic_handler(&ctx.quasar_gateway, "eve_public.plex.vault.api.BalanceRequest", "eve_public.plex.vault.api.BalanceResponse");
     register_dynamic_handler(&ctx.quasar_gateway, "eve.ship.api.GetRequest", "eve.ship.api.GetResponse");
-    register_dynamic_handler(&ctx.quasar_gateway, "eve_public.store.offer.api.GetAllRequest", "eve_public.store.offer.api.GetAllResponse");
-    register_dynamic_handler(&ctx.quasar_gateway, "eve.corporation.structure.GetAllWithDetailsRequest", "eve.corporation.structure.GetAllWithDetailsResponse");
-    register_dynamic_handler(&ctx.quasar_gateway, "eve.user.character.GetCharactersRequest", "eve.user.character.GetCharactersResponse");
 
     ctx.quasar_gateway.subscribe_session(&sess, Vec::new(), ctx.now_unix());
 
@@ -602,7 +557,6 @@ async fn test_quasar_service_routing_batch2b() {
     let mut sess = make_session(30_012, 102, 90_000_102, 98_000_002);
 
     register_dynamic_handler(&ctx.quasar_gateway, "eve.acl.api.GetRequest", "eve.acl.api.GetResponse");
-    register_dynamic_handler(&ctx.quasar_gateway, "eve_public.ai.assistant.chat.api.QueryRequest", "eve_public.ai.assistant.chat.api.QueryResponse");
     register_dynamic_handler(&ctx.quasar_gateway, "eve.content.GetAllRequest", "eve.content.GetAllResponse");
     register_dynamic_handler(&ctx.quasar_gateway, "eve.debug.monolith.externalqueue.EmitProtobufEventRequest", "eve.debug.monolith.externalqueue.EmitProtobufEventResponse");
     register_dynamic_handler(&ctx.quasar_gateway, "eve.id.api.GetRequest", "eve.id.api.GetResponse");
@@ -777,4 +731,206 @@ async fn test_quasar_service_routing_batch3b() {
     // 55. Vendors (19 files)
     assert_eq!(reg.files_by_domain.get("vendors").unwrap().len(), 19);
     dispatch_and_verify_request(&ctx, &mut sess, "eve.vendors.epic.api.GetUserByEveUserIDRequest", Some("eve.vendors.epic.api.GetUserByEveUserIDResponse"), b"vend-01").await;
+}
+
+fn verify_pyj_batch(reg: &QuasarDescriptorRegistry, row_ids: &[&str]) -> usize {
+    for &row_id in row_ids {
+        let pyj = row_id.strip_prefix("quasar:").expect("quasar: prefix");
+        let fd = reg.get_file_by_pyj(pyj).expect("cataloged pyj present");
+        assert_eq!(fd.pyj_path, pyj);
+        for (idx, m) in fd.messages.iter().enumerate() {
+            let sample = reg
+                .instantiate_populated_sample(&m.full_name, (idx as u64) + 1)
+                .expect("instantiate sample");
+            let wire = reg.encode_dynamic(&sample).expect("encode sample");
+            let decoded = reg
+                .decode_dynamic(&m.full_name, &wire)
+                .expect("decode sample");
+            assert_eq!(decoded, sample);
+            let any = GoogleAny {
+                type_url: sample.type_url(),
+                value: wire,
+            };
+            assert_eq!(any.normalized_type_name(), m.full_name);
+        }
+    }
+    row_ids.len()
+}
+
+#[tokio::test]
+async fn test_quasar_campaign_objectives_and_contributions_batch() {
+    // parity: quasar:eveProto/generated/eve_public/campaign/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/campaign/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/campaign/campaign_pb2.pyj, quasar:eveProto/generated/eve_public/campaign/contributionmethod/configuration_pb2.pyj, quasar:eveProto/generated/eve_public/campaign/contributionmethod/definition/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/campaign/contributionmethod/definition/definition_pb2.pyj, quasar:eveProto/generated/eve_public/campaign/contributionmethod/parameter_pb2.pyj, quasar:eveProto/generated/eve_public/campaign/objective/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/campaign/objective/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/campaign/objective/objective_pb2.pyj, quasar:eveProto/generated/eve_public/campaign/parameter/parameter_pb2.pyj, quasar:eveProto/generated/eve_public/campaign/participation/participation_pb2.pyj
+    const ROWS: &[&str] = &[
+        "quasar:eveProto/generated/eve_public/campaign/api/notices_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/campaign/api/requests_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/campaign/campaign_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/campaign/contributionmethod/configuration_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/campaign/contributionmethod/definition/api/requests_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/campaign/contributionmethod/definition/definition_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/campaign/contributionmethod/parameter_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/campaign/objective/api/notices_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/campaign/objective/api/requests_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/campaign/objective/objective_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/campaign/parameter/parameter_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/campaign/participation/participation_pb2.pyj",
+    ];
+    eve_testkit::attest(ROWS);
+
+    let ctx = ServerContext::new();
+    let mut sess = make_session(31_001, 101, 90_000_101, 98_000_001);
+    assert_eq!(verify_pyj_batch(&ctx.quasar_gateway.descriptors, ROWS), 12);
+
+    dispatch_and_verify_request(&ctx, &mut sess, "eve_public.campaign.api.GetAllRequest", Some("eve_public.campaign.api.GetAllResponse"), b"cmp-b1-1").await;
+    dispatch_and_verify_request(&ctx, &mut sess, "eve_public.campaign.contributionmethod.definition.api.GetAllRequest", Some("eve_public.campaign.contributionmethod.definition.api.GetAllResponse"), b"cmp-b1-2").await;
+    dispatch_and_verify_request(&ctx, &mut sess, "eve_public.campaign.objective.api.GetRequest", Some("eve_public.campaign.objective.api.GetResponse"), b"cmp-b1-3").await;
+    assert_eq!(ctx.quasar_gateway.descriptors.get_file_by_pyj("eveProto/generated/eve_public/campaign/campaign_pb2.pyj").unwrap().domain, "campaign");
+    assert_eq!(ctx.quasar_gateway.descriptors.get_file_by_pyj("eveProto/generated/eve_public/campaign/objective/objective_pb2.pyj").unwrap().domain, "campaign");
+    assert_eq!(ctx.quasar_gateway.descriptors.get_file_by_pyj("eveProto/generated/eve_public/campaign/participation/participation_pb2.pyj").unwrap().domain, "campaign");
+}
+
+#[tokio::test]
+async fn test_quasar_campaign_tracks_and_triggers_batch() {
+    // parity: quasar:eveProto/generated/eve_public/campaign/sideffect/sideffect_pb2.pyj, quasar:eveProto/generated/eve_public/campaign/track/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/campaign/track/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/campaign/track/track_pb2.pyj, quasar:eveProto/generated/eve_public/campaign/trigger/eventmatch/definition/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/campaign/trigger/eventmatch/definition/definition_pb2.pyj, quasar:eveProto/generated/eve_public/campaign/trigger/eventmatch/eventmatch_pb2.pyj, quasar:eveProto/generated/eve_public/campaign/trigger/immediate/immediate_pb2.pyj, quasar:eveProto/generated/eve_public/campaign/trigger/objectivecompleted/objectivecompleted_pb2.pyj, quasar:eveProto/generated/eve_public/campaign/trigger/objectivefailed/objectivefailed_pb2.pyj, quasar:eveProto/generated/eve_public/campaign/trigger/relativeschedule/relativeschedule_pb2.pyj, quasar:eveProto/generated/eve_public/campaign/trigger/tracktargetprogressreached/tracktargetprogressreached_pb2.pyj
+    const ROWS: &[&str] = &[
+        "quasar:eveProto/generated/eve_public/campaign/sideffect/sideffect_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/campaign/track/api/notices_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/campaign/track/api/requests_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/campaign/track/track_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/campaign/trigger/eventmatch/definition/api/requests_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/campaign/trigger/eventmatch/definition/definition_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/campaign/trigger/eventmatch/eventmatch_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/campaign/trigger/immediate/immediate_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/campaign/trigger/objectivecompleted/objectivecompleted_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/campaign/trigger/objectivefailed/objectivefailed_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/campaign/trigger/relativeschedule/relativeschedule_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/campaign/trigger/tracktargetprogressreached/tracktargetprogressreached_pb2.pyj",
+    ];
+    eve_testkit::attest(ROWS);
+
+    let ctx = ServerContext::new();
+    let mut sess = make_session(31_002, 101, 90_000_101, 98_000_001);
+    assert_eq!(verify_pyj_batch(&ctx.quasar_gateway.descriptors, ROWS), 12);
+
+    dispatch_and_verify_request(&ctx, &mut sess, "eve_public.campaign.track.api.GetTickingContributionsPredictionRequest", Some("eve_public.campaign.track.api.GetTickingContributionsPredictionResponse"), b"cmp-b2-1").await;
+    dispatch_and_verify_request(&ctx, &mut sess, "eve_public.campaign.trigger.eventmatch.definition.api.GetAllRequest", Some("eve_public.campaign.trigger.eventmatch.definition.api.GetAllResponse"), b"cmp-b2-2").await;
+    assert_eq!(ctx.quasar_gateway.descriptors.get_file_by_pyj("eveProto/generated/eve_public/campaign/track/track_pb2.pyj").unwrap().domain, "campaign");
+    assert_eq!(ctx.quasar_gateway.descriptors.get_file_by_pyj("eveProto/generated/eve_public/campaign/sideffect/sideffect_pb2.pyj").unwrap().domain, "campaign");
+    assert_eq!(ctx.quasar_gateway.descriptors.get_file_by_pyj("eveProto/generated/eve_public/campaign/trigger/immediate/immediate_pb2.pyj").unwrap().domain, "campaign");
+}
+
+#[tokio::test]
+async fn test_quasar_deadspace_faction_math_ships_and_sov_hub_batch() {
+    // parity: quasar:eveProto/generated/eve_public/campaign/trigger/trigger_pb2.pyj, quasar:eveProto/generated/eve_public/campaign/ui/ui_pb2.pyj, quasar:eveProto/generated/eve_public/deadspace/archetype_pb2.pyj, quasar:eveProto/generated/eve_public/deadspace/signaturetype_pb2.pyj, quasar:eveProto/generated/eve_public/faction/activity/admin_pb2.pyj, quasar:eveProto/generated/eve_public/math/fraction_pb2.pyj, quasar:eveProto/generated/eve_public/math/vector_pb2.pyj, quasar:eveProto/generated/eve_public/ship/classification_pb2.pyj, quasar:eveProto/generated/eve_public/ship/ship_pb2.pyj, quasar:eveProto/generated/eve_public/ship/ship_type_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/hub/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/hub/hub_pb2.pyj
+    const ROWS: &[&str] = &[
+        "quasar:eveProto/generated/eve_public/campaign/trigger/trigger_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/campaign/ui/ui_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/deadspace/archetype_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/deadspace/signaturetype_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/faction/activity/admin_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/math/fraction_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/math/vector_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/ship/classification_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/ship/ship_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/ship/ship_type_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/sovereignty/hub/api/notices_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/sovereignty/hub/hub_pb2.pyj",
+    ];
+    eve_testkit::attest(ROWS);
+
+    let ctx = ServerContext::new();
+    let mut sess = make_session(31_003, 101, 90_000_101, 98_000_001);
+    assert_eq!(verify_pyj_batch(&ctx.quasar_gateway.descriptors, ROWS), 12);
+
+    dispatch_and_verify_request(&ctx, &mut sess, "eve_public.faction.activity.admin.IncrementContributionScoreRequest", Some("eve_public.faction.activity.admin.IncrementContributionScoreResponse"), b"sov-b3-1").await;
+    assert_eq!(ctx.quasar_gateway.descriptors.get_file_by_pyj("eveProto/generated/eve_public/ship/ship_pb2.pyj").unwrap().domain, "ship");
+    assert_eq!(ctx.quasar_gateway.descriptors.get_file_by_pyj("eveProto/generated/eve_public/math/vector_pb2.pyj").unwrap().domain, "math");
+    assert_eq!(ctx.quasar_gateway.descriptors.get_file_by_pyj("eveProto/generated/eve_public/sovereignty/hub/hub_pb2.pyj").unwrap().domain, "sovereignty");
+}
+
+#[tokio::test]
+async fn test_quasar_sovereignty_hub_upgrades_workforce_and_mercenaryden_batch() {
+    // parity: quasar:eveProto/generated/eve_public/sovereignty/hub/upgrade/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/hub/upgrade/upgrade_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/hub/upgrade/upgrade_type_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/hub/workforce/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/hub/workforce/workforce_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/activity/activity_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/activity/activitytemplate/activitytemplate_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/activity/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/activity/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/evolution_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/infomorph/itemtype/identifier_pb2.pyj
+    const ROWS: &[&str] = &[
+        "quasar:eveProto/generated/eve_public/sovereignty/hub/upgrade/api/notices_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/sovereignty/hub/upgrade/upgrade_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/sovereignty/hub/upgrade/upgrade_type_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/sovereignty/hub/workforce/api/notices_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/sovereignty/hub/workforce/workforce_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/activity/activity_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/activity/activitytemplate/activitytemplate_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/activity/api/notices_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/activity/api/requests_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/api/notices_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/evolution_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/infomorph/itemtype/identifier_pb2.pyj",
+    ];
+    eve_testkit::attest(ROWS);
+
+    let ctx = ServerContext::new();
+    let mut sess = make_session(31_004, 101, 90_000_101, 98_000_001);
+    assert_eq!(verify_pyj_batch(&ctx.quasar_gateway.descriptors, ROWS), 12);
+
+    dispatch_and_verify_request(&ctx, &mut sess, "eve_public.sovereignty.mercenaryden.activity.api.GetAllRequest", Some("eve_public.sovereignty.mercenaryden.activity.api.GetAllResponse"), b"sov-b4-1").await;
+    dispatch_and_verify_request(&ctx, &mut sess, "eve_public.sovereignty.mercenaryden.activity.api.GetCapacityRequest", Some("eve_public.sovereignty.mercenaryden.activity.api.GetCapacityResponse"), b"sov-b4-2").await;
+    assert_eq!(ctx.quasar_gateway.descriptors.get_file_by_pyj("eveProto/generated/eve_public/sovereignty/hub/upgrade/upgrade_pb2.pyj").unwrap().domain, "sovereignty");
+    assert_eq!(ctx.quasar_gateway.descriptors.get_file_by_pyj("eveProto/generated/eve_public/sovereignty/hub/workforce/workforce_pb2.pyj").unwrap().domain, "sovereignty");
+    assert_eq!(ctx.quasar_gateway.descriptors.get_file_by_pyj("eveProto/generated/eve_public/sovereignty/mercenaryden/evolution_pb2.pyj").unwrap().domain, "sovereignty");
+}
+
+#[tokio::test]
+async fn test_quasar_sovereignty_resources_and_skyhooks_batch() {
+    // parity: quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/infomorphs_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/mercenaryden_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/mercenaryden_type_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/resource/planet/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/resource/planet/planet_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/resource/planet/reagent/itemtype/identifier_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/resource/planet/reagent_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/resource/star/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/resource/star/star_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/skyhook/api/admin/admin_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/skyhook/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/skyhook/theftvulnerability_pb2.pyj
+    const ROWS: &[&str] = &[
+        "quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/infomorphs_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/mercenaryden_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/mercenaryden_type_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/sovereignty/resource/planet/api/requests_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/sovereignty/resource/planet/planet_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/sovereignty/resource/planet/reagent/itemtype/identifier_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/sovereignty/resource/planet/reagent_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/sovereignty/resource/star/api/requests_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/sovereignty/resource/star/star_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/sovereignty/skyhook/api/admin/admin_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/sovereignty/skyhook/api/notices_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/sovereignty/skyhook/theftvulnerability_pb2.pyj",
+    ];
+    eve_testkit::attest(ROWS);
+
+    let ctx = ServerContext::new();
+    let mut sess = make_session(31_005, 101, 90_000_101, 98_000_001);
+    assert_eq!(verify_pyj_batch(&ctx.quasar_gateway.descriptors, ROWS), 12);
+
+    dispatch_and_verify_request(&ctx, &mut sess, "eve_public.sovereignty.resource.planet.api.GetAllDefinitionsRequest", Some("eve_public.sovereignty.resource.planet.api.GetAllDefinitionsResponse"), b"sov-b5-1").await;
+    dispatch_and_verify_request(&ctx, &mut sess, "eve_public.sovereignty.resource.star.api.GetAllConfigurationsRequest", Some("eve_public.sovereignty.resource.star.api.GetAllConfigurationsResponse"), b"sov-b5-2").await;
+    dispatch_and_verify_request(&ctx, &mut sess, "eve_public.sovereignty.skyhook.api.admin.ModifyReagentsRequest", Some("eve_public.sovereignty.skyhook.api.admin.ModifyReagentsResponse"), b"sov-b5-3").await;
+    assert_eq!(ctx.quasar_gateway.descriptors.get_file_by_pyj("eveProto/generated/eve_public/sovereignty/resource/planet/planet_pb2.pyj").unwrap().domain, "sovereignty");
+    assert_eq!(ctx.quasar_gateway.descriptors.get_file_by_pyj("eveProto/generated/eve_public/sovereignty/resource/star/star_pb2.pyj").unwrap().domain, "sovereignty");
+    assert_eq!(ctx.quasar_gateway.descriptors.get_file_by_pyj("eveProto/generated/eve_public/sovereignty/skyhook/theftvulnerability_pb2.pyj").unwrap().domain, "sovereignty");
+}
+
+#[tokio::test]
+async fn test_quasar_stars_stargates_stations_and_structures_batch() {
+    // parity: quasar:eveProto/generated/eve_public/sovereignty/skyhook/workforce_pb2.pyj, quasar:eveProto/generated/eve_public/star/star_pb2.pyj, quasar:eveProto/generated/eve_public/stargate/lock/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/stargate/lock/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/stargate/stargate_pb2.pyj, quasar:eveProto/generated/eve_public/station/station_pb2.pyj, quasar:eveProto/generated/eve_public/structure/group_pb2.pyj, quasar:eveProto/generated/eve_public/structure/structure_pb2.pyj, quasar:eveProto/generated/eve_public/structure/structure_type_pb2.pyj
+    const ROWS: &[&str] = &[
+        "quasar:eveProto/generated/eve_public/sovereignty/skyhook/workforce_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/star/star_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/stargate/lock/api/notices_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/stargate/lock/api/requests_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/stargate/stargate_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/station/station_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/structure/group_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/structure/structure_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/structure/structure_type_pb2.pyj",
+    ];
+    eve_testkit::attest(ROWS);
+
+    let ctx = ServerContext::new();
+    let mut sess = make_session(31_006, 101, 90_000_101, 98_000_001);
+    assert_eq!(verify_pyj_batch(&ctx.quasar_gateway.descriptors, ROWS), 9);
+
+    dispatch_and_verify_request(&ctx, &mut sess, "eve_public.stargate.lock.api.GetRequest", Some("eve_public.stargate.lock.api.GetResponse"), b"sov-b6-1").await;
+    dispatch_and_verify_request(&ctx, &mut sess, "eve_public.stargate.lock.api.GetRestrictedSystemsRequest", Some("eve_public.stargate.lock.api.GetRestrictedSystemsResponse"), b"sov-b6-2").await;
+    assert_eq!(ctx.quasar_gateway.descriptors.get_file_by_pyj("eveProto/generated/eve_public/star/star_pb2.pyj").unwrap().domain, "star");
+    assert_eq!(ctx.quasar_gateway.descriptors.get_file_by_pyj("eveProto/generated/eve_public/stargate/stargate_pb2.pyj").unwrap().domain, "stargate");
+    assert_eq!(ctx.quasar_gateway.descriptors.get_file_by_pyj("eveProto/generated/eve_public/structure/structure_pb2.pyj").unwrap().domain, "structure");
 }

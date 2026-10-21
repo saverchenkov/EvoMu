@@ -943,3 +943,242 @@ async fn quasar_community_progression_tales_and_goals() {
     .await;
     assert_eq!(chall_rsp.status_code, STATUS_OK);
 }
+
+fn verify_progression_pyj_batch(ctx: &ServerContext, row_ids: &[&str]) -> usize {
+    let reg = &ctx.quasar_gateway.descriptors;
+    for &row_id in row_ids {
+        let pyj = row_id.strip_prefix("quasar:").expect("quasar: prefix");
+        let fd = reg.get_file_by_pyj(pyj).expect("cataloged pyj present");
+        assert_eq!(fd.pyj_path, pyj);
+        for (idx, m) in fd.messages.iter().enumerate() {
+            let sample = reg
+                .instantiate_populated_sample(&m.full_name, (idx as u64) + 1)
+                .expect("instantiate sample");
+            let wire = reg.encode_dynamic(&sample).expect("encode sample");
+            let decoded = reg
+                .decode_dynamic(&m.full_name, &wire)
+                .expect("decode sample");
+            assert_eq!(decoded, sample);
+            let any = GoogleAny {
+                type_url: sample.type_url(),
+                value: wire,
+            };
+            assert_eq!(any.normalized_type_name(), m.full_name);
+        }
+    }
+    row_ids.len()
+}
+
+#[tokio::test]
+async fn test_q4_progression_achievement_categories_and_definitions() {
+    // parity: quasar:eveProto/generated/eve_public/achievement/api/admin/requests_pb2.pyj, quasar:eveProto/generated/eve_public/achievement/api/events_pb2.pyj, quasar:eveProto/generated/eve_public/achievement/category/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/achievement/category/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/achievement/category/definition/category_pb2.pyj, quasar:eveProto/generated/eve_public/achievement/category/milestone/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/achievement/category/milestone/definition/milestone_pb2.pyj, quasar:eveProto/generated/eve_public/achievement/contribution/contribution_pb2.pyj, quasar:eveProto/generated/eve_public/achievement/definition/achievement_pb2.pyj, quasar:eveProto/generated/eve_public/achievement/definition/version/api/notices_pb2.pyj
+    const ROWS: &[&str] = &[
+        "quasar:eveProto/generated/eve_public/achievement/api/admin/requests_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/achievement/api/events_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/achievement/category/api/notices_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/achievement/category/api/requests_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/achievement/category/definition/category_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/achievement/category/milestone/api/notices_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/achievement/category/milestone/definition/milestone_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/achievement/contribution/contribution_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/achievement/definition/achievement_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/achievement/definition/version/api/notices_pb2.pyj",
+    ];
+    eve_testkit::attest(ROWS);
+
+    let ctx = ServerContext::new();
+    let mut sess = build_sess(8401, 90_000_001, 98_000_001);
+    assert_eq!(verify_progression_pyj_batch(&ctx, ROWS), 10);
+
+    let cat_rsp = quasar_rpc(
+        &ctx,
+        &mut sess,
+        "eve_public.achievement.category.api.GetRequest",
+        sample_request_payload(&ctx, "eve_public.achievement.category.api.GetRequest"),
+    )
+    .await;
+    assert_eq!(
+        cat_rsp.payload.as_ref().unwrap().normalized_type_name(),
+        "eve_public.achievement.category.api.GetResponse"
+    );
+    assert_eq!(cat_rsp.correlation_uuid, b"prog-test-corr01");
+
+    let rst_rsp = quasar_rpc(
+        &ctx,
+        &mut sess,
+        "eve_public.achievement.api.admin.ResetAllRequest",
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(
+        rst_rsp.payload.as_ref().unwrap().normalized_type_name(),
+        "google.protobuf.Empty"
+    );
+    assert_eq!(rst_rsp.correlation_uuid, b"prog-test-corr01");
+}
+
+#[tokio::test]
+async fn test_q4_progression_achievement_rewards_showcase_and_character() {
+    // parity: quasar:eveProto/generated/eve_public/achievement/milestone/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/achievement/milestone/definition/milestone_pb2.pyj, quasar:eveProto/generated/eve_public/achievement/reward/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/achievement/reward/definition/reward_pb2.pyj, quasar:eveProto/generated/eve_public/achievement/showcase/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/agent/agent_pb2.pyj, quasar:eveProto/generated/eve_public/career/career_pb2.pyj, quasar:eveProto/generated/eve_public/career/goal/api/admin/requests_pb2.pyj, quasar:eveProto/generated/eve_public/character/character_pb2.pyj, quasar:eveProto/generated/eve_public/character/hacking/hacking_pb2.pyj
+    const ROWS: &[&str] = &[
+        "quasar:eveProto/generated/eve_public/achievement/milestone/api/notices_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/achievement/milestone/definition/milestone_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/achievement/reward/api/requests_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/achievement/reward/definition/reward_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/achievement/showcase/api/requests_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/agent/agent_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/career/career_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/career/goal/api/admin/requests_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/character/character_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/character/hacking/hacking_pb2.pyj",
+    ];
+    eve_testkit::attest(ROWS);
+
+    let ctx = ServerContext::new();
+    let mut sess = build_sess(8402, 90_000_001, 98_000_001);
+    assert_eq!(verify_progression_pyj_batch(&ctx, ROWS), 10);
+
+    let rew_rsp = quasar_rpc(
+        &ctx,
+        &mut sess,
+        "eve_public.achievement.reward.api.GetUnclaimedRequest",
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(
+        rew_rsp.payload.as_ref().unwrap().normalized_type_name(),
+        "eve_public.achievement.reward.api.GetUnclaimedResponse"
+    );
+
+    let show_rsp = quasar_rpc(
+        &ctx,
+        &mut sess,
+        "eve_public.achievement.showcase.api.GetCharacterScoreRequest",
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(
+        show_rsp.payload.as_ref().unwrap().normalized_type_name(),
+        "eve_public.achievement.showcase.api.GetCharacterScoreResponse"
+    );
+
+    let names_rsp = quasar_rpc(
+        &ctx,
+        &mut sess,
+        "eve_public.character.GetNamesByUserRequest",
+        sample_request_payload(&ctx, "eve_public.character.GetNamesByUserRequest"),
+    )
+    .await;
+    assert_eq!(
+        names_rsp.payload.as_ref().unwrap().normalized_type_name(),
+        "eve_public.character.GetNamesByUserResponse"
+    );
+    assert_eq!(names_rsp.correlation_uuid, b"prog-test-corr01");
+}
+
+#[tokio::test]
+async fn test_q4_progression_character_skill_plans_and_goals() {
+    // parity: quasar:eveProto/generated/eve_public/character/skill/plan/milestone_pb2.pyj, quasar:eveProto/generated/eve_public/character/skill/plan/plan_pb2.pyj, quasar:eveProto/generated/eve_public/communitytrack/instance/instance_pb2.pyj, quasar:eveProto/generated/eve_public/dailygoal/api/admin/admin_pb2.pyj, quasar:eveProto/generated/eve_public/epicarc/epicarc_pb2.pyj, quasar:eveProto/generated/eve_public/goal/api/events_pb2.pyj, quasar:eveProto/generated/eve_public/goal/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/goal/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/goal/contribution/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/goal/goal_pb2.pyj
+    const ROWS: &[&str] = &[
+        "quasar:eveProto/generated/eve_public/character/skill/plan/milestone_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/character/skill/plan/plan_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/communitytrack/instance/instance_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/dailygoal/api/admin/admin_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/epicarc/epicarc_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/goal/api/events_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/goal/api/notices_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/goal/api/requests_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/goal/contribution/api/notices_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/goal/goal_pb2.pyj",
+    ];
+    eve_testkit::attest(ROWS);
+
+    let ctx = ServerContext::new();
+    let mut sess = build_sess(8403, 90_000_001, 98_000_001);
+    assert_eq!(verify_progression_pyj_batch(&ctx, ROWS), 10);
+
+    let sp_rsp = quasar_rpc(
+        &ctx,
+        &mut sess,
+        "eve_public.character.skill.plan.GetAllRequest",
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(
+        sp_rsp.payload.as_ref().unwrap().normalized_type_name(),
+        "eve_public.character.skill.plan.GetAllResponse"
+    );
+
+    let ms_rsp = quasar_rpc(
+        &ctx,
+        &mut sess,
+        "eve_public.character.skill.plan.milestone.GetAllRequest",
+        sample_request_payload(&ctx, "eve_public.character.skill.plan.milestone.GetAllRequest"),
+    )
+    .await;
+    assert_eq!(
+        ms_rsp.payload.as_ref().unwrap().normalized_type_name(),
+        "eve_public.character.skill.plan.milestone.GetAllResponse"
+    );
+
+    let goal_rsp = quasar_rpc(
+        &ctx,
+        &mut sess,
+        "eve_public.goal.api.CreateRequest",
+        sample_request_payload(&ctx, "eve_public.goal.api.CreateRequest"),
+    )
+    .await;
+    assert_eq!(
+        goal_rsp.payload.as_ref().unwrap().normalized_type_name(),
+        "eve_public.goal.api.CreateResponse"
+    );
+    assert_eq!(goal_rsp.correlation_uuid, b"prog-test-corr01");
+}
+
+#[tokio::test]
+async fn test_q4_progression_missions_opportunities_skills_and_tales() {
+    // parity: quasar:eveProto/generated/eve_public/goal/matcher_pb2.pyj, quasar:eveProto/generated/eve_public/mission/mission_pb2.pyj, quasar:eveProto/generated/eve_public/nodegraph/nodegraph_pb2.pyj, quasar:eveProto/generated/eve_public/opportunity/api/event_pb2.pyj, quasar:eveProto/generated/eve_public/opportunity/opportunity_pb2.pyj, quasar:eveProto/generated/eve_public/skill/plan/certified_pb2.pyj, quasar:eveProto/generated/eve_public/skill/skilltype_pb2.pyj, quasar:eveProto/generated/eve_public/tale/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/tale/spawntemplate_pb2.pyj, quasar:eveProto/generated/eve_public/tale/tale_pb2.pyj
+    const ROWS: &[&str] = &[
+        "quasar:eveProto/generated/eve_public/goal/matcher_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/mission/mission_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/nodegraph/nodegraph_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/opportunity/api/event_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/opportunity/opportunity_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/skill/plan/certified_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/skill/skilltype_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/tale/api/notices_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/tale/spawntemplate_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/tale/tale_pb2.pyj",
+    ];
+    eve_testkit::attest(ROWS);
+
+    let ctx = ServerContext::new();
+    let mut sess = build_sess(8404, 90_000_001, 98_000_001);
+    assert_eq!(verify_progression_pyj_batch(&ctx, ROWS), 10);
+
+    let plan_rsp = quasar_rpc(
+        &ctx,
+        &mut sess,
+        "eve_public.skill.plan.GetAllRequest",
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(
+        plan_rsp.payload.as_ref().unwrap().normalized_type_name(),
+        "eve_public.skill.plan.GetAllResponse"
+    );
+
+    let tale_rsp = quasar_rpc(
+        &ctx,
+        &mut sess,
+        "eve.tale.api.GetActiveTalesCountRequest",
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(
+        tale_rsp.payload.as_ref().unwrap().normalized_type_name(),
+        "eve.tale.api.GetActiveTalesCountResponse"
+    );
+    assert_eq!(tale_rsp.correlation_uuid, b"prog-test-corr01");
+    assert_eq!(plan_rsp.correlation_uuid, b"prog-test-corr01");
+}

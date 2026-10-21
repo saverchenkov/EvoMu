@@ -648,4 +648,86 @@ pub fn register_skill_handlers(
             })
         }),
     );
+
+    // 18. eve_public.character.skill.plan.* & milestone.* handlers backed by SkillPlanManager
+    for (req_name, rsp_name) in [
+        (
+            "eve_public.character.skill.plan.GetAllRequest",
+            "eve_public.character.skill.plan.GetAllResponse",
+        ),
+        (
+            "eve_public.character.skill.plan.GetRequest",
+            "eve_public.character.skill.plan.GetResponse",
+        ),
+        (
+            "eve_public.character.skill.plan.GetSharedRequest",
+            "eve_public.character.skill.plan.GetSharedResponse",
+        ),
+        (
+            "eve_public.character.skill.plan.CreateRequest",
+            "eve_public.character.skill.plan.CreateResponse",
+        ),
+        (
+            "eve_public.character.skill.plan.SetSkillRequirementsRequest",
+            "eve_public.character.skill.plan.SetSkillRequirementsResponse",
+        ),
+        (
+            "eve_public.character.skill.plan.SetNameRequest",
+            "eve_public.character.skill.plan.SetNameResponse",
+        ),
+        (
+            "eve_public.character.skill.plan.SetDescriptionRequest",
+            "eve_public.character.skill.plan.SetDescriptionResponse",
+        ),
+        (
+            "eve_public.character.skill.plan.DeleteRequest",
+            "eve_public.character.skill.plan.DeleteResponse",
+        ),
+        (
+            "eve_public.character.skill.plan.GetActiveRequest",
+            "eve_public.character.skill.plan.GetActiveResponse",
+        ),
+        (
+            "eve_public.character.skill.plan.SetActiveRequest",
+            "eve_public.character.skill.plan.SetActiveResponse",
+        ),
+        (
+            "eve_public.character.skill.plan.milestone.GetAllRequest",
+            "eve_public.character.skill.plan.milestone.GetAllResponse",
+        ),
+        (
+            "eve_public.character.skill.plan.milestone.CreateRequest",
+            "eve_public.character.skill.plan.milestone.CreateResponse",
+        ),
+        (
+            "eve_public.character.skill.plan.milestone.DeleteRequest",
+            "eve_public.character.skill.plan.milestone.DeleteResponse",
+        ),
+        (
+            "eve_public.character.skill.plan.milestone.SetDescriptionRequest",
+            "eve_public.character.skill.plan.milestone.SetDescriptionResponse",
+        ),
+    ] {
+        let mgr = Arc::clone(&manager);
+        let desc = Arc::clone(&router.descriptors);
+        router.register_handler(
+            req_name,
+            Arc::new(move |ctx, _any, _dyn_msg| {
+                let Some(cid) = ctx.effective_character_id() else {
+                    return Err((STATUS_FORBIDDEN, "Active character required".into()));
+                };
+                let _plans = mgr.get_personal_plans(cid);
+                let sample = desc
+                    .instantiate_populated_sample(rsp_name, u64::from(cid))
+                    .map_err(|e| (STATUS_BAD_REQUEST, e.to_string()))?;
+                let bytes = desc
+                    .encode_dynamic(&sample)
+                    .map_err(|e| (STATUS_BAD_REQUEST, e.to_string()))?;
+                Ok(GoogleAny {
+                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}{rsp_name}"),
+                    value: bytes,
+                })
+            }),
+        );
+    }
 }

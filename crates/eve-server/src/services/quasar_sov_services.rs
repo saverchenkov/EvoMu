@@ -500,4 +500,62 @@ pub fn register_handlers(router: &PublicGatewayRouter, _db: Arc<WorldRepository>
             }),
         );
     }
+
+    // 9. Mercenary den activity, planetary/stellar sov resources, skyhook & faction admin
+    for (req_name, rsp_name) in [
+        (
+            "eve_public.faction.activity.admin.IncrementContributionScoreRequest",
+            "eve_public.faction.activity.admin.IncrementContributionScoreResponse",
+        ),
+        (
+            "eve_public.faction.activity.admin.SetContributionScoreRequest",
+            "eve_public.faction.activity.admin.SetContributionScoreResponse",
+        ),
+        (
+            "eve_public.sovereignty.mercenaryden.activity.api.GetForMercenaryDenRequest",
+            "eve_public.sovereignty.mercenaryden.activity.api.GetForMercenaryDenResponse",
+        ),
+        (
+            "eve_public.sovereignty.mercenaryden.activity.api.GetAllRequest",
+            "eve_public.sovereignty.mercenaryden.activity.api.GetAllResponse",
+        ),
+        (
+            "eve_public.sovereignty.mercenaryden.activity.api.StartRequest",
+            "eve_public.sovereignty.mercenaryden.activity.api.StartResponse",
+        ),
+        (
+            "eve_public.sovereignty.mercenaryden.activity.api.GetCapacityRequest",
+            "eve_public.sovereignty.mercenaryden.activity.api.GetCapacityResponse",
+        ),
+        (
+            "eve_public.sovereignty.resource.planet.api.GetAllDefinitionsRequest",
+            "eve_public.sovereignty.resource.planet.api.GetAllDefinitionsResponse",
+        ),
+        (
+            "eve_public.sovereignty.resource.planet.api.GetDefinitionsVersionRequest",
+            "eve_public.sovereignty.resource.planet.api.GetDefinitionsVersionResponse",
+        ),
+        (
+            "eve_public.sovereignty.resource.planet.api.GetAllConfigurationsRequest",
+            "eve_public.sovereignty.resource.planet.api.GetAllConfigurationsResponse",
+        ),
+        (
+            "eve_public.sovereignty.resource.star.api.GetAllConfigurationsRequest",
+            "eve_public.sovereignty.resource.star.api.GetAllConfigurationsResponse",
+        ),
+        (
+            "eve_public.sovereignty.skyhook.api.admin.ModifyReagentsRequest",
+            "eve_public.sovereignty.skyhook.api.admin.ModifyReagentsResponse",
+        ),
+        (
+            "eve_public.sovereignty.skyhook.api.admin.ScheduleTheftVulnerabilityWindowRequest",
+            "eve_public.sovereignty.skyhook.api.admin.ScheduleTheftVulnerabilityWindowResponse",
+        ),
+    ] {
+        let d = Arc::clone(&desc);
+        router.register_handler(
+            req_name,
+            Arc::new(move |_ctx, _any, _dyn_msg| build_dynamic_response(&d, rsp_name, |_resp| {})),
+        );
+    }
 }

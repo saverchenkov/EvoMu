@@ -345,7 +345,11 @@ pub struct PublicGatewayRouter {
 }
 
 impl PublicGatewayRouter {
-    pub fn new(descriptors: Arc<QuasarDescriptorRegistry>, db: Arc<WorldRepository>) -> Self {
+    pub fn new(
+        descriptors: Arc<QuasarDescriptorRegistry>,
+        db: Arc<WorldRepository>,
+        sde: Arc<eve_sde::SdeRegistry>,
+    ) -> Self {
         let router = Self {
             descriptors,
             gateway_instance_uuid: b"evomu-quasar-gw1".to_vec(),
@@ -360,7 +364,32 @@ impl PublicGatewayRouter {
             next_notice_seq: AtomicU64::new(1),
             pending_notices: Arc::new(RwLock::new(Vec::new())),
         };
-        router.register_builtin_core_handlers(db);
+        router.register_builtin_core_handlers(Arc::clone(&db));
+        crate::services::quasar_social::register_social_services(&router, Arc::clone(&db));
+        crate::services::quasar_market::register_market_handlers(
+            &router,
+            Arc::clone(&db),
+            Arc::clone(&sde),
+            Arc::clone(&router.descriptors),
+        );
+        crate::services::quasar_inventory_asset::register_inventory_asset_handlers(
+            &router,
+            Arc::clone(&db),
+            Arc::clone(&sde),
+            Arc::clone(&router.descriptors),
+        );
+        crate::services::quasar_assetholding_entitlements::register_assetholding_handlers(
+            &router,
+            Arc::clone(&db),
+            Arc::clone(&sde),
+            Arc::clone(&router.descriptors),
+        );
+        crate::services::quasar_economy_planetary_industry::register_economy_planetary_industry_handlers(
+            &router,
+            Arc::clone(&db),
+            Arc::clone(&sde),
+            Arc::clone(&router.descriptors),
+        );
         router
     }
 
@@ -426,7 +455,12 @@ impl PublicGatewayRouter {
         // 5. Q-9: Cosmetics, SKINR, Titles, Heraldry & App Services
         crate::services::quasar_cosmetics_services::register_handlers(self, Arc::clone(&db));
 
-        // 6. Quasar Character & Progression Track (Q-4 / Q-6) handlers
+        // 6. Q-3: Identity, Accounts, Entitlements, Store & Payment Services
+        crate::services::quasar_auth_user::register_handlers(self, Arc::clone(&db));
+        crate::services::quasar_entitlement_membership::register_handlers(self, Arc::clone(&db));
+        crate::services::quasar_payment_store::register_handlers(self, Arc::clone(&db));
+
+        // 7. Quasar Character & Progression Track (Q-4) handlers
         crate::services::quasar_progression::register_all_progression_handlers(
             self,
             Arc::clone(&db),
@@ -917,6 +951,11 @@ impl PublicGatewayRouter {
                 None,
             ),
         };
+
+        // Drain any notices queued by Quasar social service handlers and fan out to subscribers
+        for (scope, payload, ts) in crate::services::quasar_social_chat::drain_local_notices() {
+            let _ = self.publish_notice(scope, payload, ts);
+        }
 
         if let Some(ikey) = idem_key {
             let cache_tuple = (session_uid, cid_key, norm_type, ikey);

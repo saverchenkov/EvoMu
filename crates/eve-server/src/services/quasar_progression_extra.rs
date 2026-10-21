@@ -692,4 +692,82 @@ pub fn register_progression_extra_handlers(
             })
         }),
     );
+
+    // Campaign objectives, tracks, contribution methods, triggers & title admin
+    for (req_name, rsp_name) in [
+        (
+            "eve_public.campaign.contributionmethod.definition.api.GetAllRequest",
+            "eve_public.campaign.contributionmethod.definition.api.GetAllResponse",
+        ),
+        (
+            "eve_public.campaign.objective.api.GetRequest",
+            "eve_public.campaign.objective.api.GetResponse",
+        ),
+        (
+            "eve_public.campaign.objective.api.GetStatusRequest",
+            "eve_public.campaign.objective.api.GetStatusResponse",
+        ),
+        (
+            "eve_public.campaign.objective.api.GetParticipantStatusRequest",
+            "eve_public.campaign.objective.api.GetParticipantStatusResponse",
+        ),
+        (
+            "eve_public.campaign.objective.api.CommitRequest",
+            "eve_public.campaign.objective.api.CommitResponse",
+        ),
+        (
+            "eve_public.campaign.objective.api.ResignRequest",
+            "eve_public.campaign.objective.api.ResignResponse",
+        ),
+        (
+            "eve_public.campaign.objective.api.RedeemRewardsRequest",
+            "eve_public.campaign.objective.api.RedeemRewardsResponse",
+        ),
+        (
+            "eve_public.campaign.objective.api.GetStatsRequest",
+            "eve_public.campaign.objective.api.GetStatsResponse",
+        ),
+        (
+            "eve_public.campaign.objective.api.GetParticipantStatsRequest",
+            "eve_public.campaign.objective.api.GetParticipantStatsResponse",
+        ),
+        (
+            "eve_public.campaign.track.api.GetTickingContributionsPredictionRequest",
+            "eve_public.campaign.track.api.GetTickingContributionsPredictionResponse",
+        ),
+        (
+            "eve_public.campaign.track.api.RedeemParticipantRewardsRequest",
+            "eve_public.campaign.track.api.RedeemParticipantRewardsResponse",
+        ),
+        (
+            "eve_public.campaign.trigger.eventmatch.definition.api.GetAllRequest",
+            "eve_public.campaign.trigger.eventmatch.definition.api.GetAllResponse",
+        ),
+        (
+            "eve_public.cosmetic.character.title.api.admin.GrantRequest",
+            "eve_public.cosmetic.character.title.api.admin.GrantResponse",
+        ),
+        (
+            "eve_public.cosmetic.character.title.api.admin.RevokeRequest",
+            "eve_public.cosmetic.character.title.api.admin.RevokeResponse",
+        ),
+    ] {
+        let desc = Arc::clone(&router.descriptors);
+        router.register_handler(
+            req_name,
+            Arc::new(move |ctx, _any, _dyn_msg| {
+                let seed = u64::from(ctx.effective_character_id().unwrap_or(90_000_001));
+                let sample = desc
+                    .instantiate_populated_sample(rsp_name, seed)
+                    .map_err(|e| (STATUS_BAD_REQUEST, e.to_string()))?;
+                let bytes = desc
+                    .encode_dynamic(&sample)
+                    .map_err(|e| (STATUS_BAD_REQUEST, e.to_string()))?;
+                Ok(GoogleAny {
+                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}{rsp_name}"),
+                    value: bytes,
+                })
+            }),
+        );
+    }
 }
