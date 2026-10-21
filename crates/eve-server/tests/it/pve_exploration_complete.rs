@@ -1007,13 +1007,36 @@ async fn test_pve_abyssal_deadspace_pocket_gates_weather_and_tiers() {
     assert!(boosted_therm_res > 0.65);
 
     // 3. Transition Room 1 -> Room 2 -> Room 3 via `AbyssalGateActivation`, then exit via `AbyssalEndGateActivation`
+    let locked_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "abyssal_content_manager",
+            None,
+            "AbyssalGateActivation",
+            &[],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("AbyssalGateActivation must reject while Room 1 NPC balls remain");
+    assert_eq!(locked_err.code, "AbyssalGateLocked");
+
+    let abyssal_handle = ctx.systems.get_or_spawn(32_000_001);
+    if let Some(PyRep::List(r1_npcs)) = enter_rep.dict_get("npcBallIDs") {
+        for npc in r1_npcs {
+            if let Some(bid) = npc.as_i64() {
+                let _ = abyssal_handle.remove_ball(bid).await;
+            }
+        }
+    }
+
     let r2 = ctx
         .dispatch_rpc(
             &mut sess,
             "abyssal_content_manager",
             None,
             "AbyssalGateActivation",
-            &[PyRep::Bool(true)],
+            &[],
             &kw,
             None,
         )
@@ -1021,19 +1044,35 @@ async fn test_pve_abyssal_deadspace_pocket_gates_weather_and_tiers() {
         .expect("AbyssalGateActivation Room 1 -> 2");
     assert_eq!(r2.dict_get("currentRoom").and_then(|v| v.as_i64()), Some(2));
 
+    if let Some(PyRep::List(r2_npcs)) = r2.dict_get("npcBallIDs") {
+        for npc in r2_npcs {
+            if let Some(bid) = npc.as_i64() {
+                let _ = abyssal_handle.remove_ball(bid).await;
+            }
+        }
+    }
+
     let r3 = ctx
         .dispatch_rpc(
             &mut sess,
             "abyssal_content_manager",
             None,
             "AbyssalGateActivation",
-            &[PyRep::Bool(true)],
+            &[],
             &kw,
             None,
         )
         .await
         .expect("AbyssalGateActivation Room 2 -> 3");
     assert_eq!(r3.dict_get("currentRoom").and_then(|v| v.as_i64()), Some(3));
+
+    if let Some(PyRep::List(r3_npcs)) = r3.dict_get("npcBallIDs") {
+        for npc in r3_npcs {
+            if let Some(bid) = npc.as_i64() {
+                let _ = abyssal_handle.remove_ball(bid).await;
+            }
+        }
+    }
 
     let exit_rep = ctx
         .dispatch_rpc(

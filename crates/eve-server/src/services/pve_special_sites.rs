@@ -1040,6 +1040,7 @@ pub async fn handle_pve_special_sites(
                 ("startedAt", PyRep::Integer(started_ts as i64)),
                 ("collapseAt", PyRep::Integer(collapse_ts as i64)),
                 ("timerSeconds", PyRep::Integer(1_200)),
+                ("npcBallIDs", PyRep::List(room1_npcs.iter().map(|&id| PyRep::Integer(id)).collect())),
             ])))
         }
 
@@ -1047,8 +1048,7 @@ pub async fn handle_pve_special_sites(
         ("abyssal_content_manager", "AbyssalGateActivation")
         | ("abyssal_content_manager", "ActivateAbyssalAccelerationGate") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let clear_current_room = args.first().and_then(|a| a.as_bool()).unwrap_or(true);
-            let res = with_pve_special_reg(ctx, |reg| {
+            let pre_check = with_pve_special_reg(ctx, |reg| {
                 let now = spec_now_sec(reg);
                 let Some(pocket) = reg.abyssal_pockets.get_mut(&char_id) else {
                     return Err(rpc_err("NotInAbyssalPocket", "Character has no active Abyssal pocket"));
@@ -1057,21 +1057,46 @@ pub async fn handle_pve_special_sites(
                     pocket.collapsed_destroyed = true;
                     return Err(rpc_err("AbyssalPocketCollapsed", "Abyssal pocket 20-minute timer expired; ship and capsule destroyed"));
                 }
-                let r_idx = (pocket.current_room.saturating_sub(1) as usize).min(2);
-                if clear_current_room { pocket.rooms[r_idx].cleared = true; }
-                if !pocket.rooms[r_idx].cleared {
-                    return Err(rpc_err("AbyssalGateLocked", "Cannot activate Triglavian Transfer Conduit while room hostiles remain"));
-                }
                 if pocket.current_room >= 3 {
                     return Err(rpc_err("AlreadyInFinalAbyssalRoom", "Already in Room 3; use AbyssalEndGateActivation to exit"));
                 }
+                let r_idx = (pocket.current_room.saturating_sub(1) as usize).min(2);
+                Ok((pocket.abyssal_solar_system_id, r_idx, pocket.rooms[r_idx].npc_ball_ids.clone()))
+            });
+            let (abyssal_sys_id, r_idx, room_npcs) = match pre_check { Ok(v) => v, Err(e) => return Some(Err(e)) };
+
+            let sys_handle = ctx.systems.get_or_spawn(abyssal_sys_id);
+            let mut alive_npcs = 0usize;
+            for &bid in &room_npcs {
+                if matches!(sys_handle.get_ball_snapshot(bid).await, Ok(Some(_))) {
+                    alive_npcs += 1;
+                }
+            }
+            if alive_npcs > 0 {
+                return Some(Err(rpc_err(
+                    "AbyssalGateLocked",
+                    format!("Cannot activate Triglavian Transfer Conduit while {alive_npcs} room hostiles remain"),
+                )));
+            }
+
+            let res = with_pve_special_reg(ctx, |reg| {
+                let Some(pocket) = reg.abyssal_pockets.get_mut(&char_id) else {
+                    return Err(rpc_err("NotInAbyssalPocket", "Character has no active Abyssal pocket"));
+                };
+                pocket.rooms[r_idx].cleared = true;
                 pocket.current_room += 1;
                 let next_room_num = pocket.current_room;
-                let next_room_name = pocket.rooms[(next_room_num - 1) as usize].dungeon_name.clone();
-                let next_room_did = pocket.rooms[(next_room_num - 1) as usize].dungeon_id;
-                Ok((next_room_num, next_room_did, next_room_name))
+                let next_idx = (next_room_num - 1) as usize;
+                let next_room_name = pocket.rooms[next_idx].dungeon_name.clone();
+                let next_room_did = pocket.rooms[next_idx].dungeon_id;
+                let next_room_npcs = pocket.rooms[next_idx].npc_ball_ids.clone();
+                Ok((next_room_num, next_room_did, next_room_name, next_room_npcs))
             });
-            let (next_room_num, next_room_did, next_room_name) = match res { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let (next_room_num, next_room_did, next_room_name, next_room_npcs) = match res { Ok(v) => v, Err(e) => return Some(Err(e)) };
+
+            for (idx, &bid) in next_room_npcs.iter().enumerate() {
+                let _ = sys_handle.spawn_ball(make_site_npc_ball(bid, 47_956, DVec3::new((idx as f64) * 3_000.0, 5_000.0, 0.0))).await;
+            }
 
             session.push_notification("AbyssalRoomChanged", vec![PyRep::Integer(next_room_num as i64), PyRep::Integer(next_room_did as i64)]);
 
@@ -1079,6 +1104,7 @@ pub async fn handle_pve_special_sites(
                 ("currentRoom", PyRep::Integer(next_room_num as i64)),
                 ("dungeonID", PyRep::Integer(next_room_did as i64)),
                 ("dungeonName", PyRep::String(next_room_name)),
+                ("npcBallIDs", PyRep::List(next_room_npcs.iter().map(|&id| PyRep::Integer(id)).collect())),
             ])))
         }
 
@@ -1087,9 +1113,8 @@ pub async fn handle_pve_special_sites(
         | ("abyssal_content_manager", "ActivateAbyssalEndGate")
         | ("abyssal_content_manager", "AbyssalContentFinished") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let exit_res = with_pve_special_reg(ctx, |reg| {
+            let pre_exit = with_pve_special_reg(ctx, |reg| {
                 let now = spec_now_sec(reg);
-                let iid = 1_897_000_000 + next_spec_seq(reg);
                 let Some(pocket) = reg.abyssal_pockets.get_mut(&char_id) else {
                     return Err(rpc_err("NotInAbyssalPocket", "Character has no active Abyssal pocket"));
                 };
@@ -1100,6 +1125,29 @@ pub async fn handle_pve_special_sites(
                 if pocket.current_room < 3 {
                     return Err(rpc_err("NotInFinalAbyssalRoom", format!("Origin Conduit only exists in Room 3 (currently in Room {})", pocket.current_room)));
                 }
+                Ok((pocket.abyssal_solar_system_id, pocket.rooms[2].npc_ball_ids.clone()))
+            });
+            let (abyssal_sys_id, room3_npcs) = match pre_exit { Ok(v) => v, Err(e) => return Some(Err(e)) };
+
+            let sys_handle = ctx.systems.get_or_spawn(abyssal_sys_id);
+            let mut alive_npcs = 0usize;
+            for &bid in &room3_npcs {
+                if matches!(sys_handle.get_ball_snapshot(bid).await, Ok(Some(_))) {
+                    alive_npcs += 1;
+                }
+            }
+            if alive_npcs > 0 {
+                return Some(Err(rpc_err(
+                    "AbyssalGateLocked",
+                    format!("Cannot activate Origin Conduit while {alive_npcs} Room 3 hostiles remain"),
+                )));
+            }
+
+            let exit_res = with_pve_special_reg(ctx, |reg| {
+                let iid = 1_897_000_000 + next_spec_seq(reg);
+                let Some(pocket) = reg.abyssal_pockets.get_mut(&char_id) else {
+                    return Err(rpc_err("NotInAbyssalPocket", "Character has no active Abyssal pocket"));
+                };
                 pocket.rooms[2].cleared = true;
                 pocket.completed = true;
                 let qty = ((pocket.tier as i64) + 1) * 15;

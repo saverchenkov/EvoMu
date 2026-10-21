@@ -20,6 +20,33 @@ pub(super) struct BookmarkExtrasState {
 pub(super) static BM_SCAN_STATE: LazyLock<Mutex<BookmarkExtrasState>> =
     LazyLock::new(|| Mutex::new(BookmarkExtrasState::default()));
 
+fn shared_bookmark_corp_id(
+    snap: &eve_db::WorldStateSnapshot,
+    bm: &BookmarkRecord,
+) -> Option<i64> {
+    bm.folder_id
+        .and_then(|fid| snap.bookmark_folders.get(&fid))
+        .and_then(|f| f.corporation_id)
+        .or_else(|| snap.characters.get(&bm.owner_id).map(|c| c.corporation_id))
+}
+
+fn has_corp_bookmark_admin_role(
+    snap: &eve_db::WorldStateSnapshot,
+    session: &SessionState,
+    char_id: i64,
+    corp_id: i64,
+) -> bool {
+    if let Some(corp) = snap.corporations.get(&corp_id) {
+        let role = corp.member_roles.get(&char_id).copied().unwrap_or(0);
+        char_id == corp.ceo_id
+            || corp_roles::has_role(role, corp_roles::ROLE_DIRECTOR)
+            || corp_roles::has_role(role, corp_roles::ROLE_PERSONNEL_MANAGER)
+    } else {
+        corp_roles::has_role(session.corp_role, corp_roles::ROLE_DIRECTOR)
+            || corp_roles::has_role(session.corp_role, corp_roles::ROLE_PERSONNEL_MANAGER)
+    }
+}
+
 pub(super) async fn handle_bookmarks(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -228,7 +255,10 @@ pub(super) async fn handle_bookmarks(
                                 return false;
                             }
                         }
-                        b.owner_id == char_id || (b.is_shared && corp_id_opt.is_some())
+                        b.owner_id == char_id
+                            || (b.is_shared
+                                && corp_id_opt.is_some()
+                                && shared_bookmark_corp_id(snap, b) == corp_id_opt)
                     })
                     .map(|b| {
                         vec![
@@ -287,13 +317,17 @@ pub(super) async fn handle_bookmarks(
                 let corp_id = session
                     .corporation_id
                     .or_else(|| snap.characters.get(&char_id).map(|c| c.corporation_id));
+                let bm_corp = snap
+                    .bookmarks
+                    .get(&bm_id)
+                    .and_then(|b| shared_bookmark_corp_id(snap, b));
                 let Some(bm) = snap.bookmarks.get_mut(&bm_id) else {
                     return Err(BridgeRpcError {
                         code: "BookmarkNotFound".into(),
                         message: format!("Bookmark {bm_id} not found"),
                     });
                 };
-                if bm.owner_id != char_id && !bm.is_shared {
+                if bm.owner_id != char_id && !(bm.is_shared && corp_id.is_some() && bm_corp == corp_id) {
                     return Err(BridgeRpcError {
                         code: "AccessDenied".into(),
                         message: "Cannot edit another character's bookmark".into(),
@@ -362,7 +396,10 @@ pub(super) async fn handle_bookmarks(
                             message: format!("Bookmark {bm_id} not found"),
                         });
                     };
-                    if bm.owner_id != char_id && !bm.is_shared {
+                    let bm_corp = shared_bookmark_corp_id(snap, bm);
+                    if bm.owner_id != char_id
+                        && !(bm.is_shared && corp_id.is_some() && bm_corp == corp_id)
+                    {
                         return Err(BridgeRpcError {
                             code: "AccessDenied".into(),
                             message: "Cannot delete another character's bookmark".into(),
@@ -420,23 +457,38 @@ pub(super) async fn handle_bookmarks(
             let is_move = method.starts_with("Move");
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let caller_corp_id = session
+                    .corporation_id
+                    .or_else(|| snap.characters.get(&char_id).map(|c| c.corporation_id));
                 let is_shared_target = if let Some(fid) = target_folder_id {
                     let Some(tf) = snap.bookmark_folders.get(&fid) else {
                         return Err(BridgeRpcError { code: "FolderNotFound".into(), message: format!("Bookmark folder {fid} not found") });
                     };
-                    if tf.owner_id != char_id && !tf.is_shared {
+                    if tf.owner_id != char_id
+                        && !(tf.is_shared && caller_corp_id.is_some() && tf.corporation_id == caller_corp_id)
+                    {
                         return Err(BridgeRpcError { code: "BookmarkFolderAccessDenied".into(), message: "No write access to target bookmark folder".into() });
                     }
                     tf.is_shared
                 } else {
                     false
                 };
-                if !is_move {
-                    let current_in_folder = snap.bookmarks.values().filter(|b| b.folder_id == target_folder_id && (is_shared_target || b.owner_id == char_id)).count();
-                    if current_in_folder + bm_ids.len() > 500 {
-                        let code = if is_shared_target { "MaxSharedFolderBookmarksReached" } else { "MaxBookmarksReached" };
-                        return Err(BridgeRpcError { code: code.into(), message: "Bookmark folder capacity (500) exceeded".into() });
-                    }
+                let current_in_folder = snap
+                    .bookmarks
+                    .values()
+                    .filter(|b| b.folder_id == target_folder_id && (is_shared_target || b.owner_id == char_id))
+                    .count();
+                let added_count = if is_move {
+                    bm_ids
+                        .iter()
+                        .filter(|&&id| snap.bookmarks.get(&id).is_some_and(|b| b.folder_id != target_folder_id))
+                        .count()
+                } else {
+                    bm_ids.len()
+                };
+                if current_in_folder + added_count > 500 {
+                    let code = if is_shared_target { "MaxSharedFolderBookmarksReached" } else { "MaxBookmarksReached" };
+                    return Err(BridgeRpcError { code: code.into(), message: "Bookmark folder capacity (500) exceeded".into() });
                 }
                 let mut out_ids = Vec::new();
                 for &bm_id in &bm_ids {
@@ -446,7 +498,21 @@ pub(super) async fn handle_bookmarks(
                             message: format!("Bookmark {bm_id} not found"),
                         });
                     };
-                    if orig.owner_id != char_id && !orig.is_shared {
+                    let orig_corp_id = shared_bookmark_corp_id(snap, &orig);
+                    let same_corp_shared = orig.is_shared && caller_corp_id.is_some() && orig_corp_id == caller_corp_id;
+                    let can_access = if is_move {
+                        orig.owner_id == char_id
+                            || (same_corp_shared
+                                && has_corp_bookmark_admin_role(
+                                    snap,
+                                    session,
+                                    char_id,
+                                    caller_corp_id.unwrap(),
+                                ))
+                    } else {
+                        orig.owner_id == char_id || same_corp_shared
+                    };
+                    if !can_access {
                         return Err(BridgeRpcError {
                             code: "BookmarkAccessDenied".into(),
                             message: format!("No access to bookmark {bm_id}"),
