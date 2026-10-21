@@ -6,7 +6,7 @@
 
 use eve_db::{
     AllianceRecord, CharacterLoginStats, CorpWalletDivisionRecord, CorporationRecord,
-    InventoryFlag, InventoryItemRecord, IskCents, StandingTransactionRecord, TrainedSkillRecord,
+    InventoryFlag, InventoryItemRecord, IskCents, StandingTransactionRecord,
     UpwellStructureRecord,
 };
 use eve_server::esi::sample_routes::format_iso8601_utc;
@@ -213,6 +213,11 @@ async fn test_esi5_alliance_and_corporation_public_identity() {
     let al_ids = alliances_list.as_array().expect("alliances array");
     assert!(al_ids.contains(&json!(alliance_id)));
 
+    // Unbacked GET /alliances/{alliance_id} must return 501 Not Implemented (no fabricated date_founded/creator_id)
+    let al_detail_resp =
+        router.handle_request(&EsiHttpRequest::new("GET", format!("/v1/alliances/{alliance_id}/")));
+    assert_eq!(al_detail_resp.status_code, 501);
+
     // 2. GET /alliances/{alliance_id}/corporations (`esi:GET /alliances/{alliance_id}/corporations`, `feat:esi.alliance.corporations`)
     let al_corps_initial = check_cached_get(
         &router,
@@ -353,7 +358,49 @@ async fn test_esi5_alliance_and_corporation_public_identity() {
         json!(404)
     );
 
+    // 5b. GET /corporations/{corporation_id} for an SDE NPC corporation (`1000035` Caldari Navy)
+    let sde_npc = ctx
+        .sde
+        .npc_corporations
+        .get(&1_000_035)
+        .expect("Caldari Navy 1000035 in SDE");
+    let expected_npc_ceo = ctx
+        .sde
+        .agents
+        .values()
+        .filter(|a| a.corporation_id == 1_000_035)
+        .map(|a| a.agent_id)
+        .min()
+        .unwrap_or(1);
+    let npc_corp_pub = check_cached_get(
+        &router,
+        &spec,
+        &EsiHttpRequest::new("GET", "/v5/corporations/1000035/"),
+        200,
+        false,
+    );
+    assert_eq!(npc_corp_pub["name"], json!(sde_npc.name));
+    assert_eq!(npc_corp_pub["ticker"], json!(sde_npc.ticker_name));
+    assert_eq!(npc_corp_pub["ceo_id"], json!(expected_npc_ceo));
+    assert_eq!(npc_corp_pub["creator_id"], json!(expected_npc_ceo));
+    assert_eq!(npc_corp_pub["tax_rate"], json!(sde_npc.tax_rate));
+    assert_eq!(npc_corp_pub["faction_id"], json!(sde_npc.faction_id));
+    assert_eq!(npc_corp_pub["home_station_id"], json!(sde_npc.station_id));
+    assert!(npc_corp_pub.get("date_founded").is_none());
+    assert!(npc_corp_pub.get("shares").is_none());
+
     // 6. GET /corporations/{corporation_id}/icons (`esi:GET /corporations/{corporation_id}/icons`, `feat:esi.corporation.icons`)
+    let npc_corp_icons = check_cached_get(
+        &router,
+        &spec,
+        &EsiHttpRequest::new("GET", "/v1/corporations/1000035/icons/"),
+        200,
+        false,
+    );
+    assert_eq!(
+        npc_corp_icons["px64x64"],
+        json!("https://images.evetech.net/corporations/1000035/logo?tenant=tranquility&size=64")
+    );
     let corp_icons = check_cached_get(
         &router,
         &spec,
@@ -393,14 +440,12 @@ async fn test_esi5_alliance_and_corporation_public_identity() {
 
 #[tokio::test]
 async fn test_esi5_corporation_membership_tracking_limit_and_roles() {
-    // parity: esi:GET /corporations/{corporation_id}/members, esi:GET /corporations/{corporation_id}/members/limit
-    // parity: esi:GET /corporations/{corporation_id}/membertracking, esi:GET /corporations/{corporation_id}/roles
+    // parity: esi:GET /corporations/{corporation_id}/members
+    // parity: esi:GET /corporations/{corporation_id}/membertracking
     // parity: feat:esi.corporation.membertracking
     eve_testkit::attest(&[
         "esi:GET /corporations/{corporation_id}/members",
-        "esi:GET /corporations/{corporation_id}/members/limit",
         "esi:GET /corporations/{corporation_id}/membertracking",
-        "esi:GET /corporations/{corporation_id}/roles",
         "feat:esi.corporation.membertracking",
     ]);
 
@@ -476,16 +521,6 @@ async fn test_esi5_corporation_membership_tracking_limit_and_roles() {
                 ..Default::default()
             },
         );
-
-        // Train Corporation Management V (type 3363, +20 members/lvl = 100) on CEO
-        snap.skills.entry(ceo_id).or_default().insert(
-            3363,
-            TrainedSkillRecord {
-                type_id: 3363,
-                level: 5,
-                skill_points: 256_000.0,
-            },
-        );
     });
 
     let token = issue_token_with_scopes(
@@ -503,7 +538,7 @@ async fn test_esi5_corporation_membership_tracking_limit_and_roles() {
         vec!["esi-corporations.read_corporation_membership.v1".to_string()],
     );
 
-    // 1. Members & Member Limit (`GET /corporations/{id}/members`, `/limit`)
+    // 1. Members (`GET /corporations/{id}/members`) & unbacked `/members/limit` (501)
     let members = check_cached_get(
         &router,
         &spec,
@@ -536,23 +571,11 @@ async fn test_esi5_corporation_membership_tracking_limit_and_roles() {
         json!(403)
     );
 
-    let limit = check_cached_get(
-        &router,
-        &spec,
+    let limit_resp = router.handle_request(
         &EsiHttpRequest::new("GET", format!("/v1/corporations/{corp_id}/members/limit/"))
             .with_bearer_token(&token),
-        200,
-        false,
     );
-    let sde_bonus_per_lvl = ctx
-        .sde
-        .types
-        .get(&3363)
-        .and_then(|t| t.default_attributes.get(&191))
-        .copied()
-        .expect("SDE Corporation Management (3363) attribute 191")
-        .round() as i64;
-    assert_eq!(limit, json!(sde_bonus_per_lvl * 5));
+    assert_eq!(limit_resp.status_code, 501);
 
     // 2. Member Tracking (`GET /corporations/{id}/membertracking`, `feat:esi.corporation.membertracking`)
     let tracking = check_cached_get(
@@ -592,7 +615,7 @@ async fn test_esi5_corporation_membership_tracking_limit_and_roles() {
         json!(401)
     );
 
-    // 3. Roles (`GET /corporations/{id}/roles`)
+    // 3. Roles (`GET /corporations/{id}/roles` — untagged until grantable/location role masks are persisted)
     let roles = check_cached_get(
         &router,
         &spec,
@@ -605,21 +628,20 @@ async fn test_esi5_corporation_membership_tracking_limit_and_roles() {
     assert_eq!(r_arr.len(), 2);
     assert_eq!(r_arr[0]["character_id"], json!(ceo_id));
     assert_eq!(r_arr[0]["roles"], json!(["Director", "Station_Manager"]));
+    assert!(r_arr[0].get("grantable_roles").is_none());
     assert_eq!(r_arr[1]["character_id"], json!(wingman_id));
     assert_eq!(r_arr[1]["roles"], json!(["Accountant", "Factory_Manager"]));
 }
 
 #[tokio::test]
 async fn test_esi5_corporation_divisions_blueprints_and_standings() {
-    // parity: esi:GET /corporations/{corporation_id}/blueprints, esi:GET /corporations/{corporation_id}/divisions
+    // parity: esi:GET /corporations/{corporation_id}/blueprints
     // parity: esi:GET /corporations/{corporation_id}/standings, feat:esi.corporation.blueprints
-    // parity: feat:esi.corporation.divisions, feat:esi.corporation.standings
+    // parity: feat:esi.corporation.standings
     eve_testkit::attest(&[
         "esi:GET /corporations/{corporation_id}/blueprints",
-        "esi:GET /corporations/{corporation_id}/divisions",
         "esi:GET /corporations/{corporation_id}/standings",
         "feat:esi.corporation.blueprints",
-        "feat:esi.corporation.divisions",
         "feat:esi.corporation.standings",
     ]);
 
@@ -774,29 +796,12 @@ async fn test_esi5_corporation_divisions_blueprints_and_standings() {
         json!(404)
     );
 
-    // 2. Divisions (`GET /corporations/{id}/divisions`, `feat:esi.corporation.divisions`)
-    let divs = check_cached_get(
-        &router,
-        &spec,
+    // 2. Divisions (`GET /corporations/{id}/divisions` — unimplemented 501 until separate hangar_divisions exist)
+    let divs_resp = router.handle_request(
         &EsiHttpRequest::new("GET", format!("/v1/corporations/{corp_id}/divisions/"))
             .with_bearer_token(&token),
-        200,
-        false,
     );
-    assert_eq!(
-        divs["wallet"],
-        json!([
-            { "division": 1, "name": "Capital Reserve" },
-            { "division": 2, "name": "R&D Operations" }
-        ])
-    );
-    assert_eq!(
-        divs["hangar"],
-        json!([
-            { "division": 1, "name": "Capital Reserve" },
-            { "division": 2, "name": "R&D Operations" }
-        ])
-    );
+    assert_eq!(divs_resp.status_code, 501);
 
     // 3. Standings (`GET /corporations/{id}/standings`, `feat:esi.corporation.standings`)
     let standings = check_cached_get(
@@ -829,17 +834,12 @@ async fn test_esi5_corporation_divisions_blueprints_and_standings() {
 #[tokio::test]
 async fn test_esi5_corporation_structures_facilities_and_starbases() {
     // parity: esi:GET /corporations/{corporation_id}/facilities, esi:GET /corporations/{corporation_id}/starbases
-    // parity: esi:GET /corporations/{corporation_id}/structures, feat:esi.corporation.facilities
-    // parity: feat:esi.corporation.starbases, feat:esi.corporation.structures
-    // parity: feat:esi.corporations.structures-services-timers
+    // parity: feat:esi.corporation.facilities, feat:esi.corporation.starbases
     eve_testkit::attest(&[
         "esi:GET /corporations/{corporation_id}/facilities",
         "esi:GET /corporations/{corporation_id}/starbases",
-        "esi:GET /corporations/{corporation_id}/structures",
         "feat:esi.corporation.facilities",
         "feat:esi.corporation.starbases",
-        "feat:esi.corporation.structures",
-        "feat:esi.corporations.structures-services-timers",
     ]);
 
     let ctx = Arc::new(ServerContext::new());
@@ -849,9 +849,11 @@ async fn test_esi5_corporation_structures_facilities_and_starbases() {
     let ceo_id = 90_000_001_i64;
     let corp_id = 98_500_030_i64;
     let struct_id = 1_035_000_030_001_i64;
+    let undamaged_struct_id = 1_035_000_030_002_i64;
     let svc_online_id = 885_201_i64;
     let svc_offline_id = 885_202_i64;
     let starbase_id = 885_203_i64;
+    let non_tower_pos_id = 885_204_i64;
     let timer_start_unix = 1_710_000_000_u64;
     let timer_end_unix = 1_710_010_800_u64;
     let next_apply_unix = 1_710_090_000_u64; // (1_710_090_000 / 3600) % 24 == 17
@@ -875,7 +877,7 @@ async fn test_esi5_corporation_structures_facilities_and_starbases() {
             },
         );
 
-        // Owned Upwell structure in ArmorReinforced state with vulnerability window & 2 fitted service modules
+        // 1. Owned Upwell structure in ArmorReinforced state with vulnerability window & 2 fitted service modules
         snap.structures.insert(
             struct_id,
             UpwellStructureRecord {
@@ -899,7 +901,31 @@ async fn test_esi5_corporation_structures_facilities_and_starbases() {
         snap.structure_vulnerability_windows
             .insert(struct_id, (16 * 3600, next_apply_unix));
 
-        // ServiceSlot0: Standup Cloning Center I (35894, online); ServiceSlot1: Standup Market Hub I (35892, offline)
+        // 2. Second structure with no damage and no online service modules (must not appear in /facilities or emit state_timer_start)
+        snap.structures.insert(
+            undamaged_struct_id,
+            UpwellStructureRecord {
+                structure_id: undamaged_struct_id,
+                type_id: 35_832, // Astrahus
+                owner_corp_id: corp_id,
+                solar_system_id: 30_000_144,
+                name: "Perimeter Astrahus Bastion".to_string(),
+                position: [-15_000.0, 4_000.0, 12_000.0],
+                state: "ShieldVulnerable".to_string(),
+                quantum_core_installed: true,
+                fuel_blocks: 100,
+                shield_hp: 5_000.0,
+                armor_hp: 5_000.0,
+                hull_hp: 5_000.0,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+            },
+        );
+        snap.structure_vulnerability_windows
+            .insert(undamaged_struct_id, (18 * 3600, next_apply_unix));
+
+        // ServiceSlot0: Standup Cloning Center I (35894, online); ServiceSlot1: Standup Market Hub I (35892, unseeded -> defaults to offline)
         snap.items.insert(
             svc_online_id,
             InventoryItemRecord {
@@ -927,7 +953,6 @@ async fn test_esi5_corporation_structures_facilities_and_starbases() {
                 ..Default::default()
             },
         );
-        snap.module_online_states.insert(svc_offline_id, false);
     });
 
     let token = issue_token_with_scopes(
@@ -941,6 +966,7 @@ async fn test_esi5_corporation_structures_facilities_and_starbases() {
     );
 
     // 1. Facilities (`GET /corporations/{id}/facilities`, `feat:esi.corporation.facilities`)
+    // Only struct_id has an online fitted service module; undamaged_struct_id has none
     let facilities = check_cached_get(
         &router,
         &spec,
@@ -958,7 +984,7 @@ async fn test_esi5_corporation_structures_facilities_and_starbases() {
         }])
     );
 
-    // 2. Structures (`GET /corporations/{id}/structures`, `feat:esi.corporation.structures`, `feat:esi.corporations.structures-services-timers`)
+    // 2. Structures (`GET /corporations/{id}/structures` — untagged until fuel_expires and timer start timestamps are persisted)
     let structures = check_cached_get(
         &router,
         &spec,
@@ -968,7 +994,7 @@ async fn test_esi5_corporation_structures_facilities_and_starbases() {
         true,
     );
     let st_arr = structures.as_array().expect("structures array");
-    assert_eq!(st_arr.len(), 1);
+    assert_eq!(st_arr.len(), 2);
     let st = &st_arr[0];
     assert_eq!(st["structure_id"], json!(struct_id));
     assert_eq!(st["type_id"], json!(35_825));
@@ -993,10 +1019,7 @@ async fn test_esi5_corporation_structures_facilities_and_starbases() {
         st["next_reinforce_apply"],
         json!(format_iso8601_utc(next_apply_unix))
     );
-    assert_eq!(
-        st["fuel_expires"],
-        json!(format_iso8601_utc(timer_start_unix + 300 * 3600))
-    );
+    assert!(st.get("fuel_expires").is_none());
 
     let svcs = st["services"].as_array().expect("structure services array");
     assert_eq!(svcs.len(), 2);
@@ -1011,8 +1034,15 @@ async fn test_esi5_corporation_structures_facilities_and_starbases() {
         json!({ "name": sde_svc1_name, "state": "offline" })
     );
 
+    // Undamaged structure with vulnerability window (18 * 3600) and last_damage_unix == 0 must not emit state_timer_start
+    let st2 = &st_arr[1];
+    assert_eq!(st2["structure_id"], json!(undamaged_struct_id));
+    assert_eq!(st2["reinforce_hour"], json!(18));
+    assert!(st2.get("state_timer_start").is_none());
+    assert!(st2.get("state_timer_end").is_none());
+    assert!(st2.get("fuel_expires").is_none());
+
     // 3. Starbases (`GET /corporations/{id}/starbases`, `feat:esi.corporation.starbases`)
-    // Empty in V24 when no POS Control Tower is anchored:
     let sb_empty = check_cached_get(
         &router,
         &spec,
@@ -1023,15 +1053,18 @@ async fn test_esi5_corporation_structures_facilities_and_starbases() {
     );
     assert_eq!(sb_empty, json!([]));
 
-    // Anchor a category-23 POS Control Tower (12235 Amarr Control Tower) and verify live state
-    assert_eq!(
-        ctx.sde
-            .types
-            .get(&12_235)
-            .expect("12235 in SDE")
-            .category_id,
-        23
-    );
+    // Anchor both a group-365 Control Tower (12235 Amarr Control Tower) and a non-tower category-23 POS structure
+    let tower_type = ctx.sde.types.get(&12_235).expect("12235 in SDE");
+    assert_eq!(tower_type.category_id, 23);
+    assert_eq!(tower_type.group_id, 365);
+    let non_tower_pos_type_id = ctx
+        .sde
+        .types
+        .values()
+        .find(|t| t.category_id == 23 && t.group_id != 365)
+        .expect("non-tower category-23 POS module in SDE")
+        .type_id;
+
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(
             starbase_id,
@@ -1046,9 +1079,22 @@ async fn test_esi5_corporation_structures_facilities_and_starbases() {
                 ..Default::default()
             },
         );
-        snap.module_online_states.insert(starbase_id, false);
+        snap.items.insert(
+            non_tower_pos_id,
+            InventoryItemRecord {
+                item_id: non_tower_pos_id,
+                type_id: non_tower_pos_type_id,
+                owner_id: corp_id,
+                location_id: 30_000_144,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
     });
 
+    // Only the group-365 Control Tower is returned, and missing module_online_states defaults to "offline"
     let sb_populated = check_cached_get(
         &router,
         &spec,

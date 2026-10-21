@@ -79,37 +79,6 @@ pub fn dispatch_corp_alliance_route(
 
     match (method, path) {
         // 1. Alliance Routes (ESI-5)
-        ("GET", "/alliances/{alliance_id}") => {
-            let alliance_id = match parse_path_i64(path_params, "alliance_id") {
-                Ok(v) => v,
-                Err(e) => return Some(e),
-            };
-            Some(ctx.db.with_snapshot(|snap| {
-                let Some(al) = snap.alliances.get(&alliance_id) else {
-                    return RouteExecutionResult::error(
-                        404,
-                        format!("Alliance {alliance_id} not found"),
-                    );
-                };
-                let creator_id = snap
-                    .corporations
-                    .get(&al.executor_corp_id)
-                    .map(|c| c.ceo_id)
-                    .unwrap_or(90_000_001);
-                RouteExecutionResult::ok_json(
-                    json!({
-                        "name": al.name,
-                        "ticker": al.short_name,
-                        "creator_id": creator_id,
-                        "creator_corporation_id": al.executor_corp_id,
-                        "executor_corporation_id": al.executor_corp_id,
-                        "date_founded": "2024-01-01T00:00:00Z",
-                    }),
-                    3600,
-                )
-            }))
-        }
-
         ("GET", "/alliances/{alliance_id}/corporations") => {
             let alliance_id = match parse_path_i64(path_params, "alliance_id") {
                 Ok(v) => v,
@@ -160,33 +129,64 @@ pub fn dispatch_corp_alliance_route(
                 Err(e) => return Some(e),
             };
             Some(ctx.db.with_snapshot(|snap| {
-                let Some(corp) = snap.corporations.get(&corp_id) else {
-                    return RouteExecutionResult::error(
-                        404,
-                        format!("Corporation {corp_id} not found"),
-                    );
-                };
-                let mut obj = json!({
-                    "name": corp.name,
-                    "ticker": corp.ticker,
-                    "ceo_id": corp.ceo_id,
-                    "creator_id": corp.ceo_id,
-                    "member_count": corp.members.len() as i64,
-                    "tax_rate": corp.tax_rate,
-                });
-                if let Some(aid) = corp.alliance_id {
-                    obj["alliance_id"] = json!(aid);
+                if let Some(corp) = snap.corporations.get(&corp_id) {
+                    // DERIVED: CorporationRecord does not store a separate creator_id; use ceo_id.
+                    let mut obj = json!({
+                        "name": corp.name,
+                        "ticker": corp.ticker,
+                        "ceo_id": corp.ceo_id,
+                        "creator_id": corp.ceo_id,
+                        "member_count": corp.members.len() as i64,
+                        "tax_rate": corp.tax_rate,
+                    });
+                    if let Some(aid) = corp.alliance_id {
+                        obj["alliance_id"] = json!(aid);
+                    }
+                    if let Some(hq) = corp.hq_station_id {
+                        obj["home_station_id"] = json!(hq);
+                    }
+                    if !corp.description.is_empty() {
+                        obj["description"] = json!(corp.description);
+                    }
+                    if !corp.url.is_empty() {
+                        obj["url"] = json!(corp.url);
+                    }
+                    return RouteExecutionResult::ok_json(obj, 3600);
                 }
-                if let Some(hq) = corp.hq_station_id {
-                    obj["home_station_id"] = json!(hq);
+                if let Some(npc) = ctx.sde.npc_corporations.get(&corp_id) {
+                    // DERIVED: NpcCorporationInfo does not persist a separate ceo_id or creator_id;
+                    // use the lowest SDE agent_id belonging to the NPC corporation (or corp_id if none),
+                    // and count characters currently in the corporation for member_count.
+                    let ceo_id = ctx
+                        .sde
+                        .agents
+                        .values()
+                        .filter(|a| a.corporation_id == corp_id)
+                        .map(|a| a.agent_id)
+                        .min()
+                        .unwrap_or(corp_id);
+                    let member_count = snap
+                        .characters
+                        .values()
+                        .filter(|c| c.corporation_id == corp_id)
+                        .count() as i64;
+                    let mut obj = json!({
+                        "name": npc.name,
+                        "ticker": npc.ticker_name,
+                        "ceo_id": ceo_id,
+                        "creator_id": ceo_id,
+                        "member_count": member_count,
+                        "tax_rate": npc.tax_rate,
+                    });
+                    if let Some(fid) = npc.faction_id {
+                        obj["faction_id"] = json!(fid as i64);
+                    }
+                    if let Some(sid) = npc.station_id {
+                        obj["home_station_id"] = json!(sid);
+                    }
+                    return RouteExecutionResult::ok_json(obj, 3600);
                 }
-                if !corp.description.is_empty() {
-                    obj["description"] = json!(corp.description);
-                }
-                if !corp.url.is_empty() {
-                    obj["url"] = json!(corp.url);
-                }
-                RouteExecutionResult::ok_json(obj, 3600)
+                RouteExecutionResult::error(404, format!("Corporation {corp_id} not found"))
             }))
         }
 
@@ -261,39 +261,6 @@ pub fn dispatch_corp_alliance_route(
             }))
         }
 
-        ("GET", "/corporations/{corporation_id}/divisions") => {
-            let corp_id = match parse_path_i64(path_params, "corporation_id") {
-                Ok(v) => v,
-                Err(e) => return Some(e),
-            };
-            Some(ctx.db.with_snapshot(|snap| {
-                let Some(corp) = snap.corporations.get(&corp_id) else {
-                    return RouteExecutionResult::error(
-                        404,
-                        format!("Corporation {corp_id} not found"),
-                    );
-                };
-                // DERIVED: CorporationRecord stores unified division names in wallet_divisions (updated by corpRegistry.UpdateDivisionNames).
-                let mut sorted_divs: Vec<_> = corp
-                    .wallet_divisions
-                    .iter()
-                    .filter(|w| (1..=7).contains(&w.division_id) && !w.name.is_empty())
-                    .collect();
-                sorted_divs.sort_by_key(|w| w.division_id);
-                let entries: Vec<Value> = sorted_divs
-                    .into_iter()
-                    .map(|w| json!({ "division": w.division_id as i64, "name": w.name }))
-                    .collect();
-                RouteExecutionResult::ok_json(
-                    json!({
-                        "hangar": entries,
-                        "wallet": entries,
-                    }),
-                    3600,
-                )
-            }))
-        }
-
         ("GET", "/corporations/{corporation_id}/facilities") => {
             let corp_id = match parse_path_i64(path_params, "corporation_id") {
                 Ok(v) => v,
@@ -309,7 +276,29 @@ pub fn dispatch_corp_alliance_route(
                 let mut facilities: Vec<Value> = snap
                     .structures
                     .values()
-                    .filter(|s| s.owner_corp_id == corp_id && s.state != "Destroyed")
+                    .filter(|s| {
+                        s.owner_corp_id == corp_id
+                            && s.state != "Destroyed"
+                            && snap.items.values().any(|i| {
+                                i.location_id == s.structure_id
+                                    && matches!(
+                                        i.flag,
+                                        InventoryFlag::ServiceSlot0
+                                            | InventoryFlag::ServiceSlot1
+                                            | InventoryFlag::ServiceSlot2
+                                            | InventoryFlag::ServiceSlot3
+                                            | InventoryFlag::ServiceSlot4
+                                            | InventoryFlag::ServiceSlot5
+                                            | InventoryFlag::ServiceSlot6
+                                            | InventoryFlag::ServiceSlot7
+                                    )
+                                    && snap
+                                        .module_online_states
+                                        .get(&i.item_id)
+                                        .copied()
+                                        .unwrap_or(false)
+                            })
+                    })
                     .map(|s| {
                         json!({
                             "facility_id": s.structure_id,
@@ -366,37 +355,6 @@ pub fn dispatch_corp_alliance_route(
                 }
                 members.sort_unstable();
                 RouteExecutionResult::ok_json(json!(members), 3600)
-            }))
-        }
-
-        ("GET", "/corporations/{corporation_id}/members/limit") => {
-            let corp_id = match parse_path_i64(path_params, "corporation_id") {
-                Ok(v) => v,
-                Err(e) => return Some(e),
-            };
-            Some(ctx.db.with_snapshot(|snap| {
-                let Some(corp) = snap.corporations.get(&corp_id) else {
-                    return RouteExecutionResult::error(
-                        404,
-                        format!("Corporation {corp_id} not found"),
-                    );
-                };
-                // DERIVED: Sum SDE dogma attribute 191 (`corporationMemberBonus`) across the CEO's trained
-                // corporation management skills; base limit is 20 when no bonus skills are trained.
-                let mut bonus_members: i64 = 0;
-                if let Some(ceo_skills) = snap.skills.get(&corp.ceo_id) {
-                    for s in ceo_skills.values() {
-                        if s.level > 0 {
-                            if let Some(ty) = ctx.sde.types.get(&s.type_id) {
-                                if let Some(&per_level) = ty.default_attributes.get(&191) {
-                                    bonus_members += (per_level.round() as i64) * (s.level as i64);
-                                }
-                            }
-                        }
-                    }
-                }
-                let limit = if bonus_members > 0 { bonus_members } else { 20 };
-                RouteExecutionResult::ok_json(json!(limit), 3600)
             }))
         }
 
@@ -469,11 +427,7 @@ pub fn dispatch_corp_alliance_route(
                 member_ids.sort_unstable();
                 let mut out = Vec::new();
                 for cid in member_ids {
-                    let mask = corp
-                        .member_roles
-                        .get(&cid)
-                        .copied()
-                        .unwrap_or_else(|| if cid == corp.ceo_id { u64::MAX } else { 0 });
+                    let mask = corp.member_roles.get(&cid).copied().unwrap_or(0);
                     let roles: Vec<&str> = CORP_ROLE_TABLE
                         .iter()
                         .filter_map(|&(bit, name)| ((mask & bit) != 0).then_some(name))
@@ -482,13 +436,6 @@ pub fn dispatch_corp_alliance_route(
                         out.push(json!({
                             "character_id": cid,
                             "roles": roles,
-                            "grantable_roles": roles,
-                            "roles_at_hq": roles,
-                            "grantable_roles_at_hq": roles,
-                            "roles_at_base": roles,
-                            "grantable_roles_at_base": roles,
-                            "roles_at_other": roles,
-                            "grantable_roles_at_other": roles,
                         }));
                     }
                 }
@@ -517,19 +464,24 @@ pub fn dispatch_corp_alliance_route(
                 }
                 let out: Vec<Value> = by_from
                     .into_iter()
-                    .map(|(from_id, standing)| {
+                    .filter_map(|(from_id, standing)| {
                         let from_type = if ctx.sde.agents.contains_key(&from_id) {
                             "agent"
                         } else if ctx.sde.npc_corporations.contains_key(&from_id) {
                             "npc_corp"
-                        } else {
+                        } else if u32::try_from(from_id)
+                            .ok()
+                            .is_some_and(|fid| ctx.sde.factions.contains_key(&fid))
+                        {
                             "faction"
+                        } else {
+                            return None;
                         };
-                        json!({
+                        Some(json!({
                             "from_id": from_id,
                             "from_type": from_type,
                             "standing": (standing * 100.0).round() / 100.0,
-                        })
+                        }))
                     })
                     .collect();
                 match paginate_slice(&out, page, 1000) {
@@ -553,6 +505,7 @@ pub fn dispatch_corp_alliance_route(
                         format!("Corporation {corp_id} not found"),
                     );
                 }
+                // Filter strictly by SDE group 365 (Control Tower), not all of category 23 (Starbase modules).
                 let mut towers: Vec<_> = snap
                     .items
                     .values()
@@ -564,7 +517,7 @@ pub fn dispatch_corp_alliance_route(
                             .sde
                             .types
                             .get(&it.type_id)
-                            .is_some_and(|t| t.category_id == 23)
+                            .is_some_and(|t| t.group_id == 365)
                         {
                             return None;
                         }
@@ -575,7 +528,7 @@ pub fn dispatch_corp_alliance_route(
                             .module_online_states
                             .get(&it.item_id)
                             .copied()
-                            .unwrap_or(true);
+                            .unwrap_or(false);
                         Some((
                             it.item_id,
                             json!({
@@ -642,7 +595,7 @@ pub fn dispatch_corp_alliance_route(
                                     .module_online_states
                                     .get(&i.item_id)
                                     .copied()
-                                    .unwrap_or(true);
+                                    .unwrap_or(false);
                                 Some((
                                     i.item_id,
                                     json!({
@@ -668,37 +621,23 @@ pub fn dispatch_corp_alliance_route(
                             "services": services,
                         });
 
-                        let stored_win = snap.structure_vulnerability_windows.get(&s.structure_id);
-                        let timer_start = if s.last_damage_unix > 0 {
-                            Some(s.last_damage_unix)
-                        } else {
-                            stored_win.map(|(ws, _)| *ws).filter(|&ws| ws > 0)
-                        };
-                        let timer_end = if s.reinforced_until_unix > 0 {
-                            Some(s.reinforced_until_unix)
-                        } else {
-                            stored_win.map(|(_, we)| *we).filter(|&we| we > 0)
-                        };
-                        if let Some(ts) = timer_start {
-                            obj["state_timer_start"] = json!(format_iso8601_utc(ts));
+                        if s.last_damage_unix > 0 {
+                            obj["state_timer_start"] =
+                                json!(format_iso8601_utc(s.last_damage_unix));
                         }
-                        if let Some(te) = timer_end {
-                            obj["state_timer_end"] = json!(format_iso8601_utc(te));
+                        if s.reinforced_until_unix > 0 {
+                            obj["state_timer_end"] =
+                                json!(format_iso8601_utc(s.reinforced_until_unix));
                         }
-                        if let Some(&(ws, we)) = stored_win {
+                        if let Some(&(ws, we)) =
+                            snap.structure_vulnerability_windows.get(&s.structure_id)
+                        {
                             let reinforce_hour = ((ws / 3600) % 24) as i64;
                             let next_reinforce_hour = ((we / 3600) % 24) as i64;
                             obj["reinforce_hour"] = json!(reinforce_hour);
                             obj["next_reinforce_hour"] = json!(next_reinforce_hour);
                             if we > 0 {
                                 obj["next_reinforce_apply"] = json!(format_iso8601_utc(we));
-                            }
-                        }
-                        if s.fuel_blocks > 0 {
-                            if let Some(anchor_unix) = timer_start.or(timer_end) {
-                                obj["fuel_expires"] = json!(format_iso8601_utc(
-                                    anchor_unix + (s.fuel_blocks as u64) * 3600
-                                ));
                             }
                         }
                         obj

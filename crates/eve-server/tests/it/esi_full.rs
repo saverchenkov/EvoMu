@@ -123,7 +123,7 @@ fn setup_esi_test_environment() -> (Arc<ServerContext>, Arc<EsiRouter>, OpenApiS
                 tax_rate: 0.05,
                 master_wallet: IskCents::from_isk(250_000_000),
                 members: HashSet::from([char_id, 90_000_002]),
-                member_roles: HashMap::new(),
+                member_roles: HashMap::from([(char_id, eve_db::corp_roles::ROLE_DIRECTOR)]),
                 applications: HashMap::new(),
                 wallet_divisions: Vec::new(),
                 description: String::new(),
@@ -561,12 +561,13 @@ async fn test_esi6_fleets_corporations_alliances_mail_bookmarks_routes() {
     assert!(!corp_roles_arr.is_empty());
     assert_eq!(corp_roles_arr[0]["character_id"], json!(char_id));
 
-    // 7. GET /v1/alliances/{id}/ (public)
-    let req = EsiHttpRequest::new("GET", format!("/v1/alliances/{alliance_id}/"));
-    let alliance_json = validate_and_json(&router, &spec, &req, 200);
-    assert_eq!(alliance_json["name"], json!("EvoMu Pioneer Alliance"));
-    assert_eq!(alliance_json["ticker"], json!("PIONEER"));
-    assert_eq!(alliance_json["executor_corporation_id"], json!(corp_id));
+    // 7. GET /v2/alliances/{id}/icons/ (public)
+    let req = EsiHttpRequest::new("GET", format!("/v2/alliances/{alliance_id}/icons/"));
+    let alliance_icons_json = validate_and_json(&router, &spec, &req, 200);
+    assert!(alliance_icons_json["px64x64"]
+        .as_str()
+        .unwrap_or_default()
+        .contains(&alliance_id.to_string()));
 
     // 8. GET /v1/alliances/{id}/corporations/ (public)
     let req = EsiHttpRequest::new("GET", format!("/v1/alliances/{alliance_id}/corporations/"));
