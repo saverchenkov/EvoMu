@@ -81,6 +81,18 @@ fn spawn_test_asteroid(
     asteroid_id
 }
 
+/// Mining crits (`miningCritChance`, attr 5967) roll a CSPRNG per cycle and add bonus units that do
+/// not come out of the rock. Returns `normalUnits` after asserting the exact decomposition
+/// `yieldUnits == normalUnits + bonusCritUnits`, with bonus units present iff the cycle crit.
+fn normal_units_checked(res: &PyRep) -> i64 {
+    let get = |k: &str| get_dict_val(res, k).and_then(|v| v.as_i64()).expect(k);
+    let (total, normal, bonus) = (get("yieldUnits"), get("normalUnits"), get("bonusCritUnits"));
+    let is_crit = matches!(get_dict_val(res, "isCrit"), Some(PyRep::Bool(true)));
+    assert_eq!(bonus > 0, is_crit, "crit bonus units appear iff the cycle crit");
+    assert_eq!(total, normal + bonus, "deposited = normal + crit bonus");
+    normal
+}
+
 fn get_dict_val<'a>(dict: &'a PyRep, key: &str) -> Option<&'a PyRep> {
     match dict {
         PyRep::KeyVal(entries) => entries
@@ -211,7 +223,7 @@ async fn test_phase_5m_mn04_mining_laser_cycle_engine() {
 
     // Verify asteroid quantity decreased
     let ast_after = ctx.db.get_asteroid(ast_id).expect("asteroid");
-    assert_eq!(ast_after.quantity, 10_000 - yield_units);
+    assert_eq!(ast_after.quantity, 10_000 - normal_units_checked(&res));
 
     // Verify ore deposited in ship
     let ship_items = ctx.db.get_items_for_character(char_id);
@@ -261,7 +273,8 @@ async fn test_phase_5m_mn04_mining_laser_cycle_engine() {
         .and_then(|v| v.as_i64())
         .expect("cycleTimeMs");
 
-    assert_eq!(small_yield, 3);
+    assert!(small_yield >= 3);
+    assert_eq!(normal_units_checked(&dep_res), 3);
     assert!(small_depleted);
     assert!(small_cycle < cycle_time, "Partial cycle time must be shorter");
 
@@ -587,7 +600,8 @@ async fn test_phase_5m_mn06_mining_crystals_and_residue() {
 
     // Check asteroid quantity reduced by yield + residue
     let ast_after = ctx.db.get_asteroid(ast_id).expect("asteroid");
-    assert_eq!(ast_after.quantity, 50_000 - (yield_units + residue_units));
+    assert!(yield_units > 0);
+    assert_eq!(ast_after.quantity, 50_000 - (normal_units_checked(&res) + residue_units));
 
     // 2. Crystal destruction when HP drops to 0
     ctx.db.with_mut_snapshot(|snap| {
@@ -709,7 +723,8 @@ async fn test_phase_5m_mn07_ice_and_gas_harvesting() {
         .and_then(|v| v.as_i64())
         .expect("cycleTimeMs");
 
-    assert_eq!(ice_yield, 1, "Ice Harvester I yields exactly 1 unit of 1000m3 ice");
+    assert!(ice_yield >= 1);
+    assert_eq!(normal_units_checked(&ice_res), 1, "Ice Harvester I extracts exactly 1 unit of 1000m3 ice");
     assert_eq!(ice_type, 16262);
     // Base duration 240,000 ms * (1.0 - 0.25) = 180,000 ms
     assert_eq!(ice_cycle, 180_000);
@@ -766,7 +781,8 @@ async fn test_phase_5m_mn07_ice_and_gas_harvesting() {
         .expect("oreTypeID");
 
     // Base volume 10 m3 * 2.0 (Venture 100% bonus) = 20 m3 / 10 m3 per unit = 2 units
-    assert_eq!(gas_yield, 2);
+    assert!(gas_yield >= 2);
+    assert_eq!(normal_units_checked(&gas_res), 2);
     assert_eq!(gas_type, 25268);
 }
 
