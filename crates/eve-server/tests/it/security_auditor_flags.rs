@@ -683,7 +683,14 @@ async fn test_serverops_lossless_static_data() {
 
     // 1. Direct SQLite verification of static tables and row counts
     let canon = std::fs::canonicalize(&db_path).unwrap_or_else(|_| db_path.clone());
-    let uri = format!("file:{}?immutable=1", canon.display());
+    let path_str = canon.to_string_lossy();
+    // Strip Windows extended path prefix for SQLite URI compatibility
+    let clean_path = if cfg!(windows) && path_str.starts_with(r"\\?\") {
+        &path_str[4..]
+    } else {
+        &*path_str
+    };
+    let uri = format!("file:{}?immutable=1", clean_path);
     let conn = rusqlite::Connection::open_with_flags(
         &uri,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI | OpenFlags::SQLITE_OPEN_NO_MUTEX,
