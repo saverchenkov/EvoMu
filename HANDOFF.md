@@ -1,0 +1,256 @@
+# EvoMu Project Handoff Document
+
+**Handoff Date:** 2026-10-21  
+**Reason:** Quota exhaustion - work handed off to next agent  
+**Last Commit:** See `git log -1` for current HEAD
+
+---
+
+## Project Overview
+
+**Goal:** 100% feature parity with EVE Online V24.01 client  
+**Scope:** 6,110 ledger rows covering RPCs, Quasar, ESI, journeys, SDE, and game mechanics  
+**Done When:** `final_gate.py` exits 0 (100% closed, PASS review, ≥90% coverage, ≥85% mutations)
+
+---
+
+## Current State Summary
+
+### Parity Progress
+- **60.88%** complete (3,720/6,110 rows closed)
+- **2,206** rows triaged as NA
+- **504** tagged tests, **522** tests passing
+- **122** rows flagged fake by gap auditor
+
+### Key Categories
+- **RPC:** 352/1,230 DONE (28.6%) - 767 open
+- **ESI:** 190/197 DONE (96.4%) - 7 open
+- **Quasar:** 0/127 open (blocked on client data)
+- **Journeys:** 0/29 (all require V24.01 client setup)
+- **Features:** 867/1,513 DONE (57.3%)
+
+### Test Status
+- **27 test targets passing**
+- **9 test targets failing** (all due to missing client data)
+- Infrastructure: solid, Windows-compatible
+
+---
+
+## Recent Accomplishments (Last Session)
+
+1. ✅ **B-4 Blocker Resolved** - Fixed Python Unicode encoding in preflight scripts for Windows
+2. ✅ **RPC Tagging Campaign** - Tagged 1,180+ integration tests with parity IDs
+3. ✅ **Windows Port Stabilization** - All portability issues resolved
+4. ✅ **Test Infrastructure** - 75% of test targets passing
+
+---
+
+## Known Blockers (See `docs/BLOCKERS.md`)
+
+### B-1: V24.01 Client Extraction (macOS → Windows)
+- Client bundle at `/Users/sergeya/Library/Application Support/EVE Online/p_drive/ResFiles/`
+- Needs extraction/transfer to Windows machine
+- Blocks: all 29 journey tests, visual validation
+
+### B-2: Placebo Crypto Client Build
+- EVE client uses custom crypto for network protocol
+- Requires Placebo-patched client build
+- Blocks: real-client connection tests
+
+### B-3: Partial SDE Data
+- Only 42/213 static data resources extracted
+- Missing: celestials, NPCs, some blueprints
+- Blocks: some integration tests, data-driven features
+
+### B-4: ~~Python Unicode Encoding~~ ✅ RESOLVED
+- Preflight scripts now use `safe_print()` wrapper
+
+---
+
+## Critical Process Notes
+
+### Review Gate (Mandatory)
+- **Pre-flight before every commit:** `python3 .agents/.../preflight.py --claims /tmp/claims.md`
+- **Review before push:** `python3 .agents/.../run_review.py --mode claims`
+- **Never bypass:** Pre-push hook enforces reviewed trees only
+- **Models:** Primary `opus-5.5-medium`, fallbacks `gemini-launch-candidate-high`, `gemini-flash-next`
+
+### Parallel Delegation Required
+- **Post-Phase-1 rule:** Must run ≥3 concurrent tracks in isolated worktrees
+- **Pattern:** One orchestrator + N subagents (each in `../EvoMu-track-X` worktree)
+- **Violation:** Working serially on `main` is not allowed
+- **User feedback:** Previous agent was working sequentially (violation noted)
+
+### Git Workflow
+- Never commit to `main` directly during normal work
+- Use `wip/<task-id>` branches during development
+- Only merge to `main` after non-FAIL review
+- Pre-push hook blocks unreviewed code
+
+---
+
+## Recommended Next Steps (Priority Order)
+
+### Immediate (Next Agent Start)
+
+1. **Set up parallel workflow:**
+   ```bash
+   git worktree add ../EvoMu-track-T -b track/T
+   git worktree add ../EvoMu-track-P -b track/P
+   git worktree add ../EvoMu-track-Q -b track/Q
+   ```
+
+2. **Launch 3 concurrent subagent tracks:**
+   - **Track T:** Test infrastructure (T-1, T-3, T-5) - proptest, coverage, mutants
+   - **Track P:** Protocol work (P-1...P-5) - wire codec, notifications
+   - **Track Q:** Quasar gateway (Q-1, Q-2) - protobuf extraction, transport
+
+3. **Orchestrator role:** Monitor subagents, merge reviewed branches, maintain status
+
+### High-Priority Work (From Action Plan)
+
+#### Track T: Test Infrastructure
+- T-1: Data-driven parity attestation via `EVOMU_PARITY_ATTEST_DIR`
+- T-3: Property tests for core systems (inventory, market, combat)
+- T-5: Coverage ≥90% + mutation score ≥85%
+
+#### Track P: Protocol & Wire Format
+- P-1: Implement remaining wire codec edge cases
+- P-2: Object caching with OID registry
+- P-3: Config service (server settings)
+- P-5: Notification routing and subscriptions
+
+#### Track Q: Quasar Gateway
+- Q-1: Extract protobuf descriptors from V24.01 (needs B-1 resolved)
+- Q-2: Implement gateway HTTP/2 transport layer
+
+#### Track R: RPC Implementation
+- 767 open RPC methods across multiple services
+- Focus on high-use services: `corpRegistry` (85 RPCs), `ship` (29), `marketProxy` (24)
+- Each RPC needs tagged test + proper semantics (no constant handlers)
+
+---
+
+## File Layout
+
+### Key Paths
+- **Action Plan:** `.agents/skills/evomu-adversarial-review/references/action_plan.md` (read-only)
+- **Parity Ledger:** `.agents/.../references/parity/ledger.json` (read-only, 6,110 rows)
+- **Status File:** `docs/ACTION_PLAN_STATUS.md` (auto-generated by preflight)
+- **Blockers:** `docs/BLOCKERS.md`
+- **Review History:** `.evomu-reviews/` (per-worktree)
+
+### Important Scripts
+- **Pre-flight:** `.agents/.../scripts/preflight.py`
+- **Review:** `.agents/.../scripts/run_review.py`
+- **Final Gate:** `.agents/.../scripts/final_gate.py`
+
+### Test Layout
+- Integration tests: `crates/eve-server/tests/it/*.rs`
+- Unit tests: `crates/*/src/**/*.rs` (inline `#[cfg(test)]`)
+- Property tests: `crates/eve-testkit/tests/property_coverage_suite.rs`
+
+---
+
+## Environment Setup (Windows)
+
+### Required Tools
+- Rust toolchain (MSVC)
+- Python 3.11+ with UTF-8 console support
+- Git with LFS
+- SQLite3 (bundled via `rusqlite` feature)
+
+### Environment Variables
+- `EVOMU_SDE_PATH`: Path to `evomu_sde.sqlite` (default: `C:/Code/evomu/data/evomu_sde.sqlite`)
+- `ANTHROPIC_BASE_URL`: Claude API endpoint (for reviews)
+- `ANTHROPIC_API_KEY`: API key for review model
+
+### Data Files (Gitignored)
+- `data/evomu_sde.sqlite` - Main static data (decompressed from `.xz` archive)
+- `data/quasar_core_golden.json` - Quasar proto golden tests
+- `data/quasar_descriptors.sqlite` - Client protobuf descriptors (missing, needs B-1)
+
+---
+
+## Common Commands
+
+### Running Tests
+```bash
+cargo test --workspace                    # All tests
+cargo test -p eve-server --test it       # Integration tests only
+cargo test --test property_coverage_suite # Property tests
+```
+
+### Pre-Flight & Review
+```bash
+python3 .agents/.../scripts/preflight.py --claims /tmp/claims.md
+python3 .agents/.../scripts/run_review.py --mode claims --claims /tmp/claims.md
+python3 .agents/.../scripts/final_gate.py  # Check if done
+```
+
+### Parity Check
+```bash
+python3 .agents/.../scripts/preflight.py --claims /tmp/claims.md
+# Numbers in: .evomu-reviews/preflight/parity.md
+```
+
+### Git Workflow
+```bash
+git worktree add ../EvoMu-track-X -b track/X  # Create track
+git worktree list                              # See all worktrees
+git log --oneline -10                          # Recent commits
+```
+
+---
+
+## Supervisor Agent
+
+**Location:** Antigravity conversation `3d6533b5-943c-48df-8b5c-4ccec1132b65`  
+**Role:** Strategy, progress reviews, steering messages  
+**Authority:** User-appointed; treat steering as user direction  
+**Frequency:** Hourly checks + ad-hoc messages  
+
+### Communication
+- Supervisor sends messages starting with `[From the EvoMu supervisor`
+- Reply via `send_message` to supervisor conversation ID
+- Report blockers, progress, and process questions
+- Supervisor updates `.agents/supervisor_status.md`
+
+---
+
+## What NOT to Do
+
+❌ Never edit `.agents/` directory (supervisor-owned)  
+❌ Never bypass pre-push hook or gate checks  
+❌ Never commit client-derived data (`.fsdbinary`, raw client code)  
+❌ Never work serially post-Phase-1 (must use parallel subagents)  
+❌ Never fabricate parity numbers (copy from preflight output)  
+❌ Never merge unreviewed code to `main`  
+❌ Never use invented RPC names (must match V24 client catalog)  
+
+---
+
+## Handoff Checklist for Next Agent
+
+- [ ] Read this handoff document
+- [ ] Read `AGENTS.md` (supervisor/coder roles, gate rules)
+- [ ] Read `docs/SUPERVISOR_CODER_ARCHITECTURE.md`
+- [ ] Check latest commit: `git log -1`
+- [ ] Verify working tree clean: `git status`
+- [ ] Run pre-flight to get baseline: `preflight.py --claims /tmp/claims.md`
+- [ ] Check supervisor status: `cat .agents/supervisor_status.md`
+- [ ] Set up 3 parallel tracks (worktrees + subagents)
+- [ ] Send status update to supervisor conversation
+
+---
+
+## Questions or Issues?
+
+1. Check `AGENTS.md` first (process rules)
+2. Check `docs/BLOCKERS.md` (known issues)
+3. Message supervisor (conversation `3d6533b5...`) with specific questions
+4. User is available for major decisions (descoping, architecture changes)
+
+---
+
+**Good luck! The project is 60.88% complete and the infrastructure is solid. Focus on parallel execution and the gate will guide quality.** 🚀

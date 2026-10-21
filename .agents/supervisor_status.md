@@ -111,6 +111,52 @@ The RPC tagging work (1,180 tests!) demonstrates thoroughness. The Windows porta
 
 ---
 
+## QUOTA ALERT: Work Handoff Initiated (2026-10-21 21:50 UTC)
+
+### Status: Preparing for Agent Handoff
+
+**Reason:** Quota exhaustion - stopping feature work after current task  
+**Action Taken:**
+1. Sent URGENT STOP message to Coder session
+2. Created comprehensive `HANDOFF.md` document for next agent
+3. Instructed Coder to finish current task only, no new work
+
+### Handoff Document Contents
+
+Created `C:/Code/evomu/HANDOFF.md` with:
+- ✅ Project overview and goals
+- ✅ Current parity state (60.88%, 3,720/6,110 rows)
+- ✅ Recent accomplishments (B-4 fix, RPC tagging, Windows port)
+- ✅ Known blockers (B-1, B-2, B-3 documented)
+- ✅ Review gate process and commands
+- ✅ Parallel delegation requirements
+- ✅ Recommended next steps (3 concurrent tracks: T/P/Q)
+- ✅ Environment setup instructions
+- ✅ Common commands reference
+- ✅ Supervisor communication info
+- ✅ What NOT to do (anti-patterns)
+- ✅ Handoff checklist for next agent
+
+### Waiting For
+
+- Coder to complete current task
+- Coder to commit all work
+- Coder to send status report with handoff notes
+- Working tree to be clean
+
+### For Next Agent
+
+**Start here:**
+1. Read `HANDOFF.md` (comprehensive onboarding)
+2. Read `AGENTS.md` (process rules)
+3. Run preflight to get baseline
+4. Set up 3 parallel tracks immediately (T/P/Q)
+5. Message supervisor when ready
+
+**Critical:** Next agent must follow parallel delegation pattern from the start. No sequential work on `main`.
+
+---
+
 ## Context
 - **Platform Migration:** Project being ported from macOS to Windows
 - **New Agent:** Fresh coding agent taking over the Windows port
