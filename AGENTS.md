@@ -42,12 +42,12 @@
 ## Independent review gate (mandatory)
 - **When to run it.** Activate the `evomu-adversarial-review` skill (`.agents/skills/evomu-adversarial-review/SKILL.md`) and follow it before any of these:
   - claiming any work is complete, fixed, implemented, verified or passing;
-  - `git commit` or `git push` (except local, never-pushed `wip/*` commits; see "Increment size and WIP");
+  - merging, cherry-picking or pushing anything into `main` (commits on work branches don't need a prior review; see "Increment size and WIP");
   - editing status claims in `PLAN.md`, `README.md` or `docs/`;
   - ending a turn in which repo files changed.
 - **The reviewer's verdict is authoritative.**
-  - On **FAIL**, don't commit, push, or describe the work as done.
-  - On **PASS_WITH_ISSUES**, **commit right away** and move on. Don't re-run reviews just to turn PASS_WITH_ISSUES into PASS. Fix the listed P1s in your next increment, or in the same one if you're touching that code anyway. They stay visible in `.evomu-reviews/latest.md` and `open_findings`. PASS is only required at the final gate.
+  - On **FAIL**, don't merge to `main`, push it, or describe the work as done. Fix it with new commits on the branch and review again.
+  - On **PASS_WITH_ISSUES**, **merge right away** and move on. Don't re-run reviews just to turn PASS_WITH_ISSUES into PASS. Fix the listed P1s in your next increment, or in the same one if you're touching that code anyway. They stay visible in `.evomu-reviews/latest.md` and `open_findings`. PASS is only required at the final gate.
   - Always record the verdict, the report path and whether tests actually executed.
 - **Gap audits.** The orchestrator automatically chains a recall-focused **gap audit** every few reviews (or run `run_review.py --mode gap-audit`). Rows it appends are in scope immediately, and rows it flags as fake DONE count as open until a later audit clears them.
 - **The Stop hook enforces two things:** an unreviewed tree must be reviewed, and a reviewed tree must keep making progress until `final_gate.py` passes.
@@ -134,11 +134,11 @@
 
 ## Reviewer unavailable (quota or capacity outages)
 - **How the orchestrator handles quota errors.** `run_review.py` tries the primary reviewer (`opus-5.5-medium`, Claude Opus 5.5 Medium) first, then the fallbacks `gemini-launch-candidate-high` (Gemini 4 Argon High) and `gemini-flash-next` (Gemini Flash Next) (`EVOMU_REVIEW_FALLBACK_MODELS`).
-  - A fallback verdict is a real review and gates commits normally. The report says which model reviewed.
+  - A fallback verdict is a real review and gates merges normally. The report says which model reviewed.
   - The final gate still needs a PASS from the primary model.
 - **If every model is out, the review returns `UNAVAILABLE` (exit code 4).** Nothing was reviewed, so never treat it as a pass. Also don't treat a user instruction to "keep developing while the reviewer is down" as permission to skip the gate. While the reviewer is unavailable:
-  1. **Never commit, merge, cherry-pick or push to `main` or to any `track/*` branch.** Commit only to local `wip/<task-id>` branches, one task per branch, never pushed. Subagents follow the same rule in their worktrees.
-  2. **The free gates still apply to every wip commit:**
+  1. **Never merge, cherry-pick or push to `main`.** Keep committing to work branches (one task per branch). Subagents follow the same rule in their worktrees.
+  2. **The free gates still apply before a branch is queued for review:**
      - `cargo test --workspace` passes;
      - `preflight.py --claims` prints OK;
      - `cargo mutants --in-diff` on the change;
@@ -152,9 +152,9 @@
 
 ## Increment size and WIP
 - **Review one canonical task (or a few tightly coupled ones) at a time**, not a whole phase. Smaller diffs review faster and fail more narrowly.
-- **To avoid losing work while a review is failing**, you may commit to a local `wip/<task-id>` branch without a review.
-  - Never push `wip/*` branches.
-  - Never merge or cherry-pick into `main` without a non-FAIL review of the exact tree.
+- **Commit early and often on work branches** (`wip/<task-id>`, `track/*`). No review is needed to commit there. Reviews run on a committed snapshot (`run_review.py --commit <sha>`, default `HEAD`), so commit first, then review.
+  - Don't push `wip/*` branches unless asked (for example, for a handoff).
+  - Never merge, cherry-pick or push into `main` without a non-FAIL review of the same code tree.
   - `main` stays review-gated.
 
 ## Client-derived data and the public repository
