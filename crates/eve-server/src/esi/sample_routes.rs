@@ -88,7 +88,14 @@ pub(crate) fn open_sde_sqlite(ctx: &ServerContext) -> Option<Connection> {
         .db_path
         .clone()
         .unwrap_or_else(eve_sde::SdeRegistry::default_db_path);
-    let uri = format!("file:{}?immutable=1", path.display());
+    let path_str = path.to_string_lossy();
+    // Strip Windows extended path prefix for SQLite URI compatibility
+    let clean_path = if cfg!(windows) && path_str.starts_with(r"\\?\") {
+        &path_str[4..]
+    } else {
+        &*path_str
+    };
+    let uri = format!("file:{}?immutable=1", clean_path);
     Connection::open_with_flags(
         &uri,
         OpenFlags::SQLITE_OPEN_READ_ONLY
