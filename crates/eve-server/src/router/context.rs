@@ -28,7 +28,10 @@ pub struct BoundObjectEntry {
     pub object_id: i64,
 }
 
+static NEXT_CTX_INSTANCE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
 pub struct ServerContext {
+    pub instance_id: u64,
     pub sde: Arc<SdeRegistry>,
     pub db: Arc<WorldRepository>,
     pub clock: RwLock<Arc<dyn eve_db::ServerClock>>,
@@ -130,6 +133,7 @@ impl ServerContext {
         ));
 
         Self {
+            instance_id: NEXT_CTX_INSTANCE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             sde,
             db,
             clock: RwLock::new(clock),

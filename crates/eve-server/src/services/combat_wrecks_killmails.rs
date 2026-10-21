@@ -1180,6 +1180,68 @@ pub async fn handle_wrecks_killmails(
             ])))
         }
 
+        ("warStatisticMgr", "GetKills") | ("warStatisticMgr", "GetKillsByGroup") => {
+            if args.first().and_then(|a| a.as_i64()).is_some() {
+                return None;
+            }
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let rows = ctx.db.with_snapshot(|snap| {
+                snap.killmails
+                    .values()
+                    .filter(|k| {
+                        k.attacker_character_id == char_id || k.victim_character_id == char_id
+                    })
+                    .map(|k| {
+                        let hash = compute_killmail_esi_hash(
+                            k.victim_character_id,
+                            k.attacker_character_id,
+                            k.ship_type_id,
+                            1_700_000_000,
+                        );
+                        PyRep::keyval([
+                            ("killID", PyRep::Integer(k.kill_id)),
+                            ("solarSystemID", PyRep::Integer(k.solar_system_id as i64)),
+                            ("victimCharacterID", PyRep::Integer(k.victim_character_id)),
+                            ("finalCharacterID", PyRep::Integer(k.attacker_character_id)),
+                            ("victimShipTypeID", PyRep::Integer(k.ship_type_id as i64)),
+                            ("hash", PyRep::String(hash)),
+                        ])
+                    })
+                    .collect::<Vec<_>>()
+            });
+            Some(Ok(PyRep::List(rows)))
+        }
+
+        ("warStatisticMgr", "GetBaseInfo") => {
+            if args.first().and_then(|a| a.as_i64()).is_some() {
+                return None;
+            }
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let (kills, losses) = ctx.db.with_snapshot(|snap| {
+                let k = snap
+                    .killmails
+                    .values()
+                    .filter(|m| m.attacker_character_id == char_id)
+                    .count();
+                let l = snap
+                    .killmails
+                    .values()
+                    .filter(|m| m.victim_character_id == char_id)
+                    .count();
+                (k as i64, l as i64)
+            });
+            Some(Ok(PyRep::keyval([
+                ("kills", PyRep::Integer(kills)),
+                ("losses", PyRep::Integer(losses)),
+            ])))
+        }
+
         ("insuranceSvc", "UnInsureShip") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,

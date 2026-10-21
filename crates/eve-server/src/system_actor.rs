@@ -1181,6 +1181,29 @@ impl SystemRegistry {
                                     mode: MovementMode::Stop,
                                 };
                                 let ok = ballpark.add_ball(ball);
+                                if ok {
+                                    ballpark.emit_event(
+                                        Some(id),
+                                        eve_destiny::DestinyEvent::SetBallFree {
+                                            ball_id: id,
+                                            is_free: false,
+                                        },
+                                    );
+                                    ballpark.emit_event(
+                                        Some(id),
+                                        eve_destiny::DestinyEvent::SetBallRadius {
+                                            ball_id: id,
+                                            radius,
+                                        },
+                                    );
+                                    ballpark.emit_event(
+                                        Some(id),
+                                        eve_destiny::DestinyEvent::SetBallHarmonic {
+                                            ball_id: id,
+                                            harmonic: 1,
+                                        },
+                                    );
+                                }
                                 pending_anchoring_disruptors.push(PendingAnchoringDisruptor {
                                     id,
                                     type_id,

@@ -35,7 +35,7 @@ pub(crate) struct SessionChangeTimerState {
 }
 
 pub(crate) fn ctx_scope_id(ctx: &ServerContext) -> usize {
-    std::ptr::from_ref(ctx) as usize
+    ctx.instance_id as usize
 }
 
 pub(crate) static SESSION_CHANGE_TIMERS: std::sync::LazyLock<

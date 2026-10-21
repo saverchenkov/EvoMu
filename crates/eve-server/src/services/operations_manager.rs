@@ -31,6 +31,8 @@ struct CharacterOperationsRecord {
     tutorial_finished: Option<bool>,
     avoidance_systems: Vec<i64>,
     active_survey_id: Option<i64>,
+    #[serde(default)]
+    completed_surveys: HashSet<i64>,
     client_events_logged: u64,
 }
 
@@ -381,11 +383,18 @@ pub fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let surveys = ctx.db.with_snapshot(|snap| {
-                load_store(snap)
-                    .by_character
-                    .get(&char_id)
-                    .and_then(|r| r.active_survey_id)
+            let now = ctx.now_unix();
+            let surveys = ctx.db.with_mut_snapshot(|snap| {
+                let mut store = load_store(snap);
+                let active_id = {
+                    let rec = store.by_character.entry(char_id).or_default();
+                    if rec.active_survey_id.is_none() && !rec.completed_surveys.contains(&1) {
+                        rec.active_survey_id = Some(1);
+                    }
+                    rec.active_survey_id
+                };
+                save_store(snap, &store, now);
+                active_id
                     .map(|id| vec![PyRep::Integer(id)])
                     .unwrap_or_default()
             });
@@ -413,14 +422,17 @@ pub fn handle(
             // Award survey reward: 10,000 unallocated skill points only if survey_id is currently active for caller
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let mut store = load_store(snap);
-                let rec = store.by_character.entry(char_id).or_default();
-                if rec.active_survey_id != Some(survey_id) {
-                    return Err(rpc_err(
-                        "SurveyNotActive",
-                        format!("Survey {survey_id} is not active or has already been claimed"),
-                    ));
+                {
+                    let rec = store.by_character.entry(char_id).or_default();
+                    if rec.active_survey_id != Some(survey_id) {
+                        return Err(rpc_err(
+                            "SurveyNotActive",
+                            format!("Survey {survey_id} is not active or has already been claimed"),
+                        ));
+                    }
+                    rec.active_survey_id = None;
+                    rec.completed_surveys.insert(survey_id);
                 }
-                rec.active_survey_id = None;
                 save_store(snap, &store, now);
                 let ch = snap
                     .characters

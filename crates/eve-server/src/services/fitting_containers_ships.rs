@@ -59,9 +59,6 @@ pub(crate) struct ContainerShipRuntimeState {
     pub alsc_locked_items: HashSet<i64>,
     pub alsc_logs: HashMap<i64, Vec<AlscLogEntry>>,
     pub ship_configs: HashMap<i64, ShipAccessConfig>,
-    pub newbie_ship_last_claim_unix: HashMap<(usize, i64), u64>,
-    pub jettison_last_unix: HashMap<(usize, i64), u64>,
-    pub ship_kill_counts: HashMap<i64, i64>,
     pub custom_item_flags: HashMap<i64, u16>,
     pub asset_safety_wraps: HashMap<i64, AssetSafetyWrapState>,
 }

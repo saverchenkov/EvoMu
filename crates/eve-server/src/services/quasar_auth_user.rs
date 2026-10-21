@@ -155,4 +155,62 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
             })
         }),
     );
+
+    // 5. eve.legal.agreement.api.GetLatestRequest -> GetLatestResponse
+    router.register_handler(
+        "eve.legal.agreement.api.GetLatestRequest",
+        Arc::new(move |_ctx, _any, _dyn_msg| {
+            let mut doc = Vec::new();
+            encode_string_field(1, "EVE Online End User License Agreement V24.01", &mut doc);
+            let mut out = Vec::new();
+            encode_bytes_field(1, &doc, &mut out);
+            Ok(GoogleAny {
+                type_url: format!(
+                    "{TYPE_GOOGLEAPIS_PREFIX}eve.legal.agreement.api.GetLatestResponse"
+                ),
+                value: out,
+            })
+        }),
+    );
+
+    // 6. eve.user.legal.agreement.api.AcceptRequest -> AcceptResponse
+    router.register_handler(
+        "eve.user.legal.agreement.api.AcceptRequest",
+        Arc::new(move |ctx, any, _dyn_msg| {
+            let uid = ctx.effective_user_id().unwrap_or(1) as u64;
+            let agreement_id = if !any.value.is_empty() {
+                String::from_utf8_lossy(&any.value).into_owned()
+            } else {
+                "eula_v24".to_string()
+            };
+            get_identity_store()
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .accepted_agreements
+                .entry(uid)
+                .or_default()
+                .push(agreement_id);
+            Ok(GoogleAny {
+                type_url: format!(
+                    "{TYPE_GOOGLEAPIS_PREFIX}eve.user.legal.agreement.api.AcceptResponse"
+                ),
+                value: vec![],
+            })
+        }),
+    );
+
+    // 7. eve.localization.message.api.GetLocalizedTextRequest -> GetLocalizedTextResponse
+    router.register_handler(
+        "eve.localization.message.api.GetLocalizedTextRequest",
+        Arc::new(move |_ctx, _any, _dyn_msg| {
+            let mut out = Vec::new();
+            encode_string_field(1, "Welcome to EVE Online Tranquility", &mut out);
+            Ok(GoogleAny {
+                type_url: format!(
+                    "{TYPE_GOOGLEAPIS_PREFIX}eve.localization.message.api.GetLocalizedTextResponse"
+                ),
+                value: out,
+            })
+        }),
+    );
 }

@@ -418,17 +418,18 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                 }));
             };
             let now_unix = ctx.now_unix_secs();
-            let db_key = (std::sync::Arc::as_ptr(&ctx.db) as usize, char_id);
-            {
-                let st = container_ship_state().read().unwrap_or_else(|e| e.into_inner());
-                if let Some(&last_ts) = st.newbie_ship_last_claim_unix.get(&db_key) {
-                    if now_unix < last_ts.saturating_add(60) {
-                        return Some(Err(BridgeRpcError {
-                            code: "NewbieShipCooldown".into(),
-                            message: "Corvette claim cooldown is still active".into(),
-                        }));
-                    }
-                }
+            let claim_key = -8_800_000 - char_id;
+            let on_cooldown = ctx.db.with_snapshot(|snap| {
+                snap.item_custom_names
+                    .get(&claim_key)
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .is_some_and(|last_ts| now_unix < last_ts.saturating_add(60))
+            });
+            if on_cooldown {
+                return Some(Err(BridgeRpcError {
+                    code: "NewbieShipCooldown".into(),
+                    message: "Corvette claim cooldown is still active".into(),
+                }));
             }
             let capsule_group = ctx.sde.groups.values().find(|g| g.name == "Capsule").map(|g| g.group_id);
             let in_capsule = ctx.db.with_snapshot(|snap| {
@@ -502,11 +503,9 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
             });
             match res {
                 Ok((corvette_id, corvette_tid, race_id)) => {
-                    container_ship_state()
-                        .write()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .newbie_ship_last_claim_unix
-                        .insert(db_key, now_unix);
+                    ctx.db.with_mut_snapshot(|snap| {
+                        snap.item_custom_names.insert(claim_key, now_unix.to_string());
+                    });
                     session.ship_id = Some(corvette_id);
                     // `ProcessActiveShipChanged` is derived by the V24 client (`DogmaLocation.MakeShipActive`)
                     // from the `shipid` session change; the server never sends it.
@@ -624,28 +623,27 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                 .unwrap_or(0);
             if method == "SetShipKillCounter" {
                 let kills = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1);
-                container_ship_state()
-                    .write()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .ship_kill_counts
-                    .insert(ship_id, kills);
+                ctx.db.with_mut_snapshot(|snap| {
+                    if let Some(it) = snap.items.get_mut(&ship_id) {
+                        it.dynamic_attributes.insert(9998, kills as f64);
+                    } else {
+                        snap.item_custom_names.insert(-8_900_000 - ship_id, kills.to_string());
+                    }
+                });
                 return Some(Ok(PyRep::Integer(kills)));
             }
-            let kills = container_ship_state()
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .ship_kill_counts
-                .get(&ship_id)
-                .copied()
-                .unwrap_or_else(|| {
-                    ctx.db.with_snapshot(|snap| {
-                        snap.items
-                            .get(&ship_id)
-                            .and_then(|i| i.dynamic_attributes.get(&9998).copied())
-                            .map(|v| v as i64)
-                            .unwrap_or(0)
+            let kills = ctx.db.with_snapshot(|snap| {
+                snap.items
+                    .get(&ship_id)
+                    .and_then(|i| i.dynamic_attributes.get(&9998).copied())
+                    .map(|v| v as i64)
+                    .or_else(|| {
+                        snap.item_custom_names
+                            .get(&(-8_900_000 - ship_id))
+                            .and_then(|s| s.parse::<i64>().ok())
                     })
-                });
+                    .unwrap_or(0)
+            });
             Some(Ok(PyRep::Integer(kills)))
         }
 

@@ -1138,9 +1138,7 @@ pub async fn handle(
                                 .as_deref().unwrap_or_default()
                                 .to_lowercase();
                             c.contains("mining")
-                                || t.contains("mining")
-                                || t.contains("mineral")
-                                || t.contains("ore")
+                                || t.split(|ch: char| !ch.is_alphanumeric()).any(|w| matches!(w, "mining" | "mineral" | "minerals" | "ore" | "ores"))
                         };
 
                         if m.state != "Accepted" || (m.npcs_remaining > 0 && !is_mining_mission) {

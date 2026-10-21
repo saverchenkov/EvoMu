@@ -210,6 +210,9 @@ pub async fn handle(
         ),
         // ---- character selection screen (eve/client/script/ui/login/charSelection) ----
         ("loginCampaignManager", "get_client_campaign_state") => {
+            if session.character_id.is_some() {
+                return None;
+            }
             if let Err(e) = ServerContext::require_auth(session) {
                 return Some(Err(e));
             }
@@ -218,6 +221,9 @@ pub async fn handle(
             Some(Ok(PyRep::None))
         }
         ("seasonalLoginCampaignManager", "get_active_campaign") => {
+            if session.character_id.is_some() {
+                return None;
+            }
             if let Err(e) = ServerContext::require_auth(session) {
                 return Some(Err(e));
             }
