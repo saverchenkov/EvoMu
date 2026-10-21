@@ -217,6 +217,15 @@ def main():
             triage = json.load(open(tp))
         except ValueError:
             triage = {}
+    # Supervisor-owned triage (evidence-backed, audited like docs/parity/triage.json). Agent entries win on conflict.
+    sp = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "..", "references", "parity",
+                      "supervisor_triage.json")
+    if os.path.exists(sp):
+        try:
+            for k, v in json.load(open(sp)).get("rows", {}).items():
+                triage.setdefault(k, v)
+        except ValueError:
+            pass
 
     status = {}
     for r in rows:

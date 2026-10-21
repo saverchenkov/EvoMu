@@ -35,6 +35,7 @@
 - **Tag every test that closes a ledger row** with `// parity: <row id>[, …]` in its comment block (no wildcards).
   - Data-driven static-data tests may attest IDs through `EVOMU_PARITY_ATTEST_DIR` (task T-1).
   - Rows you believe aren't server-facing go in `docs/parity/triage.json` with concrete client-code evidence. The gap auditor audits them.
+  - The supervisor keeps its own evidence-backed NA list in `.agents/skills/evomu-adversarial-review/references/parity/supervisor_triage.json` (currently 1,112 Quasar protos the client never imports or never sends, from a static import-graph analysis of `code.ccp`). It is part of the gate: don't edit it. If you think an entry is wrong (the client really uses that proto), tell the supervisor with evidence. Quasar work should target the remaining open `quasar:*` rows, starting with the `eve_public` requests and notices the client actually sends or subscribes to.
 - Put task IDs (e.g. `S-1`, `MN-04`, `Q-5`) in commit messages and in the claims file you give the reviewer.
 - A task is `DONE` only when every "Done when" criterion is met by real, general logic (SDE-driven, no hardcoded IDs), and its tagged tests execute and pass.
 

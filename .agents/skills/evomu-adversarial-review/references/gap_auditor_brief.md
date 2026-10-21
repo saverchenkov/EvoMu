@@ -12,6 +12,7 @@ A separate claims reviewer checks whether what the coding agent says is true. **
   - the curated feature rows (`feat:*`), plan tasks and real-client journeys.
 - `references/parity/auditor_rows.json`: rows that previous audits added.
 - `docs/parity/triage.json` in the repo: rows the agent claims are not server-facing (NA), with evidence.
+- `references/parity/supervisor_triage.json`: NA rows triaged by the user-appointed supervisor (currently Quasar protos the client never imports or never sends, from a static import-graph analysis of the client bytecode; method in its `_about`). Audit it exactly like `docs/parity/triage.json`.
 - Ground truth for EVE behaviour:
   - the wiki (`~/ai/eve-wiki`, 4,100 articles);
   - the pinned client catalogs in `references/parity/sources/`;
@@ -22,7 +23,7 @@ A separate claims reviewer checks whether what the coding agent says is true. **
    - Walk the wiki's mechanics, ship, module, PvE, industry, social and sovereignty articles, and the client script paths in the catalogs. Pick mechanics that have **no** matching ledger row, or whose row is so coarse it hides multiple systems (the way "mining" once hid 18 sub-systems).
    - Propose them as `new_rows`, with concrete acceptance criteria and sources. Don't duplicate existing rows; search `ledger.json` and `auditor_rows.json` first.
    - Aim for the most important gaps first. You may return up to 150 rows per audit.
-2. **Audit the NA triage.** Sample at least 25 entries from `docs/parity/triage.json` (all of them if there are fewer).
+2. **Audit the NA triage.** Sample at least 25 entries from `docs/parity/triage.json` and at least 10 from `references/parity/supervisor_triage.json` (all of them if there are fewer).
    - Reject any entry where the evidence is weak, or where the live server does produce the behaviour. Examples: a notification the server actually sends, or an RPC the client really calls in a reachable code path.
    - List rejections in `rejected_triage`.
 3. **Audit fake DONE.** Sample at least 25 DONE rows, weighted toward `feat:*`, `journey:*`, `quasar:*` and `esi:*`.
