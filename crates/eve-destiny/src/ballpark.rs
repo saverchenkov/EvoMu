@@ -998,9 +998,15 @@ impl Ballpark {
                 self.queue_event_for_grid_observers(gid, None, &ev);
             }
         }
-        // Warp tunnel visuals (`OnActivatingWarp`, `OnSpecialFX`) reach grid observers too.
+        // `OnActivatingWarp` stays simulation-internal: the client's own destiny tick raises it
+        // (michelle.pyj Ballpark.OnActivatingWarp). Only `OnSpecialFX('effects.Warping')` goes on the
+        // wire next to `WarpTo`, as in evemu_Crucible DestinyManager::WarpTo.
         for ev in extra_events {
-            self.emit_event(Some(ball_id), ev);
+            if matches!(ev, DestinyEvent::OnActivatingWarp { .. }) {
+                self.pending_events.push(ev);
+            } else {
+                self.emit_event(Some(ball_id), ev);
+            }
         }
         Ok(())
     }

@@ -1,12 +1,14 @@
-//! Integration test suite verifying binary Destiny stream encoding/decoding and Ballpark
-//! movement physics across all 39 `destiny:*` actions/notifications and 13 `ballmode:*` modes.
+//! Regression tests for Destiny action-tuple encoding and Ballpark movement physics.
+//!
+//! These tests carry no parity tags. Most encode hand-built `DestinyEvent`s and check the
+//! action tuple instead of a simulation-emitted, client-decoder golden layout, so they do not meet
+//! the ledger acceptance text for `destiny:*` / `ballmode:*` rows (review 20261020-192642, R-P1-2/3).
 
 use eve_destiny::wire::*;
 use eve_destiny::{
     Ball, BallId, Ballpark, CombatState, DamageVector, DestinyEvent, MovementMode, AU_METERS,
 };
 use eve_proto::PyRep;
-use eve_testkit::attest;
 use glam::DVec3;
 
 fn make_test_ship(id: BallId, pos: DVec3, mode: MovementMode) -> Ball {
@@ -29,26 +31,6 @@ fn make_test_ship(id: BallId, pos: DVec3, mode: MovementMode) -> Ball {
 // ============================================================================
 #[tokio::test]
 async fn test_destiny_ball_lifecycle_wire_actions_and_destruction() {
-    // parity: destiny:AddBall, destiny:AddBalls, destiny:AddBalls2
-    // parity: destiny:RemoveBall, destiny:RemoveBalls
-    // parity: destiny:SetBallFree, destiny:SetBallHarmonic, destiny:SetBallInteractive, destiny:SetBallRadius
-    // parity: destiny:SetState, destiny:CloakBall, destiny:PackagedAction, destiny:TerminalPlayDestructionEffect
-    attest(&[
-        "destiny:AddBall",
-        "destiny:AddBalls",
-        "destiny:AddBalls2",
-        "destiny:RemoveBall",
-        "destiny:RemoveBalls",
-        "destiny:SetBallFree",
-        "destiny:SetBallHarmonic",
-        "destiny:SetBallInteractive",
-        "destiny:SetBallRadius",
-        "destiny:SetState",
-        "destiny:CloakBall",
-        "destiny:PackagedAction",
-        "destiny:TerminalPlayDestructionEffect",
-    ]);
-
     let mut park = Ballpark::new(30_000_142);
     let ship1 = make_test_ship(100_000_001, DVec3::new(1_000.0, 2_000.0, 3_000.0), MovementMode::Stop);
     let ship2 = make_test_ship(100_000_002, DVec3::new(5_000.0, 5_000.0, 5_000.0), MovementMode::Stop);
@@ -158,19 +140,6 @@ async fn test_destiny_ball_lifecycle_wire_actions_and_destruction() {
 // ============================================================================
 #[tokio::test]
 async fn test_destiny_steering_navigation_and_warp() {
-    // parity: destiny:GotoDirection, destiny:GotoPoint, destiny:FollowBall, destiny:Orbit
-    // parity: destiny:Stop, destiny:WarpTo, destiny:OnActivatingWarp, destiny:OnDeactivatingWarp
-    attest(&[
-        "destiny:GotoDirection",
-        "destiny:GotoPoint",
-        "destiny:FollowBall",
-        "destiny:Orbit",
-        "destiny:Stop",
-        "destiny:WarpTo",
-        "destiny:OnActivatingWarp",
-        "destiny:OnDeactivatingWarp",
-    ]);
-
     let mut park = Ballpark::new(30_000_142);
     let ship_id = 100_000_010;
     let target_id = 100_000_020;
@@ -265,25 +234,6 @@ async fn test_destiny_steering_navigation_and_warp() {
 // ============================================================================
 #[tokio::test]
 async fn test_destiny_ballpark_state_events_fleet_and_controllers() {
-    // parity: destiny:OnClientControllerEvent, destiny:SetControllerVariableOnBall
-    // parity: destiny:OnDamageStateChange, destiny:OnFleetDamageStateChange, destiny:OnFleetStateChange
-    // parity: destiny:OnShipStateUpdate, destiny:OnSlimItemChange, destiny:OnSovereigntyChanged
-    // parity: destiny:OnSpecialFX, destiny:OnAudioActivated, destiny:OnDockingAccepted, destiny:ScatterEwars
-    attest(&[
-        "destiny:OnClientControllerEvent",
-        "destiny:SetControllerVariableOnBall",
-        "destiny:OnDamageStateChange",
-        "destiny:OnFleetDamageStateChange",
-        "destiny:OnFleetStateChange",
-        "destiny:OnShipStateUpdate",
-        "destiny:OnSlimItemChange",
-        "destiny:OnSovereigntyChanged",
-        "destiny:OnSpecialFX",
-        "destiny:OnAudioActivated",
-        "destiny:OnDockingAccepted",
-        "destiny:ScatterEwars",
-    ]);
-
     let mut park = Ballpark::new(30_000_142);
     let ship_id = 100_000_030;
     let ship = make_test_ship(ship_id, DVec3::ZERO, MovementMode::Stop);
@@ -412,18 +362,6 @@ async fn test_destiny_ballpark_state_events_fleet_and_controllers() {
 // ============================================================================
 #[tokio::test]
 async fn test_destiny_dogma_buffs_dot_and_drone_events() {
-    // parity: destiny:OnDbuffUpdated, destiny:OnDotVictimUpdated
-    // parity: destiny:OnDroneStateChange, destiny:OnDroneStateChange2
-    // parity: destiny:OnDroneActivityChange, destiny:OnDroneControlLost
-    attest(&[
-        "destiny:OnDbuffUpdated",
-        "destiny:OnDotVictimUpdated",
-        "destiny:OnDroneStateChange",
-        "destiny:OnDroneStateChange2",
-        "destiny:OnDroneActivityChange",
-        "destiny:OnDroneControlLost",
-    ]);
-
     let park = Ballpark::new(30_000_142);
     let drone_id = 50_000_001;
 
@@ -496,27 +434,6 @@ async fn test_destiny_dogma_buffs_dot_and_drone_events() {
 // ============================================================================
 #[tokio::test]
 async fn test_destiny_all_13_ball_physics_modes_and_wire_roundtrip() {
-    // parity: ballmode:DSTBALL_BOID, ballmode:DSTBALL_FIELD, ballmode:DSTBALL_FOLLOW
-    // parity: ballmode:DSTBALL_FORMATION, ballmode:DSTBALL_GOTO, ballmode:DSTBALL_MINIBALL
-    // parity: ballmode:DSTBALL_MISSILE, ballmode:DSTBALL_MUSHROOM, ballmode:DSTBALL_ORBIT
-    // parity: ballmode:DSTBALL_RIGID, ballmode:DSTBALL_STOP, ballmode:DSTBALL_TROLL
-    // parity: ballmode:DSTBALL_WARP
-    attest(&[
-        "ballmode:DSTBALL_BOID",
-        "ballmode:DSTBALL_FIELD",
-        "ballmode:DSTBALL_FOLLOW",
-        "ballmode:DSTBALL_FORMATION",
-        "ballmode:DSTBALL_GOTO",
-        "ballmode:DSTBALL_MINIBALL",
-        "ballmode:DSTBALL_MISSILE",
-        "ballmode:DSTBALL_MUSHROOM",
-        "ballmode:DSTBALL_ORBIT",
-        "ballmode:DSTBALL_RIGID",
-        "ballmode:DSTBALL_STOP",
-        "ballmode:DSTBALL_TROLL",
-        "ballmode:DSTBALL_WARP",
-    ]);
-
     let mut park = Ballpark::new(30_000_142);
     let anchor_id = 999_999;
     let anchor = make_test_ship(anchor_id, DVec3::ZERO, MovementMode::Stop);

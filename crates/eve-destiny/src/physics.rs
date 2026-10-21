@@ -589,8 +589,9 @@ impl Ballpark {
             self.pending_events.push(ev_deact.clone());
             self.pending_events.push(ev_sfx.clone());
             if let Some(&gid) = self.ball_grid_ids.get(&ball_id) {
+                // `OnDeactivatingWarp` is raised by the client's own destiny tick; it is kept in
+                // `pending_events` for the simulation but never queued onto the wire.
                 self.queue_event_for_grid_observers(gid, None, &ev);
-                self.queue_event_for_grid_observers(gid, None, &ev_deact);
                 self.queue_event_for_grid_observers(gid, None, &ev_sfx);
             }
         }

@@ -1282,6 +1282,7 @@ async fn test_hic_warp_disruption_field_generator_bubble_and_focused_script() {
     assert_eq!(inf_warp_err.code, "WarpScrambled");
 }
 
+// parity: feat:modules.warp-disruption-field
 #[test]
 fn test_warp_bubble_interception_stop_and_drag() {
     let mut park = Ballpark::new(30_000_142);

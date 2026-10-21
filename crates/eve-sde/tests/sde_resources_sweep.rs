@@ -1,7 +1,8 @@
-//! Sweeps and spot-checks for client static data resources (`.fsdbinary`, `.static`, `.pickle`).
+//! Size and RFC 1321 MD5 regression sweep over client static data resources (`.fsdbinary`,
+//! `.static`, `.pickle`) in the installed V24.01 client `ResFiles/`.
 //!
-//! Validates lossless loading, byte size, RFC 1321 MD5 checksum, record count, and
-//! spot values directly against the installed V24.01 client files in `ResFiles/`.
+//! Untagged: it does not verify per-record spot values against the client file, so it does not
+//! meet the `sde:*` acceptance text by itself.
 
 #![forbid(unsafe_code)]
 
@@ -136,7 +137,11 @@ fn verify_resource_sweep(
     let computed_md5 = md5_hex(&raw);
     assert_eq!(computed_md5, info.md5, "MD5 mismatch for {res_path}");
 
-    // 3. Verify record count and spot value from client file
+    // 3. Record count / spot value. NOTE: the client `.static` files are not SQLite (they start
+    // with a length-prefixed pickle header), so the SQLite branch below is never taken for them;
+    // FSD files only get a header-count check and pickles get neither. This file therefore carries
+    // no parity tags (review 20261020-192642, R-P1-4); per-record verification lives in
+    // sde_fsd_sweep.rs and sde_sweep.rs.
     if raw.starts_with(b"SQLite format 3\0") {
         let conn = Connection::open_with_flags(&client_file, OpenFlags::SQLITE_OPEN_READ_ONLY)
             .unwrap_or_else(|e| panic!("Failed to open client SQLite {:?}: {e}", client_file));
@@ -204,12 +209,6 @@ fn verify_resource_sweep(
 
 #[test]
 fn test_sde_sweep_group_1() {
-    // parity: sde:res:/localizationfsd/localization_fsd_de.pickle, sde:res:/localizationfsd/localization_fsd_en-us.pickle, sde:res:/localizationfsd/localization_fsd_es.pickle, sde:res:/localizationfsd/localization_fsd_fr.pickle
-    // parity: sde:res:/localizationfsd/localization_fsd_it.pickle, sde:res:/localizationfsd/localization_fsd_ja.pickle, sde:res:/localizationfsd/localization_fsd_ko.pickle, sde:res:/localizationfsd/localization_fsd_main.pickle
-    // parity: sde:res:/localizationfsd/localization_fsd_ru.pickle, sde:res:/localizationfsd/localization_fsd_zh.pickle, sde:res:/staticdata/accountingentrytypes.fsdbinary, sde:res:/staticdata/accountingkeys.fsdbinary
-    // parity: sde:res:/staticdata/achievementevents.fsdbinary, sde:res:/staticdata/achievements.static, sde:res:/staticdata/agencyhelpvideogroups.fsdbinary, sde:res:/staticdata/agencyhelpvideos.fsdbinary
-    // parity: sde:res:/staticdata/agentsinspace.fsdbinary, sde:res:/staticdata/agenttypes.fsdbinary, sde:res:/staticdata/archetypes.fsdbinary, sde:res:/staticdata/asteroidcountbytypeidbeltid.static
-    // parity: sde:res:/staticdata/asteroidtypesbysolarsystemid.pickle, sde:res:/staticdata/atoms.fsdbinary, sde:res:/staticdata/audiometadata.fsdbinary
     let db_path = SdeRegistry::default_db_path();
     let sde = SdeRegistry::open(&db_path).expect("Real SDE SQLite database must open");
     let sde_uri = format!("file:{}?immutable=1", db_path.display());
@@ -219,32 +218,6 @@ fn test_sde_sweep_group_1() {
     )
     .expect("open sde_conn");
     let rf = resfiles_dir();
-
-    eve_testkit::attest(&[
-        "sde:res:/localizationfsd/localization_fsd_de.pickle",
-        "sde:res:/localizationfsd/localization_fsd_en-us.pickle",
-        "sde:res:/localizationfsd/localization_fsd_es.pickle",
-        "sde:res:/localizationfsd/localization_fsd_fr.pickle",
-        "sde:res:/localizationfsd/localization_fsd_it.pickle",
-        "sde:res:/localizationfsd/localization_fsd_ja.pickle",
-        "sde:res:/localizationfsd/localization_fsd_ko.pickle",
-        "sde:res:/localizationfsd/localization_fsd_main.pickle",
-        "sde:res:/localizationfsd/localization_fsd_ru.pickle",
-        "sde:res:/localizationfsd/localization_fsd_zh.pickle",
-        "sde:res:/staticdata/accountingentrytypes.fsdbinary",
-        "sde:res:/staticdata/accountingkeys.fsdbinary",
-        "sde:res:/staticdata/achievementevents.fsdbinary",
-        "sde:res:/staticdata/achievements.static",
-        "sde:res:/staticdata/agencyhelpvideogroups.fsdbinary",
-        "sde:res:/staticdata/agencyhelpvideos.fsdbinary",
-        "sde:res:/staticdata/agentsinspace.fsdbinary",
-        "sde:res:/staticdata/agenttypes.fsdbinary",
-        "sde:res:/staticdata/archetypes.fsdbinary",
-        "sde:res:/staticdata/asteroidcountbytypeidbeltid.static",
-        "sde:res:/staticdata/asteroidtypesbysolarsystemid.pickle",
-        "sde:res:/staticdata/atoms.fsdbinary",
-        "sde:res:/staticdata/audiometadata.fsdbinary",
-    ]);
 
     verify_resource_sweep(
         "res:/localizationfsd/localization_fsd_de.pickle",
@@ -353,12 +326,6 @@ fn test_sde_sweep_group_1() {
 
 #[test]
 fn test_sde_sweep_group_2() {
-    // parity: sde:res:/staticdata/billboards.fsdbinary, sde:res:/staticdata/billtypes.fsdbinary, sde:res:/staticdata/blueprintsbymaterialtypeids.pickle, sde:res:/staticdata/brackets.static
-    // parity: sde:res:/staticdata/bracketsbycategory.static, sde:res:/staticdata/bracketsbygroup.static, sde:res:/staticdata/bracketsbytype.static, sde:res:/staticdata/careerpaths.fsdbinary
-    // parity: sde:res:/staticdata/certificates.static, sde:res:/staticdata/challengeconditions.fsdbinary, sde:res:/staticdata/challengeevents.fsdbinary, sde:res:/staticdata/challenges.fsdbinary
-    // parity: sde:res:/staticdata/character_avatarbehaviors.fsdbinary, sde:res:/staticdata/character_colorlocations.fsdbinary, sde:res:/staticdata/character_colornames.fsdbinary, sde:res:/staticdata/character_modifierlocations.fsdbinary
-    // parity: sde:res:/staticdata/character_portraitresources.fsdbinary, sde:res:/staticdata/character_resources.fsdbinary, sde:res:/staticdata/character_sculptinglocations.fsdbinary, sde:res:/staticdata/checkpoints.fsdbinary
-    // parity: sde:res:/staticdata/clientlocationlists.fsdbinary, sde:res:/staticdata/commandsets.fsdbinary, sde:res:/staticdata/community_track_templates.fsdbinary
     let db_path = SdeRegistry::default_db_path();
     let sde = SdeRegistry::open(&db_path).expect("Real SDE SQLite database must open");
     let sde_uri = format!("file:{}?immutable=1", db_path.display());
@@ -368,32 +335,6 @@ fn test_sde_sweep_group_2() {
     )
     .expect("open sde_conn");
     let rf = resfiles_dir();
-
-    eve_testkit::attest(&[
-        "sde:res:/staticdata/billboards.fsdbinary",
-        "sde:res:/staticdata/billtypes.fsdbinary",
-        "sde:res:/staticdata/blueprintsbymaterialtypeids.pickle",
-        "sde:res:/staticdata/brackets.static",
-        "sde:res:/staticdata/bracketsbycategory.static",
-        "sde:res:/staticdata/bracketsbygroup.static",
-        "sde:res:/staticdata/bracketsbytype.static",
-        "sde:res:/staticdata/careerpaths.fsdbinary",
-        "sde:res:/staticdata/certificates.static",
-        "sde:res:/staticdata/challengeconditions.fsdbinary",
-        "sde:res:/staticdata/challengeevents.fsdbinary",
-        "sde:res:/staticdata/challenges.fsdbinary",
-        "sde:res:/staticdata/character_avatarbehaviors.fsdbinary",
-        "sde:res:/staticdata/character_colorlocations.fsdbinary",
-        "sde:res:/staticdata/character_colornames.fsdbinary",
-        "sde:res:/staticdata/character_modifierlocations.fsdbinary",
-        "sde:res:/staticdata/character_portraitresources.fsdbinary",
-        "sde:res:/staticdata/character_resources.fsdbinary",
-        "sde:res:/staticdata/character_sculptinglocations.fsdbinary",
-        "sde:res:/staticdata/checkpoints.fsdbinary",
-        "sde:res:/staticdata/clientlocationlists.fsdbinary",
-        "sde:res:/staticdata/commandsets.fsdbinary",
-        "sde:res:/staticdata/community_track_templates.fsdbinary",
-    ]);
 
     verify_resource_sweep("res:/staticdata/billboards.fsdbinary", &rf, &sde, &conn);
     verify_resource_sweep("res:/staticdata/billtypes.fsdbinary", &rf, &sde, &conn);
@@ -487,12 +428,6 @@ fn test_sde_sweep_group_2() {
 
 #[test]
 fn test_sde_sweep_group_3() {
-    // parity: sde:res:/staticdata/constellations.schema, sde:res:/staticdata/contenttags.fsdbinary, sde:res:/staticdata/contenttagtypes.fsdbinary, sde:res:/staticdata/contrabandtypes.fsdbinary
-    // parity: sde:res:/staticdata/contributionmethods.fsdbinary, sde:res:/staticdata/controltowerresources.fsdbinary, sde:res:/staticdata/conversationagents.fsdbinary, sde:res:/staticdata/conversations.fsdbinary
-    // parity: sde:res:/staticdata/corporationactivities.fsdbinary, sde:res:/staticdata/corporationrolegroups.fsdbinary, sde:res:/staticdata/corporationroles.fsdbinary, sde:res:/staticdata/crates.fsdbinary
-    // parity: sde:res:/staticdata/currencybuckets.fsdbinary, sde:res:/staticdata/defaultoverviews.fsdbinary, sde:res:/staticdata/dialogs.schema, sde:res:/staticdata/dialogs.static
-    // parity: sde:res:/staticdata/dogmaattributecategories.fsdbinary, sde:res:/staticdata/dogmaunits.fsdbinary, sde:res:/staticdata/dungeonenvironmenttemplates.fsdbinary, sde:res:/staticdata/dungeonobjectives.fsdbinary
-    // parity: sde:res:/staticdata/dungeons.fsdbinary, sde:res:/staticdata/dusticons.static, sde:res:/staticdata/effects.fsdbinary
     let db_path = SdeRegistry::default_db_path();
     let sde = SdeRegistry::open(&db_path).expect("Real SDE SQLite database must open");
     let sde_uri = format!("file:{}?immutable=1", db_path.display());
@@ -502,32 +437,6 @@ fn test_sde_sweep_group_3() {
     )
     .expect("open sde_conn");
     let rf = resfiles_dir();
-
-    eve_testkit::attest(&[
-        "sde:res:/staticdata/constellations.schema",
-        "sde:res:/staticdata/contenttags.fsdbinary",
-        "sde:res:/staticdata/contenttagtypes.fsdbinary",
-        "sde:res:/staticdata/contrabandtypes.fsdbinary",
-        "sde:res:/staticdata/contributionmethods.fsdbinary",
-        "sde:res:/staticdata/controltowerresources.fsdbinary",
-        "sde:res:/staticdata/conversationagents.fsdbinary",
-        "sde:res:/staticdata/conversations.fsdbinary",
-        "sde:res:/staticdata/corporationactivities.fsdbinary",
-        "sde:res:/staticdata/corporationrolegroups.fsdbinary",
-        "sde:res:/staticdata/corporationroles.fsdbinary",
-        "sde:res:/staticdata/crates.fsdbinary",
-        "sde:res:/staticdata/currencybuckets.fsdbinary",
-        "sde:res:/staticdata/defaultoverviews.fsdbinary",
-        "sde:res:/staticdata/dialogs.schema",
-        "sde:res:/staticdata/dialogs.static",
-        "sde:res:/staticdata/dogmaattributecategories.fsdbinary",
-        "sde:res:/staticdata/dogmaunits.fsdbinary",
-        "sde:res:/staticdata/dungeonenvironmenttemplates.fsdbinary",
-        "sde:res:/staticdata/dungeonobjectives.fsdbinary",
-        "sde:res:/staticdata/dungeons.fsdbinary",
-        "sde:res:/staticdata/dusticons.static",
-        "sde:res:/staticdata/effects.fsdbinary",
-    ]);
 
     verify_resource_sweep("res:/staticdata/constellations.schema", &rf, &sde, &conn);
     verify_resource_sweep("res:/staticdata/contenttags.fsdbinary", &rf, &sde, &conn);
@@ -621,12 +530,6 @@ fn test_sde_sweep_group_3() {
 
 #[test]
 fn test_sde_sweep_group_4() {
-    // parity: sde:res:/staticdata/effectsequences.fsdbinary, sde:res:/staticdata/empireselection.static, sde:res:/staticdata/empiretechnologies.static, sde:res:/staticdata/environmenttemplateanchorcategoryids.fsdbinary
-    // parity: sde:res:/staticdata/environmenttemplateanchorgroupids.fsdbinary, sde:res:/staticdata/environmenttemplateanchortypeids.fsdbinary, sde:res:/staticdata/environmenttemplates.fsdbinary, sde:res:/staticdata/epicarcs.fsdbinary
-    // parity: sde:res:/staticdata/essreservekeys.fsdbinary, sde:res:/staticdata/eventmessagetypes.static, sde:res:/staticdata/eventtypes.static, sde:res:/staticdata/expertsystems.fsdbinary
-    // parity: sde:res:/staticdata/explosionbucketids.fsdbinary, sde:res:/staticdata/explosionids.fsdbinary, sde:res:/staticdata/factionsowningsolarsystems.schema, sde:res:/staticdata/factionsowningsolarsystems.static
-    // parity: sde:res:/staticdata/globaltypes.fsdbinary, sde:res:/staticdata/goals.fsdbinary, sde:res:/staticdata/graphicids.fsdbinary, sde:res:/staticdata/graphiclocations.fsdbinary
-    // parity: sde:res:/staticdata/graphicmaterialsets.fsdbinary, sde:res:/staticdata/groupgraphics.fsdbinary, sde:res:/staticdata/grouprewards.fsdbinary
     let db_path = SdeRegistry::default_db_path();
     let sde = SdeRegistry::open(&db_path).expect("Real SDE SQLite database must open");
     let sde_uri = format!("file:{}?immutable=1", db_path.display());
@@ -636,32 +539,6 @@ fn test_sde_sweep_group_4() {
     )
     .expect("open sde_conn");
     let rf = resfiles_dir();
-
-    eve_testkit::attest(&[
-        "sde:res:/staticdata/effectsequences.fsdbinary",
-        "sde:res:/staticdata/empireselection.static",
-        "sde:res:/staticdata/empiretechnologies.static",
-        "sde:res:/staticdata/environmenttemplateanchorcategoryids.fsdbinary",
-        "sde:res:/staticdata/environmenttemplateanchorgroupids.fsdbinary",
-        "sde:res:/staticdata/environmenttemplateanchortypeids.fsdbinary",
-        "sde:res:/staticdata/environmenttemplates.fsdbinary",
-        "sde:res:/staticdata/epicarcs.fsdbinary",
-        "sde:res:/staticdata/essreservekeys.fsdbinary",
-        "sde:res:/staticdata/eventmessagetypes.static",
-        "sde:res:/staticdata/eventtypes.static",
-        "sde:res:/staticdata/expertsystems.fsdbinary",
-        "sde:res:/staticdata/explosionbucketids.fsdbinary",
-        "sde:res:/staticdata/explosionids.fsdbinary",
-        "sde:res:/staticdata/factionsowningsolarsystems.schema",
-        "sde:res:/staticdata/factionsowningsolarsystems.static",
-        "sde:res:/staticdata/globaltypes.fsdbinary",
-        "sde:res:/staticdata/goals.fsdbinary",
-        "sde:res:/staticdata/graphicids.fsdbinary",
-        "sde:res:/staticdata/graphiclocations.fsdbinary",
-        "sde:res:/staticdata/graphicmaterialsets.fsdbinary",
-        "sde:res:/staticdata/groupgraphics.fsdbinary",
-        "sde:res:/staticdata/grouprewards.fsdbinary",
-    ]);
 
     verify_resource_sweep(
         "res:/staticdata/effectsequences.fsdbinary",
@@ -745,12 +622,6 @@ fn test_sde_sweep_group_4() {
 
 #[test]
 fn test_sde_sweep_group_5() {
-    // parity: sde:res:/staticdata/huecategories.fsdbinary, sde:res:/staticdata/icetypesbydungeonid.static, sde:res:/staticdata/iconids.fsdbinary, sde:res:/staticdata/industry_activities.static
-    // parity: sde:res:/staticdata/industry_activity_modifier_sources.static, sde:res:/staticdata/industry_activity_target_filters.static, sde:res:/staticdata/industry_assembly_lines.static, sde:res:/staticdata/industry_installation_types.static
-    // parity: sde:res:/staticdata/infobubbles.static, sde:res:/staticdata/itemtraderrecipes.fsdbinary, sde:res:/staticdata/jumps.schema, sde:res:/staticdata/landmarks.static
-    // parity: sde:res:/staticdata/locationcache.static, sde:res:/staticdata/manufacturableitems.fsdbinary, sde:res:/staticdata/menuhighlights.fsdbinary, sde:res:/staticdata/metagroups.fsdbinary
-    // parity: sde:res:/staticdata/missions.fsdbinary, sde:res:/staticdata/musictriggers.fsdbinary, sde:res:/staticdata/newactivities.fsdbinary, sde:res:/staticdata/newfeatures.fsdbinary
-    // parity: sde:res:/staticdata/nodegraphs.fsdbinary, sde:res:/staticdata/nodetypes.fsdbinary, sde:res:/staticdata/npccharacters.fsdbinary
     let db_path = SdeRegistry::default_db_path();
     let sde = SdeRegistry::open(&db_path).expect("Real SDE SQLite database must open");
     let sde_uri = format!("file:{}?immutable=1", db_path.display());
@@ -760,32 +631,6 @@ fn test_sde_sweep_group_5() {
     )
     .expect("open sde_conn");
     let rf = resfiles_dir();
-
-    eve_testkit::attest(&[
-        "sde:res:/staticdata/huecategories.fsdbinary",
-        "sde:res:/staticdata/icetypesbydungeonid.static",
-        "sde:res:/staticdata/iconids.fsdbinary",
-        "sde:res:/staticdata/industry_activities.static",
-        "sde:res:/staticdata/industry_activity_modifier_sources.static",
-        "sde:res:/staticdata/industry_activity_target_filters.static",
-        "sde:res:/staticdata/industry_assembly_lines.static",
-        "sde:res:/staticdata/industry_installation_types.static",
-        "sde:res:/staticdata/infobubbles.static",
-        "sde:res:/staticdata/itemtraderrecipes.fsdbinary",
-        "sde:res:/staticdata/jumps.schema",
-        "sde:res:/staticdata/landmarks.static",
-        "sde:res:/staticdata/locationcache.static",
-        "sde:res:/staticdata/manufacturableitems.fsdbinary",
-        "sde:res:/staticdata/menuhighlights.fsdbinary",
-        "sde:res:/staticdata/metagroups.fsdbinary",
-        "sde:res:/staticdata/missions.fsdbinary",
-        "sde:res:/staticdata/musictriggers.fsdbinary",
-        "sde:res:/staticdata/newactivities.fsdbinary",
-        "sde:res:/staticdata/newfeatures.fsdbinary",
-        "sde:res:/staticdata/nodegraphs.fsdbinary",
-        "sde:res:/staticdata/nodetypes.fsdbinary",
-        "sde:res:/staticdata/npccharacters.fsdbinary",
-    ]);
 
     verify_resource_sweep("res:/staticdata/huecategories.fsdbinary", &rf, &sde, &conn);
     verify_resource_sweep(
@@ -854,12 +699,6 @@ fn test_sde_sweep_group_5() {
 
 #[test]
 fn test_sde_sweep_group_6() {
-    // parity: sde:res:/staticdata/npccorporationdivisions.fsdbinary, sde:res:/staticdata/npcstationtaxmodifier.fsdbinary, sde:res:/staticdata/npcstructuresettings.fsdbinary, sde:res:/staticdata/objectivechains.fsdbinary
-    // parity: sde:res:/staticdata/objectives.fsdbinary, sde:res:/staticdata/objectivetasktypes.fsdbinary, sde:res:/staticdata/objectivetypes.fsdbinary, sde:res:/staticdata/operationcategories.fsdbinary
-    // parity: sde:res:/staticdata/operations.fsdbinary, sde:res:/staticdata/operationsites.fsdbinary, sde:res:/staticdata/operationtasks.fsdbinary, sde:res:/staticdata/operationtreestructures.fsdbinary
-    // parity: sde:res:/staticdata/oretypesbydungeonid.static, sde:res:/staticdata/paints.fsdbinary, sde:res:/staticdata/paperdolls.fsdbinary, sde:res:/staticdata/petitionevents.fsdbinary
-    // parity: sde:res:/staticdata/petitionproperties.fsdbinary, sde:res:/staticdata/podguide.static, sde:res:/staticdata/podguidegroups.static, sde:res:/staticdata/pvpfilamenteventdates.fsdbinary
-    // parity: sde:res:/staticdata/pvpfilamentmatchtypes.fsdbinary, sde:res:/staticdata/recruitmentgroups.fsdbinary, sde:res:/staticdata/recruitmenttypes.fsdbinary
     let db_path = SdeRegistry::default_db_path();
     let sde = SdeRegistry::open(&db_path).expect("Real SDE SQLite database must open");
     let sde_uri = format!("file:{}?immutable=1", db_path.display());
@@ -869,32 +708,6 @@ fn test_sde_sweep_group_6() {
     )
     .expect("open sde_conn");
     let rf = resfiles_dir();
-
-    eve_testkit::attest(&[
-        "sde:res:/staticdata/npccorporationdivisions.fsdbinary",
-        "sde:res:/staticdata/npcstationtaxmodifier.fsdbinary",
-        "sde:res:/staticdata/npcstructuresettings.fsdbinary",
-        "sde:res:/staticdata/objectivechains.fsdbinary",
-        "sde:res:/staticdata/objectives.fsdbinary",
-        "sde:res:/staticdata/objectivetasktypes.fsdbinary",
-        "sde:res:/staticdata/objectivetypes.fsdbinary",
-        "sde:res:/staticdata/operationcategories.fsdbinary",
-        "sde:res:/staticdata/operations.fsdbinary",
-        "sde:res:/staticdata/operationsites.fsdbinary",
-        "sde:res:/staticdata/operationtasks.fsdbinary",
-        "sde:res:/staticdata/operationtreestructures.fsdbinary",
-        "sde:res:/staticdata/oretypesbydungeonid.static",
-        "sde:res:/staticdata/paints.fsdbinary",
-        "sde:res:/staticdata/paperdolls.fsdbinary",
-        "sde:res:/staticdata/petitionevents.fsdbinary",
-        "sde:res:/staticdata/petitionproperties.fsdbinary",
-        "sde:res:/staticdata/podguide.static",
-        "sde:res:/staticdata/podguidegroups.static",
-        "sde:res:/staticdata/pvpfilamenteventdates.fsdbinary",
-        "sde:res:/staticdata/pvpfilamentmatchtypes.fsdbinary",
-        "sde:res:/staticdata/recruitmentgroups.fsdbinary",
-        "sde:res:/staticdata/recruitmenttypes.fsdbinary",
-    ]);
 
     verify_resource_sweep(
         "res:/staticdata/npccorporationdivisions.fsdbinary",
@@ -988,12 +801,6 @@ fn test_sde_sweep_group_6() {
 
 #[test]
 fn test_sde_sweep_group_7() {
-    // parity: sde:res:/staticdata/regions.schema, sde:res:/staticdata/requiredskillsfortypes.fsdbinary, sde:res:/staticdata/requiredskillsindex.fsdbinary, sde:res:/staticdata/schoolmap.fsdbinary
-    // parity: sde:res:/staticdata/seasonalcampaignsloginrewards.fsdbinary, sde:res:/staticdata/seasonselection.fsdbinary, sde:res:/staticdata/selectiongroups.static, sde:res:/staticdata/ship_cosmetic_slot_categories.fsdbinary
-    // parity: sde:res:/staticdata/ship_cosmetic_slot_configurations.fsdbinary, sde:res:/staticdata/ship_cosmetic_slot_names.fsdbinary, sde:res:/staticdata/ship_cosmetic_slots.fsdbinary, sde:res:/staticdata/ship_skin_design_component_categories.fsdbinary
-    // parity: sde:res:/staticdata/ship_skin_design_component_point_values.fsdbinary, sde:res:/staticdata/ship_skin_design_component_rarities.fsdbinary, sde:res:/staticdata/ship_skin_design_components.fsdbinary, sde:res:/staticdata/ship_skin_design_components_post_process.fsdbinary
-    // parity: sde:res:/staticdata/ship_skin_design_tier_thresholds.fsdbinary, sde:res:/staticdata/shipcosmeticlicenses.fsdbinary, sde:res:/staticdata/skillplans.fsdbinary, sde:res:/staticdata/skilltags.static
-    // parity: sde:res:/staticdata/skilltreegroups.fsdbinary, sde:res:/staticdata/skyboxeffects.fsdbinary, sde:res:/staticdata/solarsystemcontent.static
     let db_path = SdeRegistry::default_db_path();
     let sde = SdeRegistry::open(&db_path).expect("Real SDE SQLite database must open");
     let sde_uri = format!("file:{}?immutable=1", db_path.display());
@@ -1003,32 +810,6 @@ fn test_sde_sweep_group_7() {
     )
     .expect("open sde_conn");
     let rf = resfiles_dir();
-
-    eve_testkit::attest(&[
-        "sde:res:/staticdata/regions.schema",
-        "sde:res:/staticdata/requiredskillsfortypes.fsdbinary",
-        "sde:res:/staticdata/requiredskillsindex.fsdbinary",
-        "sde:res:/staticdata/schoolmap.fsdbinary",
-        "sde:res:/staticdata/seasonalcampaignsloginrewards.fsdbinary",
-        "sde:res:/staticdata/seasonselection.fsdbinary",
-        "sde:res:/staticdata/selectiongroups.static",
-        "sde:res:/staticdata/ship_cosmetic_slot_categories.fsdbinary",
-        "sde:res:/staticdata/ship_cosmetic_slot_configurations.fsdbinary",
-        "sde:res:/staticdata/ship_cosmetic_slot_names.fsdbinary",
-        "sde:res:/staticdata/ship_cosmetic_slots.fsdbinary",
-        "sde:res:/staticdata/ship_skin_design_component_categories.fsdbinary",
-        "sde:res:/staticdata/ship_skin_design_component_point_values.fsdbinary",
-        "sde:res:/staticdata/ship_skin_design_component_rarities.fsdbinary",
-        "sde:res:/staticdata/ship_skin_design_components.fsdbinary",
-        "sde:res:/staticdata/ship_skin_design_components_post_process.fsdbinary",
-        "sde:res:/staticdata/ship_skin_design_tier_thresholds.fsdbinary",
-        "sde:res:/staticdata/shipcosmeticlicenses.fsdbinary",
-        "sde:res:/staticdata/skillplans.fsdbinary",
-        "sde:res:/staticdata/skilltags.static",
-        "sde:res:/staticdata/skilltreegroups.fsdbinary",
-        "sde:res:/staticdata/skyboxeffects.fsdbinary",
-        "sde:res:/staticdata/solarsystemcontent.static",
-    ]);
 
     verify_resource_sweep("res:/staticdata/regions.schema", &rf, &sde, &conn);
     verify_resource_sweep(
@@ -1142,11 +923,6 @@ fn test_sde_sweep_group_7() {
 
 #[test]
 fn test_sde_sweep_group_8() {
-    // parity: sde:res:/staticdata/soundids.fsdbinary, sde:res:/staticdata/spaceobjecthighlights.fsdbinary, sde:res:/staticdata/starmapcache.pickle, sde:res:/staticdata/stationstandingsrestrictions.fsdbinary
-    // parity: sde:res:/staticdata/surveys.fsdbinary, sde:res:/staticdata/systems.schema, sde:res:/staticdata/tags.fsdbinary, sde:res:/staticdata/traveleffects.fsdbinary
-    // parity: sde:res:/staticdata/triggertypes.static, sde:res:/staticdata/typedogma.fsdbinary, sde:res:/staticdata/uiblinks.fsdbinary, sde:res:/staticdata/uielementtypes.fsdbinary
-    // parity: sde:res:/staticdata/uihelppointers.fsdbinary, sde:res:/staticdata/uihidingtemplates.fsdbinary, sde:res:/staticdata/uihighlights.fsdbinary, sde:res:/staticdata/voidspaceencounters.fsdbinary
-    // parity: sde:res:/staticdata/warzonespositiondata.fsdbinary, sde:res:/staticdata/wrecks.static
     let db_path = SdeRegistry::default_db_path();
     let sde = SdeRegistry::open(&db_path).expect("Real SDE SQLite database must open");
     let sde_uri = format!("file:{}?immutable=1", db_path.display());
@@ -1156,27 +932,6 @@ fn test_sde_sweep_group_8() {
     )
     .expect("open sde_conn");
     let rf = resfiles_dir();
-
-    eve_testkit::attest(&[
-        "sde:res:/staticdata/soundids.fsdbinary",
-        "sde:res:/staticdata/spaceobjecthighlights.fsdbinary",
-        "sde:res:/staticdata/starmapcache.pickle",
-        "sde:res:/staticdata/stationstandingsrestrictions.fsdbinary",
-        "sde:res:/staticdata/surveys.fsdbinary",
-        "sde:res:/staticdata/systems.schema",
-        "sde:res:/staticdata/tags.fsdbinary",
-        "sde:res:/staticdata/traveleffects.fsdbinary",
-        "sde:res:/staticdata/triggertypes.static",
-        "sde:res:/staticdata/typedogma.fsdbinary",
-        "sde:res:/staticdata/uiblinks.fsdbinary",
-        "sde:res:/staticdata/uielementtypes.fsdbinary",
-        "sde:res:/staticdata/uihelppointers.fsdbinary",
-        "sde:res:/staticdata/uihidingtemplates.fsdbinary",
-        "sde:res:/staticdata/uihighlights.fsdbinary",
-        "sde:res:/staticdata/voidspaceencounters.fsdbinary",
-        "sde:res:/staticdata/warzonespositiondata.fsdbinary",
-        "sde:res:/staticdata/wrecks.static",
-    ]);
 
     verify_resource_sweep("res:/staticdata/soundids.fsdbinary", &rf, &sde, &conn);
     verify_resource_sweep(

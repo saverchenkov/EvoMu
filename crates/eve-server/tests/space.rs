@@ -621,8 +621,8 @@ async fn test_p7_destiny_binary_stream_undock_movement_and_stargate_jump() {
         .drain_observer_updates(ship_id)
         .await
         .expect("drain movement observer updates");
-    // SetSpeedFraction, GotoDirection, FollowBall, Orbit, Stop, WarpTo + warp visuals (OnActivatingWarp, OnSpecialFX)
-    assert_eq!(evs.len(), 8);
+    // SetSpeedFraction, GotoDirection, FollowBall, Orbit, Stop, WarpTo + OnSpecialFX('effects.Warping')
+    assert_eq!(evs.len(), 7);
     let encoded_updates = eve_proto::marshal::encode(&pyrep_updates);
     let decoded_updates =
         eve_proto::marshal::decode(&encoded_updates).expect("marshal roundtrip on movement updates");
@@ -692,6 +692,14 @@ async fn test_p7_destiny_binary_stream_undock_movement_and_stargate_jump() {
     assert_eq!(args5.len(), 6);
     assert_eq!(args5[4], PyRep::Integer(0));
     assert_eq!(args5[5], PyRep::Integer(50));
+
+    // Warp tunnel visual goes out as OnSpecialFX('effects.Warping'); OnActivatingWarp is raised by
+    // the client's own destiny tick and must never appear on the wire.
+    let (a6, args6) = extract_action(6);
+    assert_eq!(a6, "OnSpecialFX");
+    assert_eq!(args6[0], PyRep::Integer(ship_id));
+    assert!(args6.iter().any(|a| a.as_str() == Some("effects.Warping")));
+    assert!((0..7).all(|i| extract_action(i).0 != "OnActivatingWarp"));
 
     // 6. Step Jita ticks until ship completes warp at Perimeter Stargate (50001249), verifying 1-second tick advancement and per-tick DoDestinyUpdate stamps
     let mut prev_tick = jita_handle
