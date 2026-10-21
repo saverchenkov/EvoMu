@@ -80,7 +80,7 @@ fn grant_all_required_skills_for_type(ctx: &ServerContext, char_id: i64, type_id
 
 #[tokio::test]
 async fn test_phase_4_dg2_fit_validation_and_rigs() {
-    // parity: feat:fitting.fit-module, feat:fitting.unfit-module, feat:fitting.fit-rig, feat:fitting.fit-subsystems, feat:fitting.max-group-fitted, feat:fitting.max-type-fitted, feat:fitting.fittings-save, notify:OnModuleFitted, notify:OnModuleUnfitted, notify:OnModuleAttributeChanges, rpc:charFittingMgr.DeleteFitting, rpc:charFittingMgr.GetFittings, rpc:charFittingMgr.SaveFitting, rpc:charUnboundMgr.SelectCharacterID, rpc:corpFittingMgr.DeleteFitting, rpc:corpFittingMgr.SaveFitting, rpc:dogmaIM.DestroyFitting, rpc:invbroker.Add, rpc:stationSvc.Undock
+    // parity: plan:DG-2, feat:fitting.fit-module, feat:fitting.unfit-module, feat:fitting.fit-rig, feat:fitting.fit-subsystems, feat:fitting.max-group-fitted, feat:fitting.max-type-fitted, feat:fitting.fittings-save, notify:OnModuleFitted, notify:OnModuleUnfitted, notify:OnModuleAttributeChanges, rpc:charFittingMgr.DeleteFitting, rpc:charFittingMgr.GetFittings, rpc:charFittingMgr.SaveFitting, rpc:charUnboundMgr.SelectCharacterID, rpc:corpFittingMgr.DeleteFitting, rpc:corpFittingMgr.SaveFitting, rpc:dogmaIM.DestroyFitting, rpc:invbroker.Add, rpc:stationSvc.Undock
     eve_testkit::attest(&["feat:fitting.fit-module", "feat:fitting.unfit-module", "feat:fitting.fit-rig", "feat:fitting.fit-subsystems", "feat:fitting.max-group-fitted", "feat:fitting.max-type-fitted", "feat:fitting.fittings-save", "notify:OnModuleFitted", "notify:OnModuleUnfitted", "notify:OnModuleAttributeChanges"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();
@@ -832,7 +832,7 @@ async fn test_phase_4_dg3_online_offline_and_persistence() {
 
 #[tokio::test]
 async fn test_phase_4_dg5_targeting_lock_and_break() {
-    // parity: feat:dogma.targeting-lock, feat:dogma.targeting-break, notify:OnTarget, notify:OnTargets, notify:OnTargetClear, rpc:charUnboundMgr.SelectCharacterID, rpc:dogmaIM.Activate, rpc:dogmaIM.AddTarget, rpc:dogmaIM.ClearTargets, rpc:dogmaIM.RemoveTarget, rpc:stationSvc.Undock
+    // parity: plan:DG-5, feat:dogma.targeting-lock, feat:dogma.targeting-break, notify:OnTarget, notify:OnTargets, notify:OnTargetClear, rpc:charUnboundMgr.SelectCharacterID, rpc:dogmaIM.Activate, rpc:dogmaIM.AddTarget, rpc:dogmaIM.ClearTargets, rpc:dogmaIM.RemoveTarget, rpc:stationSvc.Undock
     eve_testkit::attest(&["feat:dogma.targeting-lock", "feat:dogma.targeting-break", "notify:OnTarget", "notify:OnTargets", "notify:OnTargetClear"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();

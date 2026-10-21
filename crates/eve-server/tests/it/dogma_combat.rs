@@ -118,7 +118,7 @@ fn extract_item_attr(info_rep: &PyRep, attr_id: i64) -> f64 {
 
 #[tokio::test]
 async fn test_dg4_module_cycle_capacitor_and_shield_booster() {
-    // parity: feat:dogma.capacitor-recharge, feat:dogma.capacitor-stable, feat:modules.shield-booster, rpc:charUnboundMgr.SelectCharacterID, rpc:dogmaIM.Activate, rpc:invbroker.Add, rpc:stationSvc.Undock
+    // parity: plan:DG-4, feat:dogma.capacitor-recharge, feat:dogma.capacitor-stable, feat:modules.shield-booster, rpc:charUnboundMgr.SelectCharacterID, rpc:dogmaIM.Activate, rpc:invbroker.Add, rpc:stationSvc.Undock
     eve_testkit::attest(&["feat:dogma.capacitor-recharge", "feat:dogma.capacitor-stable", "feat:modules.shield-booster"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();
@@ -316,7 +316,7 @@ async fn test_dg4_module_cycle_capacitor_and_shield_booster() {
 
 #[tokio::test]
 async fn test_dg4_overheat_heat_damage_and_reactivation_delay() {
-    // parity: feat:fitting.overheat, feat:dogma.reactivation-delay, rpc:charUnboundMgr.SelectCharacterID, rpc:dogmaIM.Activate, rpc:dogmaIM.Deactivate, rpc:invbroker.Add, rpc:stationSvc.Undock
+    // parity: plan:DG-4, feat:fitting.overheat, feat:dogma.reactivation-delay, rpc:charUnboundMgr.SelectCharacterID, rpc:dogmaIM.Activate, rpc:dogmaIM.Deactivate, rpc:invbroker.Add, rpc:stationSvc.Undock
     eve_testkit::attest(&["feat:fitting.overheat", "feat:dogma.reactivation-delay"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();
@@ -659,7 +659,7 @@ async fn test_c1_c2_turret_tracking_missiles_and_damage_pipeline() {
 
 #[tokio::test]
 async fn test_dg5_web_grappler_neut_nos_burst_projector_and_targeters() {
-    // parity: feat:modules.stasis-webifier, feat:modules.heavy-stasis-grappler-falloff, feat:modules.energy-neutralizer, feat:modules.nosferatu-transfer-rule, feat:modules.burst-projectors, feat:modules.auto-targeting-system, feat:modules.passive-targeter, rpc:charUnboundMgr.SelectCharacterID, rpc:dogmaIM.Activate, rpc:dogmaIM.Deactivate, rpc:dogmaIM.ItemGetInfo, rpc:invbroker.Add, rpc:stationSvc.Undock
+    // parity: plan:DG-5, feat:modules.stasis-webifier, feat:modules.heavy-stasis-grappler-falloff, feat:modules.energy-neutralizer, feat:modules.nosferatu-transfer-rule, feat:modules.burst-projectors, feat:modules.auto-targeting-system, feat:modules.passive-targeter, rpc:charUnboundMgr.SelectCharacterID, rpc:dogmaIM.Activate, rpc:dogmaIM.Deactivate, rpc:dogmaIM.ItemGetInfo, rpc:invbroker.Add, rpc:stationSvc.Undock
     eve_testkit::attest(&["feat:modules.stasis-webifier", "feat:modules.heavy-stasis-grappler-falloff", "feat:modules.energy-neutralizer", "feat:modules.nosferatu-transfer-rule", "feat:modules.burst-projectors", "feat:modules.auto-targeting-system", "feat:modules.passive-targeter"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();

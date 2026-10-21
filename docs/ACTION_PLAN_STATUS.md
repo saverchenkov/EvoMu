@@ -4,7 +4,7 @@
 
 The canonical plan is `.agents/skills/evomu-adversarial-review/references/action_plan.md`. This file is regenerated from the latest pre-flight parity run, so it can't go stale or be overstated.
 
-**Parity: 3721 / 6110 ledger rows closed (60.90%)**, 2206 NA, 504 tagged tests, 523 passing tests. Flagged fake by the gap auditor: 122.
+**Parity: 3723 / 6110 ledger rows closed (60.93%)**, 2206 NA, 505 tagged tests, 523 passing tests. Flagged fake by the gap auditor: 122.
 
 | Category | Total | DONE | NA | Open |
 |---|---|---|---|---|
@@ -14,7 +14,7 @@ The canonical plan is `.agents/skills/evomu-adversarial-review/references/action
 | feat | 1513 | 868 | 94 | 551 |
 | journey | 29 | 0 | 0 | 29 |
 | notify | 1311 | 30 | 603 | 678 |
-| plan | 109 | 36 | 0 | 73 |
+| plan | 109 | 38 | 0 | 71 |
 | quasar | 1455 | 0 | 1328 | 127 |
 | rpc | 1230 | 352 | 111 | 767 |
 | sde | 213 | 1 | 60 | 152 |
@@ -85,11 +85,11 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 
 | Task | Title | Ledger | Features | Tests | Assessment | Note | Last commit |
 |---|---|---|---|---|---|---|---|
-| DG-1 | Modifier engine over V24 modifierInfo | MISSING | 23/23 | — | PARTIAL | Dogma modifierInfo evaluator with 6 domains, stacking penalties, weapon upgrades, propulsion & scrambler suppression, and command bursts; 217 expression-only effects and remaining feat rows open. | ebb1c44 2026-10-21 |
-| DG-2 | Fit validation | MISSING | 0/6 | — | PARTIAL (claimed DONE, ledger MISSING) | Module fit validation with CPU, PG, calibration, slot restrictions, hardpoints, rig size, and maxGroupFitted checks. | cdc48d9 2026-10-19 |
+| DG-1 | Modifier engine over V24 modifierInfo | DONE | 23/23 | test_plan_dg1_dogma_modifier_engine_rifter_overdrives | PARTIAL | Dogma modifierInfo evaluator with 6 domains, stacking penalties, weapon upgrades, propulsion & scrambler suppression, and command bursts; 217 expression-only effects and remaining feat rows open. | ebb1c44 2026-10-21 |
+| DG-2 | Fit validation | BLOCKED_BY_FEATURES | 0/6 | test_phase_4_dg2_fit_validation_and_rigs | PARTIAL (claimed DONE, ledger BLOCKED_BY_FEATURES) | Module fit validation with CPU, PG, calibration, slot restrictions, hardpoints, rig size, and maxGroupFitted checks. | cdc48d9 2026-10-19 |
 | DG-3 | Online/offline | DONE | 1/1 | test_phase_4_dg3_online_offline_and_persistence | DONE | SetModuleOnline and TakeModuleOffline state machine with 75% capacitor requirement, persistence, and OnModuleAttributeChanges notification. | — |
-| DG-4 | Module cycle engine | MISSING | 26/26 | — | PARTIAL | Module activation cycle engine in SystemActor tick, capacitor deduction per cycle, reactivation delay, overheat rack heat damage, and OnGodmaShipEffect notifications; blocked by remaining features. | 171ec4f 2026-10-18 |
-| DG-5 | Targeting | MISSING | 12/16 | — | PARTIAL | Combat target lock state machine with dynamic lock time from scan resolution, max targets from skills, EW jam/damp/paint/disrupt, and lock clearing on warp; blocked by remaining features. | cdc48d9 2026-10-19 |
+| DG-4 | Module cycle engine | DONE | 26/26 | test_dg4_module_cycle_capacitor_and_shield_booster, test_dg4_overheat_heat_damage_and_reactivation_delay, test_phase_4_d | PARTIAL | Module activation cycle engine in SystemActor tick, capacitor deduction per cycle, reactivation delay, overheat rack heat damage, and OnGodmaShipEffect notifications; blocked by remaining features. | 171ec4f 2026-10-18 |
+| DG-5 | Targeting | BLOCKED_BY_FEATURES | 12/16 | test_dg5_targeting_state_machine_sensor_strength_and_ewar, test_dg5_web_grappler_neut_nos_burst_projector_and_targeters, | PARTIAL | Combat target lock state machine with dynamic lock time from scan resolution, max targets from skills, EW jam/damp/paint/disrupt, and lock clearing on warp; blocked by remaining features. | cdc48d9 2026-10-19 |
 | DG-6 | Ammo and grouping | MISSING | 5/5 | — | PARTIAL | Ammunition load/unload, reload timers, and weapon grouping (LinkWeapons/UnlinkModule) in charFittingMgr and shipGroupingSvc; blocked by remaining features. | ebb1c44 2026-10-21 |
 
 ## Phase 5: Combat and PvE loop

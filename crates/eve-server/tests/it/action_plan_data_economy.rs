@@ -316,6 +316,7 @@ password_token = "cadet_secret_token"
 // ====================================================================
 // Test 3: DG-1: Dogma Modifier Engine, Stacking Penalties, Rifter + 2x Overdrive
 // ====================================================================
+// parity: plan:DG-1
 #[tokio::test]
 async fn test_plan_dg1_dogma_modifier_engine_rifter_overdrives() {
     let sde = SdeRegistry::with_canonical_seed();
