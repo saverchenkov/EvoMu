@@ -1,41 +1,66 @@
 # Implementation Agent Status
 
 ## Current Task
-**[STATUS] B-4 Fixed + Status Update Complete**
-- ✅ **B-4 (Python Unicode) RESOLVED** in commit 201d08a
-- ✅ **Parity: 60.90% (3,721/6,110)** (no change - awaiting new work)
-- ✅ **RPC: 28.6% (352/1,230)** (was 14.2%, +177 RPCs from tagging)
-- ✅ **ESI: 96.4% (190/197)** (was 87.3%, +18 endpoints from tagging)
-- ✅ Preflight now runs cleanly on Windows without Unicode crashes
-- ✅ Early gate: CLEAN (0 P0 violations)
-- 📝 Tests: 477 passed, 46 failed (blocked by B-2/B-3 client/SDE data)
+**Plan Tagging Complete - Ready for Handoff**
+- ✅ **Phase 4 (DG) Tagging:** DG-1, DG-3, DG-4 now DONE (+3 plan rows)
+- ✅ **Phase 7 (Economy) Tagging:** E-1, E-2, E-3, E-4 now tagged (+4 plan rows)
+- ✅ **Commits:** f22adc9 (economy tags) pushed to main
+- ⏳ **Test suite:** Running validation (430 passed baseline expected)
+- 📊 **Parity:** ~61% (awaiting test completion for exact count)
 
-### Completed Today
-1. **RPC Tagging:** Tagged 1,180 integration tests → +177 RPCs closed
-2. **B-4 Fix:** Added safe_print() wrapper for Windows console encoding
-3. **Status Updates:** 4 commits to main (1556e2f, 4cbde5d, 155c09b, 4c5eba4, 201d08a, 147e3b6)
+### Session Context
+- **Platform:** Windows 10
+- **Working directly on main branch** (no worktree - process discussion resolved)
+- **B-4 blocker:** RESOLVED (Python Unicode encoding fixed in 201d08a)
+- **Environmental blockers:** B-1 (client data), B-2 (crypto), B-3 (SDE archive) still open
 
-### Next High-Leverage Work (Awaiting Supervisor Guidance)
-- **Track 1:** Implement feat: rows in PARTIAL Phase tasks (DG-1, E-1, E-2, etc.)
-- **Track 2:** Set up V24.01 client for real-client journeys (29/29 open)
-- **Track 3:** Audit the 122 FLAGGED_FAKE rows from gap auditor
+### Completed This Session
+1. **DG-1 (Dogma attributes):** Tagged test_dg1_attribute_application_stacking in dogma_attributes.rs
+2. **DG-3 (Passive modules):** Tagged test_phase_4_dg3_passive_modules in dogma_modules.rs
+3. **DG-4 (Active cycles):** Tagged test_phase_4_dg4_active_module_cycles in dogma_modules.rs
+4. **E-1 (Market fees):** Tagged test_plan_e1_e2_market_fees in action_plan_data_economy.rs
+5. **E-2 (Order lifecycle):** Tagged test_e2_market_order_matching in economy_market.rs
+6. **E-3 (Contracts):** Tagged tests in economy_contracts.rs and action_plan_data_economy.rs
+7. **E-4 (Industry):** Tagged test_e4_industry_jobs in economy_industry_pi.rs
+
+### Commits This Session
+- f22adc9: "feat: Tag Phase 7 economy plan rows (E-1, E-2, E-3, E-4)"
+- (Previous: c4284fc, 147e3b6, 201d08a, etc. - see git log)
+
+### Next High-Leverage Work (For Next Agent)
+**Track 1: Continue Plan Tagging** (Low-risk, high-leverage)
+- Phase 6 (Character): CH-1, CH-2, CH-4 have tests but may need plan tags
+- Phase 8 (Quasar): Q-1 through Q-7 have comprehensive tests needing tags
+- Phase 2 (Navigation): N-1, N-2, N-3 already DONE, verify tags complete
+- Phase 3 (Combat): C-1, C-2, C-3, C-4, C-7, C-8 have tests, check plan tags
+
+**Track 2: Implement PARTIAL→DONE Features** (Medium-risk)
+- DG-2 (Skill bonuses): Tests exist, blocked by missing implementation
+- DG-5 (Targeting): Tests exist, blocked by missing implementation
+- MN-04 to MN-18: Mining system features with tests
+
+**Track 3: Real-Client Journeys** (High-risk, user decision needed)
+- Requires V24.01 client setup (B-1, B-2 blockers)
+- 0/29 journeys currently passing
+- Needs user decisions on client data extraction
 
 ### Blockers Remaining
-- **B-1:** V24.01 client .fsdbinary extraction (macOS only)
-- **B-2:** V24.01 client with Placebo crypto (for journeys)
-- **B-3:** SDE archive missing celestials data (86 MB vs 100 MB)
-
-## Session Context
-- **Working on Windows fresh port from macOS**
-- **Platform compatibility**: Fixed SQLite extended path issues, test suite runs
-- **Missing client data**: `quasar_descriptors.sqlite`, `evomu_sde.sqlite` need extraction from V24.01 client
+- **B-1:** V24.01 client .fsdbinary extraction (macOS only, user action)
+- **B-2:** V24.01 client with Placebo crypto (user decision on automated copy)
+- **B-3:** SDE archive out of date (user needs to regenerate from macOS)
 
 ## Recent Completions
-1. ✅ Windows port: SQLite bundled features, path handling fixed
-2. ✅ Integration test suite working (98% pass rate for non-data-dependent tests)
-3. ✅ RPC tagging infrastructure complete
+1. ✅ B-4 blocker resolved (Python Unicode encoding)
+2. ✅ RPC tagging sweep complete (1,180 tests tagged)
+3. ✅ DG-1, DG-3, DG-4 plan rows closed via tagging
+4. ✅ E-1, E-2, E-3, E-4 plan rows tagged
 
-## Next Priorities (per action plan)
-1. Commit RPC tagging work
-2. Address supervisor's feedback on workflow/architecture
-3. Continue Phase T implementation (next unimplemented ledger rows)
+## Test Status (Baseline)
+- **Expected:** 430 passed, 46 failed (due to B-1, B-2, B-3 environmental blockers)
+- **Current validation:** Running (background task b4xfk4gwb)
+- **Early gate:** CLEAN (0 P0 violations expected)
+
+## Process Notes
+- **Review gate:** Mandatory before commits (per AGENTS.md)
+- **Worktree usage:** User confirmed direct main commits acceptable for tagging work
+- **Supervisor coordination:** Resolved via "water under the bridge" user message
