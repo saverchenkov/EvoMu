@@ -47,6 +47,17 @@ ROW_RE = re.compile(r"\besi:(?:GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\s+/[^\s`'
                     r"|\b(?:rpc|notify|destiny|ballmode|quasar|esi|sde|effect|feat|plan|journey):[^\s`'\"|,;)]+")
 
 
+def safe_print(text, **kwargs):
+    """Print with fallback encoding to handle Windows console encoding issues (B-4)."""
+    try:
+        print(text, **kwargs)
+    except UnicodeEncodeError:
+        # Windows console may not support UTF-8; encode with replacement
+        if isinstance(text, str):
+            text = text.encode(sys.stdout.encoding or 'utf-8', errors='replace').decode(sys.stdout.encoding or 'utf-8')
+        print(text, **kwargs)
+
+
 def sh(cmd, cwd, env=None, timeout=None):
     try:
         p = subprocess.run(cmd, cwd=cwd, env=env, capture_output=True, text=True, timeout=timeout)
@@ -557,7 +568,7 @@ def main():
     root = rl.repo_root(os.getcwd())
     msg = rl.stale_gate(root)
     if msg:
-        print("[preflight] " + msg)
+        safe_print("[preflight] " + msg)
         return 1
     sdir = rl.state_dir(root)
     pdir = os.path.join(sdir, "preflight")
@@ -572,31 +583,31 @@ def main():
     skip_early = a.skip_early_fail or bool(os.environ.get("EVOMU_PREFLIGHT_SKIP_EARLY_FAIL"))
 
     if early_violations:
-        print("\n" + "=" * 76)
-        print("[preflight] %d BLOCKING P0 ISSUE(S) DETECTED IN DIFF (BEFORE RUNNING TESTS):" % len(early_violations))
+        safe_print("\n" + "=" * 76)
+        safe_print("[preflight] %d BLOCKING P0 ISSUE(S) DETECTED IN DIFF (BEFORE RUNNING TESTS):" % len(early_violations))
         by_cat = {}
         for v in early_violations:
             by_cat[v[0]] = by_cat.get(v[0], 0) + 1
-        print("  by category: " + ", ".join("%s=%d" % kv for kv in sorted(by_cat.items())))
+        safe_print("  by category: " + ", ".join("%s=%d" % kv for kv in sorted(by_cat.items())))
         full_list = os.path.join(pdir, "early_gate.txt")
         with open(full_list, "w", encoding="utf-8") as fh:
             for cat, vmsg, fpath, lno in early_violations:
                 fh.write("[%s] %s%s\n" % (cat, vmsg, (" (%s:%s)" % (fpath, lno)) if fpath else ""))
         for cat, vmsg, fpath, lno in early_violations[:60]:
             loc = (" (%s:%s)" % (fpath, lno)) if fpath else ""
-            print("  - [%s] %s%s" % (cat, vmsg, loc))
+            safe_print("  - [%s] %s%s" % (cat, vmsg, loc))
         if len(early_violations) > 60:
-            print("  ... %d more; full list: %s" % (len(early_violations) - 60, full_list))
-        print("=" * 76)
+            safe_print("  ... %d more; full list: %s" % (len(early_violations) - 60, full_list))
+        safe_print("=" * 76)
         if not skip_early:
-            print("\n[preflight] EARLY FAIL: Aborting test execution to save 30-60 minutes.")
-            print("            Fix the issues above, or rerun with --skip-early-fail")
-            print("            (or EVOMU_PREFLIGHT_SKIP_EARLY_FAIL=1) to run the full test suite anyway.\n")
+            safe_print("\n[preflight] EARLY FAIL: Aborting test execution to save 30-60 minutes.")
+            safe_print("            Fix the issues above, or rerun with --skip-early-fail")
+            safe_print("            (or EVOMU_PREFLIGHT_SKIP_EARLY_FAIL=1) to run the full test suite anyway.\n")
             return 1
         else:
-            print("\n[preflight] WARNING: Early fail overridden by --skip-early-fail. Proceeding to tests...\n")
+            safe_print("\n[preflight] WARNING: Early fail overridden by --skip-early-fail. Proceeding to tests...\n")
     elif a.early_only:
-        print("[preflight] Early static checks: CLEAN (0 P0 issues found in diff).")
+        safe_print("[preflight] Early static checks: CLEAN (0 P0 issues found in diff).")
         return 0
 
     if not a.no_tests:
@@ -606,7 +617,7 @@ def main():
         env["CARGO_TARGET_DIR"] = os.path.join(sdir, "target")
         env["EVOMU_PARITY_ATTEST_DIR"] = attest
         cargo = shutil.which("cargo", path=env.get("PATH")) or "/opt/homebrew/bin/cargo"
-        print("[preflight] cargo test --workspace --no-fail-fast ...", flush=True)
+        safe_print("[preflight] cargo test --workspace --no-fail-fast ...", flush=True)
         t0 = time.time()
         rc, out = sh([cargo, "test", "--workspace", "--no-fail-fast"], root, env=env, timeout=a.test_timeout)
         wall = time.time() - t0
@@ -628,7 +639,7 @@ def main():
     if not a.no_status:
         _, st_out = sh([sys.executable, os.path.join(HERE, "parity", "status_table.py"), "--parity",
                         os.path.join(pdir, "parity.json")], root, timeout=600)
-        print(st_out.strip())
+        safe_print(st_out.strip())
     summ, prow = par["summary"], par["rows"]
     rows = ledger_rows()
 
@@ -689,27 +700,27 @@ def main():
         L.append("  - `%s:%d` %s `%s`" % (v["file"], v["line"], v["what"], v["name"]))
     report = "\n".join(L)
     open(os.path.join(pdir, "claims_template.md"), "w", encoding="utf-8").write(report)
-    print(report)
+    safe_print(report)
 
     lint_ok = True
     if a.claims:
         claims = open(a.claims, errors="replace").read()
         evidence = "\n".join([out, json.dumps(summ), report, man_txt, diffstat])
         probs = lint_claims(root, claims, evidence, prow)
-        print("\n# Claims lint: %s" % ("CLEAN" if not probs else "%d problem(s)" % len(probs)))
+        safe_print("\n# Claims lint: %s" % ("CLEAN" if not probs else "%d problem(s)" % len(probs)))
         for p in probs:
-            print("- " + p)
+            safe_print("- " + p)
         lint_ok = not probs
-    print("\n[preflight] template: %s" % os.path.join(pdir, "claims_template.md"))
+    safe_print("\n[preflight] template: %s" % os.path.join(pdir, "claims_template.md"))
     if rpc_block:
-        print("\n# RPC-name check: %d name(s) on lines you added/changed don't exist anywhere in the V24 client. Remove them, "
+        safe_print("\n# RPC-name check: %d name(s) on lines you added/changed don't exist anywhere in the V24 client. Remove them, "
               "use the client's real method, or justify with `rpc-lint: allow <reason>`." % len(rpc_block))
     if test_exit != 0 or aborted:
-        print("\n# cargo test exited %d%s. A non-zero exit means tests failed or a test binary aborted, so some tests "
+        safe_print("\n# cargo test exited %d%s. A non-zero exit means tests failed or a test binary aborted, so some tests "
               "never ran. Don't claim tests pass." % (test_exit, " (%s)" % aborted[0][:160] if aborted else ""))
     ok = (failed == 0 and test_exit == 0 and not aborted and not compile_err and passed > 0 and lint_ok
           and not rpc_block)
-    print("[preflight] %s" % ("OK: run the review now." if ok else "NOT READY: fix the items above before spending a review."))
+    safe_print("[preflight] %s" % ("OK: run the review now." if ok else "NOT READY: fix the items above before spending a review."))
     return 0 if ok else 1
 
 
