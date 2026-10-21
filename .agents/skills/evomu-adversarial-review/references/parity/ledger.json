@@ -62550,7 +62550,7 @@
    "id": "feat:mining.mining-upgrades",
    "category": "feat",
    "title": "Mining laser upgrades",
-   "acceptance": "Mining laser upgrades increase yield with stacking penalty and CPU cost.",
+   "acceptance": "Mining laser upgrades increase mining yield (miningAmount, SDE attribute 77 is stackable=1, so NO stacking penalty; supervisor correction 2026-10-21 per SDE and wiki ORE_Basic) and cost CPU.",
    "na_allowed": false,
    "attest_ok": false,
    "domain": "mining",
