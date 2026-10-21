@@ -566,6 +566,16 @@ def run_import(
             to_system_id INTEGER NOT NULL,
             jump_type INTEGER NOT NULL
         );
+        CREATE TABLE sde_stars (
+            star_id INTEGER PRIMARY KEY,
+            system_id INTEGER NOT NULL,
+            type_id INTEGER NOT NULL,
+            radius INTEGER NOT NULL,
+            age INTEGER NOT NULL,
+            luminosity REAL NOT NULL,
+            temperature INTEGER NOT NULL,
+            spectral_class TEXT NOT NULL
+        );
         """
     )
 
@@ -1137,6 +1147,22 @@ def run_import(
                     j["jump_type"],
                 )
                 for j in fsd_data["jumps"]
+            ],
+        )
+        conn.executemany(
+            "INSERT INTO sde_stars VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                (
+                    st["star_id"],
+                    st["system_id"],
+                    st["type_id"],
+                    st["radius"],
+                    st["age"],
+                    st["luminosity"],
+                    st["temperature"],
+                    st["spectral_class"],
+                )
+                for st in fsd_data.get("stars", [])
             ],
         )
 

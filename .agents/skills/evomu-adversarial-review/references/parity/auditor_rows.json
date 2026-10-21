@@ -5338,35 +5338,491 @@
    "na_allowed": false,
    "attest_ok": false,
    "added_by_audit": "20261020-230707"
+  },
+  {
+   "acceptance": "Energy Vampire (Nosferatu) modules transfer capacitor from target to host ship only if the target's absolute capacitor energy (in GJ) is higher than the activating ship's current capacitor energy, unless the activating ship has a Blood Raider hull bonus (Cruor, Ashimmu, Bhaalgorn) which overrides this limitation and drains target capacitor down to 0 GJ; transfer occurs at the end of the module cycle.",
+   "domain": "combat",
+   "id": "feat:combat.nosferatu-drain-cap",
+   "plan_task": null,
+   "sources": [
+    "wiki:Capacitor_warfare",
+    "wiki:List_of_PvP_Ships_by_Bonus"
+   ],
+   "title": "Energy Vampire (Nosferatu) absolute capacitor threshold and Blood Raider override",
+   "why_missing": "Capacitor warfare in the ledger does not specify the target-greater-than-user absolute cap requirement, end-of-cycle transfer timing, or the Blood Raider hull exception.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261021-005829"
+  },
+  {
+   "acceptance": "Energy Neutralizer modules deduct activation cost from user capacitor at cycle initiation and immediately drain neutralizing energy from the target ship's capacitor at cycle initiation (modified by distance falloff E = E0 * 0.5^(((d - opt) / falloff)^2) and target capacitor battery resistance); if target capacitor is less than neutralized amount, target capacitor is drained to exactly 0 GJ without underflowing.",
+   "domain": "combat",
+   "id": "feat:combat.energy-neutralizer-cycle",
+   "plan_task": null,
+   "sources": [
+    "wiki:Capacitor_warfare"
+   ],
+   "title": "Energy Neutralizer cycle initiation drain, falloff, and zero-cap clamping",
+   "why_missing": "The ledger lacks a row for Energy Neutralizer cycle start cap drain, falloff scaling, and target capacitor zero-clamping behavior.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261021-005829"
+  },
+  {
+   "acceptance": "Activating a Target Painter increases target ship signature radius by Sig_effective = Sig_base * (1 + sum(Bonus_i * StackingPenalty_i)), where stacking penalty follows S(n) = e^(-(n-1)^2 / 26.7); signature increase immediately updates incoming missile damage and turret tracking equations against the painted target.",
+   "domain": "combat",
+   "id": "feat:combat.target-painter-bloom",
+   "plan_task": null,
+   "sources": [
+    "wiki:Electronic_warfare",
+    "wiki:Target_painters",
+    "wiki:Stacking_penalties"
+   ],
+   "title": "Target Painter signature radius bloom formula and stacking penalties",
+   "why_missing": "Target painting signature bloom formula, stacking penalty application, and instant damage formula recalculation are absent from all EWAR rows.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261021-005829"
+  },
+  {
+   "acceptance": "Remote Sensor Dampeners (unscripted or loaded with Targeting Range Dampening Script) reduce target's max targeting range by module bonus percentage with stacking penalties; target locks already active beyond the newly reduced max range are preserved until broken, but attempting new locks beyond the reduced range fails.",
+   "domain": "combat",
+   "id": "feat:combat.sensor-dampener-targeting-range",
+   "plan_task": null,
+   "sources": [
+    "wiki:Electronic_warfare",
+    "wiki:Sensor_dampeners"
+   ],
+   "title": "Remote Sensor Dampener targeting range reduction and active lock preservation",
+   "why_missing": "Sensor dampener targeting range reduction, scripting bonus doubling, and retention of existing locks are not specified in the ledger.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261021-005829"
+  },
+  {
+   "acceptance": "Remote Sensor Dampeners (unscripted or loaded with Scan Resolution Dampening Script) reduce target ship scan resolution with stacking penalties; target lock acquisition time scales inversely according to t_lock = 40000 / (ScanRes * (arcsinh(Sig))^2) (bounded by 0.25s server tick minimum).",
+   "domain": "combat",
+   "id": "feat:combat.sensor-dampener-scan-resolution",
+   "plan_task": null,
+   "sources": [
+    "wiki:Electronic_warfare",
+    "wiki:Sensor_dampeners",
+    "wiki:Targeting"
+   ],
+   "title": "Remote Sensor Dampener scan resolution lock time penalty",
+   "why_missing": "Scan resolution dampening effect on targeting lock time formula is completely omitted from the ledger.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261021-005829"
+  },
+  {
+   "acceptance": "Weapon Tracking Disruptors loaded with Optimal Range Disruption Script (or unscripted) apply percentage reduction to target turret optimal range and falloff distance with stacking penalties, shifting the turret hit probability curve inward.",
+   "domain": "combat",
+   "id": "feat:combat.tracking-disruptor-optimal-falloff",
+   "plan_task": null,
+   "sources": [
+    "wiki:Electronic_warfare",
+    "wiki:Tracking_disruptors",
+    "wiki:Turret_mechanics"
+   ],
+   "title": "Weapon Tracking Disruptor optimal range and falloff disruption",
+   "why_missing": "Tracking disruptor optimal and falloff disruption is not differentiated or tested in any ledger row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261021-005829"
+  },
+  {
+   "acceptance": "Weapon Tracking Disruptors loaded with Tracking Speed Disruption Script (or unscripted) apply percentage reduction to target turret tracking speed with stacking penalties, dramatically decreasing turret hit chance and critical hit chance against targets with high angular velocity.",
+   "domain": "combat",
+   "id": "feat:combat.tracking-disruptor-tracking-speed",
+   "plan_task": null,
+   "sources": [
+    "wiki:Electronic_warfare",
+    "wiki:Tracking_disruptors",
+    "wiki:Turret_mechanics"
+   ],
+   "title": "Weapon Tracking Disruptor tracking speed disruption",
+   "why_missing": "Turret tracking speed reduction math under tracking disruption is absent from the ledger.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261021-005829"
+  },
+  {
+   "acceptance": "Missile Guidance Disruptors reduce target missile velocity and flight time (when loaded with Missile Range Disruption Script) or reduce explosion velocity and increase explosion radius (when loaded with Missile Precision Disruption Script) with stacking penalties, degrading applied missile damage against small or fast targets.",
+   "domain": "combat",
+   "id": "feat:combat.guidance-disruptor-missiles",
+   "plan_task": null,
+   "sources": [
+    "wiki:Electronic_warfare",
+    "wiki:Missile_guidance_disruptors",
+    "wiki:Missile_mechanics"
+   ],
+   "title": "Missile Guidance Disruptor range and precision disruption",
+   "why_missing": "Missile Guidance Disruptor mechanics (range and precision disruption scripts) have no matching row in the ledger.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261021-005829"
+  },
+  {
+   "acceptance": "Activating a Burst Jammer pulses an area-of-effect ECM wave affecting all uncloaked ships (friendly, hostile, and neutral) within its effect radius (5km T1, 6km T2); rolls independent jam chance against each ship's sensor strength; breaking target locks on jammed ships and flagging the activating pilot suspect/criminal if unprovoked neutral targets are affected in High/Low security space.",
+   "domain": "combat",
+   "id": "feat:combat.ecm-burst-radius",
+   "plan_task": null,
+   "sources": [
+    "wiki:Electronic_warfare",
+    "wiki:Electronic_Countermeasures"
+   ],
+   "title": "Burst Jammer AoE radius, friendly-fire mechanics, and Crimewatch flags",
+   "why_missing": "Burst Jammer AoE radius mechanics, friendly-fire lack of discrimination, and Crimewatch flagging are omitted from the ledger.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261021-005829"
+  },
+  {
+   "acceptance": "Overloading an active module increases rack heat each cycle according to t = -ln(1 - H) / (heatAttenuation * sum(heatAbsorptionRateModifier)), raising rack heat towards 100%; module receives duration or attribute boost (e.g. 50% speed for prop mods, 20% tackle range, 10% repair amount and -15% repair cycle time).",
+   "domain": "modules",
+   "id": "feat:modules.overheat-rack-heat-generation",
+   "plan_task": null,
+   "sources": [
+    "wiki:Overheating"
+   ],
+   "title": "Overheating rack heat generation formula and module performance multipliers",
+   "why_missing": "Overheating rack heat generation formula and module performance multipliers are not represented in any ledger row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261021-005829"
+  },
+  {
+   "acceptance": "Each overheated module cycle rolls a chance of heat damage based on current rack heat level; damage is applied to the module and conducts to adjacent slot positions in the same rack with falloff based on slot distance (without wrapping around rack edges); Thermodynamics skill reduces heat damage taken by 5% per level.",
+   "domain": "modules",
+   "id": "feat:modules.overheat-damage-propagation",
+   "plan_task": null,
+   "sources": [
+    "wiki:Overheating"
+   ],
+   "title": "Heat damage probability scaling and adjacent slot propagation",
+   "why_missing": "Heat damage probability scaling with rack heat and distance-based heat propagation to neighboring slots are absent from the ledger.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261021-005829"
+  },
+  {
+   "acceptance": "When a module's heat damage accumulates to 100% of its structure hitpoints (typically 40 HP), the module burns out: it immediately deactivates, goes offline, cannot be reactivated or offlined/onlined in space, and disables any module group it belongs to until repaired or ungrouped.",
+   "domain": "modules",
+   "id": "feat:modules.overheat-burnout-state",
+   "plan_task": null,
+   "sources": [
+    "wiki:Overheating"
+   ],
+   "title": "Module burnout state transition, automatic offlining, and group disabling",
+   "why_missing": "Module burnout state transition, automatic offlining, and module group breakage are not specified in any ledger row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261021-005829"
+  },
+  {
+   "acceptance": "Selecting Repair on a heat-damaged module in space consumes Nanite Repair Paste from cargo over time; repair rate and paste consumption scale with module volume, Thermodynamics, Nanite Operation (-5% paste/level), and Nanite Interfacing (+20% repair rate/level); fully burned-out modules cannot be repaired in space with paste and require docking or Upwell structure tethering.",
+   "domain": "modules",
+   "id": "feat:modules.nanite-repair-paste-in-space",
+   "plan_task": null,
+   "sources": [
+    "wiki:Overheating",
+    "wiki:Nanite_Repair_Paste"
+   ],
+   "title": "In-space Nanite Repair Paste consumption and burned-out repair restrictions",
+   "why_missing": "In-space nanite repair paste consumption formulas, skill modifiers, and burned-out module repair restrictions have no ledger row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261021-005829"
+  },
+  {
+   "acceptance": "Natural shield recharge follows the differential rate dC/dt = (10 * C_max / tau) * (sqrt(C / C_max) - C / C_max), where recharge rate reaches its maximum of 2.5 * C_max / tau at exactly 25% current shield capacity, falling towards 0 as capacity approaches 0% or 100%.",
+   "domain": "combat",
+   "id": "feat:combat.passive-shield-recharge-peak",
+   "plan_task": null,
+   "sources": [
+    "wiki:Capacitor",
+    "wiki:Passive_shield_tanking"
+   ],
+   "title": "Passive shield recharge rate non-linear curve peaking at 25%",
+   "why_missing": "The non-linear 25% peak shield and capacitor recharge curve differential equation is not explicitly tested by any ledger row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261021-005829"
+  },
+  {
+   "acceptance": "Shield Booster modules consume capacitor and apply their full shield hitpoint restoration instantly at the beginning of the module activation cycle (t = 0), entering cooldown for the remainder of the cycle duration.",
+   "domain": "combat",
+   "id": "feat:combat.active-shield-boost-cycle-start",
+   "plan_task": null,
+   "sources": [
+    "wiki:Shield_tanking",
+    "wiki:Fitting_ships"
+   ],
+   "title": "Shield Booster instant boost application at cycle initiation",
+   "why_missing": "Shield booster cycle-start boost application timing is not specified or contrasted with armor repairers in the ledger.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261021-005829"
+  },
+  {
+   "acceptance": "Armor Repairer modules consume capacitor at the start of activation (t = 0) but apply armor hitpoint restoration only upon cycle completion (t = tau_cycle); if the activating ship is destroyed or module is knocked offline before cycle end, zero armor hitpoints are restored.",
+   "domain": "combat",
+   "id": "feat:combat.active-armor-repair-cycle-end",
+   "plan_task": null,
+   "sources": [
+    "wiki:Armor_tanking",
+    "wiki:Fitting_ships"
+   ],
+   "title": "Armor Repairer delayed repair application at cycle completion",
+   "why_missing": "Armor repairer end-of-cycle repair timing and cancellation on premature destruction/offlining lack a testable row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261021-005829"
+  },
+  {
+   "acceptance": "Remote Armor Repairers and Remote Shield Transporters apply 100% repair amount within optimal range; beyond optimal range, applied repair decays exponentially according to 0.5^(((distance - optimal) / falloff)^2), dropping to ~50% at optimal + falloff and 0% beyond optimal + 3*falloff.",
+   "domain": "combat",
+   "id": "feat:combat.remote-repair-falloff",
+   "plan_task": null,
+   "sources": [
+    "wiki:Remote_repairs",
+    "wiki:Electronic_warfare"
+   ],
+   "title": "Remote Armor and Shield repair optimal and falloff effectiveness curve",
+   "why_missing": "Remote repair optimal and falloff effectiveness falloff mechanics are absent from the ledger.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261021-005829"
+  },
+  {
+   "acceptance": "Ancillary Armor Repairers (AAR) loaded with Nanite Repair Paste repair 3x the normal armor amount per cycle while consuming 1 unit of paste per cycle; when paste runs out, the module continues to cycle repairing only 1x base armor amount; initiating a reload triggers a mandatory 60-second reload cycle.",
+   "domain": "combat",
+   "id": "feat:combat.ancillary-armor-repairer-paste",
+   "plan_task": null,
+   "sources": [
+    "wiki:Armor_tanking",
+    "wiki:Overheating"
+   ],
+   "title": "Ancillary Armor Repairer Nanite paste consumption and 3x repair multiplier",
+   "why_missing": "Ancillary Armor Repairer 3x paste multiplier, capless/cap-consuming paste mechanics, and 60s reload timer are omitted from the ledger.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261021-005829"
+  },
+  {
+   "acceptance": "Ancillary Shield Boosters (ASB) loaded with Cap Booster charges (Navy or standard) consume 1 cap booster charge per cycle and 0 capacitor energy; when empty, the module continues cycling by consuming large capacitor energy per cycle; initiating a reload triggers a 60-second reload cycle.",
+   "domain": "combat",
+   "id": "feat:combat.ancillary-shield-booster-charges",
+   "plan_task": null,
+   "sources": [
+    "wiki:Shield_tanking",
+    "wiki:Cap_Booster"
+   ],
+   "title": "Ancillary Shield Booster charge consumption, zero-cap operation, and reload lock",
+   "why_missing": "Ancillary Shield Booster charge consumption, zero-cap operation while loaded, and 60s reload lock have no ledger row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261021-005829"
+  },
+  {
+   "acceptance": "Deactivating a cloaking device triggers a sensor recalibration delay timer (governed by module cloaking delay attribute and Cloaking skill level, -10% delay per level); during this delay, the ship is completely blocked from initiating targeting locks on any space entity; Stealth Bombers and Covert Ops hulls have role bonuses reducing this delay to 0 seconds.",
+   "domain": "navigation",
+   "id": "feat:navigation.cloak-targeting-delay",
+   "plan_task": null,
+   "sources": [
+    "wiki:Cloaking",
+    "wiki:Stealth_Bombers"
+   ],
+   "title": "Cloak deactivation sensor recalibration targeting delay and Stealth Bomber exemption",
+   "why_missing": "Decloak sensor recalibration targeting lock delay and Stealth Bomber 0s delay exception are not in any ledger row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261021-005829"
+  },
+  {
+   "acceptance": "Activating a Prototype Cloaking Device or Improved Cloaking Device immediately reduces the ship's maximum sub-warp velocity by 90% or 75% respectively; the velocity limit is enforced until cloak deactivation; Covert Ops Cloaking Devices incur 0% velocity penalty.",
+   "domain": "navigation",
+   "id": "feat:navigation.cloak-velocity-penalty",
+   "plan_task": null,
+   "sources": [
+    "wiki:Cloaking"
+   ],
+   "title": "Standard Cloaking Device sub-warp velocity penalty enforcement",
+   "why_missing": "Cloaking sub-warp velocity reduction penalties (75% / 90%) and Covert Ops exemption are absent from the ledger.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261021-005829"
+  },
+  {
+   "acceptance": "A warp disruption bubble located along a ship's warp path within 500 km behind the destination celestial drags the ship out of warp at the bubble edge (drag bubble); a bubble placed directly in front of the destination along the warp vector stops the ship on the near perimeter of the bubble (catch/stop bubble); ships with Interdiction Nullification active ignore drag and catch effects.",
+   "domain": "navigation",
+   "id": "feat:navigation.warp-bubble-drag-and-catch",
+   "plan_task": null,
+   "sources": [
+    "wiki:Tackling",
+    "wiki:Warp_interdiction"
+   ],
+   "title": "Warp disruption bubble 500km vector drag and catch anchor points",
+   "why_missing": "Warp bubble 500km vector drag and forward catch anchor calculations are not defined in any ledger row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261021-005829"
+  },
+  {
+   "acceptance": "Activating a Micro Jump Drive spools for 12 seconds (reducible by Micro Jump Drive Operation skill); warp scrambler (scram) applied during spool cancels the jump; upon completion, ship jumps exactly 100 km forward in the direction of its current heading vector while preserving sub-warp speed and alignment.",
+   "domain": "navigation",
+   "id": "feat:navigation.micro-jump-drive-spool",
+   "plan_task": null,
+   "sources": [
+    "wiki:Micro_jump_drive",
+    "wiki:Propulsion_equipment"
+   ],
+   "title": "Micro Jump Drive 12-second spool, scram cancellation, and 100km vector jump",
+   "why_missing": "Micro Jump Drive 12-second spool-up, scram cancellation, and 100km vector jump execution lack a dedicated testable row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261021-005829"
+  },
+  {
+   "acceptance": "Applying a Warp Scrambler (short point) applies 2 points of warp disruption strength and immediately deactivates running Microwarpdrives (MWD) and Micro Jump Drives (MJD), preventing their reactivation while scrambled; Warp Disruptors (long point) apply only warp disruption without shutting off propulsion modules.",
+   "domain": "navigation",
+   "id": "feat:navigation.warp-scramble-propulsion-shutoff",
+   "plan_task": null,
+   "sources": [
+    "wiki:Tackling",
+    "wiki:Propulsion_equipment"
+   ],
+   "title": "Warp Scrambler MWD and MJD propulsion shutdown vs Warp Disruptor",
+   "why_missing": "The distinction between warp disruption (warp block only) and warp scrambling (immediate MWD/MJD deactivation) is not captured in any ledger row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261021-005829"
+  },
+  {
+   "acceptance": "Launching drones from drone bay verifies that total bandwidth of launched drones does not exceed the ship hull's drone bandwidth attribute (e.g. 50 Mbit/s for cruisers) and total number of active drones does not exceed 5; launching additional drones beyond bandwidth or count limit is refused with UserError.",
+   "domain": "drones",
+   "id": "feat:drones.bandwidth-and-bay-constraints",
+   "plan_task": null,
+   "sources": [
+    "wiki:Drones",
+    "wiki:Drone_mechanics"
+   ],
+   "title": "Drone bay bandwidth allocation and maximum active 5-drone control limit",
+   "why_missing": "Ship hull drone bandwidth limits and active 5-drone control caps are not covered in any drone ledger row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261021-005829"
+  },
+  {
+   "acceptance": "Sentry drones deploy into space with velocity 0 m/s and cannot accept move or orbit commands; sentry drones acquire targets and fire turrets using standard turret tracking math based on target angular velocity and distance relative to the stationary sentry drone ball.",
+   "domain": "drones",
+   "id": "feat:drones.sentry-drone-stationary-tracking",
+   "plan_task": null,
+   "sources": [
+    "wiki:Drones",
+    "wiki:Drone_mechanics",
+    "wiki:Sentry_drones"
+   ],
+   "title": "Sentry drone zero-velocity immobility and stationary turret tracking math",
+   "why_missing": "Sentry drone zero-velocity immobility and stationary turret tracking calculations lack a testable row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261021-005829"
+  },
+  {
+   "acceptance": "NPC combat entities periodically evaluate threat priority and switch aggro from player ship to active player drones based on drone signature radius, proximity, and DPS output; attacking drones take damage and can be recalled to bay to shed NPC aggro.",
+   "domain": "drones",
+   "id": "feat:drones.drone-npc-aggro-switching",
+   "plan_task": null,
+   "sources": [
+    "wiki:Drone_mechanics",
+    "wiki:Aggro"
+   ],
+   "title": "NPC threat priority evaluation and aggro switching onto player drones",
+   "why_missing": "NPC threat priority and aggro switching onto player drones is omitted from PvE and drone ledger rows.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261021-005829"
+  },
+  {
+   "acceptance": "A ship tethered to an Upwell structure receives passive shield, armor, and hull repair and cannot be targeted or damaged; tether immediately breaks if the ship activates an offensive module, acquires a weapons timer, starts target locking an entity, or moves beyond the structure's docking perimeter.",
+   "domain": "structures",
+   "id": "feat:structures.tethering-docking-lock",
+   "plan_task": null,
+   "sources": [
+    "wiki:Tethering",
+    "wiki:Upwell_structure"
+   ],
+   "title": "Upwell structure tethering protection, repair, and weapons timer breaking",
+   "why_missing": "Upwell structure tethering protection rules, weapons timer breaking conditions, and repair effects are absent from the ledger.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261021-005829"
+  },
+  {
+   "acceptance": "Activating a Smartbomb module inflicts instantaneous area-of-effect damage of its specified damage type to all uncloaked entities (ships, drones, missiles, probes) within its spherical radius (up to 5,000m for Large Smartbombs) without requiring target locks; applying smartbomb damage to unprovoked neutral entities in High/Lowsec triggers Crimewatch suspect/criminal flags and CONCORD intervention.",
+   "domain": "combat",
+   "id": "feat:combat.smartbomb-aoe-damage",
+   "plan_task": null,
+   "sources": [
+    "wiki:Smartbombs",
+    "wiki:Crimewatch"
+   ],
+   "title": "Smartbomb area-of-effect omnidirectional damage and Crimewatch flagging",
+   "why_missing": "Smartbomb AoE sphere damage application, lack of target lock requirement, missile/drone destruction, and Crimewatch flagging have no testable row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261021-005829"
+  },
+  {
+   "acceptance": "Activating an Interdiction Nullifier module grants immunity to warp disruption bubbles (mobile warp disruptors, warp disrupt probes, and warp disruption field generators) for its active duration, allowing warp initiation from inside bubbles and preventing drag/catch bubble effects; incurs passive penalties to ship drone bandwidth, scan resolution, and targeting range while fitted.",
+   "domain": "navigation",
+   "id": "feat:navigation.interdiction-nullification-module",
+   "plan_task": null,
+   "sources": [
+    "wiki:Interdiction_Nullifier",
+    "wiki:Tackling"
+   ],
+   "title": "Interdiction Nullifier module active bubble immunity and passive fitting penalties",
+   "why_missing": "Active Interdiction Nullifier module activation, bubble immunity window, and passive fitting penalties are missing from the ledger.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261021-005829"
   }
  ],
  "rejected_triage": [],
  "fake_done": [
-  {
-   "evidence": "crates/eve-server/src/esi/character_routes.rs:290-323 maps `ch.jump_cooldown_until_unix` (jump activation cooldown) to `jump_fatigue_expire_date` (character_routes.rs:304-309) instead of computing fatigue expiry from `ch.jump_fatigue_minutes`, and maps `ch.last_clone_jump_unix` (clone jump timestamp) to both `last_jump_date` and `last_update_date` (character_routes.rs:310-320). Tested at crates/eve-server/tests/esi_routes.rs:973-975, 1148-1156.",
-   "id": "esi:GET /characters/{character_id}/fatigue",
-   "flagged_by_audit": "20261018-131718"
-  },
-  {
-   "evidence": "crates/eve-server/src/esi/universe_routes.rs:466-518 iterates over `snap.structures.values()` (player Upwell structures such as Astrahus type_id 35832 in crates/eve-server/tests/esi_routes.rs:197-215, 524-540) instead of Sovereignty Hubs / Territorial Claim Units, fabricates `vulnerability_occupancy_level` via a hardcoded formula `(1.0 + (s.military_index as f64 + s.industrial_index as f64 + s.strategic_index as f64) * 0.2).clamp(1.0, 6.0)` (universe_routes.rs:483-489), and fabricates `vulnerable_start_time` as `(now / 86_400) * 86_400 + 18 * 3_600` (universe_routes.rs:490-491).",
-   "id": "esi:GET /sovereignty/structures",
-   "flagged_by_audit": "20261018-131718"
-  },
-  {
-   "evidence": "Acceptance: 'Banned or suspended accounts are refused at login with the correct ban message and expiry.' The tagged test (e2e_journeys.rs:7106-7140) tests only a timed GM /ban; suspension is never exercised. The error code 'AccountBanned' is a bridge-invented string (crates/eve-server/src/services/auth_cache.rs:73), and the test only checks substrings of a server-composed message (:7135-7139). Nothing shows it is the V24 login-failure message/UserError the client renders.",
-   "id": "feat:account.account-bans",
-   "flagged_by_audit": "20261018-073440"
-  },
-  {
-   "evidence": "Acceptance: 'multiLoginBlocker.Login kicks or refuses a second concurrent session on the same account per V24 rules.'\n\nWhat the handler does (crates/eve-server/src/services/auth_cache.rs):\n- It decides kick vs refuse from an assumed bool argument (args[0] \u2192 allow_displace, :144). Nothing evidences that the V24 characterSelection call passes a bool.\n- It answers with bridge-invented error codes: 'AlreadyLoggedIn' and 'SessionKicked' (:168-172), and 'MultiLoginBlocked' elsewhere. None is shown to be the V24 UserError.\n- authentication.Login already grabs the online lock silently (:89-97), so the decision is not made at the V24 multiLoginBlocker call point.\n\nThe displaced client gets no notification or disconnect. It is only rejected lazily on its next RPC: the test asserts SessionKicked only after sess1 makes another call (tests/auth.rs:502-520).\n\nThe tagged test (tests/auth.rs:437-520) asserts only these invented codes. Same failure mode as the earlier feat:account.account-bans flag.",
-   "id": "feat:account.multi-login-block",
-   "flagged_by_audit": "20261018-090529"
-  },
-  {
-   "evidence": "Acceptance: 'bans/suspends an account ... enforced at next login and kicks live sessions.' In the tagged test the live session is first removed with a separate `/kick demo` (e2e_journeys.rs:7039-7049), and `/ban` runs only afterwards (:7107-7117). So the ban's own live-session kick is never exercised. The /ban handler (auth_cache.rs:262-309) only calls ban_account + release_user_bindings. Suspend is not tested.",
-   "id": "feat:admin.gm-ban",
-   "flagged_by_audit": "20261018-073440"
-  },
   {
    "evidence": "crates/eve-server/tests/social_fleets_corps.rs:504-516 asserts only is_keyval on bookmark.BookmarkLocation. The stored coordinates, item and folder are not checked.",
    "id": "feat:bookmarks.create",
@@ -5390,26 +5846,6 @@
   {
    "evidence": "tests/character_skills_clones.rs:985-1002 asserts only that the charUnboundMgr.GetCharacterInfo KeyVal has characterID, balance and skillPoints keys. Acceptance requires skills, attributes, implants, jump clones, standings, security status, kill rights, medals and decorations. GetCharacterInfo is a petitioner call (crucible CharUnboundMgrService.cpp:100-107).",
    "id": "feat:character.character-sheet",
-   "flagged_by_audit": "20261019-053529"
-  },
-  {
-   "evidence": "crates/eve-server/src/services/character_skills.rs:183-219 reads args as (name, raceID, bloodlineID, ancestryID, schoolID) with hardcoded defaults (race 2, bloodline 3, ancestry 19, school 14) and shares the arm with 'CreateCharacter'. The V24 layout is (charactername, bloodlineID, genderID, ancestryID, charInfo, portraitInfo, schoolID) (crucible:src/eve-server/character/CharUnboundMgrService.cpp:142-143). The doll is never validated. The test at tests/character_skills_clones.rs:705-722 uses the invented 5-arg layout.",
-   "id": "feat:character.create-character",
-   "flagged_by_audit": "20261019-053529"
-  },
-  {
-   "evidence": "Acceptance: GetCharacterInfo returns all characters with portrait, location, ship, skill training and wallet. tests/character_skills_clones.rs:762-774 only asserts GetCharactersToSelect returns a CRowset (is_crowset). The ship name is the SDE type name (character_skills.rs:43-55), and there is no skill-training summary.",
-   "id": "feat:character.list-characters",
-   "flagged_by_audit": "20261019-053529"
-  },
-  {
-   "evidence": "crates/eve-server/src/services/character_skills.rs:129-144 checks only length 3-37 and case-insensitive uniqueness. The character-set and banned-word checks that the acceptance requires are absent, and the test (tests/character_skills_clones.rs:660-701) checks only length and duplicates.",
-   "id": "feat:character.name-validation",
-   "flagged_by_audit": "20261019-053529"
-  },
-  {
-   "evidence": "crates/eve-server/src/services/character_skills.rs:146-181 builds the name from a hardcoded 20x20 first/last name list and ignores the bloodline (acceptance: 'valid for the chosen bloodline'). tests/character_skills_clones.rs:642-657 asserts only the string length.",
-   "id": "feat:character.random-name",
    "flagged_by_audit": "20261019-053529"
   },
   {
@@ -5476,16 +5912,6 @@
    "evidence": "mining_complete.rs:779-796 calls droneMgr.Mine with a `droneID` kwarg on a drone that sits in the drone bay and is never launched. The droneMgr service is NOT_IN_CLIENT (metrics: mining_complete.rs:784). The asserted minedUnits and isDrone fields are an invented return shape.",
    "id": "feat:drones.mining-drones",
    "flagged_by_audit": "20261019-145905"
-  },
-  {
-   "evidence": "crates/eve-server/src/esi/character_routes.rs:304-320 conflates jump activation cooldown (`jump_cooldown_until_unix`) with jump fatigue expiry (`jump_fatigue_expire_date`), ignores `jump_fatigue_minutes`, and uses `last_clone_jump_unix` for `last_jump_date` and `last_update_date`. Tested at crates/eve-server/tests/esi_routes.rs:973-975, 1148-1156.",
-   "id": "feat:esi.character.fatigue",
-   "flagged_by_audit": "20261018-131718"
-  },
-  {
-   "evidence": "crates/eve-server/src/esi/universe_routes.rs:466-518 returns Upwell structures from `snap.structures` instead of sovereignty structures, and synthesizes ADM (`vulnerability_occupancy_level`) and vulnerability window timestamps (`vulnerable_start_time` / `vulnerable_end_time`) from wall-clock `now` (universe_routes.rs:480-492); crates/eve-server/tests/esi_routes.rs:524-540 only asserts that an Astrahus (35832) is returned with `vulnerability_occupancy_level >= 1.0`.",
-   "id": "feat:esi.sovereignty.structures",
-   "flagged_by_audit": "20261018-131718"
   },
   {
    "evidence": "crates/eve-server/tests/dogma_modules.rs:126-172 fits through invbroker.MoveItem(itemID, shipID, flag). invbroker.MoveItem is NOT_IN_CLIENT (metrics dogma_modules.rs:132, 153); the V24 client fits through the bound ship inventory Add/MultiAdd.",
@@ -5923,11 +6349,6 @@
    "flagged_by_audit": "20261019-110620"
   },
   {
-   "evidence": "Acceptance: 'V24 SDE/FSD static data imported and loaded at runtime (types, dogma, map, blueprints, NPCs).' The tagged test test_phase_1_d1_to_d5... (e2e_journeys.rs:6586-6596) asserts only the resource count, non-empty types/solar_systems, the market_groups count and npc_spawn_groups == 392. It has no dogma attribute/effect or blueprint assertions; those exist only in the untagged eve-sde test. The 'NPCs' clause rests on sde_npc_spawn_groups, which tools/sde-import/import_sde.py:1831 synthesizes with build_v24_npc_spawn_groups(groups, types), grouping category-11 types (:1404-1405). That is derived data presented as SDE, not imported and not labelled as derived.",
-   "id": "feat:serverops.static-data",
-   "flagged_by_audit": "20261018-073440"
-  },
-  {
    "evidence": "Acceptance: 'refuses fitted/damaged items.' tests/character_progression.rs:1010-1119 tests only the active-ship and not-docked refusals; fitted and damaged items are never exercised.",
    "id": "feat:ships.repackage",
    "flagged_by_audit": "20261019-053529"
@@ -5940,11 +6361,6 @@
   {
    "evidence": "Acceptance: 'Alpha characters cannot train above the alpha cap per skill; SP above cap is inactive.' tests/character_skills_clones.rs:256-328 only tests a 5,000,000 total-SP cap. No per-skill clone-grade cap or inactive-SP behaviour is exercised.",
    "id": "feat:skills.alpha-skill-caps",
-   "flagged_by_audit": "20261019-053529"
-  },
-  {
-   "evidence": "Acceptance: 'GetSkillHistory returns trained/injected/removed events with timestamps.' tests/character_skills_clones.rs:514-536 checks only the column names. No row content is asserted, not even for the injection performed at :593-615.",
-   "id": "feat:skills.skill-history",
    "flagged_by_audit": "20261019-053529"
   },
   {
@@ -6006,16 +6422,6 @@
    "evidence": "crates/eve-sde/src/lib.rs:313-328, 562-658, 1185-1222, 1289, 1887-2015 \u2014 Task D-2 in action_plan.md requires: \"Add indexed lookups: types, groups, categories, dogma_attributes, dogma_effects, type_materials, blueprints, solar_systems, stargates, celestials_in_system, stations, agents, planet_schematics, schools, races, bloodlines, ancestries, factions, npc_corporations.\" SdeRegistry (crates/eve-sde/src/lib.rs:593-658) has no indexed stations lookup map (HashMap<i64, StationInfo>); stations are only nested inside SolarSystem.stations: Vec<StationInfo> (crates/eve-sde/src/lib.rs:313, 1246), requiring a linear scan across all 8,490 solar systems to look up a station by ID. Furthermore, SdeRegistry::open (crates/eve-sde/src/lib.rs:1188-1215) drops reprocessing_efficiency, reprocessing_stations_take, operation_id, constellation_id, region_id, is_conquerable, and orbit_id from sde_stations, hardcodes fallback owner_faction_id = 500001 (crates/eve-sde/src/lib.rs:1200-1203) and fallback corvette_type_id = 601 (crates/eve-sde/src/lib.rs:1289), and retains the legacy SdeSeedFile / SdeRegistry::from_json_str loader (crates/eve-sde/src/lib.rs:562-589, 1887-2015).",
    "id": "plan:D-2",
    "flagged_by_audit": "20261018-122150"
-  },
-  {
-   "evidence": "Done-when: 'Docs honesty \u2014 status labels follow rule 8' (action_plan.md:74).\n\nThe tagged test only checks string presence, not honesty:\n- test_phase_0_s10_doc_reconciliation_and_labels (crates/eve-server/tests/system.rs:74-131) checks that five phrase families are absent (:91-108).\n- It requires the docs to contain the literal numbers '72/580' and '158 handlers across 118 match arms' (:109-117). That pins the doc numbers instead of verifying them.\n\nThe docs remain dishonest against the authoritative parity output (rpc 0/1230 DONE, 7/5824 rows overall):\n- README.md:28/33/38/48/53/58/63/68 show 60\u201380% progress bars per subsystem, and README.md:75 shows 100%. These are not rule-8 labels.\n- PLAN.md:24 claims '72/1,230 (5.9%)'.\n- PLAN.md:115-118 presents 'Verified Exit Criteria' for an in-progress milestone.\n- PLAN.md:24 still cites `router.rs`, and PLAN.md:128 cites `router.rs` and `tests/e2e_journeys.rs`. The S-REFACTOR removed both files (claims.md:80, :83).",
-   "id": "plan:S-10",
-   "flagged_by_audit": "20261018-090529"
-  },
-  {
-   "evidence": "S-7 requires proximity/ownership/state checks for AttackStructure, ClaimSovereignty, CaptureComplex and the PI writers. The tagged test (e2e_journeys.rs:5911-6325) never calls ClaimSovereignty. Its 'planet not in the character's current system' check (comment :5961) actually passes a nonexistent ID 99_999_999 (:6012) and expects InvalidPlanetID (:6019), so the wrong-system rejection for a real planet is not exercised.",
-   "id": "plan:S-7",
-   "flagged_by_audit": "20261018-073440"
   },
   {
    "evidence": "crates/eve-sde/src/lib.rs:455-462, 1530-1572; crates/eve-sde/tests/sde_sweep.rs:198-228 \u2014 FighterAbilityInfo (crates/eve-sde/src/lib.rs:455-462, 1538-1566) discards tooltipTextID, turretGraphicID, abilityNameID, and ability effect/cooldown/charge parameters from sde_fighter_abilities.data_json when populating SdeRegistry.fighter_abilities (only keeping ability_id, target_mode, disallow_in_high_sec, disallow_in_low_sec, icon_id, display_name_id), and sde.fighter_abilities is never referenced anywhere in crates/eve-server/. Moreover, sweep_fighter_abilities (crates/eve-sde/tests/sde_sweep.rs:198-228) only asserts against sde_manifest in SQLite rather than reading the client resource file.",

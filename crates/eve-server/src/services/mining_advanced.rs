@@ -22,7 +22,6 @@ use eve_db::{
 };
 use eve_destiny::{Ball, MovementMode};
 use eve_machonet::SessionState;
-use eve_proto::dbrow::{DBRowDescriptor, DbColumnType};
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::TypeId;
 use glam::DVec3;
@@ -78,6 +77,21 @@ pub(crate) fn derive_moon_ores_from_sde(
         .map(|s| s.security_status)
         .unwrap_or(0.0);
     let restrict_to_r4 = sec >= 0.45 || solar_system_id >= 31_000_000;
+    let is_base_moon_ore = |t: &eve_sde::InvType| -> bool {
+        t.published
+            && !t.name.contains("Compressed")
+            && !t.name.contains("Brimful")
+            && !t.name.contains("Bountiful")
+            && !t.name.contains("Shining")
+            && !t.name.contains("Glistening")
+            && !t.name.contains("Glowing")
+            && !t.name.contains("Twinkling")
+            && !t.name.contains("Shimmering")
+            && !t.name.contains("Resplendent")
+            && !t.name.contains("Sparkling")
+            && !t.name.contains("Dazzling")
+            && !t.name.contains("Lavish")
+    };
     let mut base_moon_ores: Vec<TypeId> = sde
         .types
         .values()
@@ -87,19 +101,7 @@ pub(crate) fn derive_moon_ores_from_sde(
             } else {
                 matches!(t.group_id, 1884 | 1920..=1923)
             };
-            t.published
-                && group_ok
-                && !t.name.contains("Compressed")
-                && !t.name.contains("Bountiful")
-                && !t.name.contains("Shining")
-                && !t.name.contains("Glistening")
-                && !t.name.contains("Glowing")
-                && !t.name.contains("Twinkling")
-                && !t.name.contains("Shimmering")
-                && !t.name.contains("Resplendent")
-                && !t.name.contains("Sparkling")
-                && !t.name.contains("Dazzling")
-                && !t.name.contains("Lavish")
+            group_ok && is_base_moon_ore(t)
         })
         .map(|t| t.type_id)
         .collect();
@@ -112,7 +114,22 @@ pub(crate) fn derive_moon_ores_from_sde(
         ];
     }
     let h = (moon_id as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
-    let idx0 = (h as usize) % base_moon_ores.len();
+    let mut idx0 = (h as usize) % base_moon_ores.len();
+    if !restrict_to_r4 {
+        let higher_ores: Vec<usize> = base_moon_ores
+            .iter()
+            .enumerate()
+            .filter(|(_, &tid)| {
+                sde.types
+                    .get(&tid)
+                    .is_some_and(|t| matches!(t.group_id, 1920..=1923))
+            })
+            .map(|(i, _)| i)
+            .collect();
+        if !higher_ores.is_empty() {
+            idx0 = higher_ores[(h as usize) % higher_ores.len()];
+        }
+    }
     let idx1 = ((h >> 16) as usize % (base_moon_ores.len() - 1) + idx0 + 1) % base_moon_ores.len();
     let mut idx2 = ((h >> 32) as usize) % base_moon_ores.len();
     while idx2 == idx0 || idx2 == idx1 {
@@ -128,6 +145,29 @@ pub(crate) fn derive_moon_ores_from_sde(
     ]
 }
 
+/// Maps a standard moon ore `type_id` to its +15% improved variant (`Brimful`/`Bountiful`/`Replete`/`Copious`/`Lavish`) in the same SDE group.
+fn find_improved_variant(sde: &eve_sde::SdeRegistry, base_ore_tid: TypeId) -> TypeId {
+    let Some(base_t) = sde.types.get(&base_ore_tid) else {
+        return base_ore_tid;
+    };
+    sde.types
+        .values()
+        .find(|t| {
+            t.published
+                && t.group_id == base_t.group_id
+                && t.type_id != base_ore_tid
+                && !t.name.contains("Compressed")
+                && t.name.ends_with(&base_t.name)
+                && (t.name.starts_with("Brimful ")
+                    || t.name.starts_with("Bountiful ")
+                    || t.name.starts_with("Replete ")
+                    || t.name.starts_with("Copious ")
+                    || t.name.starts_with("Lavish "))
+        })
+        .map(|t| t.type_id)
+        .unwrap_or(base_ore_tid)
+}
+
 /// Maps a standard moon ore `type_id` to its +100% jackpot variant in the same SDE group if present.
 fn find_jackpot_variant(sde: &eve_sde::SdeRegistry, base_ore_tid: TypeId) -> TypeId {
     let Some(base_t) = sde.types.get(&base_ore_tid) else {
@@ -141,7 +181,10 @@ fn find_jackpot_variant(sde: &eve_sde::SdeRegistry, base_ore_tid: TypeId) -> Typ
                 && t.type_id != base_ore_tid
                 && !t.name.contains("Compressed")
                 && t.name.ends_with(&base_t.name)
-                && (t.name.starts_with("Bountiful ")
+                && (t.name.starts_with("Glistening ")
+                    || t.name.starts_with("Glowing ")
+                    || t.name.starts_with("Twinkling ")
+                    || t.name.starts_with("Shimmering ")
                     || t.name.starts_with("Shining ")
                     || t.name.starts_with("Resplendent ")
                     || t.name.starts_with("Sparkling ")
@@ -151,89 +194,176 @@ fn find_jackpot_variant(sde: &eve_sde::SdeRegistry, base_ore_tid: TypeId) -> Typ
         .unwrap_or(base_ore_tid)
 }
 
-/// Computes gas decompression efficiency in a structure from SDE attributes:
-/// - `3262` (`gasDecompressionBaseEfficiency` = 0.80)
-/// - `3261` (`structureGasDecompressionEfficiencyBonus`: +0.04 on Athanor 35835, +0.10 on Tatara 35836, 0.0 default)
-/// - `3260` (`GasDecompressionEfficiencyBonus` = +1% per level of skill `62452` `Gas Decompression Efficiency`)
-fn compute_gas_decompression_efficiency(
-    ctx: &ServerContext,
-    char_id: i64,
-    structure_id_opt: Option<i64>,
-) -> f64 {
-    let base_eff = ctx
-        .sde
-        .attributes
-        .get(&3262)
-        .map(|a| a.default_value)
-        .unwrap_or(0.80);
-    let skill_bonus_pct_per_lvl = ctx
-        .sde
-        .types
-        .get(&62452)
-        .and_then(|t| t.default_attributes.get(&3260).copied())
-        .unwrap_or(1.0);
-    ctx.db.with_snapshot(|snap| {
-        let skill_lvl = snap
-            .skills
-            .get(&char_id)
-            .and_then(|m| m.get(&62452))
-            .map(|s| s.level as f64)
-            .unwrap_or(0.0);
-        let struct_bonus = structure_id_opt
-            .and_then(|sid| snap.structures.get(&sid))
-            .and_then(|st| ctx.sde.types.get(&st.type_id))
-            .and_then(|t| t.default_attributes.get(&3261).copied())
-            .unwrap_or(0.0);
-        let eff = base_eff + struct_bonus + skill_lvl * (skill_bonus_pct_per_lvl / 100.0);
-        (eff * 10_000.0).round() / 10_000.0
-    })
-}
-
-/// Computes the Moon Materials (`group_id == 427`, e.g. `16633..=16653` from `sde.type_materials`)
-/// harvested by a Metenox Moon Drill (`30,000 m³/hour` raw moon volume × `efficiency` = `0.40`)
-/// over `cycles` hours for the moon's ore composition (`derive_moon_ores_from_sde`).
-/// DERIVED: Metenox Moon Drill harvests `30,000 m³/hour` of the moon's composition at `40%` efficiency
-/// and outputs only `group_id == 427` Moon Materials (`docs/eve-wiki/Metenox_Moon_Drill.md:15,30`).
-fn derive_metenox_moon_materials(
+/// Computes the auto-fracture delay after chunk arrival (default 3h = 10,800s, modified by refinery rigs).
+fn compute_auto_fracture_delay_secs(
     sde: &eve_sde::SdeRegistry,
-    solar_system_id: u32,
-    moon_id: i64,
-    efficiency: f64,
-    cycles: u32,
-) -> Vec<(TypeId, u64)> {
-    let composition = derive_moon_ores_from_sde(sde, solar_system_id, moon_id);
-    let mut totals: std::collections::BTreeMap<TypeId, f64> = std::collections::BTreeMap::new();
-    for (ore_tid, frac) in composition {
-        let portion_vol = sde
-            .types
-            .get(&ore_tid)
-            .map(|t| t.volume.max(0.1) * (t.portion_size.max(1) as f64))
-            .unwrap_or(1_000.0);
-        let portions = (30_000.0 * frac * (cycles as f64)) / portion_vol;
-        if let Some(mats) = sde.type_materials.get(&ore_tid) {
-            for mat in mats {
-                let is_moon_material = sde
-                    .types
-                    .get(&mat.material_type_id)
-                    .is_some_and(|t| t.group_id == 427);
-                if is_moon_material {
-                    *totals.entry(mat.material_type_id).or_insert(0.0) +=
-                        portions * (mat.quantity as f64) * efficiency;
-                }
+    snap: &eve_db::WorldStateSnapshot,
+    structure_id: i64,
+) -> u64 {
+    let mut bonus_pct = 0.0_f64;
+    for it in snap.items.values() {
+        if it.location_id == structure_id
+            && matches!(
+                it.flag,
+                InventoryFlag::RigSlot0 | InventoryFlag::RigSlot1 | InventoryFlag::RigSlot2
+            )
+        {
+            if let Some(rig_t) = sde.types.get(&it.type_id) {
+                let attr_bonus = rig_t
+                    .default_attributes
+                    .get(&2739)
+                    .or_else(|| rig_t.default_attributes.get(&2740))
+                    .or_else(|| rig_t.default_attributes.get(&2738))
+                    .copied()
+                    .unwrap_or(if rig_t.name.contains("Stability") || rig_t.name.contains("Moon") {
+                        20.0
+                    } else {
+                        0.0
+                    });
+                bonus_pct += attr_bonus.max(0.0);
             }
         }
     }
-    let mut out: Vec<(TypeId, u64)> = totals
-        .into_iter()
-        .map(|(tid, qty)| (tid, qty.round() as u64))
-        .filter(|&(_, qty)| qty > 0)
-        .collect();
-    if out.is_empty() {
-        let fallback_qty = (30.0 * 65.0 * efficiency * (cycles as f64)).round() as u64;
-        out.push((16633, fallback_qty.max(1)));
-    }
-    out
+    (10_800.0 * (1.0 + bonus_pct / 100.0)).round() as u64
 }
+
+fn build_moon_chunk_asteroids(
+    sde: &eve_sde::SdeRegistry,
+    snap: &mut eve_db::WorldStateSnapshot,
+    structure_id: i64,
+    sys_id: u32,
+    st_pos: [f64; 3],
+    base_ores: &[(TypeId, f64)],
+    total_chunk_volume_m3: f64,
+    is_jackpot: bool,
+) -> (Vec<i64>, Vec<(i64, TypeId, u64, f64, DVec3)>) {
+    let base_pos = DVec3::new(st_pos[0], st_pos[1], st_pos[2]);
+    let mut spawned_specs = Vec::new();
+    let mut spawned_ids = Vec::new();
+    let mut slot_idx = 0usize;
+
+    for &(base_tid, frac) in base_ores {
+        let variants: Vec<(TypeId, f64)> = if is_jackpot {
+            vec![(find_jackpot_variant(sde, base_tid), frac)]
+        } else {
+            let imp_tid = find_improved_variant(sde, base_tid);
+            vec![(base_tid, frac * 0.5), (imp_tid, frac * 0.5)]
+        };
+        for (ore_tid, slice_frac) in variants {
+            let uvol = sde
+                .types
+                .get(&ore_tid)
+                .map(|t| t.volume.max(0.1))
+                .unwrap_or(10.0);
+            let units = (((total_chunk_volume_m3 * slice_frac) / uvol).round() as u64).max(1);
+            snap.next_entity_id += 1;
+            let ast_id = 950_000_000 + snap.next_entity_id;
+            let offset = DVec3::new(
+                (slot_idx as f64 + 1.0) * 3_500.0,
+                (slot_idx as f64) * 2_000.0,
+                -(slot_idx as f64 + 1.0) * 3_000.0,
+            );
+            slot_idx += 1;
+            let pos = base_pos + offset;
+            snap.asteroids.insert(
+                ast_id,
+                eve_db::AsteroidRecord {
+                    asteroid_id: ast_id,
+                    solar_system_id: sys_id,
+                    belt_id: structure_id,
+                    type_id: ore_tid,
+                    quantity: units as i64,
+                    initial_quantity: units as i64,
+                    position: (pos.x, pos.y, pos.z),
+                    radius: 60.0,
+                },
+            );
+            spawned_ids.push(ast_id);
+            spawned_specs.push((ast_id, ore_tid, units, uvol, pos));
+        }
+    }
+    (spawned_ids, spawned_specs)
+}
+
+async fn maybe_auto_fracture_moon_extraction(ctx: &ServerContext, structure_id: i64) {
+    let now = ctx.now_unix();
+    let auto_res = ctx.db.try_with_mut_snapshot(|snap| -> Result<Option<(u32, Vec<(i64, TypeId, u64, f64, DVec3)>)>, BridgeRpcError> {
+        let Some(st) = snap.structures.get(&structure_id) else {
+            return Ok(None);
+        };
+        let sys_id = st.solar_system_id;
+        let st_pos = st.position;
+        let delay_secs = compute_auto_fracture_delay_secs(&ctx.sde, snap, structure_id);
+        let Some(ext) = snap.moon_extractions.get(&structure_id) else {
+            return Ok(None);
+        };
+        if (ext.status != "Started" && ext.status != "Ready")
+            || now < ext.chunk_arrival_unix.saturating_add(delay_secs)
+            || now >= ext.natural_decay_unix
+        {
+            return Ok(None);
+        }
+        let base_ores = if ext.moon_ores.is_empty() {
+            derive_moon_ores_from_sde(&ctx.sde, sys_id, ext.moon_id)
+        } else {
+            ext.moon_ores.clone()
+        };
+        let duration_secs = ext
+            .chunk_arrival_unix
+            .saturating_sub(ext.extraction_start_unix)
+            .max(518_400);
+        let total_chunk_volume_m3 = (duration_secs as f64 / 3600.0) * 30_000.0;
+        let (spawned_ids, spawned_specs) = build_moon_chunk_asteroids(
+            &ctx.sde,
+            snap,
+            structure_id,
+            sys_id,
+            st_pos,
+            &base_ores,
+            total_chunk_volume_m3,
+            false,
+        );
+        if let Some(ext_mut) = snap.moon_extractions.get_mut(&structure_id) {
+            ext_mut.status = "Fractured".into();
+            ext_mut.auto_fracture = true;
+            ext_mut.spawned_asteroid_ids = spawned_ids;
+        }
+        Ok(Some((sys_id, spawned_specs)))
+    });
+    if let Ok(Some((sys_id, spawned_specs))) = auto_res {
+        let handle = ctx.systems.get_or_spawn(sys_id);
+        for (ast_id, ore_tid, units, uvol, pos) in spawned_specs {
+            let ball = Ball {
+                id: ast_id,
+                type_id: ore_tid,
+                position: pos,
+                velocity: DVec3::ZERO,
+                max_velocity: 0.0,
+                inertia: 1.0,
+                mass: 50_000.0,
+                radius: 60.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            };
+            let ast_state = crate::system_actor::AsteroidState {
+                asteroid_id: ast_id,
+                belt_id: structure_id,
+                type_id: ore_tid,
+                initial_units: units,
+                remaining_units: units,
+                unit_volume: uvol,
+                depleted: false,
+                respawn_at_tick: None,
+            };
+            let _ = handle.spawn_asteroid(ast_state, ball).await;
+        }
+    }
+}
+
+#[path = "mining_compression.rs"]
+pub mod mining_compression;
+pub use mining_compression::*;
+
 
 pub async fn handle(
     ctx: &ServerContext,
@@ -268,11 +398,7 @@ pub async fn handle(
             // duration must be in 6d..=56d (`518_400..=4_838_400` seconds, default 6d = 518,400s),
             // natural decay window fixed at 48h (172,800s) after chunk arrival.
             let now = ctx.now_unix();
-            let explicit_dur = args
-                .get(1)
-                .and_then(|a| a.as_i64())
-                .or_else(|| _kwargs.get("duration").and_then(|v| v.as_i64()))
-                .or_else(|| _kwargs.get("chunkArrivalTime").and_then(|v| v.as_i64()));
+            let explicit_dur = args.get(1).and_then(|a| a.as_i64());
             let duration_secs = match explicit_dur {
                 Some(raw_dur) => {
                     let secs = if raw_dur > now as i64 {
@@ -367,12 +493,14 @@ pub async fn handle(
 
             match res {
                 Ok((s_id, m_id, st, arr, dec, ev_id, ores)) => {
+                    let chunk_vol_m3 = ((arr.saturating_sub(st)) as f64 / 3600.0) * 30_000.0;
                     let ore_list: Vec<PyRep> = ores
                         .into_iter()
                         .map(|(tid, pct)| {
                             PyRep::keyval([
                                 ("typeID", PyRep::Integer(tid as i64)),
                                 ("yield", PyRep::Real(pct)),
+                                ("volumeM3", PyRep::Real(chunk_vol_m3 * pct)),
                             ])
                         })
                         .collect();
@@ -383,6 +511,7 @@ pub async fn handle(
                         ("extractionStartTime", PyRep::Integer(st as i64)),
                         ("chunkArrivalTime", PyRep::Integer(arr as i64)),
                         ("naturalDecayTime", PyRep::Integer(dec as i64)),
+                        ("chunkVolumeM3", PyRep::Real(chunk_vol_m3)),
                         ("status", PyRep::String("Started".into())),
                         ("eventID", PyRep::Integer(ev_id)),
                         ("readyToFracture", PyRep::Bool(false)),
@@ -435,6 +564,7 @@ pub async fn handle(
                     });
                 };
                 ext.status = "Cancelled".into();
+                ext.spawned_asteroid_ids.clear();
                 Ok(true)
             });
 
@@ -462,11 +592,9 @@ pub async fn handle(
             };
 
             let now = ctx.now_unix();
-            // DERIVED: 15% jackpot probability roll via the context mechanic RNG (seeded test RNG).
-            let is_jackpot = ctx.mechanic_rng.roll(0.15);
+            // DERIVED: 15% jackpot probability roll via deterministic seeded/CSPRNG `ctx.mechanic_rng`
+            let is_jackpot = ctx.mechanic_rng.try_unit_f64().unwrap_or(0.5) < 0.15;
 
-            // Atomically validate structure ownership, active extraction status, and chunk arrival
-            // BEFORE spawning any asteroids so repeated calls cannot refill or duplicate moon ore.
             let commit_res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(st) = snap.structures.get(&structure_id) else {
                     return Err(BridgeRpcError {
@@ -478,11 +606,7 @@ pub async fn handle(
                 let st_pos = st.position;
                 let owner_corp_id = st.owner_corp_id;
 
-                let caller_corp = snap
-                    .characters
-                    .get(&char_id)
-                    .map(|c| c.corporation_id)
-                    .unwrap_or(0);
+                let caller_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
                 if owner_corp_id != caller_corp {
                     return Err(BridgeRpcError {
                         code: "AccessDenied".into(),
@@ -490,7 +614,7 @@ pub async fn handle(
                     });
                 }
 
-                let Some(ext) = snap.moon_extractions.get_mut(&structure_id) else {
+                let Some(ext) = snap.moon_extractions.get(&structure_id) else {
                     return Err(BridgeRpcError {
                         code: "NoActiveExtraction".into(),
                         message: format!("No active extraction to fracture on structure {structure_id}"),
@@ -511,10 +635,7 @@ pub async fn handle(
                 if now < ext.chunk_arrival_unix {
                     return Err(BridgeRpcError {
                         code: "ChunkNotReadyToFracture".into(),
-                        message: format!(
-                            "Moon chunk has not yet arrived (now={now}, arrival={})",
-                            ext.chunk_arrival_unix
-                        ),
+                        message: format!("Moon chunk has not yet arrived (now={now}, arrival={})", ext.chunk_arrival_unix),
                     });
                 }
 
@@ -525,88 +646,36 @@ pub async fn handle(
                 };
 
                 // Moon extraction chunk volume scales linearly at 30,000 m³/hour (`docs/eve-wiki/Moon_mining.md:107-112`)
-                let duration_secs = ext
-                    .chunk_arrival_unix
-                    .saturating_sub(ext.extraction_start_unix)
-                    .max(518_400);
+                let duration_secs = ext.chunk_arrival_unix.saturating_sub(ext.extraction_start_unix).max(518_400);
                 let total_chunk_volume_m3 = (duration_secs as f64 / 3600.0) * 30_000.0;
 
-                let base_pos = DVec3::new(st_pos[0], st_pos[1], st_pos[2]);
-                let mut spawned_specs = Vec::with_capacity(base_ores.len());
-                let mut spawned_ids = Vec::with_capacity(base_ores.len());
-
-                for (idx, &(base_tid, frac)) in base_ores.iter().enumerate() {
-                    let ore_tid = if is_jackpot {
-                        find_jackpot_variant(&ctx.sde, base_tid)
-                    } else {
-                        base_tid
-                    };
-                    let uvol = ctx
-                        .sde
-                        .types
-                        .get(&ore_tid)
-                        .map(|t| t.volume.max(0.1))
-                        .unwrap_or(10.0);
-                    let units = (((total_chunk_volume_m3 * frac) / uvol).round() as u64).max(1);
-                    snap.next_entity_id += 1;
-                    let ast_id = 950_000_000 + snap.next_entity_id;
-                    let offset = DVec3::new(
-                        (idx as f64 + 1.0) * 4_000.0,
-                        (idx as f64) * 2_500.0,
-                        -(idx as f64 + 1.0) * 3_500.0,
-                    );
-                    let pos = base_pos + offset;
-                    snap.asteroids.insert(
-                        ast_id,
-                        eve_db::AsteroidRecord {
-                            asteroid_id: ast_id,
-                            solar_system_id: sys_id,
-                            belt_id: structure_id,
-                            type_id: ore_tid,
-                            quantity: units as i64,
-                            initial_quantity: units as i64,
-                            position: (pos.x, pos.y, pos.z),
-                            radius: 60.0,
-                        },
-                    );
-                    spawned_ids.push(ast_id);
-                    spawned_specs.push((ast_id, ore_tid, units, uvol, pos));
-                }
+                let (spawned_ids, spawned_specs) = build_moon_chunk_asteroids(
+                    &ctx.sde, snap, structure_id, sys_id, st_pos, &base_ores, total_chunk_volume_m3, is_jackpot,
+                );
 
                 let ext_mut = snap.moon_extractions.get_mut(&structure_id).unwrap();
                 ext_mut.status = "Fractured".into();
+                ext_mut.auto_fracture = false;
                 ext_mut.spawned_asteroid_ids = spawned_ids.clone();
 
-                Ok((sys_id, spawned_ids, spawned_specs))
+                Ok((sys_id, spawned_ids, spawned_specs, total_chunk_volume_m3))
             });
 
             match commit_res {
-                Ok((sys_id, ast_ids, spawned_specs)) => {
+                Ok((sys_id, ast_ids, spawned_specs, total_chunk_volume_m3)) => {
                     let handle = ctx.systems.get_or_spawn(sys_id);
                     let mut ore_tids = Vec::with_capacity(spawned_specs.len());
                     for (ast_id, ore_tid, units, uvol, pos) in spawned_specs {
                         ore_tids.push(PyRep::Integer(ore_tid as i64));
                         let ball = Ball {
-                            id: ast_id,
-                            type_id: ore_tid,
-                            position: pos,
-                            velocity: DVec3::ZERO,
-                            max_velocity: 0.0,
-                            inertia: 1.0,
-                            mass: 50_000.0,
-                            radius: 60.0,
-                            speed_fraction: 0.0,
-                            mode: MovementMode::Stop,
+                            id: ast_id, type_id: ore_tid, position: pos, velocity: DVec3::ZERO,
+                            max_velocity: 0.0, inertia: 1.0, mass: 50_000.0, radius: 60.0,
+                            speed_fraction: 0.0, mode: MovementMode::Stop,
                         };
                         let ast_state = crate::system_actor::AsteroidState {
-                            asteroid_id: ast_id,
-                            belt_id: structure_id,
-                            type_id: ore_tid,
-                            initial_units: units,
-                            remaining_units: units,
-                            unit_volume: uvol,
-                            depleted: false,
-                            respawn_at_tick: None,
+                            asteroid_id: ast_id, belt_id: structure_id, type_id: ore_tid,
+                            initial_units: units, remaining_units: units, unit_volume: uvol,
+                            depleted: false, respawn_at_tick: None,
                         };
                         let _ = handle.spawn_asteroid(ast_state, ball).await;
                     }
@@ -615,6 +684,7 @@ pub async fn handle(
                         ("structureID", PyRep::Integer(structure_id)),
                         ("fractured", PyRep::Bool(true)),
                         ("status", PyRep::String("Fractured".into())),
+                        ("chunkVolumeM3", PyRep::Real(total_chunk_volume_m3)),
                         ("asteroidCount", PyRep::Integer(ast_ids.len() as i64)),
                         ("asteroidIDs", PyRep::List(ast_id_reps)),
                         ("oreTypes", PyRep::List(ore_tids)),
@@ -631,29 +701,24 @@ pub async fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-
-            let corp_id = args
-                .first()
-                .and_then(|a| a.as_i64())
-                .unwrap_or_else(|| {
-                    ctx.db.with_snapshot(|snap| {
-                        snap.characters
-                            .get(&char_id)
-                            .map(|c| c.corporation_id)
-                            .unwrap_or(0)
-                    })
-                });
-
+            let corp_id = args.first().and_then(|a| a.as_i64()).unwrap_or_else(|| {
+                ctx.db.with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0))
+            });
+            let struct_ids: Vec<i64> = ctx.db.with_snapshot(|snap| {
+                snap.moon_extractions
+                    .keys()
+                    .copied()
+                    .filter(|sid| snap.structures.get(sid).map(|s| s.owner_corp_id == corp_id).unwrap_or(false))
+                    .collect()
+            });
+            for sid in struct_ids {
+                maybe_auto_fracture_moon_extraction(ctx, sid).await;
+            }
             let now = ctx.now_unix();
             let extractions = ctx.db.with_snapshot(|snap| {
                 snap.moon_extractions
                     .values()
-                    .filter(|ext| {
-                        snap.structures
-                            .get(&ext.structure_id)
-                            .map(|s| s.owner_corp_id == corp_id)
-                            .unwrap_or(false)
-                    })
+                    .filter(|ext| snap.structures.get(&ext.structure_id).map(|s| s.owner_corp_id == corp_id).unwrap_or(false))
                     .cloned()
                     .collect::<Vec<_>>()
             });
@@ -676,6 +741,7 @@ pub async fn handle(
                         ("chunkArrivalTime", PyRep::Integer(e.chunk_arrival_unix as i64)),
                         ("naturalDecayTime", PyRep::Integer(e.natural_decay_unix as i64)),
                         ("status", PyRep::String(effective_status)),
+                        ("autoFractured", PyRep::Bool(e.auto_fracture)),
                         ("readyToFracture", PyRep::Bool(ready)),
                     ])
                 })
@@ -749,10 +815,13 @@ pub async fn handle(
                 }));
             };
 
+            maybe_auto_fracture_moon_extraction(ctx, structure_id).await;
+
             let now = ctx.now_unix();
-            let ext = ctx
-                .db
-                .with_snapshot(|snap| snap.moon_extractions.get(&structure_id).cloned());
+            let (ext, delay_secs) = ctx.db.with_snapshot(|snap| {
+                let d = compute_auto_fracture_delay_secs(&ctx.sde, snap, structure_id);
+                (snap.moon_extractions.get(&structure_id).cloned(), d)
+            });
 
             if let Some(e) = ext {
                 let effective_status = if e.status != "Cancelled" && now >= e.natural_decay_unix {
@@ -767,15 +836,23 @@ pub async fn handle(
                 } else {
                     e.spawned_asteroid_ids.len() as i64
                 };
+                let ast_id_reps: Vec<PyRep> = e
+                    .spawned_asteroid_ids
+                    .iter()
+                    .map(|&id| PyRep::Integer(id))
+                    .collect();
                 Some(Ok(PyRep::keyval([
                     ("structureID", PyRep::Integer(e.structure_id)),
                     ("moonID", PyRep::Integer(e.moon_id)),
                     ("extractionStartTime", PyRep::Integer(e.extraction_start_unix as i64)),
                     ("chunkArrivalTime", PyRep::Integer(e.chunk_arrival_unix as i64)),
+                    ("autoFractureTime", PyRep::Integer(e.chunk_arrival_unix.saturating_add(delay_secs) as i64)),
                     ("naturalDecayTime", PyRep::Integer(e.natural_decay_unix as i64)),
                     ("status", PyRep::String(effective_status)),
+                    ("autoFractured", PyRep::Bool(e.auto_fracture)),
                     ("eventID", PyRep::Integer(e.event_id)),
                     ("activeAsteroidCount", PyRep::Integer(active_count)),
+                    ("asteroidIDs", PyRep::List(ast_id_reps)),
                 ])))
             } else {
                 Some(Ok(PyRep::None))
@@ -810,125 +887,41 @@ pub async fn handle(
                 .unwrap_or(5.0)
                 .round()
                 .max(1.0) as u32;
-            // DERIVED: Metenox Moon Drill consumes Magmatic Gas (type 81143) per hourly cycle (`docs/eve-wiki/Metenox_Moon_Drill.md:15,30`).
-            let gas_per_cycle: u32 = 10;
+            // DERIVED: Metenox Moon Drill consumes Magmatic Gas (`type_id == 81143`) per hourly cycle (`docs/spec/03_economy_industry_social.md:64`).
+            let gas_per_cycle: u32 = METENOX_MAGMATIC_GAS_PER_CYCLE;
 
             let now = ctx.now_unix();
-            let res = ctx.db.try_with_mut_snapshot(|snap| {
-                let Some(st) = snap.structures.get(&structure_id) else {
-                    return Err(BridgeRpcError {
-                        code: "StructureNotFound".into(),
-                        message: format!("Structure {structure_id} not found"),
-                    });
-                };
+            // Read-only query (`R73 P2-4`): never mutate `snap.auto_moon_miners` on `RequestMiningDetails`.
+            let res = ctx.db.with_snapshot(|snap| {
+                let existing = snap.auto_moon_miners.get(&structure_id);
+                let efficiency = existing.map(|r| r.efficiency).unwrap_or(0.40);
+                let cycle_duration_seconds = existing.map(|r| r.cycle_duration_seconds).unwrap_or(3600);
+                let last_cycle_unix = existing.map(|r| r.last_cycle_unix).unwrap_or(now);
 
-                if !matches!(st.type_id, 81826 | 81824) {
-                    return Err(BridgeRpcError {
-                        code: "InvalidStructureType".into(),
-                        message: format!(
-                            "Auto moon mining requires a Metenox Moon Drill (type 81826), got structure type {}",
-                            st.type_id
-                        ),
-                    });
-                }
-
-                let caller_corp = snap
-                    .characters
-                    .get(&char_id)
-                    .map(|c| c.corporation_id)
-                    .unwrap_or(0);
-                if st.owner_corp_id != caller_corp {
-                    return Err(BridgeRpcError {
-                        code: "AccessDenied".into(),
-                        message: "Character lacks corporation permissions for auto moon mining".into(),
-                    });
-                }
-
-                let st_sys_id = st.solar_system_id;
-                let sec = ctx
-                    .sde
-                    .solar_systems
-                    .get(&st_sys_id)
-                    .map(|s| s.security_status)
-                    .unwrap_or(0.0);
-                if sec >= 0.45 && st_sys_id < 31_000_000 {
-                    return Err(BridgeRpcError {
-                        code: "InvalidSystemSecurity".into(),
-                        message: format!(
-                            "Metenox Moon Drill cannot operate in High-Sec system {st_sys_id} (security {sec:.2}); requires Low-Sec (< 0.45), Null-Sec, or Wormhole space"
-                        ),
-                    });
-                }
-
-                let st_pos = st.position;
-                let st_fuel_blocks = st.fuel_blocks;
-                let item_fuel_blocks: u32 = snap
-                    .items
-                    .values()
-                    .filter(|it| {
-                        it.location_id == structure_id
-                            && it.quantity > 0
-                            && it.flag != InventoryFlag::Locked
-                            && !snap.is_item_locked_in_contract_or_job(it.item_id)
-                            && ctx
-                                .sde
-                                .types
-                                .get(&it.type_id)
-                                .is_some_and(|t| t.group_id == 1136)
-                    })
-                    .map(|it| it.quantity as u32)
-                    .sum();
-                let total_struct_fuel = st_fuel_blocks.saturating_add(item_fuel_blocks);
-                let total_struct_gas: u32 = snap
-                    .items
-                    .values()
-                    .filter(|it| {
-                        it.location_id == structure_id
-                            && it.quantity > 0
-                            && it.flag != InventoryFlag::Locked
-                            && !snap.is_item_locked_in_contract_or_job(it.item_id)
-                            && it.type_id == 81143
-                    })
-                    .map(|it| it.quantity as u32)
-                    .sum();
-
-                let moon_id = resolve_structure_moon_id(&ctx.sde, st_sys_id, st_pos)
-                    .unwrap_or(40_000_001);
-                let hourly_materials =
-                    derive_metenox_moon_materials(&ctx.sde, st_sys_id, moon_id, 0.40, 1);
-                let hourly_yield: u64 = hourly_materials.iter().map(|&(_, q)| q as u64).sum();
-                let primary_mat_tid = hourly_materials
-                    .first()
-                    .map(|&(tid, _)| tid)
-                    .unwrap_or(16633);
-
-                let auto_miner = snap.auto_moon_miners.entry(structure_id).or_insert_with(|| {
-                    AutoMoonMinerRecord {
-                        structure_id,
-                        fuel_units_remaining: total_struct_fuel,
-                        magmatic_gas_remaining: total_struct_gas,
-                        efficiency: 0.40, // 40% Metenox Moon Drill baseline (`docs/eve-wiki/Metenox_Moon_Drill.md:15,30`)
-                        cycle_duration_seconds: 3600,
-                        last_cycle_unix: now,
-                        ore_type_id: primary_mat_tid,
-                        hourly_yield,
-                        status: "Active".into(),
-                    }
-                });
-                // Authoritative sync from structure inventory (never preserve stale record balances via `.max()`):
-                auto_miner.fuel_units_remaining = total_struct_fuel;
-                auto_miner.magmatic_gas_remaining = total_struct_gas;
-                auto_miner.hourly_yield = hourly_yield;
-                auto_miner.ore_type_id = primary_mat_tid;
-                auto_miner.status = if total_struct_fuel >= fuel_per_cycle && total_struct_gas >= gas_per_cycle {
+                let info = inspect_metenox_drill(&ctx.sde, snap, structure_id, char_id, efficiency)?;
+                let status = if info.total_struct_fuel >= fuel_per_cycle
+                    && info.total_struct_gas >= gas_per_cycle
+                {
                     "Active".into()
-                } else if total_struct_fuel < fuel_per_cycle {
+                } else if info.total_struct_fuel < fuel_per_cycle {
                     "OutOfFuel".into()
                 } else {
                     "OutOfMagmaticGas".into()
                 };
 
-                Ok((auto_miner.clone(), hourly_materials))
+                let view = AutoMoonMinerRecord {
+                    structure_id,
+                    fuel_units_remaining: info.total_struct_fuel,
+                    magmatic_gas_remaining: info.total_struct_gas,
+                    efficiency,
+                    cycle_duration_seconds,
+                    last_cycle_unix,
+                    ore_type_id: info.primary_mat_tid,
+                    hourly_yield: info.hourly_yield,
+                    status,
+                };
+
+                Ok((view, info.hourly_materials))
             });
 
             match res {
@@ -1005,102 +998,34 @@ pub async fn handle(
                 .unwrap_or(5.0)
                 .round()
                 .max(1.0) as u32;
-            let gas_per_cycle: u32 = 10;
+            // DERIVED: Metenox Moon Drill consumes Magmatic Gas (`type_id == 81143`) per hourly cycle (`docs/spec/03_economy_industry_social.md:64`).
+            let gas_per_cycle: u32 = METENOX_MAGMATIC_GAS_PER_CYCLE;
 
             let now = ctx.now_unix();
+            let default_start_unix = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(now)
+                .min(now);
             let date = eve_db::unix_secs_to_date_string(now);
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {
-                let (st_type_id, st_owner_corp, st_sys_id, st_pos, st_fuel_blocks) = {
-                    let Some(st) = snap.structures.get(&structure_id) else {
-                        return Err(BridgeRpcError {
-                            code: "StructureNotFound".into(),
-                            message: format!("Structure {structure_id} not found"),
-                        });
-                    };
-                    (
-                        st.type_id,
-                        st.owner_corp_id,
-                        st.solar_system_id,
-                        st.position,
-                        st.fuel_blocks,
-                    )
+                let info = inspect_metenox_drill(&ctx.sde, snap, structure_id, char_id, 0.40)?;
+                let st_owner_corp = info.st_owner_corp;
+                let caller_corp = info.caller_corp;
+                let st_sys_id = info.st_sys_id;
+                let moon_id = info.moon_id;
+                let total_struct_fuel = info.total_struct_fuel;
+                let total_struct_gas = info.total_struct_gas;
+                let primary_mat_tid = info.primary_mat_tid;
+                let hourly_yield = info.hourly_yield;
+                let matches_reagent_owner = |item_owner_id: i64| -> bool {
+                    if st_owner_corp != 0 {
+                        item_owner_id == st_owner_corp
+                    } else {
+                        item_owner_id == char_id || item_owner_id == caller_corp
+                    }
                 };
-
-                if !matches!(st_type_id, 81826 | 81824) {
-                    return Err(BridgeRpcError {
-                        code: "InvalidStructureType".into(),
-                        message: format!(
-                            "Auto moon mining requires a Metenox Moon Drill (type 81826), got structure type {st_type_id}"
-                        ),
-                    });
-                }
-
-                let caller_corp = snap
-                    .characters
-                    .get(&char_id)
-                    .map(|c| c.corporation_id)
-                    .unwrap_or(0);
-                if st_owner_corp != caller_corp {
-                    return Err(BridgeRpcError {
-                        code: "AccessDenied".into(),
-                        message: "Character lacks corporation permissions for auto moon mining".into(),
-                    });
-                }
-
-                let sec = ctx
-                    .sde
-                    .solar_systems
-                    .get(&st_sys_id)
-                    .map(|s| s.security_status)
-                    .unwrap_or(0.0);
-                if sec >= 0.45 && st_sys_id < 31_000_000 {
-                    return Err(BridgeRpcError {
-                        code: "InvalidSystemSecurity".into(),
-                        message: format!(
-                            "Metenox Moon Drill cannot operate in High-Sec system {st_sys_id} (security {sec:.2}); requires Low-Sec (< 0.45), Null-Sec, or Wormhole space"
-                        ),
-                    });
-                }
-
-                let item_fuel_blocks: u32 = snap
-                    .items
-                    .values()
-                    .filter(|it| {
-                        it.location_id == structure_id
-                            && it.quantity > 0
-                            && it.flag != InventoryFlag::Locked
-                            && !snap.is_item_locked_in_contract_or_job(it.item_id)
-                            && ctx
-                                .sde
-                                .types
-                                .get(&it.type_id)
-                                .is_some_and(|t| t.group_id == 1136)
-                    })
-                    .map(|it| it.quantity as u32)
-                    .sum();
-                let total_struct_fuel = st_fuel_blocks.saturating_add(item_fuel_blocks);
-                let total_struct_gas: u32 = snap
-                    .items
-                    .values()
-                    .filter(|it| {
-                        it.location_id == structure_id
-                            && it.quantity > 0
-                            && it.flag != InventoryFlag::Locked
-                            && !snap.is_item_locked_in_contract_or_job(it.item_id)
-                            && it.type_id == 81143
-                    })
-                    .map(|it| it.quantity as u32)
-                    .sum();
-                let moon_id = resolve_structure_moon_id(&ctx.sde, st_sys_id, st_pos)
-                    .unwrap_or(40_000_001);
-                let hourly_materials =
-                    derive_metenox_moon_materials(&ctx.sde, st_sys_id, moon_id, 0.40, 1);
-                let hourly_yield: u64 = hourly_materials.iter().map(|&(_, q)| q as u64).sum();
-                let primary_mat_tid = hourly_materials
-                    .first()
-                    .map(|&(tid, _)| tid)
-                    .unwrap_or(16633);
 
                 let (cycles, efficiency, fuel_req, gas_req, fuel_rem) = {
                     let auto_miner = snap.auto_moon_miners.entry(structure_id).or_insert_with(|| {
@@ -1110,7 +1035,7 @@ pub async fn handle(
                             magmatic_gas_remaining: total_struct_gas,
                             efficiency: 0.40,
                             cycle_duration_seconds: 3600,
-                            last_cycle_unix: now,
+                            last_cycle_unix: default_start_unix,
                             ore_type_id: primary_mat_tid,
                             hourly_yield,
                             status: "Active".into(),
@@ -1190,94 +1115,68 @@ pub async fn handle(
                     )
                 };
 
-                // Deduct consumed fuel blocks from structure fuel bay / unlocked items
+                // Deduct consumed fuel blocks and Magmatic Gas from structure inventory
                 let mut rem_fuel_to_deduct = fuel_req;
+                let mut rem_gas_to_deduct = gas_req;
                 if let Some(st_mut) = snap.structures.get_mut(&structure_id) {
                     let from_bay = st_mut.fuel_blocks.min(rem_fuel_to_deduct);
                     st_mut.fuel_blocks -= from_bay;
                     rem_fuel_to_deduct -= from_bay;
                 }
-                if rem_fuel_to_deduct > 0 {
-                    let mut fuel_item_ids: Vec<i64> = snap
-                        .items
-                        .values()
-                        .filter(|it| {
-                            it.location_id == structure_id
-                                && it.quantity > 0
-                                && it.flag != InventoryFlag::Locked
-                                && !snap.is_item_locked_in_contract_or_job(it.item_id)
-                                && ctx
-                                    .sde
-                                    .types
-                                    .get(&it.type_id)
-                                    .is_some_and(|t| t.group_id == 1136)
-                        })
-                        .map(|it| it.item_id)
-                        .collect();
-                    fuel_item_ids.sort_unstable();
-                    for fid in fuel_item_ids {
-                        if rem_fuel_to_deduct == 0 {
-                            break;
-                        }
-                        if let Some(fit) = snap.items.get_mut(&fid) {
-                            let take = (fit.quantity.max(0) as u32).min(rem_fuel_to_deduct);
-                            fit.quantity -= take as i32;
-                            rem_fuel_to_deduct -= take;
-                            if fit.quantity <= 0 {
-                                snap.items.remove(&fid);
+                for (rem_ref, is_fuel, err_code, label) in [
+                    (&mut rem_fuel_to_deduct, true, "OutOfFuel", "fuel blocks"),
+                    (&mut rem_gas_to_deduct, false, "OutOfMagmaticGas", "Magmatic Gas (type 81143)"),
+                ] {
+                    if *rem_ref > 0 {
+                        let mut item_ids: Vec<i64> = snap
+                            .items
+                            .values()
+                            .filter(|it| {
+                                it.location_id == structure_id
+                                    && matches_reagent_owner(it.owner_id)
+                                    && it.quantity > 0
+                                    && it.flag != InventoryFlag::Locked
+                                    && !snap.is_item_locked_in_contract_or_job(it.item_id)
+                                    && if is_fuel {
+                                        ctx.sde.types.get(&it.type_id).is_some_and(|t| t.group_id == 1136)
+                                    } else {
+                                        it.type_id == 81143
+                                    }
+                            })
+                            .map(|it| it.item_id)
+                            .collect();
+                        item_ids.sort_unstable();
+                        for iid in item_ids {
+                            if *rem_ref == 0 {
+                                break;
+                            }
+                            if let Some(it) = snap.items.get_mut(&iid) {
+                                let take = (it.quantity.max(0) as u32).min(*rem_ref);
+                                it.quantity -= take as i32;
+                                *rem_ref -= take;
+                                if it.quantity <= 0 {
+                                    snap.items.remove(&iid);
+                                }
                             }
                         }
-                    }
-                }
-                if rem_fuel_to_deduct > 0 {
-                    return Err(BridgeRpcError {
-                        code: "OutOfFuel".into(),
-                        message: format!(
-                            "Insufficient fuel blocks in structure {structure_id} to complete deduction ({rem_fuel_to_deduct} short)"
-                        ),
-                    });
-                }
-
-                // Deduct consumed Magmatic Gas (type 81143) from unlocked structure items
-                let mut rem_gas_to_deduct = gas_req;
-                let mut gas_item_ids: Vec<i64> = snap
-                    .items
-                    .values()
-                    .filter(|it| {
-                        it.location_id == structure_id
-                            && it.quantity > 0
-                            && it.flag != InventoryFlag::Locked
-                            && !snap.is_item_locked_in_contract_or_job(it.item_id)
-                            && it.type_id == 81143
-                    })
-                    .map(|it| it.item_id)
-                    .collect();
-                gas_item_ids.sort_unstable();
-                for gid in gas_item_ids {
-                    if rem_gas_to_deduct == 0 {
-                        break;
-                    }
-                    if let Some(git) = snap.items.get_mut(&gid) {
-                        let take = (git.quantity.max(0) as u32).min(rem_gas_to_deduct);
-                        git.quantity -= take as i32;
-                        rem_gas_to_deduct -= take;
-                        if git.quantity <= 0 {
-                            snap.items.remove(&gid);
+                        if *rem_ref > 0 {
+                            return Err(BridgeRpcError {
+                                code: err_code.into(),
+                                message: format!("Insufficient {label} in structure {structure_id} ({rem_ref} short)"),
+                            });
                         }
                     }
-                }
-                if rem_gas_to_deduct > 0 {
-                    return Err(BridgeRpcError {
-                        code: "OutOfMagmaticGas".into(),
-                        message: format!(
-                            "Insufficient Magmatic Gas (type 81143) in structure {structure_id} to complete deduction ({rem_gas_to_deduct} short)"
-                        ),
-                    });
                 }
 
                 // Compute harvested Moon Materials (`group_id == 427`, e.g. `16633..=16653`) for `cycles` hours
                 let cycle_materials =
                     derive_metenox_moon_materials(&ctx.sde, st_sys_id, moon_id, efficiency, cycles);
+                if cycle_materials.is_empty() {
+                    return Err(BridgeRpcError {
+                        code: "NoMoonMaterials".into(),
+                        message: format!("Moon {moon_id} in system {st_sys_id} yields no group-427 moon materials"),
+                    });
+                }
                 let units_produced: u64 = cycle_materials.iter().map(|&(_, q)| q).sum();
 
                 // Deliver harvested Moon Materials to structure output bay / hangar and record in observer ledger
@@ -1352,851 +1251,7 @@ pub async fn handle(
             }
         }
 
-        // ====================================================================
-        // MN-15: Corp Mining Ledger Service (corpMiningLedger.*)
-        // ====================================================================
-        ("corpMiningLedger", "GetObserversWithMiningEvents") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-
-            let caller_corp = ctx.db.with_snapshot(|snap| {
-                snap.characters
-                    .get(&char_id)
-                    .map(|c| c.corporation_id)
-                    .unwrap_or(0)
-            });
-
-            if caller_corp == 0 {
-                return Some(Err(BridgeRpcError {
-                    code: "NoCorporation".into(),
-                    message: "Character does not belong to a corporation".into(),
-                }));
-            }
-
-            let observers = ctx.db.with_snapshot(|snap| {
-                let mut list = Vec::new();
-                for (&obs_id, entries) in &snap.observer_mining_ledger {
-                    if let Some(st) = snap.structures.get(&obs_id) {
-                        if st.owner_corp_id == caller_corp && !entries.is_empty() {
-                            let last_date = entries
-                                .last()
-                                .map(|e| e.last_updated_date.clone())
-                                .unwrap_or_else(|| "2026-10-19".into());
-                            list.push((obs_id, "structure".to_string(), last_date));
-                        }
-                    }
-                }
-                list
-            });
-
-            let descriptor = DBRowDescriptor::new([
-                ("observerID", DbColumnType::I8),
-                ("observerType", DbColumnType::Str),
-                ("lastUpdated", DbColumnType::Str),
-            ]);
-
-            let rows: Vec<Vec<PyRep>> = observers
-                .into_iter()
-                .map(|(id, o_type, date)| {
-                    vec![
-                        PyRep::Integer(id),
-                        PyRep::String(o_type),
-                        PyRep::String(date),
-                    ]
-                })
-                .collect();
-
-            Some(Ok(descriptor.build_crowset(rows)))
-        }
-
-        ("corpMiningLedger", "GetObserverLedger") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-
-            let Some(observer_id) = args
-                .first()
-                .and_then(|a| a.as_i64())
-                .or_else(|| _kwargs.get("observerID").and_then(|v| v.as_i64()))
-            else {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidArgument".into(),
-                    message: "GetObserverLedger requires observerID".into(),
-                }));
-            };
-
-            let res = ctx.db.with_snapshot(|snap| {
-                let caller_corp = snap
-                    .characters
-                    .get(&char_id)
-                    .map(|c| c.corporation_id)
-                    .unwrap_or(0);
-
-                if let Some(st) = snap.structures.get(&observer_id) {
-                    if st.owner_corp_id != caller_corp {
-                        return Err(BridgeRpcError {
-                            code: "AccessDenied".into(),
-                            message: format!(
-                                "Character {char_id} (corp {caller_corp}) lacks ACL access to observer {observer_id} (owner corp {})",
-                                st.owner_corp_id
-                            ),
-                        });
-                    }
-                }
-
-                let entries = snap
-                    .observer_mining_ledger
-                    .get(&observer_id)
-                    .cloned()
-                    .unwrap_or_default();
-
-                Ok(entries)
-            });
-
-            match res {
-                Ok(entries) => {
-                    let descriptor = DBRowDescriptor::new([
-                        ("characterID", DbColumnType::I8),
-                        ("recordedCorporationID", DbColumnType::I8),
-                        ("typeID", DbColumnType::I4),
-                        ("quantity", DbColumnType::I8),
-                        ("lastUpdated", DbColumnType::Str),
-                    ]);
-
-                    let rows: Vec<Vec<PyRep>> = entries
-                        .into_iter()
-                        .map(|e| {
-                            vec![
-                                PyRep::Integer(e.character_id),
-                                PyRep::Integer(e.recorded_corporation_id),
-                                PyRep::Integer(e.type_id as i64),
-                                PyRep::Integer(e.quantity),
-                                PyRep::String(e.last_updated_date),
-                            ]
-                        })
-                        .collect();
-
-                    Some(Ok(descriptor.build_crowset(rows)))
-                }
-                Err(e) => Some(Err(e)),
-            }
-        }
-
-        // ====================================================================
-        // MN-16: In-Space & Structure Compression & Decompression
-        // ====================================================================
-        ("inSpaceCompressionMgr", "CompressItemInSpace") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-
-            if session.station_id.is_some() || session.structure_id.is_some() {
-                return Some(Err(BridgeRpcError {
-                    code: "MustBeInSpace".into(),
-                    message: "CompressItemInSpace requires being undocked in space".into(),
-                }));
-            }
-
-            let Some(item_id) = args.first().and_then(|a| a.as_i64()) else {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidArgument".into(),
-                    message: "CompressItemInSpace requires itemID".into(),
-                }));
-            };
-
-            let ship_id = session.ship_id;
-            let Some(sys_id) = session.solar_system_id else {
-                return Some(Err(BridgeRpcError {
-                    code: "MustBeInSpace".into(),
-                    message: "CompressItemInSpace requires a valid solarSystemID in space".into(),
-                }));
-            };
-
-            // 1. Validate target item in ship's mining hold and determine its SDE attributes
-            let item_check = ctx.db.with_snapshot(|snap| {
-                let Some(item) = snap.items.get(&item_id) else {
-                    return Err(BridgeRpcError {
-                        code: "ItemNotFound".into(),
-                        message: format!("Item {item_id} not found"),
-                    });
-                };
-                if item.owner_id != char_id || Some(item.location_id) != ship_id {
-                    return Err(BridgeRpcError {
-                        code: "CompressionFailed".into(),
-                        message: "Item must be owned by character and located on the active ship".into(),
-                    });
-                }
-                if item.flag == InventoryFlag::Locked
-                    || snap.is_item_locked_in_contract_or_job(item_id)
-                {
-                    return Err(BridgeRpcError {
-                        code: "ItemLocked".into(),
-                        message: "Item is locked in a contract or job and cannot be compressed".into(),
-                    });
-                }
-                if item.quantity < 1 {
-                    return Err(BridgeRpcError {
-                        code: "CompressionFailed".into(),
-                        message: "Item has invalid quantity".into(),
-                    });
-                }
-                // V24 in-space compression requires the material to be in the ship's mining hold (`docs/eve-wiki/Compression.md:27`)
-                let in_mining_hold = matches!(
-                    item.flag,
-                    InventoryFlag::SpecializedOreHold
-                        | InventoryFlag::SpecializedIceHold
-                        | InventoryFlag::SpecializedGasHold
-                        | InventoryFlag::SpecializedMineralHold
-                );
-                if !in_mining_hold {
-                    return Err(BridgeRpcError {
-                        code: "NotInMiningHold".into(),
-                        message: "Material to compress in space must be in the ship's mining hold".into(),
-                    });
-                }
-                let Some(&comp_type) = ctx.sde.compressible_types.get(&item.type_id) else {
-                    return Err(BridgeRpcError {
-                        code: "CompressionFailed".into(),
-                        message: format!("Type {} is not compressible", item.type_id),
-                    });
-                };
-                let Some(item_t) = ctx.sde.types.get(&item.type_id) else {
-                    return Err(BridgeRpcError {
-                        code: "CompressionFailed".into(),
-                        message: format!("Unknown SDE type {}", item.type_id),
-                    });
-                };
-                Ok((comp_type, item_t.type_id))
-            });
-            let (comp_type, item_type_id) = match item_check {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-
-            let logistics_bonus_pct_per_lvl = ctx
-                .sde
-                .types
-                .get(&62453)
-                .and_then(|t| t.default_attributes.get(&3263).copied())
-                .unwrap_or(10.0);
-
-            // 2. Identify candidate compressor ships in the same solar system (self or fleet members)
-            // whose active compressor module (`group_id == 4174`) matches the item's SDE attributes,
-            // satisfies SDE hull restrictions (`1302..=1305` `canFitShipType1..4` and `1298..=1301` `canFitShipGroup01..04`),
-            // and satisfies SDE `3265` (`activationRequiresActiveIndustrialCore`) via an active `group_id == 515` module.
-            let fittings_guard = ctx
-                .ship_fittings
-                .read()
-                .map(|g| g.clone())
-                .unwrap_or_default();
-            let candidate_compressors: Vec<(i64, f64)> = ctx.db.with_snapshot(|snap| {
-                let mut candidate_chars = vec![char_id];
-                for fl in snap.fleets.values() {
-                    if fl.members.contains(&char_id) {
-                        for &m_id in &fl.members {
-                            if !candidate_chars.contains(&m_id) {
-                                candidate_chars.push(m_id);
-                            }
-                        }
-                    }
-                }
-                candidate_chars
-                    .into_iter()
-                    .filter_map(|cid| {
-                        let ch = snap.characters.get(&cid)?;
-                        if ch.solar_system_id != sys_id
-                            || ch.station_id.is_some()
-                            || ch.structure_id.is_some()
-                        {
-                            return None;
-                        }
-                        let c_ship_id = ch.active_ship_id;
-                        let c_ship_type = snap.items.get(&c_ship_id)?.type_id;
-                        let c_ship_group = ctx
-                            .sde
-                            .types
-                            .get(&c_ship_type)
-                            .map(|t| t.group_id)
-                            .unwrap_or(0);
-                        let ship_fit_opt = fittings_guard.get(&c_ship_id);
-
-                        let is_mod_active = |mod_item: &InventoryItemRecord| -> bool {
-                            let active_in_fit = ship_fit_opt
-                                .and_then(|f| f.modules.get(&mod_item.item_id))
-                                .is_some_and(|fm| {
-                                    matches!(
-                                        fm.state,
-                                        eve_dogma::ModuleState::Active
-                                            | eve_dogma::ModuleState::Overloaded
-                                    )
-                                });
-                            let active_in_db = snap.module_active_states.contains(&mod_item.item_id);
-                            active_in_fit || active_in_db
-                        };
-
-                        let matches_hull_sde = |mod_t: &eve_sde::InvType| -> bool {
-                            let allowed_types: Vec<u32> = [1302u16, 1303, 1304, 1305]
-                                .into_iter()
-                                .filter_map(|aid| mod_t.default_attributes.get(&aid).copied())
-                                .filter(|&v| v > 0.0)
-                                .map(|v| v.round() as u32)
-                                .collect();
-                            let allowed_groups: Vec<u32> = [1298u16, 1299, 1300, 1301]
-                                .into_iter()
-                                .filter_map(|aid| mod_t.default_attributes.get(&aid).copied())
-                                .filter(|&v| v > 0.0)
-                                .map(|v| v.round() as u32)
-                                .collect();
-                            if allowed_types.is_empty() && allowed_groups.is_empty() {
-                                true
-                            } else {
-                                allowed_types.contains(&c_ship_type)
-                                    || allowed_groups.contains(&c_ship_group)
-                            }
-                        };
-
-                        let has_active_industrial_core = snap.items.values().any(|it| {
-                            if it.location_id != c_ship_id
-                                || !(27..=34).contains(&(it.flag as u16))
-                                || !is_mod_active(it)
-                            {
-                                return false;
-                            }
-                            let Some(core_t) = ctx.sde.types.get(&it.type_id) else {
-                                return false;
-                            };
-                            core_t.group_id == 515 && matches_hull_sde(core_t)
-                        });
-
-                        let logistics_lvl = snap
-                            .skills
-                            .get(&cid)
-                            .and_then(|sk| sk.get(&62453))
-                            .map(|r| r.level.clamp(0, 5) as f64)
-                            .unwrap_or(0.0);
-                        let mut best_range: Option<f64> = None;
-                        for it in snap.items.values() {
-                            if it.location_id != c_ship_id
-                                || !(27..=34).contains(&(it.flag as u16))
-                                || !is_mod_active(it)
-                            {
-                                continue;
-                            }
-                            let Some(mod_t) = ctx.sde.types.get(&it.type_id) else {
-                                continue;
-                            };
-                            if mod_t.group_id != 4174 {
-                                continue;
-                            }
-                            // Validate hull restriction solely from SDE `canFitShipType1..4` (`1302..=1305`) and `canFitShipGroup01..04` (`1298..=1301`)
-                            if !matches_hull_sde(mod_t) {
-                                continue;
-                            }
-                            // Enforce SDE `3265` (`activationRequiresActiveIndustrialCore`) (`docs/eve-wiki/Compression.md:39`)
-                            let requires_core = mod_t
-                                .default_attributes
-                                .get(&3265)
-                                .copied()
-                                .unwrap_or(0.0)
-                                > 0.0;
-                            if requires_core && !has_active_industrial_core {
-                                continue;
-                            }
-                            // Resolve compressor SDE attribute `3255` (`compressibleItemsTypeList`) against the client
-                            // type list (`res:/staticdata/typelist.fsdbinary`, imported as `sde_type_lists`).
-                            let type_list_id = mod_t
-                                .default_attributes
-                                .get(&3255)
-                                .copied()
-                                .unwrap_or(0.0)
-                                .round() as u32;
-                            let matches_category = ctx
-                                .sde
-                                .type_lists
-                                .get(&type_list_id)
-                                .zip(ctx.sde.types.get(&item_type_id))
-                                .is_some_and(|(tl, item_t)| tl.contains(item_t));
-                            if !matches_category {
-                                continue;
-                            }
-                            let base_range = mod_t
-                                .default_attributes
-                                .get(&54)
-                                .copied()
-                                .unwrap_or(44_000.0);
-                            let eff_range = base_range
-                                * (1.0 + (logistics_bonus_pct_per_lvl / 100.0) * logistics_lvl);
-                            best_range = Some(best_range.map_or(eff_range, |r| r.max(eff_range)));
-                        }
-                        best_range.map(|r| (c_ship_id, r))
-                    })
-                    .collect()
-            });
-
-            // 3. Verify 3D Ballpark distance to at least one matching active compressor ship
-            let handle = ctx.systems.get_or_spawn(sys_id);
-            let my_pos = if let Some(sid) = ship_id {
-                handle
-                    .get_ball_snapshot(sid)
-                    .await
-                    .ok()
-                    .flatten()
-                    .map(|(_, b)| b.position)
-            } else {
-                None
-            };
-            let mut in_range_compressor = false;
-            for (c_ship_id, max_range) in candidate_compressors {
-                if Some(c_ship_id) == ship_id {
-                    in_range_compressor = true;
-                    break;
-                }
-                if let Some(mpos) = my_pos {
-                    if let Ok(Some((_, cball))) = handle.get_ball_snapshot(c_ship_id).await {
-                        if (mpos - cball.position).length() <= max_range {
-                            in_range_compressor = true;
-                            break;
-                        }
-                    }
-                }
-            }
-
-            if !in_range_compressor {
-                return Some(Err(BridgeRpcError {
-                    code: "NoActiveCompressorInRange".into(),
-                    message: "In-space compression requires a ship with an active Industrial Core and matching active Compressor module in range".into(),
-                }));
-            }
-
-            // 4. V24 1:1 lossless unit compression (`sde_compressible_types`: 1 raw unit -> 1 compressed unit)
-            let res = ctx.db.try_with_mut_snapshot(|snap| {
-                if snap.is_item_locked_in_contract_or_job(item_id) {
-                    return Err(BridgeRpcError {
-                        code: "ItemLocked".into(),
-                        message: "Item is locked in a contract or job and cannot be compressed".into(),
-                    });
-                }
-                let Some(item) = snap.items.get_mut(&item_id) else {
-                    return Err(BridgeRpcError {
-                        code: "ItemNotFound".into(),
-                        message: format!("Item {item_id} not found"),
-                    });
-                };
-                if item.owner_id != char_id
-                    || Some(item.location_id) != ship_id
-                    || item.flag == InventoryFlag::Locked
-                    || item.quantity < 1
-                {
-                    return Err(BridgeRpcError {
-                        code: "CompressionFailed".into(),
-                        message: "Item cannot be compressed in space".into(),
-                    });
-                }
-                item.type_id = comp_type;
-                item.version += 1;
-                Ok((item.item_id, item.type_id, item.quantity, 0i32))
-            });
-
-            match res {
-                Ok((iid, ctype, qty, rem)) => Some(Ok(PyRep::keyval([
-                    ("itemID", PyRep::Integer(iid)),
-                    ("compressedTypeID", PyRep::Integer(ctype as i64)),
-                    ("quantity", PyRep::Integer(qty as i64)),
-                    ("compressedUnits", PyRep::Integer(qty as i64)),
-                    ("remainderUnits", PyRep::Integer(rem as i64)),
-                ]))),
-                Err(e) => Some(Err(e)),
-            }
-        }
-
-        ("structureCompressionMgr", "CompressItemInStructure") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-
-            if session.station_id.is_none() && session.structure_id.is_none() {
-                return Some(Err(BridgeRpcError {
-                    code: "NotDocked".into(),
-                    message: "CompressItemInStructure requires being docked at an Upwell structure".into(),
-                }));
-            }
-            let Some(structure_id) = session.structure_id else {
-                return Some(Err(BridgeRpcError {
-                    code: "MustBeInStructure".into(),
-                    message: "CompressItemInStructure requires an Upwell structure with reprocessing, not an NPC station".into(),
-                }));
-            };
-
-            // Args can be [structure_id, item_id] or [item_id]
-            let item_id = if args.len() >= 2 {
-                if let Some(arg_sid) = args.first().and_then(|a| a.as_i64()) {
-                    if arg_sid != structure_id {
-                        return Some(Err(BridgeRpcError {
-                            code: "InvalidStructure".into(),
-                            message: format!(
-                                "Cannot compress using structure {arg_sid} while docked at {structure_id}"
-                            ),
-                        }));
-                    }
-                }
-                args.get(1).and_then(|a| a.as_i64()).unwrap_or(0)
-            } else {
-                args.first().and_then(|a| a.as_i64()).unwrap_or(0)
-            };
-
-            if item_id == 0 {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidArgument".into(),
-                    message: "CompressItemInStructure requires itemID".into(),
-                }));
-            }
-
-            let res = ctx.db.try_with_mut_snapshot(|snap| {
-                let Some(st) = snap.structures.get(&structure_id) else {
-                    return Err(BridgeRpcError {
-                        code: "StructureNotFound".into(),
-                        message: format!("Structure {structure_id} not found"),
-                    });
-                };
-                let is_refinery = ctx
-                    .sde
-                    .types
-                    .get(&st.type_id)
-                    .is_some_and(|t| t.group_id == 1406);
-                let has_reproc_service = is_refinery
-                    || snap.items.values().any(|it| {
-                        it.location_id == structure_id
-                            && (it.type_id == 35894
-                                || ctx
-                                    .sde
-                                    .types
-                                    .get(&it.type_id)
-                                    .is_some_and(|t| t.group_id == 1322))
-                    });
-                if st.fuel_blocks == 0 || !has_reproc_service {
-                    return Err(BridgeRpcError {
-                        code: "ReprocessingServiceOffline".into(),
-                        message: format!(
-                            "Structure {structure_id} does not have an online Reprocessing service"
-                        ),
-                    });
-                }
-
-                if snap.is_item_locked_in_contract_or_job(item_id) {
-                    return Err(BridgeRpcError {
-                        code: "ItemLocked".into(),
-                        message: format!("Item {item_id} is locked in a contract or job"),
-                    });
-                }
-
-                let Some(item) = snap.items.get_mut(&item_id) else {
-                    return Err(BridgeRpcError {
-                        code: "CompressionFailed".into(),
-                        message: format!("Item {item_id} not found"),
-                    });
-                };
-                if item.owner_id != char_id {
-                    return Err(BridgeRpcError {
-                        code: "AccessDenied".into(),
-                        message: "Character does not own this item".into(),
-                    });
-                }
-                if item.flag == InventoryFlag::Locked {
-                    return Err(BridgeRpcError {
-                        code: "ItemLocked".into(),
-                        message: format!("Item {item_id} is locked"),
-                    });
-                }
-                let reachable = (item.location_id == structure_id
-                    && item.flag == InventoryFlag::Hangar)
-                    || (Some(item.location_id) == session.ship_id);
-                if !reachable || item.quantity < 1 {
-                    return Err(BridgeRpcError {
-                        code: "CompressionFailed".into(),
-                        message: "Item cannot be compressed (invalid quantity or not in current structure hangar)".into(),
-                    });
-                }
-                let Some(&comp_type) = ctx.sde.compressible_types.get(&item.type_id) else {
-                    return Err(BridgeRpcError {
-                        code: "CompressionFailed".into(),
-                        message: format!("Type {} is not compressible", item.type_id),
-                    });
-                };
-                let group_id = ctx
-                    .sde
-                    .types
-                    .get(&item.type_id)
-                    .map(|t| t.group_id)
-                    .unwrap_or(0);
-                // Gas (group 711) and Moon Ore (groups 1884, 1920..=1923) cannot be compressed in structures (`docs/eve-wiki/Compression.md:57-60`)
-                if group_id == 711 || matches!(group_id, 1884 | 1920..=1923) {
-                    return Err(BridgeRpcError {
-                        code: "StructureCannotCompressType".into(),
-                        message: "Gas and Moon Ore cannot be compressed in a structure; use an in-space compressor".into(),
-                    });
-                }
-
-                // V24 1:1 lossless unit compression (`sde_compressible_types`: 1 raw unit -> 1 compressed unit)
-                item.type_id = comp_type;
-                item.version += 1;
-                Ok((item.item_id, item.type_id, item.quantity, 0i32))
-            });
-
-            match res {
-                Ok((iid, ctype, qty, rem)) => Some(Ok(PyRep::keyval([
-                    ("itemID", PyRep::Integer(iid)),
-                    ("compressedTypeID", PyRep::Integer(ctype as i64)),
-                    ("quantity", PyRep::Integer(qty as i64)),
-                    ("compressedUnits", PyRep::Integer(qty as i64)),
-                    ("remainderUnits", PyRep::Integer(rem as i64)),
-                ]))),
-                Err(e) => Some(Err(e)),
-            }
-        }
-
-        ("structureCompressionMgr", "DecompressGasInStructure") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-
-            if session.station_id.is_none() && session.structure_id.is_none() {
-                return Some(Err(BridgeRpcError {
-                    code: "NotDocked".into(),
-                    message: "DecompressGasInStructure requires being docked at an Upwell structure".into(),
-                }));
-            }
-            let Some(structure_id) = session.structure_id else {
-                return Some(Err(BridgeRpcError {
-                    code: "MustBeInStructure".into(),
-                    message: "DecompressGasInStructure requires an Upwell structure".into(),
-                }));
-            };
-
-            let item_id = if args.len() >= 2 {
-                if let Some(arg_sid) = args.first().and_then(|a| a.as_i64()) {
-                    if arg_sid != structure_id {
-                        return Some(Err(BridgeRpcError {
-                            code: "InvalidStructure".into(),
-                            message: format!(
-                                "Cannot decompress gas using structure {arg_sid} while docked at {structure_id}"
-                            ),
-                        }));
-                    }
-                }
-                args.get(1).and_then(|a| a.as_i64()).unwrap_or(0)
-            } else {
-                args.first().and_then(|a| a.as_i64()).unwrap_or(0)
-            };
-
-            if item_id == 0 {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidArgument".into(),
-                    message: "DecompressGasInStructure requires itemID".into(),
-                }));
-            }
-
-            // Always use `session.structure_id` exclusively (never client-supplied structure ID)
-            let efficiency =
-                compute_gas_decompression_efficiency(ctx, char_id, Some(structure_id));
-
-            let res = ctx.db.try_with_mut_snapshot(|snap| {
-                let Some(st) = snap.structures.get(&structure_id) else {
-                    return Err(BridgeRpcError {
-                        code: "StructureNotFound".into(),
-                        message: format!("Structure {structure_id} not found"),
-                    });
-                };
-                let is_refinery = ctx
-                    .sde
-                    .types
-                    .get(&st.type_id)
-                    .is_some_and(|t| t.group_id == 1406);
-                let has_reproc_service = is_refinery
-                    || snap.items.values().any(|it| {
-                        it.location_id == structure_id
-                            && (it.type_id == 35894
-                                || ctx
-                                    .sde
-                                    .types
-                                    .get(&it.type_id)
-                                    .is_some_and(|t| t.group_id == 1322))
-                    });
-                if st.fuel_blocks == 0 || !has_reproc_service {
-                    return Err(BridgeRpcError {
-                        code: "ReprocessingServiceOffline".into(),
-                        message: format!(
-                            "Structure {structure_id} does not have an online Reprocessing service"
-                        ),
-                    });
-                }
-
-                let is_locked_in_contract_or_job = snap.is_item_locked_in_contract_or_job(item_id);
-
-                let (raw_tid, decomp_qty) = {
-                    let Some(item) = snap.items.get_mut(&item_id) else {
-                        return Err(BridgeRpcError {
-                            code: "ItemNotFound".into(),
-                            message: format!("Item {item_id} not found"),
-                        });
-                    };
-
-                    if item.owner_id != char_id {
-                        return Err(BridgeRpcError {
-                            code: "AccessDenied".into(),
-                            message: "Character does not own this item".into(),
-                        });
-                    }
-
-                    if item.flag == InventoryFlag::Locked || is_locked_in_contract_or_job {
-                        return Err(BridgeRpcError {
-                            code: "ItemLocked".into(),
-                            message: format!(
-                                "Item {item_id} is locked (e.g. in courier escrow or contract) and cannot be decompressed"
-                            ),
-                        });
-                    }
-
-                    if item.location_id != structure_id || item.flag != InventoryFlag::Hangar {
-                        return Err(BridgeRpcError {
-                            code: "ItemNotInStructureHangar".into(),
-                            message: format!(
-                                "Item {item_id} must be in your hangar at structure {structure_id} to decompress"
-                            ),
-                        });
-                    }
-
-                    // Reverse lookup: find raw type that compresses to item.type_id
-                    let raw_type = ctx
-                        .sde
-                        .compressible_types
-                        .iter()
-                        .find(|&(_, &c_tid)| c_tid == item.type_id)
-                        .map(|(&r_tid, _)| r_tid);
-
-                    let Some(raw_tid) = raw_type else {
-                        return Err(BridgeRpcError {
-                            code: "NotCompressedItem".into(),
-                            message: format!("Type {} is not a compressed item", item.type_id),
-                        });
-                    };
-
-                    // Only compressed gas (raw group_id == 711) can be decompressed (`docs/eve-wiki/Compression.md:62-66`)
-                    let is_gas = ctx
-                        .sde
-                        .types
-                        .get(&raw_tid)
-                        .is_some_and(|t| t.group_id == 711);
-                    if !is_gas {
-                        return Err(BridgeRpcError {
-                            code: "NotCompressedGas".into(),
-                            message: format!(
-                                "Type {} (raw type {raw_tid}) is not compressed harvestable cloud gas (group 711)",
-                                item.type_id
-                            ),
-                        });
-                    }
-
-                    // V24 1:1 unit semantics: decompressed units = floor(quantity * efficiency)
-                    let total_raw = ((item.quantity as f64) * efficiency).floor() as i64;
-                    if total_raw <= 0 {
-                        return Err(BridgeRpcError {
-                            code: "InsufficientQuantityToDecompress".into(),
-                            message: "Quantity too small to yield decompressed gas units".into(),
-                        });
-                    }
-                    // Consume the compressed gas item
-                    item.quantity = 0;
-                    (raw_tid, total_raw)
-                };
-
-                // Remove 0-qty item
-                snap.items.remove(&item_id);
-
-                // Add decompressed gas item to structure hangar
-                snap.next_entity_id += 1;
-                let new_id = snap.next_entity_id;
-                snap.items.insert(
-                    new_id,
-                    InventoryItemRecord {
-                        item_id: new_id,
-                        type_id: raw_tid,
-                        owner_id: char_id,
-                        location_id: structure_id,
-                        flag: InventoryFlag::Hangar,
-                        quantity: decomp_qty as i32,
-                        singleton: false,
-                        version: 1,
-                        ..Default::default()
-                    },
-                );
-
-                Ok((new_id, raw_tid, decomp_qty))
-            });
-
-            match res {
-                Ok((new_iid, r_tid, d_qty)) => Some(Ok(PyRep::keyval([
-                    ("itemID", PyRep::Integer(new_iid)),
-                    ("decompressedTypeID", PyRep::Integer(r_tid as i64)),
-                    ("decompressedQuantity", PyRep::Integer(d_qty)),
-                    ("decompressedUnits", PyRep::Integer(d_qty)),
-                    ("efficiency", PyRep::Real(efficiency)),
-                ]))),
-                Err(e) => Some(Err(e)),
-            }
-        }
-
-        ("structureCompressionMgr", "GetMyGasDecompressionEfficiency") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            if let Some(arg_sid) = args.first().and_then(|a| a.as_i64()) {
-                if session.structure_id != Some(arg_sid) {
-                    return Some(Err(BridgeRpcError {
-                        code: "InvalidStructure".into(),
-                        message: format!(
-                            "Cannot query gas decompression efficiency for structure {arg_sid} while not docked there"
-                        ),
-                    }));
-                }
-            }
-            let eff = compute_gas_decompression_efficiency(ctx, char_id, session.structure_id);
-            Some(Ok(PyRep::Real(eff)))
-        }
-
-        // ====================================================================
-        // MN-18: Career Progression Verification from Mining Ledger
-        // ====================================================================
-        ("careerGoals", "GetMiningCareerProgress")
-        | ("seasonManager", "get_mining_goal_progress") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-
-            let goal_id = args.first().and_then(|a| a.as_i64()).unwrap_or(2) as u32;
-
-            let total_mined = ctx.db.with_snapshot(|snap| {
-                snap.mining_ledger
-                    .iter()
-                    .filter(|r| r.character_id == char_id)
-                    .map(|r| r.quantity.max(0) as u64)
-                    .sum::<u64>()
-            });
-
-            Some(Ok(PyRep::keyval([
-                ("goalID", PyRep::Integer(goal_id as i64)),
-                ("currentProgress", PyRep::Integer(total_mined as i64)),
-                ("verifiedFromLedger", PyRep::Bool(true)),
-            ])))
-        }
-
-        _ => None,
+        _ => mining_compression::handle_compression(ctx, session, service, method, args, _kwargs)
+            .await,
     }
 }

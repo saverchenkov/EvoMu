@@ -182,7 +182,7 @@ pub fn dispatch_economy_route(
     claims: Option<&SsoTokenClaims>,
     page: usize,
 ) -> Option<RouteExecutionResult> {
-    let now = ctx.now_unix();
+    let _now = ctx.now_unix();
 
     match (method, path) {
         // 1. Market Routes (ESI-6)

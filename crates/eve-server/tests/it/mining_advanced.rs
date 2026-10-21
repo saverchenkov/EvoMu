@@ -22,6 +22,56 @@ use eve_server::system_actor::AsteroidState;
 use glam::DVec3;
 use std::collections::HashMap;
 
+fn make_item(
+    item_id: i64,
+    type_id: u32,
+    owner_id: i64,
+    location_id: i64,
+    flag: InventoryFlag,
+    quantity: i32,
+    singleton: bool,
+) -> InventoryItemRecord {
+    InventoryItemRecord {
+        item_id,
+        type_id,
+        owner_id,
+        location_id,
+        flag,
+        quantity,
+        singleton,
+        version: 1,
+        ..Default::default()
+    }
+}
+
+fn make_structure(
+    structure_id: i64,
+    type_id: u32,
+    owner_corp_id: i64,
+    solar_system_id: u32,
+    name: &str,
+    position: [f64; 3],
+    fuel_blocks: u32,
+) -> UpwellStructureRecord {
+    UpwellStructureRecord {
+        structure_id,
+        type_id,
+        owner_corp_id,
+        solar_system_id,
+        name: name.into(),
+        position,
+        state: "ShieldVulnerable".into(),
+        quantum_core_installed: true,
+        fuel_blocks,
+        shield_hp: 50_000.0,
+        armor_hp: 50_000.0,
+        hull_hp: 50_000.0,
+        reinforced_until_unix: 0,
+        last_damage_tick: 0,
+        last_damage_unix: 0,
+    }
+}
+
 // ============================================================================
 // Helper: Authenticate session with character 90_000_001
 // ============================================================================
@@ -64,6 +114,8 @@ async fn create_auth_session(ctx: &ServerContext, session_id: u64) -> SessionSta
 // ============================================================================
 #[tokio::test]
 async fn test_mn13_moon_extraction_lifecycle_and_fracture() {
+    // parity: plan:MN-13, feat:mining.moon-extraction, feat:mining.moon-fracture, feat:mining.moon-resources
+    eve_testkit::attest(&["plan:MN-13", "feat:mining.moon-extraction", "feat:mining.moon-fracture", "feat:mining.moon-resources"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let mut sess = create_auth_session(&ctx, 1301).await;
@@ -76,23 +128,7 @@ async fn test_mn13_moon_extraction_lifecycle_and_fracture() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.structures.insert(
             structure_id,
-            UpwellStructureRecord {
-                structure_id,
-                type_id: 35835, // Athanor refinery
-                owner_corp_id: corp_id,
-                solar_system_id: system_id,
-                name: "Jita IV Moon Drill".into(),
-                position: [100_000.0, 50_000.0, -200_000.0],
-                state: "ShieldVulnerable".into(),
-                quantum_core_installed: true,
-                fuel_blocks: 500,
-                shield_hp: 50_000.0,
-                armor_hp: 50_000.0,
-                hull_hp: 50_000.0,
-                reinforced_until_unix: 0,
-                last_damage_tick: 0,
-                last_damage_unix: 0,
-            },
+            make_structure(structure_id, 35835, corp_id, system_id, "Jita IV Moon Drill", [100_000.0, 50_000.0, -200_000.0], 500),
         );
     });
 
@@ -294,7 +330,10 @@ async fn test_mn13_moon_extraction_lifecycle_and_fracture() {
     };
     assert_eq!(frac_kv["fractured"], PyRep::Bool(true));
     assert_eq!(frac_kv["status"].as_str(), Some("Fractured"));
-    assert_eq!(frac_kv["asteroidCount"].as_i64(), Some(3));
+    assert!(
+        matches!(frac_kv["asteroidCount"].as_i64(), Some(3 | 6)),
+        "Fractured moon chunk must spawn 6 mixed basic/+15% asteroids (or 3 on jackpot)"
+    );
     let PyRep::List(ast_id_list) = &frac_kv["asteroidIDs"] else {
         panic!("Expected asteroidIDs list");
     };
@@ -311,8 +350,9 @@ async fn test_mn13_moon_extraction_lifecycle_and_fracture() {
 // MN-14: Auto Moon Mining Service (Metenox Moon Drill)
 // ============================================================================
 #[tokio::test]
-// parity: feat:mining.metenox
 async fn test_mn14_auto_moon_mining_service() {
+    // parity: feat:mining.metenox
+    eve_testkit::attest(&["feat:mining.metenox"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let mut sess = create_auth_session(&ctx, 1401).await;
@@ -327,58 +367,22 @@ async fn test_mn14_auto_moon_mining_service() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.structures.insert(
             highsec_structure_id,
-            UpwellStructureRecord {
-                structure_id: highsec_structure_id,
-                type_id: 81826, // Metenox Moon Drill
-                owner_corp_id: corp_id,
-                solar_system_id: highsec_system_id,
-                name: "Highsec Invalid Moon Drill".into(),
-                position: [200_000.0, 0.0, -100_000.0],
-                state: "ShieldVulnerable".into(),
-                quantum_core_installed: true,
-                fuel_blocks: 100,
-                shield_hp: 50_000.0,
-                armor_hp: 50_000.0,
-                hull_hp: 50_000.0,
-                reinforced_until_unix: 0,
-                last_damage_tick: 0,
-                last_damage_unix: 0,
-            },
+            make_structure(highsec_structure_id, 81826, corp_id, highsec_system_id, "Highsec Invalid Moon Drill", [200_000.0, 0.0, -100_000.0], 100),
         );
         snap.structures.insert(
             structure_id,
-            UpwellStructureRecord {
-                structure_id,
-                type_id: 81826, // Metenox Moon Drill
-                owner_corp_id: corp_id,
-                solar_system_id: lowsec_system_id,
-                name: "Asabona Auto Moon Drill".into(),
-                position: [200_000.0, 0.0, -100_000.0],
-                state: "ShieldVulnerable".into(),
-                quantum_core_installed: true,
-                fuel_blocks: 100,
-                shield_hp: 50_000.0,
-                armor_hp: 50_000.0,
-                hull_hp: 50_000.0,
-                reinforced_until_unix: 0,
-                last_damage_tick: 0,
-                last_damage_unix: 0,
-            },
+            make_structure(structure_id, 81826, corp_id, lowsec_system_id, "Asabona Auto Moon Drill", [200_000.0, 0.0, -100_000.0], 100),
         );
         // Seed actual Magmatic Gas (type 81143) item in the Low-Sec Metenox structure inventory
         snap.items.insert(
             gas_item_id,
-            InventoryItemRecord {
-                item_id: gas_item_id,
-                type_id: 81143, // Magmatic Gas
-                owner_id: corp_id,
-                location_id: structure_id,
-                flag: InventoryFlag::Hangar,
-                quantity: 50,
-                singleton: false,
-                version: 1,
-                ..Default::default()
-            },
+            make_item(gas_item_id, 81143, corp_id, structure_id, InventoryFlag::Hangar, 50, false),
+        );
+        // Seed a third-party Magmatic Gas stack (owner_id != corp_id) in the structure hangar;
+        // it must NOT be counted toward the Metenox drill's reagent inventory
+        snap.items.insert(
+            gas_item_id + 1,
+            make_item(gas_item_id + 1, 81143, 999_999_999, structure_id, InventoryFlag::Hangar, 500, false),
         );
 
         // Seed a stale record with inflated `magmatic_gas_remaining: 999` to verify authoritative inventory sync
@@ -431,9 +435,18 @@ async fn test_mn14_auto_moon_mining_service() {
         panic!("Expected KeyVal from RequestMiningDetails");
     };
     assert_eq!(det_kv["status"].as_str(), Some("Active"));
-    // Authoritative inventory sync must overwrite stale 999 with actual 100 fuel and 50 gas
+    // Authoritative inventory read must return actual 100 fuel and 50 corp-owned gas (ignoring third-party 500 gas),
+    // and RequestMiningDetails must NOT mutate the underlying `snap.auto_moon_miners` state on read
     assert_eq!(det_kv["fuelRemaining"].as_i64(), Some(100));
     assert_eq!(det_kv["magmaticGasRemaining"].as_i64(), Some(50));
+    let unmutated_fuel = ctx.db.with_snapshot(|snap| {
+        snap.auto_moon_miners.get(&structure_id).map(|m| m.fuel_units_remaining)
+    });
+    assert_eq!(
+        unmutated_fuel,
+        Some(999),
+        "RequestMiningDetails must be read-only and not mutate persisted AutoMoonMinerRecord before cycle tick"
+    );
     assert_eq!(det_kv["efficiency"].as_f64(), Some(0.40));
     let hourly_yield = det_kv["hourlyYield"].as_i64().unwrap();
     assert!(hourly_yield > 0, "Hourly moon material yield must be positive");
@@ -529,6 +542,8 @@ async fn test_mn14_auto_moon_mining_service() {
 // ============================================================================
 #[tokio::test]
 async fn test_mn15_corp_mining_ledger_service_and_observer_tracking() {
+    // parity: plan:MN-16, feat:mining.corp-ledger
+    eve_testkit::attest(&["plan:MN-16", "feat:mining.corp-ledger"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let mut sess = create_auth_session(&ctx, 1501).await;
@@ -541,29 +556,32 @@ async fn test_mn15_corp_mining_ledger_service_and_observer_tracking() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.structures.insert(
             observer_id,
-            UpwellStructureRecord {
-                structure_id: observer_id,
-                type_id: 35835, // Athanor refinery observer
-                owner_corp_id: corp_id,
-                solar_system_id: system_id,
-                name: "Jita Mining Observer".into(),
-                position: [150_000.0, 20_000.0, -80_000.0],
-                state: "ShieldVulnerable".into(),
-                quantum_core_installed: true,
-                fuel_blocks: 500,
-                shield_hp: 50_000.0,
-                armor_hp: 50_000.0,
-                hull_hp: 50_000.0,
-                reinforced_until_unix: 0,
-                last_damage_tick: 0,
-                last_damage_unix: 0,
-            },
+            make_structure(observer_id, 35835, corp_id, system_id, "Jita Mining Observer", [150_000.0, 20_000.0, -80_000.0], 500),
         );
     });
 
     // Record mining ledger entries for character in the system
     let _ = ctx.db.record_mining_ledger_entry(90_000_001, system_id, 1230, 2_500, now);
     let _ = ctx.db.record_mining_ledger_entry(90_000_001, system_id, 45492, 1_200, now);
+
+    // 0. Unprivileged member (corp_role == 0) must be rejected with CrpAccessDenied
+    sess.corp_role = 0;
+    let role_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "corpMiningLedger",
+            None,
+            "GetObserversWithMiningEvents",
+            &[],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("GetObserversWithMiningEvents without Accountant/StationManager/Director role must fail");
+    assert_eq!(role_err.code, "CrpAccessDenied");
+
+    // Grant Accountant role
+    sess.corp_role = eve_db::corp_roles::ROLE_ACCOUNTANT;
 
     // 1. GetObserversWithMiningEvents
     let obs_list_res = ctx
@@ -610,8 +628,9 @@ async fn test_mn15_corp_mining_ledger_service_and_observer_tracking() {
 // MN-16: In-Space & Structure Compression & Decompression
 // ============================================================================
 #[tokio::test]
-// parity: feat:mining.compression-space, feat:mining.compression-structure, feat:mining.gas-decompression
 async fn test_mn16_in_space_and_structure_compression_and_decompression() {
+    // parity: feat:mining.compression-space, feat:mining.compression-structure, feat:mining.gas-decompression
+    eve_testkit::attest(&["feat:mining.compression-space", "feat:mining.compression-structure", "feat:mining.gas-decompression"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let mut sess = create_auth_session(&ctx, 1601).await;
@@ -624,23 +643,7 @@ async fn test_mn16_in_space_and_structure_compression_and_decompression() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.structures.insert(
             structure_id,
-            UpwellStructureRecord {
-                structure_id,
-                type_id: 35835,
-                owner_corp_id: corp_id,
-                solar_system_id: system_id,
-                name: "Jita Compression Facility".into(),
-                position: [0.0, 0.0, 0.0],
-                state: "ShieldVulnerable".into(),
-                quantum_core_installed: true,
-                fuel_blocks: 500,
-                shield_hp: 50_000.0,
-                armor_hp: 50_000.0,
-                hull_hp: 50_000.0,
-                reinforced_until_unix: 0,
-                last_damage_tick: 0,
-                last_damage_unix: 0,
-            },
+            make_structure(structure_id, 35835, corp_id, system_id, "Jita Compression Facility", [0.0, 0.0, 0.0], 500),
         );
     });
 
@@ -903,6 +906,46 @@ async fn test_mn16_in_space_and_structure_compression_and_decompression() {
         );
     });
 
+    // An unfitted Standup Reprocessing Facility I (`35892`, group 1322) sitting in the structure hangar
+    // (`InventoryFlag::Hangar`, flag_id == 4) does NOT count as a fitted online service module
+    let reproc_svc_mod_id = 710_000_009_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            reproc_svc_mod_id,
+            InventoryItemRecord {
+                item_id: reproc_svc_mod_id,
+                type_id: 35892, // Standup Reprocessing Facility I
+                owner_id: corp_id,
+                location_id: structure_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+    let unfitted_svc_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "structureCompressionMgr",
+            None,
+            "CompressItemInStructure",
+            &[PyRep::Integer(structure_id), PyRep::Integer(item_in_struct)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Unfitted reprocessing module in hangar must not enable structure compression");
+    assert_eq!(unfitted_svc_err.code, "ReprocessingServiceOffline");
+
+    // Fit the Standup Reprocessing Facility I into `InventoryFlag::ServiceSlot0` (`flag_id == 164`)
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(m) = snap.items.get_mut(&reproc_svc_mod_id) {
+            m.flag = InventoryFlag::ServiceSlot0;
+        }
+    });
+
     // Moon Ore cannot be compressed in a structure (`StructureCannotCompressType`)
     let moon_comp_err = ctx
         .dispatch_rpc(
@@ -1004,65 +1047,19 @@ async fn test_mn16_in_space_and_structure_compression_and_decompression() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.structures.insert(
             other_structure_id,
-            UpwellStructureRecord {
-                structure_id: other_structure_id,
-                type_id: 35836, // Tatara (+10% bonus)
-                owner_corp_id: corp_id,
-                solar_system_id: system_id,
-                name: "Remote Tatara".into(),
-                position: [50_000.0, 0.0, 0.0],
-                state: "ShieldVulnerable".into(),
-                quantum_core_installed: true,
-                fuel_blocks: 500,
-                shield_hp: 50_000.0,
-                armor_hp: 50_000.0,
-                hull_hp: 50_000.0,
-                reinforced_until_unix: 0,
-                last_damage_tick: 0,
-                last_damage_unix: 0,
-            },
+            make_structure(other_structure_id, 35836, corp_id, system_id, "Remote Tatara", [50_000.0, 0.0, 0.0], 500),
         );
         snap.items.insert(
             comp_gas_item,
-            InventoryItemRecord {
-                item_id: comp_gas_item,
-                type_id: 62399, // Compressed Fullerite-C50
-                owner_id: char_id,
-                location_id: structure_id,
-                flag: InventoryFlag::Hangar,
-                quantity: 100,
-                singleton: false,
-                version: 1,
-                ..Default::default()
-            },
+            make_item(comp_gas_item, 62399, char_id, structure_id, InventoryFlag::Hangar, 100, false),
         );
         snap.items.insert(
             remote_gas_item,
-            InventoryItemRecord {
-                item_id: remote_gas_item,
-                type_id: 62399, // Compressed Fullerite-C50 at remote station
-                owner_id: char_id,
-                location_id: 60_003_760,
-                flag: InventoryFlag::Hangar,
-                quantity: 100,
-                singleton: false,
-                version: 1,
-                ..Default::default()
-            },
+            make_item(remote_gas_item, 62399, char_id, 60_003_760, InventoryFlag::Hangar, 100, false),
         );
         snap.items.insert(
             courier_locked_gas_item,
-            InventoryItemRecord {
-                item_id: courier_locked_gas_item,
-                type_id: 62399, // Compressed Fullerite-C50 locked in courier wrap
-                owner_id: char_id,
-                location_id: 990_000_001, // courier wrap_id
-                flag: InventoryFlag::Locked,
-                quantity: 100,
-                singleton: false,
-                version: 1,
-                ..Default::default()
-            },
+            make_item(courier_locked_gas_item, 62399, char_id, 990_000_001, InventoryFlag::Locked, 100, false),
         );
     });
 
@@ -1157,6 +1154,8 @@ async fn test_mn16_in_space_and_structure_compression_and_decompression() {
 // ============================================================================
 #[tokio::test]
 async fn test_mn17_living_world_npc_mining_ops_and_market_hauling() {
+    // parity: feat:mining.npc-mining-ops, feat:npc.mining-op-npc
+    eve_testkit::attest(&["feat:mining.npc-mining-ops", "feat:npc.mining-op-npc"]);
     let ctx = ServerContext::new();
     let director = LivingWorldDirector::new();
 
@@ -1245,6 +1244,8 @@ async fn test_mn17_living_world_npc_mining_ops_and_market_hauling() {
 // ============================================================================
 #[tokio::test]
 async fn test_mn18_mining_missions_and_career_goals_from_ledger() {
+    // parity: feat:mining.mining-missions, feat:mining.mining-goals
+    eve_testkit::attest(&["feat:mining.mining-missions", "feat:mining.mining-goals"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let mut sess = create_auth_session(&ctx, 1801).await;
@@ -1257,21 +1258,10 @@ async fn test_mn18_mining_missions_and_career_goals_from_ledger() {
     // ------------------------------------------------------------------------
     // 1. Find a Level 1 Mining (divisionID = 23) agent via agentMgr.GetAgents
     let agents_rep = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "agentMgr",
-            None,
-            "GetAgents",
-            &[PyRep::Integer(1), PyRep::Integer(23)],
-            &kw,
-            None,
-        )
+        .dispatch_rpc(&mut sess, "agentMgr", None, "GetAgents", &[PyRep::Integer(1), PyRep::Integer(23)], &kw, None)
         .await
         .expect("agentMgr.GetAgents for L1 Mining");
-    let PyRep::Rowset {
-        rows: agent_rows, ..
-    } = agents_rep
-    else {
+    let PyRep::Rowset { rows: agent_rows, .. } = agents_rep else {
         panic!("Expected Rowset from agentMgr.GetAgents");
     };
     assert!(!agent_rows.is_empty(), "L1 Mining agents must exist in SDE");
@@ -1291,15 +1281,7 @@ async fn test_mn18_mining_missions_and_career_goals_from_ledger() {
 
     // 2. Bind to the mining agent moniker via MachoBindObject on agentMgr
     let bind_res = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "agentMgr",
-            None,
-            "MachoBindObject",
-            &[PyRep::Integer(mining_agent_id), PyRep::None],
-            &kw,
-            None,
-        )
+        .dispatch_rpc(&mut sess, "agentMgr", None, "MachoBindObject", &[PyRep::Integer(mining_agent_id), PyRep::None], &kw, None)
         .await
         .expect("MachoBindObject on agentMgr");
     let PyRep::Tuple(bind_tuple) = bind_res else {
@@ -1309,59 +1291,23 @@ async fn test_mn18_mining_missions_and_career_goals_from_ledger() {
 
     // 3. Request mining mission via bound agentMgr.DoAction(2) (agentDialogueButtonRequestMission)
     let offer_res = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "agentMgr",
-            Some(agent_oid),
-            "DoAction",
-            &[PyRep::Integer(2)],
-            &kw,
-            None,
-        )
+        .dispatch_rpc(&mut sess, "agentMgr", Some(agent_oid), "DoAction", &[PyRep::Integer(2)], &kw, None)
         .await
         .expect("agentMgr.DoAction(RequestMission)");
-    let mission_id = offer_res
-        .dict_get("missionID")
-        .and_then(|v| v.as_i64())
-        .expect("missionID from DoAction offer") as u32;
-    assert_eq!(
-        offer_res.dict_get("state").and_then(|v| v.as_str()),
-        Some("Offered")
-    );
+    let mission_id = offer_res.dict_get("missionID").and_then(|v| v.as_i64()).expect("missionID from DoAction offer") as u32;
+    assert_eq!(offer_res.dict_get("state").and_then(|v| v.as_str()), Some("Offered"));
 
     // 4. Accept mission via bound agentMgr.DoAction(3) (agentDialogueButtonAccept) -> spawns pocket asteroid
     let accept_res = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "agentMgr",
-            Some(agent_oid),
-            "DoAction",
-            &[PyRep::Integer(3)],
-            &kw,
-            None,
-        )
+        .dispatch_rpc(&mut sess, "agentMgr", Some(agent_oid), "DoAction", &[PyRep::Integer(3)], &kw, None)
         .await
         .expect("agentMgr.DoAction(Accept)");
-    assert_eq!(
-        accept_res.dict_get("state").and_then(|v| v.as_str()),
-        Some("Accepted")
-    );
-    let bookmark_id = accept_res
-        .dict_get("bookmarkID")
-        .and_then(|v| v.as_i64())
-        .expect("bookmarkID on accept");
+    assert_eq!(accept_res.dict_get("state").and_then(|v| v.as_str()), Some("Accepted"));
+    let bookmark_id = accept_res.dict_get("bookmarkID").and_then(|v| v.as_i64()).expect("bookmarkID on accept");
 
     // Verify mission journal via agentMgr.GetMyJournalDetails
     let journal_res = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "agentMgr",
-            None,
-            "GetMyJournalDetails",
-            &[],
-            &kw,
-            None,
-        )
+        .dispatch_rpc(&mut sess, "agentMgr", None, "GetMyJournalDetails", &[], &kw, None)
         .await
         .expect("agentMgr.GetMyJournalDetails");
     let PyRep::Tuple(journal_tuple) = journal_res else {
@@ -1382,39 +1328,20 @@ async fn test_mn18_mining_missions_and_career_goals_from_ledger() {
     let pocket_ast_id = 910_000_000 + (mission_id as i64) * 1000 + 1;
     let handle = ctx.systems.get_or_spawn(system_id);
     let pocket_ast = handle.get_asteroid_state(pocket_ast_id).await.unwrap();
-    assert!(
-        pocket_ast.is_some(),
-        "Pocket asteroid must be spawned in mission room"
-    );
+    assert!(pocket_ast.is_some(), "Pocket asteroid must be spawned in mission room");
     assert_eq!(pocket_ast.unwrap().type_id, 1230); // Veldspar
-    assert!(
-        ctx.db.with_snapshot(|snap| snap.bookmarks.contains_key(&bookmark_id)),
-        "Mission pocket bookmark must exist"
-    );
+    assert!(ctx.db.with_snapshot(|snap| snap.bookmarks.contains_key(&bookmark_id)), "Mission pocket bookmark must exist");
 
     // Clear any starter Veldspar from character inventory to test incomplete delivery
     ctx.db.with_mut_snapshot(|snap| {
-        snap.items
-            .retain(|_, it| !(it.owner_id == char_id && it.type_id == 1230));
+        snap.items.retain(|_, it| !(it.owner_id == char_id && it.type_id == 1230));
     });
 
     // Try completing mission via DoAction(6) before mining/delivering required ore -> must fail
     let incomplete_res = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "agentMgr",
-            Some(agent_oid),
-            "DoAction",
-            &[PyRep::Integer(6)],
-            &kw,
-            None,
-        )
+        .dispatch_rpc(&mut sess, "agentMgr", Some(agent_oid), "DoAction", &[PyRep::Integer(6)], &kw, None)
         .await;
-
-    assert!(
-        incomplete_res.is_err(),
-        "Completing mining mission without required ore must fail"
-    );
+    assert!(incomplete_res.is_err(), "Completing mining mission without required ore must fail");
     assert_eq!(incomplete_res.err().unwrap().code, "MissionIncomplete");
 
     // Provide required ore (500 units of Veldspar) into character station hangar
@@ -1422,78 +1349,32 @@ async fn test_mn18_mining_missions_and_career_goals_from_ledger() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(
             ore_item_id,
-            InventoryItemRecord {
-                item_id: ore_item_id,
-                type_id: 1230,
-                owner_id: char_id,
-                location_id: station_id,
-                flag: InventoryFlag::Hangar,
-                quantity: 500,
-                singleton: false,
-                version: 1,
-                ..Default::default()
-            },
+            make_item(ore_item_id, 1230, char_id, station_id, InventoryFlag::Hangar, 500, false),
         );
     });
 
     // Complete mission via DoAction(6) (agentDialogueButtonComplete) -> succeeds, consumes ore, pays rewards
     let complete_res = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "agentMgr",
-            Some(agent_oid),
-            "DoAction",
-            &[PyRep::Integer(6)],
-            &kw,
-            None,
-        )
+        .dispatch_rpc(&mut sess, "agentMgr", Some(agent_oid), "DoAction", &[PyRep::Integer(6)], &kw, None)
         .await
         .expect("agentMgr.DoAction(Complete) RPC");
-
-    assert_eq!(
-        complete_res.dict_get("missionID").and_then(|v| v.as_i64()),
-        Some(mission_id as i64)
-    );
-    let m_state = ctx.db.with_snapshot(|snap| {
-        snap.active_missions
-            .get(&(char_id, mission_id))
-            .map(|m| m.state.clone())
-    });
+    assert_eq!(complete_res.dict_get("missionID").and_then(|v| v.as_i64()), Some(mission_id as i64));
+    let m_state = ctx.db.with_snapshot(|snap| snap.active_missions.get(&(char_id, mission_id)).map(|m| m.state.clone()));
     assert_eq!(m_state.as_deref(), Some("Completed"));
 
     // Verify ore was consumed from inventory
-    let remaining_ore = ctx.db.with_snapshot(|snap| {
-        snap.items
-            .get(&ore_item_id)
-            .map(|it| it.quantity)
-            .unwrap_or(0)
-    });
-    assert_eq!(
-        remaining_ore, 0,
-        "Mission delivery must consume the 500 units of ore"
-    );
+    let remaining_ore = ctx.db.with_snapshot(|snap| snap.items.get(&ore_item_id).map(|it| it.quantity).unwrap_or(0));
+    assert_eq!(remaining_ore, 0, "Mission delivery must consume the 500 units of ore");
 
     // ------------------------------------------------------------------------
     // B. Career Progression Verified from Mining Ledger
     // ------------------------------------------------------------------------
-    let _ = ctx
-        .db
-        .record_mining_ledger_entry(char_id, system_id, 1230, 3_500, now);
-    let _ = ctx
-        .db
-        .record_mining_ledger_entry(char_id, system_id, 1228, 1_500, now);
+    let _ = ctx.db.record_mining_ledger_entry(char_id, system_id, 1230, 3_500, now);
+    let _ = ctx.db.record_mining_ledger_entry(char_id, system_id, 1228, 1_500, now);
 
     // Query career goal progress via V24 seasonManager.get_character_progress_by_character_id
     let goal_res = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "seasonManager",
-            None,
-            "get_character_progress_by_character_id",
-            &[PyRep::Integer(2)],
-            &kw,
-            None,
-        )
+        .dispatch_rpc(&mut sess, "seasonManager", None, "get_character_progress_by_character_id", &[PyRep::Integer(2)], &kw, None)
         .await
         .expect("seasonManager.get_character_progress_by_character_id RPC");
 

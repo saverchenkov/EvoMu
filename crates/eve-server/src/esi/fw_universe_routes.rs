@@ -121,19 +121,148 @@ fn parse_solarsystemcontent_stars(raw: &[u8]) -> Option<HashMap<i64, StarStaticR
     Some(stars)
 }
 
+// DERIVED: Fallback star spectral class, effective temperature (K), and age (years) from the SDE
+// star type name (`Sun <Class> (...)`) and solar system luminosity when neither `sde_stars` nor
+// client `ResFiles/solarsystemcontent.static` is available on the host.
+fn derive_star_stats_from_sde(type_name: &str, luminosity: f64, star_id: i64) -> (String, i64, i64) {
+    let token = type_name
+        .strip_prefix("Sun ")
+        .and_then(|rest| rest.split_whitespace().next())
+        .unwrap_or("G5");
+    let (spectral_class, base_temp) = match token {
+        "A0" => ("A0", 9600_i64),
+        "A0IV" => ("A0IV", 9400),
+        "A0IV2" => ("A0IV2", 9400),
+        "O1" | "B0" => ("F1 V", 7300),
+        "B5" => ("F6 V", 6450),
+        "F0" => ("F0 V", 7200),
+        "G3" => ("G3 V", 5750),
+        "G5" => ("G5 V", 5660),
+        "K3" => ("K3 V", 4750),
+        "K5" => ("K5 V", 4400),
+        "K7" => ("K7 V", 4050),
+        "M0" => ("M0 V", 3850),
+        _ => ("G5 V", 5660),
+    };
+    let lum_adj = ((luminosity.max(0.001).ln() * 120.0).round() as i64).clamp(-400, 400);
+    let temperature = (base_temp + lum_adj).max(2500);
+    let age = 10_000_000_000_000_000_i64
+        + ((star_id.unsigned_abs() % 450) as i64) * 1_000_000_000_000_000_i64;
+    (spectral_class.to_string(), temperature, age)
+}
+
+fn candidate_resfiles_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Ok(d) = std::env::var("EVOMU_RESFILES_DIR") {
+        if !d.is_empty() {
+            dirs.push(PathBuf::from(d));
+        }
+    }
+    for var in ["EVOMU_SHARED_CACHE", "EVE_SHARED_CACHE_DIR"] {
+        if let Ok(d) = std::env::var(var) {
+            if !d.is_empty() {
+                dirs.push(PathBuf::from(&d).join("ResFiles"));
+                dirs.push(PathBuf::from(d));
+            }
+        }
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        if !home.is_empty() {
+            let h = PathBuf::from(home);
+            dirs.push(h.join("Library/Application Support/EVE Online/SharedCache/ResFiles"));
+            dirs.push(h.join(".local/share/ccp/eve/SharedCache/ResFiles"));
+            dirs.push(h.join(
+                ".steam/steam/steamapps/compatdata/8500/pfx/drive_c/EVE/SharedCache/ResFiles",
+            ));
+        }
+    }
+    if let Ok(local_app) = std::env::var("LOCALAPPDATA") {
+        if !local_app.is_empty() {
+            dirs.push(PathBuf::from(local_app).join("CCP/EVE/SharedCache/ResFiles"));
+        }
+    }
+    dirs.push(PathBuf::from("C:/EVE/SharedCache/ResFiles"));
+    dirs
+}
+
 fn star_static_records(sde: &SdeRegistry) -> &HashMap<i64, StarStaticRecord> {
     STAR_STATIC_RECORDS.get_or_init(|| {
-        let Some(res) = sde.resources.get("res:/staticdata/solarsystemcontent.static") else {
-            return HashMap::new();
-        };
-        let home = std::env::var("HOME").unwrap_or_default();
-        let path = PathBuf::from(home)
-            .join("Library/Application Support/EVE Online/SharedCache/ResFiles")
-            .join(&res.cdn_relative_path);
-        let Ok(raw) = std::fs::read(path) else {
-            return HashMap::new();
-        };
-        parse_solarsystemcontent_stars(&raw).unwrap_or_default()
+        let mut stars = HashMap::new();
+        if let Some(db_path) = &sde.db_path {
+            if let Ok(conn) = rusqlite::Connection::open_with_flags(
+                db_path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            ) {
+                if let Ok(mut stmt) = conn.prepare(
+                    "SELECT c.celestial_id, c.system_id, c.type_id, c.radius, COALESCE(s.luminosity, 0.0) FROM sde_celestials c LEFT JOIN sde_systems s ON s.system_id = c.system_id WHERE c.group_id = 6",
+                ) {
+                    if let Ok(rows) = stmt.query_map([], |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, i64>(2)?,
+                            row.get::<_, f64>(3)?,
+                            row.get::<_, f64>(4)?,
+                        ))
+                    }) {
+                        for (star_id, system_id, type_id, radius, luminosity) in rows.flatten() {
+                            let type_name = sde
+                                .types
+                                .get(&(type_id as u32))
+                                .map(|t| t.name.as_str())
+                                .unwrap_or("");
+                            let (spectral_class, temperature, age) =
+                                derive_star_stats_from_sde(type_name, luminosity, star_id);
+                            stars.insert(
+                                star_id,
+                                StarStaticRecord {
+                                    star_id,
+                                    solar_system_id: system_id,
+                                    type_id,
+                                    radius: radius.round() as i64,
+                                    age,
+                                    luminosity,
+                                    temperature,
+                                    spectral_class,
+                                },
+                            );
+                        }
+                    }
+                }
+                if let Ok(mut stmt) = conn.prepare(
+                    "SELECT star_id, system_id, type_id, radius, age, luminosity, temperature, spectral_class FROM sde_stars",
+                ) {
+                    if let Ok(rows) = stmt.query_map([], |row| {
+                        Ok(StarStaticRecord {
+                            star_id: row.get(0)?,
+                            solar_system_id: row.get(1)?,
+                            type_id: row.get(2)?,
+                            radius: row.get(3)?,
+                            age: row.get(4)?,
+                            luminosity: row.get(5)?,
+                            temperature: row.get(6)?,
+                            spectral_class: row.get(7)?,
+                        })
+                    }) {
+                        for rec in rows.flatten() {
+                            stars.insert(rec.star_id, rec);
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(res) = sde.resources.get("res:/staticdata/solarsystemcontent.static") {
+            for dir in candidate_resfiles_dirs() {
+                let path = dir.join(&res.cdn_relative_path);
+                if let Ok(raw) = std::fs::read(path) {
+                    if let Some(parsed) = parse_solarsystemcontent_stars(&raw) {
+                        stars.extend(parsed);
+                        break;
+                    }
+                }
+            }
+        }
+        stars
     })
 }
 

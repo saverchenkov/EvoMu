@@ -16,8 +16,9 @@ use glam::DVec3;
 use std::collections::HashMap;
 
 #[tokio::test]
-// parity: plan:SP-3, feat:navigation.bubbles-grid, feat:navigation.warp-speed-formula, destiny:AddBalls2, destiny:RemoveBalls
 async fn test_sp3_spatial_grid_bubbles_dynamic_transitions_and_warp_curves() {
+    // parity: plan:SP-3, feat:navigation.bubbles-grid, feat:navigation.warp-speed-formula, destiny:AddBalls2, destiny:RemoveBalls
+    eve_testkit::attest(&["plan:SP-3", "feat:navigation.bubbles-grid", "feat:navigation.warp-speed-formula", "destiny:AddBalls2", "destiny:RemoveBalls"]);
     let ctx = ServerContext::new();
     let jita = ctx.systems.get_or_spawn(30_000_142);
 
@@ -125,8 +126,9 @@ async fn test_sp3_spatial_grid_bubbles_dynamic_transitions_and_warp_curves() {
 }
 
 #[tokio::test]
-// parity: feat:mining.depletion
 async fn test_sp4_asteroid_belt_entities_collision_bounce_and_respawn_cycle() {
+    // parity: feat:mining.depletion, feat:mining.belt-respawn
+    eve_testkit::attest(&["feat:mining.depletion", "feat:mining.belt-respawn"]);
     let ctx = ServerContext::new();
     let perim = ctx.systems.get_or_spawn(30_000_144);
 
@@ -229,8 +231,9 @@ async fn test_sp4_asteroid_belt_entities_collision_bounce_and_respawn_cycle() {
 }
 
 #[tokio::test]
-// parity: plan:SP-5, feat:navigation.stargate-jump, feat:navigation.gate-cloak
 async fn test_sp5_stargate_jumping_session_handoff_and_gate_cloak_invulnerability() {
+    // parity: plan:SP-5, feat:navigation.stargate-jump, feat:navigation.gate-cloak
+    eve_testkit::attest(&["plan:SP-5", "feat:navigation.stargate-jump", "feat:navigation.gate-cloak"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let mut sess = SessionState::new(955);
@@ -374,8 +377,9 @@ async fn test_sp5_stargate_jumping_session_handoff_and_gate_cloak_invulnerabilit
 }
 
 #[tokio::test]
-// parity: feat:mining.mining-laser-cycle, feat:mining.strip-miner, feat:mining.mining-residue
 async fn test_mn01_mining_laser_cycle_yield_residue_and_ore_hold_deposit() {
+    // parity: feat:mining.mining-laser-cycle, feat:mining.strip-miner, feat:mining.mining-residue
+    eve_testkit::attest(&["feat:mining.mining-laser-cycle", "feat:mining.strip-miner", "feat:mining.mining-residue"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let mut sess = SessionState::new(961);
@@ -482,8 +486,9 @@ async fn test_mn01_mining_laser_cycle_yield_residue_and_ore_hold_deposit() {
 }
 
 #[tokio::test]
-// parity: feat:mining.ice-harvester, feat:mining.gas-harvesting
 async fn test_mn02_ice_harvesting_and_gas_harvesting_cycles() {
+    // parity: feat:mining.ice-harvester, feat:mining.gas-harvesting
+    eve_testkit::attest(&["feat:mining.ice-harvester", "feat:mining.gas-harvesting"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let mut sess = SessionState::new(962);
@@ -617,8 +622,9 @@ async fn test_mn02_ice_harvesting_and_gas_harvesting_cycles() {
 }
 
 #[tokio::test]
-// parity: feat:mining.character-ledger
 async fn test_mn03_mining_ledger_recording_and_char_mining_ledger_service() {
+    // parity: feat:mining.character-ledger
+    eve_testkit::attest(&["feat:mining.character-ledger"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let mut sess = SessionState::new(963);
@@ -704,36 +710,81 @@ async fn test_mn03_mining_ledger_recording_and_char_mining_ledger_service() {
     let PyRep::KeyVal(mine_kv) = &mine_res else { panic!("Expected KeyVal") };
     let mined_units = mine_kv["minedUnits"].as_i64().unwrap();
 
-    // Query mining ledger via RPC service charMiningLedger.GetMiningLedger
+    // Execute a second mining cycle on the same asteroid on the same day so we can verify per-day/per-type/per-system aggregation
+    let mine_res_2 = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "beyonce",
+            Some(beyonce_id),
+            "CmdMineRepeatedly",
+            &[PyRep::Integer(scordite_ast_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("CmdMine #2");
+    let PyRep::KeyVal(mine_kv_2) = &mine_res_2 else { panic!("Expected KeyVal") };
+    let mined_units_2 = mine_kv_2["minedUnits"].as_i64().unwrap();
+    let expected_agg_units = mined_units + mined_units_2;
+
+    // Seed an entry older than 30 days (31 days ago) which must be excluded by the 30-day rolling window
+    let now = ctx.now_unix();
+    let old_ts = now.saturating_sub(31 * 86_400);
+    let _ = ctx.db.record_mining_ledger_entry(90_000_001, 30_000_142, 1230, 9_999, old_ts);
+
+    // Query mining ledger via canonical V24 RPC service characterMiningLedger.GetCharacterLogs
     let ledger_res = ctx
         .dispatch_rpc(
             &mut sess,
-            "charMiningLedger",
+            "characterMiningLedger",
             None,
-            "GetMiningLedger",
+            "GetCharacterLogs",
             &[],
             &kw,
             None,
         )
         .await
-        .expect("charMiningLedger.GetMiningLedger");
+        .expect("characterMiningLedger.GetCharacterLogs");
     let PyRep::List(entries) = &ledger_res else { panic!("Expected List of ledger entries") };
     assert!(
         !entries.is_empty(),
         "Mining ledger must contain entry after mining cycle"
     );
 
-    let has_scordite_entry = entries.iter().any(|e| {
+    let scordite_rows: Vec<&HashMap<String, PyRep>> = entries
+        .iter()
+        .filter_map(|e| {
+            if let PyRep::KeyVal(kv) = e {
+                if kv.get("typeID").and_then(|v| v.as_i64()) == Some(1228)
+                    && kv.get("solarSystemID").and_then(|v| v.as_i64()) == Some(30_000_142)
+                {
+                    return Some(kv);
+                }
+            }
+            None
+        })
+        .collect();
+    assert_eq!(
+        scordite_rows.len(),
+        1,
+        "Multiple mining cycles of the same ore on the same day in the same system must aggregate into a single row"
+    );
+    assert_eq!(
+        scordite_rows[0].get("quantity").and_then(|v| v.as_i64()),
+        Some(expected_agg_units),
+        "Aggregated daily ledger row must sum both mining cycles ({mined_units} + {mined_units_2} = {expected_agg_units})"
+    );
+
+    let has_stale_entry = entries.iter().any(|e| {
         if let PyRep::KeyVal(kv) = e {
-            kv.get("typeID").and_then(|v| v.as_i64()) == Some(1228)
-                && kv.get("solarSystemID").and_then(|v| v.as_i64()) == Some(30_000_142)
-                && kv.get("quantity").and_then(|v| v.as_i64()) == Some(mined_units)
+            kv.get("typeID").and_then(|v| v.as_i64()) == Some(1230)
+                && kv.get("quantity").and_then(|v| v.as_i64()) == Some(9_999)
         } else {
             false
         }
     });
     assert!(
-        has_scordite_entry,
-        "Mining ledger must accurately record type 1228, system 30000142, and quantity"
+        !has_stale_entry,
+        "Mining ledger entries older than 30 days must be excluded from characterMiningLedger.GetCharacterLogs"
     );
 }

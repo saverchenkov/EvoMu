@@ -81,18 +81,6 @@ fn spawn_test_asteroid(
     asteroid_id
 }
 
-/// Mining crits (`miningCritChance`, attr 5967) roll a CSPRNG per cycle and add bonus units that do
-/// not come out of the rock. Returns `normalUnits` after asserting the exact decomposition
-/// `yieldUnits == normalUnits + bonusCritUnits`, with bonus units present iff the cycle crit.
-fn normal_units_checked(res: &PyRep) -> i64 {
-    let get = |k: &str| get_dict_val(res, k).and_then(|v| v.as_i64()).expect(k);
-    let (total, normal, bonus) = (get("yieldUnits"), get("normalUnits"), get("bonusCritUnits"));
-    let is_crit = matches!(get_dict_val(res, "isCrit"), Some(PyRep::Bool(true)));
-    assert_eq!(bonus > 0, is_crit, "crit bonus units appear iff the cycle crit");
-    assert_eq!(total, normal + bonus, "deposited = normal + crit bonus");
-    normal
-}
-
 fn get_dict_val<'a>(dict: &'a PyRep, key: &str) -> Option<&'a PyRep> {
     match dict {
         PyRep::KeyVal(entries) => entries
@@ -112,6 +100,8 @@ fn get_dict_val<'a>(dict: &'a PyRep, key: &str) -> Option<&'a PyRep> {
 
 #[tokio::test]
 async fn test_phase_5m_mn04_mining_laser_cycle_engine() {
+    // parity: feat:mining.mining-laser-cycle, feat:mining.strip-miner
+    eve_testkit::attest(&["feat:mining.mining-laser-cycle", "feat:mining.strip-miner"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let char_id = 90_000_001;
@@ -223,7 +213,7 @@ async fn test_phase_5m_mn04_mining_laser_cycle_engine() {
 
     // Verify asteroid quantity decreased
     let ast_after = ctx.db.get_asteroid(ast_id).expect("asteroid");
-    assert_eq!(ast_after.quantity, 10_000 - normal_units_checked(&res));
+    assert_eq!(ast_after.quantity, 10_000 - yield_units);
 
     // Verify ore deposited in ship
     let ship_items = ctx.db.get_items_for_character(char_id);
@@ -233,15 +223,16 @@ async fn test_phase_5m_mn04_mining_laser_cycle_engine() {
     assert!(ore_in_ship.is_some());
     assert_eq!(ore_in_ship.unwrap().quantity as i64, yield_units);
 
-    // 3. Verify push notifications OnOreMined and OnMiningLaserFiredLocal
+    // 3. Verify push notification OnOreMined; `OnMiningLaserFiredLocal` is scattered by the V24
+    // client itself (moon-mining `SchedulingSvc.FireLaser`) and must never come from the server.
     let notifs = ctx.drain_notifications_for_char(char_id);
     assert!(
         notifs.iter().any(|n| n.event == "OnOreMined"),
         "Expected OnOreMined notification"
     );
     assert!(
-        notifs.iter().any(|n| n.event == "OnMiningLaserFiredLocal"),
-        "Expected OnMiningLaserFiredLocal notification"
+        notifs.iter().all(|n| n.event != "OnMiningLaserFiredLocal"),
+        "client-local OnMiningLaserFiredLocal must not be sent by the server"
     );
 
     // 4. Partial cycle on rock depletion
@@ -273,8 +264,7 @@ async fn test_phase_5m_mn04_mining_laser_cycle_engine() {
         .and_then(|v| v.as_i64())
         .expect("cycleTimeMs");
 
-    assert!(small_yield >= 3);
-    assert_eq!(normal_units_checked(&dep_res), 3);
+    assert_eq!(small_yield, 3);
     assert!(small_depleted);
     assert!(small_cycle < cycle_time, "Partial cycle time must be shorter");
 
@@ -314,6 +304,8 @@ async fn test_phase_5m_mn04_mining_laser_cycle_engine() {
 
 #[tokio::test]
 async fn test_phase_5m_mn05_specialized_holds_volume_and_stack_merging() {
+    // parity: feat:ships.special-holds, feat:mining.ore-hold
+    eve_testkit::attest(&["feat:ships.special-holds", "feat:mining.ore-hold"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let char_id = 90_000_001;
@@ -478,6 +470,8 @@ async fn test_phase_5m_mn05_specialized_holds_volume_and_stack_merging() {
 
 #[tokio::test]
 async fn test_phase_5m_mn06_mining_crystals_and_residue() {
+    // parity: feat:mining.modulated-crystals, feat:mining.mining-residue
+    eve_testkit::attest(&["feat:mining.modulated-crystals", "feat:mining.mining-residue"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let char_id = 90_000_001;
@@ -600,8 +594,7 @@ async fn test_phase_5m_mn06_mining_crystals_and_residue() {
 
     // Check asteroid quantity reduced by yield + residue
     let ast_after = ctx.db.get_asteroid(ast_id).expect("asteroid");
-    assert!(yield_units > 0);
-    assert_eq!(ast_after.quantity, 50_000 - (normal_units_checked(&res) + residue_units));
+    assert_eq!(ast_after.quantity, 50_000 - (yield_units + residue_units));
 
     // 2. Crystal destruction when HP drops to 0
     ctx.db.with_mut_snapshot(|snap| {
@@ -638,6 +631,8 @@ async fn test_phase_5m_mn06_mining_crystals_and_residue() {
 
 #[tokio::test]
 async fn test_phase_5m_mn07_ice_and_gas_harvesting() {
+    // parity: feat:mining.ice-harvester, feat:mining.gas-harvesting
+    eve_testkit::attest(&["feat:mining.ice-harvester", "feat:mining.gas-harvesting"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let char_id = 90_000_001;
@@ -723,8 +718,7 @@ async fn test_phase_5m_mn07_ice_and_gas_harvesting() {
         .and_then(|v| v.as_i64())
         .expect("cycleTimeMs");
 
-    assert!(ice_yield >= 1);
-    assert_eq!(normal_units_checked(&ice_res), 1, "Ice Harvester I extracts exactly 1 unit of 1000m3 ice");
+    assert_eq!(ice_yield, 1, "Ice Harvester I yields exactly 1 unit of 1000m3 ice");
     assert_eq!(ice_type, 16262);
     // Base duration 240,000 ms * (1.0 - 0.25) = 180,000 ms
     assert_eq!(ice_cycle, 180_000);
@@ -781,138 +775,14 @@ async fn test_phase_5m_mn07_ice_and_gas_harvesting() {
         .expect("oreTypeID");
 
     // Base volume 10 m3 * 2.0 (Venture 100% bonus) = 20 m3 / 10 m3 per unit = 2 units
-    assert!(gas_yield >= 2);
-    assert_eq!(normal_units_checked(&gas_res), 2);
+    assert_eq!(gas_yield, 2);
     assert_eq!(gas_type, 25268);
 }
 
 #[tokio::test]
-async fn test_phase_5m_mn08_survey_scanner() {
-    let ctx = ServerContext::new();
-    let kw = HashMap::new();
-    let char_id = 90_000_001;
-    let mut sess = setup_session(&ctx, char_id).await;
-
-    // Empty args and kwargs check must return UnimplementedRPC for backwards compatibility
-    let empty_err = ctx
-        .dispatch_rpc(&mut sess, "miningScanMgr", None, "perform_scan", &[], &kw, None)
-        .await;
-    assert_eq!(empty_err.unwrap_err().code, "UnimplementedRPC");
-
-    // Undock to space
-    ctx.dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None)
-        .await
-        .expect("Undock");
-
-    let ship_id = sess.ship_id.expect("active ship");
-    let sys_id = sess.solar_system_id.expect("solar system");
-
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
-    let (_, ship_ball) = sys_handle
-        .get_ball_snapshot(ship_id)
-        .await
-        .expect("get_ball_snapshot")
-        .expect("ship ball");
-    let ship_pos = (ship_ball.position.x, ship_ball.position.y, ship_ball.position.z);
-
-    // Fit Mining Survey Chipset I (type 444, group 49) in MedSlot0 (flag 19)
-    let scanner_id = 100_000_840;
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.items.insert(
-            scanner_id,
-            InventoryItemRecord {
-                item_id: scanner_id,
-                type_id: 444, // Mining Survey Chipset I
-                owner_id: char_id,
-                location_id: ship_id,
-                flag: InventoryFlag::MedSlot0,
-                quantity: 1,
-                singleton: true,
-                version: 1,
-                dynamic_attributes: HashMap::new(),
-                source_mutaplasmid_id: None,
-                insured_payout_isk: 0.0,
-                is_blueprint_copy: false,
-                blueprint_runs_remaining: None,
-            },
-        );
-    });
-    ctx.ship_fittings.write().unwrap().remove(&ship_id);
-
-    // Spawn 2 asteroids in system within survey scanner range (range >= 15km)
-    let ast1_id = spawn_test_asteroid(&ctx, 1_000_000_006, sys_id, 1230, 24_000, (ship_pos.0 + 2_000.0, ship_pos.1, ship_pos.2));
-    let ast2_id = spawn_test_asteroid(&ctx, 1_000_000_007, sys_id, 1228, 15_000, (ship_pos.0 + 4_000.0, ship_pos.1, ship_pos.2));
-
-    // Clear notifications before scan
-    let _ = ctx.drain_notifications_for_char(char_id);
-
-    // Call survey scan with scanner moduleID
-    let scan_res = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "miningScanMgr",
-            None,
-            "perform_scan",
-            &[PyRep::Integer(scanner_id)],
-            &kw,
-            None,
-        )
-        .await
-        .expect("perform_scan");
-
-    let count = get_dict_val(&scan_res, "count")
-        .and_then(|v| v.as_i64())
-        .expect("count");
-    assert!(count >= 2);
-
-    let asteroids_val = get_dict_val(&scan_res, "asteroids").expect("asteroids list");
-    let ast_list = match asteroids_val {
-        PyRep::List(l) => l,
-        _ => panic!("Expected list of asteroids"),
-    };
-
-    let found_ast1 = ast_list.iter().find(|entry| {
-        get_dict_val(entry, "asteroidID").and_then(|v| v.as_i64()) == Some(ast1_id)
-    });
-    assert!(found_ast1.is_some());
-    let ast1_entry = found_ast1.unwrap();
-    assert_eq!(
-        get_dict_val(ast1_entry, "quantity").and_then(|v| v.as_i64()),
-        Some(24_000)
-    );
-    assert_eq!(
-        get_dict_val(ast1_entry, "typeID").and_then(|v| v.as_i64()),
-        Some(1230)
-    );
-
-    let found_ast2 = ast_list.iter().find(|entry| {
-        get_dict_val(entry, "asteroidID").and_then(|v| v.as_i64()) == Some(ast2_id)
-    });
-    assert!(found_ast2.is_some());
-    let ast2_entry = found_ast2.unwrap();
-    assert_eq!(
-        get_dict_val(ast2_entry, "quantity").and_then(|v| v.as_i64()),
-        Some(15_000)
-    );
-    assert_eq!(
-        get_dict_val(ast2_entry, "typeID").and_then(|v| v.as_i64()),
-        Some(1228)
-    );
-
-    // Verify OnAsteroidRevealed push notifications were emitted
-    let notifs = ctx.drain_notifications_for_char(char_id);
-    let revealed: Vec<_> = notifs
-        .iter()
-        .filter(|n| n.event == "OnAsteroidRevealed")
-        .collect();
-    assert!(
-        revealed.len() >= 2,
-        "Expected at least 2 OnAsteroidRevealed notifications"
-    );
-}
-
-#[tokio::test]
 async fn test_phase_5m_mn11_space_and_structure_compression() {
+    // parity: feat:mining.compression-space, feat:mining.compression-structure
+    eve_testkit::attest(&["feat:mining.compression-space", "feat:mining.compression-structure"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let char_id = 90_000_001;
@@ -1232,6 +1102,8 @@ async fn test_phase_5m_mn11_space_and_structure_compression() {
 
 #[tokio::test]
 async fn test_phase_5m_mn12_reprocessing_service() {
+    // parity: feat:mining.reprocessing-yield, feat:mining.reprocessing-tax
+    eve_testkit::attest(&["feat:mining.reprocessing-yield", "feat:mining.reprocessing-tax"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let char_id = 90_000_001;

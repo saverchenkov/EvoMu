@@ -333,7 +333,7 @@ impl ServerContext {
                     .filter(|&id| self.sde.solar_systems.contains_key(&id));
                 if let Some(sys_id) = session.solar_system_id {
                     if requested_sys.is_none_or(|req_id| req_id == sys_id) {
-                        crate::services::sov_fw_insurgency::seed_system_mining_sites_from_sde(
+                        crate::services::mining_sites::seed_system_mining_sites_from_sde(
                             self, sys_id,
                         )
                         .await;
@@ -429,6 +429,19 @@ impl ServerContext {
         ) {
             return res;
         }
+        if let Some(res) = Box::pin(services::fitting_mining_lasers::handle(
+            self,
+            session,
+            bound_entry.as_ref(),
+            effective_service,
+            method,
+            args,
+            kwargs,
+        ))
+        .await
+        {
+            return res;
+        }
         if let Some(res) = Box::pin(services::inventory_fitting::handle(
             self,
             session,
@@ -443,6 +456,30 @@ impl ServerContext {
             return res;
         }
         if let Some(res) = Box::pin(services::station_structure::handle(
+            self,
+            session,
+            effective_service,
+            method,
+            args,
+            kwargs,
+        ))
+        .await
+        {
+            return res;
+        }
+        if let Some(res) = Box::pin(services::space_entity_mining::handle(
+            self,
+            session,
+            effective_service,
+            method,
+            args,
+            bound_entry.as_ref(),
+        ))
+        .await
+        {
+            return res;
+        }
+        if let Some(res) = Box::pin(services::mining_sites::handle(
             self,
             session,
             effective_service,
@@ -622,3 +659,441 @@ impl ServerContext {
 }
 
 const MAX_UNIMPLEMENTED_LOG_BYTES: u64 = 10 * 1024 * 1024; // 10 MiB cap
+
+
+use crate::services::mining_sites::{
+    asteroid_offset, derive_system_site_position_from_sde, region_name, resolve_gas_site,
+    resolve_ore_site, ResolvedGasSite, ResolvedOreSite, SiteKind, COSMIC_ORE_SITES, GAS_SITES,
+    SOV_PROSPECTING_DEPOSITS,
+};
+use crate::system_actor::AsteroidState;
+use eve_db::{AsteroidRecord, CosmicAnomalyRecord, CosmicSignatureRecord};
+use eve_destiny::{Ball, MovementMode};
+use eve_sde::TypeId;
+use glam::DVec3;
+
+/// Evaluates server-clock respawn timers for depleted Sovereignty Hub prospecting deposits in `sys_id`.
+pub async fn tick_sov_prospecting_deposit_respawn(ctx: &ServerContext, sys_id: u32) {
+    let has_sov_anom = ctx.db.with_snapshot(|snap| {
+        snap.cosmic_anomalies
+            .get(&sys_id)
+            .is_some_and(|list| list.iter().any(|a| a.anomaly_type == "SovOre"))
+    });
+    if !has_sov_anom {
+        return;
+    }
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let sov_asteroid_ids: Vec<i64> = ctx.db.with_snapshot(|snap| {
+        snap.asteroids
+            .values()
+            .filter(|a| a.solar_system_id == sys_id && a.belt_id == 0)
+            .map(|a| a.asteroid_id)
+            .collect()
+    });
+    let mut live_ast_states = Vec::with_capacity(sov_asteroid_ids.len());
+    for aid in sov_asteroid_ids {
+        if let Ok(Some(st)) = sys_handle.get_asteroid_state(aid).await {
+            live_ast_states.push((aid, if st.depleted { 0_i64 } else { st.remaining_units as i64 }));
+        }
+    }
+
+    let mut modelled: HashMap<TypeId, (u64, ResolvedOreSite)> = HashMap::new();
+    for def in SOV_PROSPECTING_DEPOSITS {
+        if let Ok(site) = resolve_ore_site(&ctx.sde, &def.site) {
+            if site.asteroids.iter().all(|a| ctx.sde.types.contains_key(&a.type_id)) {
+                modelled.insert(def.upgrade_type_id, (def.respawn_seconds, site));
+            }
+        }
+    }
+    let type_vol_rad = |tid: u32| -> (f64, f64) {
+        ctx.sde
+            .types
+            .get(&tid)
+            .map(|t| (t.volume.max(0.001), t.radius.max(50.0)))
+            .unwrap_or((0.001, 50.0))
+    };
+    let sov_pos = derive_system_site_position_from_sde(ctx, sys_id, 3, 5.0);
+    let now = ctx.now_unix();
+
+    let newly_spawned = ctx.db.with_mut_snapshot(|snap| {
+        for &(aid, rem) in &live_ast_states {
+            if let Some(ast) = snap.asteroids.get_mut(&aid) {
+                ast.quantity = rem;
+            }
+        }
+
+        let installed_upgrade = snap
+            .structures
+            .values()
+            .filter(|s| s.solar_system_id == sys_id)
+            .find_map(|s| {
+                snap.items.values().find_map(|it| {
+                    if it.location_id == s.structure_id
+                        && it.flag == eve_db::InventoryFlag::SubSystemSlot0
+                    {
+                        modelled.get(&it.type_id)
+                    } else {
+                        None
+                    }
+                })
+            });
+        let default_respawn_secs = installed_upgrade.map(|(r, _)| *r).unwrap_or(36_000);
+
+        let mut newly_cleared_anom_ids = Vec::new();
+        if let Some(anoms) = snap.cosmic_anomalies.get_mut(&sys_id) {
+            for anom in anoms.iter_mut().filter(|a| a.anomaly_type == "SovOre") {
+                let anom_pos = DVec3::from_array(anom.position);
+                let any_remaining = snap.asteroids.values().any(|a| {
+                    a.solar_system_id == sys_id
+                        && a.quantity > 0
+                        && DVec3::new(a.position.0, a.position.1, a.position.2).distance(anom_pos)
+                            <= 50_000.0
+                });
+                if !any_remaining {
+                    if !anom.cleared {
+                        anom.cleared = true;
+                        anom.remaining_volume = 0.0;
+                        anom.created_unix = now;
+                        anom.lifetime_seconds = default_respawn_secs;
+                        newly_cleared_anom_ids.push(anom.anomaly_id.clone());
+                    } else if anom.lifetime_seconds == 0 {
+                        anom.created_unix = now;
+                        anom.lifetime_seconds = default_respawn_secs;
+                    }
+                }
+            }
+        }
+        if !newly_cleared_anom_ids.is_empty() {
+            if let Some(sigs) = snap.cosmic_signatures.get_mut(&sys_id) {
+                for s in sigs.iter_mut() {
+                    if newly_cleared_anom_ids.contains(&s.signature_id) {
+                        s.collapsed = true;
+                        s.signal_strength = 0.0;
+                    }
+                }
+            }
+        }
+
+        let Some((respawn_secs, site)) = installed_upgrade else {
+            return Vec::new();
+        };
+        let has_uncleared = snap
+            .cosmic_anomalies
+            .get(&sys_id)
+            .is_some_and(|list| list.iter().any(|a| a.anomaly_type == "SovOre" && !a.cleared));
+        let ready_to_respawn = !has_uncleared
+            && snap.cosmic_anomalies.get(&sys_id).is_some_and(|list| {
+                list.iter().any(|a| {
+                    a.anomaly_type == "SovOre"
+                        && a.cleared
+                        && now >= a.created_unix.saturating_add(a.lifetime_seconds.max(*respawn_secs))
+                })
+            });
+        if !ready_to_respawn {
+            return Vec::new();
+        }
+
+        let sov_pos_vec = DVec3::from_array(sov_pos);
+        snap.asteroids.retain(|_, a| {
+            !(a.solar_system_id == sys_id
+                && a.belt_id == 0
+                && DVec3::new(a.position.0, a.position.1, a.position.2).distance(sov_pos_vec)
+                    <= 50_000.0)
+        });
+        if let Some(anoms) = snap.cosmic_anomalies.get_mut(&sys_id) {
+            anoms.retain(|a| a.anomaly_type != "SovOre");
+        }
+        if let Some(sigs) = snap.cosmic_signatures.get_mut(&sys_id) {
+            sigs.retain(|s| s.sig_group != "SovOre");
+        }
+
+        snap.next_entity_id += 1;
+        let anom_id = format!("DNG-{}-{}", site.dungeon_id, snap.next_entity_id);
+        let mut volume = 0.0_f64;
+        let mut spawned = Vec::with_capacity(site.asteroids.len());
+        for (i, a) in site.asteroids.iter().enumerate() {
+            let off = asteroid_offset(i);
+            let pos = [sov_pos[0] + off[0], sov_pos[1] + off[1], sov_pos[2] + off[2]];
+            let (uvol, rad) = type_vol_rad(a.type_id);
+            volume += a.units as f64 * uvol;
+            snap.next_entity_id += 1;
+            let aid = snap.next_entity_id;
+            snap.asteroids.insert(
+                aid,
+                AsteroidRecord {
+                    asteroid_id: aid,
+                    solar_system_id: sys_id,
+                    belt_id: 0,
+                    type_id: a.type_id,
+                    quantity: a.units,
+                    initial_quantity: a.units,
+                    position: (pos[0], pos[1], pos[2]),
+                    radius: rad,
+                },
+            );
+            spawned.push((aid, a.type_id, a.units as u64, uvol, rad, DVec3::from_array(pos)));
+        }
+        snap.cosmic_anomalies.entry(sys_id).or_default().push(CosmicAnomalyRecord {
+            anomaly_id: anom_id.clone(),
+            solar_system_id: sys_id,
+            name: site.name.clone(),
+            anomaly_type: "SovOre".into(),
+            position: sov_pos,
+            signal_strength: 1.0,
+            ore_types: site.ore_types(),
+            remaining_volume: volume,
+            created_unix: now,
+            lifetime_seconds: 0,
+            cleared: false,
+        });
+        snap.cosmic_signatures.entry(sys_id).or_default().push(CosmicSignatureRecord {
+            signature_id: anom_id,
+            solar_system_id: sys_id,
+            sig_group: "SovOre".into(),
+            type_name: site.name.clone(),
+            position: sov_pos,
+            signal_strength: 1.0,
+            wormhole_type_id: None,
+            destination_system_id: None,
+            created_unix: now,
+            lifetime_seconds: 0,
+            max_mass_kg: 0.0,
+            remaining_mass_kg: 0.0,
+            max_jump_mass_kg: 0.0,
+            collapsed: false,
+        });
+        spawned
+    });
+
+    for (aid, tid, units, uvol, rad, pos) in newly_spawned {
+        let ball = Ball {
+            id: aid,
+            type_id: tid,
+            position: pos,
+            velocity: DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 1.0,
+            mass: 80_000.0,
+            radius: rad,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        };
+        let st = AsteroidState {
+            asteroid_id: aid,
+            belt_id: 0,
+            type_id: tid,
+            initial_units: units,
+            remaining_units: units,
+            unit_volume: uvol,
+            depleted: false,
+            respawn_at_tick: None,
+        };
+        let _ = sys_handle.spawn_asteroid(st, ball).await;
+    }
+}
+
+/// Seeds the cosmic ore anomaly, hidden ore signature and gas site for `sys_id`, once per system.
+pub async fn seed_system_mining_sites_from_sde(ctx: &ServerContext, sys_id: u32) {
+    tick_sov_prospecting_deposit_respawn(ctx, sys_id).await;
+
+    let Some(sys) = ctx.sde.solar_systems.get(&sys_id) else {
+        return;
+    };
+    let region = region_name(&ctx.sde, sys_id).map(str::to_owned);
+
+    enum Planned {
+        Ore(SiteKind, ResolvedOreSite),
+        Gas(ResolvedGasSite),
+    }
+    let mut planned: Vec<Planned> = Vec::new();
+    for def in COSMIC_ORE_SITES
+        .iter()
+        .filter(|d| d.band.matches_system(sys))
+    {
+        match resolve_ore_site(&ctx.sde, def) {
+            Ok(site) if site.asteroids.iter().all(|a| ctx.sde.types.contains_key(&a.type_id)) => {
+                planned.push(Planned::Ore(def.kind, site))
+            }
+            Ok(site) => warn!(
+                site = site.name,
+                "ore site references an asteroid type missing from sde_types; not spawned"
+            ),
+            Err(e) => warn!(site = def.dungeon_name, error = e, "ore site not spawned"),
+        }
+    }
+    if let Some(def) = GAS_SITES.iter().find(|d| {
+        d.band.matches_system(sys)
+            && region
+                .as_deref()
+                .is_some_and(|r| d.region_names.contains(&r))
+    }) {
+        match resolve_gas_site(&ctx.sde, def) {
+            Ok(site) if ctx.sde.types.contains_key(&site.gas_type_id) => {
+                planned.push(Planned::Gas(site))
+            }
+            Ok(site) => warn!(
+                site = site.name,
+                "gas site references a gas type missing from sde_types; not spawned"
+            ),
+            Err(e) => warn!(site = def.dungeon_name, error = e, "gas site not spawned"),
+        }
+    }
+    if planned.is_empty() {
+        return;
+    }
+
+    let type_vol_rad = |tid: u32| -> (f64, f64) {
+        ctx.sde
+            .types
+            .get(&tid)
+            .map(|t| (t.volume.max(0.001), t.radius.max(50.0)))
+            .unwrap_or((0.001, 50.0))
+    };
+    let centre_for = |p: &Planned| -> [f64; 3] {
+        match p {
+            Planned::Ore(SiteKind::Anomaly, _) => derive_system_site_position_from_sde(ctx, sys_id, 0, 4.0),
+            Planned::Ore(SiteKind::Signature, _) => derive_system_site_position_from_sde(ctx, sys_id, 1, 6.5),
+            Planned::Gas(_) => derive_system_site_position_from_sde(ctx, sys_id, 2, 8.5),
+        }
+    };
+    let centres: Vec<[f64; 3]> = planned.iter().map(centre_for).collect();
+
+    let now = ctx.now_unix();
+    let newly_spawned = ctx.db.with_mut_snapshot(|snap| {
+        let already_seeded = snap
+            .cosmic_anomalies
+            .get(&sys_id)
+            .is_some_and(|list| list.iter().any(|a| a.anomaly_type == "OreAnomaly"))
+            || snap.cosmic_signatures.get(&sys_id).is_some_and(|list| {
+                list.iter()
+                    .any(|s| matches!(s.sig_group.as_str(), "OreAnomaly" | "Ore" | "Gas"))
+            });
+        if already_seeded {
+            return Vec::new();
+        }
+
+        let mut spawned = Vec::new();
+        for (p, centre) in planned.iter().zip(centres.iter().copied()) {
+            snap.next_entity_id += 1;
+            let seq = snap.next_entity_id;
+            let blank_sig = |id: String, group: &str, name: String, strength: f64| CosmicSignatureRecord {
+                signature_id: id,
+                solar_system_id: sys_id,
+                sig_group: group.into(),
+                type_name: name,
+                signal_strength: strength,
+                position: centre,
+                wormhole_type_id: None,
+                destination_system_id: None,
+                created_unix: now,
+                lifetime_seconds: 0,
+                max_mass_kg: 0.0,
+                remaining_mass_kg: 0.0,
+                max_jump_mass_kg: 0.0,
+                collapsed: false,
+            };
+            let rocks: Vec<(TypeId, i64)> = match p {
+                Planned::Ore(kind, site) => {
+                    let site_id = format!("DNG-{}-{seq}", site.dungeon_id);
+                    match kind {
+                        SiteKind::Anomaly => {
+                            let volume: f64 = site
+                                .asteroids
+                                .iter()
+                                .map(|a| a.units as f64 * type_vol_rad(a.type_id).0)
+                                .sum();
+                            snap.cosmic_anomalies.entry(sys_id).or_default().push(
+                                CosmicAnomalyRecord {
+                                    anomaly_id: site_id.clone(),
+                                    solar_system_id: sys_id,
+                                    name: site.name.clone(),
+                                    anomaly_type: "OreAnomaly".into(),
+                                    position: centre,
+                                    signal_strength: 1.0,
+                                    ore_types: site.ore_types(),
+                                    remaining_volume: volume,
+                                    created_unix: now,
+                                    lifetime_seconds: 0,
+                                    cleared: false,
+                                },
+                            );
+                            snap.cosmic_signatures
+                                .entry(sys_id)
+                                .or_default()
+                                .push(blank_sig(site_id, "OreAnomaly", site.name.clone(), 1.0));
+                        }
+                        SiteKind::Signature => {
+                            snap.cosmic_signatures
+                                .entry(sys_id)
+                                .or_default()
+                                .push(blank_sig(site_id, "Ore", site.name.clone(), 0.0));
+                        }
+                    }
+                    site.asteroids.iter().map(|a| (a.type_id, a.units)).collect()
+                }
+                Planned::Gas(site) => {
+                    let site_id = format!("DNG-{}-{seq}", site.dungeon_id);
+                    snap.cosmic_signatures
+                        .entry(sys_id)
+                        .or_default()
+                        .push(blank_sig(site_id, "Gas", site.name.clone(), 0.0));
+                    site.cloud_units.iter().map(|&u| (site.gas_type_id, u)).collect()
+                }
+            };
+
+            for (i, (tid, units)) in rocks.into_iter().enumerate() {
+                let off = asteroid_offset(i);
+                let pos = [centre[0] + off[0], centre[1] + off[1], centre[2] + off[2]];
+                let (uvol, rad) = type_vol_rad(tid);
+                snap.next_entity_id += 1;
+                let aid = snap.next_entity_id;
+                snap.asteroids.insert(
+                    aid,
+                    AsteroidRecord {
+                        asteroid_id: aid,
+                        solar_system_id: sys_id,
+                        belt_id: 0,
+                        type_id: tid,
+                        quantity: units,
+                        initial_quantity: units,
+                        position: (pos[0], pos[1], pos[2]),
+                        radius: rad,
+                    },
+                );
+                spawned.push((aid, tid, units as u64, uvol, rad, DVec3::from_array(pos)));
+            }
+        }
+        spawned
+    });
+
+    if !newly_spawned.is_empty() {
+        let handle = ctx.systems.get_or_spawn(sys_id);
+        for (aid, tid, units, uvol, rad, pos) in newly_spawned {
+            let ball = Ball {
+                id: aid,
+                type_id: tid,
+                position: pos,
+                velocity: DVec3::ZERO,
+                max_velocity: 0.0,
+                inertia: 1.0,
+                mass: 50_000.0,
+                radius: rad,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            };
+            let st = AsteroidState {
+                asteroid_id: aid,
+                belt_id: 0,
+                type_id: tid,
+                initial_units: units,
+                remaining_units: units,
+                unit_volume: uvol,
+                depleted: false,
+                respawn_at_tick: None,
+            };
+            let _ = handle.spawn_asteroid(st, ball).await;
+        }
+    }
+}
+

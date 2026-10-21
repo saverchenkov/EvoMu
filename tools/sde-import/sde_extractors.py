@@ -334,12 +334,26 @@ jumps_raw = load_static_with_schema('jumps')
 gate_to_sys = {}
 solar_systems = []
 stargates_raw = []
+stars_raw = []
 
 for sid, s in systems_raw.iteritems():
     isid = int(sid)
     ssc = ssc_raw[isid] if isid in ssc_raw else None
     sg_ids = []
     pl_ids = [int(p) for p in s.planetItemIDs] if s.planetItemIDs else []
+    st_obj = getattr(ssc, 'star', None) if ssc is not None else None
+    if st_obj is not None:
+        st_stats = getattr(st_obj, 'statistics', None)
+        stars_raw.append({
+            'star_id': int(st_obj.id),
+            'system_id': isid,
+            'type_id': int(st_obj.typeID),
+            'radius': int(round(float(getattr(st_obj, 'radius', 0.0) or 0.0))),
+            'age': int(round(float(getattr(st_stats, 'age', 0.0) or 0.0))) if st_stats is not None else 0,
+            'luminosity': float(getattr(st_stats, 'luminosity', 0.0) or 0.0) if st_stats is not None else float(getattr(ssc, 'luminosity', 0.0) or 0.0),
+            'temperature': int(round(float(getattr(st_stats, 'temperature', 0.0) or 0.0))) if st_stats is not None else 0,
+            'spectral_class': str(getattr(st_stats, 'spectralClass', '') or '') if st_stats is not None else '',
+        })
     if ssc is not None and ssc.stargates:
         for sg_id, sg in ssc.stargates.iteritems():
             isg = int(sg_id)
@@ -692,6 +706,7 @@ out = {
     'constellations': constellations,
     'solar_systems': solar_systems,
     'stargates': stargates_raw,
+    'stars': stars_raw,
     'jumps': jumps,
     'races': races,
     'bloodlines': bloodlines,

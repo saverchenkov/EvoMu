@@ -419,7 +419,21 @@ async fn test_phase_0_s9_service_roles_bitmask_and_production_account_seed() {
     let _ = std::fs::remove_file(&tmp_roles_db);
 }
 
-#[tokio::test]
+async fn connect_loopback_with_retry(addr: std::net::SocketAddr) -> TcpStream {
+    for attempt in 0..8 {
+        match tokio::time::timeout(std::time::Duration::from_secs(3), TcpStream::connect(addr)).await {
+            Ok(Ok(stream)) => return stream,
+            Ok(Err(_)) | Err(_) if attempt < 7 => {
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+            Ok(Err(e)) => panic!("TcpStream::connect({addr}) failed after retries: {e:?}"),
+            Err(e) => panic!("TcpStream::connect({addr}) timed out after retries: {e:?}"),
+        }
+    }
+    unreachable!()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_phase_2_p6_native_machonet_handshake_state_machine() {
     // parity: plan:P-6, feat:account.native-handshake
     let ctx = Arc::new(ServerContext::new());
@@ -437,10 +451,11 @@ async fn test_phase_2_p6_native_machonet_handshake_state_machine() {
             });
         }
     });
+    tokio::task::yield_now().await;
 
     // 1. A client build older than the server build must be rejected with GPSTransportClosed (HANDSHAKE_INCOMPATIBLEBUILD)
     {
-        let mut s = TcpStream::connect(addr).await.unwrap();
+        let mut s = connect_loopback_with_retry(addr).await;
         let srv_hello = read_framed_pyrep(&mut s).await.unwrap().unwrap();
         assert_eq!(srv_hello, VersionExchange::default().to_server_hello_pyrep());
 
@@ -460,7 +475,7 @@ async fn test_phase_2_p6_native_machonet_handshake_state_machine() {
 
     // 2. Premature CallReq or legacy AuthenticationReq("ok") before completing handshake must be rejected with GPSTransportClosed
     {
-        let mut s = TcpStream::connect(addr).await.unwrap();
+        let mut s = connect_loopback_with_retry(addr).await;
         let _ = read_framed_pyrep(&mut s).await.unwrap().unwrap();
         let fake_auth_req = MachoPacket {
             packet_type: MachoPacketType::AuthenticationReq,
@@ -489,7 +504,7 @@ async fn test_phase_2_p6_native_machonet_handshake_state_machine() {
 
     // 3. Wrong password in Step 3 CryptoChallengePacket must be rejected with GPSTransportClosed (LoginAuthFailed)
     {
-        let mut s = TcpStream::connect(addr).await.unwrap();
+        let mut s = connect_loopback_with_retry(addr).await;
         let _ = read_framed_pyrep(&mut s).await.unwrap().unwrap();
         write_framed_pyrep(&mut s, &VersionExchange::default().to_pyrep())
             .await
@@ -517,7 +532,7 @@ async fn test_phase_2_p6_native_machonet_handshake_state_machine() {
             .ban_account("banned_p6", now_unix + 7200, "RMT violation")
             .unwrap();
 
-        let mut s = TcpStream::connect(addr).await.unwrap();
+        let mut s = connect_loopback_with_retry(addr).await;
         let _ = read_framed_pyrep(&mut s).await.unwrap().unwrap();
         write_framed_pyrep(&mut s, &VersionExchange::default().to_pyrep())
             .await
@@ -545,7 +560,7 @@ async fn test_phase_2_p6_native_machonet_handshake_state_machine() {
         ctx.db
             .suspend_account("suspended_p6", now_unix + 1800, "Billing hold")
             .unwrap();
-        let mut s2 = TcpStream::connect(addr).await.unwrap();
+        let mut s2 = connect_loopback_with_retry(addr).await;
         let _ = read_framed_pyrep(&mut s2).await.unwrap().unwrap();
         write_framed_pyrep(&mut s2, &VersionExchange::default().to_pyrep())
             .await
@@ -573,7 +588,7 @@ async fn test_phase_2_p6_native_machonet_handshake_state_machine() {
 
     // 5. Full valid 4-step V24.01 handshake (including QC, VK, 2-step passwordVersion=1 -> Attempt 2, CryptoServerHandshake, CryptoHandshakeResult, CryptoHandshakeAck, SessionInitialStateNotification, SessionChangeNotification, and authenticated CallReq)
     {
-        let mut s = TcpStream::connect(addr).await.unwrap();
+        let mut s = connect_loopback_with_retry(addr).await;
         let srv_hello = read_framed_pyrep(&mut s).await.unwrap().unwrap();
         let parsed_ver = VersionExchange::from_pyrep(&srv_hello).expect("server VersionExchange");
         assert_eq!(parsed_ver.birthday, 170_472);
