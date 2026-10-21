@@ -1,7 +1,9 @@
 //! `esi` — EVE Swagger Interface (ESI) HTTP/1.1 server, OpenAPI 3.0 router, OAuth2 Bearer
 //! scope guard, conditional `ETag` caching, `X-Pages` pagination, and schema validator (`ESI-2`).
 
+pub mod char_social_mail_routes;
 pub mod char_social_routes;
+pub mod character_mail_routes;
 pub mod character_routes;
 pub mod corp_alliance_routes;
 pub mod economy_industry_routes;

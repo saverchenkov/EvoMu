@@ -32,18 +32,54 @@ pub struct EsiContactEntry {
     pub label_ids: Vec<i64>,
 }
 
+#[derive(Debug, Clone)]
+pub struct EsiCalendarEvent {
+    pub event_id: i64,
+    pub event_date_unix: u64,
+    pub title: String,
+    pub text: String,
+    pub duration_minutes: i64,
+    pub importance: i64,
+    pub owner_id: i64,
+    pub owner_name: String,
+    pub owner_type: String,
+    pub attendees: Vec<i64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct EsiContactNotification {
+    pub notification_id: i64,
+    pub sender_character_id: i64,
+    pub send_date_unix: u64,
+    pub standing_level: f64,
+    pub message: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct EsiCorpHistoryEntry {
+    pub record_id: i64,
+    pub corporation_id: i64,
+    pub start_date_unix: u64,
+    pub is_deleted: bool,
+}
+
 #[derive(Debug)]
 pub struct EsiRuntimeState {
     pub deleted_mails: RwLock<HashSet<(i64, i64)>>,
     pub mail_meta: RwLock<HashMap<(i64, i64), EsiMailMeta>>,
     pub mail_labels: RwLock<HashMap<i64, Vec<EsiMailLabel>>>,
+    pub mail_lists: RwLock<HashMap<i64, Vec<(i64, String)>>>,
     pub char_contacts: RwLock<HashMap<i64, Vec<EsiContactEntry>>>,
     pub char_contact_labels: RwLock<HashMap<i64, Vec<(i64, String)>>>,
     pub corp_contacts: RwLock<HashMap<i64, Vec<EsiContactEntry>>>,
     pub corp_contact_labels: RwLock<HashMap<i64, Vec<(i64, String)>>>,
     pub alliance_contacts: RwLock<HashMap<i64, Vec<EsiContactEntry>>>,
     pub alliance_contact_labels: RwLock<HashMap<i64, Vec<(i64, String)>>>,
+    pub calendar_events: RwLock<HashMap<i64, EsiCalendarEvent>>,
     pub calendar_responses: RwLock<HashMap<(i64, i64), String>>,
+    pub contact_notifications: RwLock<HashMap<i64, Vec<EsiContactNotification>>>,
+    pub char_corp_history: RwLock<HashMap<i64, Vec<EsiCorpHistoryEntry>>>,
+    pub char_titles: RwLock<HashMap<i64, Vec<(i64, String)>>>,
     pub fleet_motd: RwLock<HashMap<i64, String>>,
     pub fleet_wing_names: RwLock<HashMap<(i64, i64), String>>,
     pub fleet_squads: RwLock<HashMap<(i64, i64), (i64, String)>>,
@@ -67,13 +103,18 @@ impl EsiRuntimeState {
             deleted_mails: RwLock::new(HashSet::new()),
             mail_meta: RwLock::new(HashMap::new()),
             mail_labels: RwLock::new(HashMap::new()),
+            mail_lists: RwLock::new(HashMap::new()),
             char_contacts: RwLock::new(HashMap::new()),
             char_contact_labels: RwLock::new(HashMap::new()),
             corp_contacts: RwLock::new(HashMap::new()),
             corp_contact_labels: RwLock::new(HashMap::new()),
             alliance_contacts: RwLock::new(HashMap::new()),
             alliance_contact_labels: RwLock::new(HashMap::new()),
+            calendar_events: RwLock::new(HashMap::new()),
             calendar_responses: RwLock::new(HashMap::new()),
+            contact_notifications: RwLock::new(HashMap::new()),
+            char_corp_history: RwLock::new(HashMap::new()),
+            char_titles: RwLock::new(HashMap::new()),
             fleet_motd: RwLock::new(HashMap::new()),
             fleet_wing_names: RwLock::new(HashMap::new()),
             fleet_squads: RwLock::new(HashMap::new()),

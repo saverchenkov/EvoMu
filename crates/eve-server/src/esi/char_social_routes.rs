@@ -4,18 +4,12 @@
 #![forbid(unsafe_code)]
 
 use crate::esi::openapi::{MatchedOperation, OperationSpec, ResponseSpec, VERSION_PREFIXES};
-use crate::esi::runtime_state::{EsiContactEntry, EsiMailLabel, EsiMailMeta};
 use crate::esi::sample_routes::{format_iso8601_utc, RouteExecutionResult};
 use crate::router::ServerContext;
+use eve_db::IskCents;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::OnceLock;
-
-const VALID_MAIL_LABEL_COLORS: &[&str] = &[
-    "#0000fe", "#006634", "#0099ff", "#00ff33", "#01ffff", "#349800", "#660066", "#666666",
-    "#999999", "#99ffff", "#9a0000", "#ccff9a", "#e6e6e6", "#fe0000", "#ff6600", "#ffff01",
-    "#ffffcd", "#ffffff",
-];
 
 fn parse_path_i64(
     path_params: &HashMap<String, String>,
@@ -39,7 +33,7 @@ fn parse_path_i64(
     Ok(val)
 }
 
-fn infer_contact_type(ctx: &ServerContext, snap: &eve_db::WorldStateSnapshot, id: i64) -> &'static str {
+pub(crate) fn infer_contact_type(ctx: &ServerContext, snap: &eve_db::WorldStateSnapshot, id: i64) -> &'static str {
     if (500_000..600_000).contains(&id) || ctx.sde.factions.contains_key(&(id as u32)) {
         "faction"
     } else if snap.alliances.contains_key(&id) || (99_000_000..100_000_000).contains(&id) {
@@ -55,26 +49,18 @@ fn infer_contact_type(ctx: &ServerContext, snap: &eve_db::WorldStateSnapshot, id
     }
 }
 
-fn parse_csv_i64(raw: &str) -> Result<Vec<i64>, RouteExecutionResult> {
-    let mut out = Vec::new();
-    let trimmed = raw.trim().trim_start_matches('[').trim_end_matches(']');
-    if trimmed.is_empty() {
-        return Ok(out);
+fn map_notification_type_id(type_id: i32) -> &'static str {
+    match type_id {
+        5 => "AllWarDeclaredMsg",
+        10 => "BountyClaimMsg",
+        14 => "CorpAppNewMsg",
+        16 => "CorpAppAcceptMsg",
+        34 => "InsuranceFirstShipMsg",
+        45 => "AllAnchoringMsg",
+        138 => "CloneActivationMsg2",
+        184 => "StructureUnderAttack",
+        _ => "AllWarDeclaredMsg",
     }
-    for part in trimmed.split(',') {
-        let p = part.trim();
-        let val = p.parse::<i64>().map_err(|_| {
-            RouteExecutionResult::error(400, format!("Invalid integer in list parameter: '{p}'"))
-        })?;
-        if val <= 0 {
-            return Err(RouteExecutionResult::error(
-                400,
-                "IDs in list parameter must be positive integers",
-            ));
-        }
-        out.push(val);
-    }
-    Ok(out)
 }
 
 fn make_legacy_op(method: &str, path_pattern: &str, op_id: &str, scope: Option<&str>) -> OperationSpec {
@@ -208,6 +194,7 @@ pub fn try_match_legacy_operation(method: &str, raw_path: &str) -> Option<Matche
     None
 }
 
+#[allow(clippy::too_many_lines)]
 pub fn dispatch_char_social_route(
     ctx: &ServerContext,
     method: &str,
@@ -232,50 +219,33 @@ pub fn dispatch_char_social_route(
                         format!("Character {char_id} not found"),
                     );
                 };
+                let gender = if ch.gender == 0 { "female" } else { "male" };
                 let mut obj = json!({
                     "name": ch.name,
                     "corporation_id": ch.corporation_id,
-                    "birthday": "2024-01-01T00:00:00Z",
+                    "birthday": format_iso8601_utc(ch.create_date_unix),
                     "bloodline_id": ch.bloodline_id as i64,
                     "race_id": ch.race_id as i64,
-                    "gender": "male",
+                    "gender": gender,
                     "security_status": ch.security_status,
-                    "description": format!("Capsuleer {}", ch.name),
+                    "description": ch.description,
                 });
-                if let Some(aid) = ch.alliance_id {
-                    obj.as_object_mut()
-                        .unwrap()
-                        .insert("alliance_id".to_string(), json!(aid));
+                if !ch.title.is_empty() {
+                    obj["title"] = json!(ch.title);
                 }
-                if let Some(fid) = ch.war_faction_id {
-                    obj.as_object_mut()
-                        .unwrap()
-                        .insert("faction_id".to_string(), json!(fid));
+                if let Some(aid) = ch.alliance_id {
+                    obj["alliance_id"] = json!(aid);
+                }
+                if let Some(fid) = ch.war_faction_id.or_else(|| {
+                    ctx.sde
+                        .npc_corporations
+                        .get(&ch.corporation_id)
+                        .and_then(|c| c.faction_id)
+                        .map(|f| f as i64)
+                }) {
+                    obj["faction_id"] = json!(fid);
                 }
                 RouteExecutionResult::ok_json(obj, 86400)
-            }))
-        }
-
-        ("GET", "/characters/{character_id}/agents_research") => {
-            let char_id = match parse_path_i64(path_params, "character_id") {
-                Ok(v) => v,
-                Err(e) => return Some(e),
-            };
-            Some(ctx.db.with_snapshot(|snap| {
-                if !snap.characters.contains_key(&char_id) {
-                    return RouteExecutionResult::error(
-                        404,
-                        format!("Character {char_id} not found"),
-                    );
-                }
-                let out = vec![json!({
-                    "agent_id": 3_008_416,
-                    "skill_type_id": 11_446,
-                    "started_at": format_iso8601_utc(now.saturating_sub(86400)),
-                    "points_per_day": 52.5,
-                    "remainder_points": 105.0,
-                })];
-                RouteExecutionResult::ok_json(json!(out), 3600)
             }))
         }
 
@@ -291,11 +261,37 @@ pub fn dispatch_char_social_route(
                         format!("Character {char_id} not found"),
                     );
                 };
-                let out = vec![json!({
-                    "corporation_id": ch.corporation_id,
-                    "record_id": 1,
-                    "start_date": "2024-01-01T00:00:00Z",
-                })];
+                let mut history = ctx
+                    .esi_state
+                    .char_corp_history
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .get(&char_id)
+                    .cloned()
+                    .unwrap_or_default();
+                if history.is_empty() && ch.create_date_unix > 0 {
+                    history.push(crate::esi::runtime_state::EsiCorpHistoryEntry {
+                        record_id: 1,
+                        corporation_id: ch.corporation_id,
+                        start_date_unix: ch.create_date_unix,
+                        is_deleted: false,
+                    });
+                }
+                history.sort_by(|a, b| b.record_id.cmp(&a.record_id));
+                let out: Vec<Value> = history
+                    .into_iter()
+                    .map(|h| {
+                        let mut entry = json!({
+                            "corporation_id": h.corporation_id,
+                            "record_id": h.record_id,
+                            "start_date": format_iso8601_utc(h.start_date_unix),
+                        });
+                        if h.is_deleted {
+                            entry["is_deleted"] = json!(true);
+                        }
+                        entry
+                    })
+                    .collect();
                 RouteExecutionResult::ok_json(json!(out), 86400)
             }))
         }
@@ -327,7 +323,12 @@ pub fn dispatch_char_social_route(
                         format!("Character {char_id} not found"),
                     );
                 };
-                let mut total_charge = 0.0_f64;
+                let contacts_guard = ctx
+                    .esi_state
+                    .char_contacts
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner());
+                let mut total_cents = 0i64;
                 for tid in &targets {
                     if *tid == char_id {
                         continue;
@@ -335,47 +336,21 @@ pub fn dispatch_char_social_route(
                     let same_corp = snap
                         .characters
                         .get(tid)
-                        .map(|t| t.corporation_id == caller.corporation_id)
-                        .unwrap_or(false);
-                    if !same_corp {
-                        total_charge += 2950.0;
+                        .is_some_and(|t| t.corporation_id == caller.corporation_id);
+                    let is_exempt_contact = contacts_guard.get(tid).is_some_and(|list| {
+                        list.iter()
+                            .any(|c| c.contact_id == char_id && !c.is_blocked && c.standing > -10.0)
+                    });
+                    if !same_corp && !is_exempt_contact {
+                        let cspa = snap
+                            .character_cspa_charges
+                            .get(tid)
+                            .copied()
+                            .unwrap_or(IskCents(0));
+                        total_cents = total_cents.saturating_add(cspa.0.max(0));
                     }
                 }
-                RouteExecutionResult::created_json(json!(total_charge))
-            }))
-        }
-
-        ("GET", "/characters/{character_id}/medals") => {
-            let char_id = match parse_path_i64(path_params, "character_id") {
-                Ok(v) => v,
-                Err(e) => return Some(e),
-            };
-            Some(ctx.db.with_snapshot(|snap| {
-                let Some(ch) = snap.characters.get(&char_id) else {
-                    return RouteExecutionResult::error(
-                        404,
-                        format!("Character {char_id} not found"),
-                    );
-                };
-                let out = vec![json!({
-                    "medal_id": 1,
-                    "title": "Distinguished Capsuleer Service Medal",
-                    "description": "Awarded for exemplary service in New Eden.",
-                    "corporation_id": ch.corporation_id,
-                    "issuer_id": ch.character_id,
-                    "date": "2025-01-01T00:00:00Z",
-                    "reason": "Distinguished service",
-                    "status": "public",
-                    "graphics": [
-                        {
-                            "part": 1,
-                            "layer": 0,
-                            "graphic": "caldari.1_1",
-                            "color": 1,
-                        }
-                    ]
-                })];
-                RouteExecutionResult::ok_json(json!(out), 3600)
+                RouteExecutionResult::created_json(json!(IskCents(total_cents).to_wire_f64()))
             }))
         }
 
@@ -385,21 +360,38 @@ pub fn dispatch_char_social_route(
                 Err(e) => return Some(e),
             };
             Some(ctx.db.with_snapshot(|snap| {
-                let Some(ch) = snap.characters.get(&char_id) else {
+                if !snap.characters.contains_key(&char_id) {
                     return RouteExecutionResult::error(
                         404,
                         format!("Character {char_id} not found"),
                     );
-                };
-                let out = vec![json!({
-                    "notification_id": 1,
-                    "type": "AllWarDeclaredMsg",
-                    "sender_id": ch.corporation_id,
-                    "sender_type": "corporation",
-                    "timestamp": format_iso8601_utc(now),
-                    "is_read": false,
-                    "text": format!("againstID: {}", ch.corporation_id),
-                })];
+                }
+                let mut recs: Vec<_> = ctx
+                    .notification_records
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .iter()
+                    .filter(|r| r.receiver_id == char_id && !r.deleted)
+                    .cloned()
+                    .collect();
+                recs.sort_by(|a, b| b.notification_id.cmp(&a.notification_id));
+                let out: Vec<Value> = recs
+                    .into_iter()
+                    .map(|r| {
+                        let unix_secs =
+                            ((r.created / 10_000_000) - 11_644_473_600).max(0) as u64;
+                        let sender_type = infer_contact_type(ctx, snap, r.sender_id);
+                        json!({
+                            "notification_id": r.notification_id,
+                            "type": map_notification_type_id(r.type_id),
+                            "sender_id": r.sender_id,
+                            "sender_type": sender_type,
+                            "timestamp": format_iso8601_utc(unix_secs),
+                            "is_read": r.processed,
+                            "text": r.data,
+                        })
+                    })
+                    .collect();
                 RouteExecutionResult::ok_json(json!(out), 600)
             }))
         }
@@ -416,24 +408,24 @@ pub fn dispatch_char_social_route(
                         format!("Character {char_id} not found"),
                     );
                 }
-                let contacts = ctx
+                let mut notifs = ctx
                     .esi_state
-                    .char_contacts
+                    .contact_notifications
                     .read()
                     .unwrap_or_else(|e| e.into_inner())
                     .get(&char_id)
                     .cloned()
                     .unwrap_or_default();
-                let out: Vec<Value> = contacts
-                    .iter()
-                    .enumerate()
-                    .map(|(idx, c)| {
+                notifs.sort_by(|a, b| b.notification_id.cmp(&a.notification_id));
+                let out: Vec<Value> = notifs
+                    .into_iter()
+                    .map(|n| {
                         json!({
-                            "notification_id": (idx as i64) + 1,
-                            "send_date": format_iso8601_utc(now),
-                            "standing_level": c.standing,
-                            "message": "Added to contacts",
-                            "sender_character_id": char_id,
+                            "notification_id": n.notification_id,
+                            "send_date": format_iso8601_utc(n.send_date_unix),
+                            "standing_level": n.standing_level,
+                            "message": n.message,
+                            "sender_character_id": n.sender_character_id,
                         })
                     })
                     .collect();
@@ -453,39 +445,30 @@ pub fn dispatch_char_social_route(
                         format!("Character {char_id} not found"),
                     );
                 };
-                let is_ceo = snap
+                let role_mask = snap
                     .corporations
                     .get(&ch.corporation_id)
-                    .map(|c| c.ceo_id == char_id)
-                    .unwrap_or(false);
-                let roles: Vec<&str> = if is_ceo {
-                    vec![
-                        "Director",
-                        "Accountant",
-                        "Communications_Officer",
-                        "Config_Equipment",
-                        "Config_Starbase_Equipment",
-                        "Contract_Manager",
-                        "Diplomat",
-                        "Factory_Manager",
-                        "Fitting_Manager",
-                        "Personnel_Manager",
-                        "Project_Manager",
-                        "Security_Officer",
-                        "Starbase_Defense_Operator",
-                        "Starbase_Fuel_Technician",
-                        "Station_Manager",
-                        "Trader",
-                    ]
-                } else {
-                    Vec::new()
-                };
+                    .and_then(|c| c.member_roles.get(&char_id).copied())
+                    .unwrap_or(0);
+                let role_table: &[(u64, &str)] = &[
+                    (eve_db::corp_roles::ROLE_DIRECTOR, "Director"),
+                    (eve_db::corp_roles::ROLE_ACCOUNTANT, "Accountant"),
+                    (eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT, "Junior_Accountant"),
+                    (eve_db::corp_roles::ROLE_CONFIG_EQUIPMENT, "Config_Equipment"),
+                    (eve_db::corp_roles::ROLE_DIPLOMAT, "Diplomat"),
+                    (eve_db::corp_roles::ROLE_FACTORY_MANAGER, "Factory_Manager"),
+                    (eve_db::corp_roles::ROLE_PERSONNEL_MANAGER, "Personnel_Manager"),
+                    (eve_db::corp_roles::ROLE_SECURITY_OFFICER, "Security_Officer"),
+                    (eve_db::corp_roles::ROLE_STATION_MANAGER, "Station_Manager"),
+                    (eve_db::corp_roles::ROLE_AUDITOR, "Auditor"),
+                ];
+                let roles: Vec<&str> = role_table
+                    .iter()
+                    .filter_map(|&(bit, name)| ((role_mask & bit) != 0).then_some(name))
+                    .collect();
                 RouteExecutionResult::ok_json(
                     json!({
                         "roles": roles,
-                        "roles_at_hq": roles,
-                        "roles_at_base": roles,
-                        "roles_at_other": roles,
                     }),
                     3600,
                 )
@@ -504,22 +487,27 @@ pub fn dispatch_char_social_route(
                         format!("Character {char_id} not found"),
                     );
                 };
-                let is_ceo = snap
-                    .corporations
-                    .get(&ch.corporation_id)
-                    .map(|c| c.ceo_id == char_id)
-                    .unwrap_or(false);
-                let out = if is_ceo {
-                    vec![json!({
-                        "title_id": 1,
-                        "name": "Chief Executive Officer",
-                    })]
-                } else {
-                    vec![json!({
-                        "title_id": 1,
-                        "name": "Capsuleer Member",
-                    })]
-                };
+                let mut titles = ctx
+                    .esi_state
+                    .char_titles
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .get(&char_id)
+                    .cloned()
+                    .unwrap_or_default();
+                if titles.is_empty() && !ch.title.is_empty() {
+                    titles.push((1, ch.title.clone()));
+                }
+                titles.sort_by_key(|&(tid, _)| tid);
+                let out: Vec<Value> = titles
+                    .into_iter()
+                    .map(|(tid, name)| {
+                        json!({
+                            "title_id": tid,
+                            "name": name,
+                        })
+                    })
+                    .collect();
                 RouteExecutionResult::ok_json(json!(out), 3600)
             }))
         }
@@ -530,28 +518,63 @@ pub fn dispatch_char_social_route(
                 Ok(v) => v,
                 Err(e) => return Some(e),
             };
+            let from_event: Option<i64> = match query_params.get("from_event") {
+                Some(raw) => match raw.parse::<i64>() {
+                    Ok(v) if v > 0 => Some(v),
+                    _ => {
+                        return Some(RouteExecutionResult::error(
+                            400,
+                            format!("Invalid from_event '{raw}'"),
+                        ));
+                    }
+                },
+                None => None,
+            };
             Some(ctx.db.with_snapshot(|snap| {
-                if !snap.characters.contains_key(&char_id) {
+                let Some(ch) = snap.characters.get(&char_id) else {
                     return RouteExecutionResult::error(
                         404,
                         format!("Character {char_id} not found"),
                     );
-                }
-                let resp = ctx
+                };
+                let events_guard = ctx
+                    .esi_state
+                    .calendar_events
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner());
+                let resp_guard = ctx
                     .esi_state
                     .calendar_responses
                     .read()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .get(&(char_id, 1))
-                    .cloned()
-                    .unwrap_or_else(|| "not_responded".to_string());
-                let out = vec![json!({
-                    "event_id": 1,
-                    "event_date": format_iso8601_utc(now + 3600),
-                    "title": "Corporation Fleet Operations Briefing",
-                    "importance": 1,
-                    "event_response": resp,
-                })];
+                    .unwrap_or_else(|e| e.into_inner());
+                let mut visible: Vec<_> = events_guard
+                    .values()
+                    .filter(|ev| {
+                        let invited = ev.owner_id == char_id
+                            || ev.attendees.contains(&char_id)
+                            || (ev.owner_type == "corporation"
+                                && ev.owner_id == ch.corporation_id);
+                        invited && from_event.is_none_or(|f| ev.event_id >= f)
+                    })
+                    .collect();
+                visible.sort_by_key(|ev| ev.event_id);
+                let out: Vec<Value> = visible
+                    .into_iter()
+                    .take(50)
+                    .map(|ev| {
+                        let resp = resp_guard
+                            .get(&(char_id, ev.event_id))
+                            .cloned()
+                            .unwrap_or_else(|| "not_responded".to_string());
+                        json!({
+                            "event_id": ev.event_id,
+                            "event_date": format_iso8601_utc(ev.event_date_unix),
+                            "title": ev.title,
+                            "importance": ev.importance,
+                            "event_response": resp,
+                        })
+                    })
+                    .collect();
                 RouteExecutionResult::ok_json(json!(out), 5)
             }))
         }
@@ -572,6 +595,26 @@ pub fn dispatch_char_social_route(
                         format!("Character {char_id} not found"),
                     );
                 };
+                let events_guard = ctx
+                    .esi_state
+                    .calendar_events
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner());
+                let Some(ev) = events_guard.get(&event_id) else {
+                    return RouteExecutionResult::error(
+                        404,
+                        format!("Calendar event {event_id} not found"),
+                    );
+                };
+                let invited = ev.owner_id == char_id
+                    || ev.attendees.contains(&char_id)
+                    || (ev.owner_type == "corporation" && ev.owner_id == ch.corporation_id);
+                if !invited {
+                    return RouteExecutionResult::error(
+                        404,
+                        format!("Calendar event {event_id} not found for character {char_id}"),
+                    );
+                }
                 let resp = ctx
                     .esi_state
                     .calendar_responses
@@ -582,16 +625,16 @@ pub fn dispatch_char_social_route(
                     .unwrap_or_else(|| "not_responded".to_string());
                 RouteExecutionResult::ok_json(
                     json!({
-                        "event_id": event_id,
-                        "owner_id": ch.corporation_id,
-                        "owner_name": snap.corporations.get(&ch.corporation_id).map(|c| c.name.as_str()).unwrap_or("CONCORD"),
-                        "date": format_iso8601_utc(now + 3600),
-                        "title": "Corporation Fleet Operations Briefing",
-                        "duration": 60,
-                        "importance": 1,
+                        "event_id": ev.event_id,
+                        "owner_id": ev.owner_id,
+                        "owner_name": ev.owner_name,
+                        "date": format_iso8601_utc(ev.event_date_unix),
+                        "title": ev.title,
+                        "duration": ev.duration_minutes,
+                        "importance": ev.importance,
                         "response": resp,
-                        "text": "Scheduled fleet assembly and strategic briefing.",
-                        "owner_type": "corporation",
+                        "text": ev.text,
+                        "owner_type": ev.owner_type,
                     }),
                     5,
                 )
@@ -637,6 +680,18 @@ pub fn dispatch_char_social_route(
                     format!("Character {char_id} not found"),
                 ));
             }
+            let event_exists = ctx
+                .esi_state
+                .calendar_events
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains_key(&event_id);
+            if !event_exists {
+                return Some(RouteExecutionResult::error(
+                    404,
+                    format!("Calendar event {event_id} not found"),
+                ));
+            }
             ctx.esi_state
                 .calendar_responses
                 .write()
@@ -661,584 +716,39 @@ pub fn dispatch_char_social_route(
                         format!("Character {char_id} not found"),
                     );
                 }
-                let resp = ctx
+                let events_guard = ctx
+                    .esi_state
+                    .calendar_events
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner());
+                let Some(ev) = events_guard.get(&event_id) else {
+                    return RouteExecutionResult::error(
+                        404,
+                        format!("Calendar event {event_id} not found"),
+                    );
+                };
+                let resp_guard = ctx
                     .esi_state
                     .calendar_responses
                     .read()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .get(&(char_id, event_id))
-                    .cloned()
-                    .unwrap_or_else(|| "not_responded".to_string());
-                let out = vec![json!({
-                    "character_id": char_id,
-                    "event_response": resp,
-                })];
-                RouteExecutionResult::ok_json(json!(out), 600)
-            }))
-        }
-
-        // 3. Contacts (ESI-4)
-        ("GET", "/characters/{character_id}/contacts") => {
-            let char_id = match parse_path_i64(path_params, "character_id") {
-                Ok(v) => v,
-                Err(e) => return Some(e),
-            };
-            Some(ctx.db.with_snapshot(|snap| {
-                if !snap.characters.contains_key(&char_id) {
-                    return RouteExecutionResult::error(
-                        404,
-                        format!("Character {char_id} not found"),
-                    );
-                }
-                let list = ctx
-                    .esi_state
-                    .char_contacts
-                    .read()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .get(&char_id)
-                    .cloned()
-                    .unwrap_or_default();
-                let out: Vec<Value> = list
-                    .into_iter()
-                    .map(|c| {
-                        let mut obj = json!({
-                            "contact_id": c.contact_id,
-                            "contact_type": c.contact_type,
-                            "standing": c.standing,
-                            "is_watched": c.is_watched,
-                            "is_blocked": c.is_blocked,
-                        });
-                        if !c.label_ids.is_empty() {
-                            obj.as_object_mut()
-                                .unwrap()
-                                .insert("label_ids".to_string(), json!(c.label_ids));
-                        }
-                        obj
-                    })
-                    .collect();
-                RouteExecutionResult::ok_json(json!(out), 300)
-            }))
-        }
-
-        ("POST", "/characters/{character_id}/contacts")
-        | ("PUT", "/characters/{character_id}/contacts") => {
-            let char_id = match parse_path_i64(path_params, "character_id") {
-                Ok(v) => v,
-                Err(e) => return Some(e),
-            };
-            let Some(raw_standing) = query_params.get("standing") else {
-                return Some(RouteExecutionResult::error(
-                    400,
-                    "Missing required query parameter 'standing'",
-                ));
-            };
-            let Ok(standing) = raw_standing.parse::<f64>() else {
-                return Some(RouteExecutionResult::error(
-                    400,
-                    format!("Invalid standing parameter '{raw_standing}'"),
-                ));
-            };
-            if !standing.is_finite() || !(-10.0..=10.0).contains(&standing) {
-                return Some(RouteExecutionResult::error(
-                    400,
-                    "Contact standing must be between -10.0 and 10.0",
-                ));
-            }
-            let watched = query_params
-                .get("watched")
-                .map(|v| v == "true" || v == "1")
-                .unwrap_or(false);
-            let label_ids = match query_params.get("label_ids") {
-                Some(raw) => match parse_csv_i64(raw) {
-                    Ok(v) => v,
-                    Err(e) => return Some(e),
-                },
-                None => Vec::new(),
-            };
-            let contact_ids: Vec<i64> = match serde_json::from_slice(req_body) {
-                Ok(v) => v,
-                Err(e) => {
-                    return Some(RouteExecutionResult::error(
-                        400,
-                        format!("Invalid contact IDs JSON array: {e}"),
-                    ));
-                }
-            };
-            if contact_ids.is_empty() || contact_ids.len() > 100 || contact_ids.iter().any(|&id| id <= 0)
-            {
-                return Some(RouteExecutionResult::error(
-                    400,
-                    "Contact IDs array must contain 1..=100 positive integers",
-                ));
-            }
-            Some(ctx.db.with_snapshot(|snap| {
-                if !snap.characters.contains_key(&char_id) {
-                    return RouteExecutionResult::error(
-                        404,
-                        format!("Character {char_id} not found"),
-                    );
-                }
-                let mut map = ctx
-                    .esi_state
-                    .char_contacts
-                    .write()
                     .unwrap_or_else(|e| e.into_inner());
-                let list = map.entry(char_id).or_default();
-                for &cid in &contact_ids {
-                    let ctype = infer_contact_type(ctx, snap, cid).to_string();
-                    if let Some(existing) = list.iter_mut().find(|e| e.contact_id == cid) {
-                        existing.standing = standing;
-                        existing.is_watched = watched;
-                        existing.label_ids = label_ids.clone();
-                    } else {
-                        list.push(EsiContactEntry {
-                            contact_id: cid,
-                            contact_type: ctype,
-                            standing,
-                            is_watched: watched,
-                            is_blocked: standing < -5.0,
-                            label_ids: label_ids.clone(),
-                        });
-                    }
-                }
-                if method == "POST" {
-                    RouteExecutionResult::created_json(json!(contact_ids))
-                } else {
-                    RouteExecutionResult::no_content(0)
-                }
-            }))
-        }
-
-        ("DELETE", "/characters/{character_id}/contacts") => {
-            let char_id = match parse_path_i64(path_params, "character_id") {
-                Ok(v) => v,
-                Err(e) => return Some(e),
-            };
-            let Some(raw_ids) = query_params.get("contact_ids") else {
-                return Some(RouteExecutionResult::error(
-                    400,
-                    "Missing required query parameter 'contact_ids'",
-                ));
-            };
-            let ids = match parse_csv_i64(raw_ids) {
-                Ok(v) => v,
-                Err(e) => return Some(e),
-            };
-            if ids.is_empty() || ids.len() > 20 {
-                return Some(RouteExecutionResult::error(
-                    400,
-                    "contact_ids must contain 1..=20 IDs",
-                ));
-            }
-            let exists = ctx
-                .db
-                .with_snapshot(|snap| snap.characters.contains_key(&char_id));
-            if !exists {
-                return Some(RouteExecutionResult::error(
-                    404,
-                    format!("Character {char_id} not found"),
-                ));
-            }
-            let mut map = ctx
-                .esi_state
-                .char_contacts
-                .write()
-                .unwrap_or_else(|e| e.into_inner());
-            if let Some(list) = map.get_mut(&char_id) {
-                list.retain(|c| !ids.contains(&c.contact_id));
-            }
-            Some(RouteExecutionResult::no_content(0))
-        }
-
-        ("GET", "/characters/{character_id}/contacts/labels") => {
-            let char_id = match parse_path_i64(path_params, "character_id") {
-                Ok(v) => v,
-                Err(e) => return Some(e),
-            };
-            Some(ctx.db.with_snapshot(|snap| {
-                if !snap.characters.contains_key(&char_id) {
-                    return RouteExecutionResult::error(
-                        404,
-                        format!("Character {char_id} not found"),
-                    );
-                }
-                let out = vec![
-                    json!({ "label_id": 1, "label_name": "Fleet Allies" }),
-                    json!({ "label_id": 2, "label_name": "Trade Partners" }),
-                ];
-                RouteExecutionResult::ok_json(json!(out), 300)
-            }))
-        }
-
-        ("GET", "/corporations/{corporation_id}/contacts") => {
-            let corp_id = match parse_path_i64(path_params, "corporation_id") {
-                Ok(v) => v,
-                Err(e) => return Some(e),
-            };
-            Some(ctx.db.with_snapshot(|snap| {
-                let Some(corp) = snap.corporations.get(&corp_id) else {
-                    return RouteExecutionResult::error(
-                        404,
-                        format!("Corporation {corp_id} not found"),
-                    );
-                };
-                let out = vec![json!({
-                    "contact_id": corp.ceo_id,
-                    "contact_type": "character",
-                    "standing": 10.0,
-                    "is_watched": true,
-                    "label_ids": [1],
-                })];
-                RouteExecutionResult::ok_json(json!(out), 300)
-            }))
-        }
-
-        ("GET", "/corporations/{corporation_id}/contacts/labels") => {
-            let corp_id = match parse_path_i64(path_params, "corporation_id") {
-                Ok(v) => v,
-                Err(e) => return Some(e),
-            };
-            Some(ctx.db.with_snapshot(|snap| {
-                if !snap.corporations.contains_key(&corp_id) {
-                    return RouteExecutionResult::error(
-                        404,
-                        format!("Corporation {corp_id} not found"),
-                    );
-                }
-                let out = vec![json!({
-                    "label_id": 1,
-                    "label_name": "Diplomatic Blues",
-                })];
-                RouteExecutionResult::ok_json(json!(out), 300)
-            }))
-        }
-
-        ("GET", "/alliances/{alliance_id}/contacts") => {
-            let alliance_id = match parse_path_i64(path_params, "alliance_id") {
-                Ok(v) => v,
-                Err(e) => return Some(e),
-            };
-            Some(ctx.db.with_snapshot(|snap| {
-                let Some(alliance) = snap.alliances.get(&alliance_id) else {
-                    return RouteExecutionResult::error(
-                        404,
-                        format!("Alliance {alliance_id} not found"),
-                    );
-                };
-                let out = vec![json!({
-                    "contact_id": alliance.executor_corp_id,
-                    "contact_type": "corporation",
-                    "standing": 10.0,
-                    "label_ids": [1],
-                })];
-                RouteExecutionResult::ok_json(json!(out), 300)
-            }))
-        }
-
-        ("GET", "/alliances/{alliance_id}/contacts/labels") => {
-            let alliance_id = match parse_path_i64(path_params, "alliance_id") {
-                Ok(v) => v,
-                Err(e) => return Some(e),
-            };
-            Some(ctx.db.with_snapshot(|snap| {
-                if !snap.alliances.contains_key(&alliance_id) {
-                    return RouteExecutionResult::error(
-                        404,
-                        format!("Alliance {alliance_id} not found"),
-                    );
-                };
-                let out = vec![json!({
-                    "label_id": 1,
-                    "label_name": "Coalition Allies",
-                })];
-                RouteExecutionResult::ok_json(json!(out), 300)
-            }))
-        }
-
-        // 4. Mail Update, Labels, and Mailing Lists (ESI-4)
-        ("PUT", "/characters/{character_id}/mail/{mail_id}") => {
-            let char_id = match parse_path_i64(path_params, "character_id") {
-                Ok(v) => v,
-                Err(e) => return Some(e),
-            };
-            let mail_id = match parse_path_i64(path_params, "mail_id") {
-                Ok(v) => v,
-                Err(e) => return Some(e),
-            };
-            let payload: Value = match serde_json::from_slice(req_body) {
-                Ok(v) => v,
-                Err(e) => {
-                    return Some(RouteExecutionResult::error(
-                        400,
-                        format!("Invalid mail update JSON body: {e}"),
-                    ));
-                }
-            };
-            let new_read = payload.get("read").and_then(Value::as_bool);
-            let new_labels = if let Some(arr) = payload.get("labels").and_then(Value::as_array) {
-                if arr.len() > 25 {
-                    return Some(RouteExecutionResult::error(
-                        400,
-                        "Mail 'labels' cannot exceed 25 entries",
-                    ));
-                }
-                let mut lvec = Vec::with_capacity(arr.len());
-                for item in arr {
-                    let Some(lid) = item.as_i64() else {
-                        return Some(RouteExecutionResult::error(
-                            400,
-                            "Mail label ID must be an integer",
-                        ));
-                    };
-                    if lid <= 0 {
-                        return Some(RouteExecutionResult::error(
-                            400,
-                            "Mail label ID must be > 0",
-                        ));
-                    }
-                    if !lvec.contains(&lid) {
-                        lvec.push(lid);
-                    }
-                }
-                Some(lvec)
-            } else {
-                None
-            };
-            if new_read.is_none() && new_labels.is_none() {
-                return Some(RouteExecutionResult::error(
-                    400,
-                    "Mail update body must specify 'read' and/or 'labels'",
-                ));
-            }
-            Some(ctx.db.with_snapshot(|snap| {
-                if !snap.characters.contains_key(&char_id) {
-                    return RouteExecutionResult::error(
-                        404,
-                        format!("Character {char_id} not found"),
-                    );
-                }
-                if snap.deleted_mails.contains(&(char_id, mail_id))
-                    || ctx.esi_state.is_mail_deleted(char_id, mail_id)
-                {
-                    return RouteExecutionResult::error(
-                        404,
-                        format!("Mail {mail_id} not found for character {char_id}"),
-                    );
-                }
-                let Some(first) = snap.mails.iter().find(|m| {
-                    m.message_id == mail_id && (m.recipient_id == char_id || m.sender_id == char_id)
-                }) else {
-                    return RouteExecutionResult::error(
-                        404,
-                        format!("Mail {mail_id} not found for character {char_id}"),
-                    );
-                };
-                let mut meta =
-                    ctx.esi_state
-                        .get_mail_meta(char_id, mail_id, first.sender_id == char_id);
-                if let Some(r) = new_read {
-                    meta.is_read = r;
-                }
-                if let Some(lbls) = new_labels {
-                    meta.labels = lbls;
-                }
-                ctx.esi_state.set_mail_meta(char_id, mail_id, meta);
-                RouteExecutionResult::no_content(0)
-            }))
-        }
-
-        ("GET", "/characters/{character_id}/mail/labels") => {
-            let char_id = match parse_path_i64(path_params, "character_id") {
-                Ok(v) => v,
-                Err(e) => return Some(e),
-            };
-            Some(ctx.db.with_snapshot(|snap| {
-                if !snap.characters.contains_key(&char_id) {
-                    return RouteExecutionResult::error(
-                        404,
-                        format!("Character {char_id} not found"),
-                    );
-                }
-                let labels = {
-                    let mut map = ctx
-                        .esi_state
-                        .mail_labels
-                        .write()
-                        .unwrap_or_else(|e| e.into_inner());
-                    map.entry(char_id)
-                        .or_insert_with(crate::esi::runtime_state::EsiRuntimeState::default_mail_labels)
-                        .clone()
-                };
-                let mut msg_ids: Vec<i64> = snap
-                    .mails
-                    .iter()
-                    .filter(|m| {
-                        (m.recipient_id == char_id || m.sender_id == char_id)
-                            && !snap.deleted_mails.contains(&(char_id, m.message_id))
-                            && !ctx.esi_state.is_mail_deleted(char_id, m.message_id)
-                    })
-                    .map(|m| m.message_id)
-                    .collect();
-                msg_ids.sort_unstable();
-                msg_ids.dedup();
-                let mut total_unread = 0_i64;
-                let mut unread_by_label: HashMap<i64, i64> = HashMap::new();
-                for mid in msg_ids {
-                    let is_sender = snap
-                        .mails
-                        .iter()
-                        .find(|m| m.message_id == mid)
-                        .map(|m| m.sender_id == char_id)
-                        .unwrap_or(false);
-                    let meta: EsiMailMeta = ctx.esi_state.get_mail_meta(char_id, mid, is_sender);
-                    if !meta.is_read {
-                        total_unread += 1;
-                        for lid in meta.labels {
-                            *unread_by_label.entry(lid).or_insert(0) += 1;
-                        }
-                    }
-                }
-                let out_labels: Vec<Value> = labels
+                let mut attendees = ev.attendees.clone();
+                attendees.sort_unstable();
+                attendees.dedup();
+                let out: Vec<Value> = attendees
                     .into_iter()
-                    .map(|l| {
+                    .map(|cid| {
+                        let resp = resp_guard
+                            .get(&(cid, event_id))
+                            .cloned()
+                            .unwrap_or_else(|| "not_responded".to_string());
                         json!({
-                            "label_id": l.label_id,
-                            "name": l.name,
-                            "color": l.color,
-                            "unread_count": unread_by_label.get(&l.label_id).copied().unwrap_or(0),
+                            "character_id": cid,
+                            "event_response": resp,
                         })
                     })
                     .collect();
-                RouteExecutionResult::ok_json(
-                    json!({
-                        "total_unread_count": total_unread,
-                        "labels": out_labels,
-                    }),
-                    30,
-                )
-            }))
-        }
-
-        ("POST", "/characters/{character_id}/mail/labels") => {
-            let char_id = match parse_path_i64(path_params, "character_id") {
-                Ok(v) => v,
-                Err(e) => return Some(e),
-            };
-            let payload: Value = match serde_json::from_slice(req_body) {
-                Ok(v) => v,
-                Err(e) => {
-                    return Some(RouteExecutionResult::error(
-                        400,
-                        format!("Invalid mail label JSON body: {e}"),
-                    ));
-                }
-            };
-            let Some(name) = payload.get("name").and_then(Value::as_str) else {
-                return Some(RouteExecutionResult::error(400, "Missing label 'name'"));
-            };
-            let trimmed = name.trim();
-            if trimmed.is_empty() || trimmed.len() > 40 {
-                return Some(RouteExecutionResult::error(
-                    400,
-                    "Mail label 'name' must be 1..=40 characters",
-                ));
-            }
-            let color = payload
-                .get("color")
-                .and_then(Value::as_str)
-                .unwrap_or("#ffffff");
-            if !VALID_MAIL_LABEL_COLORS.contains(&color) {
-                return Some(RouteExecutionResult::error(
-                    400,
-                    format!("Invalid mail label color '{color}'"),
-                ));
-            }
-            let exists = ctx
-                .db
-                .with_snapshot(|snap| snap.characters.contains_key(&char_id));
-            if !exists {
-                return Some(RouteExecutionResult::error(
-                    404,
-                    format!("Character {char_id} not found"),
-                ));
-            }
-            let label_id = ctx.esi_state.alloc_id();
-            let mut map = ctx
-                .esi_state
-                .mail_labels
-                .write()
-                .unwrap_or_else(|e| e.into_inner());
-            let list = map
-                .entry(char_id)
-                .or_insert_with(crate::esi::runtime_state::EsiRuntimeState::default_mail_labels);
-            list.push(EsiMailLabel {
-                label_id,
-                name: trimmed.to_string(),
-                color: color.to_string(),
-            });
-            Some(RouteExecutionResult::created_json(json!(label_id)))
-        }
-
-        ("DELETE", "/characters/{character_id}/mail/labels/{label_id}") => {
-            let char_id = match parse_path_i64(path_params, "character_id") {
-                Ok(v) => v,
-                Err(e) => return Some(e),
-            };
-            let label_id = match parse_path_i64(path_params, "label_id") {
-                Ok(v) => v,
-                Err(e) => return Some(e),
-            };
-            if matches!(label_id, 1 | 2 | 4 | 8) {
-                return Some(RouteExecutionResult::error(
-                    422,
-                    "Default system mail labels cannot be deleted",
-                ));
-            }
-            let exists = ctx
-                .db
-                .with_snapshot(|snap| snap.characters.contains_key(&char_id));
-            if !exists {
-                return Some(RouteExecutionResult::error(
-                    404,
-                    format!("Character {char_id} not found"),
-                ));
-            }
-            let mut map = ctx
-                .esi_state
-                .mail_labels
-                .write()
-                .unwrap_or_else(|e| e.into_inner());
-            let list = map
-                .entry(char_id)
-                .or_insert_with(crate::esi::runtime_state::EsiRuntimeState::default_mail_labels);
-            let before = list.len();
-            list.retain(|l| l.label_id != label_id);
-            if list.len() == before {
-                return Some(RouteExecutionResult::error(
-                    404,
-                    format!("Mail label {label_id} not found"),
-                ));
-            }
-            Some(RouteExecutionResult::no_content(0))
-        }
-
-        ("GET", "/characters/{character_id}/mail/lists") => {
-            let char_id = match parse_path_i64(path_params, "character_id") {
-                Ok(v) => v,
-                Err(e) => return Some(e),
-            };
-            Some(ctx.db.with_snapshot(|snap| {
-                let Some(ch) = snap.characters.get(&char_id) else {
-                    return RouteExecutionResult::error(
-                        404,
-                        format!("Character {char_id} not found"),
-                    );
-                };
-                let out = vec![json!({
-                    "mailing_list_id": 145_000_000 + ch.corporation_id,
-                    "name": "Corporation Announcements",
-                })];
-                RouteExecutionResult::ok_json(json!(out), 120)
+                RouteExecutionResult::ok_json(json!(out), 600)
             }))
         }
 
@@ -1445,6 +955,13 @@ pub fn dispatch_char_social_route(
             }))
         }
 
-        _ => None,
+        _ => super::char_social_mail_routes::dispatch_char_social_mail_route(
+            ctx,
+            method,
+            path,
+            path_params,
+            query_params,
+            req_body,
+        ),
     }
 }
