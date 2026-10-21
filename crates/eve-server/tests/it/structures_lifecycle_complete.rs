@@ -612,6 +612,8 @@ async fn test_unanchor_cancel_and_packaging_after_seven_days() {
     // parity: feat:structures.unanchor
     eve_testkit::attest(&["feat:structures.unanchor"]);
     let ctx = ServerContext::new();
+    // Deterministic virtual time: the 7-day timer assertion must not race the host wall clock.
+    ctx.set_clock(std::sync::Arc::new(eve_db::VirtualServerClock::with_fixed_base(1_800_000_000)));
     let mut sess = pilot_in_space(&ctx, 4007).await;
     move_ship(&ctx, &sess, open_space(&ctx, 6.0)).await;
     let id = online_structure(&ctx, &mut sess, 35832, "Retiring Astrahus").await;

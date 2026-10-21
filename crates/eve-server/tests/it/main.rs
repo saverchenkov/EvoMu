@@ -49,6 +49,7 @@ mod economy_market;
 mod economy_market_industry;
 mod esi;
 mod esi_corp_alliance;
+mod esi_fittings_war_killmails;
 mod esi_corp_governance;
 mod esi_fleets;
 mod esi_full;

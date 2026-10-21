@@ -14,6 +14,8 @@ async fn test_account_bans_suspensions_and_gm_ban_live_session_kick() {
     // parity: feat:account.account-bans, feat:admin.gm-ban, rpc:authentication.Login, rpc:charUnboundMgr.SelectCharacterID, rpc:slash.SlashCmd
     eve_testkit::attest(&["feat:account.account-bans", "feat:admin.gm-ban"]);
     let ctx = ServerContext::new();
+    // Deterministic virtual time: the suspension expiry assertion must not race the host wall clock.
+    ctx.set_clock(std::sync::Arc::new(eve_db::VirtualServerClock::with_fixed_base(1_800_000_000)));
     let kw = HashMap::new();
     let base_now = ctx.now_unix();
 

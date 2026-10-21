@@ -980,6 +980,10 @@ pub fn dispatch_character_routes(
                         "Fitting item missing 'flag'",
                     ));
                 };
+                // Pinned OpenAPI: "Entries placed in 'Invalid' will be discarded."
+                if flag_str == "Invalid" {
+                    continue;
+                }
                 let Some(flag) = parse_fitting_flag(flag_str) else {
                     return Some(RouteExecutionResult::error(
                         400,
@@ -1003,6 +1007,13 @@ pub fn dispatch_character_routes(
                     ));
                 }
                 parsed_items.push((tid, flag, qty));
+            }
+            // Pinned OpenAPI: discarding 'Invalid' entries that leaves nothing is an error.
+            if parsed_items.is_empty() {
+                return Some(RouteExecutionResult::error(
+                    400,
+                    "Fitting has no items left after discarding 'Invalid' entries",
+                ));
             }
 
             let res: Result<i64, RouteExecutionResult> = ctx.db.try_with_mut_snapshot(|snap| {
@@ -1029,6 +1040,14 @@ pub fn dispatch_character_routes(
             });
             Some(match res {
                 Ok(fitting_id) => {
+                    // Same notification the in-game `charFittingMgr.SaveFitting` path sends, so a
+                    // logged-in client refreshes its fitting window from the shared state.
+                    ctx.notify(
+                        crate::router::NotificationTarget::Character(char_id),
+                        "OnFittingsUpdated",
+                        "charid",
+                        vec![eve_proto::PyRep::Integer(char_id)],
+                    );
                     RouteExecutionResult::created_json(json!({ "fitting_id": fitting_id }))
                 }
                 Err(e) => e,
@@ -1066,7 +1085,15 @@ pub fn dispatch_character_routes(
                 Ok(())
             });
             Some(match res {
-                Ok(()) => RouteExecutionResult::no_content(0),
+                Ok(()) => {
+                    ctx.notify(
+                        crate::router::NotificationTarget::Character(char_id),
+                        "OnFittingsUpdated",
+                        "charid",
+                        vec![eve_proto::PyRep::Integer(char_id)],
+                    );
+                    RouteExecutionResult::no_content(0)
+                }
                 Err(e) => e,
             })
         }

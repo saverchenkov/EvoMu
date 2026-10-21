@@ -1030,10 +1030,12 @@ impl SdeRegistry {
 }
 
 pub mod cfsd_domain_loaders;
+pub mod cfsd_flat_tables;
 pub mod sqlite_loader;
 pub mod sqlite_loader_skins;
 pub mod static_domain_loaders;
 pub use cfsd_domain_loaders::*;
+pub use cfsd_flat_tables::*;
 pub use static_domain_loaders::*;
 #[cfg(test)]
 mod tests {

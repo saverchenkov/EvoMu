@@ -289,46 +289,74 @@ pub(crate) fn fitting_flag_str(flag: InventoryFlag) -> &'static str {
         InventoryFlag::SubSystemSlot1 => "SubSystemSlot1",
         InventoryFlag::SubSystemSlot2 => "SubSystemSlot2",
         InventoryFlag::SubSystemSlot3 => "SubSystemSlot3",
-        InventoryFlag::SubSystemSlot4 => "SubSystemSlot4",
+        InventoryFlag::ServiceSlot0 => "ServiceSlot0",
+        InventoryFlag::ServiceSlot1 => "ServiceSlot1",
+        InventoryFlag::ServiceSlot2 => "ServiceSlot2",
+        InventoryFlag::ServiceSlot3 => "ServiceSlot3",
+        InventoryFlag::ServiceSlot4 => "ServiceSlot4",
+        InventoryFlag::ServiceSlot5 => "ServiceSlot5",
+        InventoryFlag::ServiceSlot6 => "ServiceSlot6",
+        InventoryFlag::ServiceSlot7 => "ServiceSlot7",
+        // Every other flag (including `SubSystemSlot4`) is outside the pinned ESI fitting-item
+        // `flag` enum, which names it `Invalid`.
         _ => "Invalid",
     }
 }
 
+/// Every inventory flag the pinned ESI fitting-item `flag` enum can name (all enum values except
+/// `Invalid`). `parse_fitting_flag` is the exact inverse of `fitting_flag_str` over this set.
+const ESI_FITTING_FLAGS: [InventoryFlag; 42] = [
+    InventoryFlag::Cargo,
+    InventoryFlag::DroneBay,
+    InventoryFlag::FighterBay,
+    InventoryFlag::HiSlot0,
+    InventoryFlag::HiSlot1,
+    InventoryFlag::HiSlot2,
+    InventoryFlag::HiSlot3,
+    InventoryFlag::HiSlot4,
+    InventoryFlag::HiSlot5,
+    InventoryFlag::HiSlot6,
+    InventoryFlag::HiSlot7,
+    InventoryFlag::LoSlot0,
+    InventoryFlag::LoSlot1,
+    InventoryFlag::LoSlot2,
+    InventoryFlag::LoSlot3,
+    InventoryFlag::LoSlot4,
+    InventoryFlag::LoSlot5,
+    InventoryFlag::LoSlot6,
+    InventoryFlag::LoSlot7,
+    InventoryFlag::MedSlot0,
+    InventoryFlag::MedSlot1,
+    InventoryFlag::MedSlot2,
+    InventoryFlag::MedSlot3,
+    InventoryFlag::MedSlot4,
+    InventoryFlag::MedSlot5,
+    InventoryFlag::MedSlot6,
+    InventoryFlag::MedSlot7,
+    InventoryFlag::RigSlot0,
+    InventoryFlag::RigSlot1,
+    InventoryFlag::RigSlot2,
+    InventoryFlag::ServiceSlot0,
+    InventoryFlag::ServiceSlot1,
+    InventoryFlag::ServiceSlot2,
+    InventoryFlag::ServiceSlot3,
+    InventoryFlag::ServiceSlot4,
+    InventoryFlag::ServiceSlot5,
+    InventoryFlag::ServiceSlot6,
+    InventoryFlag::ServiceSlot7,
+    InventoryFlag::SubSystemSlot0,
+    InventoryFlag::SubSystemSlot1,
+    InventoryFlag::SubSystemSlot2,
+    InventoryFlag::SubSystemSlot3,
+];
+
+/// Parses a pinned-enum ESI fitting-item `flag`. Returns `None` for `Invalid` and for any string
+/// outside the enum; the POST handler discards `Invalid` entries and rejects unknown strings.
 pub(crate) fn parse_fitting_flag(flag_str: &str) -> Option<InventoryFlag> {
-    match flag_str {
-        "Cargo" => Some(InventoryFlag::Cargo),
-        "DroneBay" => Some(InventoryFlag::DroneBay),
-        "FighterBay" => Some(InventoryFlag::FighterBay),
-        "LoSlot0" => Some(InventoryFlag::LoSlot0),
-        "LoSlot1" => Some(InventoryFlag::LoSlot1),
-        "LoSlot2" => Some(InventoryFlag::LoSlot2),
-        "LoSlot3" => Some(InventoryFlag::LoSlot3),
-        "LoSlot4" => Some(InventoryFlag::LoSlot4),
-        "LoSlot5" => Some(InventoryFlag::LoSlot5),
-        "LoSlot6" => Some(InventoryFlag::LoSlot6),
-        "LoSlot7" => Some(InventoryFlag::LoSlot7),
-        "MedSlot0" => Some(InventoryFlag::MedSlot0),
-        "MedSlot1" => Some(InventoryFlag::MedSlot1),
-        "MedSlot2" => Some(InventoryFlag::MedSlot2),
-        "MedSlot3" => Some(InventoryFlag::MedSlot3),
-        "MedSlot4" => Some(InventoryFlag::MedSlot4),
-        "MedSlot5" => Some(InventoryFlag::MedSlot5),
-        "MedSlot6" => Some(InventoryFlag::MedSlot6),
-        "MedSlot7" => Some(InventoryFlag::MedSlot7),
-        "HiSlot0" => Some(InventoryFlag::HiSlot0),
-        "HiSlot1" => Some(InventoryFlag::HiSlot1),
-        "HiSlot2" => Some(InventoryFlag::HiSlot2),
-        "HiSlot3" => Some(InventoryFlag::HiSlot3),
-        "HiSlot4" => Some(InventoryFlag::HiSlot4),
-        "HiSlot5" => Some(InventoryFlag::HiSlot5),
-        "HiSlot6" => Some(InventoryFlag::HiSlot6),
-        "HiSlot7" => Some(InventoryFlag::HiSlot7),
-        "RigSlot0" => Some(InventoryFlag::RigSlot0),
-        "RigSlot1" => Some(InventoryFlag::RigSlot1),
-        "RigSlot2" => Some(InventoryFlag::RigSlot2),
-        "SubSystemSlot0" => Some(InventoryFlag::SubSystemSlot0),
-        _ => None,
-    }
+    ESI_FITTING_FLAGS
+        .iter()
+        .copied()
+        .find(|f| fitting_flag_str(*f) == flag_str)
 }
 
 pub fn compute_killmail_hash(
