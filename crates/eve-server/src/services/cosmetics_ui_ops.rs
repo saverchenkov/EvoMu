@@ -588,17 +588,33 @@ fn handle_crate_open(ctx: &ServerContext, session: &mut SessionState, args: &[Py
 fn handle_crate_claim_loot(ctx: &ServerContext, session: &mut SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
     let crate_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-    let item_type = args.get(2).and_then(|a| a.as_i64()).unwrap_or(34) as u32;
-    let qty = args.get(3).and_then(|a| a.as_i64()).unwrap_or(1) as i32;
-    let dest_id = args.get(4).and_then(|a| a.as_i64()).unwrap_or(60_003_760);
+    if crate_id <= 0 {
+        return Err(err("CrateNotFound", "Valid crate item ID required"));
+    }
 
     ctx.db.try_with_mut_snapshot(|snap| {
         let mut ext = load_cosmetics_ui_state(snap);
+        if !ext.opened_crates.contains_key(&crate_id) {
+            return Err(err("CrateNotOpened", format!("Crate {crate_id} has not been opened")));
+        }
+        let crate_owner = snap.items.get(&crate_id).map(|i| i.owner_id);
+        if crate_owner != Some(char_id) {
+            return Err(err("CrateNotFound", format!("Crate {crate_id} not owned by character")));
+        }
         let claimed = ext.claimed_crate_loot.entry(char_id).or_default();
         if claimed.contains(&crate_id) {
             return Err(err("LootAlreadyClaimed", format!("Loot from crate {crate_id} has already been claimed")));
         }
         claimed.push(crate_id);
+        snap.items.remove(&crate_id);
+
+        let dest_id = snap
+            .characters
+            .get(&char_id)
+            .and_then(|c| c.station_id.or(c.structure_id))
+            .unwrap_or(60_003_760);
+        let item_type = 34u32;
+        let qty = 1_000i32;
 
         snap.next_entity_id += 1;
         let new_item_id = snap.next_entity_id;
@@ -625,9 +641,15 @@ fn handle_crate_claim_loot(ctx: &ServerContext, session: &mut SessionState, args
 fn handle_crate_claim_skill_bundle(ctx: &ServerContext, session: &mut SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
     let crate_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-    let bundle_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1);
+    let bundle_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
+    if crate_id <= 0 || bundle_id != 1 {
+        return Err(err("InvalidSkillBundle", "Valid opened crate and skill bundle ID 1 required"));
+    }
     ctx.db.try_with_mut_snapshot(|snap| {
         let mut ext = load_cosmetics_ui_state(snap);
+        if !ext.opened_crates.contains_key(&crate_id) {
+            return Err(err("CrateNotOpened", format!("Crate {crate_id} has not been opened")));
+        }
         let claimed = ext.claimed_crate_loot.entry(char_id).or_default();
         let key = crate_id * 1000 + bundle_id;
         if claimed.contains(&key) {
@@ -662,7 +684,10 @@ fn handle_milestone_process_logon(ctx: &ServerContext, session: &mut SessionStat
 
 fn handle_milestone_claim_rewards(ctx: &ServerContext, session: &mut SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
-    let milestone_id = args.first().and_then(|a| a.as_i64()).unwrap_or(1);
+    let milestone_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+    if milestone_id != 1 && milestone_id != 2 {
+        return Err(err("InvalidMilestone", format!("Milestone {milestone_id} is not an active completed milestone")));
+    }
     ctx.db.try_with_mut_snapshot(|snap| {
         let mut ext = load_cosmetics_ui_state(snap);
         let claimed = ext.claimed_milestones.entry(char_id).or_default();

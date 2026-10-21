@@ -801,7 +801,10 @@ impl ServerContext {
             .unwrap_or_else(|e| e.into_inner())
             .get(&ship_id)
             .cloned()
-            .filter(|e| e.boosters == active_boosters && active_booster_side_effects.is_empty())
+            .filter(|e| {
+                e.boosters == active_boosters
+                    && e.booster_side_effects == active_booster_side_effects
+            })
         {
             existing.set_character_skills(skill_levels);
             existing.set_implants(active_implants);
@@ -821,9 +824,10 @@ impl ServerContext {
         };
 
         let mut fit = ShipFittingEngine::from_sde(ship_id, ship_item.type_id, &self.sde)
-            .with_character_skills(skill_levels.clone())
+            .with_character_skills(skill_levels)
             .with_implants(active_implants)
-            .with_boosters(active_boosters.clone());
+            .with_boosters(active_boosters);
+        fit.booster_side_effects = active_booster_side_effects;
         fit.projected_ewar = active_projected;
 
         let (online_states, active_states, active_charges) = self.db.with_snapshot(|s| {
@@ -892,13 +896,6 @@ impl ServerContext {
             }
         }
         fit.recalculate_stats(&self.sde);
-        crate::services::implant_plugging::apply_active_booster_side_effect_adjustments(
-            &self.sde,
-            &mut fit.ship.base_attributes,
-            &skill_levels,
-            &active_boosters,
-            &active_booster_side_effects,
-        );
 
         self.store_ship_fitting(ship_id, fit.clone());
         Ok(fit)

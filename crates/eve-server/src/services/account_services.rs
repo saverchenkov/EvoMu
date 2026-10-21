@@ -784,6 +784,12 @@ fn handle_inner(
                         format!("Petition {pet_id} not found"),
                     ));
                 };
+                if method == "PetitionerChat" && pet.petitioner_cid != cid {
+                    return Err(err(
+                        "AccessDenied",
+                        "Only the petitioner may post player messages on this petition",
+                    ));
+                }
                 pet.messages.push((cid, msg.clone(), now_unix));
                 let action = if method == "PetitioneeChat" {
                     format!("GMComment:{msg}")
@@ -879,7 +885,7 @@ fn handle_inner(
             ])))
         }
         ("petitioner", "GetPetitionMessages") | ("petitioner", "GetLog") => {
-            let _ = ServerContext::require_character(session)?;
+            let (_, cid) = ServerContext::require_character(session)?;
             let pet_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
             let Some(pet) = ctx
                 .db
@@ -890,6 +896,12 @@ fn handle_inner(
                     format!("Petition {pet_id} not found"),
                 ));
             };
+            if pet.petitioner_cid != cid && !session.has_gm_role() {
+                return Err(err(
+                    "AccessDenied",
+                    "Only the petitioner or a GM may read petition messages and logs",
+                ));
+            }
             if method == "GetPetitionMessages" {
                 let msgs: Vec<PyRep> = pet
                     .messages

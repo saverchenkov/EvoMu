@@ -80,23 +80,29 @@ pub fn validate_install_jump_clone(
             message: "ValidateInstallJumpClone requires being docked at an NPC station or structure".into(),
         });
     }
-    let (clone_count, balance) = ctx.db.with_snapshot(|snap| {
+    let (clone_count, max_clones, balance) = ctx.db.with_snapshot(|snap| {
         let count = snap.jump_clones.get(&char_id).map(|v| v.len()).unwrap_or(0);
         let bal = snap.characters.get(&char_id).map(|c| c.balance.0).unwrap_or(0);
-        (count, bal)
+        let skills = snap.skills.get(&char_id);
+        let info_lvl = skills.and_then(|m| m.get(&24242)).map(|s| s.level as usize).unwrap_or(0);
+        let adv_lvl = skills.and_then(|m| m.get(&33407)).map(|s| s.level as usize).unwrap_or(0);
+        let elite_lvl = skills.and_then(|m| m.get(&73910)).map(|s| s.level as usize).unwrap_or(0);
+        (count, info_lvl + adv_lvl + elite_lvl, bal)
     });
-    // Jump clone installation fee: 100,000 ISK = 10,000,000 cents
-    let clone_cost_cents = 10_000_000;
+    // Canonical jump clone installation fee: 900,000 ISK = 90,000,000 cents
+    let clone_cost_cents = 90_000_000;
     if balance < clone_cost_cents {
         return Err(BridgeRpcError {
             code: "NotEnoughMoney".into(),
-            message: "Insufficient funds to install jump clone (100,000 ISK required)".into(),
+            message: "Insufficient funds to install jump clone (900,000 ISK required)".into(),
         });
     }
-    if clone_count >= 10 {
+    if clone_count >= max_clones {
         return Err(BridgeRpcError {
             code: "JumpCloneLimitReached".into(),
-            message: "Maximum number of jump clones reached for current skill levels".into(),
+            message: format!(
+                "Maximum number of jump clones ({max_clones}) reached for current Infomorph Psychology skill levels"
+            ),
         });
     }
     Ok(PyRep::Bool(true))
