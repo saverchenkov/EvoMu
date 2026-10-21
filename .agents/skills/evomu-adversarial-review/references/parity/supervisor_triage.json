@@ -6787,6 +6787,10 @@
       "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/app/eveonline/career/career_pb2.pyj defines fire-and-forget client UI/analytics telemetry event payloads (Selected; e.g. careergoals/client/messenger/event_messenger.pyj: Selected + publish_event_payload) with 0 Request, Response, or Notice RPC messages; telemetry publish ACK is handled generically by publicGatewaySvc.PublishEventPayload (Q-2)."
     },
+    "quasar:eveProto/generated/eve_public/app/eveonline/career/goal_pb2.pyj": {
+      "disposition": "client_local",
+      "evidence": "Fire-and-forget client analytics telemetry event module (usage_kinds == [\"event_published\"] via careergoals/client/messenger/event_messenger.pyj; handled generically by PublishEventPayload)."
+    },
     "quasar:eveProto/generated/eve_public/app/eveonline/career/group_pb2.pyj": {
       "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/app/eveonline/career/group_pb2.pyj defines fire-and-forget client UI/analytics telemetry event payloads (Selected; e.g. careergoals/client/messenger/event_messenger.pyj: Selected + publish_event_payload) with 0 Request, Response, or Notice RPC messages; telemetry publish ACK is handled generically by publicGatewaySvc.PublishEventPayload (Q-2)."
@@ -7198,6 +7202,10 @@
     "quasar:eveProto/generated/eve_public/cdn/cdn_pb2.pyj": {
       "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/cdn/cdn_pb2.pyj is a shared protobuf data-type/identifier/enum module (Checkpoint, Checksum) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
+    },
+    "quasar:eveProto/generated/eve_public/character/character_pb2.pyj": {
+      "disposition": "client_local",
+      "evidence": "Shared eve_public.character.Identifier data message module (0 Request/Response/Notice RPC messages; usage_kinds == [] in V24 code.ccp)."
     },
     "quasar:eveProto/generated/eve_public/character/complaint_pb2.pyj": {
       "class": "unreachable",
@@ -7675,6 +7683,10 @@
       "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/skill/plan/milestone_pb2.pyj is a shared protobuf data-type/identifier/enum module (Attributes, Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
+    "quasar:eveProto/generated/eve_public/skill/plan/plan_pb2.pyj": {
+      "disposition": "client_local",
+      "evidence": "Shared eve_public.skill.plan data/identifier message module (0 Request/Response/Notice RPC messages; usage_kinds == [] in V24 code.ccp)."
+    },
     "quasar:eveProto/generated/eve_public/skill/skilltype_pb2.pyj": {
       "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/skill/skilltype_pb2.pyj is a shared protobuf data-type/identifier/enum module (Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
@@ -7909,6 +7921,30 @@
       "disposition": "client_local",
       "evidence": "Python list/set .remove() method called locally on a returned collection (mis-scraped from chained sm.RemoteSvc(...).Get*().remove()). Scraped from ProjectDiscovery usage in V24 client code.ccp."
     },
+    "rpc:RWManager.get_closest_rw_stations": {
+      "disposition": "removed_from_live",
+      "evidence": "Resource Wars service RWManager removed from live EVE Online in 2020 (matches feat:removed.resource-wars)."
+    },
+    "rpc:RWManager.solarsystem_contains_rw_instances": {
+      "disposition": "removed_from_live",
+      "evidence": "Resource Wars service RWManager removed from live EVE Online in 2020 (matches feat:removed.resource-wars)."
+    },
+    "rpc:abyssal_content_manager.GenerateAbyssEncounterContent": {
+      "disposition": "dead_client_code",
+      "evidence": "CCP internal developer tool service called only from eve/devtools/script/abyssal_content_tool.pyj and abyssal_npc_spawn_tool.pyj."
+    },
+    "rpc:abyssal_content_manager.GenerateContentFromExistingPlan": {
+      "disposition": "dead_client_code",
+      "evidence": "CCP internal developer tool service called only from eve/devtools/script/abyssal_content_tool.pyj and abyssal_npc_spawn_tool.pyj."
+    },
+    "rpc:abyssal_content_manager.GetContentDetailsForShipLocation": {
+      "disposition": "dead_client_code",
+      "evidence": "CCP internal developer tool service called only from eve/devtools/script/abyssal_content_tool.pyj and abyssal_npc_spawn_tool.pyj."
+    },
+    "rpc:abyssal_content_manager.generate_abyss_npc_spawn_report": {
+      "disposition": "dead_client_code",
+      "evidence": "CCP internal developer tool service called only from eve/devtools/script/abyssal_content_tool.pyj and abyssal_npc_spawn_tool.pyj."
+    },
     "rpc:allianceRegistry.Bind": {
       "disposition": "client_local",
       "evidence": "Client-side util.Moniker.Bind() wrapper in carbon/common/script/net/moniker.pyj (resolves/binds via MachoResolveObject/MachoBindObject; never sent as a '.Bind' RPC method). Scraped from allianceRegistry usage in V24 client code.ccp."
@@ -7948,6 +7984,30 @@
     "rpc:bountyProxy.clear_memoized": {
       "disposition": "client_local",
       "evidence": "Client-side @Memoize cache invalidation helper (.clear_memoized) on local service/moniker proxy in V24 client; never sent as a remote machoNet RPC. Scraped from bountyProxy usage in V24 client code.ccp."
+    },
+    "rpc:browserLockdownSvc.GetDefaultHomePage": {
+      "disposition": "removed_from_live",
+      "evidence": "Legacy In-Game Browser (IGB) site lockdown service browserLockdownSvc (carbonui/control/browser/sites.pyj); IGB removed from EVE Online in 2016."
+    },
+    "rpc:browserLockdownSvc.GetFlaggedSitesHash": {
+      "disposition": "removed_from_live",
+      "evidence": "Legacy In-Game Browser (IGB) site lockdown service browserLockdownSvc (carbonui/control/browser/sites.pyj); IGB removed from EVE Online in 2016."
+    },
+    "rpc:browserLockdownSvc.GetFlaggedSitesList": {
+      "disposition": "removed_from_live",
+      "evidence": "Legacy In-Game Browser (IGB) site lockdown service browserLockdownSvc (carbonui/control/browser/sites.pyj); IGB removed from EVE Online in 2016."
+    },
+    "rpc:browserLockdownSvc.IsBrowserInLockdown": {
+      "disposition": "removed_from_live",
+      "evidence": "Legacy In-Game Browser (IGB) site lockdown service browserLockdownSvc (carbonui/control/browser/sites.pyj); IGB removed from EVE Online in 2016."
+    },
+    "rpc:calendarMgr.flagSameAlliance": {
+      "disposition": "client_local",
+      "evidence": "Client constant attribute const.flagSameAlliance accessed in calendar UI, not a remote MachoNet RPC method."
+    },
+    "rpc:calendarMgr.flagSamePlayerCorp": {
+      "disposition": "client_local",
+      "evidence": "Client constant attribute const.flagSamePlayerCorp accessed in calendar UI, not a remote MachoNet RPC method."
     },
     "rpc:charMgr.SetSessionCheck": {
       "disposition": "client_local",
@@ -8017,6 +8077,18 @@
       "disposition": "client_local",
       "evidence": "Client-side util.Moniker.SetSessionCheck(d) in carbon/common/script/net/moniker.pyj (stores self.sessionCheck dict on the local Moniker proxy; never sent over the wire). Scraped from entity usage in V24 client code.ccp."
     },
+    "rpc:essMgr.clear_cache": {
+      "disposition": "client_local",
+      "evidence": "Client-side Python cache wrapper method clear_cache() on client ESS wrapper, not a remote MachoNet RPC."
+    },
+    "rpc:eveguard_report.heartbeat_started": {
+      "disposition": "dead_client_code",
+      "evidence": "Chinese Serenity region-only EveGuard anti-cheat service (serenity/eveguard/client/eveguard_service.pyj); inactive on Tranquility V24.01 client."
+    },
+    "rpc:eveguard_report.heartbeat_stopped": {
+      "disposition": "dead_client_code",
+      "evidence": "Chinese Serenity region-only EveGuard anti-cheat service (serenity/eveguard/client/eveguard_service.pyj); inactive on Tranquility V24.01 client."
+    },
     "rpc:fwWarzoneSolarsystem.iteritems": {
       "disposition": "client_local",
       "evidence": "Python 2 dict/Rowset .iteritems() method called locally on a returned container (mis-scraped from chained sm.RemoteSvc(...).Get*().iteritems()). Scraped from fwWarzoneSolarsystem usage in V24 client code.ccp."
@@ -8045,6 +8117,42 @@
       "disposition": "client_local",
       "evidence": "Client-side util.Moniker.Bind() wrapper in carbon/common/script/net/moniker.pyj (resolves/binds via MachoResolveObject/MachoBindObject; never sent as a '.Bind' RPC method). Scraped from keeper usage in V24 client code.ccp."
     },
+    "rpc:kiringMgr.ActivateRedeemingCode": {
+      "disposition": "dead_client_code",
+      "evidence": "Chinese Serenity/Tiancity region-only Kiring billing service (kiring/client/apigateway.pyj); inactive on Tranquility V24.01 client."
+    },
+    "rpc:kiringMgr.GetAntiAddictionCode": {
+      "disposition": "dead_client_code",
+      "evidence": "Chinese Serenity/Tiancity region-only Kiring billing service (kiring/client/apigateway.pyj); inactive on Tranquility V24.01 client."
+    },
+    "rpc:kiringMgr.GetEveGuardServerAddress": {
+      "disposition": "dead_client_code",
+      "evidence": "Chinese Serenity/Tiancity region-only Kiring billing service (kiring/client/apigateway.pyj); inactive on Tranquility V24.01 client."
+    },
+    "rpc:kiringMgr.GetKiringConfiguration": {
+      "disposition": "dead_client_code",
+      "evidence": "Chinese Serenity/Tiancity region-only Kiring billing service (kiring/client/apigateway.pyj); inactive on Tranquility V24.01 client."
+    },
+    "rpc:kiringMgr.GetSAuthAid": {
+      "disposition": "dead_client_code",
+      "evidence": "Chinese Serenity/Tiancity region-only Kiring billing service (kiring/client/apigateway.pyj); inactive on Tranquility V24.01 client."
+    },
+    "rpc:kiringMgr.IsMonochromeStyleEnabled": {
+      "disposition": "dead_client_code",
+      "evidence": "Chinese Serenity/Tiancity region-only Kiring billing service (kiring/client/apigateway.pyj); inactive on Tranquility V24.01 client."
+    },
+    "rpc:kiringMgr.PerformKiringServerSideAuthenticationFromCode": {
+      "disposition": "dead_client_code",
+      "evidence": "Chinese Serenity/Tiancity region-only Kiring billing service (kiring/client/apigateway.pyj); inactive on Tranquility V24.01 client."
+    },
+    "rpc:kiringMgr.PlaceKiringOrder": {
+      "disposition": "dead_client_code",
+      "evidence": "Chinese Serenity/Tiancity region-only Kiring billing service (kiring/client/apigateway.pyj); inactive on Tranquility V24.01 client."
+    },
+    "rpc:kiringMgr.ShouldKickCheater": {
+      "disposition": "dead_client_code",
+      "evidence": "Chinese Serenity/Tiancity region-only Kiring billing service (kiring/client/apigateway.pyj); inactive on Tranquility V24.01 client."
+    },
     "rpc:mailMgr.iteritems": {
       "disposition": "client_local",
       "evidence": "Python 2 dict/Rowset .iteritems() method called locally on a returned container (mis-scraped from chained sm.RemoteSvc(...).Get*().iteritems()). Scraped from mailMgr usage in V24 client code.ccp."
@@ -8056,6 +8164,34 @@
     "rpc:mailMgr.keys": {
       "disposition": "client_local",
       "evidence": "Python dict/Rowset .keys() method called locally on a returned container (mis-scraped from chained sm.RemoteSvc(...).Get*().keys()). Scraped from mailMgr usage in V24 client code.ccp."
+    },
+    "rpc:node_graph.qa_start_node": {
+      "disposition": "dead_client_code",
+      "evidence": "CCP internal QA node-graph debugger method (qa_*) called only from internal QA debugger UI."
+    },
+    "rpc:node_graph.qa_start_node_graph": {
+      "disposition": "dead_client_code",
+      "evidence": "CCP internal QA node-graph debugger method (qa_*) called only from internal QA debugger UI."
+    },
+    "rpc:node_graph.qa_stop_active_nodes": {
+      "disposition": "dead_client_code",
+      "evidence": "CCP internal QA node-graph debugger method (qa_*) called only from internal QA debugger UI."
+    },
+    "rpc:node_graph.qa_stop_node": {
+      "disposition": "dead_client_code",
+      "evidence": "CCP internal QA node-graph debugger method (qa_*) called only from internal QA debugger UI."
+    },
+    "rpc:node_graph.qa_stop_node_graph": {
+      "disposition": "dead_client_code",
+      "evidence": "CCP internal QA node-graph debugger method (qa_*) called only from internal QA debugger UI."
+    },
+    "rpc:node_graph.qa_subscribe": {
+      "disposition": "dead_client_code",
+      "evidence": "CCP internal QA node-graph debugger method (qa_*) called only from internal QA debugger UI."
+    },
+    "rpc:node_graph.qa_unsubscribe": {
+      "disposition": "dead_client_code",
+      "evidence": "CCP internal QA node-graph debugger method (qa_*) called only from internal QA debugger UI."
     },
     "rpc:notificationMgr.iterkeys": {
       "disposition": "client_local",
@@ -8073,9 +8209,93 @@
       "disposition": "client_local",
       "evidence": "Client-side attribute access .id on returned planet/colony object (not a remote machoNet RPC method). Scraped from planetMgr usage in V24 client code.ccp."
     },
+    "rpc:posMgr.AnchorOrbital": {
+      "disposition": "removed_from_live",
+      "evidence": "Legacy Starbase (POS) control tower service posMgr removed from live gameplay in favor of Upwell structures (matches feat:removed.pos-control-towers and sde:res:/staticdata/controltowerresources.fsdbinary)."
+    },
+    "rpc:posMgr.AnchorStructure": {
+      "disposition": "removed_from_live",
+      "evidence": "Legacy Starbase (POS) control tower service posMgr removed from live gameplay in favor of Upwell structures (matches feat:removed.pos-control-towers and sde:res:/staticdata/controltowerresources.fsdbinary)."
+    },
+    "rpc:posMgr.AssumeStructureControl": {
+      "disposition": "removed_from_live",
+      "evidence": "Legacy Starbase (POS) control tower service posMgr removed from live gameplay in favor of Upwell structures (matches feat:removed.pos-control-towers and sde:res:/staticdata/controltowerresources.fsdbinary)."
+    },
+    "rpc:posMgr.ChangeStructureProvisionType": {
+      "disposition": "removed_from_live",
+      "evidence": "Legacy Starbase (POS) control tower service posMgr removed from live gameplay in favor of Upwell structures (matches feat:removed.pos-control-towers and sde:res:/staticdata/controltowerresources.fsdbinary)."
+    },
+    "rpc:posMgr.GetConsumptionFactor": {
+      "disposition": "removed_from_live",
+      "evidence": "Legacy Starbase (POS) control tower service posMgr removed from live gameplay in favor of Upwell structures (matches feat:removed.pos-control-towers and sde:res:/staticdata/controltowerresources.fsdbinary)."
+    },
+    "rpc:posMgr.GetControlTowers": {
+      "disposition": "removed_from_live",
+      "evidence": "Legacy Starbase (POS) control tower service posMgr removed from live gameplay in favor of Upwell structures (matches feat:removed.pos-control-towers and sde:res:/staticdata/controltowerresources.fsdbinary)."
+    },
+    "rpc:posMgr.GetMoonForTower": {
+      "disposition": "removed_from_live",
+      "evidence": "Legacy Starbase (POS) control tower service posMgr removed from live gameplay in favor of Upwell structures (matches feat:removed.pos-control-towers and sde:res:/staticdata/controltowerresources.fsdbinary)."
+    },
+    "rpc:posMgr.GetMoonProcessInfoForTower": {
+      "disposition": "removed_from_live",
+      "evidence": "Legacy Starbase (POS) control tower service posMgr removed from live gameplay in favor of Upwell structures (matches feat:removed.pos-control-towers and sde:res:/staticdata/controltowerresources.fsdbinary)."
+    },
+    "rpc:posMgr.GetSiloCapacityByItemID": {
+      "disposition": "removed_from_live",
+      "evidence": "Legacy Starbase (POS) control tower service posMgr removed from live gameplay in favor of Upwell structures (matches feat:removed.pos-control-towers and sde:res:/staticdata/controltowerresources.fsdbinary)."
+    },
+    "rpc:posMgr.GetStarbasePermissions": {
+      "disposition": "removed_from_live",
+      "evidence": "Legacy Starbase (POS) control tower service posMgr removed from live gameplay in favor of Upwell structures (matches feat:removed.pos-control-towers and sde:res:/staticdata/controltowerresources.fsdbinary)."
+    },
+    "rpc:posMgr.GetTowerNotificationSettings": {
+      "disposition": "removed_from_live",
+      "evidence": "Legacy Starbase (POS) control tower service posMgr removed from live gameplay in favor of Upwell structures (matches feat:removed.pos-control-towers and sde:res:/staticdata/controltowerresources.fsdbinary)."
+    },
+    "rpc:posMgr.GetTowerSentrySettings": {
+      "disposition": "removed_from_live",
+      "evidence": "Legacy Starbase (POS) control tower service posMgr removed from live gameplay in favor of Upwell structures (matches feat:removed.pos-control-towers and sde:res:/staticdata/controltowerresources.fsdbinary)."
+    },
+    "rpc:posMgr.LinkResourceForTower": {
+      "disposition": "removed_from_live",
+      "evidence": "Legacy Starbase (POS) control tower service posMgr removed from live gameplay in favor of Upwell structures (matches feat:removed.pos-control-towers and sde:res:/staticdata/controltowerresources.fsdbinary)."
+    },
+    "rpc:posMgr.OnlineOrbital": {
+      "disposition": "removed_from_live",
+      "evidence": "Legacy Starbase (POS) control tower service posMgr removed from live gameplay in favor of Upwell structures (matches feat:removed.pos-control-towers and sde:res:/staticdata/controltowerresources.fsdbinary)."
+    },
+    "rpc:posMgr.RelinquishStructureControl": {
+      "disposition": "removed_from_live",
+      "evidence": "Legacy Starbase (POS) control tower service posMgr removed from live gameplay in favor of Upwell structures (matches feat:removed.pos-control-towers and sde:res:/staticdata/controltowerresources.fsdbinary)."
+    },
+    "rpc:posMgr.RunMoonProcessCycleforTower": {
+      "disposition": "removed_from_live",
+      "evidence": "Legacy Starbase (POS) control tower service posMgr removed from live gameplay in favor of Upwell structures (matches feat:removed.pos-control-towers and sde:res:/staticdata/controltowerresources.fsdbinary)."
+    },
     "rpc:posMgr.SetSessionCheck": {
-      "disposition": "client_local",
-      "evidence": "Client-side util.Moniker.SetSessionCheck(d) in carbon/common/script/net/moniker.pyj (stores self.sessionCheck dict on the local Moniker proxy; never sent over the wire). Scraped from posMgr usage in V24 client code.ccp."
+      "disposition": "removed_from_live",
+      "evidence": "Legacy Starbase (POS) control tower service posMgr removed from live gameplay in favor of Upwell structures (matches feat:removed.pos-control-towers and sde:res:/staticdata/controltowerresources.fsdbinary)."
+    },
+    "rpc:posMgr.SetStarbasePermissions": {
+      "disposition": "removed_from_live",
+      "evidence": "Legacy Starbase (POS) control tower service posMgr removed from live gameplay in favor of Upwell structures (matches feat:removed.pos-control-towers and sde:res:/staticdata/controltowerresources.fsdbinary)."
+    },
+    "rpc:posMgr.SetTowerNotifications": {
+      "disposition": "removed_from_live",
+      "evidence": "Legacy Starbase (POS) control tower service posMgr removed from live gameplay in favor of Upwell structures (matches feat:removed.pos-control-towers and sde:res:/staticdata/controltowerresources.fsdbinary)."
+    },
+    "rpc:posMgr.SetTowerPassword": {
+      "disposition": "removed_from_live",
+      "evidence": "Legacy Starbase (POS) control tower service posMgr removed from live gameplay in favor of Upwell structures (matches feat:removed.pos-control-towers and sde:res:/staticdata/controltowerresources.fsdbinary)."
+    },
+    "rpc:posMgr.SetTowerSentrySettings": {
+      "disposition": "removed_from_live",
+      "evidence": "Legacy Starbase (POS) control tower service posMgr removed from live gameplay in favor of Upwell structures (matches feat:removed.pos-control-towers and sde:res:/staticdata/controltowerresources.fsdbinary)."
+    },
+    "rpc:posMgr.UnanchorOrbital": {
+      "disposition": "removed_from_live",
+      "evidence": "Legacy Starbase (POS) control tower service posMgr removed from live gameplay in favor of Upwell structures (matches feat:removed.pos-control-towers and sde:res:/staticdata/controltowerresources.fsdbinary)."
     },
     "rpc:pvpFilamentMgr.values": {
       "disposition": "client_local",
@@ -8089,6 +8309,18 @@
       "disposition": "client_local",
       "evidence": "Client-side util.Moniker.SetSessionCheck(d) in carbon/common/script/net/moniker.pyj (stores self.sessionCheck dict on the local Moniker proxy; never sent over the wire). Scraped from reprocessingSvc usage in V24 client code.ccp."
     },
+    "rpc:serviceGatewayMgr.qa_disable_hijack_mode": {
+      "disposition": "dead_client_code",
+      "evidence": "CCP internal developer tool service called only from eve/devtools/script/quasarHijackWnd.pyj."
+    },
+    "rpc:serviceGatewayMgr.qa_enable_hijack_mode": {
+      "disposition": "dead_client_code",
+      "evidence": "CCP internal developer tool service called only from eve/devtools/script/quasarHijackWnd.pyj."
+    },
+    "rpc:serviceGatewayMgr.qa_is_hijack_mode_enabled": {
+      "disposition": "dead_client_code",
+      "evidence": "CCP internal developer tool service called only from eve/devtools/script/quasarHijackWnd.pyj."
+    },
     "rpc:ship.SetSessionCheck": {
       "disposition": "client_local",
       "evidence": "Client-side util.Moniker.SetSessionCheck(d) in carbon/common/script/net/moniker.pyj (stores self.sessionCheck dict on the local Moniker proxy; never sent over the wire). Scraped from ship usage in V24 client code.ccp."
@@ -8096,6 +8328,10 @@
     "rpc:ship.clear_memoized": {
       "disposition": "client_local",
       "evidence": "Client-side @Memoize cache invalidation helper (.clear_memoized) on local service/moniker proxy in V24 client; never sent as a remote machoNet RPC. Scraped from ship usage in V24 client code.ccp."
+    },
+    "rpc:sovMgr.remove_from_cache": {
+      "disposition": "client_local",
+      "evidence": "Client-side Python cache wrapper method remove_from_cache() on client sovereignty wrapper, not a remote MachoNet RPC."
     },
     "rpc:structureDirectory.clear_memoized": {
       "disposition": "client_local",
