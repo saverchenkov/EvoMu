@@ -6,8 +6,9 @@
 #![forbid(unsafe_code)]
 
 use eve_db::{
-    AllianceRecord, CorporationRecord, CosmicAnomalyRecord, InventoryFlag, InventoryItemRecord,
-    IskCents, KillmailRecord, SystemDynamicState, UpwellStructureRecord, WarRecord,
+    AllianceRecord, CorporationRecord, IncursionRecord, InventoryFlag, InventoryItemRecord,
+    IskCents, KillmailAttackerDetail, KillmailDetailRecord, KillmailRecord, SovCampaignScoreRecord,
+    SystemDynamicState, UpwellStructureRecord, WarAllyRecord, WarLifecycleMeta, WarRecord,
 };
 use eve_server::esi::sov_fw_routes::{activity_defense_multiplier, sov_structure_type_ids};
 use eve_server::esi::{EsiHttpRequest, EsiRouter, OpenApiSpec};
@@ -559,15 +560,27 @@ async fn test_esi_sovereignty_campaigns_reflect_live_command_node_events() {
         if let Some(ihub) = snap.structures.get_mut(&ihub_id) {
             ihub.state = "CommandNodeEvent".to_string();
             ihub.reinforced_until_unix = start_unix;
-            ihub.shield_hp = 6000.0;
-            ihub.armor_hp = 4000.0;
         }
         if let Some(tcu) = snap.structures.get_mut(&tcu_id) {
             tcu.state = "CommandNodeEvent".to_string();
             tcu.reinforced_until_unix = start_unix + 600;
-            tcu.shield_hp = 2500.0;
-            tcu.armor_hp = 7500.0;
         }
+        snap.sov_campaign_scores.insert(
+            ihub_id,
+            SovCampaignScoreRecord {
+                structure_id: ihub_id,
+                attackers_score: 0.4,
+                defender_score: 0.6,
+            },
+        );
+        snap.sov_campaign_scores.insert(
+            tcu_id,
+            SovCampaignScoreRecord {
+                structure_id: tcu_id,
+                attackers_score: 0.75,
+                defender_score: 0.25,
+            },
+        );
     });
 
     let active = call(
@@ -603,9 +616,9 @@ async fn test_esi_sovereignty_campaigns_reflect_live_command_node_events() {
 
     // 3. Live node capture progress updates scores; resolving a campaign removes it.
     ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ihub) = snap.structures.get_mut(&ihub_id) {
-            ihub.shield_hp = 8000.0;
-            ihub.armor_hp = 2000.0;
+        if let Some(sc) = snap.sov_campaign_scores.get_mut(&ihub_id) {
+            sc.defender_score = 0.8;
+            sc.attackers_score = 0.2;
         }
         if let Some(tcu) = snap.structures.get_mut(&tcu_id) {
             tcu.state = "ShieldVulnerable".to_string();
@@ -650,6 +663,7 @@ async fn test_esi_incursions_wars_and_single_killmail_reflect_live_state() {
     let ctx = Arc::new(ServerContext::new());
     let router = EsiRouter::new(Arc::clone(&ctx));
     let now = ctx.now_unix();
+    let fmt = eve_server::esi::sample_routes::format_iso8601_utc;
 
     // 1. Incursions (`GET /v1/incursions/`)
     let sansha_fid = ctx
@@ -659,14 +673,32 @@ async fn test_esi_incursions_wars_and_single_killmail_reflect_live_state() {
         .find(|f| f.name.contains("Sansha"))
         .expect("Sansha faction in SDE")
         .faction_id as i64;
-    let jita_constellation = ctx.sde.solar_systems[&30_000_142].constellation_id as i64;
+    let jita_constellation = ctx.sde.solar_systems[&30_000_142].constellation_id;
+
+    let empty_incursions = call(&router, EsiHttpRequest::new("GET", "/v1/incursions/"), 200);
+    assert_eq!(empty_incursions, json!([]));
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.incursions.insert(
+            jita_constellation,
+            IncursionRecord {
+                constellation_id: jita_constellation,
+                staging_solar_system_id: 30_000_142,
+                infested_solar_systems: vec![30_000_142, 30_000_144],
+                faction_id: sansha_fid,
+                has_boss: true,
+                influence: 0.85,
+                state: "established".to_string(),
+                incursion_type: "Incursion".to_string(),
+            },
+        );
+    });
 
     let incursions_initial = call(&router, EsiHttpRequest::new("GET", "/v1/incursions/"), 200);
     let inc_arr = incursions_initial.as_array().expect("incursions array");
-    let kimotoro = inc_arr
-        .iter()
-        .find(|i| i["constellation_id"] == json!(jita_constellation))
-        .expect("Kimotoro constellation incursion");
+    assert_eq!(inc_arr.len(), 1);
+    let kimotoro = &inc_arr[0];
+    assert_eq!(kimotoro["constellation_id"], json!(jita_constellation as i64));
     assert_eq!(kimotoro["faction_id"], json!(sansha_fid));
     assert_eq!(kimotoro["staging_solar_system_id"], json!(30_000_142));
     assert_eq!(
@@ -674,63 +706,44 @@ async fn test_esi_incursions_wars_and_single_killmail_reflect_live_state() {
         json!([30_000_142, 30_000_144])
     );
     assert_eq!(kimotoro["state"], json!("established"));
-    assert_eq!(kimotoro["influence"], json!(0.9));
+    assert_eq!(kimotoro["influence"], json!(0.85));
     assert_eq!(kimotoro["has_boss"], json!(true));
     assert_eq!(kimotoro["type"], json!("Incursion"));
 
-    // Clearing an incursion site and increasing suppression reduces influence and transitions state.
+    // Mutate incursion state (mothership defeated -> withdrawing, influence drops to 0.15).
     ctx.db.with_mut_snapshot(|snap| {
-        for sid in [30_000_142_u32, 30_000_144_u32] {
-            if let Some(st) = snap.system_states.get_mut(&sid) {
-                st.insurgency_suppression_stage = 2;
-            }
+        if let Some(inc) = snap.incursions.get_mut(&jita_constellation) {
+            inc.influence = 0.15;
+            inc.has_boss = false;
+            inc.state = "withdrawing".to_string();
         }
-        snap.cosmic_anomalies
-            .entry(30_000_142)
-            .or_default()
-            .push(CosmicAnomalyRecord {
-                anomaly_id: "INC-001".to_string(),
-                solar_system_id: 30_000_142,
-                name: "Sansha Vanguard Site".to_string(),
-                anomaly_type: "Combat".to_string(),
-                position: [1000.0, 0.0, 0.0],
-                signal_strength: 1.0,
-                ore_types: Vec::new(),
-                remaining_volume: 0.0,
-                created_unix: now,
-                lifetime_seconds: 3600,
-                cleared: true,
-            });
     });
     let incursions_withdrawing = call(&router, EsiHttpRequest::new("GET", "/v1/incursions/"), 200);
-    let kimotoro_after = incursions_withdrawing
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|i| i["constellation_id"] == json!(jita_constellation))
-        .unwrap();
-    assert_eq!(kimotoro_after["influence"], json!(0.2));
+    let kimotoro_after = &incursions_withdrawing.as_array().unwrap()[0];
+    assert_eq!(kimotoro_after["influence"], json!(0.15));
     assert_eq!(kimotoro_after["state"], json!("withdrawing"));
     assert_eq!(kimotoro_after["has_boss"], json!(false));
 
     // 2. Single Killmail (`GET /v1/killmails/{killmail_id}/{killmail_hash}/`)
     let attacker_id = 90_000_001_i64;
+    let wingman_id = 90_000_003_i64;
     let victim_id = 90_000_002_i64;
     let aggr_corp = 98_400_001_i64;
     let def_corp = 98_400_002_i64;
-    let ally_corp = 98_400_003_i64;
+    let non_ally_member_corp = 98_400_003_i64;
+    let explicit_ally_corp = 98_400_004_i64;
     let def_alliance = 99_400_001_i64;
     let victim_ship_item_id = 990_100_001_i64;
     let victim_cargo_item_id = 990_100_002_i64;
-    let attacker_ship_item_id = 990_100_003_i64;
-    let attacker_weapon_item_id = 990_100_004_i64;
     let killmail_id = 77_901_i64;
+    let km_time_unix = now.saturating_sub(1_200);
     let war_id = 551_i64;
+    let war_declared_unix = now.saturating_sub(100_000);
+    let war_started_unix = war_declared_unix + 86_400;
 
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&attacker_id) {
             ch.corporation_id = aggr_corp;
-            ch.active_ship_id = attacker_ship_item_id;
             ch.security_status = 1.75;
         }
         if let Some(ch) = snap.characters.get_mut(&victim_id) {
@@ -752,8 +765,6 @@ async fn test_esi_incursions_wars_and_single_killmail_reflect_live_state() {
                 ..Default::default()
             },
         );
-        snap.item_positions
-            .insert(victim_ship_item_id, [12_500.0, -4_000.0, 8_500.0]);
         snap.items.insert(
             victim_cargo_item_id,
             InventoryItemRecord {
@@ -764,36 +775,6 @@ async fn test_esi_incursions_wars_and_single_killmail_reflect_live_state() {
                 type_id: 34, // Tritanium
                 quantity: 250,
                 singleton: false,
-                dynamic_attributes: HashMap::new(),
-                source_mutaplasmid_id: None,
-                ..Default::default()
-            },
-        );
-        snap.items.insert(
-            attacker_ship_item_id,
-            InventoryItemRecord {
-                item_id: attacker_ship_item_id,
-                owner_id: attacker_id,
-                location_id: 30_000_142,
-                flag: InventoryFlag::Hangar,
-                type_id: 587, // Rifter
-                quantity: 1,
-                singleton: true,
-                dynamic_attributes: HashMap::new(),
-                source_mutaplasmid_id: None,
-                ..Default::default()
-            },
-        );
-        snap.items.insert(
-            attacker_weapon_item_id,
-            InventoryItemRecord {
-                item_id: attacker_weapon_item_id,
-                owner_id: attacker_id,
-                location_id: attacker_ship_item_id,
-                flag: InventoryFlag::HiSlot0,
-                type_id: 484, // 125mm Gatling AutoCannon I
-                quantity: 1,
-                singleton: true,
                 dynamic_attributes: HashMap::new(),
                 source_mutaplasmid_id: None,
                 ..Default::default()
@@ -810,10 +791,42 @@ async fn test_esi_incursions_wars_and_single_killmail_reflect_live_state() {
                 total_value_isk: 2_500_000.0,
             },
         );
+        snap.killmail_details.insert(
+            killmail_id,
+            KillmailDetailRecord {
+                kill_id: killmail_id,
+                killmail_time_unix: km_time_unix,
+                damage_taken: 1_840,
+                victim_position: Some([12_500.0, -4_000.0, 8_500.0]),
+                attackers: vec![
+                    KillmailAttackerDetail {
+                        character_id: attacker_id,
+                        corporation_id: aggr_corp,
+                        alliance_id: None,
+                        ship_type_id: 587,
+                        weapon_type_id: 484,
+                        damage_done: 1_200,
+                        final_blow: true,
+                        security_status: 1.75,
+                    },
+                    KillmailAttackerDetail {
+                        character_id: wingman_id,
+                        corporation_id: aggr_corp,
+                        alliance_id: None,
+                        ship_type_id: 585,
+                        weapon_type_id: 484,
+                        damage_done: 640,
+                        final_blow: false,
+                        security_status: 0.5,
+                    },
+                ],
+            },
+        );
         for (cid, aid) in [
             (aggr_corp, None),
             (def_corp, Some(def_alliance)),
-            (ally_corp, Some(def_alliance)),
+            (non_ally_member_corp, Some(def_alliance)),
+            (explicit_ally_corp, None),
         ] {
             snap.corporations.insert(
                 cid,
@@ -835,7 +848,7 @@ async fn test_esi_incursions_wars_and_single_killmail_reflect_live_state() {
                 name: "Defender Coalition".into(),
                 short_name: "DEFC".into(),
                 executor_corp_id: def_corp,
-                member_corp_ids: HashSet::from([def_corp, ally_corp]),
+                member_corp_ids: HashSet::from([def_corp, non_ally_member_corp]),
             },
         );
         snap.wars.insert(
@@ -845,8 +858,22 @@ async fn test_esi_incursions_wars_and_single_killmail_reflect_live_state() {
                 aggressor_corp_id: aggr_corp,
                 defender_corp_id: def_corp,
                 mutual: false,
-                started_unix: now.saturating_sub(3_600),
+                started_unix: war_started_unix,
                 active: true,
+            },
+        );
+        snap.war_lifecycle_meta.insert(
+            war_id,
+            WarLifecycleMeta {
+                declared_unix: Some(war_declared_unix),
+                started_unix: Some(war_started_unix),
+                retracted_unix: None,
+                finished_unix: None,
+                open_for_allies: Some(true),
+                allies: vec![WarAllyRecord {
+                    corporation_id: Some(explicit_ally_corp),
+                    alliance_id: None,
+                }],
             },
         );
     });
@@ -875,23 +902,18 @@ async fn test_esi_incursions_wars_and_single_killmail_reflect_live_state() {
         .expect("killmail_hash string")
         .to_string();
 
-    let rifter_sde = &ctx.sde.types[&587];
-    let expected_hp = (rifter_sde.default_attributes.get(&9).copied().unwrap_or(0.0)
-        + rifter_sde.default_attributes.get(&265).copied().unwrap_or(0.0)
-        + rifter_sde.default_attributes.get(&263).copied().unwrap_or(0.0))
-    .round() as i64;
-
     let km_detail = call(
         &router,
         EsiHttpRequest::new("GET", format!("/v1/killmails/{killmail_id}/{km_hash}/")),
         200,
     );
     assert_eq!(km_detail["killmail_id"], json!(killmail_id));
+    assert_eq!(km_detail["killmail_time"], json!(fmt(km_time_unix)));
     assert_eq!(km_detail["solar_system_id"], json!(30_000_142));
     assert_eq!(km_detail["victim"]["character_id"], json!(victim_id));
     assert_eq!(km_detail["victim"]["corporation_id"], json!(def_corp));
     assert_eq!(km_detail["victim"]["ship_type_id"], json!(587));
-    assert_eq!(km_detail["victim"]["damage_taken"], json!(expected_hp));
+    assert_eq!(km_detail["victim"]["damage_taken"], json!(1_840));
     assert_eq!(
         km_detail["victim"]["position"],
         json!({ "x": 12_500.0, "y": -4_000.0, "z": 8_500.0 })
@@ -905,15 +927,28 @@ async fn test_esi_incursions_wars_and_single_killmail_reflect_live_state() {
             "quantity_destroyed": 250,
         }])
     );
+    assert_eq!(km_detail["attackers"].as_array().unwrap().len(), 2);
     assert_eq!(km_detail["attackers"][0]["character_id"], json!(attacker_id));
     assert_eq!(km_detail["attackers"][0]["corporation_id"], json!(aggr_corp));
     assert_eq!(km_detail["attackers"][0]["ship_type_id"], json!(587));
     assert_eq!(km_detail["attackers"][0]["weapon_type_id"], json!(484));
-    assert_eq!(km_detail["attackers"][0]["damage_done"], json!(expected_hp));
+    assert_eq!(km_detail["attackers"][0]["damage_done"], json!(1_200));
     assert_eq!(km_detail["attackers"][0]["final_blow"], json!(true));
     assert_eq!(km_detail["attackers"][0]["security_status"], json!(1.75));
+    assert_eq!(km_detail["attackers"][1]["character_id"], json!(wingman_id));
+    assert_eq!(km_detail["attackers"][1]["damage_done"], json!(640));
+    assert_eq!(km_detail["attackers"][1]["final_blow"], json!(false));
 
-    // Error codes for wrong hash (422) and unknown killmail (404).
+    // Error codes for wrong hash (422), legacy guessable hash (422), and unknown killmail (404).
+    let legacy_guess_hash = format!("{:040x}", (killmail_id as u64).wrapping_mul(2_654_435_761));
+    call(
+        &router,
+        EsiHttpRequest::new(
+            "GET",
+            format!("/v1/killmails/{killmail_id}/{legacy_guess_hash}/"),
+        ),
+        422,
+    );
     call(
         &router,
         EsiHttpRequest::new("GET", format!("/v1/killmails/{killmail_id}/deadbeef/")),
@@ -932,6 +967,8 @@ async fn test_esi_incursions_wars_and_single_killmail_reflect_live_state() {
         200,
     );
     assert_eq!(war_json["id"], json!(war_id));
+    assert_eq!(war_json["declared"], json!(fmt(war_declared_unix)));
+    assert_eq!(war_json["started"], json!(fmt(war_started_unix)));
     assert_eq!(war_json["mutual"], json!(false));
     assert_eq!(war_json["open_for_allies"], json!(true));
     assert_eq!(war_json["aggressor"]["corporation_id"], json!(aggr_corp));
@@ -940,15 +977,17 @@ async fn test_esi_incursions_wars_and_single_killmail_reflect_live_state() {
     assert_eq!(war_json["defender"]["corporation_id"], json!(def_corp));
     assert_eq!(war_json["defender"]["ships_killed"], json!(0));
     assert_eq!(war_json["defender"]["isk_destroyed"], json!(0.0));
+    // Only explicit war allies are reported (not `non_ally_member_corp` in the defender's alliance).
     assert_eq!(
         war_json["allies"],
-        json!([{ "corporation_id": ally_corp }])
+        json!([{ "corporation_id": explicit_ally_corp }])
     );
-    assert!(war_json["declared"].as_str().is_some());
-    assert!(war_json["started"].as_str().is_some());
+    assert!(war_json.get("retracted").is_none());
     assert!(war_json.get("finished").is_none());
 
-    // Mutate war state (defender kills an aggressor ship and war concludes) -> reflected in GET /wars/{war_id}.
+    // Mutate war state (defender kills an aggressor ship and war concludes with explicit timestamps).
+    let war_retracted_unix = war_started_unix + 36_000;
+    let war_finished_unix = war_retracted_unix + 86_400;
     ctx.db.with_mut_snapshot(|snap| {
         snap.killmails.insert(
             killmail_id + 1,
@@ -965,6 +1004,11 @@ async fn test_esi_incursions_wars_and_single_killmail_reflect_live_state() {
             w.mutual = true;
             w.active = false;
         }
+        if let Some(meta) = snap.war_lifecycle_meta.get_mut(&war_id) {
+            meta.open_for_allies = Some(false);
+            meta.retracted_unix = Some(war_retracted_unix);
+            meta.finished_unix = Some(war_finished_unix);
+        }
     });
     let war_concluded = call(
         &router,
@@ -975,8 +1019,8 @@ async fn test_esi_incursions_wars_and_single_killmail_reflect_live_state() {
     assert_eq!(war_concluded["open_for_allies"], json!(false));
     assert_eq!(war_concluded["defender"]["ships_killed"], json!(1));
     assert_eq!(war_concluded["defender"]["isk_destroyed"], json!(1_750_000.0));
-    assert!(war_concluded["retracted"].as_str().is_some());
-    assert!(war_concluded["finished"].as_str().is_some());
+    assert_eq!(war_concluded["retracted"], json!(fmt(war_retracted_unix)));
+    assert_eq!(war_concluded["finished"], json!(fmt(war_finished_unix)));
 
     call(&router, EsiHttpRequest::new("GET", "/v1/wars/99999999/"), 404);
 }

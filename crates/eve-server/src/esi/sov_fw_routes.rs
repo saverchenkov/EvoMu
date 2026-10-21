@@ -7,7 +7,7 @@ use crate::esi::sample_routes::{format_iso8601_utc, RouteExecutionResult};
 use crate::router::ServerContext;
 use eve_sde::{SdeRegistry, TypeId};
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 /// SDE group names whose published types are sovereignty structures reported by ESI.
 /// `Sovereignty Hub` (formerly Infrastructure Hub) and `Territorial Claim Unit`; the type IDs are
@@ -44,9 +44,9 @@ pub fn sov_campaign_event_type(sde: &SdeRegistry, type_id: TypeId) -> &'static s
     }
 }
 
-/// Activity Defense Multiplier per index level (`eve-wiki/articles/Sovereignty.md:263-269`):
-/// military and industrial add 0 / 0.6 / 1.2 / 1.7 / 2.1 / 2.5, strategic adds
-/// 0 / 0.4 / 0.6 / 0.8 / 0.9 / 1.0, on a base of 1.0, capped at 6.0.
+// DERIVED: Activity Defense Multiplier per index level (`eve-wiki/articles/Sovereignty.md:263-269`):
+// military and industrial add 0 / 0.6 / 1.2 / 1.7 / 2.1 / 2.5, strategic adds
+// 0 / 0.4 / 0.6 / 0.8 / 0.9 / 1.0, on a base of 1.0, capped at 6.0.
 const MIL_IND_ADM_BONUS: [f64; 6] = [0.0, 0.6, 1.2, 1.7, 2.1, 2.5];
 const STRAT_ADM_BONUS: [f64; 6] = [0.0, 0.4, 0.6, 0.8, 0.9, 1.0];
 
@@ -57,12 +57,33 @@ pub fn activity_defense_multiplier(military: u8, industrial: u8, strategic: u8) 
     ((1.0 + mil + ind + strat).clamp(1.0, 6.0) * 10.0).round() / 10.0
 }
 
+// DERIVED: Empire militia faction war pairings resolved by SDE faction name
+// (`Caldari State` <-> `Gallente Federation`, `Minmatar Republic` <-> `Amarr Empire`).
+pub fn sde_empire_fw_war_pairs(sde: &SdeRegistry) -> Vec<(i64, i64)> {
+    let find_fid = |name: &str| -> Option<i64> {
+        sde.factions
+            .values()
+            .find(|f| f.name == name && f.militia_corporation_id.is_some())
+            .map(|f| f.faction_id as i64)
+    };
+    let mut pairs = Vec::new();
+    if let (Some(cal), Some(gal)) = (find_fid("Caldari State"), find_fid("Gallente Federation")) {
+        pairs.push((cal, gal));
+        pairs.push((gal, cal));
+    }
+    if let (Some(min), Some(ama)) = (find_fid("Minmatar Republic"), find_fid("Amarr Empire")) {
+        pairs.push((min, ama));
+        pairs.push((ama, min));
+    }
+    pairs.sort_unstable();
+    pairs
+}
+
 pub fn dispatch_sov_route(
     ctx: &ServerContext,
     method: &str,
     path_pattern: &str,
 ) -> Option<RouteExecutionResult> {
-    let now = ctx.now_unix();
     match (method, path_pattern) {
         ("GET", "/sovereignty/map") => Some(ctx.db.with_snapshot(|snap| {
             let mut sys_ids: Vec<_> = ctx.sde.solar_systems.keys().copied().collect();
@@ -158,7 +179,10 @@ pub fn dispatch_sov_route(
                     .filter(|st| {
                         st.state != "Destroyed"
                             && sov_types.contains(&st.type_id)
-                            && (st.state == "CommandNodeEvent" || st.reinforced_until_unix > 0)
+                            && st.reinforced_until_unix > 0
+                            && (st.state == "CommandNodeEvent"
+                                || st.state == "ArmorReinforced"
+                                || st.state == "HullReinforced")
                     })
                     .collect();
                 structs.sort_by_key(|st| st.structure_id);
@@ -179,15 +203,11 @@ pub fn dispatch_sov_route(
                     let Some(sys) = ctx.sde.solar_systems.get(&st.solar_system_id) else {
                         continue;
                     };
-                    let total_nodes = (st.shield_hp + st.armor_hp).max(1.0);
-                    let defender_score =
-                        ((st.shield_hp / total_nodes).clamp(0.0, 1.0) * 100.0).round() / 100.0;
-                    let attackers_score = ((1.0 - defender_score) * 100.0).round() / 100.0;
-                    let start_unix = if st.reinforced_until_unix > 0 {
-                        st.reinforced_until_unix
-                    } else {
-                        now
-                    };
+                    let (attackers_score, defender_score) = snap
+                        .sov_campaign_scores
+                        .get(&st.structure_id)
+                        .map(|s| (s.attackers_score, s.defender_score))
+                        .unwrap_or((0.4, 0.6));
                     campaigns.push(json!({
                         "campaign_id": st.structure_id,
                         "constellation_id": sys.constellation_id as i64,
@@ -197,101 +217,44 @@ pub fn dispatch_sov_route(
                         "defender_id": defender_id,
                         "defender_score": defender_score,
                         "attackers_score": attackers_score,
-                        "start_time": format_iso8601_utc(start_unix),
+                        "start_time": format_iso8601_utc(st.reinforced_until_unix),
                     }));
                 }
                 RouteExecutionResult::ok_json(json!(campaigns), 5)
             }))
         }
 
-        // Active Sansha's Nation incursions derived from live constellation system state & anomalies.
-        ("GET", "/incursions") => {
-            let sansha_faction_id = ctx
-                .sde
-                .factions
-                .values()
-                .find(|f| f.name.contains("Sansha"))
-                .map(|f| f.faction_id as i64)
-                .unwrap_or(500_019);
-            Some(ctx.db.with_snapshot(|snap| {
-                let mut by_constellation: BTreeMap<u32, Vec<(u32, u8, u8)>> = BTreeMap::new();
-                for (&sys_id, st) in &snap.system_states {
-                    if sys_id >= 31_000_000 || st.insurgency_corruption_stage == 0 {
-                        continue;
-                    }
-                    if let Some(sys) = ctx.sde.solar_systems.get(&sys_id) {
-                        by_constellation.entry(sys.constellation_id).or_default().push((
-                            sys_id,
-                            st.insurgency_corruption_stage,
-                            st.insurgency_suppression_stage,
-                        ));
-                    }
-                }
-                let mut out = Vec::new();
-                for (constellation_id, mut systems) in by_constellation {
-                    systems.sort_by_key(|(sid, _, _)| *sid);
-                    let infested_solar_systems: Vec<i64> =
-                        systems.iter().map(|(sid, _, _)| *sid as i64).collect();
-                    let staging_solar_system_id = infested_solar_systems[0];
-                    let count = systems.len() as f64;
-                    let avg_corr = systems.iter().map(|(_, c, _)| *c as f64).sum::<f64>() / count;
-                    let avg_supp = systems
-                        .iter()
-                        .map(|(_, _, s)| (*s).max(1) as f64)
-                        .sum::<f64>()
-                        / count;
-                    let cleared_sites: usize = systems
-                        .iter()
-                        .filter_map(|(sid, _, _)| snap.cosmic_anomalies.get(sid))
-                        .flat_map(|list| list.iter())
-                        .filter(|a| a.cleared)
-                        .count();
-                    let raw_influence =
-                        (avg_corr * 0.45 / avg_supp) - (cleared_sites as f64 * 0.25);
-                    let influence = (raw_influence.clamp(0.0, 1.0) * 100.0).round() / 100.0;
-                    let has_boss = avg_corr >= 2.0 && influence > 0.25;
-                    let state = if influence <= 0.25 {
-                        "withdrawing"
-                    } else if influence < 0.6 {
-                        "mobilizing"
-                    } else {
-                        "established"
-                    };
-                    out.push(json!({
-                        "constellation_id": constellation_id as i64,
-                        "faction_id": sansha_faction_id,
-                        "has_boss": has_boss,
-                        "infested_solar_systems": infested_solar_systems,
-                        "influence": influence,
-                        "staging_solar_system_id": staging_solar_system_id,
-                        "state": state,
-                        "type": "Incursion",
-                    }));
-                }
-                RouteExecutionResult::ok_json(json!(out), 300)
-            }))
-        }
-
-        // Faction Warfare war matrix from SDE militia factions and live active faction wars.
-        ("GET", "/fw/wars") => Some(ctx.db.with_snapshot(|snap| {
-            let mut militia_factions: Vec<u32> = ctx
-                .sde
-                .factions
-                .values()
-                .filter(|f| f.militia_corporation_id.is_some() && f.size_factor >= 5.0)
-                .map(|f| f.faction_id)
+        // Active incursions from live `snap.incursions` state.
+        ("GET", "/incursions") => Some(ctx.db.with_snapshot(|snap| {
+            let mut list: Vec<_> = snap.incursions.values().collect();
+            list.sort_by_key(|inc| inc.constellation_id);
+            let out: Vec<Value> = list
+                .into_iter()
+                .map(|inc| {
+                    let infested: Vec<i64> =
+                        inc.infested_solar_systems.iter().map(|&s| s as i64).collect();
+                    json!({
+                        "constellation_id": inc.constellation_id as i64,
+                        "faction_id": inc.faction_id,
+                        "has_boss": inc.has_boss,
+                        "infested_solar_systems": infested,
+                        "influence": inc.influence,
+                        "staging_solar_system_id": inc.staging_solar_system_id as i64,
+                        "state": inc.state,
+                        "type": inc.incursion_type,
+                    })
+                })
                 .collect();
-            militia_factions.sort_unstable();
-            let mut pairs: Vec<(i64, i64)> = Vec::new();
-            let n = militia_factions.len();
-            for i in 0..(n / 2) {
-                let f_a = militia_factions[i] as i64;
-                let f_b = militia_factions[n - 1 - i] as i64;
-                if f_a != f_b {
-                    pairs.push((f_a, f_b));
-                    pairs.push((f_b, f_a));
-                }
-            }
+            RouteExecutionResult::ok_json(json!(out), 300)
+        })),
+
+        // Faction Warfare war matrix from live `snap.fw_wars`, SDE empire militia war pairs, and active wars.
+        ("GET", "/fw/wars") => Some(ctx.db.with_snapshot(|snap| {
+            let mut pairs: Vec<(i64, i64)> = if !snap.fw_wars.is_empty() {
+                snap.fw_wars.clone()
+            } else {
+                sde_empire_fw_war_pairs(&ctx.sde)
+            };
             let resolve_faction = |id: i64| -> Option<i64> {
                 if let Ok(fid) = u32::try_from(id) {
                     if ctx.sde.factions.contains_key(&fid) {

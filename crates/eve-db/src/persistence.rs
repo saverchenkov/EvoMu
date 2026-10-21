@@ -396,6 +396,7 @@ impl WorldRepository {
             structure_vulnerability_windows: HashMap::new(),
             skill_history: HashMap::new(),
             character_doll_info: HashMap::new(),
+            ..Default::default()
         };
         let mut conn = rusqlite::Connection::open_in_memory().map_err(|e| e.to_string())?;
         sqlite_store::apply_migrations(&conn)?;

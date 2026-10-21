@@ -243,7 +243,20 @@ fn setup_esi_test_environment() -> (Arc<ServerContext>, Arc<EsiRouter>, OpenApiS
             },
         );
 
-        // 6. Planetary Colony fixture
+        // 6. Planetary Colony & Incursion fixtures
+        snap.incursions.insert(
+            20_000_020,
+            eve_db::IncursionRecord {
+                constellation_id: 20_000_020,
+                staging_solar_system_id: 30_000_142,
+                infested_solar_systems: vec![30_000_142, 30_000_144],
+                faction_id: 500_019,
+                has_boss: true,
+                influence: 0.9,
+                state: "established".to_string(),
+                incursion_type: "Incursion".to_string(),
+            },
+        );
         snap.planetary_colonies.insert(
             (char_id, planet_id),
             PlanetaryColonyRecord {

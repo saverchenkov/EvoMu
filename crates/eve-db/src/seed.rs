@@ -509,6 +509,7 @@ impl WorldRepository {
             structure_vulnerability_windows: HashMap::new(),
             skill_history,
             character_doll_info: HashMap::new(),
+            ..Default::default()
         };
         let mut conn = rusqlite::Connection::open_in_memory()
             .expect("open in-memory SQLite connection for WorldRepository");

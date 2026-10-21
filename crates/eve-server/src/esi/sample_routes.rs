@@ -317,7 +317,7 @@ pub(crate) fn parse_fitting_flag(flag_str: &str) -> Option<InventoryFlag> {
     }
 }
 
-pub(crate) fn compute_killmail_hash(
+pub fn compute_killmail_hash(
     kill_id: i64,
     victim_id: i64,
     attacker_id: i64,
@@ -454,7 +454,6 @@ pub fn is_operation_implemented(method: &str, path_pattern: &str) -> bool {
             | ("GET", "/universe/graphics")
             | ("GET", "/universe/graphics/{graphic_id}")
             | ("GET", "/universe/races")
-            | ("GET", "/universe/stars/{star_id}")
             | ("GET", "/universe/stations/{station_id}")
             | ("GET", "/universe/system_jumps")
             | ("GET", "/universe/system_kills")
@@ -1108,8 +1107,12 @@ pub fn dispatch_operation(
                         def_isk_destroyed += km.total_value_isk;
                     }
                 }
-                let declared_str = format_iso8601_utc(w.started_unix);
-                let started_str = format_iso8601_utc(w.started_unix.saturating_add(86_400));
+                let meta = snap.war_lifecycle_meta.get(&war_id);
+                let declared_unix = meta.and_then(|m| m.declared_unix).unwrap_or(w.started_unix);
+                let started_unix = meta.and_then(|m| m.started_unix).unwrap_or(w.started_unix);
+                let open_for_allies = meta
+                    .and_then(|m| m.open_for_allies)
+                    .unwrap_or(!w.mutual && w.active);
                 let mut allies = ctx
                     .esi_state
                     .war_allies
@@ -1118,33 +1121,26 @@ pub fn dispatch_operation(
                     .get(&war_id)
                     .cloned()
                     .unwrap_or_default();
-                if let Some(aid) = snap
-                    .corporations
-                    .get(&w.defender_corp_id)
-                    .and_then(|c| c.alliance_id)
-                {
-                    if let Some(al) = snap.alliances.get(&aid) {
-                        let mut member_ids: Vec<i64> = al
-                            .member_corp_ids
-                            .iter()
-                            .copied()
-                            .filter(|&cid| cid != w.defender_corp_id && cid != w.aggressor_corp_id)
-                            .collect();
-                        member_ids.sort_unstable();
-                        for cid in member_ids {
-                            let entry = json!({ "corporation_id": cid });
-                            if !allies.contains(&entry) {
-                                allies.push(entry);
-                            }
+                if let Some(m) = meta {
+                    for ally in &m.allies {
+                        let mut entry = json!({});
+                        if let Some(cid) = ally.corporation_id {
+                            entry["corporation_id"] = json!(cid);
+                        }
+                        if let Some(aid) = ally.alliance_id {
+                            entry["alliance_id"] = json!(aid);
+                        }
+                        if !allies.contains(&entry) {
+                            allies.push(entry);
                         }
                     }
                 }
                 let mut body = json!({
                     "id": w.war_id,
-                    "declared": declared_str,
-                    "started": started_str,
+                    "declared": format_iso8601_utc(declared_unix),
+                    "started": format_iso8601_utc(started_unix),
                     "mutual": w.mutual,
-                    "open_for_allies": !w.mutual && w.active,
+                    "open_for_allies": open_for_allies,
                     "allies": allies,
                     "aggressor": {
                         "corporation_id": w.aggressor_corp_id,
@@ -1157,9 +1153,11 @@ pub fn dispatch_operation(
                         "isk_destroyed": def_isk_destroyed,
                     },
                 });
-                if !w.active {
-                    body["retracted"] = json!(format_iso8601_utc(w.started_unix.saturating_add(172_800)));
-                    body["finished"] = json!(format_iso8601_utc(w.started_unix.saturating_add(259_200)));
+                if let Some(retracted_unix) = meta.and_then(|m| m.retracted_unix) {
+                    body["retracted"] = json!(format_iso8601_utc(retracted_unix));
+                }
+                if let Some(finished_unix) = meta.and_then(|m| m.finished_unix) {
+                    body["finished"] = json!(format_iso8601_utc(finished_unix));
                 }
                 RouteExecutionResult::ok_json(body, 3600)
             })

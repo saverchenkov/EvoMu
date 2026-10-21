@@ -636,14 +636,12 @@ async fn test_esi_error_limit_window_headers_and_420_throttling() {
 
 #[tokio::test]
 async fn test_esi_all_31_openapi_tags_sample_routes_and_schema_validation() {
-    // parity: feat:esi.status.status, feat:esi.wallet.char-balance, feat:esi.skills.skills
-    // parity: feat:esi.wars.list
+    // parity: feat:esi.status.status, feat:esi.wars.list
     // parity: esi:GET /alliances, esi:GET /corporations/npccorps
-    // parity: esi:GET /characters/{character_id}/standings, esi:GET /characters/{character_id}/wallet
-    // parity: esi:GET /characters/{character_id}/skills, esi:GET /characters/{character_id}/clones
+    // parity: esi:GET /characters/{character_id}/standings, esi:GET /characters/{character_id}/clones
     // parity: esi:GET /dogma/attributes, esi:GET /dogma/effects
     // parity: esi:GET /markets/groups, esi:GET /universe/schematics/{schematic_id}
-    // parity: esi:GET /universe/types, esi:GET /wars
+    // parity: esi:GET /wars
     let ctx = Arc::new(ServerContext::new());
 
     // Seed rich world state so collection and detail routes exercise non-empty schemas

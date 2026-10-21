@@ -7,7 +7,8 @@
 #![forbid(unsafe_code)]
 
 use eve_db::{
-    CorporationRecord, CosmicAnomalyRecord, IskCents, KillmailRecord, SystemDynamicState,
+    CorporationRecord, FwCharacterStatsRecord, FwSystemOccupationRecord, FwWindowedStat, IskCents,
+    KillmailDetailRecord, KillmailRecord, SystemDynamicState, SystemJumpEvent, SystemKillEvent,
     UpwellStructureRecord, WarRecord,
 };
 use eve_server::esi::{EsiHttpRequest, EsiRouter, OpenApiSpec};
@@ -279,11 +280,14 @@ async fn test_esi_faction_warfare_routes_reflect_live_state() {
     let ctx = Arc::new(ServerContext::new());
     let router = EsiRouter::new(Arc::clone(&ctx));
     let now = ctx.now_unix();
+    let fmt = eve_server::esi::sample_routes::format_iso8601_utc;
 
     let char_id = 90_000_001_i64;
     let other_char_id = 90_000_002_i64;
     let corp_id = 98_000_001_i64;
     let sys_id = 30_000_001_u32;
+    let char_enlisted_unix = now - 604_800;
+    let corp_enlisted_unix = now - 1_209_600;
 
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) {
@@ -291,7 +295,7 @@ async fn test_esi_faction_warfare_routes_reflect_live_state() {
             ch.corporation_id = corp_id;
             ch.war_faction_id = Some(500_001); // Caldari State FW
             ch.solar_system_id = sys_id;
-            ch.loyalty_points.clear();
+            ch.loyalty_points.insert(1_000_035, 99_999); // LP balance must not leak into FW victory points
         }
         snap.corporations.insert(
             corp_id,
@@ -302,6 +306,37 @@ async fn test_esi_faction_warfare_routes_reflect_live_state() {
                 ceo_id: char_id,
                 members: HashSet::from([char_id]),
                 ..Default::default()
+            },
+        );
+        snap.fw_character_stats.insert(
+            char_id,
+            FwCharacterStatsRecord {
+                character_id: char_id,
+                faction_id: Some(500_001),
+                enlisted_on_unix: Some(char_enlisted_unix),
+                current_rank: 3,
+                highest_rank: 4,
+                kills: FwWindowedStat {
+                    yesterday: 2,
+                    last_week: 5,
+                    total: 12,
+                },
+                victory_points: FwWindowedStat {
+                    yesterday: 400,
+                    last_week: 1_200,
+                    total: 3_400,
+                },
+            },
+        );
+        snap.fw_corp_enlisted_on.insert(corp_id, corp_enlisted_unix);
+        snap.fw_system_occupations.insert(
+            sys_id,
+            FwSystemOccupationRecord {
+                solar_system_id: sys_id,
+                owner_faction_id: 500_004,
+                occupier_faction_id: 500_001,
+                victory_points: 2_250,
+                victory_points_threshold: 4_500,
             },
         );
         snap.system_states.insert(
@@ -330,17 +365,6 @@ async fn test_esi_faction_warfare_routes_reflect_live_state() {
                 last_sov_claim_tick: 0,
             },
         );
-        snap.killmails.insert(
-            88_001,
-            KillmailRecord {
-                kill_id: 88_001,
-                victim_character_id: other_char_id,
-                attacker_character_id: char_id,
-                solar_system_id: sys_id,
-                ship_type_id: 587,
-                total_value_isk: 1_500_000.0,
-            },
-        );
     });
 
     let char_token = issue_token_with_scopes(
@@ -361,11 +385,17 @@ async fn test_esi_faction_warfare_routes_reflect_live_state() {
         200,
     );
     assert_eq!(char_fw["faction_id"], json!(500_001));
-    assert_eq!(char_fw["current_rank"], json!(1));
-    assert_eq!(char_fw["highest_rank"], json!(1));
-    assert_eq!(char_fw["kills"]["total"], json!(1));
-    assert_eq!(char_fw["victory_points"]["total"], json!(100));
-    assert!(char_fw["enlisted_on"].as_str().is_some());
+    assert_eq!(char_fw["current_rank"], json!(3));
+    assert_eq!(char_fw["highest_rank"], json!(4));
+    assert_eq!(char_fw["enlisted_on"], json!(fmt(char_enlisted_unix)));
+    assert_eq!(
+        char_fw["kills"],
+        json!({ "yesterday": 2, "last_week": 5, "total": 12 })
+    );
+    assert_eq!(
+        char_fw["victory_points"],
+        json!({ "yesterday": 400, "last_week": 1_200, "total": 3_400 })
+    );
 
     // Scope & identity enforcement (401 without token, 403 without scope, 403 for other character)
     call(
@@ -395,8 +425,15 @@ async fn test_esi_faction_warfare_routes_reflect_live_state() {
     );
     assert_eq!(corp_fw["faction_id"], json!(500_001));
     assert_eq!(corp_fw["pilots"], json!(1));
-    assert_eq!(corp_fw["kills"]["total"], json!(1));
-    assert_eq!(corp_fw["victory_points"]["total"], json!(100));
+    assert_eq!(corp_fw["enlisted_on"], json!(fmt(corp_enlisted_unix)));
+    assert_eq!(
+        corp_fw["kills"],
+        json!({ "yesterday": 2, "last_week": 5, "total": 12 })
+    );
+    assert_eq!(
+        corp_fw["victory_points"],
+        json!({ "yesterday": 400, "last_week": 1_200, "total": 3_400 })
+    );
 
     call(
         &router,
@@ -418,36 +455,92 @@ async fn test_esi_faction_warfare_routes_reflect_live_state() {
 
     // 3. FW Leaderboards (`GET /fw/leaderboards`, `/characters`, `/corporations`)
     let lb = call(&router, EsiHttpRequest::new("GET", "/v1/fw/leaderboards/"), 200);
-    let lb_fac = lb["kills"]["active_total"].as_array().expect("faction kills leaderboard");
-    assert_eq!(lb_fac.len(), 4);
-    let cal_lb = lb_fac.iter().find(|e| e["faction_id"] == json!(500_001)).unwrap();
-    assert_eq!(cal_lb["amount"], json!(1));
+    for (bucket, expected_kills, expected_vp) in [
+        ("yesterday", 2_i64, 400_i64),
+        ("last_week", 5, 1_200),
+        ("active_total", 12, 3_400),
+    ] {
+        let k_arr = lb["kills"][bucket].as_array().unwrap();
+        assert_eq!(k_arr.len(), 4);
+        assert_eq!(
+            k_arr.iter().find(|e| e["faction_id"] == json!(500_001)).unwrap()["amount"],
+            json!(expected_kills)
+        );
+        let vp_arr = lb["victory_points"][bucket].as_array().unwrap();
+        assert_eq!(vp_arr.len(), 4);
+        assert_eq!(
+            vp_arr.iter().find(|e| e["faction_id"] == json!(500_001)).unwrap()["amount"],
+            json!(expected_vp)
+        );
+    }
 
     let lb_char = call(
         &router,
         EsiHttpRequest::new("GET", "/v1/fw/leaderboards/characters/"),
         200,
     );
-    let char_entries = lb_char["kills"]["active_total"].as_array().unwrap();
-    let char_lb_entry = char_entries
-        .iter()
-        .find(|e| e["character_id"] == json!(char_id))
-        .expect("character on FW leaderboard");
-    assert_eq!(char_lb_entry["amount"], json!(1));
+    assert_eq!(
+        lb_char["kills"]["yesterday"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["character_id"] == json!(char_id))
+            .unwrap()["amount"],
+        json!(2)
+    );
+    assert_eq!(
+        lb_char["kills"]["last_week"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["character_id"] == json!(char_id))
+            .unwrap()["amount"],
+        json!(5)
+    );
+    assert_eq!(
+        lb_char["kills"]["active_total"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["character_id"] == json!(char_id))
+            .unwrap()["amount"],
+        json!(12)
+    );
 
     let lb_corp = call(
         &router,
         EsiHttpRequest::new("GET", "/v1/fw/leaderboards/corporations/"),
         200,
     );
-    let corp_entries = lb_corp["kills"]["active_total"].as_array().unwrap();
-    let corp_lb_entry = corp_entries
-        .iter()
-        .find(|e| e["corporation_id"] == json!(corp_id))
-        .expect("corporation on FW leaderboard");
-    assert_eq!(corp_lb_entry["amount"], json!(1));
+    assert_eq!(
+        lb_corp["victory_points"]["yesterday"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["corporation_id"] == json!(corp_id))
+            .unwrap()["amount"],
+        json!(400)
+    );
+    assert_eq!(
+        lb_corp["victory_points"]["last_week"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["corporation_id"] == json!(corp_id))
+            .unwrap()["amount"],
+        json!(1_200)
+    );
+    assert_eq!(
+        lb_corp["victory_points"]["active_total"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["corporation_id"] == json!(corp_id))
+            .unwrap()["amount"],
+        json!(3_400)
+    );
 
-    // 4. FW Stats (`GET /fw/stats`)
+    // 4. FW Stats (`GET /fw/stats`) — verify populated faction and unpopulated faction (0 pilots, 0 systems)
     let fw_stats = call(&router, EsiHttpRequest::new("GET", "/v1/fw/stats/"), 200);
     let fac_stats_arr = fw_stats.as_array().expect("fw stats array");
     assert_eq!(fac_stats_arr.len(), 4);
@@ -455,8 +548,22 @@ async fn test_esi_faction_warfare_routes_reflect_live_state() {
         .iter()
         .find(|s| s["faction_id"] == json!(500_001))
         .expect("Caldari FW stats");
-    assert!(caldari_fw["pilots"].as_i64().unwrap() >= 1);
-    assert_eq!(caldari_fw["kills"]["total"], json!(1));
+    assert_eq!(caldari_fw["pilots"], json!(1));
+    assert_eq!(caldari_fw["systems_controlled"], json!(1));
+    assert_eq!(
+        caldari_fw["kills"],
+        json!({ "yesterday": 2, "last_week": 5, "total": 12 })
+    );
+    assert_eq!(
+        caldari_fw["victory_points"],
+        json!({ "yesterday": 400, "last_week": 1_200, "total": 3_400 })
+    );
+    let minmatar_fw = fac_stats_arr
+        .iter()
+        .find(|s| s["faction_id"] == json!(500_002))
+        .expect("Minmatar FW stats");
+    assert_eq!(minmatar_fw["pilots"], json!(0));
+    assert_eq!(minmatar_fw["systems_controlled"], json!(0));
 
     // 5. FW Systems (`GET /fw/systems`) + live capture mutation
     let fw_systems = call(&router, EsiHttpRequest::new("GET", "/v1/fw/systems/"), 200);
@@ -465,26 +572,25 @@ async fn test_esi_faction_warfare_routes_reflect_live_state() {
         .iter()
         .find(|s| s["solar_system_id"] == json!(sys_id))
         .expect("contested system in /fw/systems");
+    assert_eq!(sys_entry["owner_faction_id"], json!(500_004));
+    assert_eq!(sys_entry["occupier_faction_id"], json!(500_001));
     assert_eq!(sys_entry["contested"], json!("contested"));
-    assert_eq!(sys_entry["victory_points"], json!(1500));
-    assert_eq!(sys_entry["victory_points_threshold"], json!(3000));
+    assert_eq!(sys_entry["victory_points"], json!(2_250));
+    assert_eq!(sys_entry["victory_points_threshold"], json!(4_500));
 
-    // Mutate system capture to 100% -> becomes "vulnerable" with 3000 VP; add a second killmail -> stats update.
+    // Mutate system capture to 4500/4500 -> becomes "vulnerable", and mutate character FW stats -> live update.
     ctx.db.with_mut_snapshot(|snap| {
-        if let Some(st) = snap.system_states.get_mut(&sys_id) {
-            st.fw_contested_pct = 100.0;
+        if let Some(occ) = snap.fw_system_occupations.get_mut(&sys_id) {
+            occ.victory_points = 4_500;
         }
-        snap.killmails.insert(
-            88_002,
-            KillmailRecord {
-                kill_id: 88_002,
-                victim_character_id: other_char_id,
-                attacker_character_id: char_id,
-                solar_system_id: sys_id,
-                ship_type_id: 587,
-                total_value_isk: 2_000_000.0,
-            },
-        );
+        if let Some(rec) = snap.fw_character_stats.get_mut(&char_id) {
+            rec.kills.yesterday += 1;
+            rec.kills.last_week += 1;
+            rec.kills.total += 1;
+            rec.victory_points.yesterday += 150;
+            rec.victory_points.last_week += 150;
+            rec.victory_points.total += 150;
+        }
     });
     let fw_systems_after = call(&router, EsiHttpRequest::new("GET", "/v1/fw/systems/"), 200);
     let sys_after = fw_systems_after
@@ -494,7 +600,8 @@ async fn test_esi_faction_warfare_routes_reflect_live_state() {
         .find(|s| s["solar_system_id"] == json!(sys_id))
         .unwrap();
     assert_eq!(sys_after["contested"], json!("vulnerable"));
-    assert_eq!(sys_after["victory_points"], json!(3000));
+    assert_eq!(sys_after["victory_points"], json!(4_500));
+    assert_eq!(sys_after["victory_points_threshold"], json!(4_500));
 
     let char_fw_after = call(
         &router,
@@ -502,8 +609,8 @@ async fn test_esi_faction_warfare_routes_reflect_live_state() {
             .with_bearer_token(&char_token),
         200,
     );
-    assert_eq!(char_fw_after["kills"]["total"], json!(2));
-    assert_eq!(char_fw_after["victory_points"]["total"], json!(200));
+    assert_eq!(char_fw_after["kills"]["total"], json!(13));
+    assert_eq!(char_fw_after["victory_points"]["total"], json!(3_550));
 
     // 6. FW Wars (`GET /fw/wars`) + live inter-militia war mutation
     let fw_wars = call(&router, EsiHttpRequest::new("GET", "/v1/fw/wars/"), 200);
@@ -542,16 +649,14 @@ async fn test_esi_faction_warfare_routes_reflect_live_state() {
 
 #[tokio::test]
 async fn test_esi_universe_celestials_stations_structures_and_jumps_kills() {
-    // parity: esi:GET /universe/stars/{star_id}, esi:GET /universe/stations/{station_id}
+    // parity: esi:GET /universe/stations/{station_id}
     // parity: esi:GET /universe/system_jumps, esi:GET /universe/system_kills
-    // parity: feat:esi.universe.celestials, feat:esi.universe.stations-structures
+    // parity: feat:esi.universe.stations-structures
     // parity: feat:esi.universe.system-jumps-kills
     eve_testkit::attest(&[
-        "esi:GET /universe/stars/{star_id}",
         "esi:GET /universe/stations/{station_id}",
         "esi:GET /universe/system_jumps",
         "esi:GET /universe/system_kills",
-        "feat:esi.universe.celestials",
         "feat:esi.universe.stations-structures",
         "feat:esi.universe.system-jumps-kills",
     ]);
@@ -634,6 +739,27 @@ async fn test_esi_universe_celestials_stations_structures_and_jumps_kills() {
                 last_damage_unix: 0,
             },
         );
+        snap.station_office_rental_costs
+            .insert(60_003_760, 750_000.0);
+
+        // 1-hour windowed jump events (2 inside [now - 3600, now], 1 expired at now - 7200)
+        snap.system_jump_events.push(SystemJumpEvent {
+            solar_system_id: sys_id,
+            character_id: char_id,
+            timestamp_unix: now - 600,
+        });
+        snap.system_jump_events.push(SystemJumpEvent {
+            solar_system_id: sys_id,
+            character_id: outsider_id,
+            timestamp_unix: now - 1_800,
+        });
+        snap.system_jump_events.push(SystemJumpEvent {
+            solar_system_id: sys_id,
+            character_id: char_id,
+            timestamp_unix: now - 7_200,
+        });
+
+        // 1-hour windowed kill events (1 ship kill + 1 pod kill + 3 NPC kills inside window; 1 expired ship kill + 5 expired NPC kills outside window)
         snap.killmails.insert(
             89_001,
             KillmailRecord {
@@ -641,8 +767,18 @@ async fn test_esi_universe_celestials_stations_structures_and_jumps_kills() {
                 victim_character_id: outsider_id,
                 attacker_character_id: char_id,
                 solar_system_id: sys_id,
-                ship_type_id: 587, // Rifter (ship kill)
+                ship_type_id: 587, // Rifter (ship kill inside 1h window)
                 total_value_isk: 1_500_000.0,
+            },
+        );
+        snap.killmail_details.insert(
+            89_001,
+            KillmailDetailRecord {
+                kill_id: 89_001,
+                killmail_time_unix: now - 300,
+                damage_taken: 1_200,
+                victim_position: Some([0.0, 0.0, 0.0]),
+                attackers: Vec::new(),
             },
         );
         snap.killmails.insert(
@@ -652,26 +788,55 @@ async fn test_esi_universe_celestials_stations_structures_and_jumps_kills() {
                 victim_character_id: outsider_id,
                 attacker_character_id: char_id,
                 solar_system_id: sys_id,
-                ship_type_id: capsule_type_id, // Capsule (pod kill)
+                ship_type_id: capsule_type_id, // Capsule (pod kill inside 1h window)
                 total_value_isk: 10_000.0,
             },
         );
-        snap.cosmic_anomalies
-            .entry(sys_id)
-            .or_default()
-            .push(CosmicAnomalyRecord {
-                anomaly_id: "ANOM-001".to_string(),
+        snap.killmail_details.insert(
+            89_002,
+            KillmailDetailRecord {
+                kill_id: 89_002,
+                killmail_time_unix: now - 900,
+                damage_taken: 400,
+                victim_position: Some([0.0, 0.0, 0.0]),
+                attackers: Vec::new(),
+            },
+        );
+        snap.killmails.insert(
+            89_003,
+            KillmailRecord {
+                kill_id: 89_003,
+                victim_character_id: outsider_id,
+                attacker_character_id: char_id,
                 solar_system_id: sys_id,
-                name: "Sansha Hideaway".to_string(),
-                anomaly_type: "Combat".to_string(),
-                position: [0.0, 0.0, 0.0],
-                signal_strength: 1.0,
-                ore_types: Vec::new(),
-                remaining_volume: 0.0,
-                created_unix: now,
-                lifetime_seconds: 3600,
-                cleared: true,
-            });
+                ship_type_id: 587, // Expired ship kill outside 1h window
+                total_value_isk: 1_500_000.0,
+            },
+        );
+        snap.killmail_details.insert(
+            89_003,
+            KillmailDetailRecord {
+                kill_id: 89_003,
+                killmail_time_unix: now - 5_400,
+                damage_taken: 1_200,
+                victim_position: Some([0.0, 0.0, 0.0]),
+                attackers: Vec::new(),
+            },
+        );
+        snap.system_kill_events.push(SystemKillEvent {
+            solar_system_id: sys_id,
+            ship_kills: 0,
+            pod_kills: 0,
+            npc_kills: 3,
+            timestamp_unix: now - 1_200,
+        });
+        snap.system_kill_events.push(SystemKillEvent {
+            solar_system_id: sys_id,
+            ship_kills: 0,
+            pod_kills: 0,
+            npc_kills: 5,
+            timestamp_unix: now - 7_200,
+        });
     });
 
     let owner_token = issue_token_with_scopes(
@@ -685,21 +850,9 @@ async fn test_esi_universe_celestials_stations_structures_and_jumps_kills() {
         vec!["esi-universe.read_structures.v1".to_string()],
     );
 
-    // 1. Universe Stars & Celestials (`GET /universe/stars/{id}`, `/planets/{id}`, `/moons/{id}`, `/asteroid_belts/{id}`, `/stargates/{id}`)
-    let star = call(
-        &router,
-        EsiHttpRequest::new("GET", "/v1/universe/stars/40000001/"),
-        200,
-    );
-    assert_eq!(star["name"], json!("Tanoo - Star"));
-    assert_eq!(star["solar_system_id"], json!(30_000_001));
-    assert_eq!(star["age"], json!(4_600_000_000_i64));
-    assert_eq!(star["spectral_class"], json!("G2 V"));
-    call(
-        &router,
-        EsiHttpRequest::new("GET", "/v1/universe/stars/99999999/"),
-        404,
-    );
+    // 1. Universe Stars (unimplemented 501 until star.statistics is in SDE) & Celestials (`/planets/{id}`, `/moons/{id}`, `/asteroid_belts/{id}`, `/stargates/{id}`)
+    let star_resp = router.handle_request(&EsiHttpRequest::new("GET", "/v1/universe/stars/40000001/"));
+    assert_eq!(star_resp.status_code, 501);
 
     let planet = call(
         &router,
@@ -774,6 +927,32 @@ async fn test_esi_universe_celestials_stations_structures_and_jumps_kills() {
         station["owner"],
         json!(sde_jita_station.owner_corporation_id)
     );
+    assert_eq!(station["office_rental_cost"], json!(750_000.0));
+    let station_other_op = call(
+        &router,
+        EsiHttpRequest::new("GET", "/v2/universe/stations/60000004/"),
+        200,
+    );
+    assert_ne!(
+        station["services"], station_other_op["services"],
+        "stations with different SDE operation_id values must expose distinct service lists"
+    );
+    assert!(station_other_op["services"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("storage")));
+    assert!(!station["services"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("storage")));
+    assert!(station["services"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("factory")));
+    assert!(!station_other_op["services"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("factory")));
     call(
         &router,
         EsiHttpRequest::new("GET", "/v2/universe/stations/99999999/"),
@@ -855,5 +1034,5 @@ async fn test_esi_universe_celestials_stations_structures_and_jumps_kills() {
         .expect("system kill entry");
     assert_eq!(sys_kill["ship_kills"], json!(1));
     assert_eq!(sys_kill["pod_kills"], json!(1));
-    assert_eq!(sys_kill["npc_kills"], json!(1));
+    assert_eq!(sys_kill["npc_kills"], json!(3));
 }

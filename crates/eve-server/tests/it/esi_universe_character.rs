@@ -482,7 +482,12 @@ async fn test_esi3_universe_status_meta_dogma_killmails_insurance_fw() {
     assert_eq!(effect_16["effect_id"], json!(16));
 
     // 12. /v1/killmails/{killmail_id}/{killmail_hash}/
-    let valid_hash = format!("{:040x}", (killmail_id as u64).wrapping_mul(2_654_435_761));
+    let valid_hash = eve_server::esi::sample_routes::compute_killmail_hash(
+        killmail_id,
+        90_000_002,
+        char_id,
+        587,
+    );
     // Invalid hash -> 422
     validate_and_json(
         &router,
