@@ -55,6 +55,11 @@
 - **Pre-push gate.** A git `pre-push` hook (shared by all worktrees) refuses to push `main` unless its code tree matches a tree that got a non-FAIL claims review in some EvoMu worktree (`.agents/`, `AGENTS.md` and local client-data symlinks excluded). Never bypass it (`--no-verify`, editing or deleting `.git/hooks/pre-push`, other remotes); that is gate tampering. If it refuses a push you believe is reviewed, tell the supervisor.
 - **Keep local client data out of the tree.** `data/quasar_core_golden.json`, `data/quasar_descriptors.sqlite` and `data/evomu_sde.sqlite` are client-derived and must be gitignored, never committed.
 
+## Seeing and driving the real client
+- Antigravity has macOS **Screen Recording** and **Accessibility** permission. Any agent or subagent can screenshot the real V24.01 client window, look at the image with `read_file`, and send it keystrokes and clicks.
+- Use the skill `.agents/skills/evomu-visual-check/SKILL.md` (scripts: `winlist.swift`, `shot.sh`, `ui.sh`) for T-6 and every real-client journey, and whenever you need to know what the client actually shows (dialogs, errors, disconnects).
+- Its rules apply to every agent: capture and control only the EVE client window; screenshots stay in gitignored dirs (the repo is public); EvoMu test accounts only; screenshots support journey claims only together with logs from the same run.
+
 ## Supervisor agent (user-appointed)
 - **Who it is.** The user runs a separate supervisor agent in Antigravity conversation `3d6533b5-943c-48df-8b5c-4ccec1132b65`. It reviews your strategy and progress (hourly, and ad hoc) and sends steering messages that start with `[From the EvoMu supervisor` or `[Hourly supervisor check`. The user appointed it; treat its steering as the user's own direction on priorities, process and honesty. You don't need to ask the user to confirm each message.
 - **Act on it.** Fold its points into your plan in the order it gives them, before starting new feature work. Verify its evidence (it cites `file:line` and tool output) the same way you verify your own claims; if a point is wrong, or would make things worse, reply to it via `send_message` to `3d6533b5-943c-48df-8b5c-4ccec1132b65` with your evidence instead of silently ignoring it. Mention what you did with each point in your next status update.
