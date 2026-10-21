@@ -167,6 +167,10 @@ impl AuthoritativeContext {
             .as_ref()
             .and_then(|id| id.corporation.map(|c| c.sequential))
     }
+
+    pub fn now_unix(&self) -> u64 {
+        self.received.as_ref().map(|t| t.seconds as u64).unwrap_or(0)
+    }
 }
 
 impl QuasarMessage for AuthoritativeContext {
@@ -844,6 +848,73 @@ impl QuasarMessage for EveInternalRequest {
     }
 }
 
+/// `.eve.Response.CacheInfo` (`eve/eve.proto`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EveResponseCacheInfo {
+    pub cached_on: Option<GoogleTimestamp>,
+    pub cached_until: Option<GoogleTimestamp>,
+}
+
+impl QuasarMessage for EveResponseCacheInfo {
+    const FULL_NAME: &'static str = "eve.Response.CacheInfo";
+
+    fn encode_proto(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        if let Some(ts) = &self.cached_on {
+            encode_bytes_field(1, &ts.encode_proto(), &mut out);
+        }
+        if let Some(ts) = &self.cached_until {
+            encode_bytes_field(2, &ts.encode_proto(), &mut out);
+        }
+        out
+    }
+
+    fn decode_proto(buf: &[u8]) -> Result<Self, QuasarError> {
+        let wm = WireMessage::decode(buf)?;
+        let mut res = Self::default();
+        for f in wm.fields {
+            let Some(b) = f.value.as_bytes() else {
+                continue;
+            };
+            match f.field_number {
+                1 => res.cached_on = Some(GoogleTimestamp::decode_proto(b)?),
+                2 => res.cached_until = Some(GoogleTimestamp::decode_proto(b)?),
+                _ => {}
+            }
+        }
+        Ok(res)
+    }
+}
+
+/// `.eve.Response.PagingInfo` (`eve/eve.proto`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EveResponsePagingInfo {
+    pub total_pages_count: u64,
+}
+
+impl QuasarMessage for EveResponsePagingInfo {
+    const FULL_NAME: &'static str = "eve.Response.PagingInfo";
+
+    fn encode_proto(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        if self.total_pages_count != 0 {
+            encode_varint_field(1, self.total_pages_count, &mut out);
+        }
+        out
+    }
+
+    fn decode_proto(buf: &[u8]) -> Result<Self, QuasarError> {
+        let wm = WireMessage::decode(buf)?;
+        let mut res = Self::default();
+        for f in wm.fields {
+            if f.field_number == 1 {
+                res.total_pages_count = f.value.as_varint().unwrap_or(0);
+            }
+        }
+        Ok(res)
+    }
+}
+
 /// `.eve.Response` (`eve/eve.proto`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EveInternalResponse {
@@ -854,7 +925,9 @@ pub struct EveInternalResponse {
     pub tenant: String,
     pub publisher: String,
     pub payload_not_cached: bool,
+    pub payload_cache_info: Option<EveResponseCacheInfo>,
     pub payload_not_paged: bool,
+    pub payload_paging_info: Option<EveResponsePagingInfo>,
     pub recipient: String,
     pub created: Option<GoogleTimestamp>,
     pub trace_context: Option<TraceContext>,
@@ -886,8 +959,14 @@ impl QuasarMessage for EveInternalResponse {
         if self.payload_not_cached {
             encode_varint_field(7, 1, &mut out);
         }
+        if let Some(ci) = &self.payload_cache_info {
+            encode_bytes_field(8, &ci.encode_proto(), &mut out);
+        }
         if self.payload_not_paged {
             encode_varint_field(9, 1, &mut out);
+        }
+        if let Some(pi) = &self.payload_paging_info {
+            encode_bytes_field(10, &pi.encode_proto(), &mut out);
         }
         if !self.recipient.is_empty() {
             encode_string_field(11, &self.recipient, &mut out);
@@ -933,7 +1012,17 @@ impl QuasarMessage for EveInternalResponse {
                     }
                 }
                 7 => res.payload_not_cached = f.value.as_varint().unwrap_or(0) != 0,
+                8 => {
+                    if let Some(b) = f.value.as_bytes() {
+                        res.payload_cache_info = Some(EveResponseCacheInfo::decode_proto(b)?);
+                    }
+                }
                 9 => res.payload_not_paged = f.value.as_varint().unwrap_or(0) != 0,
+                10 => {
+                    if let Some(b) = f.value.as_bytes() {
+                        res.payload_paging_info = Some(EveResponsePagingInfo::decode_proto(b)?);
+                    }
+                }
                 11 => {
                     if let Some(s) = f.value.as_str()? {
                         res.recipient = s.to_string();
@@ -995,11 +1084,112 @@ impl QuasarMessage for InternalGatewayRequest {
     }
 }
 
+/// `.eve_public.internal_gateway.ConsumerInfo` (`eve_public/internal_gateway.proto`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InternalGatewayConsumerInfo {
+    pub name: String,
+    pub context: String,
+    pub tag: String,
+}
+
+impl QuasarMessage for InternalGatewayConsumerInfo {
+    const FULL_NAME: &'static str = "eve_public.internal_gateway.ConsumerInfo";
+
+    fn encode_proto(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        if !self.name.is_empty() {
+            encode_string_field(1, &self.name, &mut out);
+        }
+        if !self.context.is_empty() {
+            encode_string_field(2, &self.context, &mut out);
+        }
+        if !self.tag.is_empty() {
+            encode_string_field(3, &self.tag, &mut out);
+        }
+        out
+    }
+
+    fn decode_proto(buf: &[u8]) -> Result<Self, QuasarError> {
+        let wm = WireMessage::decode(buf)?;
+        let mut res = Self::default();
+        for f in wm.fields {
+            let slot = match f.field_number {
+                1 => &mut res.name,
+                2 => &mut res.context,
+                3 => &mut res.tag,
+                _ => continue,
+            };
+            if let Some(s) = f.value.as_str()? {
+                *slot = s.to_string();
+            }
+        }
+        Ok(res)
+    }
+}
+
+/// `.eve_public.internal_gateway.RequestsSubscriptionInfo` (`eve_public/internal_gateway.proto`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InternalGatewayRequestsSubscriptionInfo {
+    pub bind_requests: Vec<EvePublicRequest>,
+    pub consumer: Option<InternalGatewayConsumerInfo>,
+    pub in_flight_max: u32,
+    pub unbind_requests: Vec<EvePublicRequest>,
+}
+
+impl QuasarMessage for InternalGatewayRequestsSubscriptionInfo {
+    const FULL_NAME: &'static str = "eve_public.internal_gateway.RequestsSubscriptionInfo";
+
+    fn encode_proto(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        for r in &self.bind_requests {
+            encode_bytes_field(1, &r.encode_proto(), &mut out);
+        }
+        if let Some(c) = &self.consumer {
+            encode_bytes_field(2, &c.encode_proto(), &mut out);
+        }
+        if self.in_flight_max != 0 {
+            encode_varint_field(3, u64::from(self.in_flight_max), &mut out);
+        }
+        for r in &self.unbind_requests {
+            encode_bytes_field(4, &r.encode_proto(), &mut out);
+        }
+        out
+    }
+
+    fn decode_proto(buf: &[u8]) -> Result<Self, QuasarError> {
+        let wm = WireMessage::decode(buf)?;
+        let mut res = Self::default();
+        for f in wm.fields {
+            match f.field_number {
+                1 | 4 => {
+                    if let Some(b) = f.value.as_bytes() {
+                        let req = EvePublicRequest::decode_proto(b)?;
+                        if f.field_number == 1 {
+                            res.bind_requests.push(req);
+                        } else {
+                            res.unbind_requests.push(req);
+                        }
+                    }
+                }
+                2 => {
+                    if let Some(b) = f.value.as_bytes() {
+                        res.consumer = Some(InternalGatewayConsumerInfo::decode_proto(b)?);
+                    }
+                }
+                3 => res.in_flight_max = f.value.as_varint().unwrap_or(0) as u32,
+                _ => {}
+            }
+        }
+        Ok(res)
+    }
+}
+
 /// `.eve_public.internal_gateway.Response` (`eve_public/internal_gateway.proto`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InternalGatewayResponse {
     pub response: Option<EvePublicResponse>,
     pub ack_id: u64,
+    pub subscription: Option<InternalGatewayRequestsSubscriptionInfo>,
 }
 
 impl QuasarMessage for InternalGatewayResponse {
@@ -1012,6 +1202,9 @@ impl QuasarMessage for InternalGatewayResponse {
         }
         if self.ack_id != 0 {
             encode_varint_field(2, self.ack_id, &mut out);
+        }
+        if let Some(sub) = &self.subscription {
+            encode_bytes_field(3, &sub.encode_proto(), &mut out);
         }
         out
     }
@@ -1027,6 +1220,12 @@ impl QuasarMessage for InternalGatewayResponse {
                     }
                 }
                 2 => res.ack_id = f.value.as_varint().unwrap_or(0),
+                3 => {
+                    if let Some(b) = f.value.as_bytes() {
+                        res.subscription =
+                            Some(InternalGatewayRequestsSubscriptionInfo::decode_proto(b)?);
+                    }
+                }
                 _ => {}
             }
         }

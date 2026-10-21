@@ -19,8 +19,9 @@ const EMBEDDED_QUASAR_CATALOG_JSON: &str =
     include_str!("../../../docs/index/quasar_protobuf_catalog.json");
 
 #[test]
-// parity: plan:Q-1
 fn q1_all_1455_descriptors_across_135_domains_load_and_match_manifest() {
+    // parity: plan:Q-1
+    eve_testkit::attest(&["plan:Q-1"]);
     let reg = QuasarDescriptorRegistry::open_default()
         .expect("load 1,455 Quasar FileDescriptorProto schemas from data/quasar_descriptors.sqlite");
 
@@ -466,6 +467,7 @@ fn q1_static_core_types_and_gateway_envelopes_wire_compat_with_v24_descriptors()
     let int_rsp = InternalGatewayResponse {
         response: Some(pub_rsp),
         ack_id: 42,
+        subscription: None,
     };
     let int_rsp_wire = int_rsp.encode_proto();
     assert_eq!(
@@ -505,7 +507,9 @@ fn q1_static_core_types_and_gateway_envelopes_wire_compat_with_v24_descriptors()
         tenant: "tranquility".into(),
         publisher: "evomu".into(),
         payload_not_cached: true,
+        payload_cache_info: None,
         payload_not_paged: true,
+        payload_paging_info: None,
         recipient: "client".into(),
         created: Some(GoogleTimestamp {
             seconds: 1_760_000_005,

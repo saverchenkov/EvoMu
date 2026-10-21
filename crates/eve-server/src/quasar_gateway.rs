@@ -341,6 +341,7 @@ pub struct PublicGatewayRouter {
     pub published_events: RwLock<VecDeque<EvePublicEvent>>,
     pub server_hijack_state: RwLock<QuasarHijackState>,
     pub next_notice_seq: AtomicU64,
+    pub pending_notices: Arc<RwLock<Vec<(NoticeScope, GoogleAny)>>>,
 }
 
 impl PublicGatewayRouter {
@@ -357,9 +358,17 @@ impl PublicGatewayRouter {
             published_events: RwLock::new(VecDeque::new()),
             server_hijack_state: RwLock::new(QuasarHijackState::default()),
             next_notice_seq: AtomicU64::new(1),
+            pending_notices: Arc::new(RwLock::new(Vec::new())),
         };
         router.register_builtin_core_handlers(db);
         router
+    }
+
+    pub fn enqueue_notice(&self, scope: NoticeScope, payload: GoogleAny) {
+        self.pending_notices
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .push((scope, payload));
     }
 
     pub fn register_handler(&self, full_name_or_type_url: &str, handler: QuasarHandlerFn) {
@@ -407,16 +416,93 @@ impl PublicGatewayRouter {
                 })
             }),
         );
+
+        // 3. Q-7: Space, Celestials, Navigation, Insurgency & DBS Services
+        crate::services::quasar_space_services::register_handlers(self, Arc::clone(&db));
+
+        // 4. Q-8: Sovereignty, Faction Warfare & Operations Services
+        crate::services::quasar_sov_services::register_handlers(self, Arc::clone(&db));
+
+        // 5. Q-9: Cosmetics, SKINR, Titles, Heraldry & App Services
+        crate::services::quasar_cosmetics_services::register_handlers(self, Arc::clone(&db));
+
+        // 6. Quasar Character & Progression Track (Q-4 / Q-6) handlers
+        crate::services::quasar_progression::register_all_progression_handlers(
+            self,
+            Arc::clone(&db),
+        );
     }
 
     /// Server-side policy determining whether a Quasar request message type requires an active character.
-    /// User-level and Ping requests (`google.protobuf.Empty`, `eve_public.character.GetNamesByUserRequest`)
-    /// can be invoked prior to character selection; all character-scoped requests require an active character.
+    /// User-level and Ping requests (`google.protobuf.Empty`, `eve_public.character.GetNamesByUserRequest`,
+    /// and user/account/entitlement/payment/store services) can be invoked prior to character selection;
+    /// only character-gameplay-scoped requests require an active character.
     pub fn requires_active_character(normalized_type_name: &str) -> bool {
-        !matches!(
+        if matches!(
             normalized_type_name,
-            "google.protobuf.Empty" | "eve_public.character.GetNamesByUserRequest"
-        )
+            "google.protobuf.Empty"
+                | "eve_public.character.GetNamesByUserRequest"
+                | "eve.quasar.config.api.GetRequest"
+                | "eve_public.solarsystem.api.GetRequest"
+                | "eve.constellation.GetRequest"
+                | "eve.constellation.GetAllRequest"
+                | "eve.constellation.SearchRequest"
+                | "eve.region.GetRequest"
+                | "eve.region.GetAllRequest"
+                | "eve.region.SearchRequest"
+                | "eve.faction.SearchRequest"
+                | "eve.faction.api.GetRequest"
+                | "eve.universe.navigation.GetShortestGateJumpCountRequest"
+                | "eve.universe.navigation.GetShortestSystemJumpCountRequest"
+                | "eve_public.app.launcher.distribution.api.LauncherDistributionClientStartRequest"
+                | "eve_public.app.launcher.eve_client.GameClientStartRequest"
+                | "eve_public.app.launcher.eve_client.GameClientStopRequest"
+        ) {
+            return false;
+        }
+        const USER_SCOPED_PREFIXES: &[&str] = &[
+            "eve_public.auth",
+            "eve.auth",
+            "eve_public.login",
+            "eve.login",
+            "eve_public.user",
+            "eve.user",
+            "eve_public.entitlement",
+            "eve.entitlement",
+            "eve_public.omega",
+            "eve.omega",
+            "eve_public.membership",
+            "eve.membership",
+            "eve_public.payment",
+            "eve.payment",
+            "eve_public.plex",
+            "eve.plex",
+            "eve_public.store",
+            "eve.store",
+            "eve_public.vendors",
+            "eve.vendors",
+            "eve_public.fulfillment",
+            "eve.fulfillment",
+            "eve_public.isk",
+            "eve.isk",
+            "eve_public.legal",
+            "eve.legal",
+            "eve_public.pii",
+            "eve.pii",
+            "eve_public.device",
+            "eve.device",
+            "eve_public.cdn",
+            "eve.cdn",
+            "eve_public.localization",
+            "eve.localization",
+        ];
+        if USER_SCOPED_PREFIXES
+            .iter()
+            .any(|prefix| normalized_type_name.starts_with(prefix))
+        {
+            return false;
+        }
+        true
     }
 
     pub fn default_app_instance_uuid(session_id: u64) -> Vec<u8> {
@@ -849,6 +935,17 @@ impl PublicGatewayRouter {
                 );
         }
 
+        // Drain and publish any pending notices queued by request handlers
+        let queued: Vec<_> = self
+            .pending_notices
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .drain(..)
+            .collect();
+        for (scope, payload) in queued {
+            let _ = self.publish_notice(scope, payload, now_unix);
+        }
+
         build_response(status_code, status_message, rsp_payload)
     }
 
@@ -874,6 +971,7 @@ impl PublicGatewayRouter {
         InternalGatewayResponse {
             response: Some(rsp),
             ack_id: internal_req.ack_id,
+            subscription: None,
         }
     }
 
@@ -902,7 +1000,9 @@ impl PublicGatewayRouter {
             tenant: self.tenant.clone(),
             publisher: "evomu.quasar.gateway".into(),
             payload_not_cached: true,
+            payload_cache_info: None,
             payload_not_paged: true,
+            payload_paging_info: None,
             recipient: req.publisher.clone(),
             created: pub_rsp.dispatched,
             trace_context: pub_rsp.trace_context,

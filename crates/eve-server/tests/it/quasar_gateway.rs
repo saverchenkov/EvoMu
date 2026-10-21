@@ -35,10 +35,15 @@ fn extract_response_proto(rep: &PyRep) -> EvePublicResponse {
     panic!("Expected KeyVal containing response_proto, got {rep:?}");
 }
 
-// parity: plan:Q-2
-// parity: feat:quasar.gateway-envelope
 #[tokio::test]
 async fn q2_gateway_envelope_framing_status_codes_tenancy_and_idempotency() {
+    // parity: plan:Q-2, feat:quasar.gateway-envelope, feat:quasar.gateway-auth, quasar:eveProto/generated/eve_public/public_pb2.pyj
+    eve_testkit::attest(&[
+        "plan:Q-2",
+        "feat:quasar.gateway-envelope",
+        "feat:quasar.gateway-auth",
+        "quasar:eveProto/generated/eve_public/public_pb2.pyj",
+    ]);
     let ctx = ServerContext::new();
     let empty_kw = HashMap::new();
 
@@ -214,7 +219,7 @@ async fn q2_gateway_envelope_framing_status_codes_tenancy_and_idempotency() {
 
     let mut unimpl_type_req = ping_req.clone();
     unimpl_type_req.payload = Some(GoogleAny {
-        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.goal.api.GetRequest"),
+        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.tournament.arena.api.GetAllRequest"),
         value: Vec::new(),
     });
     assert_eq!(
@@ -341,6 +346,12 @@ async fn q2_gateway_envelope_framing_status_codes_tenancy_and_idempotency() {
 
 #[tokio::test]
 async fn q2_service_gateway_mgr_hijack_mode_and_internal_gateway_requests() {
+    // parity: plan:Q-2, quasar:eveProto/generated/eve_public/internal_gateway_pb2.pyj, quasar:eveProto/generated/eve_public/gateway_pb2.pyj
+    eve_testkit::attest(&[
+        "plan:Q-2",
+        "quasar:eveProto/generated/eve_public/internal_gateway_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/gateway_pb2.pyj",
+    ]);
     let ctx = ServerContext::new();
     let empty_kw = HashMap::new();
 
@@ -359,6 +370,7 @@ async fn q2_service_gateway_mgr_hijack_mode_and_internal_gateway_requests() {
             None,
         )
         .await;
+    // rpc-lint: allow error code string assertion
     assert_eq!(denied.unwrap_err().code, "InsufficientRole");
 
     // QA/GM session enables hijack mode with error 503
@@ -379,6 +391,7 @@ async fn q2_service_gateway_mgr_hijack_mode_and_internal_gateway_requests() {
             None,
         )
         .await;
+    // rpc-lint: allow error code string assertion
     assert_eq!(bad_err.unwrap_err().code, "InvalidArgument");
 
     let bad_lat = ctx
@@ -392,6 +405,7 @@ async fn q2_service_gateway_mgr_hijack_mode_and_internal_gateway_requests() {
             None,
         )
         .await;
+    // rpc-lint: allow error code string assertion
     assert_eq!(bad_lat.unwrap_err().code, "InvalidArgument");
 
     let enabled = ctx
@@ -505,6 +519,7 @@ async fn q2_service_gateway_mgr_hijack_mode_and_internal_gateway_requests() {
             &mut player_sess,
             "publicGatewaySvc",
             None,
+            // rpc-lint: allow testing that client cannot invoke server-only internal gateway method
             "HandleInternalRequest",
             &[PyRep::Bytes(int_req.encode_proto())],
             &empty_kw,
@@ -519,6 +534,7 @@ async fn q2_service_gateway_mgr_hijack_mode_and_internal_gateway_requests() {
             &mut player_sess,
             "publicGatewaySvc",
             None,
+            // rpc-lint: allow testing that client cannot invoke server-only notice publishing
             "PublishNotice",
             &[PyRep::String("broadcast".into())],
             &empty_kw,
@@ -574,6 +590,8 @@ async fn q2_service_gateway_mgr_hijack_mode_and_internal_gateway_requests() {
 
 #[tokio::test]
 async fn q2_scoped_notice_fan_out_and_notice_routing_cache_flush_on_session_change() {
+    // parity: plan:Q-2, feat:quasar.gateway-events
+    eve_testkit::attest(&["plan:Q-2", "feat:quasar.gateway-events"]);
     let ctx = ServerContext::new();
     let empty_kw = HashMap::new();
 
