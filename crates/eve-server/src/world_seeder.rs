@@ -167,7 +167,70 @@ pub fn seed_dual_anchor_markets(db: &WorldRepository, sde: &SdeRegistry) -> usiz
                 }
             }
         }
+        inserted += seed_npc_skillbooks_and_faction_items(snap, sde, &mut existing);
         Ok(inserted)
     })
     .unwrap_or(0)
+}
+
+/// Tier 1b: every published, market-listed skillbook (SDE categoryID 16) is sold by the hub station's
+/// owner corporation at basePrice; faction items (SDE metaGroupID 4 with a factionID) are sold at hub
+/// stations whose owner faction matches the item's faction.
+///
+/// DERIVED: the SDE has no NPC market-seeding table, so which NPC corp sells which faction item, its
+/// price (SDE basePrice) and its finite 100-unit stock are a seeding rule, not imported data.
+/// Skillbooks are infinite NPC stock (the matcher replenishes them); faction stock depletes per fill.
+fn seed_npc_skillbooks_and_faction_items(
+    snap: &mut eve_db::WorldStateSnapshot,
+    sde: &SdeRegistry,
+    existing: &mut std::collections::HashSet<(i64, i64, TypeId, bool)>,
+) -> usize {
+    let mut inserted = 0;
+    let mut types: Vec<&eve_sde::InvType> = sde
+        .types
+        .values()
+        .filter(|t| t.published && t.market_group_id.is_some() && t.base_price > 0.0)
+        .filter(|t| t.category_id == 16 || (t.meta_group_id == Some(4) && t.faction_id.is_some()))
+        .collect();
+    types.sort_by_key(|t| t.type_id);
+    let mut asks: std::collections::HashSet<(i64, TypeId)> =
+        existing.iter().filter(|e| !e.3).map(|e| (e.1, e.2)).collect();
+    for &(station_id, region_id, _) in TRADE_HUB_STATIONS {
+        let Some(station) = sde.stations.get(&station_id) else {
+            continue;
+        };
+        let owner = station.owner_corporation_id;
+        for t in &types {
+            let is_faction_item = t.category_id != 16;
+            if is_faction_item && station.owner_faction_id != t.faction_id.map(i64::from) {
+                continue;
+            }
+            if !asks.insert((station_id, t.type_id)) {
+                continue;
+            }
+            existing.insert((owner, station_id, t.type_id, false));
+            let vol = if is_faction_item { 100 } else { 1_000 };
+            snap.next_entity_id += 1;
+            let id = snap.next_entity_id;
+            snap.market_orders.insert(
+                id,
+                MarketOrderRecord {
+                    order_id: id,
+                    owner_id: owner,
+                    station_id,
+                    region_id,
+                    type_id: t.type_id,
+                    is_bid: false,
+                    price: IskCents::from_f64_isk(t.base_price),
+                    vol_entered: vol,
+                    vol_remaining: vol,
+                    min_volume: 1,
+                    is_npc: true,
+                    escrow: IskCents(0),
+                },
+            );
+            inserted += 1;
+        }
+    }
+    inserted
 }

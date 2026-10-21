@@ -12,6 +12,7 @@ pub mod accounts;
 pub mod characters;
 pub mod clock;
 pub mod inventory;
+pub mod ledger;
 pub mod persistence;
 #[cfg(any(test, feature = "demo-seed"))]
 pub mod seed;

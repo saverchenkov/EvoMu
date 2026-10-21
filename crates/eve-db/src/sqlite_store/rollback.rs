@@ -799,5 +799,6 @@ pub fn rollback_dirty_from_sqlite(
         }
     }
 
+    super::ledger_store::rollback_ledger(conn, snap, fp);
     Ok(())
 }

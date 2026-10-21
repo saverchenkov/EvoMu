@@ -82,6 +82,9 @@ impl WorldStateWalDelta {
             && old.structure_vulnerability_windows == new.structure_vulnerability_windows
             && old.skill_history == new.skill_history
             && old.character_doll_info == new.character_doll_info
+            && old.wallet_journal_meta == new.wallet_journal_meta
+            && old.market_transactions == new.market_transactions
+            && old.account_plex_vault == new.account_plex_vault
             && new.wallet_journal.len() >= old.wallet_journal.len()
             && new.wallet_journal[..old.wallet_journal.len()] == old.wallet_journal[..]
             && old
@@ -619,6 +622,7 @@ impl WorldRepository {
             self.pending_wal_records
                 .store(valid_count, std::sync::atomic::Ordering::SeqCst);
         }
+        snap.fold_legacy_plex_balances();
         *fp = sqlite_store::replace_sqlite_from_snapshot(&mut conn, &snap)?;
         *guard = snap;
         Ok(())

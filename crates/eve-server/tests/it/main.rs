@@ -4,6 +4,8 @@
 #![forbid(unsafe_code)]
 
 mod common;
+mod action_plan_data_economy;
+mod agents_missions_complete;
 mod auth;
 mod auth_persistence;
 mod character;
@@ -22,6 +24,8 @@ mod dogma_combat;
 mod dogma_modifier_engine;
 mod dogma_modules;
 mod e2e_journeys;
+mod economy_contracts;
+mod economy_industry_pi;
 mod economy_market;
 mod economy_market_industry;
 mod esi;
@@ -36,6 +40,8 @@ mod esi_universe_character;
 mod esi_universe_fw_complete;
 mod esi_universe_sov_complete;
 mod industry;
+mod industry_pi_complete;
+mod market_orders_complete;
 mod mining_advanced;
 mod mining_belts_drones_sites;
 mod mining_complete;
@@ -58,3 +64,5 @@ mod space_navigation_cyno;
 mod structures;
 mod system;
 mod time_control;
+mod wallet_ledger_complete;
+mod wallet_serverops_complete;

@@ -422,6 +422,7 @@ pub fn apply_migrations(conn: &Connection) -> Result<(), String> {
     )
     .map_err(|e| e.to_string())?;
     let _ = conn.execute("ALTER TABLE skill_queues ADD COLUMN started_at_unix INTEGER", []);
+    super::ledger_store::apply_ledger_migration(conn)?;
     Ok(())
 }
 

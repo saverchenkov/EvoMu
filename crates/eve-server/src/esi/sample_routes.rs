@@ -232,6 +232,13 @@ pub(crate) fn asset_location_flag_str(flag: InventoryFlag) -> Option<&'static st
         InventoryFlag::ServiceSlot5 => Some("ServiceSlot5"),
         InventoryFlag::ServiceSlot6 => Some("ServiceSlot6"),
         InventoryFlag::ServiceSlot7 => Some("ServiceSlot7"),
+        InventoryFlag::CorpSAG1 => Some("CorpSAG1"),
+        InventoryFlag::CorpSAG2 => Some("CorpSAG2"),
+        InventoryFlag::CorpSAG3 => Some("CorpSAG3"),
+        InventoryFlag::CorpSAG4 => Some("CorpSAG4"),
+        InventoryFlag::CorpSAG5 => Some("CorpSAG5"),
+        InventoryFlag::CorpSAG6 => Some("CorpSAG6"),
+        InventoryFlag::CorpSAG7 => Some("CorpSAG7"),
         InventoryFlag::None
         | InventoryFlag::Capsule
         | InventoryFlag::Pilot

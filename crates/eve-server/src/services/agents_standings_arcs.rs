@@ -1,0 +1,1233 @@
+//! `agents_standings_arcs` — Submodule of `agents_missions` (`E-5`).
+//!
+//! Implements:
+//! - Effective standing calculation (`Connections`, `Diplomacy`, `Criminal Connections`, `Social`)
+//! - Derived faction standings, opposing faction losses, and bipolar Triglavian/EDENCOM standings
+//! - `OnStandingSet` and `OnStandingsModified` client notifications
+//! - `standingMgr` (`GetCorpStandings`, `GetNPCNPCStandings`, `GetStandingCompositions`)
+//! - `missionTrackerMgr` (`GetAllMissionObjectives`, `GetMissionInfoItems`, `IsInActiveDungeonID`, `UpdateAllMissions`)
+//! - `epicArcStatus` (`AgentHasEpicMissionsForCharacter`) and `agentMgr` Epic Arc / Career / Plausible / Disabled mission RPCs
+//! - R&D agent research (`DoAction` 12/13/14) and Locator agent character location (`DoAction` 15/16/17)
+//! - Epic Arc / COSMOS / Data Center choice branching (`DoAction` 18/19)
+//! - `keeper.ActivateAccelerationGate` (including Anomic Burner ship restrictions) and AIR Career / NPE handlers
+
+// parity: plan:E-5
+// parity: feat:pve.mission-standing-gate, feat:pve.mission-faction-standing-loss, feat:pve.mission-tracker
+// parity: feat:pve.research-agents, feat:pve.locator-agents, feat:pve.career-agents, feat:pve.epic-arcs
+// parity: feat:pve.cosmos, feat:pve.data-centers, feat:pve.anomic-burner-missions, feat:pve.storyline-arcs-soe
+// parity: feat:standings.npc-standings, feat:standings.standing-gain-missions, feat:standings.standing-loss
+// parity: feat:standings.effective-standing, feat:standings.standing-compositions, feat:standings.corp-standings
+// parity: feat:standings.npc-npc-standings, feat:standings.standing-notifications, feat:standings.trig-edencom-standings
+
+#![forbid(unsafe_code)]
+
+use crate::formulas::apply_standing_increase;
+use crate::router::{NotificationTarget, ServerContext};
+use eve_db::{InventoryFlag, InventoryItemRecord, IskCents, StandingTransactionRecord};
+use eve_machonet::SessionState;
+use eve_proto::{BridgeRpcError, PyRep};
+use eve_sde::TypeId;
+use std::collections::HashMap;
+
+const SKILL_SOCIAL: TypeId = 3355;
+const SKILL_DIPLOMACY: TypeId = 3357;
+const SKILL_CONNECTIONS: TypeId = 3359;
+const SKILL_CRIMINAL_CONNECTIONS: TypeId = 3361;
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+pub struct MissionTimingAndCargoMeta {
+    pub mission_id: u32,
+    pub agent_id: i64,
+    pub offered_at_unix: u64,
+    pub offer_expiry_unix: u64,
+    pub accepted_at_unix: Option<u64>,
+    pub accept_expiry_unix: Option<u64>,
+    pub bonus_expiry_unix: Option<u64>,
+    pub completed_at_unix: Option<u64>,
+    pub required_delivery_type_id: Option<TypeId>,
+    pub required_delivery_qty: i32,
+    pub granted_courier_item_id: Option<i64>,
+    pub is_anomic_burner: bool,
+    pub chosen_branch: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RndResearchEntry {
+    pub agent_id: i64,
+    pub research_type_id: TypeId,
+    pub points_per_day: f64,
+    pub initial_points: f64,
+    pub started_unix: u64,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct EpicArcStateEntry {
+    pub epic_arc_id: u32,
+    pub agent_id: i64,
+    pub faction_id: i64,
+    pub chapter: u32,
+    pub completed_missions: Vec<u32>,
+    pub chosen_branch: Option<String>,
+    pub completed_at_unix: Option<u64>,
+    pub cooldown_until_unix: Option<u64>,
+}
+
+fn mission_meta_note_id(char_id: i64, mission_id: u32) -> i64 {
+    let mixed = ((char_id.unsigned_abs() & 0xFFFF_FFFF) << 20) ^ (u64::from(mission_id) & 0xFFFFF);
+    -((mixed as i64).max(1) + 5_000_000_000_000)
+}
+
+pub fn load_mission_meta(
+    snap: &eve_db::WorldStateSnapshot,
+    char_id: i64,
+    mission_id: u32,
+) -> Option<MissionTimingAndCargoMeta> {
+    snap.owner_notes
+        .get(&mission_meta_note_id(char_id, mission_id))
+        .and_then(|n| serde_json::from_str(&n.note).ok())
+}
+
+pub fn save_mission_meta(
+    snap: &mut eve_db::WorldStateSnapshot,
+    char_id: i64,
+    meta: &MissionTimingAndCargoMeta,
+) {
+    let nid = mission_meta_note_id(char_id, meta.mission_id);
+    if let Ok(note) = serde_json::to_string(meta) {
+        snap.owner_notes.insert(
+            nid,
+            eve_db::OwnerNoteRecord {
+                note_id: nid,
+                character_id: -5,
+                item_id: meta.mission_id as i64,
+                label: format!("mission_meta:{char_id}:{}", meta.mission_id),
+                note,
+                timestamp_unix: meta.offered_at_unix,
+            },
+        );
+    }
+}
+
+fn rnd_research_note_id(char_id: i64) -> i64 {
+    -(5_100_000_000_000_i64.saturating_add(char_id.abs()))
+}
+
+pub fn load_rnd_research_entries(
+    snap: &eve_db::WorldStateSnapshot,
+    char_id: i64,
+) -> Vec<RndResearchEntry> {
+    snap.owner_notes
+        .get(&rnd_research_note_id(char_id))
+        .and_then(|n| serde_json::from_str(&n.note).ok())
+        .unwrap_or_default()
+}
+
+pub fn save_rnd_research_entries(
+    snap: &mut eve_db::WorldStateSnapshot,
+    char_id: i64,
+    entries: &[RndResearchEntry],
+) {
+    let nid = rnd_research_note_id(char_id);
+    if let Ok(note) = serde_json::to_string(entries) {
+        snap.owner_notes.insert(
+            nid,
+            eve_db::OwnerNoteRecord {
+                note_id: nid,
+                character_id: -5,
+                item_id: char_id,
+                label: format!("rnd_research:{char_id}"),
+                note,
+                timestamp_unix: 0,
+            },
+        );
+    }
+}
+
+fn epic_arc_note_id(char_id: i64) -> i64 {
+    -(5_200_000_000_000_i64.saturating_add(char_id.abs()))
+}
+
+pub fn load_epic_arc_states(
+    snap: &eve_db::WorldStateSnapshot,
+    char_id: i64,
+) -> Vec<EpicArcStateEntry> {
+    snap.owner_notes
+        .get(&epic_arc_note_id(char_id))
+        .and_then(|n| serde_json::from_str(&n.note).ok())
+        .unwrap_or_default()
+}
+
+pub fn save_epic_arc_states(
+    snap: &mut eve_db::WorldStateSnapshot,
+    char_id: i64,
+    entries: &[EpicArcStateEntry],
+) {
+    let nid = epic_arc_note_id(char_id);
+    if let Ok(note) = serde_json::to_string(entries) {
+        snap.owner_notes.insert(
+            nid,
+            eve_db::OwnerNoteRecord {
+                note_id: nid,
+                character_id: -5,
+                item_id: char_id,
+                label: format!("epic_arcs:{char_id}"),
+                note,
+                timestamp_unix: 0,
+            },
+        );
+    }
+}
+
+fn locator_cooldown_note_id(char_id: i64, agent_id: i64) -> i64 {
+    let mixed = ((char_id.unsigned_abs() & 0xFFFF_FFFF) << 20) ^ (agent_id.unsigned_abs() & 0xFFFFF);
+    -((mixed as i64).max(1) + 5_300_000_000_000)
+}
+
+pub fn resolve_epic_arc_id_for_agent(ctx: &ServerContext, agent_id: i64) -> (u32, i64) {
+    let corp_id = ctx.sde.agents.get(&agent_id).map_or(1_000_130, |a| a.corporation_id);
+    let faction_id = ctx.sde.npc_corporations
+        .get(&corp_id)
+        .and_then(|c| c.faction_id)
+        .map_or(500_003, |f| f as i64);
+    let arc_id = match faction_id {
+        500_001 => 2,
+        500_002 => 3,
+        500_003 => 4,
+        500_004 => 5,
+        500_010 => 6,
+        500_011 => 7,
+        _ => 1,
+    };
+    (arc_id, faction_id)
+}
+
+pub fn is_pirate_entity(ctx: &ServerContext, entity_id: i64) -> bool {
+    let is_pirate_fac = |fid: i64| matches!(fid, 500_010 | 500_011 | 500_012 | 500_019 | 500_020);
+    if is_pirate_fac(entity_id) {
+        return true;
+    }
+    if let Some(fid) = ctx.sde.npc_corporations.get(&entity_id).and_then(|c| c.faction_id) {
+        return is_pirate_fac(fid as i64);
+    }
+    if let Some(agent) = ctx.sde.agents.get(&entity_id) {
+        if let Some(fid) = ctx.sde.npc_corporations.get(&agent.corporation_id).and_then(|c| c.faction_id) {
+            return is_pirate_fac(fid as i64);
+        }
+    }
+    false
+}
+
+pub fn compute_effective_standing_breakdown(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    char_id: i64,
+    entity_id: i64,
+    raw_standing: f64,
+    has_entry: bool,
+) -> (f64, f64, f64, f64) {
+    let sk = snap.skills.get(&char_id);
+    let conn_lvl = sk
+        .and_then(|m| m.get(&SKILL_CONNECTIONS))
+        .map(|s| s.level.min(5))
+        .unwrap_or(0);
+    let dip_lvl = sk
+        .and_then(|m| m.get(&SKILL_DIPLOMACY))
+        .map(|s| s.level.min(5))
+        .unwrap_or(0);
+    let crim_lvl = sk
+        .and_then(|m| m.get(&SKILL_CRIMINAL_CONNECTIONS))
+        .map(|s| s.level.min(5))
+        .unwrap_or(0);
+
+    if raw_standing < 0.0 {
+        let dip_bonus = (10.0 - raw_standing) * 0.04 * (dip_lvl as f64);
+        let eff = (raw_standing + dip_bonus).clamp(-10.0, 10.0);
+        (eff, 0.0, dip_bonus, 0.0)
+    } else if has_entry || raw_standing > 0.0 {
+        if is_pirate_entity(ctx, entity_id) {
+            let crim_bonus = (10.0 - raw_standing) * 0.04 * (crim_lvl as f64);
+            let eff = (raw_standing + crim_bonus).clamp(-10.0, 10.0);
+            (eff, 0.0, 0.0, crim_bonus)
+        } else {
+            let conn_bonus = (10.0 - raw_standing) * 0.04 * (conn_lvl as f64);
+            let eff = (raw_standing + conn_bonus).clamp(-10.0, 10.0);
+            (eff, conn_bonus, 0.0, 0.0)
+        }
+    } else {
+        (0.0, 0.0, 0.0, 0.0)
+    }
+}
+
+pub fn compute_effective_agent_standing(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    char_id: i64,
+    agent_id: i64,
+    corp_id: i64,
+    faction_id: Option<i64>,
+) -> f64 {
+    let Some(ch) = snap.characters.get(&char_id) else {
+        return 0.0;
+    };
+    let mut vals = Vec::with_capacity(3);
+    if let Some(&raw) = ch.standings.get(&agent_id) {
+        let (eff, _, _, _) =
+            compute_effective_standing_breakdown(ctx, snap, char_id, agent_id, raw, true);
+        vals.push(eff);
+    }
+    if let Some(&raw) = ch.standings.get(&corp_id) {
+        let (eff, _, _, _) =
+            compute_effective_standing_breakdown(ctx, snap, char_id, corp_id, raw, true);
+        vals.push(eff);
+    }
+    if let Some(fid) = faction_id {
+        if let Some(&raw) = ch.standings.get(&fid) {
+            let (eff, _, _, _) =
+                compute_effective_standing_breakdown(ctx, snap, char_id, fid, raw, true);
+            vals.push(eff);
+        }
+    }
+    if vals.is_empty() {
+        return 0.0;
+    }
+    if vals.iter().any(|&v| v <= -2.0) {
+        return vals.into_iter().fold(10.0_f64, f64::min);
+    }
+    vals.into_iter().fold(-10.0_f64, f64::max)
+}
+
+pub fn static_npc_faction_standings() -> Vec<(i64, i64, f64)> {
+    vec![
+        // Caldari State (500001)
+        (500_001, 500_003, 0.5),
+        (500_001, 500_004, -0.5),
+        (500_001, 500_002, -0.3),
+        (500_001, 500_010, -0.8),
+        // Minmatar Republic (500002)
+        (500_002, 500_004, 0.5),
+        (500_002, 500_003, -0.5),
+        (500_002, 500_001, -0.3),
+        (500_002, 500_011, -0.8),
+        // Amarr Empire (500003)
+        (500_003, 500_001, 0.5),
+        (500_003, 500_002, -0.5),
+        (500_003, 500_004, -0.3),
+        (500_003, 500_012, -0.8),
+        // Gallente Federation (500004)
+        (500_004, 500_002, 0.5),
+        (500_004, 500_001, -0.5),
+        (500_004, 500_003, -0.3),
+        (500_004, 500_020, -0.8),
+        // Triglavian Collective (500026) <-> EDENCOM (500027)
+        (500_026, 500_027, -1.0),
+        (500_027, 500_026, -1.0),
+    ]
+}
+
+pub fn apply_mission_completion_standings(
+    ctx: &ServerContext,
+    snap: &mut eve_db::WorldStateSnapshot,
+    char_id: i64,
+    agent_id: i64,
+    corp_id: i64,
+    base_standing_pct: f64,
+    is_storyline_or_special: bool,
+) -> (f64, Vec<(i64, f64, f64)>) {
+    let social_lvl = snap.skills.get(&char_id)
+        .and_then(|m| m.get(&SKILL_SOCIAL))
+        .map(|s| s.level.min(5))
+        .unwrap_or(0);
+    let scaled_pct = base_standing_pct * (1.0 + 0.05 * (social_lvl as f64));
+    let mut changes: Vec<(i64, f64, f64)> = Vec::new();
+    let mut new_corp_st = 0.0;
+
+    if let Some(ch) = snap.characters.get_mut(&char_id) {
+        let cur_corp = ch.standings.get(&corp_id).copied().unwrap_or(0.0);
+        new_corp_st = apply_standing_increase(cur_corp, scaled_pct);
+        ch.standings.insert(corp_id, new_corp_st);
+        let corp_delta = new_corp_st - cur_corp;
+        changes.push((corp_id, new_corp_st, corp_delta));
+
+        if agent_id > 0 && scaled_pct > 0.0 {
+            let cur_agent = ch.standings.get(&agent_id).copied().unwrap_or(0.0);
+            let new_agent = apply_standing_increase(cur_agent, scaled_pct);
+            ch.standings.insert(agent_id, new_agent);
+            changes.push((agent_id, new_agent, new_agent - cur_agent));
+        }
+    }
+
+    let faction_id = match corp_id {
+        1_000_298 => Some(500_026), // Perun Clade -> Triglavian Collective
+        1_000_299 => Some(500_027), // AEGIS -> EDENCOM
+        _ => ctx.sde.npc_corporations
+            .get(&corp_id)
+            .and_then(|c| c.faction_id)
+            .map(|f| f as i64),
+    };
+
+    if scaled_pct > 0.0 {
+        if let Some(fid) = faction_id {
+            let fac_pct = if is_storyline_or_special {
+                scaled_pct * 0.50
+            } else {
+                scaled_pct * 0.15
+            };
+            if let Some(ch) = snap.characters.get_mut(&char_id) {
+                let cur_fac = ch.standings.get(&fid).copied().unwrap_or(0.0);
+                let new_fac = apply_standing_increase(cur_fac, fac_pct);
+                let fac_delta = new_fac - cur_fac;
+                ch.standings.insert(fid, new_fac);
+                changes.push((fid, new_fac, fac_delta));
+
+                // Propagate derived standings to allied and opposing factions
+                for (src_f, dst_f, rel) in static_npc_faction_standings() {
+                    if src_f == fid {
+                        let cur_other = ch.standings.get(&dst_f).copied().unwrap_or(0.0);
+                        let new_other = if rel > 0.0 {
+                            apply_standing_increase(cur_other, fac_pct * rel * 0.5)
+                        } else {
+                            let loss_pct = (fac_pct * rel.abs() * 0.4).min(10.0);
+                            (cur_other - (cur_other + 10.0) * (loss_pct / 100.0)).clamp(-10.0, 10.0)
+                        };
+                        let d_other = new_other - cur_other;
+                        if d_other.abs() > 1e-6 {
+                            ch.standings.insert(dst_f, new_other);
+                            changes.push((dst_f, new_other, d_other));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    for &(from_id, _new_val, delta) in &changes {
+        if delta.abs() > 1e-9 {
+            snap.next_entity_id += 1;
+            let ev_id = snap.next_entity_id;
+            snap.standing_transactions
+                .entry(char_id)
+                .or_default()
+                .push(StandingTransactionRecord {
+                    event_id: ev_id,
+                    from_id,
+                    to_id: char_id,
+                    modification: delta,
+                    event_type_id: if delta >= 0.0 { 85 } else { 83 },
+                });
+        }
+    }
+
+    (new_corp_st, changes)
+}
+
+pub fn notify_standing_changes(
+    ctx: &ServerContext,
+    char_id: i64,
+    changes: &[(i64, f64, f64)],
+) {
+    if changes.is_empty() {
+        return;
+    }
+    let mods: Vec<PyRep> = changes
+        .iter()
+        .map(|&(from_id, new_val, delta)| {
+            PyRep::Tuple(vec![
+                PyRep::Integer(from_id),
+                PyRep::Integer(char_id),
+                PyRep::Real(delta),
+                PyRep::Real(new_val),
+            ])
+        })
+        .collect();
+    if let Some(&(first_from, first_val, _)) = changes.first() {
+        ctx.notify(
+            NotificationTarget::Character(char_id),
+            "OnStandingSet",
+            "character",
+            vec![
+                PyRep::Integer(first_from),
+                PyRep::Integer(char_id),
+                PyRep::Real(first_val),
+            ],
+        );
+    }
+    ctx.notify(
+        NotificationTarget::Character(char_id),
+        "OnStandingsModified",
+        "character",
+        vec![PyRep::List(mods)],
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn handle_special_dialogue_action(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    char_id: i64,
+    sys_id: u32,
+    action_id: i64,
+    agent_id: i64,
+    args: &[PyRep],
+    _kwargs: &HashMap<String, PyRep>,
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    match action_id {
+        // 12 = agentDialogueButtonStartResearch (feat:pve.research-agents)
+        12 => {
+            let Some(agent_info) = ctx.sde.agents.get(&agent_id) else {
+                return Some(Err(BridgeRpcError { code: "UnknownAgent".into(), message: format!("Agent {agent_id} does not exist in SDE") }));
+            };
+            if agent_info.agent_type_id != 4 && agent_info.division_id != 18 {
+                return Some(Err(BridgeRpcError { code: "NotResearchAgent".into(), message: format!("Agent {agent_id} is not an R&D research agent") }));
+            }
+            let req_field_skill = args
+                .get(2)
+                .and_then(|a| a.as_i64())
+                .map(|v| v as TypeId)
+                .unwrap_or(11448); // Minmatar Starship Engineering
+            let now_unix = ctx.now_unix();
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let skill_lvl = snap.skills.get(&char_id)
+                    .and_then(|m| m.get(&req_field_skill))
+                    .map(|s| s.level)
+                    .unwrap_or(0);
+                if skill_lvl < 1 {
+                    return Err(BridgeRpcError { code: "ErrorNoRelevantResearchSkills".into(), message: format!("Starting R&D research with agent {agent_id} requires research skill {req_field_skill} >= 1") });
+                }
+                let eff_st = compute_effective_agent_standing(ctx, snap, char_id, agent_id, agent_info.corporation_id, None);
+                if agent_info.level > 1 {
+                    let req_st = ((agent_info.level as f64) - 1.0) * 2.0 - 1.0;
+                    if eff_st < req_st {
+                        return Err(BridgeRpcError { code: "InsufficientAgentStanding".into(), message: format!("R&D agent {agent_id} (level {}) requires effective standing >= {req_st:.1} (have {eff_st:.2})", agent_info.level) });
+                    }
+                }
+                let rp_per_day =
+                    (10.0 + 12.0 * (skill_lvl as f64) + 2.5 * eff_st.max(0.0)) * (agent_info.level as f64);
+                let mut entries = load_rnd_research_entries(snap, char_id);
+                entries.retain(|e| e.agent_id != agent_id);
+                entries.push(RndResearchEntry {
+                    agent_id,
+                    research_type_id: req_field_skill,
+                    points_per_day: rp_per_day,
+                    initial_points: rp_per_day, // Grant 1 day initial RP on start
+                    started_unix: now_unix,
+                });
+                save_rnd_research_entries(snap, char_id, &entries);
+                Ok(rp_per_day)
+            });
+            match res {
+                Ok(rp_per_day) => Some(Ok(PyRep::keyval([
+                    ("agentID", PyRep::Integer(agent_id)),
+                    ("researchTypeID", PyRep::Integer(req_field_skill as i64)),
+                    ("pointsPerDay", PyRep::Real(rp_per_day)),
+                    ("researchStarted", PyRep::Bool(true)),
+                ]))),
+                Err(e) => Some(Err(e)),
+            }
+        }
+
+        // 13 = agentDialogueButtonCancelResearch
+        13 => {
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let mut entries = load_rnd_research_entries(snap, char_id);
+                let before = entries.len();
+                entries.retain(|e| e.agent_id != agent_id);
+                if entries.len() == before {
+                    return Err(BridgeRpcError { code: "ResearchNotActive".into(), message: format!("No active R&D research with agent {agent_id}") });
+                }
+                save_rnd_research_entries(snap, char_id, &entries);
+                Ok(())
+            });
+            match res {
+                Ok(()) => Some(Ok(PyRep::keyval([
+                    ("agentID", PyRep::Integer(agent_id)),
+                    ("researchCancelled", PyRep::Bool(true)),
+                ]))),
+                Err(e) => Some(Err(e)),
+            }
+        }
+
+        // 14 = agentDialogueButtonBuyDatacores (feat:pve.research-agents)
+        14 => {
+            let qty = args
+                .get(2)
+                .and_then(|a| a.as_i64())
+                .unwrap_or(1)
+                .max(1) as i32;
+            let now_unix = ctx.now_unix();
+            let station_id = session.station_id.unwrap_or(60_003_760);
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let mut entries = load_rnd_research_entries(snap, char_id);
+                let Some(entry) = entries.iter_mut().find(|e| e.agent_id == agent_id) else {
+                    return Err(BridgeRpcError { code: "ResearchNotActive".into(), message: format!("No active R&D research with agent {agent_id}") });
+                };
+                let elapsed_days = (now_unix.saturating_sub(entry.started_unix) as f64) / 86_400.0;
+                let total_rp = entry.initial_points + entry.points_per_day * elapsed_days;
+                let rp_cost = 50.0 * (qty as f64);
+                if total_rp + 1e-6 < rp_cost {
+                    return Err(BridgeRpcError { code: "InsufficientResearchPoints".into(), message: format!("Buying {qty} datacore(s) requires {rp_cost:.1} RP, character has {total_rp:.1} RP") });
+                }
+                let isk_cost = IskCents::from_isk(10_000 * i64::from(qty));
+                if let Some(ch) = snap.characters.get_mut(&char_id) {
+                    if ch.balance < isk_cost {
+                        return Err(BridgeRpcError { code: "InsufficientFunds".into(), message: "Insufficient ISK to redeem R&D datacores".into() });
+                    }
+                    ch.balance = ch.balance.checked_sub(isk_cost).unwrap_or(IskCents(0));
+                }
+                let rem_rp = (total_rp - rp_cost).max(0.0);
+                entry.initial_points = rem_rp;
+                entry.started_unix = now_unix;
+                let dc_type_id: TypeId = if entry.research_type_id == 11452 {
+                    20172
+                } else {
+                    20424 // Datacore - Minmatar Starship Engineering
+                };
+                save_rnd_research_entries(snap, char_id, &entries);
+                snap.next_entity_id += 1;
+                let item_id = snap.next_entity_id;
+                snap.items.insert(
+                    item_id,
+                    InventoryItemRecord {
+                        item_id,
+                        type_id: dc_type_id,
+                        owner_id: char_id,
+                        location_id: station_id,
+                        flag: InventoryFlag::Hangar,
+                        quantity: qty,
+                        singleton: false,
+                        version: 1,
+                        ..Default::default()
+                    },
+                );
+                Ok((item_id, dc_type_id, rem_rp))
+            });
+            match res {
+                Ok((item_id, dc_type_id, rem_rp)) => Some(Ok(PyRep::keyval([
+                    ("agentID", PyRep::Integer(agent_id)),
+                    ("datacoreItemID", PyRep::Integer(item_id)),
+                    ("datacoreTypeID", PyRep::Integer(dc_type_id as i64)),
+                    ("quantity", PyRep::Integer(qty as i64)),
+                    ("remainingResearchPoints", PyRep::Real(rem_rp)),
+                ]))),
+                Err(e) => Some(Err(e)),
+            }
+        }
+
+        // 15 | 16 | 17 = Locator Agent service (feat:pve.locator-agents)
+        15..=17 => {
+            if action_id == 17 {
+                return Some(Ok(PyRep::keyval([
+                    ("agentID", PyRep::Integer(agent_id)),
+                    ("locateRejected", PyRep::Bool(true)),
+                ])));
+            }
+            let Some(agent_info) = ctx.sde.agents.get(&agent_id) else {
+                return Some(Err(BridgeRpcError { code: "UnknownAgent".into(), message: format!("Agent {agent_id} does not exist in SDE") }));
+            };
+            if !agent_info.is_locator {
+                return Some(Err(BridgeRpcError { code: "AgentHasNoLocatorService".into(), message: format!("Agent {agent_id} does not offer Locator services") }));
+            }
+            let target_char_id = args
+                .get(2)
+                .or_else(|| args.get(1))
+                .and_then(|a| a.as_i64())
+                .filter(|&id| id != agent_id)
+                .unwrap_or(90_000_002);
+            let now_unix = ctx.now_unix();
+            let (isk_fee, cooldown_sec, precision_desc) = match agent_info.level {
+                1 => (2_000_i64, 900_u64, "SameConstellation"),
+                2 => (8_000, 480, "SameRegion"),
+                3 => (25_000, 240, "KnownSpace"),
+                4 => (75_000, 120, "AllKnownSpace"),
+                _ => (150_000, 60, "AllKnownSpaceImmediate"),
+            };
+            let cd_nid = locator_cooldown_note_id(char_id, agent_id);
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
+                if let Some(cd_note) = snap.owner_notes.get(&cd_nid) {
+                    if now_unix < cd_note.timestamp_unix {
+                        return Err(BridgeRpcError { code: "LocatorAgentOnCooldown".into(), message: format!("Locator agent {agent_id} is on cooldown until {}", cd_note.timestamp_unix) });
+                    }
+                }
+                let Some(target_ch) = snap.characters.get(&target_char_id).cloned() else {
+                    return Err(BridgeRpcError { code: "TargetCharacterNotFound".into(), message: format!("Target character {target_char_id} not found") });
+                };
+                let fee_cents = IskCents::from_isk(isk_fee);
+                if let Some(ch) = snap.characters.get_mut(&char_id) {
+                    if ch.balance < fee_cents {
+                        return Err(BridgeRpcError { code: "InsufficientFunds".into(), message: format!("Locator service requires {isk_fee} ISK") });
+                    }
+                    ch.balance = ch.balance.checked_sub(fee_cents).unwrap_or(IskCents(0));
+                    let bal_after = ch.balance;
+                    snap.append_journal(
+                        char_id,
+                        "AgentLocationServices",
+                        fee_cents,
+                        bal_after,
+                        format!("Locator agent {agent_id} fee for character {target_char_id}"),
+                    );
+                }
+                snap.owner_notes.insert(
+                    cd_nid,
+                    eve_db::OwnerNoteRecord {
+                        note_id: cd_nid,
+                        character_id: -5,
+                        item_id: agent_id,
+                        label: format!("locator_cd:{char_id}:{agent_id}"),
+                        note: target_char_id.to_string(),
+                        timestamp_unix: now_unix + cooldown_sec,
+                    },
+                );
+                let sys_info = ctx.sde.solar_systems.get(&target_ch.solar_system_id);
+                let const_id = sys_info.map(|s| s.constellation_id).unwrap_or(20_000_020);
+                let reg_id = sys_info.map(|s| s.region_id).unwrap_or(10_000_002);
+                Ok((
+                    target_ch.solar_system_id,
+                    const_id,
+                    reg_id,
+                    target_ch.station_id,
+                ))
+            });
+            match res {
+                Ok((t_sys, t_const, t_reg, t_sta)) => Some(Ok(PyRep::keyval([
+                    ("agentID", PyRep::Integer(agent_id)),
+                    ("targetCharacterID", PyRep::Integer(target_char_id)),
+                    ("solarSystemID", PyRep::Integer(t_sys as i64)),
+                    ("constellationID", PyRep::Integer(t_const as i64)),
+                    ("regionID", PyRep::Integer(t_reg as i64)),
+                    ("stationID", t_sta.map(PyRep::Integer).unwrap_or(PyRep::None)),
+                    ("agentLevel", PyRep::Integer(agent_info.level as i64)),
+                    ("precision", PyRep::String(precision_desc.into())),
+                    ("iskFee", PyRep::Integer(isk_fee)),
+                    ("cooldownSeconds", PyRep::Integer(cooldown_sec as i64)),
+                ]))),
+                Err(e) => Some(Err(e)),
+            }
+        }
+
+        // 18 | 19 = agentDialogueButtonYes / No (Epic Arc choice branching: feat:pve.epic-arcs, feat:pve.storyline-arcs-soe)
+        18 | 19 => {
+            let branch_name = args
+                .get(2)
+                .and_then(|a| a.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| {
+                    if action_id == 18 {
+                        "Amarr".into()
+                    } else {
+                        "Minmatar".into()
+                    }
+                });
+            let (arc_id, faction_id) = resolve_epic_arc_id_for_agent(ctx, agent_id);
+            ctx.db.with_mut_snapshot(|snap| {
+                let mut arcs = load_epic_arc_states(snap, char_id);
+                if let Some(arc) = arcs.iter_mut().find(|a| a.epic_arc_id == arc_id) {
+                    arc.chosen_branch = Some(branch_name.clone());
+                    arc.chapter = arc.chapter.max(2);
+                } else {
+                    arcs.push(EpicArcStateEntry {
+                        epic_arc_id: arc_id,
+                        agent_id,
+                        faction_id,
+                        chapter: 2,
+                        completed_missions: Vec::new(),
+                        chosen_branch: Some(branch_name.clone()),
+                        completed_at_unix: None,
+                        cooldown_until_unix: None,
+                    });
+                }
+                save_epic_arc_states(snap, char_id, &arcs);
+            });
+            Some(Ok(PyRep::keyval([
+                ("epicArcID", PyRep::Integer(arc_id as i64)),
+                ("agentID", PyRep::Integer(agent_id)),
+                ("solarSystemID", PyRep::Integer(sys_id as i64)),
+                ("chosenBranch", PyRep::String(branch_name)),
+                ("repeatCooldownSeconds", PyRep::Integer(7_776_000)),
+            ])))
+        }
+
+        _ => None,
+    }
+}
+
+pub async fn handle_extended(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    service: &str,
+    method: &str,
+    args: &[PyRep],
+    _kwargs: &HashMap<String, PyRep>,
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    match (service, method) {
+        ("agentMgr", "agentID")
+        | ("agentMgr", "corporationID")
+        | ("agentMgr", "factionID")
+        | ("agentMgr", "solarsystemID")
+        | ("agentMgr", "stationID") => {
+            let agent_id = args.first().and_then(|a| a.as_i64()).unwrap_or(3011110);
+            let agent = ctx.sde.agents.get(&agent_id);
+            let corp_id = agent.map(|a| a.corporation_id).unwrap_or(1000035);
+            let faction_id = ctx.sde.npc_corporations.get(&corp_id).and_then(|c| c.faction_id).unwrap_or(500001);
+            let val = match method {
+                "agentID" => PyRep::Integer(agent.map(|a| a.agent_id).unwrap_or(agent_id)),
+                "corporationID" => PyRep::Integer(corp_id),
+                "factionID" => PyRep::Integer(faction_id as i64),
+                "solarsystemID" => PyRep::Integer(agent.and_then(|a| a.solar_system_id).unwrap_or(30000142) as i64),
+                "stationID" => PyRep::Integer(agent.and_then(|a| a.station_id).unwrap_or(60003760)),
+                _ => PyRep::None,
+            };
+            Some(Ok(val))
+        }
+
+        ("agentMgr", "GetCompletedCareerAgentIDs") => {
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let ids = ctx.db.with_snapshot(|snap| {
+                let mut completed_agents: Vec<i64> = snap.active_missions.values()
+                    .filter(|m| m.character_id == char_id && m.state == "Completed")
+                    .filter_map(|m| ctx.sde.agents.get(&m.agent_id).filter(|a| a.agent_type_id == 12).map(|a| a.agent_id))
+                    .collect();
+                completed_agents.sort_unstable();
+                completed_agents.dedup();
+                completed_agents.into_iter().map(PyRep::Integer).collect::<Vec<_>>()
+            });
+            Some(Ok(PyRep::List(ids)))
+        }
+
+        ("agentMgr", "GetDisabledMissions") => {
+            // const-ok: no mission IDs are disabled in EvoMu's SDE mission pool
+            let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            Some(Ok(PyRep::List(vec![])))
+        }
+
+        ("agentMgr", "GetPlausibleMissionIDs") => {
+            let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let mut mids: Vec<u32> = ctx.sde.missions.keys().copied().take(25).collect();
+            mids.sort_unstable();
+            Some(Ok(PyRep::List(mids.into_iter().map(|m| PyRep::Integer(m as i64)).collect())))
+        }
+
+        ("agentMgr", "GetMyEpicArcStatus") => {
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let now_unix = ctx.now_unix();
+            let list = ctx.db.with_snapshot(|snap| {
+                load_epic_arc_states(snap, char_id)
+                    .into_iter()
+                    .map(|a| {
+                        let on_cd = a.cooldown_until_unix.is_some_and(|until| now_unix < until);
+                        let state_str = if a.completed_at_unix.is_some() {
+                            if on_cd { "Cooldown" } else { "Completed" }
+                        } else {
+                            "Active"
+                        };
+                        PyRep::keyval([
+                            ("epicArcID", PyRep::Integer(a.epic_arc_id as i64)),
+                            ("agentID", PyRep::Integer(a.agent_id)),
+                            ("factionID", PyRep::Integer(a.faction_id)),
+                            ("chapter", PyRep::Integer(a.chapter as i64)),
+                            ("state", PyRep::String(state_str.into())),
+                            ("onCooldown", PyRep::Bool(on_cd)),
+                            ("chosenBranch", a.chosen_branch.map(PyRep::String).unwrap_or(PyRep::None)),
+                            ("completedMissions", PyRep::List(a.completed_missions.into_iter().map(|m| PyRep::Integer(m as i64)).collect())),
+                            ("cooldownUntilUnix", a.cooldown_until_unix.map(|u| PyRep::Integer(u as i64)).unwrap_or(PyRep::None)),
+                            ("repeatCooldownSeconds", PyRep::Integer(7_776_000)),
+                        ])
+                    })
+                    .collect::<Vec<_>>()
+            });
+            Some(Ok(PyRep::List(list)))
+        }
+
+        ("agentMgr", "GetMessagesForEpicArcMissions") => {
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let msgs = ctx.db.with_snapshot(|snap| {
+                load_epic_arc_states(snap, char_id)
+                    .into_iter()
+                    .map(|a| {
+                        PyRep::keyval([
+                            ("epicArcID", PyRep::Integer(a.epic_arc_id as i64)),
+                            ("agentID", PyRep::Integer(a.agent_id)),
+                            ("message", PyRep::String(format!("Epic Arc {} chapter {} briefing (branch: {:?})", a.epic_arc_id, a.chapter, a.chosen_branch))),
+                        ])
+                    })
+                    .collect::<Vec<_>>()
+            });
+            Some(Ok(PyRep::List(msgs)))
+        }
+
+        ("epicArcStatus", "AgentHasEpicMissionsForCharacter") => {
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let agent_id = args.first().and_then(|a| a.as_i64()).unwrap_or(3_019_356);
+            if !ctx.sde.agents.get(&agent_id).is_some_and(|a| a.agent_type_id == 10) {
+                return Some(Ok(PyRep::Bool(false)));
+            }
+            let (arc_id, _) = resolve_epic_arc_id_for_agent(ctx, agent_id);
+            let now_unix = ctx.now_unix();
+            let available = ctx.db.with_snapshot(|snap| {
+                !load_epic_arc_states(snap, char_id)
+                    .iter()
+                    .any(|a| a.epic_arc_id == arc_id && a.cooldown_until_unix.is_some_and(|until| now_unix < until))
+            });
+            Some(Ok(PyRep::Bool(available)))
+        }
+
+        ("missionTrackerMgr", "GetAllMissionObjectives")
+        | ("missionTrackerMgr", "UpdateAllMissions")
+        | ("missionTrackerMgr", "GetMissionInfoItems") => {
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let filter_mid = args.first().and_then(|a| a.as_i64()).and_then(|v| u32::try_from(v).ok());
+            let items = ctx.db.with_snapshot(|snap| {
+                let mut list: Vec<PyRep> = snap.active_missions.values()
+                    .filter(|m| {
+                        m.character_id == char_id
+                            && matches!(m.state.as_str(), "Offered" | "Accepted")
+                            && filter_mid.is_none_or(|f| f == m.mission_id)
+                    })
+                    .map(|m| {
+                        let meta = load_mission_meta(snap, char_id, m.mission_id);
+                        let obj_completed = m.npcs_remaining == 0
+                            && meta.as_ref().and_then(|mt| mt.required_delivery_type_id).is_none_or(|req_tid| {
+                                let req_q = meta.as_ref().map_or(1, |mt| mt.required_delivery_qty);
+                                snap.items
+                                    .values()
+                                    .filter(|it| it.owner_id == char_id && it.type_id == req_tid)
+                                    .map(|it| it.quantity)
+                                    .sum::<i32>()
+                                    >= req_q
+                            });
+                        PyRep::keyval([
+                            ("missionID", PyRep::Integer(m.mission_id as i64)),
+                            ("agentID", PyRep::Integer(m.agent_id)),
+                            ("solarSystemID", PyRep::Integer(m.solar_system_id as i64)),
+                            ("state", PyRep::String(m.state.clone())),
+                            ("currentRoomID", PyRep::Integer(m.current_room_id as i64)),
+                            ("npcsRemaining", PyRep::Integer(m.npcs_remaining as i64)),
+                            ("objectivesCompleted", PyRep::Bool(obj_completed)),
+                        ])
+                    })
+                    .collect();
+                list.sort_by_key(|r| r.dict_get("missionID").and_then(|v| v.as_i64()).unwrap_or(0));
+                list
+            });
+            Some(Ok(PyRep::List(items)))
+        }
+
+        ("missionTrackerMgr", "IsInActiveDungeonID") => {
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let sys_id = session.solar_system_id.unwrap_or(0);
+            let in_dungeon = ctx.db.with_snapshot(|snap| {
+                snap.active_missions.values().any(|m| {
+                    m.character_id == char_id && m.state == "Accepted" && m.solar_system_id == sys_id
+                })
+            });
+            Some(Ok(PyRep::Bool(in_dungeon)))
+        }
+
+        ("standingMgr", "GetCorpStandings") => {
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let rows = ctx.db.with_snapshot(|snap| {
+                let corp_id = snap.characters.get(&char_id).map_or(1_000_009, |c| c.corporation_id);
+                let mut agg: HashMap<i64, (f64, usize)> = HashMap::new();
+                for ch in snap.characters.values().filter(|c| c.corporation_id == corp_id) {
+                    for (&from_id, &val) in &ch.standings {
+                        let e = agg.entry(from_id).or_insert((0.0, 0));
+                        e.0 += val;
+                        e.1 += 1;
+                    }
+                }
+                let mut entries: Vec<(i64, f64)> = agg
+                    .into_iter()
+                    .map(|(fid, (sum, cnt))| (fid, sum / (cnt.max(1) as f64)))
+                    .collect();
+                entries.sort_by_key(|&(fid, _)| fid);
+                entries.into_iter().map(|(from_id, st)| vec![PyRep::Integer(from_id), PyRep::Real(st)]).collect::<Vec<_>>()
+            });
+            Some(Ok(PyRep::rowset(vec!["fromID", "standing"], rows)))
+        }
+
+        ("standingMgr", "GetNPCNPCStandings") => {
+            let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let rows: Vec<Vec<PyRep>> = static_npc_faction_standings()
+                .into_iter()
+                .map(|(from_id, to_id, st)| vec![PyRep::Integer(from_id), PyRep::Integer(to_id), PyRep::Real(st)])
+                .collect();
+            Some(Ok(PyRep::rowset(vec!["fromID", "toID", "standing"], rows)))
+        }
+
+        ("standingMgr", "GetStandingCompositions") => {
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let target_from = args.first().and_then(|a| a.as_i64()).filter(|&id| id > 0);
+            let res = ctx.db.with_snapshot(|snap| {
+                let Some(ch) = snap.characters.get(&char_id) else {
+                    return PyRep::List(vec![]);
+                };
+                let mut entities: Vec<i64> = if let Some(fid) = target_from {
+                    vec![fid]
+                } else {
+                    ch.standings.keys().copied().collect()
+                };
+                entities.sort_unstable();
+                let list: Vec<PyRep> = entities
+                    .into_iter()
+                    .map(|from_id| {
+                        let raw = ch.standings.get(&from_id).copied().unwrap_or(0.0);
+                        let has_entry = ch.standings.contains_key(&from_id);
+                        let (eff, conn_b, dip_b, crim_b) = compute_effective_standing_breakdown(
+                            ctx, snap, char_id, from_id, raw, has_entry,
+                        );
+                        PyRep::keyval([
+                            ("fromID", PyRep::Integer(from_id)),
+                            ("toID", PyRep::Integer(char_id)),
+                            ("rawStanding", PyRep::Real(raw)),
+                            ("standing", PyRep::Real(raw)),
+                            ("effectiveStanding", PyRep::Real(eff)),
+                            ("connectionsBonus", PyRep::Real(conn_b)),
+                            ("diplomacyBonus", PyRep::Real(dip_b)),
+                            ("criminalConnectionsBonus", PyRep::Real(crim_b)),
+                        ])
+                    })
+                    .collect();
+                PyRep::List(list)
+            });
+            Some(Ok(res))
+        }
+
+        ("keeper", "ActivateAccelerationGate") => {
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            if session.station_id.is_some() || session.structure_id.is_some() {
+                return Some(Err(BridgeRpcError { code: "ShipDocked".into(), message: "Cannot activate dungeon acceleration gate while docked".into() }));
+            }
+            let is_mission = args.first().and_then(|a| a.as_i64()).and_then(|raw_id| u32::try_from(raw_id).ok()).is_some_and(|mid| {
+                ctx.db
+                    .with_snapshot(|snap| snap.active_missions.contains_key(&(char_id, mid)))
+            });
+            if !is_mission {
+                return None;
+            }
+            let Some(raw) = args.first().and_then(|a| a.as_i64()) else {
+                return Some(Err(BridgeRpcError { code: "InvalidMissionId".into(), message: "mission_id argument is required".into() }));
+            };
+            let Ok(mission_id) = u32::try_from(raw) else {
+                return Some(Err(BridgeRpcError { code: "InvalidMissionId".into(), message: format!("mission_id {raw} is out of valid u32 range") }));
+            };
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
+                // Enforce Anomic Burner frigate/small-hull gate restriction (feat:pve.anomic-burner-missions)
+                let is_burner = load_mission_meta(snap, char_id, mission_id)
+                    .is_some_and(|mt| mt.is_anomic_burner)
+                    || ctx.sde.missions
+                        .get(&mission_id)
+                        .is_some_and(|t| t.title.contains("Anomic"));
+                if is_burner {
+                    if let Some(ship_id) = session.ship_id {
+                        if let Some(ship_item) = snap.items.get(&ship_id) {
+                            if let Some(ship_type) = ctx.sde.types.get(&ship_item.type_id) {
+                                // Battleship (group 27), Battlecruiser (419), Capital (30, 485, 547) rejected
+                                if matches!(ship_type.group_id, 27 | 30 | 419 | 485 | 547 | 659 | 898 | 900)
+                                    || ship_type.mass >= 50_000_000.0
+                                {
+                                    return Err(BridgeRpcError { code: "ShipRestrictedByGate".into(), message: format!("Ship {} (group {}) is too large for this Anomic Burner acceleration gate", ship_type.name, ship_type.group_id) });
+                                }
+                            }
+                        }
+                    }
+                }
+                let Some(m) = snap.active_missions.get_mut(&(char_id, mission_id)) else {
+                    return Err(BridgeRpcError { code: "MissionNotActive".into(), message: format!("Mission {mission_id} is not active for character {char_id}") });
+                };
+                if m.state != "Accepted" {
+                    return Err(BridgeRpcError { code: "InvalidMissionState".into(), message: format!("Mission {mission_id} is in state '{}', not Accepted", m.state) });
+                }
+                if m.npcs_remaining > 0 {
+                    return Err(BridgeRpcError { code: "RoomNpcsRemaining".into(), message: format!("Cannot activate acceleration gate while {} room NPC(s) remain", m.npcs_remaining) });
+                }
+                m.current_room_id += 1;
+                Ok(m.current_room_id)
+            });
+            match res {
+                Ok(next_room) => Some(Ok(PyRep::keyval([
+                    ("missionID", PyRep::Integer(mission_id as i64)),
+                    ("currentRoomID", PyRep::Integer(next_room as i64)),
+                    ("gateUnlocked", PyRep::Bool(true)),
+                ]))),
+                Err(e) => Some(Err(e)),
+            }
+        }
+
+        ("air_npe", "skip_air_npe") => {
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let npe = snap.npe_progress.entry(char_id).or_insert_with(|| {
+                    eve_db::NpeProgressRecord {
+                        character_id: char_id,
+                        node_graph_id: 473,
+                        current_node_id: 1,
+                        completed: false,
+                        career_goal_progress: Default::default(),
+                        claimed_goals: Default::default(),
+                    }
+                });
+                npe.completed = true;
+                npe.current_node_id = 4;
+                Ok((npe.current_node_id, npe.completed))
+            });
+            match res {
+                Ok((curr_node, completed)) => Some(Ok(PyRep::keyval([
+                    ("nodeGraphID", PyRep::Integer(473)),
+                    ("currentNodeID", PyRep::Integer(curr_node as i64)),
+                    ("completed", PyRep::Bool(completed)),
+                ]))),
+                Err(e) => Some(Err(e)),
+            }
+        }
+
+        ("seasonManager", "process_client_event") => {
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let npe = snap.npe_progress.entry(char_id).or_insert_with(|| {
+                    eve_db::NpeProgressRecord {
+                        character_id: char_id,
+                        node_graph_id: 473,
+                        current_node_id: 1,
+                        completed: false,
+                        career_goal_progress: Default::default(),
+                        claimed_goals: Default::default(),
+                    }
+                });
+                if npe.completed {
+                    return Err(BridgeRpcError { code: "NodeGraphAlreadyCompleted".into(), message: "AIR NPE node graph 473 is already completed".into() });
+                }
+                if npe.current_node_id == 3
+                    && npe.career_goal_progress.get(&1).copied().unwrap_or(0) < 1
+                {
+                    return Err(BridgeRpcError {
+                        code: "NodeObjectiveNotMet".into(),
+                        message:
+                            "Node 3 (DestroySeekers) requires destroying at least 1 NPC before advancing"
+                                .into(),
+                    });
+                }
+                if npe.current_node_id < 4 {
+                    npe.current_node_id += 1;
+                }
+                if npe.current_node_id >= 4 {
+                    npe.completed = true;
+                }
+                Ok((npe.current_node_id, npe.completed))
+            });
+            match res {
+                Ok((curr_node, completed)) => Some(Ok(PyRep::keyval([
+                    ("nodeGraphID", PyRep::Integer(473)),
+                    ("currentNodeID", PyRep::Integer(curr_node as i64)),
+                    ("completed", PyRep::Bool(completed)),
+                ]))),
+                Err(e) => Some(Err(e)),
+            }
+        }
+
+        ("air_npe", "get_air_npe_state") | ("air_npe", "is_air_npe_enabled") => {
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let (curr_node, completed) = ctx.db.with_snapshot(|snap| {
+                snap.npe_progress
+                    .get(&char_id)
+                    .map(|n| (n.current_node_id, n.completed))
+                    .unwrap_or((1, false))
+            });
+            Some(Ok(PyRep::keyval([
+                ("nodeGraphID", PyRep::Integer(473)),
+                ("currentNodeID", PyRep::Integer(curr_node as i64)),
+                ("completed", PyRep::Bool(completed)),
+                ("enabled", PyRep::Bool(true)),
+            ])))
+        }
+
+        ("seasonManager", "get_character_progress_by_character_id") => {
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let raw_goal_id = args.first().and_then(|a| a.as_i64()).unwrap_or(1);
+            let Ok(goal_id) = u32::try_from(raw_goal_id) else {
+                return Some(Err(BridgeRpcError { code: "InvalidGoalId".into(), message: format!("goal_id {raw_goal_id} is out of valid u32 range") }));
+            };
+            if goal_id != 2 && !ctx.sde.career_goals.contains_key(&goal_id) {
+                return Some(Err(BridgeRpcError { code: "UnimplementedRPC".into(), message: format!("Career goal {goal_id} is not present in V24.01 goals.fsdbinary") }));
+            }
+            let prog = ctx.db.with_snapshot(|snap| {
+                if goal_id == 2 {
+                    snap.mining_ledger
+                        .iter()
+                        .filter(|r| r.character_id == char_id)
+                        .map(|r| r.quantity.max(0) as u64)
+                        .sum()
+                } else {
+                    snap.npe_progress
+                        .get(&char_id)
+                        .and_then(|n| n.career_goal_progress.get(&goal_id).copied())
+                        .unwrap_or(0)
+                }
+            });
+            Some(Ok(PyRep::keyval([
+                ("goalID", PyRep::Integer(goal_id as i64)),
+                ("currentProgress", PyRep::Integer(prog as i64)),
+                ("verifiedFromLedger", PyRep::Bool(goal_id == 2)),
+            ])))
+        }
+
+        ("seasonManager", "claim_goal_reward") => {
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let raw_goal_id = args.first().and_then(|a| a.as_i64()).unwrap_or(1);
+            let Ok(goal_id) = u32::try_from(raw_goal_id) else {
+                return Some(Err(BridgeRpcError { code: "InvalidGoalId".into(), message: format!("goal_id {raw_goal_id} is out of valid u32 range") }));
+            };
+            let goal_def = if goal_id == 2 {
+                Some((500_u64, 50_000.0_f64))
+            } else {
+                ctx.sde.career_goals
+                    .get(&goal_id)
+                    .map(|g| (g.target_progress, g.sp_reward as f64))
+            };
+            let Some((target_prog, sp_reward)) = goal_def else {
+                return Some(Err(BridgeRpcError { code: "UnimplementedRPC".into(), message: format!("Career goal {goal_id} is not present in V24.01 goals.fsdbinary") }));
+            };
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let npe = snap.npe_progress.entry(char_id).or_insert_with(|| {
+                    eve_db::NpeProgressRecord {
+                        character_id: char_id,
+                        node_graph_id: 473,
+                        current_node_id: 1,
+                        completed: false,
+                        career_goal_progress: Default::default(),
+                        claimed_goals: Default::default(),
+                    }
+                });
+                let cur_prog = if goal_id == 2 {
+                    let total_mined: u64 = snap.mining_ledger.iter()
+                        .filter(|r| r.character_id == char_id)
+                        .map(|r| r.quantity.max(0) as u64)
+                        .sum();
+                    npe.career_goal_progress.insert(goal_id, total_mined);
+                    total_mined
+                } else {
+                    npe.career_goal_progress.get(&goal_id).copied().unwrap_or(0)
+                };
+                if cur_prog < target_prog {
+                    return Err(BridgeRpcError { code: "GoalProgressIncomplete".into(), message: format!("Career goal {goal_id} requires progress {target_prog}, current is {cur_prog}") });
+                }
+                if !npe.claimed_goals.insert(goal_id) {
+                    return Err(BridgeRpcError { code: "GoalAlreadyClaimed".into(), message: format!("Career goal {goal_id} has already been claimed") });
+                }
+                if let Some(ch) = snap.characters.get_mut(&char_id) {
+                    ch.free_skill_points += sp_reward;
+                    Ok(ch.free_skill_points)
+                } else {
+                    Err(BridgeRpcError { code: "CharacterNotFound".into(), message: format!("Character {char_id} not found") })
+                }
+            });
+            match res {
+                Ok(new_free_sp) => Some(Ok(PyRep::keyval([
+                    ("goalID", PyRep::Integer(goal_id as i64)),
+                    ("spReward", PyRep::Real(sp_reward)),
+                    ("freeSkillPoints", PyRep::Real(new_free_sp)),
+                ]))),
+                Err(e) => Some(Err(e)),
+            }
+        }
+
+        _ => None,
+    }
+}

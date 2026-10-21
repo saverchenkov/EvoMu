@@ -511,6 +511,8 @@ impl WorldRepository {
             character_doll_info: HashMap::new(),
             ..Default::default()
         };
+        let mut initial_snap = initial_snap;
+        initial_snap.fold_legacy_plex_balances();
         let mut conn = rusqlite::Connection::open_in_memory()
             .expect("open in-memory SQLite connection for WorldRepository");
         sqlite_store::apply_migrations(&conn).expect("apply SQLite migrations for WorldRepository");

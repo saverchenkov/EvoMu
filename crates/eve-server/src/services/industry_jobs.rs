@@ -1,0 +1,1380 @@
+//! `industry_jobs` — Industry job installation, BOM consumption, ME/TE/Copy/Invention/Decryptor/T3/Reaction execution, & job monitor (`E-4`).
+
+// parity: plan:E-4
+// parity: feat:industry.install-job, feat:industry.manufacturing, feat:industry.research-me, feat:industry.research-te
+// parity: feat:industry.copying, feat:industry.invention, feat:industry.decryptors, feat:industry.t3-invention
+// parity: feat:industry.reactions, feat:industry.job-complete, feat:industry.job-cancel, feat:industry.job-list
+// parity: feat:industry.job-slots, feat:industry.job-range, feat:industry.industry-monitor, feat:industry.corp-industry
+// parity: feat:industry.blueprint-lock
+
+#![forbid(unsafe_code)]
+
+use crate::formulas::{
+    compute_invention_probability, compute_manufacturing_material_qty,
+    compute_manufacturing_time_seconds,
+};
+use crate::router::{NotificationTarget, ServerContext};
+use crate::services::industry_pi::{
+    ATTR_BLUEPRINT_ME, ATTR_BLUEPRINT_TE, IndustryJobCostMeta, compute_industry_job_costs_for_char,
+    has_custom_facility_taxes, is_fulcrum_pirate_ship_bonus_applicable,
+    is_structure_industry_service_online, load_job_cost_meta,
+    resolve_facility_modifiers_and_system, resolve_structure_rig_bonus, save_job_cost_meta,
+    sync_industry_job_pause_states,
+};
+use eve_db::{IndustryJobRecord, InventoryFlag, InventoryItemRecord, IskCents};
+use eve_machonet::SessionState;
+use eve_proto::{BridgeRpcError, PyRep};
+use eve_sde::TypeId;
+use std::collections::{HashMap, HashSet, VecDeque};
+
+fn solar_system_jump_distance(ctx: &ServerContext, from_sys: u32, to_sys: u32) -> Option<u32> {
+    if from_sys == to_sys {
+        return Some(0);
+    }
+    let mut visited = HashSet::from([from_sys]);
+    let mut queue = VecDeque::from([(from_sys, 0_u32)]);
+    while let Some((curr, dist)) = queue.pop_front() {
+        if dist >= 35 {
+            continue;
+        }
+        for jump in ctx.sde.jumps.values() {
+            let neighbor_opt = if jump.from_solar_system_id == curr {
+                Some(jump.to_solar_system_id)
+            } else if jump.to_solar_system_id == curr {
+                Some(jump.from_solar_system_id)
+            } else {
+                None
+            };
+            if let Some(neighbor) = neighbor_opt {
+                if neighbor == to_sys {
+                    return Some(dist + 1);
+                }
+                if visited.insert(neighbor) {
+                    queue.push_back((neighbor, dist + 1));
+                }
+            }
+        }
+    }
+    None
+}
+
+fn resolve_decryptor_modifiers(
+    ctx: &ServerContext,
+    decryptor_type_id: TypeId,
+) -> Result<(f64, f64, f64, i32), BridgeRpcError> {
+    let Some(dtype) = ctx.sde.types.get(&decryptor_type_id) else {
+        return Err(BridgeRpcError {
+            code: "InvalidDecryptor".into(),
+            message: format!("Decryptor type {decryptor_type_id} not found in SDE"),
+        });
+    };
+    if dtype.group_id != 1304 {
+        return Err(BridgeRpcError {
+            code: "InvalidDecryptor".into(),
+            message: format!("Type {decryptor_type_id} is not a Decryptor (group 1304)"),
+        });
+    }
+    let prob_mult = dtype.default_attributes.get(&1112).copied().filter(|&v| v > 0.0).unwrap_or(1.0);
+    let me_mod = dtype.default_attributes.get(&1113).copied().unwrap_or(0.0);
+    let te_mod = dtype.default_attributes.get(&1114).copied().unwrap_or(0.0);
+    let runs_mod = dtype.default_attributes.get(&1124).copied().unwrap_or(0.0).round() as i32;
+    Ok((prob_mult, me_mod, te_mod, runs_mod))
+}
+
+fn format_industry_job_pyrep(j: &IndustryJobRecord, meta: &IndustryJobCostMeta) -> PyRep {
+    let owner_id = if meta.owner_id > 0 { meta.owner_id } else { j.installer_id };
+    PyRep::keyval([
+        ("jobID", PyRep::Integer(j.job_id)),
+        ("installerID", PyRep::Integer(j.installer_id)),
+        ("ownerID", PyRep::Integer(owner_id)),
+        ("facilityID", PyRep::Integer(j.facility_id)),
+        ("blueprintItemID", PyRep::Integer(j.blueprint_item_id)),
+        ("blueprintTypeID", PyRep::Integer(j.blueprint_type_id as i64)),
+        ("activityID", PyRep::Integer(j.activity_id as i64)),
+        ("runs", PyRep::Integer(j.runs as i64)),
+        ("productTypeID", PyRep::Integer(j.product_type_id as i64)),
+        ("status", PyRep::String(j.status.clone())),
+        ("durationSeconds", PyRep::Integer(j.duration_seconds as i64)),
+        ("startUnix", PyRep::Integer(j.start_unix as i64)),
+        ("estimatedItemValueISK", PyRep::Real(meta.eiv_isk)),
+        ("baseJobCost", PyRep::Real(meta.base_job_cost_isk)),
+        ("facilityTaxISK", PyRep::Real(meta.facility_tax_isk)),
+        ("sccSurchargeISK", PyRep::Real(meta.scc_surcharge_isk)),
+        ("alphaCloneTaxISK", PyRep::Real(meta.alpha_clone_tax_isk)),
+        ("totalJobCostISK", PyRep::Real(meta.total_cost_isk)),
+    ])
+}
+
+pub fn handle_industry_jobs(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    service: &str,
+    method: &str,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    match (service, method) {
+        ("industryManager", "InstallJob") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let Some(docked_id) = session.station_id.or(session.structure_id) else {
+                return Some(Err(BridgeRpcError {
+                    code: "NotDocked".into(),
+                    message: "Installing an industry job requires being docked".into(),
+                }));
+            };
+
+            let mut is_v24_call = false;
+            let mut explicit_bp_item_id: Option<i64> = None;
+            let mut explicit_facility_id: Option<i64> = None;
+            let lookup_first = |k: &str| -> Option<&PyRep> {
+                match args.first() {
+                    Some(PyRep::KeyVal(kv)) => kv.get(k),
+                    Some(PyRep::Dict(entries)) => entries
+                        .iter()
+                        .find(|(ek, _)| ek.as_str() == Some(k))
+                        .map(|(_, ev)| ev),
+                    _ => None,
+                }
+                .or_else(|| kwargs.get(k))
+            };
+            let decryptor_type_id: Option<TypeId> = lookup_first("decryptorTypeID")
+                .or_else(|| lookup_first("decryptorID"))
+                .and_then(|v| v.as_i64())
+                .filter(|&id| id > 0)
+                .map(|id| id as TypeId);
+            let mut use_corp: bool = lookup_first("useCorp")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let explicit_owner_id: Option<i64> = lookup_first("ownerID")
+                .and_then(|v| v.as_i64())
+                .filter(|&id| id > 0);
+
+            let (raw_bp_type_id, raw_activity_id, runs_raw) = match args.first() {
+                Some(PyRep::KeyVal(_) | PyRep::Dict(_)) => {
+                    is_v24_call = true;
+                    explicit_bp_item_id = lookup_first("blueprintID")
+                        .or_else(|| lookup_first("blueprintItemID"))
+                        .and_then(|v| v.as_i64())
+                        .filter(|&id| id > 0);
+                    explicit_facility_id = lookup_first("facilityID")
+                        .and_then(|v| v.as_i64())
+                        .filter(|&id| id > 0);
+                    let btid = lookup_first("blueprintTypeID").and_then(|v| v.as_i64()).unwrap_or(0);
+                    let act = lookup_first("activityID").and_then(|v| v.as_i64()).unwrap_or(1);
+                    let r = lookup_first("runs").and_then(|v| v.as_i64()).unwrap_or(1);
+                    (Some(btid), act, r)
+                }
+                _ if args.len() >= 4 => {
+                    is_v24_call = true;
+                    explicit_bp_item_id = args.first().and_then(|a| a.as_i64()).filter(|&id| id > 0);
+                    explicit_facility_id = args.get(4).and_then(|a| a.as_i64()).filter(|&id| id > 0);
+                    (
+                        args.get(1).and_then(|a| a.as_i64()),
+                        args.get(2).and_then(|a| a.as_i64()).unwrap_or(1),
+                        args.get(3).and_then(|a| a.as_i64()).unwrap_or(1),
+                    )
+                }
+                _ => (
+                    args.first().and_then(|a| a.as_i64()),
+                    args.get(1).and_then(|a| a.as_i64()).unwrap_or(1),
+                    args.get(2).and_then(|a| a.as_i64()).unwrap_or(1),
+                ),
+            };
+            let station_id = explicit_facility_id.unwrap_or(docked_id);
+
+            let resolved_bp_type_id = raw_bp_type_id.filter(|&id| id > 0).or_else(|| {
+                explicit_bp_item_id.and_then(|iid| {
+                    ctx.db.with_snapshot(|snap| snap.items.get(&iid).map(|it| it.type_id as i64))
+                })
+            });
+            let Some(raw_bp_tid) = resolved_bp_type_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidIndustryJobParameters".into(),
+                    message: "InstallJob requires an explicit blueprint typeID or blueprintItemID".into(),
+                }));
+            };
+            let (Ok(bp_type_id), Ok(activity_id)) =
+                (TypeId::try_from(raw_bp_tid), u8::try_from(raw_activity_id))
+            else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidIndustryJobParameters".into(),
+                    message: "Invalid blueprint typeID or activityID".into(),
+                }));
+            };
+
+            if !(1..=1_000).contains(&runs_raw) || !matches!(activity_id, 1 | 3 | 4 | 5 | 8 | 9) {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidIndustryJobParameters".into(),
+                    message: "Runs must be in 1..=1000 and activityID in {1, 3, 4, 5, 8, 9}".into(),
+                }));
+            }
+            let (runs, runs_i32) = (runs_raw as u32, runs_raw as i32);
+
+            let Some(bp) = ctx.sde.blueprints.get(&bp_type_id) else {
+                return Some(Err(BridgeRpcError {
+                    code: "UnknownBlueprint".into(),
+                    message: format!("Blueprint type {bp_type_id} not found in SDE"),
+                }));
+            };
+            let is_ancient_relic = ctx.sde.types.get(&bp_type_id).map(|t| t.group_id == 971).unwrap_or(false);
+
+            // Enforce remote job range (`feat:industry.job-range`) when `station_id != docked_id`
+            if station_id != docked_id {
+                let current_sys = session.solar_system_id.unwrap_or(30_000_142);
+                let range_check = ctx.db.with_snapshot(|snap| {
+                    let Some((_, _, f_sys, _, _, _, _)) =
+                        resolve_facility_modifiers_and_system(ctx, snap, station_id)
+                    else {
+                        return Err(BridgeRpcError {
+                            code: "FacilityNotFound".into(),
+                            message: format!("Industry facility {station_id} not found"),
+                        });
+                    };
+                    if f_sys == current_sys {
+                        return Ok(());
+                    }
+                    let jump_dist = solar_system_jump_distance(ctx, current_sys, f_sys).unwrap_or(999);
+                    let remote_skill_id: TypeId = match activity_id {
+                        1 => 24270, // Supply Chain Management
+                        9 => 45750, // Remote Reactions
+                        _ => 3409,  // Scientific Networking
+                    };
+                    let remote_lvl = snap
+                        .skills
+                        .get(&char_id)
+                        .and_then(|m| m.get(&remote_skill_id))
+                        .map(|s| s.level)
+                        .unwrap_or(0);
+                    let max_jumps = u32::from(remote_lvl) * 5;
+                    if jump_dist > max_jumps {
+                        return Err(BridgeRpcError {
+                            code: "FacilityOutOfRemoteRange".into(),
+                            message: format!(
+                                "Facility {station_id} in system {f_sys} is {jump_dist} jumps away (max {max_jumps})"
+                            ),
+                        });
+                    }
+                    Ok(())
+                });
+                if let Err(e) = range_check {
+                    return Some(Err(e));
+                }
+            }
+
+            let now_unix = ctx.now_unix();
+
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
+                sync_industry_job_pause_states(snap, now_unix);
+                let is_alpha_clone = snap
+                    .characters
+                    .get(&char_id)
+                    .is_some_and(|ch| ch.clone_grade <= 1);
+                if !is_structure_industry_service_online(snap, station_id, activity_id) {
+                    return Err(BridgeRpcError {
+                        code: "FacilityServiceOffline".into(),
+                        message: format!(
+                            "Facility {station_id} industry/reaction service is offline or out of fuel"
+                        ),
+                    });
+                }
+                let char_corp_id = snap
+                    .characters
+                    .get(&char_id)
+                    .map(|c| c.corporation_id)
+                    .or(session.corporation_id)
+                    .unwrap_or(1_000_009);
+                let job_owner_id = if let Some(oid) = explicit_owner_id {
+                    if oid == char_corp_id {
+                        use_corp = true;
+                    }
+                    oid
+                } else if use_corp {
+                    char_corp_id
+                } else {
+                    char_id
+                };
+
+                let (fac_type_id, _, fac_sys_id, _, mat_mod, time_mod, _) =
+                    resolve_facility_modifiers_and_system(ctx, snap, station_id).unwrap_or((
+                        1529, 1000035, 30000142, 10000002, 1.0, 1.0, 1.0,
+                    ));
+                let (rig_mat_bonus, _, _) =
+                    resolve_structure_rig_bonus(ctx, snap, station_id, fac_sys_id);
+                let fulcrum_bonus = is_fulcrum_pirate_ship_bonus_applicable(
+                    ctx,
+                    snap,
+                    Some(char_id),
+                    bp_type_id,
+                    activity_id,
+                    station_id,
+                );
+                let eff_mat_mod = if fulcrum_bonus { mat_mod * 0.94 } else { mat_mod };
+                let eff_time_mod = if fulcrum_bonus { time_mod * 0.30 } else { time_mod };
+
+                if activity_id == 1 {
+                    let prod_grp = ctx
+                        .sde
+                        .types
+                        .get(&bp.product_type_id)
+                        .map(|t| t.group_id)
+                        .unwrap_or(0);
+                    let fac_sec = ctx
+                        .sde
+                        .solar_systems
+                        .get(&fac_sys_id)
+                        .map(|s| s.security_status)
+                        .unwrap_or(1.0);
+                    if matches!(prod_grp, 659 | 30) {
+                        if fac_sec > 0.0 || fac_sys_id >= 31_000_000 {
+                            return Err(BridgeRpcError {
+                                code: "SupercapitalRequiresSovereignNullSec".into(),
+                                message: format!(
+                                    "Supercapitals require sovereign Null-Sec (system {fac_sys_id} sec {fac_sec:.2})"
+                                ),
+                            });
+                        }
+                        let has_sov = snap
+                            .system_states
+                            .get(&fac_sys_id)
+                            .and_then(|s| s.sov_alliance_id)
+                            .is_some()
+                            || snap.items.values().any(|i| {
+                                i.location_id == fac_sys_id as i64
+                                    && matches!(i.type_id, 81623 | 2009)
+                                    && i.dynamic_attributes.get(&2).copied().unwrap_or(1.0) > 0.0
+                            });
+                        if !has_sov {
+                            return Err(BridgeRpcError {
+                                code: "SupercapitalRequiresSovereignNullSec".into(),
+                                message: format!(
+                                    "System {fac_sys_id} lacks active sovereignty for supercapital construction"
+                                ),
+                            });
+                        }
+                        let has_supercap_shipyard = fac_type_id == 35827
+                            && snap.items.values().any(|i| {
+                                i.location_id == station_id
+                                    && (164..=171).contains(&(i.flag as u16))
+                                    && i.type_id == 35877
+                                    && i.dynamic_attributes.get(&2).copied().unwrap_or(1.0) > 0.0
+                            });
+                        if !has_supercap_shipyard {
+                            return Err(BridgeRpcError {
+                                code: "SupercapitalRequiresSotiyoSupercapitalShipyard".into(),
+                                message: format!(
+                                    "Supercapitals require a Sotiyo (35827) with an online Standup Supercapital Shipyard I (35877) at {station_id}"
+                                ),
+                            });
+                        }
+                    } else if matches!(prod_grp, 485 | 4594 | 547 | 5120 | 1538 | 883 | 902 | 513) {
+                        if fac_sec >= 0.45 && fac_sys_id < 31_000_000 {
+                            return Err(BridgeRpcError {
+                                code: "CapitalConstructionForbiddenInHighSec".into(),
+                                message: format!(
+                                    "Capital ship construction is forbidden in High-Sec (system {fac_sys_id} sec {fac_sec:.2})"
+                                ),
+                            });
+                        }
+                        let has_cap_shipyard = matches!(fac_type_id, 35826 | 35827 | 35833 | 35834)
+                            || snap.items.values().any(|i| {
+                                i.location_id == station_id
+                                    && (164..=171).contains(&(i.flag as u16))
+                                    && matches!(i.type_id, 35881 | 35877)
+                                    && i.dynamic_attributes.get(&2).copied().unwrap_or(1.0) > 0.0
+                            });
+                        if !has_cap_shipyard {
+                            return Err(BridgeRpcError {
+                                code: "FacilityNotCapitalCapable".into(),
+                                message: format!(
+                                    "Facility {station_id} (type {fac_type_id}) is not a capital-capable shipyard facility"
+                                ),
+                            });
+                        }
+                    }
+                }
+
+                if activity_id == 9 {
+                    if !matches!(fac_type_id, 35835 | 35836) {
+                        return Err(BridgeRpcError {
+                            code: "FacilityDoesNotSupportReactions".into(),
+                            message: format!(
+                                "Facility {station_id} (type {fac_type_id}) does not support Reactions (requires Athanor 35835 or Tatara 35836)"
+                            ),
+                        });
+                    }
+                    let fac_sec = ctx
+                        .sde
+                        .solar_systems
+                        .get(&fac_sys_id)
+                        .map(|s| s.security_status)
+                        .unwrap_or(1.0);
+                    if fac_sec >= 0.45 {
+                        return Err(BridgeRpcError {
+                            code: "ReactionsForbiddenInHighSec".into(),
+                            message: format!(
+                                "Reactions cannot be run in high-sec (system {fac_sys_id} sec {fac_sec:.2} >= 0.45)"
+                            ),
+                        });
+                    }
+                }
+
+                let char_skills = snap.skills.get(&char_id);
+                let skill_lvl = |sid: TypeId| -> u8 {
+                    char_skills.and_then(|m| m.get(&sid)).map(|s| s.level).unwrap_or(0)
+                };
+                let industry_lvl = skill_lvl(3380);
+                let adv_industry_lvl = skill_lvl(3388);
+                let mass_prod_lvl = skill_lvl(3387);
+                let adv_mass_prod_lvl = skill_lvl(24625);
+                let lab_op_lvl = skill_lvl(3406);
+                let adv_lab_op_lvl = skill_lvl(24624);
+                let reactions_lvl = skill_lvl(45746);
+                let mass_react_lvl = skill_lvl(45748);
+                let adv_mass_react_lvl = skill_lvl(45749);
+                let sci1_lvl = skill_lvl(11448).max(skill_lvl(11454)).max(skill_lvl(20433));
+                let sci2_lvl = skill_lvl(11452).max(skill_lvl(11442));
+                let enc_lvl = skill_lvl(21791).max(skill_lvl(23121)).max(skill_lvl(3408));
+
+                let max_slots = match activity_id {
+                    1 => 1 + (mass_prod_lvl as usize) + (adv_mass_prod_lvl as usize),
+                    9 => 1 + (mass_react_lvl as usize) + (adv_mass_react_lvl as usize),
+                    _ => 1 + (lab_op_lvl as usize) + (adv_lab_op_lvl as usize),
+                };
+                let active_slots_used = snap
+                    .industry_jobs
+                    .values()
+                    .filter(|j| {
+                        j.installer_id == char_id
+                            && matches!(j.status.as_str(), "Active" | "Paused")
+                            && match activity_id {
+                                1 => j.activity_id == 1,
+                                9 => j.activity_id == 9,
+                                _ => matches!(j.activity_id, 3 | 4 | 5 | 8),
+                            }
+                    })
+                    .count();
+                if active_slots_used >= max_slots {
+                    return Err(BridgeRpcError {
+                        code: "IndustrySlotsFull".into(),
+                        message: format!(
+                            "Character {char_id} has used all {active_slots_used}/{max_slots} slots for activity {activity_id}"
+                        ),
+                    });
+                }
+
+                let matching_bps: Vec<InventoryItemRecord> = snap
+                    .items
+                    .values()
+                    .filter(|i| {
+                        (i.owner_id == char_id || (use_corp && i.owner_id == job_owner_id))
+                            && (i.location_id == station_id || i.location_id == docked_id)
+                            && i.type_id == bp_type_id
+                            && explicit_bp_item_id.map(|eid| i.item_id == eid).unwrap_or(true)
+                            && i.quantity >= 1
+                            && i.flag != InventoryFlag::Locked
+                            && !snap.is_item_locked_in_contract_or_job(i.item_id)
+                    })
+                    .cloned()
+                    .collect();
+                if matching_bps.is_empty() {
+                    return Err(BridgeRpcError {
+                        code: "BlueprintNotAvailable".into(),
+                        message: format!("No unlocked blueprint {bp_type_id} at facility {station_id}"),
+                    });
+                }
+
+                let bp_rec = match activity_id {
+                    3 | 4 | 5 => matching_bps
+                        .into_iter()
+                        .find(|i| !i.is_blueprint_copy)
+                        .ok_or_else(|| BridgeRpcError {
+                            code: "CannotResearchOrCopyBPC".into(),
+                            message: "ME/TE research and copying require a BPO".into(),
+                        })?,
+                    8 if is_ancient_relic => matching_bps.into_iter().next().unwrap(),
+                    8 => matching_bps
+                        .into_iter()
+                        .find(|i| i.is_blueprint_copy && i.blueprint_runs_remaining.unwrap_or(0) >= 1)
+                        .ok_or_else(|| BridgeRpcError {
+                            code: "InventionRequiresBPC".into(),
+                            message: "T2 Invention requires a BPC with at least 1 remaining run".into(),
+                        })?,
+                    _ => matching_bps
+                        .into_iter()
+                        .find(|i| !i.is_blueprint_copy || i.blueprint_runs_remaining.unwrap_or(0) >= runs_i32)
+                        .ok_or_else(|| BridgeRpcError {
+                            code: "InsufficientBlueprintRuns".into(),
+                            message: format!("No BPO or BPC with {runs} remaining runs available"),
+                        })?,
+                };
+                let bp_iid = bp_rec.item_id;
+                let me_level = bp_rec
+                    .dynamic_attributes
+                    .get(&ATTR_BLUEPRINT_ME)
+                    .map(|v| (*v as i64).clamp(0, 10) as u8)
+                    .unwrap_or(0);
+                let te_level = bp_rec
+                    .dynamic_attributes
+                    .get(&ATTR_BLUEPRINT_TE)
+                    .map(|v| (*v as i64).clamp(0, 20) as u8)
+                    .unwrap_or(0);
+
+                let (dec_prob_mult, dec_me_mod, dec_te_mod, dec_runs_mod) =
+                    if let Some(dtid) = decryptor_type_id {
+                        resolve_decryptor_modifiers(ctx, dtid)?
+                    } else {
+                        (1.0, 0.0, 0.0, 0)
+                    };
+
+                let (product_type_id, base_inv_runs): (TypeId, i32) = if activity_id == 8 {
+                    bp.activities
+                        .get("invention")
+                        .or_else(|| bp.activities.get("8"))
+                        .and_then(|a| a.products.first())
+                        .map(|p| (p.type_id, (p.quantity as i32).max(1)))
+                        .unwrap_or((11372, 1))
+                } else if activity_id == 9 {
+                    let r_prod = bp
+                        .activities
+                        .get("reaction")
+                        .or_else(|| bp.activities.get("9"))
+                        .and_then(|a| a.products.first())
+                        .map(|p| p.type_id)
+                        .unwrap_or(bp.product_type_id);
+                    (r_prod, 1)
+                } else {
+                    (bp.product_type_id, 1)
+                };
+
+                let invented_runs = (base_inv_runs + dec_runs_mod).max(1);
+                let invented_me = (2.0 + dec_me_mod).clamp(0.0, 10.0);
+                let invented_te = (4.0 + dec_te_mod).clamp(0.0, 20.0);
+
+                let duration_sec = match activity_id {
+                    1 => compute_manufacturing_time_seconds(
+                        runs,
+                        bp.manufacturing_time_sec,
+                        te_level,
+                        industry_lvl,
+                        adv_industry_lvl,
+                        eff_time_mod,
+                    ),
+                    3 => (((bp.research_te_time_sec.max(1) as f64) * eff_time_mod).round().max(1.0) as u64)
+                        .saturating_mul(runs as u64),
+                    4 => (((bp.research_me_time_sec.max(1) as f64) * eff_time_mod).round().max(1.0) as u64)
+                        .saturating_mul(runs as u64),
+                    5 => (((bp.copy_time_sec.max(1) as f64) * eff_time_mod).round().max(1.0) as u64)
+                        .saturating_mul(runs as u64),
+                    8 => (((bp.invention_time_sec.max(1) as f64) * eff_time_mod).round().max(1.0) as u64)
+                        .saturating_mul(runs as u64),
+                    9 => {
+                        let base_react_sec = bp
+                            .activities
+                            .get("reaction")
+                            .or_else(|| bp.activities.get("9"))
+                            .map(|a| a.time)
+                            .unwrap_or(10_800)
+                            .max(1);
+                        let react_skill_factor = (1.0 - 0.04 * (reactions_lvl.min(5) as f64)).max(0.20);
+                        (((base_react_sec as f64) * react_skill_factor * eff_time_mod).round().max(1.0) as u64)
+                            .saturating_mul(runs as u64)
+                    }
+                    _ => 600,
+                };
+                let trit_req =
+                    compute_manufacturing_material_qty(runs, 32_000, me_level, eff_mat_mod, rig_mat_bonus);
+                let inv_prob = compute_invention_probability(
+                    bp.invention_base_probability,
+                    sci1_lvl,
+                    sci2_lvl,
+                    enc_lvl,
+                    dec_prob_mult,
+                );
+
+                let consume_material = |snap: &mut eve_db::WorldStateSnapshot,
+                                        mat_tid: TypeId,
+                                        req_qty: i32,
+                                        err_code: &str|
+                 -> Result<(), BridgeRpcError> {
+                    let mat_item_id = snap
+                        .items
+                        .values()
+                        .find(|i| {
+                            (i.owner_id == char_id || (use_corp && i.owner_id == job_owner_id))
+                                && (i.location_id == station_id || i.location_id == docked_id)
+                                && i.type_id == mat_tid
+                                && i.quantity >= req_qty
+                                && i.flag != InventoryFlag::Locked
+                                && !snap.is_item_locked_in_contract_or_job(i.item_id)
+                        })
+                        .map(|i| i.item_id);
+                    let Some(mid) = mat_item_id else {
+                        return Err(BridgeRpcError {
+                            code: err_code.into(),
+                            message: format!("Missing {req_qty}x material type {mat_tid} at {station_id}"),
+                        });
+                    };
+                    if let Some(m_item) = snap.items.get_mut(&mid) {
+                        if m_item.quantity > req_qty {
+                            m_item.quantity -= req_qty;
+                            m_item.version += 1;
+                        } else {
+                            snap.items.remove(&mid);
+                        }
+                    }
+                    Ok(())
+                };
+
+                if activity_id == 1 {
+                    if industry_lvl < 1 {
+                        return Err(BridgeRpcError {
+                            code: "MissingIndustrySkills".into(),
+                            message: "Manufacturing requires Industry (3380) >= level 1".into(),
+                        });
+                    }
+                    for mat in &bp.materials {
+                        let req_qty = compute_manufacturing_material_qty(
+                            runs,
+                            mat.quantity,
+                            me_level,
+                            eff_mat_mod,
+                            rig_mat_bonus,
+                        ) as i32;
+                        consume_material(snap, mat.type_id, req_qty, "InsufficientManufacturingMaterials")?;
+                    }
+                } else if activity_id == 8 {
+                    if bp.invention_base_probability <= 0.0 {
+                        return Err(BridgeRpcError {
+                            code: "BlueprintNotInventable".into(),
+                            message: format!("Blueprint/Relic {bp_type_id} does not support invention"),
+                        });
+                    }
+                    if sci1_lvl < 1 || sci2_lvl < 1 || enc_lvl < 1 {
+                        return Err(BridgeRpcError {
+                            code: "MissingInventionSkills".into(),
+                            message: "Invention requires science and encryption skills >= level 1".into(),
+                        });
+                    }
+                    let req_dc = runs as i32;
+                    let sde_inv_mats: Vec<(TypeId, i32)> = bp
+                        .activities
+                        .get("invention")
+                        .or_else(|| bp.activities.get("8"))
+                        .map(|a| {
+                            a.materials
+                                .iter()
+                                .map(|m| (m.type_id, (m.quantity as i32).max(1) * req_dc))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let has_sde_mats = !sde_inv_mats.is_empty()
+                        && sde_inv_mats.iter().all(|(tid, q)| {
+                            snap.items.values().any(|i| {
+                                (i.owner_id == char_id || (use_corp && i.owner_id == job_owner_id))
+                                    && (i.location_id == station_id || i.location_id == docked_id)
+                                    && i.type_id == *tid
+                                    && i.quantity >= *q
+                                    && i.flag != InventoryFlag::Locked
+                            })
+                        });
+                    if has_sde_mats {
+                        for (dc_type, q) in sde_inv_mats {
+                            consume_material(snap, dc_type, q, "InsufficientInventionDatacores")?;
+                        }
+                    } else {
+                        for dc_type in [20424_u32, 20172_u32] {
+                            consume_material(snap, dc_type, req_dc, "InsufficientInventionDatacores")?;
+                        }
+                    }
+                    if let Some(dtid) = decryptor_type_id {
+                        consume_material(snap, dtid, req_dc, "InsufficientDecryptors")?;
+                    }
+                } else if activity_id == 9 {
+                    if reactions_lvl < 1 {
+                        return Err(BridgeRpcError {
+                            code: "MissingReactionSkills".into(),
+                            message: "Reactions require Reactions skill (45746) >= level 1".into(),
+                        });
+                    }
+                    let react_mats: Vec<(TypeId, u64)> = bp
+                        .activities
+                        .get("reaction")
+                        .or_else(|| bp.activities.get("9"))
+                        .map(|a| a.materials.iter().map(|m| (m.type_id, m.quantity)).collect())
+                        .unwrap_or_default();
+                    if react_mats.is_empty() {
+                        return Err(BridgeRpcError {
+                            code: "BlueprintNotReactionFormula".into(),
+                            message: format!("Type {bp_type_id} has no SDE reaction activity materials"),
+                        });
+                    }
+                    for (mtid, mqty) in react_mats {
+                        let req_qty =
+                            compute_manufacturing_material_qty(runs, mqty, 0, eff_mat_mod, rig_mat_bonus) as i32;
+                        consume_material(snap, mtid, req_qty, "InsufficientReactionMaterials")?;
+                    }
+                }
+
+                let mut cost_meta = compute_industry_job_costs_for_char(
+                    ctx,
+                    snap,
+                    Some(char_id),
+                    bp_type_id,
+                    activity_id,
+                    runs,
+                    station_id,
+                    is_alpha_clone,
+                )?;
+                cost_meta.decryptor_type_id = decryptor_type_id;
+                cost_meta.product_type_id = product_type_id;
+                cost_meta.invented_runs = invented_runs;
+                cost_meta.invented_me = invented_me;
+                cost_meta.invented_te = invented_te;
+                cost_meta.inv_prob = inv_prob;
+                cost_meta.use_corp = use_corp;
+                cost_meta.owner_id = job_owner_id;
+
+                let use_full_eiv_debit = is_v24_call || has_custom_facility_taxes(snap, station_id);
+                let (charged_facility_tax_isk, total_debit_isk) = if use_full_eiv_debit {
+                    (cost_meta.facility_tax_isk, cost_meta.total_cost_isk)
+                } else {
+                    let legacy_tax = 1_000.0 * (runs as f64);
+                    (legacy_tax, legacy_tax)
+                };
+
+                let total_debit_cents = IskCents::from_f64_isk(total_debit_isk);
+                if use_corp && snap.corporations.contains_key(&job_owner_id) {
+                    let corp_bal = snap
+                        .corporations
+                        .get(&job_owner_id)
+                        .map(|c| c.master_wallet)
+                        .unwrap_or(IskCents(0));
+                    if corp_bal < total_debit_cents {
+                        return Err(BridgeRpcError {
+                            code: "InsufficientFunds".into(),
+                            message: format!("Insufficient corporation funds ({total_debit_isk:.2} ISK)"),
+                        });
+                    }
+                    if let Some(corp_mut) = snap.corporations.get_mut(&job_owner_id) {
+                        corp_mut.master_wallet = corp_mut
+                            .master_wallet
+                            .checked_sub(total_debit_cents)
+                            .unwrap_or(IskCents(0));
+                    }
+                } else if let Some(ch) = snap.characters.get(&char_id) {
+                    if ch.balance < total_debit_cents {
+                        return Err(BridgeRpcError {
+                            code: "InsufficientFunds".into(),
+                            message: format!("Insufficient funds ({total_debit_isk:.2} ISK required)"),
+                        });
+                    }
+                }
+
+                snap.next_entity_id += 1;
+                let jid = snap.next_entity_id;
+
+                if !(use_corp && snap.corporations.contains_key(&job_owner_id)) {
+                    if use_full_eiv_debit {
+                        let base_cents = IskCents::from_f64_isk(cost_meta.base_job_cost_isk);
+                        let tax_cents = IskCents::from_f64_isk(cost_meta.facility_tax_isk);
+                        let scc_cents = IskCents::from_f64_isk(cost_meta.scc_surcharge_isk);
+                        let alpha_cents = IskCents::from_f64_isk(cost_meta.alpha_clone_tax_isk);
+                        if let Some(ch) = snap.characters.get_mut(&char_id) {
+                            ch.balance = ch.balance.checked_sub(base_cents).unwrap_or(IskCents(0));
+                            let b1 = ch.balance;
+                            snap.append_journal(char_id, "IndustryJobInstallationFee", base_cents, b1, format!("Base job cost for industry job {jid}"));
+                        }
+                        if let Some(ch) = snap.characters.get_mut(&char_id) {
+                            ch.balance = ch.balance.checked_sub(tax_cents).unwrap_or(IskCents(0));
+                            let b2 = ch.balance;
+                            snap.append_journal(char_id, "IndustryFacilityTax", tax_cents, b2, format!("Facility tax for industry job {jid}"));
+                        }
+                        if let Some(ch) = snap.characters.get_mut(&char_id) {
+                            ch.balance = ch.balance.checked_sub(scc_cents).unwrap_or(IskCents(0));
+                            let b3 = ch.balance;
+                            snap.append_journal(char_id, "IndustrySccSurcharge", scc_cents, b3, format!("SCC surcharge for industry job {jid}"));
+                        }
+                        if alpha_cents.0 > 0 {
+                            if let Some(ch) = snap.characters.get_mut(&char_id) {
+                                ch.balance = ch.balance.checked_sub(alpha_cents).unwrap_or(IskCents(0));
+                                let b4 = ch.balance;
+                                snap.append_journal(char_id, "IndustryAlphaCloneTax", alpha_cents, b4, format!("Alpha clone tax for industry job {jid}"));
+                            }
+                        }
+                    } else if let Some(ch) = snap.characters.get_mut(&char_id) {
+                        ch.balance = ch.balance.checked_sub(total_debit_cents).unwrap_or(IskCents(0));
+                        let bal_after = ch.balance;
+                        snap.append_journal(char_id, "IndustryFacilityTax", total_debit_cents, bal_after, format!("Facility tax for industry job {jid}"));
+                    }
+                }
+
+                if let Some(bp_mut) = snap.items.get_mut(&bp_iid) {
+                    bp_mut.singleton = true;
+                    bp_mut.flag = InventoryFlag::Locked;
+                    bp_mut.version += 1;
+                }
+
+                snap.industry_jobs.insert(
+                    jid,
+                    IndustryJobRecord {
+                        job_id: jid,
+                        installer_id: char_id,
+                        facility_id: station_id,
+                        blueprint_item_id: bp_iid,
+                        blueprint_type_id: bp_type_id,
+                        activity_id,
+                        runs,
+                        product_type_id,
+                        status: "Active".into(),
+                        duration_seconds: duration_sec,
+                        start_unix: now_unix,
+                    },
+                );
+                save_job_cost_meta(snap, jid, &cost_meta);
+                Ok((jid, bp_iid, product_type_id, duration_sec, trit_req, inv_prob, charged_facility_tax_isk, cost_meta))
+            });
+
+            match res {
+                Ok((job_id, bp_iid, product_type_id, duration_sec, trit_req, inv_prob, charged_tax_isk, cost_meta)) => {
+                    ctx.notify(
+                        NotificationTarget::Character(char_id),
+                        "OnIndustryJob",
+                        "character",
+                        vec![
+                            PyRep::Integer(job_id),
+                            PyRep::Integer(char_id),
+                            PyRep::Integer(bp_iid),
+                            PyRep::Integer(bp_type_id as i64),
+                            PyRep::Integer(activity_id as i64),
+                            PyRep::String("Active".into()),
+                        ],
+                    );
+                    Some(Ok(PyRep::keyval([
+                        ("jobID", PyRep::Integer(job_id)),
+                        ("ownerID", PyRep::Integer(cost_meta.owner_id)),
+                        ("blueprintID", PyRep::Integer(bp_iid)),
+                        ("blueprintItemID", PyRep::Integer(bp_iid)),
+                        ("blueprintTypeID", PyRep::Integer(bp_type_id as i64)),
+                        ("facilityID", PyRep::Integer(station_id)),
+                        ("activityID", PyRep::Integer(activity_id as i64)),
+                        ("runs", PyRep::Integer(runs as i64)),
+                        ("productTypeID", PyRep::Integer(product_type_id as i64)),
+                        ("inventedRuns", PyRep::Integer(cost_meta.invented_runs as i64)),
+                        ("inventedME", PyRep::Real(cost_meta.invented_me)),
+                        ("inventedTE", PyRep::Real(cost_meta.invented_te)),
+                        ("durationSeconds", PyRep::Integer(duration_sec as i64)),
+                        ("tritaniumRequired", PyRep::Integer(trit_req as i64)),
+                        ("inventionProbability", PyRep::Real(inv_prob)),
+                        ("estimatedItemValue", PyRep::Real(cost_meta.eiv_isk)),
+                        ("estimatedItemValueISK", PyRep::Real(cost_meta.eiv_isk)),
+                        ("systemCostIndex", PyRep::Real(cost_meta.system_cost_index)),
+                        ("structureCostModifier", PyRep::Real(cost_meta.structure_cost_modifier)),
+                        ("baseJobCost", PyRep::Real(cost_meta.base_job_cost_isk)),
+                        ("facilityTaxRate", PyRep::Real(cost_meta.facility_tax_rate)),
+                        ("facilityTaxISK", PyRep::Real(charged_tax_isk)),
+                        ("sccSurchargeISK", PyRep::Real(cost_meta.scc_surcharge_isk)),
+                        ("alphaCloneTaxISK", PyRep::Real(cost_meta.alpha_clone_tax_isk)),
+                        ("totalJobCost", PyRep::Real(cost_meta.total_cost_isk)),
+                        ("totalJobCostISK", PyRep::Real(cost_meta.total_cost_isk)),
+                    ])))
+                }
+                Err(e) => Some(Err(e)),
+            }
+        }
+
+        ("industryManager", "GetJobCounts") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let now_unix = ctx.now_unix();
+            let counts = ctx.db.with_mut_snapshot(|snap| {
+                sync_industry_job_pause_states(snap, now_unix);
+                let char_skills = snap.skills.get(&char_id);
+                let skill_lvl = |sid: TypeId| -> u8 {
+                    char_skills.and_then(|m| m.get(&sid)).map(|s| s.level).unwrap_or(0)
+                };
+                let mfg_max = 1 + (skill_lvl(3387) as i64) + (skill_lvl(24625) as i64);
+                let sci_max = 1 + (skill_lvl(3406) as i64) + (skill_lvl(24624) as i64);
+                let react_max = 1 + (skill_lvl(45748) as i64) + (skill_lvl(45749) as i64);
+                let mfg_used = snap
+                    .industry_jobs
+                    .values()
+                    .filter(|j| j.installer_id == char_id && matches!(j.status.as_str(), "Active" | "Paused") && j.activity_id == 1)
+                    .count() as i64;
+                let sci_used = snap
+                    .industry_jobs
+                    .values()
+                    .filter(|j| {
+                        j.installer_id == char_id
+                            && matches!(j.status.as_str(), "Active" | "Paused")
+                            && matches!(j.activity_id, 3 | 4 | 5 | 8)
+                    })
+                    .count() as i64;
+                let react_used = snap
+                    .industry_jobs
+                    .values()
+                    .filter(|j| j.installer_id == char_id && matches!(j.status.as_str(), "Active" | "Paused") && j.activity_id == 9)
+                    .count() as i64;
+                PyRep::keyval([
+                    ("manufacturingUsed", PyRep::Integer(mfg_used)),
+                    ("manufacturingMax", PyRep::Integer(mfg_max)),
+                    ("researchUsed", PyRep::Integer(sci_used)),
+                    ("researchMax", PyRep::Integer(sci_max)),
+                    ("reactionsUsed", PyRep::Integer(react_used)),
+                    ("reactionsMax", PyRep::Integer(react_max)),
+                ])
+            });
+            Some(Ok(counts))
+        }
+
+        ("industryManager", "GetJob") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let job_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let now_unix = ctx.now_unix();
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
+                sync_industry_job_pause_states(snap, now_unix);
+                let Some(j) = snap.industry_jobs.get(&job_id) else {
+                    return Err(BridgeRpcError {
+                        code: "JobNotFound".into(),
+                        message: format!("Industry job {job_id} not found"),
+                    });
+                };
+                let meta = load_job_cost_meta(snap, j.job_id).unwrap_or_default();
+                let char_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
+                if j.installer_id != char_id && !(meta.use_corp && meta.owner_id == char_corp) {
+                    return Err(BridgeRpcError {
+                        code: "JobOwnershipViolation".into(),
+                        message: format!("Industry job {job_id} does not belong to character {char_id}"),
+                    });
+                }
+                Ok(format_industry_job_pyrep(j, &meta))
+            });
+            Some(res)
+        }
+
+        ("industryManager", "CancelJob") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let job_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let now_unix = ctx.now_unix();
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
+                sync_industry_job_pause_states(snap, now_unix);
+                let Some(job) = snap.industry_jobs.get(&job_id).cloned() else {
+                    return Err(BridgeRpcError {
+                        code: "JobNotFound".into(),
+                        message: format!("Industry job {job_id} does not exist"),
+                    });
+                };
+                if job.installer_id != char_id {
+                    return Err(BridgeRpcError {
+                        code: "JobOwnershipViolation".into(),
+                        message: format!("Industry job {job_id} does not belong to character {char_id}"),
+                    });
+                }
+                if !matches!(job.status.as_str(), "Active" | "Paused") {
+                    return Err(BridgeRpcError {
+                        code: "InvalidJobState".into(),
+                        message: format!("Industry job {job_id} is not Active"),
+                    });
+                }
+                if let Some(j_mut) = snap.industry_jobs.get_mut(&job_id) {
+                    j_mut.status = "Cancelled".into();
+                }
+                if let Some(bp_mut) = snap.items.get_mut(&job.blueprint_item_id) {
+                    bp_mut.flag = InventoryFlag::Hangar;
+                    bp_mut.version += 1;
+                }
+                Ok(job)
+            });
+            match res {
+                Ok(job) => {
+                    ctx.notify(
+                        NotificationTarget::Character(char_id),
+                        "OnIndustryJob",
+                        "character",
+                        vec![
+                            PyRep::Integer(job_id),
+                            PyRep::Integer(char_id),
+                            PyRep::Integer(job.blueprint_item_id),
+                            PyRep::Integer(job.blueprint_type_id as i64),
+                            PyRep::Integer(job.activity_id as i64),
+                            PyRep::String("Cancelled".into()),
+                        ],
+                    );
+                    Some(Ok(PyRep::keyval([
+                        ("jobID", PyRep::Integer(job_id)),
+                        ("status", PyRep::String("Cancelled".into())),
+                    ])))
+                }
+                Err(e) => Some(Err(e)),
+            }
+        }
+
+        ("industryManager", "GetJobsByOwner") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let req_owner_id = args
+                .first()
+                .and_then(|a| a.as_i64())
+                .or_else(|| kwargs.get("ownerID").and_then(|v| v.as_i64()))
+                .unwrap_or(char_id);
+            let now_unix = ctx.now_unix();
+            let jobs = ctx.db.with_mut_snapshot(|snap| {
+                sync_industry_job_pause_states(snap, now_unix);
+                snap.industry_jobs
+                    .values()
+                    .filter(|j| {
+                        let meta = load_job_cost_meta(snap, j.job_id).unwrap_or_default();
+                        if req_owner_id == char_id {
+                            j.installer_id == char_id
+                        } else {
+                            meta.owner_id == req_owner_id || j.installer_id == req_owner_id
+                        }
+                    })
+                    .map(|j| {
+                        let meta = load_job_cost_meta(snap, j.job_id).unwrap_or_default();
+                        format_industry_job_pyrep(j, &meta)
+                    })
+                    .collect::<Vec<_>>()
+            });
+            Some(Ok(PyRep::List(jobs)))
+        }
+
+        ("industryManager", "CompleteJob") | ("industryManager", "CompleteManyJobs") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let job_ids: Vec<i64> = match args.first() {
+                Some(PyRep::List(ids) | PyRep::Tuple(ids)) => {
+                    ids.iter().filter_map(|v| v.as_i64()).collect()
+                }
+                Some(v) => v.as_i64().into_iter().collect(),
+                None => Vec::new(),
+            };
+            let job_id = job_ids.first().copied().unwrap_or(0);
+            let now_unix = ctx.now_unix();
+
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
+                sync_industry_job_pause_states(snap, now_unix);
+                let Some(job) = snap.industry_jobs.get(&job_id).cloned() else {
+                    return Err(BridgeRpcError {
+                        code: "JobNotFound".into(),
+                        message: format!("Industry job {job_id} does not exist"),
+                    });
+                };
+                let meta = load_job_cost_meta(snap, job_id).unwrap_or_default();
+                let char_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
+                if job.installer_id != char_id && !(meta.use_corp && meta.owner_id == char_corp) {
+                    return Err(BridgeRpcError {
+                        code: "JobOwnershipViolation".into(),
+                        message: format!("Industry job {job_id} does not belong to character {char_id}"),
+                    });
+                }
+                if job.status == "Paused" {
+                    return Err(BridgeRpcError {
+                        code: "JobPausedServiceOffline".into(),
+                        message: format!("Industry job {job_id} is paused because facility service is offline or out of fuel"),
+                    });
+                }
+                if job.status != "Active" {
+                    return Err(BridgeRpcError {
+                        code: "InvalidJobState".into(),
+                        message: format!("Industry job {job_id} is in state '{}', not Active", job.status),
+                    });
+                }
+                let ready_at = job.start_unix.saturating_add(job.duration_seconds);
+                if now_unix < ready_at {
+                    return Err(BridgeRpcError {
+                        code: "JobNotYetComplete".into(),
+                        message: format!("Industry job {job_id} completes at {ready_at} (now {now_unix})"),
+                    });
+                }
+
+                let docked_loc = session.station_id.or(session.structure_id);
+                let out_owner_id = if meta.use_corp && meta.owner_id > 0 { meta.owner_id } else { char_id };
+                let is_ancient_relic = ctx
+                    .sde
+                    .types
+                    .get(&job.blueprint_type_id)
+                    .map(|t| t.group_id == 971)
+                    .unwrap_or(false);
+                let bp_valid = snap
+                    .items
+                    .get(&job.blueprint_item_id)
+                    .map(|bp| {
+                        (bp.owner_id == char_id || bp.owner_id == out_owner_id)
+                            && (bp.location_id == job.facility_id || Some(bp.location_id) == docked_loc)
+                            && bp.flag == InventoryFlag::Locked
+                            && (is_ancient_relic
+                                || !bp.is_blueprint_copy
+                                || !matches!(job.activity_id, 1 | 8)
+                                || bp.blueprint_runs_remaining.unwrap_or(0) >= job.runs as i32)
+                    })
+                    .unwrap_or(false);
+                if !bp_valid {
+                    return Err(BridgeRpcError {
+                        code: "BlueprintMissingOrUnlocked".into(),
+                        message: format!("Blueprint {} for job {job_id} is missing or unlocked", job.blueprint_item_id),
+                    });
+                }
+
+                if job.activity_id == 8 {
+                    let mut remove_bpc = true;
+                    if let Some(bp_mut) = snap.items.get_mut(&job.blueprint_item_id) {
+                        if is_ancient_relic && !bp_mut.is_blueprint_copy {
+                            if bp_mut.quantity > job.runs as i32 {
+                                bp_mut.quantity -= job.runs as i32;
+                                bp_mut.flag = InventoryFlag::Hangar;
+                                bp_mut.version += 1;
+                                remove_bpc = false;
+                            }
+                        } else {
+                            let rem = bp_mut.blueprint_runs_remaining.unwrap_or(1).saturating_sub(job.runs as i32);
+                            if rem > 0 {
+                                bp_mut.blueprint_runs_remaining = Some(rem);
+                                bp_mut.flag = InventoryFlag::Hangar;
+                                bp_mut.version += 1;
+                                remove_bpc = false;
+                            }
+                        }
+                    }
+                    if remove_bpc {
+                        snap.items.remove(&job.blueprint_item_id);
+                    }
+                    let inv_prob = if meta.inv_prob > 0.0 {
+                        meta.inv_prob
+                    } else {
+                        let char_skills = snap.skills.get(&char_id);
+                        let skill_lvl = |sid: TypeId| -> u8 {
+                            char_skills.and_then(|m| m.get(&sid)).map(|s| s.level).unwrap_or(0)
+                        };
+                        let sci1_lvl = skill_lvl(11448).max(skill_lvl(11454)).max(skill_lvl(20433));
+                        let sci2_lvl = skill_lvl(11452).max(skill_lvl(11442));
+                        let enc_lvl = skill_lvl(21791).max(skill_lvl(23121)).max(skill_lvl(3408));
+                        let base_prob = ctx
+                            .sde
+                            .blueprints
+                            .get(&job.blueprint_type_id)
+                            .map(|b| b.invention_base_probability)
+                            .unwrap_or(0.30);
+                        compute_invention_probability(base_prob, sci1_lvl, sci2_lvl, enc_lvl, 1.0)
+                    };
+                    let server_roll = ctx.next_invention_roll(job.job_id as u64, char_id as u64, now_unix);
+                    if server_roll >= inv_prob {
+                        if let Some(j_mut) = snap.industry_jobs.get_mut(&job_id) {
+                            j_mut.status = "Failed".into();
+                        }
+                        return Ok(Err(BridgeRpcError {
+                            code: "InventionAttemptFailed".into(),
+                            message: format!("Invention roll {server_roll:.4} >= probability {inv_prob:.4}"),
+                        }));
+                    }
+                    if let Some(j_mut) = snap.industry_jobs.get_mut(&job_id) {
+                        j_mut.status = "Delivered".into();
+                    }
+                    snap.next_entity_id += 1;
+                    let bpc_item_id = snap.next_entity_id;
+                    let out_me = if meta.invented_runs > 0 { meta.invented_me } else { 2.0 };
+                    let out_te = if meta.invented_runs > 0 { meta.invented_te } else { 4.0 };
+                    let out_runs = if meta.invented_runs > 0 { meta.invented_runs } else { 1 };
+                    let mut dyn_attrs = HashMap::new();
+                    dyn_attrs.insert(ATTR_BLUEPRINT_ME, out_me);
+                    dyn_attrs.insert(ATTR_BLUEPRINT_TE, out_te);
+                    let t2_bpc_type_id: TypeId = if job.product_type_id > 0 { job.product_type_id } else { 11372 };
+                    snap.items.insert(
+                        bpc_item_id,
+                        InventoryItemRecord {
+                            item_id: bpc_item_id,
+                            type_id: t2_bpc_type_id,
+                            owner_id: out_owner_id,
+                            location_id: job.facility_id,
+                            flag: InventoryFlag::Hangar,
+                            quantity: 1,
+                            singleton: true,
+                            version: 1,
+                            dynamic_attributes: dyn_attrs,
+                            source_mutaplasmid_id: None,
+                            insured_payout_isk: 0.0,
+                            is_blueprint_copy: true,
+                            blueprint_runs_remaining: Some(out_runs),
+                        },
+                    );
+                    return Ok(Ok((bpc_item_id, t2_bpc_type_id, job)));
+                }
+
+                if let Some(j_mut) = snap.industry_jobs.get_mut(&job_id) {
+                    j_mut.status = "Delivered".into();
+                }
+
+                let mut parent_dyn_attrs = HashMap::new();
+                let mut remove_consumed_bpc = false;
+                let mut bp_location_id = job.facility_id;
+                if let Some(bp_mut) = snap.items.get_mut(&job.blueprint_item_id) {
+                    bp_location_id = bp_mut.location_id;
+                    bp_mut.flag = InventoryFlag::Hangar;
+                    if matches!(job.activity_id, 1 | 9) && bp_mut.is_blueprint_copy {
+                        let rem = bp_mut.blueprint_runs_remaining.unwrap_or(1).saturating_sub(job.runs as i32);
+                        if rem <= 0 {
+                            remove_consumed_bpc = true;
+                        } else {
+                            bp_mut.blueprint_runs_remaining = Some(rem);
+                        }
+                    } else if job.activity_id == 3 {
+                        let cur_te = bp_mut.dynamic_attributes.get(&ATTR_BLUEPRINT_TE).copied().unwrap_or(0.0);
+                        bp_mut.dynamic_attributes.insert(ATTR_BLUEPRINT_TE, (cur_te + 2.0 * (job.runs as f64)).min(20.0));
+                    } else if job.activity_id == 4 {
+                        let cur_me = bp_mut.dynamic_attributes.get(&ATTR_BLUEPRINT_ME).copied().unwrap_or(0.0);
+                        bp_mut.dynamic_attributes.insert(ATTR_BLUEPRINT_ME, (cur_me + 1.0 * (job.runs as f64)).min(10.0));
+                    }
+                    parent_dyn_attrs = bp_mut.dynamic_attributes.clone();
+                    bp_mut.version += 1;
+                }
+                if remove_consumed_bpc {
+                    snap.items.remove(&job.blueprint_item_id);
+                }
+
+                if matches!(job.activity_id, 1 | 9) {
+                    let prod_qty_per_run = ctx
+                        .sde
+                        .blueprints
+                        .get(&job.blueprint_type_id)
+                        .and_then(|bp| {
+                            let key = if job.activity_id == 9 { "reaction" } else { "manufacturing" };
+                            bp.activities.get(key).and_then(|a| a.products.first()).map(|p| (p.quantity as i32).max(1))
+                        })
+                        .unwrap_or(1);
+                    let total_out_qty = (job.runs as i32).saturating_mul(prod_qty_per_run);
+                    snap.next_entity_id += 1;
+                    let prod_item_id = snap.next_entity_id;
+                    snap.items.insert(
+                        prod_item_id,
+                        InventoryItemRecord {
+                            item_id: prod_item_id,
+                            type_id: job.product_type_id,
+                            owner_id: out_owner_id,
+                            location_id: bp_location_id,
+                            flag: InventoryFlag::Hangar,
+                            quantity: total_out_qty,
+                            singleton: total_out_qty == 1,
+                            version: 1,
+                            dynamic_attributes: HashMap::new(),
+                            source_mutaplasmid_id: None,
+                            insured_payout_isk: 0.0,
+                            is_blueprint_copy: false,
+                            blueprint_runs_remaining: None,
+                        },
+                    );
+                    Ok(Ok((prod_item_id, job.product_type_id, job)))
+                } else if job.activity_id == 5 {
+                    snap.next_entity_id += 1;
+                    let copy_item_id = snap.next_entity_id;
+                    snap.items.insert(
+                        copy_item_id,
+                        InventoryItemRecord {
+                            item_id: copy_item_id,
+                            type_id: job.blueprint_type_id,
+                            owner_id: out_owner_id,
+                            location_id: bp_location_id,
+                            flag: InventoryFlag::Hangar,
+                            quantity: 1,
+                            singleton: true,
+                            version: 1,
+                            dynamic_attributes: parent_dyn_attrs,
+                            source_mutaplasmid_id: None,
+                            insured_payout_isk: 0.0,
+                            is_blueprint_copy: true,
+                            blueprint_runs_remaining: Some(job.runs as i32),
+                        },
+                    );
+                    Ok(Ok((copy_item_id, job.blueprint_type_id, job)))
+                } else {
+                    Ok(Ok((job.blueprint_item_id, job.blueprint_type_id, job)))
+                }
+            });
+
+            match res {
+                Ok(Ok((prod_item_id, prod_type, job))) => {
+                    ctx.notify(
+                        NotificationTarget::Character(char_id),
+                        "OnIndustryJob",
+                        "character",
+                        vec![
+                            PyRep::Integer(job_id),
+                            PyRep::Integer(char_id),
+                            PyRep::Integer(job.blueprint_item_id),
+                            PyRep::Integer(job.blueprint_type_id as i64),
+                            PyRep::Integer(job.activity_id as i64),
+                            PyRep::String("Delivered".into()),
+                        ],
+                    );
+                    let kv = PyRep::keyval([
+                        ("jobID", PyRep::Integer(job_id)),
+                        ("deliveredItemID", PyRep::Integer(prod_item_id)),
+                        ("productTypeID", PyRep::Integer(prod_type as i64)),
+                        ("inventionSucceeded", PyRep::Bool(job.activity_id == 8)),
+                    ]);
+                    if method == "CompleteManyJobs" {
+                        Some(Ok(PyRep::List(vec![kv])))
+                    } else {
+                        Some(Ok(kv))
+                    }
+                }
+                Ok(Err(inv_err)) => Some(Err(inv_err)),
+                Err(e) => Some(Err(e)),
+            }
+        }
+
+        ("industryMonitor", "ConnectJob") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let job_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let res = ctx.db.with_snapshot(|snap| {
+                let Some(j) = snap.industry_jobs.get(&job_id) else {
+                    return Err(BridgeRpcError {
+                        code: "JobNotFound".into(),
+                        message: format!("Industry job {job_id} not found"),
+                    });
+                };
+                Ok(PyRep::keyval([
+                    ("jobID", PyRep::Integer(j.job_id)),
+                    ("installerID", PyRep::Integer(j.installer_id)),
+                    ("status", PyRep::String(j.status.clone())),
+                    ("connected", PyRep::Bool(true)),
+                    ("subscriberCharID", PyRep::Integer(char_id)),
+                ]))
+            });
+            Some(res)
+        }
+
+        ("industryMonitor", "DisconnectJob") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let job_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let exists = ctx
+                .db
+                .with_snapshot(|snap| snap.industry_jobs.contains_key(&job_id) || snap.characters.contains_key(&char_id));
+            Some(Ok(PyRep::keyval([
+                ("jobID", PyRep::Integer(job_id)),
+                ("connected", PyRep::Bool(!exists)),
+            ])))
+        }
+
+        _ => None,
+    }
+}

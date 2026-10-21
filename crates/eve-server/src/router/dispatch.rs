@@ -556,6 +556,16 @@ impl ServerContext {
         ) {
             return res;
         }
+        if let Some(res) = services::wallet_serverops::handle(
+            self,
+            session,
+            effective_service,
+            method,
+            args,
+            kwargs,
+        ) {
+            return res;
+        }
         if let Some(res) = Box::pin(services::mining_advanced::handle(
             self,
             session,

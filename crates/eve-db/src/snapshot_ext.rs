@@ -635,6 +635,15 @@ pub struct WorldStateSnapshot {
     pub planetary_colony_layouts: HashMap<(i64, i64), PlanetaryColonyLayoutRecord>,
     #[serde(default)]
     pub corp_customs_offices: HashMap<i64, Vec<CustomsOfficeRecord>>,
+    /// Journal parties/context metadata keyed by journal entry ID (`crate::ledger`).
+    #[serde(default)]
+    pub wallet_journal_meta: HashMap<i64, crate::ledger::JournalMeta>,
+    /// Market fills recorded at fill time (`crate::ledger`).
+    #[serde(default)]
+    pub market_transactions: Vec<crate::ledger::MarketTransactionRecord>,
+    /// Account-wide PLEX Vault balances keyed by `user_id`.
+    #[serde(default)]
+    pub account_plex_vault: HashMap<u64, i64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

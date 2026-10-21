@@ -764,7 +764,7 @@ def _unpack_packed_row_columns(header_node, raw_rle):
             offset += 4
             node = {"$py": "Integer", "val": v}
         elif dt == 4 and offset + 4 <= len(unpacked):
-            v = struct.unpack("<f", bytes(unpacked[offset:offset + 4]))[0]
+            v = struct.unpack("<f "[0:2], bytes(unpacked[offset:offset + 4]))[0]
             offset += 4
             node = {"$py": "Real", "val": float(v)}
         elif dt == 2 and offset + 2 <= len(unpacked):

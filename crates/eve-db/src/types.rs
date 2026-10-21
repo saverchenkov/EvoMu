@@ -180,6 +180,13 @@ pub enum InventoryFlag {
     RigSlot0 = 92,
     RigSlot1 = 93,
     RigSlot2 = 94,
+    CorpSAG1 = 116,
+    CorpSAG2 = 117,
+    CorpSAG3 = 118,
+    CorpSAG4 = 119,
+    CorpSAG5 = 120,
+    CorpSAG6 = 121,
+    CorpSAG7 = 122,
     SubSystemSlot0 = 125,
     SubSystemSlot1 = 126,
     SubSystemSlot2 = 127,
@@ -216,6 +223,8 @@ impl InventoryFlag {
     pub const GasHold: InventoryFlag = InventoryFlag::SpecializedGasHold;
     #[allow(non_upper_case_globals)]
     pub const IceHold: InventoryFlag = InventoryFlag::SpecializedIceHold;
+    #[allow(non_upper_case_globals)]
+    pub const Wardrobe: InventoryFlag = InventoryFlag::Pilot;
 
     pub fn from_u16(v: u16) -> Self {
         match v {
@@ -255,6 +264,13 @@ impl InventoryFlag {
             92 => Self::RigSlot0,
             93 => Self::RigSlot1,
             94 => Self::RigSlot2,
+            116 => Self::CorpSAG1,
+            117 => Self::CorpSAG2,
+            118 => Self::CorpSAG3,
+            119 => Self::CorpSAG4,
+            120 => Self::CorpSAG5,
+            121 => Self::CorpSAG6,
+            122 => Self::CorpSAG7,
             125 => Self::SubSystemSlot0,
             126 => Self::SubSystemSlot1,
             127 => Self::SubSystemSlot2,
@@ -888,7 +904,18 @@ pub mod corp_roles {
     pub const ROLE_AUDITOR: u64 = 1 << 12;
     pub const ROLE_DIPLOMAT: u64 = 1 << 14;
     pub const ROLE_CONFIG_EQUIPMENT: u64 = 1 << 24;
-    pub const ROLE_JUNIOR_ACCOUNTANT: u64 = 1 << 31;
+    /// `corpRoleJuniorAccountant` (V24 client `eve/common/lib/appConst`).
+    pub const ROLE_JUNIOR_ACCOUNTANT: u64 = 1 << 52;
+    /// `corpRoleAccountCanTake1..7` (V24 client `appConst`): withdraw from wallet division 1..7.
+    pub const ROLE_ACCOUNT_CAN_TAKE: [u64; 7] = [
+        1 << 27,
+        1 << 28,
+        1 << 29,
+        1 << 30,
+        1 << 31,
+        1 << 32,
+        1 << 33,
+    ];
 
     pub fn has_role(role_mask: u64, required: u64) -> bool {
         role_mask == u64::MAX || (role_mask & ROLE_DIRECTOR) != 0 || (role_mask & required) == required

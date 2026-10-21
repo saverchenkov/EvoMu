@@ -30,3 +30,6 @@ pub mod sov_fw_insurgency;
 pub mod space_destiny;
 pub mod space_entity_mining;
 pub mod station_structure;
+pub mod wallet_ledger;
+pub mod wallet_serverops;
+pub mod wallet_services_ext;
