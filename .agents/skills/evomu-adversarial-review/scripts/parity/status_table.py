@@ -121,7 +121,7 @@ def main():
                 tid, titles.get(tid, "").replace("|", "/"), st, closed, len(fs), tests, assess, note,
                 last_commit(root, tid)))
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    open(out_path, "w").write("\n".join(L) + "\n")
+    open(out_path, "w", encoding="utf-8").write("\n".join(L) + "\n")
     print("[status] wrote %s (%d phases)" % (out_path, len(phases)))
 
 

@@ -75,7 +75,7 @@ def main():
     if not hs.get("baseline_tree"):
         # Baseline = last commit, so uncommitted work present at install time is still reviewed.
         hs["baseline_tree"] = rl.head_tree(root) or tree
-        json.dump(hs, open(hook_state_path, "w"), indent=2)
+        json.dump(hs, open(hook_state_path, "w", encoding="utf-8"), indent=2)
 
     state = rl.load_state(root)
     skill = os.path.join(root, ".agents", "skills", "evomu-adversarial-review", "SKILL.md")
@@ -94,7 +94,7 @@ def main():
                 gate = {}
         if gate.get("passed") and gate.get("tree") == tree:
             hs.pop("forced", None)
-            json.dump(hs, open(hook_state_path, "w"), indent=2)
+            json.dump(hs, open(hook_state_path, "w", encoding="utf-8"), indent=2)
             emit({"decision": "allow"})
         key = "goal:" + tree
         forced = hs.get("forced", {})
@@ -102,7 +102,7 @@ def main():
         if n >= MAX_FORCED:
             emit({"decision": "allow"})
         hs["forced"] = {key: n + 1}
-        json.dump(hs, open(hook_state_path, "w"), indent=2)
+        json.dump(hs, open(hook_state_path, "w", encoding="utf-8"), indent=2)
         pct = None
         for r in reversed(state.get("reviews", [])):
             if r.get("parity_percent") is not None:
@@ -127,11 +127,11 @@ def main():
     n = forced.get(tree, 0)
     if n >= MAX_FORCED:
         hs.setdefault("bypassed_trees", []).append(tree)
-        json.dump(hs, open(hook_state_path, "w"), indent=2)
+        json.dump(hs, open(hook_state_path, "w", encoding="utf-8"), indent=2)
         emit({"decision": "allow"})
     forced = {tree: n + 1}
     hs["forced"] = forced
-    json.dump(hs, open(hook_state_path, "w"), indent=2)
+    json.dump(hs, open(hook_state_path, "w", encoding="utf-8"), indent=2)
 
     emit({
         "decision": "continue",

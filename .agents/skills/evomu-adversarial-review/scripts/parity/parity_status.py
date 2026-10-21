@@ -303,7 +303,7 @@ def main():
         seen = set(json.load(open(sp))) if os.path.exists(sp) else set()
         now = {r["id"] for r in rows}
         tamper = sorted(seen - now)
-        json.dump(sorted(seen | now), open(sp, "w"))
+        json.dump(sorted(seen | now), open(sp, "w", encoding="utf-8"))
 
     summary = {
         "total_rows": total, "closed_rows": closed, "open_rows": total - closed,
@@ -315,7 +315,7 @@ def main():
     }
     out = {"summary": summary, "rows": status}
     if a.out:
-        json.dump(out, open(a.out, "w"), indent=1)
+        json.dump(out, open(a.out, "w", encoding="utf-8"), indent=1)
     md = ["# Parity status", "",
           "**%s / %s rows closed (%.2f%%)**, %d NA (triaged), %d passing tests, %d tagged tests."
           % (closed, total, summary["percent_closed"], summary["na_rows"], len(passed), len(tags)), "",
@@ -335,7 +335,7 @@ def main():
             md.append("- **%s:** %s" % (k, ", ".join("`%s` (%s)" % (o, status[o]["status"]) for o in opens)))
     text = "\n".join(md)
     if a.md:
-        open(a.md, "w").write(text)
+        open(a.md, "w", encoding="utf-8").write(text)
     print(text.split("\n## First open")[0])
     return 0 if summary["complete"] else 1
 

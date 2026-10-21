@@ -87,7 +87,7 @@ def main():
     os.makedirs(attest, exist_ok=True)
     env["EVOMU_PARITY_ATTEST_DIR"] = attest
     rc, out = sh([cargo, "test", "--workspace", "--no-fail-fast"], root, env=env, timeout=4 * 3600)
-    open(os.path.join(out_dir, "tests.txt"), "w").write(out)
+    open(os.path.join(out_dir, "tests.txt"), "w", encoding="utf-8").write(out)
     failed = sum(int(m) for m in re.findall(r"test result: \w+\. \d+ passed; (\d+) failed", out))
     prc, pout = sh([sys.executable, os.path.join(HERE, "parity", "parity_status.py"), "--tests",
                     os.path.join(out_dir, "tests.txt"), "--attest-dir", attest, "--out",
@@ -132,7 +132,7 @@ def main():
             pct = json.loads(cout.split("\n[stderr]")[0])["data"][0]["totals"]["lines"]["percent"]
         except Exception:  # noqa: BLE001
             pass
-        open(os.path.join(out_dir, "coverage.txt"), "w").write(cout[-20000:])
+        open(os.path.join(out_dir, "coverage.txt"), "w", encoding="utf-8").write(cout[-20000:])
         checks["line_coverage"] = {"passed": pct is not None and pct >= min_cov, "percent": pct,
                                    "min": min_cov, "note": None if pct is not None else
                                    "cargo-llvm-cov missing or failed (cargo install cargo-llvm-cov)"}
@@ -154,7 +154,7 @@ def main():
             pass
         denom = caught + timeout_n + missed
         score = 100.0 * (caught + timeout_n) / denom if denom else None
-        open(os.path.join(out_dir, "mutants.txt"), "w").write(mout[-20000:])
+        open(os.path.join(out_dir, "mutants.txt"), "w", encoding="utf-8").write(mout[-20000:])
         checks["mutation_score"] = {"passed": score is not None and score >= min_mut, "score": score,
                                     "caught": caught, "missed": missed, "timeout": timeout_n, "min": min_mut,
                                     "note": None if denom else "cargo-mutants missing or failed (cargo install cargo-mutants)"}
@@ -171,7 +171,7 @@ def main():
         if os.path.exists(harness) and os.access(harness, os.X_OK):
             hrc, hout = sh([harness, "--out", jdir, "--journeys", os.path.join(PARITY, "client_journeys.json")],
                            root, timeout=12 * 3600)
-            open(os.path.join(out_dir, "client_harness.txt"), "w").write(hout[-20000:])
+            open(os.path.join(out_dir, "client_harness.txt"), "w", encoding="utf-8").write(hout[-20000:])
             try:
                 res = json.load(open(os.path.join(jdir, "result.json")))
             except Exception:  # noqa: BLE001
@@ -191,8 +191,8 @@ def main():
 
     passed = all(c.get("passed") for c in checks.values())
     result = {"tree": tree, "timestamp": ts, "passed": passed, "checks": checks}
-    json.dump(result, open(os.path.join(out_dir, "final_gate.json"), "w"), indent=2)
-    json.dump(result, open(os.path.join(sdir, "final_gate.json"), "w"), indent=2)
+    json.dump(result, open(os.path.join(out_dir, "final_gate.json"), "w", encoding="utf-8"), indent=2)
+    json.dump(result, open(os.path.join(sdir, "final_gate.json"), "w", encoding="utf-8"), indent=2)
     for k, c in checks.items():
         print("[final-gate] %-22s %s  %s" % (k, "PASS" if c.get("passed") else "FAIL",
                                              {x: y for x, y in c.items() if x != "passed"}))

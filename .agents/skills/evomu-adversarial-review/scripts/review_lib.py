@@ -62,7 +62,7 @@ def load_state(root):
 def save_state(root, state):
     p = os.path.join(state_dir(root), "state.json")
     tmp = p + ".tmp"
-    with open(tmp, "w") as f:
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(state, f, indent=2)
     os.replace(tmp, p)
 
@@ -111,7 +111,7 @@ def code_tree_of(root, tree, _cache={}):
     disk[tree] = out
     try:
         tmp = cache_file + ".tmp"
-        json.dump(disk, open(tmp, "w"))
+        json.dump(disk, open(tmp, "w", encoding="utf-8"))
         os.replace(tmp, cache_file)
     except OSError:
         pass

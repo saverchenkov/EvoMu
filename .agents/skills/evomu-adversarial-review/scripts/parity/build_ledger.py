@@ -150,7 +150,7 @@ def main():
     if dups:
         sys.exit("duplicate ids: %s" % dups[:20])
     out = {"version": 1, "row_count": len(rows), "rows": rows}
-    with open(os.path.join(PARITY, "ledger.json"), "w") as f:
+    with open(os.path.join(PARITY, "ledger.json"), "w", encoding="utf-8") as f:
         json.dump(out, f, indent=1, sort_keys=False)
     counts = {}
     for r in rows:

@@ -76,7 +76,7 @@ def client_identifiers(root, ccp):
                 if ident.match(s):
                     ids.add(s.decode())
     os.makedirs(os.path.dirname(cache), exist_ok=True)
-    json.dump(sorted(ids), open(cache, "w"))
+    json.dump(sorted(ids), open(cache, "w", encoding="utf-8"))
     return ids
 
 
@@ -166,7 +166,7 @@ def main():
     a = ap.parse_args()
     viol, have_client = run(a.files, a.code_ccp)
     if a.json:
-        json.dump(viol, open(a.json, "w"), indent=1)
+        json.dump(viol, open(a.json, "w", encoding="utf-8"), indent=1)
     hard = [v for v in viol if v["kind"] == "NOT_IN_CLIENT"]
     soft = [v for v in viol if v["kind"] == "NOT_IN_CATALOG"]
     print("RPC-name check: %d NOT_IN_CLIENT (blocking), %d NOT_IN_CATALOG (informational)%s" % (

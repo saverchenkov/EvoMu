@@ -579,7 +579,7 @@ def main():
             by_cat[v[0]] = by_cat.get(v[0], 0) + 1
         print("  by category: " + ", ".join("%s=%d" % kv for kv in sorted(by_cat.items())))
         full_list = os.path.join(pdir, "early_gate.txt")
-        with open(full_list, "w") as fh:
+        with open(full_list, "w", encoding="utf-8") as fh:
             for cat, vmsg, fpath, lno in early_violations:
                 fh.write("[%s] %s%s\n" % (cat, vmsg, (" (%s:%s)" % (fpath, lno)) if fpath else ""))
         for cat, vmsg, fpath, lno in early_violations[:60]:
@@ -610,7 +610,7 @@ def main():
         t0 = time.time()
         rc, out = sh([cargo, "test", "--workspace", "--no-fail-fast"], root, env=env, timeout=a.test_timeout)
         wall = time.time() - t0
-        open(tests_txt, "w").write("exit=%d\n%s" % (rc, out))
+        open(tests_txt, "w", encoding="utf-8").write("exit=%d\n%s" % (rc, out))
         record_timing(root, wall, out)
     out = open(tests_txt, errors="replace").read() if os.path.exists(tests_txt) else ""
     passed = sum(int(m) for m in re.findall(r"test result: \w+\. (\d+) passed", out))
