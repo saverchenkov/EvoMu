@@ -49,6 +49,7 @@ pub async fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            let now = ctx.now_unix();
             let fid = ctx.db.try_with_mut_snapshot(|snap| {
                 snap.next_entity_id += 1;
                 let id = snap.next_entity_id;
@@ -86,6 +87,7 @@ pub async fn handle(
                         takes_fleet_warp: true,
                         job: 0,
                         role_name: "Fleet Commander".into(),
+                        join_time_unix: now,
                     },
                 );
 
@@ -288,6 +290,7 @@ pub async fn handle(
                 Err(e) => return Some(Err(e)),
             };
             let target_fid = args.first().and_then(|a| a.as_i64()).or(session.fleet_id);
+            let now = ctx.now_unix();
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let fid = if let Some(fid) = target_fid {
@@ -328,6 +331,7 @@ pub async fn handle(
                         takes_fleet_warp: true,
                         job: 0,
                         role_name: "Squad Member".into(),
+                        join_time_unix: now,
                     },
                 );
                 Ok(fid)

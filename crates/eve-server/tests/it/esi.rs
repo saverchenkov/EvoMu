@@ -226,13 +226,28 @@ async fn test_esi_http_server_routing_versioning_meta_and_openapi_spec() {
     let token = issue_token_with_scopes(
         &ctx,
         90_000_001,
-        vec!["esi-fleets.write_fleet.v1".to_string()],
+        vec![
+            "esi-fleets.write_fleet.v1".to_string(),
+            "esi-ui.write_waypoint.v1".to_string(),
+        ],
     );
-    let unimplemented_op = send_raw_esi_request(
+    let missing_fleet_op = send_raw_esi_request(
         addr,
         &EsiHttpRequest::new("POST", "/v1/fleets/100/wings/")
             .with_bearer_token(&token)
             .with_body(b"{}".to_vec()),
+    )
+    .await
+    .expect("POST /v1/fleets/100/wings/ nonexistent fleet");
+    assert_eq!(missing_fleet_op.status_code, 404);
+
+    let unimplemented_op = send_raw_esi_request(
+        addr,
+        &EsiHttpRequest::new(
+            "POST",
+            "/v2/ui/autopilot/waypoint/?add_to_beginning=false&clear_other_waypoints=true&destination_id=30000142",
+        )
+        .with_bearer_token(&token),
     )
     .await
     .expect("POST unimplemented operation");

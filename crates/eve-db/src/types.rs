@@ -823,6 +823,8 @@ pub struct FleetMemberRecord {
     pub job: u32,
     #[serde(default)]
     pub role_name: String,
+    #[serde(default)]
+    pub join_time_unix: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

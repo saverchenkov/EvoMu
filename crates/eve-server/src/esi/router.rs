@@ -588,17 +588,27 @@ impl EsiRouter {
             }
         }
 
-        let exec: RouteExecutionResult = sample_routes::dispatch_operation(
+        let exec: RouteExecutionResult = super::fleet_routes::dispatch_fleet_routes(
             &self.ctx,
-            self.started_at_unix,
             &op.method,
             &op.path_pattern,
             &matched.path_params,
-            &query_params,
             verified_claims.as_ref(),
-            page,
             &req.body,
-        );
+        )
+        .unwrap_or_else(|| {
+            sample_routes::dispatch_operation(
+                &self.ctx,
+                self.started_at_unix,
+                &op.method,
+                &op.path_pattern,
+                &matched.path_params,
+                &query_params,
+                verified_claims.as_ref(),
+                page,
+                &req.body,
+            )
+        });
 
         if exec.status_code >= 400 {
             let count_error = (400..500).contains(&exec.status_code);

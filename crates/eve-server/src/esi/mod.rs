@@ -8,6 +8,7 @@ pub mod character_routes;
 pub mod corp_alliance_routes;
 pub mod economy_industry_routes;
 pub mod economy_routes;
+pub mod fleet_routes;
 pub mod fw_universe_routes;
 pub mod openapi;
 pub mod router;

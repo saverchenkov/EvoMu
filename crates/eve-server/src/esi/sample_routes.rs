@@ -337,6 +337,9 @@ pub fn compute_killmail_hash(
 
 /// Returns `true` if `(method, path_pattern)` is fully implemented (`2xx` on valid input).
 pub fn is_operation_implemented(method: &str, path_pattern: &str) -> bool {
+    if super::fleet_routes::is_fleet_operation_implemented(method, path_pattern) {
+        return true;
+    }
     matches!(
         (method, path_pattern),
         ("GET", "/status")
@@ -436,9 +439,6 @@ pub fn is_operation_implemented(method: &str, path_pattern: &str) -> bool {
             | ("GET", "/corporations/{corporation_id}/contracts")
             | ("GET", "/corporations/{corporation_id}/contracts/{contract_id}/items")
             | ("GET", "/corporations/{corporation_id}/contracts/{contract_id}/bids")
-            | ("GET", "/fleets/{fleet_id}")
-            | ("GET", "/fleets/{fleet_id}/members")
-            | ("GET", "/fleets/{fleet_id}/wings")
             | ("GET", "/corporations/{corporation_id}")
             | ("GET", "/corporations/{corporation_id}/members")
             | ("GET", "/corporations/{corporation_id}/roles")
@@ -505,6 +505,17 @@ pub fn dispatch_operation(
         path_pattern,
         path_params,
         query_params,
+        req_body,
+    ) {
+        return res;
+    }
+
+    if let Some(res) = super::fleet_routes::dispatch_fleet_routes(
+        ctx,
+        method,
+        path_pattern,
+        path_params,
+        claims,
         req_body,
     ) {
         return res;
@@ -832,48 +843,6 @@ pub fn dispatch_operation(
             501,
             "Faction warfare war table is not yet active (ESI-3)",
         ),
-
-        // 8. Fleets tag (ESI-7)
-        ("GET", "/characters/{character_id}/fleet") => {
-            let char_id = match parse_path_i64(path_params, "character_id") {
-                Ok(v) => v,
-                Err(e) => return e,
-            };
-            ctx.db.with_snapshot(|snap| {
-                if !snap.characters.contains_key(&char_id) {
-                    return RouteExecutionResult::error(
-                        404,
-                        format!("Character {char_id} not found"),
-                    );
-                }
-                let fleet = snap
-                    .fleets
-                    .values()
-                    .find(|f| f.boss_id == char_id || f.members.contains(&char_id));
-                let Some(f) = fleet else {
-                    return RouteExecutionResult::error(
-                        404,
-                        format!("Character {char_id} is not in a fleet"),
-                    );
-                };
-                if f.boss_id != char_id {
-                    return RouteExecutionResult::error(
-                        501,
-                        "Per-member fleet wing/squad hierarchy is not yet active (ESI-7)",
-                    );
-                }
-                RouteExecutionResult::ok_json(
-                    json!({
-                        "fleet_id": f.fleet_id,
-                        "fleet_boss_id": f.boss_id,
-                        "wing_id": -1,
-                        "squad_id": -1,
-                        "role": "fleet_commander",
-                    }),
-                    60,
-                )
-            })
-        }
 
         // 9. Incursions tag (ESI-3)
         ("GET", "/incursions") => RouteExecutionResult::error(
