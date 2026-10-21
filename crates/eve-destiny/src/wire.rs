@@ -544,8 +544,13 @@ pub fn resolve_slim_item_meta(park: Option<&Ballpark>, ball: &Ball) -> SlimItemM
     SlimItemMeta::default()
 }
 
-/// Builds a `foo.SlimItem` `PyRep::Object` for a `Ball` using [`SlimItemMeta`].
-pub fn encode_slim_item_with_meta(ball: &Ball, meta: &SlimItemMeta) -> PyRep {
+/// Builds the plain slim-item attribute dict for a `Ball` (string keys -> values).
+///
+/// The V24 client assigns this dict straight to `SlimItem().__dict__` for `AddBalls2`
+/// (`michelle.pyj:1697-1698`), and the `foo.SlimItem` class (`eve/common/script/util/slimItem.pyj`)
+/// has no `__setstate__`, so the unpickled object state must also be a plain dict
+/// (evemu_Crucible `SystemBubble.cpp:726` wraps `MakeSlimItem()`'s `PyDict` the same way).
+pub fn slim_item_dict(ball: &Ball, meta: &SlimItemMeta) -> PyRep {
     let char_rep = meta.char_id.map(PyRep::Integer).unwrap_or(PyRep::None);
     let corp_rep = if meta.corp_id > 0 {
         PyRep::Integer(meta.corp_id)
@@ -557,20 +562,31 @@ pub fn encode_slim_item_with_meta(ball: &Ball, meta: &SlimItemMeta) -> PyRep {
     } else {
         PyRep::None
     };
+    let entries = [
+        ("itemID", PyRep::Integer(ball.id)),
+        ("typeID", PyRep::Integer(ball.type_id as i64)),
+        ("groupID", PyRep::Integer(meta.group_id as i64)),
+        ("categoryID", PyRep::Integer(meta.category_id as i64)),
+        ("ownerID", PyRep::Integer(meta.owner_id)),
+        ("charID", char_rep),
+        ("corpID", corp_rep),
+        ("allianceID", alliance_rep),
+        ("securityStatus", PyRep::Real(meta.security_status)),
+        ("radius", PyRep::Real(ball.radius)),
+    ];
+    PyRep::Dict(
+        entries
+            .into_iter()
+            .map(|(k, v)| (PyRep::String(k.into()), v))
+            .collect(),
+    )
+}
+
+/// Builds a `foo.SlimItem` `PyRep::Object` (state = plain dict) for a `Ball` using [`SlimItemMeta`].
+pub fn encode_slim_item_with_meta(ball: &Ball, meta: &SlimItemMeta) -> PyRep {
     PyRep::Object {
         type_name: "foo.SlimItem".into(),
-        args: Box::new(PyRep::keyval([
-            ("itemID", PyRep::Integer(ball.id)),
-            ("typeID", PyRep::Integer(ball.type_id as i64)),
-            ("groupID", PyRep::Integer(meta.group_id as i64)),
-            ("categoryID", PyRep::Integer(meta.category_id as i64)),
-            ("ownerID", PyRep::Integer(meta.owner_id)),
-            ("charID", char_rep),
-            ("corpID", corp_rep),
-            ("allianceID", alliance_rep),
-            ("securityStatus", PyRep::Real(meta.security_status)),
-            ("radius", PyRep::Real(ball.radius)),
-        ])),
+        args: Box::new(slim_item_dict(ball, meta)),
     }
 }
 
@@ -630,76 +646,58 @@ pub fn encode_set_state_payload(park: &Ballpark, observer_ball_id: BallId) -> Py
         }
     }
 
-    let drone_state = PyRep::Object {
-        type_name: "util.Rowset".into(),
-        args: Box::new(PyRep::keyval([
-            (
-                "header",
-                PyRep::List(vec![
-                    PyRep::String("droneID".into()),
-                    PyRep::String("ownerID".into()),
-                    PyRep::String("controllerID".into()),
-                    PyRep::String("activityState".into()),
-                    PyRep::String("typeID".into()),
-                    PyRep::String("controllerOwnerID".into()),
-                    PyRep::String("targetID".into()),
-                ]),
-            ),
-            (
-                "RowClass",
-                PyRep::Token("util.Row".into()),
-            ),
-            ("lines", PyRep::List(vec![])),
-        ])),
-    };
+    // `droneState` is iterated row by row (`michelle.pyj:1228-1231` reads `d.droneID`, `d.ownerID`,
+    // ...); `util.Rowset` has no `__setstate__`, so its state is the plain `{header, RowClass, lines}`
+    // dict that `PyRep::Rowset` marshals (column list from evemu_Crucible `Destiny.xmlp:168`).
+    let drone_state = PyRep::rowset(
+        vec![
+            "droneID",
+            "ownerID",
+            "controllerID",
+            "activityState",
+            "typeID",
+            "controllerOwnerID",
+            "targetID",
+        ],
+        Vec::new(),
+    );
 
+    // `solItem` is a `util.Row`; `Row.__setstate__` unpacks `(header, line)`
+    // (`carbon/common/script/sys/row.pyj:98-99`). Columns follow evemu_Crucible `Destiny.xmlp:176`.
     let sol_item = PyRep::Object {
         type_name: "util.Row".into(),
-        args: Box::new(PyRep::keyval([
-            (
-                "header",
-                PyRep::List(vec![
-                    PyRep::String("itemID".into()),
-                    PyRep::String("typeID".into()),
-                    PyRep::String("ownerID".into()),
-                    PyRep::String("locationID".into()),
-                    PyRep::String("flagID".into()),
-                    PyRep::String("contraband".into()),
-                    PyRep::String("singleton".into()),
-                    PyRep::String("quantity".into()),
-                    PyRep::String("groupID".into()),
-                    PyRep::String("categoryID".into()),
-                    PyRep::String("customInfo".into()),
-                ]),
+        args: Box::new(PyRep::Tuple(vec![
+            PyRep::List(
+                [
+                    "itemID",
+                    "typeID",
+                    "ownerID",
+                    "locationID",
+                    "flagID",
+                    "contraband",
+                    "singleton",
+                    "quantity",
+                    "groupID",
+                    "categoryID",
+                    "customInfo",
+                ]
+                .into_iter()
+                .map(|c| PyRep::String(c.into()))
+                .collect(),
             ),
-            (
-                "line",
-                PyRep::List(vec![
-                    PyRep::Integer(park.solar_system_id as i64),
-                    PyRep::Integer(5),
-                    PyRep::Integer(1),
-                    PyRep::Integer(park.constellation_id as i64),
-                    PyRep::Integer(0),
-                    PyRep::Integer(0),
-                    PyRep::Integer(1),
-                    PyRep::Integer(-1),
-                    PyRep::Integer(5),
-                    PyRep::Integer(2),
-                    PyRep::String(String::new()),
-                ]),
-            ),
-            ("itemID", PyRep::Integer(park.solar_system_id as i64)),
-            ("solarSystemID", PyRep::Integer(park.solar_system_id as i64)),
-            ("typeID", PyRep::Integer(5)),
-            ("ownerID", PyRep::Integer(1)),
-            ("locationID", PyRep::Integer(park.constellation_id as i64)),
-            ("flagID", PyRep::Integer(0)),
-            ("contraband", PyRep::Integer(0)),
-            ("singleton", PyRep::Integer(1)),
-            ("quantity", PyRep::Integer(-1)),
-            ("groupID", PyRep::Integer(5)),
-            ("categoryID", PyRep::Integer(2)),
-            ("customInfo", PyRep::String(String::new())),
+            PyRep::List(vec![
+                PyRep::Integer(park.solar_system_id as i64),
+                PyRep::Integer(5),
+                PyRep::Integer(1),
+                PyRep::Integer(park.constellation_id as i64),
+                PyRep::Integer(0),
+                PyRep::Integer(0),
+                PyRep::Integer(1),
+                PyRep::Integer(-1),
+                PyRep::Integer(5),
+                PyRep::Integer(2),
+                PyRep::String(String::new()),
+            ]),
         ])),
     };
 
@@ -733,12 +731,15 @@ pub fn encode_set_state_update(park: &Ballpark, observer_ball_id: BallId) -> PyR
     ])
 }
 
+/// `AddBalls2` `extraBallData`: one `(slimItemDict, damageState)` tuple per ball. The V24 client
+/// unpacks the tuple and assigns the dict to `SlimItem().__dict__` (`michelle.pyj:1685-1700`), as
+/// evemu_Crucible `SystemBubble.cpp:775-777` builds it.
 fn encode_ball_extra_list(balls: &[&Ball], park: Option<&Ballpark>, stamp: u32) -> Vec<PyRep> {
     balls
         .iter()
         .map(|ball| {
             let meta = resolve_slim_item_meta(park, ball);
-            let slim = encode_slim_item_with_meta(ball, &meta);
+            let slim = slim_item_dict(ball, &meta);
             let dmg = encode_damage_state_tuple(
                 park.and_then(|p| p.combat_states.get(&ball.id)),
                 stamp,
@@ -765,17 +766,32 @@ pub fn encode_add_ball_action(stamp: u32, ball: &Ball, park: Option<&Ballpark>) 
     ])
 }
 
-/// Encodes an `AddBalls` `DoDestinyUpdate` action tuple `(stamp, ("AddBalls", ((state_bytes, extra_ball_data_list),)))`.
+/// Encodes an `AddBalls` `DoDestinyUpdate` action tuple
+/// `(stamp, ("AddBalls", ((state_bytes, [foo.SlimItem, ...], {ballID: damageState}),)))`.
+///
+/// The V24 client unpacks `state, slims, damageDict = chunk` (`michelle.pyj:1645-1671`); slims are
+/// `foo.SlimItem` objects (it reads `slimItem.itemID`), and the binary header uses packet type `1`
+/// ("balls"), as evemu_Crucible `SystemBubble.cpp:712-735` builds it.
 pub fn encode_add_balls_action(stamp: u32, balls: &[&Ball], park: Option<&Ballpark>) -> PyRep {
-    let state_bytes = encode_add_balls_with_park(0, stamp, balls, park);
-    let extra_data = encode_ball_extra_list(balls, park, stamp);
+    let state_bytes = encode_add_balls_with_park(1, stamp, balls, park);
+    let mut slims = Vec::with_capacity(balls.len());
+    let mut damage = Vec::with_capacity(balls.len());
+    for ball in balls {
+        let meta = resolve_slim_item_meta(park, ball);
+        slims.push(encode_slim_item_with_meta(ball, &meta));
+        damage.push((
+            PyRep::Integer(ball.id),
+            encode_damage_state_tuple(park.and_then(|p| p.combat_states.get(&ball.id)), stamp),
+        ));
+    }
     PyRep::Tuple(vec![
         PyRep::Integer(stamp as i64),
         PyRep::Tuple(vec![
             PyRep::String("AddBalls".into()),
             PyRep::Tuple(vec![PyRep::Tuple(vec![
                 PyRep::Bytes(state_bytes),
-                PyRep::List(extra_data),
+                PyRep::List(slims),
+                PyRep::Dict(damage),
             ])]),
         ]),
     ])
@@ -911,12 +927,13 @@ pub fn encode_destiny_event(stamp: u32, event: &DestinyEvent, park: Option<&Ball
         ]),
         DestinyEvent::TerminalExplosion {
             ball_id,
-            wreck_ball_id,
+            destruction_effect_id,
         } => PyRep::Tuple(vec![
+            // `Park.TerminalPlayDestructionEffect(shipID, destructionEffectId)` (`michelle.pyj:1596`).
             PyRep::String("TerminalPlayDestructionEffect".into()),
             PyRep::Tuple(vec![
                 PyRep::Integer(*ball_id),
-                PyRep::Integer(*wreck_ball_id),
+                destruction_effect_id.map(PyRep::Integer).unwrap_or(PyRep::None),
             ]),
         ]),
         DestinyEvent::Collision { ball_a, ball_b } => PyRep::Tuple(vec![
@@ -971,8 +988,9 @@ pub fn encode_destiny_event(stamp: u32, event: &DestinyEvent, park: Option<&Ball
             ]),
         ]),
         DestinyEvent::CloakBall { ball_id, cloaked } => PyRep::Tuple(vec![
+            // evemu_Crucible `Destiny.xmlp:670-681` (`SetBallCloak`): `(entityID, bool cloaked)`.
             PyRep::String("CloakBall".into()),
-            PyRep::Tuple(vec![PyRep::Integer(*ball_id), PyRep::Integer(i64::from(*cloaked))]),
+            PyRep::Tuple(vec![PyRep::Integer(*ball_id), PyRep::Bool(*cloaked != 0)]),
         ]),
         DestinyEvent::GotoPoint { ball_id, point } => PyRep::Tuple(vec![
             PyRep::String("GotoPoint".into()),

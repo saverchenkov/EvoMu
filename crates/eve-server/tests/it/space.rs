@@ -400,36 +400,34 @@ async fn test_p7_destiny_binary_stream_undock_movement_and_stargate_jump() {
         panic!("Expected PyRep::List under SetState['slims']");
     };
     assert_eq!(slims.len(), 68);
-    let find_slim = |target_id: i64| -> &HashMap<String, PyRep> {
+    let find_slim = |target_id: i64| -> &PyRep {
         slims
             .iter()
-            .find_map(|s| {
+            .find(|s| {
                 if let PyRep::Object { type_name, args } = s {
                     assert_eq!(type_name, "foo.SlimItem");
-                    if let PyRep::KeyVal(kv) = args.as_ref() {
-                        if kv.get("itemID").and_then(|v| v.as_i64()) == Some(target_id) {
-                            return Some(kv);
-                        }
-                    }
+                    // foo.SlimItem has no __setstate__: its state must be a plain dict.
+                    assert!(matches!(args.as_ref(), PyRep::Dict(_)));
+                    return s.dict_get("itemID").and_then(|v| v.as_i64()) == Some(target_id);
                 }
-                None
+                false
             })
             .unwrap_or_else(|| panic!("SlimItem for {target_id} must exist"))
     };
     let ship_slim = find_slim(ship_id);
-    assert_eq!(ship_slim["ownerID"].as_i64(), Some(90_000_001));
-    assert_eq!(ship_slim["charID"].as_i64(), Some(90_000_001));
-    assert_eq!(ship_slim["corpID"].as_i64(), Some(1_000_170));
-    assert_eq!(ship_slim["groupID"].as_i64(), Some(25));
-    assert_eq!(ship_slim["categoryID"].as_i64(), Some(6));
+    assert_eq!(ship_slim.dict_get("ownerID").and_then(PyRep::as_i64), Some(90_000_001));
+    assert_eq!(ship_slim.dict_get("charID").and_then(PyRep::as_i64), Some(90_000_001));
+    assert_eq!(ship_slim.dict_get("corpID").and_then(PyRep::as_i64), Some(1_000_170));
+    assert_eq!(ship_slim.dict_get("groupID").and_then(PyRep::as_i64), Some(25));
+    assert_eq!(ship_slim.dict_get("categoryID").and_then(PyRep::as_i64), Some(6));
 
     let cnap_slim = find_slim(60_003_760);
-    assert_eq!(cnap_slim["groupID"].as_i64(), Some(15));
-    assert_eq!(cnap_slim["categoryID"].as_i64(), Some(3));
+    assert_eq!(cnap_slim.dict_get("groupID").and_then(PyRep::as_i64), Some(15));
+    assert_eq!(cnap_slim.dict_get("categoryID").and_then(PyRep::as_i64), Some(3));
 
     let star_slim = find_slim(40_009_076);
-    assert_eq!(star_slim["groupID"].as_i64(), Some(6));
-    assert_eq!(star_slim["categoryID"].as_i64(), Some(2));
+    assert_eq!(star_slim.dict_get("groupID").and_then(PyRep::as_i64), Some(6));
+    assert_eq!(star_slim.dict_get("categoryID").and_then(PyRep::as_i64), Some(2));
 
     // 3. Verify beyonce.GetFormations and invented beyonce.GetState return UnimplementedRPC
     let formations_err = ctx

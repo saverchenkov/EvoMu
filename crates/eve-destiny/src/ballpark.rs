@@ -101,6 +101,19 @@ impl Ballpark {
         self.ball_slim_meta.get(&ball_id)
     }
 
+    /// Replaces the slim item of a ball that is already in space and tells every observer on its
+    /// grid with `OnSlimItemChange(itemID, foo.SlimItem)`, as evemu_Crucible
+    /// `DestinyManager::UpdateNewShip` / `UpdateOldShip` do (`DestinyManager.cpp:2725-2770`).
+    /// Returns `false` (and emits nothing) when the ball is unknown or the slim item is unchanged.
+    pub fn change_slim_item(&mut self, ball_id: BallId, meta: SlimItemMeta) -> bool {
+        if !self.balls.contains_key(&ball_id) || self.ball_slim_meta.get(&ball_id) == Some(&meta) {
+            return false;
+        }
+        self.set_ball_slim_meta(ball_id, meta);
+        self.emit_event(Some(ball_id), DestinyEvent::OnSlimItemChange { ball_id });
+        true
+    }
+
     /// Returns `true` if `ball_id` is a system-wide static celestial/gate/station (`MovementMode::Rigid` / `static_ball_ids`).
     pub fn is_static_ball(&self, ball_id: BallId) -> bool {
         self.static_ball_ids.contains(&ball_id)
@@ -412,7 +425,7 @@ impl Ballpark {
         if destroyed {
             let term_ev = DestinyEvent::TerminalExplosion {
                 ball_id,
-                wreck_ball_id: 0,
+                destruction_effect_id: None,
             };
             if let Some(gid) = grid_id {
                 self.queue_event_for_grid_observers(gid, None, &term_ev);

@@ -474,9 +474,11 @@ pub enum DestinyEvent {
         armor_ratio: f64,
         structure_ratio: f64,
     },
+    /// Wire action `TerminalPlayDestructionEffect(shipID, destructionEffectId)` (`michelle.pyj:1596`).
+    /// `None` makes the client fall back to `destructionEffectType.EXPLOSION` (`michelle.pyj:1609`).
     TerminalExplosion {
         ball_id: BallId,
-        wreck_ball_id: BallId,
+        destruction_effect_id: Option<i64>,
     },
     Collision {
         ball_a: BallId,

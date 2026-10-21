@@ -39,7 +39,23 @@ impl Ballpark {
         let mut warp_exit_stops = Vec::new();
 
         for ball in self.balls.values_mut() {
-            if matches!(ball.mode, MovementMode::Rigid | MovementMode::Field) {
+            // evemu_Crucible `DestinyManager::ProcessState` (`DestinyManager.cpp:250-258`) gives these
+            // modes no server-side movement: the server never integrates their position.
+            if matches!(
+                ball.mode,
+                MovementMode::Rigid
+                    | MovementMode::Field
+                    | MovementMode::Mushroom
+                    | MovementMode::Boid
+                    | MovementMode::Troll
+                    | MovementMode::Miniball
+                    | MovementMode::Formation
+            ) {
+                continue;
+            }
+
+            if let MovementMode::Missile { target_id } = ball.mode {
+                step_missile_ball(ball, positions.get(&target_id).map(|&(p, _)| p), dt);
                 continue;
             }
 
@@ -557,10 +573,16 @@ impl Ballpark {
                 }
             }
             if !entered.is_empty() {
-                self.observer_events
-                    .entry(obs_id)
-                    .or_default()
-                    .push(DestinyEvent::AddBalls2 { balls: entered });
+                // A ball that itself crossed into another grid is sent that grid's balls with
+                // `AddBalls`, as evemu_Crucible `SystemBubble::Add` -> `SendAddBalls(pSE)` does for an
+                // entity entering a bubble (`SystemBubble.cpp:330-332`, `:697-745`). Balls that stay
+                // put get the newcomer via `AddBalls2`.
+                let ev = if obs_before != obs_after {
+                    DestinyEvent::AddBalls { balls: entered }
+                } else {
+                    DestinyEvent::AddBalls2 { balls: entered }
+                };
+                self.observer_events.entry(obs_id).or_default().push(ev);
             }
             if !left.is_empty() {
                 self.observer_events
@@ -875,13 +897,6 @@ pub(crate) fn compute_subwarp_goal_velocity(
                 DVec3::ZERO
             }
         }
-        MovementMode::Missile { target_id } => {
-            if let Some(&(target_pos, _)) = positions.get(target_id) {
-                (target_pos - ball.position).normalize_or_zero() * ball.max_velocity
-            } else {
-                DVec3::ZERO
-            }
-        }
         MovementMode::Orbit { target_id, range } => {
             if let Some(&(target_pos, target_radius)) = positions.get(target_id) {
                 let to_target = target_pos - ball.position;
@@ -913,19 +928,35 @@ pub(crate) fn compute_subwarp_goal_velocity(
                 DVec3::ZERO
             }
         }
-        MovementMode::Boid | MovementMode::Formation => {
-            let dir = ball.velocity.normalize_or_zero();
-            let heading = if dir == DVec3::ZERO { DVec3::X } else { dir };
-            heading * (ball.max_velocity * ball.speed_fraction.max(0.5))
-        }
-        MovementMode::Mushroom | MovementMode::Troll | MovementMode::Miniball => {
-            ball.velocity * 0.25
-        }
-        MovementMode::Stop
+        MovementMode::Missile { .. }
+        | MovementMode::Mushroom
+        | MovementMode::Boid
+        | MovementMode::Troll
+        | MovementMode::Miniball
+        | MovementMode::Formation
+        | MovementMode::Stop
         | MovementMode::Warp { .. }
         | MovementMode::Field
         | MovementMode::Rigid => DVec3::ZERO,
     }
+}
+
+/// `DSTBALL_MISSILE` movement, following evemu_Crucible `DestinyManager::ProcessState`
+/// (`DestinyManager.cpp:165-174`): no inertial ramp; each tick the heading is re-aimed at the
+/// target point and the missile moves at constant `maxVelocity` along it
+/// (`velocity = heading * maxSpeed`, `position += velocity * dt`). The target point is the target
+/// ball's current position (`MISSILE_Struct.targetID`, `DestinyStructs.h:170-179`); once the target
+/// is gone the missile keeps flying along its last velocity (`DestinyManager.cpp:166`).
+pub(crate) fn step_missile_ball(ball: &mut Ball, target_pos: Option<DVec3>, dt: f64) {
+    if dt <= 0.0 {
+        return;
+    }
+    let heading = match target_pos {
+        Some(p) => (p - ball.position).normalize_or_zero(),
+        None => ball.velocity.normalize_or_zero(),
+    };
+    ball.velocity = heading * ball.max_velocity;
+    ball.position += ball.velocity * dt;
 }
 
 /// Integrates exponential sub-warp movement over `dt` seconds:

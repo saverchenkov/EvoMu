@@ -110,7 +110,7 @@ async fn test_destiny_ball_lifecycle_wire_actions_and_destruction() {
     let PyRep::Tuple(ck_outer) = &cloak_rep else { panic!("Expected tuple") };
     let PyRep::Tuple(ck_action) = &ck_outer[1] else { panic!("Expected action tuple") };
     assert_eq!(ck_action[0].as_str(), Some("CloakBall"));
-    assert_eq!(ck_action[1], PyRep::Tuple(vec![PyRep::Integer(100_000_001), PyRep::Integer(1)]));
+    assert_eq!(ck_action[1], PyRep::Tuple(vec![PyRep::Integer(100_000_001), PyRep::Bool(true)]));
 
     // 6. PackagedAction: ("PackagedAction", bytes)
     let pkg_bytes = vec![1, 2, 3, 4, 5];
@@ -128,11 +128,11 @@ async fn test_destiny_ball_lifecycle_wire_actions_and_destruction() {
     let (_, destroyed) = combat.apply_damage(DamageVector::new(500.0, 500.0, 500.0, 500.0));
     assert!(destroyed);
 
-    let term_rep = encode_destiny_event(21, &DestinyEvent::TerminalExplosion { ball_id: 100_000_001, wreck_ball_id: 100_000_099 }, Some(&park));
+    let term_rep = encode_destiny_event(21, &DestinyEvent::TerminalExplosion { ball_id: 100_000_001, destruction_effect_id: None }, Some(&park));
     let PyRep::Tuple(tm_outer) = &term_rep else { panic!("Expected tuple") };
     let PyRep::Tuple(tm_action) = &tm_outer[1] else { panic!("Expected action tuple") };
     assert_eq!(tm_action[0].as_str(), Some("TerminalPlayDestructionEffect"));
-    assert_eq!(tm_action[1], PyRep::Tuple(vec![PyRep::Integer(100_000_001), PyRep::Integer(100_000_099)]));
+    assert_eq!(tm_action[1], PyRep::Tuple(vec![PyRep::Integer(100_000_001), PyRep::None]));
 }
 
 // ============================================================================
