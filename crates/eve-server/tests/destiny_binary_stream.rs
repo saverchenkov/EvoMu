@@ -188,7 +188,7 @@ fn test_warp_continuous_physics_curves_and_visual_handoff() {
                 guid,
                 is_active: true,
                 ..
-            } if guid == "effects.WarpDrive"
+            } if guid == "effects.Warping"
         )
     });
     assert!(has_sfx_start, "Must emit OnSpecialFX for WarpDrive activation");
@@ -257,7 +257,7 @@ fn test_warp_continuous_physics_curves_and_visual_handoff() {
                             guid,
                             is_active: false,
                             ..
-                        } if guid == "effects.WarpDrive"
+                        } if guid == "effects.Warping"
                     )
                 });
                 assert!(has_sfx_end, "Must emit OnSpecialFX with is_active = false on warp exit");
@@ -1282,22 +1282,18 @@ async fn test_hic_warp_disruption_field_generator_bubble_and_focused_script() {
     assert_eq!(inf_warp_err.code, "WarpScrambled");
 }
 
-// parity: feat:modules.warp-disruption-field
 #[test]
 fn test_warp_bubble_interception_stop_and_drag() {
     let mut park = Ballpark::new(30_000_142);
     let ship_id = 3001;
-
     let origin = DVec3::ZERO;
-    let target_destination = DVec3::new(10_000_000.0, 0.0, 0.0); // 10,000 km
+    let target_destination = DVec3::new(10_000_000.0, 0.0, 0.0);
 
-    // Test 1: Stop bubble placed at x = 5,000,000 m (5,000 km), radius = 20,000 m (20 km)
     let stop_bubble_id = 7001;
     let stop_bubble_pos = DVec3::new(5_000_000.0, 0.0, 0.0);
     let bubble_radius = 20_000.0;
     park.add_warp_bubble(stop_bubble_id, stop_bubble_pos, bubble_radius);
-
-    let ship = Ball {
+    park.add_ball(Ball {
         id: ship_id,
         type_id: 587,
         position: origin,
@@ -1308,116 +1304,60 @@ fn test_warp_bubble_interception_stop_and_drag() {
         radius: 37.0,
         speed_fraction: 0.0,
         mode: MovementMode::Stop,
-    };
-    park.add_ball(ship);
+    });
 
-    // Initiating warp towards 10,000 km must be intercepted by the stop bubble at 4,980,000 m
-    park.set_mode(
-        ship_id,
-        MovementMode::new_warp(origin, target_destination, 3.0),
-    )
-    .expect("set warp mode");
-
-    let ball_after_init = park.balls.get(&ship_id).unwrap();
-    if let MovementMode::Warp { destination, .. } = ball_after_init.mode {
-        assert_eq!(
-            destination.x, 4_980_000.0,
-            "Stop bubble must pull warp destination to the bubble perimeter entry point"
-        );
-    } else {
+    park.set_mode(ship_id, MovementMode::new_warp(origin, target_destination, 3.0))
+        .expect("set warp mode");
+    let MovementMode::Warp { destination, .. } = park.balls[&ship_id].mode else {
         panic!("Ship must be in Warp mode");
-    }
+    };
+    assert_eq!(destination.x, 4_980_000.0, "Stop bubble must pull warp destination to entry perimeter");
 
-    // Step physics to completion
     for _ in 0..40 {
         park.step(1.0);
     }
-    let landed = park.balls.get(&ship_id).unwrap();
+    let landed = &park.balls[&ship_id];
     assert_eq!(landed.mode, MovementMode::Stop);
-    let dist_to_perimeter = (landed.position - DVec3::new(4_980_000.0, 0.0, 0.0)).length();
-    assert!(
-        dist_to_perimeter <= 2_500.0,
-        "Ship must land at stop bubble entry perimeter within 2,500 m, got {dist_to_perimeter}"
-    );
+    assert!((landed.position - DVec3::new(4_980_000.0, 0.0, 0.0)).length() <= 2_500.0);
 
-    // Test 2: Drag bubble placed at x = 10,100,000 m (100 km behind destination), radius = 20,000 m
     park.remove_warp_bubble(stop_bubble_id);
     let drag_bubble_id = 7002;
     let drag_bubble_pos = DVec3::new(10_100_000.0, 0.0, 0.0);
     park.add_warp_bubble(drag_bubble_id, drag_bubble_pos, bubble_radius);
 
     park.set_ball_position(ship_id, origin);
-    park.set_mode(
-        ship_id,
-        MovementMode::new_warp(origin, target_destination, 3.0),
-    )
-    .expect("set warp with drag bubble");
-
-    let ball_after_drag_init = park.balls.get(&ship_id).unwrap();
-    if let MovementMode::Warp { destination, .. } = ball_after_drag_init.mode {
-        assert_eq!(
-            destination.x, 10_080_000.0,
-            "Drag bubble inline behind destination must drag warp landing point to bubble perimeter"
-        );
-    } else {
+    park.set_mode(ship_id, MovementMode::new_warp(origin, target_destination, 3.0))
+        .expect("set warp with drag bubble");
+    let MovementMode::Warp { destination: drag_dest, .. } = park.balls[&ship_id].mode else {
         panic!("Ship must be in Warp mode");
-    }
+    };
+    assert_eq!(drag_dest.x, 10_080_000.0, "Drag bubble must drag warp landing point to perimeter");
 
-    // Step physics to completion
     for _ in 0..40 {
         park.step(1.0);
     }
-    let landed_drag = park.balls.get(&ship_id).unwrap();
+    let landed_drag = &park.balls[&ship_id];
     assert_eq!(landed_drag.mode, MovementMode::Stop);
-    let dist_to_drag = (landed_drag.position - DVec3::new(10_080_000.0, 0.0, 0.0)).length();
-    assert!(
-        dist_to_drag <= 2_500.0,
-        "Ship must land at drag bubble perimeter within 2,500 m, got {dist_to_drag}"
-    );
+    assert!((landed_drag.position - DVec3::new(10_080_000.0, 0.0, 0.0)).length() <= 2_500.0);
 
-    // Test 3: Starting warp while already inside a bubble must fail with WarpScrambled
-    park.set_ball_position(ship_id, drag_bubble_pos); // inside drag bubble
-    let inside_err = park.set_mode(
-        ship_id,
-        MovementMode::new_warp(drag_bubble_pos, origin, 3.0),
-    );
-    assert!(inside_err.is_err(), "Warping from inside a bubble must be rejected");
-    assert!(
-        inside_err.unwrap_err().contains("WarpScrambled"),
-        "Must return WarpScrambled error"
-    );
+    park.set_ball_position(ship_id, drag_bubble_pos);
+    let inside_err = park.set_mode(ship_id, MovementMode::new_warp(drag_bubble_pos, origin, 3.0));
+    assert!(inside_err.unwrap_err().contains("WarpScrambled"));
 
-    // Test 4: In-flight bubble interception
     park.remove_warp_bubble(drag_bubble_id);
     park.set_ball_position(ship_id, origin);
-    park.set_mode(
-        ship_id,
-        MovementMode::new_warp(origin, target_destination, 3.0),
-    )
-    .expect("clean warp");
-
-    // Advance 5 seconds into warp flight
+    park.set_mode(ship_id, MovementMode::new_warp(origin, target_destination, 3.0))
+        .expect("clean warp");
     for _ in 0..5 {
         park.step(1.0);
     }
-    let mid_flight_pos = park.balls.get(&ship_id).unwrap().position;
-
-    // Deploy an interdiction bubble right at the ship's current position
-    let dynamic_bubble_id = 7003;
-    park.add_warp_bubble(dynamic_bubble_id, mid_flight_pos, 25_000.0);
-
-    // Next step must immediately pull the ship out of warp
+    let mid_flight_pos = park.balls[&ship_id].position;
+    park.add_warp_bubble(7003, mid_flight_pos, 25_000.0);
     let evs = park.step(1.0);
-    let stopped_ball = park.balls.get(&ship_id).unwrap();
-    assert_eq!(
-        stopped_ball.mode,
-        MovementMode::Stop,
-        "Ship entering a warp bubble mid-flight must immediately drop out of warp"
-    );
+    assert_eq!(park.balls[&ship_id].mode, MovementMode::Stop);
     assert!(
         evs.iter()
             .any(|e| matches!(e, DestinyEvent::OnDeactivatingWarp { ball_id: 3001 })),
         "Must emit OnDeactivatingWarp when stopped by in-flight bubble"
     );
 }
-
