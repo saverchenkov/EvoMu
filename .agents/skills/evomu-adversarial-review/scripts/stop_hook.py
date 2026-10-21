@@ -79,7 +79,8 @@ def main():
 
     state = rl.load_state(root)
     skill = os.path.join(root, ".agents", "skills", "evomu-adversarial-review", "SKILL.md")
-    reviewed = tree == hs.get("baseline_tree") or tree in rl.reviewed_trees(state)
+    reviewed = tree == hs.get("baseline_tree") or tree in rl.reviewed_trees(state) or \
+        rl.reviewed_by_code(root, tree=tree) is not None
 
     if reviewed:
         # Review gate satisfied. Now the goal gate: the project is only done when final_gate.py passed

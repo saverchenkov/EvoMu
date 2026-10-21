@@ -110,6 +110,10 @@ def main():
     ga = latest(state, tree, "gap-audit")
     final_models = [m.strip() for m in os.environ.get(
         "EVOMU_FINAL_REVIEW_MODEL", "opus-5.5-high,auto,gemini-launch-candidate-high,gemini-flash-next").split(",") if m.strip()]
+    if not (cr and cr.get("verdict") == "PASS" and cr.get("model") in final_models):
+        cr = rl.reviewed_by_code(root, verdicts=("PASS",), mode="claims", models=final_models, tree=tree) or cr
+    if not (ga and ga.get("verdict") == "CLEAN"):
+        ga = rl.reviewed_by_code(root, verdicts=("CLEAN",), mode="gap-audit", tree=tree) or ga
     checks["claims_review_pass"] = {"passed": bool(cr and cr.get("verdict") == "PASS" and cr.get("model") in final_models),
                                     "required_model": final_models,
                                     "latest": cr and {k: cr.get(k) for k in ("verdict", "model", "timestamp", "report")}}

@@ -72,6 +72,92 @@ def reviewed_trees(state, verdicts=None):
             if verdicts is None or r.get("verdict") in verdicts}
 
 
+GATE_PATHS = (".agents", "AGENTS.md")  # supervisor-owned; excluded from the code fingerprint
+
+
+def code_tree_of(root, tree, _cache={}):
+    """Tree hash with the supervisor-owned gate paths removed. Two working trees with the same code tree differ
+    only in .agents/ and AGENTS.md, so a review of one covers the other once the gate files match `main`."""
+    if not tree:
+        return ""
+    if tree in _cache:
+        return _cache[tree]
+    cache_file = os.path.join(main_state_dir(root), "code_tree_cache.json")
+    disk = {}
+    if os.path.exists(cache_file):
+        try:
+            disk = json.load(open(cache_file))
+        except Exception:  # noqa: BLE001
+            disk = {}
+    if tree in disk:
+        _cache[tree] = disk[tree]
+        return disk[tree]
+    with tempfile.TemporaryDirectory() as d:
+        env = dict(os.environ, GIT_INDEX_FILE=os.path.join(d, "index"))
+        if subprocess.run(["git", "read-tree", tree], cwd=root, env=env, capture_output=True).returncode:
+            return ""
+        subprocess.run(["git", "rm", "-r", "-q", "--cached", "--ignore-unmatch", "--"] + list(GATE_PATHS),
+                       cwd=root, env=env, capture_output=True)
+        out = subprocess.run(["git", "write-tree"], cwd=root, env=env, capture_output=True, text=True).stdout.strip()
+    _cache[tree] = out
+    disk[tree] = out
+    try:
+        tmp = cache_file + ".tmp"
+        json.dump(disk, open(tmp, "w"))
+        os.replace(tmp, cache_file)
+    except OSError:
+        pass
+    return out
+
+
+def main_state_dir(root):
+    common = subprocess.run(["git", "rev-parse", "--git-common-dir"], cwd=root, capture_output=True,
+                            text=True).stdout.strip()
+    main_root = os.path.dirname(os.path.abspath(os.path.join(root, common))) if common else root
+    p = os.path.join(main_root, STATE_DIRNAME)
+    os.makedirs(p, exist_ok=True)
+    return p
+
+
+def worktree_roots(root):
+    out = subprocess.run(["git", "worktree", "list", "--porcelain"], cwd=root, capture_output=True, text=True).stdout
+    return [ln[len("worktree "):] for ln in out.splitlines() if ln.startswith("worktree ")]
+
+
+def gate_matches_main(root):
+    if subprocess.run(["git", "rev-parse", "--verify", "-q", "main"], cwd=root, capture_output=True).returncode:
+        return False
+    return subprocess.run(["git", "diff", "--quiet", "main", "--"] + list(GATE_PATHS) +
+                          [":(exclude)%s" % AUDITOR_ROWS_REL], cwd=root, capture_output=True).returncode == 0
+
+
+def reviewed_by_code(root, verdicts=("PASS", "PASS_WITH_ISSUES"), mode="claims", models=None, tree=None):
+    """Latest review (in ANY worktree of this repo) whose reviewed tree has the same code tree as this working
+    tree, provided this tree's gate files equal `main`. Returns the review dict (plus 'worktree') or None."""
+    if not gate_matches_main(root):
+        return None
+    mine = code_tree_of(root, tree or worktree_fingerprint(root))
+    if not mine:
+        return None
+    best = None
+    for wt in worktree_roots(root):
+        p = os.path.join(wt, STATE_DIRNAME, "state.json")
+        if not os.path.exists(p):
+            continue
+        try:
+            st = json.load(open(p))
+        except Exception:  # noqa: BLE001
+            continue
+        for r in st.get("reviews", []):
+            if r.get("mode", "claims") != mode or r.get("verdict") not in verdicts:
+                continue
+            if models and r.get("model") not in models:
+                continue
+            if code_tree_of(root, r.get("tree")) == mine and (best is None or r.get("timestamp", "") > best.get("timestamp", "")):
+                best = dict(r, worktree=wt)
+    return best
+
+
 def stale_gate(root):
     """True (with a message) when this worktree's .agents/ differs from the `main` branch's copy, i.e. a track
     worktree is running an outdated review gate. auditor_rows.json is exempt (written by the orchestrator)."""

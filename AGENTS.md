@@ -112,6 +112,7 @@
   - Each worktree has its own `.evomu-reviews/` state, Stop hook and review history.
   - Share the static data with `EVOMU_SDE_PATH=/Users/sergeya/ai/EvoMu/data/evomu_sde.sqlite`.
 - **Merging into `main`** is done by the orchestrator, one track at a time: rebase or merge the reviewed branch, run pre-flight on `main`, then run a claims review of the merged tree. Never push or merge an unreviewed tree.
+  - **Exception — identical code:** if the merged tree differs from a tree that already got a non-FAIL claims review (in any EvoMu worktree) only in supervisor-owned gate files (`.agents/`, `AGENTS.md`), and those match `main`, no new review is needed. The gate checks this mechanically (`review_lib.reviewed_by_code`; the Stop hook and `final_gate.py` accept it). Put the reused review's timestamp in the merge/push message. Pre-flight on `main` is still required.
 - **Subagents must get `AGENTS.md` and the plan as context** and obey every rule here. No subagent may modify `.agents/`, disable hooks or bypass Santa. Delegation doesn't relax any rule.
 - **Subagent reports to you are claims, not facts.** Verify them with pre-flight and the review before recording anything in `docs/ACTION_PLAN_STATUS.md`.
 
