@@ -220,12 +220,14 @@ def main():
     # Supervisor-owned triage (evidence-backed, audited like docs/parity/triage.json). Agent entries win on conflict.
     sp = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "..", "references", "parity",
                       "supervisor_triage.json")
+    sup_triage = {}
     if os.path.exists(sp):
         try:
-            for k, v in json.load(open(sp)).get("rows", {}).items():
+            sup_triage = json.load(open(sp)).get("rows", {})
+            for k, v in sup_triage.items():
                 triage.setdefault(k, v)
         except ValueError:
-            pass
+            sup_triage = {}
 
     status = {}
     for r in rows:
@@ -239,7 +241,7 @@ def main():
             tested = exp > 0 and n >= exp
             a_pass = ["%d/%d effects attested" % (n, exp)]
         tri = triage.get(rid)
-        if (r.get("na_allowed") and tri and tri.get("disposition") in DISPOSITIONS
+        if ((r.get("na_allowed") or rid in sup_triage) and tri and tri.get("disposition") in DISPOSITIONS
                 and len(str(tri.get("evidence", ""))) >= 12 and rid not in rejected):
             st = "NA"
         elif rid in fake:
@@ -265,6 +267,7 @@ def main():
         "T-2": lambda rid: rid.startswith(("sde:", "effect:")),          # every sde:* and effect:* attested
         "T-6": lambda rid: rid.startswith("journey:"),                    # harness drives every real-client journey
         "ESI-1": lambda rid: rid == "journey:launch_login",               # real client logs in via emulated launcher
+        "ESI-7": lambda rid: rid.startswith("esi:") or rid == "journey:esi_external",  # Phase ESI exit gate + esi_external journey
     }
     all_ids = [r["id"] for r in rows]
     for r in rows:

@@ -1,6 +1,382 @@
 {
- "_about": "Supervisor-owned NA triage (user-appointed supervisor agent, 2026-10-20). Same semantics as docs/parity/triage.json and audited the same way by the gap auditor (rejected_triage). The coding agent must not edit this file. Method: Static import graph of all 12,774 modules in the V24.01 client code.ccp (CPython 2.7 marshal, 0 parse failures, 82,603 imports with level/fromlist resolved); roots = every non-generated client module; closure through pb2->pb2 imports, validated against each pb2's embedded descriptor dependency list (1,454/1,454 exact). No string constant outside eveProto/generated names a generated module, so no dynamic import/pickle path can reach it. Client module paths are identifiers only; no client data is stored.",
+ "_about": "Supervisor-maintained NA triage: (1) 1,112 Quasar proto modules unreachable from V24 code.ccp (all 1,048 internal eve/* protos + 64 unreachable eve_public/* protos); (2) 94 feat:quasar.<pkg> rows whose packages have 0 reachable Request/Notice RPC protos in V24 code.ccp (66 internal-only packages + 28 shared identifier/value-type-only packages); (3) 55 rpc:* rows that are client-side Python util.Moniker wrapper methods (Bind, Unbind, QuickBind, SetSessionCheck, clear_memoized) or dict/list/DBRowset/KeyVal attribute accesses (.columns, .header, .itervalues, .iteritems, .iterkeys, .keys, .values, .append, .remove, .get, .description, .dictatorial, .url, .deleted, .colonies, .id) mis-scraped from chained client expressions.",
  "rows": {
+  "feat:quasar.academy": {
+   "disposition": "dead_client_code",
+   "evidence": "All 2 Quasar proto files in package 'academy' (e.g. eveProto/generated/eve/academy/ships/events_pb2.pyj, eveProto/generated/eve_public/academy/ships/events_pb2.pyj) are internal eve/* or unreachable in V24 code.ccp import graph (0 reachable eve_public protos)."
+  },
+  "feat:quasar.accounting": {
+   "disposition": "dead_client_code",
+   "evidence": "All 7 Quasar proto files in package 'accounting' (e.g. eveProto/generated/eve/accounting/character/journal_pb2.pyj, eveProto/generated/eve/accounting/corporation/journal_pb2.pyj) are internal eve/* or unreachable in V24 code.ccp import graph (0 reachable eve_public protos)."
+  },
+  "feat:quasar.acl": {
+   "disposition": "client_local",
+   "evidence": "Package 'acl' has 0 reachable Request/Notice RPC protos in V24 code.ccp; its 1 reachable eve_public proto(s) (eveProto/generated/eve_public/acl/acl_pb2.pyj) are shared identifier/value types tested via their quasar:* rows."
+  },
+  "feat:quasar.agent": {
+   "disposition": "client_local",
+   "evidence": "Package 'agent' has 0 reachable Request/Notice RPC protos in V24 code.ccp; its 1 reachable eve_public proto(s) (eveProto/generated/eve_public/agent/agent_pb2.pyj) are shared identifier/value types tested via their quasar:* rows."
+  },
+  "feat:quasar.alliance": {
+   "disposition": "client_local",
+   "evidence": "Package 'alliance' has 0 reachable Request/Notice RPC protos in V24 code.ccp; its 1 reachable eve_public proto(s) (eveProto/generated/eve_public/alliance/alliance_pb2.pyj) are shared identifier/value types tested via their quasar:* rows."
+  },
+  "feat:quasar.ancestry": {
+   "disposition": "dead_client_code",
+   "evidence": "All 1 Quasar proto files in package 'ancestry' (e.g. eveProto/generated/eve/ancestry/ancestry_pb2.pyj) are internal eve/* or unreachable in V24 code.ccp import graph (0 reachable eve_public protos)."
+  },
+  "feat:quasar.asset": {
+   "disposition": "dead_client_code",
+   "evidence": "All 2 Quasar proto files in package 'asset' (e.g. eveProto/generated/eve/asset/asset_pb2.pyj, eveProto/generated/eve/asset/character_pb2.pyj) are internal eve/* or unreachable in V24 code.ccp import graph (0 reachable eve_public protos)."
+  },
+  "feat:quasar.asteroidbelt": {
+   "disposition": "dead_client_code",
+   "evidence": "All 1 Quasar proto files in package 'asteroidbelt' (e.g. eveProto/generated/eve/asteroidbelt/asteroidbelt_pb2.pyj) are internal eve/* or unreachable in V24 code.ccp import graph (0 reachable eve_public protos)."
+  },
+  "feat:quasar.auth": {
+   "disposition": "dead_client_code",
+   "evidence": "All 4 Quasar proto files in package 'auth' (e.g. eveProto/generated/eve/auth/api/events_pb2.pyj, eveProto/generated/eve_public/auth/auth_pb2.pyj) are internal eve/* or unreachable in V24 code.ccp import graph (0 reachable eve_public protos)."
+  },
+  "feat:quasar.battlepass": {
+   "disposition": "dead_client_code",
+   "evidence": "All 6 Quasar proto files in package 'battlepass' (e.g. eveProto/generated/eve/battlepass/battlepass_pb2.pyj, eveProto/generated/eve/battlepass/quest/quest_pb2.pyj) are internal eve/* or unreachable in V24 code.ccp import graph (0 reachable eve_public protos)."
+  },
+  "feat:quasar.bloodline": {
+   "disposition": "dead_client_code",
+   "evidence": "All 1 Quasar proto files in package 'bloodline' (e.g. eveProto/generated/eve/bloodline/bloodline_pb2.pyj) are internal eve/* or unreachable in V24 code.ccp import graph (0 reachable eve_public protos)."
+  },
+  "feat:quasar.blueprint": {
+   "disposition": "dead_client_code",
+   "evidence": "All 2 Quasar proto files in package 'blueprint' (e.g. eveProto/generated/eve/blueprint/blueprint_pb2.pyj, eveProto/generated/eve/blueprint/blueprint_type_pb2.pyj) are internal eve/* or unreachable in V24 code.ccp import graph (0 reachable eve_public protos)."
+  },
+  "feat:quasar.bookmark": {
+   "disposition": "dead_client_code",
+   "evidence": "All 3 Quasar proto files in package 'bookmark' (e.g. eveProto/generated/eve/bookmark/bookmark_pb2.pyj, eveProto/generated/eve/bookmark/folder_pb2.pyj) are internal eve/* or unreachable in V24 code.ccp import graph (0 reachable eve_public protos)."
+  },
+  "feat:quasar.bubble": {
+   "disposition": "dead_client_code",
+   "evidence": "All 4 Quasar proto files in package 'bubble' (e.g. eveProto/generated/eve/bubble/bubble_pb2.pyj, eveProto/generated/eve/bubble/presence/api/requests_pb2.pyj) are internal eve/* or unreachable in V24 code.ccp import graph (0 reachable eve_public protos)."
+  },
+  "feat:quasar.calendar": {
+   "disposition": "dead_client_code",
+   "evidence": "All 5 Quasar proto files in package 'calendar' (e.g. eveProto/generated/eve/calendar/alliance_event_pb2.pyj, eveProto/generated/eve/calendar/calendar_event_pb2.pyj) are internal eve/* or unreachable in V24 code.ccp import graph (0 reachable eve_public protos)."
+  },
+  "feat:quasar.capacitor": {
+   "disposition": "dead_client_code",
+   "evidence": "All 1 Quasar proto files in package 'capacitor' (e.g. eveProto/generated/eve/capacitor/capacitor_pb2.pyj) are internal eve/* or unreachable in V24 code.ccp import graph (0 reachable eve_public protos)."
+  },
+  "feat:quasar.cdn": {
+   "disposition": "client_local",
+   "evidence": "Package 'cdn' has 0 reachable Request/Notice RPC protos in V24 code.ccp; its 1 reachable eve_public proto(s) (eveProto/generated/eve_public/cdn/cdn_pb2.pyj) are shared identifier/value types tested via their quasar:* rows."
+  },
+  "feat:quasar.client": {
+   "disposition": "dead_client_code",
+   "evidence": "All 4 Quasar proto files in package 'client' (e.g. eveProto/generated/eve/client/anticheating_pb2.pyj, eveProto/generated/eve/client/connection_pb2.pyj) are internal eve/* or unreachable in V24 code.ccp import graph (0 reachable eve_public protos)."
+  },
+  "feat:quasar.constellation": {
+   "disposition": "client_local",
+   "evidence": "Package 'constellation' has 0 reachable Request/Notice RPC protos in V24 code.ccp; its 1 reachable eve_public proto(s) (eveProto/generated/eve_public/constellation/constellation_pb2.pyj) are shared identifier/value types tested via their quasar:* rows."
+  },
+  "feat:quasar.contact": {
+   "disposition": "dead_client_code",
+   "evidence": "All 3 Quasar proto files in package 'contact' (e.g. eveProto/generated/eve/contact/api_pb2.pyj, eveProto/generated/eve/contact/contact_pb2.pyj) are internal eve/* or unreachable in V24 code.ccp import graph (0 reachable eve_public protos)."
+  },
+  "feat:quasar.container": {
+   "disposition": "dead_client_code",
+   "evidence": "All 1 Quasar proto files in package 'container' (e.g. eveProto/generated/eve/container/type_pb2.pyj) are internal eve/* or unreachable in V24 code.ccp import graph (0 reachable eve_public protos)."
+  },
+  "feat:quasar.content": {
+   "disposition": "dead_client_code",
+   "evidence": "All 16 Quasar proto files in package 'content' (e.g. eveProto/generated/eve/content/content_pb2.pyj, eveProto/generated/eve/content/orchestrator/admin/api/requests_pb2.pyj) are internal eve/* or unreachable in V24 code.ccp import graph (0 reachable eve_public protos)."
+  },
+  "feat:quasar.contextualoffer": {
+   "disposition": "dead_client_code",
+   "evidence": "All 1 Quasar proto files in package 'contextualoffer' (e.g. eveProto/generated/eve/contextualoffer/contextualoffer_pb2.pyj) are internal eve/* or unreachable in V24 code.ccp import graph (0 reachable eve_public protos)."
+  },
+  "feat:quasar.contract": {
+   "disposition": "dead_client_code",
+   "evidence": "All 2 Quasar proto files in package 'contract' (e.g. eveProto/generated/eve/contract/contract_pb2.pyj, eveProto/generated/eve/contract/item_exchange_pb2.pyj) are internal eve/* or unreachable in V24 code.ccp import graph (0 reachable eve_public protos)."
+  },
+  "feat:quasar.csat": {
+   "disposition": "dead_client_code",
+   "evidence": "All 1 Quasar proto files in package 'csat' (e.g. eveProto/generated/eve/csat/survey_pb2.pyj) are internal eve/* or unreachable in V24 code.ccp import graph (0 reachable eve_public protos)."
+  },
+  "feat:quasar.deadspace": {
+   "disposition": "client_local",
+   "evidence": "Package 'deadspace' has 0 reachable Request/Notice RPC protos in V24 code.ccp; its 2 reachable eve_public proto(s) (eveProto/generated/eve_public/deadspace/archetype_pb2.pyj, eveProto/generated/eve_public/deadspace/signaturetype_pb2.pyj) are shared identifier/value types tested via their quasar:* rows."
+  },
+  "feat:quasar.debug": {
+   "disposition": "dead_client_code",
+   "evidence": "All 4 Quasar proto files in package 'debug' (e.g. eveProto/generated/eve/debug/monolith/event_pb2.pyj, eveProto/generated/eve/debug/monolith/externalqueue_pb2.pyj) are internal eve/* or unreachable in V24 code.ccp import graph (0 reachable eve_public protos)."
+  },
+  "feat:quasar.dogma": {
+   "disposition": "dead_client_code",
+   "evidence": "All 3 Quasar proto files in package 'dogma' (e.g. eveProto/generated/eve/dogma/dogma_pb2.pyj, eveProto/generated/eve/dogma/modifier/dbuff_pb2.pyj) are internal eve/* or unreachable in V24 code.ccp import graph (0 reachable eve_public protos)."
+  },
+  "feat:quasar.duel": {
+   "disposition": "dead_client_code",
+   "evidence": "All 1 Quasar proto files in package 'duel' (e.g. eveProto/generated/eve/duel/duel_pb2.pyj) are internal eve/* or unreachable in V24 code.ccp import graph (0 reachable eve_public protos)."
+  },
+  "feat:quasar.dungeon": {
+   "disposition": "client_local",
+   "evidence": "Package 'dungeon' has 0 reachable Request/Notice RPC protos in V24 code.ccp; its 2 reachable eve_public proto(s) (eveProto/generated/eve_public/dungeon/dungeon_pb2.pyj, eveProto/generated/eve_public/dungeon/instance_pb2.pyj) are shared identifier/value types tested via their quasar:* rows."
+  },
+  "feat:quasar.dynamicbountysystem": {
+   "disposition": "dead_client_code",
+   "evidence": "All 2 Quasar proto files in package 'dynamicbountysystem' (e.g. eveProto/generated/eve/dynamicbountysystem/inputs_pb2.pyj, eveProto/generated/eve/dynamicbountysystem/settings_pb2.pyj) are internal eve/* or unreachable in V24 code.ccp import graph (0 reachable eve_public protos)."
+  },
+  "feat:quasar.effect": {
+   "disposition": "dead_client_code",
+   "evidence": "All 7 Quasar proto files in package 'effect' (e.g. eveProto/generated/eve/effect/combat/combat_pb2.pyj, eveProto/generated/eve/effect/combat/electronic/pve_pb2.pyj) are internal eve/* or unreachable in V24 code.ccp import graph (0 reachable eve_public protos)."
+  },
+  "feat:quasar.epicarc": {
+   "disposition": "client_local",
+   "evidence": "Package 'epicarc' has 0 reachable Request/Notice RPC protos in V24 code.ccp; its 1 reachable eve_public proto(s) (eveProto/generated/eve_public/epicarc/epicarc_pb2.pyj) are shared identifier/value types tested via their quasar:* rows."
+  },
+  "feat:quasar.factionwarfare": {
+   "disposition": "dead_client_code",
+   "evidence": "All 20 Quasar proto files in package 'factionwarfare' (e.g. eveProto/generated/eve/factionwarfare/activity_pb2.pyj, eveProto/generated/eve/factionwarfare/combat/api/events_pb2.pyj) are internal eve/* or unreachable in V24 code.ccp import graph (0 reachable eve_public protos)."
+  },
+  "feat:quasar.fighter": {
+   "disposition": "dead_client_code",
+   "evidence": "All 1 Quasar proto files in package 'fighter' (e.g. eveProto/generated/eve/fighter/fighter_type_pb2.pyj) are internal eve/* or unreachable in V24 code.ccp import graph (0 reachable eve_public protos)."
+  },
+  "feat:quasar.fleet": {
+   "disposition": "dead_client_code",
+   "evidence": "All 3 Quasar proto files in package 'fleet' (e.g. eveProto/generated/eve/fleet/api/events_pb2.pyj, eveProto/generated/eve/fleet/fleet_pb2.pyj) are internal eve/* or unreachable in V24 code.ccp import graph (0 reachable eve_public protos)."
+  },
+  "feat:quasar.fulfillment": {
+   "disposition": "client_local",
+   "evidence": "Package 'fulfillment' has 0 reachable Request/Notice RPC protos in V24 code.ccp; its 1 reachable eve_public proto(s) (eveProto/generated/eve_public/fulfillment/offer_pb2.pyj) are shared identifier/value types tested via their quasar:* rows."
+  },
+  "feat:quasar.id": {
+   "disposition": "dead_client_code",
+   "evidence": "All 6 Quasar proto files in package 'id' (e.g. eveProto/generated/eve/id/api/api_pb2.pyj, eveProto/generated/eve/id/auth/auth_pb2.pyj) are internal eve/* or unreachable in V24 code.ccp import graph (0 reachable eve_public protos)."
+  },
+  "feat:quasar.implant": {
+   "disposition": "dead_client_code",
+   "evidence": "All 1 Quasar proto files in package 'implant' (e.g. eveProto/generated/eve/implant/implant_type_pb2.pyj) are internal eve/* or unreachable in V24 code.ccp import graph (0 reachable eve_public protos)."
+  },
+  "feat:quasar.industry": {
+   "disposition": "dead_client_code",
+   "evidence": "All 24 Quasar proto files in package 'industry' (e.g. eveProto/generated/eve/industry/activity_pb2.pyj, eveProto/generated/eve/industry/blueprint/blueprint_pb2.pyj) are internal eve/* or unreachable in V24 code.ccp import graph (0 reachable eve_public protos)."
+  },
+  "feat:quasar.inventory": {
+   "disposition": "client_local",
+   "evidence": "Package 'inventory' has 0 reachable Request/Notice RPC protos in V24 code.ccp; its 4 reachable eve_public proto(s) (eveProto/generated/eve_public/inventory/generic_item_pb2.pyj, eveProto/generated/eve_public/inventory/generic_item_type_pb2.pyj, eveProto/generated/eve_public/inventory/group/group_pb2.pyj) are shared identifier/value types tested via their quasar:* rows."
+  },
+  "feat:quasar.isk": {
+   "disposition": "client_local",
+   "evidence": "Package 'isk' has 0 reachable Request/Notice RPC protos in V24 code.ccp; its 2 reachable eve_public proto(s) (eveProto/generated/eve_public/isk/isk_pb2.pyj, eveProto/generated/eve_public/isk/wallet/wallet_pb2.pyj) are shared identifier/value types tested via their quasar:* rows."
+  },
+  "feat:quasar.killmail": {
+   "disposition": "dead_client_code",
+   "evidence": "All 2 Quasar proto files in package 'killmail' (e.g. eveProto/generated/eve/killmail/api/events_pb2.pyj, eveProto/generated/eve/killmail/killmail_pb2.pyj) are internal eve/* or unreachable in V24 code.ccp import graph (0 reachable eve_public protos)."
+  },
+  "feat:quasar.legal": {
+   "disposition": "dead_client_code",
+   "evidence": "All 2 Quasar proto files in package 'legal' (e.g. eveProto/generated/eve/legal/agreement/agreement_pb2.pyj, eveProto/generated/eve/legal/agreement/api/requests_pb2.pyj) are internal eve/* or unreachable in V24 code.ccp import graph (0 reachable eve_public protos)."
+  },
+  "feat:quasar.localization": {
+   "disposition": "client_local",
+   "evidence": "Package 'localization' has 0 reachable Request/Notice RPC protos in V24 code.ccp; its 3 reachable eve_public proto(s) (eveProto/generated/eve_public/localization/cerberus/cerberus_pb2.pyj, eveProto/generated/eve_public/localization/localization_pb2.pyj, eveProto/generated/eve_public/localization/message_pb2.pyj) are shared identifier/value types tested via their quasar:* rows."
+  },
+  "feat:quasar.login": {
+   "disposition": "client_local",
+   "evidence": "Package 'login' has 0 reachable Request/Notice RPC protos in V24 code.ccp; its 1 reachable eve_public proto(s) (eveProto/generated/eve_public/login/milestone_pb2.pyj) are shared identifier/value types tested via their quasar:* rows."
+  },
+  "feat:quasar.loyaltypoints": {
+   "disposition": "client_local",
+   "evidence": "Package 'loyaltypoints' has 0 reachable Request/Notice RPC protos in V24 code.ccp; its 1 reachable eve_public proto(s) (eveProto/generated/eve_public/loyaltypoints/loyaltypoints_pb2.pyj) are shared identifier/value types tested via their quasar:* rows."
+  },
+  "feat:quasar.mail": {
+   "disposition": "dead_client_code",
+   "evidence": "All 5 Quasar proto files in package 'mail' (e.g. eveProto/generated/eve/mail/body_pb2.pyj, eveProto/generated/eve/mail/cspa_pb2.pyj) are internal eve/* or unreachable in V24 code.ccp import graph (0 reachable eve_public protos)."
+  },
+  "feat:quasar.market": {
+   "disposition": "dead_client_code",
+   "evidence": "All 16 Quasar proto files in package 'market' (e.g. eveProto/generated/eve/market/character/order_pb2.pyj, eveProto/generated/eve/market/character/sellorder_pb2.pyj) are internal eve/* or unreachable in V24 code.ccp import graph (0 reachable eve_public protos)."
+  },
+  "feat:quasar.medal": {
+   "disposition": "dead_client_code",
+   "evidence": "All 3 Quasar proto files in package 'medal' (e.g. eveProto/generated/eve/medal/event_pb2.pyj, eveProto/generated/eve/medal/issued_pb2.pyj) are internal eve/* or unreachable in V24 code.ccp import graph (0 reachable eve_public protos)."
+  },
+  "feat:quasar.membership": {
+   "disposition": "dead_client_code",
+   "evidence": "All 4 Quasar proto files in package 'membership' (e.g. eveProto/generated/eve/membership/alliance_pb2.pyj, eveProto/generated/eve/membership/corporation_pb2.pyj) are internal eve/* or unreachable in V24 code.ccp import graph (0 reachable eve_public protos)."
+  },
+  "feat:quasar.mission": {
+   "disposition": "client_local",
+   "evidence": "Package 'mission' has 0 reachable Request/Notice RPC protos in V24 code.ccp; its 1 reachable eve_public proto(s) (eveProto/generated/eve_public/mission/mission_pb2.pyj) are shared identifier/value types tested via their quasar:* rows."
+  },
+  "feat:quasar.module": {
+   "disposition": "dead_client_code",
+   "evidence": "All 2 Quasar proto files in package 'module' (e.g. eveProto/generated/eve/module/module_pb2.pyj, eveProto/generated/eve/module/module_type_pb2.pyj) are internal eve/* or unreachable in V24 code.ccp import graph (0 reachable eve_public protos)."
+  },
+  "feat:quasar.monolith": {
+   "disposition": "dead_client_code",
+   "evidence": "All 10 Quasar proto files in package 'monolith' (e.g. eveProto/generated/eve/monolith/api/events_pb2.pyj, eveProto/generated/eve/monolith/character/location_pb2.pyj) are internal eve/* or unreachable in V24 code.ccp import graph (0 reachable eve_public protos)."
+  },
+  "feat:quasar.moon": {
+   "disposition": "dead_client_code",
+   "evidence": "All 1 Quasar proto files in package 'moon' (e.g. eveProto/generated/eve/moon/moon_pb2.pyj) are internal eve/* or unreachable in V24 code.ccp import graph (0 reachable eve_public protos)."
+  },
+  "feat:quasar.narrative": {
+   "disposition": "dead_client_code",
+   "evidence": "All 1 Quasar proto files in package 'narrative' (e.g. eveProto/generated/eve/narrative/api/events_pb2.pyj) are internal eve/* or unreachable in V24 code.ccp import graph (0 reachable eve_public protos)."
+  },
+  "feat:quasar.notification": {
+   "disposition": "dead_client_code",
+   "evidence": "All 4 Quasar proto files in package 'notification' (e.g. eveProto/generated/eve/notification/contact_pb2.pyj, eveProto/generated/eve/notification/notification_pb2.pyj) are internal eve/* or unreachable in V24 code.ccp import graph (0 reachable eve_public protos)."
+  },
+  "feat:quasar.npc": {
+   "disposition": "dead_client_code",
+   "evidence": "All 7 Quasar proto files in package 'npc' (e.g. eveProto/generated/eve/npc/barter_pb2.pyj, eveProto/generated/eve/npc/event_pb2.pyj) are internal eve/* or unreachable in V24 code.ccp import graph (0 reachable eve_public protos)."
+  },
+  "feat:quasar.omega": {
+   "disposition": "client_local",
+   "evidence": "Package 'omega' has 0 reachable Request/Notice RPC protos in V24 code.ccp; its 1 reachable eve_public proto(s) (eveProto/generated/eve_public/omega/benefit_pb2.pyj) are shared identifier/value types tested via their quasar:* rows."
+  },
+  "feat:quasar.ore": {
+   "disposition": "client_local",
+   "evidence": "Package 'ore' has 0 reachable Request/Notice RPC protos in V24 code.ccp; its 2 reachable eve_public proto(s) (eveProto/generated/eve_public/ore/group_pb2.pyj, eveProto/generated/eve_public/ore/ore_type_pb2.pyj) are shared identifier/value types tested via their quasar:* rows."
+  },
+  "feat:quasar.piratestronghold": {
+   "disposition": "dead_client_code",
+   "evidence": "All 2 Quasar proto files in package 'piratestronghold' (e.g. eveProto/generated/eve/piratestronghold/event_pb2.pyj, eveProto/generated/eve/piratestronghold/piratestronghold_type_pb2.pyj) are internal eve/* or unreachable in V24 code.ccp import graph (0 reachable eve_public protos)."
+  },
+  "feat:quasar.planet": {
+   "disposition": "client_local",
+   "evidence": "Package 'planet' has 0 reachable Request/Notice RPC protos in V24 code.ccp; its 2 reachable eve_public proto(s) (eveProto/generated/eve_public/planet/planet_pb2.pyj, eveProto/generated/eve_public/planet/skyhook/skyhook_pb2.pyj) are shared identifier/value types tested via their quasar:* rows."
+  },
+  "feat:quasar.planetinteraction": {
+   "disposition": "dead_client_code",
+   "evidence": "All 8 Quasar proto files in package 'planetinteraction' (e.g. eveProto/generated/eve/planetinteraction/collector/collector_pb2.pyj, eveProto/generated/eve/planetinteraction/colony/colony_pb2.pyj) are internal eve/* or unreachable in V24 code.ccp import graph (0 reachable eve_public protos)."
+  },
+  "feat:quasar.presence": {
+   "disposition": "dead_client_code",
+   "evidence": "All 1 Quasar proto files in package 'presence' (e.g. eveProto/generated/eve_public/presence/api/request_pb2.pyj) are internal eve/* or unreachable in V24 code.ccp import graph (0 reachable eve_public protos)."
+  },
+  "feat:quasar.probe": {
+   "disposition": "dead_client_code",
+   "evidence": "All 2 Quasar proto files in package 'probe' (e.g. eveProto/generated/eve/probe/event_pb2.pyj, eveProto/generated/eve/probe/exploration_scanresult_pb2.pyj) are internal eve/* or unreachable in V24 code.ccp import graph (0 reachable eve_public protos)."
+  },
+  "feat:quasar.projectdiscovery": {
+   "disposition": "dead_client_code",
+   "evidence": "All 1 Quasar proto files in package 'projectdiscovery' (e.g. eveProto/generated/eve/projectdiscovery/event_pb2.pyj) are internal eve/* or unreachable in V24 code.ccp import graph (0 reachable eve_public protos)."
+  },
+  "feat:quasar.pvp": {
+   "disposition": "dead_client_code",
+   "evidence": "All 6 Quasar proto files in package 'pvp' (e.g. eveProto/generated/eve/pvp/provinggrounds/matchtype_pb2.pyj, eveProto/generated/eve/pvp/provinggrounds/provinggrounds_pb2.pyj) are internal eve/* or unreachable in V24 code.ccp import graph (0 reachable eve_public protos)."
+  },
+  "feat:quasar.quasar": {
+   "disposition": "dead_client_code",
+   "evidence": "All 11 Quasar proto files in package 'quasar' (e.g. eveProto/generated/eve/quasar/admin/admin_pb2.pyj, eveProto/generated/eve/quasar/config/api/events_pb2.pyj) are internal eve/* or unreachable in V24 code.ccp import graph (0 reachable eve_public protos)."
+  },
+  "feat:quasar.race": {
+   "disposition": "dead_client_code",
+   "evidence": "All 1 Quasar proto files in package 'race' (e.g. eveProto/generated/eve/race/race_pb2.pyj) are internal eve/* or unreachable in V24 code.ccp import graph (0 reachable eve_public protos)."
+  },
+  "feat:quasar.raffle": {
+   "disposition": "dead_client_code",
+   "evidence": "All 1 Quasar proto files in package 'raffle' (e.g. eveProto/generated/eve/raffle/raffle_pb2.pyj) are internal eve/* or unreachable in V24 code.ccp import graph (0 reachable eve_public protos)."
+  },
+  "feat:quasar.region": {
+   "disposition": "client_local",
+   "evidence": "Package 'region' has 0 reachable Request/Notice RPC protos in V24 code.ccp; its 1 reachable eve_public proto(s) (eveProto/generated/eve_public/region/region_pb2.pyj) are shared identifier/value types tested via their quasar:* rows."
+  },
+  "feat:quasar.school": {
+   "disposition": "dead_client_code",
+   "evidence": "All 1 Quasar proto files in package 'school' (e.g. eveProto/generated/eve/school/school_pb2.pyj) are internal eve/* or unreachable in V24 code.ccp import graph (0 reachable eve_public protos)."
+  },
+  "feat:quasar.search": {
+   "disposition": "dead_client_code",
+   "evidence": "All 1 Quasar proto files in package 'search' (e.g. eveProto/generated/eve/search/tag_pb2.pyj) are internal eve/* or unreachable in V24 code.ccp import graph (0 reachable eve_public protos)."
+  },
+  "feat:quasar.seasonalevent": {
+   "disposition": "dead_client_code",
+   "evidence": "All 1 Quasar proto files in package 'seasonalevent' (e.g. eveProto/generated/eve/seasonalevent/challenge_pb2.pyj) are internal eve/* or unreachable in V24 code.ccp import graph (0 reachable eve_public protos)."
+  },
+  "feat:quasar.securitystatus": {
+   "disposition": "client_local",
+   "evidence": "Package 'securitystatus' has 0 reachable Request/Notice RPC protos in V24 code.ccp; its 1 reachable eve_public proto(s) (eveProto/generated/eve_public/securitystatus/securitystatus_pb2.pyj) are shared identifier/value types tested via their quasar:* rows."
+  },
+  "feat:quasar.ship": {
+   "disposition": "client_local",
+   "evidence": "Package 'ship' has 0 reachable Request/Notice RPC protos in V24 code.ccp; its 3 reachable eve_public proto(s) (eveProto/generated/eve_public/ship/classification_pb2.pyj, eveProto/generated/eve_public/ship/ship_pb2.pyj, eveProto/generated/eve_public/ship/ship_type_pb2.pyj) are shared identifier/value types tested via their quasar:* rows."
+  },
+  "feat:quasar.skill": {
+   "disposition": "client_local",
+   "evidence": "Package 'skill' has 0 reachable Request/Notice RPC protos in V24 code.ccp; its 4 reachable eve_public proto(s) (eveProto/generated/eve_public/skill/plan/certified_pb2.pyj, eveProto/generated/eve_public/skill/plan/milestone_pb2.pyj, eveProto/generated/eve_public/skill/plan/plan_pb2.pyj) are shared identifier/value types tested via their quasar:* rows."
+  },
+  "feat:quasar.solarsystem": {
+   "disposition": "client_local",
+   "evidence": "Package 'solarsystem' has 0 reachable Request/Notice RPC protos in V24 code.ccp; its 1 reachable eve_public proto(s) (eveProto/generated/eve_public/solarsystem/solarsystem_pb2.pyj) are shared identifier/value types tested via their quasar:* rows."
+  },
+  "feat:quasar.spacecomponent": {
+   "disposition": "dead_client_code",
+   "evidence": "All 9 Quasar proto files in package 'spacecomponent' (e.g. eveProto/generated/eve/spacecomponent/deploy/api/events_pb2.pyj, eveProto/generated/eve/spacecomponent/deploy/deploy_pb2.pyj) are internal eve/* or unreachable in V24 code.ccp import graph (0 reachable eve_public protos)."
+  },
+  "feat:quasar.standing": {
+   "disposition": "client_local",
+   "evidence": "Package 'standing' has 0 reachable Request/Notice RPC protos in V24 code.ccp; its 1 reachable eve_public proto(s) (eveProto/generated/eve_public/standing/standing_pb2.pyj) are shared identifier/value types tested via their quasar:* rows."
+  },
+  "feat:quasar.star": {
+   "disposition": "client_local",
+   "evidence": "Package 'star' has 0 reachable Request/Notice RPC protos in V24 code.ccp; its 1 reachable eve_public proto(s) (eveProto/generated/eve_public/star/star_pb2.pyj) are shared identifier/value types tested via their quasar:* rows."
+  },
+  "feat:quasar.starbase": {
+   "disposition": "dead_client_code",
+   "evidence": "All 2 Quasar proto files in package 'starbase' (e.g. eveProto/generated/eve/starbase/starbase_pb2.pyj, eveProto/generated/eve/starbase/starbase_type_pb2.pyj) are internal eve/* or unreachable in V24 code.ccp import graph (0 reachable eve_public protos)."
+  },
+  "feat:quasar.starterspace": {
+   "disposition": "dead_client_code",
+   "evidence": "All 3 Quasar proto files in package 'starterspace' (e.g. eveProto/generated/eve/starterspace/admin/admin_pb2.pyj, eveProto/generated/eve/starterspace/api/events_pb2.pyj) are internal eve/* or unreachable in V24 code.ccp import graph (0 reachable eve_public protos)."
+  },
+  "feat:quasar.station": {
+   "disposition": "client_local",
+   "evidence": "Package 'station' has 0 reachable Request/Notice RPC protos in V24 code.ccp; its 1 reachable eve_public proto(s) (eveProto/generated/eve_public/station/station_pb2.pyj) are shared identifier/value types tested via their quasar:* rows."
+  },
+  "feat:quasar.structure": {
+   "disposition": "client_local",
+   "evidence": "Package 'structure' has 0 reachable Request/Notice RPC protos in V24 code.ccp; its 3 reachable eve_public proto(s) (eveProto/generated/eve_public/structure/group_pb2.pyj, eveProto/generated/eve_public/structure/structure_pb2.pyj, eveProto/generated/eve_public/structure/structure_type_pb2.pyj) are shared identifier/value types tested via their quasar:* rows."
+  },
+  "feat:quasar.tag": {
+   "disposition": "dead_client_code",
+   "evidence": "All 5 Quasar proto files in package 'tag' (e.g. eveProto/generated/eve/tag/api/events_pb2.pyj, eveProto/generated/eve/tag/api/requests_pb2.pyj) are internal eve/* or unreachable in V24 code.ccp import graph (0 reachable eve_public protos)."
+  },
+  "feat:quasar.thirdpartyapi": {
+   "disposition": "dead_client_code",
+   "evidence": "All 1 Quasar proto files in package 'thirdpartyapi' (e.g. eveProto/generated/eve/thirdpartyapi/events_pb2.pyj) are internal eve/* or unreachable in V24 code.ccp import graph (0 reachable eve_public protos)."
+  },
+  "feat:quasar.tournament": {
+   "disposition": "dead_client_code",
+   "evidence": "All 7 Quasar proto files in package 'tournament' (e.g. eveProto/generated/eve/tournament/arena/api/requests_pb2.pyj, eveProto/generated/eve/tournament/arena/arena_pb2.pyj) are internal eve/* or unreachable in V24 code.ccp import graph (0 reachable eve_public protos)."
+  },
+  "feat:quasar.ui": {
+   "disposition": "client_local",
+   "evidence": "Package 'ui' has 0 reachable Request/Notice RPC protos in V24 code.ccp; its 4 reachable eve_public proto(s) (eveProto/generated/eve_public/ui/annotation_pb2.pyj, eveProto/generated/eve_public/ui/contenttag_pb2.pyj, eveProto/generated/eve_public/ui/icon_pb2.pyj) are shared identifier/value types tested via their quasar:* rows."
+  },
+  "feat:quasar.universe": {
+   "disposition": "dead_client_code",
+   "evidence": "All 3 Quasar proto files in package 'universe' (e.g. eveProto/generated/eve/universe/constellation_pb2.pyj, eveProto/generated/eve/universe/navigation/location_pb2.pyj) are internal eve/* or unreachable in V24 code.ccp import graph (0 reachable eve_public protos)."
+  },
+  "feat:quasar.vanguard": {
+   "disposition": "dead_client_code",
+   "evidence": "All 6 Quasar proto files in package 'vanguard' (e.g. eveProto/generated/eve/vanguard/commission/assignment/admin/api/requests_pb2.pyj, eveProto/generated/eve/vanguard/commission/assignment/api/events_pb2.pyj) are internal eve/* or unreachable in V24 code.ccp import graph (0 reachable eve_public protos)."
+  },
+  "feat:quasar.vendors": {
+   "disposition": "dead_client_code",
+   "evidence": "All 19 Quasar proto files in package 'vendors' (e.g. eveProto/generated/eve/vendors/contentful/asset/asset_pb2.pyj, eveProto/generated/eve/vendors/epic/api_pb2.pyj) are internal eve/* or unreachable in V24 code.ccp import graph (0 reachable eve_public protos)."
+  },
+  "feat:quasar.war": {
+   "disposition": "dead_client_code",
+   "evidence": "All 2 Quasar proto files in package 'war' (e.g. eveProto/generated/eve/war/entity_pb2.pyj, eveProto/generated/eve/war/war_pb2.pyj) are internal eve/* or unreachable in V24 code.ccp import graph (0 reachable eve_public protos)."
+  },
+  "feat:quasar.wormhole": {
+   "disposition": "dead_client_code",
+   "evidence": "All 1 Quasar proto files in package 'wormhole' (e.g. eveProto/generated/eve/wormhole/wormhole_pb2.pyj) are internal eve/* or unreachable in V24 code.ccp import graph (0 reachable eve_public protos)."
+  },
   "quasar:eveProto/generated/eve/academy/ships/events_pb2.pyj": {
    "class": "unreachable",
    "disposition": "client_local",
@@ -6672,6 +7048,226 @@
    "disposition": "dead_client_code",
    "evidence": "No import path from any non-generated V24.01 client module (direct or via pb2 deps); see _about for method.",
    "namespace": "eve_public"
+  },
+  "rpc:ProjectDiscovery.append": {
+   "disposition": "client_local",
+   "evidence": "Python list .append() method called locally on a returned list/collection (mis-scraped from chained sm.RemoteSvc(...).Get*().append()). Scraped from ProjectDiscovery usage in V24 client code.ccp."
+  },
+  "rpc:ProjectDiscovery.remove": {
+   "disposition": "client_local",
+   "evidence": "Python list/set .remove() method called locally on a returned collection (mis-scraped from chained sm.RemoteSvc(...).Get*().remove()). Scraped from ProjectDiscovery usage in V24 client code.ccp."
+  },
+  "rpc:allianceRegistry.Bind": {
+   "disposition": "client_local",
+   "evidence": "Client-side util.Moniker.Bind() wrapper in carbon/common/script/net/moniker.pyj (resolves/binds via MachoResolveObject/MachoBindObject; never sent as a '.Bind' RPC method). Scraped from allianceRegistry usage in V24 client code.ccp."
+  },
+  "rpc:allianceRegistry.SetSessionCheck": {
+   "disposition": "client_local",
+   "evidence": "Client-side util.Moniker.SetSessionCheck(d) in carbon/common/script/net/moniker.pyj (stores self.sessionCheck dict on the local Moniker proxy; never sent over the wire). Scraped from allianceRegistry usage in V24 client code.ccp."
+  },
+  "rpc:allianceRegistry.description": {
+   "disposition": "client_local",
+   "evidence": "Client-side KeyVal/DBRow .description attribute access on a returned corporation/alliance record (not a remote RPC method). Scraped from allianceRegistry usage in V24 client code.ccp."
+  },
+  "rpc:allianceRegistry.dictatorial": {
+   "disposition": "client_local",
+   "evidence": "Client-side KeyVal/DBRow .dictatorial attribute access on a returned alliance record (not a remote RPC method). Scraped from allianceRegistry usage in V24 client code.ccp."
+  },
+  "rpc:allianceRegistry.url": {
+   "disposition": "client_local",
+   "evidence": "Client-side KeyVal/DBRow .url attribute access on a returned alliance record (not a remote RPC method). Scraped from allianceRegistry usage in V24 client code.ccp."
+  },
+  "rpc:beyonce.Bind": {
+   "disposition": "client_local",
+   "evidence": "Client-side util.Moniker.Bind() wrapper in carbon/common/script/net/moniker.pyj (resolves/binds via MachoResolveObject/MachoBindObject; never sent as a '.Bind' RPC method). Scraped from beyonce usage in V24 client code.ccp."
+  },
+  "rpc:beyonce.SetSessionCheck": {
+   "disposition": "client_local",
+   "evidence": "Client-side util.Moniker.SetSessionCheck(d) in carbon/common/script/net/moniker.pyj (stores self.sessionCheck dict on the local Moniker proxy; never sent over the wire). Scraped from beyonce usage in V24 client code.ccp."
+  },
+  "rpc:beyonce.Unbind": {
+   "disposition": "client_local",
+   "evidence": "Client-side util.Moniker.Unbind() wrapper in carbon/common/script/net/moniker.pyj (clears local bound OID state; never sent as a '.Unbind' RPC method). Scraped from beyonce usage in V24 client code.ccp."
+  },
+  "rpc:billMgr.get": {
+   "disposition": "client_local",
+   "evidence": "Python dict .get() method called locally on a returned dict/cache mapping (mis-scraped from chained sm.RemoteSvc(...).Get*().get()). Scraped from billMgr usage in V24 client code.ccp."
+  },
+  "rpc:bountyProxy.clear_memoized": {
+   "disposition": "client_local",
+   "evidence": "Client-side @Memoize cache invalidation helper (.clear_memoized) on local service/moniker proxy in V24 client; never sent as a remote machoNet RPC. Scraped from bountyProxy usage in V24 client code.ccp."
+  },
+  "rpc:charMgr.SetSessionCheck": {
+   "disposition": "client_local",
+   "evidence": "Client-side util.Moniker.SetSessionCheck(d) in carbon/common/script/net/moniker.pyj (stores self.sessionCheck dict on the local Moniker proxy; never sent over the wire). Scraped from charMgr usage in V24 client code.ccp."
+  },
+  "rpc:charMgr.clear_memoized": {
+   "disposition": "client_local",
+   "evidence": "Client-side @Memoize cache invalidation helper (.clear_memoized) on local service/moniker proxy in V24 client; never sent as a remote machoNet RPC. Scraped from charMgr usage in V24 client code.ccp."
+  },
+  "rpc:corpRegistry.Bind": {
+   "disposition": "client_local",
+   "evidence": "Client-side util.Moniker.Bind() wrapper in carbon/common/script/net/moniker.pyj (resolves/binds via MachoResolveObject/MachoBindObject; never sent as a '.Bind' RPC method). Scraped from corpRegistry usage in V24 client code.ccp."
+  },
+  "rpc:corpRegistry.SetSessionCheck": {
+   "disposition": "client_local",
+   "evidence": "Client-side util.Moniker.SetSessionCheck(d) in carbon/common/script/net/moniker.pyj (stores self.sessionCheck dict on the local Moniker proxy; never sent over the wire). Scraped from corpRegistry usage in V24 client code.ccp."
+  },
+  "rpc:corpRegistry.Unbind": {
+   "disposition": "client_local",
+   "evidence": "Client-side util.Moniker.Unbind() wrapper in carbon/common/script/net/moniker.pyj (clears local bound OID state; never sent as a '.Unbind' RPC method). Scraped from corpRegistry usage in V24 client code.ccp."
+  },
+  "rpc:corpRegistry.clear_memoized": {
+   "disposition": "client_local",
+   "evidence": "Client-side @Memoize cache invalidation helper (.clear_memoized) on local service/moniker proxy in V24 client; never sent as a remote machoNet RPC. Scraped from corpRegistry usage in V24 client code.ccp."
+  },
+  "rpc:corpRegistry.columns": {
+   "disposition": "client_local",
+   "evidence": "Client-side DBRowset/CRowset .columns attribute access on a returned rowset object (mis-scraped from chained sm.RemoteSvc(...).Get*().columns). Scraped from corpRegistry usage in V24 client code.ccp."
+  },
+  "rpc:corpRegistry.header": {
+   "disposition": "client_local",
+   "evidence": "Client-side DBRowset/CRowset .header attribute access on a returned rowset object (mis-scraped from chained sm.RemoteSvc(...).Get*().header). Scraped from corpRegistry usage in V24 client code.ccp."
+  },
+  "rpc:corpRegistry.itervalues": {
+   "disposition": "client_local",
+   "evidence": "Python 2 dict/Rowset .itervalues() method called locally on a returned container (mis-scraped from chained sm.RemoteSvc(...).Get*().itervalues()). Scraped from corpRegistry usage in V24 client code.ccp."
+  },
+  "rpc:corpStationMgr.SetSessionCheck": {
+   "disposition": "client_local",
+   "evidence": "Client-side util.Moniker.SetSessionCheck(d) in carbon/common/script/net/moniker.pyj (stores self.sessionCheck dict on the local Moniker proxy; never sent over the wire). Scraped from corpStationMgr usage in V24 client code.ccp."
+  },
+  "rpc:corpStationMgr.Unbind": {
+   "disposition": "client_local",
+   "evidence": "Client-side util.Moniker.Unbind() wrapper in carbon/common/script/net/moniker.pyj (clears local bound OID state; never sent as a '.Unbind' RPC method). Scraped from corpStationMgr usage in V24 client code.ccp."
+  },
+  "rpc:corpmgr.deleted": {
+   "disposition": "client_local",
+   "evidence": "Client-side KeyVal/DBRow .deleted attribute access on a returned corporation record (not a remote RPC method). Scraped from corpmgr usage in V24 client code.ccp."
+  },
+  "rpc:corpmgr.description": {
+   "disposition": "client_local",
+   "evidence": "Client-side KeyVal/DBRow .description attribute access on a returned corporation/alliance record (not a remote RPC method). Scraped from corpmgr usage in V24 client code.ccp."
+  },
+  "rpc:dogmaIM.SetSessionCheck": {
+   "disposition": "client_local",
+   "evidence": "Client-side util.Moniker.SetSessionCheck(d) in carbon/common/script/net/moniker.pyj (stores self.sessionCheck dict on the local Moniker proxy; never sent over the wire). Scraped from dogmaIM usage in V24 client code.ccp."
+  },
+  "rpc:dynamicResourceCacheMgr.get": {
+   "disposition": "client_local",
+   "evidence": "Python dict .get() method called locally on a returned dict/cache mapping (mis-scraped from chained sm.RemoteSvc(...).Get*().get()). Scraped from dynamicResourceCacheMgr usage in V24 client code.ccp."
+  },
+  "rpc:dynamicResourceCacheMgr.iteritems": {
+   "disposition": "client_local",
+   "evidence": "Python 2 dict/Rowset .iteritems() method called locally on a returned container (mis-scraped from chained sm.RemoteSvc(...).Get*().iteritems()). Scraped from dynamicResourceCacheMgr usage in V24 client code.ccp."
+  },
+  "rpc:entity.SetSessionCheck": {
+   "disposition": "client_local",
+   "evidence": "Client-side util.Moniker.SetSessionCheck(d) in carbon/common/script/net/moniker.pyj (stores self.sessionCheck dict on the local Moniker proxy; never sent over the wire). Scraped from entity usage in V24 client code.ccp."
+  },
+  "rpc:fwWarzoneSolarsystem.iteritems": {
+   "disposition": "client_local",
+   "evidence": "Python 2 dict/Rowset .iteritems() method called locally on a returned container (mis-scraped from chained sm.RemoteSvc(...).Get*().iteritems()). Scraped from fwWarzoneSolarsystem usage in V24 client code.ccp."
+  },
+  "rpc:fwWarzoneSolarsystem.itervalues": {
+   "disposition": "client_local",
+   "evidence": "Python 2 dict/Rowset .itervalues() method called locally on a returned container (mis-scraped from chained sm.RemoteSvc(...).Get*().itervalues()). Scraped from fwWarzoneSolarsystem usage in V24 client code.ccp."
+  },
+  "rpc:fwWarzoneSolarsystem.keys": {
+   "disposition": "client_local",
+   "evidence": "Python dict/Rowset .keys() method called locally on a returned container (mis-scraped from chained sm.RemoteSvc(...).Get*().keys()). Scraped from fwWarzoneSolarsystem usage in V24 client code.ccp."
+  },
+  "rpc:hackingMgr.values": {
+   "disposition": "client_local",
+   "evidence": "Python dict/Rowset .values() method called locally on a returned container (mis-scraped from chained sm.RemoteSvc(...).Get*().values()). Scraped from hackingMgr usage in V24 client code.ccp."
+  },
+  "rpc:insuranceSvc.SetSessionCheck": {
+   "disposition": "client_local",
+   "evidence": "Client-side util.Moniker.SetSessionCheck(d) in carbon/common/script/net/moniker.pyj (stores self.sessionCheck dict on the local Moniker proxy; never sent over the wire). Scraped from insuranceSvc usage in V24 client code.ccp."
+  },
+  "rpc:invbroker.SetSessionCheck": {
+   "disposition": "client_local",
+   "evidence": "Client-side util.Moniker.SetSessionCheck(d) in carbon/common/script/net/moniker.pyj (stores self.sessionCheck dict on the local Moniker proxy; never sent over the wire). Scraped from invbroker usage in V24 client code.ccp."
+  },
+  "rpc:keeper.Bind": {
+   "disposition": "client_local",
+   "evidence": "Client-side util.Moniker.Bind() wrapper in carbon/common/script/net/moniker.pyj (resolves/binds via MachoResolveObject/MachoBindObject; never sent as a '.Bind' RPC method). Scraped from keeper usage in V24 client code.ccp."
+  },
+  "rpc:mailMgr.iteritems": {
+   "disposition": "client_local",
+   "evidence": "Python 2 dict/Rowset .iteritems() method called locally on a returned container (mis-scraped from chained sm.RemoteSvc(...).Get*().iteritems()). Scraped from mailMgr usage in V24 client code.ccp."
+  },
+  "rpc:mailMgr.itervalues": {
+   "disposition": "client_local",
+   "evidence": "Python 2 dict/Rowset .itervalues() method called locally on a returned container (mis-scraped from chained sm.RemoteSvc(...).Get*().itervalues()). Scraped from mailMgr usage in V24 client code.ccp."
+  },
+  "rpc:mailMgr.keys": {
+   "disposition": "client_local",
+   "evidence": "Python dict/Rowset .keys() method called locally on a returned container (mis-scraped from chained sm.RemoteSvc(...).Get*().keys()). Scraped from mailMgr usage in V24 client code.ccp."
+  },
+  "rpc:notificationMgr.iterkeys": {
+   "disposition": "client_local",
+   "evidence": "Python 2 dict/Rowset .iterkeys() method called locally on a returned container (mis-scraped from chained sm.RemoteSvc(...).Get*().iterkeys()). Scraped from notificationMgr usage in V24 client code.ccp."
+  },
+  "rpc:planetMgr.append": {
+   "disposition": "client_local",
+   "evidence": "Python list .append() method called locally on a returned list/collection (mis-scraped from chained sm.RemoteSvc(...).Get*().append()). Scraped from planetMgr usage in V24 client code.ccp."
+  },
+  "rpc:planetMgr.colonies": {
+   "disposition": "client_local",
+   "evidence": "Client-side attribute access .colonies on planetMgr service/data object (not a remote machoNet RPC method). Scraped from planetMgr usage in V24 client code.ccp."
+  },
+  "rpc:planetMgr.id": {
+   "disposition": "client_local",
+   "evidence": "Client-side attribute access .id on returned planet/colony object (not a remote machoNet RPC method). Scraped from planetMgr usage in V24 client code.ccp."
+  },
+  "rpc:posMgr.SetSessionCheck": {
+   "disposition": "client_local",
+   "evidence": "Client-side util.Moniker.SetSessionCheck(d) in carbon/common/script/net/moniker.pyj (stores self.sessionCheck dict on the local Moniker proxy; never sent over the wire). Scraped from posMgr usage in V24 client code.ccp."
+  },
+  "rpc:pvpFilamentMgr.values": {
+   "disposition": "client_local",
+   "evidence": "Python dict/Rowset .values() method called locally on a returned container (mis-scraped from chained sm.RemoteSvc(...).Get*().values()). Scraped from pvpFilamentMgr usage in V24 client code.ccp."
+  },
+  "rpc:repairSvc.SetSessionCheck": {
+   "disposition": "client_local",
+   "evidence": "Client-side util.Moniker.SetSessionCheck(d) in carbon/common/script/net/moniker.pyj (stores self.sessionCheck dict on the local Moniker proxy; never sent over the wire). Scraped from repairSvc usage in V24 client code.ccp."
+  },
+  "rpc:reprocessingSvc.SetSessionCheck": {
+   "disposition": "client_local",
+   "evidence": "Client-side util.Moniker.SetSessionCheck(d) in carbon/common/script/net/moniker.pyj (stores self.sessionCheck dict on the local Moniker proxy; never sent over the wire). Scraped from reprocessingSvc usage in V24 client code.ccp."
+  },
+  "rpc:ship.SetSessionCheck": {
+   "disposition": "client_local",
+   "evidence": "Client-side util.Moniker.SetSessionCheck(d) in carbon/common/script/net/moniker.pyj (stores self.sessionCheck dict on the local Moniker proxy; never sent over the wire). Scraped from ship usage in V24 client code.ccp."
+  },
+  "rpc:ship.clear_memoized": {
+   "disposition": "client_local",
+   "evidence": "Client-side @Memoize cache invalidation helper (.clear_memoized) on local service/moniker proxy in V24 client; never sent as a remote machoNet RPC. Scraped from ship usage in V24 client code.ccp."
+  },
+  "rpc:structureDirectory.clear_memoized": {
+   "disposition": "client_local",
+   "evidence": "Client-side @Memoize cache invalidation helper (.clear_memoized) on local service/moniker proxy in V24 client; never sent as a remote machoNet RPC. Scraped from structureDirectory usage in V24 client code.ccp."
+  },
+  "rpc:structureSettings.clear_memoized": {
+   "disposition": "client_local",
+   "evidence": "Client-side @Memoize cache invalidation helper (.clear_memoized) on local service/moniker proxy in V24 client; never sent as a remote machoNet RPC. Scraped from structureSettings usage in V24 client code.ccp."
+  },
+  "rpc:warRegistry.Bind": {
+   "disposition": "client_local",
+   "evidence": "Client-side util.Moniker.Bind() wrapper in carbon/common/script/net/moniker.pyj (resolves/binds via MachoResolveObject/MachoBindObject; never sent as a '.Bind' RPC method). Scraped from warRegistry usage in V24 client code.ccp."
+  },
+  "rpc:warRegistry.SetSessionCheck": {
+   "disposition": "client_local",
+   "evidence": "Client-side util.Moniker.SetSessionCheck(d) in carbon/common/script/net/moniker.pyj (stores self.sessionCheck dict on the local Moniker proxy; never sent over the wire). Scraped from warRegistry usage in V24 client code.ccp."
+  },
+  "rpc:warRegistry.Unbind": {
+   "disposition": "client_local",
+   "evidence": "Client-side util.Moniker.Unbind() wrapper in carbon/common/script/net/moniker.pyj (clears local bound OID state; never sent as a '.Unbind' RPC method). Scraped from warRegistry usage in V24 client code.ccp."
+  },
+  "rpc:warStatisticMgr.Bind": {
+   "disposition": "client_local",
+   "evidence": "Client-side util.Moniker.Bind() wrapper in carbon/common/script/net/moniker.pyj (resolves/binds via MachoResolveObject/MachoBindObject; never sent as a '.Bind' RPC method). Scraped from warStatisticMgr usage in V24 client code.ccp."
   }
  }
 }
