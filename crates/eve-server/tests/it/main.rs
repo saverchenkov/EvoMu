@@ -26,6 +26,8 @@ mod esi;
 mod esi_full;
 mod esi_routes;
 mod esi_universe_character;
+mod esi_universe_fw_complete;
+mod esi_universe_sov_complete;
 mod industry;
 mod mining_advanced;
 mod mining_complete;

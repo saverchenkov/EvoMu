@@ -423,11 +423,8 @@ async fn test_esi3_universe_status_meta_dogma_killmails_insurance_fw() {
         &EsiHttpRequest::new("GET", "/v1/sovereignty/campaigns/"),
         200,
     );
-    assert!(campaigns
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|c| c["solar_system_id"] == json!(30_000_142)));
+    // No sovereignty campaign (command-node event) state is active on any sov structure in this fixture.
+    assert_eq!(campaigns, json!([]));
 
     // 10. /v1/wars/, /v1/wars/{war_id}/, /v1/wars/{war_id}/killmails/
     let wars_list = validate_and_json(

@@ -10,6 +10,7 @@ pub mod openapi;
 pub mod router;
 pub mod runtime_state;
 pub mod sample_routes;
+pub mod sov_fw_routes;
 pub mod universe_routes;
 
 pub use openapi::OpenApiSpec;

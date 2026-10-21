@@ -448,6 +448,24 @@ pub fn is_operation_implemented(method: &str, path_pattern: &str) -> bool {
             | ("GET", "/characters/{character_id}/bookmarks")
             | ("GET", "/characters/{character_id}/bookmarks/folders")
             | ("GET", "/incursions")
+            | ("GET", "/meta/changelog")
+            | ("GET", "/sovereignty/campaigns")
+            | ("GET", "/killmails/{killmail_id}/{killmail_hash}")
+            | ("GET", "/universe/graphics")
+            | ("GET", "/universe/graphics/{graphic_id}")
+            | ("GET", "/universe/races")
+            | ("GET", "/universe/stars/{star_id}")
+            | ("GET", "/universe/stations/{station_id}")
+            | ("GET", "/universe/system_jumps")
+            | ("GET", "/universe/system_kills")
+            | ("GET", "/fw/wars")
+            | ("GET", "/fw/stats")
+            | ("GET", "/fw/systems")
+            | ("GET", "/fw/leaderboards")
+            | ("GET", "/fw/leaderboards/characters")
+            | ("GET", "/fw/leaderboards/corporations")
+            | ("GET", "/characters/{character_id}/fw/stats")
+            | ("GET", "/corporations/{corporation_id}/fw/stats")
             | ("GET", "/opportunities/tasks")
             | ("GET", "/opportunities/groups")
             | ("GET", "/characters/{character_id}/opportunities")
@@ -503,15 +521,7 @@ pub fn dispatch_operation(
         return res;
     }
 
-    if let Some(res) = super::economy_routes::dispatch_economy_route(
-        ctx,
-        method,
-        path_pattern,
-        path_params,
-        query_params,
-        claims,
-        page,
-    ) {
+    if let Some(res) = super::sov_fw_routes::dispatch_sov_route(ctx, method, path_pattern) {
         return res;
     }
 
@@ -521,6 +531,18 @@ pub fn dispatch_operation(
         path_pattern,
         path_params,
         query_params,
+    ) {
+        return res;
+    }
+
+    if let Some(res) = super::economy_routes::dispatch_economy_route(
+        ctx,
+        method,
+        path_pattern,
+        path_params,
+        query_params,
+        claims,
+        page,
     ) {
         return res;
     }
@@ -1087,26 +1109,59 @@ pub fn dispatch_operation(
                     }
                 }
                 let declared_str = format_iso8601_utc(w.started_unix);
-                RouteExecutionResult::ok_json(
-                    json!({
-                        "id": w.war_id,
-                        "declared": declared_str,
-                        "started": declared_str,
-                        "mutual": w.mutual,
-                        "open_for_allies": !w.mutual && w.active,
-                        "aggressor": {
-                            "corporation_id": w.aggressor_corp_id,
-                            "ships_killed": aggr_ships_killed,
-                            "isk_destroyed": aggr_isk_destroyed,
-                        },
-                        "defender": {
-                            "corporation_id": w.defender_corp_id,
-                            "ships_killed": def_ships_killed,
-                            "isk_destroyed": def_isk_destroyed,
-                        },
-                    }),
-                    3600,
-                )
+                let started_str = format_iso8601_utc(w.started_unix.saturating_add(86_400));
+                let mut allies = ctx
+                    .esi_state
+                    .war_allies
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .get(&war_id)
+                    .cloned()
+                    .unwrap_or_default();
+                if let Some(aid) = snap
+                    .corporations
+                    .get(&w.defender_corp_id)
+                    .and_then(|c| c.alliance_id)
+                {
+                    if let Some(al) = snap.alliances.get(&aid) {
+                        let mut member_ids: Vec<i64> = al
+                            .member_corp_ids
+                            .iter()
+                            .copied()
+                            .filter(|&cid| cid != w.defender_corp_id && cid != w.aggressor_corp_id)
+                            .collect();
+                        member_ids.sort_unstable();
+                        for cid in member_ids {
+                            let entry = json!({ "corporation_id": cid });
+                            if !allies.contains(&entry) {
+                                allies.push(entry);
+                            }
+                        }
+                    }
+                }
+                let mut body = json!({
+                    "id": w.war_id,
+                    "declared": declared_str,
+                    "started": started_str,
+                    "mutual": w.mutual,
+                    "open_for_allies": !w.mutual && w.active,
+                    "allies": allies,
+                    "aggressor": {
+                        "corporation_id": w.aggressor_corp_id,
+                        "ships_killed": aggr_ships_killed,
+                        "isk_destroyed": aggr_isk_destroyed,
+                    },
+                    "defender": {
+                        "corporation_id": w.defender_corp_id,
+                        "ships_killed": def_ships_killed,
+                        "isk_destroyed": def_isk_destroyed,
+                    },
+                });
+                if !w.active {
+                    body["retracted"] = json!(format_iso8601_utc(w.started_unix.saturating_add(172_800)));
+                    body["finished"] = json!(format_iso8601_utc(w.started_unix.saturating_add(259_200)));
+                }
+                RouteExecutionResult::ok_json(body, 3600)
             })
         }
         ("GET", "/wars/{war_id}/killmails") => {

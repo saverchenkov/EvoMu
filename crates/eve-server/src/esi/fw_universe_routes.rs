@@ -1,13 +1,16 @@
-//! `esi::fw_universe_routes` — Remaining `ESI-3` routes across `Meta`, `Universe`, `Sovereignty`,
-//! `Killmails`, `Loyalty`, and `Faction Warfare` (`ESI-3`).
+//! `esi::fw_universe_routes` — `ESI-3` routes across `Meta`, `Universe`, `Killmails`, `Loyalty`,
+//! and `Faction Warfare`, backed by `SdeRegistry` and live `WorldRepository` state.
 
 #![forbid(unsafe_code)]
 
-use crate::esi::sample_routes::{format_iso8601_utc, RouteExecutionResult};
+use crate::esi::sample_routes::{
+    compute_killmail_hash, format_iso8601_utc, RouteExecutionResult,
+};
 use crate::router::ServerContext;
+use eve_db::InventoryFlag;
 use rusqlite::Connection;
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 fn parse_path_i64(
     path_params: &HashMap<String, String>,
@@ -35,6 +38,19 @@ fn open_sde_conn(ctx: &ServerContext) -> Option<Connection> {
     crate::esi::sample_routes::open_sde_sqlite(ctx)
 }
 
+/// Returns the sorted list of Faction Warfare militia faction IDs from the SDE.
+fn sde_fw_militia_factions(ctx: &ServerContext) -> Vec<i64> {
+    let mut ids: Vec<i64> = ctx
+        .sde
+        .factions
+        .values()
+        .filter(|f| f.militia_corporation_id.is_some() && f.size_factor >= 5.0)
+        .map(|f| f.faction_id as i64)
+        .collect();
+    ids.sort_unstable();
+    ids
+}
+
 pub fn dispatch_fw_universe_route(
     ctx: &ServerContext,
     method: &str,
@@ -45,77 +61,62 @@ pub fn dispatch_fw_universe_route(
     let now = ctx.now_unix();
 
     match (method, path) {
-        ("GET", "/meta/changelog") => Some(RouteExecutionResult::ok_json(
-            json!({
-                "changelog": {
-                    "2025-12-16": [
+        ("GET", "/meta/changelog") => {
+            let spec = crate::esi::openapi::OpenApiSpec::pinned();
+            let mut by_date = serde_json::Map::new();
+            for date in &spec.compatibility_dates {
+                by_date.insert(
+                    date.clone(),
+                    json!([
                         {
-                            "compatibility_date": "2025-12-16",
-                            "description": "Pinned V24.01 ESI OpenAPI 3.1.0 specification",
+                            "compatibility_date": date,
+                            "description": "Pinned V24.01 ESI OpenAPI specification",
                             "is_breaking": false,
                             "method": "GET",
                             "path": "/meta/changelog",
                         }
-                    ]
-                }
-            }),
-            300,
-        )),
+                    ]),
+                );
+            }
+            Some(RouteExecutionResult::ok_json(
+                json!({ "changelog": by_date }),
+                300,
+            ))
+        }
 
+        // Graphic IDs are the SDE `graphicID`s referenced by types (`sde_types.graphic_id`).
         ("GET", "/universe/graphics") => {
             let mut ids: Vec<i64> = ctx
                 .sde
                 .types
-                .keys()
-                .filter(|&&tid| ctx.sde.types.get(&tid).map(|t| t.category_id == 6).unwrap_or(false))
-                .take(200)
-                .map(|&tid| tid as i64)
+                .values()
+                .filter_map(|t| t.graphic_id)
+                .map(i64::from)
                 .collect();
-            if !ids.contains(&587) {
-                ids.push(587);
-            }
             ids.sort_unstable();
             ids.dedup();
             Some(RouteExecutionResult::ok_json(json!(ids), 3600))
         }
 
+        // The client SDE carries graphic IDs on types but not the `graphicIDs` file/SOF records, so
+        // only `graphic_id` (the one required field) is reported for a graphic some type references;
+        // optional file/SOF fields are omitted rather than synthesised.
         ("GET", "/universe/graphics/{graphic_id}") => {
             let graphic_id = match parse_path_i64(path_params, "graphic_id") {
                 Ok(v) => v,
                 Err(e) => return Some(e),
             };
-            let Ok(tid) = u32::try_from(graphic_id) else {
+            let known = u32::try_from(graphic_id)
+                .ok()
+                .is_some_and(|gid| ctx.sde.types.values().any(|t| t.graphic_id == Some(gid)));
+            if !known {
                 return Some(RouteExecutionResult::error(
                     404,
                     format!("Graphic {graphic_id} not found"),
                 ));
-            };
-            let Some(inv_type) = ctx.sde.types.get(&tid) else {
-                return Some(RouteExecutionResult::error(
-                    404,
-                    format!("Graphic {graphic_id} not found"),
-                ));
-            };
-            let race_name = inv_type
-                .race_id
-                .and_then(|rid| ctx.sde.races.get(&rid))
-                .map(|r| r.name.to_lowercase())
-                .unwrap_or_else(|| "caldari".to_string());
-            let hull_name = inv_type
-                .name
-                .to_lowercase()
-                .chars()
-                .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
-                .collect::<String>();
+            }
             Some(RouteExecutionResult::ok_json(
-                json!({
-                    "graphic_id": graphic_id,
-                    "graphic_file": format!("res:/dx9/model/ship/{race_name}/{hull_name}.red"),
-                    "sof_fation_name": format!("{race_name}base"),
-                    "sof_hull_name": hull_name,
-                    "sof_race_name": race_name,
-                    "sof_dna": format!("{hull_name}:{race_name}base:{race_name}"),
-                }),
+                json!({ "graphic_id": graphic_id }),
                 3600,
             ))
         }
@@ -123,16 +124,26 @@ pub fn dispatch_fw_universe_route(
         ("GET", "/universe/races") => {
             let mut races: Vec<_> = ctx.sde.races.values().collect();
             races.sort_by_key(|r| r.race_id);
+            let default_faction_id = ctx
+                .sde
+                .factions
+                .keys()
+                .copied()
+                .min()
+                .unwrap_or_default() as i64;
             let out: Vec<Value> = races
                 .into_iter()
                 .map(|r| {
-                    let alliance_id = match r.race_id {
-                        1 => 500_001_i64, // Caldari State
-                        2 => 500_002_i64, // Minmatar Republic
-                        4 => 500_003_i64, // Amarr Empire
-                        8 => 500_004_i64, // Gallente Federation
-                        _ => 500_005_i64, // Jove Empire
-                    };
+                    // DERIVED: Match each race to its empire/faction in `sde_factions` by name prefix;
+                    // non-playable races without a dedicated faction entry fall back to the lowest SDE faction ID.
+                    let prefix = format!("{} ", r.name);
+                    let alliance_id = ctx
+                        .sde
+                        .factions
+                        .values()
+                        .find(|f| f.name == r.name || f.name.starts_with(&prefix))
+                        .map(|f| f.faction_id as i64)
+                        .unwrap_or(default_faction_id);
                     json!({
                         "race_id": r.race_id as i64,
                         "name": r.name,
@@ -296,58 +307,53 @@ pub fn dispatch_fw_universe_route(
         })),
 
         ("GET", "/universe/system_kills") => Some(ctx.db.with_snapshot(|snap| {
+            let capsule_group_id = ctx
+                .sde
+                .groups
+                .values()
+                .find(|g| g.name == "Capsule")
+                .map(|g| g.group_id);
+            let mut all_systems: BTreeSet<u32> = snap.system_states.keys().copied().collect();
             let mut ship_kills: HashMap<u32, i64> = HashMap::new();
+            let mut pod_kills: HashMap<u32, i64> = HashMap::new();
+            let mut npc_kills: HashMap<u32, i64> = HashMap::new();
             for km in snap.killmails.values() {
-                *ship_kills.entry(km.solar_system_id).or_insert(0) += 1;
+                all_systems.insert(km.solar_system_id);
+                let is_capsule = ctx
+                    .sde
+                    .types
+                    .get(&km.ship_type_id)
+                    .is_some_and(|t| Some(t.group_id) == capsule_group_id);
+                if is_capsule {
+                    *pod_kills.entry(km.solar_system_id).or_insert(0) += 1;
+                } else {
+                    *ship_kills.entry(km.solar_system_id).or_insert(0) += 1;
+                }
             }
-            for &sys_id in snap.system_states.keys() {
-                ship_kills.entry(sys_id).or_insert(0);
+            for (&sys_id, anoms) in &snap.cosmic_anomalies {
+                let cleared = anoms.iter().filter(|a| a.cleared).count() as i64;
+                if cleared > 0 {
+                    all_systems.insert(sys_id);
+                    *npc_kills.entry(sys_id).or_insert(0) += cleared;
+                }
             }
-            let mut entries: Vec<(u32, i64)> = ship_kills.into_iter().collect();
-            entries.sort_by_key(|(sid, _)| *sid);
-            let out: Vec<Value> = entries
+            let out: Vec<Value> = all_systems
                 .into_iter()
-                .map(|(sid, kills)| {
+                .map(|sid| {
                     json!({
                         "system_id": sid as i64,
-                        "ship_kills": kills,
-                        "npc_kills": 0,
-                        "pod_kills": 0,
+                        "ship_kills": ship_kills.get(&sid).copied().unwrap_or(0),
+                        "npc_kills": npc_kills.get(&sid).copied().unwrap_or(0),
+                        "pod_kills": pod_kills.get(&sid).copied().unwrap_or(0),
                     })
                 })
                 .collect();
             RouteExecutionResult::ok_json(json!(out), 3600)
         })),
 
-        ("GET", "/sovereignty/campaigns") => Some(ctx.db.with_snapshot(|snap| {
-            let mut campaigns: Vec<Value> = Vec::new();
-            let mut sys_ids: Vec<u32> = snap.system_states.keys().copied().collect();
-            sys_ids.sort_unstable();
-            for sys_id in sys_ids {
-                if let Some(st) = snap.system_states.get(&sys_id) {
-                    if let Some(aid) = st.sov_alliance_id {
-                        let constellation_id = ctx
-                            .sde
-                            .solar_systems
-                            .get(&sys_id)
-                            .map(|s| s.constellation_id as i64)
-                            .unwrap_or(20_000_020);
-                        campaigns.push(json!({
-                            "campaign_id": (sys_id as i64) * 10 + 1,
-                            "constellation_id": constellation_id,
-                            "solar_system_id": sys_id as i64,
-                            "structure_id": (sys_id as i64) * 100 + 1,
-                            "event_type": "ihub_defense",
-                            "defender_id": aid,
-                            "defender_score": 0.6,
-                            "attackers_score": 0.4,
-                            "start_time": format_iso8601_utc(now),
-                        }));
-                    }
-                }
-            }
-            RouteExecutionResult::ok_json(json!(campaigns), 5)
-        })),
+        ("GET", "/sovereignty/campaigns") => {
+            super::sov_fw_routes::dispatch_sov_route(ctx, method, path)
+        }
 
         ("GET", "/killmails/{killmail_id}/{killmail_hash}") => {
             let killmail_id = match parse_path_i64(path_params, "killmail_id") {
@@ -364,24 +370,128 @@ pub fn dispatch_fw_universe_route(
                         format!("Killmail {killmail_id} not found"),
                     );
                 };
-                let expected_hash =
+                let canonical_hash = compute_killmail_hash(
+                    km.kill_id,
+                    km.victim_character_id,
+                    km.attacker_character_id,
+                    km.ship_type_id,
+                );
+                let legacy_hash =
                     format!("{:040x}", (km.kill_id as u64).wrapping_mul(2_654_435_761));
-                if !killmail_hash.eq_ignore_ascii_case(&expected_hash) {
+                if !killmail_hash.eq_ignore_ascii_case(&canonical_hash)
+                    && !killmail_hash.eq_ignore_ascii_case(&legacy_hash)
+                {
                     return RouteExecutionResult::error(
                         422,
                         format!("Invalid killmail_hash for killmail {killmail_id}"),
                     );
                 }
-                let victim_corp_id = snap
-                    .characters
-                    .get(&km.victim_character_id)
+                let default_npc_corp = ctx
+                    .sde
+                    .npc_corporations
+                    .keys()
+                    .copied()
+                    .min()
+                    .unwrap_or_default();
+                let victim_char = snap.characters.get(&km.victim_character_id);
+                let attacker_char = snap.characters.get(&km.attacker_character_id);
+                let victim_corp_id = victim_char
                     .map(|c| c.corporation_id)
-                    .unwrap_or(1_000_009);
-                let attacker_corp_id = snap
-                    .characters
-                    .get(&km.attacker_character_id)
+                    .unwrap_or(default_npc_corp);
+                let attacker_corp_id = attacker_char
                     .map(|c| c.corporation_id)
-                    .unwrap_or(1_000_009);
+                    .unwrap_or(default_npc_corp);
+                let attacker_sec_status = attacker_char
+                    .map(|c| (c.security_status * 100.0).round() / 100.0)
+                    .unwrap_or(0.5);
+
+                let victim_ship_item = victim_char
+                    .and_then(|c| snap.items.get(&c.active_ship_id))
+                    .filter(|it| it.type_id == km.ship_type_id)
+                    .or_else(|| {
+                        snap.items.values().find(|it| {
+                            it.owner_id == km.victim_character_id && it.type_id == km.ship_type_id
+                        })
+                    });
+                let pos = victim_ship_item
+                    .and_then(|it| snap.item_positions.get(&it.item_id).copied())
+                    .unwrap_or([0.0, 0.0, 0.0]);
+                let items: Vec<Value> = if let Some(ship_it) = victim_ship_item {
+                    let mut contained: Vec<_> = snap
+                        .items
+                        .values()
+                        .filter(|it| it.location_id == ship_it.item_id)
+                        .collect();
+                    contained.sort_by_key(|it| it.item_id);
+                    contained
+                        .into_iter()
+                        .map(|it| {
+                            json!({
+                                "item_type_id": it.type_id as i64,
+                                "flag": it.flag as i64,
+                                "singleton": i64::from(it.singleton),
+                                "quantity_destroyed": it.quantity.max(1) as i64,
+                            })
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+
+                let sde_total_hp = ctx
+                    .sde
+                    .types
+                    .get(&km.ship_type_id)
+                    .map(|t| {
+                        let hull = t.default_attributes.get(&9).copied().unwrap_or(0.0);
+                        let armor = t.default_attributes.get(&265).copied().unwrap_or(0.0);
+                        let shield = t.default_attributes.get(&263).copied().unwrap_or(0.0);
+                        (hull + armor + shield).round() as i64
+                    })
+                    .unwrap_or(0);
+                let damage_total = if sde_total_hp > 0 {
+                    sde_total_hp
+                } else {
+                    (km.total_value_isk / 1_000.0).round().max(1.0) as i64
+                };
+
+                let attacker_ship_item = attacker_char
+                    .and_then(|c| snap.items.get(&c.active_ship_id))
+                    .or_else(|| {
+                        snap.items.values().find(|it| {
+                            it.owner_id == km.attacker_character_id
+                                && ctx
+                                    .sde
+                                    .types
+                                    .get(&it.type_id)
+                                    .is_some_and(|t| t.category_id == 6)
+                        })
+                    });
+                let attacker_ship_type_id = attacker_ship_item
+                    .map(|it| it.type_id)
+                    .unwrap_or(km.ship_type_id) as i64;
+                let attacker_weapon_type_id = attacker_ship_item
+                    .and_then(|ship_it| {
+                        snap.items
+                            .values()
+                            .find(|it| {
+                                it.location_id == ship_it.item_id
+                                    && matches!(
+                                        it.flag,
+                                        InventoryFlag::HiSlot0
+                                            | InventoryFlag::HiSlot1
+                                            | InventoryFlag::HiSlot2
+                                            | InventoryFlag::HiSlot3
+                                            | InventoryFlag::HiSlot4
+                                            | InventoryFlag::HiSlot5
+                                            | InventoryFlag::HiSlot6
+                                            | InventoryFlag::HiSlot7
+                                    )
+                            })
+                            .map(|it| it.type_id as i64)
+                    })
+                    .unwrap_or(attacker_ship_type_id);
+
                 RouteExecutionResult::ok_json(
                     json!({
                         "killmail_id": km.kill_id,
@@ -391,19 +501,19 @@ pub fn dispatch_fw_universe_route(
                             "character_id": km.victim_character_id,
                             "corporation_id": victim_corp_id,
                             "ship_type_id": km.ship_type_id as i64,
-                            "damage_taken": 1250,
-                            "position": { "x": 0.0, "y": 0.0, "z": 0.0 },
-                            "items": [],
+                            "damage_taken": damage_total,
+                            "position": { "x": pos[0], "y": pos[1], "z": pos[2] },
+                            "items": items,
                         },
                         "attackers": [
                             {
                                 "character_id": km.attacker_character_id,
                                 "corporation_id": attacker_corp_id,
-                                "ship_type_id": 587,
-                                "weapon_type_id": 587,
-                                "damage_done": 1250,
+                                "ship_type_id": attacker_ship_type_id,
+                                "weapon_type_id": attacker_weapon_type_id,
+                                "damage_done": damage_total,
                                 "final_blow": true,
-                                "security_status": 0.5,
+                                "security_status": attacker_sec_status,
                             }
                         ],
                     }),
@@ -446,88 +556,17 @@ pub fn dispatch_fw_universe_route(
             Some(RouteExecutionResult::ok_json(json!(offers), 3600))
         }
 
-        ("GET", "/fw/stats") => Some(ctx.db.with_snapshot(|snap| {
-            let mut out = Vec::new();
-            for &fid in &[500_001_i64, 500_002, 500_003, 500_004] {
-                let pilots = snap
-                    .characters
-                    .values()
-                    .filter(|c| c.war_faction_id == Some(fid))
-                    .count() as i64;
-                let kills_total = snap
-                    .killmails
-                    .values()
-                    .filter(|km| {
-                        snap.characters
-                            .get(&km.attacker_character_id)
-                            .and_then(|c| c.war_faction_id)
-                            == Some(fid)
-                    })
-                    .count() as i64;
-                let systems_controlled = ctx
-                    .sde
-                    .regions
-                    .values()
-                    .filter(|r| r.faction_id == Some(fid as u32))
-                    .count() as i64;
-                out.push(json!({
-                    "faction_id": fid,
-                    "pilots": pilots.max(1),
-                    "systems_controlled": systems_controlled.max(1),
-                    "kills": {
-                        "yesterday": kills_total,
-                        "last_week": kills_total,
-                        "total": kills_total,
-                    },
-                    "victory_points": {
-                        "yesterday": 100,
-                        "last_week": 500,
-                        "total": 2500,
-                    }
-                }));
-            }
-            RouteExecutionResult::ok_json(json!(out), 3600)
-        })),
-
-        ("GET", "/fw/systems") => Some(ctx.db.with_snapshot(|snap| {
-            let mut sys_ids: Vec<u32> = snap.system_states.keys().copied().collect();
-            sys_ids.sort_unstable();
-            let mut out = Vec::new();
-            for sid in sys_ids {
-                if let Some(st) = snap.system_states.get(&sid) {
-                    let owner_faction_id = ctx
-                        .sde
-                        .solar_systems
-                        .get(&sid)
-                        .and_then(|s| ctx.sde.regions.get(&s.region_id))
-                        .and_then(|r| r.faction_id)
-                        .unwrap_or(500_001) as i64;
-                    let contested = if st.fw_contested_pct >= 100.0 {
-                        "vulnerable"
-                    } else if st.fw_contested_pct > 0.0 {
-                        "contested"
-                    } else {
-                        "uncontested"
-                    };
-                    let vp = (st.fw_contested_pct * 30.0).round() as i64;
-                    out.push(json!({
-                        "solar_system_id": sid as i64,
-                        "owner_faction_id": owner_faction_id,
-                        "occupier_faction_id": owner_faction_id,
-                        "contested": contested,
-                        "victory_points": vp,
-                        "victory_points_threshold": 3000,
-                    }));
-                }
-            }
-            RouteExecutionResult::ok_json(json!(out), 1800)
-        })),
-
-        ("GET", "/fw/leaderboards") => Some(ctx.db.with_snapshot(|snap| {
-            let entries: Vec<Value> = [500_001_i64, 500_002, 500_003, 500_004]
-                .into_iter()
-                .map(|fid| {
-                    let kills = snap
+        ("GET", "/fw/stats") => {
+            let militia_factions = sde_fw_militia_factions(ctx);
+            Some(ctx.db.with_snapshot(|snap| {
+                let mut out = Vec::new();
+                for fid in militia_factions {
+                    let pilots = snap
+                        .characters
+                        .values()
+                        .filter(|c| c.war_faction_id == Some(fid))
+                        .count() as i64;
+                    let kills_total = snap
                         .killmails
                         .values()
                         .filter(|km| {
@@ -537,52 +576,183 @@ pub fn dispatch_fw_universe_route(
                                 == Some(fid)
                         })
                         .count() as i64;
-                    json!({ "faction_id": fid, "amount": kills })
-                })
-                .collect();
-            RouteExecutionResult::ok_json(
-                json!({
-                    "kills": {
-                        "yesterday": entries,
-                        "last_week": entries,
-                        "active_total": entries,
-                    },
-                    "victory_points": {
-                        "yesterday": entries,
-                        "last_week": entries,
-                        "active_total": entries,
+                    let systems_controlled = ctx
+                        .sde
+                        .regions
+                        .values()
+                        .filter(|r| r.faction_id == Some(fid as u32))
+                        .count() as i64;
+                    let system_vp: i64 = snap
+                        .system_states
+                        .iter()
+                        .filter(|(&sid, _)| {
+                            ctx.sde
+                                .solar_systems
+                                .get(&sid)
+                                .and_then(|s| ctx.sde.regions.get(&s.region_id))
+                                .and_then(|r| r.faction_id)
+                                == Some(fid as u32)
+                        })
+                        .map(|(_, st)| (st.fw_contested_pct * 30.0).round() as i64)
+                        .sum();
+                    let vp_total = system_vp + kills_total * 100;
+                    out.push(json!({
+                        "faction_id": fid,
+                        "pilots": pilots.max(1),
+                        "systems_controlled": systems_controlled.max(1),
+                        "kills": {
+                            "yesterday": kills_total,
+                            "last_week": kills_total,
+                            "total": kills_total,
+                        },
+                        "victory_points": {
+                            "yesterday": vp_total,
+                            "last_week": vp_total,
+                            "total": vp_total,
+                        }
+                    }));
+                }
+                RouteExecutionResult::ok_json(json!(out), 3600)
+            }))
+        }
+
+        ("GET", "/fw/systems") => {
+            let default_militia = sde_fw_militia_factions(ctx)
+                .first()
+                .copied()
+                .unwrap_or(500_001);
+            Some(ctx.db.with_snapshot(|snap| {
+                let mut sys_ids: Vec<u32> = snap.system_states.keys().copied().collect();
+                sys_ids.sort_unstable();
+                let mut out = Vec::new();
+                for sid in sys_ids {
+                    if let Some(st) = snap.system_states.get(&sid) {
+                        let owner_faction_id = ctx
+                            .sde
+                            .solar_systems
+                            .get(&sid)
+                            .and_then(|s| ctx.sde.regions.get(&s.region_id))
+                            .and_then(|r| r.faction_id)
+                            .map(i64::from)
+                            .unwrap_or(default_militia);
+                        let occupier_faction_id = st
+                            .sov_alliance_id
+                            .filter(|&id| {
+                                u32::try_from(id)
+                                    .ok()
+                                    .is_some_and(|fid| ctx.sde.factions.contains_key(&fid))
+                            })
+                            .unwrap_or(owner_faction_id);
+                        let contested = if st.fw_contested_pct >= 100.0 {
+                            "vulnerable"
+                        } else if st.fw_contested_pct > 0.0 {
+                            "contested"
+                        } else {
+                            "uncontested"
+                        };
+                        let vp = (st.fw_contested_pct * 30.0).round() as i64;
+                        out.push(json!({
+                            "solar_system_id": sid as i64,
+                            "owner_faction_id": owner_faction_id,
+                            "occupier_faction_id": occupier_faction_id,
+                            "contested": contested,
+                            "victory_points": vp,
+                            "victory_points_threshold": 3000,
+                        }));
                     }
-                }),
-                3600,
-            )
-        })),
+                }
+                RouteExecutionResult::ok_json(json!(out), 1800)
+            }))
+        }
+
+        ("GET", "/fw/leaderboards") => {
+            let militia_factions = sde_fw_militia_factions(ctx);
+            Some(ctx.db.with_snapshot(|snap| {
+                let mut kill_rows: Vec<(i64, i64)> = militia_factions
+                    .iter()
+                    .map(|&fid| {
+                        let kills = snap
+                            .killmails
+                            .values()
+                            .filter(|km| {
+                                snap.characters
+                                    .get(&km.attacker_character_id)
+                                    .and_then(|c| c.war_faction_id)
+                                    == Some(fid)
+                            })
+                            .count() as i64;
+                        (fid, kills)
+                    })
+                    .collect();
+                kill_rows.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+                let kill_entries: Vec<Value> = kill_rows
+                    .iter()
+                    .map(|&(fid, amount)| json!({ "faction_id": fid, "amount": amount }))
+                    .collect();
+                let vp_entries: Vec<Value> = kill_rows
+                    .iter()
+                    .map(|&(fid, amount)| json!({ "faction_id": fid, "amount": amount * 100 }))
+                    .collect();
+                RouteExecutionResult::ok_json(
+                    json!({
+                        "kills": {
+                            "yesterday": kill_entries,
+                            "last_week": kill_entries,
+                            "active_total": kill_entries,
+                        },
+                        "victory_points": {
+                            "yesterday": vp_entries,
+                            "last_week": vp_entries,
+                            "active_total": vp_entries,
+                        }
+                    }),
+                    3600,
+                )
+            }))
+        }
 
         ("GET", "/fw/leaderboards/characters") => Some(ctx.db.with_snapshot(|snap| {
-            let mut char_ids: Vec<i64> = snap.characters.keys().copied().collect();
-            char_ids.sort_unstable();
-            let entries: Vec<Value> = char_ids
-                .into_iter()
-                .take(10)
+            let mut rows: Vec<(i64, i64)> = snap
+                .characters
+                .keys()
+                .copied()
                 .map(|cid| {
                     let kills = snap
                         .killmails
                         .values()
                         .filter(|km| km.attacker_character_id == cid)
                         .count() as i64;
-                    json!({ "character_id": cid, "amount": kills })
+                    (cid, kills)
+                })
+                .collect();
+            rows.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+            rows.truncate(10);
+            let kill_entries: Vec<Value> = rows
+                .iter()
+                .map(|&(cid, kills)| json!({ "character_id": cid, "amount": kills }))
+                .collect();
+            let vp_entries: Vec<Value> = rows
+                .iter()
+                .map(|&(cid, kills)| {
+                    let lp: i64 = snap
+                        .characters
+                        .get(&cid)
+                        .map(|c| c.loyalty_points.values().copied().sum::<i64>())
+                        .unwrap_or(0);
+                    json!({ "character_id": cid, "amount": lp + kills * 100 })
                 })
                 .collect();
             RouteExecutionResult::ok_json(
                 json!({
                     "kills": {
-                        "yesterday": entries,
-                        "last_week": entries,
-                        "active_total": entries,
+                        "yesterday": kill_entries,
+                        "last_week": kill_entries,
+                        "active_total": kill_entries,
                     },
                     "victory_points": {
-                        "yesterday": entries,
-                        "last_week": entries,
-                        "active_total": entries,
+                        "yesterday": vp_entries,
+                        "last_week": vp_entries,
+                        "active_total": vp_entries,
                     }
                 }),
                 3600,
@@ -590,11 +760,10 @@ pub fn dispatch_fw_universe_route(
         })),
 
         ("GET", "/fw/leaderboards/corporations") => Some(ctx.db.with_snapshot(|snap| {
-            let mut corp_ids: Vec<i64> = snap.corporations.keys().copied().collect();
-            corp_ids.sort_unstable();
-            let entries: Vec<Value> = corp_ids
-                .into_iter()
-                .take(10)
+            let mut rows: Vec<(i64, i64)> = snap
+                .corporations
+                .keys()
+                .copied()
                 .map(|cid| {
                     let kills = snap
                         .killmails
@@ -606,20 +775,30 @@ pub fn dispatch_fw_universe_route(
                                 == Some(cid)
                         })
                         .count() as i64;
-                    json!({ "corporation_id": cid, "amount": kills })
+                    (cid, kills)
                 })
+                .collect();
+            rows.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+            rows.truncate(10);
+            let kill_entries: Vec<Value> = rows
+                .iter()
+                .map(|&(cid, kills)| json!({ "corporation_id": cid, "amount": kills }))
+                .collect();
+            let vp_entries: Vec<Value> = rows
+                .iter()
+                .map(|&(cid, kills)| json!({ "corporation_id": cid, "amount": kills * 100 }))
                 .collect();
             RouteExecutionResult::ok_json(
                 json!({
                     "kills": {
-                        "yesterday": entries,
-                        "last_week": entries,
-                        "active_total": entries,
+                        "yesterday": kill_entries,
+                        "last_week": kill_entries,
+                        "active_total": kill_entries,
                     },
                     "victory_points": {
-                        "yesterday": entries,
-                        "last_week": entries,
-                        "active_total": entries,
+                        "yesterday": vp_entries,
+                        "last_week": vp_entries,
+                        "active_total": vp_entries,
                     }
                 }),
                 3600,
@@ -643,18 +822,24 @@ pub fn dispatch_fw_universe_route(
                     .values()
                     .filter(|km| km.attacker_character_id == char_id)
                     .count() as i64;
+                let vp = ch.loyalty_points.values().copied().sum::<i64>() + kills * 100;
+                let rank = ch
+                    .war_faction_id
+                    .and_then(|fid| ch.standings.get(&fid).copied())
+                    .map(|s| (s.max(0.0).floor() as i64).clamp(1, 9))
+                    .unwrap_or(1);
                 let mut obj = json!({
-                    "current_rank": 1,
-                    "highest_rank": 1,
+                    "current_rank": rank,
+                    "highest_rank": rank,
                     "kills": {
                         "yesterday": kills,
                         "last_week": kills,
                         "total": kills,
                     },
                     "victory_points": {
-                        "yesterday": 0,
-                        "last_week": 0,
-                        "total": 0,
+                        "yesterday": vp,
+                        "last_week": vp,
+                        "total": vp,
                     }
                 });
                 if let Some(fid) = ch.war_faction_id {
@@ -689,22 +874,32 @@ pub fn dispatch_fw_universe_route(
                             == Some(corp_id)
                     })
                     .count() as i64;
-                RouteExecutionResult::ok_json(
-                    json!({
-                        "pilots": corp.members.len() as i64,
-                        "kills": {
-                            "yesterday": kills,
-                            "last_week": kills,
-                            "total": kills,
-                        },
-                        "victory_points": {
-                            "yesterday": 0,
-                            "last_week": 0,
-                            "total": 0,
-                        }
-                    }),
-                    3600,
-                )
+                let vp = kills * 100;
+                let corp_faction = corp
+                    .members
+                    .iter()
+                    .filter_map(|&mid| snap.characters.get(&mid).and_then(|c| c.war_faction_id))
+                    .next();
+                let mut obj = json!({
+                    "pilots": corp.members.len() as i64,
+                    "kills": {
+                        "yesterday": kills,
+                        "last_week": kills,
+                        "total": kills,
+                    },
+                    "victory_points": {
+                        "yesterday": vp,
+                        "last_week": vp,
+                        "total": vp,
+                    }
+                });
+                if let Some(fid) = corp_faction {
+                    if let Some(map) = obj.as_object_mut() {
+                        map.insert("faction_id".to_string(), json!(fid));
+                        map.insert("enlisted_on".to_string(), json!(format_iso8601_utc(now)));
+                    }
+                }
+                RouteExecutionResult::ok_json(obj, 3600)
             }))
         }
 
