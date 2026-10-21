@@ -82,6 +82,35 @@ The RPC tagging work (1,180 tests!) demonstrates thoroughness. The Windows porta
 
 ---
 
+## 30-Minute Check-In (2026-10-21 21:40 UTC)
+
+### Critical Finding: Sequential Work Pattern (Process Violation)
+
+**User feedback received:** Coder is working sequentially without parallelization.
+
+**Issue:** The Coder has been working directly on `main` in a single-threaded pattern, making incremental status updates. This violates AGENTS.md requirements:
+- Post-Phase-1 projects must maintain **≥3 concurrent tracks**
+- Each track needs isolated worktree + subagent
+- Orchestrator coordinates, doesn't implement features
+
+**Action Taken:** Sent PRIORITY DIRECTIVE to Coder with:
+- Clear explanation of the violation
+- Step-by-step instructions for worktree setup
+- Three suggested parallel tracks (T/P/Q)
+- Mandate to switch to parallel delegation immediately
+
+**Status:** Message queued to Coder session, awaiting response.
+
+**Expected Next Steps:**
+1. Coder commits current changes
+2. Creates 3 worktrees (Track T, P, Q)
+3. Launches 3 subagents with proper isolation
+4. Switches to orchestrator role (merge + coordinate)
+
+**Monitoring:** Will check in 15 minutes to verify subagents are launched.
+
+---
+
 ## Context
 - **Platform Migration:** Project being ported from macOS to Windows
 - **New Agent:** Fresh coding agent taking over the Windows port
