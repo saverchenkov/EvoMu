@@ -75,6 +75,10 @@
 - Never bypass macOS Santa or other permission systems.
 - evemu_Crucible is LGPL: re-implement its logic, never copy it.
 
+## Platform-Specific Review Gates
+
+Windows reviews are accepted when pass count ≥528 and all failures match documented blockers (B-1/B-2/B-3: macOS client data dependencies). Claims must state "Windows review; N tests skipped (client data dependencies)". Final gate requires macOS validation with full client data.
+
 ## Pre-flight before every review (mandatory)
 - Before `run_review.py`, run:
   `/usr/bin/python3 .agents/skills/evomu-adversarial-review/scripts/preflight.py --claims /tmp/evomu_claims.md`
