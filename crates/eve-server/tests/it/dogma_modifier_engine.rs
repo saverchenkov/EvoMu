@@ -15,8 +15,6 @@
 //!   - Combat booster drugs & neurotoxin skills
 //!   - Character implants & stacking exemption
 //!
-//! // parity: plan:DG-1
-//! // parity: feat:dogma.modifier-engine
 
 use eve_dogma::{
     aggregate_dbuff_values, compute_ecm_jam_chance, eval_command_burst, eval_energy_neutralizer,
@@ -33,7 +31,6 @@ fn setup_sde() -> SdeRegistry {
 
 #[tokio::test]
 async fn test_dg1_all_domain_modifier_functions_and_isolation() {
-    // parity: plan:DG-1
     // parity: feat:dogma.modifier-engine
     eve_testkit::attest(&["feat:dogma.modifier-engine"]);
 
@@ -263,7 +260,6 @@ async fn test_dg1_all_domain_modifier_functions_and_isolation() {
 
 #[tokio::test]
 async fn test_dg1_stacking_penalty_curve_and_exemptions() {
-    // parity: plan:DG-1
     // parity: feat:dogma.modifier-engine
     eve_testkit::attest(&["feat:dogma.modifier-engine"]);
 
@@ -338,7 +334,6 @@ async fn test_dg1_stacking_penalty_curve_and_exemptions() {
 
 #[tokio::test]
 async fn test_dg1_weapon_upgrades_family() {
-    // parity: plan:DG-1
     // parity: feat:dogma.modifier-engine
     eve_testkit::attest(&["feat:dogma.modifier-engine"]);
 
@@ -407,7 +402,6 @@ async fn test_dg1_weapon_upgrades_family() {
 
 #[tokio::test]
 async fn test_dg1_propulsion_family_ab_mwd_scrambler() {
-    // parity: plan:DG-1
     // parity: feat:dogma.modifier-engine
     eve_testkit::attest(&["feat:dogma.modifier-engine"]);
 
@@ -452,7 +446,6 @@ async fn test_dg1_propulsion_family_ab_mwd_scrambler() {
 
 #[tokio::test]
 async fn test_dg1_energy_neutralizers_and_nosferatu() {
-    // parity: plan:DG-1
     // parity: feat:dogma.modifier-engine
     eve_testkit::attest(&["feat:dogma.modifier-engine"]);
 
@@ -500,7 +493,6 @@ async fn test_dg1_energy_neutralizers_and_nosferatu() {
 
 #[tokio::test]
 async fn test_dg1_electronic_warfare_family() {
-    // parity: plan:DG-1
     // parity: feat:dogma.modifier-engine
     eve_testkit::attest(&["feat:dogma.modifier-engine"]);
 
@@ -566,7 +558,6 @@ async fn test_dg1_electronic_warfare_family() {
 
 #[tokio::test]
 async fn test_dg1_command_bursts_boosters_and_implants() {
-    // parity: plan:DG-1
     // parity: feat:dogma.modifier-engine
     eve_testkit::attest(&["feat:dogma.modifier-engine"]);
 

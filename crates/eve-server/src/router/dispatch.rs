@@ -486,19 +486,6 @@ impl ServerContext {
         ) {
             return res;
         }
-        if let Some(res) = Box::pin(services::fitting_mining_lasers::handle(
-            self,
-            session,
-            bound_entry.as_ref(),
-            effective_service,
-            method,
-            args,
-            kwargs,
-        ))
-        .await
-        {
-            return res;
-        }
         if let Some(res) = Box::pin(services::inventory_fitting::handle(
             self,
             session,

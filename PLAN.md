@@ -108,7 +108,11 @@ To keep this master plan concise while preserving 100% mathematical, schema, and
 
 > **Canonical Task Status Tracker:** See [`docs/ACTION_PLAN.md`](./docs/ACTION_PLAN.md) and [`docs/ACTION_PLAN_STATUS.md`](./docs/ACTION_PLAN_STATUS.md) for the authoritative per-task status (`NOT STARTED` / `PARTIAL` / `DONE`).
 
+<<<<<<< HEAD
 `EvoMu` is organized into **9 dependency-ordered Milestones (`M0` through `M8`)** (current vertical-slice routing in `services/*.rs`: `393/872` V24.01 client candidate methods across the `113` explicit cataloged services [`95/216` with `>=1` exact V24.01 client candidate method + `18` additional cataloged services handled via custom/bridge/Crucible method names = `113/216` explicit cataloged services total; `103/216` returning `UnimplementedRPC`; `731` `(service, method)` handlers across `512` match arms: `377` single-method + `135` multi-method arms]; authoritative per-row parity closure across the `1,230` cataloged RPC methods is governed by `docs/parity/` and [`docs/ACTION_PLAN_STATUS.md`](./docs/ACTION_PLAN_STATUS.md)):
+=======
+`EvoMu` is organized into **9 dependency-ordered Milestones (`M0` through `M8`)** (current vertical-slice routing in `services/*.rs`: `334/813` V24.01 client candidate methods across the `108` explicit cataloged services [`90/216` with `>=1` exact V24.01 client candidate method + `18` additional cataloged services handled via custom/bridge/Crucible method names = `108/216` explicit cataloged services total; `108/216` returning `UnimplementedRPC`; `688` `(service, method)` handlers across `457` match arms: `317` single-method + `140` multi-method arms]; authoritative per-row parity closure across the `1,230` cataloged RPC methods is governed by `docs/parity/` and [`docs/ACTION_PLAN_STATUS.md`](./docs/ACTION_PLAN_STATUS.md)):
+>>>>>>> 4b168ff (DG-1..DG-6: implement Dogma modifier engine, fitting validation, module cycles, and inventory suites)
 
 ### Milestone `M0`: Wire Protocol, Dual-Bus Bridge, Core Kinematics & Server-Logic Indexer (In progress)
 - **Deliverables:**

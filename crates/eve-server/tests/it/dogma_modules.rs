@@ -1,6 +1,5 @@
 //! Phase 4 Dogma and Fitting integration tests (`DG-2`..`DG-6` and Phase 4 Exit Gate).
 
-#![forbid(unsafe_code)]
 
 use crate::common;
 
@@ -81,21 +80,13 @@ fn grant_all_required_skills_for_type(ctx: &ServerContext, char_id: i64, type_id
 
 #[tokio::test]
 async fn test_phase_4_dg2_fit_validation_and_rigs() {
-    // parity: plan:DG-2, feat:fitting.fit-module, feat:fitting.unfit-module, feat:fitting.fit-rig, feat:fitting.fit-subsystems, feat:fitting.max-group-fitted, feat:fitting.max-type-fitted, notify:OnModuleFitted, notify:OnModuleUnfitted, notify:OnModuleAttributeChanges
+    // parity: feat:fitting.fit-module, feat:fitting.unfit-module, feat:fitting.fit-rig, feat:fitting.fit-subsystems, feat:fitting.max-group-fitted, feat:fitting.max-type-fitted, feat:fitting.fittings-save, notify:OnModuleFitted, notify:OnModuleAttributeChanges
+    eve_testkit::attest(&["feat:fitting.fit-module", "feat:fitting.unfit-module", "feat:fitting.fit-rig", "feat:fitting.fit-subsystems", "feat:fitting.max-group-fitted", "feat:fitting.max-type-fitted", "feat:fitting.fittings-save", "notify:OnModuleFitted", "notify:OnModuleAttributeChanges"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let mut sess = SessionState::new(4001);
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
-    ctx.dispatch_rpc(
-        &mut sess,
-        "charUnboundMgr",
-        None,
-        "SelectCharacterID",
-        &[PyRep::Integer(90_000_001)],
-        &kw,
-        None,
-    )
-    .await
+    ctx.dispatch_rpc(&mut sess, "charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(90_000_001)], &kw, None).await
     .expect("SelectCharacterID");
 
     let char_id = 90_000_001i64;
@@ -225,10 +216,31 @@ async fn test_phase_4_dg2_fit_validation_and_rigs() {
     .await
     .expect("Unfit 1MN Afterburner II to hangar while docked");
     let notes = sess.drain_notifications();
-    assert!(
-        notes.iter().any(|(n, _)| n == "OnModuleUnfitted"),
-        "Expected OnModuleUnfitted notification"
-    );
+    // The server sends `OnItemChange(item, {ixLocationID: oldLoc, ixFlag: oldFlag})`; the V24
+    // client's `InventorySvc.OnItemChange` derives `OnModuleUnfitted` when ixFlag left a fitting
+    // flag. The client-local name itself must never come from the server.
+    let unfit_change = notes
+        .iter()
+        .find(|(n, a)| {
+            n == "OnItemChange"
+                && matches!(a.first(), Some(PyRep::KeyVal(kv))
+                    if kv.get("itemID") == Some(&PyRep::Integer(100_000_003)))
+        })
+        .expect("OnItemChange for the unfitted module");
+    let PyRep::KeyVal(row) = &unfit_change.1[0] else { unreachable!() };
+    assert_eq!(row.get("locationID"), Some(&PyRep::Integer(station_id)));
+    assert_eq!(row.get("flagID"), Some(&PyRep::Integer(InventoryFlag::Hangar as i64)));
+    let Some(PyRep::Dict(change)) = unfit_change.1.get(1) else {
+        panic!("OnItemChange change dict expected");
+    };
+    let old_flag = change
+        .iter()
+        .find(|(k, _)| *k == PyRep::Integer(4))
+        .and_then(|(_, v)| v.as_i64())
+        .expect("ixFlag (4) in change dict");
+    assert!((11..=34).contains(&old_flag), "old flag {old_flag} must be a fitting slot");
+    assert!(change.iter().any(|(k, v)| *k == PyRep::Integer(3) && *v == PyRep::Integer(ship_id)));
+    assert!(notes.iter().all(|(n, _)| n != "OnModuleUnfitted"));
 
     // 4. Ship restriction (canFitShipGroup): Assault Damage Control II (47257) cannot fit on Rifter (587)
     seed_item(&ctx, 100_000_801, 47257, char_id, station_id, InventoryFlag::Hangar, 1, true);
@@ -470,6 +482,7 @@ async fn test_phase_4_dg2_fit_validation_and_rigs() {
     );
 
     // Unfitting a rig via MoveItem or DestroyFitting destroys the rig item rather than returning it to hangar
+    let _ = sess.drain_notifications();
     let rig_unfit = ctx
         .dispatch_rpc(
             &mut sess,
@@ -494,6 +507,7 @@ async fn test_phase_4_dg2_fit_validation_and_rigs() {
         ctx.db.with_snapshot(|s| !s.items.contains_key(&100_000_806)),
         "Unfitted rig must be destroyed and removed from inventory"
     );
+    assert_rig_trashed_item_change(&sess.drain_notifications(), 100_000_806, ship_id);
 
     seed_item(&ctx, 100_000_808, 30987, char_id, station_id, InventoryFlag::Hangar, 1, true);
     ctx.dispatch_rpc(
@@ -512,17 +526,10 @@ async fn test_phase_4_dg2_fit_validation_and_rigs() {
     .await
     .expect("Fit second Small Trimark Armor Pump I into RigSlot1");
 
-    ctx.dispatch_rpc(
-        &mut sess,
-        "dogmaIM",
-        None,
-        "DestroyFitting",
-        &[PyRep::Integer(100_000_808)],
-        &kw,
-        None,
-    )
-    .await
+    let _ = sess.drain_notifications();
+    ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "DestroyFitting", &[PyRep::Integer(100_000_808)], &kw, None).await
     .expect("DestroyFitting on rig");
+    assert_rig_trashed_item_change(&sess.drain_notifications(), 100_000_808, ship_id);
     assert!(
         ctx.db.with_snapshot(|s| !s.items.contains_key(&100_000_808)),
         "Destroyed rig must be removed from inventory"
@@ -619,37 +626,59 @@ async fn test_phase_4_dg2_fit_validation_and_rigs() {
     });
     sess.ship_id = Some(ship_id);
 
-    eve_testkit::attest(&[
-        "plan:DG-2",
-        "feat:fitting.fit-module",
-        "feat:fitting.unfit-module",
-        "feat:fitting.fit-rig",
-        "feat:fitting.fit-subsystems",
-        "feat:fitting.max-group-fitted",
-        "feat:fitting.max-type-fitted",
-        "notify:OnModuleFitted",
-        "notify:OnModuleUnfitted",
-        "notify:OnModuleAttributeChanges",
+    // 10. Saved fittings CRUD via charFittingMgr & corpFittingMgr (feat:fitting.fittings-save)
+    let fit_kv = PyRep::keyval([
+        ("name", PyRep::String("DG2 Rifter Brawl".into())),
+        ("description", PyRep::String("Autocannon Rifter".into())),
+        ("shipTypeID", PyRep::Integer(587)),
+        (
+            "fitData",
+            PyRep::List(vec![
+                PyRep::Tuple(vec![
+                    PyRep::Integer(2889),
+                    PyRep::Integer(InventoryFlag::HiSlot0 as i64),
+                    PyRep::Integer(1),
+                ]),
+                PyRep::Tuple(vec![
+                    PyRep::Integer(438),
+                    PyRep::Integer(InventoryFlag::MedSlot0 as i64),
+                    PyRep::Integer(1),
+                ]),
+            ]),
+        ),
     ]);
+    let saved_id = ctx.dispatch_rpc(&mut sess, "charFittingMgr", None, "SaveFitting", &[PyRep::Integer(char_id), fit_kv.clone()], &kw, None).await
+        .expect("charFittingMgr.SaveFitting")
+        .as_i64()
+        .expect("saved fitting ID");
+    assert!(saved_id > 0);
+    let char_fits = ctx.dispatch_rpc(&mut sess, "charFittingMgr", None, "GetFittings", &[PyRep::Integer(char_id)], &kw, None).await
+        .expect("charFittingMgr.GetFittings");
+    assert!(
+        matches!(char_fits, PyRep::Rowset { ref rows, .. } if !rows.is_empty()),
+        "charFittingMgr.GetFittings must return saved fitting"
+    );
+    ctx.dispatch_rpc(&mut sess, "charFittingMgr", None, "DeleteFitting", &[PyRep::Integer(char_id), PyRep::Integer(saved_id)], &kw, None).await
+    .expect("charFittingMgr.DeleteFitting");
+
+    let corp_id = sess.corporation_id.unwrap_or(1_000_009);
+    let corp_fit_id = ctx.dispatch_rpc(&mut sess, "corpFittingMgr", None, "SaveFitting", &[PyRep::Integer(corp_id), fit_kv], &kw, None).await
+        .expect("corpFittingMgr.SaveFitting")
+        .as_i64()
+        .expect("corp fitting ID");
+    ctx.dispatch_rpc(&mut sess, "corpFittingMgr", None, "DeleteFitting", &[PyRep::Integer(corp_id), PyRep::Integer(corp_fit_id)], &kw, None).await
+    .expect("corpFittingMgr.DeleteFitting");
 }
 
 #[tokio::test]
 async fn test_phase_4_dg3_online_offline_and_persistence() {
-    // parity: plan:DG-3, feat:fitting.online-offline, rpc:dogmaIM.SetModuleOnline, rpc:dogmaIM.TakeModuleOffline, notify:OnModuleOnlineChange, notify:OnModuleAttributeChanges
+    // parity: feat:fitting.online-offline, rpc:dogmaIM.SetModuleOnline, rpc:dogmaIM.TakeModuleOffline, notify:OnModuleAttributeChanges
+    eve_testkit::attest(&["feat:fitting.online-offline", "rpc:dogmaIM.SetModuleOnline", "rpc:dogmaIM.TakeModuleOffline", "notify:OnModuleAttributeChanges"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let mut sess = SessionState::new(4002);
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
-    ctx.dispatch_rpc(
-        &mut sess,
-        "charUnboundMgr",
-        None,
-        "SelectCharacterID",
-        &[PyRep::Integer(90_000_001)],
-        &kw,
-        None,
-    )
-    .await
+    ctx.dispatch_rpc(&mut sess, "charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(90_000_001)], &kw, None).await
     .expect("SelectCharacterID");
 
     let char_id = 90_000_001i64;
@@ -694,24 +723,34 @@ async fn test_phase_4_dg3_online_offline_and_persistence() {
 
     // 2. Call dogmaIM.SetModuleOnline -> updates CPU/PG, persists true, and emits OnModuleOnlineChange + OnModuleAttributeChanges
     let _ = sess.drain_notifications();
-    ctx.dispatch_rpc(
-        &mut sess,
-        "dogmaIM",
-        None,
-        "SetModuleOnline",
-        &[PyRep::Integer(ship_id), PyRep::Integer(ab_id)],
-        &kw,
-        None,
-    )
-    .await
+    ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "SetModuleOnline", &[PyRep::Integer(ship_id), PyRep::Integer(ab_id)], &kw, None).await
     .expect("SetModuleOnline");
     assert_eq!(
         ctx.db.with_snapshot(|s| s.module_online_states.get(&ab_id).copied()),
         Some(true)
     );
     let notes = sess.drain_notifications();
-    assert!(notes.iter().any(|(n, _)| n == "OnModuleOnlineChange"));
-    assert!(notes.iter().any(|(n, _)| n == "OnModuleAttributeChanges"));
+    // `OnModuleAttributeChanges([('OnModuleAttributeChange', ownerID, itemKey, attributeID, time,
+    // newValue, oldValue)])`: the V24 client's godma `ApplyAttributeChange` derives
+    // `OnModuleOnlineChange` from `attributeIsOnline` (2). The derived name is never sent.
+    let mac = notes
+        .iter()
+        .find(|(n, _)| n == "OnModuleAttributeChanges")
+        .expect("OnModuleAttributeChanges");
+    let Some(PyRep::List(changes)) = mac.1.first() else {
+        panic!("OnModuleAttributeChanges(changes) list expected, got {:?}", mac.1);
+    };
+    assert_eq!(changes.len(), 1);
+    let PyRep::Tuple(t) = &changes[0] else { panic!("change tuple expected") };
+    assert_eq!(t.len(), 7);
+    assert_eq!(t[0], PyRep::String("OnModuleAttributeChange".into()));
+    assert_eq!(t[1], PyRep::Integer(char_id));
+    assert_eq!(t[2], PyRep::Integer(ab_id));
+    assert_eq!(t[3], PyRep::Integer(2));
+    assert!(matches!(t[4], PyRep::Integer(ft) if ft > 116_444_736_000_000_000));
+    assert_eq!(t[5], PyRep::Real(1.0));
+    assert_eq!(t[6], PyRep::Real(0.0));
+    assert!(notes.iter().all(|(n, _)| n != "OnModuleOnlineChange"));
 
     // Rebuild from snapshot to prove persistence across cache invalidation
     ctx.ship_fittings.write().unwrap().remove(&ship_id);
@@ -730,16 +769,7 @@ async fn test_phase_4_dg3_online_offline_and_persistence() {
     );
 
     // 3. Call dogmaIM.TakeModuleOffline -> drops CPU/PG load and persists false
-    ctx.dispatch_rpc(
-        &mut sess,
-        "dogmaIM",
-        None,
-        "TakeModuleOffline",
-        &[PyRep::Integer(ship_id), PyRep::Integer(ab_id)],
-        &kw,
-        None,
-    )
-    .await
+    ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "TakeModuleOffline", &[PyRep::Integer(ship_id), PyRep::Integer(ab_id)], &kw, None).await
     .expect("TakeModuleOffline");
     assert_eq!(
         ctx.db.with_snapshot(|s| s.module_online_states.get(&ab_id).copied()),
@@ -771,44 +801,16 @@ async fn test_phase_4_dg3_online_offline_and_persistence() {
     .await
     .expect("Fit second 1MN Afterburner I offline");
 
-    ctx.dispatch_rpc(
-        &mut sess,
-        "dogmaIM",
-        None,
-        "SetModuleOnline",
-        &[PyRep::Integer(ship_id), PyRep::Integer(100_000_821)],
-        &kw,
-        None,
-    )
-    .await
+    ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "SetModuleOnline", &[PyRep::Integer(ship_id), PyRep::Integer(100_000_821)], &kw, None).await
     .expect("Online second 1MN Afterburner I");
-    let second_online = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "dogmaIM",
-            None,
-            "SetModuleOnline",
-            &[PyRep::Integer(ship_id), PyRep::Integer(ab_id)],
-            &kw,
-            None,
-        )
-        .await;
+    let second_online = ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "SetModuleOnline", &[PyRep::Integer(ship_id), PyRep::Integer(ab_id)], &kw, None).await;
     assert!(
         second_online
             .expect_err("Second propulsion module online must fail maxGroupOnline")
             .message
             .contains("MaxGroupOnlineExceeded")
     );
-    ctx.dispatch_rpc(
-        &mut sess,
-        "dogmaIM",
-        None,
-        "TakeModuleOffline",
-        &[PyRep::Integer(ship_id), PyRep::Integer(100_000_821)],
-        &kw,
-        None,
-    )
-    .await
+    ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "TakeModuleOffline", &[PyRep::Integer(ship_id), PyRep::Integer(100_000_821)], &kw, None).await
     .expect("Offline second 1MN Afterburner I before space test");
 
     // 5. In-space 75% capacitor check on SetModuleOnline
@@ -817,62 +819,26 @@ async fn test_phase_4_dg3_online_offline_and_persistence() {
         .expect("Undock");
     let sys = ctx.systems.get_or_spawn(30_000_142);
     sys.set_capacitor(ship_id, 100.0).await.expect("set_capacitor 100.0");
-    let low_cap_err = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "dogmaIM",
-            None,
-            "SetModuleOnline",
-            &[PyRep::Integer(ship_id), PyRep::Integer(ab_id)],
-            &kw,
-            None,
-        )
-        .await;
+    let low_cap_err = ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "SetModuleOnline", &[PyRep::Integer(ship_id), PyRep::Integer(ab_id)], &kw, None).await;
     assert_eq!(
         low_cap_err.expect_err("SetModuleOnline below 75% cap in space must fail").code,
         "NotEnoughCapacitorToOnline"
     );
 
     sys.set_capacitor(ship_id, 250.0).await.expect("set_capacitor 250.0");
-    ctx.dispatch_rpc(
-        &mut sess,
-        "dogmaIM",
-        None,
-        "SetModuleOnline",
-        &[PyRep::Integer(ship_id), PyRep::Integer(ab_id)],
-        &kw,
-        None,
-    )
-    .await
+    ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "SetModuleOnline", &[PyRep::Integer(ship_id), PyRep::Integer(ab_id)], &kw, None).await
     .expect("SetModuleOnline with full capacitor in space");
-
-    eve_testkit::attest(&[
-        "plan:DG-3",
-        "feat:fitting.online-offline",
-        "rpc:dogmaIM.SetModuleOnline",
-        "rpc:dogmaIM.TakeModuleOffline",
-        "notify:OnModuleOnlineChange",
-        "notify:OnModuleAttributeChanges",
-    ]);
 }
 
 #[tokio::test]
 async fn test_phase_4_dg5_targeting_lock_and_break() {
-    // parity: plan:DG-5, feat:dogma.targeting-lock, feat:dogma.targeting-break, notify:OnTarget, notify:OnTargetClear, notify:OnTargets
+    // parity: feat:dogma.targeting-lock, feat:dogma.targeting-break, notify:OnTarget, notify:OnTargetClear
+    eve_testkit::attest(&["feat:dogma.targeting-lock", "feat:dogma.targeting-break", "notify:OnTarget", "notify:OnTargetClear"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let mut sess = SessionState::new(4003);
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
-    ctx.dispatch_rpc(
-        &mut sess,
-        "charUnboundMgr",
-        None,
-        "SelectCharacterID",
-        &[PyRep::Integer(90_000_001)],
-        &kw,
-        None,
-    )
-    .await
+    ctx.dispatch_rpc(&mut sess, "charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(90_000_001)], &kw, None).await
     .expect("SelectCharacterID");
 
     let ship_id = 100_000_001i64;
@@ -937,17 +903,7 @@ async fn test_phase_4_dg5_targeting_lock_and_break() {
     .expect("spawn far target");
 
     // 1. Out-of-range target (50 km > Rifter maxTargetRange 22.5 km) must fail
-    let far_res = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "dogmaIM",
-            None,
-            "AddTarget",
-            &[PyRep::Integer(far_target_id)],
-            &kw,
-            None,
-        )
-        .await;
+    let far_res = ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "AddTarget", &[PyRep::Integer(far_target_id)], &kw, None).await;
     let far_err = far_res.expect_err("AddTarget beyond maxTargetRange must fail");
     assert_eq!(far_err.code, "TargetingFailed");
     assert!(far_err.message.contains("maxTargetRange"));
@@ -978,17 +934,7 @@ async fn test_phase_4_dg5_targeting_lock_and_break() {
     let _ = sess.drain_notifications();
     let expected_sec = eve_destiny::combat::compute_lock_time_seconds(660.0, 35.0);
     assert!(expected_sec > 1.0 && expected_sec < 5.0);
-    let add_ret = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "dogmaIM",
-            None,
-            "AddTarget",
-            &[PyRep::Integer(near_target_id)],
-            &kw,
-            None,
-        )
-        .await
+    let add_ret = ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "AddTarget", &[PyRep::Integer(near_target_id)], &kw, None).await
         .expect("AddTarget near_target_id");
     let PyRep::KeyVal(add_kv) = add_ret else {
         panic!("Expected KeyVal from AddTarget, got {add_ret:?}");
@@ -1001,7 +947,27 @@ async fn test_phase_4_dg5_targeting_lock_and_break() {
     assert!((lock_ms - expected_sec * 1000.0).abs() < 1.0);
     let notes = sess.drain_notifications();
     assert!(notes.iter().any(|(n, _)| n == "OnTarget"));
-    assert!(notes.iter().any(|(n, _)| n == "OnTargets"));
+    // `OnMultiEvent([(('OnTarget', 'add', targetID, reason), groupKey)])`: the V24 client's
+    // `Godma.OnMultiEvent` derives `OnTargets`; the derived name is never sent by the server.
+    let multi = notes
+        .iter()
+        .find(|(n, _)| n == "OnMultiEvent")
+        .expect("OnMultiEvent carrying OnTarget");
+    let Some(PyRep::List(events)) = multi.1.first() else {
+        panic!("OnMultiEvent(events) list expected");
+    };
+    let PyRep::Tuple(entry) = &events[0] else { panic!("(event, key) tuple expected") };
+    assert_eq!(entry.len(), 2);
+    assert_eq!(
+        entry[0],
+        PyRep::Tuple(vec![
+            PyRep::String("OnTarget".into()),
+            PyRep::String("add".into()),
+            PyRep::Integer(near_target_id),
+            PyRep::String(String::new()),
+        ])
+    );
+    assert!(notes.iter().all(|(n, _)| n != "OnTargets"));
 
     let locks_before = sys.get_target_locks(ship_id).await.expect("get_target_locks");
     assert_eq!(locks_before.len(), 1);
@@ -1016,16 +982,7 @@ async fn test_phase_4_dg5_targeting_lock_and_break() {
 
     // 4. RemoveTarget & ClearTargets
     let _ = sess.drain_notifications();
-    ctx.dispatch_rpc(
-        &mut sess,
-        "dogmaIM",
-        None,
-        "RemoveTarget",
-        &[PyRep::Integer(near_target_id)],
-        &kw,
-        None,
-    )
-    .await
+    ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "RemoveTarget", &[PyRep::Integer(near_target_id)], &kw, None).await
     .expect("RemoveTarget");
     assert!(
         sess.drain_notifications().iter().any(|(n, _)| n == "OnTarget"),
@@ -1033,16 +990,7 @@ async fn test_phase_4_dg5_targeting_lock_and_break() {
     );
     assert!(sys.get_target_locks(ship_id).await.unwrap().is_empty());
 
-    ctx.dispatch_rpc(
-        &mut sess,
-        "dogmaIM",
-        None,
-        "AddTarget",
-        &[PyRep::Integer(near_target_id)],
-        &kw,
-        None,
-    )
-    .await
+    ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "AddTarget", &[PyRep::Integer(near_target_id)], &kw, None).await
     .expect("Re-add target");
     let _ = sess.drain_notifications();
     ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "ClearTargets", &[], &kw, None)
@@ -1057,16 +1005,7 @@ async fn test_phase_4_dg5_targeting_lock_and_break() {
     assert!(sys.get_target_locks(ship_id).await.unwrap().is_empty());
 
     // 5. Automatic lock break when target warps away or attacker enters warp (feat:dogma.targeting-break)
-    ctx.dispatch_rpc(
-        &mut sess,
-        "dogmaIM",
-        None,
-        "AddTarget",
-        &[PyRep::Integer(near_target_id)],
-        &kw,
-        None,
-    )
-    .await
+    ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "AddTarget", &[PyRep::Integer(near_target_id)], &kw, None).await
     .expect("AddTarget before target warp break");
     for _ in 0..4 {
         sys.step_manual(1.0).await.expect("step lock");
@@ -1111,16 +1050,7 @@ async fn test_phase_4_dg5_targeting_lock_and_break() {
         .expect("stop target");
 
     // Re-lock and verify entering warp clears all locks on the warping attacker ship
-    ctx.dispatch_rpc(
-        &mut sess,
-        "dogmaIM",
-        None,
-        "AddTarget",
-        &[PyRep::Integer(near_target_id)],
-        &kw,
-        None,
-    )
-    .await
+    ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "AddTarget", &[PyRep::Integer(near_target_id)], &kw, None).await
     .expect("AddTarget before attacker warp break");
     assert_eq!(sys.get_target_locks(ship_id).await.unwrap().len(), 1);
     sys.set_movement_mode(
@@ -1144,739 +1074,18 @@ async fn test_phase_4_dg5_targeting_lock_and_break() {
         sys.get_target_locks(ship_id).await.unwrap().is_empty(),
         "Target locks must drop immediately when ship enters warp"
     );
-
-    eve_testkit::attest(&[
-        "plan:DG-5",
-        "feat:dogma.targeting-lock",
-        "feat:dogma.targeting-break",
-        "notify:OnTarget",
-        "notify:OnTargetClear",
-        "notify:OnTargets",
-    ]);
 }
 
-#[tokio::test]
-async fn test_phase_4_dg6_ammo_loading_and_weapon_grouping() {
-    // parity: plan:DG-6, feat:fitting.ammo-load, feat:fitting.ammo-unload, feat:fitting.weapon-grouping, feat:modules.scripts-swap, rpc:dogmaIM.LoadAmmo, rpc:dogmaIM.UnloadAmmo, rpc:dogmaIM.LinkWeapons, rpc:dogmaIM.LinkAllWeapons, rpc:dogmaIM.UnlinkModule, rpc:dogmaIM.UnlinkAllModules, rpc:dogmaIM.PeelAndLink, rpc:dogmaIM.MergeModuleGroups, rpc:dogmaIM.DestroyWeaponBank
-    let ctx = ServerContext::new();
-    let kw = HashMap::new();
-    let mut sess = SessionState::new(4004);
-    common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
-    ctx.dispatch_rpc(
-        &mut sess,
-        "charUnboundMgr",
-        None,
-        "SelectCharacterID",
-        &[PyRep::Integer(90_000_001)],
-        &kw,
-        None,
-    )
-    .await
-    .expect("SelectCharacterID");
-
-    let char_id = 90_000_001i64;
-    let ship_id = 100_000_001i64;
-    let station_id = 60_003_760i64;
-    for tid in [2889u32, 183, 12625, 1978, 28999, 29001] {
-        grant_all_required_skills_for_type(&ctx, char_id, tid);
-    }
-
-    // Fit 2 additional 200mm AutoCannon II (2889) into HiSlot1 (28) and HiSlot2 (29)
-    let t1_id = 100_000_005i64; // already in HiSlot0 (27)
-    let t2_id = 100_000_831i64;
-    let t3_id = 100_000_832i64;
-    seed_item(&ctx, t2_id, 2889, char_id, station_id, InventoryFlag::Hangar, 1, true);
-    seed_item(&ctx, t3_id, 2889, char_id, station_id, InventoryFlag::Hangar, 1, true);
-    ctx.dispatch_rpc(
-        &mut sess,
-        "invbroker",
-        None,
-        "Add",
-        &[
-            PyRep::Integer(t2_id),
-            PyRep::Integer(ship_id),
-            PyRep::Integer(InventoryFlag::HiSlot1 as i64),
-        ],
-        &kw,
-        None,
-    )
-    .await
-    .expect("Fit second 200mm AutoCannon II");
-    ctx.dispatch_rpc(
-        &mut sess,
-        "invbroker",
-        None,
-        "Add",
-        &[
-            PyRep::Integer(t3_id),
-            PyRep::Integer(ship_id),
-            PyRep::Integer(InventoryFlag::HiSlot2 as i64),
-        ],
-        &kw,
-        None,
-    )
-    .await
-    .expect("Fit third 200mm AutoCannon II");
-
-    // 1. Exercise all 7 weapon-grouping RPCs
-    ctx.dispatch_rpc(
-        &mut sess,
-        "dogmaIM",
-        None,
-        "LinkWeapons",
-        &[
-            PyRep::Integer(ship_id),
-            PyRep::Integer(t1_id),
-            PyRep::Integer(t2_id),
-        ],
-        &kw,
-        None,
-    )
-    .await
-    .expect("LinkWeapons");
-    ctx.dispatch_rpc(
-        &mut sess,
-        "dogmaIM",
-        None,
-        "PeelAndLink",
-        &[
-            PyRep::Integer(ship_id),
-            PyRep::Integer(t3_id),
-            PyRep::Integer(t2_id),
-        ],
-        &kw,
-        None,
-    )
-    .await
-    .expect("PeelAndLink");
-    ctx.dispatch_rpc(
-        &mut sess,
-        "dogmaIM",
-        None,
-        "MergeModuleGroups",
-        &[
-            PyRep::Integer(ship_id),
-            PyRep::Integer(t1_id),
-            PyRep::Integer(t3_id),
-        ],
-        &kw,
-        None,
-    )
-    .await
-    .expect("MergeModuleGroups");
-    ctx.dispatch_rpc(
-        &mut sess,
-        "dogmaIM",
-        None,
-        "UnlinkModule",
-        &[PyRep::Integer(ship_id), PyRep::Integer(t3_id)],
-        &kw,
-        None,
-    )
-    .await
-    .expect("UnlinkModule");
-    ctx.dispatch_rpc(
-        &mut sess,
-        "dogmaIM",
-        None,
-        "DestroyWeaponBank",
-        &[PyRep::Integer(ship_id), PyRep::Integer(t1_id)],
-        &kw,
-        None,
-    )
-    .await
-    .expect("DestroyWeaponBank");
-    ctx.dispatch_rpc(
-        &mut sess,
-        "dogmaIM",
-        None,
-        "LinkAllWeapons",
-        &[PyRep::Integer(ship_id)],
-        &kw,
-        None,
-    )
-    .await
-    .expect("LinkAllWeapons");
-    ctx.dispatch_rpc(
-        &mut sess,
-        "dogmaIM",
-        None,
-        "UnlinkAllModules",
-        &[PyRep::Integer(ship_id)],
-        &kw,
-        None,
-    )
-    .await
-    .expect("UnlinkAllModules");
-    // Re-link all 3 turrets into one bank for grouped ammo loading
-    ctx.dispatch_rpc(
-        &mut sess,
-        "dogmaIM",
-        None,
-        "LinkAllWeapons",
-        &[PyRep::Integer(ship_id)],
-        &kw,
-        None,
-    )
-    .await
-    .expect("LinkAllWeapons re-link");
-    assert_eq!(
-        ctx.db.with_snapshot(|s| {
-            s.weapon_banks
-                .get(&ship_id)
-                .and_then(|b| b.get(&t1_id))
-                .map(Vec::len)
-        }),
-        Some(3),
-        "All 3 200mm AutoCannon II turrets must be in master turret's bank"
-    );
-
-    // 2. Load Fusion S (183, vol=0.0025, range mult=0.5) into the 3-turret bank via dogmaIM.LoadAmmo
-    let fusion_stack_id = 100_000_833i64;
-    seed_item(
-        &ctx,
-        fusion_stack_id,
-        183,
-        char_id,
-        ship_id,
-        InventoryFlag::Cargo,
-        500,
-        false,
-    );
-    let load_ret = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "dogmaIM",
-            None,
-            "LoadAmmo",
-            &[
-                PyRep::Integer(ship_id),
-                PyRep::List(vec![PyRep::Integer(t1_id)]),
-                PyRep::List(vec![PyRep::Integer(fusion_stack_id)]),
-                PyRep::Integer(ship_id),
-            ],
-            &kw,
-            None,
-        )
-        .await
-        .expect("LoadAmmo Fusion S");
-
-    let PyRep::KeyVal(load_dict) = load_ret else {
-        panic!("Expected KeyVal from LoadAmmo, got {load_ret:?}");
-    };
-    assert_eq!(
-        load_dict.get("reloadTimeMs"),
-        Some(&PyRep::Real(10_000.0)),
-        "Expected reloadTimeMs = 10000.0 from SDE attr 1795"
-    );
-    assert_eq!(
-        ctx.db
-            .with_snapshot(|s| s.items.get(&fusion_stack_id).map(|i| i.quantity)),
-        Some(140),
-        "500 - 3*120 = 140 rounds must remain in cargo"
-    );
-
-    // Verify Fusion S charge modifier (effect 596: ammoInfluenceRange, PreMul 0.5 on maxRange 54)
-    let fit_fusion = ctx
-        .get_or_rebuild_ship_fitting(char_id, ship_id)
-        .expect("fit_fusion");
-    let mod_state_fusion =
-        fit_fusion.build_effective_module_state(t1_id, 2889, false, &ctx.sde);
-    let range_with_fusion = mod_state_fusion.get_attribute(attr_ids::MAX_RANGE, &ctx.sde);
-    assert!(
-        (range_with_fusion - 600.0).abs() < 0.1,
-        "Expected Fusion S to halve 200mm AutoCannon II maxRange from 1200 to 600, got {range_with_fusion}"
-    );
-
-    // 3. UnloadAmmo from the bank back to cargo
-    ctx.dispatch_rpc(
-        &mut sess,
-        "dogmaIM",
-        None,
-        "UnloadAmmo",
-        &[
-            PyRep::Integer(ship_id),
-            PyRep::List(vec![PyRep::Integer(t1_id)]),
-            PyRep::Tuple(vec![
-                PyRep::Integer(ship_id),
-                PyRep::Integer(InventoryFlag::Cargo as i64),
-            ]),
-        ],
-        &kw,
-        None,
-    )
-    .await
-    .expect("UnloadAmmo");
-    let fit_unloaded = ctx
-        .get_or_rebuild_ship_fitting(char_id, ship_id)
-        .expect("fit_unloaded");
-    let mod_state_unloaded =
-        fit_unloaded.build_effective_module_state(t1_id, 2889, false, &ctx.sde);
-    assert!(
-        (mod_state_unloaded.get_attribute(attr_ids::MAX_RANGE, &ctx.sde) - 1200.0).abs() < 0.1,
-        "Unloaded turret maxRange must return to 1200.0"
-    );
-
-    // 4. Scripted module script loading & swapping (feat:modules.scripts-swap):
-    // Tracking Computer II (1978, MedSlot0=19) loads Optimal Range Script (28999) and swaps to Tracking Speed Script (29001).
-    let tc_id = 100_000_834i64;
-    let opt_script_id = 100_000_835i64;
-    let trk_script_id = 100_000_836i64;
-    seed_item(&ctx, tc_id, 1978, char_id, station_id, InventoryFlag::Hangar, 1, true);
-    seed_item(&ctx, opt_script_id, 28999, char_id, ship_id, InventoryFlag::Cargo, 1, false);
-    seed_item(&ctx, trk_script_id, 29001, char_id, ship_id, InventoryFlag::Cargo, 1, false);
-    ctx.dispatch_rpc(
-        &mut sess,
-        "invbroker",
-        None,
-        "Add",
-        &[
-            PyRep::Integer(tc_id),
-            PyRep::Integer(ship_id),
-            PyRep::Integer(InventoryFlag::MedSlot0 as i64),
-        ],
-        &kw,
-        None,
-    )
-    .await
-    .expect("Fit Tracking Computer II into MedSlot0");
-
-    ctx.dispatch_rpc(
-        &mut sess,
-        "dogmaIM",
-        None,
-        "LoadAmmo",
-        &[
-            PyRep::Integer(ship_id),
-            PyRep::List(vec![PyRep::Integer(tc_id)]),
-            PyRep::List(vec![PyRep::Integer(opt_script_id)]),
-            PyRep::Integer(ship_id),
-        ],
-        &kw,
-        None,
-    )
-    .await
-    .expect("Load Optimal Range Script into Tracking Computer II");
-
-    let fit_opt_script = ctx
-        .get_or_rebuild_ship_fitting(char_id, ship_id)
-        .expect("fit_opt_script");
-    let tc_state_opt = fit_opt_script.build_effective_module_state(tc_id, 1978, false, &ctx.sde);
-    assert!(
-        (tc_state_opt.get_attribute(351, &ctx.sde) - 15.0).abs() < 0.1,
-        "Optimal Range Script must double maxRangeBonus (351) from 7.5 to 15.0"
-    );
-    assert!(
-        tc_state_opt.get_attribute(767, &ctx.sde).abs() < 0.1,
-        "Optimal Range Script must zero trackingSpeedBonus (767)"
-    );
-
-    // Swap directly to Tracking Speed Script (29001) via LoadAmmo (automatically unloads Optimal Range Script to cargo)
-    ctx.dispatch_rpc(
-        &mut sess,
-        "dogmaIM",
-        None,
-        "LoadAmmo",
-        &[
-            PyRep::Integer(ship_id),
-            PyRep::List(vec![PyRep::Integer(tc_id)]),
-            PyRep::List(vec![PyRep::Integer(trk_script_id)]),
-            PyRep::Integer(ship_id),
-        ],
-        &kw,
-        None,
-    )
-    .await
-    .expect("Swap to Tracking Speed Script in Tracking Computer II");
-
-    let fit_trk_script = ctx
-        .get_or_rebuild_ship_fitting(char_id, ship_id)
-        .expect("fit_trk_script");
-    let tc_state_trk = fit_trk_script.build_effective_module_state(tc_id, 1978, false, &ctx.sde);
-    assert!(
-        tc_state_trk.get_attribute(351, &ctx.sde).abs() < 0.1,
-        "Tracking Speed Script must zero maxRangeBonus (351)"
-    );
-    assert!(
-        (tc_state_trk.get_attribute(767, &ctx.sde) - 30.0).abs() < 0.1,
-        "Tracking Speed Script must double trackingSpeedBonus (767) from 15.0 to 30.0"
-    );
-
-    eve_testkit::attest(&[
-        "plan:DG-6",
-        "feat:fitting.ammo-load",
-        "feat:fitting.ammo-unload",
-        "feat:fitting.weapon-grouping",
-        "feat:modules.scripts-swap",
-        "rpc:dogmaIM.LoadAmmo",
-        "rpc:dogmaIM.UnloadAmmo",
-        "rpc:dogmaIM.LinkWeapons",
-        "rpc:dogmaIM.LinkAllWeapons",
-        "rpc:dogmaIM.UnlinkModule",
-        "rpc:dogmaIM.UnlinkAllModules",
-        "rpc:dogmaIM.PeelAndLink",
-        "rpc:dogmaIM.MergeModuleGroups",
-        "rpc:dogmaIM.DestroyWeaponBank",
-    ]);
-}
-
-#[tokio::test]
-async fn test_phase_4_dg4_and_exit_gate_full_cycle_journey() {
-    // parity: plan:DG-4, feat:dogma.module-cycle, notify:OnGodmaShipEffect, notify:OnModuleActivated, notify:OnModulesDeactivating
-    let ctx = ServerContext::new();
-    let kw = HashMap::new();
-    let mut sess = SessionState::new(4005);
-    common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
-    ctx.dispatch_rpc(
-        &mut sess,
-        "charUnboundMgr",
-        None,
-        "SelectCharacterID",
-        &[PyRep::Integer(90_000_001)],
-        &kw,
-        None,
-    )
-    .await
-    .expect("SelectCharacterID");
-
-    let char_id = 90_000_001i64;
-    let ship_id = 100_000_001i64;
-    let station_id = 60_003_760i64;
-    for tid in [439u32, 2889, 183, 30987] {
-        grant_all_required_skills_for_type(&ctx, char_id, tid);
-    }
-    // Remove Navigation skill so base Rifter max_velocity is unmodified 365.0 m/s
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(entry) = snap.skills.get_mut(&char_id) {
-            entry.remove(&3449);
-        }
-    });
-    ctx.ship_fittings.write().unwrap().remove(&ship_id);
-
-    // 1. Fit 1MN Afterburner I (439) in MedSlot0, second 200mm AutoCannon II (2889) in HiSlot1, and Small Trimark Armor Pump I (30987) in RigSlot0
-    let ab_id = 100_000_850i64;
-    let t1_id = 100_000_005i64;
-    let t2_id = 100_000_851i64;
-    let rig_id = 100_000_852i64;
-    let ammo_id = 100_000_853i64;
-    seed_item(&ctx, ab_id, 439, char_id, station_id, InventoryFlag::Hangar, 1, true);
-    seed_item(&ctx, t2_id, 2889, char_id, station_id, InventoryFlag::Hangar, 1, true);
-    seed_item(&ctx, rig_id, 30987, char_id, station_id, InventoryFlag::Hangar, 1, true);
-    seed_item(&ctx, ammo_id, 183, char_id, ship_id, InventoryFlag::Cargo, 500, false);
-
-    ctx.dispatch_rpc(
-        &mut sess,
-        "invbroker",
-        None,
-        "Add",
-        &[
-            PyRep::Integer(ab_id),
-            PyRep::Integer(ship_id),
-            PyRep::Integer(InventoryFlag::MedSlot0 as i64),
-        ],
-        &kw,
-        None,
-    )
-    .await
-    .expect("Fit 1MN Afterburner I");
-    ctx.dispatch_rpc(
-        &mut sess,
-        "invbroker",
-        None,
-        "Add",
-        &[
-            PyRep::Integer(t2_id),
-            PyRep::Integer(ship_id),
-            PyRep::Integer(InventoryFlag::HiSlot1 as i64),
-        ],
-        &kw,
-        None,
-    )
-    .await
-    .expect("Fit second 200mm AutoCannon II");
-    ctx.dispatch_rpc(
-        &mut sess,
-        "invbroker",
-        None,
-        "Add",
-        &[
-            PyRep::Integer(rig_id),
-            PyRep::Integer(ship_id),
-            PyRep::Integer(InventoryFlag::RigSlot0 as i64),
-        ],
-        &kw,
-        None,
-    )
-    .await
-    .expect("Fit Small Trimark Armor Pump I");
-
-    // Link both turrets and load Fusion S (183) into both
-    ctx.dispatch_rpc(
-        &mut sess,
-        "dogmaIM",
-        None,
-        "LinkAllWeapons",
-        &[PyRep::Integer(ship_id)],
-        &kw,
-        None,
-    )
-    .await
-    .expect("LinkAllWeapons");
-    ctx.dispatch_rpc(
-        &mut sess,
-        "dogmaIM",
-        None,
-        "LoadAmmo",
-        &[
-            PyRep::Integer(ship_id),
-            PyRep::List(vec![PyRep::Integer(t1_id)]),
-            PyRep::List(vec![PyRep::Integer(ammo_id)]),
-            PyRep::Integer(ship_id),
-        ],
-        &kw,
-        None,
-    )
-    .await
-    .expect("LoadAmmo Fusion S");
-
-    // 2. Undock into Jita (30_000_142) and spawn a target within weapon range (2,000 m)
-    ctx.dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None)
-        .await
-        .expect("Undock");
-    let sys = ctx.systems.get_or_spawn(30_000_142);
-    let (_, ship_ball) = sys
-        .get_ball_snapshot(ship_id)
-        .await
-        .expect("get_ball_snapshot")
-        .expect("ship ball");
-
-    let target_id = 990_000_020i64;
-    sys.spawn_ball_with_combat(
-        Ball {
-            id: target_id,
-            type_id: 587,
-            position: DVec3::new(
-                ship_ball.position.x + 2_000.0,
-                ship_ball.position.y,
-                ship_ball.position.z,
-            ),
-            velocity: DVec3::ZERO,
-            max_velocity: 300.0,
-            inertia: 3.2,
-            mass: 1_350_000.0,
-            radius: 35.0,
-            speed_fraction: 0.0,
-            mode: MovementMode::Stop,
-        },
-        CombatState::default(),
-    )
-    .await
-    .expect("spawn target");
-
-    // 3. Lock target via dogmaIM.AddTarget and step until locked
-    ctx.dispatch_rpc(
-        &mut sess,
-        "dogmaIM",
-        None,
-        "AddTarget",
-        &[PyRep::Integer(target_id)],
-        &kw,
-        None,
-    )
-    .await
-    .expect("AddTarget");
-    for _ in 0..4 {
-        sys.step_manual(1.0).await.expect("sys.step_manual lock");
-    }
-    let locks = sys.get_target_locks(ship_id).await.unwrap();
-    assert!(locks[0].locked);
-
-    // 4. Activate 1MN Afterburner I (ab_id) and linked 200mm AutoCannon II (t1_id) via dogmaIM.Activate
-    let _ = sess.drain_notifications();
-    ctx.dispatch_rpc(
-        &mut sess,
-        "dogmaIM",
-        None,
-        "Activate",
-        &[
-            PyRep::Integer(ab_id),
-            PyRep::String("moduleBonusAfterburner".into()),
-            PyRep::None,
-            PyRep::Integer(1),
-        ],
-        &kw,
-        None,
-    )
-    .await
-    .expect("Activate 1MN Afterburner I");
-
-    let (_, ship_ball_boosted) = sys
-        .get_ball_snapshot(ship_id)
-        .await
-        .unwrap()
-        .expect("boosted ship ball");
-    let ship_combat_boosted = sys
-        .get_combat_state(ship_id)
-        .await
-        .unwrap()
-        .expect("ship combat state");
-    assert!(
-        ship_ball_boosted.max_velocity > 600.0,
-        "Expected 1MN Afterburner I to boost ship max_velocity above 600 m/s, got {}",
-        ship_ball_boosted.max_velocity
-    );
-    // Base 1MN Afterburner I capNeed is 20 GJ; Afterburner V (skill 3450, -10%/lvl) reduces it by 50% to 10 GJ (250 -> 240)
-    assert!(
-        (ship_combat_boosted.capacitor - 240.0).abs() < 0.1,
-        "Expected initial Afterburner activation with Afterburner V to drain 10 GJ (250 -> 240), got {}",
-        ship_combat_boosted.capacitor
-    );
-
-    ctx.dispatch_rpc(
-        &mut sess,
-        "dogmaIM",
-        None,
-        "Activate",
-        &[
-            PyRep::Integer(t1_id),
-            PyRep::String("projectileFired".into()),
-            PyRep::Integer(target_id),
-            PyRep::Integer(1),
-        ],
-        &kw,
-        None,
-    )
-    .await
-    .expect("Activate linked 200mm AutoCannon II");
-
-    let act_notes = sess.drain_notifications();
-    assert!(act_notes.iter().any(|(n, _)| n == "OnGodmaShipEffect"));
-    assert!(act_notes.iter().any(|(n, _)| n == "OnModuleActivated"));
-
-    // Both linked turrets (HiSlot0=27, HiSlot1=28) must have consumed 1 round on activation (120 -> 119)
-    let charges_after_init: Vec<i32> = ctx.db.with_snapshot(|s| {
-        s.items
-            .values()
-            .filter(|i| i.location_id == ship_id && i.type_id == 183 && (i.flag as u16 == 27 || i.flag as u16 == 28))
-            .map(|i| i.quantity)
-            .collect()
-    });
-    assert_eq!(charges_after_init, vec![119, 119]);
-
-    // 5. Step SystemActor 4 seconds -> turret cycle completes (3,750 ms), consumes a second round (119 -> 118), and damages target
-    for _ in 0..4 {
-        sys.step_manual(1.0).await.expect("sys.step_manual turret cycle");
-    }
-    let charges_after_cycle: Vec<i32> = ctx.db.with_snapshot(|s| {
-        s.items
-            .values()
-            .filter(|i| i.location_id == ship_id && i.type_id == 183 && (i.flag as u16 == 27 || i.flag as u16 == 28))
-            .map(|i| i.quantity)
-            .collect()
-    });
-    assert_eq!(
-        charges_after_cycle,
-        vec![118, 118],
-        "Linked turrets must consume 1 round each per completed SystemActor cycle"
-    );
-    let target_combat_after = sys
-        .get_combat_state(target_id)
-        .await
-        .unwrap()
-        .expect("target combat state");
-    assert!(
-        target_combat_after.shield_hp < target_combat_after.max_shield_hp,
-        "Target shield HP must decrease after turret cycle completion"
-    );
-
-    // 6. Deactivate Afterburner -> emits OnModulesDeactivating + OnGodmaShipEffect and restores base max_velocity (365 m/s)
-    let _ = sess.drain_notifications();
-    ctx.dispatch_rpc(
-        &mut sess,
-        "dogmaIM",
-        None,
-        "Deactivate",
-        &[
-            PyRep::Integer(ab_id),
-            PyRep::String("moduleBonusAfterburner".into()),
-        ],
-        &kw,
-        None,
-    )
-    .await
-    .expect("Deactivate 1MN Afterburner I");
-    let deact_notes = sess.drain_notifications();
-    assert!(deact_notes.iter().any(|(n, _)| n == "OnModulesDeactivating"));
-    assert!(deact_notes.iter().any(|(n, _)| n == "OnGodmaShipEffect"));
-
-    let (_, ship_ball_restored) = sys
-        .get_ball_snapshot(ship_id)
-        .await
-        .unwrap()
-        .expect("restored ship ball");
-    assert!(
-        (ship_ball_restored.max_velocity - 365.0).abs() < 0.1,
-        "Expected ship max_velocity to return to 365.0 after Afterburner deactivation, got {}",
-        ship_ball_restored.max_velocity
-    );
-
-    // 7. Single-cycle activation (repeat = 0) automatically deactivates at cycle end (7,500 ms)
-    ctx.dispatch_rpc(
-        &mut sess,
-        "dogmaIM",
-        None,
-        "Activate",
-        &[
-            PyRep::Integer(ab_id),
-            PyRep::String("moduleBonusAfterburner".into()),
-            PyRep::None,
-            PyRep::Integer(0),
-        ],
-        &kw,
-        None,
-    )
-    .await
-    .expect("Activate 1MN Afterburner I with repeat=0");
-    for _ in 0..8 {
-        sys.step_manual(1.0).await.expect("sys.step_manual single cycle");
-    }
-    let (_, ship_ball_single_cycle) = sys
-        .get_ball_snapshot(ship_id)
-        .await
-        .unwrap()
-        .expect("single cycle ship ball");
-    assert!(
-        (ship_ball_single_cycle.max_velocity - 365.0).abs() < 0.1,
-        "Expected repeat=0 Afterburner to auto-deactivate at cycle end and restore 365.0 m/s, got {}",
-        ship_ball_single_cycle.max_velocity
-    );
-
-    eve_testkit::attest(&[
-        "plan:DG-4",
-        "feat:dogma.module-cycle",
-        "notify:OnGodmaShipEffect",
-        "notify:OnModuleActivated",
-        "notify:OnModulesDeactivating",
-    ]);
-}
 
 #[tokio::test]
 async fn test_phase_4_modifier_engine_stacking_penalty_and_skills() {
     // parity: feat:dogma.modifier-engine, feat:fitting.stacking-penalty, feat:modules.nanofiber-overdrive, feat:skills.skill-bonus-application
+    eve_testkit::attest(&["feat:dogma.modifier-engine", "feat:fitting.stacking-penalty", "feat:modules.nanofiber-overdrive", "feat:skills.skill-bonus-application"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let mut sess = SessionState::new(4006);
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
-    ctx.dispatch_rpc(
-        &mut sess,
-        "charUnboundMgr",
-        None,
-        "SelectCharacterID",
-        &[PyRep::Integer(90_000_001)],
-        &kw,
-        None,
-    )
-    .await
+    ctx.dispatch_rpc(&mut sess, "charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(90_000_001)], &kw, None).await
     .expect("SelectCharacterID");
 
     let char_id = 90_000_001i64;
@@ -1965,11 +1174,30 @@ async fn test_phase_4_modifier_engine_stacking_penalty_and_skills() {
         (actual_cap - expected_cap).abs() < 1e-4,
         "Expected cargo capacity {expected_cap}, got {actual_cap}"
     );
+}
 
-    eve_testkit::attest(&[
-        "feat:dogma.modifier-engine",
-        "feat:fitting.stacking-penalty",
-        "feat:modules.nanofiber-overdrive",
-        "feat:skills.skill-bonus-application",
-    ]);
+
+/// A destroyed fitted item is announced as `OnItemChange(item, {ixLocationID: ship, ixFlag: rigSlot})`
+/// with the item now in `locationJunkyard` (10) / `flagJunkyardTrashed` (147); the V24 client's
+/// `InventorySvc.OnItemChange` derives `OnModuleUnfitted` from it.
+fn assert_rig_trashed_item_change(notes: &[(String, Vec<PyRep>)], item_id: i64, ship_id: i64) {
+    let (_, args) = notes
+        .iter()
+        .find(|(n, a)| {
+            n == "OnItemChange"
+                && matches!(a.first(), Some(PyRep::KeyVal(kv)) if kv.get("itemID") == Some(&PyRep::Integer(item_id)))
+        })
+        .unwrap_or_else(|| panic!("OnItemChange for destroyed rig {item_id}: {notes:?}"));
+    let PyRep::KeyVal(row) = &args[0] else { unreachable!() };
+    assert_eq!(row.get("locationID"), Some(&PyRep::Integer(10)));
+    assert_eq!(row.get("flagID"), Some(&PyRep::Integer(147)));
+    let Some(PyRep::Dict(change)) = args.get(1) else { panic!("change dict expected") };
+    assert!(change.iter().any(|(k, v)| *k == PyRep::Integer(3) && *v == PyRep::Integer(ship_id)));
+    let old_flag = change
+        .iter()
+        .find(|(k, _)| *k == PyRep::Integer(4))
+        .and_then(|(_, v)| v.as_i64())
+        .expect("ixFlag in change");
+    assert!((92..=99).contains(&old_flag), "old flag {old_flag} must be a rig slot");
+    assert!(notes.iter().all(|(n, _)| n != "OnModuleUnfitted"));
 }

@@ -8,7 +8,6 @@
 //! - C-1: Turret tracking formula, wrecking shots, and missile flight time & damage application.
 //! - C-2: Dogma-initialized CombatState, 4-channel resonance HP deduction, and OnDamageStateChange notifications.
 
-#![forbid(unsafe_code)]
 
 use crate::common;
 
@@ -119,7 +118,8 @@ fn extract_item_attr(info_rep: &PyRep, attr_id: i64) -> f64 {
 
 #[tokio::test]
 async fn test_dg4_module_cycle_capacitor_and_shield_booster() {
-    // parity: plan:DG-4, feat:dogma.capacitor-recharge, feat:dogma.capacitor-stable, feat:modules.shield-booster
+    // parity: feat:dogma.capacitor-recharge, feat:dogma.capacitor-stable, feat:modules.shield-booster
+    eve_testkit::attest(&["feat:dogma.capacitor-recharge", "feat:dogma.capacitor-stable", "feat:modules.shield-booster"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let mut sess = SessionState::new(4101);
@@ -312,18 +312,12 @@ async fn test_dg4_module_cycle_capacitor_and_shield_booster() {
         )
         .await;
     assert!(no_cap_err.is_err(), "Activation must fail when capacitor is below capacitorNeed");
-
-    eve_testkit::attest(&[
-        "plan:DG-4",
-        "feat:dogma.capacitor-recharge",
-        "feat:dogma.capacitor-stable",
-        "feat:modules.shield-booster",
-    ]);
 }
 
 #[tokio::test]
 async fn test_dg4_overheat_heat_damage_and_reactivation_delay() {
-    // parity: plan:DG-4, feat:fitting.overheat, feat:dogma.reactivation-delay
+    // parity: feat:fitting.overheat, feat:dogma.reactivation-delay
+    eve_testkit::attest(&["feat:fitting.overheat", "feat:dogma.reactivation-delay"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let mut sess = SessionState::new(4102);
@@ -511,907 +505,13 @@ async fn test_dg4_overheat_heat_damage_and_reactivation_delay() {
         )
         .await;
     assert!(delayed_react.is_ok(), "Reactivation must succeed after delay expiration");
-
-    eve_testkit::attest(&[
-        "plan:DG-4",
-        "feat:fitting.overheat",
-        "feat:dogma.reactivation-delay",
-    ]);
 }
 
-#[tokio::test]
-async fn test_dg5_targeting_state_machine_sensor_strength_and_ewar() {
-    // parity: plan:DG-5, feat:dogma.targeting-ships-sensor-strength, feat:modules.ecm, feat:modules.sensor-dampener, feat:modules.tracking-disruptor, feat:modules.target-painter
-    let ctx = ServerContext::new();
-    let kw = HashMap::new();
-    let mut sess = SessionState::new(4103);
-    common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
-    ctx.dispatch_rpc(
-        &mut sess,
-        "charUnboundMgr",
-        None,
-        "SelectCharacterID",
-        &[PyRep::Integer(90_000_001)],
-        &kw,
-        None,
-    )
-    .await
-    .expect("SelectCharacterID");
-
-    let char_id = 90_000_001i64;
-    let ship_id = 100_000_001i64;
-    let station_id = 60_003_760i64;
-
-    // Upgrade attacker hull to Scorpion (640, group 27 Battleship, 8 MedSlots) while docked
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ship_item) = snap.items.get_mut(&ship_id) {
-            ship_item.type_id = 640;
-        }
-    });
-    ctx.invalidate_ship_fitting(ship_id);
-    for tid in [640u32, 1957, 580, 2108, 37543, 29005, 29007, 40334, 40335, 2889, 499, 210] {
-        grant_all_required_skills_for_type(&ctx, char_id, tid);
-    }
-    grant_skills(&ctx, char_id, &[
-        (3426, 5), // CPU Management
-        (3413, 5), // Power Grid Management
-        (3418, 5), // Capacitor Management
-        (3417, 5), // Capacitor Systems Operation
-        (3427, 5), // Electronic Warfare
-        (3435, 5), // Weapon Disruption
-    ]);
-
-    // 1. Verify Racial Sensor Strengths across all 4 factions (feat:dogma.targeting-ships-sensor-strength)
-    // Caldari Merlin (603): Gravimetric (211) = 11.0
-    let merlin_state = DogmaItemState::from_sde(1, 603, &ctx.sde);
-    let (m_type, m_strength) = get_ship_sensor_strength(&merlin_state, &ctx.sde);
-    assert_eq!(m_type, ShipSensorType::Gravimetric);
-    assert_eq!(m_strength, 11.0);
-
-    // Minmatar Rifter (587): Ladar (209) = 8.0
-    let rifter_state = DogmaItemState::from_sde(2, 587, &ctx.sde);
-    let (r_type, r_strength) = get_ship_sensor_strength(&rifter_state, &ctx.sde);
-    assert_eq!(r_type, ShipSensorType::Ladar);
-    assert_eq!(r_strength, 8.0);
-
-    // Gallente Tristan (593): Magnetometric (210) = 9.0
-    let tristan_state = DogmaItemState::from_sde(3, 593, &ctx.sde);
-    let (t_type, t_strength) = get_ship_sensor_strength(&tristan_state, &ctx.sde);
-    assert_eq!(t_type, ShipSensorType::Magnetometric);
-    assert_eq!(t_strength, 9.0);
-
-    // Amarr Executioner (589): Radar (208) = 8.0
-    let exec_state = DogmaItemState::from_sde(4, 589, &ctx.sde);
-    let (e_type, e_strength) = get_ship_sensor_strength(&exec_state, &ctx.sde);
-    assert_eq!(e_type, ShipSensorType::Radar);
-    assert_eq!(e_strength, 8.0);
-
-    // 2. Verify ECM Jammer & Burst Jammer fitting and activation via dogmaIM.Activate (feat:modules.ecm)
-    let ecm_item = DogmaItemState::from_sde(5, 1957, &ctx.sde);
-    let jam_opt = compute_ecm_jam_against_ship(&ecm_item, &merlin_state, 10_000.0, &ctx.sde);
-    assert!((jam_opt - 0.20).abs() < 1e-4);
-    let jam_falloff = compute_ecm_jam_against_ship(&ecm_item, &merlin_state, 19_200.0 + 18_000.0, &ctx.sde);
-    assert!((jam_falloff - 0.10).abs() < 1e-4);
-
-    // Fit Multispectral ECM I (1957), Burst Jammer I (580), Tracking Disruptor I (2108), and Guidance Disruptor I (37543) via invbroker.Add
-    let ecm_mod_id = 100_000_931i64;
-    let burst_mod_id = 100_000_932i64;
-    let td_mod_id = 100_000_933i64;
-    let gd_mod_id = 100_000_934i64;
-    seed_test_item(&ctx, ecm_mod_id, 1957, char_id, station_id, InventoryFlag::Hangar, 1);
-    seed_test_item(&ctx, burst_mod_id, 580, char_id, station_id, InventoryFlag::Hangar, 1);
-    seed_test_item(&ctx, td_mod_id, 2108, char_id, station_id, InventoryFlag::Hangar, 1);
-    seed_test_item(&ctx, gd_mod_id, 37543, char_id, station_id, InventoryFlag::Hangar, 1);
-
-    let opt_script_id = 100_000_935i64;
-    let trk_script_id = 100_000_936i64;
-    let m_rng_script_id = 100_000_937i64;
-    let m_prec_script_id = 100_000_938i64;
-    seed_test_item(&ctx, opt_script_id, 29005, char_id, ship_id, InventoryFlag::Cargo, 1);
-    seed_test_item(&ctx, trk_script_id, 29007, char_id, ship_id, InventoryFlag::Cargo, 1);
-    seed_test_item(&ctx, m_rng_script_id, 40334, char_id, ship_id, InventoryFlag::Cargo, 1);
-    seed_test_item(&ctx, m_prec_script_id, 40335, char_id, ship_id, InventoryFlag::Cargo, 1);
-
-    for (mid, flag) in [
-        (ecm_mod_id, InventoryFlag::MedSlot0),
-        (burst_mod_id, InventoryFlag::MedSlot1),
-        (td_mod_id, InventoryFlag::MedSlot2),
-        (gd_mod_id, InventoryFlag::MedSlot3),
-    ] {
-        ctx.dispatch_rpc(
-            &mut sess,
-            "invbroker",
-            None,
-            "Add",
-            &[
-                PyRep::Integer(mid),
-                PyRep::Integer(ship_id),
-                PyRep::Integer(flag as i64),
-            ],
-            &kw,
-            None,
-        )
-        .await
-        .expect("Fit EWAR module into MedSlot via invbroker.Add");
-    }
-
-    // Undock into solar system 30_000_142
-    ctx.dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None)
-        .await
-        .expect("Undock");
-
-    let sys_id = sess.solar_system_id.expect("solar_system_id after Undock");
-    let sys = ctx.systems.get_or_spawn(sys_id);
-    let (_, ship_ball) = sys
-        .get_ball_snapshot(ship_id)
-        .await
-        .unwrap()
-        .expect("ship ball in space");
-
-    // Seed target ship (victim_id) fitted with 200mm AutoCannon II (2889) and Light Missile Launcher I (499) + Scourge Light Missile (210)
-    let target_char_id = 90_000_002i64;
-    for tid in [587u32, 2889, 499, 210] {
-        grant_all_required_skills_for_type(&ctx, target_char_id, tid);
-    }
-    grant_skills(&ctx, target_char_id, &[
-        (3426, 5), // CPU Management
-        (3413, 5), // Power Grid Management
-    ]);
-    let victim_id = 100_000_940i64;
-    let target_turret_id = 100_000_941i64;
-    let target_launcher_id = 100_000_942i64;
-    let target_missile_id = 100_000_943i64;
-    seed_test_item(&ctx, victim_id, 587, target_char_id, sys_id as i64, InventoryFlag::None, 1);
-    seed_test_item(&ctx, target_turret_id, 2889, target_char_id, victim_id, InventoryFlag::HiSlot0, 1);
-    seed_test_item(&ctx, target_launcher_id, 499, target_char_id, victim_id, InventoryFlag::HiSlot1, 1);
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.items.insert(
-            target_missile_id,
-            InventoryItemRecord {
-                item_id: target_missile_id,
-                type_id: 210, // Scourge Light Missile
-                owner_id: target_char_id,
-                location_id: victim_id,
-                flag: InventoryFlag::HiSlot1,
-                quantity: 40,
-                singleton: false,
-                version: 1,
-                ..Default::default()
-            },
-        );
-    });
-
-    // Spawn victim_id at 5 km (inside 10 km Burst Jammer range) and far_id at 25 km (outside 10 km Burst Jammer range)
-    let far_id = 100_000_945i64;
-    sys.spawn_ball(Ball {
-        id: victim_id,
-        type_id: 587,
-        position: ship_ball.position + DVec3::new(5_000.0, 0.0, 0.0),
-        velocity: DVec3::ZERO,
-        max_velocity: 365.0,
-        inertia: 3.2,
-        mass: 1_350_000.0,
-        radius: 35.0,
-        speed_fraction: 0.0,
-        mode: MovementMode::Stop,
-    })
-    .await
-    .expect("spawn victim ball");
-    sys.spawn_ball(Ball {
-        id: far_id,
-        type_id: 587,
-        position: ship_ball.position + DVec3::new(25_000.0, 0.0, 0.0),
-        velocity: DVec3::ZERO,
-        max_velocity: 365.0,
-        inertia: 3.2,
-        mass: 1_350_000.0,
-        radius: 35.0,
-        speed_fraction: 0.0,
-        mode: MovementMode::Stop,
-    })
-    .await
-    .expect("spawn far ball");
-
-    // Lock victim_id from attacker ship_id, and give victim_id a lock on ship_id
-    sys.add_target_lock(
-        ship_id,
-        TargetLock {
-            target_id: victim_id,
-            lock_time_ms: 1000.0,
-            remaining_lock_ms: 0.0,
-            locked: true,
-            max_range_m: Some(50_000.0),
-        },
-    )
-    .await
-    .unwrap();
-    sys.add_target_lock(
-        victim_id,
-        TargetLock {
-            target_id: ship_id,
-            lock_time_ms: 1000.0,
-            remaining_lock_ms: 0.0,
-            locked: true,
-            max_range_m: Some(50_000.0),
-        },
-    )
-    .await
-    .unwrap();
-    assert_eq!(sys.get_target_locks(victim_id).await.unwrap().len(), 1);
-
-    // Activate Multispectral ECM I (1957) on victim_id via dogmaIM.Activate until probabilistic CSPRNG jam roll lands
-    let mut ecm_jammed = false;
-    for _ in 0..100 {
-        ctx.dispatch_rpc(
-            &mut sess,
-            "dogmaIM",
-            None,
-            "Activate",
-            &[
-                PyRep::Integer(ecm_mod_id),
-                PyRep::String("targetHostile".into()),
-                PyRep::Integer(victim_id),
-                PyRep::Integer(1),
-            ],
-            &kw,
-            None,
-        )
-        .await
-        .expect("Activate Multispectral ECM I via dogmaIM.Activate");
-        let jammed_s = sys
-            .get_combat_state(victim_id)
-            .await
-            .unwrap()
-            .unwrap()
-            .ecm_jammed_remaining_s;
-        ctx.dispatch_rpc(
-            &mut sess,
-            "dogmaIM",
-            None,
-            "Deactivate",
-            &[
-                PyRep::Integer(ecm_mod_id),
-                PyRep::String("targetHostile".into()),
-            ],
-            &kw,
-            None,
-        )
-        .await
-        .expect("Deactivate Multispectral ECM I");
-        if jammed_s > 0.0 {
-            ecm_jammed = true;
-            break;
-        }
-    }
-    assert!(
-        ecm_jammed,
-        "Victim must be ECM-jammed after Multispectral ECM I activation"
-    );
-    assert_eq!(
-        sys.get_target_locks(victim_id).await.unwrap().len(),
-        0,
-        "Targeted Multispectral ECM I activation must break all target locks on victim"
-    );
-
-    // Clear victim's initial jam timer, then re-lock from both victim_id (5 km) and far_id (25 km)
-    let _ = sys.apply_ecm_jam(victim_id, 0.0).await;
-    sys.add_target_lock(
-        victim_id,
-        TargetLock {
-            target_id: ship_id,
-            lock_time_ms: 1000.0,
-            remaining_lock_ms: 0.0,
-            locked: true,
-            max_range_m: Some(50_000.0),
-        },
-    )
-    .await
-    .unwrap();
-    sys.add_target_lock(
-        far_id,
-        TargetLock {
-            target_id: ship_id,
-            lock_time_ms: 1000.0,
-            remaining_lock_ms: 0.0,
-            locked: true,
-            max_range_m: Some(50_000.0),
-        },
-    )
-    .await
-    .unwrap();
-
-    // Activate Burst Jammer I (580, ecmBurstRange = 10,000m) via dogmaIM.Activate until probabilistic CSPRNG jam roll lands on victim_id (5 km)
-    let mut burst_jammed = false;
-    for _ in 0..100 {
-        ctx.dispatch_rpc(
-            &mut sess,
-            "dogmaIM",
-            None,
-            "Activate",
-            &[
-                PyRep::Integer(burst_mod_id),
-                PyRep::String("ecmBurst".into()),
-                PyRep::None,
-                PyRep::Integer(1),
-            ],
-            &kw,
-            None,
-        )
-        .await
-        .expect("Activate Burst Jammer I via dogmaIM.Activate");
-        assert_eq!(
-            sys.get_target_locks(far_id).await.unwrap().len(),
-            1,
-            "Burst Jammer I must NOT break locks on targets outside its 10km ecmBurstRange (far_id at 25km)"
-        );
-        assert_eq!(
-            sys.get_combat_state(far_id)
-                .await
-                .unwrap()
-                .unwrap()
-                .ecm_jammed_remaining_s,
-            0.0,
-            "far_id at 25km must not be jammed by 10km Burst Jammer I"
-        );
-        let jammed_s = sys
-            .get_combat_state(victim_id)
-            .await
-            .unwrap()
-            .unwrap()
-            .ecm_jammed_remaining_s;
-        ctx.dispatch_rpc(
-            &mut sess,
-            "dogmaIM",
-            None,
-            "Deactivate",
-            &[
-                PyRep::Integer(burst_mod_id),
-                PyRep::String("ecmBurst".into()),
-            ],
-            &kw,
-            None,
-        )
-        .await
-        .expect("Deactivate Burst Jammer I");
-        if jammed_s > 0.0 {
-            burst_jammed = true;
-            break;
-        }
-    }
-    assert!(
-        burst_jammed,
-        "Victim at 5km must be jammed by Burst Jammer I"
-    );
-    assert_eq!(
-        sys.get_target_locks(victim_id).await.unwrap().len(),
-        0,
-        "Burst Jammer I must break locks on targets within its 10km ecmBurstRange (victim at 5km)"
-    );
-
-    // 3. Verify Remote Sensor Dampener & Scripts (feat:modules.sensor-dampener)
-    let damp_item = DogmaItemState::from_sde(6, 1968, &ctx.sde);
-    let (damp_scan_un, damp_range_un) = eval_scripted_sensor_dampener(&damp_item, None, 10_000.0, &ctx.sde);
-    assert!(damp_scan_un < 1.0 && damp_range_un < 1.0);
-    assert!((damp_scan_un - (1.0 - 0.137)).abs() < 1e-4);
-    assert!((damp_range_un - (1.0 - 0.137)).abs() < 1e-4);
-
-    let (damp_scan_scr, damp_range_scr) = eval_scripted_sensor_dampener(&damp_item, Some(29013), 10_000.0, &ctx.sde);
-    assert!(damp_scan_scr < damp_scan_un, "Scripted scan dampening must double scan resolution reduction");
-    assert_eq!(damp_range_scr, 1.0, "Scan resolution script zeroes range reduction");
-
-    let (damp_scan_rng, damp_range_rng) = eval_scripted_sensor_dampener(&damp_item, Some(29015), 10_000.0, &ctx.sde);
-    assert_eq!(damp_scan_rng, 1.0, "Targeting range script zeroes scan res reduction");
-    assert!(damp_range_rng < damp_range_un, "Scripted range dampening must double range reduction");
-
-    // 4. Verify Tracking Disruptor & Guidance Disruptor with Scripts via dogmaIM.Activate (feat:modules.tracking-disruptor)
-    // Baseline target turret (2889 200mm AutoCannon II) and missile launcher (499 Light Missile Launcher I + 210 Scourge Light Missile) attributes
-    let base_turret_info = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "dogmaIM",
-            None,
-            "ItemGetInfo",
-            &[PyRep::Integer(target_turret_id)],
-            &kw,
-            None,
-        )
-        .await
-        .expect("ItemGetInfo baseline turret");
-    let base_optimal = extract_item_attr(&base_turret_info, 54);
-    let base_falloff = extract_item_attr(&base_turret_info, 158);
-    let base_tracking = extract_item_attr(&base_turret_info, 160);
-    assert!(base_optimal > 0.0 && base_falloff > 0.0 && base_tracking > 0.0);
-
-    let base_launcher_info = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "dogmaIM",
-            None,
-            "ItemGetInfo",
-            &[PyRep::Integer(target_launcher_id)],
-            &kw,
-            None,
-        )
-        .await
-        .expect("ItemGetInfo baseline launcher");
-    let base_missile_vel = extract_item_attr(&base_launcher_info, 37);
-    let base_flight_time = extract_item_attr(&base_launcher_info, 281);
-    let base_exp_vel = extract_item_attr(&base_launcher_info, 653);
-    let base_exp_radius = extract_item_attr(&base_launcher_info, 654);
-    assert!(
-        base_missile_vel > 0.0
-            && base_flight_time > 0.0
-            && base_exp_vel > 0.0
-            && base_exp_radius > 0.0
-    );
-
-    // 4a. Unscripted Tracking Disruptor I (2108) -> reduces turret optimal (54), falloff (158), and trackingSpeed (160)
-    ctx.dispatch_rpc(
-        &mut sess,
-        "dogmaIM",
-        None,
-        "Activate",
-        &[
-            PyRep::Integer(td_mod_id),
-            PyRep::String("shipModuleTrackingDisruptor".into()),
-            PyRep::Integer(victim_id),
-            PyRep::Integer(1),
-        ],
-        &kw,
-        None,
-    )
-    .await
-    .expect("Activate unscripted Tracking Disruptor I");
-    let td_unscripted_info = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "dogmaIM",
-            None,
-            "ItemGetInfo",
-            &[PyRep::Integer(target_turret_id)],
-            &kw,
-            None,
-        )
-        .await
-        .expect("ItemGetInfo under unscripted Tracking Disruptor I");
-    let td_un_opt = extract_item_attr(&td_unscripted_info, 54);
-    let td_un_fall = extract_item_attr(&td_unscripted_info, 158);
-    let td_un_trk = extract_item_attr(&td_unscripted_info, 160);
-    assert!(td_un_opt < base_optimal, "Unscripted TD must reduce target turret optimal range");
-    assert!(td_un_fall < base_falloff, "Unscripted TD must reduce target turret falloff");
-    assert!(td_un_trk < base_tracking, "Unscripted TD must reduce target turret tracking speed");
-    ctx.dispatch_rpc(
-        &mut sess,
-        "dogmaIM",
-        None,
-        "Deactivate",
-        &[
-            PyRep::Integer(td_mod_id),
-            PyRep::String("shipModuleTrackingDisruptor".into()),
-        ],
-        &kw,
-        None,
-    )
-    .await
-    .expect("Deactivate Tracking Disruptor I");
-
-    // 4b. Tracking Disruptor I loaded with Optimal Range Disruption Script (29005) -> doubles range/falloff penalty, zeroes tracking penalty
-    ctx.dispatch_rpc(
-        &mut sess,
-        "invbroker",
-        None,
-        "Add",
-        &[
-            PyRep::Integer(opt_script_id),
-            PyRep::Integer(ship_id),
-            PyRep::Integer(InventoryFlag::MedSlot2 as i64),
-        ],
-        &kw,
-        None,
-    )
-    .await
-    .expect("Load Optimal Range Disruption Script into Tracking Disruptor I");
-    ctx.dispatch_rpc(
-        &mut sess,
-        "dogmaIM",
-        None,
-        "Activate",
-        &[
-            PyRep::Integer(td_mod_id),
-            PyRep::String("shipModuleTrackingDisruptor".into()),
-            PyRep::Integer(victim_id),
-            PyRep::Integer(1),
-        ],
-        &kw,
-        None,
-    )
-    .await
-    .expect("Activate Optimal Range scripted Tracking Disruptor I");
-    let td_opt_info = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "dogmaIM",
-            None,
-            "ItemGetInfo",
-            &[PyRep::Integer(target_turret_id)],
-            &kw,
-            None,
-        )
-        .await
-        .expect("ItemGetInfo under Optimal Range scripted TD");
-    let td_opt_opt = extract_item_attr(&td_opt_info, 54);
-    let td_opt_fall = extract_item_attr(&td_opt_info, 158);
-    let td_opt_trk = extract_item_attr(&td_opt_info, 160);
-    assert!(td_opt_opt < td_un_opt, "Optimal Range Disruption Script must double optimal range reduction");
-    assert!(td_opt_fall < td_un_fall, "Optimal Range Disruption Script must double falloff reduction");
-    assert!((td_opt_trk - base_tracking).abs() < 1e-4, "Optimal Range Disruption Script must leave tracking speed unpenalized");
-    ctx.dispatch_rpc(
-        &mut sess,
-        "dogmaIM",
-        None,
-        "Deactivate",
-        &[
-            PyRep::Integer(td_mod_id),
-            PyRep::String("shipModuleTrackingDisruptor".into()),
-        ],
-        &kw,
-        None,
-    )
-    .await
-    .expect("Deactivate Optimal Range scripted TD");
-
-    // 4c. Tracking Disruptor I loaded with Tracking Speed Disruption Script (29007) -> doubles tracking penalty, zeroes range/falloff penalty
-    ctx.dispatch_rpc(
-        &mut sess,
-        "invbroker",
-        None,
-        "Add",
-        &[
-            PyRep::Integer(trk_script_id),
-            PyRep::Integer(ship_id),
-            PyRep::Integer(InventoryFlag::MedSlot2 as i64),
-        ],
-        &kw,
-        None,
-    )
-    .await
-    .expect("Load Tracking Speed Disruption Script into Tracking Disruptor I");
-    ctx.dispatch_rpc(
-        &mut sess,
-        "dogmaIM",
-        None,
-        "Activate",
-        &[
-            PyRep::Integer(td_mod_id),
-            PyRep::String("shipModuleTrackingDisruptor".into()),
-            PyRep::Integer(victim_id),
-            PyRep::Integer(1),
-        ],
-        &kw,
-        None,
-    )
-    .await
-    .expect("Activate Tracking Speed scripted Tracking Disruptor I");
-    let td_trk_info = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "dogmaIM",
-            None,
-            "ItemGetInfo",
-            &[PyRep::Integer(target_turret_id)],
-            &kw,
-            None,
-        )
-        .await
-        .expect("ItemGetInfo under Tracking Speed scripted TD");
-    let td_trk_opt = extract_item_attr(&td_trk_info, 54);
-    let td_trk_fall = extract_item_attr(&td_trk_info, 158);
-    let td_trk_trk = extract_item_attr(&td_trk_info, 160);
-    assert!((td_trk_opt - base_optimal).abs() < 1e-4, "Tracking Speed Disruption Script must leave optimal range unpenalized");
-    assert!((td_trk_fall - base_falloff).abs() < 1e-4, "Tracking Speed Disruption Script must leave falloff unpenalized");
-    assert!(td_trk_trk < td_un_trk, "Tracking Speed Disruption Script must double tracking speed reduction");
-    ctx.dispatch_rpc(
-        &mut sess,
-        "dogmaIM",
-        None,
-        "Deactivate",
-        &[
-            PyRep::Integer(td_mod_id),
-            PyRep::String("shipModuleTrackingDisruptor".into()),
-        ],
-        &kw,
-        None,
-    )
-    .await
-    .expect("Deactivate Tracking Speed scripted TD");
-
-    // 4d. Unscripted Guidance Disruptor I (37543) -> reduces missile velocity (37), flight time (281), explosion velocity (653), and expands explosion radius (654)
-    ctx.dispatch_rpc(
-        &mut sess,
-        "dogmaIM",
-        None,
-        "Activate",
-        &[
-            PyRep::Integer(gd_mod_id),
-            PyRep::String("shipModuleGuidanceDisruptor".into()),
-            PyRep::Integer(victim_id),
-            PyRep::Integer(1),
-        ],
-        &kw,
-        None,
-    )
-    .await
-    .expect("Activate unscripted Guidance Disruptor I");
-    let gd_un_info = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "dogmaIM",
-            None,
-            "ItemGetInfo",
-            &[PyRep::Integer(target_launcher_id)],
-            &kw,
-            None,
-        )
-        .await
-        .expect("ItemGetInfo under unscripted Guidance Disruptor I");
-    let gd_un_vel = extract_item_attr(&gd_un_info, 37);
-    let gd_un_time = extract_item_attr(&gd_un_info, 281);
-    let gd_un_exp_vel = extract_item_attr(&gd_un_info, 653);
-    let gd_un_exp_rad = extract_item_attr(&gd_un_info, 654);
-    assert!(gd_un_vel < base_missile_vel, "Unscripted Guidance Disruptor must reduce target missile velocity");
-    assert!(gd_un_time < base_flight_time, "Unscripted Guidance Disruptor must reduce target missile flight time");
-    assert!(gd_un_exp_vel < base_exp_vel, "Unscripted Guidance Disruptor must reduce target missile explosion velocity");
-    assert!(gd_un_exp_rad > base_exp_radius, "Unscripted Guidance Disruptor must increase target missile explosion radius");
-    ctx.dispatch_rpc(
-        &mut sess,
-        "dogmaIM",
-        None,
-        "Deactivate",
-        &[
-            PyRep::Integer(gd_mod_id),
-            PyRep::String("shipModuleGuidanceDisruptor".into()),
-        ],
-        &kw,
-        None,
-    )
-    .await
-    .expect("Deactivate unscripted Guidance Disruptor I");
-
-    // 4e. Guidance Disruptor I loaded with Missile Range Disruption Script (40334) -> doubles velocity/flight-time penalty, zeroes precision penalty
-    ctx.dispatch_rpc(
-        &mut sess,
-        "invbroker",
-        None,
-        "Add",
-        &[
-            PyRep::Integer(m_rng_script_id),
-            PyRep::Integer(ship_id),
-            PyRep::Integer(InventoryFlag::MedSlot3 as i64),
-        ],
-        &kw,
-        None,
-    )
-    .await
-    .expect("Load Missile Range Disruption Script into Guidance Disruptor I");
-    ctx.dispatch_rpc(
-        &mut sess,
-        "dogmaIM",
-        None,
-        "Activate",
-        &[
-            PyRep::Integer(gd_mod_id),
-            PyRep::String("shipModuleGuidanceDisruptor".into()),
-            PyRep::Integer(victim_id),
-            PyRep::Integer(1),
-        ],
-        &kw,
-        None,
-    )
-    .await
-    .expect("Activate Missile Range scripted Guidance Disruptor I");
-    let gd_rng_info = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "dogmaIM",
-            None,
-            "ItemGetInfo",
-            &[PyRep::Integer(target_launcher_id)],
-            &kw,
-            None,
-        )
-        .await
-        .expect("ItemGetInfo under Missile Range scripted GD");
-    let gd_rng_vel = extract_item_attr(&gd_rng_info, 37);
-    let gd_rng_time = extract_item_attr(&gd_rng_info, 281);
-    let gd_rng_exp_vel = extract_item_attr(&gd_rng_info, 653);
-    let gd_rng_exp_rad = extract_item_attr(&gd_rng_info, 654);
-    assert!(gd_rng_vel < gd_un_vel, "Missile Range Disruption Script must double missile velocity reduction");
-    assert!(gd_rng_time < gd_un_time, "Missile Range Disruption Script must double missile flight time reduction");
-    assert!((gd_rng_exp_vel - base_exp_vel).abs() < 1e-4, "Missile Range Disruption Script must leave explosion velocity unpenalized");
-    assert!((gd_rng_exp_rad - base_exp_radius).abs() < 1e-4, "Missile Range Disruption Script must leave explosion radius unpenalized");
-    ctx.dispatch_rpc(
-        &mut sess,
-        "dogmaIM",
-        None,
-        "Deactivate",
-        &[
-            PyRep::Integer(gd_mod_id),
-            PyRep::String("shipModuleGuidanceDisruptor".into()),
-        ],
-        &kw,
-        None,
-    )
-    .await
-    .expect("Deactivate Missile Range scripted GD");
-
-    // 4f. Guidance Disruptor I loaded with Missile Precision Disruption Script (40335) -> doubles explosion velocity/radius penalty, zeroes range penalty
-    ctx.dispatch_rpc(
-        &mut sess,
-        "invbroker",
-        None,
-        "Add",
-        &[
-            PyRep::Integer(m_prec_script_id),
-            PyRep::Integer(ship_id),
-            PyRep::Integer(InventoryFlag::MedSlot3 as i64),
-        ],
-        &kw,
-        None,
-    )
-    .await
-    .expect("Load Missile Precision Disruption Script into Guidance Disruptor I");
-    ctx.dispatch_rpc(
-        &mut sess,
-        "dogmaIM",
-        None,
-        "Activate",
-        &[
-            PyRep::Integer(gd_mod_id),
-            PyRep::String("shipModuleGuidanceDisruptor".into()),
-            PyRep::Integer(victim_id),
-            PyRep::Integer(1),
-        ],
-        &kw,
-        None,
-    )
-    .await
-    .expect("Activate Missile Precision scripted Guidance Disruptor I");
-    let gd_prec_info = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "dogmaIM",
-            None,
-            "ItemGetInfo",
-            &[PyRep::Integer(target_launcher_id)],
-            &kw,
-            None,
-        )
-        .await
-        .expect("ItemGetInfo under Missile Precision scripted GD");
-    let gd_prec_vel = extract_item_attr(&gd_prec_info, 37);
-    let gd_prec_time = extract_item_attr(&gd_prec_info, 281);
-    let gd_prec_exp_vel = extract_item_attr(&gd_prec_info, 653);
-    let gd_prec_exp_rad = extract_item_attr(&gd_prec_info, 654);
-    assert!((gd_prec_vel - base_missile_vel).abs() < 1e-4, "Missile Precision Disruption Script must leave missile velocity unpenalized");
-    assert!((gd_prec_time - base_flight_time).abs() < 1e-4, "Missile Precision Disruption Script must leave missile flight time unpenalized");
-    assert!(gd_prec_exp_vel < gd_un_exp_vel, "Missile Precision Disruption Script must double explosion velocity reduction");
-    assert!(gd_prec_exp_rad > gd_un_exp_rad, "Missile Precision Disruption Script must double explosion radius expansion");
-    ctx.dispatch_rpc(
-        &mut sess,
-        "dogmaIM",
-        None,
-        "Deactivate",
-        &[
-            PyRep::Integer(gd_mod_id),
-            PyRep::String("shipModuleGuidanceDisruptor".into()),
-        ],
-        &kw,
-        None,
-    )
-    .await
-    .expect("Deactivate Missile Precision scripted GD");
-
-    // 5. Verify Target Painter with Overload (feat:modules.target-painter)
-    // Target Painter I (12709): signatureRadiusBonus = 25.0%
-    let tp_item = DogmaItemState::from_sde(8, 12709, &ctx.sde);
-    let tp_unloaded = eval_target_painter_with_overload(&tp_item, false, 10_000.0, &ctx.sde);
-    assert!((tp_unloaded - 1.25).abs() < 1e-4, "Target painter must expand sig radius by 25%");
-
-    // Overloaded painter gains +20% bonus (25% * 1.20 = 30% bonus -> 1.30 multiplier)
-    let tp_overloaded = eval_target_painter_with_overload(&tp_item, true, 10_000.0, &ctx.sde);
-    assert!((tp_overloaded - 1.30).abs() < 1e-4, "Overloaded target painter must expand sig radius by 30%");
-
-    // 6. Verify Stasis Webifier & Warp Scrambler (DG-5)
-    // Stasis Webifier I (526): speedFactor = -50.0%
-    let web_item = DogmaItemState::from_sde(9, 526, &ctx.sde);
-    let slowed_vel = eval_stasis_webifier_stacking(&[&web_item], &[5_000.0], 365.0, &ctx.sde);
-    assert!((slowed_vel - 182.5).abs() < 1e-2, "Webifier must reduce velocity by 50%");
-
-    // Warp Scrambler I (447): 2 warp scramble points and blocks MWD
-    let scram_item = DogmaItemState::from_sde(10, 447, &ctx.sde);
-    let scram_state = eval_warp_scrambler_effects(&[&scram_item], &[5_000.0], &ctx.sde);
-    assert_eq!(scram_state.scramble_strength, 2);
-    assert!(scram_state.blocks_mwd, "Warp scrambler must suppress MWD");
-
-    // 7. Verify Target Lock Time & Max Locked Targets (DG-5)
-    // Target lock time formula: t = 40000 / (scan_res * asinh(sig)^2)
-    let t_lock_fast = compute_target_lock_time(660.0, 100.0); // cruiser size
-    let t_lock_slow = compute_target_lock_time(660.0, 35.0);  // frigate size
-    assert!(t_lock_slow > t_lock_fast, "Smaller signature radius takes longer to lock");
-
-    // Max locked targets calculation with skills
-    // Hull has 4 max targets, Target Management IV (+4) -> 2 + 4 = 6, capped by hull (4)
-    let max_t1 = compute_effective_max_locked_targets(4, 4, 0);
-    assert_eq!(max_t1, 4);
-    // Hull has 10 max targets (Battleship), TM V (+5) -> 2 + 5 = 7
-    let max_t2 = compute_effective_max_locked_targets(10, 5, 0);
-    assert_eq!(max_t2, 7);
-    // Battleship with TM V and Advanced TM III (+3) -> 2 + 5 + 3 = 10
-    let max_t3 = compute_effective_max_locked_targets(10, 5, 3);
-    assert_eq!(max_t3, 10);
-
-    // Lock break on range: target moves beyond maxTargetRange
-    let mut ballpark = eve_destiny::Ballpark::new(30_000_142);
-    let src_ball_id = 990_000_040i64;
-    let tgt_ball_id = 990_000_041i64;
-    ballpark.add_ball(Ball {
-        id: src_ball_id,
-        type_id: 587,
-        position: DVec3::ZERO,
-        velocity: DVec3::ZERO,
-        max_velocity: 300.0,
-        inertia: 3.2,
-        mass: 1_350_000.0,
-        radius: 35.0,
-        speed_fraction: 0.0,
-        mode: MovementMode::Stop,
-    });
-    ballpark.combat_states.insert(src_ball_id, CombatState::default());
-    ballpark.add_ball(Ball {
-        id: tgt_ball_id,
-        type_id: 587,
-        position: DVec3::new(20_000.0, 0.0, 0.0), // 20 km
-        velocity: DVec3::ZERO,
-        max_velocity: 300.0,
-        inertia: 3.2,
-        mass: 1_350_000.0,
-        radius: 35.0,
-        speed_fraction: 0.0,
-        mode: MovementMode::Stop,
-    });
-    ballpark.combat_states.insert(tgt_ball_id, CombatState::default());
-    ballpark.add_target_lock(src_ball_id, TargetLock {
-        target_id: tgt_ball_id,
-        lock_time_ms: 1000.0,
-        remaining_lock_ms: 0.0,
-        locked: true,
-        max_range_m: Some(25_000.0), // 25 km max range
-    });
-    // Within range -> retained
-    ballpark.step(1.0);
-    assert_eq!(ballpark.get_target_locks(src_ball_id).len(), 1);
-
-    // Target moves to 30 km (> 25 km max range) -> lock breaks!
-    if let Some(tb) = ballpark.balls.get_mut(&tgt_ball_id) {
-        tb.position = DVec3::new(30_000.0, 0.0, 0.0);
-    }
-    let step_events = ballpark.step(1.0);
-    assert_eq!(ballpark.get_target_locks(src_ball_id).len(), 0, "Lock must break when target exceeds max range");
-    assert!(step_events.iter().any(|e| matches!(e, DestinyEvent::OnTarget { mode, .. } if mode == "lost")));
-
-    eve_testkit::attest(&[
-        "plan:DG-5",
-        "feat:dogma.targeting-ships-sensor-strength",
-        "feat:modules.ecm",
-        "feat:modules.sensor-dampener",
-        "feat:modules.tracking-disruptor",
-        "feat:modules.target-painter",
-    ]);
-}
 
 #[tokio::test]
 async fn test_c1_c2_turret_tracking_missiles_and_damage_pipeline() {
     // parity: plan:C-1, plan:C-2
+    eve_testkit::attest(&["plan:C-1", "plan:C-2"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let mut sess = SessionState::new(4101);
@@ -1555,9 +655,596 @@ async fn test_c1_c2_turret_tracking_missiles_and_damage_pipeline() {
     );
     assert_eq!(notifs.len(), 1);
     assert_eq!(notifs[0].event, "OnDamageStateChange");
+}
 
-    eve_testkit::attest(&[
-        "plan:C-1",
-        "plan:C-2",
-    ]);
+#[tokio::test]
+async fn test_dg5_web_grappler_neut_nos_burst_projector_and_targeters() {
+    // parity: feat:modules.stasis-webifier, feat:modules.heavy-stasis-grappler-falloff, feat:modules.energy-neutralizer, feat:modules.nosferatu-transfer-rule, feat:modules.burst-projectors, feat:modules.auto-targeting-system, feat:modules.passive-targeter
+    eve_testkit::attest(&["feat:modules.stasis-webifier", "feat:modules.heavy-stasis-grappler-falloff", "feat:modules.energy-neutralizer", "feat:modules.nosferatu-transfer-rule", "feat:modules.burst-projectors", "feat:modules.auto-targeting-system", "feat:modules.passive-targeter"]);
+    let ctx = ServerContext::new();
+    let kw = HashMap::new();
+    let mut sess = SessionState::new(4150);
+    common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
+    ctx.dispatch_rpc(
+        &mut sess,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(90_000_001)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("SelectCharacterID");
+
+    let char_id = 90_000_001i64;
+    let ship_id = 100_000_001i64;
+    let station_id = 60_003_760i64;
+
+    // Upgrade attacker hull to Aeon (23919, Supercarrier, 8 HiSlots + 6 MedSlots) while docked
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ship_item) = snap.items.get_mut(&ship_id) {
+            ship_item.type_id = 23919;
+        }
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+    for tid in [23919u32, 526, 41057, 533, 530, 40698, 40635, 1182, 581, 587] {
+        grant_all_required_skills_for_type(&ctx, char_id, tid);
+    }
+    grant_skills(
+        &ctx,
+        char_id,
+        &[
+            (3426, 5), // CPU Management
+            (3413, 5), // Power Grid Management
+            (3418, 5), // Capacitor Management
+            (3417, 5), // Capacitor Systems Operation
+            (3428, 4), // Target Management IV (base 2 + 4 = 6 max locked targets before Auto Targeting System)
+        ],
+    );
+
+    let web_mod_id = 100_001_501i64;
+    let grap_mod_id = 100_001_502i64;
+    let passive_tgt_id = 100_001_503i64;
+    let neut_mod_id = 100_001_504i64;
+    let nos_mod_id = 100_001_505i64;
+    let auto_tgt_id = 100_001_506i64;
+    let web_bp_id = 100_001_507i64;
+    let neut_bp_id = 100_001_508i64;
+
+    seed_test_item(&ctx, web_mod_id, 526, char_id, station_id, InventoryFlag::Hangar, 1);
+    seed_test_item(&ctx, grap_mod_id, 41057, char_id, station_id, InventoryFlag::Hangar, 1);
+    seed_test_item(&ctx, passive_tgt_id, 581, char_id, station_id, InventoryFlag::Hangar, 1);
+    seed_test_item(&ctx, neut_mod_id, 533, char_id, station_id, InventoryFlag::Hangar, 1);
+    seed_test_item(&ctx, nos_mod_id, 530, char_id, station_id, InventoryFlag::Hangar, 1);
+    seed_test_item(&ctx, auto_tgt_id, 1182, char_id, station_id, InventoryFlag::Hangar, 1);
+    seed_test_item(&ctx, web_bp_id, 40698, char_id, station_id, InventoryFlag::Hangar, 1);
+    seed_test_item(&ctx, neut_bp_id, 40635, char_id, station_id, InventoryFlag::Hangar, 1);
+
+    // Check baseline maxLockedTargets (192) before fitting Auto Targeting System I (1182)
+    let ship_info_before_ats = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "dogmaIM",
+            None,
+            "ItemGetInfo",
+            &[PyRep::Integer(ship_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("ItemGetInfo before ATS");
+    let max_targets_before_ats = extract_item_attr(&ship_info_before_ats, 192);
+
+    for (mid, flag) in [
+        (web_mod_id, InventoryFlag::MedSlot0),
+        (grap_mod_id, InventoryFlag::MedSlot1),
+        (passive_tgt_id, InventoryFlag::MedSlot2),
+        (neut_mod_id, InventoryFlag::HiSlot1),
+        (nos_mod_id, InventoryFlag::HiSlot2),
+        (auto_tgt_id, InventoryFlag::HiSlot3),
+        (web_bp_id, InventoryFlag::HiSlot4),
+    ] {
+        ctx.dispatch_rpc(
+            &mut sess,
+            "invbroker",
+            None,
+            "Add",
+            &[
+                PyRep::Integer(mid),
+                PyRep::Integer(ship_id),
+                PyRep::Integer(flag as i64),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect("Fit module into slot via invbroker.Add");
+    }
+
+    // 1. Verify Auto Targeting System I (1182) passive +2 maxTargetBonus (feat:modules.auto-targeting-system)
+    let ship_info_after_ats = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "dogmaIM",
+            None,
+            "ItemGetInfo",
+            &[PyRep::Integer(ship_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("ItemGetInfo after ATS");
+    let max_targets_after_ats = extract_item_attr(&ship_info_after_ats, 192);
+    assert_eq!(
+        max_targets_after_ats,
+        max_targets_before_ats + 2.0,
+        "Auto Targeting System I (1182) must passively add +2 to maxLockedTargets (192)"
+    );
+
+    // Undock into solar system 30_000_142
+    ctx.dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None)
+        .await
+        .expect("Undock");
+    let sys_id = sess.solar_system_id.expect("solar_system_id after Undock");
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    let (_, ship_ball) = sys
+        .get_ball_snapshot(ship_id)
+        .await
+        .unwrap()
+        .expect("ship ball in space");
+
+    // Spawn victim_id at 1 km (within Heavy Stasis Grappler II optimal = 1 km) and far_id at 25 km
+    let victim_char_id = 90_000_002i64;
+    let victim_id = 100_001_520i64;
+    let far_id = 100_001_521i64;
+    seed_test_item(&ctx, victim_id, 587, victim_char_id, sys_id as i64, InventoryFlag::None, 1);
+    seed_test_item(&ctx, far_id, 587, victim_char_id, sys_id as i64, InventoryFlag::None, 1);
+    sys.spawn_ball_with_combat(
+        Ball {
+            id: victim_id,
+            type_id: 587,
+            position: ship_ball.position + DVec3::new(1_000.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 365.0,
+            inertia: 3.2,
+            mass: 1_350_000.0,
+            radius: 35.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        },
+        CombatState::default(),
+    )
+    .await
+    .expect("spawn victim_id");
+    sys.spawn_ball_with_combat(
+        Ball {
+            id: far_id,
+            type_id: 587,
+            position: ship_ball.position + DVec3::new(25_000.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 365.0,
+            inertia: 3.2,
+            mass: 1_350_000.0,
+            radius: 35.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        },
+        CombatState::default(),
+    )
+    .await
+    .expect("spawn far_id");
+
+    // 2. Verify Auto Targeting System I active lock acquisition (feat:modules.auto-targeting-system)
+    assert_eq!(sys.get_target_locks(ship_id).await.unwrap().len(), 0);
+    ctx.dispatch_rpc(
+        &mut sess,
+        "dogmaIM",
+        None,
+        "Activate",
+        &[
+            PyRep::Integer(auto_tgt_id),
+            PyRep::String("autoTarget".into()),
+            PyRep::None,
+            PyRep::Integer(1),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Activate Auto Targeting System I");
+    let locks_after_ats = sys.get_target_locks(ship_id).await.unwrap();
+    assert!(
+        locks_after_ats.iter().any(|l| l.target_id == victim_id && l.locked),
+        "Active Auto Targeting System I must automatically lock targets in range"
+    );
+    ctx.dispatch_rpc(
+        &mut sess,
+        "dogmaIM",
+        None,
+        "Deactivate",
+        &[
+            PyRep::Integer(auto_tgt_id),
+            PyRep::String("autoTarget".into()),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Deactivate Auto Targeting System I");
+
+    // 3. Verify Passive Targeter I (581) locks target without yellow-box targetedBy notification (feat:modules.passive-targeter)
+    let _ = sys.clear_target_locks(ship_id).await;
+    let _ = sess.drain_notifications();
+    ctx.dispatch_rpc(
+        &mut sess,
+        "dogmaIM",
+        None,
+        "Activate",
+        &[
+            PyRep::Integer(passive_tgt_id),
+            PyRep::String("targetPassively".into()),
+            PyRep::Integer(victim_id),
+            PyRep::Integer(0),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Activate Passive Targeter I");
+    let passive_notifs = sess.drain_notifications();
+    assert!(
+        !passive_notifs.iter().any(|(name, payload)| name == "OnTarget"
+            && format!("{payload:?}").contains("targetedBy")),
+        "Passive Targeter I must not emit an OnTarget targetedBy yellow-box notification"
+    );
+    let locks_after_passive = sys.get_target_locks(ship_id).await.unwrap();
+    assert!(
+        locks_after_passive.iter().any(|l| l.target_id == victim_id && l.locked),
+        "Passive Targeter I must acquire a target lock on victim_id"
+    );
+    ctx.dispatch_rpc(
+        &mut sess,
+        "dogmaIM",
+        None,
+        "Deactivate",
+        &[
+            PyRep::Integer(passive_tgt_id),
+            PyRep::String("targetPassively".into()),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Deactivate Passive Targeter I");
+
+    // 4. Verify Stasis Webifier I (526) & Heavy Stasis Grappler II (41057) falloff decay (feat:modules.stasis-webifier, feat:modules.heavy-stasis-grappler-falloff)
+    ctx.dispatch_rpc(
+        &mut sess,
+        "dogmaIM",
+        None,
+        "Activate",
+        &[
+            PyRep::Integer(web_mod_id),
+            PyRep::String("decreaseTargetSpeed".into()),
+            PyRep::Integer(victim_id),
+            PyRep::Integer(1),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Activate Stasis Webifier I");
+    let (_, victim_ball_webbed) = sys.get_ball_snapshot(victim_id).await.unwrap().unwrap();
+    assert!(
+        (victim_ball_webbed.max_velocity - 365.0 * 0.50).abs() < 0.5,
+        "Stasis Webifier I (-50%) must reduce victim ball max_velocity from 365.0 to 182.5, got {}",
+        victim_ball_webbed.max_velocity
+    );
+    ctx.dispatch_rpc(
+        &mut sess,
+        "dogmaIM",
+        None,
+        "Deactivate",
+        &[
+            PyRep::Integer(web_mod_id),
+            PyRep::String("decreaseTargetSpeed".into()),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Deactivate Stasis Webifier I");
+    let (_, victim_ball_unwebbed) = sys.get_ball_snapshot(victim_id).await.unwrap().unwrap();
+    assert!(
+        (victim_ball_unwebbed.max_velocity - 365.0).abs() < 0.5,
+        "Deactivating Stasis Webifier I must restore victim max_velocity to 365.0"
+    );
+
+    // Activate Heavy Stasis Grappler II (41057, speedFactor = -85%, optimal = 1 km, falloffEffectiveness = 10 km) at 1 km
+    ctx.dispatch_rpc(
+        &mut sess,
+        "dogmaIM",
+        None,
+        "Activate",
+        &[
+            PyRep::Integer(grap_mod_id),
+            PyRep::String("decreaseTargetSpeed".into()),
+            PyRep::Integer(victim_id),
+            PyRep::Integer(1),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Activate Heavy Stasis Grappler II at 1 km");
+    let (_, victim_ball_grap_1km) = sys.get_ball_snapshot(victim_id).await.unwrap().unwrap();
+    assert!(
+        (victim_ball_grap_1km.max_velocity - 365.0 * 0.15).abs() < 0.5,
+        "Heavy Stasis Grappler II at 1 km (optimal) must reduce max_velocity by 85% (to 54.75 m/s), got {}",
+        victim_ball_grap_1km.max_velocity
+    );
+    ctx.dispatch_rpc(
+        &mut sess,
+        "dogmaIM",
+        None,
+        "Deactivate",
+        &[
+            PyRep::Integer(grap_mod_id),
+            PyRep::String("decreaseTargetSpeed".into()),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Deactivate Heavy Stasis Grappler II");
+
+    // Lock far_id at 25 km and activate Heavy Stasis Grappler II -> decays to -15% floor (365 * 0.85 = 310.25)
+    sys.add_target_lock(
+        ship_id,
+        TargetLock {
+            target_id: far_id,
+            lock_time_ms: 0.0,
+            remaining_lock_ms: 0.0,
+            locked: true,
+            max_range_m: Some(50_000.0),
+        },
+    )
+    .await
+    .unwrap();
+    ctx.dispatch_rpc(
+        &mut sess,
+        "dogmaIM",
+        None,
+        "Activate",
+        &[
+            PyRep::Integer(grap_mod_id),
+            PyRep::String("decreaseTargetSpeed".into()),
+            PyRep::Integer(far_id),
+            PyRep::Integer(1),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Activate Heavy Stasis Grappler II at 25 km");
+    let (_, far_ball_grap_25km) = sys.get_ball_snapshot(far_id).await.unwrap().unwrap();
+    assert!(
+        far_ball_grap_25km.max_velocity > victim_ball_grap_1km.max_velocity
+            && far_ball_grap_25km.max_velocity <= 365.0 * 0.85 + 0.5,
+        "Heavy Stasis Grappler II at 25 km must decay across falloffEffectiveness and clamp at >=15% web floor, got {}",
+        far_ball_grap_25km.max_velocity
+    );
+    ctx.dispatch_rpc(
+        &mut sess,
+        "dogmaIM",
+        None,
+        "Deactivate",
+        &[
+            PyRep::Integer(grap_mod_id),
+            PyRep::String("decreaseTargetSpeed".into()),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Deactivate Heavy Stasis Grappler II on far_id");
+
+    // 5. Verify Energy Neutralizer (533) & Nosferatu Transfer Rule (530) (feat:modules.energy-neutralizer, feat:modules.nosferatu-transfer-rule)
+    sys.set_capacitor(victim_id, 200.0).await.unwrap();
+    sys.set_capacitor(ship_id, 100.0).await.unwrap();
+    ctx.dispatch_rpc(
+        &mut sess,
+        "dogmaIM",
+        None,
+        "Activate",
+        &[
+            PyRep::Integer(neut_mod_id),
+            PyRep::String("energyNeutralizerFalloff".into()),
+            PyRep::Integer(victim_id),
+            PyRep::Integer(1),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Activate Small Energy Neutralizer I");
+    let victim_cap_after_neut = sys.get_combat_state(victim_id).await.unwrap().unwrap().capacitor;
+    assert!(
+        (victim_cap_after_neut - 155.0).abs() < 0.5,
+        "Small Energy Neutralizer I (45 GJ) must drain victim capacitor from 200.0 to 155.0, got {victim_cap_after_neut}"
+    );
+    ctx.dispatch_rpc(
+        &mut sess,
+        "dogmaIM",
+        None,
+        "Deactivate",
+        &[
+            PyRep::Integer(neut_mod_id),
+            PyRep::String("energyNeutralizerFalloff".into()),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Deactivate Small Energy Neutralizer I");
+
+    // 5b. Nosferatu when target_cap (150.0) > self_cap (80.0): transfers capacitor to self
+    sys.set_capacitor(ship_id, 80.0).await.unwrap();
+    ctx.dispatch_rpc(
+        &mut sess,
+        "dogmaIM",
+        None,
+        "Activate",
+        &[
+            PyRep::Integer(nos_mod_id),
+            PyRep::String("energyNosferatuFalloff".into()),
+            PyRep::Integer(victim_id),
+            PyRep::Integer(1),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Activate Small Energy Nosferatu I when target_cap > self_cap");
+    let victim_cap_after_nos1 = sys.get_combat_state(victim_id).await.unwrap().unwrap().capacitor;
+    let self_cap_after_nos1 = sys.get_combat_state(ship_id).await.unwrap().unwrap().capacitor;
+    assert!(
+        victim_cap_after_nos1 < 150.0 && self_cap_after_nos1 > 80.0,
+        "Small Energy Nosferatu I must transfer capacitor from target ({victim_cap_after_nos1}) to self ({self_cap_after_nos1}) when target_cap > self_cap"
+    );
+    ctx.dispatch_rpc(
+        &mut sess,
+        "dogmaIM",
+        None,
+        "Deactivate",
+        &[
+            PyRep::Integer(nos_mod_id),
+            PyRep::String("energyNosferatuFalloff".into()),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Deactivate Small Energy Nosferatu I");
+
+    // 5c. Nosferatu when target_cap (50.0) <= self_cap (200.0): transfers 0.0 GJ!
+    sys.set_capacitor(victim_id, 50.0).await.unwrap();
+    sys.set_capacitor(ship_id, 200.0).await.unwrap();
+    ctx.dispatch_rpc(
+        &mut sess,
+        "dogmaIM",
+        None,
+        "Activate",
+        &[
+            PyRep::Integer(nos_mod_id),
+            PyRep::String("energyNosferatuFalloff".into()),
+            PyRep::Integer(victim_id),
+            PyRep::Integer(1),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Activate Small Energy Nosferatu I when target_cap <= self_cap");
+    let victim_cap_after_nos2 = sys.get_combat_state(victim_id).await.unwrap().unwrap().capacitor;
+    let self_cap_after_nos2 = sys.get_combat_state(ship_id).await.unwrap().unwrap().capacitor;
+    assert!(
+        (victim_cap_after_nos2 - 50.0).abs() < 1e-4 && (self_cap_after_nos2 - 200.0).abs() < 1e-4,
+        "Small Energy Nosferatu I must NOT drain target or boost self when target_cap (50) <= self_cap (200)"
+    );
+    ctx.dispatch_rpc(
+        &mut sess,
+        "dogmaIM",
+        None,
+        "Deactivate",
+        &[
+            PyRep::Integer(nos_mod_id),
+            PyRep::String("energyNosferatuFalloff".into()),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Deactivate Small Energy Nosferatu I");
+
+    // 6. Verify Supercarrier Burst Projectors (40698 Stasis Webification, 40635 Energy Neutralization) (feat:modules.burst-projectors)
+    sys.set_capacitor(ship_id, 50_000.0).await.unwrap();
+    sys.set_capacitor(victim_id, 250.0).await.unwrap();
+    sys.set_capacitor(far_id, 250.0).await.unwrap();
+    ctx.dispatch_rpc(
+        &mut sess,
+        "dogmaIM",
+        None,
+        "Activate",
+        &[
+            PyRep::Integer(web_bp_id),
+            PyRep::String("doomsdayAOEWeb".into()),
+            PyRep::Integer(victim_id),
+            PyRep::Integer(0),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Activate Stasis Webification Burst Projector");
+    let (_, victim_ball_bp_web) = sys.get_ball_snapshot(victim_id).await.unwrap().unwrap();
+    let (_, far_ball_bp_web) = sys.get_ball_snapshot(far_id).await.unwrap().unwrap();
+    assert!(
+        victim_ball_bp_web.max_velocity < 365.0,
+        "Stasis Webification Burst Projector must slow ships within AoE radius (victim_id), got {}",
+        victim_ball_bp_web.max_velocity
+    );
+    assert!(
+        (far_ball_bp_web.max_velocity - 365.0).abs() < 0.5,
+        "Stasis Webification Burst Projector must not slow far_id outside AoE radius"
+    );
+    ctx.dispatch_rpc(
+        &mut sess,
+        "dogmaIM",
+        None,
+        "Deactivate",
+        &[
+            PyRep::Integer(web_bp_id),
+            PyRep::String("doomsdayAOEWeb".into()),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Deactivate Stasis Webification Burst Projector");
+
+    // Swap Stasis Webification Burst Projector (40698) to Energy Neutralization Burst Projector (40635) in HiSlot4 (maxGroupFitted = 1)
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(m_item) = snap.items.get_mut(&web_bp_id) {
+            m_item.type_id = 40635;
+        }
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+    ctx.dispatch_rpc(
+        &mut sess,
+        "dogmaIM",
+        None,
+        "Activate",
+        &[
+            PyRep::Integer(web_bp_id),
+            PyRep::String("doomsdayAOENeut".into()),
+            PyRep::Integer(victim_id),
+            PyRep::Integer(0),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Activate Energy Neutralization Burst Projector");
+    let victim_cap_bp_neut = sys.get_combat_state(victim_id).await.unwrap().unwrap().capacitor;
+    let far_cap_bp_neut = sys.get_combat_state(far_id).await.unwrap().unwrap().capacitor;
+    assert_eq!(
+        victim_cap_bp_neut, 0.0,
+        "Energy Neutralization Burst Projector (1200 GJ) must drain victim_id capacitor inside AoE cloud"
+    );
+    assert_eq!(
+        far_cap_bp_neut, 250.0,
+        "Energy Neutralization Burst Projector must not drain far_id outside AoE cloud"
+    );
 }

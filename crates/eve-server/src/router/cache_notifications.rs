@@ -1126,4 +1126,170 @@ impl ServerContext {
             ],
         );
     }
+
+    pub fn effect_id_for_module(&self, type_id: u32, effect_name: Option<&str>) -> Option<i64> {
+        let ty = self.sde.types.get(&type_id);
+        if let Some(name) = effect_name {
+            let in_type = ty.and_then(|t| {
+                t.effect_ids
+                    .iter()
+                    .find(|eid| self.sde.effects.get(eid).is_some_and(|e| e.name == name))
+                    .copied()
+            });
+            if let Some(eid) = in_type {
+                return Some(eid as i64);
+            }
+            if let Some(e) = self.sde.effects.values().find(|e| e.name == name) {
+                return Some(e.effect_id as i64);
+            }
+        }
+        ty.and_then(|t| t.default_effect_id).map(|e| e as i64)
+    }
+
+    pub fn notify_module_effect_started(
+        &self,
+        char_id: i64,
+        ship_id: i64,
+        module_id: i64,
+        module_type_id: u32,
+        effect_name: Option<&str>,
+        target_id: Option<i64>,
+    ) -> Vec<PendingMachoNotification> {
+        let effect_id = self.effect_id_for_module(module_type_id, effect_name).unwrap_or(0);
+        let duration_ms = self
+            .sde
+            .types
+            .get(&module_type_id)
+            .and_then(|t| {
+                t.default_attributes
+                    .get(&73)
+                    .or_else(|| t.default_attributes.get(&51))
+                    .copied()
+            })
+            .unwrap_or(0.0);
+        let now = self.now_blueos_filetime_ticks();
+        let environment = PyRep::Tuple(vec![
+            PyRep::Integer(module_id),
+            PyRep::Integer(char_id),
+            PyRep::Integer(ship_id),
+            target_id.map(PyRep::Integer).unwrap_or(PyRep::None),
+            PyRep::None,
+            PyRep::List(vec![]),
+            PyRep::Integer(effect_id),
+        ]);
+        self.notify(
+            NotificationTarget::Character(char_id),
+            "OnGodmaShipEffect",
+            "charid",
+            vec![
+                PyRep::Integer(module_id),
+                PyRep::Integer(effect_id),
+                PyRep::Integer(now),
+                PyRep::Integer(1),
+                PyRep::Integer(1),
+                environment,
+                PyRep::Integer(now),
+                PyRep::Real(duration_ms),
+                PyRep::Integer(0),
+                PyRep::None,
+            ],
+        )
+    }
+
+    pub fn notify_module_online_state(
+        &self,
+        char_id: i64,
+        module_id: i64,
+        online: bool,
+    ) -> Vec<PendingMachoNotification> {
+        let (new_v, old_v) = if online { (1.0, 0.0) } else { (0.0, 1.0) };
+        let now = self.now_blueos_filetime_ticks();
+        let entry = PyRep::Tuple(vec![
+            PyRep::String("OnModuleAttributeChange".into()),
+            PyRep::Integer(char_id),
+            PyRep::Integer(module_id),
+            PyRep::Integer(2),
+            PyRep::Integer(now),
+            PyRep::Real(new_v),
+            PyRep::Real(old_v),
+        ]);
+        self.notify(
+            NotificationTarget::Character(char_id),
+            "OnModuleAttributeChanges",
+            "charid",
+            vec![PyRep::List(vec![entry])],
+        )
+    }
+
+    pub fn notify_target_events(
+        &self,
+        char_id: i64,
+        events: &[(&str, i64, &str)],
+    ) -> Vec<PendingMachoNotification> {
+        let list = events
+            .iter()
+            .map(|(what, tid, reason)| {
+                PyRep::Tuple(vec![
+                    PyRep::Tuple(vec![
+                        PyRep::String("OnTarget".into()),
+                        PyRep::String((*what).into()),
+                        PyRep::Integer(*tid),
+                        PyRep::String((*reason).into()),
+                    ]),
+                    PyRep::Integer(0),
+                ])
+            })
+            .collect();
+        self.notify(
+            NotificationTarget::Character(char_id),
+            "OnMultiEvent",
+            "charid",
+            vec![PyRep::List(list)],
+        )
+    }
+
+    pub fn notify_system_criminal_flag_updates(
+        &self,
+        sys_id: u32,
+        new_idles: &[i64],
+        new_suspects: &[i64],
+        new_criminals: &[i64],
+    ) -> Vec<PendingMachoNotification> {
+        let ids = |v: &[i64]| PyRep::List(v.iter().map(|c| PyRep::Integer(*c)).collect());
+        self.notify(
+            NotificationTarget::SolarSystem(sys_id),
+            "OnSystemCriminalFlagUpdates",
+            "solarsystemid",
+            vec![ids(new_idles), ids(new_suspects), ids(new_criminals)],
+        )
+    }
+
+    pub fn notify_fitted_item_trashed(
+        &self,
+        char_id: i64,
+        item_id: i64,
+        type_id: i64,
+        quantity: i64,
+        old_location_id: i64,
+        old_flag: i64,
+    ) -> Vec<PendingMachoNotification> {
+        self.notify(
+            NotificationTarget::Character(char_id),
+            "OnItemChange",
+            "charid",
+            vec![
+                PyRep::keyval([
+                    ("itemID", PyRep::Integer(item_id)),
+                    ("typeID", PyRep::Integer(type_id)),
+                    ("locationID", PyRep::Integer(10)),
+                    ("flagID", PyRep::Integer(147)),
+                    ("quantity", PyRep::Integer(quantity)),
+                ]),
+                PyRep::Dict(vec![
+                    (PyRep::Integer(3), PyRep::Integer(old_location_id)),
+                    (PyRep::Integer(4), PyRep::Integer(old_flag)),
+                ]),
+            ],
+        )
+    }
 }

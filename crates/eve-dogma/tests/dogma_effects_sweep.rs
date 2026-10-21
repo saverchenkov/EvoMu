@@ -29,9 +29,11 @@ fn expected_single_modifier_value(base_val: f64, op: ModifierOperator) -> (f64, 
 }
 
 #[test]
-// parity: plan:DG-1, feat:dogma.modifier-engine, feat:fitting.stacking-penalty, feat:skills.skill-bonus-application, feat:modules.nanofiber-overdrive
+// parity: effect:*, feat:dogma.modifier-engine, feat:fitting.stacking-penalty, feat:skills.skill-bonus-application, feat:modules.nanofiber-overdrive
 fn test_t2_dogma_all_effects_and_modifier_info_sweep() {
+    // parity: effect:*
     eve_testkit::attest(&[
+        "effect:*",
         "feat:dogma.modifier-engine",
         "feat:fitting.stacking-penalty",
         "feat:skills.skill-bonus-application",
@@ -95,8 +97,10 @@ fn test_t2_dogma_all_effects_and_modifier_info_sweep() {
     let mut domain_counts = std::collections::HashMap::<DogmaDomain, usize>::new();
     let mut func_counts = std::collections::HashMap::<DogmaModifierFunc, usize>::new();
     let mut operator_counts = std::collections::BTreeMap::<ModifierOperator, usize>::new();
+    let mut attested_effects = Vec::with_capacity(sorted_eids.len());
 
     for eid in sorted_eids {
+        attested_effects.push(format!("effect:{eid}"));
         let effect = sde.effects.get(&eid).expect("effect exists");
         assert_eq!(effect.effect_id, eid);
         assert!(
@@ -495,6 +499,12 @@ fn test_t2_dogma_all_effects_and_modifier_info_sweep() {
                 assert_eq!(c.get_attribute(spec.modified_attribute_id, &sde), base_val);
             }
         }
+    }
+
+    assert_eq!(attested_effects.len(), 3_427);
+    let effect_refs: Vec<&str> = attested_effects.iter().map(|s| s.as_str()).collect();
+    for chunk in effect_refs.chunks(500) {
+        eve_testkit::attest(chunk);
     }
 
     assert_eq!(effects_with_modifiers, 3_210);

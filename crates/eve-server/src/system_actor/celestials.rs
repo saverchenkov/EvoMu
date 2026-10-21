@@ -3,8 +3,8 @@
 #![forbid(unsafe_code)]
 
 use super::{
-    ActiveModuleCycle, AsteroidState, MiningExtractionResult, SystemCommand, TickBroadcast,
-    next_downtime_unix_secs,
+    ActiveModuleCycle, ActiveNaniteRepair, AsteroidState, MiningExtractionResult, SystemCommand,
+    TickBroadcast, next_downtime_unix_secs,
 };
 use eve_destiny::wire::encode_destiny_updates;
 use eve_destiny::{
@@ -670,6 +670,99 @@ impl SystemHandle {
             .map_err(|_| "Solar system actor stopped".to_string())?;
         rx.await.map_err(|_| "Solar system reply dropped".to_string())
     }
+
+    pub async fn emit_destiny_event(
+        &self,
+        ball_id: BallId,
+        event: DestinyEvent,
+    ) -> Result<bool, String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SystemCommand::EmitDestinyEvent {
+                ball_id,
+                event,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| "Solar system actor stopped".to_string())?;
+        rx.await.map_err(|_| "Solar system reply dropped".to_string())
+    }
+
+    pub async fn goto_point(&self, ball_id: BallId, point: DVec3) -> Result<u64, String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SystemCommand::GotoPoint {
+                ball_id,
+                point,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| "Solar system actor stopped".to_string())?;
+        rx.await
+            .map_err(|_| "Solar system reply dropped".to_string())?
+    }
+
+    pub async fn update_module_overload(
+        &self,
+        ship_id: BallId,
+        module_id: i64,
+        is_overloaded: bool,
+    ) -> Result<bool, String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SystemCommand::UpdateModuleOverload {
+                ship_id,
+                module_id,
+                is_overloaded,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| "Solar system actor stopped".to_string())?;
+        rx.await.map_err(|_| "Solar system reply dropped".to_string())
+    }
+
+    pub async fn start_nanite_repair(&self, repair: ActiveNaniteRepair) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SystemCommand::StartNaniteRepair { repair, reply: tx })
+            .await
+            .map_err(|_| "Solar system actor stopped".to_string())?;
+        rx.await.map_err(|_| "Solar system reply dropped".to_string())
+    }
+
+    pub async fn stop_nanite_repair(
+        &self,
+        ship_id: BallId,
+        module_id: i64,
+    ) -> Result<Option<f64>, String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SystemCommand::StopNaniteRepair {
+                ship_id,
+                module_id,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| "Solar system actor stopped".to_string())?;
+        rx.await.map_err(|_| "Solar system reply dropped".to_string())
+    }
+
+    pub async fn record_incoming_armor_damage(
+        &self,
+        ship_id: BallId,
+        damage: [f64; 4],
+    ) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SystemCommand::RecordIncomingArmorDamage {
+                ship_id,
+                damage,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| "Solar system actor stopped".to_string())?;
+        rx.await.map_err(|_| "Solar system reply dropped".to_string())
+    }
 }
 
 /// Populates a solar system's `Ballpark` with its real SDE stars, planets, moons, asteroid belts,
@@ -1131,107 +1224,6 @@ pub(super) fn handle_mine_asteroid(
         Err(format!(
             "Asteroid {asteroid_id} not found in system {solar_system_id}"
         ))
-    }
-}
-
-pub(super) fn cleanup_removed_module_cycle(ballpark: &mut Ballpark, removed: &ActiveModuleCycle) {
-    if let Some(orig_v) = removed.original_max_velocity {
-        if let Some(ball) = ballpark.balls.get_mut(&removed.ship_id) {
-            ball.max_velocity = orig_v;
-        }
-    }
-    if let Some(orig_m) = removed.original_mass {
-        if let Some(ball) = ballpark.balls.get_mut(&removed.ship_id) {
-            ball.mass = orig_m;
-        }
-    }
-    if let Some(orig_sig) = removed.original_signature_radius {
-        if let Some(cs) = ballpark.combat_states.get_mut(&removed.ship_id) {
-            cs.signature_radius = orig_sig;
-        }
-    }
-    if removed.hic_bubble_radius_m.is_some() {
-        ballpark.remove_warp_bubble(removed.module_id);
-    }
-    if removed.grants_interdiction_nullification {
-        ballpark.set_interdiction_nullified(removed.ship_id, false);
-    }
-}
-
-pub(super) fn reconcile_tackle_and_bubbles(
-    ballpark: &mut Ballpark,
-    active_module_cycles: &mut Vec<ActiveModuleCycle>,
-    base_scramble_strengths: &HashMap<BallId, i32>,
-    base_core_strengths: &HashMap<BallId, i32>,
-) {
-    let mut mwd_disabled_targets: Vec<BallId> = Vec::new();
-    for cycle in active_module_cycles.iter() {
-        if cycle.disables_target_mwd_mjd {
-            if let Some(tid) = cycle.target_id {
-                if !mwd_disabled_targets.contains(&tid) {
-                    mwd_disabled_targets.push(tid);
-                }
-            }
-        }
-    }
-
-    for cycle in active_module_cycles.iter() {
-        if let Some(radius) = cycle.hic_bubble_radius_m {
-            if let Some(ship_ball) = ballpark.balls.get(&cycle.ship_id) {
-                ballpark.add_warp_bubble(cycle.module_id, ship_ball.position, radius);
-            }
-        }
-    }
-
-    let ball_ids: Vec<BallId> = ballpark.combat_states.keys().copied().collect();
-    for ball_id in ball_ids {
-        let base_scram = base_scramble_strengths.get(&ball_id).copied().unwrap_or(0);
-        let base_core = base_core_strengths.get(&ball_id).copied().unwrap_or(1);
-
-        let mod_scram: i32 = active_module_cycles
-            .iter()
-            .filter(|c| c.target_id == Some(ball_id))
-            .map(|c| c.warp_scramble_points)
-            .sum();
-        let mod_core: i32 = active_module_cycles
-            .iter()
-            .filter(|c| c.ship_id == ball_id)
-            .map(|c| c.warp_core_stab_bonus)
-            .sum();
-        let mwd_disabled = active_module_cycles
-            .iter()
-            .any(|c| c.target_id == Some(ball_id) && c.disables_target_mwd_mjd);
-        let disallow_assist = active_module_cycles
-            .iter()
-            .any(|c| c.ship_id == ball_id && c.hic_bubble_radius_m.is_some());
-        let nullified_by_mod = active_module_cycles
-            .iter()
-            .any(|c| c.ship_id == ball_id && c.grants_interdiction_nullification);
-
-        if let Some(cs) = ballpark.combat_states.get_mut(&ball_id) {
-            cs.warp_scramble_strength = base_scram + mod_scram;
-            cs.warp_core_strength = base_core + mod_core;
-            cs.is_mwd_mjd_disabled = mwd_disabled;
-            cs.disallow_assistance = disallow_assist;
-            if nullified_by_mod {
-                cs.is_interdiction_nullified = true;
-            }
-        }
-    }
-
-    let mut idx = 0;
-    while idx < active_module_cycles.len() {
-        let ship_id = active_module_cycles[idx].ship_id;
-        let stop_mwd_or_mjd =
-            active_module_cycles[idx].is_mwd_or_mjd && mwd_disabled_targets.contains(&ship_id);
-        let stop_mjd_from_scram = active_module_cycles[idx].mjd_jump_distance_m.is_some()
-            && ballpark.is_ball_scrambled(ship_id);
-        if stop_mwd_or_mjd || stop_mjd_from_scram {
-            let shut_down = active_module_cycles.remove(idx);
-            cleanup_removed_module_cycle(ballpark, &shut_down);
-        } else {
-            idx += 1;
-        }
     }
 }
 
