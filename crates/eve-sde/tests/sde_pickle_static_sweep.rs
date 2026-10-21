@@ -1,11 +1,9 @@
-//! Independent raw client-file parse of every `.pickle` resource and every `.static` resource that
-//! carries a pickled FSD schema header (`T-2`), plus magic-byte format classification of all 213
-//! client static-data resources.
+//! Independent raw client-file parse of every `.pickle` resource, every `.static` resource that
+//! carries a pickled or external FSD schema, and every `.schema` YAML resource (`T-2`), plus
+//! magic-byte format classification of all 213 client static-data resources.
 //!
-//! Untagged: the records of these files are not loaded into `SdeRegistry` or the
-//! `evomu_sde.sqlite` domain tables (only their `sde_resources` row is), so they do not meet the
-//! `sde:*` acceptance clause "every record available to server logic". This test pins the
-//! importer's per-file record count and spot key to counts parsed here from the raw bytes.
+//! Resources whose records are available to server logic through `SdeRegistry` are verified
+//! record-by-record in `test_t2_sde_static_schema_and_pickle_domain_verification` and attested.
 
 #![forbid(unsafe_code)]
 
@@ -152,4 +150,439 @@ fn test_t2_sde_pickle_and_pickled_schema_static_raw_parse() {
     assert_eq!(formats["Pickle (protocol 2)"], 3);
     assert_eq!(pickles_parsed, 13);
     assert_eq!(statics_counted, 23);
+}
+
+fn f32_at(buf: &[u8], pos: usize) -> f32 {
+    f32::from_le_bytes(buf[pos..pos + 4].try_into().expect("f32 slice"))
+}
+
+/// Parses an FSD binaryLoader dict whose footer items are `item_size` bytes (`8` or `12`),
+/// returning `(key, value_pos)` pairs.
+fn fsd_dict_entries(buf: &[u8], pos: usize, item_size: usize) -> Vec<(u32, usize)> {
+    let body_start = pos + 4;
+    let body_end = body_start + u32_at(buf, pos) as usize;
+    let footer_size = u32_at(buf, body_end - 4) as usize;
+    let footer = body_end - 4 - footer_size;
+    let cnt = u32_at(buf, footer) as usize;
+    assert_eq!(footer_size, 4 + item_size * cnt, "FSD dict footer size");
+    (0..cnt)
+        .map(|i| {
+            let at = footer + 4 + i * item_size;
+            (u32_at(buf, at), body_start + u32_at(buf, at + 4) as usize)
+        })
+        .collect()
+}
+
+/// Counts top-level (zero-indentation) keys in a `.schema` YAML file.
+fn yaml_top_level_key_count(text: &str) -> usize {
+    text.lines()
+        .filter(|l| {
+            let t = l.trim_end();
+            !t.is_empty()
+                && !t.starts_with(' ')
+                && !t.starts_with('#')
+                && t.contains(':')
+        })
+        .count()
+}
+
+fn read_pinned_resource(sde: &SdeRegistry, res_path: &str, md5: &str, bytes: u64) -> Vec<u8> {
+    let info = sde
+        .resources
+        .get(res_path)
+        .unwrap_or_else(|| panic!("{res_path} missing from sde.resources"));
+    assert_eq!(info.md5, md5, "{res_path} info.md5");
+    assert_eq!(info.byte_size, bytes, "{res_path} info.byte_size");
+    let raw = std::fs::read(resfiles_dir().join(&info.cdn_relative_path)).expect("client file");
+    assert_eq!(raw.len() as u64, bytes, "{res_path} raw size");
+    assert_eq!(md5_hex(&raw), md5, "{res_path} raw md5");
+    raw
+}
+
+#[test]
+fn test_t2_sde_static_schema_and_pickle_domain_verification() {
+    // parity: sde:res:/staticdata/solarsystemcontent.static
+    // parity: sde:res:/staticdata/regions.schema, sde:res:/staticdata/constellations.schema
+    // parity: sde:res:/staticdata/systems.schema, sde:res:/staticdata/jumps.schema
+    // parity: sde:res:/staticdata/factionsowningsolarsystems.schema, sde:res:/staticdata/factionsowningsolarsystems.static
+    // parity: sde:res:/staticdata/oretypesbydungeonid.static, sde:res:/staticdata/icetypesbydungeonid.static
+    // parity: sde:res:/staticdata/locationcache.static
+    // parity: sde:res:/staticdata/blueprintsbymaterialtypeids.pickle, sde:res:/staticdata/starmapcache.pickle
+    let sde = SdeRegistry::open(&SdeRegistry::default_db_path()).expect("real V24.01 SDE");
+    const METERS_PER_LY: f64 = 9_460_730_472_580_800.0;
+
+    // 1. External YAML `.schema` files + `factionsowningsolarsystems.static`
+    for (res_path, md5, bytes, top_keys, snippet) in [
+        (
+            "res:/staticdata/regions.schema",
+            "babc6a072c8e31fbebb91d994e386730",
+            1_606u64,
+            4usize,
+            "endOfFixedSizeData: 36",
+        ),
+        (
+            "res:/staticdata/constellations.schema",
+            "c776a184212daafc1e61ba1d1ab785c6",
+            1_340,
+            4,
+            "endOfFixedSizeData: 36",
+        ),
+        (
+            "res:/staticdata/systems.schema",
+            "9e8ab2ea8cf0826c28a0eff4795c3433",
+            3_210,
+            4,
+            "endOfFixedSizeData: 48",
+        ),
+        (
+            "res:/staticdata/jumps.schema",
+            "f367b13a63d72c8f0996640650c64aaf",
+            939,
+            3,
+            "fixedItemSize: 65",
+        ),
+        (
+            "res:/staticdata/factionsowningsolarsystems.schema",
+            "b55d2c3320b5cf290d797a8f189b00a1",
+            63,
+            3,
+            "fixedItemSize: 4",
+        ),
+    ] {
+        let raw = read_pinned_resource(&sde, res_path, md5, bytes);
+        assert_eq!(detect_format(&raw, false), "FSD Schema (YAML text)");
+        let text = std::str::from_utf8(&raw).expect("UTF-8 schema");
+        assert_eq!(yaml_top_level_key_count(text), top_keys, "{res_path} top keys");
+        assert_eq!(sde.resources[res_path].record_count, top_keys);
+        assert_eq!(sde.resources[res_path].spot, "schema");
+        assert!(text.contains(snippet), "{res_path} missing {snippet}");
+    }
+
+    let foss_raw = read_pinned_resource(
+        &sde,
+        "res:/staticdata/factionsowningsolarsystems.static",
+        "346fbb14c8ea54c681a876d0a6cbe27c",
+        92,
+    );
+    assert_eq!(detect_format(&foss_raw, true), "FSD Static (external .schema)");
+    let foss_cnt = u32_at(&foss_raw, 0) as usize;
+    assert_eq!(foss_cnt, 22);
+    let foss_ids: Vec<u32> = (0..foss_cnt)
+        .map(|i| u32_at(&foss_raw, 4 + i * 4))
+        .collect();
+    assert_eq!(foss_ids[0].to_string(), sde.resources["res:/staticdata/factionsowningsolarsystems.static"].spot);
+    assert_eq!(foss_ids, sde.factions_owning_solar_systems());
+    for &fid in &foss_ids {
+        assert!(sde.factions.contains_key(&fid), "faction {fid} in sde.factions");
+    }
+
+    // 2. `solarsystemcontent.static`: 8,490 solar systems + 13,978 stargates + planet lists.
+    let ssc_raw = read_pinned_resource(
+        &sde,
+        "res:/staticdata/solarsystemcontent.static",
+        "2ddb08422c48a5a0b7eabcece1e2fcf0",
+        92_396_316,
+    );
+    let ssc_sch_len = u32_at(&ssc_raw, 0) as usize;
+    let ssc_schema = unpickle(&ssc_raw[4..4 + ssc_sch_len]);
+    assert_eq!(
+        ssc_schema
+            .get("keyFooter")
+            .and_then(|f| f.get("fixedItemSize"))
+            .and_then(|v| v.as_int()),
+        Some(12)
+    );
+    let ssc_entries = fsd_dict_entries(&ssc_raw, 4 + ssc_sch_len, 12);
+    assert_eq!(ssc_entries.len(), 8_490);
+    assert_eq!(ssc_entries.len(), sde.solar_systems.len());
+    const SSC_VAR_MASKS: [(&str, u64); 19] = [
+        ("descriptionID", 1),
+        ("planets", 0),
+        ("wormholeClassID", 2),
+        ("secondarySun", 4),
+        ("securityClass", 8),
+        ("factionID", 16),
+        ("sunTypeID", 32),
+        ("sunFlareGraphicID", 64),
+        ("star", 128),
+        ("stargates", 0),
+        ("disruptedStargates", 256),
+        ("warpTunnelOverwrite", 512),
+        ("systemWideCloud", 1024),
+        ("visualEffect", 2048),
+        ("disallowedAnchorGroups", 4096),
+        ("disallowedAnchorCategories", 8192),
+        ("dscanRange", 16384),
+        ("disallowScanning", 32768),
+        ("disallowCyno", 65536),
+    ];
+    let mut total_gates = 0usize;
+    for (sid, pos) in ssc_entries {
+        assert_eq!(u32_at(&ssc_raw, pos), sid);
+        let lum = f32_at(&ssc_raw, pos + 14);
+        let cx = f64_at(&ssc_raw, pos + 18);
+        let cy = f64_at(&ssc_raw, pos + 26);
+        let cz = f64_at(&ssc_raw, pos + 34);
+        let radius = f64::from(f32_at(&ssc_raw, pos + 90));
+        let sec = f64::from(f32_at(&ssc_raw, pos + 94));
+        assert!(lum >= 0.0 && lum.is_finite());
+        let sys = sde.solar_systems.get(&sid).expect("solar system in sde");
+        assert!((sys.radius - radius).abs() < 1.0, "system {sid} radius");
+        assert!((sys.security_status - sec).abs() < 1e-6, "system {sid} security");
+        assert_eq!(
+            sys.galactic_pos_ly,
+            [cx / METERS_PER_LY, cy / METERS_PER_LY, cz / METERS_PER_LY]
+        );
+
+        let bitmask = u64_at(&ssc_raw, pos + 98);
+        let present: Vec<&str> = SSC_VAR_MASKS
+            .iter()
+            .filter_map(|&(name, m)| (m == 0 || (bitmask & m) != 0).then_some(name))
+            .collect();
+        let table_start = pos + 98 + 8;
+        let base = table_start + 4 * present.len();
+        let var_pos = |target: &str| -> usize {
+            let idx = present.iter().position(|&n| n == target).expect(target);
+            base + u32_at(&ssc_raw, table_start + 4 * idx) as usize
+        };
+
+        let mut planet_ids: Vec<i64> = fsd_dict_entries(&ssc_raw, var_pos("planets"), 12)
+            .into_iter()
+            .map(|(pid, _)| i64::from(pid))
+            .collect();
+        planet_ids.sort_unstable();
+        assert_eq!(sys.planet_ids, planet_ids, "system {sid} planets");
+
+        for (sg_id, gpos) in fsd_dict_entries(&ssc_raw, var_pos("stargates"), 12) {
+            let dest_gate_id = i64::from(u32_at(&ssc_raw, gpos));
+            let gx = f64_at(&ssc_raw, gpos + 4);
+            let gy = f64_at(&ssc_raw, gpos + 12);
+            let gz = f64_at(&ssc_raw, gpos + 20);
+            let gate_tid = u32_at(&ssc_raw, gpos + 28);
+            assert!(sde.types.contains_key(&gate_tid));
+            let jump = sde
+                .jumps
+                .get(&i64::from(sg_id))
+                .expect("stargate in sde.jumps");
+            assert_eq!(jump.from_solar_system_id, sid);
+            assert_eq!(jump.destination_stargate_id, dest_gate_id);
+            assert_eq!(jump.position.to_array(), [gx, gy, gz]);
+            total_gates += 1;
+        }
+    }
+    assert_eq!(total_gates, 13_978);
+    assert_eq!(total_gates, sde.jumps.len());
+
+    // 3. `oretypesbydungeonid.static` (1,120 records) and `icetypesbydungeonid.static` (21 records).
+    let ore_raw = read_pinned_resource(
+        &sde,
+        "res:/staticdata/oretypesbydungeonid.static",
+        "7ccd58c48605109b492fa98dee34f0d3",
+        24_674,
+    );
+    let ore_sch_len = u32_at(&ore_raw, 0) as usize;
+    let ore_entries = fsd_dict_entries(&ore_raw, 4 + ore_sch_len, 8);
+    assert_eq!(ore_entries.len(), 1_120);
+    let mut total_ore_refs = 0usize;
+    for (did, pos) in &ore_entries {
+        let cnt = u32_at(&ore_raw, *pos) as usize;
+        let mut tids: Vec<u32> = (0..cnt).map(|j| u32_at(&ore_raw, pos + 4 + j * 4)).collect();
+        tids.sort_unstable();
+        total_ore_refs += tids.len();
+        assert_eq!(
+            sde.dungeon_ore_types(*did),
+            Some(tids),
+            "dungeon {did} ore types"
+        );
+    }
+    assert_eq!(total_ore_refs, 2_660);
+    assert_eq!(
+        sde.dungeon_asteroids
+            .keys()
+            .filter(|&&did| sde.dungeon_ore_types(did).is_some())
+            .count(),
+        1_120
+    );
+
+    let ice_raw = read_pinned_resource(
+        &sde,
+        "res:/staticdata/icetypesbydungeonid.static",
+        "28a606d1706d89e74eac9627776dbbf4",
+        1_114,
+    );
+    let ice_sch_len = u32_at(&ice_raw, 0) as usize;
+    let ice_entries = fsd_dict_entries(&ice_raw, 4 + ice_sch_len, 8);
+    assert_eq!(ice_entries.len(), 21);
+    let mut total_ice_refs = 0usize;
+    for (did, pos) in &ice_entries {
+        let cnt = u32_at(&ice_raw, *pos) as usize;
+        let mut tids: Vec<u32> = (0..cnt).map(|j| u32_at(&ice_raw, pos + 4 + j * 4)).collect();
+        tids.sort_unstable();
+        total_ice_refs += tids.len();
+        assert_eq!(
+            sde.dungeon_ice_types(*did),
+            Some(tids),
+            "dungeon {did} ice types"
+        );
+    }
+    assert_eq!(total_ice_refs, 67);
+    assert_eq!(
+        sde.dungeon_asteroids
+            .keys()
+            .filter(|&&did| sde.dungeon_ice_types(did).is_some())
+            .count(),
+        21
+    );
+
+    // 4. `locationcache.static` (481,068 location_id -> solar_system_id entries).
+    let loc_raw = read_pinned_resource(
+        &sde,
+        "res:/staticdata/locationcache.static",
+        "e04d46f1623cbd9d95cbe396740a34a1",
+        5_773_406,
+    );
+    let loc_sch_len = u32_at(&loc_raw, 0) as usize;
+    let loc_entries = fsd_dict_entries(&loc_raw, 4 + loc_sch_len, 8);
+    assert_eq!(loc_entries.len(), 481_068);
+    let sde_loc_map = sde.location_solar_system_map();
+    // `sde_loc_map` has all 481,068 `locationcache.static` entries plus Zarzakh station 60015187 (`mapObjects.db`).
+    assert_eq!(sde_loc_map.len(), 481_069);
+    for (loc_id, pos) in loc_entries {
+        let sys_id = u32_at(&loc_raw, pos);
+        assert_eq!(
+            sde_loc_map.get(&i64::from(loc_id)),
+            Some(&sys_id),
+            "location {loc_id} solar system"
+        );
+    }
+    assert_eq!(sde.location_solar_system(40_000_001), Some(30_000_001));
+    assert_eq!(sde.location_solar_system(60_003_760), Some(30_000_142));
+
+    // 5. `blueprintsbymaterialtypeids.pickle` (1,715 material_type_id -> blueprint_type_ids).
+    let bpm_raw = read_pinned_resource(
+        &sde,
+        "res:/staticdata/blueprintsbymaterialtypeids.pickle",
+        "d7128aa3e2572d1372afecf6d819f5b8",
+        131_702,
+    );
+    let PyVal::Dict(bpm_dict) = unpickle(&bpm_raw) else {
+        panic!("blueprintsbymaterialtypeids must unpickle to a dict");
+    };
+    let sde_bpm = sde.blueprints_by_material_type();
+    assert_eq!(bpm_dict.borrow().len(), 1_715);
+    assert_eq!(sde_bpm.len(), 1_715);
+    for (k, v) in bpm_dict.borrow().iter() {
+        let mat_tid = k.as_int().expect("material type id") as u32;
+        let PyVal::List(list) = v else {
+            panic!("blueprint list for {mat_tid}");
+        };
+        let mut client_bps: Vec<u32> = list
+            .borrow()
+            .iter()
+            .map(|x| x.as_int().expect("bp id") as u32)
+            .collect();
+        client_bps.sort_unstable();
+        assert_eq!(
+            sde_bpm.get(&mat_tid),
+            Some(&client_bps),
+            "blueprints for material {mat_tid}"
+        );
+    }
+
+    // 6. `starmapcache.pickle` (regions: 114, constellations: 1,184, solarSystems: 8,490, jumps: 6,989).
+    let sm_raw = read_pinned_resource(
+        &sde,
+        "res:/staticdata/starmapcache.pickle",
+        "a9831434566044a0d64837669f38e3ba",
+        2_165_420,
+    );
+    let sm_top = unpickle(&sm_raw);
+    assert_eq!(sm_top.len(), Some(4));
+    let PyVal::Dict(sm_regs) = sm_top.get("regions").expect("regions") else {
+        panic!("starmapcache.regions dict");
+    };
+    assert_eq!(sm_regs.borrow().len(), sde.regions.len());
+    for (k, v) in sm_regs.borrow().iter() {
+        let rid = k.as_int().expect("region id") as u32;
+        let reg = sde.regions.get(&rid).expect("region in sde");
+        let PyVal::List(center) = v.get("center").expect("region center") else {
+            panic!("region center list");
+        };
+        let c: Vec<f64> = center
+            .borrow()
+            .iter()
+            .map(|x| match x {
+                PyVal::Float(f) => *f,
+                other => panic!("coord {other:?}"),
+            })
+            .collect();
+        assert_eq!(reg.center, [c[0], c[1], c[2]], "region {rid} center");
+    }
+
+    let PyVal::Dict(sm_cons) = sm_top.get("constellations").expect("constellations") else {
+        panic!("starmapcache.constellations dict");
+    };
+    assert_eq!(sm_cons.borrow().len(), sde.constellations.len());
+    for (k, v) in sm_cons.borrow().iter() {
+        let cid = k.as_int().expect("constellation id") as u32;
+        let con = sde.constellations.get(&cid).expect("constellation in sde");
+        assert_eq!(
+            v.get("regionID").and_then(|x| x.as_int()),
+            Some(i64::from(con.region_id))
+        );
+    }
+
+    let PyVal::Dict(sm_sys) = sm_top.get("solarSystems").expect("solarSystems") else {
+        panic!("starmapcache.solarSystems dict");
+    };
+    assert_eq!(sm_sys.borrow().len(), sde.solar_systems.len());
+    for (k, v) in sm_sys.borrow().iter() {
+        let sid = k.as_int().expect("system id") as u32;
+        let sys = sde.solar_systems.get(&sid).expect("solar system in sde");
+        assert_eq!(
+            v.get("constellationID").and_then(|x| x.as_int()),
+            Some(i64::from(sys.constellation_id))
+        );
+        assert_eq!(
+            v.get("regionID").and_then(|x| x.as_int()),
+            Some(i64::from(sys.region_id))
+        );
+        let PyVal::List(pids) = v.get("planetItemIDs").expect("planetItemIDs") else {
+            panic!("planetItemIDs list");
+        };
+        let mut p_list: Vec<i64> = pids
+            .borrow()
+            .iter()
+            .map(|x| x.as_int().expect("planet id"))
+            .collect();
+        p_list.sort_unstable();
+        assert_eq!(sys.planet_ids, p_list, "starmapcache planets for {sid}");
+    }
+
+    let PyVal::List(sm_jumps) = sm_top.get("jumps").expect("jumps") else {
+        panic!("starmapcache.jumps list");
+    };
+    assert_eq!(sm_jumps.borrow().len(), 6_989);
+    assert_eq!(sm_jumps.borrow().len() * 2, sde.jumps.len());
+    for j in sm_jumps.borrow().iter() {
+        let from_sys = j.get("fromSystemID").and_then(|x| x.as_int()).expect("from") as u32;
+        let to_sys = j.get("toSystemID").and_then(|x| x.as_int()).expect("to") as u32;
+        assert!(sde.solar_systems.contains_key(&from_sys));
+        assert!(sde.solar_systems.contains_key(&to_sys));
+    }
+
+    eve_testkit::attest(&[
+        "sde:res:/staticdata/solarsystemcontent.static",
+        "sde:res:/staticdata/regions.schema",
+        "sde:res:/staticdata/constellations.schema",
+        "sde:res:/staticdata/systems.schema",
+        "sde:res:/staticdata/jumps.schema",
+        "sde:res:/staticdata/factionsowningsolarsystems.schema",
+        "sde:res:/staticdata/factionsowningsolarsystems.static",
+        "sde:res:/staticdata/oretypesbydungeonid.static",
+        "sde:res:/staticdata/icetypesbydungeonid.static",
+        "sde:res:/staticdata/locationcache.static",
+        "sde:res:/staticdata/blueprintsbymaterialtypeids.pickle",
+        "sde:res:/staticdata/starmapcache.pickle",
+    ]);
 }

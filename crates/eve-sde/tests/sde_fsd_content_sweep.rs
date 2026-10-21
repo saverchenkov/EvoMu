@@ -41,11 +41,69 @@ const NODEGRAPHS: (&str, &str, u64) = (
     "a59acb0775423a99b82cb8a3f8e697a6",
     8_254_048,
 );
+const REQ_SKILLS_FOR_TYPES: (&str, &str, u64) = (
+    "res:/staticdata/requiredskillsfortypes.fsdbinary",
+    "58d4d940882dbe8af6531268679d87e4",
+    863_720,
+);
+const REQ_SKILLS_INDEX: (&str, &str, u64) = (
+    "res:/staticdata/requiredskillsindex.fsdbinary",
+    "d3d5a70e4b51d03b2bab6ae17857c6d0",
+    266_136,
+);
 const EN_US: (&str, &str, u64) = (
     "res:/localizationfsd/localization_fsd_en-us.pickle",
     "7a753c9da2eeca4dcc7cf0c6655aaae0",
     40_753_078,
 );
+
+/// Walks a nested `cfsd` hash dict whose entries are 24-byte `(key u64, inner_dict_rel u64,
+/// inner_dict_len u64)` triples.
+fn cfsd_dict_of_dicts(buf: &[u8], rel: u64, expected_len: usize) -> Vec<(u64, u64, usize)> {
+    let abs = cfsd_abs(rel);
+    let buckets = u64_at(buf, abs - 8) as usize;
+    let mut out = Vec::with_capacity(expected_len);
+    for b in 0..buckets {
+        let boff = u64_at(buf, abs + b * 8);
+        if boff == 0 {
+            continue;
+        }
+        let babs = cfsd_abs(boff);
+        let bn = u64_at(buf, babs - 8) as usize;
+        for i in 0..bn {
+            let e = babs + i * 24;
+            out.push((u64_at(buf, e), u64_at(buf, e + 8), u64_at(buf, e + 16) as usize));
+        }
+    }
+    assert_eq!(out.len(), expected_len, "cfsd nested dict count");
+    out
+}
+
+/// Walks a nested `cfsd` hash dict whose entries are 16-byte `(key u64, list_rel u64)` pairs where
+/// each list holds `u32` elements.
+fn cfsd_dict_of_u32_lists(buf: &[u8], rel: u64, expected_len: usize) -> HashMap<u32, Vec<u32>> {
+    let abs = cfsd_abs(rel);
+    let buckets = u64_at(buf, abs - 8) as usize;
+    let mut out = HashMap::with_capacity(expected_len);
+    for b in 0..buckets {
+        let boff = u64_at(buf, abs + b * 8);
+        if boff == 0 {
+            continue;
+        }
+        let babs = cfsd_abs(boff);
+        let bn = u64_at(buf, babs - 8) as usize;
+        for i in 0..bn {
+            let e = babs + i * 16;
+            let k = u64_at(buf, e) as u32;
+            let (l_pos, l_cnt) = cfsd_list(buf, u64_at(buf, e + 8));
+            let mut tids: Vec<u32> = (0..l_cnt).map(|j| u32_at(buf, l_pos + j * 4)).collect();
+            tids.sort_unstable();
+            out.insert(k, tids);
+        }
+    }
+    assert_eq!(out.len(), expected_len, "cfsd list-dict count");
+    out
+}
 
 fn load(sde: &SdeRegistry, res: (&str, &str, u64), stride: usize) -> CfsdFile {
     let info = sde
@@ -79,6 +137,7 @@ fn test_t2_sde_fsdbinary_dogma_and_content_raw_client_verification() {
     // parity: sde:res:/staticdata/typedogma.fsdbinary, sde:res:/staticdata/missions.fsdbinary
     // parity: sde:res:/staticdata/epicarcs.fsdbinary, sde:res:/staticdata/dungeons.fsdbinary
     // parity: sde:res:/staticdata/nodegraphs.fsdbinary
+    // parity: sde:res:/staticdata/requiredskillsfortypes.fsdbinary, sde:res:/staticdata/requiredskillsindex.fsdbinary
     let sde = SdeRegistry::open(&SdeRegistry::default_db_path()).expect("real V24.01 SDE");
     let labels = load_en_us_labels(&sde);
     assert_eq!(labels[&524_288], "Tormentor Ironblood Serenity Only SKIN (30 Days)");
@@ -290,11 +349,84 @@ fn test_t2_sde_fsdbinary_dogma_and_content_raw_client_verification() {
         ))
     );
 
+    // requiredskillsfortypes: stride 24 (type_id u64, skills_dict rel u64, skills_dict len u64).
+    // Inner dict entries are 8-byte (skill_type_id u32, level u32) pairs.
+    let rft = load(&sde, REQ_SKILLS_FOR_TYPES, 24);
+    assert_eq!(rft.records.len(), 9_573);
+    let mut total_skill_reqs = 0usize;
+    for &rec in &rft.records {
+        let r = &rft.raw;
+        let tid = u64_at(r, rec) as u32;
+        let d_rel = u64_at(r, rec + 8);
+        let d_len = u64_at(r, rec + 16) as usize;
+        let abs = cfsd_abs(d_rel);
+        let buckets = u64_at(r, abs - 8) as usize;
+        let mut client_skills: HashMap<u32, u8> = HashMap::with_capacity(d_len);
+        for b in 0..buckets {
+            let boff = u64_at(r, abs + b * 8);
+            if boff == 0 {
+                continue;
+            }
+            let babs = cfsd_abs(boff);
+            let bn = u64_at(r, babs - 8) as usize;
+            for j in 0..bn {
+                let e = babs + j * 8;
+                client_skills.insert(u32_at(r, e), u32_at(r, e + 4) as u8);
+            }
+        }
+        assert_eq!(client_skills.len(), d_len, "type {tid} skill dict len");
+        total_skill_reqs += d_len;
+        assert_eq!(
+            sde.required_skills_for_type(tid),
+            client_skills,
+            "required skills for type {tid}"
+        );
+    }
+    assert_eq!(total_skill_reqs, 12_432);
+    assert_eq!(
+        sde.required_skills_for_type(638),
+        HashMap::from([(3338, 1)])
+    );
+
+    // requiredskillsindex: stride 24 (skill_type_id u64, level_dict rel u64, level_dict len u64).
+    // Nested dicts map level -> root_market_group_id -> meta_group_id -> sorted Vec<type_id>.
+    let rsi = load(&sde, REQ_SKILLS_INDEX, 24);
+    assert_eq!(rsi.records.len(), 421);
+    let server_index = sde.required_skills_index();
+    assert_eq!(server_index.len(), rsi.records.len());
+    let mut indexed_type_entries = 0usize;
+    for &rec in &rsi.records {
+        let r = &rsi.raw;
+        let sk_id = u64_at(r, rec) as u32;
+        let lvl_entries = cfsd_dict_of_dicts(r, u64_at(r, rec + 8), u64_at(r, rec + 16) as usize);
+        let mut client_lvl_map: HashMap<u8, HashMap<u32, HashMap<u32, Vec<u32>>>> =
+            HashMap::with_capacity(lvl_entries.len());
+        for (lvl, mg_rel, mg_len) in lvl_entries {
+            let mg_entries = cfsd_dict_of_dicts(r, mg_rel, mg_len);
+            let mut client_mg_map: HashMap<u32, HashMap<u32, Vec<u32>>> =
+                HashMap::with_capacity(mg_entries.len());
+            for (rmg, meta_rel, meta_len) in mg_entries {
+                let meta_map = cfsd_dict_of_u32_lists(r, meta_rel, meta_len);
+                indexed_type_entries += meta_map.values().map(Vec::len).sum::<usize>();
+                client_mg_map.insert(rmg as u32, meta_map);
+            }
+            client_lvl_map.insert(lvl as u8, client_mg_map);
+        }
+        assert_eq!(
+            server_index.get(&sk_id),
+            Some(&client_lvl_map),
+            "requiredskillsindex mismatch for skill {sk_id}"
+        );
+    }
+    assert_eq!(indexed_type_entries, 16_970);
+
     eve_testkit::attest(&[
         "sde:res:/staticdata/typedogma.fsdbinary",
         "sde:res:/staticdata/missions.fsdbinary",
         "sde:res:/staticdata/epicarcs.fsdbinary",
         "sde:res:/staticdata/dungeons.fsdbinary",
         "sde:res:/staticdata/nodegraphs.fsdbinary",
+        "sde:res:/staticdata/requiredskillsfortypes.fsdbinary",
+        "sde:res:/staticdata/requiredskillsindex.fsdbinary",
     ]);
 }
