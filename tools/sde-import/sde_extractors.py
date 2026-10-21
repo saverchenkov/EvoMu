@@ -121,13 +121,14 @@ def load_static_with_schema(name):
     sch = persistence.LoadSchema(open(os.path.join(res_dir, rfi[sp.lower()]), 'rb').read())
     return binaryLoader.LoadFromString(open(os.path.join(res_dir, cat_map[rp]), 'rb').read(), sch)
 
-# 1. Verify and count all 213 staticdata_catalog.json resources
+# 1. Verify and count all 213 staticdata_catalog.json resources. Dispatch on the resource extension
+# and the file's own magic bytes, not on the catalog's extension-derived `format` label (which calls
+# every `.static` "SQLite3" although most are FSD data behind a pickled schema header).
 resource_counts = {}
 for item in cat:
     rp = item['res_path']
     p = os.path.join(res_dir, item['cdn_relative_path'])
-    fmt = item['format']
-    if fmt == 'FSD Binary':
+    if rp.endswith('.fsdbinary'):
         stem = os.path.basename(rp).split('.')[0].lower()
         mod = __import__(loaders[stem])
         data = mod.load(p)
@@ -139,7 +140,7 @@ for item in cat:
             cnt = len(attrs)
             sample_k = attrs[0] if attrs else 'object'
         resource_counts[rp] = {'count': cnt, 'spot': sample_k}
-    elif fmt == 'SQLite3':
+    elif rp.endswith('.static'):
         hdr = open(p, 'rb').read(16)
         if hdr.startswith('SQLite format 3'):
             resource_counts[rp] = {'count': -1, 'spot': 'sqlite'}
@@ -158,7 +159,8 @@ for item in cat:
                 cnt = len(attrs)
                 sample_k = attrs[0] if attrs else 'object'
             resource_counts[rp] = {'count': cnt, 'spot': sample_k}
-    elif fmt == 'Pickle/Binary':
+    else:
+        # `.schema` (YAML text) and `.pickle` resources
         if rp.endswith('.schema'):
             sch = persistence.LoadSchema(open(p, 'rb').read())
             cnt = len(sch) if hasattr(sch, '__len__') else 1
@@ -771,12 +773,56 @@ def build_v24_npc_spawn_groups(
     return out
 
 
+# Resource container formats, classified from each client file's own magic bytes (T-2). The
+# extension-based labels in `docs/index/staticdata_catalog.json` call every `.static` "SQLite3" and
+# every `.schema`/`.pickle` "Pickle/Binary", which is wrong for most files.
+FORMAT_SQLITE = "SQLite3"
+FORMAT_FSD_BINARY = "FSD Binary"
+FORMAT_FSD_STATIC_PICKLED_SCHEMA = "FSD Static (pickled schema header)"
+FORMAT_FSD_STATIC_EXTERNAL_SCHEMA = "FSD Static (external .schema)"
+FORMAT_FSD_SCHEMA_TEXT = "FSD Schema (YAML text)"
+FORMAT_PICKLE_PROTOCOL_0 = "Pickle (protocol 0)"
+FORMAT_PICKLE_PROTOCOL_2 = "Pickle (protocol 2)"
+
+
+def detect_resource_format(raw: bytes, has_sibling_schema: bool) -> str:
+    """Classify a client resource from its magic bytes; raises on an unrecognised container.
+
+    - `SQLite format 3\\0` header: SQLite3 database.
+    - `cfsd` FSD binary: 24-byte header hash, then a u64 LE payload length equal to `len - 32`.
+    - FSD static with pickled schema: u32 LE length `n`, then a protocol-0 pickle of the schema
+      dict (`(dp`) occupying exactly bytes `4..4+n` and ending with the pickle STOP opcode `.`.
+    - Pickle protocol 2 starts with the PROTO opcode `\\x80\\x02`; protocol 0 starts with MARK `(`
+      and ends with STOP `.`.
+    - FSD schema: printable YAML text (`keyFooter:` / `fixedItemSize:` ...).
+    - Anything else is headerless FSD static data whose schema lives in the sibling `.schema`.
+    """
+    if raw.startswith(b"SQLite format 3\x00"):
+        return FORMAT_SQLITE
+    if len(raw) >= 40 and int.from_bytes(raw[24:32], "little") == len(raw) - 32:
+        return FORMAT_FSD_BINARY
+    if len(raw) >= 8:
+        n = int.from_bytes(raw[0:4], "little")
+        if 4 < n < len(raw) - 4 and raw[4:7] == b"(dp" and raw[3 + n : 4 + n] == b".":
+            return FORMAT_FSD_STATIC_PICKLED_SCHEMA
+    if raw.startswith(b"\x80\x02"):
+        return FORMAT_PICKLE_PROTOCOL_2
+    if raw.startswith(b"(") and raw.rstrip().endswith(b"."):
+        return FORMAT_PICKLE_PROTOCOL_0
+    if raw and all(32 <= c < 127 or c in (9, 10, 13) for c in raw):
+        return FORMAT_FSD_SCHEMA_TEXT
+    if has_sibling_schema:
+        return FORMAT_FSD_STATIC_EXTERNAL_SCHEMA
+    raise ValueError(f"Unrecognised client resource container (first bytes {raw[:16].hex()})")
+
+
 def verify_sde_resources(
     catalog: list[dict],
     res_dir: Path,
     resource_counts: dict,
 ) -> list[dict]:
     verified_resources = []
+    res_paths = {item["res_path"] for item in catalog}
     for item in catalog:
         rp = item["res_path"]
         p = res_dir / item["cdn_relative_path"]
@@ -784,6 +830,8 @@ def verify_sde_resources(
         actual_md5 = hashlib.md5(raw).hexdigest()
         if actual_md5 != item["md5"]:
             raise ValueError(f"MD5 mismatch for {rp}: expected {item['md5']}, got {actual_md5}")
+        has_sibling_schema = rp.endswith(".static") and (rp[: -len(".static")] + ".schema") in res_paths
+        fmt = detect_resource_format(raw, has_sibling_schema)
         rc_info = resource_counts[rp]
         cnt = rc_info["count"]
         spot = rc_info["spot"]
@@ -807,7 +855,7 @@ def verify_sde_resources(
                 "cdn_relative_path": item["cdn_relative_path"],
                 "md5": actual_md5,
                 "byte_size": len(raw),
-                "format": item["format"],
+                "format": fmt,
                 "record_count": int(cnt),
                 "spot": str(spot),
             }

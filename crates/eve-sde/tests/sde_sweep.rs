@@ -13,98 +13,8 @@ fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
-/// Pure-Rust RFC 1321 MD5 digest implementation to independently verify raw client files in `ResFiles/`.
-fn md5_hex(data: &[u8]) -> String {
-    const S: [u32; 64] = [
-        7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 5, 9, 14, 20, 5, 9, 14, 20, 5,
-        9, 14, 20, 5, 9, 14, 20, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 6, 10,
-        15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
-    ];
-    const K: [u32; 64] = [
-        0xd76aa478, 0xe8c7b756, 0x242070db, 0xc1bdceee, 0xf57c0faf, 0x4787c62a, 0xa8304613,
-        0xfd469501, 0x698098d8, 0x8b44f7af, 0xffff5bb1, 0x895cd7be, 0x6b901122, 0xfd987193,
-        0xa679438e, 0x49b40821, 0xf61e2562, 0xc040b340, 0x265e5a51, 0xe9b6c7aa, 0xd62f105d,
-        0x02441453, 0xd8a1e681, 0xe7d3fbc8, 0x21e1cde6, 0xc33707d6, 0xf4d50d87, 0x455a14ed,
-        0xa9e3e905, 0xfcefa3f8, 0x676f02d9, 0x8d2a4c8a, 0xfffa3942, 0x8771f681, 0x6d9d6122,
-        0xfde5380c, 0xa4beea44, 0x4bdecfa9, 0xf6bb4b60, 0xbebfbc70, 0x289b7ec6, 0xeaa127fa,
-        0xd4ef3085, 0x04881d05, 0xd9d4d039, 0xe6db99e5, 0x1fa27cf8, 0xc4ac5665, 0xf4292244,
-        0x432aff97, 0xab9423a7, 0xfc93a039, 0x655b59c3, 0x8f0ccc92, 0xffeff47d, 0x85845dd1,
-        0x6fa87e4f, 0xfe2ce6e0, 0xa3014314, 0x4e0811a1, 0xf7537e82, 0xbd3af235, 0x2ad7d2bb,
-        0xeb86d391,
-    ];
-
-    #[inline(always)]
-    fn compress(state: &mut [u32; 4], chunk: &[u8]) {
-        let mut m = [0u32; 16];
-        let mut i = 0;
-        while i < 16 {
-            let base = i * 4;
-            m[i] = u32::from_le_bytes([
-                chunk[base],
-                chunk[base + 1],
-                chunk[base + 2],
-                chunk[base + 3],
-            ]);
-            i += 1;
-        }
-        let [mut a, mut b, mut c, mut d] = *state;
-        let mut r = 0;
-        while r < 64 {
-            let (f, g) = if r < 16 {
-                ((b & c) | (!b & d), r)
-            } else if r < 32 {
-                ((d & b) | (!d & c), (5 * r + 1) & 15)
-            } else if r < 48 {
-                (b ^ c ^ d, (3 * r + 5) & 15)
-            } else {
-                (c ^ (b | !d), (7 * r) & 15)
-            };
-            let temp = d;
-            d = c;
-            c = b;
-            let sum = a.wrapping_add(f).wrapping_add(K[r]).wrapping_add(m[g]);
-            b = b.wrapping_add(sum.rotate_left(S[r]));
-            a = temp;
-            r += 1;
-        }
-        state[0] = state[0].wrapping_add(a);
-        state[1] = state[1].wrapping_add(b);
-        state[2] = state[2].wrapping_add(c);
-        state[3] = state[3].wrapping_add(d);
-    }
-
-    let mut state = [0x67452301u32, 0xefcdab89, 0x98badcfe, 0x10325476];
-    let chunks = data.chunks_exact(64);
-    let rem = chunks.remainder();
-    for chunk in chunks {
-        compress(&mut state, chunk);
-    }
-
-    let bit_len = (data.len() as u64).wrapping_mul(8);
-    let mut tail = [0u8; 128];
-    tail[..rem.len()].copy_from_slice(rem);
-    tail[rem.len()] = 0x80;
-    if rem.len() < 56 {
-        tail[56..64].copy_from_slice(&bit_len.to_le_bytes());
-        compress(&mut state, &tail[..64]);
-    } else {
-        tail[120..128].copy_from_slice(&bit_len.to_le_bytes());
-        compress(&mut state, &tail[..64]);
-        compress(&mut state, &tail[64..128]);
-    }
-
-    let mut digest = [0u8; 16];
-    digest[0..4].copy_from_slice(&state[0].to_le_bytes());
-    digest[4..8].copy_from_slice(&state[1].to_le_bytes());
-    digest[8..12].copy_from_slice(&state[2].to_le_bytes());
-    digest[12..16].copy_from_slice(&state[3].to_le_bytes());
-    let mut out = String::with_capacity(32);
-    for byte in digest {
-        use std::fmt::Write;
-        let _ = write!(&mut out, "{byte:02x}");
-    }
-    out
-}
+mod raw_client;
+use raw_client::md5_hex;
 
 fn read_u32_le(buf: &[u8], pos: usize) -> u32 {
     u32::from_le_bytes(buf[pos..pos + 4].try_into().expect("u32 slice"))
@@ -1004,16 +914,7 @@ fn test_t2_sde_all_213_resources_and_domain_tables_sweep() {
             Some(info.cdn_relative_path.as_str()),
             cat["cdn_relative_path"].as_str()
         );
-        assert!(
-            matches!(
-                info.format.as_str(),
-                "FSD Binary" | "SQLite3" | "Pickle/Binary"
-            ),
-            "Unexpected format {} for {res_path}",
-            info.format
-        );
         assert_eq!(Some(info.format.as_str()), man["format"].as_str());
-        assert_eq!(Some(info.format.as_str()), cat["format"].as_str());
 
         // Verify byte_size and record_count
         assert!(info.byte_size > 0, "Zero byte_size for {res_path}");
@@ -1054,8 +955,21 @@ fn test_t2_sde_all_213_resources_and_domain_tables_sweep() {
             "Client file MD5 mismatch vs catalog for {res_path}"
         );
 
-        // For SQLite3 / .static client files, independently verify record_count, spot key, and all loaded rows
-        if info.format == "SQLite3" {
+        // The importer now labels `format` from the file's magic bytes (T-2). Until
+        // data/evomu_sde.sqlite is regenerated, the database still carries the legacy
+        // extension-derived catalog label, so accept exactly one of the two.
+        let has_sibling_schema = res_path
+            .strip_suffix(".static")
+            .is_some_and(|stem| catalog_by_res.contains_key(&format!("{stem}.schema")));
+        let detected = raw_client::detect_format(&raw_bytes, has_sibling_schema);
+        assert!(
+            info.format == detected || Some(info.format.as_str()) == cat["format"].as_str(),
+            "format {} for {res_path} is neither the detected {detected} nor the catalog label",
+            info.format
+        );
+
+        // For .static client files, independently verify record_count, spot key, and all loaded rows
+        if res_path.ends_with(".static") {
             let c_conn = if raw_bytes.starts_with(b"SQLite format 3\0") {
                 let conn =
                     Connection::open_with_flags(&client_file, OpenFlags::SQLITE_OPEN_READ_ONLY)

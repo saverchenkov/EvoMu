@@ -30,4 +30,7 @@ Thumbs.db
 # Generated runtime/SDE SQLite databases (rebuilt locally via tools/sde-import; never committed)
 /data/*.sqlite*
 /data/quasar_descriptors.*
+data/evomu_sde.sqlite
+data/quasar_descriptors.sqlite
+data/quasar_core_golden.json
 
