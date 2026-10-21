@@ -649,14 +649,16 @@ async fn test_esi_faction_warfare_routes_reflect_live_state() {
 
 #[tokio::test]
 async fn test_esi_universe_celestials_stations_structures_and_jumps_kills() {
-    // parity: esi:GET /universe/stations/{station_id}
+    // parity: esi:GET /universe/stars/{star_id}, esi:GET /universe/stations/{station_id}
     // parity: esi:GET /universe/system_jumps, esi:GET /universe/system_kills
-    // parity: feat:esi.universe.stations-structures
+    // parity: feat:esi.universe.celestials, feat:esi.universe.stations-structures
     // parity: feat:esi.universe.system-jumps-kills
     eve_testkit::attest(&[
+        "esi:GET /universe/stars/{star_id}",
         "esi:GET /universe/stations/{station_id}",
         "esi:GET /universe/system_jumps",
         "esi:GET /universe/system_kills",
+        "feat:esi.universe.celestials",
         "feat:esi.universe.stations-structures",
         "feat:esi.universe.system-jumps-kills",
     ]);
@@ -850,9 +852,40 @@ async fn test_esi_universe_celestials_stations_structures_and_jumps_kills() {
         vec!["esi-universe.read_structures.v1".to_string()],
     );
 
-    // 1. Universe Stars (unimplemented 501 until star.statistics is in SDE) & Celestials (`/planets/{id}`, `/moons/{id}`, `/asteroid_belts/{id}`, `/stargates/{id}`)
-    let star_resp = router.handle_request(&EsiHttpRequest::new("GET", "/v1/universe/stars/40000001/"));
-    assert_eq!(star_resp.status_code, 501);
+    // 1. Universe Stars & Celestials (`/stars/{id}`, `/planets/{id}`, `/moons/{id}`, `/asteroid_belts/{id}`, `/stargates/{id}`)
+    let tanoo_star = call(
+        &router,
+        EsiHttpRequest::new("GET", "/v1/universe/stars/40000001/"),
+        200,
+    );
+    assert_eq!(tanoo_star["name"], json!("Tanoo - Star"));
+    assert_eq!(tanoo_star["solar_system_id"], json!(30_000_001));
+    assert_eq!(tanoo_star["type_id"], json!(45_041));
+    assert_eq!(tanoo_star["radius"], json!(63_350_000));
+    assert_eq!(tanoo_star["temperature"], json!(4_567));
+    assert_eq!(tanoo_star["spectral_class"], json!("K2 V"));
+    assert!(tanoo_star["age"].as_i64().unwrap() > 0);
+    assert!(tanoo_star["luminosity"].as_f64().unwrap() > 0.0);
+
+    let jita_star = call(
+        &router,
+        EsiHttpRequest::new("GET", "/v1/universe/stars/40009076/"),
+        200,
+    );
+    assert_eq!(jita_star["name"], json!("Jita - Star"));
+    assert_eq!(jita_star["solar_system_id"], json!(30_000_142));
+    assert_eq!(jita_star["type_id"], json!(3_796));
+    assert_eq!(jita_star["radius"], json!(513_100_000));
+    assert_eq!(jita_star["temperature"], json!(7_305));
+    assert_eq!(jita_star["spectral_class"], json!("F1 V"));
+    assert_ne!(jita_star["age"], tanoo_star["age"]);
+    assert_ne!(jita_star["luminosity"], tanoo_star["luminosity"]);
+
+    call(
+        &router,
+        EsiHttpRequest::new("GET", "/v1/universe/stars/99999999/"),
+        404,
+    );
 
     let planet = call(
         &router,

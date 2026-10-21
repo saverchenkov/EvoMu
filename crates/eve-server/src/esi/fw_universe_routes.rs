@@ -12,6 +12,130 @@ use eve_db::{FwWindowedStat, InventoryFlag, WorldStateSnapshot};
 use eve_sde::{SdeRegistry, StationInfo};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::path::PathBuf;
+use std::sync::OnceLock;
+
+/// Parsed star physical and spectral statistics from `res:/staticdata/solarsystemcontent.static`.
+#[derive(Debug, Clone)]
+pub struct StarStaticRecord {
+    pub star_id: i64,
+    pub solar_system_id: i64,
+    pub type_id: i64,
+    pub radius: i64,
+    pub age: i64,
+    pub luminosity: f64,
+    pub temperature: i64,
+    pub spectral_class: String,
+}
+
+static STAR_STATIC_RECORDS: OnceLock<HashMap<i64, StarStaticRecord>> = OnceLock::new();
+
+fn parse_solarsystemcontent_stars(raw: &[u8]) -> Option<HashMap<i64, StarStaticRecord>> {
+    if raw.len() < 12 {
+        return None;
+    }
+    let schema_len = u32::from_le_bytes(raw[0..4].try_into().ok()?) as usize;
+    let data_base = 8usize.checked_add(schema_len)?;
+    let footer_bytes = u32::from_le_bytes(raw[raw.len() - 4..].try_into().ok()?) as usize;
+    let footer_start = raw.len().checked_sub(4usize.checked_add(footer_bytes)?)?;
+    if footer_start + 4 > raw.len() {
+        return None;
+    }
+    let count = u32::from_le_bytes(raw[footer_start..footer_start + 4].try_into().ok()?) as usize;
+    let mut stars = HashMap::with_capacity(count);
+    for i in 0..count {
+        let e = footer_start + 4 + i * 12;
+        if e + 12 > raw.len() {
+            break;
+        }
+        let system_id = u32::from_le_bytes(raw[e..e + 4].try_into().ok()?) as i64;
+        let off = u32::from_le_bytes(raw[e + 4..e + 8].try_into().ok()?) as usize;
+        let rec = data_base + off;
+        if rec + 106 > raw.len() {
+            continue;
+        }
+        let bf = u64::from_le_bytes(raw[rec + 98..rec + 106].try_into().ok()?);
+        if (bf & 128) == 0 {
+            continue;
+        }
+        let total_var = 2 + bf.count_ones() as usize;
+        let star_idx = 1 + (bf & 0x7F).count_ones() as usize;
+        let star_rel_off = rec + 106 + star_idx * 4;
+        if star_rel_off + 4 > raw.len() {
+            continue;
+        }
+        let star_rel =
+            u32::from_le_bytes(raw[star_rel_off..star_rel_off + 4].try_into().ok()?) as usize;
+        let star_pos = rec + 106 + total_var * 4 + star_rel;
+        if star_pos + 24 > raw.len() {
+            continue;
+        }
+        let star_id = u32::from_le_bytes(raw[star_pos..star_pos + 4].try_into().ok()?) as i64;
+        let star_radius =
+            u32::from_le_bytes(raw[star_pos + 4..star_pos + 8].try_into().ok()?) as i64;
+        let star_type_id =
+            u32::from_le_bytes(raw[star_pos + 8..star_pos + 12].try_into().ok()?) as i64;
+        let star_bf = u64::from_le_bytes(raw[star_pos + 12..star_pos + 20].try_into().ok()?);
+        if (star_bf & 1) == 0 {
+            continue;
+        }
+        let star_total_var = star_bf.count_ones() as usize;
+        let stats_rel =
+            u32::from_le_bytes(raw[star_pos + 20..star_pos + 24].try_into().ok()?) as usize;
+        let stats_pos = star_pos + 20 + star_total_var * 4 + stats_rel;
+        if stats_pos + 33 > raw.len() {
+            continue;
+        }
+        let age_f32 = f32::from_le_bytes(raw[stats_pos..stats_pos + 4].try_into().ok()?) as f64;
+        let luminosity_f32 =
+            f32::from_le_bytes(raw[stats_pos + 9..stats_pos + 13].try_into().ok()?) as f64;
+        let temperature_f32 =
+            f32::from_le_bytes(raw[stats_pos + 17..stats_pos + 21].try_into().ok()?) as f64;
+        let spec_rel =
+            u32::from_le_bytes(raw[stats_pos + 29..stats_pos + 33].try_into().ok()?) as usize;
+        let spec_pos = stats_pos + 33 + spec_rel;
+        if spec_pos + 4 > raw.len() {
+            continue;
+        }
+        let spec_len =
+            u32::from_le_bytes(raw[spec_pos..spec_pos + 4].try_into().ok()?) as usize;
+        if spec_pos + 4 + spec_len > raw.len() {
+            continue;
+        }
+        let spectral_class =
+            String::from_utf8_lossy(&raw[spec_pos + 4..spec_pos + 4 + spec_len]).into_owned();
+        stars.insert(
+            star_id,
+            StarStaticRecord {
+                star_id,
+                solar_system_id: system_id,
+                type_id: star_type_id,
+                radius: star_radius,
+                age: age_f32.round() as i64,
+                luminosity: luminosity_f32,
+                temperature: temperature_f32.round() as i64,
+                spectral_class,
+            },
+        );
+    }
+    Some(stars)
+}
+
+fn star_static_records(sde: &SdeRegistry) -> &HashMap<i64, StarStaticRecord> {
+    STAR_STATIC_RECORDS.get_or_init(|| {
+        let Some(res) = sde.resources.get("res:/staticdata/solarsystemcontent.static") else {
+            return HashMap::new();
+        };
+        let home = std::env::var("HOME").unwrap_or_default();
+        let path = PathBuf::from(home)
+            .join("Library/Application Support/EVE Online/SharedCache/ResFiles")
+            .join(&res.cdn_relative_path);
+        let Ok(raw) = std::fs::read(path) else {
+            return HashMap::new();
+        };
+        parse_solarsystemcontent_stars(&raw).unwrap_or_default()
+    })
+}
 
 /// Returns the sorted list of Faction Warfare militia faction IDs from the SDE.
 fn sde_fw_militia_factions(ctx: &ServerContext) -> Vec<i64> {
@@ -206,6 +330,50 @@ pub fn dispatch_fw_universe_route(
                 })
                 .collect();
             Some(RouteExecutionResult::ok_json(json!(out), 86400))
+        }
+
+        ("GET", "/universe/stars/{star_id}") => {
+            let star_id = match parse_path_i64(path_params, "star_id") {
+                Ok(v) => v,
+                Err(e) => return Some(e),
+            };
+            let Some(star) = star_static_records(&ctx.sde).get(&star_id) else {
+                return Some(RouteExecutionResult::error(
+                    404,
+                    format!("Star {star_id} not found"),
+                ));
+            };
+            let Some(name) = ctx
+                .sde
+                .celestials_in_system(star.solar_system_id as u32)
+                .into_iter()
+                .find(|c| c.celestial_id == star_id && c.group_id == 6)
+                .map(|c| c.name)
+                .or_else(|| {
+                    ctx.sde
+                        .solar_systems
+                        .get(&(star.solar_system_id as u32))
+                        .map(|sys| format!("{} - Star", sys.name))
+                })
+            else {
+                return Some(RouteExecutionResult::error(
+                    404,
+                    format!("Star {star_id} not found"),
+                ));
+            };
+            Some(RouteExecutionResult::ok_json(
+                json!({
+                    "name": name,
+                    "solar_system_id": star.solar_system_id,
+                    "type_id": star.type_id,
+                    "age": star.age,
+                    "luminosity": star.luminosity,
+                    "radius": star.radius,
+                    "spectral_class": star.spectral_class,
+                    "temperature": star.temperature,
+                }),
+                86400,
+            ))
         }
 
         ("GET", "/universe/stations/{station_id}") => {

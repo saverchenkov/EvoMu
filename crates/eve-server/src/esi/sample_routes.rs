@@ -401,6 +401,7 @@ pub fn is_operation_implemented(method: &str, path_pattern: &str) -> bool {
             | ("GET", "/universe/constellations/{constellation_id}")
             | ("GET", "/universe/systems")
             | ("GET", "/universe/systems/{system_id}")
+            | ("GET", "/universe/stars/{star_id}")
             | ("GET", "/universe/planets/{planet_id}")
             | ("GET", "/universe/moons/{moon_id}")
             | ("GET", "/universe/asteroid_belts/{asteroid_belt_id}")
