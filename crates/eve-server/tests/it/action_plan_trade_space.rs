@@ -30,21 +30,6 @@ use std::sync::Arc;
 
 #[tokio::test]
 async fn test_action_plan_t_trade_market_escrow_codecs_time() {
-    // parity: rpc:marketProxy.BuyMultipleItems, rpc:marketProxy.CancelCharOrder, rpc:marketProxy.GetCharEscrow, rpc:marketProxy.GetCharOrders, rpc:marketProxy.GetOrders, rpc:marketProxy.GetStationAsks, rpc:marketProxy.GetRegionBest, rpc:marketProxy.PlaceBuyOrder, rpc:marketProxy.PlaceMultiSellOrder, rpc:marketProxy.GetOldPriceHistory, rpc:marketProxy.GetNewPriceHistory
-    eve_testkit::attest(&[
-        "rpc:marketProxy.BuyMultipleItems",
-        "rpc:marketProxy.CancelCharOrder",
-        "rpc:marketProxy.GetCharEscrow",
-        "rpc:marketProxy.GetCharOrders",
-        "rpc:marketProxy.GetOrders",
-        "rpc:marketProxy.GetStationAsks",
-        "rpc:marketProxy.GetRegionBest",
-        "rpc:marketProxy.PlaceBuyOrder",
-        "rpc:marketProxy.PlaceMultiSellOrder",
-        "rpc:marketProxy.GetOldPriceHistory",
-        "rpc:marketProxy.GetNewPriceHistory",
-    ]);
-
     let ctx = ServerContext::new();
     let empty_kw = HashMap::new();
 
@@ -300,23 +285,6 @@ async fn test_action_plan_t_trade_market_escrow_codecs_time() {
 
 #[tokio::test]
 async fn test_action_plan_s_space_structures_clones_mutations() {
-    // parity: rpc:planetMgr.CancelInstallProgram, rpc:planetMgr.Flush, rpc:planetMgr.GetCommandCenterLevel, rpc:planetMgr.GetPlanetInfo, rpc:planetMgr.GetPlanetResourceInfo, rpc:planetMgr.GetPlanetsForChar, rpc:planetMgr.GetColony, rpc:planetMgr.UserUpdateNetwork, rpc:planetMgr.UserAbandonPlanet, rpc:jumpCloneSvc.GetCloneState, rpc:jumpCloneSvc.InstallCloneInStation, rpc:jumpCloneSvc.CloneJump, rpc:jumpCloneSvc.DestroyInstalledClone
-    eve_testkit::attest(&[
-        "rpc:planetMgr.CancelInstallProgram",
-        "rpc:planetMgr.Flush",
-        "rpc:planetMgr.GetCommandCenterLevel",
-        "rpc:planetMgr.GetPlanetInfo",
-        "rpc:planetMgr.GetPlanetResourceInfo",
-        "rpc:planetMgr.GetPlanetsForChar",
-        "rpc:planetMgr.GetColony",
-        "rpc:planetMgr.UserUpdateNetwork",
-        "rpc:planetMgr.UserAbandonPlanet",
-        "rpc:jumpCloneSvc.GetCloneState",
-        "rpc:jumpCloneSvc.InstallCloneInStation",
-        "rpc:jumpCloneSvc.CloneJump",
-        "rpc:jumpCloneSvc.DestroyInstalledClone",
-    ]);
-
     let ctx = ServerContext::new();
     let empty_kw = HashMap::new();
 

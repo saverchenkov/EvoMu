@@ -7,7 +7,7 @@ use crate::router::ServerContext;
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use std::collections::HashMap;
-use std::sync::RwLock;
+use std::sync::{Arc, OnceLock, RwLock, Weak};
 
 /// SDE Type ID for Orbital Skyhook.
 pub const TYPE_ORBITAL_SKYHOOK: u32 = 81080;
@@ -20,32 +20,45 @@ pub const TYPE_PHAROLUX_CYNO_BEACON: u32 = 35840;
 pub const TYPE_MAGMATIC_GAS: u32 = 81143;
 pub const TYPE_SUPERIONIC_ICE: u32 = 81144;
 
-#[derive(Debug, Clone, Default)]
-struct SovRuntimeState {
-    fuel_access_groups: HashMap<i64, i64>,
-    hacked_hubs: HashMap<i64, u64>,
-    skyhook_reagents: HashMap<i64, (u32, u64)>, // skyhook_id -> (reagent_type_id, units)
-    skyhook_hackable: HashMap<i64, bool>,
+#[derive(Debug, Default)]
+pub struct SovRuntimeState {
+    pub db_weak: Weak<eve_db::WorldRepository>,
+    pub fuel_access_groups: HashMap<i64, i64>,
+    pub hacked_hubs: HashMap<i64, u64>,
+    pub skyhook_reagents: HashMap<i64, (u32, u64)>, // skyhook_id -> (reagent_type_id, units)
+    pub skyhook_hackable: HashMap<i64, bool>,
 }
 
-static SOV_RUNTIME: RwLock<Option<SovRuntimeState>> = RwLock::new(None);
+static SOV_RUNTIME: OnceLock<RwLock<HashMap<usize, SovRuntimeState>>> = OnceLock::new();
 
-fn with_runtime<F, R>(f: F) -> R
-where
-    F: FnOnce(&mut SovRuntimeState) -> R,
-{
-    let mut guard = SOV_RUNTIME.write().unwrap();
-    let state = guard.get_or_insert_with(SovRuntimeState::default);
-    f(state)
+fn runtime_map() -> &'static RwLock<HashMap<usize, SovRuntimeState>> {
+    SOV_RUNTIME.get_or_init(|| RwLock::new(HashMap::new()))
 }
 
-fn read_runtime<F, R>(f: F) -> R
-where
-    F: FnOnce(&SovRuntimeState) -> R,
-{
-    let mut guard = SOV_RUNTIME.write().unwrap();
-    let state = guard.get_or_insert_with(SovRuntimeState::default);
-    f(state)
+fn ctx_key(ctx: &ServerContext) -> usize {
+    Arc::as_ptr(&ctx.db) as usize
+}
+
+pub fn with_sov_runtime<R>(ctx: &ServerContext, f: impl FnOnce(&mut SovRuntimeState) -> R) -> R {
+    let key = ctx_key(ctx);
+    let mut guard = runtime_map().write().unwrap_or_else(|e| e.into_inner());
+    guard.retain(|_, v| v.db_weak.strong_count() > 0);
+    let st = guard.entry(key).or_insert_with(|| SovRuntimeState {
+        db_weak: Arc::downgrade(&ctx.db),
+        ..Default::default()
+    });
+    f(st)
+}
+
+pub fn read_sov_runtime<R>(ctx: &ServerContext, f: impl FnOnce(&SovRuntimeState) -> R) -> R {
+    let key = ctx_key(ctx);
+    let mut guard = runtime_map().write().unwrap_or_else(|e| e.into_inner());
+    guard.retain(|_, v| v.db_weak.strong_count() > 0);
+    let st = guard.entry(key).or_insert_with(|| SovRuntimeState {
+        db_weak: Arc::downgrade(&ctx.db),
+        ..Default::default()
+    });
+    f(st)
 }
 
 /// Computes the Activity Defense Multiplier (ADM) from military, industrial, and strategic indices.
@@ -111,7 +124,7 @@ pub fn emit_dev_index_changed(ctx: &ServerContext, sys_id: u32, dev_indices: &Ha
 
 /// Marks a Skyhook as hackable and emits `OnSkyhookCanBeHacked`.
 pub fn set_skyhook_hackable(ctx: &ServerContext, sys_id: u32, skyhook_id: i64, can_hack: bool) {
-    with_runtime(|rt| {
+    with_sov_runtime(ctx, |rt| {
         rt.skyhook_hackable.insert(skyhook_id, can_hack);
         if can_hack {
             rt.skyhook_reagents.entry(skyhook_id).or_insert((TYPE_MAGMATIC_GAS, 500));
@@ -133,7 +146,7 @@ pub fn set_skyhook_hackable(ctx: &ServerContext, sys_id: u32, skyhook_id: i64, c
 /// Records a successful hack on a Sovereignty Hub, temporarily disabling upgrades and emitting `OnSovHubHacked`.
 pub fn record_hub_hack(ctx: &ServerContext, sys_id: u32, hub_id: i64, disruption_seconds: u64) {
     let now = ctx.now_unix();
-    with_runtime(|rt| {
+    with_sov_runtime(ctx, |rt| {
         rt.hacked_hubs.insert(hub_id, now + disruption_seconds);
     });
     ctx.notify(
@@ -150,7 +163,7 @@ pub fn record_hub_hack(ctx: &ServerContext, sys_id: u32, hub_id: i64, disruption
 /// Checks whether a Sovereignty Hub is currently disrupted by a hack.
 pub fn is_hub_hacked(ctx: &ServerContext, hub_id: i64) -> bool {
     let now = ctx.now_unix();
-    read_runtime(|rt| {
+    read_sov_runtime(ctx, |rt| {
         rt.hacked_hubs.get(&hub_id).copied().is_some_and(|until| now < until)
     })
 }
@@ -242,6 +255,19 @@ pub async fn handle(
 
             let is_corp_director = ctx.db.with_snapshot(|snap| {
                 let corp_id = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
+                if let Some(corp) = snap.corporations.get(&corp_id) {
+                    let role = corp.member_roles.get(&char_id).copied().unwrap_or(session.corp_role);
+                    let has_role = char_id == corp.ceo_id
+                        || eve_db::corp_roles::has_role(
+                            role,
+                            eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER,
+                        );
+                    if !has_role {
+                        return false;
+                    }
+                } else {
+                    return false;
+                }
                 snap.structures
                     .get(&hub_id)
                     .map(|st| st.owner_corp_id == corp_id)
@@ -250,11 +276,11 @@ pub async fn handle(
             if !is_corp_director {
                 return Some(Err(BridgeRpcError {
                     code: "CorpRoleDenied".into(),
-                    message: "Only owner corporation members may set hub fuel access group".into(),
+                    message: "Only owner corporation directors or station managers may set hub fuel access group".into(),
                 }));
             }
 
-            with_runtime(|rt| {
+            with_sov_runtime(ctx, |rt| {
                 rt.fuel_access_groups.insert(hub_id, access_group_id);
             });
             Some(Ok(PyRep::Integer(access_group_id)))
@@ -267,7 +293,7 @@ pub async fn handle(
                     message: "GetSovHubFuelAccessGroup requires hubID".into(),
                 }));
             };
-            let group_id = read_runtime(|rt| rt.fuel_access_groups.get(&hub_id).copied().unwrap_or(0));
+            let group_id = read_sov_runtime(ctx, |rt| rt.fuel_access_groups.get(&hub_id).copied().unwrap_or(0));
             Some(Ok(PyRep::Integer(group_id)))
         }
 
@@ -317,6 +343,26 @@ pub async fn handle(
                 }));
             };
 
+            let is_corp_director = ctx.db.with_snapshot(|snap| {
+                let corp_id = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
+                if let Some(corp) = snap.corporations.get(&corp_id) {
+                    let role = corp.member_roles.get(&char_id).copied().unwrap_or(session.corp_role);
+                    char_id == corp.ceo_id
+                        || eve_db::corp_roles::has_role(
+                            role,
+                            eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER,
+                        )
+                } else {
+                    false
+                }
+            });
+            if !is_corp_director {
+                return Some(Err(BridgeRpcError {
+                    code: "CorpRoleDenied".into(),
+                    message: "Only owner corporation directors or station managers may destroy skyhooks".into(),
+                }));
+            }
+
             let destroyed_count = ctx.db.with_mut_snapshot(|snap| {
                 let char_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
                 let skyhook_ids: Vec<i64> = snap
@@ -347,7 +393,7 @@ pub async fn handle(
                     .values()
                     .filter(|s| s.type_id == TYPE_ORBITAL_SKYHOOK && s.owner_corp_id == corp_id)
                     .map(|s| {
-                        let reagents = read_runtime(|rt| {
+                        let reagents = read_sov_runtime(ctx, |rt| {
                             rt.skyhook_reagents.get(&s.structure_id).copied().unwrap_or((TYPE_MAGMATIC_GAS, 100))
                         });
                         PyRep::keyval([

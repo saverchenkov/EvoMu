@@ -7,7 +7,7 @@ use crate::router::ServerContext;
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use std::collections::HashMap;
-use std::sync::RwLock;
+use std::sync::{Arc, OnceLock, RwLock, Weak};
 
 /// SDE Solar System IDs for the 4 Empire Militia War HQs:
 /// - Mehatoor (30002974) - 24th Imperial Crusade (Amarr)
@@ -28,41 +28,54 @@ pub const STATUS_FRONTLINE: i64 = 1;
 pub const STATUS_COMMAND: i64 = 2;
 pub const STATUS_REARGUARD: i64 = 3;
 
-#[derive(Debug, Clone, Default)]
-struct FwRuntimeState {
-    system_victory_points: HashMap<u32, i64>,
-    system_advantage: HashMap<u32, (f64, f64)>, // sys_id -> (friendly_adv, enemy_adv)
-    battlefield_instances: Vec<BattlefieldRecord>,
+#[derive(Debug, Default)]
+pub struct FwRuntimeState {
+    pub db_weak: Weak<eve_db::WorldRepository>,
+    pub system_victory_points: HashMap<u32, i64>,
+    pub system_advantage: HashMap<u32, (f64, f64)>, // sys_id -> (friendly_adv, enemy_adv)
+    pub battlefield_instances: Vec<BattlefieldRecord>,
 }
 
 #[derive(Debug, Clone)]
-struct BattlefieldRecord {
-    instance_id: i64,
-    solar_system_id: u32,
-    faction_id: i64,
-    name: String,
-    capture_progress: f64,
-    completed: bool,
+pub struct BattlefieldRecord {
+    pub instance_id: i64,
+    pub solar_system_id: u32,
+    pub faction_id: i64,
+    pub name: String,
+    pub capture_progress: f64,
+    pub completed: bool,
 }
 
-static FW_RUNTIME: RwLock<Option<FwRuntimeState>> = RwLock::new(None);
+static FW_RUNTIME: OnceLock<RwLock<HashMap<usize, FwRuntimeState>>> = OnceLock::new();
 
-fn with_fw_runtime<F, R>(f: F) -> R
-where
-    F: FnOnce(&mut FwRuntimeState) -> R,
-{
-    let mut guard = FW_RUNTIME.write().unwrap();
-    let state = guard.get_or_insert_with(FwRuntimeState::default);
-    f(state)
+fn runtime_map() -> &'static RwLock<HashMap<usize, FwRuntimeState>> {
+    FW_RUNTIME.get_or_init(|| RwLock::new(HashMap::new()))
 }
 
-fn read_fw_runtime<F, R>(f: F) -> R
-where
-    F: FnOnce(&FwRuntimeState) -> R,
-{
-    let mut guard = FW_RUNTIME.write().unwrap();
-    let state = guard.get_or_insert_with(FwRuntimeState::default);
-    f(state)
+fn ctx_key(ctx: &ServerContext) -> usize {
+    Arc::as_ptr(&ctx.db) as usize
+}
+
+pub fn with_fw_runtime<R>(ctx: &ServerContext, f: impl FnOnce(&mut FwRuntimeState) -> R) -> R {
+    let key = ctx_key(ctx);
+    let mut guard = runtime_map().write().unwrap_or_else(|e| e.into_inner());
+    guard.retain(|_, v| v.db_weak.strong_count() > 0);
+    let st = guard.entry(key).or_insert_with(|| FwRuntimeState {
+        db_weak: Arc::downgrade(&ctx.db),
+        ..Default::default()
+    });
+    f(st)
+}
+
+pub fn read_fw_runtime<R>(ctx: &ServerContext, f: impl FnOnce(&FwRuntimeState) -> R) -> R {
+    let key = ctx_key(ctx);
+    let mut guard = runtime_map().write().unwrap_or_else(|e| e.into_inner());
+    guard.retain(|_, v| v.db_weak.strong_count() > 0);
+    let st = guard.entry(key).or_insert_with(|| FwRuntimeState {
+        db_weak: Arc::downgrade(&ctx.db),
+        ..Default::default()
+    });
+    f(st)
 }
 
 /// Broadcasts `OnSolarsystemAdvantageStateUpdated_Local` notification.
@@ -81,7 +94,7 @@ pub fn emit_advantage_updated(ctx: &ServerContext, sys_id: u32, friendly: f64, e
 
 /// Updates advantage in a warzone system and notifies clients.
 pub fn update_system_advantage(ctx: &ServerContext, sys_id: u32, friendly_delta: f64, enemy_delta: f64) {
-    let (friendly, enemy) = with_fw_runtime(|rt| {
+    let (friendly, enemy) = with_fw_runtime(ctx, |rt| {
         let entry = rt.system_advantage.entry(sys_id).or_insert((0.0, 0.0));
         entry.0 = (entry.0 + friendly_delta).clamp(0.0, 100.0);
         entry.1 = (entry.1 + enemy_delta).clamp(0.0, 100.0);
@@ -92,7 +105,7 @@ pub fn update_system_advantage(ctx: &ServerContext, sys_id: u32, friendly_delta:
 
 /// Adds victory points to a system from complex captures or enemy kills.
 pub fn add_victory_points(ctx: &ServerContext, sys_id: u32, vp: i64) -> (i64, f64) {
-    let new_vp = with_fw_runtime(|rt| {
+    let new_vp = with_fw_runtime(ctx, |rt| {
         let entry = rt.system_victory_points.entry(sys_id).or_insert(0);
         *entry = (*entry + vp).max(0);
         *entry
@@ -112,8 +125,8 @@ pub fn calculate_capture_speed_multiplier(friendly_adv: f64, enemy_adv: f64) -> 
 }
 
 /// Adds a Battlefield site instance to a warzone system.
-pub fn spawn_battlefield_site(sys_id: u32, faction_id: i64, name: &str) -> i64 {
-    with_fw_runtime(|rt| {
+pub fn spawn_battlefield_site(ctx: &ServerContext, sys_id: u32, faction_id: i64, name: &str) -> i64 {
+    with_fw_runtime(ctx, |rt| {
         let id = (rt.battlefield_instances.len() as i64) + 700_001;
         rt.battlefield_instances.push(BattlefieldRecord {
             instance_id: id,
@@ -238,7 +251,7 @@ pub async fn handle(
                     message: "Session has no active solar system".into(),
                 }));
             };
-            let (vp, contested) = read_fw_runtime(|rt| {
+            let (vp, contested) = read_fw_runtime(ctx, |rt| {
                 let points = rt.system_victory_points.get(&sys_id).copied().unwrap_or(0);
                 let c = ctx.db.with_snapshot(|snap| {
                     snap.system_states.get(&sys_id).map(|s| s.fw_contested_pct).unwrap_or(0.0)
@@ -254,7 +267,7 @@ pub async fn handle(
         }
 
         ("fwVictoryPointMgr", "GetAllVictoryPointStates") => {
-            let res = read_fw_runtime(|rt| {
+            let res = read_fw_runtime(ctx, |rt| {
                 let mut map = Vec::new();
                 for (&sys_id, &vp) in &rt.system_victory_points {
                     let c = ctx.db.with_snapshot(|snap| {
@@ -275,7 +288,7 @@ pub async fn handle(
 
         ("dungeonInstanceCacheMgr", "GetFactionWarfareBattlefieldInstances") => {
             let sys_id = args.first().and_then(|a| a.as_i64()).and_then(|v| u32::try_from(v).ok()).or(session.solar_system_id);
-            let instances = read_fw_runtime(|rt| {
+            let instances = read_fw_runtime(ctx, |rt| {
                 rt.battlefield_instances
                     .iter()
                     .filter(|b| sys_id.map(|s| b.solar_system_id == s).unwrap_or(true))

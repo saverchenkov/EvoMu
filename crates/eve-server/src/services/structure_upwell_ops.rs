@@ -877,11 +877,24 @@ async fn handle_cmd_jump_through_structure_stargate(ctx: &ServerContext, session
     let sys_id = session.solar_system_id.ok_or_else(|| err("NoSolarSystem", "Session has no solarSystemID"))?;
     let ship_id = session.ship_id.ok_or_else(|| err("NoActiveShip", "Session has no active ship"))?;
 
+    let now_unix = ctx.now_unix();
+    if ctx
+        .crimewatch
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .states
+        .get(&char_id)
+        .is_some_and(|st| st.is_weapon_timer_active(now_unix))
+    {
+        return Err(err("WeaponsTimerActive", "Cannot jump through structure stargate while weapons timer is active"));
+    }
+
     let corp_id = session.corporation_id.unwrap_or_else(|| {
         ctx.db.get_character(char_id).map(|c| c.corporation_id).unwrap_or(0)
     });
 
-    let (st_pos, st_radius, linked_id, dest_sys_id) = ctx.db.try_with_mut_snapshot(|snap| {
+    // Pre-validate structure, access, destination, and ship class before checking Ballpark proximity
+    let (st_pos, st_radius, linked_id, dest_sys_id) = ctx.db.with_snapshot(|snap| {
         let st = snap.structures.get(&structure_id).cloned().ok_or_else(|| err("StructureNotFound", format!("Structure {structure_id} not found")))?;
         if st.solar_system_id != sys_id || st.state == "Destroyed" {
             return Err(err("StructureNotOperational", "Structure stargate is not active in this solar system"));
@@ -897,8 +910,39 @@ async fn handle_cmd_jump_through_structure_stargate(ctx: &ServerContext, session
         if dest_st.state == "Destroyed" {
             return Err(err("DestinationStructureDestroyed", "Linked destination stargate is destroyed"));
         }
+        if let Some(ship_item) = snap.items.get(&ship_id) {
+            let ship_group = ctx.sde.types.get(&ship_item.type_id).map(|t| t.group_id).unwrap_or(0);
+            // Titans (30) and Supercarriers (659) are barred from using Ansiblex jump gates
+            if matches!(ship_group, 30 | 659) {
+                return Err(err("ShipNotAllowedThroughAnsiblex", "Supercarriers and Titans cannot jump through an Ansiblex jump gate"));
+            }
+        }
+        let rad = ctx.sde.types.get(&st.type_id).map(|t| t.radius).unwrap_or(500.0);
+        Ok((glam::DVec3::from_array(st.position), rad, linked, dest_st.solar_system_id))
+    })?;
 
-        // Consume Liquid Ozone from structure fuel/cargo
+    // Check ship existence and proximity in space BEFORE mutating Liquid Ozone fuel (`SF-02`)
+    let old_handle = ctx.systems.get_or_spawn(sys_id);
+    let Some((cur_tick, ship_ball)) = old_handle.get_ball_snapshot(ship_id).await.map_err(|e| err("DestinyQueryFailed", e))? else {
+        return Err(err("ShipNotInSpace", "Ship is not in space"));
+    };
+    if ship_ball.position.distance(st_pos) > st_radius + 5_000.0 {
+        return Err(err("OutsideJumpBridgeRange", format!("Ship is {:.1} m from gate (must be within {:.1} m)", ship_ball.position.distance(st_pos), st_radius + 5000.0)));
+    }
+    if let Some(active) = crate::services::space_destiny::check_session_change_timer_active(
+        ctx,
+        char_id,
+        now_unix,
+        Some((sys_id, cur_tick)),
+    ) {
+        return Err(err(
+            "SessionChangeInProgress",
+            format!("Cannot jump through structure stargate while 10s timer from '{}' is active", active.reason),
+        ));
+    }
+
+    // Transactionally consume Liquid Ozone after all preconditions pass
+    ctx.db.try_with_mut_snapshot(|snap| {
         let mut ozone_found = false;
         for item in snap.items.values_mut() {
             if item.location_id == structure_id && item.type_id == LIQUID_OZONE_TYPE_ID && item.quantity >= ANSIBLEX_JUMP_OZONE_COST {
@@ -911,19 +955,8 @@ async fn handle_cmd_jump_through_structure_stargate(ctx: &ServerContext, session
         if !ozone_found {
             return Err(err("InsufficientLiquidOzone", format!("Ansiblex gate requires at least {ANSIBLEX_JUMP_OZONE_COST} units of Liquid Ozone fuel")));
         }
-
-        let rad = ctx.sde.types.get(&st.type_id).map(|t| t.radius).unwrap_or(500.0);
-        Ok((glam::DVec3::from_array(st.position), rad, linked, dest_st.solar_system_id))
+        Ok(())
     })?;
-
-    // Check ship proximity in space
-    let old_handle = ctx.systems.get_or_spawn(sys_id);
-    let Some((_, ship_ball)) = old_handle.get_ball_snapshot(ship_id).await.map_err(|e| err("DestinyQueryFailed", e))? else {
-        return Err(err("ShipNotInSpace", "Ship is not in space"));
-    };
-    if ship_ball.position.distance(st_pos) > st_radius + 5_000.0 {
-        return Err(err("OutsideJumpBridgeRange", format!("Ship is {:.1} m from gate (must be within {:.1} m)", ship_ball.position.distance(st_pos), st_radius + 5000.0)));
-    }
 
     // Move character and ship to destination
     let updated_ch = ctx.db.set_character_solar_system(char_id, dest_sys_id, &ctx.sde)
@@ -941,7 +974,15 @@ async fn handle_cmd_jump_through_structure_stargate(ctx: &ServerContext, session
     new_ball.speed_fraction = 0.0;
     new_ball.mode = eve_destiny::MovementMode::Stop;
     let combat_state = ctx.build_ship_combat_state(char_id, ship_id, new_ball.type_id);
-    let _ = new_handle.spawn_ball_with_combat(new_ball, combat_state).await;
+    let new_tick = new_handle.spawn_ball_with_combat(new_ball, combat_state).await.unwrap_or(0);
+    crate::services::space_destiny::record_session_change_timer(
+        ctx,
+        char_id,
+        now_unix,
+        dest_sys_id,
+        new_tick,
+        "jump_bridge",
+    );
 
     session.solar_system_id = Some(updated_ch.solar_system_id);
     session.constellation_id = Some(updated_ch.constellation_id);

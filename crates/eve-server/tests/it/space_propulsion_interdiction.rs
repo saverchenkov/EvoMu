@@ -59,7 +59,7 @@ fn grant_all_test_skills(ctx: &ServerContext, char_id: i64) {
 #[tokio::test]
 async fn test_sp2_grid_bubble_splitting_interdiction_and_nullifier() {
     // parity: plan:SP-2
-    // parity: feat:navigation.bubbles-grid, feat:modules.interdiction-sphere, feat:modules.warp-disruption-field, feat:modules.mobile-warp-disruptor, feat:modules.interdiction-nullifier, feat:modules.interdiction-probe-variants, feat:modules.mobile-warp-disruptor-anchoring-skill
+    // parity: feat:navigation.bubbles-grid, feat:modules.interdiction-sphere, feat:modules.warp-disruption-field, feat:modules.mobile-warp-disruptor, feat:modules.interdiction-nullifier, feat:modules.mobile-warp-disruptor-anchoring-skill
     eve_testkit::attest(&[
         "plan:SP-2",
         "feat:navigation.bubbles-grid",
@@ -67,7 +67,6 @@ async fn test_sp2_grid_bubble_splitting_interdiction_and_nullifier() {
         "feat:modules.warp-disruption-field",
         "feat:modules.mobile-warp-disruptor",
         "feat:modules.interdiction-nullifier",
-        "feat:modules.interdiction-probe-variants",
         "feat:modules.mobile-warp-disruptor-anchoring-skill",
     ]);
 

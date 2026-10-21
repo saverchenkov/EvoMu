@@ -7,7 +7,7 @@ use crate::router::ServerContext;
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use std::collections::HashMap;
-use std::sync::RwLock;
+use std::sync::{Arc, OnceLock, RwLock, Weak};
 
 pub const FACTION_GURISTAS: i64 = 500010;
 pub const FACTION_ANGEL_CARTEL: i64 = 500011;
@@ -35,50 +35,63 @@ pub struct InsurgencyCampaign {
     pub suppression_points: HashMap<u32, i64>,
 }
 
-#[derive(Debug, Clone, Default)]
-struct InsurgencyRuntimeState {
-    campaigns: HashMap<i64, InsurgencyCampaign>,
-    insurgency_instances: Vec<InsurgencySiteRecord>,
-    ice_heist_instances: Vec<IceHeistRecord>,
+#[derive(Debug, Default)]
+pub struct InsurgencyRuntimeState {
+    pub db_weak: Weak<eve_db::WorldRepository>,
+    pub campaigns: HashMap<i64, InsurgencyCampaign>,
+    pub insurgency_instances: Vec<InsurgencySiteRecord>,
+    pub ice_heist_instances: Vec<IceHeistRecord>,
 }
 
 #[derive(Debug, Clone)]
-struct InsurgencySiteRecord {
-    instance_id: i64,
-    solar_system_id: u32,
-    site_type: String,
-    name: String,
-    corruption_reward: f64,
-    completed: bool,
+pub struct InsurgencySiteRecord {
+    pub instance_id: i64,
+    pub solar_system_id: u32,
+    pub site_type: String,
+    pub name: String,
+    pub corruption_reward: f64,
+    pub completed: bool,
 }
 
 #[derive(Debug, Clone)]
-struct IceHeistRecord {
-    instance_id: i64,
-    solar_system_id: u32,
-    pirate_tankers_saved: u32,
-    empire_tankers_saved: u32,
-    completed: bool,
+pub struct IceHeistRecord {
+    pub instance_id: i64,
+    pub solar_system_id: u32,
+    pub pirate_tankers_saved: u32,
+    pub empire_tankers_saved: u32,
+    pub completed: bool,
 }
 
-static INSURGENCY_RUNTIME: RwLock<Option<InsurgencyRuntimeState>> = RwLock::new(None);
+static INSURGENCY_RUNTIME: OnceLock<RwLock<HashMap<usize, InsurgencyRuntimeState>>> = OnceLock::new();
 
-fn with_insurgency_runtime<F, R>(f: F) -> R
-where
-    F: FnOnce(&mut InsurgencyRuntimeState) -> R,
-{
-    let mut guard = INSURGENCY_RUNTIME.write().unwrap();
-    let state = guard.get_or_insert_with(InsurgencyRuntimeState::default);
-    f(state)
+fn runtime_map() -> &'static RwLock<HashMap<usize, InsurgencyRuntimeState>> {
+    INSURGENCY_RUNTIME.get_or_init(|| RwLock::new(HashMap::new()))
 }
 
-fn read_insurgency_runtime<F, R>(f: F) -> R
-where
-    F: FnOnce(&InsurgencyRuntimeState) -> R,
-{
-    let mut guard = INSURGENCY_RUNTIME.write().unwrap();
-    let state = guard.get_or_insert_with(InsurgencyRuntimeState::default);
-    f(state)
+fn ctx_key(ctx: &ServerContext) -> usize {
+    Arc::as_ptr(&ctx.db) as usize
+}
+
+pub fn with_insurgency_runtime<R>(ctx: &ServerContext, f: impl FnOnce(&mut InsurgencyRuntimeState) -> R) -> R {
+    let key = ctx_key(ctx);
+    let mut guard = runtime_map().write().unwrap_or_else(|e| e.into_inner());
+    guard.retain(|_, v| v.db_weak.strong_count() > 0);
+    let st = guard.entry(key).or_insert_with(|| InsurgencyRuntimeState {
+        db_weak: Arc::downgrade(&ctx.db),
+        ..Default::default()
+    });
+    f(st)
+}
+
+pub fn read_insurgency_runtime<R>(ctx: &ServerContext, f: impl FnOnce(&InsurgencyRuntimeState) -> R) -> R {
+    let key = ctx_key(ctx);
+    let mut guard = runtime_map().write().unwrap_or_else(|e| e.into_inner());
+    guard.retain(|_, v| v.db_weak.strong_count() > 0);
+    let st = guard.entry(key).or_insert_with(|| InsurgencyRuntimeState {
+        db_weak: Arc::downgrade(&ctx.db),
+        ..Default::default()
+    });
+    f(st)
 }
 
 /// Broadcasts `OnInsurgencyCampaignStartedForLocation` notification.
@@ -139,7 +152,7 @@ pub fn init_insurgency_campaign(
         suppression_points: HashMap::new(),
     };
 
-    with_insurgency_runtime(|rt| {
+    with_insurgency_runtime(ctx, |rt| {
         rt.campaigns.insert(campaign_id, campaign);
     });
 
@@ -161,7 +174,7 @@ pub fn get_campaign_phase_and_timer(campaign: &InsurgencyCampaign, now: u64) -> 
 
 /// Advances corruption points in a system and updates corruption stage (1..5).
 pub fn add_system_corruption(ctx: &ServerContext, campaign_id: i64, sys_id: u32, points: i64) -> (i64, u8) {
-    let (pts, stage) = with_insurgency_runtime(|rt| {
+    let (pts, stage) = with_insurgency_runtime(ctx, |rt| {
         let Some(c) = rt.campaigns.get_mut(&campaign_id) else {
             return (0, 1);
         };
@@ -183,7 +196,7 @@ pub fn add_system_corruption(ctx: &ServerContext, campaign_id: i64, sys_id: u32,
 
 /// Advances suppression points in a system and updates suppression stage (1..5).
 pub fn add_system_suppression(ctx: &ServerContext, campaign_id: i64, sys_id: u32, points: i64) -> (i64, u8) {
-    let (pts, stage) = with_insurgency_runtime(|rt| {
+    let (pts, stage) = with_insurgency_runtime(ctx, |rt| {
         let Some(c) = rt.campaigns.get_mut(&campaign_id) else {
             return (0, 1);
         };
@@ -204,8 +217,8 @@ pub fn add_system_suppression(ctx: &ServerContext, campaign_id: i64, sys_id: u32
 }
 
 /// Spawns an Ice Heist site instance in a system.
-pub fn spawn_ice_heist(sys_id: u32) -> i64 {
-    with_insurgency_runtime(|rt| {
+pub fn spawn_ice_heist(ctx: &ServerContext, sys_id: u32) -> i64 {
+    with_insurgency_runtime(ctx, |rt| {
         let id = (rt.ice_heist_instances.len() as i64) + 800_001;
         rt.ice_heist_instances.push(IceHeistRecord {
             instance_id: id,
@@ -229,7 +242,7 @@ pub async fn handle(
     let now = ctx.now_unix();
     match (service, method) {
         ("insurgencySolarsystem", "GetAllVisibleCampaigns") => {
-            let campaigns = read_insurgency_runtime(|rt| {
+            let campaigns = read_insurgency_runtime(ctx, |rt| {
                 rt.campaigns
                     .values()
                     .map(|c| {
@@ -259,7 +272,7 @@ pub async fn handle(
                 }));
             };
 
-            let snapshot = read_insurgency_runtime(|rt| {
+            let snapshot = read_insurgency_runtime(ctx, |rt| {
                 rt.campaigns
                     .values()
                     .find(|c| c.systems.contains(&sys_id))
@@ -306,7 +319,7 @@ pub async fn handle(
 
         ("dungeonInstanceCacheMgr", "GetPirateInsurgencyInstances") => {
             let sys_id = args.first().and_then(|a| a.as_i64()).and_then(|v| u32::try_from(v).ok()).or(session.solar_system_id);
-            let instances = read_insurgency_runtime(|rt| {
+            let instances = read_insurgency_runtime(ctx, |rt| {
                 rt.insurgency_instances
                     .iter()
                     .filter(|s| sys_id.map(|sys| s.solar_system_id == sys).unwrap_or(true))
@@ -327,7 +340,7 @@ pub async fn handle(
 
         ("dungeonInstanceCacheMgr", "GetPirateInsurgencyIceHeistInstances") => {
             let sys_id = args.first().and_then(|a| a.as_i64()).and_then(|v| u32::try_from(v).ok()).or(session.solar_system_id);
-            let instances = read_insurgency_runtime(|rt| {
+            let instances = read_insurgency_runtime(ctx, |rt| {
                 rt.ice_heist_instances
                     .iter()
                     .filter(|h| sys_id.map(|sys| h.solar_system_id == sys).unwrap_or(true))

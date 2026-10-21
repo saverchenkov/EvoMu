@@ -178,6 +178,8 @@ async fn test_deploy_anchor_timers_restrictions_and_quantum_core() {
     // parity: feat:structures.deploy-anchor, feat:structures.quantum-core
     eve_testkit::attest(&["feat:structures.deploy-anchor", "feat:structures.quantum-core"]);
     let ctx = ServerContext::new();
+    let clock = std::sync::Arc::new(eve_db::VirtualServerClock::with_fixed_base(1_800_000_000));
+    ctx.set_clock(clock);
     let mut sess = pilot_in_space(&ctx, 4001).await;
 
     // Distance rule: right next to the undock station the position is refused.

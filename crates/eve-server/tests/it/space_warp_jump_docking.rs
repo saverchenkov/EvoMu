@@ -798,11 +798,10 @@ async fn test_sp3_warp_to_disrupted_capacitor_cost_and_exit_invulnerability() {
 #[tokio::test]
 async fn test_sp4_stargate_capital_restriction_session_timers_and_jump_cloak_immunities() {
     // parity: plan:SP-4, plan:S-1
-    // parity: feat:navigation.stargate-capital-restriction, feat:navigation.session-change-timer-triggers, feat:navigation.jump-cloak-immunities
+    // parity: feat:navigation.stargate-capital-restriction, feat:navigation.jump-cloak-immunities
     eve_testkit::attest(&[
         "plan:S-1",
         "feat:navigation.stargate-capital-restriction",
-        "feat:navigation.session-change-timer-triggers",
         "feat:navigation.jump-cloak-immunities",
     ]);
 

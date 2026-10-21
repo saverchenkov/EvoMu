@@ -364,11 +364,10 @@ async fn sov_hub_anchoring_claims_unclaimed_nullsec_and_emits_notifications() {
 
 #[tokio::test]
 async fn sov_info_adm_scaling_dev_indices_and_map_data() {
-    // parity: feat:sovereignty.sov-info, feat:sovereignty.sov-adm, feat:sovereignty.sov-dev-indices, feat:sovereignty.sov-map-data
+    // parity: feat:sovereignty.sov-info, feat:sovereignty.sov-adm, feat:sovereignty.sov-map-data
     eve_testkit::attest(&[
         "feat:sovereignty.sov-info",
         "feat:sovereignty.sov-adm",
-        "feat:sovereignty.sov-dev-indices",
         "feat:sovereignty.sov-map-data",
     ]);
 
@@ -534,13 +533,9 @@ async fn sov_info_adm_scaling_dev_indices_and_map_data() {
 
 #[tokio::test]
 async fn sov_hub_vulnerability_fuel_jammer_sites_and_hacking() {
-    // parity: feat:sovereignty.sov-vulnerability, feat:sovereignty.sov-hub-fuel, feat:sovereignty.sov-cyno-jammer-upgrade, feat:sovereignty.sov-upgrade-sites, feat:sovereignty.sov-hub-hacking
+    // parity: feat:sovereignty.sov-cyno-jammer-upgrade
     eve_testkit::attest(&[
-        "feat:sovereignty.sov-vulnerability",
-        "feat:sovereignty.sov-hub-fuel",
         "feat:sovereignty.sov-cyno-jammer-upgrade",
-        "feat:sovereignty.sov-upgrade-sites",
-        "feat:sovereignty.sov-hub-hacking",
     ]);
 
     let ctx = ServerContext::new();
@@ -657,6 +652,17 @@ async fn sov_hub_vulnerability_fuel_jammer_sites_and_hacking() {
         .expect("IsOnLocalSovHubFuelAccessGroup");
     assert_eq!(is_on_group, PyRep::Bool(true));
 
+    // Verify non-director line member without CEO/director/station manager role is denied
+    let mut line_sess = SessionState::new(41_099);
+    ctx.db.with_mut_snapshot(|s| {
+        s.characters.get_mut(&OTHER).unwrap().corporation_id = corp_id;
+    });
+    select(&ctx, &mut line_sess, "other", "other-secret", OTHER).await;
+    let fuel_denied = sov_call(&ctx, &mut line_sess, "sovMgr", "SetSovHubFuelAccessGroup", &[PyRep::Integer(hub_id), PyRep::Integer(access_group_id)])
+        .await
+        .unwrap_err();
+    assert_eq!(fuel_denied.code, "CorpRoleDenied");
+
     ctx.db.with_mut_snapshot(|s| {
         s.structures.get_mut(&hub_id).unwrap().fuel_blocks = 0;
         s.structures.get_mut(&jammer_id).unwrap().fuel_blocks = 0;
@@ -709,12 +715,6 @@ async fn sov_hub_vulnerability_fuel_jammer_sites_and_hacking() {
 
 #[tokio::test]
 async fn skyhook_acquisition_theft_and_reagent_loss() {
-    // parity: feat:sovereignty.skyhook-acquire, feat:sovereignty.skyhook-theft
-    eve_testkit::attest(&[
-        "feat:sovereignty.skyhook-acquire",
-        "feat:sovereignty.skyhook-theft",
-    ]);
-
     let ctx = ServerContext::new();
     let sys_id: u32 = 30000208;
     let corp_id: i64 = 98_000_100;
@@ -803,6 +803,17 @@ async fn skyhook_acquisition_theft_and_reagent_loss() {
     assert_eq!(hack_notif.args.first().and_then(|a| a.as_i64()), Some(sys_id as i64));
     assert_eq!(hack_notif.args.get(1).and_then(|a| a.as_i64()), Some(skyhook_id));
 
+    // Verify non-director line member without CEO/director/station manager role is denied
+    let mut line_sess = SessionState::new(41_099);
+    ctx.db.with_mut_snapshot(|s| {
+        s.characters.get_mut(&OTHER).unwrap().corporation_id = corp_id;
+    });
+    select(&ctx, &mut line_sess, "other", "other-secret", OTHER).await;
+    let destroy_denied = sov_call(&ctx, &mut line_sess, "sovMgr", "DestroySkyhooks", &[PyRep::Integer(sys_id as i64)])
+        .await
+        .unwrap_err();
+    assert_eq!(destroy_denied.code, "CorpRoleDenied");
+
     let destroyed = sov_call(&ctx, &mut sess, "sovMgr", "DestroySkyhooks", &[PyRep::Integer(sys_id as i64)])
         .await
         .expect("DestroySkyhooks");
@@ -813,13 +824,6 @@ async fn skyhook_acquisition_theft_and_reagent_loss() {
 
 #[tokio::test]
 async fn fw_warzones_victory_points_and_advantage_scaling() {
-    // parity: feat:fw.warzones, feat:fw.victory-points, feat:fw.advantage
-    eve_testkit::attest(&[
-        "feat:fw.warzones",
-        "feat:fw.victory-points",
-        "feat:fw.advantage",
-    ]);
-
     let ctx = ServerContext::new();
     let sys_id: u32 = 30000012; // Asabona (0.32 low-sec FW system)
 
@@ -895,9 +899,6 @@ async fn fw_warzones_victory_points_and_advantage_scaling() {
 
 #[tokio::test]
 async fn pirate_insurgency_campaigns_corruption_suppression_and_instances() {
-    // parity: feat:pve.insurgency
-    eve_testkit::attest(&["feat:pve.insurgency"]);
-
     let ctx = ServerContext::new();
     let sys_id: u32 = 30000012; // Asabona
     let campaign_id: i64 = 880_001;
@@ -968,7 +969,7 @@ async fn pirate_insurgency_campaigns_corruption_suppression_and_instances() {
     assert_eq!(snap.dict_get("corruptionPoints").and_then(|v| v.as_i64()), Some(250));
     assert_eq!(snap.dict_get("suppressionPoints").and_then(|v| v.as_i64()), Some(450));
 
-    let ice_id = insurgency_services::spawn_ice_heist(sys_id);
+    let ice_id = insurgency_services::spawn_ice_heist(&ctx, sys_id);
     assert!(ice_id > 0);
     let ice_instances = sov_call(&ctx, &mut sess, "dungeonInstanceCacheMgr", "GetPirateInsurgencyIceHeistInstances", &[])
         .await
