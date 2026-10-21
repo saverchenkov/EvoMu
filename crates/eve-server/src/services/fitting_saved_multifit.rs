@@ -874,8 +874,15 @@ pub(crate) async fn handle_ships_and_services(
                                 PyRep::Dict(changes),
                             ],
                         );
-                        // `ProcessActiveShipChanged` is derived by the V24 client (`DogmaLocation.MakeShipActive`)
-                        // from the `shipid` session change; the server never sends it.
+                        ctx.notify(
+                            crate::router::NotificationTarget::Character(char_id),
+                            "ProcessActiveShipChanged",
+                            "charid",
+                            vec![
+                                PyRep::Integer(sid),
+                                prev_ship_id.map(PyRep::Integer).unwrap_or(PyRep::None),
+                            ],
+                        );
                     }
                     Some(Ok(PyRep::keyval([
                         ("characterID", PyRep::Integer(char_id)),
@@ -1091,3 +1098,10 @@ pub(crate) async fn handle_ships_and_services(
         _ => None,
     }
 }
+
+pub const CLIENT_DERIVED_DOGMA_SCATTER_EVENTS: &[&str] = &[
+    "OnModuleActivated",
+    "OnModuleOnlineChange",
+    "OnModuleUnfitted",
+    "OnTargets",
+];

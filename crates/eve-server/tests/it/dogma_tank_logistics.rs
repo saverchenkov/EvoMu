@@ -95,8 +95,8 @@ fn extract_attr_from_info(info_rep: &PyRep, attr_id: i64) -> f64 {
 
 #[tokio::test]
 async fn test_phase_4_dg4_and_exit_gate_full_cycle_journey() {
-    // parity: feat:dogma.module-cycle, notify:OnGodmaShipEffect, notify:OnModulesDeactivating
-    eve_testkit::attest(&["feat:dogma.module-cycle", "notify:OnGodmaShipEffect", "notify:OnModulesDeactivating"]);
+    // parity: feat:dogma.module-cycle, notify:OnGodmaShipEffect, notify:OnModuleActivated, notify:OnModulesDeactivating
+    eve_testkit::attest(&["feat:dogma.module-cycle", "notify:OnGodmaShipEffect", "notify:OnModuleActivated", "notify:OnModulesDeactivating"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let mut sess = SessionState::new(4005);

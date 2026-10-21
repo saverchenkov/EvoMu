@@ -80,8 +80,8 @@ fn grant_all_required_skills_for_type(ctx: &ServerContext, char_id: i64, type_id
 
 #[tokio::test]
 async fn test_phase_4_dg2_fit_validation_and_rigs() {
-    // parity: feat:fitting.fit-module, feat:fitting.unfit-module, feat:fitting.fit-rig, feat:fitting.fit-subsystems, feat:fitting.max-group-fitted, feat:fitting.max-type-fitted, feat:fitting.fittings-save, notify:OnModuleFitted, notify:OnModuleAttributeChanges
-    eve_testkit::attest(&["feat:fitting.fit-module", "feat:fitting.unfit-module", "feat:fitting.fit-rig", "feat:fitting.fit-subsystems", "feat:fitting.max-group-fitted", "feat:fitting.max-type-fitted", "feat:fitting.fittings-save", "notify:OnModuleFitted", "notify:OnModuleAttributeChanges"]);
+    // parity: feat:fitting.fit-module, feat:fitting.unfit-module, feat:fitting.fit-rig, feat:fitting.fit-subsystems, feat:fitting.max-group-fitted, feat:fitting.max-type-fitted, feat:fitting.fittings-save, notify:OnModuleFitted, notify:OnModuleUnfitted, notify:OnModuleAttributeChanges
+    eve_testkit::attest(&["feat:fitting.fit-module", "feat:fitting.unfit-module", "feat:fitting.fit-rig", "feat:fitting.fit-subsystems", "feat:fitting.max-group-fitted", "feat:fitting.max-type-fitted", "feat:fitting.fittings-save", "notify:OnModuleFitted", "notify:OnModuleUnfitted", "notify:OnModuleAttributeChanges"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let mut sess = SessionState::new(4001);
@@ -672,8 +672,8 @@ async fn test_phase_4_dg2_fit_validation_and_rigs() {
 
 #[tokio::test]
 async fn test_phase_4_dg3_online_offline_and_persistence() {
-    // parity: feat:fitting.online-offline, rpc:dogmaIM.SetModuleOnline, rpc:dogmaIM.TakeModuleOffline, notify:OnModuleAttributeChanges
-    eve_testkit::attest(&["feat:fitting.online-offline", "rpc:dogmaIM.SetModuleOnline", "rpc:dogmaIM.TakeModuleOffline", "notify:OnModuleAttributeChanges"]);
+    // parity: plan:DG-3, feat:fitting.online-offline, rpc:dogmaIM.SetModuleOnline, rpc:dogmaIM.TakeModuleOffline, notify:OnModuleOnlineChange, notify:OnModuleAttributeChanges
+    eve_testkit::attest(&["plan:DG-3", "feat:fitting.online-offline", "rpc:dogmaIM.SetModuleOnline", "rpc:dogmaIM.TakeModuleOffline", "notify:OnModuleOnlineChange", "notify:OnModuleAttributeChanges"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let mut sess = SessionState::new(4002);
@@ -832,8 +832,8 @@ async fn test_phase_4_dg3_online_offline_and_persistence() {
 
 #[tokio::test]
 async fn test_phase_4_dg5_targeting_lock_and_break() {
-    // parity: feat:dogma.targeting-lock, feat:dogma.targeting-break, notify:OnTarget, notify:OnTargetClear
-    eve_testkit::attest(&["feat:dogma.targeting-lock", "feat:dogma.targeting-break", "notify:OnTarget", "notify:OnTargetClear"]);
+    // parity: feat:dogma.targeting-lock, feat:dogma.targeting-break, notify:OnTarget, notify:OnTargets, notify:OnTargetClear
+    eve_testkit::attest(&["feat:dogma.targeting-lock", "feat:dogma.targeting-break", "notify:OnTarget", "notify:OnTargets", "notify:OnTargetClear"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let mut sess = SessionState::new(4003);

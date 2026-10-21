@@ -945,6 +945,15 @@ pub(crate) async fn handle_superweapons_dbuffs_and_clones(
                     PyRep::Real(total_raw_damage),
                 ],
             );
+            ctx.notify(
+                crate::router::NotificationTarget::Character(char_id),
+                "OnDamageMessages",
+                "charid",
+                vec![PyRep::List(vec![PyRep::Tuple(vec![
+                    PyRep::Integer(module_id),
+                    PyRep::Real(total_raw_damage),
+                ])])],
+            );
 
             Some(Ok(PyRep::keyval([
                 ("moduleID", PyRep::Integer(module_id)),
@@ -1046,6 +1055,14 @@ pub(crate) async fn handle_superweapons_dbuffs_and_clones(
             }
 
             let agg = get_aggregated_ship_dbuffs(ctx, ship_id, now_unix);
+            if agg.is_empty() && ship_id > 0 {
+                ctx.notify(
+                    crate::router::NotificationTarget::Character(char_id),
+                    "OnGodmaFlushLocation",
+                    "charid",
+                    vec![PyRep::Integer(ship_id)],
+                );
+            }
             let entries: Vec<(PyRep, PyRep)> = agg
                 .into_iter()
                 .map(|(id, (val, exp))| {
@@ -1298,6 +1315,18 @@ pub(crate) async fn handle_superweapons_dbuffs_and_clones(
                         });
                     cid
                 });
+                ctx.notify(
+                    crate::router::NotificationTarget::Character(char_id),
+                    "OnShipJumpCloneCacheInvalidated",
+                    "charid",
+                    vec![PyRep::Integer(host_ship_id), PyRep::Integer(char_id)],
+                );
+                ctx.notify(
+                    crate::router::NotificationTarget::Character(char_id),
+                    "OnJumpCloneCacheInvalidated",
+                    "charid",
+                    vec![],
+                );
                 return Some(Ok(PyRep::keyval([
                     ("jumpCloneID", PyRep::Integer(clone_id)),
                     ("characterID", PyRep::Integer(char_id)),

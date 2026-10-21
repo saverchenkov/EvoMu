@@ -753,6 +753,14 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                 ctx.invalidate_ship_fitting(ship_id);
             }
             let first_ship = target_ship_ids.first().copied().unwrap_or(0);
+            if fitted_count > 0 {
+                ctx.notify(
+                    crate::router::NotificationTarget::Character(char_id),
+                    "OnMultipleItemChange",
+                    "charid",
+                    vec![PyRep::List(vec![PyRep::Integer(first_ship)])],
+                );
+            }
             let missing_entries: Vec<(PyRep, PyRep)> = missing
                 .into_iter()
                 .map(|(t, q)| (PyRep::Integer(t as i64), PyRep::Integer(q)))

@@ -1218,11 +1218,7 @@ pub(crate) async fn handle_mining_and_deactivate(
 
         ("miningScanMgr", "perform_scan") => {
             if args.is_empty() && kwargs.is_empty() {
-                return Some(Err(BridgeRpcError {
-                    // rpc-lint: allow error code string literal after lowercase method name perform_scan
-                    code: "UnimplementedRPC".into(),
-                    message: "miningScanMgr.perform_scan requires explicit scanner moduleID or parameters".into(),
-                }));
+                return None;
             }
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
