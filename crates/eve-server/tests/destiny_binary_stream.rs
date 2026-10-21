@@ -4,10 +4,6 @@
 #![forbid(unsafe_code)]
 
 // parity: feat:navigation.warp-speed-formula
-// parity: ballmode:DSTBALL_MISSILE
-// parity: ballmode:DSTBALL_MUSHROOM
-// parity: ballmode:DSTBALL_TROLL
-// parity: ballmode:DSTBALL_FORMATION
 
 use eve_destiny::wire::{
     decode_add_balls, encode_add_balls, DST_BALL_FORMATION, DST_BALL_MISSILE, DST_BALL_MUSHROOM,
@@ -37,10 +33,8 @@ fn sample_test_ball(id: i64, mode: MovementMode) -> Ball {
     }
 }
 
-// parity: ballmode:DSTBALL_MISSILE
-// parity: ballmode:DSTBALL_MUSHROOM
-// parity: ballmode:DSTBALL_TROLL
-// parity: ballmode:DSTBALL_FORMATION
+// Wire-layout regression only (AddBalls encode/decode); the simulation is never stepped, so this
+// test does not close the ballmode rows (review 20261020-194722, R2-P1-1).
 #[test]
 fn test_destiny_binary_mode_missile_mushroom_troll_formation() {
     let mut park = Ballpark::new(30_000_142);
