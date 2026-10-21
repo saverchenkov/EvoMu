@@ -201,7 +201,7 @@ fn load_and_verify_cfsd_records(
 }
 
 #[test]
-// parity: plan:T-1, plan:T-2, plan:D-2
+// parity: plan:T-1, plan:D-2
 // parity: sde:res:/staticdata/types.fsdbinary, sde:res:/staticdata/categories.fsdbinary, sde:res:/staticdata/groups.fsdbinary
 // parity: sde:res:/staticdata/typematerials.fsdbinary, sde:res:/staticdata/compressibletypes.fsdbinary, sde:res:/staticdata/typelist.fsdbinary
 // parity: sde:res:/staticdata/races.fsdbinary, sde:res:/staticdata/bloodlines.fsdbinary, sde:res:/staticdata/ancestries.fsdbinary

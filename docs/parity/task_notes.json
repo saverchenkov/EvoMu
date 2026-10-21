@@ -53,7 +53,7 @@
   },
   "D-1": {
     "assessment": "PARTIAL",
-    "note": "Client static data loaders for 213 resources, localized English descriptions, default_effect_id from typedogma, and SQLite tables; 5/213 sde rows currently closed."
+    "note": "Client static data loaders for 213 resources, localized English descriptions, default_effect_id from typedogma, and SQLite tables; 37/213 sde rows currently closed."
   },
   "D-2": {
     "assessment": "PARTIAL",
@@ -380,8 +380,8 @@
     "note": "Implemented eve-testkit JSONL attestation crate, parity tag documentation, and machoNet.GetTime RPC test."
   },
   "T-2": {
-    "assessment": "DONE",
-    "note": "Data-driven sweeps across all 213 SDE client resources, domain tables, record counts, and spot checks passing."
+    "assessment": "PARTIAL",
+    "note": "Raw-client FSD and SQLite sweeps close 37/213 sde rows and 0/1 effect rows; 176 sde rows and 217 expression-only effects remain open."
   },
   "T-3": {
     "assessment": "DONE",
@@ -413,11 +413,11 @@
   },
   "Z-3": {
     "assessment": "PARTIAL",
-    "note": "11/52 destiny rows closed; remaining destiny actions and ball modes open."
+    "note": "22/52 destiny rows DONE and 10/52 NA; 20 destiny actions and ball modes remain open."
   },
   "Z-4": {
     "assessment": "PARTIAL",
-    "note": "5/213 sde rows closed and 0/1 effect rows closed (217 expression-only effects open)."
+    "note": "37/213 sde rows closed and 0/1 effect rows closed (176 sde rows and 217 expression-only effects open)."
   },
   "Z-5": {
     "assessment": "PARTIAL",

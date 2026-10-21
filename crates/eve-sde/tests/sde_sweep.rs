@@ -795,7 +795,7 @@ fn verify_client_sqlite_static_loaded_rows(
 }
 
 #[test]
-// parity: plan:T-1, plan:T-2, plan:D-2
+// parity: plan:T-1, plan:D-2
 // parity: sde:res:/staticdata/blueprints.static, sde:res:/staticdata/clonegrades.static, sde:res:/staticdata/dbuffcollections.static
 // parity: sde:res:/staticdata/fighterabilities.static, sde:res:/staticdata/fighterabilitiesbytype.static
 // parity: sde:res:/staticdata/skinlicenses.static, sde:res:/staticdata/skinmaterials.static, sde:res:/staticdata/skins.static
