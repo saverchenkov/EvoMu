@@ -29,3 +29,12 @@
 - **Impact:** 1 ESI test fails on Windows and any fresh checkout that unpacks from the archive. The macOS agent with the live SDE passes all tests.
 - **Required Action:** User needs to regenerate `data/evomu_sde.sqlite.xz` from the current macOS SDE and commit it, OR mark the celestials test as `#[ignore]` until the archive is updated.
 - **Status:** Awaiting user decision on whether to update the archive or skip the test on Windows.
+
+## 4. ~~Python Preflight Unicode Encoding~~ [RESOLVED]
+
+- **Context:** Windows console (cmd.exe, PowerShell) may use encodings like CP1252 or CP437 that don't support all Unicode characters. When `preflight.py` prints parity reports containing Unicode characters (file paths, test names), it crashed with `UnicodeEncodeError`.
+- **Symptoms:** `UnicodeEncodeError: 'charmap' codec can't encode character '…' in position 1234: character maps to <undefined>`
+- **Root Cause:** Python's `print()` uses `sys.stdout.encoding` (console encoding) which may not be UTF-8 on Windows.
+- **Fix (201d08a):** Added `safe_print()` wrapper that catches `UnicodeEncodeError` and re-encodes with replacement characters (`errors='replace'`), allowing the script to complete successfully even when the console doesn't support UTF-8.
+- **Impact:** Preflight now runs cleanly on Windows consoles without crashing.
+- **Status:** RESOLVED in commit 201d08a (2025-01-22).
