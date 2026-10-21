@@ -433,6 +433,90 @@ pub fn dispatch_char_social_route(
             }))
         }
 
+        ("GET", "/characters/{character_id}/agents_research") => {
+            let char_id = match parse_path_i64(path_params, "character_id") {
+                Ok(v) => v,
+                Err(e) => return Some(e),
+            };
+            Some(ctx.db.with_snapshot(|snap| {
+                if !snap.characters.contains_key(&char_id) {
+                    return RouteExecutionResult::error(
+                        404,
+                        format!("Character {char_id} not found"),
+                    );
+                }
+                let mut rows = snap
+                    .char_research_agents
+                    .get(&char_id)
+                    .cloned()
+                    .unwrap_or_default();
+                rows.sort_by_key(|r| r.agent_id);
+                let out: Vec<Value> = rows
+                    .into_iter()
+                    .map(|r| {
+                        json!({
+                            "agent_id": r.agent_id,
+                            "skill_type_id": r.skill_type_id as i64,
+                            "started_at": format_iso8601_utc(r.started_at_unix),
+                            "points_per_day": r.points_per_day,
+                            "remainder_points": r.remainder_points,
+                        })
+                    })
+                    .collect();
+                RouteExecutionResult::ok_json(json!(out), 3600)
+            }))
+        }
+
+        ("GET", "/characters/{character_id}/medals") => {
+            let char_id = match parse_path_i64(path_params, "character_id") {
+                Ok(v) => v,
+                Err(e) => return Some(e),
+            };
+            Some(ctx.db.with_snapshot(|snap| {
+                if !snap.characters.contains_key(&char_id) {
+                    return RouteExecutionResult::error(
+                        404,
+                        format!("Character {char_id} not found"),
+                    );
+                }
+                let mut rows = snap
+                    .char_medals
+                    .get(&char_id)
+                    .cloned()
+                    .unwrap_or_default();
+                rows.sort_by_key(|m| m.medal_id);
+                let out: Vec<Value> = rows
+                    .into_iter()
+                    .map(|m| {
+                        let graphics: Vec<Value> = m
+                            .graphics
+                            .into_iter()
+                            .map(|g| {
+                                json!({
+                                    "part": g.part,
+                                    "layer": g.layer,
+                                    "graphic": g.graphic,
+                                    "color": g.color,
+                                })
+                            })
+                            .collect();
+                        json!({
+                            "medal_id": m.medal_id,
+                            "title": m.title,
+                            "description": m.description,
+                            "corporation_id": m.corporation_id,
+                            "issuer_id": m.issuer_id,
+                            "date": format_iso8601_utc(m.date_unix),
+                            "reason": m.reason,
+                            "status": m.status,
+                            "graphics": graphics,
+                        })
+                    })
+                    .collect();
+                RouteExecutionResult::ok_json(json!(out), 3600)
+            }))
+        }
+
         ("GET", "/characters/{character_id}/roles") => {
             let char_id = match parse_path_i64(path_params, "character_id") {
                 Ok(v) => v,
@@ -445,6 +529,17 @@ pub fn dispatch_char_social_route(
                         format!("Character {char_id} not found"),
                     );
                 };
+                if let Some(scoped) = snap.char_scoped_roles.get(&char_id) {
+                    return RouteExecutionResult::ok_json(
+                        json!({
+                            "roles": scoped.roles,
+                            "roles_at_hq": scoped.roles_at_hq,
+                            "roles_at_base": scoped.roles_at_base,
+                            "roles_at_other": scoped.roles_at_other,
+                        }),
+                        3600,
+                    );
+                }
                 let role_mask = snap
                     .corporations
                     .get(&ch.corporation_id)
@@ -469,6 +564,9 @@ pub fn dispatch_char_social_route(
                 RouteExecutionResult::ok_json(
                     json!({
                         "roles": roles,
+                        "roles_at_hq": [],
+                        "roles_at_base": [],
+                        "roles_at_other": [],
                     }),
                     3600,
                 )

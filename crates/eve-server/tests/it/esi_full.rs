@@ -139,7 +139,7 @@ fn setup_esi_test_environment() -> (Arc<ServerContext>, Arc<EsiRouter>, OpenApiS
             ch.station_id = Some(60_003_760);
         }
 
-        // 2. Wallet Journal entries
+        // 2. Wallet Journal & Transaction entries
         snap.wallet_journal.push(WalletJournalEntry {
             entry_id: 7001,
             character_id: char_id,
@@ -156,6 +156,23 @@ fn setup_esi_test_environment() -> (Arc<ServerContext>, Arc<EsiRouter>, OpenApiS
             balance_after: IskCents::from_isk(1_040_000_000),
             reason: "Market purchase order escrow".to_string(),
         });
+        snap.wallet_journal_timestamps.insert(7001, now.saturating_sub(7200));
+        snap.wallet_journal_timestamps.insert(7002, now.saturating_sub(3600));
+        snap.char_wallet_transactions.insert(
+            char_id,
+            vec![eve_db::WalletTransactionRecord {
+                transaction_id: 8001,
+                date_unix: now.saturating_sub(3600),
+                location_id: 60_003_760,
+                type_id: 34,
+                unit_price: 5.5,
+                quantity: 1000,
+                client_id: 90_000_002,
+                is_buy: true,
+                is_personal: true,
+                journal_ref_id: 7002,
+            }],
+        );
 
         // 3. Contract & contract item
         snap.items.insert(

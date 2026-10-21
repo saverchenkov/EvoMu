@@ -3,20 +3,64 @@
 
 #![forbid(unsafe_code)]
 
-use crate::esi::sample_routes::{format_iso8601_utc, parse_path_i64, RouteExecutionResult};
+use crate::esi::sample_routes::{
+    format_iso8601_utc, paginate_slice, parse_path_i64, RouteExecutionResult,
+};
 use crate::router::ServerContext;
-use eve_db::{IskCents, MailRecord, WalletJournalEntry};
+use eve_db::{IskCents, MailRecord, SsoTokenClaims, WalletJournalEntry};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
-/// Dispatches Wallet balance/divisions, Loyalty points, and Mail OpenAPI operations (`ESI-4`).
-#[allow(clippy::too_many_lines)]
+fn parse_optional_from_id(
+    query_params: &HashMap<String, String>,
+) -> Result<Option<i64>, RouteExecutionResult> {
+    match query_params.get("from_id") {
+        Some(raw) => match raw.parse::<i64>() {
+            Ok(v) if v > 0 => Ok(Some(v)),
+            _ => Err(RouteExecutionResult::error(
+                400,
+                format!("Invalid from_id '{raw}'"),
+            )),
+        },
+        None => Ok(None),
+    }
+}
+
+fn check_corp_wallet_access(
+    corp: &eve_db::CorporationRecord,
+    claims: Option<&SsoTokenClaims>,
+) -> Result<(), RouteExecutionResult> {
+    if let Some(c) = claims {
+        let role_mask = corp.member_roles.get(&c.character_id).copied().unwrap_or(0);
+        let has_role = corp.ceo_id == c.character_id
+            || (role_mask
+                & (eve_db::corp_roles::ROLE_DIRECTOR
+                    | eve_db::corp_roles::ROLE_ACCOUNTANT
+                    | eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT))
+                != 0;
+        if !corp.members.contains(&c.character_id) || !has_role {
+            return Err(RouteExecutionResult::error(
+                403,
+                format!(
+                    "Character {} lacks Accountant/Director/CEO role for corporation {}",
+                    c.character_id, corp.corporation_id
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Dispatches Wallet balance/divisions/journal/transactions, Loyalty points/offers, and Mail OpenAPI operations (`ESI-4`).
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 pub fn dispatch_character_mail_routes(
     ctx: &ServerContext,
     method: &str,
     path_pattern: &str,
     path_params: &HashMap<String, String>,
     query_params: &HashMap<String, String>,
+    claims: Option<&SsoTokenClaims>,
+    page: usize,
     req_body: &[u8],
 ) -> Option<RouteExecutionResult> {
     match (method, path_pattern) {
@@ -36,6 +80,105 @@ pub fn dispatch_character_mail_routes(
                 RouteExecutionResult::ok_json(json!(ch.balance.to_wire_f64()), 120)
             }))
         }
+        ("GET", "/characters/{character_id}/wallet/journal") => {
+            let char_id = match parse_path_i64(path_params, "character_id") {
+                Ok(v) => v,
+                Err(e) => return Some(e),
+            };
+            Some(ctx.db.with_snapshot(|snap| {
+                if !snap.characters.contains_key(&char_id) {
+                    return RouteExecutionResult::error(
+                        404,
+                        format!("Character {char_id} not found"),
+                    );
+                }
+                let mut entries: Vec<_> = snap
+                    .wallet_journal
+                    .iter()
+                    .filter(|e| e.character_id == char_id)
+                    .collect();
+                entries.sort_by_key(|e| std::cmp::Reverse(e.entry_id));
+                let out: Vec<Value> = entries
+                    .into_iter()
+                    .map(|e| {
+                        let ref_type = if e.entry_type.is_empty() {
+                            "player_donation"
+                        } else {
+                            e.entry_type.as_str()
+                        };
+                        let desc = if e.reason.is_empty() {
+                            "Wallet transaction"
+                        } else {
+                            e.reason.as_str()
+                        };
+                        let ts = snap
+                            .wallet_journal_timestamps
+                            .get(&e.entry_id)
+                            .copied()
+                            .unwrap_or(0);
+                        json!({
+                            "id": e.entry_id,
+                            "date": format_iso8601_utc(ts),
+                            "ref_type": ref_type,
+                            "description": desc,
+                            "amount": e.amount.to_wire_f64(),
+                            "balance": e.balance_after.to_wire_f64(),
+                            "reason": e.reason,
+                        })
+                    })
+                    .collect();
+                let (slice, total_pages) = match paginate_slice(&out, page, 1000) {
+                    Ok(v) => v,
+                    Err(e) => return e,
+                };
+                RouteExecutionResult::ok_paginated_json(json!(slice), 3600, total_pages)
+            }))
+        }
+        ("GET", "/characters/{character_id}/wallet/transactions") => {
+            let char_id = match parse_path_i64(path_params, "character_id") {
+                Ok(v) => v,
+                Err(e) => return Some(e),
+            };
+            let from_id = match parse_optional_from_id(query_params) {
+                Ok(v) => v,
+                Err(e) => return Some(e),
+            };
+            Some(ctx.db.with_snapshot(|snap| {
+                if !snap.characters.contains_key(&char_id) {
+                    return RouteExecutionResult::error(
+                        404,
+                        format!("Character {char_id} not found"),
+                    );
+                }
+                let mut rows: Vec<_> = snap
+                    .char_wallet_transactions
+                    .get(&char_id)
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|t| from_id.is_none_or(|fid| t.transaction_id < fid))
+                    .collect();
+                rows.sort_by_key(|t| std::cmp::Reverse(t.transaction_id));
+                let out: Vec<Value> = rows
+                    .into_iter()
+                    .map(|t| {
+                        json!({
+                            "transaction_id": t.transaction_id,
+                            "date": format_iso8601_utc(t.date_unix),
+                            "location_id": t.location_id,
+                            "type_id": t.type_id as i64,
+                            "unit_price": t.unit_price,
+                            "quantity": t.quantity,
+                            "client_id": t.client_id,
+                            "is_buy": t.is_buy,
+                            "is_personal": t.is_personal,
+                            "journal_ref_id": t.journal_ref_id,
+                        })
+                    })
+                    .collect();
+                RouteExecutionResult::ok_json(json!(out), 3600)
+            }))
+        }
         ("GET", "/corporations/{corporation_id}/wallets") => {
             let corp_id = match parse_path_i64(path_params, "corporation_id") {
                 Ok(v) => v,
@@ -48,6 +191,9 @@ pub fn dispatch_character_mail_routes(
                         format!("Corporation {corp_id} not found"),
                     );
                 };
+                if let Err(e) = check_corp_wallet_access(corp, claims) {
+                    return e;
+                }
                 let mut divisions = Vec::with_capacity(7);
                 for div in 1..=7u8 {
                     let bal = corp.division_balance(div).to_wire_f64();
@@ -57,6 +203,124 @@ pub fn dispatch_character_mail_routes(
                     }));
                 }
                 RouteExecutionResult::ok_json(json!(divisions), 300)
+            }))
+        }
+        ("GET", "/corporations/{corporation_id}/wallets/{division}/journal") => {
+            let corp_id = match parse_path_i64(path_params, "corporation_id") {
+                Ok(v) => v,
+                Err(e) => return Some(e),
+            };
+            let division = match parse_path_i64(path_params, "division") {
+                Ok(v) if (1..=7).contains(&v) => v,
+                Ok(v) => {
+                    return Some(RouteExecutionResult::error(
+                        400,
+                        format!("Wallet division {v} must be between 1 and 7"),
+                    ));
+                }
+                Err(e) => return Some(e),
+            };
+            Some(ctx.db.with_snapshot(|snap| {
+                let Some(corp) = snap.corporations.get(&corp_id) else {
+                    return RouteExecutionResult::error(
+                        404,
+                        format!("Corporation {corp_id} not found"),
+                    );
+                };
+                if let Err(e) = check_corp_wallet_access(corp, claims) {
+                    return e;
+                }
+                let mut rows = snap
+                    .corp_wallet_journals
+                    .get(&(corp_id, division))
+                    .cloned()
+                    .unwrap_or_default();
+                rows.sort_by_key(|e| std::cmp::Reverse(e.id));
+                let out: Vec<Value> = rows
+                    .into_iter()
+                    .map(|e| {
+                        let mut obj = json!({
+                            "id": e.id,
+                            "date": format_iso8601_utc(e.date_unix),
+                            "ref_type": e.ref_type,
+                            "description": e.description,
+                            "amount": e.amount,
+                            "balance": e.balance,
+                        });
+                        if let Some(fp) = e.first_party_id {
+                            obj["first_party_id"] = json!(fp);
+                        }
+                        if let Some(sp) = e.second_party_id {
+                            obj["second_party_id"] = json!(sp);
+                        }
+                        if let Some(ref r) = e.reason {
+                            obj["reason"] = json!(r);
+                        }
+                        obj
+                    })
+                    .collect();
+                let (slice, total_pages) = match paginate_slice(&out, page, 1000) {
+                    Ok(v) => v,
+                    Err(e) => return e,
+                };
+                RouteExecutionResult::ok_paginated_json(json!(slice), 300, total_pages)
+            }))
+        }
+        ("GET", "/corporations/{corporation_id}/wallets/{division}/transactions") => {
+            let corp_id = match parse_path_i64(path_params, "corporation_id") {
+                Ok(v) => v,
+                Err(e) => return Some(e),
+            };
+            let division = match parse_path_i64(path_params, "division") {
+                Ok(v) if (1..=7).contains(&v) => v,
+                Ok(v) => {
+                    return Some(RouteExecutionResult::error(
+                        400,
+                        format!("Wallet division {v} must be between 1 and 7"),
+                    ));
+                }
+                Err(e) => return Some(e),
+            };
+            let from_id = match parse_optional_from_id(query_params) {
+                Ok(v) => v,
+                Err(e) => return Some(e),
+            };
+            Some(ctx.db.with_snapshot(|snap| {
+                let Some(corp) = snap.corporations.get(&corp_id) else {
+                    return RouteExecutionResult::error(
+                        404,
+                        format!("Corporation {corp_id} not found"),
+                    );
+                };
+                if let Err(e) = check_corp_wallet_access(corp, claims) {
+                    return e;
+                }
+                let mut rows: Vec<_> = snap
+                    .corp_wallet_transactions
+                    .get(&(corp_id, division))
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|t| from_id.is_none_or(|fid| t.transaction_id < fid))
+                    .collect();
+                rows.sort_by_key(|t| std::cmp::Reverse(t.transaction_id));
+                let out: Vec<Value> = rows
+                    .into_iter()
+                    .map(|t| {
+                        json!({
+                            "transaction_id": t.transaction_id,
+                            "date": format_iso8601_utc(t.date_unix),
+                            "location_id": t.location_id,
+                            "type_id": t.type_id as i64,
+                            "unit_price": t.unit_price,
+                            "quantity": t.quantity,
+                            "client_id": t.client_id,
+                            "is_buy": t.is_buy,
+                            "journal_ref_id": t.journal_ref_id,
+                        })
+                    })
+                    .collect();
+                RouteExecutionResult::ok_json(json!(out), 3600)
             }))
         }
 
@@ -82,6 +346,56 @@ pub fn dispatch_character_mail_routes(
                             "corporation_id": corp_id,
                             "loyalty_points": pts,
                         })
+                    })
+                    .collect();
+                RouteExecutionResult::ok_json(json!(out), 3600)
+            }))
+        }
+        ("GET", "/loyalty/stores/{corporation_id}/offers") => {
+            let corp_id = match parse_path_i64(path_params, "corporation_id") {
+                Ok(v) => v,
+                Err(e) => return Some(e),
+            };
+            Some(ctx.db.with_snapshot(|snap| {
+                if !ctx.sde.npc_corporations.contains_key(&corp_id)
+                    && !snap.corporations.contains_key(&corp_id)
+                {
+                    return RouteExecutionResult::error(
+                        404,
+                        format!("Corporation {corp_id} not found"),
+                    );
+                }
+                let mut offers = snap
+                    .loyalty_store_offers
+                    .get(&corp_id)
+                    .cloned()
+                    .unwrap_or_default();
+                offers.sort_by_key(|o| o.offer_id);
+                let out: Vec<Value> = offers
+                    .into_iter()
+                    .map(|o| {
+                        let req_items: Vec<Value> = o
+                            .required_items
+                            .into_iter()
+                            .map(|ri| {
+                                json!({
+                                    "type_id": ri.type_id as i64,
+                                    "quantity": ri.quantity,
+                                })
+                            })
+                            .collect();
+                        let mut obj = json!({
+                            "offer_id": o.offer_id,
+                            "type_id": o.type_id as i64,
+                            "quantity": o.quantity,
+                            "lp_cost": o.lp_cost,
+                            "isk_cost": o.isk_cost,
+                            "required_items": req_items,
+                        });
+                        if let Some(ak) = o.ak_cost {
+                            obj["ak_cost"] = json!(ak);
+                        }
+                        obj
                     })
                     .collect();
                 RouteExecutionResult::ok_json(json!(out), 3600)

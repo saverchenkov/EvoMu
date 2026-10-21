@@ -264,6 +264,93 @@ pub struct CorpProjectContributorEntry {
     pub contributed_quantity: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CharacterResearchAgentRecord {
+    pub agent_id: i64,
+    pub skill_type_id: TypeId,
+    pub started_at_unix: u64,
+    pub points_per_day: f64,
+    pub remainder_points: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CharacterMedalGraphicRecord {
+    pub part: i64,
+    pub layer: i64,
+    pub graphic: String,
+    pub color: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CharacterMedalRecord {
+    pub medal_id: i64,
+    pub title: String,
+    pub description: String,
+    pub corporation_id: i64,
+    pub issuer_id: i64,
+    pub date_unix: u64,
+    pub reason: String,
+    pub status: String,
+    pub graphics: Vec<CharacterMedalGraphicRecord>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CharacterScopedRolesRecord {
+    pub roles: Vec<String>,
+    pub roles_at_hq: Vec<String>,
+    pub roles_at_base: Vec<String>,
+    pub roles_at_other: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoyaltyStoreOfferItemRecord {
+    pub type_id: TypeId,
+    pub quantity: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoyaltyStoreOfferRecord {
+    pub offer_id: i64,
+    pub type_id: TypeId,
+    pub quantity: i64,
+    pub lp_cost: i64,
+    pub isk_cost: i64,
+    #[serde(default)]
+    pub ak_cost: Option<i64>,
+    #[serde(default)]
+    pub required_items: Vec<LoyaltyStoreOfferItemRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WalletTransactionRecord {
+    pub transaction_id: i64,
+    pub date_unix: u64,
+    pub location_id: i64,
+    pub type_id: TypeId,
+    pub unit_price: f64,
+    pub quantity: i64,
+    pub client_id: i64,
+    pub is_buy: bool,
+    pub is_personal: bool,
+    pub journal_ref_id: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CorpWalletJournalRecord {
+    pub id: i64,
+    pub date_unix: u64,
+    pub ref_type: String,
+    pub description: String,
+    pub amount: f64,
+    pub balance: f64,
+    #[serde(default)]
+    pub first_party_id: Option<i64>,
+    #[serde(default)]
+    pub second_party_id: Option<i64>,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct WorldStateSnapshot {
     pub next_entity_id: i64,
@@ -424,6 +511,22 @@ pub struct WorldStateSnapshot {
     pub starbase_settings: HashMap<i64, StarbaseDetailSettings>,
     #[serde(default)]
     pub corp_project_contributors: HashMap<i64, Vec<CorpProjectContributorEntry>>,
+    #[serde(default)]
+    pub char_research_agents: HashMap<i64, Vec<CharacterResearchAgentRecord>>,
+    #[serde(default)]
+    pub char_medals: HashMap<i64, Vec<CharacterMedalRecord>>,
+    #[serde(default)]
+    pub char_scoped_roles: HashMap<i64, CharacterScopedRolesRecord>,
+    #[serde(default)]
+    pub loyalty_store_offers: HashMap<i64, Vec<LoyaltyStoreOfferRecord>>,
+    #[serde(default)]
+    pub wallet_journal_timestamps: HashMap<i64, u64>,
+    #[serde(default)]
+    pub char_wallet_transactions: HashMap<i64, Vec<WalletTransactionRecord>>,
+    #[serde(default, with = "tuple_map_serde")]
+    pub corp_wallet_journals: HashMap<(i64, i64), Vec<CorpWalletJournalRecord>>,
+    #[serde(default, with = "tuple_map_serde")]
+    pub corp_wallet_transactions: HashMap<(i64, i64), Vec<WalletTransactionRecord>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

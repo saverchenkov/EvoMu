@@ -8,6 +8,7 @@ mod auth;
 mod auth_persistence;
 mod character;
 mod character_esi_social_mail;
+mod character_esi_wallet_loyalty;
 mod character_progression;
 mod character_skills_clones;
 mod client_handshake_v24;

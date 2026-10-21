@@ -1169,6 +1169,8 @@ pub fn dispatch_character_routes(
             path_pattern,
             path_params,
             query_params,
+            _claims,
+            page,
             req_body,
         ),
     }
