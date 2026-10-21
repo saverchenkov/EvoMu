@@ -1073,8 +1073,7 @@ pub async fn handle_weapons(
 
                     snap.next_entity_id += 1;
                     generated_kill_id = snap.next_entity_id;
-                    snap.killmails.insert(
-                        generated_kill_id,
+                    snap.record_killmail(
                         KillmailRecord {
                             kill_id: generated_kill_id,
                             victim_character_id: victim_id,
@@ -1082,7 +1081,9 @@ pub async fn handle_weapons(
                             solar_system_id: sys_id,
                             ship_type_id: target_ball.type_id,
                             total_value_isk: 250_000.0,
+                            ..Default::default()
                         },
+                        ctx.now_unix(),
                     );
                 });
 

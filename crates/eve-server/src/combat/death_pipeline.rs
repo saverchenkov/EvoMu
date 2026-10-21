@@ -228,8 +228,7 @@ pub async fn execute_death_pipeline(
         // Create and persist Killmail
         snap.next_entity_id += 1;
         let kid = snap.next_entity_id;
-        snap.killmails.insert(
-            kid,
+        snap.record_killmail(
             KillmailRecord {
                 kill_id: kid,
                 victim_character_id: victim_char_id,
@@ -237,7 +236,9 @@ pub async fn execute_death_pipeline(
                 solar_system_id: sys_id,
                 ship_type_id: victim_ship_type_id,
                 total_value_isk: base_price,
+                ..Default::default()
             },
+            ctx.now_unix(),
         );
 
         Ok::<_, String>((wreck_id, dropped, destroyed, cap_id, kid))

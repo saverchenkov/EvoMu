@@ -714,6 +714,22 @@ pub struct ObserverMiningRecord {
 }
 
 impl WorldStateSnapshot {
+    /// Persists a killmail stamped with the kill time and the victim's and final-blow attacker's
+    /// corporation/alliance as they are at the moment of the kill. Affiliations already set on
+    /// `km` (e.g. a structure's owning corporation) are kept when the id is not a known pilot.
+    pub fn record_killmail(&mut self, mut km: KillmailRecord, killed_unix: u64) {
+        km.killed_unix = killed_unix;
+        if let Some(c) = self.characters.get(&km.victim_character_id) {
+            km.victim_corp_id = c.corporation_id;
+            km.victim_alliance_id = c.alliance_id;
+        }
+        if let Some(c) = self.characters.get(&km.attacker_character_id) {
+            km.attacker_corp_id = c.corporation_id;
+            km.attacker_alliance_id = c.alliance_id;
+        }
+        self.killmails.insert(km.kill_id, km);
+    }
+
     pub fn record_system_jump(
         &mut self,
         solar_system_id: SolarSystemId,

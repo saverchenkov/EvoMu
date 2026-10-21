@@ -198,6 +198,7 @@ async fn test_esi3_universe_status_meta_dogma_killmails_insurance_fw() {
                 solar_system_id: 30_000_142,
                 ship_type_id: 587,
                 total_value_isk: 1_250_000.0,
+                ..Default::default()
             },
         );
     });

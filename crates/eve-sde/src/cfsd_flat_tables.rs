@@ -355,25 +355,6 @@ pub const CFSD_FLAT_LAYOUTS: &[CfsdLayout] = &[
     ),
 ];
 
-fn rd_u32(buf: &[u8], pos: usize) -> u32 {
-    u32::from_le_bytes(buf[pos..pos + 4].try_into().expect("u32 slice"))
-}
-
-fn rd_u64(buf: &[u8], pos: usize) -> u64 {
-    u64::from_le_bytes(buf[pos..pos + 8].try_into().expect("u64 slice"))
-}
-
-fn rd_str(buf: &[u8], rel: u64) -> Result<String, SdeError> {
-    if rel == 0 {
-        return Ok(String::new());
-    }
-    let abs = 32 + rel as usize;
-    let len = rd_u64(buf, abs - 8) as usize;
-    std::str::from_utf8(&buf[abs..abs + len])
-        .map(str::to_string)
-        .map_err(|e| SdeError::InvalidSchema(format!("cfsd string: {e}")))
-}
-
 impl SdeRegistry {
     /// Layout of a flat `cfsd` catalogue resource decoded by [`Self::load_cfsd_table`].
     pub fn cfsd_flat_layout(res_path: &str) -> Option<&'static CfsdLayout> {
@@ -391,60 +372,53 @@ impl SdeRegistry {
         let raw = std::fs::read(&path)
             .map_err(|_| SdeError::MissingDatabase(path.display().to_string()))?;
         let info = &self.resources[res_path];
-        if raw.len() as u64 != info.byte_size || raw.len() < 56 {
+        if raw.len() as u64 != info.byte_size {
             return Err(SdeError::InvalidSchema(format!(
                 "{res_path}: {} bytes, importer pinned {}",
                 raw.len(),
                 info.byte_size
             )));
         }
-        let count = rd_u64(&raw, 40) as usize;
-        let buckets = rd_u64(&raw, 48) as usize;
+        let buf = super::cfsd_nested_tables::CfsdBuf(&raw);
+        let count = buf.u64(40)? as usize;
         let mut out = BTreeMap::new();
-        for b in 0..buckets {
-            let off = rd_u64(&raw, 56 + b * 8) as usize;
-            if off == 0 {
-                continue;
-            }
-            let abs = 32 + off;
-            for i in 0..rd_u64(&raw, abs - 8) as usize {
-                let rec = abs + i * lay.stride;
-                let key = if lay.key_width == 8 {
-                    rd_u64(&raw, rec) as i64
-                } else {
-                    i64::from(rd_u32(&raw, rec))
-                };
-                let mask = lay.mask_offset.map(|m| rd_u32(&raw, rec + m)).unwrap_or(0);
-                let mut fields = BTreeMap::new();
-                for &(name, kind, off, bit) in lay.fields {
-                    if bit.is_some_and(|b| mask & b == 0) {
-                        continue;
-                    }
-                    let p = rec + off;
-                    let v = match kind {
-                        Bool => CfsdValue::Int(i64::from(raw[p] != 0)),
-                        I32 => CfsdValue::Int(i64::from(rd_u32(&raw, p) as i32)),
-                        U32 => CfsdValue::Int(i64::from(rd_u32(&raw, p))),
-                        U64 => CfsdValue::Int(rd_u64(&raw, p) as i64),
-                        Str => CfsdValue::Str(rd_str(&raw, rd_u64(&raw, p))?),
-                        U32List => {
-                            let rel = rd_u64(&raw, p) as usize;
-                            let (abs_l, n) = if rel == 0 {
-                                (0, 0)
-                            } else {
-                                (32 + rel, rd_u64(&raw, 32 + rel - 8) as usize)
-                            };
-                            CfsdValue::IntList(
-                                (0..n)
-                                    .map(|j| i64::from(rd_u32(&raw, abs_l + j * 4)))
-                                    .collect(),
-                            )
-                        }
-                    };
-                    fields.insert(name.to_string(), v);
+        for rec in buf.dict_entries(56, lay.stride)? {
+            let key = if lay.key_width == 8 {
+                buf.u64(rec)? as i64
+            } else {
+                i64::from(buf.u32(rec)?)
+            };
+            let mask = match lay.mask_offset {
+                Some(m) => buf.u32(rec + m)?,
+                None => 0,
+            };
+            let mut fields = BTreeMap::new();
+            for &(name, kind, off, bit) in lay.fields {
+                if bit.is_some_and(|b| mask & b == 0) {
+                    continue;
                 }
-                out.insert(key, CfsdRecord { key, fields });
+                let p = rec + off;
+                let v = match kind {
+                    Bool => CfsdValue::Int(i64::from(buf.u8(p)? != 0)),
+                    I32 => CfsdValue::Int(i64::from(buf.u32(p)? as i32)),
+                    U32 => CfsdValue::Int(i64::from(buf.u32(p)?)),
+                    U64 => CfsdValue::Int(buf.u64(p)? as i64),
+                    Str => CfsdValue::Str(buf.str_at(buf.u64(p)?)?),
+                    U32List => {
+                        let rel = buf.u64(p)?;
+                        let mut list = Vec::new();
+                        if rel != 0 {
+                            let (at, n) = buf.counted(rel)?;
+                            for j in 0..n.min(raw.len()) {
+                                list.push(i64::from(buf.u32(at + j * 4)?));
+                            }
+                        }
+                        CfsdValue::IntList(list)
+                    }
+                };
+                fields.insert(name.to_string(), v);
             }
+            out.insert(key, CfsdRecord { key, fields });
         }
         if out.len() != count {
             return Err(SdeError::InvalidSchema(format!(

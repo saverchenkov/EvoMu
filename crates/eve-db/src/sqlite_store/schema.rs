@@ -422,6 +422,16 @@ pub fn apply_migrations(conn: &Connection) -> Result<(), String> {
     )
     .map_err(|e| e.to_string())?;
     let _ = conn.execute("ALTER TABLE skill_queues ADD COLUMN started_at_unix INTEGER", []);
+    // Kill time and kill-time affiliations (war killmail attribution); legacy rows default to 0/NULL.
+    for col in [
+        "killed_unix INTEGER NOT NULL DEFAULT 0",
+        "victim_corp_id INTEGER NOT NULL DEFAULT 0",
+        "victim_alliance_id INTEGER",
+        "attacker_corp_id INTEGER NOT NULL DEFAULT 0",
+        "attacker_alliance_id INTEGER",
+    ] {
+        let _ = conn.execute(&format!("ALTER TABLE killmails ADD COLUMN {col}"), []);
+    }
     super::ledger_store::apply_ledger_migration(conn)?;
     Ok(())
 }

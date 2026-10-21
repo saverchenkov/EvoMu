@@ -473,7 +473,7 @@ pub fn load_snapshot_from_sqlite(
 
     {
         let mut stmt = conn
-            .prepare("SELECT kill_id, victim_character_id, attacker_character_id, solar_system_id, ship_type_id, total_value_isk FROM killmails")
+            .prepare("SELECT kill_id, victim_character_id, attacker_character_id, solar_system_id, ship_type_id, total_value_isk, killed_unix, victim_corp_id, victim_alliance_id, attacker_corp_id, attacker_alliance_id FROM killmails")
             .map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map([], |r| {
@@ -484,6 +484,11 @@ pub fn load_snapshot_from_sqlite(
                     solar_system_id: r.get::<_, i64>(3)? as SolarSystemId,
                     ship_type_id: r.get::<_, i64>(4)? as TypeId,
                     total_value_isk: r.get(5)?,
+                    killed_unix: r.get::<_, i64>(6)? as u64,
+                    victim_corp_id: r.get(7)?,
+                    victim_alliance_id: r.get(8)?,
+                    attacker_corp_id: r.get(9)?,
+                    attacker_alliance_id: r.get(10)?,
                 })
             })
             .map_err(|e| e.to_string())?;

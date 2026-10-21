@@ -789,6 +789,7 @@ async fn test_esi_incursions_wars_and_single_killmail_reflect_live_state() {
                 solar_system_id: 30_000_142,
                 ship_type_id: 587,
                 total_value_isk: 2_500_000.0,
+                ..Default::default()
             },
         );
         snap.killmail_details.insert(
@@ -998,6 +999,7 @@ async fn test_esi_incursions_wars_and_single_killmail_reflect_live_state() {
                 solar_system_id: 30_000_142,
                 ship_type_id: 587,
                 total_value_isk: 1_750_000.0,
+                ..Default::default()
             },
         );
         if let Some(w) = snap.wars.get_mut(&war_id) {

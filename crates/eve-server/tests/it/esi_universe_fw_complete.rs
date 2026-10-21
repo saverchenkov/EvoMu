@@ -771,6 +771,7 @@ async fn test_esi_universe_celestials_stations_structures_and_jumps_kills() {
                 solar_system_id: sys_id,
                 ship_type_id: 587, // Rifter (ship kill inside 1h window)
                 total_value_isk: 1_500_000.0,
+                ..Default::default()
             },
         );
         snap.killmail_details.insert(
@@ -792,6 +793,7 @@ async fn test_esi_universe_celestials_stations_structures_and_jumps_kills() {
                 solar_system_id: sys_id,
                 ship_type_id: capsule_type_id, // Capsule (pod kill inside 1h window)
                 total_value_isk: 10_000.0,
+                ..Default::default()
             },
         );
         snap.killmail_details.insert(
@@ -813,6 +815,7 @@ async fn test_esi_universe_celestials_stations_structures_and_jumps_kills() {
                 solar_system_id: sys_id,
                 ship_type_id: 587, // Expired ship kill outside 1h window
                 total_value_isk: 1_500_000.0,
+                ..Default::default()
             },
         );
         snap.killmail_details.insert(

@@ -155,10 +155,11 @@ fn fittings_updated_count(ctx: &ServerContext) -> usize {
 
 #[tokio::test]
 async fn test_esi_fittings_post_and_delete_scopes_errors_and_client_state() {
-    // parity: esi:POST /characters/{character_id}/fittings, esi:DELETE /characters/{character_id}/fittings/{fitting_id}
+    // parity: esi:POST /characters/{character_id}/fittings, esi:DELETE /characters/{character_id}/fittings/{fitting_id}, feat:esi.fittings.write
     eve_testkit::attest(&[
         "esi:POST /characters/{character_id}/fittings",
         "esi:DELETE /characters/{character_id}/fittings/{fitting_id}",
+        "feat:esi.fittings.write",
     ]);
     let ctx = Arc::new(ServerContext::new());
     let router = EsiRouter::new(Arc::clone(&ctx));
@@ -371,8 +372,11 @@ async fn test_esi_fittings_post_and_delete_scopes_errors_and_client_state() {
 
 #[tokio::test]
 async fn test_esi_war_killmails_pagination_caching_and_world_state() {
-    // parity: esi:GET /wars/{war_id}/killmails
-    eve_testkit::attest(&["esi:GET /wars/{war_id}/killmails"]);
+    // parity: esi:GET /wars/{war_id}/killmails, feat:esi.wars.killmails
+    eve_testkit::attest(&[
+        "esi:GET /wars/{war_id}/killmails",
+        "feat:esi.wars.killmails",
+    ]);
     let ctx = Arc::new(ServerContext::new());
     let router = EsiRouter::new(Arc::clone(&ctx));
     let op = OpenApiSpec::pinned()
@@ -383,8 +387,12 @@ async fn test_esi_war_killmails_pagination_caching_and_world_state() {
         op.required_scopes.is_empty(),
         "war killmails is a public endpoint"
     );
+    // Deterministic virtual time; the war started 10,000 s ago and is still running.
+    ctx.set_clock(Arc::new(eve_db::VirtualServerClock::with_fixed_base(
+        1_800_000_000,
+    )));
+    let started = ctx.now_unix() - 10_000;
     let (aggr, def, bystander) = (98_100_001_i64, 98_100_002_i64, 98_100_003_i64);
-    let bystander_pilot = 90_000_003_i64;
     let rifter = 587u32;
     assert_eq!(ctx.sde.types[&rifter].name, "Rifter");
     let jita = ctx
@@ -394,14 +402,20 @@ async fn test_esi_war_killmails_pagination_caching_and_world_state() {
         .find(|s| s.name == "Jita")
         .expect("Jita in SDE")
         .solar_system_id;
+    let kill = |kill_id: i64, victim: i64, attacker: i64| KillmailRecord {
+        kill_id,
+        victim_character_id: victim,
+        attacker_character_id: attacker,
+        solar_system_id: jita,
+        ship_type_id: rifter,
+        total_value_isk: 1_000_000.0,
+        ..Default::default()
+    };
     ctx.db.with_mut_snapshot(|snap| {
-        for (pilot, corp) in [
-            (PILOT, aggr),
-            (OTHER_PILOT, def),
-            (bystander_pilot, bystander),
-        ] {
+        for (pilot, corp) in [(PILOT, aggr), (OTHER_PILOT, def)] {
             if let Some(ch) = snap.characters.get_mut(&pilot) {
                 ch.corporation_id = corp;
+                ch.alliance_id = None;
             }
             snap.corporations.insert(
                 corp,
@@ -423,45 +437,43 @@ async fn test_esi_war_killmails_pagination_caching_and_world_state() {
                 aggressor_corp_id: aggr,
                 defender_corp_id: def,
                 mutual: false,
-                started_unix: 0,
+                started_unix: started,
                 active: true,
             },
         );
-        // 1,001 war kills in both directions (pages of 1,000) plus 2 unrelated kills.
+        // 1,001 war kills in both directions (pages of 1,000), each stamped by the production
+        // `record_killmail` with its kill time and both pilots' kill-time corporations.
         for i in 0..1_001_i64 {
             let (victim, attacker) = if i % 2 == 0 {
                 (OTHER_PILOT, PILOT)
             } else {
                 (PILOT, OTHER_PILOT)
             };
-            snap.killmails.insert(
-                5_000_000 + i,
-                KillmailRecord {
-                    kill_id: 5_000_000 + i,
-                    victim_character_id: victim,
-                    attacker_character_id: attacker,
-                    solar_system_id: jita,
-                    ship_type_id: rifter,
-                    total_value_isk: 1_000_000.0,
-                },
+            snap.record_killmail(
+                kill(5_000_000 + i, victim, attacker),
+                started + 1 + i as u64,
             );
         }
+        // Two kills involving a corporation outside the war.
         for (kid, victim, attacker) in [
-            (6_000_000, bystander_pilot, PILOT),
-            (6_000_001, OTHER_PILOT, bystander_pilot),
+            (6_000_000, 95_000_001, PILOT),
+            (6_000_001, OTHER_PILOT, 95_000_002),
         ] {
-            snap.killmails.insert(
-                kid,
-                KillmailRecord {
-                    kill_id: kid,
-                    victim_character_id: victim,
-                    attacker_character_id: attacker,
-                    solar_system_id: jita,
-                    ship_type_id: rifter,
-                    total_value_isk: 1.0,
-                },
-            );
+            let mut km = kill(kid, victim, attacker);
+            if victim == 95_000_001 {
+                km.victim_corp_id = bystander;
+            } else {
+                km.attacker_corp_id = bystander;
+            }
+            snap.record_killmail(km, started + 50);
         }
+    });
+    ctx.db.with_snapshot(|snap| {
+        let km = &snap.killmails[&5_000_000];
+        assert_eq!(
+            (km.killed_unix, km.victim_corp_id, km.attacker_corp_id),
+            (started + 1, def, aggr)
+        );
     });
 
     // Page 1: 1,000 newest war kills, X-Pages = 2, public 3600 s cache window.
@@ -548,19 +560,9 @@ async fn test_esi_war_killmails_pagination_caching_and_world_state() {
     );
     assert!(r304.body.is_empty());
     assert_eq!(r304.header("ETag"), Some(etag.as_str()));
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.killmails.insert(
-            5_002_000,
-            KillmailRecord {
-                kill_id: 5_002_000,
-                victim_character_id: PILOT,
-                attacker_character_id: OTHER_PILOT,
-                solar_system_id: jita,
-                ship_type_id: rifter,
-                total_value_isk: 5.0,
-            },
-        );
-    });
+    let now = ctx.now_unix();
+    ctx.db
+        .with_mut_snapshot(|snap| snap.record_killmail(kill(5_002_000, PILOT, OTHER_PILOT), now));
     let fresh = send(
         &router,
         &EsiHttpRequest::new("GET", "/v1/wars/7001/killmails/").with_header("If-None-Match", &etag),
@@ -568,4 +570,118 @@ async fn test_esi_war_killmails_pagination_caching_and_world_state() {
     );
     assert_ne!(fresh.header("ETag"), Some(etag.as_str()));
     assert_eq!(fresh.json().unwrap()[0]["killmail_id"], json!(5_002_000));
+
+    // War 7002: finished war window, an alliance ally (lifecycle meta) and a corporation ally
+    // (runtime ally state) on the defender's side, and kill-time affiliations.
+    let (aggr2, def2, ally_corp, ally_alliance, ally_corp2, outsider) = (
+        98_200_001_i64,
+        98_200_002_i64,
+        98_200_005_i64,
+        99_200_009_i64,
+        98_200_004_i64,
+        98_200_003_i64,
+    );
+    let (s2, f2) = (now - 5_000, now - 1_000);
+    let affil = |km: &mut KillmailRecord, v: (i64, Option<i64>), a: (i64, Option<i64>)| {
+        (km.victim_corp_id, km.victim_alliance_id) = v;
+        (km.attacker_corp_id, km.attacker_alliance_id) = a;
+    };
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.wars.insert(
+            7002,
+            WarRecord {
+                war_id: 7002,
+                aggressor_corp_id: aggr2,
+                defender_corp_id: def2,
+                mutual: false,
+                started_unix: s2,
+                active: false,
+            },
+        );
+        snap.war_lifecycle_meta.insert(
+            7002,
+            eve_db::WarLifecycleMeta {
+                started_unix: Some(s2),
+                finished_unix: Some(f2),
+                allies: vec![eve_db::WarAllyRecord {
+                    corporation_id: None,
+                    alliance_id: Some(ally_alliance),
+                }],
+                ..Default::default()
+            },
+        );
+        // (kill id, time, victim corp/alliance, attacker corp/alliance) for pilots that are not
+        // characters on this server, so the explicit kill-time affiliation is what counts.
+        let none = None;
+        for (kid, t, v, a) in [
+            (7_100_001, s2 - 1, (def2, none), (aggr2, none)), // before war start
+            (7_100_002, s2, (def2, none), (aggr2, none)),     // at start
+            (
+                7_100_003,
+                s2 + 10,
+                (ally_corp, Some(ally_alliance)),
+                (aggr2, none),
+            ), // alliance ally victim
+            (7_100_004, s2 + 20, (aggr2, none), (ally_corp2, none)), // runtime corp ally attacker
+            (7_100_005, f2 + 1, (def2, none), (aggr2, none)), // after war finished
+            (7_100_006, f2, (def2, none), (aggr2, none)),     // at finish
+            (7_100_007, s2 + 30, (outsider, none), (aggr2, none)), // not a war party
+        ] {
+            let mut km = kill(kid, 96_000_000 + kid, 97_000_000 + kid);
+            affil(&mut km, v, a);
+            snap.record_killmail(km, t);
+        }
+        // Real pilot OTHER_PILOT: killed while in def2 (counts even after leaving), then killed
+        // while in an outside corp (never counts, even after joining def2).
+        snap.characters
+            .get_mut(&OTHER_PILOT)
+            .unwrap()
+            .corporation_id = def2;
+        let mut km = kill(7_100_008, OTHER_PILOT, 97_100_008);
+        affil(&mut km, (0, None), (aggr2, None));
+        snap.record_killmail(km, s2 + 40);
+        snap.characters
+            .get_mut(&OTHER_PILOT)
+            .unwrap()
+            .corporation_id = outsider;
+        let mut km = kill(7_100_009, OTHER_PILOT, 97_100_009);
+        affil(&mut km, (0, None), (aggr2, None));
+        snap.record_killmail(km, s2 + 50);
+        snap.characters
+            .get_mut(&OTHER_PILOT)
+            .unwrap()
+            .corporation_id = def2;
+        assert_eq!(snap.killmails[&7_100_008].victim_corp_id, def2);
+        assert_eq!(snap.killmails[&7_100_009].victim_corp_id, outsider);
+    });
+    ctx.esi_state
+        .war_allies
+        .write()
+        .unwrap()
+        .insert(7002, vec![json!({ "corporation_id": ally_corp2 })]);
+    let w2 = send(
+        &router,
+        &EsiHttpRequest::new("GET", "/v1/wars/7002/killmails/"),
+        200,
+    );
+    let ids2: Vec<i64> = w2
+        .json()
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["killmail_id"].as_i64().unwrap())
+        .collect();
+    assert_eq!(
+        ids2,
+        vec![7_100_008, 7_100_006, 7_100_004, 7_100_003, 7_100_002]
+    );
+    assert_eq!(w2.header("X-Pages"), Some("1"));
+    // War 7001 is unaffected by OTHER_PILOT's later corp moves (kills keep kill-time corps).
+    let again = send(
+        &router,
+        &EsiHttpRequest::new("GET", "/v1/wars/7001/killmails/?page=2"),
+        200,
+    );
+    assert_eq!(again.json().unwrap().as_array().unwrap().len(), 2);
 }

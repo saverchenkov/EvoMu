@@ -1130,7 +1130,7 @@ pub struct CorpProjectRecord {
     pub escrow_remaining: IskCents,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct KillmailRecord {
     pub kill_id: i64,
     pub victim_character_id: i64,
@@ -1138,6 +1138,19 @@ pub struct KillmailRecord {
     pub solar_system_id: SolarSystemId,
     pub ship_type_id: TypeId,
     pub total_value_isk: f64,
+    /// Server time of the kill (`0` for legacy records written before it was recorded).
+    #[serde(default)]
+    pub killed_unix: u64,
+    /// Victim / final-blow attacker corporation and alliance *at kill time*, so later corp
+    /// changes never move a kill into or out of a war (`0` / `None` when unknown).
+    #[serde(default)]
+    pub victim_corp_id: i64,
+    #[serde(default)]
+    pub victim_alliance_id: Option<i64>,
+    #[serde(default)]
+    pub attacker_corp_id: i64,
+    #[serde(default)]
+    pub attacker_alliance_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

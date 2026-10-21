@@ -562,8 +562,7 @@ pub async fn handle_legacy_and_ess(
                             }
                             snap.next_entity_id += 1;
                             let kid = snap.next_entity_id;
-                            snap.killmails.insert(
-                                kid,
+                            snap.record_killmail(
                                 KillmailRecord {
                                     kill_id: kid,
                                     victim_character_id: char_id,
@@ -571,7 +570,9 @@ pub async fn handle_legacy_and_ess(
                                     solar_system_id: sys_id,
                                     ship_type_id: attacker_ball.type_id,
                                     total_value_isk: attacker_ship_val,
+                                    ..Default::default()
                                 },
+                                ctx.now_unix(),
                             );
                             snap.next_entity_id += 1;
                             let krid = snap.next_entity_id;
@@ -811,8 +812,7 @@ pub async fn handle_legacy_and_ess(
                     .try_with_mut_snapshot(|snap| {
                         snap.next_entity_id += 1;
                         let kid = snap.next_entity_id;
-                        snap.killmails.insert(
-                            kid,
+                        snap.record_killmail(
                             KillmailRecord {
                                 kill_id: kid,
                                 victim_character_id: target_ball_id,
@@ -820,7 +820,9 @@ pub async fn handle_legacy_and_ess(
                                 solar_system_id: sys_id,
                                 ship_type_id: target_ball.type_id,
                                 total_value_isk: target_ship_val,
+                                ..Default::default()
                             },
+                            ctx.now_unix(),
                         );
                         Ok::<_, std::convert::Infallible>(kid)
                     })
@@ -886,8 +888,7 @@ pub async fn handle_legacy_and_ess(
                             }
                             snap.next_entity_id += 1;
                             let id = snap.next_entity_id;
-                            snap.killmails.insert(
-                                id,
+                            snap.record_killmail(
                                 KillmailRecord {
                                     kill_id: id,
                                     victim_character_id: victim_char_id,
@@ -895,7 +896,9 @@ pub async fn handle_legacy_and_ess(
                                     solar_system_id: sys_id,
                                     ship_type_id: target_ball.type_id,
                                     total_value_isk: target_ship_val,
+                                    ..Default::default()
                                 },
+                                ctx.now_unix(),
                             );
 
                             let mut cap_id = 0;
@@ -1130,8 +1133,7 @@ pub async fn handle_legacy_and_ess(
 
                 snap.next_entity_id += 1;
                 let kid = snap.next_entity_id;
-                snap.killmails.insert(
-                    kid,
+                snap.record_killmail(
                     KillmailRecord {
                         kill_id: kid,
                         victim_character_id: target_id,
@@ -1139,7 +1141,9 @@ pub async fn handle_legacy_and_ess(
                         solar_system_id: sys_id,
                         ship_type_id: target_ball.type_id,
                         total_value_isk: 100_000.0,
+                        ..Default::default()
                     },
+                    ctx.now_unix(),
                 );
                 Ok::<(i64, i64), BridgeRpcError>((kid, wreck_id))
             });

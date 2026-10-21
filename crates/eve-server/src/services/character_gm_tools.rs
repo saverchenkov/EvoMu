@@ -1128,8 +1128,7 @@ pub async fn handle_gm_slash_ext(
                 );
                 snap.next_entity_id += 1;
                 let kid = snap.next_entity_id;
-                snap.killmails.insert(
-                    kid,
+                snap.record_killmail(
                     KillmailRecord {
                         kill_id: kid,
                         victim_character_id: 0,
@@ -1137,7 +1136,9 @@ pub async fn handle_gm_slash_ext(
                         solar_system_id: sys_id,
                         ship_type_id: ball.type_id,
                         total_value_isk: 10_000.0,
+                        ..Default::default()
                     },
+                    ctx.now_unix(),
                 );
                 (wid, kid)
             });

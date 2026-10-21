@@ -378,9 +378,9 @@ async fn test_wars_declaration_hq_eligibility_mutual_peace_allies_and_stats() {
 
     // war-stats: kills/ISK come from persisted killmails between the two sides.
     ctx.db.with_mut_snapshot(|snap| {
-        snap.killmails.insert(880_001, eve_db::KillmailRecord { kill_id: 880_001, victim_character_id: 90_000_002, attacker_character_id: 90_000_001, solar_system_id: 30_000_142, ship_type_id: 587, total_value_isk: 400_000.0 });
-        snap.killmails.insert(880_002, eve_db::KillmailRecord { kill_id: 880_002, victim_character_id: 90_000_001, attacker_character_id: 90_000_002, solar_system_id: 30_000_142, ship_type_id: 603, total_value_isk: 350_000.0 });
-        snap.killmails.insert(880_003, eve_db::KillmailRecord { kill_id: 880_003, victim_character_id: 90_000_001, attacker_character_id: p3_char, solar_system_id: 30_000_142, ship_type_id: 587, total_value_isk: 999.0 });
+        snap.killmails.insert(880_001, eve_db::KillmailRecord { kill_id: 880_001, victim_character_id: 90_000_002, attacker_character_id: 90_000_001, solar_system_id: 30_000_142, ship_type_id: 587, total_value_isk: 400_000.0 , ..Default::default()});
+        snap.killmails.insert(880_002, eve_db::KillmailRecord { kill_id: 880_002, victim_character_id: 90_000_001, attacker_character_id: 90_000_002, solar_system_id: 30_000_142, ship_type_id: 603, total_value_isk: 350_000.0 , ..Default::default()});
+        snap.killmails.insert(880_003, eve_db::KillmailRecord { kill_id: 880_003, victim_character_id: 90_000_001, attacker_character_id: p3_char, solar_system_id: 30_000_142, ship_type_id: 587, total_value_isk: 999.0 , ..Default::default()});
     });
     let base = call(&ctx, &mut sess1, "warStatisticMgr", "GetBaseInfo", vec![PyRep::Integer(war_id)]).await.unwrap();
     assert_eq!(field(&base, "killsForAggressor"), PyRep::Integer(1));

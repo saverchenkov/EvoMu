@@ -989,8 +989,7 @@ pub fn dispatch_character_routes(
                         400,
                         format!("Invalid fitting item flag '{flag_str}'"),
                     ));
-                }
-                ;
+                };
                 let Some(qty_i64) = entry.get("quantity").and_then(Value::as_i64) else {
                     return Some(RouteExecutionResult::error(
                         400,

@@ -373,8 +373,7 @@ impl NpcSpawnManager {
             // Persist Killmail with dynamic bounty value (NOT flat 100k)
             snap.next_entity_id += 1;
             let kid = snap.next_entity_id;
-            snap.killmails.insert(
-                kid,
+            snap.record_killmail(
                 KillmailRecord {
                     kill_id: kid,
                     victim_character_id: npc_ball_id,
@@ -382,7 +381,9 @@ impl NpcSpawnManager {
                     solar_system_id: sys_id,
                     ship_type_id: entity.type_id,
                     total_value_isk: bounty,
+                    ..Default::default()
                 },
+                now_unix,
             );
 
             // Spawn physical NPC wreck item (26557)

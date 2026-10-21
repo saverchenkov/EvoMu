@@ -519,7 +519,10 @@ pub fn destroy_structure(ctx: &ServerContext, snap: &mut WorldStateSnapshot, ext
     snap.next_entity_id += 1;
     let kill_id = snap.next_entity_id;
     let value = ctx.sde.types.get(&st.type_id).map(|t| t.base_price).unwrap_or(0.0);
-    snap.killmails.insert(kill_id, KillmailRecord { kill_id, victim_character_id: st.owner_corp_id, attacker_character_id: attacker_char_id, solar_system_id: st.solar_system_id, ship_type_id: st.type_id, total_value_isk: value });
+    // The victim of a structure kill is its owning corporation (stamped explicitly; there is no
+    // victim pilot to resolve an affiliation from).
+    let victim_alliance_id = snap.corporations.get(&st.owner_corp_id).and_then(|c| c.alliance_id);
+    snap.record_killmail(KillmailRecord { kill_id, victim_character_id: st.owner_corp_id, attacker_character_id: attacker_char_id, solar_system_id: st.solar_system_id, ship_type_id: st.type_id, total_value_isk: value, victim_corp_id: st.owner_corp_id, victim_alliance_id, ..Default::default() }, now);
     out.killmail_id = Some(kill_id);
     if let Some(s) = snap.structures.get_mut(&structure_id) {
         s.state = STATE_DESTROYED.into();

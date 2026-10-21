@@ -920,8 +920,8 @@ pub fn sync_dirty_to_sqlite(
         if fp.killmails.get(&kid) != Some(&h) {
             cold_changed = true;
             tx.execute(
-                "INSERT OR REPLACE INTO killmails (kill_id, victim_character_id, attacker_character_id, solar_system_id, ship_type_id, total_value_isk)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                "INSERT OR REPLACE INTO killmails (kill_id, victim_character_id, attacker_character_id, solar_system_id, ship_type_id, total_value_isk, killed_unix, victim_corp_id, victim_alliance_id, attacker_corp_id, attacker_alliance_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 params![
                     km.kill_id,
                     km.victim_character_id,
@@ -929,6 +929,11 @@ pub fn sync_dirty_to_sqlite(
                     km.solar_system_id as i64,
                     km.ship_type_id as i64,
                     km.total_value_isk,
+                    km.killed_unix as i64,
+                    km.victim_corp_id,
+                    km.victim_alliance_id,
+                    km.attacker_corp_id,
+                    km.attacker_alliance_id,
                 ],
             )
             .map_err(|e| e.to_string())?;
