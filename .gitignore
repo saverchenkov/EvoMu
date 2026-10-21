@@ -27,10 +27,11 @@ Thumbs.db
 # Independent review gate state (local; must not affect tree fingerprints)
 /.evomu-reviews/*
 
-# Generated runtime/SDE SQLite databases (rebuilt locally via tools/sde-import; never committed)
+# Generated runtime/SDE SQLite databases (raw .sqlite is local/gitignored; compressed golden archive .sqlite.xz is tracked)
 /data/*.sqlite*
+!/data/evomu_sde.sqlite.xz
 /data/quasar_descriptors.*
-data/evomu_sde.sqlite
-data/quasar_descriptors.sqlite
-data/quasar_core_golden.json
 
+
+# Local Quasar core-type wire golden vectors (client-derived; built by tools/quasar-import/core_golden.py)
+/data/quasar_core_golden.json

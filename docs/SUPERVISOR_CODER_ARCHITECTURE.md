@@ -87,7 +87,7 @@ To prevent context contamination, lock contention, and accidental invalidation o
 
 ### Invariants for Worktrees
 1. **Single-Agent Invariant:** Exactly one agent writes to a given worktree at any time. Concurrent writes to the same working tree immediately invalidate running reviews and corrupt git index state.
-2. **Shared Static Data:** All worktrees share the canonical local SDE database via environment variable:
+2. **Bundled Golden SDE Archive:** The repository includes `data/evomu_sde.sqlite.xz` (16.08 MB). On fresh checkouts or machines without the EVE client installed, `tools/unpack_sde.sh` (or `eve-sde::default_db_path()`) automatically decompresses it into `data/evomu_sde.sqlite`, allowing full test suites to execute out-of-the-box. Worktrees share the canonical SDE path:
    ```bash
    export EVOMU_SDE_PATH=/Users/sergeya/ai/EvoMu/data/evomu_sde.sqlite
    ```
@@ -249,6 +249,7 @@ When resuming work on any machine with GitHub access, follow this step-by-step w
 ```bash
 git clone https://github.com/saverchenkov/EvoMu.git
 cd EvoMu
+./tools/unpack_sde.sh
 /usr/bin/python3 .agents/skills/evomu-adversarial-review/scripts/preflight.py --early-only
 ```
 
