@@ -204,7 +204,7 @@ pub mod service_roles {
 }
 
 impl WorldRepository {
-    /// Generates a 32-byte (256-bit) cryptographically random secret from OS CSPRNG (`/dev/urandom`),
+    /// Generates a 32-byte (256-bit) cryptographically random secret from OS CSPRNG (cross-platform),
     /// or from `EVOMU_SSO_JWT_SECRET` when explicitly configured with at least 32 bytes (`R34-P0-1`).
     pub(crate) fn generate_random_secret_32() -> [u8; 32] {
         if let Ok(env_secret) = std::env::var("EVOMU_SSO_JWT_SECRET") {
@@ -213,23 +213,17 @@ impl WorldRepository {
                 return sha256_bytes(trimmed.as_bytes());
             }
         }
-        use std::io::Read as _;
         let mut secret = [0u8; 32];
-        let mut f = std::fs::File::open("/dev/urandom")
-            .expect("OS CSPRNG (/dev/urandom) must be available to initialize JWT signing secret");
-        f.read_exact(&mut secret)
-            .expect("OS CSPRNG (/dev/urandom) must yield 32 random bytes for JWT signing secret");
+        getrandom::getrandom(&mut secret)
+            .expect("OS CSPRNG must be available to initialize JWT signing secret");
         secret
     }
 
-    /// Generates a 16-byte random per-account salt encoded as 32 lowercase hex characters from OS CSPRNG (`/dev/urandom`).
+    /// Generates a 16-byte random per-account salt encoded as 32 lowercase hex characters from OS CSPRNG (cross-platform).
     fn generate_random_salt_hex() -> String {
-        use std::io::Read as _;
         let mut salt_bytes = [0u8; 16];
-        let mut f = std::fs::File::open("/dev/urandom")
-            .expect("OS CSPRNG (/dev/urandom) must be available to generate password salt");
-        f.read_exact(&mut salt_bytes)
-            .expect("OS CSPRNG (/dev/urandom) must yield 16 random bytes for password salt");
+        getrandom::getrandom(&mut salt_bytes)
+            .expect("OS CSPRNG must be available to generate password salt");
         let mut hex = String::with_capacity(32);
         for b in salt_bytes {
             use std::fmt::Write as _;
