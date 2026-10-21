@@ -275,10 +275,15 @@ async fn test_ansiblex_jump_bridge_access_liquid_ozone_and_destination() {
 #[tokio::test]
 async fn test_filaments_abyssal_pocket_void_space_and_needlejack() {
     // parity: feat:navigation.filament-abyssal, feat:navigation.filament-void, feat:navigation.filament-needlejack
+    // parity: rpc:abyssalMgr.AbyssalEntranceDeployment, rpc:abyssalMgr.AbyssalEntranceGateActivation, rpc:voidSpaceMgr.VoidSpacePlayerJump, rpc:randomJumpMgr.ActivateRandomJumpFilament
     eve_testkit::attest(&[
         "feat:navigation.filament-abyssal",
         "feat:navigation.filament-void",
         "feat:navigation.filament-needlejack",
+        "rpc:abyssalMgr.AbyssalEntranceDeployment",
+        "rpc:abyssalMgr.AbyssalEntranceGateActivation",
+        "rpc:voidSpaceMgr.VoidSpacePlayerJump",
+        "rpc:randomJumpMgr.ActivateRandomJumpFilament",
     ]);
 
     let ctx = ServerContext::new();
@@ -781,8 +786,8 @@ async fn test_daily_and_seasonal_login_campaign_rewards() {
 
 #[tokio::test]
 async fn test_custom_agency_provider_content_nearby_sites() {
-    // parity: feat:pve.agency-content
-    eve_testkit::attest(&["feat:pve.agency-content"]);
+    // parity: feat:pve.agency-content, rpc:custom_agency_provider.get_content_data
+    eve_testkit::attest(&["feat:pve.agency-content", "rpc:custom_agency_provider.get_content_data"]);
 
     let ctx = ServerContext::new();
     let char_id = 90_000_001;

@@ -119,8 +119,9 @@ fn make_id_request(_id: u32) -> Vec<u8> {
 
 #[tokio::test]
 async fn quasar_daily_goals_lifecycle_and_rewards() {
-    // parity: feat:quasar.dailygoal, quasar:eveProto/generated/eve_public/dailygoal/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/dailygoal/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/dailygoal/api/admin/admin_pb2.pyj
+    // parity: plan:Q-4, feat:quasar.dailygoal, quasar:eveProto/generated/eve_public/dailygoal/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/dailygoal/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/dailygoal/api/admin/admin_pb2.pyj
     eve_testkit::attest(&[
+        "plan:Q-4",
         "feat:quasar.dailygoal",
         "quasar:eveProto/generated/eve_public/dailygoal/api/requests_pb2.pyj",
         "quasar:eveProto/generated/eve_public/dailygoal/api/notices_pb2.pyj",

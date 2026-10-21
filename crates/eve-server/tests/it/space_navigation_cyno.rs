@@ -888,9 +888,14 @@ async fn test_s2_fighter_manager_load_launch_recall_movement_abilities_abandon()
 
 #[tokio::test]
 async fn test_s3_pharolux_cyno_beacon_jump_bridge_and_group_jump() {
-    // parity: plan:S-3
-    // parity: feat:navigation.pharolux-beacon
-    eve_testkit::attest(&["plan:S-3", "feat:navigation.pharolux-beacon"]);
+    // parity: plan:S-3, feat:navigation.pharolux-beacon, rpc:structureCynoBeaconMgr.CmdBridgeToStructureBeacon, rpc:structureCynoBeaconMgr.CmdGroupJumpToStructureBeacon, rpc:structureCynoBeaconMgr.CmdJumpToStructureBeacon
+    eve_testkit::attest(&[
+        "plan:S-3",
+        "feat:navigation.pharolux-beacon",
+        "rpc:structureCynoBeaconMgr.CmdBridgeToStructureBeacon",
+        "rpc:structureCynoBeaconMgr.CmdGroupJumpToStructureBeacon",
+        "rpc:structureCynoBeaconMgr.CmdJumpToStructureBeacon",
+    ]);
 
     let ctx = ServerContext::new();
     let kw = HashMap::new();

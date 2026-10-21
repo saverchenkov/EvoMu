@@ -318,6 +318,8 @@ password_token = "cadet_secret_token"
 // ====================================================================
 #[tokio::test]
 async fn test_plan_dg1_dogma_modifier_engine_rifter_overdrives() {
+    // parity: plan:DG-1
+    eve_testkit::attest(&["plan:DG-1"]);
     let sde = SdeRegistry::with_canonical_seed();
 
     // 1. Validate modifier functions over V24 modifierInfo:
@@ -853,6 +855,8 @@ async fn test_plan_e3_contracts_item_exchange_and_courier() {
 // ====================================================================
 #[tokio::test]
 async fn test_plan_c5_mining_belts_lasers_and_depletion() {
+    // parity: plan:C-5
+    eve_testkit::attest(&["plan:C-5"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let char_id = 90_000_001;
@@ -961,6 +965,8 @@ async fn test_plan_c5_mining_belts_lasers_and_depletion() {
 // ====================================================================
 #[tokio::test]
 async fn test_plan_c6_reprocessing_yield_tax_and_materials() {
+    // parity: plan:C-6
+    eve_testkit::attest(&["plan:C-6"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let char_id = 90_000_001;

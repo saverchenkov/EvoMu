@@ -90,8 +90,8 @@ fn grant_all_required_skills_for_type(ctx: &ServerContext, char_id: i64, type_id
 
 #[tokio::test]
 async fn test_containers_cargo_secure_alsc_station_freight() {
-    // parity: feat:inventory.containers, feat:inventory.secure-containers, feat:inventory.audit-log-container-events, feat:inventory.station-containers, feat:inventory.freight-container-space-rules, feat:inventory.container-contents-restrictions, rpc:invbroker.AssembleCargoContainer, rpc:invbroker.GetContainerContents
-    eve_testkit::attest(&["feat:inventory.containers", "feat:inventory.secure-containers", "feat:inventory.audit-log-container-events", "feat:inventory.station-containers", "feat:inventory.freight-container-space-rules", "feat:inventory.container-contents-restrictions", "rpc:invbroker.AssembleCargoContainer", "rpc:invbroker.GetContainerContents"]);
+    // parity: feat:inventory.containers, feat:inventory.secure-containers, feat:inventory.audit-log-container-events, feat:inventory.station-containers, feat:inventory.freight-container-space-rules, feat:inventory.container-contents-restrictions, rpc:invbroker.AssembleCargoContainer, rpc:invbroker.GetContainerContents, notify:OnSlimItemChange
+    eve_testkit::attest(&["feat:inventory.containers", "feat:inventory.secure-containers", "feat:inventory.audit-log-container-events", "feat:inventory.station-containers", "feat:inventory.freight-container-space-rules", "feat:inventory.container-contents-restrictions", "rpc:invbroker.AssembleCargoContainer", "rpc:invbroker.GetContainerContents", "notify:OnSlimItemChange"]);
     let ctx = new_sqlite_ctx();
     let kw = HashMap::new();
     let mut sess = SessionState::new(7101);

@@ -154,18 +154,9 @@ fn fit_module_and_charge(
 
 #[tokio::test]
 async fn test_c3_wrecks_loot_50pct_ownership_killmails_esi_hash_pod_corpse_and_self_destruct() {
-    // parity: feat:combat.ship-destruction
-    // parity: feat:combat.pod-destruction
-    // parity: feat:combat.wreck-loot
-    // parity: feat:combat.loot-all
-    // parity: feat:combat.wreck-lifetime
-    // parity: feat:combat.killmail-generate
-    // parity: feat:combat.killmail-view
-    // parity: feat:combat.killmail-esi-hash
-    // parity: feat:combat.killmail-assist-timeout-ewar
-    // parity: feat:combat.capsule-ejection-items
-    // parity: feat:combat.self-destruct-pod
-    // parity: feat:crimewatch.criminal-wreck-auto-abandon
+    // parity: feat:combat.ship-destruction, feat:combat.pod-destruction, feat:combat.wreck-loot, feat:combat.loot-all
+    // parity: feat:combat.wreck-lifetime, feat:combat.killmail-generate, feat:combat.killmail-view, feat:combat.killmail-esi-hash
+    // parity: feat:combat.killmail-assist-timeout-ewar, feat:combat.capsule-ejection-items, feat:combat.self-destruct-pod, feat:crimewatch.criminal-wreck-auto-abandon
     eve_testkit::attest(&[
         "feat:combat.ship-destruction",
         "feat:combat.pod-destruction",
@@ -571,18 +562,9 @@ async fn test_c3_wrecks_loot_50pct_ownership_killmails_esi_hash_pod_corpse_and_s
 
 #[tokio::test]
 async fn test_c8_crimewatch_safety_timers_restrictions_and_lowsec_pod() {
-    // parity: feat:crimewatch.suspect-flag
-    // parity: feat:crimewatch.criminal-flag
-    // parity: feat:crimewatch.concord-response
-    // parity: feat:crimewatch.safety-settings
-    // parity: feat:crimewatch.pod-timer
-    // parity: feat:crimewatch.legal-timers
-    // parity: feat:crimewatch.crimewatch-states
-    // parity: feat:crimewatch.weapon-timer-scope
-    // parity: feat:crimewatch.pvp-logoff-timer-renewal
-    // parity: feat:crimewatch.highsec-criminal-restrictions
-    // parity: feat:crimewatch.lowsec-suspect-vs-criminal
-    // parity: feat:crimewatch.weapon-timer-tether-filament-block
+    // parity: feat:crimewatch.suspect-flag, feat:crimewatch.criminal-flag, feat:crimewatch.concord-response, feat:crimewatch.safety-settings
+    // parity: feat:crimewatch.pod-timer, feat:crimewatch.legal-timers, feat:crimewatch.crimewatch-states, feat:crimewatch.weapon-timer-scope
+    // parity: feat:crimewatch.pvp-logoff-timer-renewal, feat:crimewatch.highsec-criminal-restrictions, feat:crimewatch.lowsec-suspect-vs-criminal, feat:crimewatch.weapon-timer-tether-filament-block
     // parity: feat:navigation.wormhole-aggression-exemption
     eve_testkit::attest(&[
         "feat:crimewatch.suspect-flag",
@@ -846,17 +828,9 @@ async fn test_c8_crimewatch_safety_timers_restrictions_and_lowsec_pod() {
 
 #[tokio::test]
 async fn test_c8_crimewatch_npc_timers_duels_logi_assistance_and_outlaw() {
-    // parity: feat:crimewatch.limited-engagements
-    // parity: feat:crimewatch.logi-timers
-    // parity: feat:crimewatch.npc-timers
-    // parity: feat:crimewatch.duels
-    // parity: feat:crimewatch.disapproval-flag
-    // parity: feat:crimewatch.suspects-list
-    // parity: feat:crimewatch.highsec-restrictions
-    // parity: feat:crimewatch.security-bands
-    // parity: feat:crimewatch.third-party-assistance-legality
-    // parity: feat:crimewatch.outlaw-status
-    // parity: feat:npc.concord-npc
+    // parity: feat:crimewatch.limited-engagements, feat:crimewatch.logi-timers, feat:crimewatch.npc-timers, feat:crimewatch.duels
+    // parity: feat:crimewatch.disapproval-flag, feat:crimewatch.suspects-list, feat:crimewatch.highsec-restrictions, feat:crimewatch.security-bands
+    // parity: feat:crimewatch.third-party-assistance-legality, feat:crimewatch.outlaw-status, feat:npc.concord-npc
     eve_testkit::attest(&[
         "feat:crimewatch.limited-engagements",
         "feat:crimewatch.logi-timers",
@@ -996,14 +970,8 @@ async fn test_c8_crimewatch_npc_timers_duels_logi_assistance_and_outlaw() {
 
 #[tokio::test]
 async fn test_c8_crimewatch_faction_police_killrights_tags_and_sentries() {
-    // parity: feat:crimewatch.sec-status-tags
-    // parity: feat:crimewatch.sec-status-transactions
-    // parity: feat:crimewatch.faction-police
-    // parity: feat:crimewatch.kill-rights-gain
-    // parity: feat:crimewatch.kill-rights-sell
-    // parity: feat:crimewatch.faction-police-thresholds
-    // parity: feat:crimewatch.sec-status-gain-caps
-    // parity: feat:crimewatch.sec-tag-tier-bands
+    // parity: feat:crimewatch.sec-status-tags, feat:crimewatch.sec-status-transactions, feat:crimewatch.faction-police, feat:crimewatch.kill-rights-gain
+    // parity: feat:crimewatch.kill-rights-sell, feat:crimewatch.faction-police-thresholds, feat:crimewatch.sec-status-gain-caps, feat:crimewatch.sec-tag-tier-bands
     eve_testkit::attest(&[
         "feat:crimewatch.sec-status-tags",
         "feat:crimewatch.sec-status-transactions",

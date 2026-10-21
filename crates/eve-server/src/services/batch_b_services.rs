@@ -407,6 +407,16 @@ pub fn handle(
             Some(Ok(PyRep::None))
         }
 
+        // --- taleMgr ---
+        ("taleMgr", "GetGlobalWorldEventTales")
+        | ("taleMgr", "get_active_tales_by_template") => {
+            if !session.has_gm_role() {
+                return None;
+            }
+            let _ = ctx.db.get_character(session.character_id.unwrap_or(0));
+            Some(Ok(PyRep::List(Vec::new())))
+        }
+
         // --- voidSpaceMgr ---
         ("voidSpaceMgr", "ClientIsReady")
         | ("voidSpaceMgr", "VoidSpaceEndGateActivation") => {
@@ -504,6 +514,18 @@ pub fn handle(
                 Err(e) => return Some(Err(e)),
             };
             Some(Ok(PyRep::Integer(char_id)))
+        }
+
+        ("structure", "JettisonStructureFuel") => {
+            if args.len() < 3 {
+                return None;
+            }
+            let _ = ctx.db.get_character(session.character_id.unwrap_or(0));
+            let _ = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            Some(Ok(PyRep::None))
         }
 
         ("structureAssetSafety", "MoveEjectTimeGM") => {

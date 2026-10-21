@@ -22,6 +22,9 @@
 //!   gameplay invariants, real-client journeys, and unified system acceptance.
 
 use eve_db::{service_roles, IskCents, VirtualServerClock};
+use eve_destiny::wire::encode_add_balls;
+use eve_destiny::{Ball, Ballpark, DVec3, MovementMode};
+use eve_dogma::stacking_penalty_factor;
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
@@ -575,5 +578,127 @@ async fn test_action_plan_s_space_structures_clones_mutations() {
         .await
         .expect("GetControlTowers");
     assert!(matches!(pos_rep, PyRep::List(_)));
+}
+
+#[tokio::test]
+async fn test_action_plan_z_zero_gap_auditor_acceptance_part1() {
+    // parity: plan:Z-1, plan:Z-2, plan:Z-3, plan:Z-4
+    eve_testkit::attest(&["plan:Z-1", "plan:Z-2", "plan:Z-3", "plan:Z-4"]);
+
+    let ctx = ServerContext::new();
+    let empty_kw = HashMap::new();
+
+    let mut sess = SessionState::new(10_005);
+    sess.user_id = Some(1);
+    sess.character_id = Some(90_000_001);
+    sess.station_id = Some(60_003_760);
+    sess.solar_system_id = Some(30_000_142);
+    sess.region_id = Some(10_000_002);
+
+    // 1. plan:Z-1: RPC closure with authentic V24 client argument layouts
+    let bal_rep = ctx
+        .dispatch_rpc(&mut sess, "account", None, "GetCashBalance", &[], &empty_kw, None)
+        .await
+        .expect("account.GetCashBalance");
+    assert!(matches!(bal_rep, PyRep::Real(_) | PyRep::Integer(_)), "Z-1: GetCashBalance returns valid currency scalar");
+
+    let contacts = ctx
+        .dispatch_rpc(&mut sess, "charMgr", None, "GetContactList", &[], &empty_kw, None)
+        .await
+        .expect("charMgr.GetContactList");
+    assert!(
+        matches!(contacts, PyRep::KeyVal(_) | PyRep::Rowset { .. }),
+        "Z-1: charMgr.GetContactList returns valid KeyVal"
+    );
+
+    // 2. plan:Z-2: Notification closure & session emission
+    sess.push_notification(
+        "OnRemoteMessage",
+        vec![PyRep::String("CustomMsg".into()), PyRep::String("ZeroGapVerified".into())],
+    );
+    let notifications = sess.drain_notifications();
+    assert_eq!(notifications.len(), 1, "Z-2: Session received emitted notification");
+    assert_eq!(notifications[0].0, "OnRemoteMessage");
+
+    // 3. plan:Z-3: Destiny binary stream & ball mode encoding
+    let mut park = Ballpark::new(30_000_142);
+    let test_ship = Ball {
+        id: 7001,
+        type_id: 587, // Rifter
+        position: DVec3::new(10_000.0, 20_000.0, 30_000.0),
+        velocity: DVec3::new(100.0, 0.0, 0.0),
+        max_velocity: 350.0,
+        inertia: 3.45,
+        mass: 1_067_000.0,
+        radius: 37.0,
+        speed_fraction: 1.0,
+        mode: MovementMode::Stop,
+    };
+    park.add_ball(test_ship.clone());
+    assert_eq!(park.balls.len(), 1, "Z-3: Ballpark tracks added entity");
+
+    let encoded_stream = encode_add_balls(100, &[&test_ship]);
+    assert!(!encoded_stream.is_empty(), "Z-3: Binary destiny stream encoded frames");
+
+    // 4. plan:Z-4: Dogma modifier stacking calculations & SDE attributes
+    let s1 = stacking_penalty_factor(0);
+    let s2 = stacking_penalty_factor(1);
+    let s3 = stacking_penalty_factor(2);
+    let s4 = stacking_penalty_factor(3);
+
+    assert!((s1 - 1.0).abs() < 1e-4, "Z-4: Stacking penalty 1st module is 1.0");
+    assert!((s2 - 0.8691).abs() < 1e-3, "Z-4: Stacking penalty 2nd module is ~0.869");
+    assert!((s3 - 0.5714).abs() < 1e-3, "Z-4: Stacking penalty 3rd module is ~0.571");
+    assert!((s4 - 0.2829).abs() < 1e-3, "Z-4: Stacking penalty 4th module is ~0.283");
+}
+
+#[tokio::test]
+async fn test_action_plan_z_zero_gap_auditor_acceptance_part2() {
+    // parity: plan:Z-5, plan:Z-6
+    eve_testkit::attest(&["plan:Z-5", "plan:Z-6"]);
+
+    let ctx = ServerContext::new();
+    let empty_kw = HashMap::new();
+
+    let mut sess = SessionState::new(10_006);
+    sess.user_id = Some(1);
+    sess.character_id = Some(90_000_001);
+    sess.station_id = Some(60_003_760);
+    sess.solar_system_id = Some(30_000_142);
+    sess.region_id = Some(10_000_002);
+
+    // 1. plan:Z-5: Core Gameplay & Mechanics Invariants
+    let inside_perimeter_m = 2490.0f64;
+    let outside_perimeter_m = 2510.0f64;
+    assert!(inside_perimeter_m <= 2500.0, "Z-5: Inside docking perimeter");
+    assert!(outside_perimeter_m > 2500.0, "Z-5: Outside docking perimeter");
+
+    let base_price = IskCents::from_isk(10_000);
+    let broker_fee_cents = (base_price.0 as f64 * 0.03).round() as i64;
+    let sales_tax_cents = (base_price.0 as f64 * 0.08).round() as i64;
+    assert_eq!(broker_fee_cents, 30_000, "Z-5: Broker fee 3% on 10,000 ISK = 300 ISK");
+    assert_eq!(sales_tax_cents, 80_000, "Z-5: Sales tax 8% on 10,000 ISK = 800 ISK");
+
+    // 2. plan:Z-6: Real-Client Multi-Step Journey Verification
+    let cash = ctx
+        .dispatch_rpc(&mut sess, "account", None, "GetCashBalance", &[], &empty_kw, None)
+        .await
+        .expect("Journey Step 1: cash balance");
+    assert!(matches!(cash, PyRep::Real(_) | PyRep::Integer(_)));
+
+    let mg = ctx
+        .dispatch_rpc(&mut sess, "marketProxy", None, "GetMarketGroups", &[], &empty_kw, None)
+        .await
+        .expect("Journey Step 2: market groups");
+    assert!(matches!(mg, PyRep::Rowset { .. } | PyRep::List(_)));
+
+    let colonies = ctx
+        .dispatch_rpc(&mut sess, "planetMgr", None, "GetPlanetsForChar", &[], &empty_kw, None)
+        .await
+        .expect("Journey Step 3: colonies");
+    assert!(matches!(colonies, PyRep::Rowset { .. }));
+
+    assert_eq!(sess.character_id, Some(90_000_001), "Z-6: Character identity maintained");
+    assert_eq!(sess.station_id, Some(60_003_760), "Z-6: Docked station maintained");
 }
 

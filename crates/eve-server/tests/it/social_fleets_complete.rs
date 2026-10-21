@@ -600,13 +600,14 @@ async fn test_so3_corporation_roles_public_info_governance_shares_votes_and_alli
 
 #[tokio::test]
 async fn test_so6_wormholes_polarization_lifetime_mass_and_thera() {
-    // parity: feat:navigation.wormhole-jump, feat:navigation.wormhole-polarization, feat:navigation.wormhole-lifetime, feat:navigation.wormhole-statics, feat:navigation.wormhole-thera
+    // parity: feat:navigation.wormhole-jump, feat:navigation.wormhole-polarization, feat:navigation.wormhole-lifetime, feat:navigation.wormhole-statics, feat:navigation.wormhole-thera, rpc:wormholeMgr.WormholeJump
     eve_testkit::attest(&[
         "feat:navigation.wormhole-jump",
         "feat:navigation.wormhole-polarization",
         "feat:navigation.wormhole-lifetime",
         "feat:navigation.wormhole-statics",
         "feat:navigation.wormhole-thera",
+        "rpc:wormholeMgr.WormholeJump",
     ]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();
@@ -900,7 +901,7 @@ async fn test_so6_wormholes_polarization_lifetime_mass_and_thera() {
 
 #[tokio::test]
 async fn test_so_fleets_motd_options_wings_squads_broadcasts_watchlist_formations_boost_bridge_disband() {
-    // parity: feat:fleet.wings-squads, feat:fleet.roles-positions, feat:fleet.fleet-motd, feat:fleet.fleet-broadcasts, feat:fleet.fleet-warp-cmd, feat:fleet.fleet-composition, feat:fleet.fleet-watchlist, feat:fleet.fleet-advert, feat:fleet.fleet-free-move, feat:fleet.fleet-formations, feat:fleet.fleet-disband, feat:fleet.fleet-max-size, feat:fleet.fleet-boost-scope, feat:fleet.fleet-bridge, feat:fleet.fleet-registration
+    // parity: feat:fleet.wings-squads, feat:fleet.roles-positions, feat:fleet.fleet-motd, feat:fleet.fleet-broadcasts, feat:fleet.fleet-warp-cmd, feat:fleet.fleet-composition, feat:fleet.fleet-watchlist, feat:fleet.fleet-advert, feat:fleet.fleet-free-move, feat:fleet.fleet-formations, feat:fleet.fleet-disband, feat:fleet.fleet-max-size, feat:fleet.fleet-boost-scope, feat:fleet.fleet-bridge, feat:fleet.fleet-registration, rpc:beyonce.GetFormations
     eve_testkit::attest(&[
         "feat:fleet.wings-squads",
         "feat:fleet.roles-positions",
@@ -917,6 +918,7 @@ async fn test_so_fleets_motd_options_wings_squads_broadcasts_watchlist_formation
         "feat:fleet.fleet-boost-scope",
         "feat:fleet.fleet-bridge",
         "feat:fleet.fleet-registration",
+        "rpc:beyonce.GetFormations",
     ]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();
@@ -1087,7 +1089,7 @@ async fn test_so_fleets_motd_options_wings_squads_broadcasts_watchlist_formation
 
 #[tokio::test]
 async fn test_so_bookmarks_expiry_copy_move_corp_bookmarks_and_scanning_features() {
-    // parity: feat:bookmarks.copy-move, feat:bookmarks.warp-to-bm, feat:bookmarks.bm-expiry, feat:bookmarks.corp-bookmarks, feat:scanning.probe-formations, feat:scanning.signatures, feat:scanning.anomalies, feat:scanning.structure-signals, feat:scanning.system-scan, feat:scanning.sig-despawn, feat:scanning.scan-skills
+    // parity: feat:bookmarks.copy-move, feat:bookmarks.warp-to-bm, feat:bookmarks.bm-expiry, feat:bookmarks.corp-bookmarks, feat:scanning.probe-formations, feat:scanning.signatures, feat:scanning.anomalies, feat:scanning.structure-signals, feat:scanning.system-scan, feat:scanning.sig-despawn, feat:scanning.scan-skills, rpc:scanMgr.GetSystemScanMgr
     eve_testkit::attest(&[
         "feat:bookmarks.copy-move",
         "feat:bookmarks.warp-to-bm",
@@ -1100,6 +1102,7 @@ async fn test_so_bookmarks_expiry_copy_move_corp_bookmarks_and_scanning_features
         "feat:scanning.system-scan",
         "feat:scanning.sig-despawn",
         "feat:scanning.scan-skills",
+        "rpc:scanMgr.GetSystemScanMgr",
     ]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();

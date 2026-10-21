@@ -95,8 +95,8 @@ fn extract_attr_from_info(info_rep: &PyRep, attr_id: i64) -> f64 {
 
 #[tokio::test]
 async fn test_phase_4_dg6_ammo_loading_and_weapon_grouping() {
-    // parity: feat:fitting.ammo-load, feat:fitting.ammo-unload, feat:fitting.weapon-grouping, feat:modules.scripts-swap, rpc:dogmaIM.LoadAmmo, rpc:dogmaIM.UnloadAmmo, rpc:dogmaIM.LinkWeapons, rpc:dogmaIM.LinkAllWeapons, rpc:dogmaIM.UnlinkModule, rpc:dogmaIM.UnlinkAllModules, rpc:dogmaIM.PeelAndLink, rpc:dogmaIM.MergeModuleGroups, rpc:dogmaIM.DestroyWeaponBank
-    eve_testkit::attest(&["feat:fitting.ammo-load", "feat:fitting.ammo-unload", "feat:fitting.weapon-grouping", "feat:modules.scripts-swap", "rpc:dogmaIM.LoadAmmo", "rpc:dogmaIM.UnloadAmmo", "rpc:dogmaIM.LinkWeapons", "rpc:dogmaIM.LinkAllWeapons", "rpc:dogmaIM.UnlinkModule", "rpc:dogmaIM.UnlinkAllModules", "rpc:dogmaIM.PeelAndLink", "rpc:dogmaIM.MergeModuleGroups", "rpc:dogmaIM.DestroyWeaponBank"]);
+    // parity: plan:DG-6, feat:fitting.ammo-load, feat:fitting.ammo-unload, feat:fitting.weapon-grouping, feat:modules.scripts-swap, rpc:dogmaIM.LoadAmmo, rpc:dogmaIM.UnloadAmmo, rpc:dogmaIM.LinkWeapons, rpc:dogmaIM.LinkAllWeapons, rpc:dogmaIM.UnlinkModule, rpc:dogmaIM.UnlinkAllModules, rpc:dogmaIM.PeelAndLink, rpc:dogmaIM.MergeModuleGroups, rpc:dogmaIM.DestroyWeaponBank
+    eve_testkit::attest(&["plan:DG-6", "feat:fitting.ammo-load", "feat:fitting.ammo-unload", "feat:fitting.weapon-grouping", "feat:modules.scripts-swap", "rpc:dogmaIM.LoadAmmo", "rpc:dogmaIM.UnloadAmmo", "rpc:dogmaIM.LinkWeapons", "rpc:dogmaIM.LinkAllWeapons", "rpc:dogmaIM.UnlinkModule", "rpc:dogmaIM.UnlinkAllModules", "rpc:dogmaIM.PeelAndLink", "rpc:dogmaIM.MergeModuleGroups", "rpc:dogmaIM.DestroyWeaponBank"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let mut sess = SessionState::new(4004);
@@ -391,8 +391,8 @@ async fn test_phase_4_dg6_ammo_loading_and_weapon_grouping() {
 
 #[tokio::test]
 async fn test_dg4_siege_triage_bastion_industrial_core_phenomena_and_zpme() {
-    // parity: feat:modules.siege-module, feat:modules.triage-module, feat:modules.bastion-module, feat:modules.industrial-core, feat:modules.phenomena-generator, feat:modules.zero-point-mass-entangler
-    eve_testkit::attest(&["feat:modules.siege-module", "feat:modules.triage-module", "feat:modules.bastion-module", "feat:modules.industrial-core", "feat:modules.phenomena-generator", "feat:modules.zero-point-mass-entangler"]);
+    // parity: plan:DG-4, feat:modules.siege-module, feat:modules.triage-module, feat:modules.bastion-module, feat:modules.industrial-core, feat:modules.phenomena-generator, feat:modules.zero-point-mass-entangler
+    eve_testkit::attest(&["plan:DG-4", "feat:modules.siege-module", "feat:modules.triage-module", "feat:modules.bastion-module", "feat:modules.industrial-core", "feat:modules.phenomena-generator", "feat:modules.zero-point-mass-entangler"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let mut sess = SessionState::new(4203);

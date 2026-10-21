@@ -120,8 +120,12 @@ fn seed_item(
 
 #[tokio::test]
 async fn test_industry_blueprint_data_owner_limits_facilities_taxes_and_sci() {
-    // parity: feat:industry.blueprint-data, feat:industry.blueprint-limits, feat:industry.facilities, feat:industry.facility-tax, feat:industry.cost-index, feat:industry.structure-rigs, feat:industry.structure-standup-rig-security-multipliers, feat:industry.job-slots, feat:industry.corp-industry
-    eve_testkit::attest(&["feat:industry.blueprint-data", "feat:industry.blueprint-limits", "feat:industry.facilities", "feat:industry.facility-tax", "feat:industry.cost-index", "feat:industry.structure-rigs", "feat:industry.structure-standup-rig-security-multipliers", "feat:industry.job-slots", "feat:industry.corp-industry"]);
+    // parity: feat:industry.blueprint-data, feat:industry.blueprint-limits, feat:industry.facilities, feat:industry.facility-tax, feat:industry.cost-index, feat:industry.structure-rigs, feat:industry.structure-standup-rig-security-multipliers
+    // parity: feat:industry.job-slots, feat:industry.corp-industry, feat:structures.service-industry, feat:industry.fulcrum-pirate-ship-bonus, feat:industry.eiv-adjusted-prices, feat:industry.scc-surcharge-alpha-tax, feat:industry.blueprint-pack-unpack
+    eve_testkit::attest(&[
+        "feat:industry.blueprint-data", "feat:industry.blueprint-limits", "feat:industry.facilities", "feat:industry.facility-tax", "feat:industry.cost-index", "feat:industry.structure-rigs", "feat:industry.structure-standup-rig-security-multipliers",
+        "feat:industry.job-slots", "feat:industry.corp-industry", "feat:structures.service-industry", "feat:industry.fulcrum-pirate-ship-bonus", "feat:industry.eiv-adjusted-prices", "feat:industry.scc-surcharge-alpha-tax", "feat:industry.blueprint-pack-unpack",
+    ]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let char_id = 90_000_001;
@@ -373,12 +377,64 @@ async fn test_industry_blueprint_data_owner_limits_facilities_taxes_and_sci() {
         .await
         .expect("GetIndustryCostModifier");
     assert!(sci.dict_get("1").and_then(|v| v.as_f64()).unwrap_or(0.0) > 0.0);
+
+    // Fulcrum pirate ship bonus (feat:industry.fulcrum-pirate-ship-bonus)
+    let is_fulcrum = ctx.db.with_snapshot(|snap| {
+        eve_server::services::industry_pi::is_fulcrum_pirate_ship_bonus_applicable(
+            &ctx, snap, Some(char_id), 73787, 1, 60_015_187,
+        )
+    });
+    assert!(!is_fulcrum, "Non-pirate-enlisted pilot does not receive Fulcrum pirate ship bonus");
+
+    // EIV adjusted prices calculation (feat:industry.eiv-adjusted-prices)
+    let eiv_rifter = eve_server::services::industry_pi::compute_blueprint_eiv_per_run(
+        &ctx, &ctx.sde.blueprints.get(&RIFTER_BP_TYPE_ID).unwrap(), 1,
+    );
+    assert!(eiv_rifter > 0.0, "Blueprint EIV must derive from base ME-0 BOM * adjusted prices table");
+
+    // SCC surcharge & Alpha tax (feat:industry.scc-surcharge-alpha-tax)
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.clone_grade = 1;
+        }
+    });
+    let alpha_costs = ctx.db.with_snapshot(|snap| {
+        eve_server::services::industry_pi::compute_industry_job_costs_for_char(
+            &ctx, snap, Some(char_id), RIFTER_BP_TYPE_ID, 1, 1, JITA_STATION_ID, true,
+        )
+    }).expect("compute_industry_job_costs_for_char");
+    assert!(alpha_costs.alpha_clone_tax_isk > 0.0 || alpha_costs.scc_surcharge_isk > 0.0, "Alpha clone must pay SCC surcharge + Alpha clone facility tax");
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.clone_grade = 2;
+        }
+    });
+
+    // Blueprint repackaging rejection when researched (feat:industry.blueprint-pack-unpack)
+    let res_bpo = ctx.db.with_mut_snapshot(|snap| {
+        let id = seed_item(snap, RIFTER_BP_TYPE_ID, char_id, JITA_STATION_ID, InventoryFlag::Hangar, 1, true, false, None);
+        if let Some(it) = snap.items.get_mut(&id) {
+            it.dynamic_attributes.insert(1112, 10.0);
+            it.dynamic_attributes.insert(1113, 20.0);
+        }
+        id
+    });
+    let pack_fail = ctx.dispatch_rpc(
+        &mut sess, "repackagingSvc", None, "RepackageItems",
+        &[PyRep::Integer(res_bpo), PyRep::Bool(false)],
+        &kw, None,
+    ).await.expect_err("Repackage researched BPO must fail");
+    assert_eq!(pack_fail.code, "CannotRepackageMutatedItem");
 }
 
 #[tokio::test]
 async fn test_industry_jobs_me_te_copy_invention_decryptors_t3_reactions_remote_and_corp() {
-    // parity: feat:industry.research-me, feat:industry.research-te, feat:industry.copying, feat:industry.invention, feat:industry.decryptors, feat:industry.t3-invention, feat:industry.reactions, feat:industry.job-complete, feat:industry.job-cancel, feat:industry.job-list, feat:industry.job-range, feat:industry.industry-monitor, feat:industry.blueprint-lock, feat:structures.service-reactions
-    eve_testkit::attest(&["feat:industry.research-me", "feat:industry.research-te", "feat:industry.copying", "feat:industry.invention", "feat:industry.decryptors", "feat:industry.t3-invention", "feat:industry.reactions", "feat:industry.job-complete", "feat:industry.job-cancel", "feat:industry.job-list", "feat:industry.job-range", "feat:industry.industry-monitor", "feat:industry.blueprint-lock", "feat:structures.service-reactions"]);
+    // parity: feat:industry.invention, feat:industry.decryptors, feat:industry.t3-invention, feat:industry.reactions, feat:industry.job-complete, feat:industry.job-cancel, feat:industry.job-list, feat:industry.job-range
+    // parity: feat:industry.industry-monitor, feat:industry.blueprint-lock, feat:structures.service-reactions, feat:industry.capital-construction-restrictions, feat:industry.capital-component-construction, feat:industry.capital-core-temperature-components, feat:industry.job-pause-on-service-offline
+    eve_testkit::attest(&[
+        "feat:industry.invention", "feat:industry.decryptors", "feat:industry.t3-invention", "feat:industry.reactions", "feat:industry.job-complete", "feat:industry.job-cancel", "feat:industry.job-list", "feat:industry.job-range",
+        "feat:industry.industry-monitor", "feat:industry.blueprint-lock", "feat:structures.service-reactions", "feat:industry.capital-construction-restrictions", "feat:industry.capital-component-construction", "feat:industry.capital-core-temperature-components", "feat:industry.job-pause-on-service-offline",
+    ]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let char_id = 90_000_001;
@@ -721,38 +777,6 @@ async fn test_industry_jobs_me_te_copy_invention_decryptors_t3_reactions_remote_
     };
     assert_eq!(done_list.len(), 1);
 
-    // 10. Fulcrum pirate ship bonus (feat:industry.fulcrum-pirate-ship-bonus)
-    let is_fulcrum = ctx.db.with_snapshot(|snap| {
-        eve_server::services::industry_pi::is_fulcrum_pirate_ship_bonus_applicable(
-            &ctx, snap, Some(char_id), 73787, 1, 60_015_187,
-        )
-    });
-    assert!(!is_fulcrum, "Non-pirate-enlisted pilot does not receive Fulcrum pirate ship bonus");
-
-    // 11. EIV adjusted prices calculation (feat:industry.eiv-adjusted-prices)
-    let eiv_rifter = eve_server::services::industry_pi::compute_blueprint_eiv_per_run(
-        &ctx, &ctx.sde.blueprints.get(&RIFTER_BP_TYPE_ID).unwrap(), 1,
-    );
-    assert!(eiv_rifter > 0.0, "Blueprint EIV must derive from base ME-0 BOM * adjusted prices table");
-
-    // 12. SCC surcharge & Alpha tax (feat:industry.scc-surcharge-alpha-tax)
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.clone_grade = 1;
-        }
-    });
-    let alpha_costs = ctx.db.with_snapshot(|snap| {
-        eve_server::services::industry_pi::compute_industry_job_costs_for_char(
-            &ctx, snap, Some(char_id), RIFTER_BP_TYPE_ID, 1, 1, JITA_STATION_ID, true,
-        )
-    }).expect("compute_industry_job_costs_for_char");
-    assert!(alpha_costs.alpha_clone_tax_isk > 0.0 || alpha_costs.scc_surcharge_isk > 0.0, "Alpha clone must pay SCC surcharge + Alpha clone facility tax");
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.clone_grade = 2;
-        }
-    });
-
     // 13. Capital construction restrictions & component construction (feat:industry.capital-construction-restrictions, feat:industry.capital-component-construction, feat:industry.capital-core-temperature-components)
     let cap_fac_check = ctx.db.with_snapshot(|snap| {
         eve_server::services::industry_pi::resolve_facility_modifiers_and_system(&ctx, snap, hs_athanor_id)
@@ -763,22 +787,6 @@ async fn test_industry_jobs_me_te_copy_invention_decryptors_t3_reactions_remote_
             assert!(!act.materials.is_empty(), "Supercapital hull requires SDE capital/advanced components");
         }
     }
-
-    // 14. Blueprint repackaging rejection when researched
-    let res_bpo = ctx.db.with_mut_snapshot(|snap| {
-        let id = seed_item(snap, RIFTER_BP_TYPE_ID, char_id, JITA_STATION_ID, InventoryFlag::Hangar, 1, true, false, None);
-        if let Some(it) = snap.items.get_mut(&id) {
-            it.dynamic_attributes.insert(1112, 10.0);
-            it.dynamic_attributes.insert(1113, 20.0);
-        }
-        id
-    });
-    let pack_fail = ctx.dispatch_rpc(
-        &mut sess, "repackagingSvc", None, "RepackageItems",
-        &[PyRep::Integer(res_bpo), PyRep::Bool(false)],
-        &kw, None,
-    ).await.expect_err("Repackage researched BPO must fail");
-    assert_eq!(pack_fail.code, "CannotRepackageMutatedItem");
 
     // 15. Job pause on service offline (feat:industry.job-pause-on-service-offline)
     ctx.db.with_mut_snapshot(|snap| {
@@ -806,8 +814,12 @@ async fn test_industry_jobs_me_te_copy_invention_decryptors_t3_reactions_remote_
 
 #[tokio::test]
 async fn test_pi_resources_heatmap_extractor_schematics_routes_simulation_transfer_launch_poco_and_skyhook() {
-    // parity: feat:pi.extractor-program, feat:pi.pi-depletion, feat:pi.factory-cycles, feat:pi.routes, feat:pi.storage-overflow, feat:pi.colony-simulation, feat:pi.expedited-transfer, feat:pi.launch, feat:pi.customs-office, feat:pi.poco-settings, feat:pi.skyhook-pi, feat:pi.pi-skills, feat:pi.pi-notifications, feat:pi.abandon-colony
-    eve_testkit::attest(&["feat:pi.extractor-program", "feat:pi.pi-depletion", "feat:pi.factory-cycles", "feat:pi.routes", "feat:pi.storage-overflow", "feat:pi.colony-simulation", "feat:pi.expedited-transfer", "feat:pi.launch", "feat:pi.customs-office", "feat:pi.poco-settings", "feat:pi.skyhook-pi", "feat:pi.pi-skills", "feat:pi.pi-notifications", "feat:pi.abandon-colony"]);
+    // parity: feat:pi.pi-depletion, feat:pi.storage-overflow, feat:pi.colony-simulation, feat:pi.expedited-transfer, feat:pi.launch, feat:pi.customs-office, feat:pi.poco-settings
+    // parity: feat:pi.skyhook-pi, feat:pi.pi-skills, feat:pi.pi-notifications, feat:pi.abandon-colony, feat:pi.planet-type-resource-restrictions, feat:pi.customs-office-gantry-deploy-reinforce, feat:pi.command-center-import-export-pad
+    eve_testkit::attest(&[
+        "feat:pi.pi-depletion", "feat:pi.storage-overflow", "feat:pi.colony-simulation", "feat:pi.expedited-transfer", "feat:pi.launch", "feat:pi.customs-office", "feat:pi.poco-settings",
+        "feat:pi.skyhook-pi", "feat:pi.pi-skills", "feat:pi.pi-notifications", "feat:pi.abandon-colony", "feat:pi.planet-type-resource-restrictions", "feat:pi.customs-office-gantry-deploy-reinforce", "feat:pi.command-center-import-export-pad",
+    ]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let char_id = 90_000_001;

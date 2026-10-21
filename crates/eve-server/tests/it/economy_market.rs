@@ -799,7 +799,15 @@ async fn test_market_instant_matching() {
 #[tokio::test]
 async fn test_market_modify_relist_tick_size_corp_remote_expiry_sleeper_and_plex() {
     // parity: feat:market.modify-order, feat:market.remote-orders, feat:market.corp-orders, feat:market.plex-market, feat:market.npc-buy-orders-sleeper-loot
-    eve_testkit::attest(&["feat:market.modify-order", "feat:market.remote-orders", "feat:market.corp-orders", "feat:market.plex-market", "feat:market.npc-buy-orders-sleeper-loot"]);
+    // parity: rpc:marketProxy.GetCorporationOrders, rpc:marketProxy.GetHistoryForManyTypeIDs, rpc:marketProxy.GetMarketOrderHistory, rpc:marketProxy.GetPlexBest, rpc:marketProxy.GetPlexHistory, rpc:marketProxy.GetPlexNewPriceHistory, rpc:marketProxy.GetPlexOldPriceHistory
+    // parity: rpc:marketProxy.GetPlexOrders, rpc:marketProxy.GetSystemAsks, rpc:marketProxy.ModifyCharOrder, rpc:marketProxy.ModifyPlexCharOrder, rpc:marketProxy.PlacePlexSellOrder, rpc:marketProxy.StartupCheck
+    // parity: notify:OnClientEvent_MarketItemReceived, notify:OnMarketEscrowChanged, notify:OnMarketItemReceived, notify:OnMarketQuickbarChange, notify:OnMarketTickerSettingsUpdated, notify:OnMarketTypeSelectionChanged, notify:OnOwnOrdersChanged, notify:OnShowMarketDetails
+    eve_testkit::attest(&[
+        "feat:market.modify-order", "feat:market.remote-orders", "feat:market.corp-orders", "feat:market.plex-market", "feat:market.npc-buy-orders-sleeper-loot",
+        "rpc:marketProxy.GetCorporationOrders", "rpc:marketProxy.GetHistoryForManyTypeIDs", "rpc:marketProxy.GetMarketOrderHistory", "rpc:marketProxy.GetPlexBest", "rpc:marketProxy.GetPlexHistory", "rpc:marketProxy.GetPlexNewPriceHistory", "rpc:marketProxy.GetPlexOldPriceHistory",
+        "rpc:marketProxy.GetPlexOrders", "rpc:marketProxy.GetSystemAsks", "rpc:marketProxy.ModifyCharOrder", "rpc:marketProxy.ModifyPlexCharOrder", "rpc:marketProxy.PlacePlexSellOrder", "rpc:marketProxy.StartupCheck",
+        "notify:OnClientEvent_MarketItemReceived", "notify:OnMarketEscrowChanged", "notify:OnMarketItemReceived", "notify:OnMarketQuickbarChange", "notify:OnMarketTickerSettingsUpdated", "notify:OnMarketTypeSelectionChanged", "notify:OnOwnOrdersChanged", "notify:OnShowMarketDetails",
+    ]);
     let ctx = ServerContext::new();
     let mut s1 = setup_pilot(&ctx, 210, "demo", "demo-secret", 90_000_001).await;
     let mut s2 = setup_pilot(&ctx, 211, "other", "other-secret", 90_000_002).await;

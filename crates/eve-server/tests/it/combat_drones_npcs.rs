@@ -179,9 +179,7 @@ fn add_drone_to_bay(
 
 #[tokio::test]
 async fn test_c7_salvager_wreck_difficulty_tiers_and_tractor_beam_physics() {
-    // parity: feat:modules.salvager
-    // parity: feat:combat.wreck-size-salvage-difficulty
-    // parity: feat:modules.tractor-beam
+    // parity: feat:modules.salvager, feat:combat.wreck-size-salvage-difficulty, feat:modules.tractor-beam
     eve_testkit::attest(&[
         "feat:modules.salvager",
         "feat:combat.wreck-size-salvage-difficulty",
@@ -461,21 +459,10 @@ async fn test_c7_salvager_wreck_difficulty_tiers_and_tractor_beam_physics() {
 
 #[tokio::test]
 async fn test_c7_drone_lifecycle_bandwidth_control_range_sentries_salvage_logi_ewar_and_gecko() {
-    // parity: feat:drones.engage-target
-    // parity: feat:drones.assist-guard
-    // parity: feat:drones.aggressive-passive
-    // parity: feat:drones.abandon-scoop
-    // parity: feat:drones.reconnect-drones
-    // parity: feat:drones.drone-bandwidth
-    // parity: feat:drones.drone-control-range
-    // parity: feat:drones.salvage-drones
-    // parity: feat:drones.logistic-drones
-    // parity: feat:drones.ewar-drones
-    // parity: feat:drones.sentry-drones
-    // parity: feat:drones.drone-hp-loss
-    // parity: feat:drones.sentry-drone-scoop-distance
-    // parity: feat:drones.gecko-augmented-mutated-drones
-    // parity: feat:drones.gecko-subverted-bandwidth
+    // parity: feat:drones.engage-target, feat:drones.assist-guard, feat:drones.aggressive-passive, feat:drones.abandon-scoop
+    // parity: feat:drones.reconnect-drones, feat:drones.drone-bandwidth, feat:drones.drone-control-range, feat:drones.salvage-drones
+    // parity: feat:drones.logistic-drones, feat:drones.ewar-drones, feat:drones.sentry-drones, feat:drones.drone-hp-loss
+    // parity: feat:drones.sentry-drone-scoop-distance, feat:drones.gecko-augmented-mutated-drones, feat:drones.gecko-subverted-bandwidth
     eve_testkit::attest(&[
         "feat:drones.engage-target",
         "feat:drones.assist-guard",
@@ -907,20 +894,10 @@ async fn test_c7_drone_lifecycle_bandwidth_control_range_sentries_salvage_logi_e
 
 #[tokio::test]
 async fn test_c4_npc_archetypes_triglavian_drifter_sleeper_edencom_clone_soldiers_and_ewar_rep() {
-    // parity: feat:npc.drifters
-    // parity: feat:npc.triglavians
-    // parity: feat:npc.sleepers
-    // parity: feat:npc.edencom-npc
-    // parity: feat:npc.rogue-drones
-    // parity: feat:npc.incursion-npc
-    // parity: feat:npc.navy-npc
-    // parity: feat:npc.npc-hauler
-    // parity: feat:npc.npc-standings-aggression
-    // parity: feat:npc.officer-npc
-    // parity: feat:npc.npc-ewar-application
-    // parity: feat:npc.npc-remote-repair
-    // parity: feat:npc.npc-target-switching
-    // parity: feat:npc.clone-soldier-spawns
+    // parity: feat:npc.drifters, feat:npc.triglavians, feat:npc.sleepers, feat:npc.edencom-npc
+    // parity: feat:npc.rogue-drones, feat:npc.incursion-npc, feat:npc.navy-npc, feat:npc.npc-hauler
+    // parity: feat:npc.npc-standings-aggression, feat:npc.officer-npc, feat:npc.npc-ewar-application, feat:npc.npc-remote-repair
+    // parity: feat:npc.npc-target-switching, feat:npc.clone-soldier-spawns
     eve_testkit::attest(&[
         "feat:npc.drifters",
         "feat:npc.triglavians",
@@ -1176,14 +1153,8 @@ async fn test_c4_npc_archetypes_triglavian_drifter_sleeper_edencom_clone_soldier
 
 #[tokio::test]
 async fn test_c4_bounty_tick_dbs_ess_split_encounter_waves_and_sentry_guns() {
-    // parity: feat:npc.belt-rats
-    // parity: feat:npc.npc-ai-targeting
-    // parity: feat:npc.npc-damage-types
-    // parity: feat:npc.npc-loot
-    // parity: feat:combat.bounty-payout-npc
-    // parity: feat:npc.npc-spawn-encounter
-    // parity: feat:npc.sentry-guns
-    // parity: feat:npc.sentry-gun-grid-aggression
+    // parity: feat:npc.belt-rats, feat:npc.npc-ai-targeting, feat:npc.npc-damage-types, feat:npc.npc-loot
+    // parity: feat:combat.bounty-payout-npc, feat:npc.npc-spawn-encounter, feat:npc.sentry-guns, feat:npc.sentry-gun-grid-aggression
     eve_testkit::attest(&[
         "feat:npc.belt-rats",
         "feat:npc.npc-ai-targeting",

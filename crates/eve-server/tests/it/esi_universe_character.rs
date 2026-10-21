@@ -84,6 +84,8 @@ fn validate_and_json(
 
 #[tokio::test]
 async fn test_esi3_universe_status_meta_dogma_killmails_insurance_fw() {
+    // parity: plan:ESI-3
+    eve_testkit::attest(&["plan:ESI-3"]);
     let ctx = Arc::new(ServerContext::new());
     let router = EsiRouter::new(Arc::clone(&ctx));
     let spec = OpenApiSpec::pinned();
@@ -538,6 +540,8 @@ async fn test_esi3_universe_status_meta_dogma_killmails_insurance_fw() {
 
 #[tokio::test]
 async fn test_esi4_character_clones_skills_location_fittings_assets_wallet_loyalty_calendar_contacts() {
+    // parity: plan:ESI-4
+    eve_testkit::attest(&["plan:ESI-4"]);
     let ctx = Arc::new(ServerContext::new());
     let router = EsiRouter::new(Arc::clone(&ctx));
     let spec = OpenApiSpec::pinned();

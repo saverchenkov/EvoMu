@@ -408,8 +408,8 @@ async fn test_mn10_survey_scanner() {
 // ====================================================================
 #[tokio::test]
 async fn test_mn11_compression_space_and_structure_and_gas() {
-    // parity: feat:mining.compression-space, feat:mining.compression-structure, feat:mining.gas-decompression
-    eve_testkit::attest(&["feat:mining.compression-space", "feat:mining.compression-structure", "feat:mining.gas-decompression"]);
+    // parity: plan:MN-11, feat:mining.compression-space, feat:mining.compression-structure, feat:mining.gas-decompression
+    eve_testkit::attest(&["plan:MN-11", "feat:mining.compression-space", "feat:mining.compression-structure", "feat:mining.gas-decompression"]);
     let ctx = ServerContext::new();
     let char_id = 90_000_001;
     let mut session = setup_test_session(&ctx, char_id).await;
@@ -879,8 +879,8 @@ async fn test_mn12_c6_reprocessing_yield_tax_modules_and_structure() {
 // ====================================================================
 #[tokio::test]
 async fn test_mn13_mn14_mn16_moon_mining_probes_jackpot_decay_and_ledger() {
-    // parity: feat:scanning.moon-survey-probe, feat:mining.moon-resources, feat:mining.moon-extraction, feat:mining.moon-extraction-duration-yield, feat:mining.moon-fracture, feat:mining.moon-chunk-auto-fracture, feat:mining.moon-ore-types, feat:mining.moon-ore-class-by-security, feat:mining.moon-jackpot, feat:mining.moon-field-lifetime, feat:structures.service-moon-drill, feat:modules.mining-survey-chipset, feat:mining.metenox, feat:mining.corp-ledger
-    eve_testkit::attest(&["feat:scanning.moon-survey-probe", "feat:mining.moon-resources", "feat:mining.moon-extraction", "feat:mining.moon-extraction-duration-yield", "feat:mining.moon-fracture", "feat:mining.moon-chunk-auto-fracture", "feat:mining.moon-ore-types", "feat:mining.moon-ore-class-by-security", "feat:mining.moon-jackpot", "feat:mining.moon-field-lifetime", "feat:structures.service-moon-drill", "feat:modules.mining-survey-chipset", "feat:mining.metenox", "feat:mining.corp-ledger"]);
+    // parity: plan:MN-14, feat:scanning.moon-survey-probe, feat:mining.moon-resources, feat:mining.moon-extraction, feat:mining.moon-extraction-duration-yield, feat:mining.moon-fracture, feat:mining.moon-chunk-auto-fracture, feat:mining.moon-ore-types, feat:mining.moon-ore-class-by-security, feat:mining.moon-jackpot, feat:mining.moon-field-lifetime, feat:structures.service-moon-drill, feat:modules.mining-survey-chipset, feat:mining.metenox, feat:mining.corp-ledger
+    eve_testkit::attest(&["plan:MN-14", "feat:scanning.moon-survey-probe", "feat:mining.moon-resources", "feat:mining.moon-extraction", "feat:mining.moon-extraction-duration-yield", "feat:mining.moon-fracture", "feat:mining.moon-chunk-auto-fracture", "feat:mining.moon-ore-types", "feat:mining.moon-ore-class-by-security", "feat:mining.moon-jackpot", "feat:mining.moon-field-lifetime", "feat:structures.service-moon-drill", "feat:modules.mining-survey-chipset", "feat:mining.metenox", "feat:mining.corp-ledger"]);
     let ctx = ServerContext::new();
     let char_id = 90_000_001;
     let mut session = setup_test_session(&ctx, char_id).await;

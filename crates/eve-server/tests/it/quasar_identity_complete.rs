@@ -47,6 +47,8 @@ fn build_public_request(now_unix: u64, type_name: &str, payload_value: Vec<u8>) 
 
 #[tokio::test]
 async fn test_q3_auth_login_device() {
+    // parity: plan:Q-3
+    eve_testkit::attest(&["plan:Q-3"]);
     let ctx = ServerContext::new();
     let empty_kw = HashMap::new();
 

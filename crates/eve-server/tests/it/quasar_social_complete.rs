@@ -51,8 +51,9 @@ fn encode_seq_id(field_num: u32, id: u64) -> Vec<u8> {
 
 #[tokio::test]
 async fn test_quasar_chat_and_presence_complete() {
-    // parity: feat:quasar.chat, quasar:eveProto/generated/eve_public/chat/local/api/admin/requests_pb2.pyj, quasar:eveProto/generated/eve_public/chat/local/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/chat/local/api/requests_pb2.pyj
+    // parity: plan:Q-5, feat:quasar.chat, quasar:eveProto/generated/eve_public/chat/local/api/admin/requests_pb2.pyj, quasar:eveProto/generated/eve_public/chat/local/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/chat/local/api/requests_pb2.pyj
     eve_testkit::attest(&[
+        "plan:Q-5",
         "feat:quasar.chat",
         "quasar:eveProto/generated/eve_public/chat/local/api/admin/requests_pb2.pyj",
         "quasar:eveProto/generated/eve_public/chat/local/api/notices_pb2.pyj",

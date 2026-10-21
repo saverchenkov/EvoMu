@@ -79,6 +79,8 @@ fn encode_uuid_field(tag: u32, uuid: &[u8], out: &mut Vec<u8>) {
 
 #[tokio::test]
 async fn test_quasar_market_complete() {
+    // parity: plan:Q-6
+    eve_testkit::attest(&["plan:Q-6"]);
     let ctx = ServerContext::new();
     let empty_kw = HashMap::new();
     let mut sess = SessionState::new(1001);

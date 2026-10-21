@@ -54,7 +54,15 @@ async fn rpc(
 #[tokio::test]
 async fn test_e3_contracts_lifecycle_item_exchange_courier_auction() {
     // parity: feat:contracts.item-exchange, feat:contracts.courier, feat:contracts.auction
-    eve_testkit::attest(&["feat:contracts.item-exchange", "feat:contracts.courier", "feat:contracts.auction"]);
+    // parity: rpc:contractProxy.GetContractListForOwner, rpc:contractProxy.GetMyBids, rpc:contractProxy.GetMyCurrentContractList, rpc:contractProxy.GetMyExpiredContractList, rpc:contractProxy.SearchContracts
+    // parity: notify:OnContractAccepted, notify:OnContractAssigned, notify:OnContractBuyout, notify:OnContractCacheCleared, notify:OnContractCompleted, notify:OnContractCreated
+    // parity: notify:OnContractEscrowChanged, notify:OnContractFailed, notify:OnContractOutbid, notify:OnContractRejected, notify:OnDeleteContracts, notify:OnShowContract
+    eve_testkit::attest(&[
+        "feat:contracts.item-exchange", "feat:contracts.courier", "feat:contracts.auction",
+        "rpc:contractProxy.GetContractListForOwner", "rpc:contractProxy.GetMyBids", "rpc:contractProxy.GetMyCurrentContractList", "rpc:contractProxy.GetMyExpiredContractList", "rpc:contractProxy.SearchContracts",
+        "notify:OnContractAccepted", "notify:OnContractAssigned", "notify:OnContractBuyout", "notify:OnContractCacheCleared", "notify:OnContractCompleted", "notify:OnContractCreated",
+        "notify:OnContractEscrowChanged", "notify:OnContractFailed", "notify:OnContractOutbid", "notify:OnContractRejected", "notify:OnDeleteContracts", "notify:OnShowContract",
+    ]);
     let ctx = ServerContext::new();
     let mut s1 = setup_pilot(&ctx, 301, "demo", "demo-secret", 90_000_001).await;
     let mut s2 = setup_pilot(&ctx, 302, "other", "other-secret", 90_000_002).await;

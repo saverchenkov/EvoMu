@@ -70,6 +70,8 @@ fn call_req(
 
 #[tokio::test]
 async fn q7_space_celestials_navigation_and_dbs() {
+    // parity: plan:Q-7
+    eve_testkit::attest(&["plan:Q-7"]);
     let ctx = ServerContext::new();
     let empty_kw = HashMap::new();
 
@@ -480,8 +482,9 @@ async fn q8_sovereignty_hub_skyhooks_and_workforce() {
 
 #[tokio::test]
 async fn q8_faction_warfare_and_operations() {
-    // parity: quasar:eveProto/generated/eve_public/operation/recommendation/recommendation_pb2.pyj
+    // parity: plan:Q-8, quasar:eveProto/generated/eve_public/operation/recommendation/recommendation_pb2.pyj
     eve_testkit::attest(&[
+        "plan:Q-8",
         "quasar:eveProto/generated/eve_public/operation/recommendation/recommendation_pb2.pyj",
     ]);
 

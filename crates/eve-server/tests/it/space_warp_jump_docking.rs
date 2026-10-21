@@ -14,14 +14,14 @@ use std::collections::HashMap;
 
 #[tokio::test]
 async fn test_sp5_docking_and_undocking_station_structure_and_boarding() {
-    // parity: plan:SP-5
-    // parity: feat:ships.board-ship, feat:navigation.undock, feat:navigation.dock-station, feat:navigation.dock-structure
+    // parity: plan:SP-5, feat:ships.board-ship, feat:navigation.undock, feat:navigation.dock-station, feat:navigation.dock-structure, rpc:beyonce.UpdateStateRequest
     eve_testkit::attest(&[
         "plan:SP-5",
         "feat:ships.board-ship",
         "feat:navigation.undock",
         "feat:navigation.dock-station",
         "feat:navigation.dock-structure",
+        "rpc:beyonce.UpdateStateRequest",
     ]);
 
     let ctx = ServerContext::new();

@@ -152,10 +152,7 @@ fn fit_module_and_charge(
 
 #[tokio::test]
 async fn test_c1_turret_families_hit_formula_wrecking_shots_and_crystal_degradation() {
-    // parity: feat:modules.turret-hybrid
-    // parity: feat:modules.turret-projectile
-    // parity: feat:modules.turret-laser
-    // parity: feat:modules.turret-hit-chance
+    // parity: feat:modules.turret-hybrid, feat:modules.turret-projectile, feat:modules.turret-laser, feat:modules.turret-hit-chance
     // parity: feat:dogma.resistances
     eve_testkit::attest(&[
         "feat:modules.turret-hybrid",
@@ -503,9 +500,7 @@ async fn test_c1_turret_families_hit_formula_wrecking_shots_and_crystal_degradat
 
 #[tokio::test]
 async fn test_c1_triglavian_entropic_spool_and_edencom_vorton_arc_and_sig_radius() {
-    // parity: feat:modules.turret-precursor
-    // parity: feat:modules.vorton-projector
-    // parity: feat:dogma.signature-radius
+    // parity: feat:modules.turret-precursor, feat:modules.vorton-projector, feat:dogma.signature-radius
     eve_testkit::attest(&[
         "feat:modules.turret-precursor",
         "feat:modules.vorton-projector",
@@ -756,18 +751,9 @@ async fn test_c1_triglavian_entropic_spool_and_edencom_vorton_arc_and_sig_radius
 
 #[tokio::test]
 async fn test_c2_missiles_drf_smartbombs_bombs_breacher_pods_damage_layers_and_shield_recharge() {
-    // parity: feat:modules.missile-launchers
-    // parity: feat:modules.missile-application
-    // parity: feat:modules.missile-defender
-    // parity: feat:modules.missile-fof
-    // parity: feat:modules.smartbomb
-    // parity: feat:modules.bomb-launcher
-    // parity: feat:modules.capital-weapons
-    // parity: feat:modules.breacher-pods
-    // parity: feat:combat.missile-flight-physics-destruction
-    // parity: feat:combat.bomb-damage-void-lockbreaker
-    // parity: feat:combat.damage-pipeline
-    // parity: feat:combat.damage-log
+    // parity: feat:modules.missile-launchers, feat:modules.missile-application, feat:modules.missile-defender, feat:modules.missile-fof
+    // parity: feat:modules.smartbomb, feat:modules.bomb-launcher, feat:modules.capital-weapons, feat:modules.breacher-pods
+    // parity: feat:combat.missile-flight-physics-destruction, feat:combat.bomb-damage-void-lockbreaker, feat:combat.damage-pipeline, feat:combat.damage-log
     // parity: feat:dogma.shield-recharge
     eve_testkit::attest(&[
         "feat:modules.missile-launchers",
