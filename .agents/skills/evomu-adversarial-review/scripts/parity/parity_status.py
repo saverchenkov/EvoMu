@@ -259,10 +259,20 @@ def main():
     for r in rows:
         if r["category"] == "feat" and r.get("plan_task"):
             by_task.setdefault(r["plan_task"], []).append(r["id"])
+    # Plan tasks whose pinned "Done when" is about whole ledger categories or real-client journeys (supervisor-
+    # maintained). A single tagged test can't close them; every listed row must be DONE/NA first.
+    plan_deps = {
+        "T-2": lambda rid: rid.startswith(("sde:", "effect:")),          # every sde:* and effect:* attested
+        "T-6": lambda rid: rid.startswith("journey:"),                    # harness drives every real-client journey
+        "ESI-1": lambda rid: rid == "journey:launch_login",               # real client logs in via emulated launcher
+    }
+    all_ids = [r["id"] for r in rows]
     for r in rows:
         if r["category"] == "plan" and status[r["id"]]["status"] == "DONE":
             tid = r["id"].split(":", 1)[1]
             open_feats = [f for f in by_task.get(tid, []) if status[f]["status"] not in ("DONE", "NA")]
+            if tid in plan_deps:
+                open_feats += [d for d in all_ids if plan_deps[tid](d) and status[d]["status"] not in ("DONE", "NA")]
             if open_feats:
                 status[r["id"]]["status"] = "BLOCKED_BY_FEATURES"
                 status[r["id"]]["open_features"] = open_feats[:20]
