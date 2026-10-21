@@ -66,6 +66,30 @@ pub const MACHO_ADDRESS_CLASS: &str = "carbon.common.script.net.machoNetAddress.
 /// `session.SESSION_TYPE_GAME` (V24 `carbon/common/lib/session.pyj`).
 pub const SESSION_TYPE_GAME: i64 = 5;
 
+/// `cluster.MACHONETERR_WRAPPEDEXCEPTION`: `ErrorResponse.payload` is `(DumpsSanitized(exc),)`.
+pub const MACHONETERR_WRAPPEDEXCEPTION: i64 = 2;
+
+/// Body of a V24 `machoNetPacket.ErrorResponse` (`('originalCommand', 'code', 'payload')`) carrying a
+/// wrapped `exceptions.RuntimeError`. The client's `ExceptionWrapperGPCS` re-raises
+/// `machobase.LoadsSanitized(payload[0])`, so `payload[0]` is the marshal *string* of the
+/// exception, pickled as blue does for `BaseException.__reduce__`: `ObjectEx1((cls, (msg,)))`.
+pub fn wrapped_runtime_error_body(original_command: i64, message: &str) -> PyRep {
+    let exc = PyRep::ObjectEx {
+        is_type_2: false,
+        header: Box::new(PyRep::Tuple(vec![
+            PyRep::Token("exceptions.RuntimeError".into()),
+            PyRep::Tuple(vec![PyRep::ascii_bytes(message)]),
+        ])),
+        list: Vec::new(),
+        dict: Vec::new(),
+    };
+    PyRep::Tuple(vec![
+        PyRep::Integer(original_command),
+        PyRep::Integer(MACHONETERR_WRAPPEDEXCEPTION),
+        PyRep::Tuple(vec![PyRep::Bytes(eve_proto::marshal::encode(&exc))]),
+    ])
+}
+
 /// `macho.MachoAddress` endpoint representation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MachoAddress {

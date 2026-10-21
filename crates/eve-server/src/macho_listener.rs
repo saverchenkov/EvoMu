@@ -358,16 +358,10 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                 source: pkt.destination.clone(),
                                 destination: pkt.source.clone(),
                                 user_id: session.user_id,
-                                payload: PyRep::Tuple(vec![
-                                    PyRep::Integer(MachoPacketType::CallReq as i64),
-                                    PyRep::Integer(1),
-                                    PyRep::Tuple(vec![PyRep::SubStream(Box::new(PyRep::keyval(
-                                        [
-                                            ("code", PyRep::String(err.code)),
-                                            ("message", PyRep::String(err.message)),
-                                        ],
-                                    )))]),
-                                ]),
+                                payload: eve_machonet::wrapped_runtime_error_body(
+                                    MachoPacketType::CallReq as i64,
+                                    &format!("{}: {}", err.code, err.message),
+                                ),
                                 named_payload: HashMap::new(),
                             },
                         };

@@ -242,8 +242,8 @@ impl DBRowDescriptor {
             ("customInfo", DbColumnType::Str),
         ])
         .with_keywords([
-            ("stacksize", "util.StackSize"),
-            ("singleton", "util.Singleton"),
+            ("stacksize", "eve.common.script.sys.eveCfg.StackSize"),
+            ("singleton", "eve.common.script.sys.eveCfg.Singleton"),
         ])
     }
 

@@ -922,28 +922,28 @@ def _marshal_encode_inner(node, out):
         out.extend(sub)
     elif tag == "KeyVal":
         out.append(0x17)
-        _marshal_encode_inner({"$py": "Token", "val": "util.KeyVal"}, out)
+        _marshal_encode_inner({"$py": "Bytes", "val": list(bytearray(b"utillib.KeyVal"))}, out)
         entries = [[{"$py": "String", "val": k}, val[k]] for k in sorted(val.keys())]
         _marshal_encode_inner({"$py": "Dict", "val": entries}, out)
     elif tag == "Rowset":
         out.append(0x17)
-        _marshal_encode_inner({"$py": "Token", "val": "util.Rowset"}, out)
+        _marshal_encode_inner({"$py": "Bytes", "val": list(bytearray(b"eve.common.script.sys.rowset.Rowset"))}, out)
         cols = {"$py": "List", "val": [{"$py": "String", "val": c} for c in val["columns"]]}
         lines = {"$py": "List", "val": [{"$py": "List", "val": r} for r in val["rows"]]}
         d = {"$py": "Dict", "val": [
             [{"$py": "String", "val": "header"}, cols],
-            [{"$py": "String", "val": "RowClass"}, {"$py": "Token", "val": "util.Row"}],
+            [{"$py": "String", "val": "RowClass"}, {"$py": "Token", "val": "carbon.common.script.sys.row.Row"}],
             [{"$py": "String", "val": "lines"}, lines],
         ]}
         _marshal_encode_inner(d, out)
     elif tag == "IndexRowset":
         out.append(0x17)
-        _marshal_encode_inner({"$py": "Token", "val": "util.IndexRowset"}, out)
+        _marshal_encode_inner({"$py": "Bytes", "val": list(bytearray(b"eve.common.script.sys.rowset.IndexRowset"))}, out)
         cols = {"$py": "List", "val": [{"$py": "String", "val": c} for c in val["columns"]]}
         items_dict = {"$py": "Dict", "val": [[k, {"$py": "List", "val": r}] for k, r in val["items"]]}
         d = {"$py": "Dict", "val": [
             [{"$py": "String", "val": "header"}, cols],
-            [{"$py": "String", "val": "RowClass"}, {"$py": "Token", "val": "util.Row"}],
+            [{"$py": "String", "val": "RowClass"}, {"$py": "Token", "val": "carbon.common.script.sys.row.Row"}],
             [{"$py": "String", "val": "idName"}, {"$py": "String", "val": val["key_column"]}],
             [{"$py": "String", "val": "items"}, items_dict],
         ]}
@@ -1145,15 +1145,15 @@ def _marshal_decode_inner(ba, state):
         if isinstance(type_name, (list, bytes, bytearray)):
             type_name = bytes(bytearray(type_name)).decode("latin-1")
         args = _marshal_decode_inner(ba, state)
-        if type_name == "util.KeyVal" and args.get("$py") == "Dict":
+        if type_name in ("util.KeyVal", "utillib.KeyVal") and args.get("$py") == "Dict":
             kv = {k.get("val"): v for k, v in args.get("val", [])}
             val = {"$py": "KeyVal", "val": kv}
-        elif type_name == "util.Rowset" and args.get("$py") == "Dict":
+        elif type_name in ("util.Rowset", "eve.common.script.sys.rowset.Rowset") and args.get("$py") == "Dict":
             dmap = {k.get("val"): v for k, v in args.get("val", [])}
             cols = [c.get("val") for c in dmap["header"].get("val", [])]
             rows = [r.get("val", []) for r in dmap["lines"].get("val", [])]
             val = {"$py": "Rowset", "val": {"columns": cols, "rows": rows}}
-        elif type_name == "util.IndexRowset" and args.get("$py") == "Dict":
+        elif type_name in ("util.IndexRowset", "eve.common.script.sys.rowset.IndexRowset") and args.get("$py") == "Dict":
             dmap = {k.get("val"): v for k, v in args.get("val", [])}
             cols = [c.get("val") for c in dmap["header"].get("val", [])]
             key_col = dmap["idName"].get("val")

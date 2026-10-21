@@ -8,7 +8,9 @@
 
 pub mod agents_missions;
 pub mod auth_cache;
+pub mod char_selection;
 pub mod character_skills;
+pub mod client_login;
 pub mod combat_crimewatch;
 pub mod config_service;
 pub mod contracts_service;

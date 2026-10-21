@@ -183,6 +183,7 @@ impl ServerContext {
 
         if effective_service == "taleMgr" && !self.feature_flags.enable_living_world {
             return Err(BridgeRpcError {
+                // rpc-lint: allow "FeatureDisabled" is an error code, not a taleMgr method
                 code: "FeatureDisabled".into(),
                 message: "Living World Director (taleMgr) is disabled in evomu.toml feature_flags"
                     .into(),
@@ -191,6 +192,7 @@ impl ServerContext {
 
         if effective_service == "publicGatewaySvc" && !self.feature_flags.enable_quasar_gateway {
             return Err(BridgeRpcError {
+                // rpc-lint: allow "FeatureDisabled" is an error code, not a publicGatewaySvc method
                 code: "FeatureDisabled".into(),
                 message: "Quasar publicGatewaySvc is disabled in evomu.toml feature_flags".into(),
             });
@@ -201,6 +203,7 @@ impl ServerContext {
             effective_service,
             "slash" | "publicQaToolsServer" | "devToolsProvider"
         ) || (effective_service == "taleMgr"
+            // rpc-lint: allow pre-existing GM gate for a server-internal name; refusing it is the point
             && method == "MaterializeSystemLOD2")
             || (effective_service == "keeper" && method == "GetLevelEditor")
             || method.starts_with("GM_")
@@ -369,6 +372,18 @@ impl ServerContext {
         }
 
         // Dispatch across the 12 domain modules in order
+        if let Some(res) = Box::pin(services::client_login::handle(
+            self,
+            session,
+            effective_service,
+            method,
+            args,
+            kwargs,
+        ))
+        .await
+        {
+            return res;
+        }
         if let Some(res) = Box::pin(services::auth_cache::handle(
             self,
             session,

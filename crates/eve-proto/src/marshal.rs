@@ -40,6 +40,13 @@ pub fn encode_zlib(rep: &PyRep) -> Result<Vec<u8>, ProtoError> {
         .map_err(|e| ProtoError::ZlibError(e.to_string()))
 }
 
+/// Module paths blue imports when unpickling these classes in the V24.01 client (there is no
+/// `util` module there): `utillib.KeyVal`, `eve/common/script/sys/rowset.pyj`, `carbon/common/script/sys/row.pyj`.
+pub const V24_KEYVAL_CLASS: &str = "utillib.KeyVal";
+pub const V24_ROWSET_CLASS: &str = "eve.common.script.sys.rowset.Rowset";
+pub const V24_INDEX_ROWSET_CLASS: &str = "eve.common.script.sys.rowset.IndexRowset";
+pub const V24_ROW_CLASS: &str = "carbon.common.script.sys.row.Row";
+
 fn encode_inner(rep: &PyRep, out: &mut Vec<u8>) {
     match rep {
         PyRep::None => out.push(MarshalOpcode::PyNone as u8),
@@ -163,7 +170,7 @@ fn encode_inner(rep: &PyRep, out: &mut Vec<u8>) {
         }
         PyRep::KeyVal(map) => {
             out.push(MarshalOpcode::PyObject as u8);
-            encode_inner(&PyRep::Token("util.KeyVal".to_string()), out);
+            encode_inner(&PyRep::ascii_bytes(V24_KEYVAL_CLASS), out);
             let mut entries: Vec<(PyRep, PyRep)> = map
                 .iter()
                 .map(|(k, v)| (PyRep::String(k.clone()), v.clone()))
@@ -173,14 +180,14 @@ fn encode_inner(rep: &PyRep, out: &mut Vec<u8>) {
         }
         PyRep::Rowset { columns, rows } => {
             out.push(MarshalOpcode::PyObject as u8);
-            encode_inner(&PyRep::Token("util.Rowset".to_string()), out);
+            encode_inner(&PyRep::ascii_bytes(V24_ROWSET_CLASS), out);
             let cols = PyRep::List(columns.iter().cloned().map(PyRep::String).collect());
             let row_list = PyRep::List(rows.iter().cloned().map(PyRep::List).collect());
             let dict = PyRep::Dict(vec![
                 (PyRep::String("header".into()), cols),
                 (
                     PyRep::String("RowClass".into()),
-                    PyRep::Token("util.Row".into()),
+                    PyRep::Token(V24_ROW_CLASS.into()),
                 ),
                 (PyRep::String("lines".into()), row_list),
             ]);
@@ -192,7 +199,7 @@ fn encode_inner(rep: &PyRep, out: &mut Vec<u8>) {
             items,
         } => {
             out.push(MarshalOpcode::PyObject as u8);
-            encode_inner(&PyRep::Token("util.IndexRowset".to_string()), out);
+            encode_inner(&PyRep::ascii_bytes(V24_INDEX_ROWSET_CLASS), out);
             let cols = PyRep::List(columns.iter().cloned().map(PyRep::String).collect());
             let items_dict = PyRep::Dict(
                 items
@@ -204,7 +211,7 @@ fn encode_inner(rep: &PyRep, out: &mut Vec<u8>) {
                 (PyRep::String("header".into()), cols),
                 (
                     PyRep::String("RowClass".into()),
-                    PyRep::Token("util.Row".into()),
+                    PyRep::Token(V24_ROW_CLASS.into()),
                 ),
                 (PyRep::String("idName".into()), PyRep::String(key_column.clone())),
                 (PyRep::String("items".into()), items_dict),
@@ -680,7 +687,7 @@ fn decode_inner(
                 .to_string();
             let args = decode_inner(input, save_map, depth + 1, saved_slots, remaining_budget)?;
 
-            if type_name == "util.KeyVal" {
+            if type_name == "util.KeyVal" || type_name == V24_KEYVAL_CLASS {
                 if let PyRep::Dict(entries) = &args {
                     let mut map = HashMap::with_capacity(entries.len());
                     for (k, v) in entries {
@@ -695,7 +702,7 @@ fn decode_inner(
                         args: Box::new(args),
                     }
                 }
-            } else if type_name == "util.Rowset" {
+            } else if type_name == "util.Rowset" || type_name == V24_ROWSET_CLASS {
                 if let Some((columns, rows)) = try_extract_rowset(&args) {
                     PyRep::Rowset { columns, rows }
                 } else {
@@ -704,7 +711,7 @@ fn decode_inner(
                         args: Box::new(args),
                     }
                 }
-            } else if type_name == "util.IndexRowset" {
+            } else if type_name == "util.IndexRowset" || type_name == V24_INDEX_ROWSET_CLASS {
                 if let Some((key_column, columns, items)) = try_extract_index_rowset(&args) {
                     PyRep::IndexRowset {
                         key_column,
