@@ -1049,8 +1049,8 @@ async fn test_r66_p1_3_nine_maps_durability_restart_and_rollback() {
 
 #[tokio::test]
 async fn test_ch1_ch2_effective_attributes_catchup_and_2arg_free_sp() {
-    // parity: feat:skills.skill-catch-up, feat:attributes.attributes-base, feat:skills.free-sp, feat:attributes.neural-remap, feat:attributes.bonus-remap
-    eve_testkit::attest(&["feat:skills.skill-catch-up", "feat:attributes.attributes-base", "feat:skills.free-sp", "feat:attributes.neural-remap", "feat:attributes.bonus-remap"]);
+    // parity: feat:skills.skill-catch-up, feat:attributes.attributes-base, feat:skills.free-sp
+    eve_testkit::attest(&["feat:skills.skill-catch-up", "feat:attributes.attributes-base", "feat:skills.free-sp"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let mut sess = SessionState::new(940);

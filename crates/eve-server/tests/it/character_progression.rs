@@ -807,6 +807,11 @@ async fn test_ch4_slash_gm_commands() {
 
 #[tokio::test]
 async fn test_ch5_neural_attribute_remap_and_cooldown() {
+    // parity: feat:attributes.neural-remap, feat:attributes.bonus-remap
+    eve_testkit::attest(&[
+        "feat:attributes.neural-remap",
+        "feat:attributes.bonus-remap",
+    ]);
     let ctx = Arc::new(ServerContext::new());
     let kw = HashMap::new();
     let mut sess = SessionState::new(923);
@@ -990,7 +995,18 @@ async fn test_ch5_neural_attribute_remap_and_cooldown() {
         assert_eq!(ch.neural.memory, 21);
         assert_eq!(ch.neural.perception, 18);
         assert_eq!(ch.neural.willpower, 18);
+        let cooldown = ch.neural.remap_cooldown_until_unix.unwrap();
+        assert!(cooldown >= now_unix + 31_535_900 && cooldown <= now_unix + 31_536_100);
     });
+
+    let respec_info = ctx
+        .dispatch_rpc(&mut sess, "skillMgr2", None, "GetRespecInfo", &[], &kw, None)
+        .await
+        .expect("GetRespecInfo after bonus remap");
+    let PyRep::KeyVal(respec_kv) = respec_info else {
+        panic!("Expected KeyVal from GetRespecInfo");
+    };
+    assert_eq!(respec_kv.get("freeRespecs"), Some(&PyRep::Integer(0)));
 
     // 5. ESI GET /characters/{character_id}/attributes includes remap timestamps
     let token = issue_token_with_scopes(
