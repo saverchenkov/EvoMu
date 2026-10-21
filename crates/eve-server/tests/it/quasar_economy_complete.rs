@@ -79,9 +79,6 @@ fn encode_uuid_field(tag: u32, uuid: &[u8], out: &mut Vec<u8>) {
 
 #[tokio::test]
 async fn test_quasar_market_complete() {
-    // parity: feat:quasar.market
-    eve_testkit::attest(&["feat:quasar.market"]);
-
     let ctx = ServerContext::new();
     let empty_kw = HashMap::new();
     let mut sess = SessionState::new(1001);
@@ -272,13 +269,8 @@ async fn test_quasar_market_complete() {
 
 #[tokio::test]
 async fn test_quasar_inventory_asset_container_blueprint_ore() {
-    // parity: feat:quasar.inventory, feat:quasar.asset, feat:quasar.container, feat:quasar.blueprint, feat:quasar.ore, quasar:eveProto/generated/eve_public/inventory/generic_item_pb2.pyj, quasar:eveProto/generated/eve_public/inventory/generic_item_type_pb2.pyj, quasar:eveProto/generated/eve_public/inventory/group/group_pb2.pyj, quasar:eveProto/generated/eve_public/inventory/inventory_pb2.pyj, quasar:eveProto/generated/eve_public/ore/group_pb2.pyj, quasar:eveProto/generated/eve_public/ore/ore_type_pb2.pyj
+    // parity: quasar:eveProto/generated/eve_public/inventory/generic_item_pb2.pyj, quasar:eveProto/generated/eve_public/inventory/generic_item_type_pb2.pyj, quasar:eveProto/generated/eve_public/inventory/group/group_pb2.pyj, quasar:eveProto/generated/eve_public/inventory/inventory_pb2.pyj, quasar:eveProto/generated/eve_public/ore/group_pb2.pyj, quasar:eveProto/generated/eve_public/ore/ore_type_pb2.pyj
     eve_testkit::attest(&[
-        "feat:quasar.inventory",
-        "feat:quasar.asset",
-        "feat:quasar.container",
-        "feat:quasar.blueprint",
-        "feat:quasar.ore",
         "quasar:eveProto/generated/eve_public/inventory/generic_item_pb2.pyj",
         "quasar:eveProto/generated/eve_public/inventory/generic_item_type_pb2.pyj",
         "quasar:eveProto/generated/eve_public/inventory/group/group_pb2.pyj",
@@ -605,11 +597,8 @@ async fn test_quasar_assetholding_entitlements() {
 
 #[tokio::test]
 async fn test_quasar_accounting_loyalty_contracts() {
-    // parity: feat:quasar.accounting, feat:quasar.loyaltypoints, feat:quasar.contract, quasar:eveProto/generated/eve_public/loyaltypoints/loyaltypoints_pb2.pyj
+    // parity: quasar:eveProto/generated/eve_public/loyaltypoints/loyaltypoints_pb2.pyj
     eve_testkit::attest(&[
-        "feat:quasar.accounting",
-        "feat:quasar.loyaltypoints",
-        "feat:quasar.contract",
         "quasar:eveProto/generated/eve_public/loyaltypoints/loyaltypoints_pb2.pyj",
     ]);
 
@@ -676,14 +665,9 @@ async fn test_quasar_accounting_loyalty_contracts() {
 
 #[tokio::test]
 async fn test_quasar_industry_planetary_moon_asteroidbelt() {
-    // parity: plan:Q-6, feat:quasar.industry, feat:quasar.planet, feat:quasar.planetinteraction, feat:quasar.moon, feat:quasar.asteroidbelt, quasar:eveProto/generated/eve_public/planet/planet_pb2.pyj, quasar:eveProto/generated/eve_public/planet/skyhook/skyhook_pb2.pyj
+    // parity: plan:Q-6, quasar:eveProto/generated/eve_public/planet/planet_pb2.pyj, quasar:eveProto/generated/eve_public/planet/skyhook/skyhook_pb2.pyj
     eve_testkit::attest(&[
         "plan:Q-6",
-        "feat:quasar.industry",
-        "feat:quasar.planet",
-        "feat:quasar.planetinteraction",
-        "feat:quasar.moon",
-        "feat:quasar.asteroidbelt",
         "quasar:eveProto/generated/eve_public/planet/planet_pb2.pyj",
         "quasar:eveProto/generated/eve_public/planet/skyhook/skyhook_pb2.pyj",
     ]);

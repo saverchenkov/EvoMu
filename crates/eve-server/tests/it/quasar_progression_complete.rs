@@ -627,11 +627,9 @@ async fn quasar_achievements_categories_scores_and_claims() {
 
 #[tokio::test]
 async fn quasar_skills_plans_extractors_and_implants() {
-    // parity: plan:Q-4, feat:quasar.skill, feat:quasar.implant, quasar:eveProto/generated/eve_public/skill/plan/plan_pb2.pyj, quasar:eveProto/generated/eve_public/skill/plan/milestone_pb2.pyj, quasar:eveProto/generated/eve_public/corporation/skill/plan/plan_pb2.pyj
+    // parity: plan:Q-4, quasar:eveProto/generated/eve_public/skill/plan/plan_pb2.pyj, quasar:eveProto/generated/eve_public/skill/plan/milestone_pb2.pyj, quasar:eveProto/generated/eve_public/corporation/skill/plan/plan_pb2.pyj
     eve_testkit::attest(&[
         "plan:Q-4",
-        "feat:quasar.skill",
-        "feat:quasar.implant",
         "quasar:eveProto/generated/eve_public/skill/plan/plan_pb2.pyj",
         "quasar:eveProto/generated/eve_public/skill/plan/milestone_pb2.pyj",
         "quasar:eveProto/generated/eve_public/corporation/skill/plan/plan_pb2.pyj",

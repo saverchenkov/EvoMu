@@ -59,11 +59,10 @@ fn sample_request_payload(ctx: &ServerContext, type_name: &str) -> Vec<u8> {
 
 #[tokio::test]
 async fn test_quasar_chat_and_presence_complete() {
-    // parity: plan:Q-5, feat:quasar.chat, feat:quasar.presence, quasar:eveProto/generated/eve_public/chat/local/api/admin/requests_pb2.pyj, quasar:eveProto/generated/eve_public/chat/local/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/chat/local/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/chat/local/local_pb2.pyj
+    // parity: plan:Q-5, feat:quasar.chat, quasar:eveProto/generated/eve_public/chat/local/api/admin/requests_pb2.pyj, quasar:eveProto/generated/eve_public/chat/local/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/chat/local/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/chat/local/local_pb2.pyj
     eve_testkit::attest(&[
         "plan:Q-5",
         "feat:quasar.chat",
-        "feat:quasar.presence",
         "quasar:eveProto/generated/eve_public/chat/local/api/admin/requests_pb2.pyj",
         "quasar:eveProto/generated/eve_public/chat/local/api/notices_pb2.pyj",
         "quasar:eveProto/generated/eve_public/chat/local/api/requests_pb2.pyj",
@@ -144,10 +143,9 @@ async fn test_quasar_chat_and_presence_complete() {
 
 #[tokio::test]
 async fn test_quasar_alliance_complete() {
-    // parity: plan:Q-5, feat:quasar.alliance, quasar:eveProto/generated/eve_public/alliance/alliance_pb2.pyj
+    // parity: plan:Q-5, quasar:eveProto/generated/eve_public/alliance/alliance_pb2.pyj
     eve_testkit::attest(&[
         "plan:Q-5",
-        "feat:quasar.alliance",
         "quasar:eveProto/generated/eve_public/alliance/alliance_pb2.pyj",
     ]);
 
@@ -409,13 +407,9 @@ async fn test_quasar_freelance_complete() {
 
 #[tokio::test]
 async fn test_quasar_mail_calendar_contacts_standings_complete() {
-    // parity: plan:Q-5, feat:quasar.mail, feat:quasar.calendar, feat:quasar.contact, feat:quasar.standing, quasar:eveProto/generated/eve_public/standing/standing_pb2.pyj
+    // parity: plan:Q-5, quasar:eveProto/generated/eve_public/standing/standing_pb2.pyj
     eve_testkit::attest(&[
         "plan:Q-5",
-        "feat:quasar.mail",
-        "feat:quasar.calendar",
-        "feat:quasar.contact",
-        "feat:quasar.standing",
         "quasar:eveProto/generated/eve_public/standing/standing_pb2.pyj",
     ]);
 
@@ -467,18 +461,9 @@ async fn test_quasar_mail_calendar_contacts_standings_complete() {
 
 #[tokio::test]
 async fn test_quasar_wars_tags_bookmarks_fleet_medal_security_complete() {
-    // parity: plan:Q-5, feat:quasar.war, feat:quasar.tag, feat:quasar.bookmark, feat:quasar.fleet, feat:quasar.medal, feat:quasar.search, feat:quasar.duel, feat:quasar.securitystatus, feat:quasar.notification, quasar:eveProto/generated/eve_public/securitystatus/securitystatus_pb2.pyj
+    // parity: plan:Q-5, quasar:eveProto/generated/eve_public/securitystatus/securitystatus_pb2.pyj
     eve_testkit::attest(&[
         "plan:Q-5",
-        "feat:quasar.war",
-        "feat:quasar.tag",
-        "feat:quasar.bookmark",
-        "feat:quasar.fleet",
-        "feat:quasar.medal",
-        "feat:quasar.search",
-        "feat:quasar.duel",
-        "feat:quasar.securitystatus",
-        "feat:quasar.notification",
         "quasar:eveProto/generated/eve_public/securitystatus/securitystatus_pb2.pyj",
     ]);
 

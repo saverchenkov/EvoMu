@@ -1,55 +1,18 @@
 //! `quasar_entitlement_membership` — Quasar Entitlement, Omega & Membership Services (`Q-3`).
 
-use super::quasar_auth_user::{build_generic_response, get_identity_store};
-use crate::quasar_gateway::{
-    NoticeScope, PublicGatewayRouter,
-};
+use super::quasar_auth_user::get_identity_store;
+use crate::quasar_gateway::{require_admin_role, NoticeScope, PublicGatewayRouter};
 use eve_db::WorldRepository;
 use eve_proto::quasar::{
-    encode_bytes_field, encode_string_field, encode_varint_field,
-    DynamicValue, GoogleAny, QuasarDescriptorRegistry,
+    encode_bytes_field, encode_string_field, encode_varint_field, DynamicValue, GoogleAny,
     TYPE_GOOGLEAPIS_PREFIX,
 };
 use std::sync::Arc;
 
-pub const GROUP_2_REQUEST_PAIRS: &[(&str, &str)] = &[
-    ("eve.entitlement.character.admin.GetAllRequest", "eve.entitlement.character.admin.GetAllResponse"),
-    ("eve.entitlement.character.api.IsEntitledRequest", "eve.entitlement.character.api.IsEntitledResponse"),
-    ("eve.entitlement.character.ship.admin.alliancelogo.GrantRequest", "eve.entitlement.character.ship.admin.alliancelogo.GrantResponse"),
-    ("eve.entitlement.character.ship.admin.alliancelogo.RevokeRequest", "eve.entitlement.character.ship.admin.alliancelogo.RevokeResponse"),
-    ("eve.entitlement.character.ship.admin.corplogo.GrantRequest", "eve.entitlement.character.ship.admin.corplogo.GrantResponse"),
-    ("eve.entitlement.character.ship.admin.corplogo.RevokeRequest", "eve.entitlement.character.ship.admin.corplogo.RevokeResponse"),
-    ("eve.entitlement.user.api.GrantRequest", "eve.entitlement.user.api.GrantResponse"),
-    ("eve.entitlement.user.subscription.api.GrantRequest", "eve.entitlement.user.subscription.api.GrantResponse"),
-    ("eve.membership.GetCharacterAllRequest", "eve.membership.GetCharacterAllResponse"),
-    ("eve.membership.GetCharactersAllRequest", "eve.membership.GetCharactersAllResponse"),
-    ("eve.membership.GetCorporationAllRequest", "eve.membership.GetCorporationAllResponse"),
-    ("eve.membership.alliance.GetByCharacterRequest", "eve.membership.alliance.GetByCharacterResponse"),
-    ("eve.membership.alliance.GetByCorporationRequest", "eve.membership.alliance.GetByCorporationResponse"),
-    ("eve.membership.alliance.GetCharacterRequest", "eve.membership.alliance.GetCharacterResponse"),
-    ("eve.membership.alliance.GetMultipleCharactersRequest", "eve.membership.alliance.GetMultipleCharactersResponse"),
-    ("eve.membership.corporation.CheckIsMemberOfNPCCorporationRequest", "eve.membership.corporation.CheckIsMemberOfNPCCorporationResponse"),
-    ("eve.membership.corporation.GetCharacterRequest", "eve.membership.corporation.GetCharacterResponse"),
-    ("eve.membership.corporation.GetMultipleCharactersRequest", "eve.membership.corporation.GetMultipleCharactersResponse"),
-    ("eve.membership.faction.GetByAllianceRequest", "eve.membership.faction.GetByAllianceResponse"),
-    ("eve.membership.faction.GetByCorporationRequest", "eve.membership.faction.GetByCorporationResponse"),
-    ("eve.membership.faction.GetCharacterRequest", "eve.membership.faction.GetCharacterResponse"),
-    ("eve.membership.faction.GetMultipleCharactersRequest", "eve.membership.faction.GetMultipleCharactersResponse"),
-    ("eve_public.entitlement.character.GetAllRequest", "eve_public.entitlement.character.GetAllResponse"),
-    ("eve_public.entitlement.character.ship.admin.alliancelogo.GrantRequest", "eve_public.entitlement.character.ship.admin.alliancelogo.GrantResponse"),
-    ("eve_public.entitlement.character.ship.admin.alliancelogo.RevokeRequest", "eve_public.entitlement.character.ship.admin.alliancelogo.RevokeResponse"),
-    ("eve_public.entitlement.character.ship.admin.corplogo.GrantRequest", "eve_public.entitlement.character.ship.admin.corplogo.GrantResponse"),
-    ("eve_public.entitlement.character.ship.admin.corplogo.RevokeRequest", "eve_public.entitlement.character.ship.admin.corplogo.RevokeResponse"),
-    ("eve_public.entitlement.user.api.GetRequest", "eve_public.entitlement.user.api.GetResponse"),
-];
-
 pub fn register_handlers(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
-    let descriptors = Arc::clone(&router.descriptors);
     let store = get_identity_store();
 
-    // 1. Specific custom handlers with live entitlement/membership semantics
-
-    // eve_public.entitlement.user.api.GetRequest -> eve_public.entitlement.user.api.GetResponse
+    // 1. eve_public.entitlement.user.api.GetRequest -> eve_public.entitlement.user.api.GetResponse
     let store_ent_get = Arc::clone(&store);
     router.register_handler(
         "eve_public.entitlement.user.api.GetRequest",
@@ -61,7 +24,7 @@ pub fn register_handlers(router: &PublicGatewayRouter, _db: Arc<WorldRepository>
                 .user_entitlements
                 .get(&uid)
                 .cloned()
-                .unwrap_or_default();
+                .unwrap_or_else(|| vec!["standard_pilot".to_string()]);
 
             let mut out = Vec::new();
             for ent_name in ents {
@@ -70,26 +33,27 @@ pub fn register_handlers(router: &PublicGatewayRouter, _db: Arc<WorldRepository>
                 encode_bytes_field(1, &ent_bytes, &mut out);
             }
             Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.entitlement.user.api.GetResponse"),
+                type_url: format!(
+                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.entitlement.user.api.GetResponse"
+                ),
                 value: out,
             })
         }),
     );
 
-    // eve.entitlement.user.api.GetListRequest -> eve.entitlement.user.api.GetListResponse
-    let store_ent_int = Arc::clone(&store);
+    // 2. eve_public.entitlement.character.GetAllRequest -> eve_public.entitlement.character.GetAllResponse
+    let store_char_ent = Arc::clone(&store);
     router.register_handler(
-        "eve.entitlement.user.api.GetListRequest",
+        "eve_public.entitlement.character.GetAllRequest",
         Arc::new(move |ctx, _any, _dyn_msg| {
             let uid = ctx.effective_user_id().unwrap_or(1) as u64;
-            let ents = store_ent_int
+            let ents = store_char_ent
                 .read()
                 .unwrap_or_else(|e| e.into_inner())
                 .user_entitlements
                 .get(&uid)
                 .cloned()
-                .unwrap_or_default();
-
+                .unwrap_or_else(|| vec!["standard_pilot".to_string()]);
             let mut out = Vec::new();
             for ent_name in ents {
                 let mut ent_bytes = Vec::new();
@@ -97,13 +61,55 @@ pub fn register_handlers(router: &PublicGatewayRouter, _db: Arc<WorldRepository>
                 encode_bytes_field(1, &ent_bytes, &mut out);
             }
             Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.entitlement.user.api.GetListResponse"),
+                type_url: format!(
+                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.entitlement.character.GetAllResponse"
+                ),
                 value: out,
             })
         }),
     );
 
-    // eve.entitlement.user.api.GrantRequest -> enqueues GrantedNotice
+    // 3. eve_public.entitlement.character.ship.admin.{alliancelogo,corplogo}.{Grant,Revoke}Request
+    for (req_name, rsp_name) in [
+        (
+            "eve_public.entitlement.character.ship.admin.alliancelogo.GrantRequest",
+            "eve_public.entitlement.character.ship.admin.alliancelogo.GrantResponse",
+        ),
+        (
+            "eve_public.entitlement.character.ship.admin.alliancelogo.RevokeRequest",
+            "eve_public.entitlement.character.ship.admin.alliancelogo.RevokeResponse",
+        ),
+        (
+            "eve_public.entitlement.character.ship.admin.corplogo.GrantRequest",
+            "eve_public.entitlement.character.ship.admin.corplogo.GrantResponse",
+        ),
+        (
+            "eve_public.entitlement.character.ship.admin.corplogo.RevokeRequest",
+            "eve_public.entitlement.character.ship.admin.corplogo.RevokeResponse",
+        ),
+    ] {
+        let store_logo = Arc::clone(&store);
+        router.register_handler(
+            req_name,
+            Arc::new(move |ctx, _any, _dyn_msg| {
+                require_admin_role(ctx)?;
+                let uid = ctx.effective_user_id().unwrap_or(1) as u64;
+                let mut guard = store_logo.write().unwrap_or_else(|e| e.into_inner());
+                let entry = guard.user_entitlements.entry(uid).or_default();
+                if req_name.ends_with("GrantRequest") {
+                    entry.push(req_name.to_string());
+                } else {
+                    entry.retain(|x| !x.contains("logo"));
+                }
+                Ok(GoogleAny {
+                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}{rsp_name}"),
+                    value: Vec::new(),
+                })
+            }),
+        );
+    }
+
+    // 4. eve.entitlement.user.api.GrantRequest -> enqueues GrantedNotice
     let store_ent_grant = Arc::clone(&store);
     let router_pending = Arc::clone(&router.pending_notices);
     router.register_handler(
@@ -144,7 +150,9 @@ pub fn register_handlers(router: &PublicGatewayRouter, _db: Arc<WorldRepository>
                 .push((
                     NoticeScope::User(uid as i32),
                     GoogleAny {
-                        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.assetholding.entitlement.api.GrantedNotice"),
+                        type_url: format!(
+                            "{TYPE_GOOGLEAPIS_PREFIX}eve_public.assetholding.entitlement.api.GrantedNotice"
+                        ),
                         value: notice_bytes,
                     },
                 ));
@@ -156,7 +164,7 @@ pub fn register_handlers(router: &PublicGatewayRouter, _db: Arc<WorldRepository>
         }),
     );
 
-    // eve.membership.GetCharacterAllRequest -> eve.membership.GetCharacterAllResponse
+    // 5. eve.membership.GetCharacterAllRequest -> eve.membership.GetCharacterAllResponse
     router.register_handler(
         "eve.membership.GetCharacterAllRequest",
         Arc::new(move |ctx, _any, _dyn_msg| {
@@ -169,34 +177,11 @@ pub fn register_handlers(router: &PublicGatewayRouter, _db: Arc<WorldRepository>
             let mut out = Vec::new();
             encode_bytes_field(1, &mem_attr, &mut out);
             Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.membership.GetCharacterAllResponse"),
+                type_url: format!(
+                    "{TYPE_GOOGLEAPIS_PREFIX}eve.membership.GetCharacterAllResponse"
+                ),
                 value: out,
             })
         }),
     );
-
-    // 2. Register all other Group 2 request pairs using descriptors
-    for &(req_type, rsp_type) in GROUP_2_REQUEST_PAIRS {
-        let req_norm = QuasarDescriptorRegistry::normalize_type_name(req_type).to_string();
-        let rsp_norm = QuasarDescriptorRegistry::normalize_type_name(rsp_type).to_string();
-        let desc_arc = Arc::clone(&descriptors);
-        let rsp_name_clone = rsp_norm.clone();
-
-        if matches!(
-            req_norm.as_str(),
-            "eve_public.entitlement.user.api.GetRequest"
-                | "eve.entitlement.user.api.GetListRequest"
-                | "eve.entitlement.user.api.GrantRequest"
-                | "eve.membership.GetCharacterAllRequest"
-        ) {
-            continue;
-        }
-
-        router.register_handler(
-            &req_norm,
-            Arc::new(move |_ctx, _any, _dyn_msg| {
-                build_generic_response(&desc_arc, &rsp_name_clone, 0x2001)
-            }),
-        );
-    }
 }

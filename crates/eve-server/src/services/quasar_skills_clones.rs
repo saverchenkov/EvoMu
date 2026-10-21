@@ -709,23 +709,72 @@ pub fn register_skill_handlers(
         ),
     ] {
         let mgr = Arc::clone(&manager);
-        let desc = Arc::clone(&router.descriptors);
         router.register_handler(
             req_name,
-            Arc::new(move |ctx, _any, _dyn_msg| {
+            Arc::new(move |ctx, _any, dyn_msg| {
                 let Some(cid) = ctx.effective_character_id() else {
                     return Err((STATUS_FORBIDDEN, "Active character required".into()));
                 };
-                let _plans = mgr.get_personal_plans(cid);
-                let sample = desc
-                    .instantiate_populated_sample(rsp_name, u64::from(cid))
-                    .map_err(|e| (STATUS_BAD_REQUEST, e.to_string()))?;
-                let bytes = desc
-                    .encode_dynamic(&sample)
-                    .map_err(|e| (STATUS_BAD_REQUEST, e.to_string()))?;
+                if req_name.ends_with("SetNameRequest") {
+                    if let Some(DynamicValue::String(new_name)) = dyn_msg.get(2) {
+                        if let Some(plans) = mgr.personal_plans.write().unwrap().get_mut(&cid) {
+                            if let Some(first) = plans.first_mut() {
+                                first.name = new_name.clone();
+                            }
+                        }
+                    }
+                } else if req_name.ends_with("milestone.SetDescriptionRequest") {
+                    let desc_str = dyn_msg
+                        .get(2)
+                        .and_then(|v| match v {
+                            DynamicValue::String(s) => Some(s.clone()),
+                            _ => None,
+                        })
+                        .unwrap_or_else(|| "Updated Milestone".to_string());
+                    if let Some(plans) = mgr.personal_plans.write().unwrap().get_mut(&cid) {
+                        if let Some(first) = plans.first_mut() {
+                            if let Some(m) = first.milestones.first_mut() {
+                                *m = desc_str;
+                            } else {
+                                first.milestones.push(desc_str);
+                            }
+                        }
+                    }
+                } else if req_name.ends_with("SetDescriptionRequest") {
+                    if let Some(DynamicValue::String(new_desc)) = dyn_msg.get(2) {
+                        if let Some(plans) = mgr.personal_plans.write().unwrap().get_mut(&cid) {
+                            if let Some(first) = plans.first_mut() {
+                                first.description = new_desc.clone();
+                            }
+                        }
+                    }
+                } else if req_name.ends_with("milestone.CreateRequest") {
+                    if let Some(plans) = mgr.personal_plans.write().unwrap().get_mut(&cid) {
+                        if let Some(first) = plans.first_mut() {
+                            first.milestones.push("Milestone V".to_string());
+                        }
+                    }
+                } else if req_name.ends_with("milestone.DeleteRequest") {
+                    if let Some(plans) = mgr.personal_plans.write().unwrap().get_mut(&cid) {
+                        if let Some(first) = plans.first_mut() {
+                            first.milestones.pop();
+                        }
+                    }
+                }
+                let plans = mgr.get_personal_plans(cid);
+                let mut out = Vec::new();
+                if let Some(first) = plans.first() {
+                    let mut id_bytes = Vec::new();
+                    encode_bytes_field(1, &first.uuid, &mut id_bytes);
+                    encode_bytes_field(1, &id_bytes, &mut out);
+                } else {
+                    let mut id_bytes = Vec::new();
+                    encode_bytes_field(1, &[0x53, 0x50, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1], &mut id_bytes);
+                    encode_bytes_field(1, &id_bytes, &mut out);
+                }
                 Ok(GoogleAny {
                     type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}{rsp_name}"),
-                    value: bytes,
+                    value: out,
                 })
             }),
         );

@@ -19,14 +19,15 @@
 #![forbid(unsafe_code)]
 
 use crate::quasar_gateway::{
-    require_admin_role, PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_INTERNAL_ERROR,
+    PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_INTERNAL_ERROR,
 };
 use eve_db::WorldRepository;
 use eve_proto::quasar::{
-    AuthoritativeContext, DynamicQuasarMessage, DynamicValue, GoogleAny, QuasarDescriptorRegistry,
-    TYPE_GOOGLEAPIS_PREFIX,
+    AuthoritativeContext, DynamicQuasarMessage, DynamicValue, FieldLabel, FieldType, GoogleAny,
+    QuasarDescriptorRegistry, TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_sde::SdeRegistry;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 /// Extracts effective corp role bitmask from authoritative context.
@@ -85,15 +86,87 @@ pub fn apply_sde_record(
     }
 }
 
+fn new_schema_message(
+    descriptors: &QuasarDescriptorRegistry,
+    type_name: &str,
+    depth: usize,
+    visited: &mut HashSet<String>,
+) -> Result<DynamicQuasarMessage, (u32, String)> {
+    let desc = descriptors
+        .get_message(type_name)
+        .ok_or_else(|| (STATUS_INTERNAL_ERROR, format!("unknown message {type_name}")))?;
+    let mut msg = DynamicQuasarMessage::new(desc.full_name.clone());
+    if depth > 4 {
+        return Ok(msg);
+    }
+    visited.insert(desc.full_name.clone());
+    let mut chosen_oneofs = HashSet::new();
+    for f in &desc.fields {
+        if let Some(oneof_idx) = f.oneof_index {
+            if !chosen_oneofs.insert(oneof_idx) {
+                continue;
+            }
+        }
+        let val_opt = match f.field_type {
+            FieldType::Double => Some(DynamicValue::Double(1.0)),
+            FieldType::Float => Some(DynamicValue::Float(1.0)),
+            FieldType::Int64 => Some(DynamicValue::Int64(1)),
+            FieldType::Uint64 => Some(DynamicValue::Uint64(1)),
+            FieldType::Int32 => Some(DynamicValue::Int32(1)),
+            FieldType::Fixed64 => Some(DynamicValue::Fixed64(1)),
+            FieldType::Fixed32 => Some(DynamicValue::Fixed32(1)),
+            FieldType::Bool => Some(DynamicValue::Bool(true)),
+            FieldType::String => Some(DynamicValue::String(f.name.clone())),
+            FieldType::Bytes => Some(DynamicValue::Bytes(vec![1, 2, 3, 4])),
+            FieldType::Uint32 => Some(DynamicValue::Uint32(1)),
+            FieldType::Enum => {
+                let ev = descriptors
+                    .enums_by_full_name
+                    .get(&f.type_name)
+                    .and_then(|en| {
+                        en.values
+                            .iter()
+                            .find(|v| v.number != 0)
+                            .or_else(|| en.values.first())
+                    })
+                    .map(|v| v.number)
+                    .unwrap_or(1);
+                Some(DynamicValue::Enum(ev))
+            }
+            FieldType::Sfixed32 => Some(DynamicValue::Sfixed32(1)),
+            FieldType::Sfixed64 => Some(DynamicValue::Sfixed64(1)),
+            FieldType::Sint32 => Some(DynamicValue::Sint32(1)),
+            FieldType::Sint64 => Some(DynamicValue::Sint64(1)),
+            FieldType::Message | FieldType::Group => {
+                let target = QuasarDescriptorRegistry::normalize_type_name(&f.type_name);
+                if visited.contains(target) {
+                    None
+                } else {
+                    let sub = new_schema_message(descriptors, target, depth + 1, visited)?;
+                    Some(DynamicValue::Message(Box::new(sub)))
+                }
+            }
+        };
+        if let Some(val) = val_opt {
+            if f.label == FieldLabel::Repeated {
+                msg.set(f.number, DynamicValue::Repeated(vec![val]));
+            } else {
+                msg.set(f.number, val);
+            }
+        }
+    }
+    visited.remove(&desc.full_name);
+    Ok(msg)
+}
+
 /// Builds a dynamically serialized protobuf `GoogleAny` payload conforming to `response_type`.
 pub fn build_dynamic_response(
     descriptors: &QuasarDescriptorRegistry,
     response_type: &str,
     customize: impl FnOnce(&mut DynamicQuasarMessage),
 ) -> Result<GoogleAny, (u32, String)> {
-    let mut resp = descriptors
-        .instantiate_populated_sample(response_type, 1001)
-        .map_err(|e| (STATUS_INTERNAL_ERROR, format!("instantiate {response_type}: {e}")))?;
+    let mut visited = HashSet::new();
+    let mut resp = new_schema_message(descriptors, response_type, 0, &mut visited)?;
     customize(&mut resp);
     let value = descriptors
         .encode_dynamic(&resp)
@@ -102,132 +175,6 @@ pub fn build_dynamic_response(
         type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}{response_type}"),
         value,
     })
-}
-
-/// Populates and round-trip encodes all protobuf model messages in a Quasar domain using live
-/// `SdeRegistry` and `WorldRepository` records (`feat:quasar.*` domain model packages).
-pub fn populate_domain_model_messages(
-    sde: &SdeRegistry,
-    db: &WorldRepository,
-    descriptors: &QuasarDescriptorRegistry,
-    domain: &str,
-) -> Result<Vec<GoogleAny>, (u32, String)> {
-    let file_indices = descriptors
-        .files_by_domain
-        .get(domain)
-        .ok_or_else(|| (STATUS_BAD_REQUEST, format!("Unknown Quasar domain '{domain}'")))?;
-
-    let (primary_id, secondary_id, label): (u64, u64, String) = match domain {
-        "agent" => sde
-            .agents
-            .values()
-            .next()
-            .map(|a| (a.agent_id as u64, a.corporation_id as u64, format!("agent_{}", a.agent_id)))
-            .unwrap_or((3_008_416, 1_000_035, "Caldari Navy Agent".into())),
-        "ancestry" => sde
-            .ancestries
-            .values()
-            .next()
-            .map(|a| (a.ancestry_id as u64, a.bloodline_id as u64, a.name.clone()))
-            .unwrap_or((1, 1, "Mercenaries".into())),
-        "bloodline" => sde
-            .bloodlines
-            .values()
-            .next()
-            .map(|b| (b.bloodline_id as u64, b.race_id as u64, b.name.clone()))
-            .unwrap_or((1, 1, "Deteis".into())),
-        "capacitor" | "module" | "starbase" => sde
-            .types
-            .get(&587)
-            .map(|t| (t.type_id as u64, t.group_id as u64, t.name.clone()))
-            .unwrap_or((587, 25, "Rifter".into())),
-        "constellation" => sde
-            .constellations
-            .get(&20_000_020)
-            .or_else(|| sde.constellations.values().next())
-            .map(|c| (c.constellation_id as u64, c.region_id as u64, c.name.clone()))
-            .unwrap_or((20_000_020, 10_000_002, "Kimotoro".into())),
-        "dynamicbountysystem" | "universe" => sde
-            .solar_systems
-            .get(&30_000_142)
-            .or_else(|| sde.solar_systems.values().next())
-            .map(|s| (s.solar_system_id as u64, s.region_id as u64, s.name.clone()))
-            .unwrap_or((30_000_142, 10_000_002, "Jita".into())),
-        "epicarc" => sde
-            .epic_arcs
-            .values()
-            .next()
-            .map(|e| (e.epic_arc_id as u64, e.faction_id.unwrap_or(500_001) as u64, e.name.clone()))
-            .unwrap_or((1, 500_001, "The Blood-Stained Stars".into())),
-        "fighter" => sde
-            .fighter_abilities
-            .values()
-            .next()
-            .map(|f| (f.ability_id as u64, f.icon_id.unwrap_or(1) as u64, f.target_mode.clone()))
-            .unwrap_or((1, 1, "PointTargeted".into())),
-        "race" => sde
-            .races
-            .values()
-            .next()
-            .map(|r| (r.race_id as u64, 1, r.name.clone()))
-            .unwrap_or((1, 1, "Caldari".into())),
-        "region" => sde
-            .regions
-            .get(&10_000_002)
-            .or_else(|| sde.regions.values().next())
-            .map(|r| (r.region_id as u64, r.faction_id.unwrap_or(500_001) as u64, r.name.clone()))
-            .unwrap_or((10_000_002, 500_001, "The Forge".into())),
-        "school" => sde
-            .schools
-            .values()
-            .next()
-            .map(|s| (s.school_id as u64, s.race_id as u64, s.name.clone()))
-            .unwrap_or((11, 1, "State War Academy".into())),
-        "wormhole" => sde
-            .wormhole_types
-            .values()
-            .next()
-            .map(|w| (w.type_id as u64, w.target_system_class as u64, w.name.clone()))
-            .unwrap_or((16_272, 2, "Wormhole K162".into())),
-        _ => {
-            let cid = db.with_snapshot(|snap| {
-                snap.characters
-                    .keys()
-                    .next()
-                    .copied()
-                    .unwrap_or(90_000_001)
-            });
-            (cid as u64, 30_000_142, format!("evomu_{domain}"))
-        }
-    };
-
-    let mut encoded_anys = Vec::new();
-    for &file_idx in file_indices {
-        let fd = &descriptors.files[file_idx];
-        for msg in &fd.messages {
-            let mut instance = descriptors
-                .instantiate_populated_sample(&msg.full_name, primary_id.wrapping_add(42))
-                .map_err(|e| (STATUS_INTERNAL_ERROR, format!("instantiate {}: {e}", msg.full_name)))?;
-            apply_sde_record(&mut instance, primary_id, secondary_id, &label);
-            let wire = descriptors
-                .encode_dynamic(&instance)
-                .map_err(|e| (STATUS_INTERNAL_ERROR, format!("encode {}: {e}", msg.full_name)))?;
-            let decoded = descriptors
-                .decode_dynamic(&msg.full_name, &wire)
-                .map_err(|e| (STATUS_INTERNAL_ERROR, format!("decode {}: {e}", msg.full_name)))?;
-            if decoded != instance {
-                return Err((
-                    STATUS_INTERNAL_ERROR,
-                    format!("Roundtrip mismatch for {}", msg.full_name),
-                ));
-            }
-            encoded_anys.push(GoogleAny {
-                type_url: instance.type_url(),
-                value: wire,
-            });
-        }
-    }
-    Ok(encoded_anys)
 }
 
 /// Helper to read an integer field (uint32/int32/uint64/int64) from a dynamic message.
@@ -804,8 +751,7 @@ pub fn register_handlers(
         );
     }
 
-    // 13. Stargate lock API, AI assistant, client, ship, ACL, content, debug, id, mission,
-    //     monolith location, space tags, star power, starterspace, station owner, tournament, vanguard, epic vendor
+    // 13. Public stargate lock API, AI assistant, and space CDN update
     for (req_name, rsp_name) in [
         (
             "eve_public.stargate.lock.api.GetRequest",
@@ -820,68 +766,8 @@ pub fn register_handlers(
             "eve_public.ai.assistant.chat.api.QueryResponse",
         ),
         (
-            "eve.client.host.GetRequest",
-            "eve.client.host.GetResponse",
-        ),
-        (
-            "eve.ship.api.GetRequest",
-            "eve.ship.api.GetResponse",
-        ),
-        (
-            "eve.acl.api.GetRequest",
-            "eve.acl.api.GetResponse",
-        ),
-        (
-            "eve.content.GetAllRequest",
-            "eve.content.GetAllResponse",
-        ),
-        (
-            "eve.debug.monolith.externalqueue.EmitProtobufEventRequest",
-            "eve.debug.monolith.externalqueue.EmitProtobufEventResponse",
-        ),
-        (
-            "eve.id.api.GetRequest",
-            "eve.id.api.GetResponse",
-        ),
-        (
-            "eve.mission.api.GetCompletedCountRequest",
-            "eve.mission.api.GetCompletedCountResponse",
-        ),
-        (
-            "eve.monolith.character.location.GetRequest",
-            "eve.monolith.character.location.GetResponse",
-        ),
-        (
-            "eve.space.api.GetDefaultTagRegistryVersionRequest",
-            "eve.space.api.GetDefaultTagRegistryVersionResponse",
-        ),
-        (
-            "eve.star.resources.api.GetPowerProductionRequest",
-            "eve.star.resources.api.GetPowerProductionResponse",
-        ),
-        (
-            "eve.stargate.lock.api.admin.GetAllRequest",
-            "eve.stargate.lock.api.admin.GetAllResponse",
-        ),
-        (
-            "eve.starterspace.admin.ResetJumpShipCasterRequest",
-            "eve.starterspace.admin.ResetJumpShipCasterResponse",
-        ),
-        (
-            "eve.station.owner.GetStationOwnerRequest",
-            "eve.station.owner.GetStationOwnerResponse",
-        ),
-        (
-            "eve.tournament.arena.api.GetAllRequest",
-            "eve.tournament.arena.api.GetAllResponse",
-        ),
-        (
-            "eve.vanguard.commission.assignment.admin.api.TriggerCompletedEventRequest",
-            "eve.vanguard.commission.assignment.admin.api.TriggerCompletedEventResponse",
-        ),
-        (
-            "eve.vendors.epic.api.GetUserByEveUserIDRequest",
-            "eve.vendors.epic.api.GetUserByEveUserIDResponse",
+            "eve_public.space.api.cdn.GetUpdateRequest",
+            "eve_public.space.api.cdn.GetUpdateResponse",
         ),
     ] {
         let d = Arc::clone(&desc);
@@ -890,9 +776,6 @@ pub fn register_handlers(
         router.register_handler(
             req_name,
             Arc::new(move |ctx, _any, dyn_msg| {
-                if req_name.contains(".admin.") {
-                    require_admin_role(ctx)?;
-                }
                 let cid = ctx.effective_character_id().unwrap_or(90_000_001) as i64;
                 let (sys_id, station_id) = db_svc.with_snapshot(|s| {
                     s.characters

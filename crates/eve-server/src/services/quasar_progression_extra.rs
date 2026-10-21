@@ -12,7 +12,7 @@
 #![forbid(unsafe_code)]
 
 use crate::quasar_gateway::{
-    PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN, STATUS_NOT_FOUND,
+    require_admin_role, PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN, STATUS_NOT_FOUND,
 };
 use eve_db::WorldRepository;
 use eve_proto::quasar::{
@@ -743,31 +743,81 @@ pub fn register_progression_extra_handlers(
             "eve_public.campaign.trigger.eventmatch.definition.api.GetAllRequest",
             "eve_public.campaign.trigger.eventmatch.definition.api.GetAllResponse",
         ),
-        (
-            "eve_public.cosmetic.character.title.api.admin.GrantRequest",
-            "eve_public.cosmetic.character.title.api.admin.GrantResponse",
-        ),
-        (
-            "eve_public.cosmetic.character.title.api.admin.RevokeRequest",
-            "eve_public.cosmetic.character.title.api.admin.RevokeResponse",
-        ),
     ] {
-        let desc = Arc::clone(&router.descriptors);
+        let mgr = Arc::clone(&manager);
         router.register_handler(
             req_name,
-            Arc::new(move |ctx, _any, _dyn_msg| {
-                let seed = u64::from(ctx.effective_character_id().unwrap_or(90_000_001));
-                let sample = desc
-                    .instantiate_populated_sample(rsp_name, seed)
-                    .map_err(|e| (STATUS_BAD_REQUEST, e.to_string()))?;
-                let bytes = desc
-                    .encode_dynamic(&sample)
-                    .map_err(|e| (STATUS_BAD_REQUEST, e.to_string()))?;
+            Arc::new(move |_ctx, _any, _dyn_msg| {
+                if req_name.ends_with("CommitRequest") {
+                    mgr.add_community_progress(1, 1_000);
+                }
+                let progress = mgr
+                    .get_community_track(1)
+                    .map(|t| t.current_progress)
+                    .unwrap_or(350_000);
+                let mut out = Vec::new();
+                if req_name.ends_with("GetRequest")
+                    || req_name.ends_with("GetAllRequest")
+                    || req_name.ends_with("GetStatusRequest")
+                    || req_name.ends_with("GetParticipantStatusRequest")
+                    || req_name.ends_with("GetStatsRequest")
+                    || req_name.ends_with("GetParticipantStatsRequest")
+                    || req_name.ends_with("GetTickingContributionsPredictionRequest")
+                {
+                    let mut inner = Vec::new();
+                    encode_varint_field(1, progress, &mut inner);
+                    encode_bytes_field(1, &inner, &mut out);
+                }
                 Ok(GoogleAny {
                     type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}{rsp_name}"),
-                    value: bytes,
+                    value: out,
                 })
             }),
         );
     }
+
+    let mgr_grant = Arc::clone(&manager);
+    router.register_handler(
+        "eve_public.cosmetic.character.title.api.admin.GrantRequest",
+        Arc::new(move |ctx, _any, dyn_msg| {
+            require_admin_role(ctx)?;
+            let cid = ctx.effective_character_id().unwrap_or(90_000_001);
+            let tid = dyn_msg
+                .get(2)
+                .and_then(|v| match v {
+                    DynamicValue::Uint32(u) => Some(*u),
+                    DynamicValue::Int32(i) => Some(*i as u32),
+                    DynamicValue::Message(m) => m.get(1).and_then(|val| match val {
+                        DynamicValue::Uint32(u) => Some(*u),
+                        DynamicValue::Int32(i) => Some(*i as u32),
+                        _ => None,
+                    }),
+                    _ => None,
+                })
+                .unwrap_or(101);
+            mgr_grant.equipped_titles.write().unwrap().insert(cid, tid);
+            Ok(GoogleAny {
+                type_url: format!(
+                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.cosmetic.character.title.api.admin.GrantResponse"
+                ),
+                value: Vec::new(),
+            })
+        }),
+    );
+
+    let mgr_revoke = Arc::clone(&manager);
+    router.register_handler(
+        "eve_public.cosmetic.character.title.api.admin.RevokeRequest",
+        Arc::new(move |ctx, _any, _dyn_msg| {
+            require_admin_role(ctx)?;
+            let cid = ctx.effective_character_id().unwrap_or(90_000_001);
+            mgr_revoke.equipped_titles.write().unwrap().remove(&cid);
+            Ok(GoogleAny {
+                type_url: format!(
+                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.cosmetic.character.title.api.admin.RevokeResponse"
+                ),
+                value: Vec::new(),
+            })
+        }),
+    );
 }

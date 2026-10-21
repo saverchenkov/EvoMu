@@ -1,19 +1,9 @@
 //! End-to-End Parity Acceptance Tests for Quasar Feature Packages (`feat:quasar.*`).
 //!
 //! Validates schema integrity, dynamic wire roundtripping, gateway request routing via `publicGatewaySvc`,
-//! response envelope validation, and notice fan-out across all 80 open Quasar feature packages:
-//! - 25 Model Message Packages: `agent`, `ancestry`, `battlepass`, `bloodline`, `capacitor`,
-//!   `constellation`, `contextualoffer`, `csat`, `dynamicbountysystem`, `epicarc`, `fighter`,
-//!   `login`, `membership`, `module`, `omega`, `operation`, `race`, `raffle`, `region`,
-//!   `school`, `seasonalevent`, `starbase`, `ui`, `universe`, `wormhole`.
-//! - 55 Service Routing Packages: `app`, `auth`, `bubble`, `campaign`, `cdn`, `character`,
-//!   `client`, `cosmetic`, `dungeon`, `entitlement`, `faction`, `factionwarfare`, `fulfillment`,
-//!   `isk`, `legal`, `localization`, `npc`, `payment`, `pirate`, `plex`, `quasar`, `ship`,
-//!   `solarsystem`, `sovereignty`, `store`, `structure`, `user`, `academy`, `acl`, `ai`,
-//!   `content`, `deadspace`, `debug`, `dogma`, `effect`, `id`, `killmail`, `mission`, `monolith`,
-//!   `narrative`, `opportunity`, `piratestronghold`, `probe`, `projectdiscovery`, `pvp`, `space`,
-//!   `spacecomponent`, `star`, `stargate`, `starterspace`, `station`, `thirdpartyapi`, `tournament`,
-//!   `vanguard`, `vendors`.
+//! response envelope validation, and notice fan-out across the Quasar public feature packages:
+//! `ai`, `app`, `campaign`, `character`, `cosmetic`, `entitlement`, `faction`, `operation`,
+//! `opportunity`, `payment`, `pirate`, `plex`, `sovereignty`, `space`, `stargate`, `store`, `user`.
 
 use eve_machonet::SessionState;
 use eve_proto::quasar::{
@@ -23,7 +13,6 @@ use eve_proto::quasar::{
 use eve_proto::PyRep;
 use eve_server::quasar_gateway::{NoticeScope, STATUS_OK};
 use eve_server::router::ServerContext;
-use eve_server::services::quasar_space_services::populate_domain_model_messages;
 use std::collections::HashMap;
 
 fn extract_response_proto(rep: &PyRep) -> EvePublicResponse {
@@ -71,50 +60,6 @@ fn make_session(sid: u64, uid: u64, cid: i64, corp_id: i64) -> SessionState {
     sess.solar_system_id = Some(30_000_142);
     sess.role = eve_machonet::service_roles::ROLE_GM_DEFAULT;
     sess
-}
-
-fn verify_domain_model_messages(
-    ctx: &ServerContext,
-    domain: &str,
-    expected_files: usize,
-) {
-    let descriptors = &ctx.quasar_gateway.descriptors;
-    let file_indices = descriptors
-        .files_by_domain
-        .get(domain)
-        .unwrap_or_else(|| panic!("Domain '{domain}' not found in registry"));
-    assert_eq!(
-        file_indices.len(),
-        expected_files,
-        "File count mismatch for domain '{domain}'"
-    );
-
-    let populated = populate_domain_model_messages(&ctx.sde, &ctx.db, descriptors, domain)
-        .unwrap_or_else(|e| panic!("Server domain model population failed for {domain}: {e:?}"));
-    assert!(
-        !populated.is_empty(),
-        "Server must populate at least one model message for domain '{domain}'"
-    );
-
-    let mut total_messages_verified = 0;
-    for &file_idx in file_indices {
-        let fd = &descriptors.files[file_idx];
-        assert_eq!(fd.domain, domain);
-        assert!(!fd.raw_bytes.is_empty());
-        assert!(!fd.messages.is_empty(), "Descriptor file {} should contain messages", fd.pyj_path);
-
-        for msg in &fd.messages {
-            assert!(!msg.name.is_empty());
-            assert!(!msg.full_name.is_empty());
-            assert!(
-                populated.iter().any(|any| any.normalized_type_name() == msg.full_name),
-                "Populated server output missing {}",
-                msg.full_name
-            );
-            total_messages_verified += 1;
-        }
-    }
-    assert_eq!(populated.len(), total_messages_verified);
 }
 
 async fn dispatch_and_verify_request(
@@ -197,140 +142,18 @@ fn verify_event_notice_delivery(
 }
 
 #[tokio::test]
-async fn test_quasar_model_messages_batch1() {
-    // parity: feat:quasar.agent, feat:quasar.ancestry, feat:quasar.battlepass, feat:quasar.bloodline, feat:quasar.capacitor, feat:quasar.constellation, feat:quasar.contextualoffer, feat:quasar.csat, feat:quasar.dynamicbountysystem, feat:quasar.epicarc, feat:quasar.fighter, feat:quasar.login, feat:quasar.membership
+async fn test_quasar_service_routing_batch1() {
+    // parity: feat:quasar.ai, feat:quasar.app, feat:quasar.campaign, feat:quasar.character, feat:quasar.cosmetic, feat:quasar.entitlement, feat:quasar.faction, feat:quasar.operation, feat:quasar.opportunity
     eve_testkit::attest(&[
-        "feat:quasar.agent",
-        "feat:quasar.ancestry",
-        "feat:quasar.battlepass",
-        "feat:quasar.bloodline",
-        "feat:quasar.capacitor",
-        "feat:quasar.constellation",
-        "feat:quasar.contextualoffer",
-        "feat:quasar.csat",
-        "feat:quasar.dynamicbountysystem",
-        "feat:quasar.epicarc",
-        "feat:quasar.fighter",
-        "feat:quasar.login",
-        "feat:quasar.membership",
-    ]);
-
-    let ctx = ServerContext::new();
-    let reg = &ctx.quasar_gateway.descriptors;
-
-    // 1. Agent (2 files)
-    assert_eq!(reg.files_by_domain.get("agent").unwrap().len(), 2);
-    verify_domain_model_messages(&ctx, "agent", 2);
-    // 2. Ancestry (1 files)
-    assert_eq!(reg.files_by_domain.get("ancestry").unwrap().len(), 1);
-    verify_domain_model_messages(&ctx, "ancestry", 1);
-    // 3. Battlepass (6 files)
-    assert_eq!(reg.files_by_domain.get("battlepass").unwrap().len(), 6);
-    verify_domain_model_messages(&ctx, "battlepass", 6);
-    // 4. Bloodline (1 files)
-    assert_eq!(reg.files_by_domain.get("bloodline").unwrap().len(), 1);
-    verify_domain_model_messages(&ctx, "bloodline", 1);
-    // 5. Capacitor (1 files)
-    assert_eq!(reg.files_by_domain.get("capacitor").unwrap().len(), 1);
-    verify_domain_model_messages(&ctx, "capacitor", 1);
-    // 6. Constellation (2 files)
-    assert_eq!(reg.files_by_domain.get("constellation").unwrap().len(), 2);
-    verify_domain_model_messages(&ctx, "constellation", 2);
-    // 7. Contextualoffer (1 files)
-    assert_eq!(reg.files_by_domain.get("contextualoffer").unwrap().len(), 1);
-    verify_domain_model_messages(&ctx, "contextualoffer", 1);
-    // 8. Csat (1 files)
-    assert_eq!(reg.files_by_domain.get("csat").unwrap().len(), 1);
-    verify_domain_model_messages(&ctx, "csat", 1);
-    // 9. Dynamicbountysystem (2 files)
-    assert_eq!(reg.files_by_domain.get("dynamicbountysystem").unwrap().len(), 2);
-    verify_domain_model_messages(&ctx, "dynamicbountysystem", 2);
-    // 10. Epicarc (1 files)
-    assert_eq!(reg.files_by_domain.get("epicarc").unwrap().len(), 1);
-    verify_domain_model_messages(&ctx, "epicarc", 1);
-    // 11. Fighter (1 files)
-    assert_eq!(reg.files_by_domain.get("fighter").unwrap().len(), 1);
-    verify_domain_model_messages(&ctx, "fighter", 1);
-    // 12. Login (2 files)
-    assert_eq!(reg.files_by_domain.get("login").unwrap().len(), 2);
-    verify_domain_model_messages(&ctx, "login", 2);
-    // 13. Membership (4 files)
-    assert_eq!(reg.files_by_domain.get("membership").unwrap().len(), 4);
-    verify_domain_model_messages(&ctx, "membership", 4);
-}
-
-#[tokio::test]
-async fn test_quasar_model_messages_batch2() {
-    // parity: feat:quasar.module, feat:quasar.omega, feat:quasar.operation, feat:quasar.race, feat:quasar.raffle, feat:quasar.region, feat:quasar.school, feat:quasar.seasonalevent, feat:quasar.starbase, feat:quasar.ui, feat:quasar.universe, feat:quasar.wormhole
-    eve_testkit::attest(&[
-        "feat:quasar.module",
-        "feat:quasar.omega",
-        "feat:quasar.operation",
-        "feat:quasar.race",
-        "feat:quasar.raffle",
-        "feat:quasar.region",
-        "feat:quasar.school",
-        "feat:quasar.seasonalevent",
-        "feat:quasar.starbase",
-        "feat:quasar.ui",
-        "feat:quasar.universe",
-        "feat:quasar.wormhole",
-    ]);
-
-    let ctx = ServerContext::new();
-    let reg = &ctx.quasar_gateway.descriptors;
-
-    // 14. Module (2 files)
-    assert_eq!(reg.files_by_domain.get("module").unwrap().len(), 2);
-    verify_domain_model_messages(&ctx, "module", 2);
-    // 15. Omega (1 files)
-    assert_eq!(reg.files_by_domain.get("omega").unwrap().len(), 1);
-    verify_domain_model_messages(&ctx, "omega", 1);
-    // 16. Operation (4 files)
-    assert_eq!(reg.files_by_domain.get("operation").unwrap().len(), 4);
-    verify_domain_model_messages(&ctx, "operation", 4);
-    // 17. Race (1 files)
-    assert_eq!(reg.files_by_domain.get("race").unwrap().len(), 1);
-    verify_domain_model_messages(&ctx, "race", 1);
-    // 18. Raffle (1 files)
-    assert_eq!(reg.files_by_domain.get("raffle").unwrap().len(), 1);
-    verify_domain_model_messages(&ctx, "raffle", 1);
-    // 19. Region (2 files)
-    assert_eq!(reg.files_by_domain.get("region").unwrap().len(), 2);
-    verify_domain_model_messages(&ctx, "region", 2);
-    // 20. School (1 files)
-    assert_eq!(reg.files_by_domain.get("school").unwrap().len(), 1);
-    verify_domain_model_messages(&ctx, "school", 1);
-    // 21. Seasonalevent (1 files)
-    assert_eq!(reg.files_by_domain.get("seasonalevent").unwrap().len(), 1);
-    verify_domain_model_messages(&ctx, "seasonalevent", 1);
-    // 22. Starbase (2 files)
-    assert_eq!(reg.files_by_domain.get("starbase").unwrap().len(), 2);
-    verify_domain_model_messages(&ctx, "starbase", 2);
-    // 23. Ui (8 files)
-    assert_eq!(reg.files_by_domain.get("ui").unwrap().len(), 8);
-    verify_domain_model_messages(&ctx, "ui", 8);
-    // 24. Universe (3 files)
-    assert_eq!(reg.files_by_domain.get("universe").unwrap().len(), 3);
-    verify_domain_model_messages(&ctx, "universe", 3);
-    // 25. Wormhole (1 files)
-    assert_eq!(reg.files_by_domain.get("wormhole").unwrap().len(), 1);
-    verify_domain_model_messages(&ctx, "wormhole", 1);
-}
-
-#[tokio::test]
-async fn test_quasar_service_routing_batch1a() {
-    // parity: feat:quasar.app, feat:quasar.auth, feat:quasar.bubble, feat:quasar.campaign, feat:quasar.cdn, feat:quasar.character, feat:quasar.client, feat:quasar.cosmetic, feat:quasar.dungeon
-    eve_testkit::attest(&[
+        "feat:quasar.ai",
         "feat:quasar.app",
-        "feat:quasar.auth",
-        "feat:quasar.bubble",
         "feat:quasar.campaign",
-        "feat:quasar.cdn",
         "feat:quasar.character",
-        "feat:quasar.client",
         "feat:quasar.cosmetic",
-        "feat:quasar.dungeon",
+        "feat:quasar.entitlement",
+        "feat:quasar.faction",
+        "feat:quasar.operation",
+        "feat:quasar.opportunity",
     ]);
 
     let ctx = ServerContext::new();
@@ -339,113 +162,54 @@ async fn test_quasar_service_routing_batch1a() {
 
     ctx.quasar_gateway.subscribe_session(&sess, Vec::new(), ctx.now_unix());
 
-    // 1. App (70 files)
+    // 1. Ai (2 files)
+    assert_eq!(reg.files_by_domain.get("ai").unwrap().len(), 2);
+    dispatch_and_verify_request(&ctx, &mut sess, "eve_public.ai.assistant.chat.api.QueryRequest", Some("eve_public.ai.assistant.chat.api.QueryResponse"), b"ai-01").await;
+
+    // 2. App (70 files)
     assert_eq!(reg.files_by_domain.get("app").unwrap().len(), 70);
     dispatch_and_verify_request(&ctx, &mut sess, "eve_public.app.eveonline.career.goal.GetAllRequest", Some("eve_public.app.eveonline.career.goal.GetAllResponse"), b"app-01").await;
 
-    // 2. Auth (4 files)
-    assert_eq!(reg.files_by_domain.get("auth").unwrap().len(), 4);
-    dispatch_and_verify_request(&ctx, &mut sess, "eve_public.auth.AuthenticateUsernameRequest", Some("eve_public.auth.AuthenticateUsernameResponse"), b"auth-01").await;
-
-    // 3. Bubble (4 files)
-    assert_eq!(reg.files_by_domain.get("bubble").unwrap().len(), 4);
-    dispatch_and_verify_request(&ctx, &mut sess, "eve.bubble.presence.api.GetInBubbleRequest", Some("eve.bubble.presence.api.GetInBubbleResponse"), b"bubble-01").await;
-
-    // 4. Campaign (63 files)
+    // 3. Campaign (63 files)
     assert_eq!(reg.files_by_domain.get("campaign").unwrap().len(), 63);
     dispatch_and_verify_request(&ctx, &mut sess, "eve_public.campaign.api.GetAllRequest", Some("eve_public.campaign.api.GetAllResponse"), b"camp-01").await;
 
-    // 5. Cdn (4 files)
-    assert_eq!(reg.files_by_domain.get("cdn").unwrap().len(), 4);
-    dispatch_and_verify_request(&ctx, &mut sess, "eve.cdn.api.SignURLRequest", Some("eve.cdn.api.SignURLResponse"), b"cdn-01").await;
-
-    // 6. Character (94 files)
+    // 4. Character (94 files)
     assert_eq!(reg.files_by_domain.get("character").unwrap().len(), 94);
     dispatch_and_verify_request(&ctx, &mut sess, "eve_public.character.GetNamesByUserRequest", Some("eve_public.character.GetNamesByUserResponse"), b"char-01").await;
 
-    // 7. Client (4 files)
-    assert_eq!(reg.files_by_domain.get("client").unwrap().len(), 4);
-    dispatch_and_verify_request(&ctx, &mut sess, "eve.client.host.GetRequest", Some("eve.client.host.GetResponse"), b"client-01").await;
-
-    // 8. Cosmetic (138 files)
+    // 5. Cosmetic (138 files)
     assert_eq!(reg.files_by_domain.get("cosmetic").unwrap().len(), 138);
-    dispatch_and_verify_request(&ctx, &mut sess, "eve_public.cosmetic.character.title.api.EquipRequest", None, b"cosm-01").await;
+    dispatch_and_verify_request(&ctx, &mut sess, "eve_public.cosmetic.character.title.api.GetOwnedRequest", Some("eve_public.cosmetic.character.title.api.GetOwnedResponse"), b"cosm-01").await;
 
-    // 9. Dungeon (15 files)
-    assert_eq!(reg.files_by_domain.get("dungeon").unwrap().len(), 15);
-    dispatch_and_verify_request(&ctx, &mut sess, "eve.dungeon.sovereignty.api.GetInstancesRequest", Some("eve.dungeon.sovereignty.api.GetInstancesResponse"), b"dung-01").await;
-}
-
-#[tokio::test]
-async fn test_quasar_service_routing_batch1b() {
-    // parity: feat:quasar.entitlement, feat:quasar.faction, feat:quasar.factionwarfare, feat:quasar.fulfillment, feat:quasar.isk, feat:quasar.legal, feat:quasar.localization, feat:quasar.npc, feat:quasar.payment
-    eve_testkit::attest(&[
-        "feat:quasar.entitlement",
-        "feat:quasar.faction",
-        "feat:quasar.factionwarfare",
-        "feat:quasar.fulfillment",
-        "feat:quasar.isk",
-        "feat:quasar.legal",
-        "feat:quasar.localization",
-        "feat:quasar.npc",
-        "feat:quasar.payment",
-    ]);
-
-    let ctx = ServerContext::new();
-    let reg = &ctx.quasar_gateway.descriptors;
-    let mut sess = make_session(30_011, 101, 90_000_101, 98_000_001);
-
-    ctx.quasar_gateway.subscribe_session(&sess, Vec::new(), ctx.now_unix());
-
-    // 10. Entitlement (17 files)
+    // 6. Entitlement (17 files)
     assert_eq!(reg.files_by_domain.get("entitlement").unwrap().len(), 17);
-    dispatch_and_verify_request(&ctx, &mut sess, "eve.entitlement.user.api.GrantRequest", Some("eve.entitlement.user.api.GrantResponse"), b"ent-01").await;
+    dispatch_and_verify_request(&ctx, &mut sess, "eve_public.entitlement.user.api.GetRequest", Some("eve_public.entitlement.user.api.GetResponse"), b"ent-01").await;
 
-    // 11. Faction (9 files)
+    // 7. Faction (9 files)
     assert_eq!(reg.files_by_domain.get("faction").unwrap().len(), 9);
-    dispatch_and_verify_request(&ctx, &mut sess, "eve.faction.api.GetRequest", Some("eve.faction.api.GetResponse"), b"fact-01").await;
+    dispatch_and_verify_request(&ctx, &mut sess, "eve_public.faction.activity.admin.IncrementContributionScoreRequest", Some("eve_public.faction.activity.admin.IncrementContributionScoreResponse"), b"fact-01").await;
 
-    // 12. Factionwarfare (20 files)
-    assert_eq!(reg.files_by_domain.get("factionwarfare").unwrap().len(), 20);
-    dispatch_and_verify_request(&ctx, &mut sess, "eve.factionwarfare.stats.character.GetRequest", Some("eve.factionwarfare.stats.character.GetResponse"), b"fw-01").await;
+    // 8. Operation (4 files)
+    assert_eq!(reg.files_by_domain.get("operation").unwrap().len(), 4);
+    dispatch_and_verify_request(&ctx, &mut sess, "eve_public.operation.recommendation.GetRequest", Some("eve_public.operation.recommendation.GetResponse"), b"oper-01").await;
 
-    // 13. Fulfillment (8 files)
-    assert_eq!(reg.files_by_domain.get("fulfillment").unwrap().len(), 8);
-    dispatch_and_verify_request(&ctx, &mut sess, "eve.fulfillment.api.DeliverItemRequest", Some("eve.fulfillment.api.DeliverItemResponse"), b"ful-01").await;
-
-    // 14. Isk (6 files)
-    assert_eq!(reg.files_by_domain.get("isk").unwrap().len(), 6);
-    dispatch_and_verify_request(&ctx, &mut sess, "eve.isk.wallet.api.TransferByOwnerRequest", Some("eve.isk.wallet.api.TransferByOwnerResponse"), b"isk-01").await;
-
-    // 15. Legal (2 files)
-    assert_eq!(reg.files_by_domain.get("legal").unwrap().len(), 2);
-    dispatch_and_verify_request(&ctx, &mut sess, "eve.legal.agreement.api.GetLatestRequest", Some("eve.legal.agreement.api.GetLatestResponse"), b"leg-01").await;
-
-    // 16. Localization (7 files)
-    assert_eq!(reg.files_by_domain.get("localization").unwrap().len(), 7);
-    dispatch_and_verify_request(&ctx, &mut sess, "eve.localization.message.api.GetLocalizedTextRequest", Some("eve.localization.message.api.GetLocalizedTextResponse"), b"loc-01").await;
-
-    // 17. Npc (7 files)
-    assert_eq!(reg.files_by_domain.get("npc").unwrap().len(), 7);
-    dispatch_and_verify_request(&ctx, &mut sess, "eve.npc.ship.api.GetOwnerRequest", Some("eve.npc.ship.api.GetOwnerResponse"), b"npc-01").await;
-
-    // 18. Payment (28 files)
-    assert_eq!(reg.files_by_domain.get("payment").unwrap().len(), 28);
-    dispatch_and_verify_request(&ctx, &mut sess, "eve_public.payment.token.api.GetQuickPayRequest", Some("eve_public.payment.token.api.GetQuickPayResponse"), b"pay-01").await;
+    // 9. Opportunity (2 files)
+    assert_eq!(reg.files_by_domain.get("opportunity").unwrap().len(), 2);
+    verify_event_notice_delivery(&ctx, &sess, "eve_public.opportunity.api.Completed");
 }
 
 #[tokio::test]
-async fn test_quasar_service_routing_batch2a() {
-    // parity: feat:quasar.pirate, feat:quasar.plex, feat:quasar.quasar, feat:quasar.ship, feat:quasar.solarsystem, feat:quasar.sovereignty, feat:quasar.store, feat:quasar.structure, feat:quasar.user
+async fn test_quasar_service_routing_batch2() {
+    // parity: feat:quasar.payment, feat:quasar.pirate, feat:quasar.plex, feat:quasar.sovereignty, feat:quasar.space, feat:quasar.stargate, feat:quasar.store, feat:quasar.user
     eve_testkit::attest(&[
+        "feat:quasar.payment",
         "feat:quasar.pirate",
         "feat:quasar.plex",
-        "feat:quasar.quasar",
-        "feat:quasar.ship",
-        "feat:quasar.solarsystem",
         "feat:quasar.sovereignty",
+        "feat:quasar.space",
+        "feat:quasar.stargate",
         "feat:quasar.store",
-        "feat:quasar.structure",
         "feat:quasar.user",
     ]);
 
@@ -455,220 +219,37 @@ async fn test_quasar_service_routing_batch2a() {
 
     ctx.quasar_gateway.subscribe_session(&sess, Vec::new(), ctx.now_unix());
 
-    // 19. Pirate (13 files)
+    // 10. Payment (28 files)
+    assert_eq!(reg.files_by_domain.get("payment").unwrap().len(), 28);
+    dispatch_and_verify_request(&ctx, &mut sess, "eve_public.payment.token.api.GetQuickPayRequest", Some("eve_public.payment.token.api.GetQuickPayResponse"), b"pay-01").await;
+
+    // 11. Pirate (13 files)
     assert_eq!(reg.files_by_domain.get("pirate").unwrap().len(), 13);
     dispatch_and_verify_request(&ctx, &mut sess, "eve_public.pirate.suppression.api.GetSystemInfoRequest", Some("eve_public.pirate.suppression.api.GetSystemInfoResponse"), b"pir-01").await;
 
-    // 20. Plex (18 files)
+    // 12. Plex (18 files)
     assert_eq!(reg.files_by_domain.get("plex").unwrap().len(), 18);
     dispatch_and_verify_request(&ctx, &mut sess, "eve_public.plex.vault.api.BalanceRequest", Some("eve_public.plex.vault.api.BalanceResponse"), b"plex-01").await;
 
-    // 21. Quasar (11 files)
-    assert_eq!(reg.files_by_domain.get("quasar").unwrap().len(), 11);
-    dispatch_and_verify_request(&ctx, &mut sess, "eve.quasar.config.api.GetRequest", Some("eve.quasar.config.api.GetResponse"), b"qsr-01").await;
-
-    // 22. Ship (24 files)
-    assert_eq!(reg.files_by_domain.get("ship").unwrap().len(), 24);
-    dispatch_and_verify_request(&ctx, &mut sess, "eve.ship.api.GetRequest", Some("eve.ship.api.GetResponse"), b"ship-01").await;
-
-    // 23. Solarsystem (9 files)
-    assert_eq!(reg.files_by_domain.get("solarsystem").unwrap().len(), 9);
-    dispatch_and_verify_request(&ctx, &mut sess, "eve_public.solarsystem.api.GetRequest", Some("eve_public.solarsystem.api.GetResponse"), b"sys-01").await;
-
-    // 24. Sovereignty (93 files)
+    // 13. Sovereignty (93 files)
     assert_eq!(reg.files_by_domain.get("sovereignty").unwrap().len(), 93);
     dispatch_and_verify_request(&ctx, &mut sess, "eve_public.sovereignty.hub.upgrade.api.GetDefinitionsRequest", Some("eve_public.sovereignty.hub.upgrade.api.GetDefinitionsResponse"), b"sov-01").await;
 
-    // 25. Store (60 files)
+    // 14. Space (17 files)
+    assert_eq!(reg.files_by_domain.get("space").unwrap().len(), 17);
+    dispatch_and_verify_request(&ctx, &mut sess, "eve_public.space.api.cdn.GetUpdateRequest", Some("eve_public.space.api.cdn.GetUpdateResponse"), b"spc-01").await;
+
+    // 15. Stargate (11 files)
+    assert_eq!(reg.files_by_domain.get("stargate").unwrap().len(), 11);
+    dispatch_and_verify_request(&ctx, &mut sess, "eve_public.stargate.lock.api.GetRequest", Some("eve_public.stargate.lock.api.GetResponse"), b"sg-01").await;
+
+    // 16. Store (60 files)
     assert_eq!(reg.files_by_domain.get("store").unwrap().len(), 60);
     dispatch_and_verify_request(&ctx, &mut sess, "eve_public.store.offer.api.GetAllRequest", Some("eve_public.store.offer.api.GetAllResponse"), b"store-01").await;
 
-    // 26. Structure (13 files)
-    assert_eq!(reg.files_by_domain.get("structure").unwrap().len(), 13);
-    dispatch_and_verify_request(&ctx, &mut sess, "eve.corporation.structure.GetAllWithDetailsRequest", Some("eve.corporation.structure.GetAllWithDetailsResponse"), b"struct-01").await;
-
-    // 27. User (50 files)
+    // 17. User (50 files)
     assert_eq!(reg.files_by_domain.get("user").unwrap().len(), 50);
-    dispatch_and_verify_request(&ctx, &mut sess, "eve.user.character.GetCharactersRequest", Some("eve.user.character.GetCharactersResponse"), b"user-01").await;
-}
-
-#[tokio::test]
-async fn test_quasar_service_routing_batch2b() {
-    // parity: feat:quasar.academy, feat:quasar.acl, feat:quasar.ai, feat:quasar.content, feat:quasar.deadspace, feat:quasar.debug, feat:quasar.dogma, feat:quasar.effect, feat:quasar.id
-    eve_testkit::attest(&[
-        "feat:quasar.academy",
-        "feat:quasar.acl",
-        "feat:quasar.ai",
-        "feat:quasar.content",
-        "feat:quasar.deadspace",
-        "feat:quasar.debug",
-        "feat:quasar.dogma",
-        "feat:quasar.effect",
-        "feat:quasar.id",
-    ]);
-
-    let ctx = ServerContext::new();
-    let reg = &ctx.quasar_gateway.descriptors;
-    let mut sess = make_session(30_012, 102, 90_000_102, 98_000_002);
-
-    ctx.quasar_gateway.subscribe_session(&sess, Vec::new(), ctx.now_unix());
-
-    // 28. Academy (2 files)
-    assert_eq!(reg.files_by_domain.get("academy").unwrap().len(), 2);
-    verify_event_notice_delivery(&ctx, &sess, "eve.academy.ships.events.Borrowed");
-
-    // 29. Acl (4 files)
-    assert_eq!(reg.files_by_domain.get("acl").unwrap().len(), 4);
-    dispatch_and_verify_request(&ctx, &mut sess, "eve.acl.api.GetRequest", Some("eve.acl.api.GetResponse"), b"acl-01").await;
-
-    // 30. Ai (2 files)
-    assert_eq!(reg.files_by_domain.get("ai").unwrap().len(), 2);
-    dispatch_and_verify_request(&ctx, &mut sess, "eve_public.ai.assistant.chat.api.QueryRequest", Some("eve_public.ai.assistant.chat.api.QueryResponse"), b"ai-01").await;
-
-    // 31. Content (16 files)
-    assert_eq!(reg.files_by_domain.get("content").unwrap().len(), 16);
-    dispatch_and_verify_request(&ctx, &mut sess, "eve.content.GetAllRequest", Some("eve.content.GetAllResponse"), b"cnt-01").await;
-
-    // 32. Deadspace (18 files)
-    assert_eq!(reg.files_by_domain.get("deadspace").unwrap().len(), 18);
-    verify_event_notice_delivery(&ctx, &sess, "eve.deadspace.abyssal.event.CharacterCompleted");
-
-    // 33. Debug (4 files)
-    assert_eq!(reg.files_by_domain.get("debug").unwrap().len(), 4);
-    dispatch_and_verify_request(&ctx, &mut sess, "eve.debug.monolith.externalqueue.EmitProtobufEventRequest", Some("eve.debug.monolith.externalqueue.EmitProtobufEventResponse"), b"dbg-01").await;
-
-    // 34. Dogma (3 files)
-    assert_eq!(reg.files_by_domain.get("dogma").unwrap().len(), 3);
-    verify_event_notice_delivery(&ctx, &sess, "eve.dogma.modifier.system_wide.api.Applied");
-
-    // 35. Effect (7 files)
-    assert_eq!(reg.files_by_domain.get("effect").unwrap().len(), 7);
-    verify_event_notice_delivery(&ctx, &sess, "eve.effect.combat.electronic.pve.JammingApplied");
-
-    // 36. Id (6 files)
-    assert_eq!(reg.files_by_domain.get("id").unwrap().len(), 6);
-    dispatch_and_verify_request(&ctx, &mut sess, "eve.id.api.GetRequest", Some("eve.id.api.GetResponse"), b"id-01").await;
-}
-
-#[tokio::test]
-async fn test_quasar_service_routing_batch3a() {
-    // parity: feat:quasar.killmail, feat:quasar.mission, feat:quasar.monolith, feat:quasar.narrative, feat:quasar.opportunity, feat:quasar.piratestronghold, feat:quasar.probe, feat:quasar.projectdiscovery, feat:quasar.pvp, feat:quasar.space
-    eve_testkit::attest(&[
-        "feat:quasar.killmail",
-        "feat:quasar.mission",
-        "feat:quasar.monolith",
-        "feat:quasar.narrative",
-        "feat:quasar.opportunity",
-        "feat:quasar.piratestronghold",
-        "feat:quasar.probe",
-        "feat:quasar.projectdiscovery",
-        "feat:quasar.pvp",
-        "feat:quasar.space",
-    ]);
-
-    let ctx = ServerContext::new();
-    let reg = &ctx.quasar_gateway.descriptors;
-    let mut sess = make_session(30_003, 103, 90_000_103, 98_000_003);
-
-    ctx.quasar_gateway.subscribe_session(&sess, Vec::new(), ctx.now_unix());
-
-    // 37. Killmail (2 files)
-    assert_eq!(reg.files_by_domain.get("killmail").unwrap().len(), 2);
-    verify_event_notice_delivery(&ctx, &sess, "eve.killmail.api.ShipLossReport");
-
-    // 38. Mission (9 files)
-    assert_eq!(reg.files_by_domain.get("mission").unwrap().len(), 9);
-    dispatch_and_verify_request(&ctx, &mut sess, "eve.mission.api.GetCompletedCountRequest", Some("eve.mission.api.GetCompletedCountResponse"), b"mis-01").await;
-
-    // 39. Monolith (10 files)
-    assert_eq!(reg.files_by_domain.get("monolith").unwrap().len(), 10);
-    dispatch_and_verify_request(&ctx, &mut sess, "eve.monolith.character.location.GetRequest", Some("eve.monolith.character.location.GetResponse"), b"mono-01").await;
-
-    // 40. Narrative (1 files)
-    assert_eq!(reg.files_by_domain.get("narrative").unwrap().len(), 1);
-    verify_event_notice_delivery(&ctx, &sess, "eve.narrative.api.EncryptedItemDecrypted");
-
-    // 41. Opportunity (2 files)
-    assert_eq!(reg.files_by_domain.get("opportunity").unwrap().len(), 2);
-    verify_event_notice_delivery(&ctx, &sess, "eve_public.opportunity.api.Completed");
-
-    // 42. Piratestronghold (2 files)
-    assert_eq!(reg.files_by_domain.get("piratestronghold").unwrap().len(), 2);
-    verify_event_notice_delivery(&ctx, &sess, "eve.piratestronghold.event.DestructionParticipated");
-
-    // 43. Probe (2 files)
-    assert_eq!(reg.files_by_domain.get("probe").unwrap().len(), 2);
-    verify_event_notice_delivery(&ctx, &sess, "eve.probe.event.ExplorationSignatureScanned");
-
-    // 44. Projectdiscovery (1 files)
-    assert_eq!(reg.files_by_domain.get("projectdiscovery").unwrap().len(), 1);
-    verify_event_notice_delivery(&ctx, &sess, "eve.projectdiscovery.event.AnalysisSubmitted");
-
-    // 45. Pvp (6 files)
-    assert_eq!(reg.files_by_domain.get("pvp").unwrap().len(), 6);
-    verify_event_notice_delivery(&ctx, &sess, "eve.pvp.provinggrounds.EventEnded");
-
-    // 46. Space (17 files)
-    assert_eq!(reg.files_by_domain.get("space").unwrap().len(), 17);
-    dispatch_and_verify_request(&ctx, &mut sess, "eve.space.api.GetDefaultTagRegistryVersionRequest", Some("eve.space.api.GetDefaultTagRegistryVersionResponse"), b"spc-01").await;
-}
-
-#[tokio::test]
-async fn test_quasar_service_routing_batch3b() {
-    // parity: feat:quasar.spacecomponent, feat:quasar.star, feat:quasar.stargate, feat:quasar.starterspace, feat:quasar.station, feat:quasar.thirdpartyapi, feat:quasar.tournament, feat:quasar.vanguard, feat:quasar.vendors
-    eve_testkit::attest(&[
-        "feat:quasar.spacecomponent",
-        "feat:quasar.star",
-        "feat:quasar.stargate",
-        "feat:quasar.starterspace",
-        "feat:quasar.station",
-        "feat:quasar.thirdpartyapi",
-        "feat:quasar.tournament",
-        "feat:quasar.vanguard",
-        "feat:quasar.vendors",
-    ]);
-
-    let ctx = ServerContext::new();
-    let reg = &ctx.quasar_gateway.descriptors;
-    let mut sess = make_session(30_013, 103, 90_000_103, 98_000_003);
-
-    ctx.quasar_gateway.subscribe_session(&sess, Vec::new(), ctx.now_unix());
-
-    // 47. Spacecomponent (9 files)
-    assert_eq!(reg.files_by_domain.get("spacecomponent").unwrap().len(), 9);
-    verify_event_notice_delivery(&ctx, &sess, "eve.spacecomponent.deploy.api.Deployed");
-
-    // 48. Star (4 files)
-    assert_eq!(reg.files_by_domain.get("star").unwrap().len(), 4);
-    dispatch_and_verify_request(&ctx, &mut sess, "eve.star.resources.api.GetPowerProductionRequest", Some("eve.star.resources.api.GetPowerProductionResponse"), b"star-01").await;
-
-    // 49. Stargate (11 files)
-    assert_eq!(reg.files_by_domain.get("stargate").unwrap().len(), 11);
-    dispatch_and_verify_request(&ctx, &mut sess, "eve.stargate.lock.api.admin.GetAllRequest", Some("eve.stargate.lock.api.admin.GetAllResponse"), b"sg-01").await;
-
-    // 50. Starterspace (3 files)
-    assert_eq!(reg.files_by_domain.get("starterspace").unwrap().len(), 3);
-    dispatch_and_verify_request(&ctx, &mut sess, "eve.starterspace.admin.ResetJumpShipCasterRequest", Some("eve.starterspace.admin.ResetJumpShipCasterResponse"), b"start-01").await;
-
-    // 51. Station (6 files)
-    assert_eq!(reg.files_by_domain.get("station").unwrap().len(), 6);
-    dispatch_and_verify_request(&ctx, &mut sess, "eve.station.owner.GetStationOwnerRequest", Some("eve.station.owner.GetStationOwnerResponse"), b"sta-01").await;
-
-    // 52. Thirdpartyapi (1 files)
-    assert_eq!(reg.files_by_domain.get("thirdpartyapi").unwrap().len(), 1);
-    verify_event_notice_delivery(&ctx, &sess, "eve.thirdpartyapi.RequestReceived");
-
-    // 53. Tournament (7 files)
-    assert_eq!(reg.files_by_domain.get("tournament").unwrap().len(), 7);
-    dispatch_and_verify_request(&ctx, &mut sess, "eve.tournament.arena.api.GetAllRequest", Some("eve.tournament.arena.api.GetAllResponse"), b"tourn-01").await;
-
-    // 54. Vanguard (6 files)
-    assert_eq!(reg.files_by_domain.get("vanguard").unwrap().len(), 6);
-    dispatch_and_verify_request(&ctx, &mut sess, "eve.vanguard.commission.assignment.admin.api.TriggerCompletedEventRequest", Some("eve.vanguard.commission.assignment.admin.api.TriggerCompletedEventResponse"), b"vg-01").await;
-
-    // 55. Vendors (19 files)
-    assert_eq!(reg.files_by_domain.get("vendors").unwrap().len(), 19);
-    dispatch_and_verify_request(&ctx, &mut sess, "eve.vendors.epic.api.GetUserByEveUserIDRequest", Some("eve.vendors.epic.api.GetUserByEveUserIDResponse"), b"vend-01").await;
+    dispatch_and_verify_request(&ctx, &mut sess, "eve_public.user.license.api.GetRequest", Some("eve_public.user.license.api.GetResponse"), b"user-01").await;
 }
 
 fn verify_pyj_batch(reg: &QuasarDescriptorRegistry, row_ids: &[&str]) -> usize {

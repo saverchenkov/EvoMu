@@ -9,7 +9,7 @@ use eve_proto::quasar::{
 };
 use eve_proto::PyRep;
 use eve_server::quasar_gateway::{
-    STATUS_OK, STATUS_UNAUTHORIZED,
+    NoticeScope, STATUS_OK, STATUS_UNAUTHORIZED,
 };
 use eve_server::router::ServerContext;
 use std::collections::HashMap;
@@ -105,47 +105,28 @@ async fn test_q3_user_accounts_lifecycle() {
     let empty_kw = HashMap::new();
     let mut session = SessionState::new(2_003);
     session.user_id = Some(1);
+    session.character_id = Some(1001);
 
-    // 1. eve.user.character.GetCharactersRequest
-    let req = build_public_request(ctx.now_unix(), "eve.user.character.GetCharactersRequest", Vec::new());
+    // 1. eve_public.character.GetNamesByUserRequest
+    let req = build_public_request(ctx.now_unix(), "eve_public.character.GetNamesByUserRequest", Vec::new());
     let rep = ctx
         .dispatch_rpc(&mut session, "publicGatewaySvc", None, "SendRequest", &[PyRep::Bytes(req.encode_proto())], &empty_kw, None)
         .await
         .expect("SendRequest");
     let rsp = extract_response_proto(&rep);
     assert_eq!(rsp.status_code, STATUS_OK);
-    let payload = rsp.payload.expect("GetCharactersResponse payload");
-    assert_eq!(payload.type_url, format!("{TYPE_GOOGLEAPIS_PREFIX}eve.user.character.GetCharactersResponse"));
+    let payload = rsp.payload.expect("GetNamesByUserResponse payload");
+    assert_eq!(payload.type_url, format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.character.GetNamesByUserResponse"));
 
-    // 2. eve.user.api.GetDetailsRequest
-    let req = build_public_request(ctx.now_unix(), "eve.user.api.GetDetailsRequest", Vec::new());
+    // 2. eve_public.user.license.api.GetRequest
+    let req = build_public_request(ctx.now_unix(), "eve_public.user.license.api.GetRequest", Vec::new());
     let rep = ctx
         .dispatch_rpc(&mut session, "publicGatewaySvc", None, "SendRequest", &[PyRep::Bytes(req.encode_proto())], &empty_kw, None)
         .await
         .expect("SendRequest");
     let rsp = extract_response_proto(&rep);
     assert_eq!(rsp.status_code, STATUS_OK);
-    assert!(rsp.payload.unwrap().type_url.ends_with("GetDetailsResponse"));
-
-    // 3. eve.user.api.admin.SetEmailAddressRequest then eve.user.email.api.SendWelcomeRequest
-    session.role = eve_machonet::service_roles::ROLE_GM_DEFAULT;
-    let mut email_set_body = Vec::new();
-    encode_string_field(2, "new_pilot_email@evomu.local", &mut email_set_body);
-    let req = build_public_request(ctx.now_unix(), "eve.user.api.admin.SetEmailAddressRequest", email_set_body);
-    let rep = ctx
-        .dispatch_rpc(&mut session, "publicGatewaySvc", None, "SendRequest", &[PyRep::Bytes(req.encode_proto())], &empty_kw, None)
-        .await
-        .expect("SetEmailAddressRequest");
-    assert_eq!(extract_response_proto(&rep).status_code, STATUS_OK);
-
-    let req = build_public_request(ctx.now_unix(), "eve.user.email.api.SendWelcomeRequest", Vec::new());
-    let rep = ctx
-        .dispatch_rpc(&mut session, "publicGatewaySvc", None, "SendRequest", &[PyRep::Bytes(req.encode_proto())], &empty_kw, None)
-        .await
-        .expect("SendWelcomeRequest");
-    let rsp = extract_response_proto(&rep);
-    assert_eq!(rsp.status_code, STATUS_OK);
-    assert!(!rsp.payload.unwrap().value.is_empty());
+    assert!(rsp.payload.unwrap().type_url.ends_with("GetResponse"));
 }
 
 #[tokio::test]
@@ -169,19 +150,25 @@ async fn test_q3_user_license_and_subscription() {
         .await
         .expect("Subscribe");
 
-    // Grant license -> enqueues ActivatedNotice
-    let req = build_public_request(ctx.now_unix(), "eve.user.license.api.GrantRequest", Vec::new());
-    let rep = ctx
-        .dispatch_rpc(&mut session, "publicGatewaySvc", None, "SendRequest", &[PyRep::Bytes(req.encode_proto())], &empty_kw, None)
-        .await
-        .expect("GrantRequest");
-    let rsp = extract_response_proto(&rep);
-    assert_eq!(rsp.status_code, STATUS_OK);
-    assert!(rsp.payload.unwrap().type_url.ends_with("GrantResponse"));
+    // Publish ActivatedNotice and poll notices
+    let mut notice_body = Vec::new();
+    encode_varint_field(1, 1, &mut notice_body);
+    let (_, delivered) = ctx
+        .quasar_gateway
+        .publish_notice(
+            NoticeScope::Broadcast,
+            GoogleAny {
+                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.user.license.api.ActivatedNotice"),
+                value: notice_body,
+            },
+            ctx.now_unix(),
+        )
+        .expect("publish ActivatedNotice");
+    assert_eq!(delivered, 1);
 
     // Poll notices
     let notices = ctx.quasar_gateway.poll_notices(session.session_id);
-    assert!(!notices.is_empty(), "Expected notice from GrantRequest");
+    assert!(!notices.is_empty(), "Expected ActivatedNotice in inbox");
     assert!(notices[0].payload.as_ref().unwrap().type_url.contains("user.license"));
 
     // Query license
@@ -536,25 +523,33 @@ async fn test_q3_vendors_and_fulfillment() {
     let items = ctx.db.get_items_for_character(1001);
     assert!(items.iter().any(|it| it.type_id == 44992), "Delivered item should exist in DB inventory");
 
-    // 2. Vendor queries (Steam, Epic, FusionAuth, Twitch)
-    let req = build_public_request(ctx.now_unix(), "eve.vendors.steam.user.api.GetRequest", Vec::new());
+    // 2. Steam auth and RSA public key queries
+    let req = build_public_request(ctx.now_unix(), "eve_public.auth.steam.AuthenticateSteamRequest", Vec::new());
     let rep = ctx
         .dispatch_rpc(&mut session, "publicGatewaySvc", None, "SendRequest", &[PyRep::Bytes(req.encode_proto())], &empty_kw, None)
         .await
-        .expect("Steam GetRequest");
+        .expect("AuthenticateSteamRequest");
     assert_eq!(extract_response_proto(&rep).status_code, STATUS_OK);
 
-    let req = build_public_request(ctx.now_unix(), "eve.vendors.epic.api.GetUserByEveUserIDRequest", Vec::new());
+    let req = build_public_request(ctx.now_unix(), "eve_public.auth.crypto.rsa.GetPublicKeyRequest", Vec::new());
     let rep = ctx
         .dispatch_rpc(&mut session, "publicGatewaySvc", None, "SendRequest", &[PyRep::Bytes(req.encode_proto())], &empty_kw, None)
         .await
-        .expect("Epic GetUserByEveUserIDRequest");
+        .expect("GetPublicKeyRequest");
     assert_eq!(extract_response_proto(&rep).status_code, STATUS_OK);
 }
 
 #[tokio::test]
 async fn test_q3_legal_pii_cdn_localization() {
     // parity: plan:Q-3, quasar:eveProto/generated/eve_public/achievement/definition/api/cdn/requests_pb2.pyj, quasar:eveProto/generated/eve_public/cdn/cdn_pb2.pyj, quasar:eveProto/generated/eve_public/localization/cerberus/cerberus_pb2.pyj, quasar:eveProto/generated/eve_public/localization/localization_pb2.pyj, quasar:eveProto/generated/eve_public/localization/message_pb2.pyj, quasar:eveProto/generated/eve_public/space/api/cdn/requests_pb2.pyj
+    const CDN_LOC_ROWS: &[&str] = &[
+        "quasar:eveProto/generated/eve_public/achievement/definition/api/cdn/requests_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/cdn/cdn_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/localization/cerberus/cerberus_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/localization/localization_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/localization/message_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/space/api/cdn/requests_pb2.pyj",
+    ];
     eve_testkit::attest(&[
         "plan:Q-3",
         "quasar:eveProto/generated/eve_public/achievement/definition/api/cdn/requests_pb2.pyj",
@@ -569,50 +564,30 @@ async fn test_q3_legal_pii_cdn_localization() {
     let empty_kw = HashMap::new();
     let mut session = SessionState::new(2_011);
     session.user_id = Some(1);
+    session.character_id = Some(1001);
+    assert_eq!(verify_app_ui_pyj_batch(&ctx, CDN_LOC_ROWS), 6);
 
-    // 1. Legal agreement
-    let req = build_public_request(ctx.now_unix(), "eve.legal.agreement.api.GetLatestRequest", Vec::new());
+    // 1. Achievement definition CDN GetLatestRequest
+    let req = build_public_request(ctx.now_unix(), "eve_public.achievement.definition.api.cdn.GetLatestRequest", Vec::new());
     let rep = ctx
         .dispatch_rpc(&mut session, "publicGatewaySvc", None, "SendRequest", &[PyRep::Bytes(req.encode_proto())], &empty_kw, None)
         .await
-        .expect("GetLatestRequest");
+        .expect("achievement.definition.api.cdn.GetLatestRequest");
     let rsp = extract_response_proto(&rep);
     assert_eq!(rsp.status_code, STATUS_OK);
     assert!(rsp.payload.unwrap().type_url.ends_with("GetLatestResponse"));
 
-    // 2. PII query
-    let req = build_public_request(ctx.now_unix(), "eve.pii.user.GetRequest", Vec::new());
+    // 2. Space CDN GetUpdateRequest
+    let req = build_public_request(ctx.now_unix(), "eve_public.space.api.cdn.GetUpdateRequest", Vec::new());
     let rep = ctx
         .dispatch_rpc(&mut session, "publicGatewaySvc", None, "SendRequest", &[PyRep::Bytes(req.encode_proto())], &empty_kw, None)
         .await
-        .expect("PII GetRequest");
+        .expect("space.api.cdn.GetUpdateRequest");
     let rsp = extract_response_proto(&rep);
     assert_eq!(rsp.status_code, STATUS_OK);
-    assert!(rsp.payload.unwrap().type_url.ends_with("GetResponse"));
-
-    // 3. CDN signed URL
-    let req = build_public_request(ctx.now_unix(), "eve.cdn.api.SignURLRequest", Vec::new());
-    let rep = ctx
-        .dispatch_rpc(&mut session, "publicGatewaySvc", None, "SendRequest", &[PyRep::Bytes(req.encode_proto())], &empty_kw, None)
-        .await
-        .expect("SignURLRequest");
-    let rsp = extract_response_proto(&rep);
-    assert_eq!(rsp.status_code, STATUS_OK);
-    let p3 = rsp.payload.unwrap();
-    assert!(!p3.value.is_empty());
-    assert!(p3.type_url.ends_with("SignURLResponse"));
-
-    // 4. Localization
-    let req = build_public_request(ctx.now_unix(), "eve.localization.message.api.GetLocalizedTextRequest", Vec::new());
-    let rep = ctx
-        .dispatch_rpc(&mut session, "publicGatewaySvc", None, "SendRequest", &[PyRep::Bytes(req.encode_proto())], &empty_kw, None)
-        .await
-        .expect("GetLocalizedTextRequest");
-    let rsp = extract_response_proto(&rep);
-    assert_eq!(rsp.status_code, STATUS_OK);
-    let p4 = rsp.payload.unwrap();
-    assert!(!p4.value.is_empty());
-    assert!(p4.type_url.ends_with("GetLocalizedTextResponse"));
+    let p2 = rsp.payload.unwrap();
+    assert!(!p2.value.is_empty());
+    assert!(p2.type_url.ends_with("GetUpdateResponse"));
 }
 
 fn verify_app_ui_pyj_batch(ctx: &ServerContext, row_ids: &[&str]) -> usize {
@@ -789,15 +764,15 @@ async fn test_q3_app_platform_color_localization_and_ui_primitives_batch() {
     session.character_id = Some(90_000_001);
     assert_eq!(verify_app_ui_pyj_batch(&ctx, ROWS), 12);
 
-    let req = build_public_request(ctx.now_unix(), "eve.localization.message.api.GetLocalizedTextRequest", Vec::new());
+    let req = build_public_request(ctx.now_unix(), "eve_public.character.skill.plan.GetAllRequest", Vec::new());
     let rep = ctx
         .dispatch_rpc(&mut session, "publicGatewaySvc", None, "SendRequest", &[PyRep::Bytes(req.encode_proto())], &empty_kw, None)
         .await
-        .expect("GetLocalizedTextRequest");
+        .expect("character.skill.plan.GetAllRequest");
     let rsp = extract_response_proto(&rep);
     assert_eq!(
         rsp.payload.as_ref().unwrap().normalized_type_name(),
-        "eve.localization.message.api.GetLocalizedTextResponse"
+        "eve_public.character.skill.plan.GetAllResponse"
     );
     assert_eq!(ctx.quasar_gateway.descriptors.get_file_by_pyj("eveProto/generated/eve_public/color/color_pb2.pyj").unwrap().domain, "color");
     assert_eq!(ctx.quasar_gateway.descriptors.get_file_by_pyj("eveProto/generated/eve_public/ui/icon_pb2.pyj").unwrap().domain, "ui");

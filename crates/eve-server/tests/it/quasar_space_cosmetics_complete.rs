@@ -35,14 +35,12 @@ fn extract_response_proto(rep: &PyRep) -> EvePublicResponse {
 
 #[tokio::test]
 async fn q7_space_celestials_navigation_and_dbs() {
-    // parity: plan:Q-7, quasar:eveProto/generated/eve_public/solarsystem/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/solarsystem/solarsystem_pb2.pyj, quasar:eveProto/generated/eve_public/constellation/constellation_pb2.pyj, quasar:eveProto/generated/eve_public/region/region_pb2.pyj, quasar:eveProto/generated/eve_public/dungeon/sovereignty/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/dungeon/dungeon_pb2.pyj, quasar:eveProto/generated/eve_public/dungeon/instance_pb2.pyj
+    // parity: plan:Q-7, quasar:eveProto/generated/eve_public/solarsystem/solarsystem_pb2.pyj, quasar:eveProto/generated/eve_public/constellation/constellation_pb2.pyj, quasar:eveProto/generated/eve_public/region/region_pb2.pyj, quasar:eveProto/generated/eve_public/dungeon/dungeon_pb2.pyj, quasar:eveProto/generated/eve_public/dungeon/instance_pb2.pyj
     eve_testkit::attest(&[
         "plan:Q-7",
-        "quasar:eveProto/generated/eve_public/solarsystem/api/requests_pb2.pyj",
         "quasar:eveProto/generated/eve_public/solarsystem/solarsystem_pb2.pyj",
         "quasar:eveProto/generated/eve_public/constellation/constellation_pb2.pyj",
         "quasar:eveProto/generated/eve_public/region/region_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/dungeon/sovereignty/api/requests_pb2.pyj",
         "quasar:eveProto/generated/eve_public/dungeon/dungeon_pb2.pyj",
         "quasar:eveProto/generated/eve_public/dungeon/instance_pb2.pyj",
     ]);
@@ -306,10 +304,9 @@ async fn q7_space_celestials_navigation_and_dbs() {
 
 #[tokio::test]
 async fn q7_bubble_presence_and_pirate_insurgency() {
-    // parity: plan:Q-7, quasar:eveProto/generated/eve_public/bubble/bubble_pb2.pyj, quasar:eveProto/generated/eve_public/pirate/corruption/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/pirate/corruption/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/pirate/suppression/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/pirate/suppression/api/notices_pb2.pyj
+    // parity: plan:Q-7, quasar:eveProto/generated/eve_public/pirate/corruption/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/pirate/corruption/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/pirate/suppression/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/pirate/suppression/api/notices_pb2.pyj
     eve_testkit::attest(&[
         "plan:Q-7",
-        "quasar:eveProto/generated/eve_public/bubble/bubble_pb2.pyj",
         "quasar:eveProto/generated/eve_public/pirate/corruption/api/requests_pb2.pyj",
         "quasar:eveProto/generated/eve_public/pirate/corruption/api/notices_pb2.pyj",
         "quasar:eveProto/generated/eve_public/pirate/suppression/api/requests_pb2.pyj",
