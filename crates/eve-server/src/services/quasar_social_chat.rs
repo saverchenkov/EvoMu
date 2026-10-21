@@ -85,12 +85,20 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 return Err((STATUS_FORBIDDEN, "Active character required to broadcast".into()));
             };
 
-            // Check if muted
+            // Check if muted or banned
             let now = ctx_now_unix(ctx);
             if let Some((expiry, reason)) = state_bcast.mutes.read().unwrap_or_else(|e| e.into_inner()).get(&cid) {
                 if *expiry > now {
                     return Err((STATUS_FORBIDDEN, format!("Character is muted until {expiry}: {reason}")));
                 }
+            }
+            if let Some((expiry, reason)) = state_bcast.temp_bans.read().unwrap_or_else(|e| e.into_inner()).get(&cid) {
+                if *expiry > now {
+                    return Err((STATUS_FORBIDDEN, format!("Character is temp-banned until {expiry}: {reason}")));
+                }
+            }
+            if let Some(reason) = state_bcast.perma_bans.read().unwrap_or_else(|e| e.into_inner()).get(&cid) {
+                return Err((STATUS_FORBIDDEN, format!("Character is permanently banned: {reason}")));
             }
 
             let msg_text = match dyn_msg.get(1) {
@@ -221,7 +229,10 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
     router.register_handler(
         "eve.chat.ban.TempBanCharacterRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
-            let cid = extract_identifier_val(dyn_msg.get(1)).unwrap_or(0);
+            let cid = extract_identifier_val(dyn_msg.get(1))
+                .filter(|&id| id > 0)
+                .or_else(|| ctx.effective_character_id())
+                .unwrap_or(0);
             let reason = match dyn_msg.get(3) {
                 Some(DynamicValue::String(s)) => s.clone(),
                 _ => "Temporary chat ban".into(),
@@ -244,8 +255,11 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
     let state_pb = Arc::clone(&state);
     router.register_handler(
         "eve.chat.ban.PermaBanCharacterRequest",
-        Arc::new(move |_ctx, _any, dyn_msg| {
-            let cid = extract_identifier_val(dyn_msg.get(1)).unwrap_or(0);
+        Arc::new(move |ctx, _any, dyn_msg| {
+            let cid = extract_identifier_val(dyn_msg.get(1))
+                .filter(|&id| id > 0)
+                .or_else(|| ctx.effective_character_id())
+                .unwrap_or(0);
             let reason = match dyn_msg.get(2) {
                 Some(DynamicValue::String(s)) => s.clone(),
                 _ => "Permanent chat ban".into(),
@@ -267,8 +281,11 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
     let state_ub = Arc::clone(&state);
     router.register_handler(
         "eve.chat.ban.UnbanCharacterRequest",
-        Arc::new(move |_ctx, _any, dyn_msg| {
-            let cid = extract_identifier_val(dyn_msg.get(1)).unwrap_or(0);
+        Arc::new(move |ctx, _any, dyn_msg| {
+            let cid = extract_identifier_val(dyn_msg.get(1))
+                .filter(|&id| id > 0)
+                .or_else(|| ctx.effective_character_id())
+                .unwrap_or(0);
             state_ub.temp_bans.write().unwrap_or_else(|e| e.into_inner()).remove(&cid);
             state_ub.perma_bans.write().unwrap_or_else(|e| e.into_inner()).remove(&cid);
             state_ub.mutes.write().unwrap_or_else(|e| e.into_inner()).remove(&cid);

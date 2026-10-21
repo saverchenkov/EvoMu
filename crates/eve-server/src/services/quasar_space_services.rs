@@ -23,11 +23,10 @@ use crate::quasar_gateway::{
 };
 use eve_db::WorldRepository;
 use eve_proto::quasar::{
-    AuthoritativeContext, DynamicQuasarMessage, DynamicValue, FieldLabel, FieldType, GoogleAny,
-    QuasarDescriptorRegistry, TYPE_GOOGLEAPIS_PREFIX,
+    AuthoritativeContext, DynamicQuasarMessage, DynamicValue, FieldDescriptorProto, FieldLabel,
+    FieldType, GoogleAny, QuasarDescriptorRegistry, TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_sde::SdeRegistry;
-use std::collections::HashSet;
 use std::sync::Arc;
 
 /// Extracts effective corp role bitmask from authoritative context.
@@ -38,136 +37,146 @@ pub fn effective_roles(ctx: &AuthoritativeContext) -> u64 {
         .unwrap_or(0)
 }
 
-/// Populates a schema-conformant `DynamicQuasarMessage` in-place with authoritative SDE / repository values
-/// while preserving each field's exact protobuf wire variant so roundtrip decoding never mismatches.
-pub fn apply_sde_record(
+fn build_field_value(
+    descriptors: &QuasarDescriptorRegistry,
+    f: &FieldDescriptorProto,
+    id: u64,
+    sec: u64,
+    label: &str,
+    depth: usize,
+) -> Option<DynamicValue> {
+    if depth > 4 {
+        return None;
+    }
+    let val = match f.field_type {
+        FieldType::Uint32 => DynamicValue::Uint32(id as u32),
+        FieldType::Int32 => DynamicValue::Int32(id as i32),
+        FieldType::Uint64 => DynamicValue::Uint64(id),
+        FieldType::Int64 => DynamicValue::Int64(id as i64),
+        FieldType::Sint32 => DynamicValue::Sint32(id as i32),
+        FieldType::Sint64 => DynamicValue::Sint64(id as i64),
+        FieldType::Fixed32 => DynamicValue::Fixed32(id as u32),
+        FieldType::Fixed64 => DynamicValue::Fixed64(id),
+        FieldType::Sfixed32 => DynamicValue::Sfixed32(id as i32),
+        FieldType::Sfixed64 => DynamicValue::Sfixed64(id as i64),
+        FieldType::Double => DynamicValue::Double(id as f64),
+        FieldType::Float => DynamicValue::Float(id as f32),
+        FieldType::Bool => DynamicValue::Bool(id != 0),
+        FieldType::String => DynamicValue::String(label.to_string()),
+        FieldType::Bytes => DynamicValue::Bytes(id.to_le_bytes().to_vec()),
+        FieldType::Enum => {
+            let ev = descriptors
+                .enums_by_full_name
+                .get(&f.type_name)
+                .and_then(|en| {
+                    en.values
+                        .iter()
+                        .find(|v| v.number != 0)
+                        .or_else(|| en.values.first())
+                })
+                .map(|v| v.number)
+                .unwrap_or(0);
+            DynamicValue::Enum(ev)
+        }
+        FieldType::Message | FieldType::Group => {
+            let target = QuasarDescriptorRegistry::normalize_type_name(&f.type_name);
+            let sub_desc = descriptors.get_message(target)?;
+            let mut sub = DynamicQuasarMessage::new(sub_desc.full_name.clone());
+            let mut used_oneof = None;
+            if let Some(sf1) = sub_desc.fields.first() {
+                used_oneof = sf1.oneof_index;
+                if let Some(v1) = build_field_value(descriptors, sf1, id, sec, label, depth + 1) {
+                    sub.set(sf1.number, v1);
+                }
+            }
+            if let Some(sf2) = sub_desc.fields.get(1) {
+                if sf2.oneof_index.is_none() || sf2.oneof_index != used_oneof {
+                    if let Some(v2) =
+                        build_field_value(descriptors, sf2, sec, id, label, depth + 1)
+                    {
+                        sub.set(sf2.number, v2);
+                    }
+                }
+            }
+            DynamicValue::Message(Box::new(sub))
+        }
+    };
+    if f.label == FieldLabel::Repeated {
+        Some(DynamicValue::Repeated(vec![val]))
+    } else {
+        Some(val)
+    }
+}
+
+/// Sets a single schema-typed field on `msg` from a domain integer/label value.
+pub fn set_domain_field(
+    descriptors: &QuasarDescriptorRegistry,
+    msg: &mut DynamicQuasarMessage,
+    field_num: u32,
+    id: u64,
+    label: &str,
+) {
+    if let Some(desc) = descriptors.get_message(&msg.full_name) {
+        if let Some(f) = desc.fields.iter().find(|f| f.number == field_num) {
+            if let Some(val) = build_field_value(descriptors, f, id, id, label, 0) {
+                msg.set(f.number, val);
+                return;
+            }
+        }
+    }
+    msg.set(field_num, DynamicValue::Uint64(id));
+}
+
+/// Populates `msg` with authoritative SDE / repository values (`primary_id`, `secondary_id`, `label`)
+/// using the exact field descriptors defined on `msg.full_name`.
+pub fn set_domain_attributes(
+    descriptors: &QuasarDescriptorRegistry,
     msg: &mut DynamicQuasarMessage,
     primary_id: u64,
     secondary_id: u64,
     label: &str,
 ) {
-    fn set_val(val: &mut DynamicValue, id: u64, sec: u64, text: &str, depth: usize) {
-        if depth > 3 {
-            return;
-        }
-        match val {
-            DynamicValue::Uint32(v) => *v = id as u32,
-            DynamicValue::Int32(v) => *v = id as i32,
-            DynamicValue::Uint64(v) => *v = id,
-            DynamicValue::Int64(v) => *v = id as i64,
-            DynamicValue::Fixed32(v) => *v = id as u32,
-            DynamicValue::Fixed64(v) => *v = id,
-            DynamicValue::String(s) if !text.is_empty() => *s = text.to_string(),
-            DynamicValue::Message(sub) => {
-                if let Some(f1) = sub.fields.get_mut(&1) {
-                    set_val(f1, id, sec, text, depth + 1);
-                }
-                if let Some(f2) = sub.fields.get_mut(&2) {
-                    set_val(f2, sec, id, text, depth + 1);
-                }
-            }
-            DynamicValue::Repeated(items) => {
-                if let Some(first) = items.first_mut() {
-                    set_val(first, id, sec, text, depth + 1);
-                }
-            }
-            _ => {}
+    let Some(desc) = descriptors.get_message(&msg.full_name) else {
+        return;
+    };
+    let mut first_oneof = None;
+    if let Some(f1) = desc.fields.first() {
+        first_oneof = f1.oneof_index;
+        if let Some(v1) = build_field_value(descriptors, f1, primary_id, secondary_id, label, 0) {
+            msg.set(f1.number, v1);
         }
     }
-
-    if let Some(f1) = msg.fields.get_mut(&1) {
-        set_val(f1, primary_id, secondary_id, label, 0);
+    if let Some(f2) = desc.fields.get(1) {
+        if f2.oneof_index.is_none() || f2.oneof_index != first_oneof {
+            if let Some(v2) =
+                build_field_value(descriptors, f2, secondary_id, primary_id, label, 0)
+            {
+                msg.set(f2.number, v2);
+            }
+        }
     }
-    if let Some(f2) = msg.fields.get_mut(&2) {
-        set_val(f2, secondary_id, primary_id, label, 0);
-    }
-    if let Some(f3) = msg.fields.get_mut(&3) {
-        set_val(f3, secondary_id, primary_id, label, 0);
+    if let Some(f3) = desc.fields.get(2) {
+        if f3.field_type == FieldType::String && f3.oneof_index.is_none() {
+            if let Some(v3) =
+                build_field_value(descriptors, f3, secondary_id, primary_id, label, 0)
+            {
+                msg.set(f3.number, v3);
+            }
+        }
     }
 }
 
-fn new_schema_message(
-    descriptors: &QuasarDescriptorRegistry,
-    type_name: &str,
-    depth: usize,
-    visited: &mut HashSet<String>,
-) -> Result<DynamicQuasarMessage, (u32, String)> {
-    let desc = descriptors
-        .get_message(type_name)
-        .ok_or_else(|| (STATUS_INTERNAL_ERROR, format!("unknown message {type_name}")))?;
-    let mut msg = DynamicQuasarMessage::new(desc.full_name.clone());
-    if depth > 4 {
-        return Ok(msg);
-    }
-    visited.insert(desc.full_name.clone());
-    let mut chosen_oneofs = HashSet::new();
-    for f in &desc.fields {
-        if let Some(oneof_idx) = f.oneof_index {
-            if !chosen_oneofs.insert(oneof_idx) {
-                continue;
-            }
-        }
-        let val_opt = match f.field_type {
-            FieldType::Double => Some(DynamicValue::Double(1.0)),
-            FieldType::Float => Some(DynamicValue::Float(1.0)),
-            FieldType::Int64 => Some(DynamicValue::Int64(1)),
-            FieldType::Uint64 => Some(DynamicValue::Uint64(1)),
-            FieldType::Int32 => Some(DynamicValue::Int32(1)),
-            FieldType::Fixed64 => Some(DynamicValue::Fixed64(1)),
-            FieldType::Fixed32 => Some(DynamicValue::Fixed32(1)),
-            FieldType::Bool => Some(DynamicValue::Bool(true)),
-            FieldType::String => Some(DynamicValue::String(f.name.clone())),
-            FieldType::Bytes => Some(DynamicValue::Bytes(vec![1, 2, 3, 4])),
-            FieldType::Uint32 => Some(DynamicValue::Uint32(1)),
-            FieldType::Enum => {
-                let ev = descriptors
-                    .enums_by_full_name
-                    .get(&f.type_name)
-                    .and_then(|en| {
-                        en.values
-                            .iter()
-                            .find(|v| v.number != 0)
-                            .or_else(|| en.values.first())
-                    })
-                    .map(|v| v.number)
-                    .unwrap_or(1);
-                Some(DynamicValue::Enum(ev))
-            }
-            FieldType::Sfixed32 => Some(DynamicValue::Sfixed32(1)),
-            FieldType::Sfixed64 => Some(DynamicValue::Sfixed64(1)),
-            FieldType::Sint32 => Some(DynamicValue::Sint32(1)),
-            FieldType::Sint64 => Some(DynamicValue::Sint64(1)),
-            FieldType::Message | FieldType::Group => {
-                let target = QuasarDescriptorRegistry::normalize_type_name(&f.type_name);
-                if visited.contains(target) {
-                    None
-                } else {
-                    let sub = new_schema_message(descriptors, target, depth + 1, visited)?;
-                    Some(DynamicValue::Message(Box::new(sub)))
-                }
-            }
-        };
-        if let Some(val) = val_opt {
-            if f.label == FieldLabel::Repeated {
-                msg.set(f.number, DynamicValue::Repeated(vec![val]));
-            } else {
-                msg.set(f.number, val);
-            }
-        }
-    }
-    visited.remove(&desc.full_name);
-    Ok(msg)
-}
-
-/// Builds a dynamically serialized protobuf `GoogleAny` payload conforming to `response_type`.
-pub fn build_dynamic_response(
+/// Encodes an explicitly populated `DynamicQuasarMessage` into a `GoogleAny` response payload.
+pub fn encode_domain_message(
     descriptors: &QuasarDescriptorRegistry,
     response_type: &str,
-    customize: impl FnOnce(&mut DynamicQuasarMessage),
+    customize: impl FnOnce(&QuasarDescriptorRegistry, &mut DynamicQuasarMessage),
 ) -> Result<GoogleAny, (u32, String)> {
-    let mut visited = HashSet::new();
-    let mut resp = new_schema_message(descriptors, response_type, 0, &mut visited)?;
-    customize(&mut resp);
+    let desc = descriptors
+        .get_message(response_type)
+        .ok_or_else(|| (STATUS_INTERNAL_ERROR, format!("unknown message {response_type}")))?;
+    let mut resp = DynamicQuasarMessage::new(desc.full_name.clone());
+    customize(descriptors, &mut resp);
     let value = descriptors
         .encode_dynamic(&resp)
         .map_err(|e| (STATUS_INTERNAL_ERROR, format!("encode {response_type}: {e}")))?;
@@ -228,8 +237,8 @@ pub fn register_handlers(
                     .get(&sys_id)
                     .map(|s| (s.constellation_id as u64, s.name.clone()))
                     .unwrap_or((20_000_020, "Jita".into()));
-                build_dynamic_response(&d, "eve_public.solarsystem.api.GetResponse", |resp| {
-                    apply_sde_record(resp, sys_id as u64, const_id, &name);
+                encode_domain_message(&d, "eve_public.solarsystem.api.GetResponse", |reg, resp| {
+                    set_domain_attributes(reg, resp, sys_id as u64, const_id, &name);
                 })
             }),
         );
@@ -252,11 +261,11 @@ pub fn register_handlers(
                     .find(|j| j.from_solar_system_id == origin_sys)
                     .map(|j| j.to_solar_system_id)
                     .unwrap_or(30_000_144);
-                build_dynamic_response(
+                encode_domain_message(
                     &d,
                     "eve.solarsystem.api.GetSolarSystemsInJumpRangeResponse",
-                    |resp| {
-                        apply_sde_record(resp, neighbor_sys as u64, origin_sys as u64, "JumpRange");
+                    |reg, resp| {
+                        set_domain_attributes(reg, resp, neighbor_sys as u64, origin_sys as u64, "JumpRange");
                     },
                 )
             }),
@@ -279,8 +288,8 @@ pub fn register_handlers(
                     .get(&const_id)
                     .map(|c| (c.region_id as u64, c.name.clone()))
                     .unwrap_or((10_000_002, "Kimotoro".into()));
-                build_dynamic_response(&d, "eve.constellation.GetResponse", |resp| {
-                    apply_sde_record(resp, const_id as u64, reg_id, &name);
+                encode_domain_message(&d, "eve.constellation.GetResponse", |reg, resp| {
+                    set_domain_attributes(reg, resp, const_id as u64, reg_id, &name);
                 })
             }),
         );
@@ -292,8 +301,8 @@ pub fn register_handlers(
             "eve.constellation.GetAllRequest",
             Arc::new(move |_ctx, _any, _dyn_msg| {
                 let total = sde_c.constellations.len() as u64;
-                build_dynamic_response(&d, "eve.constellation.GetAllResponse", |resp| {
-                    apply_sde_record(resp, 20_000_020, total, "Kimotoro");
+                encode_domain_message(&d, "eve.constellation.GetAllResponse", |reg, resp| {
+                    set_domain_attributes(reg, resp, 20_000_020, total, "Kimotoro");
                 })
             }),
         );
@@ -315,8 +324,8 @@ pub fn register_handlers(
                     .find(|c| c.name.to_lowercase().contains(&q_lower))
                     .map(|c| c.constellation_id)
                     .unwrap_or(20_000_020);
-                build_dynamic_response(&d, "eve.constellation.SearchResponse", |resp| {
-                    apply_sde_record(resp, matched_id as u64, 10_000_002, &query);
+                encode_domain_message(&d, "eve.constellation.SearchResponse", |reg, resp| {
+                    set_domain_attributes(reg, resp, matched_id as u64, 10_000_002, &query);
                 })
             }),
         );
@@ -338,8 +347,8 @@ pub fn register_handlers(
                     .get(&region_id)
                     .map(|r| (r.faction_id.unwrap_or(500_001) as u64, r.name.clone()))
                     .unwrap_or((500_001, "The Forge".into()));
-                build_dynamic_response(&d, "eve.region.GetResponse", |resp| {
-                    apply_sde_record(resp, region_id as u64, fac_id, &name);
+                encode_domain_message(&d, "eve.region.GetResponse", |reg, resp| {
+                    set_domain_attributes(reg, resp, region_id as u64, fac_id, &name);
                 })
             }),
         );
@@ -351,8 +360,8 @@ pub fn register_handlers(
             "eve.region.GetAllRequest",
             Arc::new(move |_ctx, _any, _dyn_msg| {
                 let count = sde_r.regions.len() as u64;
-                build_dynamic_response(&d, "eve.region.GetAllResponse", |resp| {
-                    apply_sde_record(resp, 10_000_002, count, "The Forge");
+                encode_domain_message(&d, "eve.region.GetAllResponse", |reg, resp| {
+                    set_domain_attributes(reg, resp, 10_000_002, count, "The Forge");
                 })
             }),
         );
@@ -374,8 +383,8 @@ pub fn register_handlers(
                     .find(|r| r.name.to_lowercase().contains(&q_lower))
                     .map(|r| r.region_id)
                     .unwrap_or(10_000_002);
-                build_dynamic_response(&d, "eve.region.SearchResponse", |resp| {
-                    apply_sde_record(resp, matched_id as u64, 500_001, &query);
+                encode_domain_message(&d, "eve.region.SearchResponse", |reg, resp| {
+                    set_domain_attributes(reg, resp, matched_id as u64, 500_001, &query);
                 })
             }),
         );
@@ -398,11 +407,11 @@ pub fn register_handlers(
                     .find(|c| c.region_id == region_id)
                     .map(|c| c.constellation_id)
                     .unwrap_or(20_000_020);
-                build_dynamic_response(
+                encode_domain_message(
                     &d,
                     "eve.universe.constellation.GetAllInRegionResponse",
-                    |resp| {
-                        apply_sde_record(resp, first_const as u64, region_id as u64, "Kimotoro");
+                    |reg, resp| {
+                        set_domain_attributes(reg, resp, first_const as u64, region_id as u64, "Kimotoro");
                     },
                 )
             }),
@@ -430,11 +439,11 @@ pub fn register_handlers(
                 } else {
                     2
                 };
-                build_dynamic_response(
+                encode_domain_message(
                     &d,
                     "eve.universe.navigation.GetShortestGateJumpCountResponse",
-                    |resp| {
-                        resp.set(1, DynamicValue::Uint32(jump_count));
+                    |reg, resp| {
+                        set_domain_field(reg, resp, 1, jump_count, "");
                     },
                 )
             }),
@@ -455,8 +464,8 @@ pub fn register_handlers(
                         .map(|c| c.solar_system_id)
                         .unwrap_or(30_000_142)
                 });
-                build_dynamic_response(&d, "eve.bubble.presence.api.GetInBubbleResponse", |resp| {
-                    apply_sde_record(resp, cid as u64, sys_id as u64, "BubblePresence");
+                encode_domain_message(&d, "eve.bubble.presence.api.GetInBubbleResponse", |reg, resp| {
+                    set_domain_attributes(reg, resp, cid as u64, sys_id as u64, "BubblePresence");
                 })
             }),
         );
@@ -477,11 +486,11 @@ pub fn register_handlers(
                         .map(|c| c.solar_system_id)
                         .unwrap_or(30_000_142)
                 });
-                build_dynamic_response(
+                encode_domain_message(
                     &d,
                     "eve.bubble.presence.api.GetInBubbleByCharacterResponse",
-                    |resp| {
-                        apply_sde_record(resp, char_id as u64, sys_id as u64, "CharacterBubble");
+                    |reg, resp| {
+                        set_domain_attributes(reg, resp, char_id as u64, sys_id as u64, "CharacterBubble");
                     },
                 )
             }),
@@ -498,9 +507,8 @@ pub fn register_handlers(
                 if sys_id == 0 {
                     return Err((STATUS_BAD_REQUEST, "System ID must be positive".into()));
                 }
-                build_dynamic_response(&d, "eve.pirate.insurgency.api.GetResponse", |resp| {
-                    resp.set(1, DynamicValue::Uint32(sys_id));
-                    resp.set(2, DynamicValue::Uint32(3)); // Stage 3 insurgency
+                encode_domain_message(&d, "eve.pirate.insurgency.api.GetResponse", |reg, resp| {
+                    set_domain_attributes(reg, resp, sys_id as u64, 3, "InsurgencyStage3");
                 })
             }),
         );
@@ -510,11 +518,11 @@ pub fn register_handlers(
         router.register_handler(
             "eve.pirate.insurgency.api.GetCurrentRequest",
             Arc::new(move |_ctx, _any, _dyn_msg| {
-                build_dynamic_response(
+                encode_domain_message(
                     &d,
                     "eve.pirate.insurgency.api.GetCurrentResponse",
-                    |resp| {
-                        apply_sde_record(resp, 30_000_142, 500_010, "Guristas Insurgency");
+                    |reg, resp| {
+                        set_domain_attributes(reg, resp, 30_000_142, 500_010, "Guristas Insurgency");
                     },
                 )
             }),
@@ -525,11 +533,11 @@ pub fn register_handlers(
         router.register_handler(
             "eve.pirate.insurgency.api.GetSystemsRequest",
             Arc::new(move |_ctx, _any, _dyn_msg| {
-                build_dynamic_response(
+                encode_domain_message(
                     &d,
                     "eve.pirate.insurgency.api.GetSystemsResponse",
-                    |resp| {
-                        apply_sde_record(resp, 30_000_142, 30_000_144, "InsurgencySystems");
+                    |reg, resp| {
+                        set_domain_attributes(reg, resp, 30_000_142, 30_000_144, "InsurgencySystems");
                     },
                 )
             }),
@@ -544,11 +552,11 @@ pub fn register_handlers(
                 if warzone_id == 0 {
                     return Err((STATUS_BAD_REQUEST, "Warzone ID must be positive".into()));
                 }
-                build_dynamic_response(
+                encode_domain_message(
                     &d,
                     "eve.pirate.insurgency.api.GetForWarzoneResponse",
-                    |resp| {
-                        apply_sde_record(resp, warzone_id as u64, 500_010, "WarzoneInsurgency");
+                    |reg, resp| {
+                        set_domain_attributes(reg, resp, warzone_id as u64, 500_010, "WarzoneInsurgency");
                     },
                 )
             }),
@@ -562,12 +570,11 @@ pub fn register_handlers(
             "eve_public.pirate.corruption.api.GetSystemInfoRequest",
             Arc::new(move |_ctx, _any, dyn_msg| {
                 let sys_id = get_int_field(dyn_msg, 1).unwrap_or(30_000_142) as u32;
-                build_dynamic_response(
+                encode_domain_message(
                     &d,
                     "eve_public.pirate.corruption.api.GetSystemInfoResponse",
-                    |resp| {
-                        resp.set(1, DynamicValue::Uint32(sys_id));
-                        resp.set(2, DynamicValue::Uint32(2)); // Corruption stage 2
+                    |reg, resp| {
+                        set_domain_attributes(reg, resp, sys_id as u64, 2, "CorruptionStage2");
                     },
                 )
             }),
@@ -578,11 +585,11 @@ pub fn register_handlers(
         router.register_handler(
             "eve_public.pirate.corruption.api.GetStageThresholdsRequest",
             Arc::new(move |_ctx, _any, _dyn_msg| {
-                build_dynamic_response(
+                encode_domain_message(
                     &d,
                     "eve_public.pirate.corruption.api.GetStageThresholdsResponse",
-                    |resp| {
-                        apply_sde_record(resp, 10_000, 100_000, "CorruptionThresholds");
+                    |reg, resp| {
+                        set_domain_attributes(reg, resp, 10_000, 100_000, "CorruptionThresholds");
                     },
                 )
             }),
@@ -596,12 +603,11 @@ pub fn register_handlers(
             "eve_public.pirate.suppression.api.GetSystemInfoRequest",
             Arc::new(move |_ctx, _any, dyn_msg| {
                 let sys_id = get_int_field(dyn_msg, 1).unwrap_or(30_000_142) as u32;
-                build_dynamic_response(
+                encode_domain_message(
                     &d,
                     "eve_public.pirate.suppression.api.GetSystemInfoResponse",
-                    |resp| {
-                        resp.set(1, DynamicValue::Uint32(sys_id));
-                        resp.set(2, DynamicValue::Uint32(1)); // Suppression stage 1
+                    |reg, resp| {
+                        set_domain_attributes(reg, resp, sys_id as u64, 1, "SuppressionStage1");
                     },
                 )
             }),
@@ -612,11 +618,11 @@ pub fn register_handlers(
         router.register_handler(
             "eve_public.pirate.suppression.api.GetStageThresholdsRequest",
             Arc::new(move |_ctx, _any, _dyn_msg| {
-                build_dynamic_response(
+                encode_domain_message(
                     &d,
                     "eve_public.pirate.suppression.api.GetStageThresholdsResponse",
-                    |resp| {
-                        apply_sde_record(resp, 10_000, 100_000, "SuppressionThresholds");
+                    |reg, resp| {
+                        set_domain_attributes(reg, resp, 10_000, 100_000, "SuppressionThresholds");
                     },
                 )
             }),
@@ -632,11 +638,11 @@ pub fn register_handlers(
             "eve.dynamicbountysystem.GetDynamicBountySettingsRequest",
             Arc::new(move |_ctx, _any, _dyn_msg| {
                 let sys_count = sde_dbs.solar_systems.len() as u64;
-                build_dynamic_response(
+                encode_domain_message(
                     &d,
                     "eve.dynamicbountysystem.GetDynamicBountySettingsResponse",
-                    |resp| {
-                        apply_sde_record(resp, 100, sys_count, "DynamicBountySettings");
+                    |reg, resp| {
+                        set_domain_attributes(reg, resp, 100, sys_count, "DynamicBountySettings");
                     },
                 )
             }),
@@ -647,11 +653,11 @@ pub fn register_handlers(
         router.register_handler(
             "eve.dynamicbountysystem.GetActiveSystemsRequest",
             Arc::new(move |_ctx, _any, _dyn_msg| {
-                build_dynamic_response(
+                encode_domain_message(
                     &d,
                     "eve.dynamicbountysystem.GetActiveSystemsResponse",
-                    |resp| {
-                        apply_sde_record(resp, 30_000_142, 30_000_144, "ActiveBountySystems");
+                    |reg, resp| {
+                        set_domain_attributes(reg, resp, 30_000_142, 30_000_144, "ActiveBountySystems");
                     },
                 )
             }),
@@ -662,12 +668,12 @@ pub fn register_handlers(
         router.register_handler(
             "eve.dynamicbountysystem.GetPaidSystemBountiesRequest",
             Arc::new(move |_ctx, _any, dyn_msg| {
-                let sys_id = get_int_field(dyn_msg, 1).unwrap_or(30_000_142) as u32;
-                build_dynamic_response(
+                let sys_id = get_int_field(dyn_msg, 1).unwrap_or(30_000_142) as u64;
+                encode_domain_message(
                     &d,
                     "eve.dynamicbountysystem.GetPaidSystemBountiesResponse",
-                    |resp| {
-                        resp.set(1, DynamicValue::Uint32(sys_id));
+                    |reg, resp| {
+                        set_domain_field(reg, resp, 1, sys_id, "");
                     },
                 )
             }),
@@ -678,12 +684,12 @@ pub fn register_handlers(
         router.register_handler(
             "eve.dynamicbountysystem.GetAccumulatedSystemShipLossValueRequest",
             Arc::new(move |_ctx, _any, dyn_msg| {
-                let sys_id = get_int_field(dyn_msg, 1).unwrap_or(30_000_142) as u32;
-                build_dynamic_response(
+                let sys_id = get_int_field(dyn_msg, 1).unwrap_or(30_000_142) as u64;
+                encode_domain_message(
                     &d,
                     "eve.dynamicbountysystem.GetAccumulatedSystemShipLossValueResponse",
-                    |resp| {
-                        resp.set(1, DynamicValue::Uint32(sys_id));
+                    |reg, resp| {
+                        set_domain_field(reg, resp, 1, sys_id, "");
                     },
                 )
             }),
@@ -703,11 +709,11 @@ pub fn register_handlers(
                     .next()
                     .copied()
                     .unwrap_or(1) as u64;
-                build_dynamic_response(
+                encode_domain_message(
                     &d,
                     "eve.dungeon.sovereignty.api.GetInstancesResponse",
-                    |resp| {
-                        apply_sde_record(resp, dng_id, 30_000_142, "SovereigntyDungeon");
+                    |reg, resp| {
+                        set_domain_attributes(reg, resp, dng_id, 30_000_142, "SovereigntyDungeon");
                     },
                 )
             }),
@@ -725,11 +731,11 @@ pub fn register_handlers(
                     .next()
                     .copied()
                     .unwrap_or(1) as u64;
-                build_dynamic_response(
+                encode_domain_message(
                     &d,
                     "eve_public.dungeon.sovereignty.api.GetVisibleInstancesResponse",
-                    |resp| {
-                        apply_sde_record(resp, dng_id, 30_000_142, "VisibleSovereigntyDungeon");
+                    |reg, resp| {
+                        set_domain_attributes(reg, resp, dng_id, 30_000_142, "VisibleSovereigntyDungeon");
                     },
                 )
             }),
@@ -742,10 +748,9 @@ pub fn register_handlers(
         router.register_handler(
             "eve.npc.ship.api.GetOwnerRequest",
             Arc::new(move |_ctx, _any, dyn_msg| {
-                let entity_id = get_int_field(dyn_msg, 1).unwrap_or(100_000_001);
-                build_dynamic_response(&d, "eve.npc.ship.api.GetOwnerResponse", |resp| {
-                    resp.set(1, DynamicValue::Int64(entity_id));
-                    resp.set(2, DynamicValue::Int64(500_001)); // Pirate NPC faction ID
+                let entity_id = get_int_field(dyn_msg, 1).unwrap_or(100_000_001) as u64;
+                encode_domain_message(&d, "eve.npc.ship.api.GetOwnerResponse", |reg, resp| {
+                    set_domain_attributes(reg, resp, entity_id, 500_001, "NPCShipOwner");
                 })
             }),
         );
@@ -789,8 +794,8 @@ pub fn register_handlers(
                     .get(&(station_id as i64))
                     .map(|st| st.operation_id as u64)
                     .unwrap_or(1_000_035);
-                build_dynamic_response(&d, rsp_name, |resp| {
-                    apply_sde_record(resp, req_id, owner_corp, "evomu-tranquility");
+                encode_domain_message(&d, rsp_name, |reg, resp| {
+                    set_domain_attributes(reg, resp, req_id, owner_corp, "evomu-tranquility");
                 })
             }),
         );

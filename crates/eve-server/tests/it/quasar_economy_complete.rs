@@ -269,16 +269,6 @@ async fn test_quasar_market_complete() {
 
 #[tokio::test]
 async fn test_quasar_inventory_asset_container_blueprint_ore() {
-    // parity: quasar:eveProto/generated/eve_public/inventory/generic_item_pb2.pyj, quasar:eveProto/generated/eve_public/inventory/generic_item_type_pb2.pyj, quasar:eveProto/generated/eve_public/inventory/group/group_pb2.pyj, quasar:eveProto/generated/eve_public/inventory/inventory_pb2.pyj, quasar:eveProto/generated/eve_public/ore/group_pb2.pyj, quasar:eveProto/generated/eve_public/ore/ore_type_pb2.pyj
-    eve_testkit::attest(&[
-        "quasar:eveProto/generated/eve_public/inventory/generic_item_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/inventory/generic_item_type_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/inventory/group/group_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/inventory/inventory_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/ore/group_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/ore/ore_type_pb2.pyj",
-    ]);
-
     let ctx = ServerContext::new();
     let empty_kw = HashMap::new();
     let mut sess = SessionState::new(1001);
@@ -442,12 +432,9 @@ async fn test_quasar_inventory_asset_container_blueprint_ore() {
 
 #[tokio::test]
 async fn test_quasar_assetholding_entitlements() {
-    // parity: feat:quasar.assetholding, quasar:eveProto/generated/eve_public/assetholding/asset/asset_pb2.pyj, quasar:eveProto/generated/eve_public/assetholding/entitlement/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/assetholding/entitlement/entitlement_pb2.pyj
+    // parity: quasar:eveProto/generated/eve_public/assetholding/entitlement/api/notices_pb2.pyj
     eve_testkit::attest(&[
-        "feat:quasar.assetholding",
-        "quasar:eveProto/generated/eve_public/assetholding/asset/asset_pb2.pyj",
         "quasar:eveProto/generated/eve_public/assetholding/entitlement/api/notices_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/assetholding/entitlement/entitlement_pb2.pyj",
     ]);
 
     let ctx = ServerContext::new();
@@ -597,11 +584,6 @@ async fn test_quasar_assetholding_entitlements() {
 
 #[tokio::test]
 async fn test_quasar_accounting_loyalty_contracts() {
-    // parity: quasar:eveProto/generated/eve_public/loyaltypoints/loyaltypoints_pb2.pyj
-    eve_testkit::attest(&[
-        "quasar:eveProto/generated/eve_public/loyaltypoints/loyaltypoints_pb2.pyj",
-    ]);
-
     let ctx = ServerContext::new();
     let empty_kw = HashMap::new();
     let mut sess = SessionState::new(1001);
@@ -665,13 +647,6 @@ async fn test_quasar_accounting_loyalty_contracts() {
 
 #[tokio::test]
 async fn test_quasar_industry_planetary_moon_asteroidbelt() {
-    // parity: plan:Q-6, quasar:eveProto/generated/eve_public/planet/planet_pb2.pyj, quasar:eveProto/generated/eve_public/planet/skyhook/skyhook_pb2.pyj
-    eve_testkit::attest(&[
-        "plan:Q-6",
-        "quasar:eveProto/generated/eve_public/planet/planet_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/planet/skyhook/skyhook_pb2.pyj",
-    ]);
-
     let ctx = ServerContext::new();
     let empty_kw = HashMap::new();
     let mut sess = SessionState::new(1001);

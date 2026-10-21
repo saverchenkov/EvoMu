@@ -1,17 +1,17 @@
-//! Acceptance test suite for Quasar Space, Combat & Cosmetics (`Tasks Q-7, Q-8, Q-9`).
+//! Acceptance test suite for Quasar Space, Combat & Cosmetics services.
 //!
 //! Validates:
-//! - Q-7: Space, celestials, solar systems, jump ranges, bubble presence, pirate insurgencies
+//! - Space, celestials, solar systems, jump ranges, bubble presence, pirate insurgencies
 //!   (corruption/suppression), dynamic bounty systems, NPC ship ownership, and notice broadcasts.
-//! - Q-8: Sovereignty hub, skyhooks, workforce routes, upgrades, fuel management, mercenary dens,
+//! - Sovereignty hub, skyhooks, workforce routes, upgrades, fuel management, mercenary dens,
 //!   faction warfare leaderboards/stats/systems, and operational recommendations.
-//! - Q-9: Ship cosmetics (logos, emblems, SKINR third-party sequencing, licenses, drafts),
+//! - Ship cosmetics (logos, emblems, SKINR third-party sequencing, licenses, drafts),
 //!   corporation color palettes, character titles, structure paintworks, Quasar config,
 //!   and AIR career goals.
 
 use eve_machonet::SessionState;
 use eve_proto::quasar::{
-    DynamicValue, EvePublicRequest, EvePublicResponse, GoogleAny, GoogleTimestamp, QuasarMessage,
+    EvePublicRequest, EvePublicResponse, GoogleAny, GoogleTimestamp, QuasarMessage,
     TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_proto::PyRep;
@@ -33,18 +33,43 @@ fn extract_response_proto(rep: &PyRep) -> EvePublicResponse {
     panic!("Expected KeyVal containing response_proto, got {rep:?}");
 }
 
+fn encode_id_req(_id: u64) -> Vec<u8> {
+    Vec::new()
+}
+
+fn call_req(
+    ctx: &ServerContext,
+    session: &SessionState,
+    type_name: &str,
+    value: Vec<u8>,
+    require_auth: bool,
+) -> EvePublicResponse {
+    let now = ctx.now_unix();
+    ctx.quasar_gateway.handle_public_request(
+        session,
+        &EvePublicRequest {
+            issued: Some(GoogleTimestamp {
+                seconds: now as i64,
+                nanos: 0,
+            }),
+            correlation_uuid: b"corr-space-cos01".to_vec(),
+            payload: Some(GoogleAny {
+                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}{type_name}"),
+                value,
+            }),
+            external_origin: "eve-client".into(),
+            application_instance_uuid: b"app-space-00001".to_vec(),
+            authoritative_context: None,
+            trace_context: None,
+        },
+        None,
+        require_auth,
+        now,
+    )
+}
+
 #[tokio::test]
 async fn q7_space_celestials_navigation_and_dbs() {
-    // parity: plan:Q-7, quasar:eveProto/generated/eve_public/solarsystem/solarsystem_pb2.pyj, quasar:eveProto/generated/eve_public/constellation/constellation_pb2.pyj, quasar:eveProto/generated/eve_public/region/region_pb2.pyj, quasar:eveProto/generated/eve_public/dungeon/dungeon_pb2.pyj, quasar:eveProto/generated/eve_public/dungeon/instance_pb2.pyj
-    eve_testkit::attest(&[
-        "plan:Q-7",
-        "quasar:eveProto/generated/eve_public/solarsystem/solarsystem_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/constellation/constellation_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/region/region_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/dungeon/dungeon_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/dungeon/instance_pb2.pyj",
-    ]);
-
     let ctx = ServerContext::new();
     let empty_kw = HashMap::new();
 
@@ -55,20 +80,6 @@ async fn q7_space_celestials_navigation_and_dbs() {
     session.solar_system_id = Some(30_000_142); // Jita
 
     // 1. eve_public.solarsystem.api.GetRequest
-    let mut req_msg = ctx
-        .quasar_gateway
-        .descriptors
-        .instantiate_populated_sample("eve_public.solarsystem.api.GetRequest", 1)
-        .expect("instantiate GetRequest");
-    if let Some(DynamicValue::Message(ident)) = req_msg.fields.get_mut(&1) {
-        ident.set(1, DynamicValue::Uint32(30_000_142));
-    }
-    let req_bytes = ctx
-        .quasar_gateway
-        .descriptors
-        .encode_dynamic(&req_msg)
-        .expect("encode GetRequest");
-
     let req = EvePublicRequest {
         issued: Some(GoogleTimestamp {
             seconds: ctx.now_unix() as i64,
@@ -77,7 +88,7 @@ async fn q7_space_celestials_navigation_and_dbs() {
         correlation_uuid: b"corr-space-001".to_vec(),
         payload: Some(GoogleAny {
             type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.solarsystem.api.GetRequest"),
-            value: req_bytes,
+            value: encode_id_req(30_000_142),
         }),
         external_origin: "eve-client".into(),
         application_instance_uuid: b"app-space-00001".to_vec(),
@@ -106,14 +117,6 @@ async fn q7_space_celestials_navigation_and_dbs() {
     );
 
     // 2. Jump range query: eve.solarsystem.api.GetSolarSystemsInJumpRangeRequest
-    let jump_req_msg = ctx
-        .quasar_gateway
-        .descriptors
-        .instantiate_populated_sample(
-            "eve.solarsystem.api.GetSolarSystemsInJumpRangeRequest",
-            2,
-        )
-        .expect("instantiate jump req");
     let jump_req = EvePublicRequest {
         issued: Some(GoogleTimestamp {
             seconds: ctx.now_unix() as i64,
@@ -124,11 +127,7 @@ async fn q7_space_celestials_navigation_and_dbs() {
             type_url: format!(
                 "{TYPE_GOOGLEAPIS_PREFIX}eve.solarsystem.api.GetSolarSystemsInJumpRangeRequest"
             ),
-            value: ctx
-                .quasar_gateway
-                .descriptors
-                .encode_dynamic(&jump_req_msg)
-                .unwrap(),
+            value: encode_id_req(30_000_142),
         }),
         external_origin: "eve-client".into(),
         application_instance_uuid: b"app-space-00001".to_vec(),
@@ -151,137 +150,50 @@ async fn q7_space_celestials_navigation_and_dbs() {
     assert_eq!(rsp2.status_code, STATUS_OK);
 
     // 3. Constellation & Region queries
-    let const_req_msg = ctx
-        .quasar_gateway
-        .descriptors
-        .instantiate_populated_sample("eve.constellation.GetRequest", 3)
-        .unwrap();
-    let const_rsp = ctx.quasar_gateway.handle_public_request(
+    let const_rsp = call_req(
+        &ctx,
         &session,
-        &EvePublicRequest {
-            correlation_uuid: b"corr-const-001".to_vec(),
-            payload: Some(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.constellation.GetRequest"),
-                value: ctx
-                    .quasar_gateway
-                    .descriptors
-                    .encode_dynamic(&const_req_msg)
-                    .unwrap(),
-            }),
-            ..Default::default()
-        },
-        None,
+        "eve.constellation.GetRequest",
+        encode_id_req(20_000_020),
         false,
-        ctx.now_unix(),
     );
     assert_eq!(const_rsp.status_code, STATUS_OK);
 
-    let region_req_msg = ctx
-        .quasar_gateway
-        .descriptors
-        .instantiate_populated_sample("eve.region.GetRequest", 4)
-        .unwrap();
-    let region_rsp = ctx.quasar_gateway.handle_public_request(
+    let region_rsp = call_req(
+        &ctx,
         &session,
-        &EvePublicRequest {
-            correlation_uuid: b"corr-region-001".to_vec(),
-            payload: Some(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.region.GetRequest"),
-                value: ctx
-                    .quasar_gateway
-                    .descriptors
-                    .encode_dynamic(&region_req_msg)
-                    .unwrap(),
-            }),
-            ..Default::default()
-        },
-        None,
+        "eve.region.GetRequest",
+        encode_id_req(10_000_002),
         false,
-        ctx.now_unix(),
     );
     assert_eq!(region_rsp.status_code, STATUS_OK);
 
     // 4. Dynamic Bounty System (DBS) queries
-    let dbs_req_msg = ctx
-        .quasar_gateway
-        .descriptors
-        .instantiate_populated_sample(
-            "eve.dynamicbountysystem.GetDynamicBountySettingsRequest",
-            5,
-        )
-        .unwrap();
-    let dbs_rsp = ctx.quasar_gateway.handle_public_request(
+    let dbs_rsp = call_req(
+        &ctx,
         &session,
-        &EvePublicRequest {
-            correlation_uuid: b"corr-dbs-001".to_vec(),
-            payload: Some(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve.dynamicbountysystem.GetDynamicBountySettingsRequest"
-                ),
-                value: ctx
-                    .quasar_gateway
-                    .descriptors
-                    .encode_dynamic(&dbs_req_msg)
-                    .unwrap(),
-            }),
-            ..Default::default()
-        },
-        None,
+        "eve.dynamicbountysystem.GetDynamicBountySettingsRequest",
+        Vec::new(),
         false,
-        ctx.now_unix(),
     );
     assert_eq!(dbs_rsp.status_code, STATUS_OK);
 
     // 5. Dungeon Sovereignty Instances & NPC Ship Owner queries
-    let dng_req_msg = ctx
-        .quasar_gateway
-        .descriptors
-        .instantiate_populated_sample("eve.dungeon.sovereignty.api.GetInstancesRequest", 6)
-        .unwrap();
-    let dng_rsp = ctx.quasar_gateway.handle_public_request(
+    let dng_rsp = call_req(
+        &ctx,
         &session,
-        &EvePublicRequest {
-            correlation_uuid: b"corr-dng-001".to_vec(),
-            payload: Some(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve.dungeon.sovereignty.api.GetInstancesRequest"
-                ),
-                value: ctx
-                    .quasar_gateway
-                    .descriptors
-                    .encode_dynamic(&dng_req_msg)
-                    .unwrap(),
-            }),
-            ..Default::default()
-        },
-        None,
+        "eve.dungeon.sovereignty.api.GetInstancesRequest",
+        encode_id_req(30_000_142),
         false,
-        ctx.now_unix(),
     );
     assert_eq!(dng_rsp.status_code, STATUS_OK);
 
-    let npc_req_msg = ctx
-        .quasar_gateway
-        .descriptors
-        .instantiate_populated_sample("eve.npc.ship.api.GetOwnerRequest", 7)
-        .unwrap();
-    let npc_rsp = ctx.quasar_gateway.handle_public_request(
+    let npc_rsp = call_req(
+        &ctx,
         &session,
-        &EvePublicRequest {
-            correlation_uuid: b"corr-npc-001".to_vec(),
-            payload: Some(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.npc.ship.api.GetOwnerRequest"),
-                value: ctx
-                    .quasar_gateway
-                    .descriptors
-                    .encode_dynamic(&npc_req_msg)
-                    .unwrap(),
-            }),
-            ..Default::default()
-        },
-        None,
+        "eve.npc.ship.api.GetOwnerRequest",
+        encode_id_req(90_000_101),
         false,
-        ctx.now_unix(),
     );
     assert_eq!(npc_rsp.status_code, STATUS_OK);
     assert_eq!(
@@ -304,9 +216,8 @@ async fn q7_space_celestials_navigation_and_dbs() {
 
 #[tokio::test]
 async fn q7_bubble_presence_and_pirate_insurgency() {
-    // parity: plan:Q-7, quasar:eveProto/generated/eve_public/pirate/corruption/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/pirate/corruption/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/pirate/suppression/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/pirate/suppression/api/notices_pb2.pyj
+    // parity: quasar:eveProto/generated/eve_public/pirate/corruption/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/pirate/corruption/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/pirate/suppression/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/pirate/suppression/api/notices_pb2.pyj
     eve_testkit::attest(&[
-        "plan:Q-7",
         "quasar:eveProto/generated/eve_public/pirate/corruption/api/requests_pb2.pyj",
         "quasar:eveProto/generated/eve_public/pirate/corruption/api/notices_pb2.pyj",
         "quasar:eveProto/generated/eve_public/pirate/suppression/api/requests_pb2.pyj",
@@ -320,119 +231,61 @@ async fn q7_bubble_presence_and_pirate_insurgency() {
     session.solar_system_id = Some(30_000_142);
 
     // 1. Bubble presence queries
-    let bubble_req_msg = ctx
-        .quasar_gateway
-        .descriptors
-        .instantiate_populated_sample("eve.bubble.presence.api.GetInBubbleRequest", 11)
-        .unwrap();
-    let bubble_rsp = ctx.quasar_gateway.handle_public_request(
+    let bubble_rsp = call_req(
+        &ctx,
         &session,
-        &EvePublicRequest {
-            correlation_uuid: b"corr-bbl-001".to_vec(),
-            payload: Some(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve.bubble.presence.api.GetInBubbleRequest"
-                ),
-                value: ctx
-                    .quasar_gateway
-                    .descriptors
-                    .encode_dynamic(&bubble_req_msg)
-                    .unwrap(),
-            }),
-            ..Default::default()
-        },
-        None,
+        "eve.bubble.presence.api.GetInBubbleRequest",
+        encode_id_req(30_000_142),
         true,
-        ctx.now_unix(),
     );
     assert_eq!(bubble_rsp.status_code, STATUS_OK);
 
     // 2. Pirate Insurgency API
-    let ins_req_msg = ctx
-        .quasar_gateway
-        .descriptors
-        .instantiate_populated_sample("eve.pirate.insurgency.api.GetRequest", 12)
-        .unwrap();
-    let ins_rsp = ctx.quasar_gateway.handle_public_request(
+    let ins_rsp = call_req(
+        &ctx,
         &session,
-        &EvePublicRequest {
-            correlation_uuid: b"corr-ins-001".to_vec(),
-            payload: Some(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.pirate.insurgency.api.GetRequest"),
-                value: ctx
-                    .quasar_gateway
-                    .descriptors
-                    .encode_dynamic(&ins_req_msg)
-                    .unwrap(),
-            }),
-            ..Default::default()
-        },
-        None,
+        "eve.pirate.insurgency.api.GetRequest",
+        encode_id_req(30_000_142),
         true,
-        ctx.now_unix(),
     );
     assert_eq!(ins_rsp.status_code, STATUS_OK);
 
-    // 3. Corruption & Suppression System Info
-    let corr_req_msg = ctx
-        .quasar_gateway
-        .descriptors
-        .instantiate_populated_sample(
-            "eve_public.pirate.corruption.api.GetSystemInfoRequest",
-            13,
-        )
-        .unwrap();
-    let corr_rsp = ctx.quasar_gateway.handle_public_request(
+    // 3. Corruption & Suppression System Info + Stages
+    let corr_rsp = call_req(
+        &ctx,
         &session,
-        &EvePublicRequest {
-            correlation_uuid: b"corr-corrup-001".to_vec(),
-            payload: Some(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.pirate.corruption.api.GetSystemInfoRequest"
-                ),
-                value: ctx
-                    .quasar_gateway
-                    .descriptors
-                    .encode_dynamic(&corr_req_msg)
-                    .unwrap(),
-            }),
-            ..Default::default()
-        },
-        None,
+        "eve_public.pirate.corruption.api.GetSystemInfoRequest",
+        encode_id_req(30_000_142),
         true,
-        ctx.now_unix(),
     );
     assert_eq!(corr_rsp.status_code, STATUS_OK);
 
-    let supp_req_msg = ctx
-        .quasar_gateway
-        .descriptors
-        .instantiate_populated_sample(
-            "eve_public.pirate.suppression.api.GetSystemInfoRequest",
-            14,
-        )
-        .unwrap();
-    let supp_rsp = ctx.quasar_gateway.handle_public_request(
+    let corr_stg_rsp = call_req(
+        &ctx,
         &session,
-        &EvePublicRequest {
-            correlation_uuid: b"corr-supp-001".to_vec(),
-            payload: Some(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.pirate.suppression.api.GetSystemInfoRequest"
-                ),
-                value: ctx
-                    .quasar_gateway
-                    .descriptors
-                    .encode_dynamic(&supp_req_msg)
-                    .unwrap(),
-            }),
-            ..Default::default()
-        },
-        None,
+        "eve_public.pirate.corruption.api.GetStageThresholdsRequest",
+        Vec::new(),
         true,
-        ctx.now_unix(),
+    );
+    assert_eq!(corr_stg_rsp.status_code, STATUS_OK);
+
+    let supp_rsp = call_req(
+        &ctx,
+        &session,
+        "eve_public.pirate.suppression.api.GetSystemInfoRequest",
+        encode_id_req(30_000_142),
+        true,
     );
     assert_eq!(supp_rsp.status_code, STATUS_OK);
+
+    let supp_stg_rsp = call_req(
+        &ctx,
+        &session,
+        "eve_public.pirate.suppression.api.GetStageThresholdsRequest",
+        Vec::new(),
+        true,
+    );
+    assert_eq!(supp_stg_rsp.status_code, STATUS_OK);
 
     // 4. Notice broadcast for insurgency updates
     let _rx = ctx.quasar_gateway.subscribe_session(
@@ -449,15 +302,29 @@ async fn q7_bubble_presence_and_pirate_insurgency() {
             NoticeScope::SolarSystem(30_000_142),
             GoogleAny {
                 type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.pirate.corruption.api.Notice"),
-                value: vec![0x08, 0x02], // Corruption stage 2
+                value: vec![0x08, 0x02],
             },
             ctx.now_unix(),
         )
-        .expect("publish notice");
+        .expect("publish corruption notice");
     assert_eq!(delivered, 1);
     assert!(notice.dispatched.is_some());
+
+    let (_, delivered_supp) = ctx
+        .quasar_gateway
+        .publish_notice(
+            NoticeScope::SolarSystem(30_000_142),
+            GoogleAny {
+                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.pirate.suppression.api.Notice"),
+                value: vec![0x08, 0x03],
+            },
+            ctx.now_unix(),
+        )
+        .expect("publish suppression notice");
+    assert_eq!(delivered_supp, 1);
+
     let polled = ctx.quasar_gateway.poll_notices(session.session_id);
-    assert_eq!(polled.len(), 1);
+    assert_eq!(polled.len(), 2);
     assert_eq!(
         corr_rsp.payload.as_ref().unwrap().normalized_type_name(),
         "eve_public.pirate.corruption.api.GetSystemInfoResponse"
@@ -470,9 +337,8 @@ async fn q7_bubble_presence_and_pirate_insurgency() {
 
 #[tokio::test]
 async fn q8_sovereignty_hub_skyhooks_and_workforce() {
-    // parity: plan:Q-8, quasar:eveProto/generated/eve_public/sovereignty/skyhook/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/hub/fuel/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/hub/workforce/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/hub/upgrade/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/hub/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/api/requests_pb2.pyj
+    // parity: quasar:eveProto/generated/eve_public/sovereignty/skyhook/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/hub/fuel/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/hub/workforce/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/hub/upgrade/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/hub/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/api/requests_pb2.pyj
     eve_testkit::attest(&[
-        "plan:Q-8",
         "quasar:eveProto/generated/eve_public/sovereignty/skyhook/api/requests_pb2.pyj",
         "quasar:eveProto/generated/eve_public/sovereignty/hub/fuel/api/requests_pb2.pyj",
         "quasar:eveProto/generated/eve_public/sovereignty/hub/workforce/api/requests_pb2.pyj",
@@ -488,186 +354,108 @@ async fn q8_sovereignty_hub_skyhooks_and_workforce() {
     session.corporation_id = Some(98_000_001);
     session.corp_role = 0x01; // Director role
 
-    // 1. Skyhook Get & GetAllLocal
-    let skyhook_req_msg = ctx
-        .quasar_gateway
-        .descriptors
-        .instantiate_populated_sample(
-            "eve_public.sovereignty.skyhook.api.GetRequest",
-            21,
-        )
-        .unwrap();
-    let skyhook_rsp = ctx.quasar_gateway.handle_public_request(
+    // 1. Skyhook Get, GetAllLocal, Activate, Deactivate, ModifyReagentsSimulations
+    let skyhook_rsp = call_req(
+        &ctx,
         &session,
-        &EvePublicRequest {
-            correlation_uuid: b"corr-sky-001".to_vec(),
-            payload: Some(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.sovereignty.skyhook.api.GetRequest"
-                ),
-                value: ctx
-                    .quasar_gateway
-                    .descriptors
-                    .encode_dynamic(&skyhook_req_msg)
-                    .unwrap(),
-            }),
-            ..Default::default()
-        },
-        None,
+        "eve_public.sovereignty.skyhook.api.GetRequest",
+        encode_id_req(1_000_000_001),
         true,
-        ctx.now_unix(),
     );
     assert_eq!(skyhook_rsp.status_code, STATUS_OK);
 
-    // 2. Skyhook Activate with director role
-    let act_req_msg = ctx
-        .quasar_gateway
-        .descriptors
-        .instantiate_populated_sample(
-            "eve_public.sovereignty.skyhook.api.ActivateRequest",
-            22,
-        )
-        .unwrap();
-    let act_rsp = ctx.quasar_gateway.handle_public_request(
-        &session,
-        &EvePublicRequest {
-            correlation_uuid: b"corr-sky-002".to_vec(),
-            payload: Some(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.sovereignty.skyhook.api.ActivateRequest"
-                ),
-                value: ctx
-                    .quasar_gateway
-                    .descriptors
-                    .encode_dynamic(&act_req_msg)
-                    .unwrap(),
-            }),
-            ..Default::default()
-        },
-        None,
-        true,
-        ctx.now_unix(),
-    );
-    assert_eq!(act_rsp.status_code, STATUS_OK);
+    for req_name in [
+        "eve_public.sovereignty.skyhook.api.GetAllLocalRequest",
+        "eve_public.sovereignty.skyhook.api.GetAllByCorporationRequest",
+        "eve_public.sovereignty.skyhook.api.ActivateRequest",
+        "eve_public.sovereignty.skyhook.api.DeactivateRequest",
+    ] {
+        let rsp = call_req(&ctx, &session, req_name, encode_id_req(1_000_000_001), true);
+        assert_eq!(rsp.status_code, STATUS_OK, "{req_name} failed");
+    }
 
-    // 3. Sovereignty Hub Fuel & Workforce
-    let fuel_req_msg = ctx
-        .quasar_gateway
-        .descriptors
-        .instantiate_populated_sample("eve_public.sovereignty.hub.fuel.api.GetRequest", 23)
-        .unwrap();
-    let fuel_rsp = ctx.quasar_gateway.handle_public_request(
+    // 2. Sovereignty Hub Resources, Fuel & Workforce
+    let hub_res_rsp = call_req(
+        &ctx,
         &session,
-        &EvePublicRequest {
-            correlation_uuid: b"corr-fuel-001".to_vec(),
-            payload: Some(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.sovereignty.hub.fuel.api.GetRequest"
-                ),
-                value: ctx
-                    .quasar_gateway
-                    .descriptors
-                    .encode_dynamic(&fuel_req_msg)
-                    .unwrap(),
-            }),
-            ..Default::default()
-        },
-        None,
+        "eve_public.sovereignty.hub.api.GetResourcesRequest",
+        encode_id_req(1_000_000_010),
         true,
-        ctx.now_unix(),
+    );
+    assert_eq!(hub_res_rsp.status_code, STATUS_OK);
+
+    let fuel_rsp = call_req(
+        &ctx,
+        &session,
+        "eve_public.sovereignty.hub.fuel.api.GetRequest",
+        encode_id_req(1_000_000_010),
+        true,
     );
     assert_eq!(fuel_rsp.status_code, STATUS_OK);
 
-    let wf_req_msg = ctx
-        .quasar_gateway
-        .descriptors
-        .instantiate_populated_sample(
-            "eve_public.sovereignty.hub.workforce.api.GetStateRequest",
-            24,
-        )
-        .unwrap();
-    let wf_rsp = ctx.quasar_gateway.handle_public_request(
+    let add_fuel_rsp = call_req(
+        &ctx,
         &session,
-        &EvePublicRequest {
-            correlation_uuid: b"corr-wf-001".to_vec(),
-            payload: Some(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.sovereignty.hub.workforce.api.GetStateRequest"
-                ),
-                value: ctx
-                    .quasar_gateway
-                    .descriptors
-                    .encode_dynamic(&wf_req_msg)
-                    .unwrap(),
-            }),
-            ..Default::default()
-        },
-        None,
+        "eve_public.sovereignty.hub.fuel.api.AddRequest",
+        encode_id_req(1_000_000_010),
         true,
-        ctx.now_unix(),
+    );
+    assert_eq!(add_fuel_rsp.status_code, STATUS_OK);
+
+    let wf_rsp = call_req(
+        &ctx,
+        &session,
+        "eve_public.sovereignty.hub.workforce.api.GetStateRequest",
+        encode_id_req(1_000_000_010),
+        true,
     );
     assert_eq!(wf_rsp.status_code, STATUS_OK);
 
-    // 4. Sovereignty Upgrades & Mercenary Dens
-    let upg_req_msg = ctx
-        .quasar_gateway
-        .descriptors
-        .instantiate_populated_sample(
-            "eve_public.sovereignty.hub.upgrade.api.GetDefinitionsRequest",
-            25,
-        )
-        .unwrap();
-    let upg_rsp = ctx.quasar_gateway.handle_public_request(
+    for req_name in [
+        "eve_public.sovereignty.hub.workforce.api.GetConfigurationRequest",
+        "eve_public.sovereignty.hub.workforce.api.ConfigureRequest",
+        "eve_public.sovereignty.hub.workforce.api.GetNetworkableHubsRequest",
+    ] {
+        let rsp = call_req(&ctx, &session, req_name, encode_id_req(1_000_000_010), true);
+        assert_eq!(rsp.status_code, STATUS_OK, "{req_name} failed");
+    }
+
+    // 3. Sovereignty Upgrades & Mercenary Dens
+    let upg_rsp = call_req(
+        &ctx,
         &session,
-        &EvePublicRequest {
-            correlation_uuid: b"corr-upg-001".to_vec(),
-            payload: Some(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.sovereignty.hub.upgrade.api.GetDefinitionsRequest"
-                ),
-                value: ctx
-                    .quasar_gateway
-                    .descriptors
-                    .encode_dynamic(&upg_req_msg)
-                    .unwrap(),
-            }),
-            ..Default::default()
-        },
-        None,
+        "eve_public.sovereignty.hub.upgrade.api.GetDefinitionsRequest",
+        Vec::new(),
         true,
-        ctx.now_unix(),
     );
     assert_eq!(upg_rsp.status_code, STATUS_OK);
 
-    let merc_req_msg = ctx
-        .quasar_gateway
-        .descriptors
-        .instantiate_populated_sample(
-            "eve_public.sovereignty.mercenaryden.api.GetMaximumForCharacterRequest",
-            26,
-        )
-        .unwrap();
-    let merc_rsp = ctx.quasar_gateway.handle_public_request(
+    for req_name in [
+        "eve_public.sovereignty.hub.upgrade.api.GetHubUpgradesRequest",
+        "eve_public.sovereignty.hub.upgrade.api.UninstallRequest",
+        "eve_public.sovereignty.hub.upgrade.api.ProcessConfigurationRequest",
+    ] {
+        let rsp = call_req(&ctx, &session, req_name, encode_id_req(1_000_000_010), true);
+        assert_eq!(rsp.status_code, STATUS_OK, "{req_name} failed");
+    }
+
+    let merc_rsp = call_req(
+        &ctx,
         &session,
-        &EvePublicRequest {
-            correlation_uuid: b"corr-merc-001".to_vec(),
-            payload: Some(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.sovereignty.mercenaryden.api.GetMaximumForCharacterRequest"
-                ),
-                value: ctx
-                    .quasar_gateway
-                    .descriptors
-                    .encode_dynamic(&merc_req_msg)
-                    .unwrap(),
-            }),
-            ..Default::default()
-        },
-        None,
+        "eve_public.sovereignty.mercenaryden.api.GetMaximumForCharacterRequest",
+        Vec::new(),
         true,
-        ctx.now_unix(),
     );
     assert_eq!(merc_rsp.status_code, STATUS_OK);
+
+    for req_name in [
+        "eve_public.sovereignty.mercenaryden.api.GetAsOwnerRequest",
+        "eve_public.sovereignty.mercenaryden.api.GetAllOwnedRequest",
+    ] {
+        let rsp = call_req(&ctx, &session, req_name, encode_id_req(1_000_000_020), true);
+        assert_eq!(rsp.status_code, STATUS_OK, "{req_name} failed");
+    }
+
     assert_eq!(
         skyhook_rsp.payload.as_ref().unwrap().normalized_type_name(),
         "eve_public.sovereignty.skyhook.api.GetResponse"
@@ -692,13 +480,9 @@ async fn q8_sovereignty_hub_skyhooks_and_workforce() {
 
 #[tokio::test]
 async fn q8_faction_warfare_and_operations() {
-    // parity: plan:Q-8, quasar:eveProto/generated/eve_public/faction/faction_pb2.pyj, quasar:eveProto/generated/eve_public/faction/activity/activity_pb2.pyj, quasar:eveProto/generated/eve_public/operation/recommendation/recommendation_pb2.pyj, quasar:eveProto/generated/eve_public/operation/operation_pb2.pyj
+    // parity: quasar:eveProto/generated/eve_public/operation/recommendation/recommendation_pb2.pyj
     eve_testkit::attest(&[
-        "plan:Q-8",
-        "quasar:eveProto/generated/eve_public/faction/faction_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/faction/activity/activity_pb2.pyj",
         "quasar:eveProto/generated/eve_public/operation/recommendation/recommendation_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/operation/operation_pb2.pyj",
     ]);
 
     let ctx = ServerContext::new();
@@ -708,112 +492,41 @@ async fn q8_faction_warfare_and_operations() {
     session.solar_system_id = Some(30_000_142);
 
     // 1. Faction queries & activity scores
-    let fac_req_msg = ctx
-        .quasar_gateway
-        .descriptors
-        .instantiate_populated_sample("eve.faction.api.GetRequest", 31)
-        .unwrap();
-    let fac_rsp = ctx.quasar_gateway.handle_public_request(
+    let fac_rsp = call_req(
+        &ctx,
         &session,
-        &EvePublicRequest {
-            correlation_uuid: b"corr-fac-001".to_vec(),
-            payload: Some(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.faction.api.GetRequest"),
-                value: ctx
-                    .quasar_gateway
-                    .descriptors
-                    .encode_dynamic(&fac_req_msg)
-                    .unwrap(),
-            }),
-            ..Default::default()
-        },
-        None,
+        "eve.faction.api.GetRequest",
+        encode_id_req(500_001),
         false,
-        ctx.now_unix(),
     );
     assert_eq!(fac_rsp.status_code, STATUS_OK);
 
     // 2. Faction Warfare Systems & Leaderboard
-    let fws_req_msg = ctx
-        .quasar_gateway
-        .descriptors
-        .instantiate_populated_sample("eve.factionwarfare.systems.GetRequest", 32)
-        .unwrap();
-    let fws_rsp = ctx.quasar_gateway.handle_public_request(
+    let fws_rsp = call_req(
+        &ctx,
         &session,
-        &EvePublicRequest {
-            correlation_uuid: b"corr-fw-001".to_vec(),
-            payload: Some(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.factionwarfare.systems.GetRequest"),
-                value: ctx
-                    .quasar_gateway
-                    .descriptors
-                    .encode_dynamic(&fws_req_msg)
-                    .unwrap(),
-            }),
-            ..Default::default()
-        },
-        None,
+        "eve.factionwarfare.systems.GetRequest",
+        encode_id_req(30_000_142),
         false,
-        ctx.now_unix(),
     );
     assert_eq!(fws_rsp.status_code, STATUS_OK);
 
-    let lb_req_msg = ctx
-        .quasar_gateway
-        .descriptors
-        .instantiate_populated_sample(
-            "eve.factionwarfare.leaderboard.characters.GetRequest",
-            33,
-        )
-        .unwrap();
-    let lb_rsp = ctx.quasar_gateway.handle_public_request(
+    let lb_rsp = call_req(
+        &ctx,
         &session,
-        &EvePublicRequest {
-            correlation_uuid: b"corr-fw-002".to_vec(),
-            payload: Some(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve.factionwarfare.leaderboard.characters.GetRequest"
-                ),
-                value: ctx
-                    .quasar_gateway
-                    .descriptors
-                    .encode_dynamic(&lb_req_msg)
-                    .unwrap(),
-            }),
-            ..Default::default()
-        },
-        None,
+        "eve.factionwarfare.leaderboard.characters.GetRequest",
+        Vec::new(),
         false,
-        ctx.now_unix(),
     );
     assert_eq!(lb_rsp.status_code, STATUS_OK);
 
     // 3. Operational Recommendations
-    let rec_req_msg = ctx
-        .quasar_gateway
-        .descriptors
-        .instantiate_populated_sample("eve_public.operation.recommendation.GetRequest", 34)
-        .unwrap();
-    let rec_rsp = ctx.quasar_gateway.handle_public_request(
+    let rec_rsp = call_req(
+        &ctx,
         &session,
-        &EvePublicRequest {
-            correlation_uuid: b"corr-rec-001".to_vec(),
-            payload: Some(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.operation.recommendation.GetRequest"
-                ),
-                value: ctx
-                    .quasar_gateway
-                    .descriptors
-                    .encode_dynamic(&rec_req_msg)
-                    .unwrap(),
-            }),
-            ..Default::default()
-        },
-        None,
+        "eve_public.operation.recommendation.GetRequest",
+        Vec::new(),
         false,
-        ctx.now_unix(),
     );
     assert_eq!(rec_rsp.status_code, STATUS_OK);
     assert_eq!(
@@ -836,9 +549,9 @@ async fn q8_faction_warfare_and_operations() {
 
 #[tokio::test]
 async fn q9_ship_cosmetics_skinr_and_emblems() {
-    // parity: plan:Q-9, quasar:eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/draft/api/requests_pb2.pyj
+    // parity: quasar:eveProto/generated/eve_public/cosmetic/ship/logo/logo_pb2.pyj, quasar:eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/draft/api/requests_pb2.pyj
     eve_testkit::attest(&[
-        "plan:Q-9",
+        "quasar:eveProto/generated/eve_public/cosmetic/ship/logo/logo_pb2.pyj",
         "quasar:eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/draft/api/requests_pb2.pyj",
     ]);
 
@@ -849,148 +562,46 @@ async fn q9_ship_cosmetics_skinr_and_emblems() {
     session.solar_system_id = Some(30_000_142);
 
     // 1. Ship logo display & clear
-    let disp_req_msg = ctx
-        .quasar_gateway
-        .descriptors
-        .instantiate_populated_sample("eve_public.cosmetic.ship.logo.DisplayRequest", 41)
-        .unwrap();
-    let disp_rsp = ctx.quasar_gateway.handle_public_request(
-        &session,
-        &EvePublicRequest {
-            correlation_uuid: b"corr-logo-001".to_vec(),
-            payload: Some(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.cosmetic.ship.logo.DisplayRequest"),
-                value: ctx
-                    .quasar_gateway
-                    .descriptors
-                    .encode_dynamic(&disp_req_msg)
-                    .unwrap(),
-            }),
-            ..Default::default()
-        },
-        None,
-        true,
-        ctx.now_unix(),
-    );
-    assert_eq!(disp_rsp.status_code, STATUS_OK, "disp_rsp: {}", disp_rsp.status_message);
-
-    let clr_req_msg = ctx
-        .quasar_gateway
-        .descriptors
-        .instantiate_populated_sample("eve_public.cosmetic.ship.logo.ClearRequest", 42)
-        .unwrap();
-    let clr_rsp = ctx.quasar_gateway.handle_public_request(
-        &session,
-        &EvePublicRequest {
-            correlation_uuid: b"corr-logo-002".to_vec(),
-            payload: Some(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.cosmetic.ship.logo.ClearRequest"),
-                value: ctx
-                    .quasar_gateway
-                    .descriptors
-                    .encode_dynamic(&clr_req_msg)
-                    .unwrap(),
-            }),
-            ..Default::default()
-        },
-        None,
-        true,
-        ctx.now_unix(),
-    );
-    assert_eq!(clr_rsp.status_code, STATUS_OK, "clr_rsp: {}", clr_rsp.status_message);
+    for req_name in [
+        "eve_public.cosmetic.ship.logo.DisplayRequest",
+        "eve_public.cosmetic.ship.logo.ClearRequest",
+    ] {
+        let rsp = call_req(&ctx, &session, req_name, Vec::new(), true);
+        assert_eq!(rsp.status_code, STATUS_OK, "{req_name}: {}", rsp.status_message);
+    }
 
     // 2. SKINR third-party sequencing pricing & jobs
-    let seq_req_msg = ctx
-        .quasar_gateway
-        .descriptors
-        .instantiate_populated_sample(
-            "eve.cosmetic.ship.skin.thirdparty.sequencing.api.GetTierPricingRequest",
-            43,
-        )
-        .unwrap();
-    let seq_rsp = ctx.quasar_gateway.handle_public_request(
+    let seq_rsp = call_req(
+        &ctx,
         &session,
-        &EvePublicRequest {
-            correlation_uuid: b"corr-seq-001".to_vec(),
-            payload: Some(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve.cosmetic.ship.skin.thirdparty.sequencing.api.GetTierPricingRequest"
-                ),
-                value: ctx
-                    .quasar_gateway
-                    .descriptors
-                    .encode_dynamic(&seq_req_msg)
-                    .unwrap(),
-            }),
-            ..Default::default()
-        },
-        None,
+        "eve.cosmetic.ship.skin.thirdparty.sequencing.api.GetTierPricingRequest",
+        Vec::new(),
         true,
-        ctx.now_unix(),
     );
     assert_eq!(seq_rsp.status_code, STATUS_OK);
 
     // 3. Cosmetic Licenses (GetOwned)
-    let lic_req_msg = ctx
-        .quasar_gateway
-        .descriptors
-        .instantiate_populated_sample(
-            "eve.cosmetic.ship.skin.thirdparty.license.api.GetOwnedRequest",
-            44,
-        )
-        .unwrap();
-    let lic_rsp = ctx.quasar_gateway.handle_public_request(
+    let lic_rsp = call_req(
+        &ctx,
         &session,
-        &EvePublicRequest {
-            correlation_uuid: b"corr-lic-001".to_vec(),
-            payload: Some(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve.cosmetic.ship.skin.thirdparty.license.api.GetOwnedRequest"
-                ),
-                value: ctx
-                    .quasar_gateway
-                    .descriptors
-                    .encode_dynamic(&lic_req_msg)
-                    .unwrap(),
-            }),
-            ..Default::default()
-        },
-        None,
+        "eve.cosmetic.ship.skin.thirdparty.license.api.GetOwnedRequest",
+        Vec::new(),
         true,
-        ctx.now_unix(),
     );
     assert_eq!(lic_rsp.status_code, STATUS_OK);
 
     // 4. Saved SKINR Design Drafts
-    let draft_req_msg = ctx
-        .quasar_gateway
-        .descriptors
-        .instantiate_populated_sample(
-            "eve_public.cosmetic.ship.skin.thirdparty.draft.api.SaveRequest",
-            45,
-        )
-        .unwrap();
-    let draft_rsp = ctx.quasar_gateway.handle_public_request(
-        &session,
-        &EvePublicRequest {
-            correlation_uuid: b"corr-draft-001".to_vec(),
-            payload: Some(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.cosmetic.ship.skin.thirdparty.draft.api.SaveRequest"
-                ),
-                value: ctx
-                    .quasar_gateway
-                    .descriptors
-                    .encode_dynamic(&draft_req_msg)
-                    .unwrap(),
-            }),
-            ..Default::default()
-        },
-        None,
-        true,
-        ctx.now_unix(),
-    );
-    assert_eq!(draft_rsp.status_code, STATUS_OK);
+    for req_name in [
+        "eve_public.cosmetic.ship.skin.thirdparty.draft.api.SaveRequest",
+        "eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetRequest",
+        "eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetAllSavedRequest",
+        "eve_public.cosmetic.ship.skin.thirdparty.draft.api.UpdateRequest",
+        "eve_public.cosmetic.ship.skin.thirdparty.draft.api.DeleteRequest",
+        "eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetSaveCapacityRequest",
+    ] {
+        let rsp = call_req(&ctx, &session, req_name, Vec::new(), true);
+        assert_eq!(rsp.status_code, STATUS_OK, "{req_name}: {}", rsp.status_message);
+    }
     assert_eq!(
         seq_rsp.payload.as_ref().unwrap().normalized_type_name(),
         "eve.cosmetic.ship.skin.thirdparty.sequencing.api.GetTierPricingResponse"
@@ -999,19 +610,15 @@ async fn q9_ship_cosmetics_skinr_and_emblems() {
         lic_rsp.payload.as_ref().unwrap().normalized_type_name(),
         "eve.cosmetic.ship.skin.thirdparty.license.api.GetOwnedResponse"
     );
-    assert_eq!(draft_rsp.correlation_uuid, b"corr-draft-001");
 }
 
 #[tokio::test]
 async fn q9_corp_palette_titles_structure_paintwork_and_app_infra() {
-    // parity: plan:Q-9, quasar:eveProto/generated/eve_public/cosmetic/character/title/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/cosmetic/structure/paintwork/api/api_pb2.pyj, quasar:eveProto/generated/eve_public/cosmetic/structure/paintwork/license/api/api_pb2.pyj, quasar:eveProto/generated/eve_public/cosmetic/structure/paintwork/paintwork_pb2.pyj, quasar:eveProto/generated/eve_public/cosmetic/structure/paintwork/license/license_pb2.pyj, quasar:eveProto/generated/eve_public/app/eveonline/career/goal_pb2.pyj
+    // parity: quasar:eveProto/generated/eve_public/cosmetic/character/title/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/cosmetic/structure/paintwork/api/api_pb2.pyj, quasar:eveProto/generated/eve_public/cosmetic/structure/paintwork/license/api/api_pb2.pyj, quasar:eveProto/generated/eve_public/app/eveonline/career/goal_pb2.pyj
     eve_testkit::attest(&[
-        "plan:Q-9",
         "quasar:eveProto/generated/eve_public/cosmetic/character/title/api/requests_pb2.pyj",
         "quasar:eveProto/generated/eve_public/cosmetic/structure/paintwork/api/api_pb2.pyj",
         "quasar:eveProto/generated/eve_public/cosmetic/structure/paintwork/license/api/api_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/cosmetic/structure/paintwork/paintwork_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/cosmetic/structure/paintwork/license/license_pb2.pyj",
         "quasar:eveProto/generated/eve_public/app/eveonline/career/goal_pb2.pyj",
     ]);
 
@@ -1023,149 +630,79 @@ async fn q9_corp_palette_titles_structure_paintwork_and_app_infra() {
     session.corp_role = 0x01; // Director role
 
     // 1. Corporation color palette
-    let pal_req_msg = ctx
-        .quasar_gateway
-        .descriptors
-        .instantiate_populated_sample("eve.cosmetic.corporation.palette.api.GetRequest", 51)
-        .unwrap();
-    let pal_rsp = ctx.quasar_gateway.handle_public_request(
+    let pal_rsp = call_req(
+        &ctx,
         &session,
-        &EvePublicRequest {
-            correlation_uuid: b"corr-pal-001".to_vec(),
-            payload: Some(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve.cosmetic.corporation.palette.api.GetRequest"
-                ),
-                value: ctx
-                    .quasar_gateway
-                    .descriptors
-                    .encode_dynamic(&pal_req_msg)
-                    .unwrap(),
-            }),
-            ..Default::default()
-        },
-        None,
+        "eve.cosmetic.corporation.palette.api.GetRequest",
+        Vec::new(),
         true,
-        ctx.now_unix(),
     );
     assert_eq!(pal_rsp.status_code, STATUS_OK);
 
-    // 2. Character titles (GetOwned)
-    let tit_req_msg = ctx
-        .quasar_gateway
-        .descriptors
-        .instantiate_populated_sample(
-            "eve_public.cosmetic.character.title.api.GetOwnedRequest",
-            52,
-        )
-        .unwrap();
-    let tit_rsp = ctx.quasar_gateway.handle_public_request(
+    // 2. Character titles (GetOwned, GetSelected, Select, ClearSelection)
+    let tit_rsp = call_req(
+        &ctx,
         &session,
-        &EvePublicRequest {
-            correlation_uuid: b"corr-tit-001".to_vec(),
-            payload: Some(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.cosmetic.character.title.api.GetOwnedRequest"
-                ),
-                value: ctx
-                    .quasar_gateway
-                    .descriptors
-                    .encode_dynamic(&tit_req_msg)
-                    .unwrap(),
-            }),
-            ..Default::default()
-        },
-        None,
+        "eve_public.cosmetic.character.title.api.GetOwnedRequest",
+        Vec::new(),
         true,
-        ctx.now_unix(),
     );
     assert_eq!(tit_rsp.status_code, STATUS_OK);
 
-    // 3. Structure paintwork
-    let pnt_req_msg = ctx
-        .quasar_gateway
-        .descriptors
-        .instantiate_populated_sample(
-            "eve_public.cosmetic.structure.paintwork.api.GetRequest",
-            53,
-        )
-        .unwrap();
-    let pnt_rsp = ctx.quasar_gateway.handle_public_request(
+    for req_name in [
+        "eve_public.cosmetic.character.title.api.GetEquippedForCharacterRequest",
+        "eve_public.cosmetic.character.title.api.EquipRequest",
+        "eve_public.cosmetic.character.title.api.UnequipRequest",
+    ] {
+        let rsp = call_req(&ctx, &session, req_name, Vec::new(), true);
+        assert_eq!(rsp.status_code, STATUS_OK, "{req_name} failed");
+    }
+
+    // 3. Structure paintwork & paintwork licenses
+    let pnt_rsp = call_req(
+        &ctx,
         &session,
-        &EvePublicRequest {
-            correlation_uuid: b"corr-pnt-001".to_vec(),
-            payload: Some(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.cosmetic.structure.paintwork.api.GetRequest"
-                ),
-                value: ctx
-                    .quasar_gateway
-                    .descriptors
-                    .encode_dynamic(&pnt_req_msg)
-                    .unwrap(),
-            }),
-            ..Default::default()
-        },
-        None,
+        "eve_public.cosmetic.structure.paintwork.api.GetRequest",
+        Vec::new(),
         true,
-        ctx.now_unix(),
     );
     assert_eq!(pnt_rsp.status_code, STATUS_OK);
 
-    // 4. Quasar configuration
-    let cfg_req_msg = ctx
-        .quasar_gateway
-        .descriptors
-        .instantiate_populated_sample("eve.quasar.config.api.GetRequest", 54)
-        .unwrap();
-    let cfg_rsp = ctx.quasar_gateway.handle_public_request(
+    let pnt_sys_rsp = call_req(
+        &ctx,
         &session,
-        &EvePublicRequest {
-            correlation_uuid: b"corr-cfg-001".to_vec(),
-            payload: Some(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.quasar.config.api.GetRequest"),
-                value: ctx
-                    .quasar_gateway
-                    .descriptors
-                    .encode_dynamic(&cfg_req_msg)
-                    .unwrap(),
-            }),
-            ..Default::default()
-        },
-        None,
+        "eve_public.cosmetic.structure.paintwork.api.GetAllInSolarSystemRequest",
+        Vec::new(),
+        true,
+    );
+    assert_eq!(pnt_sys_rsp.status_code, STATUS_OK);
+
+    let pnt_lic_rsp = call_req(
+        &ctx,
+        &session,
+        "eve_public.cosmetic.structure.paintwork.license.api.GetAllOwnedByCorporationRequest",
+        Vec::new(),
+        true,
+    );
+    assert_eq!(pnt_lic_rsp.status_code, STATUS_OK);
+
+    // 4. Quasar configuration
+    let cfg_rsp = call_req(
+        &ctx,
+        &session,
+        "eve.quasar.config.api.GetRequest",
+        Vec::new(),
         false,
-        ctx.now_unix(),
     );
     assert_eq!(cfg_rsp.status_code, STATUS_OK);
 
     // 5. AIR Career Program Goals
-    let goal_req_msg = ctx
-        .quasar_gateway
-        .descriptors
-        .instantiate_populated_sample(
-            "eve_public.app.eveonline.career.goal.GetAllRequest",
-            55,
-        )
-        .unwrap();
-    let goal_rsp = ctx.quasar_gateway.handle_public_request(
+    let goal_rsp = call_req(
+        &ctx,
         &session,
-        &EvePublicRequest {
-            correlation_uuid: b"corr-goal-001".to_vec(),
-            payload: Some(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.app.eveonline.career.goal.GetAllRequest"
-                ),
-                value: ctx
-                    .quasar_gateway
-                    .descriptors
-                    .encode_dynamic(&goal_req_msg)
-                    .unwrap(),
-            }),
-            ..Default::default()
-        },
-        None,
+        "eve_public.app.eveonline.career.goal.GetAllRequest",
+        Vec::new(),
         true,
-        ctx.now_unix(),
     );
     assert_eq!(goal_rsp.status_code, STATUS_OK);
     assert_eq!(

@@ -21,13 +21,13 @@
 #![forbid(unsafe_code)]
 
 use super::quasar_space_services::{
-    apply_sde_record, build_dynamic_response, effective_roles, get_int_field, get_string_field,
+    effective_roles, encode_domain_message, get_int_field, get_string_field, set_domain_attributes,
+    set_domain_field,
 };
 use crate::quasar_gateway::{
     require_admin_role, PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN,
 };
 use eve_db::WorldRepository;
-use eve_proto::quasar::DynamicValue;
 use eve_sde::SdeRegistry;
 use std::sync::Arc;
 
@@ -45,12 +45,12 @@ pub fn register_handlers(
         router.register_handler(
             "eve_public.sovereignty.skyhook.api.GetRequest",
             Arc::new(move |_ctx, _any, dyn_msg| {
-                let structure_id = get_int_field(dyn_msg, 1).unwrap_or(1_000_000_001);
-                build_dynamic_response(
+                let structure_id = get_int_field(dyn_msg, 1).unwrap_or(1_000_000_001) as u64;
+                encode_domain_message(
                     &d,
                     "eve_public.sovereignty.skyhook.api.GetResponse",
-                    |resp| {
-                        resp.set(1, DynamicValue::Int64(structure_id));
+                    |reg, resp| {
+                        set_domain_field(reg, resp, 1, structure_id, "");
                     },
                 )
             }),
@@ -71,11 +71,11 @@ pub fn register_handlers(
                     .get(&sys_id)
                     .map(|s| s.region_id as u64)
                     .unwrap_or(10_000_002);
-                build_dynamic_response(
+                encode_domain_message(
                     &d,
                     "eve_public.sovereignty.skyhook.api.GetAllLocalResponse",
-                    |resp| {
-                        apply_sde_record(resp, sys_id as u64, reg_id, "LocalSkyhook");
+                    |reg, resp| {
+                        set_domain_attributes(reg, resp, sys_id as u64, reg_id, "LocalSkyhook");
                     },
                 )
             }),
@@ -90,11 +90,11 @@ pub fn register_handlers(
                 if corp_id == 0 {
                     return Err((STATUS_BAD_REQUEST, "Corporation ID must be positive".into()));
                 }
-                build_dynamic_response(
+                encode_domain_message(
                     &d,
                     "eve_public.sovereignty.skyhook.api.GetAllByCorporationResponse",
-                    |resp| {
-                        apply_sde_record(resp, corp_id as u64, 1_000_000_001, "CorpSkyhook");
+                    |reg, resp| {
+                        set_domain_attributes(reg, resp, corp_id as u64, 1_000_000_001, "CorpSkyhook");
                     },
                 )
             }),
@@ -105,7 +105,7 @@ pub fn register_handlers(
         router.register_handler(
             "eve_public.sovereignty.skyhook.api.ActivateRequest",
             Arc::new(move |ctx, _any, dyn_msg| {
-                let structure_id = get_int_field(dyn_msg, 1).unwrap_or(1_000_000_001);
+                let structure_id = get_int_field(dyn_msg, 1).unwrap_or(1_000_000_001) as u64;
                 let role = effective_roles(ctx);
                 if role & 0x01 == 0 && role & 0x02 == 0 && role & 0x04 == 0 {
                     // Requires director or config role
@@ -114,11 +114,11 @@ pub fn register_handlers(
                         "Corporation director role required to activate skyhook".into(),
                     ));
                 }
-                build_dynamic_response(
+                encode_domain_message(
                     &d,
                     "eve_public.sovereignty.skyhook.api.ActivateResponse",
-                    |resp| {
-                        resp.set(1, DynamicValue::Int64(structure_id));
+                    |reg, resp| {
+                        set_domain_field(reg, resp, 1, structure_id, "");
                     },
                 )
             }),
@@ -129,7 +129,7 @@ pub fn register_handlers(
         router.register_handler(
             "eve_public.sovereignty.skyhook.api.DeactivateRequest",
             Arc::new(move |ctx, _any, dyn_msg| {
-                let structure_id = get_int_field(dyn_msg, 1).unwrap_or(1_000_000_001);
+                let structure_id = get_int_field(dyn_msg, 1).unwrap_or(1_000_000_001) as u64;
                 let role = effective_roles(ctx);
                 if role & 0x01 == 0 && role & 0x02 == 0 && role & 0x04 == 0 {
                     return Err((
@@ -137,11 +137,11 @@ pub fn register_handlers(
                         "Corporation director role required to deactivate skyhook".into(),
                     ));
                 }
-                build_dynamic_response(
+                encode_domain_message(
                     &d,
                     "eve_public.sovereignty.skyhook.api.DeactivateResponse",
-                    |resp| {
-                        resp.set(1, DynamicValue::Int64(structure_id));
+                    |reg, resp| {
+                        set_domain_field(reg, resp, 1, structure_id, "");
                     },
                 )
             }),
@@ -152,11 +152,11 @@ pub fn register_handlers(
         router.register_handler(
             "eve_public.sovereignty.skyhook.api.GetSolarSystemsWithTheftVulnerableSkyhooksRequest",
             Arc::new(move |_ctx, _any, _dyn_msg| {
-                build_dynamic_response(
+                encode_domain_message(
                     &d,
                     "eve_public.sovereignty.skyhook.api.GetSolarSystemsWithTheftVulnerableSkyhooksResponse",
-                    |resp| {
-                        apply_sde_record(resp, 30_000_142, 10_000_002, "VulnerableSkyhookSystems");
+                    |reg, resp| {
+                        set_domain_attributes(reg, resp, 30_000_142, 10_000_002, "VulnerableSkyhookSystems");
                     },
                 )
             }),
@@ -167,12 +167,12 @@ pub fn register_handlers(
         router.register_handler(
             "eve_public.sovereignty.skyhook.api.GetTheftVulnerableSkyhooksInSolarSystemRequest",
             Arc::new(move |_ctx, _any, dyn_msg| {
-                let sys_id = get_int_field(dyn_msg, 1).unwrap_or(30_000_142) as u32;
-                build_dynamic_response(
+                let sys_id = get_int_field(dyn_msg, 1).unwrap_or(30_000_142) as u64;
+                encode_domain_message(
                     &d,
                     "eve_public.sovereignty.skyhook.api.GetTheftVulnerableSkyhooksInSolarSystemResponse",
-                    |resp| {
-                        resp.set(1, DynamicValue::Uint32(sys_id));
+                    |reg, resp| {
+                        set_domain_field(reg, resp, 1, sys_id, "");
                     },
                 )
             }),
@@ -185,13 +185,12 @@ pub fn register_handlers(
         router.register_handler(
             "eve_public.sovereignty.hub.fuel.api.GetRequest",
             Arc::new(move |_ctx, _any, dyn_msg| {
-                let hub_id = get_int_field(dyn_msg, 1).unwrap_or(1_000_000_001);
-                build_dynamic_response(
+                let hub_id = get_int_field(dyn_msg, 1).unwrap_or(1_000_000_001) as u64;
+                encode_domain_message(
                     &d,
                     "eve_public.sovereignty.hub.fuel.api.GetResponse",
-                    |resp| {
-                        resp.set(1, DynamicValue::Int64(hub_id));
-                        resp.set(2, DynamicValue::Int64(10_000)); // Current fuel units
+                    |reg, resp| {
+                        set_domain_attributes(reg, resp, hub_id, 10_000, "SovHubFuel");
                     },
                 )
             }),
@@ -202,12 +201,12 @@ pub fn register_handlers(
         router.register_handler(
             "eve_public.sovereignty.hub.fuel.api.AddRequest",
             Arc::new(move |_ctx, _any, dyn_msg| {
-                let hub_id = get_int_field(dyn_msg, 1).unwrap_or(1_000_000_001);
-                build_dynamic_response(
+                let hub_id = get_int_field(dyn_msg, 1).unwrap_or(1_000_000_001) as u64;
+                encode_domain_message(
                     &d,
                     "eve_public.sovereignty.hub.fuel.api.AddResponse",
-                    |resp| {
-                        resp.set(1, DynamicValue::Int64(hub_id));
+                    |reg, resp| {
+                        set_domain_field(reg, resp, 1, hub_id, "");
                     },
                 )
             }),
@@ -220,13 +219,12 @@ pub fn register_handlers(
         router.register_handler(
             "eve_public.sovereignty.hub.workforce.api.GetStateRequest",
             Arc::new(move |_ctx, _any, dyn_msg| {
-                let hub_id = get_int_field(dyn_msg, 1).unwrap_or(1_000_000_001);
-                build_dynamic_response(
+                let hub_id = get_int_field(dyn_msg, 1).unwrap_or(1_000_000_001) as u64;
+                encode_domain_message(
                     &d,
                     "eve_public.sovereignty.hub.workforce.api.GetStateResponse",
-                    |resp| {
-                        resp.set(1, DynamicValue::Int64(hub_id));
-                        resp.set(2, DynamicValue::Int64(2_500)); // Available workforce
+                    |reg, resp| {
+                        set_domain_attributes(reg, resp, hub_id, 2_500, "SovHubWorkforce");
                     },
                 )
             }),
@@ -238,11 +236,11 @@ pub fn register_handlers(
             "eve_public.sovereignty.hub.workforce.api.GetConfigurationRequest",
             Arc::new(move |_ctx, _any, dyn_msg| {
                 let hub_id = get_int_field(dyn_msg, 1).unwrap_or(1_000_000_001) as u64;
-                build_dynamic_response(
+                encode_domain_message(
                     &d,
                     "eve_public.sovereignty.hub.workforce.api.GetConfigurationResponse",
-                    |resp| {
-                        apply_sde_record(resp, hub_id, 2_500, "WorkforceConfig");
+                    |reg, resp| {
+                        set_domain_attributes(reg, resp, hub_id, 2_500, "WorkforceConfig");
                     },
                 )
             }),
@@ -254,11 +252,11 @@ pub fn register_handlers(
             "eve_public.sovereignty.hub.workforce.api.ConfigureRequest",
             Arc::new(move |_ctx, _any, dyn_msg| {
                 let hub_id = get_int_field(dyn_msg, 1).unwrap_or(1_000_000_001) as u64;
-                build_dynamic_response(
+                encode_domain_message(
                     &d,
                     "eve_public.sovereignty.hub.workforce.api.ConfigureResponse",
-                    |resp| {
-                        apply_sde_record(resp, hub_id, 2_500, "WorkforceConfigured");
+                    |reg, resp| {
+                        set_domain_attributes(reg, resp, hub_id, 2_500, "WorkforceConfigured");
                     },
                 )
             }),
@@ -269,11 +267,11 @@ pub fn register_handlers(
         router.register_handler(
             "eve_public.sovereignty.hub.workforce.api.GetNetworkableHubsRequest",
             Arc::new(move |_ctx, _any, _dyn_msg| {
-                build_dynamic_response(
+                encode_domain_message(
                     &d,
                     "eve_public.sovereignty.hub.workforce.api.GetNetworkableHubsResponse",
-                    |resp| {
-                        apply_sde_record(resp, 1_000_000_001, 30_000_142, "NetworkableSovHub");
+                    |reg, resp| {
+                        set_domain_attributes(reg, resp, 1_000_000_001, 30_000_142, "NetworkableSovHub");
                     },
                 )
             }),
@@ -286,11 +284,11 @@ pub fn register_handlers(
         router.register_handler(
             "eve_public.sovereignty.hub.upgrade.api.GetDefinitionsRequest",
             Arc::new(move |_ctx, _any, _dyn_msg| {
-                build_dynamic_response(
+                encode_domain_message(
                     &d,
                     "eve_public.sovereignty.hub.upgrade.api.GetDefinitionsResponse",
-                    |resp| {
-                        apply_sde_record(resp, 81_201, 500, "MajorThreatDetectionArray");
+                    |reg, resp| {
+                        set_domain_attributes(reg, resp, 81_201, 500, "MajorThreatDetectionArray");
                     },
                 )
             }),
@@ -301,12 +299,12 @@ pub fn register_handlers(
         router.register_handler(
             "eve_public.sovereignty.hub.upgrade.api.GetHubUpgradesRequest",
             Arc::new(move |_ctx, _any, dyn_msg| {
-                let hub_id = get_int_field(dyn_msg, 1).unwrap_or(1_000_000_001);
-                build_dynamic_response(
+                let hub_id = get_int_field(dyn_msg, 1).unwrap_or(1_000_000_001) as u64;
+                encode_domain_message(
                     &d,
                     "eve_public.sovereignty.hub.upgrade.api.GetHubUpgradesResponse",
-                    |resp| {
-                        resp.set(1, DynamicValue::Int64(hub_id));
+                    |reg, resp| {
+                        set_domain_field(reg, resp, 1, hub_id, "");
                     },
                 )
             }),
@@ -318,11 +316,11 @@ pub fn register_handlers(
             "eve_public.sovereignty.hub.upgrade.api.ProcessConfigurationRequest",
             Arc::new(move |_ctx, _any, dyn_msg| {
                 let hub_id = get_int_field(dyn_msg, 1).unwrap_or(1_000_000_001) as u64;
-                build_dynamic_response(
+                encode_domain_message(
                     &d,
                     "eve_public.sovereignty.hub.upgrade.api.ProcessConfigurationResponse",
-                    |resp| {
-                        apply_sde_record(resp, hub_id, 81_201, "UpgradeConfig");
+                    |reg, resp| {
+                        set_domain_attributes(reg, resp, hub_id, 81_201, "UpgradeConfig");
                     },
                 )
             }),
@@ -334,11 +332,11 @@ pub fn register_handlers(
             "eve_public.sovereignty.hub.upgrade.api.UninstallRequest",
             Arc::new(move |_ctx, _any, dyn_msg| {
                 let hub_id = get_int_field(dyn_msg, 1).unwrap_or(1_000_000_001) as u64;
-                build_dynamic_response(
+                encode_domain_message(
                     &d,
                     "eve_public.sovereignty.hub.upgrade.api.UninstallResponse",
-                    |resp| {
-                        apply_sde_record(resp, hub_id, 81_201, "UpgradeUninstalled");
+                    |reg, resp| {
+                        set_domain_attributes(reg, resp, hub_id, 81_201, "UpgradeUninstalled");
                     },
                 )
             }),
@@ -352,11 +350,11 @@ pub fn register_handlers(
             "eve_public.sovereignty.mercenaryden.api.GetAllOwnedRequest",
             Arc::new(move |ctx, _any, _dyn_msg| {
                 let cid = ctx.effective_character_id().unwrap_or(90_000_001) as u64;
-                build_dynamic_response(
+                encode_domain_message(
                     &d,
                     "eve_public.sovereignty.mercenaryden.api.GetAllOwnedResponse",
-                    |resp| {
-                        apply_sde_record(resp, cid, 30_000_142, "OwnedMercenaryDen");
+                    |reg, resp| {
+                        set_domain_attributes(reg, resp, cid, 30_000_142, "OwnedMercenaryDen");
                     },
                 )
             }),
@@ -367,11 +365,11 @@ pub fn register_handlers(
         router.register_handler(
             "eve_public.sovereignty.mercenaryden.api.GetMaximumForCharacterRequest",
             Arc::new(move |_ctx, _any, _dyn_msg| {
-                build_dynamic_response(
+                encode_domain_message(
                     &d,
                     "eve_public.sovereignty.mercenaryden.api.GetMaximumForCharacterResponse",
-                    |resp| {
-                        resp.set(1, DynamicValue::Uint32(3)); // Max 3 mercenary dens
+                    |reg, resp| {
+                        set_domain_field(reg, resp, 1, 3, "");
                     },
                 )
             }),
@@ -383,11 +381,11 @@ pub fn register_handlers(
             "eve_public.sovereignty.mercenaryden.api.GetAsOwnerRequest",
             Arc::new(move |ctx, _any, _dyn_msg| {
                 let cid = ctx.effective_character_id().unwrap_or(90_000_001) as u64;
-                build_dynamic_response(
+                encode_domain_message(
                     &d,
                     "eve_public.sovereignty.mercenaryden.api.GetAsOwnerResponse",
-                    |resp| {
-                        apply_sde_record(resp, cid, 30_000_142, "OwnerMercenaryDen");
+                    |reg, resp| {
+                        set_domain_attributes(reg, resp, cid, 30_000_142, "OwnerMercenaryDen");
                     },
                 )
             }),
@@ -400,11 +398,9 @@ pub fn register_handlers(
         router.register_handler(
             "eve.faction.api.GetRequest",
             Arc::new(move |_ctx, _any, dyn_msg| {
-                let faction_id = get_int_field(dyn_msg, 1).unwrap_or(500_001) as u32;
-                build_dynamic_response(&d, "eve.faction.api.GetResponse", |resp| {
-                    if let Some(DynamicValue::Message(ident)) = resp.fields.get_mut(&1) {
-                        ident.set(1, DynamicValue::Uint32(faction_id));
-                    }
+                let faction_id = get_int_field(dyn_msg, 1).unwrap_or(500_001) as u64;
+                encode_domain_message(&d, "eve.faction.api.GetResponse", |reg, resp| {
+                    set_domain_field(reg, resp, 1, faction_id, "");
                 })
             }),
         );
@@ -426,8 +422,8 @@ pub fn register_handlers(
                     .find(|f| f.name.to_lowercase().contains(&q_lower))
                     .map(|f| f.faction_id)
                     .unwrap_or(500_001);
-                build_dynamic_response(&d, "eve.faction.SearchResponse", |resp| {
-                    apply_sde_record(resp, fac_id as u64, 30_000_142, &query);
+                encode_domain_message(&d, "eve.faction.SearchResponse", |reg, resp| {
+                    set_domain_attributes(reg, resp, fac_id as u64, 30_000_142, &query);
                 })
             }),
         );
@@ -437,12 +433,12 @@ pub fn register_handlers(
         router.register_handler(
             "eve.faction.activity.GetSolarSystemScoresRequest",
             Arc::new(move |_ctx, _any, dyn_msg| {
-                let sys_id = get_int_field(dyn_msg, 1).unwrap_or(30_000_142) as u32;
-                build_dynamic_response(
+                let sys_id = get_int_field(dyn_msg, 1).unwrap_or(30_000_142) as u64;
+                encode_domain_message(
                     &d,
                     "eve.faction.activity.GetSolarSystemScoresResponse",
-                    |resp| {
-                        resp.set(1, DynamicValue::Uint32(sys_id));
+                    |reg, resp| {
+                        set_domain_field(reg, resp, 1, sys_id, "");
                     },
                 )
             }),
@@ -455,13 +451,9 @@ pub fn register_handlers(
         router.register_handler(
             "eve.factionwarfare.systems.GetRequest",
             Arc::new(move |_ctx, _any, dyn_msg| {
-                let sys_id = get_int_field(dyn_msg, 1).unwrap_or(30_000_142) as u32;
-                build_dynamic_response(&d, "eve.factionwarfare.systems.GetResponse", |resp| {
-                    if let Some(DynamicValue::Message(status)) = resp.fields.get_mut(&1) {
-                        status.set(1, DynamicValue::Uint32(sys_id));
-                        status.set(2, DynamicValue::Uint32(500_001)); // Occupier faction ID
-                        status.set(3, DynamicValue::Float(45.5)); // Contested %
-                    }
+                let sys_id = get_int_field(dyn_msg, 1).unwrap_or(30_000_142) as u64;
+                encode_domain_message(&d, "eve.factionwarfare.systems.GetResponse", |reg, resp| {
+                    set_domain_attributes(reg, resp, sys_id, 500_001, "FWSystemStatus");
                 })
             }),
         );
@@ -472,11 +464,11 @@ pub fn register_handlers(
             "eve.factionwarfare.leaderboard.characters.GetRequest",
             Arc::new(move |ctx, _any, _dyn_msg| {
                 let cid = ctx.effective_character_id().unwrap_or(90_000_001) as u64;
-                build_dynamic_response(
+                encode_domain_message(
                     &d,
                     "eve.factionwarfare.leaderboard.characters.GetResponse",
-                    |resp| {
-                        apply_sde_record(resp, cid, 500_001, "FWCharacterLeaderboard");
+                    |reg, resp| {
+                        set_domain_attributes(reg, resp, cid, 500_001, "FWCharacterLeaderboard");
                     },
                 )
             }),
@@ -488,11 +480,11 @@ pub fn register_handlers(
             "eve.factionwarfare.leaderboard.corporations.GetRequest",
             Arc::new(move |ctx, _any, _dyn_msg| {
                 let corp_id = ctx.effective_corporation_id().unwrap_or(98_000_001) as u64;
-                build_dynamic_response(
+                encode_domain_message(
                     &d,
                     "eve.factionwarfare.leaderboard.corporations.GetResponse",
-                    |resp| {
-                        apply_sde_record(resp, corp_id, 500_001, "FWCorporationLeaderboard");
+                    |reg, resp| {
+                        set_domain_attributes(reg, resp, corp_id, 500_001, "FWCorporationLeaderboard");
                     },
                 )
             }),
@@ -503,11 +495,11 @@ pub fn register_handlers(
         router.register_handler(
             "eve.factionwarfare.leaderboard.factions.GetRequest",
             Arc::new(move |_ctx, _any, _dyn_msg| {
-                build_dynamic_response(
+                encode_domain_message(
                     &d,
                     "eve.factionwarfare.leaderboard.factions.GetResponse",
-                    |resp| {
-                        apply_sde_record(resp, 500_001, 500_004, "FWFactionLeaderboard");
+                    |reg, resp| {
+                        set_domain_attributes(reg, resp, 500_001, 500_004, "FWFactionLeaderboard");
                     },
                 )
             }),
@@ -521,14 +513,12 @@ pub fn register_handlers(
                 let char_id = get_int_field(dyn_msg, 1)
                     .map(|v| v as u32)
                     .or_else(|| ctx.effective_character_id())
-                    .unwrap_or(90_000_001);
-                build_dynamic_response(
+                    .unwrap_or(90_000_001) as u64;
+                encode_domain_message(
                     &d,
                     "eve.factionwarfare.stats.character.GetResponse",
-                    |resp| {
-                        resp.set(1, DynamicValue::Uint32(char_id));
-                        resp.set(2, DynamicValue::Uint32(12)); // Kills
-                        resp.set(3, DynamicValue::Uint32(450)); // Victory points
+                    |reg, resp| {
+                        set_domain_attributes(reg, resp, char_id, 12, "FWCharacterStats");
                     },
                 )
             }),
@@ -539,8 +529,8 @@ pub fn register_handlers(
         router.register_handler(
             "eve.factionwarfare.wars.GetRequest",
             Arc::new(move |_ctx, _any, _dyn_msg| {
-                build_dynamic_response(&d, "eve.factionwarfare.wars.GetResponse", |resp| {
-                    apply_sde_record(resp, 500_001, 500_004, "CaldariGallenteMilitiaWar");
+                encode_domain_message(&d, "eve.factionwarfare.wars.GetResponse", |reg, resp| {
+                    set_domain_attributes(reg, resp, 500_001, 500_004, "CaldariGallenteMilitiaWar");
                 })
             }),
         );
@@ -550,11 +540,11 @@ pub fn register_handlers(
         router.register_handler(
             "eve.factionwarfare.warzone.api.GetAllRequest",
             Arc::new(move |_ctx, _any, _dyn_msg| {
-                build_dynamic_response(
+                encode_domain_message(
                     &d,
                     "eve.factionwarfare.warzone.api.GetAllResponse",
-                    |resp| {
-                        apply_sde_record(resp, 1, 500_001, "CaldariGallenteWarzone");
+                    |reg, resp| {
+                        set_domain_attributes(reg, resp, 1, 500_001, "CaldariGallenteWarzone");
                     },
                 )
             }),
@@ -568,11 +558,11 @@ pub fn register_handlers(
             "eve_public.operation.recommendation.GetRequest",
             Arc::new(move |ctx, _any, _dyn_msg| {
                 let cid = ctx.effective_character_id().unwrap_or(90_000_001) as u64;
-                build_dynamic_response(
+                encode_domain_message(
                     &d,
                     "eve_public.operation.recommendation.GetResponse",
-                    |resp| {
-                        apply_sde_record(resp, cid, 30_000_142, "AIRDailyOperation");
+                    |reg, resp| {
+                        set_domain_attributes(reg, resp, cid, 30_000_142, "AIRDailyOperation");
                     },
                 )
             }),
@@ -622,6 +612,10 @@ pub fn register_handlers(
             "eve_public.sovereignty.resource.star.api.GetAllConfigurationsResponse",
         ),
         (
+            "eve_public.sovereignty.hub.api.GetResourcesRequest",
+            "eve_public.sovereignty.hub.api.GetResourcesResponse",
+        ),
+        (
             "eve_public.sovereignty.skyhook.api.admin.ModifyReagentsRequest",
             "eve_public.sovereignty.skyhook.api.admin.ModifyReagentsResponse",
         ),
@@ -652,8 +646,8 @@ pub fn register_handlers(
                     .and_then(|s| sde_sov.regions.get(&s.region_id))
                     .and_then(|r| r.faction_id)
                     .unwrap_or(500_001) as u64;
-                build_dynamic_response(&d, rsp_name, |resp| {
-                    apply_sde_record(resp, sys_id, fac_id, "SovResourceState");
+                encode_domain_message(&d, rsp_name, |reg, resp| {
+                    set_domain_attributes(reg, resp, sys_id, fac_id, "SovResourceState");
                 })
             }),
         );

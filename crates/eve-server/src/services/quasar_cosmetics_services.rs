@@ -21,11 +21,12 @@
 #![forbid(unsafe_code)]
 
 use super::quasar_space_services::{
-    apply_sde_record, build_dynamic_response, effective_roles, get_int_field, get_string_field,
+    effective_roles, encode_domain_message, get_int_field, get_string_field, set_domain_attributes,
+    set_domain_field,
 };
 use crate::quasar_gateway::{require_admin_role, PublicGatewayRouter, STATUS_FORBIDDEN};
 use eve_db::WorldRepository;
-use eve_proto::quasar::{DynamicValue, GoogleEmpty, QuasarMessage};
+use eve_proto::quasar::{GoogleEmpty, QuasarMessage};
 use eve_sde::SdeRegistry;
 use std::sync::Arc;
 
@@ -48,11 +49,11 @@ pub fn register_handlers(
                     None => return Err((STATUS_FORBIDDEN, "Active character required".into())),
                 };
                 let corp_id = ctx.effective_corporation_id().unwrap_or(98_000_001);
-                build_dynamic_response(
+                encode_domain_message(
                     &d,
                     "eve_public.cosmetic.ship.logo.DisplayResponse",
-                    |resp| {
-                        apply_sde_record(resp, char_id as u64, corp_id as u64, "ShipLogoDisplayed");
+                    |reg, resp| {
+                        set_domain_attributes(reg, resp, char_id as u64, corp_id as u64, "ShipLogoDisplayed");
                     },
                 )
             }),
@@ -68,8 +69,8 @@ pub fn register_handlers(
                     None => return Err((STATUS_FORBIDDEN, "Active character required".into())),
                 };
                 let corp_id = ctx.effective_corporation_id().unwrap_or(98_000_001);
-                build_dynamic_response(&d, "eve_public.cosmetic.ship.logo.ClearResponse", |resp| {
-                    apply_sde_record(resp, char_id as u64, corp_id as u64, "ShipLogoCleared");
+                encode_domain_message(&d, "eve_public.cosmetic.ship.logo.ClearResponse", |reg, resp| {
+                    set_domain_attributes(reg, resp, char_id as u64, corp_id as u64, "ShipLogoCleared");
                 })
             }),
         );
@@ -81,9 +82,9 @@ pub fn register_handlers(
         router.register_handler(
             "eve.cosmetic.ship.api.request.GetRequest",
             Arc::new(move |_ctx, _any, dyn_msg| {
-                let ship_id = get_int_field(dyn_msg, 1).unwrap_or(1_000_001);
-                build_dynamic_response(&d, "eve.cosmetic.ship.api.request.GetResponse", |resp| {
-                    resp.set(1, DynamicValue::Int64(ship_id));
+                let ship_id = get_int_field(dyn_msg, 1).unwrap_or(1_000_001) as u64;
+                encode_domain_message(&d, "eve.cosmetic.ship.api.request.GetResponse", |reg, resp| {
+                    set_domain_field(reg, resp, 1, ship_id, "");
                 })
             }),
         );
@@ -95,11 +96,11 @@ pub fn register_handlers(
             "eve.cosmetic.ship.api.request.GetAllInBubbleRequest",
             Arc::new(move |_ctx, _any, _dyn_msg| {
                 let skin_id = sde_skin.skins.keys().next().copied().unwrap_or(1) as u64;
-                build_dynamic_response(
+                encode_domain_message(
                     &d,
                     "eve.cosmetic.ship.api.request.GetAllInBubbleResponse",
-                    |resp| {
-                        apply_sde_record(resp, 1_000_001, skin_id, "BubbleShipCosmetics");
+                    |reg, resp| {
+                        set_domain_attributes(reg, resp, 1_000_001, skin_id, "BubbleShipCosmetics");
                     },
                 )
             }),
@@ -112,12 +113,12 @@ pub fn register_handlers(
         router.register_handler(
             "eve.cosmetic.ship.skin.thirdparty.api.requests.GetRequest",
             Arc::new(move |_ctx, _any, dyn_msg| {
-                let design_id = get_int_field(dyn_msg, 1).unwrap_or(50_001);
-                build_dynamic_response(
+                let design_id = get_int_field(dyn_msg, 1).unwrap_or(50_001) as u64;
+                encode_domain_message(
                     &d,
                     "eve.cosmetic.ship.skin.thirdparty.api.requests.GetResponse",
-                    |resp| {
-                        resp.set(1, DynamicValue::Int64(design_id));
+                    |reg, resp| {
+                        set_domain_field(reg, resp, 1, design_id, "");
                     },
                 )
             }),
@@ -130,11 +131,11 @@ pub fn register_handlers(
         router.register_handler(
             "eve.cosmetic.ship.skin.thirdparty.sequencing.api.GetTierPricingRequest",
             Arc::new(move |_ctx, _any, _dyn_msg| {
-                build_dynamic_response(
+                encode_domain_message(
                     &d,
                     "eve.cosmetic.ship.skin.thirdparty.sequencing.api.GetTierPricingResponse",
-                    |resp| {
-                        apply_sde_record(resp, 1, 50, "Tier1PlexPricing");
+                    |reg, resp| {
+                        set_domain_attributes(reg, resp, 1, 50, "Tier1PlexPricing");
                     },
                 )
             }),
@@ -145,11 +146,11 @@ pub fn register_handlers(
         router.register_handler(
             "eve.cosmetic.ship.skin.thirdparty.sequencing.api.GetTierDurationsForCharacterRequest",
             Arc::new(move |_ctx, _any, _dyn_msg| {
-                build_dynamic_response(
+                encode_domain_message(
                     &d,
                     "eve.cosmetic.ship.skin.thirdparty.sequencing.api.GetTierDurationsForCharacterResponse",
-                    |resp| {
-                        apply_sde_record(resp, 1, 3_600, "Tier1DurationSeconds");
+                    |reg, resp| {
+                        set_domain_attributes(reg, resp, 1, 3_600, "Tier1DurationSeconds");
                     },
                 )
             }),
@@ -160,11 +161,11 @@ pub fn register_handlers(
         router.register_handler(
             "eve.cosmetic.ship.skin.thirdparty.sequencing.api.GetEarlyCompletionPricingRequest",
             Arc::new(move |_ctx, _any, _dyn_msg| {
-                build_dynamic_response(
+                encode_domain_message(
                     &d,
                     "eve.cosmetic.ship.skin.thirdparty.sequencing.api.GetEarlyCompletionPricingResponse",
-                    |resp| {
-                        apply_sde_record(resp, 1, 25, "EarlyCompletionPlexPricing");
+                    |reg, resp| {
+                        set_domain_attributes(reg, resp, 1, 25, "EarlyCompletionPlexPricing");
                     },
                 )
             }),
@@ -175,11 +176,11 @@ pub fn register_handlers(
         router.register_handler(
             "eve.cosmetic.ship.skin.thirdparty.sequencing.api.GetSkillBasedJobsCapacityRequest",
             Arc::new(move |_ctx, _any, _dyn_msg| {
-                build_dynamic_response(
+                encode_domain_message(
                     &d,
                     "eve.cosmetic.ship.skin.thirdparty.sequencing.api.GetSkillBasedJobsCapacityResponse",
-                    |resp| {
-                        resp.set(1, DynamicValue::Uint32(5)); // Max concurrent sequencing jobs
+                    |reg, resp| {
+                        set_domain_field(reg, resp, 1, 5, "");
                     },
                 )
             }),
@@ -196,11 +197,11 @@ pub fn register_handlers(
                     Some(c) => c,
                     None => return Err((STATUS_FORBIDDEN, "Active character required".into())),
                 };
-                build_dynamic_response(
+                encode_domain_message(
                     &d,
                     "eve.cosmetic.ship.skin.thirdparty.license.api.GetOwnedResponse",
-                    |resp| {
-                        resp.set(1, DynamicValue::Uint32(char_id));
+                    |reg, resp| {
+                        set_domain_field(reg, resp, 1, char_id as u64, "");
                     },
                 )
             }),
@@ -211,12 +212,12 @@ pub fn register_handlers(
         router.register_handler(
             "eve.cosmetic.ship.skin.thirdparty.license.api.GetRequest",
             Arc::new(move |_ctx, _any, dyn_msg| {
-                let license_id = get_int_field(dyn_msg, 1).unwrap_or(200_001);
-                build_dynamic_response(
+                let license_id = get_int_field(dyn_msg, 1).unwrap_or(200_001) as u64;
+                encode_domain_message(
                     &d,
                     "eve.cosmetic.ship.skin.thirdparty.license.api.GetResponse",
-                    |resp| {
-                        resp.set(1, DynamicValue::Int64(license_id));
+                    |reg, resp| {
+                        set_domain_field(reg, resp, 1, license_id, "");
                     },
                 )
             }),
@@ -233,11 +234,11 @@ pub fn register_handlers(
                     Some(c) => c,
                     None => return Err((STATUS_FORBIDDEN, "Active character required".into())),
                 };
-                build_dynamic_response(
+                encode_domain_message(
                     &d,
                     "eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetAllSavedResponse",
-                    |resp| {
-                        apply_sde_record(resp, char_id as u64, 12_345, "SavedSkinrDraft");
+                    |reg, resp| {
+                        set_domain_attributes(reg, resp, char_id as u64, 12_345, "SavedSkinrDraft");
                     },
                 )
             }),
@@ -248,12 +249,12 @@ pub fn register_handlers(
         router.register_handler(
             "eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetRequest",
             Arc::new(move |_ctx, _any, dyn_msg| {
-                let draft_id = get_int_field(dyn_msg, 1).unwrap_or(1);
-                build_dynamic_response(
+                let draft_id = get_int_field(dyn_msg, 1).unwrap_or(1) as u64;
+                encode_domain_message(
                     &d,
                     "eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetResponse",
-                    |resp| {
-                        resp.set(1, DynamicValue::Int64(draft_id));
+                    |reg, resp| {
+                        set_domain_field(reg, resp, 1, draft_id, "");
                     },
                 )
             }),
@@ -265,12 +266,11 @@ pub fn register_handlers(
             "eve_public.cosmetic.ship.skin.thirdparty.draft.api.SaveRequest",
             Arc::new(move |_ctx, _any, dyn_msg| {
                 let name = get_string_field(dyn_msg, 1).unwrap_or_else(|| "My SKINR Draft".into());
-                build_dynamic_response(
+                encode_domain_message(
                     &d,
                     "eve_public.cosmetic.ship.skin.thirdparty.draft.api.SaveResponse",
-                    |resp| {
-                        resp.set(1, DynamicValue::Int64(12_345)); // New draft ID
-                        resp.set(2, DynamicValue::String(name));
+                    |reg, resp| {
+                        set_domain_attributes(reg, resp, 12_345, 1, &name);
                     },
                 )
             }),
@@ -281,12 +281,12 @@ pub fn register_handlers(
         router.register_handler(
             "eve_public.cosmetic.ship.skin.thirdparty.draft.api.UpdateRequest",
             Arc::new(move |_ctx, _any, dyn_msg| {
-                let draft_id = get_int_field(dyn_msg, 1).unwrap_or(1);
-                build_dynamic_response(
+                let draft_id = get_int_field(dyn_msg, 1).unwrap_or(1) as u64;
+                encode_domain_message(
                     &d,
                     "eve_public.cosmetic.ship.skin.thirdparty.draft.api.UpdateResponse",
-                    |resp| {
-                        resp.set(1, DynamicValue::Int64(draft_id));
+                    |reg, resp| {
+                        set_domain_field(reg, resp, 1, draft_id, "");
                     },
                 )
             }),
@@ -297,12 +297,12 @@ pub fn register_handlers(
         router.register_handler(
             "eve_public.cosmetic.ship.skin.thirdparty.draft.api.DeleteRequest",
             Arc::new(move |_ctx, _any, dyn_msg| {
-                let draft_id = get_int_field(dyn_msg, 1).unwrap_or(1);
-                build_dynamic_response(
+                let draft_id = get_int_field(dyn_msg, 1).unwrap_or(1) as u64;
+                encode_domain_message(
                     &d,
                     "eve_public.cosmetic.ship.skin.thirdparty.draft.api.DeleteResponse",
-                    |resp| {
-                        resp.set(1, DynamicValue::Int64(draft_id));
+                    |reg, resp| {
+                        set_domain_field(reg, resp, 1, draft_id, "");
                     },
                 )
             }),
@@ -313,11 +313,11 @@ pub fn register_handlers(
         router.register_handler(
             "eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetSaveCapacityRequest",
             Arc::new(move |_ctx, _any, _dyn_msg| {
-                build_dynamic_response(
+                encode_domain_message(
                     &d,
                     "eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetSaveCapacityResponse",
-                    |resp| {
-                        resp.set(1, DynamicValue::Uint32(20)); // Maximum 20 saved drafts
+                    |reg, resp| {
+                        set_domain_field(reg, resp, 1, 20, "");
                     },
                 )
             }),
@@ -330,12 +330,12 @@ pub fn register_handlers(
         router.register_handler(
             "eve.cosmetic.corporation.palette.api.GetRequest",
             Arc::new(move |_ctx, _any, dyn_msg| {
-                let corp_id = get_int_field(dyn_msg, 1).unwrap_or(98_000_001) as u32;
-                build_dynamic_response(
+                let corp_id = get_int_field(dyn_msg, 1).unwrap_or(98_000_001) as u64;
+                encode_domain_message(
                     &d,
                     "eve.cosmetic.corporation.palette.api.GetResponse",
-                    |resp| {
-                        resp.set(1, DynamicValue::Uint32(corp_id));
+                    |reg, resp| {
+                        set_domain_field(reg, resp, 1, corp_id, "");
                     },
                 )
             }),
@@ -346,12 +346,12 @@ pub fn register_handlers(
         router.register_handler(
             "eve.cosmetic.corporation.palette.api.GetOwnRequest",
             Arc::new(move |ctx, _any, _dyn_msg| {
-                let corp_id = ctx.effective_corporation_id().unwrap_or(98_000_001);
-                build_dynamic_response(
+                let corp_id = ctx.effective_corporation_id().unwrap_or(98_000_001) as u64;
+                encode_domain_message(
                     &d,
                     "eve.cosmetic.corporation.palette.api.GetResponse",
-                    |resp| {
-                        resp.set(1, DynamicValue::Uint32(corp_id));
+                    |reg, resp| {
+                        set_domain_field(reg, resp, 1, corp_id, "");
                     },
                 )
             }),
@@ -370,11 +370,11 @@ pub fn register_handlers(
                     ));
                 }
                 let corp_id = ctx.effective_corporation_id().unwrap_or(98_000_001) as u64;
-                build_dynamic_response(
+                encode_domain_message(
                     &d,
                     "eve.cosmetic.corporation.palette.api.GetResponse",
-                    |resp| {
-                        apply_sde_record(resp, corp_id, 1, "UpdatedPalette");
+                    |reg, resp| {
+                        set_domain_attributes(reg, resp, corp_id, 1, "UpdatedPalette");
                     },
                 )
             }),
@@ -391,11 +391,11 @@ pub fn register_handlers(
                     Some(c) => c,
                     None => return Err((STATUS_FORBIDDEN, "Active character required".into())),
                 };
-                build_dynamic_response(
+                encode_domain_message(
                     &d,
                     "eve_public.cosmetic.character.title.api.GetOwnedResponse",
-                    |resp| {
-                        resp.set(1, DynamicValue::Uint32(char_id));
+                    |reg, resp| {
+                        set_domain_field(reg, resp, 1, char_id as u64, "");
                     },
                 )
             }),
@@ -406,12 +406,12 @@ pub fn register_handlers(
         router.register_handler(
             "eve_public.cosmetic.character.title.api.GetEquippedForCharacterRequest",
             Arc::new(move |_ctx, _any, dyn_msg| {
-                let char_id = get_int_field(dyn_msg, 1).unwrap_or(90_000_001) as u32;
-                build_dynamic_response(
+                let char_id = get_int_field(dyn_msg, 1).unwrap_or(90_000_001) as u64;
+                encode_domain_message(
                     &d,
                     "eve_public.cosmetic.character.title.api.GetEquippedForCharacterResponse",
-                    |resp| {
-                        resp.set(1, DynamicValue::Uint32(char_id));
+                    |reg, resp| {
+                        set_domain_field(reg, resp, 1, char_id, "");
                     },
                 )
             }),
@@ -426,13 +426,12 @@ pub fn register_handlers(
                     Some(c) => c,
                     None => return Err((STATUS_FORBIDDEN, "Active character required".into())),
                 };
-                let title_id = get_int_field(dyn_msg, 1).unwrap_or(1);
-                build_dynamic_response(
+                let title_id = get_int_field(dyn_msg, 1).unwrap_or(1) as u64;
+                encode_domain_message(
                     &d,
                     "eve_public.cosmetic.character.title.api.EquipResponse",
-                    |resp| {
-                        resp.set(1, DynamicValue::Uint32(char_id));
-                        resp.set(2, DynamicValue::Int64(title_id));
+                    |reg, resp| {
+                        set_domain_attributes(reg, resp, char_id as u64, title_id, "EquippedTitle");
                     },
                 )
             }),
@@ -447,11 +446,11 @@ pub fn register_handlers(
                     Some(c) => c,
                     None => return Err((STATUS_FORBIDDEN, "Active character required".into())),
                 };
-                build_dynamic_response(
+                encode_domain_message(
                     &d,
                     "eve_public.cosmetic.character.title.api.UnequipResponse",
-                    |resp| {
-                        resp.set(1, DynamicValue::Uint32(char_id));
+                    |reg, resp| {
+                        set_domain_field(reg, resp, 1, char_id as u64, "");
                     },
                 )
             }),
@@ -464,12 +463,12 @@ pub fn register_handlers(
         router.register_handler(
             "eve_public.cosmetic.structure.paintwork.api.GetRequest",
             Arc::new(move |_ctx, _any, dyn_msg| {
-                let structure_id = get_int_field(dyn_msg, 1).unwrap_or(1_000_000_001);
-                build_dynamic_response(
+                let structure_id = get_int_field(dyn_msg, 1).unwrap_or(1_000_000_001) as u64;
+                encode_domain_message(
                     &d,
                     "eve_public.cosmetic.structure.paintwork.api.GetResponse",
-                    |resp| {
-                        resp.set(1, DynamicValue::Int64(structure_id));
+                    |reg, resp| {
+                        set_domain_field(reg, resp, 1, structure_id, "");
                     },
                 )
             }),
@@ -480,12 +479,12 @@ pub fn register_handlers(
         router.register_handler(
             "eve_public.cosmetic.structure.paintwork.api.GetAllInSolarSystemRequest",
             Arc::new(move |_ctx, _any, dyn_msg| {
-                let sys_id = get_int_field(dyn_msg, 1).unwrap_or(30_000_142) as u32;
-                build_dynamic_response(
+                let sys_id = get_int_field(dyn_msg, 1).unwrap_or(30_000_142) as u64;
+                encode_domain_message(
                     &d,
                     "eve_public.cosmetic.structure.paintwork.api.GetAllInSolarSystemResponse",
-                    |resp| {
-                        resp.set(1, DynamicValue::Uint32(sys_id));
+                    |reg, resp| {
+                        set_domain_field(reg, resp, 1, sys_id, "");
                     },
                 )
             }),
@@ -496,12 +495,12 @@ pub fn register_handlers(
         router.register_handler(
             "eve_public.cosmetic.structure.paintwork.license.api.GetAllOwnedByCorporationRequest",
             Arc::new(move |_ctx, _any, dyn_msg| {
-                let corp_id = get_int_field(dyn_msg, 1).unwrap_or(98_000_001) as u32;
-                build_dynamic_response(
+                let corp_id = get_int_field(dyn_msg, 1).unwrap_or(98_000_001) as u64;
+                encode_domain_message(
                     &d,
                     "eve_public.cosmetic.structure.paintwork.license.api.GetAllOwnedByCorporationResponse",
-                    |resp| {
-                        resp.set(1, DynamicValue::Uint32(corp_id));
+                    |reg, resp| {
+                        set_domain_field(reg, resp, 1, corp_id, "");
                     },
                 )
             }),
@@ -514,8 +513,8 @@ pub fn register_handlers(
         router.register_handler(
             "eve.quasar.config.api.GetRequest",
             Arc::new(move |_ctx, _any, _dyn_msg| {
-                build_dynamic_response(&d, "eve.quasar.config.api.GetResponse", |resp| {
-                    apply_sde_record(resp, 1, 2401, "tranquility");
+                encode_domain_message(&d, "eve.quasar.config.api.GetResponse", |reg, resp| {
+                    set_domain_attributes(reg, resp, 1, 2401, "tranquility");
                 })
             }),
         );
@@ -731,8 +730,8 @@ pub fn register_handlers(
                         .unwrap_or(98_000_001)
                 });
                 let skin_id = sde_cosm.skins.keys().next().copied().unwrap_or(1) as u64;
-                build_dynamic_response(&d, rsp_name, |resp| {
-                    apply_sde_record(resp, skin_id, corp_id, "SKINRParagon");
+                encode_domain_message(&d, rsp_name, |reg, resp| {
+                    set_domain_attributes(reg, resp, skin_id, corp_id, "SKINRParagon");
                 })
             }),
         );

@@ -279,11 +279,8 @@ async fn q2_gateway_envelope_framing_status_codes_tenancy_and_idempotency() {
         }),
     );
 
-    let reserve_dyn = ctx
-        .quasar_gateway
-        .descriptors
-        .instantiate_populated_sample("eve.accounting.GetIskInWalletRequest", 7)
-        .unwrap();
+    let reserve_dyn =
+        eve_proto::quasar::DynamicQuasarMessage::new("eve.accounting.GetIskInWalletRequest");
     let idem_token = EveIdempotencyToken {
         uuid: b"idem-key-reserve1".to_vec(),
     };

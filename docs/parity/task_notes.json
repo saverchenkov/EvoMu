@@ -256,32 +256,32 @@
     "note": "Quasar public gateway framing, RPC dispatch, status codes, tenancy, and idempotency verified."
   },
   "Q-3": {
-    "assessment": "NOT STARTED",
-    "note": "Not started; 0/1455 quasar rows closed."
+    "assessment": "PARTIAL",
+    "note": "Quasar Identity, Account & Monetization gateway handlers implemented; remaining open quasar:* endpoint rows and Phase Q real-client journeys pending."
   },
   "Q-4": {
-    "assessment": "NOT STARTED",
-    "note": "Not started; 0/1455 quasar rows closed."
+    "assessment": "PARTIAL",
+    "note": "Quasar Daily Goals, Career Program, Achievements, Skill Plans, and Community Track gateway handlers implemented; remaining open quasar:* endpoint rows and Phase Q real-client journeys pending."
   },
   "Q-5": {
-    "assessment": "NOT STARTED",
-    "note": "Not started; 0/1455 quasar rows closed."
+    "assessment": "PARTIAL",
+    "note": "Quasar Chat, Corporation Goals, Freelance Projects, Alliance, Mail, Calendar, and Social gateway handlers implemented; remaining open quasar:* endpoint rows and Phase Q real-client journeys pending."
   },
   "Q-6": {
-    "assessment": "NOT STARTED",
-    "note": "Not started; 0/1455 quasar rows closed."
+    "assessment": "PARTIAL",
+    "note": "Quasar Market, Inventory, Asset Holding, Entitlements, Accounting, Industry, and Planetary gateway handlers implemented; remaining open quasar:* endpoint rows and Phase Q real-client journeys pending."
   },
   "Q-7": {
-    "assessment": "NOT STARTED",
-    "note": "Not started; 0/1455 quasar rows closed."
+    "assessment": "PARTIAL",
+    "note": "Quasar Space, Celestials, Solar System, Navigation, Bubble Presence, and Pirate Insurgency gateway handlers implemented; remaining open quasar:* endpoint rows and Phase Q real-client journeys pending."
   },
   "Q-8": {
-    "assessment": "NOT STARTED",
-    "note": "Not started; 0/1455 quasar rows closed."
+    "assessment": "PARTIAL",
+    "note": "Quasar Sovereignty Hub, Skyhook, Workforce, Upgrades, Mercenary Den, Faction Warfare, and Operations gateway handlers implemented; remaining open quasar:* endpoint rows and Phase Q real-client journeys pending."
   },
   "Q-9": {
-    "assessment": "NOT STARTED",
-    "note": "Not started; 0/1455 quasar rows closed."
+    "assessment": "PARTIAL",
+    "note": "Quasar Ship Cosmetics, SKINR Third-Party Sequencing, Licenses, Drafts, Structure Paintwork, and App Infrastructure gateway handlers implemented; remaining open quasar:* endpoint rows and Phase Q real-client journeys pending."
   },
   "S-1": {
     "assessment": "DONE",
