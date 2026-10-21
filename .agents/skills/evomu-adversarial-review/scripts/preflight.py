@@ -43,7 +43,8 @@ LEDGER = os.path.join(os.path.dirname(HERE), "references", "parity", "ledger.jso
 AUDITOR = os.path.join(os.path.dirname(HERE), "references", "parity", "auditor_rows.json")
 WRAPPER_ENV = ["RUSTC_WRAPPER", "CARGO_BUILD_RUSTC_WRAPPER", "RUSTDOC", "CARGO_BUILD_RUSTDOC",
                "RUSTC", "CARGO_BUILD_RUSTC", "RUSTC_WORKSPACE_WRAPPER", "CARGO_TARGET_DIR"]
-ROW_RE = re.compile(r"\b(?:rpc|notify|destiny|ballmode|quasar|esi|sde|effect|feat|plan|journey):[^\s`'\"|,;)]+")
+ROW_RE = re.compile(r"\besi:(?:GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\s+/[^\s`'\"|,;)]+"  # esi ids: "esi:GET /path"
+                    r"|\b(?:rpc|notify|destiny|ballmode|quasar|esi|sde|effect|feat|plan|journey):[^\s`'\"|,;)]+")
 
 
 def sh(cmd, cwd, env=None, timeout=None):
