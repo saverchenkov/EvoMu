@@ -44,6 +44,24 @@ FALLBACK_MODELS = [m.strip() for m in os.environ.get(
     "EVOMU_REVIEW_FALLBACK_MODELS", "gemini-launch-candidate-high,gemini-flash-next").split(",") if m.strip()]
 # Models whose agy selection has no effort levels (passing --effort makes agy refuse to start).
 NO_EFFORT_MODELS = {m.strip() for m in os.environ.get("EVOMU_REVIEW_NO_EFFORT_MODELS", "auto,gemini-flash-next,gemini-pro-coordinator").split(",") if m.strip()}
+
+# Map model names from agy/review format to Claude CLI format
+CLAUDE_CLI_MODELS = {
+    "opus-5.5-medium": "claude-opus-5-5",
+    "opus-5.5-high": "claude-opus-5-5",
+    "opus-5.5-low": "claude-opus-5-5",
+    "sonnet-5.5-medium": "claude-sonnet-5-5",
+    "sonnet-5.5-high": "claude-sonnet-5-5",
+}
+
+# Map effort levels to Claude CLI flags
+CLAUDE_CLI_EFFORT = {
+    "low": "low",
+    "medium": "medium",
+    "high": "high",
+    "xhigh": "xhigh",
+    "max": "max",
+}
 MODEL_UNUSABLE_RE = re.compile(r"invalid model selection|not recognized as a known model|is not supported for model", re.I)
 CONTINUE_PROMPT = (
     "Continue the EvoMu review exactly where you left off. Do not restart and do not summarize progress. "
@@ -61,6 +79,74 @@ def sh(cmd, cwd, env=None, timeout=None):
         return 124, "TIMEOUT after %ss\n%s" % (timeout, (e.stdout or ""))
     except FileNotFoundError as e:
         return 127, "NOT FOUND: %s" % e
+
+
+def detect_cli():
+    """Detect which CLI is available: claude, agy, or none. Returns ('claude'|'agy'|None, version_string)."""
+    # Check for claude CLI first
+    try:
+        result = subprocess.run(["claude", "--version"], capture_output=True, text=True, timeout=5)
+        if result.returncode == 0:
+            return "claude", result.stdout.strip()
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+
+    # Fall back to agy
+    try:
+        result = subprocess.run(["agy", "--version"], capture_output=True, text=True, timeout=5)
+        if result.returncode == 0:
+            return "agy", result.stdout.strip()
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+
+    return None, ""
+
+
+def get_launcher_env():
+    """Get environment variables for the launcher.
+    NOTE: ANTHROPIC_API_KEY (or ANTHROPIC_AUTH_TOKEN) and ANTHROPIC_BASE_URL must be set
+    in the environment by the user if using a custom API endpoint."""
+    env = dict(os.environ)
+    # Verify required environment variables are set
+    if not env.get("ANTHROPIC_API_KEY") and not env.get("ANTHROPIC_AUTH_TOKEN"):
+        print("[review] WARNING: ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN not set in environment")
+        print("[review] Set via: export ANTHROPIC_API_KEY='your-key'")
+        print("[review] For custom endpoints: export ANTHROPIC_BASE_URL='your-endpoint'")
+    return env
+
+
+def build_reviewer_command(prompt, schema, model, effort, timeout, root, launcher="claude"):
+    """Build a reviewer command for either claude or agy CLI.
+    Returns (command_list, actual_launcher)."""
+    # Auto-detect if launcher was set to 'claude' but it's not available
+    if launcher == "claude":
+        cli, _ = detect_cli()
+        if cli != "claude":
+            print(f"[review] claude CLI not available, falling back to {cli or 'agy'}")
+            launcher = cli or "agy"
+
+    if launcher == "claude":
+        # Claude CLI command structure
+        model_name = CLAUDE_CLI_MODELS.get(model, model)
+        effort_level = CLAUDE_CLI_EFFORT.get(effort, effort)
+        cmd = ["claude", "-p", prompt, "--model", model_name, "--effort", effort_level,
+               "--output", "json", "--response-format", schema,
+               "--sandbox", "--add-dir", root]
+    else:
+        # agy command structure (original)
+        cmd = ["agy", "-p", prompt, "--model", model, "--effort", effort,
+               "--output-format", "json", "--json-schema", schema,
+               "--print-timeout", timeout, "--sandbox", "--add-dir", root]
+
+    for d in (WIKI, CRUCIBLE):
+        if os.path.isdir(d):
+            cmd += ["--add-dir", d]
+
+    # Add skill dir if reviewing a separate worktree
+    if not os.path.abspath(SKILL_DIR).startswith(os.path.abspath(root) + os.sep):
+        cmd += ["--add-dir", SKILL_DIR]
+
+    return cmd, launcher
 
 
 def write(path, text):
@@ -270,11 +356,13 @@ def _launch_one(first_cmd, root, sdir, run_dir, tree_before, ts, valid_verdicts,
                 lock_name="review_in_progress.json", check_tree=True):
     max_rounds = int(os.environ.get("EVOMU_REVIEW_MAX_ROUNDS", "8"))
     max_errors = int(os.environ.get("EVOMU_REVIEW_MAX_STREAM_ERRORS", "2"))
-    base_flags = first_cmd[3:]  # everything after `agy -p <prompt>`
+    # Detect which CLI we're using from the first command
+    cli_name = first_cmd[0]  # "claude" or "agy"
+    base_flags = first_cmd[3:]  # everything after `<cli> -p <prompt>`
     # The reviewer runs inside the same workspace, so it loads .agents/hooks.json. Without this, the
     # coding-agent Stop hook fires inside the reviewer session, forces "continue", burns the per-tree
     # loop guard, and interrupts the reviewer's stream.
-    reviewer_env = dict(os.environ, EVOMU_REVIEW_HOOK="off", EVOMU_REVIEWER="1")
+    reviewer_env = dict(get_launcher_env(), EVOMU_REVIEW_HOOK="off", EVOMU_REVIEWER="1")
     lock = os.path.join(sdir, lock_name)
     write(lock, json.dumps({"pid": os.getpid(), "tree": tree_before, "ts": ts}))
     verdict, so, conv, env = "ERROR", {}, "", {}
@@ -285,11 +373,11 @@ def _launch_one(first_cmd, root, sdir, run_dir, tree_before, ts, valid_verdicts,
             if rnd == 1:
                 run_cmd = first_cmd
             else:
-                run_cmd = ["agy", "-p", CONTINUE_PROMPT, "--conversation", conv] + base_flags
+                run_cmd = [cli_name, "-p", CONTINUE_PROMPT, "--conversation", conv] + base_flags
                 print("[review] %sround %d: resuming conversation %s" % (prefix, rnd, conv))
             p = subprocess.run(run_cmd, cwd=root, capture_output=True, text=True, env=reviewer_env)
-            write(os.path.join(run_dir, "%sagy_stdout_r%d.json" % (prefix, rnd)), p.stdout)
-            write(os.path.join(run_dir, "%sagy_stderr_r%d.txt" % (prefix, rnd)), p.stderr)
+            write(os.path.join(run_dir, "%s%s_stdout_r%d.json" % (prefix, cli_name, rnd)), p.stdout)
+            write(os.path.join(run_dir, "%s%s_stderr_r%d.txt" % (prefix, cli_name, rnd)), p.stderr)
             try:
                 env = json.loads(p.stdout.strip().splitlines()[-1], strict=False) if p.stdout.strip() else {}
             except Exception:  # noqa: BLE001
@@ -312,8 +400,8 @@ def _launch_one(first_cmd, root, sdir, run_dir, tree_before, ts, valid_verdicts,
             if env.get("status") != "SUCCESS":
                 errors += 1
                 so = {"summary": "Reviewer run failed: %s" % (env.get("error") or p.stderr[-2000:] or "no output"),
-                      "report_markdown": "agy exit code %d. stderr tail:\n\n```\n%s\n```"
-                                         % (p.returncode, p.stderr[-4000:])}
+                      "report_markdown": "%s exit code %d. stderr tail:\n\n```\n%s\n```"
+                                         % (cli_name, p.returncode, p.stderr[-4000:])}
                 if conv and errors <= max_errors:
                     print("[review] %sround %d: reviewer stream error (%s); resuming" % (prefix, rnd, env.get("error")))
                     continue
@@ -418,11 +506,7 @@ def background_gap_audit(a, root, sdir):
     parity_md = open(os.path.join(ctx, "parity.md")).read() if os.path.exists(os.path.join(ctx, "parity.md")) else ""
     prompt = build_prompt(ctx, False, "gap-audit")
     write(os.path.join(run_dir, "gap_prompt.md"), prompt)
-    cmd = ["agy", "-p", prompt, "--model", a.model, "--effort", a.effort, "--output-format", "json",
-           "--json-schema", GAP_SCHEMA, "--print-timeout", a.reviewer_timeout, "--sandbox", "--add-dir", root]
-    for d in (WIKI, CRUCIBLE):
-        if os.path.isdir(d):
-            cmd += ["--add-dir", d]
+    cmd, launcher = build_reviewer_command(prompt, GAP_SCHEMA, a.model, a.effort, a.reviewer_timeout, root, a.launcher)
     verdict, so, conv, model_used = launch_reviewer(cmd, root, sdir, run_dir, tree_before, ts, GAP_EXIT, "gap_",
                                                     lock_name="gap_audit_in_progress.json", check_tree=False)
     if verdict in GAP_EXIT:
@@ -461,7 +545,7 @@ def main():
     ap.add_argument("--foreground-audit", action="store_true",
                     help="Run a chained gap audit in the foreground instead of detaching it")
     ap.add_argument("--reuse-context", help=argparse.SUPPRESS)  # internal: background gap audit of a finished run
-    ap.add_argument("--launcher", choices=["agy", "jetski-chat"], default="agy")
+    ap.add_argument("--launcher", choices=["agy", "claude", "jetski-chat"], default="agy")
     ap.add_argument("--dry-run", action="store_true", help="Collect context and print the reviewer command only")
     a = ap.parse_args()
 
@@ -544,17 +628,11 @@ def main():
         print("[review] Interactive review launched; verdict will NOT be recorded automatically.")
         return 3
 
-    def reviewer_cmd(prompt, schema):
-        c = ["agy", "-p", prompt, "--model", a.model, "--effort", a.effort,
-             "--output-format", "json", "--json-schema", schema,
-             "--print-timeout", a.reviewer_timeout, "--sandbox", "--add-dir", root]
-        if os.path.isdir(WIKI):
-            c += ["--add-dir", WIKI]
-        if os.path.isdir(CRUCIBLE):
-            c += ["--add-dir", CRUCIBLE]
-        if not os.path.abspath(SKILL_DIR).startswith(os.path.abspath(root) + os.sep):
-            c += ["--add-dir", SKILL_DIR]  # reviewing a separate worktree: brief/history live elsewhere
-        return c
+    def reviewer_cmd(prompt, schema, launcher=None):
+        """Build reviewer command for claude CLI or agy, depending on what's available."""
+        if launcher is None:
+            launcher = a.launcher
+        return build_reviewer_command(prompt, schema, a.model, a.effort, a.reviewer_timeout, root, launcher)
 
     def record(mode, verdict, so, conv, prefix, model_used=None):
         meta = {"verdict": verdict, "mode": mode, "timestamp": ts, "model": model_used or a.model, "effort": a.effort,
@@ -593,9 +671,9 @@ def main():
             continue
         prompt = build_prompt(ctx, has_claims, mode)
         write(os.path.join(run_dir, "%sprompt.md" % prefix), prompt)
-        cmd = reviewer_cmd(prompt, GAP_SCHEMA if mode == "gap-audit" else SCHEMA)
+        cmd, actual_launcher = reviewer_cmd(prompt, GAP_SCHEMA if mode == "gap-audit" else SCHEMA)
         printable = [c if c != prompt else "<prompt: %s>" % os.path.join(run_dir, "%sprompt.md" % prefix) for c in cmd]
-        print("[review] %s reviewer command: %s" % (mode, " ".join(printable)))
+        print("[review] %s reviewer command (%s): %s" % (mode, actual_launcher, " ".join(printable)))
         if a.dry_run:
             continue
         print("[review] launching headless %s reviewer (this can take a while)..." % mode)
