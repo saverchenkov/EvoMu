@@ -351,6 +351,106 @@ pub struct CorpWalletJournalRecord {
     pub reason: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MarketOrderMeta {
+    pub issued_unix: u64,
+    pub duration_days: i64,
+    pub range: String,
+    #[serde(default)]
+    pub issued_by: Option<i64>,
+    #[serde(default)]
+    pub wallet_division: Option<i64>,
+    #[serde(default)]
+    pub is_corporation: bool,
+    #[serde(default)]
+    pub state: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MarketHistoryDayRecord {
+    pub date: String,
+    pub average: f64,
+    pub highest: f64,
+    pub lowest: f64,
+    pub order_count: i64,
+    pub volume: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanetaryPinContentRecord {
+    pub type_id: TypeId,
+    pub amount: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlanetaryPinRecord {
+    pub pin_id: i64,
+    pub type_id: TypeId,
+    pub latitude: f64,
+    pub longitude: f64,
+    #[serde(default)]
+    pub schematic_id: Option<i64>,
+    #[serde(default)]
+    pub install_time_unix: Option<u64>,
+    #[serde(default)]
+    pub expiry_time_unix: Option<u64>,
+    #[serde(default)]
+    pub last_cycle_start_unix: Option<u64>,
+    #[serde(default)]
+    pub contents: Vec<PlanetaryPinContentRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanetaryLinkRecord {
+    pub source_pin_id: i64,
+    pub destination_pin_id: i64,
+    pub link_level: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanetaryRouteRecord {
+    pub route_id: i64,
+    pub source_pin_id: i64,
+    pub destination_pin_id: i64,
+    pub content_type_id: TypeId,
+    pub quantity: i64,
+    #[serde(default)]
+    pub waypoints: Vec<i64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PlanetaryColonyLayoutRecord {
+    pub pins: Vec<PlanetaryPinRecord>,
+    pub links: Vec<PlanetaryLinkRecord>,
+    pub routes: Vec<PlanetaryRouteRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CustomsOfficeRecord {
+    pub office_id: i64,
+    pub system_id: SolarSystemId,
+    pub reinforce_exit_start: i64,
+    pub reinforce_exit_end: i64,
+    pub allow_alliance_access: bool,
+    pub allow_access_with_standings: bool,
+    #[serde(default)]
+    pub standing_level: Option<String>,
+    #[serde(default)]
+    pub corporation_tax_rate: Option<f64>,
+    #[serde(default)]
+    pub alliance_tax_rate: Option<f64>,
+    #[serde(default)]
+    pub excellent_standing_tax_rate: Option<f64>,
+    #[serde(default)]
+    pub good_standing_tax_rate: Option<f64>,
+    #[serde(default)]
+    pub neutral_standing_tax_rate: Option<f64>,
+    #[serde(default)]
+    pub bad_standing_tax_rate: Option<f64>,
+    #[serde(default)]
+    pub terrible_standing_tax_rate: Option<f64>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct WorldStateSnapshot {
     pub next_entity_id: i64,
@@ -527,6 +627,14 @@ pub struct WorldStateSnapshot {
     pub corp_wallet_journals: HashMap<(i64, i64), Vec<CorpWalletJournalRecord>>,
     #[serde(default, with = "tuple_map_serde")]
     pub corp_wallet_transactions: HashMap<(i64, i64), Vec<WalletTransactionRecord>>,
+    #[serde(default)]
+    pub market_order_meta: HashMap<i64, MarketOrderMeta>,
+    #[serde(default, with = "tuple_map_serde")]
+    pub market_history: HashMap<(u32, TypeId), Vec<MarketHistoryDayRecord>>,
+    #[serde(default, with = "tuple_map_serde")]
+    pub planetary_colony_layouts: HashMap<(i64, i64), PlanetaryColonyLayoutRecord>,
+    #[serde(default)]
+    pub corp_customs_offices: HashMap<i64, Vec<CustomsOfficeRecord>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

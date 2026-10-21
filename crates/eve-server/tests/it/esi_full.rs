@@ -286,6 +286,68 @@ fn setup_esi_test_environment() -> (Arc<ServerContext>, Arc<EsiRouter>, OpenApiS
                 last_extracted_unix: now.saturating_sub(600),
             },
         );
+        snap.planetary_colony_layouts.insert(
+            (char_id, planet_id),
+            eve_db::PlanetaryColonyLayoutRecord {
+                pins: vec![
+                    eve_db::PlanetaryPinRecord {
+                        pin_id: planet_id * 10 + 1,
+                        type_id: 2254,
+                        latitude: 0.5,
+                        longitude: 1.0,
+                        schematic_id: None,
+                        install_time_unix: None,
+                        expiry_time_unix: None,
+                        last_cycle_start_unix: None,
+                        contents: vec![
+                            eve_db::PlanetaryPinContentRecord {
+                                type_id: 2268,
+                                amount: 500,
+                            },
+                            eve_db::PlanetaryPinContentRecord {
+                                type_id: 2272,
+                                amount: 100,
+                            },
+                        ],
+                    },
+                    eve_db::PlanetaryPinRecord {
+                        pin_id: planet_id * 10 + 2,
+                        type_id: 2848,
+                        latitude: 0.6,
+                        longitude: 1.1,
+                        schematic_id: Some(65),
+                        install_time_unix: Some(now.saturating_sub(3600)),
+                        expiry_time_unix: Some(now + 86_400),
+                        last_cycle_start_unix: Some(now.saturating_sub(600)),
+                        contents: Vec::new(),
+                    },
+                ],
+                links: vec![eve_db::PlanetaryLinkRecord {
+                    source_pin_id: planet_id * 10 + 2,
+                    destination_pin_id: planet_id * 10 + 1,
+                    link_level: 1,
+                }],
+                routes: vec![eve_db::PlanetaryRouteRecord {
+                    route_id: 1,
+                    source_pin_id: planet_id * 10 + 2,
+                    destination_pin_id: planet_id * 10 + 1,
+                    content_type_id: 2393,
+                    quantity: 20,
+                    waypoints: Vec::new(),
+                }],
+            },
+        );
+        snap.market_history.insert(
+            (10_000_002, 34),
+            vec![eve_db::MarketHistoryDayRecord {
+                date: "2025-12-15".to_string(),
+                average: 5.2,
+                highest: 5.5,
+                lowest: 4.9,
+                order_count: 14,
+                volume: 120_000,
+            }],
+        );
 
         // 7. Bookmarks fixture
         snap.bookmarks.insert(

@@ -2,15 +2,20 @@
 
 #![forbid(unsafe_code)]
 
+// parity: esi:GET /industry/facilities, esi:GET /industry/systems
 // parity: esi:GET /characters/{character_id}/industry/jobs, esi:GET /characters/{character_id}/mining
 // parity: esi:GET /corporations/{corporation_id}/industry/jobs
 // parity: esi:GET /corporation/{corporation_id}/mining/extractions
 // parity: esi:GET /corporation/{corporation_id}/mining/observers
 // parity: esi:GET /corporation/{corporation_id}/mining/observers/{observer_id}
-// parity: esi:GET /characters/{character_id}/planets, esi:GET /universe/schematics/{schematic_id}
+// parity: esi:GET /characters/{character_id}/planets, esi:GET /characters/{character_id}/planets/{planet_id}
+// parity: esi:GET /corporations/{corporation_id}/customs_offices, esi:GET /universe/schematics/{schematic_id}
+// parity: feat:esi.industry.facilities, feat:esi.industry.systems
 // parity: feat:esi.industry.char-jobs, feat:esi.industry.char-mining
 // parity: feat:esi.industry.corp-jobs, feat:esi.industry.corp-extractions, feat:esi.industry.corp-observers
-// parity: feat:esi.planetary-interaction.colonies, feat:esi.planetary-interaction.schematics
+// parity: feat:esi.planetary-interaction.colonies, feat:esi.planetary-interaction.layout
+// parity: feat:esi.planetary-interaction.customs, feat:esi.planetary-interaction.schematics
+// parity: plan:ESI-6
 
 use super::economy_routes::parse_path_i64;
 use crate::esi::sample_routes::{format_iso8601_utc, paginate_slice, RouteExecutionResult};
@@ -87,6 +92,103 @@ pub fn dispatch_economy_industry_route(
 ) -> Option<RouteExecutionResult> {
     let now = ctx.now_unix();
     match (method, path) {
+        ("GET", "/industry/facilities") => Some(ctx.db.with_snapshot(|snap| {
+            let mut by_id: BTreeMap<i64, Value> = BTreeMap::new();
+            for s in snap.structures.values().filter(|s| s.state != "Destroyed") {
+                let Some(sys) = ctx.sde.solar_systems.get(&s.solar_system_id) else {
+                    continue;
+                };
+                let mut obj = json!({
+                    "facility_id": s.structure_id,
+                    "owner_id": s.owner_corp_id,
+                    "region_id": sys.region_id as i64,
+                    "solar_system_id": s.solar_system_id as i64,
+                    "type_id": s.type_id as i64,
+                });
+                if let Some(corp) = snap.corporations.get(&s.owner_corp_id) {
+                    obj["tax"] = json!(corp.tax_rate);
+                }
+                by_id.insert(s.structure_id, obj);
+            }
+            for job in snap.industry_jobs.values() {
+                if by_id.contains_key(&job.facility_id) {
+                    continue;
+                }
+                if let Some(st) = ctx.sde.stations.get(&job.facility_id) {
+                    let mut obj = json!({
+                        "facility_id": st.station_id,
+                        "owner_id": st.owner_corporation_id,
+                        "region_id": st.region_id as i64,
+                        "solar_system_id": st.solar_system_id as i64,
+                        "type_id": st.station_type_id as i64,
+                    });
+                    if st.reprocessing_stations_take > 0.0 {
+                        // DERIVED: NPC station industry tax rate uses SDE reprocessing_stations_take
+                        obj["tax"] = json!(st.reprocessing_stations_take);
+                    }
+                    by_id.insert(st.station_id, obj);
+                }
+            }
+            let facilities: Vec<Value> = by_id.into_values().collect();
+            RouteExecutionResult::ok_json(json!(facilities), 3600)
+        })),
+
+        ("GET", "/industry/systems") => Some(ctx.db.with_snapshot(|snap| {
+            let mut sys_work: BTreeMap<u32, BTreeMap<&'static str, u64>> = BTreeMap::new();
+            let mut total_activity_work: BTreeMap<&'static str, u64> = BTreeMap::new();
+            for j in snap.industry_jobs.values() {
+                let Some(sid) = ctx
+                    .sde
+                    .stations
+                    .get(&j.facility_id)
+                    .map(|st| st.solar_system_id)
+                    .or_else(|| snap.structures.get(&j.facility_id).map(|s| s.solar_system_id))
+                else {
+                    continue;
+                };
+                let activity = match j.activity_id {
+                    1 => "manufacturing",
+                    3 => "researching_time_efficiency",
+                    4 => "researching_material_efficiency",
+                    5 => "copying",
+                    8 => "invention",
+                    9 | 11 => "reaction",
+                    _ => continue,
+                };
+                let work = u64::from(j.runs).saturating_mul(j.duration_seconds);
+                if work == 0 {
+                    continue;
+                }
+                *sys_work.entry(sid).or_default().entry(activity).or_insert(0) += work;
+                *total_activity_work.entry(activity).or_insert(0) += work;
+            }
+            let out: Vec<Value> = sys_work
+                .into_iter()
+                .map(|(sid, acts)| {
+                    let cost_indices: Vec<Value> = acts
+                        .into_iter()
+                        .filter_map(|(activity, work)| {
+                            let total = total_activity_work.get(activity).copied().unwrap_or(0);
+                            if total == 0 {
+                                return None;
+                            }
+                            // DERIVED: CCP industry system cost index is the system's share of total universe work for that activity
+                            let cost_index = (work as f64) / (total as f64);
+                            Some(json!({
+                                "activity": activity,
+                                "cost_index": cost_index,
+                            }))
+                        })
+                        .collect();
+                    json!({
+                        "solar_system_id": sid as i64,
+                        "cost_indices": cost_indices,
+                    })
+                })
+                .collect();
+            RouteExecutionResult::ok_json(json!(out), 3600)
+        })),
+
         ("GET", "/characters/{character_id}/industry/jobs") => {
             let char_id = match parse_path_i64(path_params, "character_id") {
                 Ok(v) => v,
@@ -460,6 +562,175 @@ pub fn dispatch_economy_industry_route(
                     })
                     .collect();
                 RouteExecutionResult::ok_json(json!(out), 600)
+            }))
+        }
+
+        ("GET", "/characters/{character_id}/planets/{planet_id}") => {
+            let char_id = match parse_path_i64(path_params, "character_id") {
+                Ok(v) => v,
+                Err(e) => return Some(e),
+            };
+            let planet_id = match parse_path_i64(path_params, "planet_id") {
+                Ok(v) => v,
+                Err(e) => return Some(e),
+            };
+            Some(ctx.db.with_snapshot(|snap| {
+                if !snap.characters.contains_key(&char_id) {
+                    return RouteExecutionResult::error(
+                        404,
+                        format!("Character {char_id} not found"),
+                    );
+                }
+                if !snap.planetary_colonies.contains_key(&(char_id, planet_id)) {
+                    return RouteExecutionResult::error(
+                        404,
+                        format!("Colony on planet {planet_id} not found for character {char_id}"),
+                    );
+                }
+                let layout = snap
+                    .planetary_colony_layouts
+                    .get(&(char_id, planet_id))
+                    .cloned()
+                    .unwrap_or_default();
+                let pins: Vec<Value> = layout
+                    .pins
+                    .into_iter()
+                    .map(|p| {
+                        let mut obj = json!({
+                            "pin_id": p.pin_id,
+                            "type_id": p.type_id as i64,
+                            "latitude": p.latitude,
+                            "longitude": p.longitude,
+                        });
+                        if let Some(sid) = p.schematic_id {
+                            obj["schematic_id"] = json!(sid);
+                        }
+                        if let Some(ts) = p.install_time_unix {
+                            obj["install_time"] = json!(format_iso8601_utc(ts));
+                        }
+                        if let Some(ts) = p.expiry_time_unix {
+                            obj["expiry_time"] = json!(format_iso8601_utc(ts));
+                        }
+                        if let Some(ts) = p.last_cycle_start_unix {
+                            obj["last_cycle_start"] = json!(format_iso8601_utc(ts));
+                        }
+                        if !p.contents.is_empty() {
+                            let contents: Vec<Value> = p
+                                .contents
+                                .into_iter()
+                                .map(|c| {
+                                    json!({
+                                        "type_id": c.type_id as i64,
+                                        "amount": c.amount,
+                                    })
+                                })
+                                .collect();
+                            obj["contents"] = json!(contents);
+                        }
+                        obj
+                    })
+                    .collect();
+                let links: Vec<Value> = layout
+                    .links
+                    .into_iter()
+                    .map(|l| {
+                        json!({
+                            "source_pin_id": l.source_pin_id,
+                            "destination_pin_id": l.destination_pin_id,
+                            "link_level": l.link_level,
+                        })
+                    })
+                    .collect();
+                let routes: Vec<Value> = layout
+                    .routes
+                    .into_iter()
+                    .map(|r| {
+                        let mut obj = json!({
+                            "route_id": r.route_id,
+                            "source_pin_id": r.source_pin_id,
+                            "destination_pin_id": r.destination_pin_id,
+                            "content_type_id": r.content_type_id as i64,
+                            "quantity": r.quantity as f64,
+                        });
+                        if !r.waypoints.is_empty() {
+                            obj["waypoints"] = json!(r.waypoints);
+                        }
+                        obj
+                    })
+                    .collect();
+                RouteExecutionResult::ok_json(
+                    json!({
+                        "pins": pins,
+                        "links": links,
+                        "routes": routes,
+                    }),
+                    600,
+                )
+            }))
+        }
+
+        ("GET", "/corporations/{corporation_id}/customs_offices") => {
+            let corp_id = match parse_path_i64(path_params, "corporation_id") {
+                Ok(v) => v,
+                Err(e) => return Some(e),
+            };
+            Some(ctx.db.with_snapshot(|snap| {
+                if !snap.corporations.contains_key(&corp_id) {
+                    return RouteExecutionResult::error(
+                        404,
+                        format!("Corporation {corp_id} not found"),
+                    );
+                }
+                let mut offices = snap
+                    .corp_customs_offices
+                    .get(&corp_id)
+                    .cloned()
+                    .unwrap_or_default();
+                offices.sort_by_key(|o| o.office_id);
+                let rows: Vec<Value> = offices
+                    .into_iter()
+                    .map(|o| {
+                        let mut obj = json!({
+                            "office_id": o.office_id,
+                            "system_id": o.system_id as i64,
+                            "reinforce_exit_start": o.reinforce_exit_start,
+                            "reinforce_exit_end": o.reinforce_exit_end,
+                            "allow_alliance_access": o.allow_alliance_access,
+                            "allow_access_with_standings": o.allow_access_with_standings,
+                        });
+                        if let Some(lvl) = o.standing_level {
+                            obj["standing_level"] = json!(lvl);
+                        }
+                        if let Some(r) = o.corporation_tax_rate {
+                            obj["corporation_tax_rate"] = json!(r);
+                        }
+                        if let Some(r) = o.alliance_tax_rate {
+                            obj["alliance_tax_rate"] = json!(r);
+                        }
+                        if let Some(r) = o.excellent_standing_tax_rate {
+                            obj["excellent_standing_tax_rate"] = json!(r);
+                        }
+                        if let Some(r) = o.good_standing_tax_rate {
+                            obj["good_standing_tax_rate"] = json!(r);
+                        }
+                        if let Some(r) = o.neutral_standing_tax_rate {
+                            obj["neutral_standing_tax_rate"] = json!(r);
+                        }
+                        if let Some(r) = o.bad_standing_tax_rate {
+                            obj["bad_standing_tax_rate"] = json!(r);
+                        }
+                        if let Some(r) = o.terrible_standing_tax_rate {
+                            obj["terrible_standing_tax_rate"] = json!(r);
+                        }
+                        obj
+                    })
+                    .collect();
+                match paginate_slice(&rows, page, 1000) {
+                    Ok((page_rows, total_pages)) => {
+                        RouteExecutionResult::ok_paginated(json!(page_rows), 3600, total_pages)
+                    }
+                    Err(e) => e,
+                }
             }))
         }
 

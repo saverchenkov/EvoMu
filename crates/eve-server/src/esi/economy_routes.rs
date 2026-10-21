@@ -5,6 +5,10 @@
 
 // parity: esi:GET /markets/groups, esi:GET /markets/groups/{market_group_id}
 // parity: esi:GET /markets/prices, esi:GET /markets/{region_id}/types
+// parity: esi:GET /markets/{region_id}/orders, esi:GET /markets/{region_id}/history
+// parity: esi:GET /markets/structures/{structure_id}
+// parity: esi:GET /characters/{character_id}/orders, esi:GET /characters/{character_id}/orders/history
+// parity: esi:GET /corporations/{corporation_id}/orders, esi:GET /corporations/{corporation_id}/orders/history
 // parity: esi:GET /characters/{character_id}/contracts
 // parity: esi:GET /characters/{character_id}/contracts/{contract_id}/bids
 // parity: esi:GET /characters/{character_id}/contracts/{contract_id}/items
@@ -15,15 +19,18 @@
 // parity: esi:GET /corporations/{corporation_id}/contracts/{contract_id}/bids
 // parity: esi:GET /corporations/{corporation_id}/contracts/{contract_id}/items
 // parity: feat:esi.market.groups, feat:esi.market.prices, feat:esi.market.types
+// parity: feat:esi.market.region-orders, feat:esi.market.history, feat:esi.market.structure-orders
+// parity: feat:esi.market.char-orders, feat:esi.market.corp-orders
 // parity: feat:esi.contracts.char-list, feat:esi.contracts.char-items-bids
 // parity: feat:esi.contracts.corp, feat:esi.contracts.public
+// parity: plan:ESI-6
 
 use crate::esi::sample_routes::{format_iso8601_utc, paginate_slice, RouteExecutionResult};
 use crate::esi::universe_routes::character_has_structure_acl_access;
 use crate::router::ServerContext;
 use eve_db::SsoTokenClaims;
 use serde_json::{json, Value};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 pub(super) fn parse_path_i64(
     path_params: &HashMap<String, String>,
@@ -311,34 +318,45 @@ pub fn dispatch_economy_route(
                     })
                     .collect();
                 orders.sort_by_key(|o| o.order_id);
-                let page_size = 1000usize;
-                let total_pages = orders.len().div_ceil(page_size).max(1);
-                let slice: Vec<Value> = if page > total_pages {
-                    Vec::new()
-                } else {
-                    orders
-                        .into_iter()
-                        .skip((page - 1) * page_size)
-                        .take(page_size)
-                        .map(|o| {
-                            json!({
-                                "order_id": o.order_id,
-                                "type_id": o.type_id as i64,
-                                "location_id": o.station_id,
-                                "system_id": 30_000_142,
-                                "volume_total": o.vol_entered,
-                                "volume_remain": o.vol_remaining,
-                                "min_volume": o.min_volume.max(1),
-                                "price": o.price.to_wire_f64(),
-                                "is_buy_order": o.is_bid,
-                                "duration": 90,
-                                "issued": format_iso8601_utc(now.saturating_sub(3600)),
-                                "range": "region",
-                            })
+                let mut rows = Vec::new();
+                for o in orders {
+                    let Some(meta) = snap.market_order_meta.get(&o.order_id) else {
+                        continue;
+                    };
+                    let Some(system_id) = ctx
+                        .sde
+                        .stations
+                        .get(&o.station_id)
+                        .map(|st| st.solar_system_id as i64)
+                        .or_else(|| {
+                            snap.structures
+                                .get(&o.station_id)
+                                .map(|st| st.solar_system_id as i64)
                         })
-                        .collect()
-                };
-                RouteExecutionResult::ok_paginated_json(json!(slice), 300, total_pages)
+                    else {
+                        continue;
+                    };
+                    rows.push(json!({
+                        "order_id": o.order_id,
+                        "type_id": o.type_id as i64,
+                        "location_id": o.station_id,
+                        "system_id": system_id,
+                        "volume_total": o.vol_entered,
+                        "volume_remain": o.vol_remaining,
+                        "min_volume": o.min_volume,
+                        "price": o.price.to_wire_f64(),
+                        "is_buy_order": o.is_bid,
+                        "duration": meta.duration_days,
+                        "issued": format_iso8601_utc(meta.issued_unix),
+                        "range": meta.range,
+                    }));
+                }
+                match paginate_slice(&rows, page, 1000) {
+                    Ok((page_rows, total_pages)) => {
+                        RouteExecutionResult::ok_paginated(json!(page_rows), 300, total_pages)
+                    }
+                    Err(e) => e,
+                }
             }))
         }
 
@@ -371,22 +389,34 @@ pub fn dispatch_economy_route(
                     format!("Invalid type_id '{raw_tid}'"),
                 ));
             };
-            let Some(inv_type) = ctx.sde.types.get(&tid) else {
+            if !ctx.sde.types.contains_key(&tid) {
                 return Some(RouteExecutionResult::error(
                     404,
                     format!("Type {tid} not found"),
                 ));
-            };
-            let avg = inv_type.base_price.max(5.0);
-            let out = vec![json!({
-                "date": "2025-12-15",
-                "average": avg,
-                "highest": avg * 1.05,
-                "lowest": avg * 0.95,
-                "order_count": 12,
-                "volume": 1000,
-            })];
-            Some(RouteExecutionResult::ok_json(json!(out), 3600))
+            }
+            Some(ctx.db.with_snapshot(|snap| {
+                let mut entries = snap
+                    .market_history
+                    .get(&(reg_u32, tid))
+                    .cloned()
+                    .unwrap_or_default();
+                entries.sort_by(|a, b| a.date.cmp(&b.date));
+                let out: Vec<Value> = entries
+                    .into_iter()
+                    .map(|d| {
+                        json!({
+                            "date": d.date,
+                            "average": d.average,
+                            "highest": d.highest,
+                            "lowest": d.lowest,
+                            "order_count": d.order_count,
+                            "volume": d.volume,
+                        })
+                    })
+                    .collect();
+                RouteExecutionResult::ok_json(json!(out), 3600)
+            }))
         }
 
         ("GET", "/markets/{region_id}/types") => {
@@ -451,25 +481,31 @@ pub fn dispatch_economy_route(
                     .filter(|o| o.station_id == structure_id && o.vol_remaining > 0)
                     .collect();
                 orders.sort_by_key(|o| o.order_id);
-                let out: Vec<Value> = orders
-                    .into_iter()
-                    .map(|o| {
-                        json!({
-                            "order_id": o.order_id,
-                            "type_id": o.type_id as i64,
-                            "location_id": o.station_id,
-                            "volume_total": o.vol_entered,
-                            "volume_remain": o.vol_remaining,
-                            "min_volume": o.min_volume.max(1),
-                            "price": o.price.to_wire_f64(),
-                            "is_buy_order": o.is_bid,
-                            "duration": 90,
-                            "issued": format_iso8601_utc(now.saturating_sub(3600)),
-                            "range": "station",
-                        })
-                    })
-                    .collect();
-                RouteExecutionResult::ok_paginated_json(json!(out), 300, 1)
+                let mut rows = Vec::new();
+                for o in orders {
+                    let Some(meta) = snap.market_order_meta.get(&o.order_id) else {
+                        continue;
+                    };
+                    rows.push(json!({
+                        "order_id": o.order_id,
+                        "type_id": o.type_id as i64,
+                        "location_id": o.station_id,
+                        "volume_total": o.vol_entered,
+                        "volume_remain": o.vol_remaining,
+                        "min_volume": o.min_volume,
+                        "price": o.price.to_wire_f64(),
+                        "is_buy_order": o.is_bid,
+                        "duration": meta.duration_days,
+                        "issued": format_iso8601_utc(meta.issued_unix),
+                        "range": meta.range,
+                    }));
+                }
+                match paginate_slice(&rows, page, 1000) {
+                    Ok((page_rows, total_pages)) => {
+                        RouteExecutionResult::ok_paginated(json!(page_rows), 300, total_pages)
+                    }
+                    Err(e) => e,
+                }
             }))
         }
 
@@ -491,28 +527,29 @@ pub fn dispatch_economy_route(
                     .filter(|o| o.owner_id == char_id && o.vol_remaining > 0)
                     .collect();
                 orders.sort_by_key(|o| o.order_id);
-                let out: Vec<Value> = orders
-                    .into_iter()
-                    .map(|o| {
-                        json!({
-                            "order_id": o.order_id,
-                            "type_id": o.type_id as i64,
-                            "region_id": o.region_id as i64,
-                            "location_id": o.station_id,
-                            "range": "station",
-                            "is_buy_order": o.is_bid,
-                            "price": o.price.to_wire_f64(),
-                            "volume_total": o.vol_entered,
-                            "volume_remain": o.vol_remaining,
-                            "issued": format_iso8601_utc(now.saturating_sub(600)),
-                            "min_volume": o.min_volume.max(1),
-                            "duration": 90,
-                            "escrow": o.escrow.to_wire_f64(),
-                            "is_corporation": false,
-                        })
-                    })
-                    .collect();
-                RouteExecutionResult::ok_json(json!(out), 1200)
+                let mut rows = Vec::new();
+                for o in orders {
+                    let Some(meta) = snap.market_order_meta.get(&o.order_id) else {
+                        continue;
+                    };
+                    rows.push(json!({
+                        "order_id": o.order_id,
+                        "type_id": o.type_id as i64,
+                        "region_id": o.region_id as i64,
+                        "location_id": o.station_id,
+                        "range": meta.range,
+                        "is_buy_order": o.is_bid,
+                        "price": o.price.to_wire_f64(),
+                        "volume_total": o.vol_entered,
+                        "volume_remain": o.vol_remaining,
+                        "issued": format_iso8601_utc(meta.issued_unix),
+                        "min_volume": o.min_volume,
+                        "duration": meta.duration_days,
+                        "escrow": o.escrow.to_wire_f64(),
+                        "is_corporation": meta.is_corporation,
+                    }));
+                }
+                RouteExecutionResult::ok_json(json!(rows), 1200)
             }))
         }
 
@@ -534,29 +571,38 @@ pub fn dispatch_economy_route(
                     .filter(|o| o.owner_id == char_id && o.vol_remaining == 0)
                     .collect();
                 orders.sort_by_key(|o| o.order_id);
-                let out: Vec<Value> = orders
-                    .into_iter()
-                    .map(|o| {
-                        json!({
-                            "order_id": o.order_id,
-                            "type_id": o.type_id as i64,
-                            "region_id": o.region_id as i64,
-                            "location_id": o.station_id,
-                            "range": "station",
-                            "is_buy_order": o.is_bid,
-                            "price": o.price.to_wire_f64(),
-                            "volume_total": o.vol_entered,
-                            "volume_remain": 0,
-                            "issued": format_iso8601_utc(now.saturating_sub(3600)),
-                            "state": "expired",
-                            "min_volume": o.min_volume.max(1),
-                            "duration": 90,
-                            "escrow": 0.0,
-                            "is_corporation": false,
-                        })
-                    })
-                    .collect();
-                RouteExecutionResult::ok_paginated_json(json!(out), 3600, 1)
+                let mut rows = Vec::new();
+                for o in orders {
+                    let Some(meta) = snap.market_order_meta.get(&o.order_id) else {
+                        continue;
+                    };
+                    let Some(ref state) = meta.state else {
+                        continue;
+                    };
+                    rows.push(json!({
+                        "order_id": o.order_id,
+                        "type_id": o.type_id as i64,
+                        "region_id": o.region_id as i64,
+                        "location_id": o.station_id,
+                        "range": meta.range,
+                        "is_buy_order": o.is_bid,
+                        "price": o.price.to_wire_f64(),
+                        "volume_total": o.vol_entered,
+                        "volume_remain": o.vol_remaining,
+                        "issued": format_iso8601_utc(meta.issued_unix),
+                        "state": state,
+                        "min_volume": o.min_volume,
+                        "duration": meta.duration_days,
+                        "escrow": o.escrow.to_wire_f64(),
+                        "is_corporation": meta.is_corporation,
+                    }));
+                }
+                match paginate_slice(&rows, page, 1000) {
+                    Ok((page_rows, total_pages)) => {
+                        RouteExecutionResult::ok_paginated(json!(page_rows), 3600, total_pages)
+                    }
+                    Err(e) => e,
+                }
             }))
         }
 
@@ -566,43 +612,56 @@ pub fn dispatch_economy_route(
                 Err(e) => return Some(e),
             };
             Some(ctx.db.with_snapshot(|snap| {
-                let Some(corp) = snap.corporations.get(&corp_id) else {
+                if !snap.corporations.contains_key(&corp_id) {
                     return RouteExecutionResult::error(
                         404,
                         format!("Corporation {corp_id} not found"),
                     );
-                };
+                }
                 let mut orders: Vec<_> = snap
                     .market_orders
                     .values()
-                    .filter(|o| {
-                        (o.owner_id == corp_id || o.owner_id == corp.ceo_id) && o.vol_remaining > 0
-                    })
+                    .filter(|o| o.owner_id == corp_id && o.vol_remaining > 0)
                     .collect();
                 orders.sort_by_key(|o| o.order_id);
-                let out: Vec<Value> = orders
-                    .into_iter()
-                    .map(|o| {
-                        json!({
-                            "order_id": o.order_id,
-                            "type_id": o.type_id as i64,
-                            "region_id": o.region_id as i64,
-                            "location_id": o.station_id,
-                            "range": "station",
-                            "is_buy_order": o.is_bid,
-                            "price": o.price.to_wire_f64(),
-                            "volume_total": o.vol_entered,
-                            "volume_remain": o.vol_remaining,
-                            "issued": format_iso8601_utc(now.saturating_sub(600)),
-                            "issued_by": corp.ceo_id,
-                            "min_volume": o.min_volume.max(1),
-                            "wallet_division": 1,
-                            "duration": 90,
-                            "escrow": o.escrow.to_wire_f64(),
-                        })
-                    })
-                    .collect();
-                RouteExecutionResult::ok_paginated_json(json!(out), 1200, 1)
+                let mut rows = Vec::new();
+                for o in orders {
+                    let Some(meta) = snap.market_order_meta.get(&o.order_id) else {
+                        continue;
+                    };
+                    if !meta.is_corporation {
+                        continue;
+                    }
+                    let Some(issued_by) = meta.issued_by else {
+                        continue;
+                    };
+                    let Some(wallet_division) = meta.wallet_division else {
+                        continue;
+                    };
+                    rows.push(json!({
+                        "order_id": o.order_id,
+                        "type_id": o.type_id as i64,
+                        "region_id": o.region_id as i64,
+                        "location_id": o.station_id,
+                        "range": meta.range,
+                        "is_buy_order": o.is_bid,
+                        "price": o.price.to_wire_f64(),
+                        "volume_total": o.vol_entered,
+                        "volume_remain": o.vol_remaining,
+                        "issued": format_iso8601_utc(meta.issued_unix),
+                        "issued_by": issued_by,
+                        "min_volume": o.min_volume,
+                        "wallet_division": wallet_division,
+                        "duration": meta.duration_days,
+                        "escrow": o.escrow.to_wire_f64(),
+                    }));
+                }
+                match paginate_slice(&rows, page, 1000) {
+                    Ok((page_rows, total_pages)) => {
+                        RouteExecutionResult::ok_paginated(json!(page_rows), 1200, total_pages)
+                    }
+                    Err(e) => e,
+                }
             }))
         }
 
@@ -612,44 +671,60 @@ pub fn dispatch_economy_route(
                 Err(e) => return Some(e),
             };
             Some(ctx.db.with_snapshot(|snap| {
-                let Some(corp) = snap.corporations.get(&corp_id) else {
+                if !snap.corporations.contains_key(&corp_id) {
                     return RouteExecutionResult::error(
                         404,
                         format!("Corporation {corp_id} not found"),
                     );
-                };
+                }
                 let mut orders: Vec<_> = snap
                     .market_orders
                     .values()
-                    .filter(|o| {
-                        (o.owner_id == corp_id || o.owner_id == corp.ceo_id) && o.vol_remaining == 0
-                    })
+                    .filter(|o| o.owner_id == corp_id && o.vol_remaining == 0)
                     .collect();
                 orders.sort_by_key(|o| o.order_id);
-                let out: Vec<Value> = orders
-                    .into_iter()
-                    .map(|o| {
-                        json!({
-                            "order_id": o.order_id,
-                            "type_id": o.type_id as i64,
-                            "region_id": o.region_id as i64,
-                            "location_id": o.station_id,
-                            "range": "station",
-                            "is_buy_order": o.is_bid,
-                            "price": o.price.to_wire_f64(),
-                            "volume_total": o.vol_entered,
-                            "volume_remain": 0,
-                            "issued": format_iso8601_utc(now.saturating_sub(3600)),
-                            "issued_by": corp.ceo_id,
-                            "state": "expired",
-                            "min_volume": o.min_volume.max(1),
-                            "wallet_division": 1,
-                            "duration": 90,
-                            "escrow": 0.0,
-                        })
-                    })
-                    .collect();
-                RouteExecutionResult::ok_paginated_json(json!(out), 3600, 1)
+                let mut rows = Vec::new();
+                for o in orders {
+                    let Some(meta) = snap.market_order_meta.get(&o.order_id) else {
+                        continue;
+                    };
+                    if !meta.is_corporation {
+                        continue;
+                    }
+                    let Some(ref state) = meta.state else {
+                        continue;
+                    };
+                    let Some(wallet_division) = meta.wallet_division else {
+                        continue;
+                    };
+                    let mut obj = json!({
+                        "order_id": o.order_id,
+                        "type_id": o.type_id as i64,
+                        "region_id": o.region_id as i64,
+                        "location_id": o.station_id,
+                        "range": meta.range,
+                        "is_buy_order": o.is_bid,
+                        "price": o.price.to_wire_f64(),
+                        "volume_total": o.vol_entered,
+                        "volume_remain": o.vol_remaining,
+                        "issued": format_iso8601_utc(meta.issued_unix),
+                        "state": state,
+                        "min_volume": o.min_volume,
+                        "wallet_division": wallet_division,
+                        "duration": meta.duration_days,
+                        "escrow": o.escrow.to_wire_f64(),
+                    });
+                    if let Some(issued_by) = meta.issued_by {
+                        obj["issued_by"] = json!(issued_by);
+                    }
+                    rows.push(obj);
+                }
+                match paginate_slice(&rows, page, 1000) {
+                    Ok((page_rows, total_pages)) => {
+                        RouteExecutionResult::ok_paginated(json!(page_rows), 3600, total_pages)
+                    }
+                    Err(e) => e,
+                }
             }))
         }
 
@@ -1039,181 +1114,7 @@ pub fn dispatch_economy_route(
             }))
         }
 
-        // 3. Industry & Mining Routes (ESI-6)
-        ("GET", "/industry/facilities") => Some(ctx.db.with_snapshot(|snap| {
-            let mut facilities = Vec::new();
-            for s in snap.structures.values() {
-                let region_id = ctx
-                    .sde
-                    .solar_systems
-                    .get(&s.solar_system_id)
-                    .map(|sys| sys.region_id as i64)
-                    .unwrap_or(10000002);
-                facilities.push(json!({
-                    "facility_id": s.structure_id,
-                    "owner_id": s.owner_corp_id,
-                    "region_id": region_id,
-                    "solar_system_id": s.solar_system_id as i64,
-                    "type_id": s.type_id as i64,
-                    "tax": 0.0,
-                }));
-            }
-            if facilities.is_empty() {
-                facilities.push(json!({
-                    "facility_id": 60003760,
-                    "owner_id": 1000035,
-                    "region_id": 10000002,
-                    "solar_system_id": 30000142,
-                    "type_id": 2500,
-                    "tax": 0.1,
-                }));
-            }
-            RouteExecutionResult::ok_json(json!(facilities), 3600)
-        })),
-
-        ("GET", "/incursions") => Some(RouteExecutionResult::ok_json(
-            json!([
-                {
-                    "constellation_id": 20000020,
-                    "faction_id": 500019,
-                    "has_boss": true,
-                    "infested_solar_systems": [30000142, 30000144],
-                    "influence": 0.9,
-                    "staging_solar_system_id": 30000142,
-                    "state": "established",
-                    "type": "Incursion",
-                }
-            ]),
-            300,
-        )),
-
-        ("GET", "/industry/systems") => Some(ctx.db.with_snapshot(|snap| {
-            let mut sys_ids: HashSet<u32> = snap.system_states.keys().copied().collect();
-            sys_ids.insert(30_000_142);
-            let mut sorted_ids: Vec<u32> = sys_ids.into_iter().collect();
-            sorted_ids.sort_unstable();
-            let out: Vec<Value> = sorted_ids
-                .into_iter()
-                .map(|sid| {
-                    let ind_idx = snap
-                        .system_states
-                        .get(&sid)
-                        .map(|st| (st.industrial_index.max(1) as f64) * 0.01)
-                        .unwrap_or(0.02);
-                    json!({
-                        "solar_system_id": sid as i64,
-                        "cost_indices": [
-                            { "activity": "manufacturing", "cost_index": ind_idx },
-                            { "activity": "researching_time_efficiency", "cost_index": ind_idx * 0.5 },
-                            { "activity": "researching_material_efficiency", "cost_index": ind_idx * 0.5 },
-                            { "activity": "copying", "cost_index": ind_idx * 0.5 },
-                            { "activity": "invention", "cost_index": ind_idx * 0.5 },
-                            { "activity": "reaction", "cost_index": ind_idx },
-                        ]
-                    })
-                })
-                .collect();
-            RouteExecutionResult::ok_json(json!(out), 3600)
-        })),
-
-        ("GET", "/characters/{character_id}/planets/{planet_id}") => {
-            let char_id = match parse_path_i64(path_params, "character_id") {
-                Ok(v) => v,
-                Err(e) => return Some(e),
-            };
-            let planet_id = match parse_path_i64(path_params, "planet_id") {
-                Ok(v) => v,
-                Err(e) => return Some(e),
-            };
-            Some(ctx.db.with_snapshot(|snap| {
-                if !snap.characters.contains_key(&char_id) {
-                    return RouteExecutionResult::error(
-                        404,
-                        format!("Character {char_id} not found"),
-                    );
-                }
-                let Some(colony) = snap.planetary_colonies.get(&(char_id, planet_id)) else {
-                    return RouteExecutionResult::error(
-                        404,
-                        format!("Colony on planet {planet_id} not found for character {char_id}"),
-                    );
-                };
-                let contents: Vec<Value> = colony
-                    .extracted_commodities
-                    .iter()
-                    .map(|(&tid, &qty)| json!({ "type_id": tid as i64, "amount": qty as i64 }))
-                    .collect();
-                let pins = vec![
-                    json!({
-                        "pin_id": planet_id * 10 + 1,
-                        "type_id": 2254,
-                        "latitude": 0.5,
-                        "longitude": 1.0,
-                        "contents": contents,
-                    }),
-                    json!({
-                        "pin_id": planet_id * 10 + 2,
-                        "type_id": 2848,
-                        "latitude": 0.6,
-                        "longitude": 1.1,
-                    }),
-                ];
-                let links = vec![json!({
-                    "source_pin_id": planet_id * 10 + 2,
-                    "destination_pin_id": planet_id * 10 + 1,
-                    "link_level": 1,
-                })];
-                let routes = vec![json!({
-                    "route_id": 1,
-                    "source_pin_id": planet_id * 10 + 2,
-                    "destination_pin_id": planet_id * 10 + 1,
-                    "content_type_id": 2393,
-                    "quantity": 20,
-                })];
-                RouteExecutionResult::ok_json(
-                    json!({
-                        "pins": pins,
-                        "links": links,
-                        "routes": routes,
-                    }),
-                    600,
-                )
-            }))
-        }
-
-        ("GET", "/corporations/{corporation_id}/customs_offices") => {
-            let corp_id = match parse_path_i64(path_params, "corporation_id") {
-                Ok(v) => v,
-                Err(e) => return Some(e),
-            };
-            Some(ctx.db.with_snapshot(|snap| {
-                if !snap.corporations.contains_key(&corp_id) {
-                    return RouteExecutionResult::error(
-                        404,
-                        format!("Corporation {corp_id} not found"),
-                    );
-                }
-                let out = vec![json!({
-                    "office_id": 10_000_000_200_i64 + corp_id,
-                    "system_id": 30_000_142,
-                    "reinforce_exit_start": 16,
-                    "reinforce_exit_end": 18,
-                    "corporation_tax_rate": 0.05,
-                    "alliance_tax_rate": 0.05,
-                    "allow_alliance_access": true,
-                    "allow_access_with_standings": true,
-                    "standing_level": "neutral",
-                    "excellent_standing_tax_rate": 0.05,
-                    "good_standing_tax_rate": 0.08,
-                    "neutral_standing_tax_rate": 0.10,
-                    "bad_standing_tax_rate": 0.15,
-                    "terrible_standing_tax_rate": 0.20,
-                })];
-                RouteExecutionResult::ok_paginated_json(json!(out), 3600, 1)
-            }))
-        }
-
-        // 4. Industry & Planetary Interaction Routes (`esi::economy_industry_routes`)
+        // 3. Industry & Planetary Interaction Routes (`esi::economy_industry_routes`)
         _ => super::economy_industry_routes::dispatch_economy_industry_route(
             ctx,
             method,
