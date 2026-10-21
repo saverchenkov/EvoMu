@@ -79,8 +79,7 @@ impl MechanicRng {
             }
         }
         let mut buf = [0u8; 8];
-        let mut f = std::fs::File::open("/dev/urandom").ok()?;
-        std::io::Read::read_exact(&mut f, &mut buf).ok()?;
+        getrandom::getrandom(&mut buf).ok()?;
         Some(u64::from_le_bytes(buf))
     }
 
