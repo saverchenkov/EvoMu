@@ -330,21 +330,28 @@ pub(crate) fn step_cycles_and_capacitor(
                     1.0
                 };
 
+                let is_sleeper_target = ballpark
+                    .balls
+                    .get(&target_id)
+                    .is_some_and(|b| matches!(b.type_id, 30185..=30500));
                 let mut nos_transferred = 0.0;
                 if let Some(cs) = ballpark.combat_states.get_mut(&target_id) {
-                    if cycle.cap_drain_target > 0.0 {
+                    if cycle.cap_drain_target > 0.0 && !is_sleeper_target {
                         cs.capacitor = (cs.capacitor - cycle.cap_drain_target).max(0.0);
                     }
-                    // Nosferatu transfer rule (`feat:modules.nosferatu-transfer-rule`):
-                    // Only drains from target and adds to self when target capacitor > self capacitor!
+                    // Nosferatu transfer rule (`feat:modules.nosferatu-transfer-rule`, `feat:npc.sleeper-capacitor-immunity-and-leash`):
+                    // Only drains from target and adds to self when target capacitor > self capacitor;
+                    // Sleepers have effectively infinite capacitor and are never drained by player neutralizers/nosferatus.
                     if cycle.cap_transfer_target > 0.0 {
                         if let Some((src_cap, src_max_cap)) = src_cap_info {
-                            if cs.capacitor > src_cap {
+                            if is_sleeper_target || cs.capacitor > src_cap {
                                 let transferred = cycle
                                     .cap_transfer_target
-                                    .min(cs.capacitor)
+                                    .min(if is_sleeper_target { cycle.cap_transfer_target } else { cs.capacitor })
                                     .min((src_max_cap - src_cap).max(0.0));
-                                cs.capacitor = (cs.capacitor - transferred).max(0.0);
+                                if !is_sleeper_target {
+                                    cs.capacitor = (cs.capacitor - transferred).max(0.0);
+                                }
                                 nos_transferred = transferred;
                             }
                         }

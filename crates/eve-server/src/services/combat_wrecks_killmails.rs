@@ -170,11 +170,31 @@ pub fn process_ship_insurance_payout(
                     balance_after: ba,
                     reason: format!("Insurance payout for loss of ship {ship_id}"),
                 });
+                snap.next_entity_id += 1;
+                let mid = snap.next_entity_id;
+                snap.mails.push(eve_db::MailRecord {
+                    message_id: mid,
+                    sender_id: 1_000_132, // Secure Commerce Commission
+                    recipient_id: victim_char_id,
+                    subject: format!("Insurance Payout for Ship {ship_id}"),
+                    body: format!(
+                        "Pend Insurance has credited {:.2} ISK to your account following the destruction of ship {} (type {}).",
+                        payout_isk, ship_id, ship_type_id
+                    ),
+                });
+                snap.mail_timestamps.insert(mid, now_unix);
+                snap.mail_assigned_labels.insert((victim_char_id, mid), vec![1]);
             }
             bal_after.map(|b| b.to_wire_f64())
         });
         if let Some(bal) = new_bal {
             let _ = ctx.notify_account_change(victim_char_id, "cash", victim_char_id, bal);
+            ctx.notify(
+                NotificationTarget::Character(victim_char_id),
+                "OnNewMailReceived",
+                "charid",
+                vec![PyRep::Integer(victim_char_id), PyRep::Real(payout_isk)],
+            );
         }
     }
     payout_isk
@@ -809,6 +829,45 @@ pub async fn handle_wrecks_killmails(
                     message: format!("Wreck or container {wreck_id} no longer exists in space"),
                 }));
             };
+            if wreck_item.location_id != sys_id as i64 {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidContainerLocation".into(),
+                    message: format!("Container {wreck_id} is not in solar system {sys_id}"),
+                }));
+            }
+            let is_ship_or_station = ctx
+                .sde
+                .types
+                .get(&wreck_item.type_id)
+                .is_some_and(|t| matches!(t.category_id, 3 | 6 | 65));
+            if is_ship_or_station {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidContainerType".into(),
+                    message: format!("Item {wreck_id} (type {}) is not a lootable wreck or cargo container", wreck_item.type_id),
+                }));
+            }
+            let sys_handle = ctx.systems.get_or_spawn(sys_id);
+            let active_ball_id = ctx
+                .db
+                .with_snapshot(|s| s.characters.get(&char_id).map(|c| c.active_ship_id))
+                .unwrap_or(ship_id);
+            let ship_ball_opt = match sys_handle.get_ball_snapshot(ship_id).await {
+                Ok(Some(v)) => Some(v),
+                _ => sys_handle.get_ball_snapshot(active_ball_id).await.ok().flatten(),
+            };
+            if let (Some((_, sb)), Ok(Some((_, wb)))) =
+                (ship_ball_opt, sys_handle.get_ball_snapshot(wreck_id).await)
+            {
+                let dist = sb.position.distance(wb.position);
+                if dist > 2_500.0 {
+                    return Some(Err(BridgeRpcError {
+                        code: "OutOfRange".into(),
+                        message: format!(
+                            "Wreck or container {wreck_id} is {dist:.1} m away (must be within 2,500 m)"
+                        ),
+                    }));
+                }
+            }
 
             // Check if owner currently holds a criminal timer -> auto-abandon (`feat:crimewatch.criminal-wreck-auto-abandon`)
             let owner_is_criminal = ctx
@@ -1132,6 +1191,17 @@ pub async fn handle_wrecks_killmails(
                     message: "UnInsureShip requires shipID argument or active ship".into(),
                 }));
             };
+            let owns_ship = ctx.db.with_snapshot(|snap| {
+                snap.items.get(&ship_id).is_some_and(|it| it.owner_id == char_id)
+            }) || with_combat_runtime(ctx, |rt| {
+                rt.insurance_contracts.get(&ship_id).is_some_and(|c| c.owner_id == char_id)
+            });
+            if !owns_ship {
+                return Some(Err(BridgeRpcError {
+                    code: "OwnershipViolation".into(),
+                    message: format!("Ship {ship_id} is not owned by character {char_id}"),
+                }));
+            }
             sync_ship_insurance_contracts(ctx, char_id);
             let voided = void_ship_insurance_contract(ctx, ship_id);
             Some(Ok(PyRep::keyval([

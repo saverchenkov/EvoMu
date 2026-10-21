@@ -427,18 +427,6 @@ pub enum SystemCommand {
         damage: [f64; 4],
         reply: oneshot::Sender<()>,
     },
-    /// Queues a simulation-produced [`DestinyEvent`] for every observer on `ball_id`'s grid (`P-7`).
-    EmitDestinyEvent {
-        ball_id: BallId,
-        event: DestinyEvent,
-        reply: oneshot::Sender<bool>,
-    },
-    /// Steers `ball_id` toward `point` and emits `GotoPoint` (`destiny:GotoPoint`).
-    GotoPoint {
-        ball_id: BallId,
-        point: DVec3,
-        reply: oneshot::Sender<Result<u64, String>>,
-    },
 }
 
 pub struct SystemRegistry {
@@ -1124,26 +1112,6 @@ impl SystemRegistry {
                                     rem = Some(r.initial_damage_hp * (1.0 - frac));
                                 }
                                 let _ = reply.send(rem);
-                            }
-                            SystemCommand::EmitDestinyEvent { ball_id, event, reply } => {
-                                let known = ballpark.balls.contains_key(&ball_id)
-                                    || matches!(event, DestinyEvent::OnSovereigntyChanged { .. });
-                                if known {
-                                    if let DestinyEvent::OnSlimItemChange { ball_id: slim_id } = &event {
-                                        if let Some(meta) = ballpark.ball_slim_meta.get_mut(slim_id) {
-                                            meta.char_id = (*slim_id == ball_id).then_some(meta.owner_id);
-                                        }
-                                    }
-                                    let scope = ballpark.balls.contains_key(&ball_id).then_some(ball_id);
-                                    ballpark.emit_event(scope, event);
-                                }
-                                let _ = reply.send(known);
-                            }
-                            SystemCommand::GotoPoint { ball_id, point, reply } => {
-                                let res = ballpark
-                                    .goto_point(ball_id, point)
-                                    .map(|()| ballpark.current_tick);
-                                let _ = reply.send(res);
                             }
                             SystemCommand::RecordIncomingArmorDamage {
                                 ship_id,

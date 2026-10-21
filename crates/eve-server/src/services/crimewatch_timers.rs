@@ -794,13 +794,25 @@ pub async fn handle_crimewatch(
                 .with_snapshot(|s| s.characters.get(&challenger_id).map(|c| c.character_id));
             let accept = args.get(1).and_then(|a| a.as_bool()).unwrap_or(true);
             let now_unix = ctx.now_unix();
-            with_mut_combat_runtime(ctx, |rt| {
-                rt.duel_challenges.remove(&(challenger_id, char_id));
+            let valid_challenge = with_mut_combat_runtime(ctx, |rt| {
+                let Some(expires_at) = rt.duel_challenges.remove(&(challenger_id, char_id)) else {
+                    return false;
+                };
+                if now_unix > expires_at {
+                    return false;
+                }
                 if accept {
                     rt.add_limited_engagement(char_id, challenger_id, now_unix);
                     rt.add_limited_engagement(challenger_id, char_id, now_unix);
                 }
+                true
             });
+            if !valid_challenge {
+                return Some(Err(BridgeRpcError {
+                    code: "NoPendingDuelChallenge".into(),
+                    message: format!("No active duel challenge from {challenger_id} to {char_id}"),
+                }));
+            }
             if accept {
                 ctx.notify(
                     NotificationTarget::Character(char_id),
@@ -1100,10 +1112,7 @@ pub async fn handle_crimewatch(
             ])))
         }
 
-        ("bountyProxy", "GetBounty")
-        | ("bountyProxy", "GetBounties")
-        | ("bountyProxy", "GetMyBounties")
-        | ("bountyProxy", "SearchBounties") => {
+        ("bountyProxy", "GetBounty") | ("bountyProxy", "GetBounties") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -1121,6 +1130,73 @@ pub async fn handle_crimewatch(
             let rows = with_combat_runtime(ctx, |rt| {
                 rt.player_bounty_pool
                     .iter()
+                    .map(|(&tid, &amt)| {
+                        PyRep::keyval([
+                            ("targetID", PyRep::Integer(tid)),
+                            ("bountyISK", PyRep::Real(amt)),
+                        ])
+                    })
+                    .collect::<Vec<_>>()
+            });
+            Some(Ok(PyRep::List(rows)))
+        }
+
+        ("bountyProxy", "GetMyBounties") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let rows = with_combat_runtime(ctx, |rt| {
+                rt.player_bounty_pool
+                    .iter()
+                    .filter(|(&tid, _)| {
+                        tid == char_id
+                            || rt
+                                .bounty_contributions
+                                .get(&tid)
+                                .is_some_and(|c| c.iter().any(|&(cid, _)| cid == char_id))
+                    })
+                    .map(|(&tid, &amt)| {
+                        PyRep::keyval([
+                            ("targetID", PyRep::Integer(tid)),
+                            ("bountyISK", PyRep::Real(amt)),
+                        ])
+                    })
+                    .collect::<Vec<_>>()
+            });
+            Some(Ok(PyRep::List(rows)))
+        }
+
+        ("bountyProxy", "SearchBounties") => {
+            let (_, _char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let query_id = args.first().and_then(|a| a.as_i64());
+            let query_str = args
+                .first()
+                .and_then(|a| a.as_str())
+                .unwrap_or("")
+                .to_lowercase();
+            let matching_ids: std::collections::HashSet<i64> = ctx.db.with_snapshot(|snap| {
+                snap.characters
+                    .values()
+                    .filter(|c| query_str.is_empty() || c.name.to_lowercase().contains(&query_str))
+                    .map(|c| c.character_id)
+                    .collect()
+            });
+            let rows = with_combat_runtime(ctx, |rt| {
+                rt.player_bounty_pool
+                    .iter()
+                    .filter(|(&tid, _)| {
+                        if let Some(qid) = query_id {
+                            tid == qid
+                        } else if !query_str.is_empty() {
+                            matching_ids.contains(&tid) || tid.to_string().contains(&query_str)
+                        } else {
+                            true
+                        }
+                    })
                     .map(|(&tid, &amt)| {
                         PyRep::keyval([
                             ("targetID", PyRep::Integer(tid)),

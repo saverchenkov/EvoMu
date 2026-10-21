@@ -399,7 +399,26 @@ async fn test_c3_wrecks_loot_50pct_ownership_killmails_esi_hash_pod_corpse_and_s
     .expect_err("Mismatched hash must error");
     assert_eq!(bad_hash_err.code, "InvalidKillmailHash");
 
-    // 3. Wreck looting ownership, capacity overflow, Suspect flag, and 2-hour decay (`feat:combat.wreck-looting-ownership`)
+    // 3. Wreck looting ownership, 2,500m range check, capacity overflow, Suspect flag, and 2-hour decay (`feat:combat.wreck-looting-ownership`)
+    let active_pod_id = ctx.db.with_snapshot(|s| s.characters[&victim_id].active_ship_id);
+    let _ = sys_handle
+        .set_ball_position(active_pod_id, DVec3::new(10_000.0, 0.0, 0.0))
+        .await;
+    let range_err = dispatch_combat_rpc(
+        &ctx,
+        &mut victim_sess,
+        "invbroker",
+        "LootAll",
+        &[PyRep::Integer(wreck_id)],
+        &HashMap::new(),
+    )
+    .await
+    .expect_err("LootAll beyond 2,500m must be rejected");
+    assert_eq!(range_err.code, "OutOfRange");
+    let _ = sys_handle
+        .set_ball_position(active_pod_id, DVec3::new(1_500.0, 0.0, 0.0))
+        .await;
+
     // Victim loots foreign wreck (owned by attacker): triggers Suspect flag!
     let loot_res = dispatch_combat_rpc(
         &ctx,

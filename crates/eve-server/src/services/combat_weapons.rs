@@ -205,6 +205,38 @@ pub async fn handle_weapons(
                         let _ = evaluate_effective_signature_radius(ctx, vcid, tid, sys_id).await;
                     }
                 }
+                // Energy Neutralizer (71) & Energy Nosferatu (68) (`feat:npc.sleeper-capacitor-immunity-and-leash`)
+                if matches!(mod_type.group_id, 68 | 71) {
+                    let is_sleeper = with_combat_runtime(ctx, |rt| {
+                        rt.npc_entities.get(&tid).is_some_and(|n| n.archetype == "Sleeper")
+                    }) || sys_handle
+                        .get_ball_snapshot(tid)
+                        .await
+                        .ok()
+                        .flatten()
+                        .is_some_and(|(_, b)| matches!(b.type_id, 30185..=30500));
+                    let drain_amt = mod_type
+                        .default_attributes
+                        .get(&97)
+                        .or_else(|| mod_type.default_attributes.get(&90))
+                        .copied()
+                        .unwrap_or(120.0)
+                        .max(60.0);
+                    if let Ok(Some(mut t_cs)) = sys_handle.get_combat_state(tid).await {
+                        if !is_sleeper {
+                            t_cs.capacitor = (t_cs.capacitor - drain_amt).max(0.0);
+                            let _ = sys_handle.set_combat_state(tid, t_cs.clone()).await;
+                        }
+                        if mod_type.group_id == 68 {
+                            if let Ok(Some(mut s_cs)) = sys_handle.get_combat_state(ship_id).await {
+                                if is_sleeper || t_cs.capacitor > s_cs.capacitor {
+                                    s_cs.capacitor = (s_cs.capacitor + drain_amt).min(s_cs.max_capacitor);
+                                    let _ = sys_handle.set_combat_state(ship_id, s_cs).await;
+                                }
+                            }
+                        }
+                    }
+                }
                 ctx.crimewatch
                     .write()
                     .unwrap_or_else(|e| e.into_inner())

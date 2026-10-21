@@ -209,6 +209,20 @@ pub async fn execute_death_pipeline(
                     .unwrap_or(payout_cents),
                 reason: format!("Insurance payout for loss of ship {victim_ship_id}"),
             });
+            snap.next_entity_id += 1;
+            let mid = snap.next_entity_id;
+            snap.mails.push(eve_db::MailRecord {
+                message_id: mid,
+                sender_id: 1_000_132,
+                recipient_id: victim_char_id,
+                subject: format!("Insurance Payout for Ship {victim_ship_id}"),
+                body: format!(
+                    "Pend Insurance has credited {:.2} ISK to your account following the destruction of ship {}.",
+                    calculated_insurance_payout, victim_ship_id
+                ),
+            });
+            snap.mail_timestamps.insert(mid, ctx.now_unix());
+            snap.mail_assigned_labels.insert((victim_char_id, mid), vec![1]);
         }
 
         // Create and persist Killmail

@@ -712,6 +712,7 @@ async fn test_sp3_propulsion_agility_mjd_mjfg_and_approach() {
             mjd_jump_distance_m: None,
             grants_interdiction_nullification: false,
             effective_max_capacitor: None,
+            ..Default::default()
         })
         .await
         .unwrap();

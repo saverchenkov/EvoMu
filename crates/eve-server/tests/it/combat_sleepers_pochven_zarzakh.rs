@@ -13,7 +13,7 @@ use eve_server::router::ServerContext;
 use eve_server::services::combat_crimewatch::{
     destroy_specialized_npc_and_queue_bounty, dispatch_combat_rpc,
     process_ship_insurance_payout, spawn_specialized_npc_entity, step_extended_npc_ai,
-    sync_ship_insurance_contracts, void_ship_insurance_contract, with_combat_runtime,
+    sync_ship_insurance_contracts, with_combat_runtime,
     with_mut_combat_runtime, InsuranceContractState,
 };
 use glam::DVec3;
@@ -130,18 +130,89 @@ async fn test_sleeper_mechanics_infinite_capacitor_spawn_leash_and_ewar_by_class
     let initial_cs = sys_handle.get_combat_state(sleeper_ball_id).await.unwrap().unwrap();
     assert!(initial_cs.max_capacitor >= 0.0);
 
-    // Player activates neutralizer against Sleeper: Sleeper cap is immune (does not drain)
-    // Nosferatu transfers energy to player without draining the Sleeper
-    let player_cs_before = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap();
-    // Simulate player Nosferatu tick (energy transfer rule: user gains energy without draining Sleeper)
-    let nos_transfer_amt = 120.0;
-    let mut updated_player = player_cs_before;
-    updated_player.capacitor = (updated_player.capacitor + nos_transfer_amt).min(updated_player.max_capacitor);
-    let _ = sys_handle.set_combat_state(ship_id, updated_player).await;
+    // Player activates real Energy Neutralizer & Energy Nosferatu modules against Sleeper:
+    // Sleeper cap is immune (does not drain); Nosferatu transfers energy to player without draining the Sleeper
+    let neut_id = 203_901i64;
+    let nos_id = 203_902i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            neut_id,
+            InventoryItemRecord {
+                item_id: neut_id,
+                type_id: 12269, // Heavy Energy Neutralizer I (group 71)
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            nos_id,
+            InventoryItemRecord {
+                item_id: nos_id,
+                type_id: 12261, // Heavy Energy Nosferatu I (group 68)
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot1,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+    let _ = sys_handle
+        .add_target_lock(
+            ship_id,
+            eve_destiny::TargetLock {
+                target_id: sleeper_ball_id,
+                lock_time_ms: 0.0,
+                remaining_lock_ms: 0.0,
+                locked: true,
+                max_range_m: Some(50_000.0),
+            },
+        )
+        .await;
+    let mut player_cs_before = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap();
+    player_cs_before.capacitor = (player_cs_before.max_capacitor - 200.0).max(10.0);
+    let cap_before_nos = player_cs_before.capacitor;
+    let _ = sys_handle.set_combat_state(ship_id, player_cs_before).await;
 
-    // Verify Sleeper capacitor was not depleted
+    let mut sess = eve_machonet::SessionState::default();
+    sess.user_id = Some(1);
+    sess.character_id = Some(char_id);
+    sess.ship_id = Some(ship_id);
+    sess.solar_system_id = Some(c3_system_id);
+
+    eve_server::services::combat_crimewatch::dispatch_combat_rpc(
+        &ctx,
+        &mut sess,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(neut_id), PyRep::Integer(sleeper_ball_id)],
+        &std::collections::HashMap::new(),
+    )
+    .await
+    .expect("Activate Heavy Energy Neutralizer I on Sleeper");
+    eve_server::services::combat_crimewatch::dispatch_combat_rpc(
+        &ctx,
+        &mut sess,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(nos_id), PyRep::Integer(sleeper_ball_id)],
+        &std::collections::HashMap::new(),
+    )
+    .await
+    .expect("Activate Heavy Energy Nosferatu I on Sleeper");
+
+    // Verify Sleeper capacitor was not depleted while player capacitor increased
     let sleeper_cs_after = sys_handle.get_combat_state(sleeper_ball_id).await.unwrap().unwrap();
     assert_eq!(sleeper_cs_after.capacitor, initial_cs.capacitor, "Player neutralizer/nosferatu must not drain Sleeper capacitor");
+    let player_cs_after = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap();
+    assert!(player_cs_after.capacitor > cap_before_nos, "Player Nosferatu must still transfer energy from Sleeper");
 
     // 2. Sleeper spawn leash: pull Sleeper > 200 km from spawn position
     let distant_pos = spawn_pos + DVec3::new(250_000.0, 0.0, 0.0);
@@ -417,20 +488,59 @@ async fn test_insurance_voiding_and_12_week_expiry() {
         "Paid insurance contract must remain active during the 12-week period"
     );
 
-    // 3. Repackaging ship (`singleton = false`), trading, or selling voids the insurance contract
-    let voided = void_ship_insurance_contract(&ctx, ship_id);
-    assert!(voided, "Repackaging, trading or selling ship must void the insurance contract");
+    // 3. Voiding via RPC (`insuranceSvc.UnInsureShip` / repackage) removes the insurance contract
+    let mut sess = eve_machonet::SessionState::default();
+    sess.user_id = Some(1);
+    sess.character_id = Some(char_id);
+    sess.ship_id = Some(ship_id);
+    sess.solar_system_id = Some(sys_id);
+    let unins_rep = eve_server::services::combat_crimewatch::dispatch_combat_rpc(
+        &ctx,
+        &mut sess,
+        "insuranceSvc",
+        "UnInsureShip",
+        &[PyRep::Integer(ship_id)],
+        &std::collections::HashMap::new(),
+    )
+    .await
+    .expect("UnInsureShip RPC");
+    assert_eq!(unins_rep.dict_get("voided").and_then(|v| v.as_bool()), Some(true));
     assert!(
         !with_combat_runtime(&ctx, |rt| rt.insurance_contracts.contains_key(&ship_id)),
         "Voided insurance contract must be removed from runtime"
     );
 
-    // 4. Voided ship loss falls back to default 40% Basic payout
+    // 4. Re-insure and advance clock past 12 weeks (`12 * 7 * 86_400 + 10` s) -> expired contract falls back to 40% Basic payout and delivers EVE-mail
+    with_mut_combat_runtime(&ctx, |rt| {
+        rt.insurance_contracts.insert(
+            ship_id,
+            InsuranceContractState {
+                ship_id,
+                ship_type_id: 587,
+                owner_id: char_id,
+                level_name: "Platinum".into(),
+                level_fraction: 1.0,
+                cost_isk: 250_000.0,
+                payout_isk: 1_000_000.0,
+                start_unix,
+                end_unix: start_unix.saturating_add(twelve_weeks),
+            },
+        );
+    });
+    ctx.advance_secs(twelve_weeks + 10);
+    let mails_before = ctx.db.with_snapshot(|s| s.mails.len());
     let payout = process_ship_insurance_payout(&ctx, char_id, ship_id, 587, false);
     assert!(
         payout > 0.0 && payout < 1_000_000.0,
-        "Voided or uninsured ship loss must fall back to the default 40% payout ({payout} ISK)"
+        "Expired or voided ship loss must fall back to the default 40% payout ({payout} ISK)"
     );
+    let has_ins_mail = ctx.db.with_snapshot(|s| {
+        s.mails.len() > mails_before
+            && s.mails
+                .iter()
+                .any(|m| m.recipient_id == char_id && m.subject.contains("Insurance Payout"))
+    });
+    assert!(has_ins_mail, "Ship loss insurance payout must deliver an EVE-mail to the victim");
 
     // CONCORD kill in high-sec as criminal yields 0.0 payout
     let concord_payout = process_ship_insurance_payout(&ctx, char_id, ship_id, 587, true);
