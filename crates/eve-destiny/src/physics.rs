@@ -251,14 +251,9 @@ impl Ballpark {
                 ball_a: id_a,
                 ball_b: id_b,
             };
-            self.pending_events.push(ev.clone());
-            if let Some(&gid) = self
-                .ball_grid_ids
-                .get(&id_a)
-                .or_else(|| self.ball_grid_ids.get(&id_b))
-            {
-                self.queue_event_for_grid_observers(gid, None, &ev);
-            }
+            // `Collision` is not a V24 DoDestinyUpdate action (the client resolves bumps in its own
+            // destiny tick), so it stays simulation-internal and is never queued onto the wire.
+            self.pending_events.push(ev);
         }
 
         // Gate cloak, post-warp invulnerability, and undock invulnerability decay and break on active movement (`SP-3`, `SP-4`, `SP-5`)
