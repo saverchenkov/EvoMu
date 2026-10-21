@@ -174,6 +174,152 @@ def collect_added_lines(root, base):
     return added
 
 
+TEST_ATTR_RE = re.compile(r"^\s*#\[(?:tokio::)?test\b")
+FN_RE = re.compile(r"^\s*(?:pub\s+)?(?:async\s+)?fn\s+(\w+)")
+ASSERT_RE = re.compile(r"\b(assert_eq|assert_ne|assert|prop_assert_eq|prop_assert_ne|prop_assert)!\s*\(")
+WEAK_ASSERT_RE = re.compile(
+    r"matches!\s*\(|\.is_(?:ok|err|some|none|empty)\(\)|status_code|STATUS_OK|check_handled|"
+    r"\.len\(\)\s*(?:>|>=|!=)\s*[01]\b")
+REAL_ASSERT_RE = re.compile(r"==|!=|<=|>=|\s<\s|\s>\s|\.contains(?:_key)?\(|\.starts_with\(|\.ends_with\(")
+DATA_ROW_PREFIXES = ("sde:", "effect:")  # data-driven sweeps may close many rows per test (AGENTS.md T-1/T-2)
+ARM_RE = re.compile(r'^\s*\|?\s*\(\s*"([A-Za-z_]\w*)"\s*,\s*"([A-Za-z_]\w*)"\s*\)')
+CONST_RET_RE = re.compile(
+    r"PyRep::None\b|PyRep::Bool\((?:true|false)\)|PyRep::List\((?:Vec::new\(\)|vec!\[\])\)|"
+    r"PyRep::Dict\((?:Default::default\(\)|\w+::new\(\))\)|PyRep::Tuple\((?:Vec::new\(\)|vec!\[\])\)")
+STATE_RE = re.compile(
+    r"ctx\.(?!now_unix)|\bctx\s*[,)]|\bsnap\b|snapshot|\.insert\(|\.remove\(|\.push\(|\.retain\(|"
+    r"notify|send_|emit|\bself\.")
+
+
+def _balanced(text, start):
+    depth, i = 0, start
+    while i < len(text):
+        c = text[i]
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                return text[start:i + 1]
+        i += 1
+    return text[start:]
+
+
+def lint_tagged_tests(root, added):
+    """Tagged tests touched by the diff must not close many rows with few substantive assertions."""
+    max_rows = int(os.environ.get("EVOMU_MAX_ROWS_PER_TEST", "15"))
+    rows_per_assert = float(os.environ.get("EVOMU_ROWS_PER_ASSERT", "3"))
+    out = []
+    for fpath, lset in added.items():
+        if not fpath.endswith(".rs") or not ("/tests/" in fpath or fpath.endswith("tests.rs")):
+            continue
+        full = os.path.join(root, fpath)
+        if not os.path.exists(full):
+            continue
+        try:
+            lines = open(full, errors="replace").read().splitlines()
+        except OSError:
+            continue
+        attrs = [i for i, l in enumerate(lines) if TEST_ATTR_RE.match(l)]
+        for k, a in enumerate(attrs):
+            end = attrs[k + 1] if k + 1 < len(attrs) else len(lines)
+            start = a
+            while start > 0 and lines[start - 1].lstrip().startswith(("//", "#[")):
+                start -= 1
+            fn_line, name = None, "?"
+            for j in range(a, min(a + 6, end)):
+                m = FN_RE.match(lines[j])
+                if m:
+                    fn_line, name = j, m.group(1)
+                    break
+            if fn_line is None:
+                continue
+            if lset is not None and not any((i + 1) in lset for i in range(start, end)):
+                continue
+            block = lines[start:end]
+            if any("parity-lint: allow" in l for l in block):
+                continue
+            rows = set()
+            for l in block:
+                if "// parity:" in l:
+                    rows.update(ROW_RE.findall(l))
+            counted = {r for r in rows if not r.startswith(DATA_ROW_PREFIXES)}
+            if not counted:
+                continue
+            body = "\n".join(lines[fn_line:end])
+            strong = weak = 0
+            for m in ASSERT_RE.finditer(body):
+                txt = _balanced(body, m.end() - 1)
+                if WEAK_ASSERT_RE.search(txt):
+                    weak += 1
+                elif m.group(1) in ("assert", "prop_assert") and not REAL_ASSERT_RE.search(txt):
+                    weak += 1
+                else:
+                    strong += 1
+            loc = (fpath, fn_line + 1)
+            n = len(counted)
+            if n > max_rows:
+                out.append(("TOO_MANY_ROWS_PER_TEST",
+                            "%s tags %d ledger rows (max %d per test; split it so each row's acceptance is "
+                            "exercised and asserted)" % (name, n, max_rows)) + loc)
+            if strong == 0:
+                out.append(("SHAPE_ONLY_TEST",
+                            "%s tags %d row(s) but has no value assertions (%d shape/status-only asserts such as "
+                            "matches!/is_ok/status_code)" % (name, n, weak)) + loc)
+            elif strong < -(-n // rows_per_assert):
+                out.append(("THIN_ASSERTIONS",
+                            "%s tags %d row(s) with only %d value assertion(s) (need >= 1 per %g rows)"
+                            % (name, n, strong, rows_per_assert)) + loc)
+    return out
+
+
+def lint_constant_arms(root, added):
+    """Production RPC handler arms added in the diff that return a constant without touching state."""
+    max_const = int(os.environ.get("EVOMU_MAX_CONST_ARMS", "5"))
+    found = []
+    for fpath, lset in added.items():
+        if not fpath.endswith(".rs") or "/src/" not in fpath or "/tests/" in fpath or fpath.endswith("tests.rs"):
+            continue
+        full = os.path.join(root, fpath)
+        if not os.path.exists(full):
+            continue
+        try:
+            lines = open(full, errors="replace").read().splitlines()
+        except OSError:
+            continue
+        starts = [i for i, l in enumerate(lines) if ARM_RE.match(l)
+                  and not (i > 0 and ARM_RE.match(lines[i - 1]) and "=>" not in lines[i - 1])]
+        for k, s in enumerate(starts):
+            if lset is not None and (s + 1) not in lset:
+                continue
+            nxt = starts[k + 1] if k + 1 < len(starts) else min(len(lines), s + 40)
+            arm = lines[s:min(nxt, s + 40)]
+            methods = []
+            j = 0
+            while j < len(arm):
+                methods += ["%s.%s" % m.groups() for m in [ARM_RE.match(arm[j])] if m]
+                if "=>" in arm[j]:
+                    break
+                j += 1
+            body = "\n".join(arm[j:])
+            body_wo_auth = body.replace("ServerContext::require_character(session)", "")
+            if "const-ok:" in "\n".join(arm) or not CONST_RET_RE.search(body):
+                continue
+            if STATE_RE.search(body_wo_auth):
+                continue
+            if len([l for l in arm[j:] if l.strip()]) > 14:
+                continue
+            found.append((fpath, s + 1, methods))
+    total = sum(len(m) for _, _, m in found)
+    if total < max_const:
+        return []
+    return [("CONSTANT_RPC_HANDLER",
+             "%s return a constant without reading or writing state (%d such methods in this diff; max %d). "
+             "Implement the semantics, return UnimplementedRPC, or justify with `// const-ok: <reason>`"
+             % (", ".join(m[:4]) + (" +%d" % (len(m) - 4) if len(m) > 4 else ""), total, max_const), f, ln)
+            for f, ln, m in found]
+
+
 def run_early_gate(root, base, added, claims_path):
     violations = []
 
@@ -214,6 +360,12 @@ def run_early_gate(root, base, added, claims_path):
                 violations.append(("QUASAR_SWEEP_GATE",
                                    "quasar:* rows require live public gateway backend handlers; descriptor sweeps cannot close them",
                                    fpath, idx))
+
+    # 2b. Tagged tests: too many rows per test, or too few substantive assertions per row
+    violations += lint_tagged_tests(root, added)
+
+    # 2c. Constant-return RPC handler arms added in production code
+    violations += lint_constant_arms(root, added)
 
     # 3. Claims citations & quotes check (if draft claims provided)
     if claims_path and os.path.exists(claims_path):
@@ -276,9 +428,19 @@ def main():
     if early_violations:
         print("\n" + "=" * 76)
         print("[preflight] %d BLOCKING P0 ISSUE(S) DETECTED IN DIFF (BEFORE RUNNING TESTS):" % len(early_violations))
-        for cat, vmsg, fpath, lno in early_violations:
+        by_cat = {}
+        for v in early_violations:
+            by_cat[v[0]] = by_cat.get(v[0], 0) + 1
+        print("  by category: " + ", ".join("%s=%d" % kv for kv in sorted(by_cat.items())))
+        full_list = os.path.join(pdir, "early_gate.txt")
+        with open(full_list, "w") as fh:
+            for cat, vmsg, fpath, lno in early_violations:
+                fh.write("[%s] %s%s\n" % (cat, vmsg, (" (%s:%s)" % (fpath, lno)) if fpath else ""))
+        for cat, vmsg, fpath, lno in early_violations[:60]:
             loc = (" (%s:%s)" % (fpath, lno)) if fpath else ""
             print("  - [%s] %s%s" % (cat, vmsg, loc))
+        if len(early_violations) > 60:
+            print("  ... %d more; full list: %s" % (len(early_violations) - 60, full_list))
         print("=" * 76)
         if not skip_early:
             print("\n[preflight] EARLY FAIL: Aborting test execution to save 30-60 minutes.")
