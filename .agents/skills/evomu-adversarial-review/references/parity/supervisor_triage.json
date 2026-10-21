@@ -8120,6 +8120,246 @@
     "rpc:warStatisticMgr.Bind": {
       "disposition": "client_local",
       "evidence": "Client-side util.Moniker.Bind() wrapper in carbon/common/script/net/moniker.pyj (resolves/binds via MachoResolveObject/MachoBindObject; never sent as a '.Bind' RPC method). Scraped from warStatisticMgr usage in V24 client code.ccp."
+    },
+    "sde:res:/localizationfsd/localization_fsd_de.pickle": {
+      "disposition": "client_local",
+      "evidence": "Client UI localization pickle table loaded only by carbon/client/script/localization/localizationClient.pyj."
+    },
+    "sde:res:/localizationfsd/localization_fsd_en-us.pickle": {
+      "disposition": "client_local",
+      "evidence": "Client UI localization pickle table loaded only by carbon/client/script/localization/localizationClient.pyj."
+    },
+    "sde:res:/localizationfsd/localization_fsd_es.pickle": {
+      "disposition": "client_local",
+      "evidence": "Client UI localization pickle table loaded only by carbon/client/script/localization/localizationClient.pyj."
+    },
+    "sde:res:/localizationfsd/localization_fsd_fr.pickle": {
+      "disposition": "client_local",
+      "evidence": "Client UI localization pickle table loaded only by carbon/client/script/localization/localizationClient.pyj."
+    },
+    "sde:res:/localizationfsd/localization_fsd_it.pickle": {
+      "disposition": "client_local",
+      "evidence": "Client UI localization pickle table loaded only by carbon/client/script/localization/localizationClient.pyj."
+    },
+    "sde:res:/localizationfsd/localization_fsd_ja.pickle": {
+      "disposition": "client_local",
+      "evidence": "Client UI localization pickle table loaded only by carbon/client/script/localization/localizationClient.pyj."
+    },
+    "sde:res:/localizationfsd/localization_fsd_ko.pickle": {
+      "disposition": "client_local",
+      "evidence": "Client UI localization pickle table loaded only by carbon/client/script/localization/localizationClient.pyj."
+    },
+    "sde:res:/localizationfsd/localization_fsd_main.pickle": {
+      "disposition": "client_local",
+      "evidence": "Client UI localization main index pickle loaded only by carbon/client/script/localization/localizationClient.pyj."
+    },
+    "sde:res:/localizationfsd/localization_fsd_ru.pickle": {
+      "disposition": "client_local",
+      "evidence": "Client UI localization pickle table loaded only by carbon/client/script/localization/localizationClient.pyj."
+    },
+    "sde:res:/localizationfsd/localization_fsd_zh.pickle": {
+      "disposition": "client_local",
+      "evidence": "Client UI localization pickle table loaded only by carbon/client/script/localization/localizationClient.pyj."
+    },
+    "sde:res:/staticdata/agencyhelpvideogroups.fsdbinary": {
+      "disposition": "client_local",
+      "evidence": "Client Agency UI help video group table (fsdBuiltData/client/agency/helpVideoGroupsFSDLoader.pyj)."
+    },
+    "sde:res:/staticdata/agencyhelpvideos.fsdbinary": {
+      "disposition": "client_local",
+      "evidence": "Client Agency UI help video table (fsdBuiltData/client/agency/helpVideoFSDLoader.pyj)."
+    },
+    "sde:res:/staticdata/audiometadata.fsdbinary": {
+      "disposition": "client_local",
+      "evidence": "Client Wwise audio metadata table (fsdBuiltData/common/audioMetadata.pyj)."
+    },
+    "sde:res:/staticdata/billboards.fsdbinary": {
+      "disposition": "client_local",
+      "evidence": "Client 3D station/gate billboard visual resource table (fsdBuiltData/client/billboards.pyj)."
+    },
+    "sde:res:/staticdata/challengeconditions.fsdbinary": {
+      "disposition": "dead_client_code",
+      "evidence": "Zero references anywhere in V24.01 code.ccp bytecode (legacy challenges static data)."
+    },
+    "sde:res:/staticdata/challengeevents.fsdbinary": {
+      "disposition": "dead_client_code",
+      "evidence": "Zero references anywhere in V24.01 code.ccp bytecode (legacy challenges static data)."
+    },
+    "sde:res:/staticdata/challenges.fsdbinary": {
+      "disposition": "dead_client_code",
+      "evidence": "Zero references anywhere in V24.01 code.ccp bytecode (legacy challenges static data)."
+    },
+    "sde:res:/staticdata/character_avatarbehaviors.fsdbinary": {
+      "disposition": "client_local",
+      "evidence": "Client 3D paperdoll avatar animation behavior table (fsdBuiltData/common/character.pyj)."
+    },
+    "sde:res:/staticdata/character_colorlocations.fsdbinary": {
+      "disposition": "client_local",
+      "evidence": "Client 3D paperdoll color location table (fsdBuiltData/common/character.pyj)."
+    },
+    "sde:res:/staticdata/character_colornames.fsdbinary": {
+      "disposition": "client_local",
+      "evidence": "Client 3D paperdoll color swatch table (fsdBuiltData/common/character.pyj)."
+    },
+    "sde:res:/staticdata/character_modifierlocations.fsdbinary": {
+      "disposition": "client_local",
+      "evidence": "Client 3D paperdoll mesh modifier location table (fsdBuiltData/common/character.pyj)."
+    },
+    "sde:res:/staticdata/character_portraitresources.fsdbinary": {
+      "disposition": "client_local",
+      "evidence": "Client portrait studio lighting/backdrop/pose resource table (fsdBuiltData/common/character.pyj)."
+    },
+    "sde:res:/staticdata/character_resources.fsdbinary": {
+      "disposition": "client_local",
+      "evidence": "Client 3D paperdoll clothing/hair mesh resource table (fsdBuiltData/common/character.pyj)."
+    },
+    "sde:res:/staticdata/character_sculptinglocations.fsdbinary": {
+      "disposition": "client_local",
+      "evidence": "Client 3D character creator face/body sculpting morph target table (fsdBuiltData/common/character.pyj)."
+    },
+    "sde:res:/staticdata/clientlocationlists.fsdbinary": {
+      "disposition": "client_local",
+      "evidence": "Client-only location list UI table (locationlists/client/client_loader.pyj)."
+    },
+    "sde:res:/staticdata/commandsets.fsdbinary": {
+      "disposition": "client_local",
+      "evidence": "Client UI command hider shortcut set table (uihider/command/staticdata.pyj)."
+    },
+    "sde:res:/staticdata/contributionmethods.fsdbinary": {
+      "disposition": "client_local",
+      "evidence": "Client UI goal contribution method display metadata (goals/client/contributionMethodTypeLoader.pyj)."
+    },
+    "sde:res:/staticdata/controltowerresources.fsdbinary": {
+      "disposition": "removed_from_live",
+      "evidence": "Legacy POS control tower resource table (controltowerresources/data.pyj), only referenced in devtools svc_poser.pyj/svc_slash.pyj."
+    },
+    "sde:res:/staticdata/defaultoverviews.fsdbinary": {
+      "disposition": "client_local",
+      "evidence": "Client default overview preset tabs/filters table (characterdata/defaultOverviews.pyj)."
+    },
+    "sde:res:/staticdata/dungeonenvironmenttemplates.fsdbinary": {
+      "disposition": "client_local",
+      "evidence": "Client 3D dungeon post-processing/fog/lighting environment template table (evedungeons/client/environmenttemplates/loader.pyj)."
+    },
+    "sde:res:/staticdata/dungeonobjectives.fsdbinary": {
+      "disposition": "client_local",
+      "evidence": "Client dungeon objective UI display loader (evedungeons/client/data.pyj)."
+    },
+    "sde:res:/staticdata/effects.fsdbinary": {
+      "disposition": "client_local",
+      "evidence": "Client Trinity 3D visual effects (.red) table (fsdBuiltData/client/effects.pyj; gameplay dogma effects are in dogmaeffects.static)."
+    },
+    "sde:res:/staticdata/effectsequences.fsdbinary": {
+      "disposition": "client_local",
+      "evidence": "Client Trinity 3D visual effect sequence table (fsdBuiltData/client/effectSequences.pyj)."
+    },
+    "sde:res:/staticdata/environmenttemplateanchorcategoryids.fsdbinary": {
+      "disposition": "client_local",
+      "evidence": "Client 3D environment template anchor category visual table (fsdBuiltData/client/environmentTemplates.pyj)."
+    },
+    "sde:res:/staticdata/environmenttemplateanchorgroupids.fsdbinary": {
+      "disposition": "client_local",
+      "evidence": "Client 3D environment template anchor group visual table (fsdBuiltData/client/environmentTemplates.pyj)."
+    },
+    "sde:res:/staticdata/environmenttemplateanchortypeids.fsdbinary": {
+      "disposition": "client_local",
+      "evidence": "Client 3D environment template anchor type visual table (fsdBuiltData/client/environmentTemplates.pyj)."
+    },
+    "sde:res:/staticdata/environmenttemplates.fsdbinary": {
+      "disposition": "client_local",
+      "evidence": "Client 3D scene skybox/lighting environment template table (fsdBuiltData/client/environmentTemplates.pyj)."
+    },
+    "sde:res:/staticdata/explosionbucketids.fsdbinary": {
+      "disposition": "client_local",
+      "evidence": "Client 3D explosion visual effect bucket table (fsdBuiltData/client/explosionBuckets.pyj)."
+    },
+    "sde:res:/staticdata/explosionids.fsdbinary": {
+      "disposition": "client_local",
+      "evidence": "Client 3D explosion visual effect ID table (fsdBuiltData/client/explosionIDs.pyj)."
+    },
+    "sde:res:/staticdata/goals.fsdbinary": {
+      "disposition": "client_local",
+      "evidence": "Client NPE storyline UI objective display table (storylines/client/objectives/loader.pyj)."
+    },
+    "sde:res:/staticdata/graphiclocations.fsdbinary": {
+      "disposition": "client_local",
+      "evidence": "Client 3D turret/locator hardpoint attachment table (fsdBuiltData/common/graphicLocations.pyj)."
+    },
+    "sde:res:/staticdata/graphicmaterialsets.fsdbinary": {
+      "disposition": "client_local",
+      "evidence": "Client 3D ship/object material shader set table (fsdBuiltData/common/graphicMaterialSets.pyj)."
+    },
+    "sde:res:/staticdata/groupgraphics.fsdbinary": {
+      "disposition": "client_local",
+      "evidence": "Client 3D group graphic icon/model mapping table (fsdBuiltData/client/groupGraphics.pyj)."
+    },
+    "sde:res:/staticdata/huecategories.fsdbinary": {
+      "disposition": "client_local",
+      "evidence": "Client nanocoating paint hue category palette table (paints/data/dataLoader.pyj)."
+    },
+    "sde:res:/staticdata/menuhighlights.fsdbinary": {
+      "disposition": "client_local",
+      "evidence": "Client NPE tutorial context-menu highlight table (uihighlighting/fsdloaders.pyj)."
+    },
+    "sde:res:/staticdata/musictriggers.fsdbinary": {
+      "disposition": "client_local",
+      "evidence": "Client dynamic soundtrack music trigger table (fsdBuiltData/client/musicTriggers.pyj)."
+    },
+    "sde:res:/staticdata/newactivities.fsdbinary": {
+      "disposition": "client_local",
+      "evidence": "Client What-Is-New UI activity showcase table (fsdBuiltData/common/newActivitiesFSDLoader.pyj)."
+    },
+    "sde:res:/staticdata/newfeatures.fsdbinary": {
+      "disposition": "client_local",
+      "evidence": "Client What-Is-New UI feature splash table (fsdBuiltData/common/newFeaturesFSDLoader.pyj)."
+    },
+    "sde:res:/staticdata/paperdolls.fsdbinary": {
+      "disposition": "client_local",
+      "evidence": "Client 3D NPC portrait paperdoll mesh preset table (paperdoll/common/npc.pyj)."
+    },
+    "sde:res:/staticdata/skilltreegroups.fsdbinary": {
+      "disposition": "client_local",
+      "evidence": "Client Skill Catalogue UI tree layout table (fsdBuiltData/client/skillTreeGroups.pyj)."
+    },
+    "sde:res:/staticdata/skyboxeffects.fsdbinary": {
+      "disposition": "client_local",
+      "evidence": "Client 3D nebula/skybox ambient visual effect table (fsdBuiltData/client/skyBoxEffects.pyj)."
+    },
+    "sde:res:/staticdata/spaceobjecthighlights.fsdbinary": {
+      "disposition": "client_local",
+      "evidence": "Client NPE tutorial in-space bracket highlight table (uihighlighting/fsdloaders.pyj)."
+    },
+    "sde:res:/staticdata/surveys.fsdbinary": {
+      "disposition": "client_local",
+      "evidence": "Client player feedback survey prompt UI table (fsdBuiltData/common/surveysFSDLoader.pyj)."
+    },
+    "sde:res:/staticdata/traveleffects.fsdbinary": {
+      "disposition": "client_local",
+      "evidence": "Client 3D warp/jump tunnel visual effect table (fsdBuiltData/client/travelEffects.pyj)."
+    },
+    "sde:res:/staticdata/uiblinks.fsdbinary": {
+      "disposition": "client_local",
+      "evidence": "Client NPE tutorial UI blink directive table (uiblinker/fsd_loader.pyj)."
+    },
+    "sde:res:/staticdata/uielementtypes.fsdbinary": {
+      "disposition": "client_local",
+      "evidence": "Client NPE UI element hider type mapping table (uihider/fsd_loader.pyj)."
+    },
+    "sde:res:/staticdata/uihelppointers.fsdbinary": {
+      "disposition": "client_local",
+      "evidence": "Client NPE UI tooltip pointer mapping table (fsdBuiltData/common/uiHelpPointersFSDLoader.pyj)."
+    },
+    "sde:res:/staticdata/uihidingtemplates.fsdbinary": {
+      "disposition": "client_local",
+      "evidence": "Client NPE UI hider template table (uihider/fsd_loader.pyj)."
+    },
+    "sde:res:/staticdata/uihighlights.fsdbinary": {
+      "disposition": "client_local",
+      "evidence": "Client NPE tutorial UI highlight directive table (uihighlighting/fsdloaders.pyj)."
+    },
+    "sde:res:/staticdata/warzonespositiondata.fsdbinary": {
+      "disposition": "client_local",
+      "evidence": "Client FW warzone 2D map widget coordinate layout table (fwwarzone/client/data/warzoneMapPositionsDataLoader.pyj)."
     }
   }
 }
