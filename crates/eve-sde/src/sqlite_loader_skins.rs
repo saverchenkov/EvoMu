@@ -102,7 +102,14 @@ impl SdeRegistry {
         let Some(ref p) = self.db_path else {
             return Vec::new();
         };
-        let uri = format!("file:{}?immutable=1", p.display());
+        // Strip Windows extended path prefix `\\?\` for SQLite URI compatibility (SUP-001)
+        let path_str = p.display().to_string();
+        let clean_path = if cfg!(windows) && path_str.starts_with(r"\\?\") {
+            &path_str[4..]
+        } else {
+            &path_str
+        };
+        let uri = format!("file:{}?immutable=1", clean_path);
         let Ok(conn) = Connection::open_with_flags(
             &uri,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
@@ -140,7 +147,14 @@ impl SdeRegistry {
             return Some(sta.solar_system_id);
         }
         let p = self.db_path.as_ref()?;
-        let uri = format!("file:{}?immutable=1", p.display());
+        // Strip Windows extended path prefix `\\?\` for SQLite URI compatibility (SUP-001)
+        let path_str = p.display().to_string();
+        let clean_path = if cfg!(windows) && path_str.starts_with(r"\\?\") {
+            &path_str[4..]
+        } else {
+            &path_str
+        };
+        let uri = format!("file:{}?immutable=1", clean_path);
         let conn = Connection::open_with_flags(
             &uri,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
@@ -162,7 +176,14 @@ impl SdeRegistry {
             out.insert(sta_id, sta.solar_system_id);
         }
         if let Some(ref p) = self.db_path {
-            let uri = format!("file:{}?immutable=1", p.display());
+            // Strip Windows extended path prefix `\\?\` for SQLite URI compatibility (SUP-001)
+            let path_str = p.display().to_string();
+            let clean_path = if cfg!(windows) && path_str.starts_with(r"\\?\") {
+                &path_str[4..]
+            } else {
+                &path_str
+            };
+            let uri = format!("file:{}?immutable=1", clean_path);
             if let Ok(conn) = Connection::open_with_flags(
                 &uri,
                 OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
@@ -189,7 +210,14 @@ impl SdeRegistry {
         let Some(ref p) = self.db_path else {
             return Vec::new();
         };
-        let uri = format!("file:{}?immutable=1", p.display());
+        // Strip Windows extended path prefix `\\?\` for SQLite URI compatibility (SUP-001)
+        let path_str = p.display().to_string();
+        let clean_path = if cfg!(windows) && path_str.starts_with(r"\\?\") {
+            &path_str[4..]
+        } else {
+            &path_str
+        };
+        let uri = format!("file:{}?immutable=1", clean_path);
         let Ok(conn) = Connection::open_with_flags(
             &uri,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,

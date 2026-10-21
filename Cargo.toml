@@ -29,7 +29,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 flate2 = "1.0"
 glam = { version = "0.29", features = ["serde"] }
-rusqlite = "0.32"
+rusqlite = { version = "0.32", features = ["bundled"] }
 argon2 = "0.5"
 toml = "0.8"
 proptest = "1.5"

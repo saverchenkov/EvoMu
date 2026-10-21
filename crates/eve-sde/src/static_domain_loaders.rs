@@ -200,7 +200,14 @@ fn fsd_dict_entries(buf: &[u8], pos: usize, item_size: usize) -> Vec<(u32, usize
 impl SdeRegistry {
     fn open_sqlite_static(&self, res_path: &str) -> Result<Connection, SdeError> {
         let path = self.cdn_resource_path(res_path)?;
-        let uri = format!("file:{}?immutable=1", path.display());
+        // Strip Windows extended path prefix `\\?\` for SQLite URI compatibility (SUP-001)
+        let path_str = path.display().to_string();
+        let clean_path = if cfg!(windows) && path_str.starts_with(r"\\?\") {
+            &path_str[4..]
+        } else {
+            &path_str
+        };
+        let uri = format!("file:{}?immutable=1", clean_path);
         Ok(Connection::open_with_flags(
             &uri,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,

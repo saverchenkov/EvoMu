@@ -34,7 +34,14 @@ impl SdeRegistry {
 
     /// Loads the SDE from `canon` without consulting the process-wide cache (`D-2`).
     fn load_uncached(canon: PathBuf) -> Result<Self, SdeError> {
-        let uri = format!("file:{}?immutable=1", canon.display());
+        // Strip Windows extended path prefix `\\?\` for SQLite URI compatibility (SUP-001)
+        let path_str = canon.display().to_string();
+        let clean_path = if cfg!(windows) && path_str.starts_with(r"\\?\") {
+            &path_str[4..]
+        } else {
+            &path_str
+        };
+        let uri = format!("file:{}?immutable=1", clean_path);
         let conn = Connection::open_with_flags(
             &uri,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
