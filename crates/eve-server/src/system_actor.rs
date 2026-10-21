@@ -1230,25 +1230,6 @@ pub fn populate_asteroid_belt_entities(
     states
 }
 
-fn roll_probability(prob: f64) -> bool {
-    if prob <= 0.0 {
-        return false;
-    }
-    if prob >= 1.0 {
-        return true;
-    }
-    let mut buf = [0u8; 8];
-    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
-        use std::io::Read;
-        if f.read_exact(&mut buf).is_ok() {
-            let val = u64::from_ne_bytes(buf);
-            let frac = (val as f64) / (u64::MAX as f64);
-            return frac < prob;
-        }
-    }
-    false
-}
-
 fn ensure_default_slim_meta(
     ballpark: &mut Ballpark,
     ball: &Ball,
@@ -1306,6 +1287,8 @@ pub struct SystemRegistry {
     pub db: Option<Arc<eve_db::WorldRepository>>,
     belt_respawn_interval_secs: Arc<std::sync::atomic::AtomicU64>,
     downtime_utc_secs_of_day: Arc<std::sync::atomic::AtomicU64>,
+    /// Game-mechanic RNG (seeded test RNG): OS CSPRNG by default, shared with `ServerContext::mechanic_rng`.
+    mechanic_rng: Arc<crate::rng::MechanicRng>,
 }
 
 impl Default for SystemRegistry {
@@ -1326,6 +1309,7 @@ impl SystemRegistry {
             downtime_utc_secs_of_day: Arc::new(std::sync::atomic::AtomicU64::new(
                 DEFAULT_DOWNTIME_UTC_SECS_OF_DAY,
             )),
+            mechanic_rng: Arc::new(crate::rng::MechanicRng::os()),
         }
     }
 
@@ -1340,6 +1324,7 @@ impl SystemRegistry {
             downtime_utc_secs_of_day: Arc::new(std::sync::atomic::AtomicU64::new(
                 DEFAULT_DOWNTIME_UTC_SECS_OF_DAY,
             )),
+            mechanic_rng: Arc::new(crate::rng::MechanicRng::os()),
         }
     }
 
@@ -1354,7 +1339,14 @@ impl SystemRegistry {
             downtime_utc_secs_of_day: Arc::new(std::sync::atomic::AtomicU64::new(
                 DEFAULT_DOWNTIME_UTC_SECS_OF_DAY,
             )),
+            mechanic_rng: Arc::new(crate::rng::MechanicRng::os()),
         }
+    }
+
+    /// Shares `rng` as this registry's game-mechanic RNG (seeded test RNG).
+    pub fn with_mechanic_rng(mut self, rng: Arc<crate::rng::MechanicRng>) -> Self {
+        self.mechanic_rng = rng;
+        self
     }
 
     pub fn belt_respawn_interval_secs(&self) -> u64 {
@@ -1749,6 +1741,7 @@ impl SystemRegistry {
         let db_opt = self.db.clone();
         let belt_interval_atomic = self.belt_respawn_interval_secs.clone();
         let downtime_utc_atomic = self.downtime_utc_secs_of_day.clone();
+        let mechanic_rng = self.mechanic_rng.clone();
         let mut ballpark = Ballpark::new(solar_system_id);
         if let Some(sde) = &sde_opt {
             populate_system_celestials(&mut ballpark, solar_system_id, sde);
@@ -1900,7 +1893,7 @@ impl SystemRegistry {
                                         ast.remaining_units -= to_mine;
 
                                         let wasted_units = if waste_probability > 0.0 && ast.remaining_units > 0 {
-                                            let rolls = waste_probability >= 1.0 || roll_probability(waste_probability);
+                                            let rolls = waste_probability >= 1.0 || mechanic_rng.roll(waste_probability);
                                             if rolls {
                                                 to_mine.min(ast.remaining_units)
                                             } else {

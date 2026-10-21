@@ -59,6 +59,7 @@ pub struct ServerContext {
     pub active_scanner_probes: RwLock<HashMap<i64, ActiveScannerProbe>>,
     pub scanned_signatures: RwLock<HashSet<(i64, u32, i64)>>,
     pub invention_roll_override: RwLock<Option<f64>>,
+    pub mechanic_rng: Arc<crate::rng::MechanicRng>, // seeded test RNG: shared with `systems`; OS CSPRNG unless seeded
     pub module_reactivation_cooldowns: RwLock<HashMap<(i64, i64), f64>>,
     pub crimewatch: RwLock<crate::combat::crimewatch::CrimeWatchDirector>,
     pub feature_flags: crate::config::FeatureFlagsConfig,
@@ -119,7 +120,11 @@ impl ServerContext {
         let quasar_domains: HashSet<String> = quasar_map.into_keys().collect();
         let (notify_tx, _) = tokio::sync::broadcast::channel(256);
 
-        let systems = Arc::new(SystemRegistry::with_sde_and_db(sde.clone(), Arc::clone(&db)));
+        let mechanic_rng = Arc::new(crate::rng::MechanicRng::os());
+        let systems = Arc::new(
+            SystemRegistry::with_sde_and_db(sde.clone(), Arc::clone(&db))
+                .with_mechanic_rng(Arc::clone(&mechanic_rng)),
+        );
         let quasar_descriptors =
             eve_proto::quasar::QuasarDescriptorRegistry::open_default_or_empty();
         let quasar_gateway = Arc::new(crate::quasar_gateway::PublicGatewayRouter::new(
@@ -154,6 +159,7 @@ impl ServerContext {
             active_scanner_probes: RwLock::new(HashMap::new()),
             scanned_signatures: RwLock::new(HashSet::new()),
             invention_roll_override: RwLock::new(None),
+            mechanic_rng,
             module_reactivation_cooldowns: RwLock::new(HashMap::new()),
             crimewatch: RwLock::new(crate::combat::crimewatch::CrimeWatchDirector::new()),
             feature_flags: crate::config::FeatureFlagsConfig::default(),
@@ -273,7 +279,11 @@ impl ServerContext {
         };
         #[cfg(not(any(test, feature = "demo-seed")))]
         let db = Arc::new(WorldRepository::new_empty());
-        Self::with_repository(db)
+        let ctx = Self::with_repository(db);
+        // seeded test RNG: test/demo builds get a deterministic mechanic RNG; production constructors never seed.
+        #[cfg(any(test, feature = "demo-seed"))]
+        let ctx = ctx.with_seeded_rng(crate::rng::TEST_MODE_DEFAULT_SEED);
+        ctx
     }
 
     pub fn mark_signature_scanned(&self, char_id: i64, solar_system_id: u32, sig_ball_id: i64) {
@@ -346,39 +356,6 @@ impl ServerContext {
             .write()
             .unwrap_or_else(|e| e.into_inner());
         guard.insert((ship_id, module_id), expiry);
-    }
-
-    pub fn set_invention_roll_override(&self, roll: Option<f64>) {
-        *self
-            .invention_roll_override
-            .write()
-            .unwrap_or_else(|e| e.into_inner()) = roll.map(|r| r.clamp(0.0, 0.999_999));
-    }
-
-    pub fn next_invention_roll(&self, job_id: u64, installer_id: u64, now_unix: u64) -> f64 {
-        if let Some(r) = *self
-            .invention_roll_override
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-        {
-            return r;
-        }
-        if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
-            let mut buf = [0u8; 8];
-            if std::io::Read::read_exact(&mut f, &mut buf).is_ok() {
-                let raw = u64::from_le_bytes(buf) >> 11;
-                return (raw as f64) / ((1u64 << 53) as f64);
-            }
-        }
-        let ticks = (self.now_blueos_filetime_ticks() as u64).max(now_unix);
-        let mut z = job_id
-            .wrapping_add(installer_id.wrapping_mul(0x517c_c1b7_2722_0a95))
-            .wrapping_add(ticks)
-            .wrapping_add(0x9E37_79B9_7F4A_7C15);
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        z ^= z >> 31;
-        ((z >> 11) as f64) / ((1u64 << 53) as f64)
     }
 
     /// Returns the active [`eve_db::ServerClock`] implementation (`T-7`).

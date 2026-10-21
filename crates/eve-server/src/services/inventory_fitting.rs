@@ -44,16 +44,9 @@ fn item_to_packed_cells(ctx: &ServerContext, i: &eve_db::InventoryItemRecord) ->
     ]
 }
 
-fn csprng_unit_f64() -> f64 {
-    let mut buf = [0u8; 8];
-    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
-        use std::io::Read as _;
-        if f.read_exact(&mut buf).is_ok() {
-            let val = u64::from_ne_bytes(buf) >> 11;
-            return (val as f64) * (1.0 / ((1u64 << 53) as f64));
-        }
-    }
-    0.5
+/// Mechanic roll in `[0, 1)` from the context RNG (seeded test RNG); `0.5` if the OS CSPRNG is unreadable.
+fn mechanic_unit_f64(ctx: &ServerContext) -> f64 {
+    ctx.mechanic_rng.try_unit_f64().unwrap_or(0.5)
 }
 
 pub async fn handle(
@@ -2614,7 +2607,7 @@ pub async fn handle(
                     optimal_range,
                     falloff_range,
                 );
-                let roll = csprng_unit_f64();
+                let roll = mechanic_unit_f64(ctx);
                 let jam_duration_s = if duration_s > 0.0 { duration_s } else { 20.0 };
                 if roll < jam_chance && jam_chance > 0.0 {
                     let _ = sys.apply_ecm_jam(target_id, jam_duration_s).await;
@@ -2636,7 +2629,7 @@ pub async fn handle(
                     mod_state.get_attribute(240, &ctx.sde),
                     mod_state.get_attribute(241, &ctx.sde),
                 ];
-                let roll = csprng_unit_f64();
+                let roll = mechanic_unit_f64(ctx);
                 let jam_duration_s = if duration_s > 0.0 { duration_s } else { 20.0 };
                 let _ = sys
                     .apply_ecm_burst(ship_id, burst_range, jam_strengths, jam_duration_s, roll)
@@ -3174,7 +3167,7 @@ pub async fn handle(
                     let entry = wcs.entry(module_id).or_insert((None, 0));
                     entry.1 = entry.1.saturating_add(1);
                 }
-                let is_crit = crit_chance > 0.0 && csprng_unit_f64() < crit_chance;
+                let is_crit = crit_chance > 0.0 && mechanic_unit_f64(ctx) < crit_chance;
                 let crit_yield_mult = if is_crit { crit_bonus } else { 1.0 };
 
                 let is_ice = mod_type.group_id == 464 && (mod_type.type_id == 16278 || mod_type.type_id == 22229 || mod_type.name.contains("Ice"));

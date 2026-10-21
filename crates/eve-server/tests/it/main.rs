@@ -34,6 +34,7 @@ mod regressions_r6;
 mod regressions_r8;
 mod rpc_notification_closure;
 mod security_auditor_flags;
+mod seeded_rng;
 mod social_fleets;
 mod social_fleets_corps;
 mod space;

@@ -151,25 +151,6 @@ fn find_jackpot_variant(sde: &eve_sde::SdeRegistry, base_ore_tid: TypeId) -> Typ
         .unwrap_or(base_ore_tid)
 }
 
-/// DERIVED: Rolls a probability in `[0.0, 1.0]` using OS CSPRNG (`/dev/urandom`), returning `false` on error.
-fn roll_jackpot_csprng(prob: f64) -> bool {
-    if prob <= 0.0 || !prob.is_finite() {
-        return false;
-    }
-    if prob >= 1.0 {
-        return true;
-    }
-    let mut buf = [0u8; 8];
-    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
-        use std::io::Read;
-        if f.read_exact(&mut buf).is_ok() {
-            let val = u64::from_ne_bytes(buf);
-            return (val as f64) / (u64::MAX as f64) < prob;
-        }
-    }
-    false
-}
-
 /// Computes gas decompression efficiency in a structure from SDE attributes:
 /// - `3262` (`gasDecompressionBaseEfficiency` = 0.80)
 /// - `3261` (`structureGasDecompressionEfficiencyBonus`: +0.04 on Athanor 35835, +0.10 on Tatara 35836, 0.0 default)
@@ -481,8 +462,8 @@ pub async fn handle(
             };
 
             let now = ctx.now_unix();
-            // DERIVED: 15% jackpot probability roll via OS CSPRNG
-            let is_jackpot = roll_jackpot_csprng(0.15);
+            // DERIVED: 15% jackpot probability roll via the context mechanic RNG (seeded test RNG).
+            let is_jackpot = ctx.mechanic_rng.roll(0.15);
 
             // Atomically validate structure ownership, active extraction status, and chunk arrival
             // BEFORE spawning any asteroids so repeated calls cannot refill or duplicate moon ore.
