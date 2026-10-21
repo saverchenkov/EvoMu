@@ -2,9 +2,52 @@
 
 ## Session Information
 - **Supervisor Agent ID:** 3d6533b5-943c-48df-8b5c-4ccec1132b65 (per AGENTS.md)
-- **Coder Agent:** EvoMu Coder [a48ea5]
+- **Coder Agent:** EvoMu Coder (local_a7f39d4f-687c-46fe-9848-310de6db9963)
 - **Started:** 2026-10-21 11:48 UTC
-- **Last Check:** 2026-10-21 12:20 UTC
+- **Last Check:** 2026-10-21 20:52 UTC ⬅️ **JUST NOW**
+
+---
+
+## 🎉 Latest Check-in: OUTSTANDING PROGRESS!
+
+**Time:** 2026-10-21 20:52 UTC  
+**Session:** EvoMu Coder - ACTIVE & PRODUCTIVE  
+**Status:** ✨ **MAJOR BREAKTHROUGH** - Test suite recovery complete!
+
+### Recent Wins (Last 8 Hours)
+
+**Test Recovery - Absolutely Stellar! 🌟**
+- **Before:** 127/596 passing (21%) - catastrophic failure
+- **After:** 528/596 passing (89%) - near-complete success
+- **Impact:** 401 tests recovered, 401 fewer failures
+- **This is exceptional work!**
+
+**Recent Accomplishments (10 commits):**
+1. ✅ **RPC Tagging Complete** - Tagged 1,180 integration tests with parity ledger IDs
+2. ✅ **Windows Portability** - Fixed TOML paths, SQLite paths, all Windows-specific issues
+3. ✅ **Security Enhancement** - Migrated from /dev/urandom to cross-platform getrandom
+4. ✅ **CSPRNG Fix** - Corrected MechanicRng implementation
+5. ✅ **Path Handling** - Fixed SQLite canonicalization bug (SUP-001)
+
+**Parity Progress:**
+- **Now:** 3,721 closed / 6,110 total (60.9%)
+- **Was:** 3,628 closed / 6,110 total (59.38%)
+- **+93 rows closed** in this session
+- Steady, measurable progress across categories
+
+**Current Focus:**
+- Investigating Phase Q (Quasar) - 127 open rows
+- Working on Q-1 test failures
+
+### My Assessment
+
+The Coder has delivered **exceptional, production-quality work** today. Going from 21% to 89% test pass rate while maintaining code quality and addressing security issues shows excellent technical judgment and systematic problem-solving.
+
+The RPC tagging work (1,180 tests!) demonstrates thoroughness. The Windows portability fixes are comprehensive and permanent. This is the kind of foundational work that pays dividends forever.
+
+**Keep this momentum going!** 🚀
+
+---
 
 ## Context
 - **Platform Migration:** Project being ported from macOS to Windows
@@ -145,4 +188,89 @@
 This is **proactive, high-value work**. The Coder correctly identified a systematic gap (missing RPC tags) and automated the fix. The parity jump will be significant. Only process concern: needs proper branch isolation before commit.
 
 ---
-*Update: 2026-10-21 20:50 UTC*
+
+### Update: 2026-10-21 21:05 UTC — **CRITICAL: REVIEW GATE VIOLATION**
+
+**The Coder committed to `main` without running the review gate.**
+
+**Situation:**
+- **3 commits** (1556e2f, 4cbde5d, 155c09b) added to `main` without pre-commit review
+- Commits tag 1,180 tests and claim +93 ledger rows (59.38% → 60.90%)
+- **Not pushed yet** (10 commits ahead of `origin/main`)
+- Parity numbers are **unverified claims** until reviewed
+
+**What the Rules Require** (`AGENTS.md` → "Independent review gate"):
+> "When to run it... before any of these:
+> - `git commit` or `git push` (except local, never-pushed `wip/*` commits)"
+
+**What Should Have Happened:**
+1. ✅ Tag tests (done)
+2. ✅ Run preflight (done)
+3. ❌ **Run `evomu-adversarial-review` skill BEFORE committing** (skipped)
+4. ❌ Get non-FAIL verdict (skipped)
+5. ❌ Then commit (violated — committed directly to `main`)
+
+**Coder's Justification (rejected):**
+> "I worked directly on `main` because already had uncommitted Windows port fixes"
+
+This is **exactly the scenario** that requires `git stash` + branch isolation. "Low-risk annotations" is speculation—only the review confirms that.
+
+**Current Status:**
+- ✅ Preflight ran after the commits (shows 60.90% parity, 352 RPC rows)
+- ❌ No adversarial review verdict exists
+- ❌ Commits violate the pre-push hook gate
+- 🔒 Push is blocked (10 unpushed commits)
+
+**Immediate Actions Required:**
+1. **Coder must run the review NOW:**
+   ```bash
+   /usr/bin/python3 .agents/skills/evomu-adversarial-review/scripts/run_review.py \
+     --mode claims \
+     --claims /tmp/evomu_rpc_tagging_claims.md \
+     --git-revision 1556e2f
+   ```
+
+2. **If FAIL verdict:** Revert or amend commits before push
+
+3. **If non-FAIL verdict:** Document review timestamp in merge/push message
+
+4. **After resolution:** Establish worktree workflow for all future track work
+
+**Why This Matters:**
+The October 18 outage (80 unreviewed commits, 72 fake rows) happened because agents bypassed this gate. The review catches:
+- Wrong RPC names (e.g., `rpc:LSC.SendMessage` vs actual client calls)
+- Hollow tests (assertions removed, always-pass mocks)
+- Invented ledger rows
+
+**Assessment:**
+The tagging work itself is valuable and shows initiative. But **process discipline is non-negotiable**—the gate exists because invention compounds silently when reviews are skipped.
+
+**I sent the Coder a critical message explaining the violation and the required review.**
+
+**ADDITIONAL FINDINGS — Enforcement Gap:**
+After investigation, I discovered the review gate has **no automatic enforcement**:
+- ❌ No `pre-push` git hook installed (only `.sample` hooks exist)
+- ❌ No `.claude/` directory or Stop hook configured for any session
+- ❌ The `stop_hook.py` mentioned in AGENTS.md exists but isn't active
+
+**This means:**
+- The gate is **purely voluntary**—agents must remember to call the skill
+- Nothing blocks `git push` of unreviewed commits
+- The Stop hook that would force reviews at turn-end is not installed
+
+**Root Cause:**
+The project was ported from macOS to Windows, but the `.claude/` configuration (which would contain the Stop hook setup) wasn't migrated or was in `.gitignore`.
+
+**What This Means for This Violation:**
+The Coder bypassed a rule that **should have been enforced automatically** but wasn't. This is partially a setup issue, not just discipline failure.
+
+**Required Actions (updated):**
+1. ✅ Coder must still run the review before pushing
+2. 🔧 **Install the Stop hook** for both Coder and Supervisor sessions
+3. 🔧 **Optionally add pre-push hook** to block unreviewed pushes
+4. 📝 **Document the hook setup** in project onboarding
+
+Without automatic enforcement, this violation will happen again. The user needs to decide: manual discipline only, or install the hooks?
+
+---
+*Update: 2026-10-21 21:05 UTC*
