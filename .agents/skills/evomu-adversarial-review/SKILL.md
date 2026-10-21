@@ -5,8 +5,8 @@ description: >-
   this skill before it (a) claims any milestone, fix, or review finding is done, implemented,
   "verified", or "passing"; (b) runs `git commit` or `git push`; (c) edits status claims in
   PLAN.md / README.md / docs/AGENT_HANDOFF.md; or (d) ends a turn in which EvoMu source changed.
-  It launches a separate headless Jetski CLI (`agy`) reviewer pinned to Gemini Flash Next
-  (`gemini-flash-next`), which verifies claims against the code, runs tests honestly,
+  It launches a separate headless Jetski CLI (`agy`) reviewer pinned to Claude Opus 5.5 (High)
+  (`opus-5.5-high`), which verifies claims against the code, runs tests honestly,
   audits exploits, and returns PASS / PASS_WITH_ISSUES / FAIL.
 ---
 
@@ -18,7 +18,7 @@ EvoMu's coding agent has a documented history of overstating progress. Examples:
 - inflating coverage by adding unrelated method names to existing handlers;
 - committing a macOS Santa bypass.
 
-This skill brings in an **independent reviewer**. It is a separate agent running Gemini Flash Next (`gemini-flash-next`) with fresh context. Its verdict, not your own judgment, decides whether you may describe work as done.
+This skill brings in an **independent reviewer**. It is a separate agent running Claude Opus 5.5 (High) (`opus-5.5-high`) with fresh context. Its verdict, not your own judgment, decides whether you may describe work as done.
 
 ## When to run (mandatory)
 Run the review **before** any of the following:
@@ -35,7 +35,7 @@ Run the review **before** any of the following:
    /usr/bin/python3 .agents/skills/evomu-adversarial-review/scripts/run_review.py --claims-file /tmp/evomu_claims.md
    ```
    - It gathers the diff since the last reviewed commit, runs `cargo test` honestly (wrappers scrubbed, isolated target dir), collects metrics and a toolchain audit, then calls:
-     `agy -p <brief> --model gemini-flash-next --effort high --output-format json --json-schema verdict_schema.json --sandbox`
+     `agy -p <brief> --model opus-5.5-high --effort high --output-format json --json-schema verdict_schema.json --sandbox`
    - Exit codes: `0` PASS, `1` PASS_WITH_ISSUES, `2` FAIL, `3` INVALID/ERROR.
    - Useful flags: `--base <ref>`, `--skip-tests` (recorded in the report as *not executed*), `--dry-run` (collect context and print the command only).
    - `--launcher jetski-chat` opens an interactive Jetski chat instead. It can't pin the model or record a verdict, so use it only for manual sessions.
@@ -44,7 +44,7 @@ Run the review **before** any of the following:
    - **FAIL:** fix every P0, plus every FALSE claim or reword it, then rerun. Don't commit, push, or tell the user the work is done.
    - **PASS_WITH_ISSUES:** you may commit. Tell the user the verdict and list the P1s, or fix them and rerun.
    - **PASS:** proceed.
-   - **UNAVAILABLE (exit 4):** every reviewer model (`gemini-flash-next`, then the fallbacks `gemini-launch-candidate-high`, `opus-5.5-high` and `fable-5.1-high`) was out of quota or capacity. **Nothing was reviewed.** Follow `AGENTS.md` → "Reviewer unavailable": local `wip/*` branches only, no merge or push to `main`, and queue per-task reviews for when quota returns.
+   - **UNAVAILABLE (exit 4):** every reviewer model (`opus-5.5-high`, then the fallbacks `gemini-launch-candidate-high`, `gemini-flash-next` and `fable-5.1-high`) was out of quota or capacity. **Nothing was reviewed.** Follow `AGENTS.md` → "Reviewer unavailable": local `wip/*` branches only, no merge or push to `main`, and queue per-task reviews for when quota returns.
    - **Fallback reviews:** a verdict from a fallback model counts for commits like any other. The final gate still requires a PASS from the primary model.
    - **INVALID / ERROR:** the workspace changed during review or the reviewer failed. Rerun once the tree is quiet. If `agy` is not authenticated, ask the user to run `agy` interactively once.
 5. **Report honestly.** Always tell the user the verdict word, the report path, the number of blocking findings, and whether tests actually executed (`tests_executed` in the report header). Never describe a result more favorably than the report does.
