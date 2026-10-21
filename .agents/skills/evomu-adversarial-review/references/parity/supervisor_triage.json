@@ -6678,7 +6678,7 @@
       "namespace": "eve_public"
     },
     "quasar:eveProto/generated/eve_public/achievement/api/events_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/achievement/api/events_pb2.pyj defines fire-and-forget client UI/analytics telemetry event payloads (Pinned, Tracked, Unpinned, Untracked; e.g. achievement_system/client/repository/message_bus/event_messenger.pyj: Pinned + publish_event_payload) with 0 Request, Response, or Notice RPC messages; telemetry publish ACK is handled generically by publicGatewaySvc.PublishEventPayload (Q-2)."
     },
     "quasar:eveProto/generated/eve_public/achievement/category/api/admin/requests_pb2.pyj": {
@@ -6688,51 +6688,51 @@
       "namespace": "eve_public"
     },
     "quasar:eveProto/generated/eve_public/achievement/category/definition/category_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/achievement/category/definition/category_pb2.pyj is a shared protobuf data-type/identifier/enum module (Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/achievement/category/milestone/definition/milestone_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/achievement/category/milestone/definition/milestone_pb2.pyj is a shared protobuf data-type/identifier/enum module (Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/achievement/contribution/contribution_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/achievement/contribution/contribution_pb2.pyj is a shared protobuf data-type/identifier/enum module (ChecklistProgress, MatcherParameterConfiguration, ParameterConfiguration) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/achievement/definition/achievement_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/achievement/definition/achievement_pb2.pyj is a shared protobuf data-type/identifier/enum module (Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/achievement/milestone/definition/milestone_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/achievement/milestone/definition/milestone_pb2.pyj is a shared protobuf data-type/identifier/enum module (Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/achievement/reward/definition/reward_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/achievement/reward/definition/reward_pb2.pyj is a shared protobuf data-type/identifier/enum module (Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/acl/acl_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/acl/acl_pb2.pyj is a shared protobuf data-type/identifier/enum module (Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/agent/agent_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/agent/agent_pb2.pyj is a shared protobuf data-type/identifier/enum module (Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/alliance/alliance_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/alliance/alliance_pb2.pyj is a shared protobuf data-type/identifier/enum module (Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/app/client/audio/audio_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/app/client/audio/audio_pb2.pyj is a shared protobuf data-type/identifier/enum module (Settings) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/app/client/client_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/app/client/client_pb2.pyj is a shared protobuf data-type/identifier/enum module (Settings) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/app/client/graphics/graphics_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/app/client/graphics/graphics_pb2.pyj defines fire-and-forget client UI/analytics telemetry event payloads (Settings; e.g. eve/client/script/sys/clientStatsSvc.pyj: Settings + publish_event_payload) with 0 Request, Response, or Notice RPC messages; telemetry publish ACK is handled generically by publicGatewaySvc.PublishEventPayload (Q-2)."
     },
     "quasar:eveProto/generated/eve_public/app/com/com_pb2.pyj": {
@@ -6760,35 +6760,35 @@
       "namespace": "eve_public"
     },
     "quasar:eveProto/generated/eve_public/app/eveonline/agency/ui/action_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/app/eveonline/agency/ui/action_pb2.pyj defines fire-and-forget client UI/analytics telemetry event payloads (Taken; e.g. eve/client/script/ui/shared/agencyNew/message_bus/agencyMessenger.pyj: Taken + publish_event_payload) with 0 Request, Response, or Notice RPC messages; telemetry publish ACK is handled generically by publicGatewaySvc.PublishEventPayload (Q-2)."
     },
     "quasar:eveProto/generated/eve_public/app/eveonline/agency/ui/bookmark_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/app/eveonline/agency/ui/bookmark_pb2.pyj defines fire-and-forget client UI/analytics telemetry event payloads (Added; e.g. eve/client/script/ui/shared/agencyNew/message_bus/agencyMessenger.pyj: Added + publish_event_payload) with 0 Request, Response, or Notice RPC messages; telemetry publish ACK is handled generically by publicGatewaySvc.PublishEventPayload (Q-2)."
     },
     "quasar:eveProto/generated/eve_public/app/eveonline/agency/ui/content_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/app/eveonline/agency/ui/content_pb2.pyj defines fire-and-forget client UI/analytics telemetry event payloads (CardClicked; e.g. eve/client/script/ui/shared/agencyNew/message_bus/agencyMessenger.pyj: CardClicked + publish_event_payload) with 0 Request, Response, or Notice RPC messages; telemetry publish ACK is handled generically by publicGatewaySvc.PublishEventPayload (Q-2)."
     },
     "quasar:eveProto/generated/eve_public/app/eveonline/agency/ui/filter_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/app/eveonline/agency/ui/filter_pb2.pyj defines fire-and-forget client UI/analytics telemetry event payloads (Changed; e.g. eve/client/script/ui/shared/agencyNew/message_bus/agencyMessenger.pyj: Changed + publish_event_payload) with 0 Request, Response, or Notice RPC messages; telemetry publish ACK is handled generically by publicGatewaySvc.PublishEventPayload (Q-2)."
     },
     "quasar:eveProto/generated/eve_public/app/eveonline/agency/ui/group_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/app/eveonline/agency/ui/group_pb2.pyj defines fire-and-forget client UI/analytics telemetry event payloads (CardClicked; e.g. eve/client/script/ui/shared/agencyNew/message_bus/agencyMessenger.pyj: CardClicked + publish_event_payload) with 0 Request, Response, or Notice RPC messages; telemetry publish ACK is handled generically by publicGatewaySvc.PublishEventPayload (Q-2)."
     },
     "quasar:eveProto/generated/eve_public/app/eveonline/agency/ui/help/video/link_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/app/eveonline/agency/ui/help/video/link_pb2.pyj defines fire-and-forget client UI/analytics telemetry event payloads (Clicked, Created; e.g. eve/client/script/ui/shared/agencyNew/message_bus/agencyMessenger.pyj: Clicked + publish_event_payload) with 0 Request, Response, or Notice RPC messages; telemetry publish ACK is handled generically by publicGatewaySvc.PublishEventPayload (Q-2)."
     },
     "quasar:eveProto/generated/eve_public/app/eveonline/career/career_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/app/eveonline/career/career_pb2.pyj defines fire-and-forget client UI/analytics telemetry event payloads (Selected; e.g. careergoals/client/messenger/event_messenger.pyj: Selected + publish_event_payload) with 0 Request, Response, or Notice RPC messages; telemetry publish ACK is handled generically by publicGatewaySvc.PublishEventPayload (Q-2)."
     },
     "quasar:eveProto/generated/eve_public/app/eveonline/career/group_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/app/eveonline/career/group_pb2.pyj defines fire-and-forget client UI/analytics telemetry event payloads (Selected; e.g. careergoals/client/messenger/event_messenger.pyj: Selected + publish_event_payload) with 0 Request, Response, or Notice RPC messages; telemetry publish ACK is handled generically by publicGatewaySvc.PublishEventPayload (Q-2)."
     },
     "quasar:eveProto/generated/eve_public/app/eveonline/fastcheckout/analytics/analytics_pb2.pyj": {
@@ -6810,95 +6810,95 @@
       "namespace": "eve_public"
     },
     "quasar:eveProto/generated/eve_public/app/eveonline/fleet/analytics_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/app/eveonline/fleet/analytics_pb2.pyj defines fire-and-forget client UI/analytics telemetry event payloads (AppliedToJoin, Created; e.g. eve/client/script/parklife/messagebus/fleetMessenger.pyj: AppliedToJoin + publish_event_payload) with 0 Request, Response, or Notice RPC messages; telemetry publish ACK is handled generically by publicGatewaySvc.PublishEventPayload (Q-2)."
     },
     "quasar:eveProto/generated/eve_public/app/eveonline/fleet/fleet_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/app/eveonline/fleet/fleet_pb2.pyj is a shared protobuf data-type/identifier/enum module (Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/app/eveonline/generic_ui/button/analytics_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/app/eveonline/generic_ui/button/analytics_pb2.pyj defines fire-and-forget client UI/analytics telemetry event payloads (Clicked; e.g. carbonui/loggers/message_bus/buttonMessenger.pyj: Clicked + publish_event_payload) with 0 Request, Response, or Notice RPC messages; telemetry publish ACK is handled generically by publicGatewaySvc.PublishEventPayload (Q-2)."
     },
     "quasar:eveProto/generated/eve_public/app/eveonline/generic_ui/button/button_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/app/eveonline/generic_ui/button/button_pb2.pyj is a shared protobuf data-type/identifier/enum module (Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/app/eveonline/generic_ui/context_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/app/eveonline/generic_ui/context_pb2.pyj is a shared protobuf data-type/identifier/enum module (Context) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/app/eveonline/generic_ui/input/idle_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/app/eveonline/generic_ui/input/idle_pb2.pyj defines fire-and-forget client UI/analytics telemetry event payloads (ActivityResumed, IdleThresholdReached; e.g. eve/client/script/parklife/messagebus/uiMessenger.pyj: ActivityResumed + publish_event_payload) with 0 Request, Response, or Notice RPC messages; telemetry publish ACK is handled generically by publicGatewaySvc.PublishEventPayload (Q-2)."
     },
     "quasar:eveProto/generated/eve_public/app/eveonline/generic_ui/tab/tab_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/app/eveonline/generic_ui/tab/tab_pb2.pyj defines fire-and-forget client UI/analytics telemetry event payloads (Selected; e.g. carbonui/loggers/message_bus/tabMessenger.pyj: Selected + publish_event_payload) with 0 Request, Response, or Notice RPC messages; telemetry publish ACK is handled generically by publicGatewaySvc.PublishEventPayload (Q-2)."
     },
     "quasar:eveProto/generated/eve_public/app/eveonline/generic_ui/video/video_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/app/eveonline/generic_ui/video/video_pb2.pyj defines fire-and-forget client UI/analytics telemetry event payloads (Looped, Seeked, Started, Stopped; e.g. carbonui/primitives/message_bus/videoMessenger.pyj: Looped + publish_event_payload) with 0 Request, Response, or Notice RPC messages; telemetry publish ACK is handled generically by publicGatewaySvc.PublishEventPayload (Q-2)."
     },
     "quasar:eveProto/generated/eve_public/app/eveonline/generic_ui/view/view_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/app/eveonline/generic_ui/view/view_pb2.pyj defines fire-and-forget client UI/analytics telemetry event payloads (Activated, Deactivated; e.g. eve/client/script/ui/services/message_bus/viewMessenger.pyj: Activated + publish_event_payload) with 0 Request, Response, or Notice RPC messages; telemetry publish ACK is handled generically by publicGatewaySvc.PublishEventPayload (Q-2)."
     },
     "quasar:eveProto/generated/eve_public/app/eveonline/generic_ui/window/analytics_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/app/eveonline/generic_ui/window/analytics_pb2.pyj defines fire-and-forget client UI/analytics telemetry event payloads (Closed, Focused, Opened, Unfocused; e.g. carbonui/loggers/message_bus/windowMessenger.pyj: Closed + publish_event_payload) with 0 Request, Response, or Notice RPC messages; telemetry publish ACK is handled generically by publicGatewaySvc.PublishEventPayload (Q-2)."
     },
     "quasar:eveProto/generated/eve_public/app/eveonline/generic_ui/window/window_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/app/eveonline/generic_ui/window/window_pb2.pyj is a shared protobuf data-type/identifier/enum module (DockingMode, Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/app/eveonline/helperpointer/ui/analytics_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/app/eveonline/helperpointer/ui/analytics_pb2.pyj defines fire-and-forget client UI/analytics telemetry event payloads (Created; e.g. eve/client/script/ui/shared/pointerTool/message_bus/helpPointerMessenger.pyj: Created + publish_event_payload) with 0 Request, Response, or Notice RPC messages; telemetry publish ACK is handled generically by publicGatewaySvc.PublishEventPayload (Q-2)."
     },
     "quasar:eveProto/generated/eve_public/app/eveonline/helperpointer/ui/link_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/app/eveonline/helperpointer/ui/link_pb2.pyj defines fire-and-forget client UI/analytics telemetry event payloads (Clicked, Created; e.g. eve/client/script/ui/shared/pointerTool/message_bus/helpPointerMessenger.pyj: Created + publish_event_payload) with 0 Request, Response, or Notice RPC messages; telemetry publish ACK is handled generically by publicGatewaySvc.PublishEventPayload (Q-2)."
     },
     "quasar:eveProto/generated/eve_public/app/eveonline/login/login_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/app/eveonline/login/login_pb2.pyj defines fire-and-forget client UI/analytics telemetry event payloads (UserInformationGathered; e.g. eve/client/script/sys/clientStatsSvc.pyj: UserInformationGathered + publish_event_payload) with 0 Request, Response, or Notice RPC messages; telemetry publish ACK is handled generically by publicGatewaySvc.PublishEventPayload (Q-2)."
     },
     "quasar:eveProto/generated/eve_public/app/eveonline/login/milestone/tooltip_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/app/eveonline/login/milestone/tooltip_pb2.pyj defines fire-and-forget client UI/analytics telemetry event payloads (Displayed; e.g. eve/client/script/ui/shared/infoPanels/milestoneTimer/milestoneTimerMessenger.pyj: Displayed + publish_event_payload) with 0 Request, Response, or Notice RPC messages; telemetry publish ACK is handled generically by publicGatewaySvc.PublishEventPayload (Q-2)."
     },
     "quasar:eveProto/generated/eve_public/app/eveonline/map/analytics/events_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/app/eveonline/map/analytics/events_pb2.pyj defines fire-and-forget client UI/analytics telemetry event payloads (AutopilotWaypointAdded, FilterOreTypeSelected, FilterSettingsChanged; e.g. eve/client/script/ui/shared/mapView/analytics_util.pyj: AutopilotWaypointAdded + publish_event_payload) with 0 Request, Response, or Notice RPC messages; telemetry publish ACK is handled generically by publicGatewaySvc.PublishEventPayload (Q-2)."
     },
     "quasar:eveProto/generated/eve_public/app/eveonline/map/settings/api/events_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/app/eveonline/map/settings/api/events_pb2.pyj defines fire-and-forget client UI/analytics telemetry event payloads (Changed; e.g. eve/client/script/ui/shared/mapView/analytics/mapViewMessenger.pyj: Changed + publish_event_payload) with 0 Request, Response, or Notice RPC messages; telemetry publish ACK is handled generically by publicGatewaySvc.PublishEventPayload (Q-2)."
     },
     "quasar:eveProto/generated/eve_public/app/eveonline/network/api/events_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/app/eveonline/network/api/events_pb2.pyj defines fire-and-forget client UI/analytics telemetry event payloads (ConnectionLost; e.g. clientevents/client/messenger.pyj: ConnectionLost + publish_event_payload) with 0 Request, Response, or Notice RPC messages; telemetry publish ACK is handled generically by publicGatewaySvc.PublishEventPayload (Q-2)."
     },
     "quasar:eveProto/generated/eve_public/app/eveonline/network/rtt_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/app/eveonline/network/rtt_pb2.pyj is a shared protobuf data-type/identifier/enum module (SamplesCollected) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/app/eveonline/newscarousel/ui/ui_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/app/eveonline/newscarousel/ui/ui_pb2.pyj defines fire-and-forget client UI/analytics telemetry event payloads (Acknowledged, AutoPopupToggled, Displayed; e.g. eve/client/script/ui/shared/message_bus/newsCarouselMessenger.pyj: Acknowledged + publish_event_payload) with 0 Request, Response, or Notice RPC messages; telemetry publish ACK is handled generically by publicGatewaySvc.PublishEventPayload (Q-2)."
     },
     "quasar:eveProto/generated/eve_public/app/eveonline/nodegraph/action/datapoint_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/app/eveonline/nodegraph/action/datapoint_pb2.pyj defines fire-and-forget client UI/analytics telemetry event payloads (Triggered; e.g. nodegraph/client/message_bus/event_messenger.pyj: Triggered + publish_event_payload) with 0 Request, Response, or Notice RPC messages; telemetry publish ACK is handled generically by publicGatewaySvc.PublishEventPayload (Q-2)."
     },
     "quasar:eveProto/generated/eve_public/app/eveonline/omegaupsell/analytics_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/app/eveonline/omegaupsell/analytics_pb2.pyj defines fire-and-forget client UI/analytics telemetry event payloads (BenefitViewed; e.g. eve/client/script/ui/omega/upsell/analytics/event_messenger.pyj: BenefitViewed + publish_event_payload) with 0 Request, Response, or Notice RPC messages; telemetry publish ACK is handled generically by publicGatewaySvc.PublishEventPayload (Q-2)."
     },
     "quasar:eveProto/generated/eve_public/app/eveonline/operation/recommendation/recommendation_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/app/eveonline/operation/recommendation/recommendation_pb2.pyj defines fire-and-forget client UI/analytics telemetry event payloads (Accepted, Dismissed; e.g. eve/client/script/ui/shared/recommendation/message_bus/recommendationMessenger.pyj: Accepted + publish_event_payload) with 0 Request, Response, or Notice RPC messages; telemetry publish ACK is handled generically by publicGatewaySvc.PublishEventPayload (Q-2)."
     },
     "quasar:eveProto/generated/eve_public/app/eveonline/operation/recommendation/ui/analytics_pb2.pyj": {
@@ -6908,7 +6908,7 @@
       "namespace": "eve_public"
     },
     "quasar:eveProto/generated/eve_public/app/eveonline/operation/recommendation/ui_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/app/eveonline/operation/recommendation/ui_pb2.pyj defines fire-and-forget client UI/analytics telemetry event payloads (Displayed; e.g. eve/client/script/ui/shared/recommendation/message_bus/recommendationMessenger.pyj: Displayed + publish_event_payload) with 0 Request, Response, or Notice RPC messages; telemetry publish ACK is handled generically by publicGatewaySvc.PublishEventPayload (Q-2)."
     },
     "quasar:eveProto/generated/eve_public/app/eveonline/planetaryproduction/planet_pb2.pyj": {
@@ -6918,15 +6918,15 @@
       "namespace": "eve_public"
     },
     "quasar:eveProto/generated/eve_public/app/eveonline/settings/featurepreview/analytics_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/app/eveonline/settings/featurepreview/analytics_pb2.pyj defines fire-and-forget client UI/analytics telemetry event payloads (Toggled; e.g. eve/client/script/ui/shared/systemMenu/feature_preview/message_bus/featurePreviewMessenger.pyj: Toggled + publish_event_payload) with 0 Request, Response, or Notice RPC messages; telemetry publish ACK is handled generically by publicGatewaySvc.PublishEventPayload (Q-2)."
     },
     "quasar:eveProto/generated/eve_public/app/eveonline/skill/plan/certified/analytics_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/app/eveonline/skill/plan/certified/analytics_pb2.pyj defines fire-and-forget client UI/analytics telemetry event payloads (AllSkillbooksBought, Clicked, OmegaButtonClicked, Tracked, TrainingStarted; e.g. skills/skillplan/loggers/skillPlanLogger.pyj: AllSkillbooksBought + publish_event_payload) with 0 Request, Response, or Notice RPC messages; telemetry publish ACK is handled generically by publicGatewaySvc.PublishEventPayload (Q-2)."
     },
     "quasar:eveProto/generated/eve_public/app/eveonline/slash/api/events_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/app/eveonline/slash/api/events_pb2.pyj defines fire-and-forget client UI/analytics telemetry event payloads (CommandUsed; e.g. slash/client/event_publisher.pyj: CommandUsed + publish_event_payload) with 0 Request, Response, or Notice RPC messages; telemetry publish ACK is handled generically by publicGatewaySvc.PublishEventPayload (Q-2)."
     },
     "quasar:eveProto/generated/eve_public/app/launcher/adglare/adglare_pb2.pyj": {
@@ -7056,7 +7056,7 @@
       "namespace": "eve_public"
     },
     "quasar:eveProto/generated/eve_public/app/platform_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/app/platform_pb2.pyj is a shared protobuf data-type/identifier/enum module (Bitness, Information, Machine, OS, Process, SemanticVersion) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/assetholding/asset/api/notices_pb2.pyj": {
@@ -7072,7 +7072,7 @@
       "namespace": "eve_public"
     },
     "quasar:eveProto/generated/eve_public/assetholding/asset/asset_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/assetholding/asset/asset_pb2.pyj is a shared protobuf data-type/identifier/enum module (Attributes, Benefactor, Capacity, Finite, Identifier, InterStellarKredits) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/assetholding/entitlement/api/admin/admin_pb2.pyj": {
@@ -7088,7 +7088,7 @@
       "namespace": "eve_public"
     },
     "quasar:eveProto/generated/eve_public/assetholding/entitlement/entitlement_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/assetholding/entitlement/entitlement_pb2.pyj is a shared protobuf data-type/identifier/enum module (Attributes, GroupBy, Holder, Identifier, Quantity) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/auth/auth_pb2.pyj": {
@@ -7116,87 +7116,87 @@
       "namespace": "eve_public"
     },
     "quasar:eveProto/generated/eve_public/campaign/campaign_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/campaign/campaign_pb2.pyj is a shared protobuf data-type/identifier/enum module (Attributes, Identifier, Issuer, LifecycleState, LifecycleTrigger, Namespace) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/campaign/contributionmethod/configuration_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/campaign/contributionmethod/configuration_pb2.pyj is a shared protobuf data-type/identifier/enum module (Configuration, MatcherParameterConfiguration, ParameterConfiguration) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/campaign/contributionmethod/definition/definition_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/campaign/contributionmethod/definition/definition_pb2.pyj is a shared protobuf data-type/identifier/enum module (Attributes, Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/campaign/contributionmethod/parameter_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/campaign/contributionmethod/parameter_pb2.pyj is a shared protobuf data-type/identifier/enum module (MatcherParameter, Parameter) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/campaign/objective/objective_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/campaign/objective/objective_pb2.pyj is a shared protobuf data-type/identifier/enum module (Attributes, CommitmentState, Identifier, Issuer, LifecycleState, LifecycleTrigger) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/campaign/parameter/parameter_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/campaign/parameter/parameter_pb2.pyj is a shared protobuf data-type/identifier/enum module (Configuration, Definition) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/campaign/participation/participation_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/campaign/participation/participation_pb2.pyj is a shared protobuf data-type/identifier/enum module (Configuration, EligibilityFilter) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/campaign/sideffect/sideffect_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/campaign/sideffect/sideffect_pb2.pyj is a shared protobuf data-type/identifier/enum module (Configuration) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/campaign/track/track_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/campaign/track/track_pb2.pyj is a shared protobuf data-type/identifier/enum module (Attributes, Identifier, LifecycleState, LifecycleTrigger, ParticipantStats, State) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/campaign/trigger/eventmatch/definition/definition_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/campaign/trigger/eventmatch/definition/definition_pb2.pyj is a shared protobuf data-type/identifier/enum module (Attributes, Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/campaign/trigger/eventmatch/eventmatch_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/campaign/trigger/eventmatch/eventmatch_pb2.pyj is a shared protobuf data-type/identifier/enum module (Configuration) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/campaign/trigger/immediate/immediate_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/campaign/trigger/immediate/immediate_pb2.pyj is a shared protobuf data-type/identifier/enum module (Configuration) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/campaign/trigger/objectivecompleted/objectivecompleted_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/campaign/trigger/objectivecompleted/objectivecompleted_pb2.pyj is a shared protobuf data-type/identifier/enum module (Configuration) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/campaign/trigger/objectivefailed/objectivefailed_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/campaign/trigger/objectivefailed/objectivefailed_pb2.pyj is a shared protobuf data-type/identifier/enum module (Configuration) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/campaign/trigger/relativeschedule/relativeschedule_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/campaign/trigger/relativeschedule/relativeschedule_pb2.pyj is a shared protobuf data-type/identifier/enum module (Configuration) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/campaign/trigger/tracktargetprogressreached/tracktargetprogressreached_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/campaign/trigger/tracktargetprogressreached/tracktargetprogressreached_pb2.pyj is a shared protobuf data-type/identifier/enum module (Configuration) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/campaign/trigger/trigger_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/campaign/trigger/trigger_pb2.pyj is a shared protobuf data-type/identifier/enum module (MaxFires) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/campaign/ui/ui_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/campaign/ui/ui_pb2.pyj is a shared protobuf data-type/identifier/enum module (Definition) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/career/career_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/career/career_pb2.pyj is a shared protobuf data-type/identifier/enum module (Path) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/career/goal_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/career/goal_pb2.pyj is a shared protobuf data-type/identifier/enum module (Attributes, Identifier, ItemRewardType, Reward, RewardLabel, RewardType) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/cdn/cdn_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/cdn/cdn_pb2.pyj is a shared protobuf data-type/identifier/enum module (Checkpoint, Checksum) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/character/complaint_pb2.pyj": {
@@ -7212,7 +7212,7 @@
       "namespace": "eve_public"
     },
     "quasar:eveProto/generated/eve_public/character/hacking/hacking_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/character/hacking/hacking_pb2.pyj is a shared protobuf data-type/identifier/enum module (Analyzer) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/character/location/presence/api/notice_pb2.pyj": {
@@ -7222,75 +7222,75 @@
       "namespace": "eve_public"
     },
     "quasar:eveProto/generated/eve_public/chat/local/local_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/chat/local/local_pb2.pyj is a shared protobuf data-type/identifier/enum module (Character, Classification) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/color/color_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/color/color_pb2.pyj is a shared protobuf data-type/identifier/enum module (RGB) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/communitytrack/definition/definition_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/communitytrack/definition/definition_pb2.pyj is a shared protobuf data-type/identifier/enum module (Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/communitytrack/instance/instance_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/communitytrack/instance/instance_pb2.pyj is a shared protobuf data-type/identifier/enum module (Attributes, Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/constellation/constellation_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/constellation/constellation_pb2.pyj is a shared protobuf data-type/identifier/enum module (Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/corporation/corporation_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/corporation/corporation_pb2.pyj is a shared protobuf data-type/identifier/enum module (Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/corporation/loyalty_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/corporation/loyalty_pb2.pyj is a shared protobuf data-type/identifier/enum module (Points) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/corporation/office_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/corporation/office_pb2.pyj is a shared protobuf data-type/identifier/enum module (Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/corporation/role_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/corporation/role_pb2.pyj is a shared protobuf data-type/identifier/enum module (Collection) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/corporation/skill/plan/category_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/corporation/skill/plan/category_pb2.pyj is a shared protobuf data-type/identifier/enum module (Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/corporationgoal/contribution/configuration_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/corporationgoal/contribution/configuration_pb2.pyj is a shared protobuf data-type/identifier/enum module (CaptureFactionWarfareComplex, DamageShip, DamageStructure, DefendFactionWarfareComplex, DeliverItem, DestroyPlayerShip) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/corporationgoal/matcher_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/corporationgoal/matcher_pb2.pyj is a shared protobuf data-type/identifier/enum module (AnalyzerGroup, Archetypes, CharacterSets, ConflictType, Corporation, Corporations) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/cosmetic/character/title/definition/title_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/cosmetic/character/title/definition/title_pb2.pyj is a shared protobuf data-type/identifier/enum module (Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/cosmetic/corporation/palette/palette_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/cosmetic/corporation/palette/palette_pb2.pyj is a shared protobuf data-type/identifier/enum module (Attributes, Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/cosmetic/market/component/listing/listing_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/cosmetic/market/component/listing/listing_pb2.pyj is a shared protobuf data-type/identifier/enum module (Attributes, Entry, Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/cosmetic/market/market_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/cosmetic/market/market_pb2.pyj is a shared protobuf data-type/identifier/enum module (BrokerFee, BuyerFee, TaxRate) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/cosmetic/market/skin/listing/listing_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/cosmetic/market/skin/listing/listing_pb2.pyj is a shared protobuf data-type/identifier/enum module (Attributes, Entry, Identifier, ListingTarget) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/cosmetic/market/skin/search/search_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/cosmetic/market/skin/search/search_pb2.pyj is a shared protobuf data-type/identifier/enum module (Filter, ListingTarget, Order, ShipTypeFilter, TargetAll, TargetMyAlliance) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/cosmetic/market/transaction/api/api_pb2.pyj": {
@@ -7300,15 +7300,15 @@
       "namespace": "eve_public"
     },
     "quasar:eveProto/generated/eve_public/cosmetic/market/transaction/transaction_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/cosmetic/market/transaction/transaction_pb2.pyj is a shared protobuf data-type/identifier/enum module (Attributes, Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/cosmetic/ship/ship_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/cosmetic/ship/ship_pb2.pyj is a shared protobuf data-type/identifier/enum module (State) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/cosmetic/ship/skin/firstparty/firstparty_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/cosmetic/ship/skin/firstparty/firstparty_pb2.pyj is a shared protobuf data-type/identifier/enum module (Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/api/events_pb2.pyj": {
@@ -7318,71 +7318,71 @@
       "namespace": "eve_public"
     },
     "quasar:eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/component/coating/coating_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/component/coating/coating_pb2.pyj is a shared protobuf data-type/identifier/enum module (Configuration, Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/component/component_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/component/component_pb2.pyj is a shared protobuf data-type/identifier/enum module (Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/component/license/finite/finite_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/component/license/finite/finite_pb2.pyj is a shared protobuf data-type/identifier/enum module (Attributes, Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/component/license/infinite/infinite_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/component/license/infinite/infinite_pb2.pyj is a shared protobuf data-type/identifier/enum module (Attributes, Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/component/license/item/item_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/component/license/item/item_pb2.pyj is a shared protobuf data-type/identifier/enum module (Attributes, Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/component/license/license_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/component/license/license_pb2.pyj is a shared protobuf data-type/identifier/enum module (Kind) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/component/pattern/pattern_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/component/pattern/pattern_pb2.pyj is a shared protobuf data-type/identifier/enum module (BlendMode, Configuration, Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/draft/draft_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/draft/draft_pb2.pyj is a shared protobuf data-type/identifier/enum module (Attributes, EditorConfiguration, Identifier, SlotEditorConfiguration) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/license/license_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/license/license_pb2.pyj is a shared protobuf data-type/identifier/enum module (Attributes, Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/sequencing/job/job_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/sequencing/job/job_pb2.pyj is a shared protobuf data-type/identifier/enum module (Attributes, Failure, Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/slot/slot_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/slot/slot_pb2.pyj is a shared protobuf data-type/identifier/enum module (Configuration, Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/thirdparty_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/thirdparty_pb2.pyj is a shared protobuf data-type/identifier/enum module (Attributes, Identifier, Layout, Tier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/cosmetic/structure/paintwork/license/license_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/cosmetic/structure/paintwork/license/license_pb2.pyj is a shared protobuf data-type/identifier/enum module (Attributes, Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/cosmetic/structure/paintwork/paintwork_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/cosmetic/structure/paintwork/paintwork_pb2.pyj is a shared protobuf data-type/identifier/enum module (Slot, SlotConfiguration) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/dailygoal/goal_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/dailygoal/goal_pb2.pyj is a shared protobuf data-type/identifier/enum module (AllianceMatcher, Attributes, Category, CharacterMatcher, ContributionConfiguration, CorporationMatcher) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/deadspace/archetype_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/deadspace/archetype_pb2.pyj is a shared protobuf data-type/identifier/enum module (Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/deadspace/signaturetype_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/deadspace/signaturetype_pb2.pyj is a shared protobuf data-type/identifier/enum module (Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/debug/debug_pb2.pyj": {
@@ -7392,15 +7392,15 @@
       "namespace": "eve_public"
     },
     "quasar:eveProto/generated/eve_public/device/user/user_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/device/user/user_pb2.pyj is a shared protobuf data-type/identifier/enum module (Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/dungeon/dungeon_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/dungeon/dungeon_pb2.pyj is a shared protobuf data-type/identifier/enum module (Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/dungeon/instance_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/dungeon/instance_pb2.pyj is a shared protobuf data-type/identifier/enum module (Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/dungeon/sovereignty/api/requests_pb2.pyj": {
@@ -7422,47 +7422,47 @@
       "namespace": "eve_public"
     },
     "quasar:eveProto/generated/eve_public/epicarc/epicarc_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/epicarc/epicarc_pb2.pyj is a shared protobuf data-type/identifier/enum module (Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/faction/faction_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/faction/faction_pb2.pyj is a shared protobuf data-type/identifier/enum module (Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/freelance/contributionmethod/configuration_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/freelance/contributionmethod/configuration_pb2.pyj is a shared protobuf data-type/identifier/enum module (Configuration) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/freelance/contributionmethod/definition/definition_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/freelance/contributionmethod/definition/definition_pb2.pyj is a shared protobuf data-type/identifier/enum module (Attributes, BaseUIRepresentation, ContributionMultiplier, Identifier, MaxContributionsPerParticipant, MaxProgressPerContribution) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/freelance/contributionmethod/definition/parameters_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/freelance/contributionmethod/definition/parameters_pb2.pyj is a shared protobuf data-type/identifier/enum module (BooleanParameter, CorporationItemDeliveryParameter, MatcherParameter, OptionsParameter, Parameter) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/freelance/contributionmethod/itemdelivery/itemdelivery_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/freelance/contributionmethod/itemdelivery/itemdelivery_pb2.pyj is a shared protobuf data-type/identifier/enum module (DeliveryLocation, Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/freelance/contributionmethod/parameters_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/freelance/contributionmethod/parameters_pb2.pyj is a shared protobuf data-type/identifier/enum module (BooleanParameterConfiguration, CorporationItemDeliveryConfiguration, MatcherParameterConfiguration, OptionsParameterConfiguration, ParameterConfiguration) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/freelance/project/api/events_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/freelance/project/api/events_pb2.pyj defines fire-and-forget client UI/analytics telemetry event payloads (DiscoveryOverflowed; e.g. freelanceprojects/client/messenger.pyj: DiscoveryOverflowed + publish_event_payload) with 0 Request, Response, or Notice RPC messages; telemetry publish ACK is handled generically by publicGatewaySvc.PublishEventPayload (Q-2)."
     },
     "quasar:eveProto/generated/eve_public/freelance/project/project_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/freelance/project/project_pb2.pyj is a shared protobuf data-type/identifier/enum module (AdminDetails, Attributes, BroadcastLocations, CharacterAgeRestriction, ContributionModifiers, CreationCost) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/fulfillment/offer_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/fulfillment/offer_pb2.pyj is a shared protobuf data-type/identifier/enum module (Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/goal/api/events_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/goal/api/events_pb2.pyj defines fire-and-forget client UI/analytics telemetry event payloads (CloneFormOpened; e.g. corporation/client/goals/goalFormsMessenger.pyj: CloneFormOpened + publish_event_payload) with 0 Request, Response, or Notice RPC messages; telemetry publish ACK is handled generically by publicGatewaySvc.PublishEventPayload (Q-2)."
     },
     "quasar:eveProto/generated/eve_public/goal/contribution/api/requests_pb2.pyj": {
@@ -7472,59 +7472,59 @@
       "namespace": "eve_public"
     },
     "quasar:eveProto/generated/eve_public/goal/goal_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/goal/goal_pb2.pyj is a shared protobuf data-type/identifier/enum module (Attributes, Capacity, ContributionConfiguration, ContributorSummary, Earning, Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/goal/matcher_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/goal/matcher_pb2.pyj is a shared protobuf data-type/identifier/enum module (Alliance, Character, Corporation, DeadspaceArchetype, Faction, Identity) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/inventory/generic_item_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/inventory/generic_item_pb2.pyj is a shared protobuf data-type/identifier/enum module (Identifier, Location) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/inventory/generic_item_type_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/inventory/generic_item_type_pb2.pyj is a shared protobuf data-type/identifier/enum module (Attributes, Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/inventory/group/group_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/inventory/group/group_pb2.pyj is a shared protobuf data-type/identifier/enum module (Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/inventory/inventory_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/inventory/inventory_pb2.pyj is a shared protobuf data-type/identifier/enum module (LocationFlag) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/isk/isk_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/isk/isk_pb2.pyj is a shared protobuf data-type/identifier/enum module (Currency) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/isk/wallet/wallet_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/isk/wallet/wallet_pb2.pyj is a shared protobuf data-type/identifier/enum module (Owner) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/localization/cerberus/cerberus_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/localization/cerberus/cerberus_pb2.pyj is a shared protobuf data-type/identifier/enum module (DynamicFormattedMessage, FormattedMessage, Parameter) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/localization/localization_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/localization/localization_pb2.pyj is a shared protobuf data-type/identifier/enum module (Language) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/localization/message_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/localization/message_pb2.pyj is a shared protobuf data-type/identifier/enum module (Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/localization_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/localization_pb2.pyj is a shared protobuf data-type/identifier/enum module (DE, EN, ES, FR, JA, KO) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/login/milestone_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/login/milestone_pb2.pyj is a shared protobuf data-type/identifier/enum module (Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/loyaltypoints/loyaltypoints_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/loyaltypoints/loyaltypoints_pb2.pyj is a shared protobuf data-type/identifier/enum module (Currency) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/market/entry/entry_pb2.pyj": {
@@ -7534,47 +7534,47 @@
       "namespace": "eve_public"
     },
     "quasar:eveProto/generated/eve_public/math/fraction_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/math/fraction_pb2.pyj is a shared protobuf data-type/identifier/enum module (Fraction) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/math/vector_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/math/vector_pb2.pyj is a shared protobuf data-type/identifier/enum module (Vector3, Vector4) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/mission/mission_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/mission/mission_pb2.pyj is a shared protobuf data-type/identifier/enum module (Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/network/rtt_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/network/rtt_pb2.pyj is a shared protobuf data-type/identifier/enum module (Sample) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/nodegraph/nodegraph_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/nodegraph/nodegraph_pb2.pyj is a shared protobuf data-type/identifier/enum module (Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/omega/benefit_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/omega/benefit_pb2.pyj is a shared protobuf data-type/identifier/enum module (Identifier, Type) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/operation/operation_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/operation/operation_pb2.pyj is a shared protobuf data-type/identifier/enum module (Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/opportunity/api/event_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/opportunity/api/event_pb2.pyj defines fire-and-forget client UI/analytics telemetry event payloads (Completed, Discovered, Tracked, Untracked, Viewed; e.g. jobboard/client/analytics/messenger.pyj: Discovered + publish_event_payload) with 0 Request, Response, or Notice RPC messages; telemetry publish ACK is handled generically by publicGatewaySvc.PublishEventPayload (Q-2)."
     },
     "quasar:eveProto/generated/eve_public/opportunity/opportunity_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/opportunity/opportunity_pb2.pyj is a shared protobuf data-type/identifier/enum module (Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/ore/group_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/ore/group_pb2.pyj is a shared protobuf data-type/identifier/enum module (Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/ore/ore_type_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/ore/ore_type_pb2.pyj is a shared protobuf data-type/identifier/enum module (Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/payment/code/api_pb2.pyj": {
@@ -7590,39 +7590,39 @@
       "namespace": "eve_public"
     },
     "quasar:eveProto/generated/eve_public/payment/payment_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/payment/payment_pb2.pyj is a shared protobuf data-type/identifier/enum module (Identifier, Method, Money) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/payment/purchase/purchase_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/payment/purchase/purchase_pb2.pyj is a shared protobuf data-type/identifier/enum module (BillingAddress, Cost, Order, Receipt) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/payment/schedule/schedule_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/payment/schedule/schedule_pb2.pyj is a shared protobuf data-type/identifier/enum module (Attributes, Identifier, Type) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/payment/token/token_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/payment/token/token_pb2.pyj is a shared protobuf data-type/identifier/enum module (Attributes, Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/planet/planet_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/planet/planet_pb2.pyj is a shared protobuf data-type/identifier/enum module (Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/planet/skyhook/skyhook_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/planet/skyhook/skyhook_pb2.pyj is a shared protobuf data-type/identifier/enum module (Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/plex/plex_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/plex/plex_pb2.pyj is a shared protobuf data-type/identifier/enum module (Currency) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/plex/vault/transaction/invoice/invoice_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/plex/vault/transaction/invoice/invoice_pb2.pyj is a shared protobuf data-type/identifier/enum module (Attributes, Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/plex/vault/transaction/transaction_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/plex/vault/transaction/transaction_pb2.pyj is a shared protobuf data-type/identifier/enum module (Attributes, Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/presence/api/request_pb2.pyj": {
@@ -7632,27 +7632,27 @@
       "namespace": "eve_public"
     },
     "quasar:eveProto/generated/eve_public/region/region_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/region/region_pb2.pyj is a shared protobuf data-type/identifier/enum module (Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/securitystatus/securitystatus_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/securitystatus/securitystatus_pb2.pyj is a shared protobuf data-type/identifier/enum module (Value) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/semanticversion_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/semanticversion_pb2.pyj is a shared protobuf data-type/identifier/enum module (Specification) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/ship/classification_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/ship/classification_pb2.pyj is a shared protobuf data-type/identifier/enum module (Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/ship/ship_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/ship/ship_pb2.pyj is a shared protobuf data-type/identifier/enum module (Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/ship/ship_type_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/ship/ship_type_pb2.pyj is a shared protobuf data-type/identifier/enum module (Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/ship/unlock/notices_pb2.pyj": {
@@ -7668,15 +7668,15 @@
       "namespace": "eve_public"
     },
     "quasar:eveProto/generated/eve_public/skill/plan/certified_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/skill/plan/certified_pb2.pyj is a shared protobuf data-type/identifier/enum module (Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/skill/plan/milestone_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/skill/plan/milestone_pb2.pyj is a shared protobuf data-type/identifier/enum module (Attributes, Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/skill/skilltype_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/skill/skilltype_pb2.pyj is a shared protobuf data-type/identifier/enum module (Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/solarsystem/api/requests_pb2.pyj": {
@@ -7686,31 +7686,31 @@
       "namespace": "eve_public"
     },
     "quasar:eveProto/generated/eve_public/solarsystem/solarsystem_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/solarsystem/solarsystem_pb2.pyj is a shared protobuf data-type/identifier/enum module (Attributes, Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/sovereignty/hub/hub_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/sovereignty/hub/hub_pb2.pyj is a shared protobuf data-type/identifier/enum module (Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/sovereignty/hub/upgrade/upgrade_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/sovereignty/hub/upgrade/upgrade_pb2.pyj is a shared protobuf data-type/identifier/enum module (Attributes, Definition, HubUpgrades, Identifier, PowerState) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/sovereignty/hub/upgrade/upgrade_type_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/sovereignty/hub/upgrade/upgrade_type_pb2.pyj is a shared protobuf data-type/identifier/enum module (Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/sovereignty/hub/workforce/workforce_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/sovereignty/hub/workforce/workforce_pb2.pyj is a shared protobuf data-type/identifier/enum module (Configuration, ExportConfiguration, ExportState, ImportConfiguration, ImportState, State) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/activity/activity_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/sovereignty/mercenaryden/activity/activity_pb2.pyj is a shared protobuf data-type/identifier/enum module (Attributes, Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/activity/activitytemplate/activitytemplate_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/sovereignty/mercenaryden/activity/activitytemplate/activitytemplate_pb2.pyj is a shared protobuf data-type/identifier/enum module (Definition) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/api/admin/admin_pb2.pyj": {
@@ -7720,55 +7720,55 @@
       "namespace": "eve_public"
     },
     "quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/evolution_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/sovereignty/mercenaryden/evolution_pb2.pyj is a shared protobuf data-type/identifier/enum module (AnarchyDefinition, AnarchySimulation, AnarchyStage, DevelopmentDefinition, DevelopmentSimulation, DevelopmentStage) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/infomorph/itemtype/identifier_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/sovereignty/mercenaryden/infomorph/itemtype/identifier_pb2.pyj is a shared protobuf data-type/identifier/enum module (Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/infomorphs_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/sovereignty/mercenaryden/infomorphs_pb2.pyj is a shared protobuf data-type/identifier/enum module (Infomorphs, InfomorphsContents, InfomorphsGenerationDefinition) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/mercenaryden_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/sovereignty/mercenaryden/mercenaryden_pb2.pyj is a shared protobuf data-type/identifier/enum module (Attributes, Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/mercenaryden_type_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/sovereignty/mercenaryden/mercenaryden_type_pb2.pyj is a shared protobuf data-type/identifier/enum module (Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/sovereignty/resource/planet/planet_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/sovereignty/resource/planet/planet_pb2.pyj is a shared protobuf data-type/identifier/enum module (Configuration, Definition) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/sovereignty/resource/planet/reagent/itemtype/identifier_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/sovereignty/resource/planet/reagent/itemtype/identifier_pb2.pyj is a shared protobuf data-type/identifier/enum module (Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/sovereignty/resource/planet/reagent_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/sovereignty/resource/planet/reagent_pb2.pyj is a shared protobuf data-type/identifier/enum module (Definition, HarvestConfiguration, HarvestSimulation, MaturationConfiguration, MaturationSimulation, Simulation) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/sovereignty/resource/star/star_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/sovereignty/resource/star/star_pb2.pyj is a shared protobuf data-type/identifier/enum module (Configuration) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/sovereignty/skyhook/theftvulnerability_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/sovereignty/skyhook/theftvulnerability_pb2.pyj is a shared protobuf data-type/identifier/enum module (TheftVulnerability) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/sovereignty/skyhook/workforce_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/sovereignty/skyhook/workforce_pb2.pyj is a shared protobuf data-type/identifier/enum module (Workforce) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/standing/standing_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/standing/standing_pb2.pyj is a shared protobuf data-type/identifier/enum module (GainPercent, LossPercent, Source, Value) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/star/star_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/star/star_pb2.pyj is a shared protobuf data-type/identifier/enum module (Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/stargate/lock/api/admin/requests_pb2.pyj": {
@@ -7778,7 +7778,7 @@
       "namespace": "eve_public"
     },
     "quasar:eveProto/generated/eve_public/stargate/stargate_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/stargate/stargate_pb2.pyj is a shared protobuf data-type/identifier/enum module (Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/station/api/requests_pb2.pyj": {
@@ -7788,35 +7788,35 @@
       "namespace": "eve_public"
     },
     "quasar:eveProto/generated/eve_public/station/station_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/station/station_pb2.pyj is a shared protobuf data-type/identifier/enum module (Attributes, Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/store/category/category_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/store/category/category_pb2.pyj is a shared protobuf data-type/identifier/enum module (Attributes, Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/store/offer/offer_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/store/offer/offer_pb2.pyj is a shared protobuf data-type/identifier/enum module (Attributes, Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/store/product/product_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/store/product/product_pb2.pyj is a shared protobuf data-type/identifier/enum module (Attributes, Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/store/store_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/store/store_pb2.pyj is a shared protobuf data-type/identifier/enum module (Catalog, Price) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/store/targetaudience/catalogue/entry/entry_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/store/targetaudience/catalogue/entry/entry_pb2.pyj is a shared protobuf data-type/identifier/enum module (Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/store/targetaudience/image_resource_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/store/targetaudience/image_resource_pb2.pyj is a shared protobuf data-type/identifier/enum module (ImageResource) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/store/targetaudience/localized_text_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/store/targetaudience/localized_text_pb2.pyj is a shared protobuf data-type/identifier/enum module (LocalizedEntry, LocalizedText) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/store/targetaudience/offer/api/notices_pb2.pyj": {
@@ -7826,59 +7826,59 @@
       "namespace": "eve_public"
     },
     "quasar:eveProto/generated/eve_public/store/targetaudience/offer/content_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/store/targetaudience/offer/content_pb2.pyj is a shared protobuf data-type/identifier/enum module (BlueprintCopyGrant, Content, EveItemGrant, GrantedProduct, LicenceGrant, PlexGrant) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/store/targetaudience/offer/offer_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/store/targetaudience/offer/offer_pb2.pyj is a shared protobuf data-type/identifier/enum module (Attributes, Identifier, NotificationType) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/store/targetaudience/offer/overlay_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/store/targetaudience/offer/overlay_pb2.pyj is a shared protobuf data-type/identifier/enum module (Overlay, OverlayDisplayType, OverlayType) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/store/targetaudience/offer/price_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/store/targetaudience/offer/price_pb2.pyj is a shared protobuf data-type/identifier/enum module (Currency, PlexPrice, Price, PriceInCurrency) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/structure/group_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/structure/group_pb2.pyj is a shared protobuf data-type/identifier/enum module (Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/structure/structure_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/structure/structure_pb2.pyj is a shared protobuf data-type/identifier/enum module (Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/structure/structure_type_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/structure/structure_type_pb2.pyj is a shared protobuf data-type/identifier/enum module (Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/tale/spawntemplate_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/tale/spawntemplate_pb2.pyj is a shared protobuf data-type/identifier/enum module (Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/tale/tale_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/tale/tale_pb2.pyj is a shared protobuf data-type/identifier/enum module (Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/tracecontext_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/tracecontext_pb2.pyj is a shared protobuf data-type/identifier/enum module (TraceContext, TraceFlags, TraceState) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/ui/annotation_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/ui/annotation_pb2.pyj is a shared protobuf data-type/identifier/enum module (Annotation) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/ui/contenttag_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/ui/contenttag_pb2.pyj is a shared protobuf data-type/identifier/enum module (Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/ui/icon_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/ui/icon_pb2.pyj is a shared protobuf data-type/identifier/enum module (Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/ui/image_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/ui/image_pb2.pyj is a shared protobuf data-type/identifier/enum module (Attributes, Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/user/commerce/offer_pb2.pyj": {
@@ -7894,11 +7894,11 @@
       "namespace": "eve_public"
     },
     "quasar:eveProto/generated/eve_public/user/license/license_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/user/license/license_pb2.pyj is a shared protobuf data-type/identifier/enum module (Attributes, Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "quasar:eveProto/generated/eve_public/user/user_pb2.pyj": {
-      "disposition": "client-internal",
+      "disposition": "client_local",
       "evidence": "eveProto/generated/eve_public/user/user_pb2.pyj is a shared protobuf data-type/identifier/enum module (Identifier) with 0 Request, Response, or Notice RPC messages and 0 direct gateway calls (usage_kinds=[]) in V24 code.ccp; its wire types are tested via Q-1 and the endpoint protos that import it."
     },
     "rpc:ProjectDiscovery.append": {
