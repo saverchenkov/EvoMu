@@ -688,7 +688,7 @@ def main():
     for v in rpc_block[:80]:
         L.append("  - `%s:%d` %s `%s`" % (v["file"], v["line"], v["what"], v["name"]))
     report = "\n".join(L)
-    open(os.path.join(pdir, "claims_template.md"), "w").write(report)
+    open(os.path.join(pdir, "claims_template.md"), "w", encoding="utf-8").write(report)
     print(report)
 
     lint_ok = True
