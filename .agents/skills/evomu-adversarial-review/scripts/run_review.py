@@ -205,7 +205,8 @@ def env_audit(root):
 
 def run_tests(root, sdir, timeout, attest_dir=None):
     env = {k: v for k, v in os.environ.items() if k not in WRAPPER_ENV}
-    env["CARGO_TARGET_DIR"] = os.path.join(sdir, "target")  # isolated from agent artifacts
+    # Isolated from agent artifacts. Snapshot reviews pass a persistent per-worktree dir so builds stay incremental.
+    env["CARGO_TARGET_DIR"] = os.environ.get("EVOMU_REVIEW_TARGET_DIR") or os.path.join(sdir, "target")
     if attest_dir:
         shutil.rmtree(attest_dir, ignore_errors=True)
         os.makedirs(attest_dir, exist_ok=True)
@@ -529,6 +530,99 @@ def background_gap_audit(a, root, sdir):
     return UNAVAILABLE_EXIT if verdict == "UNAVAILABLE" else GAP_EXIT.get(verdict, 3)
 
 
+LOCAL_DATA_FILES = ("evomu_sde.sqlite", "quasar_descriptors.sqlite", "quasar_core_golden.json")
+
+
+def snapshot_review(a, root):
+    """Review a fixed commit in a temporary detached worktree so the agent's own worktree stays free to change.
+
+    - The snapshot gets the CURRENT gate (`main`'s .agents/) overlaid, so every review runs the latest rules no matter
+      how old the branch is; no rebase is needed just to pick up gate changes.
+    - Local client data files are symlinked from this worktree's data/ (they are gitignored).
+    - The verdict is recorded in THIS worktree's .evomu-reviews/state.json against the snapshot tree. Coverage is
+      keyed by code tree (review_lib.code_tree_of), so it covers the reviewed commit wherever it is merged.
+    Uncommitted changes are NOT reviewed: commit (a local wip branch is fine) before starting a review.
+    """
+    sha = subprocess.run(["git", "rev-parse", "--verify", a.commit + "^{commit}"], cwd=root, capture_output=True,
+                         text=True).stdout.strip()
+    if not sha:
+        print("[review] unknown commit: %s" % a.commit)
+        return 3
+    dirty = subprocess.run(["git", "status", "--porcelain", "--", ".", ":(exclude).agents"], cwd=root,
+                           capture_output=True, text=True).stdout.strip()
+    if dirty and a.commit == "HEAD":
+        print("[review] NOTE: %d uncommitted change(s) in this worktree are NOT part of this review; only commit %s "
+              "is reviewed." % (len(dirty.splitlines()), sha[:9]))
+    sdir = rl.state_dir(root)
+    ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    snap_parent = os.path.join(rl.main_state_dir(root), "snapshots", "%s-%s" % (ts, sha[:9]))
+    snap = os.path.join(snap_parent, os.path.basename(root))  # same basename: preflight history lookups still match
+    os.makedirs(snap_parent, exist_ok=True)
+    if subprocess.run(["git", "worktree", "add", "--detach", snap, sha], cwd=root, capture_output=True).returncode:
+        print("[review] could not create snapshot worktree at %s" % snap)
+        return 3
+    try:
+        if subprocess.run(["git", "rev-parse", "--verify", "-q", "main"], cwd=root, capture_output=True).returncode == 0:
+            shutil.rmtree(os.path.join(snap, ".agents"), ignore_errors=True)
+            subprocess.run(["git", "checkout", "main", "--", ".agents"], cwd=snap, capture_output=True)
+        os.makedirs(os.path.join(snap, "data"), exist_ok=True)
+        for f in LOCAL_DATA_FILES:
+            src = os.path.join(root, "data", f)
+            if os.path.exists(src) and not os.path.exists(os.path.join(snap, "data", f)):
+                os.symlink(os.path.realpath(src), os.path.join(snap, "data", f))
+        snap_sdir = rl.state_dir(snap)
+        if os.path.exists(os.path.join(sdir, "state.json")):
+            shutil.copy(os.path.join(sdir, "state.json"), os.path.join(snap_sdir, "state.json"))
+        before = {(r.get("timestamp"), r.get("mode")) for r in rl.load_state(root).get("reviews", [])}
+        argv, skip = [], False
+        for i, x in enumerate(sys.argv[1:]):
+            if skip:
+                skip = False
+                continue
+            if x in ("--commit", "--claims-file"):
+                skip = True
+                continue
+            if x.startswith("--commit=") or x.startswith("--claims-file="):
+                continue
+            argv.append(x)
+        if a.claims_file:
+            argv += ["--claims-file", os.path.abspath(a.claims_file)]
+        argv += ["--in-place"]
+        if not a.no_auto_audit and not a.foreground_audit:
+            argv += ["--foreground-audit"]  # the snapshot is deleted afterwards, so no detached audits from it
+        env = dict(os.environ, EVOMU_REVIEW_TARGET_DIR=os.path.join(sdir, "target"))
+        print("[review] reviewing commit %s in snapshot %s (current gate from main); you may keep working in %s"
+              % (sha[:9], snap, root), flush=True)
+        rc = subprocess.run([sys.executable, os.path.join(snap, ".agents", "skills", "evomu-adversarial-review",
+                                                          "scripts", "run_review.py")] + argv, cwd=snap, env=env).returncode
+        # Bring results home: run dirs, new review records, latest reports, auditor rows.
+        st = rl.load_state(root)
+        audited = False
+        for r in rl.load_state(snap).get("reviews", []):
+            if (r.get("timestamp"), r.get("mode")) in before:
+                continue
+            audited = audited or r.get("mode") == "gap-audit"
+            rd = os.path.join(snap_sdir, r.get("timestamp", ""))
+            dst = os.path.join(sdir, r.get("timestamp", ""))
+            if os.path.isdir(rd) and not os.path.exists(dst):
+                shutil.copytree(rd, dst, symlinks=True, ignore=shutil.ignore_patterns("target", "attest"))
+            if r.get("report"):
+                r["report"] = r["report"].replace(snap_sdir, sdir)
+            r["snapshot_commit"] = sha
+            st.setdefault("reviews", []).append(r)
+        rl.save_state(root, st)
+        for f in ("latest.md", "latest_gap_audit.md"):
+            if os.path.exists(os.path.join(snap_sdir, f)):
+                shutil.copy(os.path.join(snap_sdir, f), os.path.join(sdir, f))
+        aud = os.path.join(".agents", "skills", "evomu-adversarial-review", "references", "parity", "auditor_rows.json")
+        if audited and os.path.exists(os.path.join(snap, aud)):
+            shutil.copy(os.path.join(snap, aud), os.path.join(root, aud))
+        return rc
+    finally:
+        subprocess.run(["git", "worktree", "remove", "--force", snap], cwd=root, capture_output=True)
+        shutil.rmtree(snap_parent, ignore_errors=True)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--claims-file", help="Markdown file with the coding agent's claims/summary")
@@ -547,13 +641,16 @@ def main():
     ap.add_argument("--reuse-context", help=argparse.SUPPRESS)  # internal: background gap audit of a finished run
     ap.add_argument("--launcher", choices=["agy", "claude", "jetski-chat"], default="agy")
     ap.add_argument("--dry-run", action="store_true", help="Collect context and print the reviewer command only")
+    ap.add_argument("--commit", default="HEAD",
+                    help="Commit to review (default HEAD). It is reviewed in a temporary snapshot worktree, so you "
+                         "can keep editing and committing in this worktree while the review runs.")
+    ap.add_argument("--in-place", action="store_true",
+                    help="Review this worktree's working tree directly (legacy; the tree must stay untouched)")
     a = ap.parse_args()
 
     root = rl.repo_root(os.getcwd())
-    msg = rl.stale_gate(root)
-    if msg and not a.reuse_context:
-        print("[review] " + msg)
-        return 3
+    if not (a.in_place or a.reuse_context):
+        return snapshot_review(a, root)
     sdir = rl.state_dir(root)
     state = rl.load_state(root)
     if a.reuse_context:

@@ -190,9 +190,9 @@ def stale_gate(root):
         return None
     if working_paths_match_main(root, [".agents"]):
         return None
-    return ("STALE REVIEW GATE: this worktree's .agents/ differs from the `main` branch. Rebase or merge `main` "
-            "into this branch (git stash; git rebase main; git stash pop) so you run the current pre-flight and "
-            "review rules, then retry. Never edit .agents/ yourself.")
+    return ("this worktree's .agents/ differs from the `main` branch, so pre-flight is running older rules. Rebase "
+            "onto `main` when convenient. run_review.py always reviews with main's current gate. Never edit .agents/ "
+            "yourself.")
 
 
 if __name__ == "__main__":

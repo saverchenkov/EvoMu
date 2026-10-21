@@ -82,6 +82,7 @@
 - **On a new machine:** clone, provide the local SDE (`data/evomu_sde.sqlite`: build it with `tools/sde-import` from your own V24.01 client install, or copy it from another machine you control; never commit it), then run `preflight.py --early-only`.
 
 ## Pre-flight before every review (mandatory)
+- If `.agents/` changed on `main` since your branch, pre-flight warns but still runs. Rebase when convenient, and never in the middle of your own work just for the gate.
 - Before `run_review.py`, run:
   `/usr/bin/python3 .agents/skills/evomu-adversarial-review/scripts/preflight.py --claims /tmp/evomu_claims.md`
   It takes about a minute, against about ten for a review.
@@ -112,7 +113,7 @@
 - From then on, keep new code in this layout.
 
 ## Parallel delegation (subagents)
-- **Never let two agents edit the same working tree.** Any edit while a review runs makes that review INVALID, and concurrent edits clobber each other. Every subagent that writes code gets an **isolated workspace**: a `branch`/`share` workspace, or a `git worktree add ../EvoMu-<track> -b track/<track>`. Read-only research subagents may share the main tree.
+- **Never let two agents edit the same working tree** (concurrent edits clobber each other). Reviews don't block a worktree: `run_review.py` reviews a fixed commit (default `HEAD`, or `--commit <sha>`) in a temporary snapshot worktree with `main`'s current gate, so you can keep editing and committing while it runs. Commit before starting a review; uncommitted changes aren't reviewed. Merge only the reviewed commit, or a tree with the same code tree. Every subagent that writes code gets an **isolated workspace**: a `branch`/`share` workspace, or a `git worktree add ../EvoMu-<track> -b track/<track>`. Read-only research subagents may share the main tree.
 - **In effect now.** Phase 1 and `S-REFACTOR` are committed, so the orchestrator must keep **at least 3 independent tracks running concurrently**, each a subagent in its own worktree, while it merges and reviews. Working serially on one track is a process violation unless every remaining open task depends on that one track.
 - **Tracks that can run in parallel once the refactor lands** (one subagent each; the orchestrator keeps the canonical status file):
   - T-1/T-3/T-5 (test kit, proptest/fuzz, coverage and mutants);

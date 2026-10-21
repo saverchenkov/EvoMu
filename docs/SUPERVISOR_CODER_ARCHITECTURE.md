@@ -86,7 +86,7 @@ To prevent context contamination, lock contention, and accidental invalidation o
 ```
 
 ### Invariants for Worktrees
-1. **Single-Agent Invariant:** Exactly one agent writes to a given worktree at any time. Concurrent writes to the same working tree immediately invalidate running reviews and corrupt git index state.
+1. **Single-Agent Invariant:** Exactly one agent writes to a given worktree at any time (concurrent writes corrupt git index state). Reviews run in a temporary snapshot worktree of the reviewed commit, overlaid with `main`'s current `.agents/`, so the coder keeps working while a review runs.
 2. **Local SDE:** `data/evomu_sde.sqlite` is client-derived and never committed (raw or compressed). Build it with `tools/sde-import` from your own V24.01 client install, or copy it from another machine you control. Worktrees share the canonical SDE path:
    ```bash
    export EVOMU_SDE_PATH=/Users/sergeya/ai/EvoMu/data/evomu_sde.sqlite

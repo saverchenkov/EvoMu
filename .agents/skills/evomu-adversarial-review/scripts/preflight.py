@@ -568,8 +568,8 @@ def main():
     root = rl.repo_root(os.getcwd())
     msg = rl.stale_gate(root)
     if msg:
-        safe_print("[preflight] " + msg)
-        return 1
+        # Warning only (user decision 2026-10-21): run_review.py reviews a snapshot with main's current gate anyway.
+        safe_print("[preflight] WARNING (not blocking): " + msg)
     sdir = rl.state_dir(root)
     pdir = os.path.join(sdir, "preflight")
     os.makedirs(pdir, exist_ok=True)

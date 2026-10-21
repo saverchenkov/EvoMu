@@ -46,7 +46,7 @@ Run the review **before** any of the following:
    - **PASS:** proceed.
    - **UNAVAILABLE (exit 4):** every reviewer model (`opus-5.5-medium`, then the fallbacks `gemini-launch-candidate-high` and `gemini-flash-next`) was out of quota or capacity. **Nothing was reviewed.** Follow `AGENTS.md` → "Reviewer unavailable": local `wip/*` branches only, no merge or push to `main`, and queue per-task reviews for when quota returns.
    - **Fallback reviews:** a verdict from a fallback model counts for commits like any other. The final gate still requires a PASS from the primary model.
-   - **INVALID / ERROR:** the workspace changed during review or the reviewer failed. Rerun once the tree is quiet. If `agy` is not authenticated, ask the user to run `agy` interactively once.
+   - **INVALID / ERROR:** the reviewer wrote to its snapshot, or it failed. Rerun. (Reviews run in a temporary snapshot worktree of the reviewed commit, so your own edits during a review don't invalidate it.) If `agy` is not authenticated, ask the user to run `agy` interactively once.
 5. **Report honestly.** Always tell the user the verdict word, the report path, the number of blocking findings, and whether tests actually executed (`tests_executed` in the report header). Never describe a result more favorably than the report does.
 
 ## Rules
