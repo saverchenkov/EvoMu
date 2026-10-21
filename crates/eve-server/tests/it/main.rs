@@ -4,14 +4,19 @@
 #![forbid(unsafe_code)]
 
 mod common;
+mod account_admin_complete;
 mod action_plan_data_economy;
 mod agents_missions_complete;
 mod auth;
 mod auth_persistence;
 mod character;
+mod character_clones_skills_complete;
+mod character_contacts_gm_tests;
+mod character_creation_sheet;
 mod character_esi_social_mail;
 mod character_esi_wallet_loyalty;
 mod character_progression;
+mod character_progression_ext;
 mod character_skills_clones;
 mod client_handshake_v24;
 mod client_login_rpcs;
@@ -19,6 +24,7 @@ mod client_harness;
 mod combat;
 mod combat_death_crimewatch;
 mod combat_pve;
+mod cosmetics_ui_complete;
 mod destiny_binary_stream;
 mod dogma_combat;
 mod dogma_modifier_engine;

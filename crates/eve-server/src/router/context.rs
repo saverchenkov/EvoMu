@@ -384,6 +384,10 @@ impl ServerContext {
     pub fn advance_secs(&self, secs: u64) {
         self.clock().advance_secs(secs);
         if secs > 0 {
+            crate::services::implant_plugging::purge_expired_boosters_all(
+                self,
+                self.now_unix_secs(),
+            );
             self.advance_skill_queues(secs as f64);
             let now = self.now_unix_secs();
             let mut balls_to_remove: Vec<(u32, i64)> = Vec::new();
@@ -519,6 +523,7 @@ impl ServerContext {
         }
         let sde = self.sde.clone();
         let now_ft = self.now_blueos_filetime_ticks();
+        let now_unix = self.now_unix();
         let (invalidated_ships, completed_events) = self.db.with_mut_snapshot(|snap| {
             let mut ships_to_invalidate = Vec::new();
             let mut completed_events = Vec::new();
@@ -541,6 +546,9 @@ impl ServerContext {
                 if is_alpha && current_char_sp >= 5_000_000.0 {
                     continue;
                 }
+                let eff_attrs = crate::services::character_skills::effective_character_attributes(
+                    &sde, snap, char_id,
+                );
 
                 let queue = snap
                     .skill_queues
@@ -562,6 +570,16 @@ impl ServerContext {
                         remaining_queue.push(q);
                         continue;
                     }
+                    if is_alpha {
+                        let alpha_cap =
+                            crate::services::character_skills::alpha_skill_cap_for_character(
+                                &sde, ch.race_id, q.type_id,
+                            );
+                        if q.target_level > alpha_cap {
+                            remaining_queue.push(q);
+                            continue;
+                        }
+                    }
 
                     let skill_type = sde.types.get(&q.type_id);
                     let p_attr_id = skill_type
@@ -574,8 +592,12 @@ impl ServerContext {
                         .copied()
                         .map(|v| v as u32)
                         .unwrap_or(eve_sde::attr_ids::WILLPOWER as u32);
-                    let p_val = ch.neural.get_attribute_by_id(p_attr_id);
-                    let s_val = ch.neural.get_attribute_by_id(s_attr_id);
+                    let p_val = crate::services::character_skills::lookup_effective_attr_from_tuple(
+                        eff_attrs, p_attr_id,
+                    );
+                    let s_val = crate::services::character_skills::lookup_effective_attr_from_tuple(
+                        eff_attrs, s_attr_id,
+                    );
                     let clone_mult = if ch.clone_grade == 2 { 1.0 } else { 0.5 };
                     let sp_min = crate::formulas::sp_per_minute(p_val, s_val, clone_mult).max(1e-6);
                     let sp_sec = sp_min / 60.0;
@@ -619,6 +641,7 @@ impl ServerContext {
                         q.start_sp += sp_advance;
                         let rem_sp = (q.end_sp - q.start_sp).max(0.0);
                         q.duration_seconds = rem_sp / sp_sec;
+                        q.started_at_unix = Some(now_unix);
                         total_sp_gained += sp_advance;
 
                         let current_lvl = skills_map.get(&q.type_id).map(|s| s.level).unwrap_or(0);
@@ -653,6 +676,11 @@ impl ServerContext {
                             },
                         );
                         remaining_queue.push(q);
+                    }
+                }
+                if let Some(head) = remaining_queue.first_mut() {
+                    if head.started_at_unix.is_none() {
+                        head.started_at_unix = Some(now_unix);
                     }
                 }
                 snap.skill_queues.insert(char_id, remaining_queue);
@@ -754,6 +782,12 @@ impl ServerContext {
         let active_implants = self.db.with_snapshot(|s| {
             s.active_implants.get(&char_id).cloned().unwrap_or_default()
         });
+        let (active_boosters, active_booster_side_effects) =
+            crate::services::implant_plugging::active_combat_boosters_for_char(
+                &self.db,
+                char_id,
+                self.now_unix(),
+            );
         let active_projected = self
             .projected_ewar
             .read()
@@ -767,6 +801,7 @@ impl ServerContext {
             .unwrap_or_else(|e| e.into_inner())
             .get(&ship_id)
             .cloned()
+            .filter(|e| e.boosters == active_boosters && active_booster_side_effects.is_empty())
         {
             existing.set_character_skills(skill_levels);
             existing.set_implants(active_implants);
@@ -786,8 +821,9 @@ impl ServerContext {
         };
 
         let mut fit = ShipFittingEngine::from_sde(ship_id, ship_item.type_id, &self.sde)
-            .with_character_skills(skill_levels)
-            .with_implants(active_implants);
+            .with_character_skills(skill_levels.clone())
+            .with_implants(active_implants)
+            .with_boosters(active_boosters.clone());
         fit.projected_ewar = active_projected;
 
         let (online_states, active_states, active_charges) = self.db.with_snapshot(|s| {
@@ -856,6 +892,13 @@ impl ServerContext {
             }
         }
         fit.recalculate_stats(&self.sde);
+        crate::services::implant_plugging::apply_active_booster_side_effect_adjustments(
+            &self.sde,
+            &mut fit.ship.base_attributes,
+            &skill_levels,
+            &active_boosters,
+            &active_booster_side_effects,
+        );
 
         self.store_ship_fitting(ship_id, fit.clone());
         Ok(fit)
@@ -1205,192 +1248,6 @@ impl ServerContext {
                     src_mut.version,
                 ))
             }
-        }
-    }
-
-    /// Builds a `CombatState` for a player's ship populated from its Dogma `ShipFittingEngine`
-    /// attributes (or SDE `default_attributes` fallback), including all 12 shield/armor/hull resonances.
-    pub fn build_ship_combat_state(
-        &self,
-        char_id: i64,
-        ship_id: i64,
-        type_id: u32,
-    ) -> eve_destiny::CombatState {
-        if let Ok(fit) = self.get_or_rebuild_ship_fitting(char_id, ship_id) {
-            let get_attr = |attr_id: u16, fallback: f64| -> f64 {
-                if fit.ship.base_attributes.contains_key(&attr_id)
-                    || self.sde.attributes.contains_key(&attr_id)
-                    || fit
-                        .ship
-                        .modifiers
-                        .iter()
-                        .any(|m| m.target_attribute_id == attr_id)
-                {
-                    fit.ship.get_attribute(attr_id, &self.sde)
-                } else {
-                    fallback
-                }
-            };
-            let shield = get_attr(eve_sde::attr_ids::SHIELD_CAPACITY, 450.0);
-            let armor = get_attr(eve_sde::attr_ids::ARMOR_HP, 350.0);
-            let hull = get_attr(eve_sde::attr_ids::HP_STRUCT, 350.0);
-            let cap = get_attr(eve_sde::attr_ids::CAPACITOR_CAPACITY, 250.0);
-            let sig = get_attr(eve_sde::attr_ids::SIGNATURE_RADIUS, 35.0);
-            let shield_rech = get_attr(eve_sde::attr_ids::SHIELD_RECHARGE_RATE, 120_000.0);
-            let cap_rech = get_attr(eve_sde::attr_ids::RECHARGE_RATE, 120_000.0);
-            return eve_destiny::CombatState {
-                shield_hp: shield,
-                max_shield_hp: shield,
-                armor_hp: armor,
-                max_armor_hp: armor,
-                structure_hp: hull,
-                max_structure_hp: hull,
-                capacitor: cap,
-                max_capacitor: cap,
-                signature_radius: sig,
-                shield_recharge_time_ms: shield_rech,
-                capacitor_recharge_time_ms: cap_rech,
-                shield_resonance: [
-                    get_attr(eve_sde::attr_ids::SHIELD_EM_DAMAGE_RESONANCE, 1.0),
-                    get_attr(eve_sde::attr_ids::SHIELD_THERMAL_DAMAGE_RESONANCE, 0.8),
-                    get_attr(eve_sde::attr_ids::SHIELD_KINETIC_DAMAGE_RESONANCE, 0.6),
-                    get_attr(eve_sde::attr_ids::SHIELD_EXPLOSIVE_DAMAGE_RESONANCE, 0.5),
-                ],
-                armor_resonance: [
-                    get_attr(eve_sde::attr_ids::ARMOR_EM_DAMAGE_RESONANCE, 0.5),
-                    get_attr(eve_sde::attr_ids::ARMOR_THERMAL_DAMAGE_RESONANCE, 0.65),
-                    get_attr(eve_sde::attr_ids::ARMOR_KINETIC_DAMAGE_RESONANCE, 0.75),
-                    get_attr(eve_sde::attr_ids::ARMOR_EXPLOSIVE_DAMAGE_RESONANCE, 0.9),
-                ],
-                structure_resonance: [
-                    get_attr(eve_sde::attr_ids::EM_DAMAGE_RESONANCE, 0.67),
-                    get_attr(eve_sde::attr_ids::THERMAL_DAMAGE_RESONANCE, 0.67),
-                    get_attr(eve_sde::attr_ids::KINETIC_DAMAGE_RESONANCE, 0.67),
-                    get_attr(eve_sde::attr_ids::EXPLOSIVE_DAMAGE_RESONANCE, 0.67),
-                ],
-                ..eve_destiny::CombatState::default()
-            };
-        }
-        self.build_type_combat_state(type_id)
-    }
-
-    /// Builds a `CombatState` directly from a type's SDE `default_attributes` (for NPCs, wrecks, or fallback hulls).
-    pub fn build_type_combat_state(&self, type_id: u32) -> eve_destiny::CombatState {
-        if let Some(t) = self.sde.types.get(&type_id) {
-            let a = &t.default_attributes;
-            let shield = a
-                .get(&eve_sde::attr_ids::SHIELD_CAPACITY)
-                .copied()
-                .unwrap_or(50.0);
-            let armor = a.get(&eve_sde::attr_ids::ARMOR_HP).copied().unwrap_or(50.0);
-            let hull = a
-                .get(&eve_sde::attr_ids::HP_STRUCT)
-                .copied()
-                .unwrap_or(50.0);
-            let cap = a
-                .get(&eve_sde::attr_ids::CAPACITOR_CAPACITY)
-                .copied()
-                .unwrap_or(100.0);
-            let sig = a
-                .get(&eve_sde::attr_ids::SIGNATURE_RADIUS)
-                .copied()
-                .unwrap_or(t.radius.max(25.0));
-            let shield_rech = a
-                .get(&eve_sde::attr_ids::SHIELD_RECHARGE_RATE)
-                .copied()
-                .unwrap_or(120_000.0);
-            let cap_rech = a
-                .get(&eve_sde::attr_ids::RECHARGE_RATE)
-                .copied()
-                .unwrap_or(120_000.0);
-            return eve_destiny::CombatState {
-                shield_hp: shield,
-                max_shield_hp: shield,
-                armor_hp: armor,
-                max_armor_hp: armor,
-                structure_hp: hull,
-                max_structure_hp: hull,
-                capacitor: cap,
-                max_capacitor: cap,
-                signature_radius: sig,
-                shield_recharge_time_ms: shield_rech,
-                capacitor_recharge_time_ms: cap_rech,
-                shield_resonance: [
-                    a.get(&eve_sde::attr_ids::SHIELD_EM_DAMAGE_RESONANCE)
-                        .copied()
-                        .unwrap_or(1.0),
-                    a.get(&eve_sde::attr_ids::SHIELD_THERMAL_DAMAGE_RESONANCE)
-                        .copied()
-                        .unwrap_or(1.0),
-                    a.get(&eve_sde::attr_ids::SHIELD_KINETIC_DAMAGE_RESONANCE)
-                        .copied()
-                        .unwrap_or(1.0),
-                    a.get(&eve_sde::attr_ids::SHIELD_EXPLOSIVE_DAMAGE_RESONANCE)
-                        .copied()
-                        .unwrap_or(1.0),
-                ],
-                armor_resonance: [
-                    a.get(&eve_sde::attr_ids::ARMOR_EM_DAMAGE_RESONANCE)
-                        .copied()
-                        .unwrap_or(1.0),
-                    a.get(&eve_sde::attr_ids::ARMOR_THERMAL_DAMAGE_RESONANCE)
-                        .copied()
-                        .unwrap_or(1.0),
-                    a.get(&eve_sde::attr_ids::ARMOR_KINETIC_DAMAGE_RESONANCE)
-                        .copied()
-                        .unwrap_or(1.0),
-                    a.get(&eve_sde::attr_ids::ARMOR_EXPLOSIVE_DAMAGE_RESONANCE)
-                        .copied()
-                        .unwrap_or(1.0),
-                ],
-                structure_resonance: [
-                    a.get(&eve_sde::attr_ids::EM_DAMAGE_RESONANCE)
-                        .copied()
-                        .unwrap_or(1.0),
-                    a.get(&eve_sde::attr_ids::THERMAL_DAMAGE_RESONANCE)
-                        .copied()
-                        .unwrap_or(1.0),
-                    a.get(&eve_sde::attr_ids::KINETIC_DAMAGE_RESONANCE)
-                        .copied()
-                        .unwrap_or(1.0),
-                    a.get(&eve_sde::attr_ids::EXPLOSIVE_DAMAGE_RESONANCE)
-                        .copied()
-                        .unwrap_or(1.0),
-                ],
-                ..eve_destiny::CombatState::default()
-            };
-        }
-        eve_destiny::CombatState::default()
-    }
-
-    /// Builds a [`eve_destiny::SlimItemMeta`] for a player ship from SDE type metadata and the character's DB record (`P-7`).
-    pub fn build_ship_slim_meta(&self, char_id: i64, type_id: u32) -> eve_destiny::SlimItemMeta {
-        let (group_id, category_id) = self
-            .sde
-            .types
-            .get(&type_id)
-            .map(|t| (t.group_id, t.category_id))
-            .unwrap_or((25, 6));
-        let (corp_id, alliance_id, security_status) = self
-            .db
-            .get_character(char_id)
-            .map(|ch| {
-                (
-                    ch.corporation_id,
-                    ch.alliance_id.unwrap_or(0),
-                    ch.security_status,
-                )
-            })
-            .unwrap_or((1_000_009, 0, 0.0));
-        eve_destiny::SlimItemMeta {
-            group_id,
-            category_id,
-            owner_id: char_id,
-            char_id: Some(char_id),
-            corp_id,
-            alliance_id,
-            security_status,
-            is_cloaked: false,
         }
     }
 }

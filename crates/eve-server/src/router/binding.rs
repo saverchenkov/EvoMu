@@ -1,8 +1,9 @@
 //! Stateful object binding and moniker handles (`MachoBindObject`).
 
 use crate::router::context::{BoundObjectEntry, ServerContext, NEXT_BOUND_ID};
+use crate::router::{NotificationTarget, PendingMachoNotification};
 use eve_machonet::SessionState;
-use eve_proto::BridgeRpcError;
+use eve_proto::{BridgeRpcError, PyRep};
 use std::sync::atomic::Ordering;
 
 const ERR_BIND_AUTH_DENIED: &str = "BindAuthorizationDenied";
@@ -323,5 +324,216 @@ impl ServerContext {
         }
 
         Ok(DBRowDescriptor::inv_item_header().build_crowset(rows))
+    }
+
+    /// Builds a `CombatState` for a player's ship populated from its Dogma `ShipFittingEngine`
+    /// attributes (or SDE `default_attributes` fallback), including all 12 shield/armor/hull resonances.
+    pub fn build_ship_combat_state(
+        &self,
+        char_id: i64,
+        ship_id: i64,
+        type_id: u32,
+    ) -> eve_destiny::CombatState {
+        if let Ok(fit) = self.get_or_rebuild_ship_fitting(char_id, ship_id) {
+            let get_attr = |attr_id: u16, fallback: f64| -> f64 {
+                if fit.ship.base_attributes.contains_key(&attr_id)
+                    || self.sde.attributes.contains_key(&attr_id)
+                    || fit
+                        .ship
+                        .modifiers
+                        .iter()
+                        .any(|m| m.target_attribute_id == attr_id)
+                {
+                    fit.ship.get_attribute(attr_id, &self.sde)
+                } else {
+                    fallback
+                }
+            };
+            let shield = get_attr(eve_sde::attr_ids::SHIELD_CAPACITY, 450.0);
+            let armor = get_attr(eve_sde::attr_ids::ARMOR_HP, 350.0);
+            let hull = get_attr(eve_sde::attr_ids::HP_STRUCT, 350.0);
+            let cap = get_attr(eve_sde::attr_ids::CAPACITOR_CAPACITY, 250.0);
+            let sig = get_attr(eve_sde::attr_ids::SIGNATURE_RADIUS, 35.0);
+            let shield_rech = get_attr(eve_sde::attr_ids::SHIELD_RECHARGE_RATE, 120_000.0);
+            let cap_rech = get_attr(eve_sde::attr_ids::RECHARGE_RATE, 120_000.0);
+            return eve_destiny::CombatState {
+                shield_hp: shield,
+                max_shield_hp: shield,
+                armor_hp: armor,
+                max_armor_hp: armor,
+                structure_hp: hull,
+                max_structure_hp: hull,
+                capacitor: cap,
+                max_capacitor: cap,
+                signature_radius: sig,
+                shield_recharge_time_ms: shield_rech,
+                capacitor_recharge_time_ms: cap_rech,
+                shield_resonance: [
+                    get_attr(eve_sde::attr_ids::SHIELD_EM_DAMAGE_RESONANCE, 1.0),
+                    get_attr(eve_sde::attr_ids::SHIELD_THERMAL_DAMAGE_RESONANCE, 0.8),
+                    get_attr(eve_sde::attr_ids::SHIELD_KINETIC_DAMAGE_RESONANCE, 0.6),
+                    get_attr(eve_sde::attr_ids::SHIELD_EXPLOSIVE_DAMAGE_RESONANCE, 0.5),
+                ],
+                armor_resonance: [
+                    get_attr(eve_sde::attr_ids::ARMOR_EM_DAMAGE_RESONANCE, 0.5),
+                    get_attr(eve_sde::attr_ids::ARMOR_THERMAL_DAMAGE_RESONANCE, 0.65),
+                    get_attr(eve_sde::attr_ids::ARMOR_KINETIC_DAMAGE_RESONANCE, 0.75),
+                    get_attr(eve_sde::attr_ids::ARMOR_EXPLOSIVE_DAMAGE_RESONANCE, 0.9),
+                ],
+                structure_resonance: [
+                    get_attr(eve_sde::attr_ids::EM_DAMAGE_RESONANCE, 0.67),
+                    get_attr(eve_sde::attr_ids::THERMAL_DAMAGE_RESONANCE, 0.67),
+                    get_attr(eve_sde::attr_ids::KINETIC_DAMAGE_RESONANCE, 0.67),
+                    get_attr(eve_sde::attr_ids::EXPLOSIVE_DAMAGE_RESONANCE, 0.67),
+                ],
+                ..eve_destiny::CombatState::default()
+            };
+        }
+        self.build_type_combat_state(type_id)
+    }
+
+    /// Builds a `CombatState` directly from a type's SDE `default_attributes` (for NPCs, wrecks, or fallback hulls).
+    pub fn build_type_combat_state(&self, type_id: u32) -> eve_destiny::CombatState {
+        if let Some(t) = self.sde.types.get(&type_id) {
+            let a = &t.default_attributes;
+            let shield = a
+                .get(&eve_sde::attr_ids::SHIELD_CAPACITY)
+                .copied()
+                .unwrap_or(50.0);
+            let armor = a.get(&eve_sde::attr_ids::ARMOR_HP).copied().unwrap_or(50.0);
+            let hull = a
+                .get(&eve_sde::attr_ids::HP_STRUCT)
+                .copied()
+                .unwrap_or(50.0);
+            let cap = a
+                .get(&eve_sde::attr_ids::CAPACITOR_CAPACITY)
+                .copied()
+                .unwrap_or(100.0);
+            let sig = a
+                .get(&eve_sde::attr_ids::SIGNATURE_RADIUS)
+                .copied()
+                .unwrap_or(t.radius.max(25.0));
+            let shield_rech = a
+                .get(&eve_sde::attr_ids::SHIELD_RECHARGE_RATE)
+                .copied()
+                .unwrap_or(120_000.0);
+            let cap_rech = a
+                .get(&eve_sde::attr_ids::RECHARGE_RATE)
+                .copied()
+                .unwrap_or(120_000.0);
+            return eve_destiny::CombatState {
+                shield_hp: shield,
+                max_shield_hp: shield,
+                armor_hp: armor,
+                max_armor_hp: armor,
+                structure_hp: hull,
+                max_structure_hp: hull,
+                capacitor: cap,
+                max_capacitor: cap,
+                signature_radius: sig,
+                shield_recharge_time_ms: shield_rech,
+                capacitor_recharge_time_ms: cap_rech,
+                shield_resonance: [
+                    a.get(&eve_sde::attr_ids::SHIELD_EM_DAMAGE_RESONANCE)
+                        .copied()
+                        .unwrap_or(1.0),
+                    a.get(&eve_sde::attr_ids::SHIELD_THERMAL_DAMAGE_RESONANCE)
+                        .copied()
+                        .unwrap_or(1.0),
+                    a.get(&eve_sde::attr_ids::SHIELD_KINETIC_DAMAGE_RESONANCE)
+                        .copied()
+                        .unwrap_or(1.0),
+                    a.get(&eve_sde::attr_ids::SHIELD_EXPLOSIVE_DAMAGE_RESONANCE)
+                        .copied()
+                        .unwrap_or(1.0),
+                ],
+                armor_resonance: [
+                    a.get(&eve_sde::attr_ids::ARMOR_EM_DAMAGE_RESONANCE)
+                        .copied()
+                        .unwrap_or(1.0),
+                    a.get(&eve_sde::attr_ids::ARMOR_THERMAL_DAMAGE_RESONANCE)
+                        .copied()
+                        .unwrap_or(1.0),
+                    a.get(&eve_sde::attr_ids::ARMOR_KINETIC_DAMAGE_RESONANCE)
+                        .copied()
+                        .unwrap_or(1.0),
+                    a.get(&eve_sde::attr_ids::ARMOR_EXPLOSIVE_DAMAGE_RESONANCE)
+                        .copied()
+                        .unwrap_or(1.0),
+                ],
+                structure_resonance: [
+                    a.get(&eve_sde::attr_ids::EM_DAMAGE_RESONANCE)
+                        .copied()
+                        .unwrap_or(1.0),
+                    a.get(&eve_sde::attr_ids::THERMAL_DAMAGE_RESONANCE)
+                        .copied()
+                        .unwrap_or(1.0),
+                    a.get(&eve_sde::attr_ids::KINETIC_DAMAGE_RESONANCE)
+                        .copied()
+                        .unwrap_or(1.0),
+                    a.get(&eve_sde::attr_ids::EXPLOSIVE_DAMAGE_RESONANCE)
+                        .copied()
+                        .unwrap_or(1.0),
+                ],
+                ..eve_destiny::CombatState::default()
+            };
+        }
+        eve_destiny::CombatState::default()
+    }
+
+    /// Builds a [`eve_destiny::SlimItemMeta`] for a player ship from SDE type metadata and the character's DB record (`P-7`).
+    pub fn build_ship_slim_meta(&self, char_id: i64, type_id: u32) -> eve_destiny::SlimItemMeta {
+        let (group_id, category_id) = self
+            .sde
+            .types
+            .get(&type_id)
+            .map(|t| (t.group_id, t.category_id))
+            .unwrap_or((25, 6));
+        let (corp_id, alliance_id, security_status) = self
+            .db
+            .get_character(char_id)
+            .map(|ch| {
+                (
+                    ch.corporation_id,
+                    ch.alliance_id.unwrap_or(0),
+                    ch.security_status,
+                )
+            })
+            .unwrap_or((1_000_009, 0, 0.0));
+        eve_destiny::SlimItemMeta {
+            group_id,
+            category_id,
+            owner_id: char_id,
+            char_id: Some(char_id),
+            corp_id,
+            alliance_id,
+            security_status,
+            is_cloaked: false,
+        }
+    }
+
+    /// Emits an `OnSkillQueuePausedServer` notification to character (`feat:skills.queue-pause`).
+    pub fn notify_skill_queue_paused_server(&self, char_id: i64) -> Vec<PendingMachoNotification> {
+        self.notify(
+            NotificationTarget::Character(char_id),
+            "OnSkillQueuePausedServer",
+            "charid",
+            vec![],
+        )
+    }
+
+    /// `OnNewSkillQueueSaved(newQueue)`; the client stores `newQueue` as its skill queue and
+    /// scatters `OnSkillQueueChanged`.
+    pub fn notify_new_skill_queue_saved(
+        &self,
+        char_id: i64,
+        new_queue: PyRep,
+    ) -> Vec<PendingMachoNotification> {
+        self.notify(
+            NotificationTarget::Character(char_id),
+            "OnNewSkillQueueSaved",
+            "charid",
+            vec![new_queue],
+        )
     }
 }

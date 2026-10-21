@@ -6,9 +6,11 @@
 
 #![forbid(unsafe_code)]
 
+pub mod account_services;
 pub mod agents_missions;
 pub mod auth_cache;
 pub mod char_selection;
+pub mod character_lifecycle;
 pub mod character_skills;
 pub mod client_login;
 pub mod combat_crimewatch;
@@ -16,10 +18,13 @@ pub mod config_service;
 pub mod contracts_service;
 pub use contracts_service as contracts;
 pub mod cosmetics_events;
+pub mod cosmetics_ui_ops;
 pub mod fitting_mining_lasers;
 pub mod fleet_social;
+pub mod implant_plugging;
 pub mod industry_pi;
 pub mod inventory_fitting;
+pub mod jump_clone_names;
 pub mod lp_store;
 pub mod market_contracts;
 pub mod market_trading;

@@ -70,6 +70,7 @@ impl ServerContext {
             })
             .unwrap_or(0);
 
+        let prev_station_id = session.station_id;
         let res = Box::pin(self.dispatch_rpc_inner(
             session,
             service,
@@ -80,6 +81,41 @@ impl ServerContext {
             caller_trace,
         ))
         .await;
+
+        if res.is_ok() && service == "stationSvc" {
+            if let Some(cid) = session.character_id {
+                let guest_row = || {
+                    self.db.with_snapshot(|snap| {
+                        let c = snap.characters.get(&cid);
+                        PyRep::Tuple(vec![
+                            PyRep::Integer(cid),
+                            c.map(|c| PyRep::Integer(c.corporation_id)).unwrap_or(PyRep::None),
+                            c.and_then(|c| c.alliance_id).map(PyRep::Integer).unwrap_or(PyRep::None),
+                            c.and_then(|c| c.war_faction_id).map(PyRep::Integer).unwrap_or(PyRep::None),
+                        ])
+                    })
+                };
+                if method == "Undock" {
+                    if let Some(st_id) = prev_station_id.filter(|_| session.station_id.is_none()) {
+                        self.notify(
+                            crate::router::NotificationTarget::Station(st_id),
+                            "OnCharNoLongerInStation",
+                            "charid",
+                            vec![guest_row()],
+                        );
+                    }
+                } else if method == "Dock" {
+                    if let Some(st_id) = session.station_id.filter(|_| prev_station_id.is_none()) {
+                        self.notify(
+                            crate::router::NotificationTarget::Station(st_id),
+                            "OnCharNowInStation",
+                            "charid",
+                            vec![guest_row()],
+                        );
+                    }
+                }
+            }
+        }
 
         if let Some(cid) = session.character_id {
             if let Some(notifs) = self
@@ -395,7 +431,23 @@ impl ServerContext {
         }
 
         // Dispatch across the 12 domain modules in order
-        if let Some(res) = Box::pin(services::client_login::handle(
+        if let Some(res) =
+            Box::pin(services::account_services::handle(self, session, effective_service, method, args)).await
+        {
+            return res;
+        }
+        if let Some(res) = Box::pin(services::character_skills::character_contacts_gm::handle_gm_qa_rpcs(
+            self,
+            session,
+            effective_service,
+            method,
+            args,
+        ))
+        .await
+        {
+            return res;
+        }
+        if let Some(res) = Box::pin(services::auth_cache::handle(
             self,
             session,
             effective_service,
@@ -405,9 +457,14 @@ impl ServerContext {
         ))
         .await
         {
+            if (effective_service, method) == ("authentication", "Login") && res.is_ok() {
+                if let Some(uid) = session.user_id {
+                    services::account_services::on_login(self, uid);
+                }
+            }
             return res;
         }
-        if let Some(res) = Box::pin(services::auth_cache::handle(
+        if let Some(res) = Box::pin(services::client_login::handle(
             self,
             session,
             effective_service,
@@ -620,6 +677,18 @@ impl ServerContext {
             return res;
         }
         if let Some(res) = Box::pin(services::sov_fw_insurgency::handle(
+            self,
+            session,
+            effective_service,
+            method,
+            args,
+            kwargs,
+        ))
+        .await
+        {
+            return res;
+        }
+        if let Some(res) = Box::pin(services::cosmetics_ui_ops::handle(
             self,
             session,
             effective_service,
