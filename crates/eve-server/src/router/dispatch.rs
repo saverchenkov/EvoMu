@@ -447,6 +447,16 @@ impl ServerContext {
         {
             return res;
         }
+        if let Some(res) = services::project_discovery::handle_project_discovery(
+            self,
+            session,
+            effective_service,
+            method,
+            args,
+            kwargs,
+        ) {
+            return res;
+        }
         if let Some(res) = Box::pin(services::auth_cache::handle(
             self,
             session,
@@ -467,6 +477,19 @@ impl ServerContext {
         if let Some(res) = Box::pin(services::client_login::handle(
             self,
             session,
+            effective_service,
+            method,
+            args,
+            kwargs,
+        ))
+        .await
+        {
+            return res;
+        }
+        if let Some(res) = Box::pin(services::corp_registry_ops::handle_corp_hangar_invbroker(
+            self,
+            session,
+            bound_entry.as_ref(),
             effective_service,
             method,
             args,
@@ -539,6 +562,42 @@ impl ServerContext {
             self,
             session,
             bound_entry.as_ref(),
+            effective_service,
+            method,
+            args,
+            kwargs,
+        ))
+        .await
+        {
+            return res;
+        }
+        if let Some(res) = Box::pin(services::pve_exploration::handle_pve_exploration(
+            self,
+            session,
+            effective_service,
+            method,
+            args,
+            kwargs,
+        ))
+        .await
+        {
+            return res;
+        }
+        if let Some(res) = Box::pin(services::pve_special_sites::handle_pve_special_sites(
+            self,
+            session,
+            effective_service,
+            method,
+            args,
+            kwargs,
+        ))
+        .await
+        {
+            return res;
+        }
+        if let Some(res) = Box::pin(services::pve_dungeon_cache::handle(
+            self,
+            session,
             effective_service,
             method,
             args,
@@ -697,6 +756,26 @@ impl ServerContext {
         ))
         .await
         {
+            return res;
+        }
+        if let Some(res) = services::operations_manager::handle(
+            self,
+            session,
+            effective_service,
+            method,
+            args,
+            kwargs,
+        ) {
+            return res;
+        }
+        if let Some(res) = services::corp_registry_ops::handle(
+            self,
+            session,
+            effective_service,
+            method,
+            args,
+            kwargs,
+        ) {
             return res;
         }
 

@@ -144,6 +144,12 @@ impl CrimeWatchDirector {
         st.weapon_timer_until_unix = now_unix.saturating_add(60);
     }
 
+    /// Triggers a 15-minute Suspect flag (e.g. exiting T4–T6 Abyssal Deadspace or stealing from a container).
+    pub fn trigger_suspect_flag(&mut self, character_id: i64, now_unix: u64) {
+        let st = self.get_or_create(character_id);
+        st.suspect_flag_until_unix = now_unix.saturating_add(900);
+    }
+
     /// Evaluates aggression against another pilot:
     /// - High-sec unprovoked attack (`sys_sec >= 0.45`): Criminal flag (15m), weapon timer (60s), PvP timer (15m), schedules CONCORD.
     /// - Low-sec unprovoked attack (`0.0 < sys_sec < 0.45`): Suspect flag (15m), weapon timer (60s), PvP timer (15m).
