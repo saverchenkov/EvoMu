@@ -502,6 +502,13 @@ def main():
         print("[review] tests: %s" % test_meta)
 
     parity, parity_md = run_parity(root, sdir, ctx)
+    # Test-loop timing recorded by preflight (claims_template's "Test loop" line) so the reviewer can verify it.
+    try:
+        hp = os.path.join(rl.main_state_dir(root), "preflight_history.jsonl")
+        recs = [l for l in open(hp) if '"worktree": "%s"' % os.path.basename(root) in l] if os.path.exists(hp) else []
+        write(os.path.join(ctx, "test_loop.jsonl"), "".join(recs[-5:]) or "(no preflight timing recorded for this worktree)\n")
+    except OSError:
+        pass
     print("[review] parity: %s%% closed (%s/%s rows)" % (parity.get("percent_closed"), parity.get("closed_rows"),
                                                         parity.get("total_rows")))
 

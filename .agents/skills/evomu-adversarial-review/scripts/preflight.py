@@ -55,13 +55,27 @@ def sh(cmd, cwd, env=None, timeout=None):
 
 
 def last_review_parity(sdir):
-    st = rl.load_state(os.path.dirname(sdir))
-    for r in reversed(st.get("reviews", [])):
-        rep = r.get("report")
-        if rep:
-            pj = os.path.join(os.path.dirname(rep), "context", "parity.json")
-            if os.path.exists(pj):
-                return pj, r.get("timestamp")
+    """Baseline for "newly closed": the most recent review that is an ancestor of this branch: either a local review
+    whose head is in HEAD's history, or (fresh worktrees, branches rebased onto a newer main) the review that covers
+    `main`'s current code tree in any worktree."""
+    root = os.path.dirname(sdir)
+    cands = []
+    for r in rl.load_state(root).get("reviews", []):
+        h = r.get("head")
+        if r.get("report") and h and subprocess.run(["git", "merge-base", "--is-ancestor", h, "HEAD"], cwd=root,
+                                                     capture_output=True).returncode == 0:
+            cands.append(r)
+    try:
+        mtree = subprocess.run(["git", "rev-parse", "main^{tree}"], cwd=root, capture_output=True, text=True).stdout.strip()
+        mr = rl.review_covering_tree(root, mtree) if mtree else None
+        if mr and mr.get("report"):
+            cands.append(mr)
+    except Exception:  # noqa: BLE001
+        pass
+    for r in sorted(cands, key=lambda x: x.get("timestamp", ""), reverse=True):
+        pj = os.path.join(os.path.dirname(r["report"]), "context", "parity.json")
+        if os.path.exists(pj):
+            return pj, r.get("timestamp")
     return None, None
 
 
@@ -75,7 +89,9 @@ def ledger_rows():
 
 def numbers_in(text):
     out = set()
-    for m in re.findall(r"(?<![\w.])\d[\d,]*(?:\.\d+)?", text):
+    # A comma is a thousands separator only before exactly three digits ("2,023"); "147,294" in "rs:89-147,294" is
+    # a list of line numbers, not 147294.
+    for m in re.findall(r"(?<![\w.])(?:\d{1,3}(?:,\d{3})+(?![\d])|\d+)(?:\.\d+)?", text):
         n = m.replace(",", "").rstrip(".")
         if n:
             out.add(n)
@@ -84,29 +100,44 @@ def numbers_in(text):
     return out
 
 
+CITE_RE = re.compile(r"([A-Za-z0-9_./\-]+\.(?:rs|py|md|toml|json|sql|c|sh|txt)):"
+                     r"(\d+(?:[-–]\d+)?(?:,\s?\d+(?:[-–]\d+)?)*)")
+ROW_WILDCARD_RE = re.compile(r"^[a-z]+:\*$")  # category shorthand in prose, e.g. "sde:*"
+
+
+def cite_ranges(spec):
+    """'79,89-147,294' -> [(79, 79), (89, 147), (294, 294)]"""
+    out = []
+    for part in re.split(r",\s?", spec):
+        a, _, b = part.replace("–", "-").partition("-")
+        out.append((int(a), int(b or a)))
+    return out
+
+
 def lint_claims(root, claims_text, evidence_text, parity_rows):
     problems = []
     ev_nums = numbers_in(evidence_text)
     # path:line references
-    refs = re.findall(r"([A-Za-z0-9_./\-]+\.(?:rs|py|md|toml|json|sql|c|sh|txt)):(\d+)(?:[-–](\d+))?", claims_text)
+    refs = CITE_RE.findall(claims_text)
     cited_text = ""
-    for path, a, b in refs:
+    for path, spec in refs:
         cands = [path] if os.path.exists(os.path.join(root, path)) else \
             [p for p in glob.glob(os.path.join(root, "**", os.path.basename(path)), recursive=True)
              if "/target/" not in p and "/.evomu-reviews/" not in p]
         full = os.path.join(root, path) if os.path.exists(os.path.join(root, path)) else (cands[0] if len(cands) == 1 else None)
         if not full:
-            problems.append("PATH NOT FOUND: %s:%s" % (path, a))
+            problems.append("PATH NOT FOUND: %s:%s" % (path, spec))
             continue
         try:
             lines = open(full, errors="replace").read().splitlines()
         except OSError:
             continue
-        hi = int(b or a)
-        if int(a) < 1 or hi > len(lines):
-            problems.append("LINE OUT OF RANGE: %s:%s%s (file has %d lines)" % (path, a, "-" + b if b else "", len(lines)))
-        else:
-            cited_text += "\n".join(lines[int(a) - 1:hi]) + "\n"
+        for a, hi in cite_ranges(spec):
+            if a < 1 or hi > len(lines) or hi < a:
+                problems.append("LINE OUT OF RANGE: %s:%d%s (file has %d lines)" % (
+                    path, a, "-%d" % hi if hi != a else "", len(lines)))
+            else:
+                cited_text += "\n".join(lines[a - 1:hi]) + "\n"
     ev_nums |= numbers_in(cited_text)
     # numbers that occur in the full text of files the claims mention (IDs, constants) are traceable
     for path in set(re.findall(r"([A-Za-z0-9_./\-]+\.(?:rs|py|md|toml|json|sql|c|sh|txt))", claims_text)):
@@ -114,11 +145,11 @@ def lint_claims(root, claims_text, evidence_text, parity_rows):
         if os.path.isfile(fp) and os.path.getsize(fp) < 5_000_000:
             ev_nums |= numbers_in(open(fp, errors="replace").read())
     # numbers
-    body = re.sub(r"([A-Za-z0-9_./\-]+\.(?:rs|py|md|toml|json|sql|c|sh|txt)):\d+(?:[-–]\d+)?", " ", claims_text)
+    body = CITE_RE.sub(" ", claims_text)
+    body = re.sub(r"\b\d{8}-\d{6}\b", " ", body)                  # review timestamps (before hashes: 20261020 is hex)
     body = re.sub(r"\b[0-9a-f]{7,40}\b", " ", body)              # commit hashes
     body = re.sub(r"\b(?:[A-Z]{1,4}\d*-P?\d+(?:-\d+)?|OF-\d+)\b", " ", body)  # task / finding ids
     body = ROW_RE.sub(" ", body)
-    body = re.sub(r"\b\d{8}-\d{6}\b", " ", body)                  # review timestamps
     body = re.sub(r"(?i)\b(?:lines?|L)\s*\d[\d,\s\-–]*", " ", body)  # bare line references
     for n in sorted(numbers_in(body), key=lambda x: (len(x), x)):
         if len(n.replace(".", "")) <= 1 or (n.startswith("0") and not n.startswith("0.")):
@@ -132,8 +163,10 @@ def lint_claims(root, claims_text, evidence_text, parity_rows):
         rc, out = sh(["git", "grep", "-F", "-q", "--untracked", "-e", q, "--", ".", ":(exclude).evomu-reviews"], root)
         if rc != 0:
             problems.append("QUOTE NOT FOUND IN REPO: \"%s\"" % q[:120])
-    # row ids claimed
+    # row ids claimed (category shorthand like "sde:*" in prose is not a row id)
     for rid in sorted(set(ROW_RE.findall(claims_text))):
+        if ROW_WILDCARD_RE.match(rid):
+            continue
         st = (parity_rows.get(rid) or {}).get("status")
         if st is None:
             problems.append("UNKNOWN LEDGER ROW: %s" % rid)
@@ -430,19 +463,19 @@ def run_early_gate(root, base, added, claims_path):
     # 3. Claims citations & quotes check (if draft claims provided)
     if claims_path and os.path.exists(claims_path):
         claims_text = open(claims_path, errors="replace").read()
-        refs = re.findall(r"([A-Za-z0-9_./\-]+\.(?:rs|py|md|toml|json|sql|c|sh|txt)):(\d+)(?:[-–](\d+))?", claims_text)
-        for path, a, b in refs:
+        refs = CITE_RE.findall(claims_text)
+        for path, spec in refs:
             full = os.path.join(root, path)
             if not os.path.exists(full):
                 violations.append(("CLAIMS_CITED_PATH_MISSING", "Cited path does not exist: %s" % path, None, None))
             else:
                 try:
                     num_lines = len(open(full, errors="replace").read().splitlines())
-                    hi = int(b or a)
-                    if int(a) < 1 or hi > num_lines:
-                        violations.append(("CLAIMS_LINE_OUT_OF_RANGE",
-                                           "Line range %s-%s out of range in %s (has %d lines)" % (a, b or a, path, num_lines),
-                                           path, int(a)))
+                    for a, hi in cite_ranges(spec):
+                        if a < 1 or hi > num_lines or hi < a:
+                            violations.append(("CLAIMS_LINE_OUT_OF_RANGE",
+                                               "Line range %d-%d out of range in %s (has %d lines)" % (a, hi, path, num_lines),
+                                               path, a))
                 except OSError:
                     pass
         for q in re.findall(r"[\"“]([^\"”\n]{12,200})[\"”]", claims_text):
