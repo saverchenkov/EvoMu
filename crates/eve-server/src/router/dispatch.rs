@@ -402,6 +402,7 @@ impl ServerContext {
             method,
             args,
             kwargs,
+            caller_trace,
         ))
         .await
         {
