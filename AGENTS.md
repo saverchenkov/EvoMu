@@ -74,8 +74,8 @@
 - Never bypass macOS Santa, Windows Defender/SmartScreen or other permission systems.
 - evemu_Crucible is LGPL: re-implement its logic, never copy it.
 
-## Supported platforms (macOS, Windows, Linux)
-- EvoMu is developed on macOS and Windows (Linux is used by external agents without the EVE client); the project may move between them at any time. Switching needs no discussion: the rules here are the same on every machine.
+## Supported platforms (macOS and Windows)
+- EvoMu is developed on both macOS and Windows; the project may move between them at any time. Switching needs no discussion: the rules here are the same on every machine.
 - **Run every gate locally, on the machine you're on.** Pre-flight, `run_review.py` and `final_gate.py` run wherever the work happens; no git hooks are used. Don't defer reviews to "the other machine".
 - **Local-only client data.** `data/evomu_sde.sqlite`, `data/quasar_descriptors.sqlite`, `data/quasar_core_golden.json` and anything read from the EVE client install are client-derived and never committed. A machine without them (for example a fresh Windows checkout without the client) has tests that fail only because those files are missing. Such a failure is acceptable in a review only if its panic message names the missing local file or client path; list each one in the claims file with its panic message, and state the passed/failed counts from pre-flight. Any other failure blocks the review. Rows closed only by tests that couldn't run on this machine don't count as closed in your claims.
 - **`final_gate.py` must run on a machine that has all local client data** (all tests executed, none failing).
@@ -130,13 +130,6 @@
   - **Exception — identical code:** if the merged tree differs from a tree that already got a non-FAIL claims review (in any EvoMu worktree) only in supervisor-owned gate files (`.agents/`, `AGENTS.md`), and those match `main`, no new review is needed. The gate checks this mechanically (`review_lib.reviewed_by_code`; the Stop hook and `final_gate.py` accept it). Put the reused review's timestamp in the merge/push message. Pre-flight on `main` is still required.
 - **Subagents must get `AGENTS.md` and the plan as context** and obey every rule here. No subagent may modify `.agents/`, disable hooks or bypass Santa. Delegation doesn't relax any rule.
 - **Subagent reports to you are claims, not facts.** Verify them with pre-flight and the review before recording anything in `docs/ACTION_PLAN_STATUS.md`.
-
-## External agents (no messaging; `ext/*` branches)
-- The user may run extra coding agents on other machines (for example Linux, without the EVE client) that can't message the supervisor or the coder. Their only channel is git.
-- **Scope lanes.** An external agent works only in the lane written in its brief, recorded in `docs/ext/LANES.md`. The coder doesn't edit files inside an active external lane, and external agents don't edit outside it. If a change is needed across the boundary, write it up in the branch's status file instead.
-- **Branches.** External agents commit only to `ext/<lane>/<topic>` branches based on the latest `origin/main`, and may push those branches. They never push `main`, never force-push shared branches, and never touch `.agents/` or `AGENTS.md`.
-- **Status file.** Each `ext/*` branch carries `docs/ext/<lane>.md` (it replaces direct communication). It records what changed, why, the exact commands run and their copied output (tests, coverage, mutants), open questions, and known limits of the machine (missing client data).
-- **Merge path.** The supervisor watches `origin/ext/*`. The coder (or the supervisor) rebases a ready branch, runs pre-flight and `run_review.py` locally as for any branch, and merges after a non-FAIL review. External work gets the same review as everyone else's.
 
 ## Reviewer unavailable (quota or capacity outages)
 - **How the orchestrator handles quota errors.** `run_review.py` tries the primary reviewer (`opus-5.5-medium`, Claude Opus 5.5 Medium) first, then the fallbacks `gemini-launch-candidate-high` (Gemini 4 Argon High) and `gemini-flash-next` (Gemini Flash Next) (`EVOMU_REVIEW_FALLBACK_MODELS`).
