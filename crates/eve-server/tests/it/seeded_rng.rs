@@ -125,8 +125,8 @@ async fn test_c5_seeded_mining_crit_forces_both_outcomes_by_value() {
     eve_testkit::attest(&["feat:mining.mining-crits"]);
     let ctx = ServerContext::new();
     let miner = ctx.sde.types.get(&MINER_I).expect("Miner I in SDE");
-    let crit_chance = miner.default_attributes.get(&5967).copied().unwrap_or(0.01);
-    let crit_bonus = miner.default_attributes.get(&5969).copied().unwrap_or(2.0);
+    let crit_chance = miner.default_attributes.get(&5967).copied().expect("Miner I miningCritChance (5967) must be in the SDE");
+    let crit_bonus = miner.default_attributes.get(&5969).copied().expect("Miner I miningCritBonusYield (5969) must be in the SDE");
     assert!(crit_chance > 0.001 && crit_chance < 0.999, "SDE miningCritChance {crit_chance}");
     // A first draw below 0.001 must crit; above 0.999 must not (ship multipliers stay in range).
     let crit_seed = find_seed(|u| u < 0.001);
