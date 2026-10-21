@@ -203,6 +203,28 @@ fn verify_client_sqlite_static_loaded_rows(
         Vec::new()
     };
 
+    // These arms verify row-by-row from the client SQLite `cache` table. They must never fall
+    // through with an empty `rows` (which would reduce them to a count check against the
+    // importer's own record_count); review 20261020-200244 R3-P1-1.
+    const SQLITE_ROW_ARMS: [&str; 8] = [
+        "res:/staticdata/blueprints.static",
+        "res:/staticdata/clonegrades.static",
+        "res:/staticdata/dbuffcollections.static",
+        "res:/staticdata/fighterabilities.static",
+        "res:/staticdata/fighterabilitiesbytype.static",
+        "res:/staticdata/skinlicenses.static",
+        "res:/staticdata/skinmaterials.static",
+        "res:/staticdata/skins.static",
+    ];
+    if SQLITE_ROW_ARMS.contains(&res_path) {
+        assert!(
+            c_conn.is_some(),
+            "{res_path}: client file must be SQLite for row-by-row verification"
+        );
+        assert!(cache_cnt > 0, "{res_path}: client SQLite cache must have rows");
+        assert_eq!(rows.len(), cache_cnt, "{res_path}: every client row must be checked");
+    }
+
     match res_path {
         "res:/staticdata/blueprints.static" => {
             assert_eq!(sde.blueprints.len(), cache_cnt);
