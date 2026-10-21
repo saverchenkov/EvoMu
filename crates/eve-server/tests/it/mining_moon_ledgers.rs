@@ -165,8 +165,8 @@ fn decode_crowset_rows(rep: &PyRep) -> Vec<Vec<PyRep>> {
 // ====================================================================
 #[tokio::test]
 async fn test_mn09_mining_drones_and_excavators() {
-    // parity: plan:MN-09, feat:drones.mining-drones, feat:mining.mining-drones-yield, feat:mining.excavator-drones, rpc:entity.CmdMineRepeatedly, rpc:entity.CmdReturnBay, rpc:ship.LaunchDrones
-    eve_testkit::attest(&["plan:MN-09", "feat:drones.mining-drones", "feat:mining.mining-drones-yield", "feat:mining.excavator-drones"]);
+    // parity: feat:drones.mining-drones, feat:mining.mining-drones-yield, feat:mining.excavator-drones, rpc:dogmaIM.Activate, rpc:entity.CmdMineRepeatedly, rpc:entity.CmdReturnBay, rpc:ship.LaunchDrones, rpc:stationSvc.Undock
+    eve_testkit::attest(&["feat:drones.mining-drones", "feat:mining.mining-drones-yield", "feat:mining.excavator-drones"]);
     let ctx = ServerContext::new();
     let char_id = 90_000_001;
     let mut session = setup_test_session(&ctx, char_id).await;
@@ -333,8 +333,8 @@ async fn test_mn09_mining_drones_and_excavators() {
 // ====================================================================
 #[tokio::test]
 async fn test_mn10_survey_scanner() {
-    // parity: plan:MN-10, feat:modules.survey-scanner, feat:mining.survey-scan, rpc:miningScanMgr.perform_scan
-    eve_testkit::attest(&["plan:MN-10", "feat:modules.survey-scanner", "feat:mining.survey-scan"]);
+    // parity: feat:modules.survey-scanner, feat:mining.survey-scan, rpc:dogmaIM.Activate, rpc:miningScanMgr.perform_scan, rpc:stationSvc.Undock
+    eve_testkit::attest(&["feat:modules.survey-scanner", "feat:mining.survey-scan"]);
     let ctx = ServerContext::new();
     let char_id = 90_000_001;
     let mut session = setup_test_session(&ctx, char_id).await;
@@ -408,7 +408,7 @@ async fn test_mn10_survey_scanner() {
 // ====================================================================
 #[tokio::test]
 async fn test_mn11_compression_space_and_structure_and_gas() {
-    // parity: feat:mining.compression-space, feat:mining.compression-structure, feat:mining.gas-decompression, rpc:inSpaceCompressionMgr.CompressItemInSpace, rpc:structureCompressionMgr.CompressItemInStructure, rpc:structureCompressionMgr.DecompressGasInStructure, rpc:structureCompressionMgr.GetMyGasDecompressionEfficiency
+    // parity: feat:mining.compression-space, feat:mining.compression-structure, feat:mining.gas-decompression, rpc:dogmaIM.Activate, rpc:fleetSvc.InitFleet, rpc:inSpaceCompressionMgr.CompressItemInSpace, rpc:stationSvc.Undock, rpc:structureCompressionMgr.CompressItemInStructure, rpc:structureCompressionMgr.DecompressGasInStructure, rpc:structureCompressionMgr.GetMyGasDecompressionEfficiency
     eve_testkit::attest(&["feat:mining.compression-space", "feat:mining.compression-structure", "feat:mining.gas-decompression"]);
     let ctx = ServerContext::new();
     let char_id = 90_000_001;
@@ -611,8 +611,8 @@ async fn test_mn11_compression_space_and_structure_and_gas() {
 // ====================================================================
 #[tokio::test]
 async fn test_mn12_c6_reprocessing_yield_tax_modules_and_structure() {
-    // parity: plan:MN-12, feat:mining.reprocessing-yield, feat:mining.reprocessing-tax, feat:mining.reprocessing-modules, feat:structures.service-reprocessing, feat:mining.upwell-refinery-base-yield, feat:structures.reprocessing-rig-security-multipliers
-    eve_testkit::attest(&["plan:MN-12", "feat:mining.reprocessing-yield", "feat:mining.reprocessing-tax", "feat:mining.reprocessing-modules", "feat:structures.service-reprocessing", "feat:mining.upwell-refinery-base-yield", "feat:structures.reprocessing-rig-security-multipliers"]);
+    // parity: feat:mining.reprocessing-yield, feat:mining.reprocessing-tax, feat:mining.reprocessing-modules, feat:structures.service-reprocessing, feat:mining.upwell-refinery-base-yield, feat:structures.reprocessing-rig-security-multipliers, rpc:reprocessingSvc.GetQuotes, rpc:reprocessingSvc.Reprocess
+    eve_testkit::attest(&["feat:mining.reprocessing-yield", "feat:mining.reprocessing-tax", "feat:mining.reprocessing-modules", "feat:structures.service-reprocessing", "feat:mining.upwell-refinery-base-yield", "feat:structures.reprocessing-rig-security-multipliers"]);
     let ctx = ServerContext::new();
     let char_id = 90_000_001;
     let mut session = setup_test_session(&ctx, char_id).await;
@@ -879,10 +879,9 @@ async fn test_mn12_c6_reprocessing_yield_tax_modules_and_structure() {
 // ====================================================================
 #[tokio::test]
 async fn test_mn13_mn14_mn16_moon_mining_probes_jackpot_decay_and_ledger() {
-    // parity: feat:scanning.moon-survey-probe, feat:mining.moon-resources, feat:mining.moon-extraction, feat:mining.moon-extraction-duration-yield, feat:mining.moon-fracture, feat:mining.moon-chunk-auto-fracture, feat:mining.moon-ore-types, feat:mining.moon-ore-class-by-security, feat:mining.moon-jackpot, feat:mining.moon-field-lifetime, feat:structures.service-moon-drill, feat:modules.mining-survey-chipset, feat:mining.metenox, feat:mining.corp-ledger, rpc:autoMoonMining.RequestMiningCycleOutput, rpc:autoMoonMining.RequestMiningDetails, rpc:corpMiningLedger.GetObserverLedger, rpc:corpMiningLedger.GetObserversWithMiningEvents, rpc:moonExtractions.CancelExtraction, rpc:moonExtractions.FractureChunkWithStructure, rpc:moonExtractions.GetExtractionAndEventIDFromStructureID, rpc:moonExtractions.GetExtractionsForCorp, rpc:moonExtractions.GetMoonResourcesForStructure, rpc:moonExtractions.StartNewExtraction
+    // parity: feat:scanning.moon-survey-probe, feat:mining.moon-resources, feat:mining.moon-extraction, feat:mining.moon-extraction-duration-yield, feat:mining.moon-fracture, feat:mining.moon-chunk-auto-fracture, feat:mining.moon-ore-types, feat:mining.moon-ore-class-by-security, feat:mining.moon-jackpot, feat:mining.moon-field-lifetime, feat:structures.service-moon-drill, feat:modules.mining-survey-chipset, feat:mining.metenox, feat:mining.corp-ledger, rpc:autoMoonMining.RequestMiningCycleOutput, rpc:autoMoonMining.RequestMiningDetails, rpc:corpMiningLedger.GetObserverLedger, rpc:corpMiningLedger.GetObserversWithMiningEvents, rpc:dogmaIM.Activate, rpc:moonExtractions.CancelExtraction, rpc:moonExtractions.FractureChunkWithStructure, rpc:moonExtractions.GetExtractionAndEventIDFromStructureID, rpc:moonExtractions.GetExtractionsForCorp, rpc:moonExtractions.GetMoonResourcesForStructure, rpc:moonExtractions.StartNewExtraction, rpc:stationSvc.Undock
     eve_testkit::attest(&["feat:scanning.moon-survey-probe", "feat:mining.moon-resources", "feat:mining.moon-extraction", "feat:mining.moon-extraction-duration-yield", "feat:mining.moon-fracture", "feat:mining.moon-chunk-auto-fracture", "feat:mining.moon-ore-types", "feat:mining.moon-ore-class-by-security", "feat:mining.moon-jackpot", "feat:mining.moon-field-lifetime", "feat:structures.service-moon-drill", "feat:modules.mining-survey-chipset", "feat:mining.metenox", "feat:mining.corp-ledger"]);
     let ctx = ServerContext::new();
-    crate::common::pin_clock(&ctx);
     let char_id = 90_000_001;
     let mut session = setup_test_session(&ctx, char_id).await;
     let kw = HashMap::new();
@@ -1081,19 +1080,11 @@ async fn test_mn13_mn14_mn16_moon_mining_probes_jackpot_decay_and_ledger() {
         sb.position = ast_pos + DVec3::new(500.0, 0.0, 0.0);
         let _ = jita.spawn_ball(sb).await;
     }
-    let mine_moon_res = ctx
-        .dispatch_rpc(
-            &mut session,
-            "dogmaIM",
-            None,
-            "Activate",
-            &[PyRep::Integer(miner_mod_id), PyRep::String("miningLaser".into()), PyRep::Integer(first_ast_id)],
-            &kw,
-            None,
-        )
+    let mine_moon_res = crate::mining_cycle_engine::mine_once(&ctx, &mut session, miner_mod_id, first_ast_id)
         .await
         .expect("Mine fractured moon asteroid");
-    let mined_moon_qty = get_dict_val(&mine_moon_res, "yieldUnits").unwrap().as_i64().unwrap();
+    let mined_moon_qty = mine_moon_res.units_delivered;
+    assert_eq!(mine_moon_res.ore_type_id, first_ast_type);
     assert!(mined_moon_qty > 0, "Mining fractured moon asteroid must yield positive moon ore units");
 
     let dup_err = ctx

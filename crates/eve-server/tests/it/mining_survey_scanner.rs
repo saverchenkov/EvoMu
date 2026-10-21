@@ -101,8 +101,8 @@ fn get_dict_val<'a>(dict: &'a PyRep, key: &str) -> Option<&'a PyRep> {
 
 #[tokio::test]
 async fn test_phase_5m_mn08_survey_scanner() {
-    // parity: plan:MN-10, feat:modules.survey-scanner, feat:mining.survey-scan, rpc:miningScanMgr.perform_scan, notify:OnAsteroidRevealed
-    eve_testkit::attest(&["plan:MN-10", "feat:modules.survey-scanner", "feat:mining.survey-scan", "rpc:miningScanMgr.perform_scan", "notify:OnAsteroidRevealed"]);
+    // parity: feat:modules.survey-scanner, feat:mining.survey-scan, rpc:miningScanMgr.perform_scan, notify:OnAsteroidRevealed, rpc:stationSvc.Undock
+    eve_testkit::attest(&["feat:modules.survey-scanner", "feat:mining.survey-scan", "rpc:miningScanMgr.perform_scan", "notify:OnAsteroidRevealed"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let char_id = 90_000_001;
@@ -232,8 +232,6 @@ async fn test_phase_5m_mn08_survey_scanner() {
 // ====================================================================
 #[tokio::test]
 async fn test_mining_target_validity_mercoxit_deep_core() {
-    // parity: feat:mining.mining-module-target-validity, feat:mining.mercoxit-deep-core-restriction
-    eve_testkit::attest(&["feat:mining.mining-module-target-validity", "feat:mining.mercoxit-deep-core-restriction"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let char_id = 90_000_001;
@@ -318,50 +316,55 @@ async fn test_mining_target_validity_mercoxit_deep_core() {
     let merc_id = spawn_test_asteroid(&ctx, 1_000_000_012, sys_id, 11396, 500, (ship_pos.0 + 1_000.0, ship_pos.1, ship_pos.2));
     let far_id = spawn_test_asteroid(&ctx, 1_000_000_013, sys_id, 1230, 5_000, (ship_pos.0 + 50_000.0, ship_pos.1, ship_pos.2));
 
-    // 1. Miner I on Ice fails with InvalidTargetType
+    // 1. Miner I on Ice fails: the ice type's requiredSkill1 (Ice Harvesting) is not a Miner I skill
     let ice_err = ctx.dispatch_rpc(
         &mut sess, "dogmaIM", None, "Activate",
         &[PyRep::Integer(ore_mod_id), PyRep::String("miningLaser".into()), PyRep::Integer(ice_id)],
         &kw, None,
     ).await.expect_err("Miner I on Ice must fail");
-    assert_eq!(ice_err.code, "InvalidTargetType");
+    assert_eq!(ice_err.code, "TargetNotMinable");
 
-    // 2. Gas scoop on Ore fails with InvalidTargetType
+    // 2. Gas scoop (miningClouds effect) on Ore fails
     let gas_err = ctx.dispatch_rpc(
         &mut sess, "dogmaIM", None, "Activate",
         &[PyRep::Integer(gas_mod_id), PyRep::String("gasHarvesting".into()), PyRep::Integer(veld_id)],
         &kw, None,
     ).await.expect_err("Gas scoop on Ore must fail");
-    assert_eq!(gas_err.code, "InvalidTargetType");
+    assert_eq!(gas_err.code, "TargetNotMinable");
+    // The remaining checks need both turret-fitted miners online: use a Venture (2 turret
+    // hardpoints) and take the gas scoop off.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.remove(&gas_mod_id);
+        snap.items.remove(&100_000_005); // starter weapon sharing HiSlot0 with Miner I
+        snap.items.get_mut(&ship_id).unwrap().type_id = 32_880;
+    });
+    ctx.invalidate_ship_fitting(ship_id);
 
-    // 3. Target out of range (> 10km) fails with TargetOutOfRange
+    // 3. A rock 50 km away was never locked, so activation fails before the range check
     let range_err = ctx.dispatch_rpc(
         &mut sess, "dogmaIM", None, "Activate",
         &[PyRep::Integer(ore_mod_id), PyRep::String("miningLaser".into()), PyRep::Integer(far_id)],
         &kw, None,
-    ).await.expect_err("Target out of range must fail");
-    assert_eq!(range_err.code, "TargetOutOfRange");
+    ).await.expect_err("Unlocked far target must fail");
+    assert_eq!(range_err.code, "TargetNotLocked");
 
-    // 4. Ordinary mining laser on Mercoxit fails with MercoxitRequiresDeepCore
+    // 4. Ordinary mining laser on Mercoxit fails: Mercoxit requires Deep Core Mining, which Miner I does not
     let merc_err = ctx.dispatch_rpc(
         &mut sess, "dogmaIM", None, "Activate",
         &[PyRep::Integer(ore_mod_id), PyRep::String("miningLaser".into()), PyRep::Integer(merc_id)],
         &kw, None,
     ).await.expect_err("Miner I on Mercoxit must fail");
-    assert_eq!(merc_err.code, "MercoxitRequiresDeepCore");
+    assert_eq!(merc_err.code, "TargetNotMinable");
 
-    // 5. Deep Core mining laser without Deep Core Mining skill fails
+    // 5. Deep Core Mining Laser I cannot run without the Deep Core Mining skill it requires
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(sk) = snap.skills.get_mut(&char_id) {
             sk.remove(&11395);
         }
     });
-    let deep_no_sk_err = ctx.dispatch_rpc(
-        &mut sess, "dogmaIM", None, "Activate",
-        &[PyRep::Integer(deep_mod_id), PyRep::String("miningLaser".into()), PyRep::Integer(merc_id)],
-        &kw, None,
-    ).await.expect_err("Deep Core without skill must fail");
-    assert_eq!(deep_no_sk_err.code, "MercoxitRequiresDeepCore");
+    ctx.invalidate_ship_fitting(ship_id);
+    let deep_no_sk = crate::mining_cycle_engine::mine_once(&ctx, &mut sess, deep_mod_id, merc_id).await;
+    assert!(deep_no_sk.is_err(), "Deep Core without skill must fail: {deep_no_sk:?}");
 
     // 6. Deep Core mining laser with Deep Core Mining V succeeds
     ctx.db.with_mut_snapshot(|snap| {
@@ -370,179 +373,127 @@ async fn test_mining_target_validity_mercoxit_deep_core() {
             TrainedSkillRecord { type_id: 11395, level: 5, skill_points: 256_000.0 },
         );
     });
-    let deep_res = ctx.dispatch_rpc(
-        &mut sess, "dogmaIM", None, "Activate",
-        &[PyRep::Integer(deep_mod_id), PyRep::String("miningLaser".into()), PyRep::Integer(merc_id)],
-        &kw, None,
-    ).await.expect("Deep Core with skill must succeed on Mercoxit");
-    let mined = get_dict_val(&deep_res, "yieldUnits").and_then(|v| v.as_i64()).unwrap_or(0);
-    assert!(mined > 0);
+    ctx.invalidate_ship_fitting(ship_id);
+    let deep_res = crate::mining_cycle_engine::mine_once(&ctx, &mut sess, deep_mod_id, merc_id)
+        .await
+        .expect("Deep Core with skill must succeed on Mercoxit");
+    assert_eq!(deep_res.ore_type_id, 11396);
+    // Whole Mercoxit units (40 m3 each) only: floor(effective miningAmount / 40).
+    assert!(deep_res.mining_amount_m3 > 0.0);
+    assert_eq!(deep_res.units_removed, (deep_res.mining_amount_m3 / 40.0).floor() as i64);
 }
 
 // ====================================================================
-// Test 3: Crystals Compatibility, ABC Modifiers & Ice Harvester Modifiers
+// Test 3: Mining crystals: ore match, volatility damage, shatter, duration multiplier
 // ====================================================================
 #[tokio::test]
-async fn test_mining_crystals_and_ice_modifiers() {
-    // parity: feat:mining.crystal-tier-ore-compatibility, feat:mining.crystal-type-abc-modifiers, feat:mining.ice-harvester-cycle-modifiers
-    eve_testkit::attest(&["feat:mining.crystal-tier-ore-compatibility", "feat:mining.crystal-type-abc-modifiers", "feat:mining.ice-harvester-cycle-modifiers"]);
-    let ctx = ServerContext::new();
-    crate::common::pin_clock(&ctx);
-    let kw = HashMap::new();
-    let char_id = 90_000_001;
-    let mut sess = setup_session(&ctx, char_id).await;
-
-    ctx.dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None)
-        .await
-        .expect("Undock");
-    let ship_id = sess.ship_id.expect("active ship");
-    let sys_id = sess.solar_system_id.expect("solar system");
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
-    let (_, ship_ball) = sys_handle
-        .get_ball_snapshot(ship_id)
-        .await
-        .unwrap()
-        .unwrap();
-    let ship_pos = (ship_ball.position.x, ship_ball.position.y, ship_ball.position.z);
-
-    let mod_miner_id = 100_000_860;
-    let ice_harv_id = 100_000_861;
-    let crystal_type_a_id = 100_000_862;
-    let crystal_type_b_id = 100_000_863;
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ship) = snap.items.get_mut(&ship_id) {
-            ship.type_id = 22548; // Mackinaw Exhumer
-        }
-        snap.items.insert(
-            mod_miner_id,
-            InventoryItemRecord {
-                item_id: mod_miner_id,
-                type_id: 17482, // Modulated Strip Miner II
-                owner_id: char_id,
-                location_id: ship_id,
+async fn test_mining_crystals_match_ore_and_take_volatility_damage() {
+    // parity: feat:mining.modulated-crystals
+    eve_testkit::attest(&["feat:mining.modulated-crystals"]);
+    use crate::mining_cycle_engine::{activate, advance, attr, lock, pilot, rock, rpc, CHAR_ID, VELDSPAR};
+    const MOD_STRIP_II: u32 = 17_912;
+    const TYPE_A_I: u32 = 60_276;
+    const TYPE_B_I: u32 = 60_279;
+    const KERNITE: u32 = 20;
+    let (strip, crystal) = (100_000_860_i64, 100_000_862_i64);
+    let skills = [(3_386, 5), (3_410, 5), (17_940, 5), (32_918, 5), (3_380, 5), (3_327, 5), (60_377, 3), (3_429, 5)];
+    let mut p = pilot(17_478, &skills, &[(strip, MOD_STRIP_II, InventoryFlag::HiSlot0)]).await;
+    let load = |p: &crate::mining_cycle_engine::Pilot, type_id: u32, damage: f64| {
+        p.ctx.db.with_mut_snapshot(|snap| {
+            snap.items.remove(&crystal);
+            let mut it = InventoryItemRecord {
+                item_id: crystal,
+                type_id,
+                owner_id: CHAR_ID,
+                location_id: p.ship_id,
                 flag: InventoryFlag::HiSlot0,
                 quantity: 1,
                 singleton: true,
                 version: 1,
-                dynamic_attributes: HashMap::new(),
-                source_mutaplasmid_id: None,
-                insured_payout_isk: 0.0,
-                is_blueprint_copy: false,
-                blueprint_runs_remaining: None,
-            },
-        );
-        snap.items.insert(
-            ice_harv_id,
-            InventoryItemRecord {
-                item_id: ice_harv_id,
-                type_id: 16278, // Ice Harvester I
-                owner_id: char_id,
-                location_id: ship_id,
-                flag: InventoryFlag::HiSlot1,
-                quantity: 1,
-                singleton: true,
-                version: 1,
-                dynamic_attributes: HashMap::new(),
-                source_mutaplasmid_id: None,
-                insured_payout_isk: 0.0,
-                is_blueprint_copy: false,
-                blueprint_runs_remaining: None,
-            },
-        );
-        snap.items.insert(
-            crystal_type_a_id,
-            InventoryItemRecord {
-                item_id: crystal_type_a_id,
-                type_id: 18066, // Veldspar Mining Crystal I
-                owner_id: char_id,
-                location_id: ship_id,
-                flag: InventoryFlag::HiSlot0,
-                quantity: 1,
-                singleton: true,
-                version: 1,
-                dynamic_attributes: HashMap::new(),
-                source_mutaplasmid_id: None,
-                insured_payout_isk: 0.0,
-                is_blueprint_copy: false,
-                blueprint_runs_remaining: None,
-            },
-        );
-    });
-    ctx.ship_fittings.write().unwrap().remove(&ship_id);
+                ..Default::default()
+            };
+            if damage > 0.0 {
+                it.dynamic_attributes.insert(eve_sde::attr_ids::DAMAGE, damage);
+            }
+            snap.items.insert(crystal, it);
+        });
+        p.ctx.invalidate_ship_fitting(p.ship_id);
+    };
+    // A seed whose first three draws are: no crit (>= 0.01), no residue (>= 0.34), then `hit`
+    // against the crystal's 2.5% volatility.
+    let seed = |hit: bool| {
+        (1u64..)
+            .find(|&s| {
+                let mut st = s;
+                let mut d = || eve_server::rng::u64_to_unit_f64(eve_server::rng::splitmix64_next(&mut st));
+                d() >= 0.01 && d() >= 0.34 && (d() < 0.025) == hit
+            })
+            .unwrap()
+    };
+    let (veld, kern) = (1_000_000_020_i64, 1_000_000_021_i64);
+    rock(&p, veld, VELDSPAR, 1_000_000, 3_000.0).await;
+    rock(&p, kern, KERNITE, 1_000_000, 3_000.0).await;
+    lock(&mut p, veld).await;
+    lock(&mut p, kern).await;
+    load(&p, TYPE_A_I, 0.0);
+    assert_eq!((attr(&p.ctx, TYPE_A_I, 782), attr(&p.ctx, TYPE_A_I, 783), attr(&p.ctx, TYPE_A_I, 784)), (1.5, 0.025, 0.05));
+    // Retriever, Mining V, Astrogeology V, Mining Barge V: 120 x 1.25 x 1.25 x 1.15 x 1.10 = 237.1875 m3.
+    let base_m3 = 120.0 * 1.25 * 1.25 * 1.15 * 1.10;
 
-    let veld_id = spawn_test_asteroid(&ctx, 1_000_000_020, sys_id, 1230, 20_000, (ship_pos.0 + 1_000.0, ship_pos.1, ship_pos.2));
-    let scord_id = spawn_test_asteroid(&ctx, 1_000_000_021, sys_id, 1228, 20_000, (ship_pos.0 + 1_000.0, ship_pos.1, ship_pos.2));
-    let ice_id = spawn_test_asteroid(&ctx, 1_000_000_022, sys_id, 16262, 50, (ship_pos.0 + 1_000.0, ship_pos.1, ship_pos.2));
+    // 1) Matching ore (Veldspar is in the Simple crystal list): x1.5 yield, and a volatility hit
+    //    adds 0.05 damage to the crystal.
+    activate(&mut p, strip, veld).await.expect("Activate on Veldspar");
+    p.ctx.set_mechanic_rng_seed(Some(seed(true)));
+    let out = advance(&p, 45).await;
+    assert_eq!(out.len(), 1);
+    assert!((out[0].mining_amount_m3 - base_m3 * 1.5).abs() < 1e-9, "{}", out[0].mining_amount_m3);
+    assert_eq!(out[0].units_removed, 3_557); // floor(355.78125 / 0.1)
+    assert_eq!(out[0].crystal.map(|c| (c.type_id, c.matched)), Some((TYPE_A_I, true)));
+    assert_eq!((out[0].crystal_damage, out[0].crystal_shattered), (0.05, false));
+    let dmg = p.ctx.db.get_item(crystal).unwrap().dynamic_attributes[&eve_sde::attr_ids::DAMAGE];
+    assert!((dmg - 0.05).abs() < 1e-12);
+    rpc(&mut p, "dogmaIM", None, "Deactivate", &[PyRep::Integer(strip), PyRep::String("miningLaser".into())]).await.unwrap();
 
-    // 1. Crystal matches target ore (Veldspar crystal on Veldspar ore)
-    let match_res = ctx.dispatch_rpc(
-        &mut sess, "dogmaIM", None, "Activate",
-        &[PyRep::Integer(mod_miner_id), PyRep::String("miningLaser".into()), PyRep::Integer(veld_id)],
-        &kw, None,
-    ).await.expect("Activate with matching crystal");
-    assert_eq!(get_dict_val(&match_res, "crystalMatched").and_then(|v| v.as_bool()), Some(true));
-    let match_mult = get_dict_val(&match_res, "crystalMultiplier").and_then(|v| v.as_f64()).unwrap_or(1.0);
-    assert!(match_mult > 1.0, "Matching crystal must grant > 1.0 yield multiplier");
+    // 2) Non-matching ore (Kernite is not a Simple ore): base modulated yield, no bonus, no penalty.
+    activate(&mut p, strip, kern).await.expect("Activate on Kernite");
+    p.ctx.set_mechanic_rng_seed(Some(seed(false)));
+    let out = advance(&p, 45).await;
+    assert!((out[0].mining_amount_m3 - base_m3).abs() < 1e-9, "{}", out[0].mining_amount_m3);
+    assert_eq!(out[0].units_removed, 197); // floor(237.1875 / 1.2)
+    assert_eq!(out[0].crystal.map(|c| c.matched), Some(false));
+    assert_eq!(out[0].crystal_damage, 0.0);
+    rpc(&mut p, "dogmaIM", None, "Deactivate", &[PyRep::Integer(strip), PyRep::String("miningLaser".into())]).await.unwrap();
 
-    // 2. Crystal does NOT match target ore (Veldspar crystal on Scordite ore) -> base modulated yield 1.0x with no penalty
-    let non_match_res = ctx.dispatch_rpc(
-        &mut sess, "dogmaIM", None, "Activate",
-        &[PyRep::Integer(mod_miner_id), PyRep::String("miningLaser".into()), PyRep::Integer(scord_id)],
-        &kw, None,
-    ).await.expect("Activate with non-matching crystal");
-    assert_eq!(get_dict_val(&non_match_res, "crystalMatched").and_then(|v| v.as_bool()), Some(false));
-    let non_match_mult = get_dict_val(&non_match_res, "crystalMultiplier").and_then(|v| v.as_f64()).unwrap_or(0.0);
-    assert!((non_match_mult - 1.0).abs() < 1e-6, "Non-matching crystal must yield base modulated 1.0x with no penalty");
+    // 3) A crystal at 0.96 damage shatters on the next volatility hit (structure HP 1.0) and is removed.
+    load(&p, TYPE_A_I, 0.96);
+    activate(&mut p, strip, veld).await.expect("Activate with worn crystal");
+    p.ctx.set_mechanic_rng_seed(Some(seed(true)));
+    let out = advance(&p, 45).await;
+    assert!(out[0].crystal_shattered);
+    assert!(p.ctx.db.get_item(crystal).is_none(), "shattered crystal leaves the slot");
+    rpc(&mut p, "dogmaIM", None, "Deactivate", &[PyRep::Integer(strip), PyRep::String("miningLaser".into())]).await.unwrap();
 
-    // 3. Type B crystal duration modifier
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.items.remove(&crystal_type_a_id);
-        snap.items.insert(
-            crystal_type_b_id,
-            InventoryItemRecord {
-                item_id: crystal_type_b_id,
-                type_id: 60279, // Simple Asteroid Mining Crystal Type B I
-                owner_id: char_id,
-                location_id: ship_id,
-                flag: InventoryFlag::HiSlot0,
-                quantity: 1,
-                singleton: true,
-                version: 1,
-                dynamic_attributes: HashMap::new(),
-                source_mutaplasmid_id: None,
-                insured_payout_isk: 0.0,
-                is_blueprint_copy: false,
-                blueprint_runs_remaining: None,
-            },
-        );
-    });
-    let type_b_res = ctx.dispatch_rpc(
-        &mut sess, "dogmaIM", None, "Activate",
-        &[PyRep::Integer(mod_miner_id), PyRep::String("miningLaser".into()), PyRep::Integer(veld_id)],
-        &kw, None,
-    ).await.expect("Activate with Type B crystal");
-    let type_b_ms = get_dict_val(&type_b_res, "cycleTimeMs").and_then(|v| v.as_i64()).unwrap_or(180_000);
-    assert!(type_b_ms <= 180_000, "Type B crystal duration must be shorter (0.9x/0.8x duration multiplier)");
-
-    // 4. Ice Harvester cycle duration modifiers and exactly 1 ice block per cycle
-    let ice_res = ctx.dispatch_rpc(
-        &mut sess, "dogmaIM", None, "Activate",
-        &[PyRep::Integer(ice_harv_id), PyRep::String("iceHarvesting".into()), PyRep::Integer(ice_id)],
-        &kw, None,
-    ).await.expect("Activate Ice Harvester I");
-    let ice_mined = get_dict_val(&ice_res, "yieldUnits").and_then(|v| v.as_i64()).unwrap_or(0);
-    assert_eq!(ice_mined, 1, "Each ice harvester cycle must yield exactly 1 ice block");
+    // 4) Type B I crystal: 0.9x cycle duration (wiki:Mining_crystals) on matching ore only.
+    let sys = p.ctx.systems.get_or_spawn(crate::mining_cycle_engine::JITA);
+    let max_cap = sys.get_combat_state(p.ship_id).await.unwrap().unwrap().max_capacitor;
+    sys.set_capacitor(p.ship_id, max_cap).await.unwrap();
+    load(&p, TYPE_B_I, 0.0);
+    let act = activate(&mut p, strip, veld).await.expect("Activate with Type B I");
+    assert_eq!(act.dict_get("cycleTimeMs").and_then(|v| v.as_i64()), Some(40_500));
+    rpc(&mut p, "dogmaIM", None, "Deactivate", &[PyRep::Integer(strip), PyRep::String("miningLaser".into())]).await.unwrap();
+    sys.set_capacitor(p.ship_id, max_cap).await.unwrap();
+    let act = activate(&mut p, strip, kern).await.expect("Activate Type B I on Kernite");
+    assert_eq!(act.dict_get("cycleTimeMs").and_then(|v| v.as_i64()), Some(45_000));
 }
 
 // ====================================================================
-// Test 4: Foreman Bursts, Reprocessing Curves, Scrapmetal & Prismaticite
+// Test 4: Reprocessing Curves, Scrapmetal & Prismaticite
 // ====================================================================
 #[tokio::test]
-async fn test_mining_bursts_and_reprocessing_curves() {
-    // parity: feat:mining.foreman-burst-charge-effects, feat:mining.npc-reprocessing-equipment-and-tax-curve, feat:mining.scrapmetal-yield-exclusions, feat:mining.prismaticite-reprocessing-and-unrefined-reactions
-    eve_testkit::attest(&["feat:mining.foreman-burst-charge-effects", "feat:mining.npc-reprocessing-equipment-and-tax-curve", "feat:mining.scrapmetal-yield-exclusions", "feat:mining.prismaticite-reprocessing-and-unrefined-reactions"]);
+async fn test_mining_reprocessing_curves_scrapmetal_and_prismaticite() {
+    // parity: feat:mining.npc-reprocessing-equipment-and-tax-curve, feat:mining.scrapmetal-yield-exclusions, feat:mining.prismaticite-reprocessing-and-unrefined-reactions, rpc:dogmaIM.Activate, rpc:reprocessingSvc.GetQuotes, rpc:reprocessingSvc.Reprocess, rpc:stationSvc.Undock
+    eve_testkit::attest(&["feat:mining.npc-reprocessing-equipment-and-tax-curve", "feat:mining.scrapmetal-yield-exclusions", "feat:mining.prismaticite-reprocessing-and-unrefined-reactions"]);
     let ctx = ServerContext::new();
-    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let char_id = 90_000_001;
     let mut sess = setup_session(&ctx, char_id).await;
@@ -625,86 +576,6 @@ async fn test_mining_bursts_and_reprocessing_curves() {
     let out_tid = get_dict_val(&prism_outputs[0], "typeID").and_then(|v| v.as_i64()).unwrap() as u32;
     assert!(ctx.sde.types.get(&out_tid).is_some_and(|t| t.group_id == 18), "Prismaticite output must be a mineral");
 
-    // 4. Foreman burst charge effects: Optimization charge grants duration reduction
-    ctx.dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None).await.expect("Undock");
-    let ship_id = sess.ship_id.unwrap();
-    let booster_burst_id = 100_000_875;
-    let booster_charge_id = 100_000_876;
-    let mining_laser_id = 100_000_877;
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.items.insert(
-            mining_laser_id,
-            InventoryItemRecord {
-                item_id: mining_laser_id,
-                type_id: 483, // Miner I
-                owner_id: char_id,
-                location_id: ship_id,
-                flag: InventoryFlag::HiSlot1,
-                quantity: 1,
-                singleton: true,
-                version: 1,
-                dynamic_attributes: HashMap::new(),
-                source_mutaplasmid_id: None,
-                insured_payout_isk: 0.0,
-                is_blueprint_copy: false,
-                blueprint_runs_remaining: None,
-            },
-        );
-        snap.items.insert(
-            booster_burst_id,
-            InventoryItemRecord {
-                item_id: booster_burst_id,
-                type_id: 42890, // Mining Foreman Burst II
-                owner_id: char_id,
-                location_id: ship_id,
-                flag: InventoryFlag::HiSlot0,
-                quantity: 1,
-                singleton: true,
-                version: 1,
-                dynamic_attributes: HashMap::new(),
-                source_mutaplasmid_id: None,
-                insured_payout_isk: 0.0,
-                is_blueprint_copy: false,
-                blueprint_runs_remaining: None,
-            },
-        );
-        snap.items.insert(
-            booster_charge_id,
-            InventoryItemRecord {
-                item_id: booster_charge_id,
-                type_id: 42830, // Mining Laser Optimization Charge
-                owner_id: char_id,
-                location_id: ship_id,
-                flag: InventoryFlag::HiSlot0,
-                quantity: 100,
-                singleton: false,
-                version: 1,
-                dynamic_attributes: HashMap::new(),
-                source_mutaplasmid_id: None,
-                insured_payout_isk: 0.0,
-                is_blueprint_copy: false,
-                blueprint_runs_remaining: None,
-            },
-        );
-        snap.module_active_states.insert(booster_burst_id);
-        snap.module_active_charges.insert(booster_burst_id, 42830);
-    });
-    ctx.ship_fittings.write().unwrap().remove(&ship_id);
-    let sys_handle = ctx.systems.get_or_spawn(sess.solar_system_id.unwrap());
-    let (_, ship_ball) = sys_handle
-        .get_ball_snapshot(ship_id)
-        .await
-        .expect("get_ball_snapshot")
-        .expect("ship ball");
-    let ship_pos = (ship_ball.position.x, ship_ball.position.y, ship_ball.position.z);
-    let ast_veld = spawn_test_asteroid(&ctx, 1_000_000_030, sess.solar_system_id.unwrap(), 1230, 10_000, (ship_pos.0 + 1000.0, ship_pos.1, ship_pos.2));
-    let opt_res = ctx.dispatch_rpc(
-        &mut sess, "dogmaIM", None, "Activate",
-        &[PyRep::Integer(mining_laser_id), PyRep::String("miningLaser".into()), PyRep::Integer(ast_veld)],
-        &kw, None,
-    ).await.expect("Activate with Optimization burst");
-    let boosted_ms = get_dict_val(&opt_res, "cycleTimeMs").and_then(|v| v.as_i64()).unwrap_or(60_000);
-    assert!(boosted_ms <= 60_000, "Optimization burst charge must reduce mining module cycle duration");
 }
 
 // ====================================================================
@@ -715,7 +586,6 @@ async fn test_mining_wormhole_sites_phased_fields_and_market_goals() {
     // parity: feat:mining.wormhole-ore-sites, feat:mining.phased-asteroid-field-lifecycle, feat:mining.mobile-phase-anchor, feat:mining.mining-market, feat:mining.mining-goals
     eve_testkit::attest(&["feat:mining.wormhole-ore-sites", "feat:mining.phased-asteroid-field-lifecycle", "feat:mining.mobile-phase-anchor", "feat:mining.mining-market", "feat:mining.mining-goals"]);
     let ctx = ServerContext::new();
-    crate::common::pin_clock(&ctx);
 
     // 1. Wormhole Ore Sites: Perimeter, Frontier, and Core Deposits
     use eve_server::services::mining_sites::{WORMHOLE_ORE_SITES, resolve_wormhole_ore_site, PhasedAsteroidFieldState};

@@ -91,7 +91,7 @@ fn get_dict_entry<'a>(dict: &'a PyRep, key: &str) -> Option<&'a PyRep> {
 
 #[tokio::test]
 async fn test_action_plan_ch1_to_ch5_character_skills_and_gm() {
-    // parity: plan:CH-1, plan:CH-3, plan:CH-4, rpc:charMgr.AddOwnerNote, rpc:charMgr.GetCharacterDescription, rpc:charMgr.GetContactList, rpc:charMgr.GetOwnerNote, rpc:charMgr.GetPublicInfo3, rpc:charMgr.SetCharacterDescription, rpc:charUnboundMgr.CreateCharacterWithDoll, rpc:charUnboundMgr.SelectCharacterID, rpc:slash.SlashCmd
+    // parity: plan:CH-1, plan:CH-3, plan:CH-4, rpc:charMgr.AddOwnerNote, rpc:charMgr.CreateLabel, rpc:charMgr.GetCharacterDescription, rpc:charMgr.GetContactList, rpc:charMgr.GetOwnerNote, rpc:charMgr.GetPublicInfo3, rpc:charMgr.RespecCharacter, rpc:charMgr.SetCharacterDescription, rpc:charUnboundMgr.CreateCharacterWithDoll, rpc:charUnboundMgr.SelectCharacterID, rpc:skillMgr2.ApplyFreeSkillPoints, rpc:skillMgr2.GetSkillHistory, rpc:skillMgr2.GetSkillQueue, rpc:skillMgr2.GetSkillQueueAndFreePoints, rpc:skillMgr2.InjectSkillIntoBrain, rpc:slash.SlashCmd
     eve_testkit::attest(&[
         "plan:CH-1",
         "plan:CH-3",
@@ -99,7 +99,6 @@ async fn test_action_plan_ch1_to_ch5_character_skills_and_gm() {
     ]);
 
     let ctx = ServerContext::new();
-    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let mut sess = SessionState::new(9101);
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
@@ -480,7 +479,7 @@ async fn test_action_plan_ch1_to_ch5_character_skills_and_gm() {
 
 #[tokio::test]
 async fn test_action_plan_p1_to_p5_wire_protocol_cache_notifications() {
-    // parity: plan:P-1, plan:P-2, plan:P-3, plan:P-4, plan:P-5, rpc:charUnboundMgr.SelectCharacterID, rpc:config.GetStationSolarSystemsByOwner
+    // parity: plan:P-1, plan:P-2, plan:P-3, plan:P-4, plan:P-5, rpc:charUnboundMgr.GetCharactersToSelect, rpc:charUnboundMgr.SelectCharacterID, rpc:config.GetMap, rpc:config.GetMultiCorpTickerNamesEx, rpc:config.GetMultiLocationsEx, rpc:config.GetMultiOwnersEx, rpc:config.GetStationSolarSystemsByOwner, rpc:invbroker.List, rpc:objectCaching.GetCachableObject
     eve_testkit::attest(&[
         "plan:P-1",
         "plan:P-2",
@@ -850,17 +849,9 @@ async fn test_action_plan_p6_p7_native_handshake_and_destiny_binary() {
 
 #[tokio::test]
 async fn test_action_plan_mn01_to_mn05_mining_static_belts_cycles_holds() {
-    // parity: plan:MN-01, plan:MN-02, plan:MN-03, plan:MN-04, plan:MN-05
-    eve_testkit::attest(&[
-        "plan:MN-01",
-        "plan:MN-02",
-        "plan:MN-03",
-        "plan:MN-04",
-        "plan:MN-05",
-    ]);
+    // parity: rpc:dogmaIM.Activate, rpc:stationSvc.Undock
 
     let ctx = ServerContext::new();
-    crate::common::pin_clock(&ctx);
     let char_id = 90_000_001;
     let mut sess = setup_pilot_session(&ctx, 9103, char_id).await;
     let kw = HashMap::new();
@@ -924,7 +915,7 @@ async fn test_action_plan_mn01_to_mn05_mining_static_belts_cycles_holds() {
             .await
             .unwrap();
     }
-    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(crate::common::TEST_CLOCK_BASE_UNIX)));
+    ctx.set_clock(Arc::new(VirtualServerClock::new()));
     ctx.advance_secs(eve_server::system_actor::DEFAULT_BELT_RESPAWN_INTERVAL_SECS * 2);
     let _ = perim_sys.step_manual(1.0).await.unwrap();
 
@@ -994,19 +985,17 @@ async fn test_action_plan_mn01_to_mn05_mining_static_belts_cycles_holds() {
     .await
     .unwrap();
 
-    let activate_rep = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "dogmaIM",
-            None,
-            "Activate",
-            &[PyRep::Integer(laser_id), PyRep::String("miningLaser".into()), PyRep::Integer(ast_rock_id)],
-            &kw,
-            None,
-        )
+    ctx.db.with_mut_snapshot(|snap| {
+        let skills = snap.skills.entry(char_id).or_default();
+        skills.insert(3386, TrainedSkillRecord { type_id: 3386, level: 5, skill_points: 256_000.0 }); // Mining V
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+    let cycle = crate::mining_cycle_engine::mine_once(&ctx, &mut sess, laser_id, ast_rock_id)
         .await
-        .expect("Activate mining laser");
-    assert!(matches!(activate_rep, PyRep::KeyVal(_) | PyRep::Dict(_) | PyRep::None));
+        .expect("one Miner II cycle on the locked Veldspar rock");
+    assert_eq!(cycle.ore_type_id, 1230);
+    assert!(cycle.units_removed > 0);
+    assert_eq!(ctx.db.get_asteroid(ast_rock_id).unwrap().quantity, 50_000 - cycle.units_removed - cycle.residue_units);
 
     // ------------------------------------------------------------------------
     // MN-05: Holds and inventory routing (SpecializedOreHold flag 134)
@@ -1043,13 +1032,7 @@ async fn test_action_plan_mn01_to_mn05_mining_static_belts_cycles_holds() {
 
 #[tokio::test]
 async fn test_action_plan_mn06_to_mn18_crystals_skills_ice_npc_missions() {
-    // parity: plan:MN-06, plan:MN-07, plan:MN-08, plan:MN-18
-    eve_testkit::attest(&[
-        "plan:MN-06",
-        "plan:MN-07",
-        "plan:MN-08",
-        "plan:MN-18",
-    ]);
+    // parity: rpc:dogmaIM.Activate, rpc:stationSvc.Undock
 
     let ctx = ServerContext::new();
     let char_id = 90_000_001;
@@ -1125,19 +1108,17 @@ async fn test_action_plan_mn06_to_mn18_crystals_skills_ice_npc_missions() {
     .unwrap();
 
     // Verify modulated mining laser activates with crystal loaded
-    let mod_activate = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "dogmaIM",
-            None,
-            "Activate",
-            &[PyRep::Integer(laser_id), PyRep::String("miningLaser".into()), PyRep::Integer(ast_rock_id)],
-            &kw,
-            None,
-        )
+    ctx.db.with_mut_snapshot(|snap| {
+        let skills = snap.skills.entry(char_id).or_default();
+        skills.insert(3386, TrainedSkillRecord { type_id: 3386, level: 5, skill_points: 256_000.0 }); // Mining V
+        skills.insert(11395, TrainedSkillRecord { type_id: 11395, level: 1, skill_points: 8_000.0 }); // Deep Core Mining I
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+    let cycle = crate::mining_cycle_engine::mine_once(&ctx, &mut sess, laser_id, ast_rock_id)
         .await
-        .expect("Activate modulated laser with crystal");
-    assert!(matches!(mod_activate, PyRep::KeyVal(_) | PyRep::Dict(_) | PyRep::None));
+        .expect("one Deep Core Mining Laser I cycle on the locked Veldspar rock");
+    assert_eq!(cycle.ore_type_id, 1230);
+    assert!(cycle.units_removed > 0);
 
     // ------------------------------------------------------------------------
     // MN-07: Skills & MLU bonuses applied through dogma engine

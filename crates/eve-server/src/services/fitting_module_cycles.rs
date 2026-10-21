@@ -127,6 +127,19 @@ pub(crate) async fn handle_module_cycles(
                 }));
             };
 
+            // Mining lasers, strip miners, ice and gas harvesters run on the repeating MN-04 cycle engine.
+            if crate::services::mining_cycle::mining_kind_of(&ctx.sde, mod_type).is_some() {
+                let Some(target_id) = target_id_opt.filter(|&t| t > 0) else {
+                    return Some(Err(BridgeRpcError {
+                        code: "TargetNotLocked".into(),
+                        message: "Mining modules require a locked target asteroid".into(),
+                    }));
+                };
+                return Some(
+                    crate::services::mining_cycle::activate(ctx, char_id, ship_id, sys_id, module_id, target_id).await,
+                );
+            }
+
             if let Some(res) =
                 handle_cyno_generator_activation(ctx, &sys, char_id, ship_id, sys_id, module_id, mod_type).await
             {
@@ -557,10 +570,7 @@ pub(crate) async fn handle_module_cycles(
                 ])));
             }
 
-            let is_mining_module = matches!(mod_type.group_id, 54 | 464 | 483 | 737 | 2004 | 4138)
-                || mod_type.default_attributes.contains_key(&77);
-
-            if !is_mining_module {
+            {
                 if ctx.is_module_in_reactivation_delay(ship_id, module_id) {
                     return Some(Err(BridgeRpcError {
                         code: "ModuleReactivationDelay".into(),
@@ -1264,20 +1274,6 @@ pub(crate) async fn handle_module_cycles(
                     ("effectiveMaxVelocity", PyRep::Real(max_vel)),
                 ])))
             }
-            } else {
-
-                activate_mining_module(
-                    ctx,
-                    session,
-                    char_id,
-                    ship_id,
-                    module_id,
-                    mod_type,
-                    method,
-                    args,
-                    kwargs,
-                )
-                .await
             }
         }
         _ => None,

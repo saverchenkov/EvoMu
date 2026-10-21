@@ -114,8 +114,8 @@ async fn create_auth_session(ctx: &ServerContext, session_id: u64) -> SessionSta
 // ============================================================================
 #[tokio::test]
 async fn test_mn13_moon_extraction_lifecycle_and_fracture() {
-    // parity: plan:MN-13, feat:mining.moon-extraction, feat:mining.moon-fracture, feat:mining.moon-resources, rpc:moonExtractions.CancelExtraction, rpc:moonExtractions.FractureChunkWithStructure, rpc:moonExtractions.GetExtractionAndEventIDFromStructureID, rpc:moonExtractions.GetExtractionsForCorp, rpc:moonExtractions.GetMoonResourcesForStructure, rpc:moonExtractions.StartNewExtraction
-    eve_testkit::attest(&["plan:MN-13", "feat:mining.moon-extraction", "feat:mining.moon-fracture", "feat:mining.moon-resources"]);
+    // parity: feat:mining.moon-extraction, feat:mining.moon-fracture, feat:mining.moon-resources, rpc:moonExtractions.CancelExtraction, rpc:moonExtractions.FractureChunkWithStructure, rpc:moonExtractions.GetExtractionAndEventIDFromStructureID, rpc:moonExtractions.GetExtractionsForCorp, rpc:moonExtractions.GetMoonResourcesForStructure, rpc:moonExtractions.StartNewExtraction
+    eve_testkit::attest(&["feat:mining.moon-extraction", "feat:mining.moon-fracture", "feat:mining.moon-resources"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
@@ -544,8 +544,8 @@ async fn test_mn14_auto_moon_mining_service() {
 // ============================================================================
 #[tokio::test]
 async fn test_mn15_corp_mining_ledger_service_and_observer_tracking() {
-    // parity: plan:MN-16, feat:mining.corp-ledger, rpc:corpMiningLedger.GetObserverLedger, rpc:corpMiningLedger.GetObserversWithMiningEvents
-    eve_testkit::attest(&["plan:MN-16", "feat:mining.corp-ledger"]);
+    // parity: feat:mining.corp-ledger, rpc:corpMiningLedger.GetObserverLedger, rpc:corpMiningLedger.GetObserversWithMiningEvents
+    eve_testkit::attest(&["feat:mining.corp-ledger"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let kw = HashMap::new();

@@ -75,32 +75,22 @@ async fn bind_service_oid(
     outer[0].as_i64().expect("bound_id integer") as u64
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Runs one Miner I cycle on `target_id` (MN-04 engine), approaching the rock with
+/// `beyonce.CmdFollowBall` first when it is out of lock or module range.
 async fn activate_in_range(
     ctx: &ServerContext,
     sess: &mut SessionState,
     handle: &eve_server::system_actor::SystemHandle,
-    dogma_oid: u64,
+    _dogma_oid: u64,
     beyonce_oid: u64,
     module_id: i64,
     target_id: i64,
-) -> PyRep {
+) -> eve_server::services::mining_cycle::MiningCycleOutcome {
     let kw = HashMap::new();
     for _attempt in 0..3 {
-        match ctx
-            .dispatch_rpc(
-                sess,
-                "dogmaIM",
-                Some(dogma_oid),
-                "Activate",
-                &[PyRep::Integer(module_id), PyRep::Integer(target_id)],
-                &kw,
-                None,
-            )
-            .await
-        {
+        match crate::mining_cycle_engine::mine_once(ctx, sess, module_id, target_id).await {
             Ok(res) => return res,
-            Err(e) if e.code == "TargetOutOfRange" => {
+            Err(code) if code == "TargetOutOfRange" || code == "TargetingFailed" => {
                 ctx.dispatch_rpc(
                     sess,
                     "beyonce",
@@ -116,7 +106,7 @@ async fn activate_in_range(
                     handle.step_manual(1.0).await.unwrap();
                 }
             }
-            Err(e) => panic!("dogmaIM.Activate on {target_id} failed: {e:?}"),
+            Err(e) => panic!("mining cycle on {target_id} failed: {e:?}"),
         }
     }
     panic!("rock {target_id} still out of range after approaching");
@@ -127,10 +117,9 @@ async fn activate_in_range(
 // ============================================================================
 #[tokio::test]
 async fn test_mn15_mining_sites_gas_anomalies_signatures_sov() {
-    // parity: plan:MN-15, feat:mining.gas-sites, feat:mining.ore-anomalies, feat:mining.ore-signatures, feat:mining.sov-ore-sites, rpc:sovMgr.AcquireSkyhooks
-    eve_testkit::attest(&["plan:MN-15", "feat:mining.gas-sites", "feat:mining.ore-anomalies", "feat:mining.ore-signatures", "feat:mining.sov-ore-sites"]);
+    // parity: feat:mining.gas-sites, feat:mining.ore-anomalies, feat:mining.ore-signatures, feat:mining.sov-ore-sites, rpc:beyonce.CmdFollowBall, rpc:beyonce.CmdWarpToStuff, rpc:beyonce.MachoBindObject, rpc:dogmaIM.Activate, rpc:scanSvc.ConeScan, rpc:scanSvc.GetScanResults, rpc:scanSvc.GetSystemScanMgr, rpc:scanSvc.RequestScans, rpc:sovHubSvc.GetInstalledUpgradesLocal, rpc:sovHubSvc.SaveUpgradeConfiguration, rpc:sovMgr.AcquireSkyhooks
+    eve_testkit::attest(&["feat:mining.gas-sites", "feat:mining.ore-anomalies", "feat:mining.ore-signatures", "feat:mining.sov-ore-sites"]);
     let ctx = ServerContext::new();
-    crate::common::pin_clock(&ctx);
     let mut sess = create_auth_session(&ctx, 1003).await;
     let kw = HashMap::new();
     let char_id = 90_000_001_i64;
@@ -423,11 +412,11 @@ async fn test_mn15_mining_sites_gas_anomalies_signatures_sov() {
         &ctx, &mut sess, &handle, dogma_oid, beyonce_oid, miner_mod_id, first_ast,
     )
     .await;
-    let mined = first_cycle.dict_get("normalUnits").and_then(|v| v.as_i64()).unwrap();
+    let mined = first_cycle.units_removed;
     assert!(mined > 0, "Miner I cycle must extract ore: {first_cycle:?}");
-    assert_eq!(first_cycle.dict_get("depleted"), Some(&PyRep::Bool(false)));
+    assert_eq!(first_cycle.stop, None);
     let after_units = ctx.db.with_snapshot(|snap| snap.asteroids[&first_ast].quantity);
-    assert_eq!(after_units, before_units - mined);
+    assert_eq!(after_units, before_units - mined - first_cycle.residue_units);
 
     ctx.db.with_mut_snapshot(|snap| {
         for id in &anom_ast_ids {
@@ -439,8 +428,8 @@ async fn test_mn15_mining_sites_gas_anomalies_signatures_sov() {
             &ctx, &mut sess, &handle, dogma_oid, beyonce_oid, miner_mod_id, *id,
         )
         .await;
-        assert_eq!(res.dict_get("normalUnits").and_then(|v| v.as_i64()), Some(1), "rock {i}");
-        assert_eq!(res.dict_get("depleted"), Some(&PyRep::Bool(true)), "rock {i}");
+        assert_eq!(res.units_removed, 1, "rock {i}");
+        assert_eq!(res.stop, Some(eve_server::services::mining_cycle::MiningStopReason::AsteroidDepleted), "rock {i}");
         let still_listed = ctx.db.with_snapshot(|snap| {
             snap.cosmic_anomalies[&sys_id]
                 .iter()
@@ -621,7 +610,7 @@ async fn test_mn15_mining_sites_gas_anomalies_signatures_sov() {
         &ctx, &mut sess, &handle, dogma_oid, beyonce_oid, miner_mod_id, sig_rock,
     )
     .await;
-    assert!(sig_cycle.dict_get("normalUnits").and_then(|v| v.as_i64()).unwrap() > 0);
+    assert!(sig_cycle.units_removed > 0);
 
     // ------------------------------------------------------------------------
     // 3. Low-sec gas site with gas harvesting (feat:mining.gas-sites)
@@ -836,26 +825,14 @@ async fn test_mn15_mining_sites_gas_anomalies_signatures_sov() {
     }
 
     let gas_before = ctx.db.with_snapshot(|snap| snap.asteroids[&gas_cloud_ball_id].quantity);
-    let harvest_res = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "dogmaIM",
-            Some(lowsec_dogma_oid),
-            "Activate",
-            &[
-                PyRep::Integer(gas_mod_id),
-                PyRep::Integer(gas_cloud_ball_id),
-            ],
-            &kw,
-            None,
-        )
+    let harvest_res = crate::mining_cycle_engine::mine_once(&ctx, &mut sess, gas_mod_id, gas_cloud_ball_id)
         .await
-        .expect("dogmaIM.Activate Gas Cloud Harvester I on gas cloud");
-    let harvested = harvest_res.dict_get("normalUnits").and_then(|v| v.as_i64()).unwrap();
+        .expect("Gas Cloud Harvester I cycle on gas cloud");
+    let harvested = harvest_res.units_removed;
     assert!(harvested > 0, "Gas Cloud Harvester must extract Vermillion Cytoserocin units");
-    assert_eq!(harvest_res.dict_get("oreTypeID").and_then(|v| v.as_i64()), Some(25278));
+    assert_eq!(harvest_res.ore_type_id, 25278);
     let gas_after = ctx.db.with_snapshot(|snap| snap.asteroids[&gas_cloud_ball_id].quantity);
-    assert_eq!(gas_after, gas_before - harvested);
+    assert_eq!(gas_after, gas_before - harvested - harvest_res.residue_units);
 
     let post_gas_scan = ctx
         .dispatch_rpc(&mut sess, "scanSvc", None, "GetScanResults", &[], &kw, None)

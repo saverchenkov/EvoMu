@@ -99,212 +99,8 @@ fn get_dict_val<'a>(dict: &'a PyRep, key: &str) -> Option<&'a PyRep> {
 }
 
 #[tokio::test]
-async fn test_phase_5m_mn04_mining_laser_cycle_engine() {
-    // parity: feat:mining.mining-laser-cycle, feat:mining.strip-miner
-    eve_testkit::attest(&["feat:mining.mining-laser-cycle", "feat:mining.strip-miner"]);
-    let ctx = ServerContext::new();
-    let kw = HashMap::new();
-    let char_id = 90_000_001;
-    let mut sess = setup_session(&ctx, char_id).await;
-
-    // Undock character to space
-    ctx.dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None)
-        .await
-        .expect("Undock");
-
-    let ship_id = sess.ship_id.expect("active ship");
-    let sys_id = sess.solar_system_id.expect("solar system");
-
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
-    let (_, ship_ball) = sys_handle
-        .get_ball_snapshot(ship_id)
-        .await
-        .expect("get_ball_snapshot")
-        .expect("ship ball");
-    let ship_pos = (ship_ball.position.x, ship_ball.position.y, ship_ball.position.z);
-
-    // Spawn an asteroid in the system near the ship (1000m away)
-    let ast_pos = (ship_pos.0 + 1_000.0, ship_pos.1, ship_pos.2);
-    let ast_id = spawn_test_asteroid(&ctx, 1_000_000_001, sys_id, 1230, 10_000, ast_pos);
-
-    // Fit Miner I (type 483, group 54) to ship in HiSlot0 (flag 27)
-    let module_id = 100_000_801;
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.items.remove(&100_000_005);
-        snap.items.insert(
-            module_id,
-            InventoryItemRecord {
-                item_id: module_id,
-                type_id: 483, // Miner I
-                owner_id: char_id,
-                location_id: ship_id,
-                flag: InventoryFlag::HiSlot0,
-                quantity: 1,
-                singleton: true,
-                version: 1,
-                dynamic_attributes: HashMap::new(),
-                source_mutaplasmid_id: None,
-                insured_payout_isk: 0.0,
-                is_blueprint_copy: false,
-                blueprint_runs_remaining: None,
-            },
-        );
-    });
-    ctx.ship_fittings.write().unwrap().remove(&ship_id);
-
-    // 1. Invalid target check
-    let invalid_res = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "dogmaIM",
-            None,
-            "Activate",
-            &[PyRep::Integer(module_id), PyRep::Integer(999_999)],
-            &kw,
-            None,
-        )
-        .await;
-    assert_eq!(invalid_res.unwrap_err().code, "InvalidTarget");
-
-    // Clear notifications before activation
-    let _ = ctx.drain_notifications_for_char(char_id);
-
-    // 2. Valid activation cycle
-    let res = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "dogmaIM",
-            None,
-            "Activate",
-            &[PyRep::Integer(module_id), PyRep::Integer(ast_id)],
-            &kw,
-            None,
-        )
-        .await
-        .expect("Activate Miner I");
-
-    let yield_units = get_dict_val(&res, "yieldUnits")
-        .and_then(|v| v.as_i64())
-        .expect("yieldUnits");
-    let cycle_time = get_dict_val(&res, "cycleTimeMs")
-        .and_then(|v| v.as_i64())
-        .expect("cycleTimeMs");
-    let ore_type = get_dict_val(&res, "oreTypeID")
-        .and_then(|v| v.as_i64())
-        .expect("oreTypeID");
-    let is_depleted = get_dict_val(&res, "depleted")
-        .and_then(|v| match v {
-            PyRep::Bool(b) => Some(*b),
-            _ => None,
-        })
-        .expect("depleted");
-    let is_hold_full = get_dict_val(&res, "holdFull")
-        .and_then(|v| match v {
-            PyRep::Bool(b) => Some(*b),
-            _ => None,
-        })
-        .expect("holdFull");
-
-    assert!(yield_units > 0);
-    assert!(cycle_time > 0);
-    assert_eq!(ore_type, 1230);
-    assert!(!is_depleted);
-    assert!(!is_hold_full);
-
-    // Verify asteroid quantity decreased
-    let ast_after = ctx.db.get_asteroid(ast_id).expect("asteroid");
-    assert_eq!(ast_after.quantity, 10_000 - yield_units);
-
-    // Verify ore deposited in ship
-    let ship_items = ctx.db.get_items_for_character(char_id);
-    let ore_in_ship = ship_items
-        .iter()
-        .find(|i| i.location_id == ship_id && i.type_id == 1230);
-    assert!(ore_in_ship.is_some());
-    assert_eq!(ore_in_ship.unwrap().quantity as i64, yield_units);
-
-    // 3. Verify push notification OnOreMined; `OnMiningLaserFiredLocal` is scattered by the V24
-    // client itself (moon-mining `SchedulingSvc.FireLaser`) and must never come from the server.
-    let notifs = ctx.drain_notifications_for_char(char_id);
-    assert!(
-        notifs.iter().any(|n| n.event == "OnOreMined"),
-        "Expected OnOreMined notification"
-    );
-    assert!(
-        notifs.iter().all(|n| n.event != "OnMiningLaserFiredLocal"),
-        "client-local OnMiningLaserFiredLocal must not be sent by the server"
-    );
-
-    // 4. Partial cycle on rock depletion
-    let small_ast_id = spawn_test_asteroid(&ctx, 1_000_000_002, sys_id, 1230, 3, ast_pos);
-
-    let dep_res = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "dogmaIM",
-            None,
-            "Activate",
-            &[PyRep::Integer(module_id), PyRep::Integer(small_ast_id)],
-            &kw,
-            None,
-        )
-        .await
-        .expect("Activate Miner on small rock");
-
-    let small_yield = get_dict_val(&dep_res, "yieldUnits")
-        .and_then(|v| v.as_i64())
-        .expect("yieldUnits");
-    let small_depleted = get_dict_val(&dep_res, "depleted")
-        .and_then(|v| match v {
-            PyRep::Bool(b) => Some(*b),
-            _ => None,
-        })
-        .expect("depleted");
-    let small_cycle = get_dict_val(&dep_res, "cycleTimeMs")
-        .and_then(|v| v.as_i64())
-        .expect("cycleTimeMs");
-
-    assert_eq!(small_yield, 3);
-    assert!(small_depleted);
-    assert!(small_cycle < cycle_time, "Partial cycle time must be shorter");
-
-    // Subsequent activation on depleted asteroid returns AsteroidDepleted
-    let dep_err = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "dogmaIM",
-            None,
-            "Activate",
-            &[PyRep::Integer(module_id), PyRep::Integer(small_ast_id)],
-            &kw,
-            None,
-        )
-        .await;
-    assert_eq!(dep_err.unwrap_err().code, "AsteroidDepleted");
-
-    // 5. Module deactivation
-    let deact_res = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "dogmaIM",
-            None,
-            "Deactivate",
-            &[PyRep::Integer(module_id)],
-            &kw,
-            None,
-        )
-        .await
-        .expect("Deactivate Miner I");
-    let is_active = get_dict_val(&deact_res, "active").and_then(|v| match v {
-        PyRep::Bool(b) => Some(*b),
-        _ => None,
-    });
-    assert_eq!(is_active, Some(false));
-}
-
-#[tokio::test]
 async fn test_phase_5m_mn05_specialized_holds_volume_and_stack_merging() {
-    // parity: feat:ships.special-holds, feat:mining.ore-hold
+    // parity: feat:ships.special-holds, feat:mining.ore-hold, rpc:invbroker.Add
     eve_testkit::attest(&["feat:ships.special-holds", "feat:mining.ore-hold"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();
@@ -469,169 +265,8 @@ async fn test_phase_5m_mn05_specialized_holds_volume_and_stack_merging() {
 }
 
 #[tokio::test]
-async fn test_phase_5m_mn06_mining_crystals_and_residue() {
-    // parity: feat:mining.modulated-crystals, feat:mining.mining-residue
-    eve_testkit::attest(&["feat:mining.modulated-crystals", "feat:mining.mining-residue"]);
-    let ctx = ServerContext::new();
-    let kw = HashMap::new();
-    let char_id = 90_000_001;
-    let mut sess = setup_session(&ctx, char_id).await;
-
-    // Undock to space
-    ctx.dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None)
-        .await
-        .expect("Undock");
-
-    let ship_id = sess.ship_id.expect("active ship");
-    let sys_id = sess.solar_system_id.expect("solar system");
-
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
-    let (_, ship_ball) = sys_handle
-        .get_ball_snapshot(ship_id)
-        .await
-        .expect("get_ball_snapshot")
-        .expect("ship ball");
-    let ship_pos = (ship_ball.position.x, ship_ball.position.y, ship_ball.position.z);
-
-    // Spawn Veldspar asteroid (type 1230) 1000m from ship
-    let ast_pos = (ship_pos.0 + 1_000.0, ship_pos.1, ship_pos.2);
-    let ast_id = spawn_test_asteroid(&ctx, 1_000_000_003, sys_id, 1230, 50_000, ast_pos);
-
-    // Fit Miner II (type 482) in HiSlot0 (flag 27) with residue attributes (prob = 34.0, mult = 1.0)
-    let module_id = 100_000_820;
-    // Load Veldspar Mining Crystal I (type 18066) into the same slot (flag 27)
-    let crystal_id = 100_000_821;
-
-    let mut crystal_attrs = HashMap::new();
-    crystal_attrs.insert(eve_sde::attr_ids::HP_STRUCT, 1.0);
-
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.items.remove(&100_000_005);
-        snap.items.insert(
-            module_id,
-            InventoryItemRecord {
-                item_id: module_id,
-                type_id: 482, // Miner II
-                owner_id: char_id,
-                location_id: ship_id,
-                flag: InventoryFlag::HiSlot0,
-                quantity: 1,
-                singleton: true,
-                version: 1,
-                dynamic_attributes: HashMap::new(),
-                source_mutaplasmid_id: None,
-                insured_payout_isk: 0.0,
-                is_blueprint_copy: false,
-                blueprint_runs_remaining: None,
-            },
-        );
-        snap.items.insert(
-            crystal_id,
-            InventoryItemRecord {
-                item_id: crystal_id,
-                type_id: 18066, // Veldspar Mining Crystal I
-                owner_id: char_id,
-                location_id: ship_id,
-                flag: InventoryFlag::HiSlot0,
-                quantity: 1,
-                singleton: true,
-                version: 1,
-                dynamic_attributes: crystal_attrs,
-                source_mutaplasmid_id: None,
-                insured_payout_isk: 0.0,
-                is_blueprint_copy: false,
-                blueprint_runs_remaining: None,
-            },
-        );
-    });
-    ctx.ship_fittings.write().unwrap().remove(&ship_id);
-
-    // 1. Activate cycle: crystal damage and residue
-    let res = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "dogmaIM",
-            None,
-            "Activate",
-            &[PyRep::Integer(module_id), PyRep::Integer(ast_id)],
-            &kw,
-            None,
-        )
-        .await
-        .expect("Activate Miner II with Crystal");
-
-    let yield_units = get_dict_val(&res, "yieldUnits")
-        .and_then(|v| v.as_i64())
-        .expect("yieldUnits");
-    let crystal_dmg = get_dict_val(&res, "crystalDamage")
-        .and_then(|v| match v {
-            PyRep::Real(r) => Some(*r),
-            _ => None,
-        })
-        .expect("crystalDamage");
-    let crystal_destroyed = get_dict_val(&res, "crystalDestroyed")
-        .and_then(|v| match v {
-            PyRep::Bool(b) => Some(*b),
-            _ => None,
-        })
-        .expect("crystalDestroyed");
-    let residue_units = get_dict_val(&res, "residueUnits")
-        .and_then(|v| v.as_i64())
-        .expect("residueUnits");
-
-    assert_eq!(crystal_dmg, 0.025); // Veldspar Mining Crystal I attribute 784
-    assert!(!crystal_destroyed);
-    assert!(residue_units > 0);
-
-    // Check crystal HP reduced in db
-    let crystal_item = ctx.db.get_item(crystal_id).expect("crystal_item");
-    let crystal_hp = crystal_item
-        .dynamic_attributes
-        .get(&eve_sde::attr_ids::HP_STRUCT)
-        .copied()
-        .unwrap_or(0.0);
-    assert!((crystal_hp - 0.975).abs() < 1e-4);
-
-    // Check asteroid quantity reduced by yield + residue
-    let ast_after = ctx.db.get_asteroid(ast_id).expect("asteroid");
-    assert_eq!(ast_after.quantity, 50_000 - (yield_units + residue_units));
-
-    // 2. Crystal destruction when HP drops to 0
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(c) = snap.items.get_mut(&crystal_id) {
-            c.dynamic_attributes
-                .insert(eve_sde::attr_ids::HP_STRUCT, 0.020);
-        }
-    });
-
-    let res_destr = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "dogmaIM",
-            None,
-            "Activate",
-            &[PyRep::Integer(module_id), PyRep::Integer(ast_id)],
-            &kw,
-            None,
-        )
-        .await
-        .expect("Activate Miner II to destroy crystal");
-
-    let is_destroyed = get_dict_val(&res_destr, "crystalDestroyed")
-        .and_then(|v| match v {
-            PyRep::Bool(b) => Some(*b),
-            _ => None,
-        })
-        .expect("crystalDestroyed");
-    assert!(is_destroyed);
-
-    // Crystal must be removed from inventory
-    assert!(ctx.db.get_item(crystal_id).is_none());
-}
-
-#[tokio::test]
 async fn test_phase_5m_mn07_ice_and_gas_harvesting() {
-    // parity: feat:mining.ice-harvester, feat:mining.gas-harvesting
+    // parity: feat:mining.ice-harvester, feat:mining.gas-harvesting, rpc:dogmaIM.Activate, rpc:stationSvc.Undock
     eve_testkit::attest(&["feat:mining.ice-harvester", "feat:mining.gas-harvesting"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();
@@ -682,8 +317,9 @@ async fn test_phase_5m_mn07_ice_and_gas_harvesting() {
                 blueprint_runs_remaining: None,
             },
         );
-        // Set Ice Harvesting skill (16281) to level 5 (reduces cycle time by 25%)
+        // Set Ice Harvesting skill (16281) to level 5 (reduces cycle time by 25%) and Mining Barge V
         let sk = snap.skills.entry(char_id).or_default();
+        sk.insert(17940, TrainedSkillRecord { type_id: 17940, level: 5, skill_points: 256_000.0 });
         sk.insert(
             16281,
             TrainedSkillRecord {
@@ -695,33 +331,16 @@ async fn test_phase_5m_mn07_ice_and_gas_harvesting() {
     });
     ctx.ship_fittings.write().unwrap().remove(&ship_id);
 
-    let ice_res = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "dogmaIM",
-            None,
-            "Activate",
-            &[PyRep::Integer(ice_mod_id), PyRep::Integer(ice_ast_id)],
-            &kw,
-            None,
-        )
+    let ice_res = crate::mining_cycle_engine::mine_once(&ctx, &mut sess, ice_mod_id, ice_ast_id)
         .await
-        .expect("Activate Ice Harvester I");
-
-    let ice_yield = get_dict_val(&ice_res, "yieldUnits")
-        .and_then(|v| v.as_i64())
-        .expect("yieldUnits");
-    let ice_type = get_dict_val(&ice_res, "oreTypeID")
-        .and_then(|v| v.as_i64())
-        .expect("oreTypeID");
-    let ice_cycle = get_dict_val(&ice_res, "cycleTimeMs")
-        .and_then(|v| v.as_i64())
-        .expect("cycleTimeMs");
-
-    assert_eq!(ice_yield, 1, "Ice Harvester I yields exactly 1 unit of 1000m3 ice");
-    assert_eq!(ice_type, 16262);
-    // Base duration 240,000 ms * (1.0 - 0.25) = 180,000 ms
-    assert_eq!(ice_cycle, 180_000);
+        .expect("Ice Harvester I cycle");
+    assert_eq!(ice_res.units_removed, 1, "Ice Harvester I yields exactly 1 unit of 1000m3 ice");
+    assert_eq!(ice_res.ore_type_id, 16262);
+    // Ice Harvesting V (-5%/level, wiki:Ice_harvesting) and the Procurer's Mining Barge ice
+    // harvester duration bonus (SDE attribute 3182 = -2%/level, trained to V here):
+    // 240,000 ms x 0.75 x 0.90 = 162,000 ms.
+    assert_eq!(ctx.sde.types[&17480].default_attributes[&3182], -2.0);
+    assert_eq!(ice_res.cycle_duration_ms, 162_000);
 
     // 2. Gas Harvesting: Gas Cloud Scoop I (type 25266), Amber Cytoserocin (type 25268, volume 10 m3)
     let gas_ast_id = spawn_test_asteroid(&ctx, 1_000_000_005, sys_id, 25268, 500, ice_ast_pos);
@@ -754,25 +373,11 @@ async fn test_phase_5m_mn07_ice_and_gas_harvesting() {
     });
     ctx.ship_fittings.write().unwrap().remove(&ship_id);
 
-    let gas_res = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "dogmaIM",
-            None,
-            "Activate",
-            &[PyRep::Integer(gas_mod_id), PyRep::Integer(gas_ast_id)],
-            &kw,
-            None,
-        )
+    let gas_res = crate::mining_cycle_engine::mine_once(&ctx, &mut sess, gas_mod_id, gas_ast_id)
         .await
-        .expect("Activate Gas Cloud Harvester I");
-
-    let gas_yield = get_dict_val(&gas_res, "yieldUnits")
-        .and_then(|v| v.as_i64())
-        .expect("yieldUnits");
-    let gas_type = get_dict_val(&gas_res, "oreTypeID")
-        .and_then(|v| v.as_i64())
-        .expect("oreTypeID");
+        .expect("Gas Cloud Scoop I cycle");
+    let gas_yield = gas_res.units_removed;
+    let gas_type = i64::from(gas_res.ore_type_id);
 
     // Base volume 10 m3 * 2.0 (Venture 100% bonus) = 20 m3 / 10 m3 per unit = 2 units
     assert_eq!(gas_yield, 2);
@@ -781,10 +386,9 @@ async fn test_phase_5m_mn07_ice_and_gas_harvesting() {
 
 #[tokio::test]
 async fn test_phase_5m_mn11_space_and_structure_compression() {
-    // parity: feat:mining.compression-space, feat:mining.compression-structure, rpc:inSpaceCompressionMgr.CompressItemInSpace, rpc:structureCompressionMgr.CompressItemInStructure
+    // parity: feat:mining.compression-space, feat:mining.compression-structure, rpc:dogmaIM.Activate, rpc:inSpaceCompressionMgr.CompressItemInSpace, rpc:stationSvc.Undock, rpc:structureCompressionMgr.CompressItemInStructure
     eve_testkit::attest(&["feat:mining.compression-space", "feat:mining.compression-structure"]);
     let ctx = ServerContext::new();
-    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let char_id = 90_000_001;
     let mut sess = setup_session(&ctx, char_id).await;
@@ -1103,7 +707,7 @@ async fn test_phase_5m_mn11_space_and_structure_compression() {
 
 #[tokio::test]
 async fn test_phase_5m_mn12_reprocessing_service() {
-    // parity: feat:mining.reprocessing-yield, feat:mining.reprocessing-tax
+    // parity: feat:mining.reprocessing-yield, feat:mining.reprocessing-tax, rpc:reprocessingSvc.GetQuotes, rpc:reprocessingSvc.Reprocess
     eve_testkit::attest(&["feat:mining.reprocessing-yield", "feat:mining.reprocessing-tax"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();

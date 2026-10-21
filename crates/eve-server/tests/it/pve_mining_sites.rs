@@ -60,7 +60,7 @@ async fn create_auth_session(ctx: &ServerContext, session_id: u64) -> SessionSta
 // ============================================================================
 #[tokio::test]
 async fn test_d1_market_groups_and_show_info() {
-    // parity: plan:D-1, feat:market.market-groups, feat:ui.show-info-types, rpc:marketProxy.GetRegionBest
+    // parity: plan:D-1, feat:market.market-groups, feat:ui.show-info-types, rpc:dogmaIM.ItemGetInfo, rpc:marketProxy.GetMarketGroups, rpc:marketProxy.GetRegionBest
     eve_testkit::attest(&["plan:D-1", "feat:market.market-groups", "feat:ui.show-info-types"]);
     let ctx = ServerContext::new();
     let mut sess = create_auth_session(&ctx, 1001).await;
@@ -217,10 +217,9 @@ async fn bind_service_oid(
 // ============================================================================
 #[tokio::test]
 async fn test_e5_agent_finder_and_conversation_lifecycle() {
-    // parity: plan:E-5, feat:pve.agent-finder, feat:pve.agent-conversation, feat:pve.mission-accept, feat:pve.mission-decline, feat:pve.mission-quit, rpc:agentMgr.GetAgents, rpc:agentMgr.GetMyJournalDetails, rpc:agentMgr.GetSolarSystemOfAgent
+    // parity: plan:E-5, feat:pve.agent-finder, feat:pve.agent-conversation, feat:pve.mission-accept, feat:pve.mission-decline, feat:pve.mission-quit, rpc:agentMgr.DoAction, rpc:agentMgr.GetAgents, rpc:agentMgr.GetInfoServiceDetails, rpc:agentMgr.GetMissionBriefingInfo, rpc:agentMgr.GetMyJournalDetails, rpc:agentMgr.GetSolarSystemOfAgent
     eve_testkit::attest(&["plan:E-5", "feat:pve.agent-finder", "feat:pve.agent-conversation", "feat:pve.mission-accept", "feat:pve.mission-decline", "feat:pve.mission-quit"]);
     let ctx = ServerContext::new();
-    crate::common::pin_clock(&ctx);
     let mut sess = create_auth_session(&ctx, 1002).await;
     let kw = HashMap::new();
     let char_id = 90_000_001_i64;
@@ -670,7 +669,7 @@ async fn test_e5_agent_finder_and_conversation_lifecycle() {
 // ============================================================================
 #[tokio::test]
 async fn test_mn17_npc_mining_ops_and_interaction() {
-    // parity: feat:npc.mining-op-npc, feat:mining.npc-mining-ops
+    // parity: feat:npc.mining-op-npc, feat:mining.npc-mining-ops, rpc:livingWorld.GetMiningOps, rpc:livingWorld.StepMiningOp
     eve_testkit::attest(&["feat:npc.mining-op-npc", "feat:mining.npc-mining-ops"]);
     let ctx = ServerContext::new();
     let mut sess = create_auth_session(&ctx, 1004).await;
@@ -830,10 +829,9 @@ async fn test_mn17_npc_mining_ops_and_interaction() {
 // ============================================================================
 #[tokio::test]
 async fn test_mn18_mining_missions_market_and_goals() {
-    // parity: plan:MN-18, feat:pve.mission-mining, feat:mining.mining-missions, feat:mining.mining-market, feat:mining.mining-goals, rpc:agentMgr.GetAgents, rpc:marketProxy.GetOrders, rpc:seasonManager.claim_goal_reward, rpc:seasonManager.get_character_progress_by_character_id
-    eve_testkit::attest(&["plan:MN-18", "feat:pve.mission-mining", "feat:mining.mining-missions", "feat:mining.mining-market", "feat:mining.mining-goals"]);
+    // parity: feat:pve.mission-mining, feat:mining.mining-missions, feat:mining.mining-market, feat:mining.mining-goals, rpc:agentMgr.DoAction, rpc:agentMgr.GetAgents, rpc:dogmaIM.Activate, rpc:marketProxy.GetOrders, rpc:seasonManager.claim_goal_reward, rpc:seasonManager.get_character_progress_by_character_id
+    eve_testkit::attest(&["feat:pve.mission-mining", "feat:mining.mining-missions", "feat:mining.mining-market", "feat:mining.mining-goals"]);
     let ctx = ServerContext::new();
-    crate::common::pin_clock(&ctx);
     let mut sess = create_auth_session(&ctx, 1005).await;
     let kw = HashMap::new();
 
@@ -1108,27 +1106,10 @@ async fn test_mn18_mining_missions_market_and_goals() {
         })
         .await
         .unwrap();
-    let mine_pocket_res = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "dogmaIM",
-            None,
-            "Activate",
-            &[
-                PyRep::Integer(m_laser_id),
-                PyRep::String("miningLaser".into()),
-                PyRep::Integer(pocket_ast_id),
-            ],
-            &kw,
-            None,
-        )
+    let mine_pocket_res = crate::mining_cycle_engine::mine_once(&ctx, &mut sess, m_laser_id, pocket_ast_id)
         .await
-        .expect("dogmaIM.Activate on mission pocket asteroid");
-    let mined_mission_units = mine_pocket_res
-        .dict_get("yieldUnits")
-        .or_else(|| mine_pocket_res.dict_get("normalUnits"))
-        .and_then(|v| v.as_i64())
-        .unwrap_or(0);
+        .expect("one mining cycle on the mission pocket asteroid");
+    let mined_mission_units = mine_pocket_res.units_removed;
     assert!(
         mined_mission_units >= 500,
         "Mining mission pocket asteroid must yield >= 500 units of Veldspar (got {mined_mission_units})"

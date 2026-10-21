@@ -595,19 +595,15 @@ async fn test_mission_archetypes_combat_courier_mining_and_burner() {
             ch.standings.insert(corp_id, 6.0);
         }
     });
+    // Lowest-ID SDE mission whose content template is the basic mining template (deterministic: a
+    // title substring match also hit e.g. "Re-examining Options" depending on HashMap order).
     let mining_mid = ctx
         .sde
         .missions
         .values()
-        .find(|m| {
-            m.content_template
-                .as_deref()
-                .unwrap_or_default()
-                .to_lowercase()
-                .contains("mining")
-                || m.title.to_lowercase().contains("mining")
-        })
+        .filter(|m| m.content_template.as_deref().is_some_and(|c| c.ends_with("BasicMiningMission")))
         .map(|m| m.mission_id)
+        .min()
         .expect("SDE mining mission");
 
     ctx.db.with_mut_snapshot(|snap| {

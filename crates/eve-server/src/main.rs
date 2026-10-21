@@ -51,6 +51,18 @@ async fn main() -> Result<()> {
     // Pre-spawn Jita (30000142) solar system actor inside the ServerContext registry
     let _jita = ctx.systems.get_or_spawn(30000142);
 
+    // World tick: resolve due mining-module cycles once per second against the server clock (MN-04).
+    {
+        let tick_ctx = Arc::clone(&ctx);
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(Duration::from_secs(1));
+            loop {
+                ticker.tick().await;
+                let _ = eve_server::services::mining_cycle::process_mining_cycles(&tick_ctx).await;
+            }
+        });
+    }
+
     info!(
         loaded_types = ctx.sde.types.len(),
         loaded_systems = ctx.sde.solar_systems.len(),

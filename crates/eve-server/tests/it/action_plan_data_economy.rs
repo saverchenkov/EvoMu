@@ -920,44 +920,29 @@ async fn test_plan_c5_mining_belts_lasers_and_depletion() {
     });
     ctx.ship_fittings.write().unwrap().remove(&ship_id);
 
-    // 4. Activate Miner I laser targeting the asteroid via dogmaIM.Activate
-    let act_res = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "dogmaIM",
-            None,
-            "Activate",
-            &[PyRep::Integer(module_id), PyRep::Integer(ast_id)],
-            &kw,
-            None,
-        )
+    // 4. Lock the asteroid, activate Miner I via dogmaIM.Activate and resolve one 15 s cycle.
+    let cycle = crate::mining_cycle_engine::mine_once(&ctx, &mut sess, module_id, ast_id)
         .await
-        .expect("dogmaIM.Activate Miner I");
-
-    let yield_units = get_dict_val(&act_res, "yieldUnits").and_then(|v| v.as_i64()).expect("yieldUnits");
-    let ore_type_id = get_dict_val(&act_res, "oreTypeID").and_then(|v| v.as_i64()).expect("oreTypeID");
-    let cycle_time_ms = get_dict_val(&act_res, "cycleTimeMs").and_then(|v| v.as_i64()).expect("cycleTimeMs");
-
+        .expect("one Miner I cycle");
+    let yield_units = cycle.units_removed;
     assert!(yield_units > 0, "Mining cycle must yield positive ore units");
-    assert_eq!(ore_type_id, VELDSPAR_TYPE_ID as i64, "Mined ore must be Veldspar");
-    assert!(cycle_time_ms > 0, "Cycle time must be positive");
+    assert_eq!(cycle.ore_type_id, VELDSPAR_TYPE_ID, "Mined ore must be Veldspar");
 
-    // 5. Verify ore delivered to ship hold (SpecializedMaterialBay or Cargo)
+    // 5. Verify ore delivered to the ship's hold (general mining hold, or cargo for hulls without one).
     ctx.db.with_snapshot(|snap| {
-        let holds = [InventoryFlag::SpecializedMaterialBay, InventoryFlag::Cargo];
-        let has_mined_ore = snap.items.values().any(|it| {
-            it.owner_id == char_id
-                && it.location_id == ship_id
-                && it.type_id == VELDSPAR_TYPE_ID
-                && holds.contains(&it.flag)
-                && it.quantity >= yield_units as i32
-        });
-        assert!(has_mined_ore, "Ship hold must contain mined Veldspar ore");
+        let holds = [InventoryFlag::SpecializedOreHold, InventoryFlag::Cargo];
+        let mined: i64 = snap
+            .items
+            .values()
+            .filter(|it| it.location_id == ship_id && it.type_id == VELDSPAR_TYPE_ID && holds.contains(&it.flag))
+            .map(|it| i64::from(it.quantity))
+            .sum();
+        assert_eq!(mined, cycle.units_delivered, "Ship hold must contain the mined Veldspar ore");
     });
 
     // 6. Verify asteroid quantity depleted in database
     let ast_after = ctx.db.get_asteroid(ast_id).expect("Asteroid must exist in DB");
-    assert_eq!(ast_after.quantity, initial_ore_qty - yield_units, "Asteroid quantity must be depleted by mined yield units");
+    assert_eq!(ast_after.quantity, initial_ore_qty - yield_units - cycle.residue_units, "Asteroid quantity must be depleted by mined yield units");
 }
 
 // ====================================================================

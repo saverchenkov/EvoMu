@@ -64,6 +64,8 @@ pub struct ServerContext {
     pub invention_roll_override: RwLock<Option<f64>>,
     pub mechanic_rng: Arc<crate::rng::MechanicRng>, // seeded test RNG: shared with `systems`; OS CSPRNG unless seeded
     pub module_reactivation_cooldowns: RwLock<HashMap<(i64, i64), f64>>,
+    /// Repeating mining-module cycles keyed by module item ID (`MN-04`).
+    pub mining_cycles: RwLock<HashMap<i64, crate::services::mining_cycle::ActiveMiningCycle>>,
     pub crimewatch: RwLock<crate::combat::crimewatch::CrimeWatchDirector>,
     pub feature_flags: crate::config::FeatureFlagsConfig,
     pub esi_port: u16,
@@ -166,6 +168,7 @@ impl ServerContext {
             invention_roll_override: RwLock::new(None),
             mechanic_rng,
             module_reactivation_cooldowns: RwLock::new(HashMap::new()),
+            mining_cycles: RwLock::new(HashMap::new()),
             crimewatch: RwLock::new(crate::combat::crimewatch::CrimeWatchDirector::new()),
             feature_flags: crate::config::FeatureFlagsConfig::default(),
             esi_port: 26_004,

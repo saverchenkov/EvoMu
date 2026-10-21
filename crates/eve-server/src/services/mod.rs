@@ -34,6 +34,7 @@ pub mod mail_notify;
 pub mod market_contracts;
 pub mod market_trading;
 pub mod mining_advanced;
+pub mod mining_cycle;
 pub mod mining_sites;
 pub mod operations_manager;
 pub mod project_discovery;

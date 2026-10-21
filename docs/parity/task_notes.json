@@ -161,7 +161,7 @@
   },
   "MN-04": {
     "assessment": "PARTIAL",
-    "note": "Mining laser and strip miner cycle handlers with yield calculation, asteroid depletion, and OnOreMined notifications; blocked on DG-1/DG-4/DG-5."
+    "note": "Repeating clock-driven cycle engine: SDE-dogma yield/duration/range/cap, lock/range/cap/cloak/warp/dock checks, hold-full and depletion stops, short cycles, seeded crits. Notify clause open."
   },
   "MN-05": {
     "assessment": "PARTIAL",
@@ -169,11 +169,11 @@
   },
   "MN-06": {
     "assessment": "PARTIAL",
-    "note": "Modulated mining crystals with ore-type bonuses, volatility damage, and residue probability calculation partially implemented."
+    "note": "Crystals apply dogma modifiers only on ores in their SDE type list; volatility damage and shatter per cycle. Residue multiplier semantics (3153/3159 vs wiki %) unresolved."
   },
   "MN-07": {
     "assessment": "PARTIAL",
-    "note": "Mining skills, ship bonuses, mining laser upgrades, and fleet boosts partially implemented; blocked on DG-1 closure."
+    "note": "Yield, duration and holds come from DG-1 modifierInfo (Retriever+2 MLU II matches wiki). Foreman bursts, rigs, implants and destroyers not yet verified."
   },
   "MN-08": {
     "assessment": "PARTIAL",
