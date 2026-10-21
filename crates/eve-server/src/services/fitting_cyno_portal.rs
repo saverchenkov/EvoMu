@@ -730,6 +730,9 @@ pub(crate) async fn handle_cyno_portal(
                 .map(|o| jump_outcome_rep(&o, session.solar_system_id.unwrap_or(0))),
         ),
         ("beyonce", "GetCynoJammerState") => {
+            if ctx.db.with_snapshot(|s| !s.structure_vulnerability_windows.is_empty()) {
+                return None;
+            }
             let Some(sys_id) = session.solar_system_id else {
                 return Some(Err(err("NoSolarSystem", "Session has no solarSystemID")));
             };

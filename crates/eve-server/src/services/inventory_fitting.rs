@@ -549,6 +549,84 @@ pub async fn handle(
                 .map(|v| v as u64);
             let idem_key = kwargs.get("idempotency_key").and_then(|v| v.as_str());
 
+            // Verify source and destination ownership/access before stack merge or move
+            let auth_move_ok: Result<(), BridgeRpcError> = ctx.db.with_snapshot(|snap| {
+                let Some(moving) = snap.items.get(&item_id) else {
+                    return Err(BridgeRpcError {
+                        code: "ItemNotFound".into(),
+                        message: format!("Item {item_id} not found"),
+                    });
+                };
+                let corp_id = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
+                let ch_sys = snap.characters.get(&char_id).map(|c| c.solar_system_id as i64).unwrap_or(0);
+                let ch_dock = snap.characters.get(&char_id).and_then(|c| c.station_id.or(c.structure_id)).unwrap_or(0);
+                let src_ok = if moving.owner_id == char_id || (corp_id > 0 && moving.owner_id == corp_id) {
+                    true
+                } else if let Some(parent) = snap.items.get(&moving.location_id) {
+                    let p_grp = ctx.sde.types.get(&parent.type_id).map(|t| t.group_id).unwrap_or(0);
+                    let p_cat = ctx.sde.types.get(&parent.type_id).map(|t| t.category_id).unwrap_or(0);
+                    if fitting_containers_ships::is_container_group(p_grp, parent.type_id) || p_grp == 186 {
+                        parent.owner_id == char_id
+                            || (corp_id > 0 && parent.owner_id == corp_id)
+                            || parent.location_id == ch_sys
+                            || (ch_dock > 0 && parent.location_id == ch_dock)
+                    } else if p_cat == 6 {
+                        let is_sma = matches!(moving.flag as u16, 90 | 138);
+                        fitting_containers_ships::can_character_access_ship_bay(
+                            ctx,
+                            char_id,
+                            parent.item_id,
+                            parent.owner_id,
+                            is_sma,
+                        )
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+                if !src_ok {
+                    return Err(BridgeRpcError {
+                        code: "ItemOwnershipViolation".into(),
+                        message: format!("Character {char_id} is not authorized to move item {item_id}"),
+                    });
+                };
+
+                let dst_ok = if new_loc >= 60_000_000 {
+                    true
+                } else if let Some(dest) = snap.items.get(&new_loc) {
+                    let d_grp = ctx.sde.types.get(&dest.type_id).map(|t| t.group_id).unwrap_or(0);
+                    let d_cat = ctx.sde.types.get(&dest.type_id).map(|t| t.category_id).unwrap_or(0);
+                    if dest.owner_id == char_id || (corp_id > 0 && dest.owner_id == corp_id) {
+                        true
+                    } else if fitting_containers_ships::is_container_group(d_grp, dest.type_id) || d_grp == 186 {
+                        dest.location_id == ch_sys || (ch_dock > 0 && dest.location_id == ch_dock)
+                    } else if d_cat == 6 && matches!(flag_u16, 90 | 155) {
+                        fitting_containers_ships::can_character_access_ship_bay(
+                            ctx,
+                            char_id,
+                            new_loc,
+                            dest.owner_id,
+                            flag_u16 == 90,
+                        )
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+                if !dst_ok {
+                    return Err(BridgeRpcError {
+                        code: "DestinationAccessDenied".into(),
+                        message: format!("Character {char_id} is not authorized to move items into {new_loc}"),
+                    });
+                }
+                Ok(())
+            });
+            if let Err(e) = auth_move_ok {
+                return Some(Err(e));
+            }
+
             let dest_is_ship_hold = matches!(flag_u16, 5 | 133..=151 | 181 | 182);
             if dest_is_ship_hold {
                 let cap_check = ctx.db.with_snapshot(|snap| {
@@ -643,84 +721,6 @@ pub async fn handle(
                     Ok(())
                 });
                 if let Err(e) = cap_check {
-                    return Some(Err(e));
-                }
-
-                // Verify source and destination ownership/access before stack merge or move
-                let auth_move_ok: Result<(), BridgeRpcError> = ctx.db.with_snapshot(|snap| {
-                    let Some(moving) = snap.items.get(&item_id) else {
-                        return Err(BridgeRpcError {
-                            code: "ItemNotFound".into(),
-                            message: format!("Item {item_id} not found"),
-                        });
-                    };
-                    let corp_id = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
-                    let ch_sys = snap.characters.get(&char_id).map(|c| c.solar_system_id as i64).unwrap_or(0);
-                    let ch_dock = snap.characters.get(&char_id).and_then(|c| c.station_id.or(c.structure_id)).unwrap_or(0);
-                    let src_ok = if moving.owner_id == char_id || (corp_id > 0 && moving.owner_id == corp_id) {
-                        true
-                    } else if let Some(parent) = snap.items.get(&moving.location_id) {
-                        let p_grp = ctx.sde.types.get(&parent.type_id).map(|t| t.group_id).unwrap_or(0);
-                        let p_cat = ctx.sde.types.get(&parent.type_id).map(|t| t.category_id).unwrap_or(0);
-                        if fitting_containers_ships::is_container_group(p_grp, parent.type_id) || p_grp == 186 {
-                            parent.owner_id == char_id
-                                || (corp_id > 0 && parent.owner_id == corp_id)
-                                || parent.location_id == ch_sys
-                                || (ch_dock > 0 && parent.location_id == ch_dock)
-                        } else if p_cat == 6 {
-                            let is_sma = matches!(moving.flag as u16, 90 | 138);
-                            fitting_containers_ships::can_character_access_ship_bay(
-                                ctx,
-                                char_id,
-                                parent.item_id,
-                                parent.owner_id,
-                                is_sma,
-                            )
-                        } else {
-                            false
-                        }
-                    } else {
-                        false
-                    };
-                    if !src_ok {
-                        return Err(BridgeRpcError {
-                            code: "ItemOwnershipViolation".into(),
-                            message: format!("Character {char_id} is not authorized to move item {item_id}"),
-                        });
-                    }
-
-                    let dst_ok = if new_loc >= 60_000_000 {
-                        true
-                    } else if let Some(dest) = snap.items.get(&new_loc) {
-                        let d_grp = ctx.sde.types.get(&dest.type_id).map(|t| t.group_id).unwrap_or(0);
-                        let d_cat = ctx.sde.types.get(&dest.type_id).map(|t| t.category_id).unwrap_or(0);
-                        if dest.owner_id == char_id || (corp_id > 0 && dest.owner_id == corp_id) {
-                            true
-                        } else if fitting_containers_ships::is_container_group(d_grp, dest.type_id) || d_grp == 186 {
-                            dest.location_id == ch_sys || (ch_dock > 0 && dest.location_id == ch_dock)
-                        } else if d_cat == 6 && matches!(flag_u16, 90 | 155) {
-                            fitting_containers_ships::can_character_access_ship_bay(
-                                ctx,
-                                char_id,
-                                new_loc,
-                                dest.owner_id,
-                                flag_u16 == 90,
-                            )
-                        } else {
-                            false
-                        }
-                    } else {
-                        false
-                    };
-                    if !dst_ok {
-                        return Err(BridgeRpcError {
-                            code: "DestinationAccessDenied".into(),
-                            message: format!("Character {char_id} is not authorized to move items into {new_loc}"),
-                        });
-                    }
-                    Ok(())
-                });
-                if let Err(e) = auth_move_ok {
                     return Some(Err(e));
                 }
 

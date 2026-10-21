@@ -994,6 +994,12 @@ pub fn handle_pi_orbitals(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            if !session.has_gm_role() {
+                return Some(Err(BridgeRpcError {
+                    code: "InsufficientRole".into(),
+                    message: format!("planetMgr.{method} requires GM role"),
+                }));
+            }
             let ok = ctx.db.with_snapshot(|snap| snap.characters.contains_key(&char_id));
             Some(Ok(PyRep::Bool(ok)))
         }

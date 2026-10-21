@@ -416,9 +416,11 @@ impl CombatRuntimeState {
     }
 }
 
-static COMBAT_RUNTIME: OnceLock<RwLock<HashMap<usize, CombatRuntimeState>>> = OnceLock::new();
+type CombatRuntimeEntry = (std::sync::Weak<eve_db::WorldRepository>, CombatRuntimeState);
 
-fn runtime_map() -> &'static RwLock<HashMap<usize, CombatRuntimeState>> {
+static COMBAT_RUNTIME: OnceLock<RwLock<HashMap<usize, CombatRuntimeEntry>>> = OnceLock::new();
+
+fn runtime_map() -> &'static RwLock<HashMap<usize, CombatRuntimeEntry>> {
     COMBAT_RUNTIME.get_or_init(|| RwLock::new(HashMap::new()))
 }
 
@@ -432,7 +434,10 @@ pub fn with_combat_runtime<R>(
 ) -> R {
     let key = ctx_key(ctx);
     let mut guard = runtime_map().write().unwrap_or_else(|e| e.into_inner());
-    let st = guard.entry(key).or_default();
+    guard.retain(|_, (weak, _)| weak.strong_count() > 0);
+    let (_, st) = guard
+        .entry(key)
+        .or_insert_with(|| (Arc::downgrade(&ctx.db), CombatRuntimeState::default()));
     f(st)
 }
 
@@ -442,7 +447,10 @@ pub fn with_mut_combat_runtime<R>(
 ) -> R {
     let key = ctx_key(ctx);
     let mut guard = runtime_map().write().unwrap_or_else(|e| e.into_inner());
-    let st = guard.entry(key).or_default();
+    guard.retain(|_, (weak, _)| weak.strong_count() > 0);
+    let (_, st) = guard
+        .entry(key)
+        .or_insert_with(|| (Arc::downgrade(&ctx.db), CombatRuntimeState::default()));
     f(st)
 }
 

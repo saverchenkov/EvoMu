@@ -18,20 +18,6 @@ pub mod structure_lifecycle;
 #[path = "structure_lifecycle_rpc.rs"]
 pub mod structure_lifecycle_rpc;
 
-/// Guest row `(characterID, corporationID, allianceID, warFactionID)` broadcast with
-/// `OnCharNowInStation` / `OnCharNoLongerInStation` (same shape as `station.GetGuests`).
-fn station_guest_row(ctx: &ServerContext, char_id: i64) -> PyRep {
-    ctx.db.with_snapshot(|snap| {
-        let c = snap.characters.get(&char_id);
-        PyRep::Tuple(vec![
-            PyRep::Integer(char_id),
-            c.map(|c| PyRep::Integer(c.corporation_id)).unwrap_or(PyRep::None),
-            c.and_then(|c| c.alliance_id).map(PyRep::Integer).unwrap_or(PyRep::None),
-            c.and_then(|c| c.war_faction_id).map(PyRep::Integer).unwrap_or(PyRep::None),
-        ])
-    })
-}
-
 pub async fn handle(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -371,15 +357,6 @@ pub async fn handle(
             }
             let _ = sys_handle.push_set_state(ship.item_id).await;
 
-            // The undocked character is no longer a guest, so only remaining guests receive this.
-            let guest_row = station_guest_row(ctx, char_id);
-            ctx.notify(
-                crate::router::NotificationTarget::Station(station_id),
-                "OnCharNoLongerInStation",
-                "charid",
-                vec![guest_row],
-            );
-
             session.station_id = None;
             session.structure_id = None;
             let beyonce_bound_id =
@@ -521,13 +498,6 @@ pub async fn handle(
                         session.station_id = Some(dock_id);
                         session.structure_id = None;
                     }
-                    let guest_row = station_guest_row(ctx, char_id);
-                    ctx.notify(
-                        crate::router::NotificationTarget::Station(dock_id),
-                        "OnCharNowInStation",
-                        "charid",
-                        vec![guest_row],
-                    );
                     Some(Ok(PyRep::keyval([
                         ("locationID", PyRep::Integer(dock_id)),
                         ("isStructure", PyRep::Bool(is_structure)),

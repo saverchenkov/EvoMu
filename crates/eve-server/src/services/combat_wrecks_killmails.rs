@@ -1105,6 +1105,7 @@ pub async fn handle_wrecks_killmails(
                 ("solarSystemID", PyRep::Integer(km.solar_system_id as i64)),
                 ("hash", PyRep::String(hash)),
                 ("victimCharacterID", PyRep::Integer(km.victim_character_id)),
+                ("finalCharacterID", PyRep::Integer(km.attacker_character_id)),
                 ("victimShipTypeID", PyRep::Integer(km.ship_type_id as i64)),
                 (
                     "attackers",
@@ -1116,10 +1117,14 @@ pub async fn handle_wrecks_killmails(
                 ("droppedItems", PyRep::List(Vec::new())),
                 ("destroyedItems", PyRep::List(Vec::new())),
                 ("totalValueISK", PyRep::Real(km.total_value_isk)),
+                ("iskLost", PyRep::Real(km.total_value_isk)),
             ])))
         }
 
         ("warStatisticMgr", "GetKills") | ("warStatisticMgr", "GetKillsByGroup") => {
+            if args.first().and_then(|a| a.as_i64()).is_some() {
+                return None;
+            }
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -1152,6 +1157,9 @@ pub async fn handle_wrecks_killmails(
         }
 
         ("warStatisticMgr", "GetBaseInfo") => {
+            if args.first().and_then(|a| a.as_i64()).is_some() {
+                return None;
+            }
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),

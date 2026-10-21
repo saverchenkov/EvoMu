@@ -617,6 +617,20 @@ pub async fn handle_npcs_drones(
                         cs,
                     )
                     .await;
+                let _ = sys_handle
+                    .emit_destiny_event(
+                        ball_id,
+                        eve_destiny::DestinyEvent::OnDroneStateChange {
+                            drone_id: ball_id,
+                            owner_id: char_id,
+                            controller_id: ship_id,
+                            activity_state: 0,
+                            type_id: rec.type_id,
+                            controller_owner_id: char_id,
+                            target_id: None,
+                        },
+                    )
+                    .await;
 
                 let st = DroneSpaceState {
                     ball_id,
