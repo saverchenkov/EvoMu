@@ -2,11 +2,11 @@
 
 #![forbid(unsafe_code)]
 
-use crate::esi::sample_routes::{format_iso8601_utc, RouteExecutionResult};
+use crate::esi::sample_routes::{format_iso8601_utc, paginate_slice, RouteExecutionResult};
 use crate::router::ServerContext;
 use eve_db::InventoryFlag;
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 fn parse_path_i64(
     path_params: &HashMap<String, String>,
@@ -51,14 +51,31 @@ fn map_upwell_state(state: &str) -> &'static str {
     }
 }
 
+const CORP_ROLE_TABLE: &[(u64, &str)] = &[
+    (eve_db::corp_roles::ROLE_DIRECTOR, "Director"),
+    (eve_db::corp_roles::ROLE_ACCOUNTANT, "Accountant"),
+    (eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT, "Junior_Accountant"),
+    (eve_db::corp_roles::ROLE_CONFIG_EQUIPMENT, "Config_Equipment"),
+    (eve_db::corp_roles::ROLE_DIPLOMAT, "Diplomat"),
+    (eve_db::corp_roles::ROLE_FACTORY_MANAGER, "Factory_Manager"),
+    (eve_db::corp_roles::ROLE_PERSONNEL_MANAGER, "Personnel_Manager"),
+    (eve_db::corp_roles::ROLE_SECURITY_OFFICER, "Security_Officer"),
+    (eve_db::corp_roles::ROLE_STATION_MANAGER, "Station_Manager"),
+    (eve_db::corp_roles::ROLE_AUDITOR, "Auditor"),
+];
+
+#[allow(clippy::too_many_lines)]
 pub fn dispatch_corp_alliance_route(
     ctx: &ServerContext,
     method: &str,
     path: &str,
     path_params: &HashMap<String, String>,
-    _query_params: &HashMap<String, String>,
+    query_params: &HashMap<String, String>,
 ) -> Option<RouteExecutionResult> {
-    let now = ctx.now_unix();
+    let page = query_params
+        .get("page")
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(1);
 
     match (method, path) {
         // 1. Alliance Routes (ESI-5)
@@ -143,83 +160,33 @@ pub fn dispatch_corp_alliance_route(
                 Err(e) => return Some(e),
             };
             Some(ctx.db.with_snapshot(|snap| {
-                if let Some(corp) = snap.corporations.get(&corp_id) {
-                    let mut obj = json!({
-                        "name": corp.name,
-                        "ticker": corp.ticker,
-                        "ceo_id": corp.ceo_id,
-                        "creator_id": corp.ceo_id,
-                        "member_count": corp.members.len().max(1) as i64,
-                        "tax_rate": corp.tax_rate,
-                        "date_founded": "2024-01-01T00:00:00Z",
-                        "description": format!("{} ({})", corp.name, corp.ticker),
-                        "home_station_id": 60_003_760,
-                        "shares": 1000,
-                        "url": "https://evomu.local",
-                        "war_eligible": true,
-                    });
-                    if let Some(aid) = corp.alliance_id {
-                        obj.as_object_mut()
-                            .unwrap()
-                            .insert("alliance_id".to_string(), json!(aid));
-                    }
-                    return RouteExecutionResult::ok_json(obj, 3600);
-                }
-                if let Some(npc) = ctx.sde.npc_corporations.get(&corp_id) {
-                    let mut obj = json!({
-                        "name": npc.name,
-                        "ticker": npc.ticker_name,
-                        "ceo_id": 1,
-                        "creator_id": 1,
-                        "member_count": 100,
-                        "tax_rate": npc.tax_rate,
-                        "date_founded": "2003-05-06T00:00:00Z",
-                        "description": npc.name,
-                        "shares": 1000,
-                        "war_eligible": false,
-                    });
-                    if let Some(fid) = npc.faction_id {
-                        obj.as_object_mut()
-                            .unwrap()
-                            .insert("faction_id".to_string(), json!(fid as i64));
-                    }
-                    if let Some(sid) = npc.station_id {
-                        obj.as_object_mut()
-                            .unwrap()
-                            .insert("home_station_id".to_string(), json!(sid));
-                    }
-                    return RouteExecutionResult::ok_json(obj, 3600);
-                }
-                RouteExecutionResult::error(404, format!("Corporation {corp_id} not found"))
-            }))
-        }
-
-        ("GET", "/corporations/{corporation_id}/alliancehistory") => {
-            let corp_id = match parse_path_i64(path_params, "corporation_id") {
-                Ok(v) => v,
-                Err(e) => return Some(e),
-            };
-            Some(ctx.db.with_snapshot(|snap| {
-                if let Some(corp) = snap.corporations.get(&corp_id) {
-                    let mut entry = json!({
-                        "record_id": 1,
-                        "start_date": "2024-01-01T00:00:00Z",
-                    });
-                    if let Some(aid) = corp.alliance_id {
-                        entry
-                            .as_object_mut()
-                            .unwrap()
-                            .insert("alliance_id".to_string(), json!(aid));
-                    }
-                    return RouteExecutionResult::ok_json(json!([entry]), 3600);
-                }
-                if ctx.sde.npc_corporations.contains_key(&corp_id) {
-                    return RouteExecutionResult::ok_json(
-                        json!([{ "record_id": 1, "start_date": "2003-05-06T00:00:00Z" }]),
-                        3600,
+                let Some(corp) = snap.corporations.get(&corp_id) else {
+                    return RouteExecutionResult::error(
+                        404,
+                        format!("Corporation {corp_id} not found"),
                     );
+                };
+                let mut obj = json!({
+                    "name": corp.name,
+                    "ticker": corp.ticker,
+                    "ceo_id": corp.ceo_id,
+                    "creator_id": corp.ceo_id,
+                    "member_count": corp.members.len() as i64,
+                    "tax_rate": corp.tax_rate,
+                });
+                if let Some(aid) = corp.alliance_id {
+                    obj["alliance_id"] = json!(aid);
                 }
-                RouteExecutionResult::error(404, format!("Corporation {corp_id} not found"))
+                if let Some(hq) = corp.hq_station_id {
+                    obj["home_station_id"] = json!(hq);
+                }
+                if !corp.description.is_empty() {
+                    obj["description"] = json!(corp.description);
+                }
+                if !corp.url.is_empty() {
+                    obj["url"] = json!(corp.url);
+                }
+                RouteExecutionResult::ok_json(obj, 3600)
             }))
         }
 
@@ -244,8 +211,7 @@ pub fn dispatch_corp_alliance_route(
                                 .sde
                                 .types
                                 .get(&i.type_id)
-                                .map(|t| t.category_id == 9)
-                                .unwrap_or(false)
+                                .is_some_and(|t| t.category_id == 9)
                                 || ctx.sde.blueprints.contains_key(&i.type_id))
                     })
                     .collect();
@@ -254,11 +220,11 @@ pub fn dispatch_corp_alliance_route(
                     .into_iter()
                     .map(|item| {
                         let (qty, runs) = if item.is_blueprint_copy {
-                            (-2, item.blueprint_runs_remaining.unwrap_or(1).max(1))
+                            (-2, item.blueprint_runs_remaining.unwrap_or(0))
                         } else if item.singleton {
                             (-1, -1)
                         } else {
-                            (item.quantity.max(1), -1)
+                            (item.quantity, -1)
                         };
                         let me = item
                             .dynamic_attributes
@@ -286,11 +252,16 @@ pub fn dispatch_corp_alliance_route(
                         })
                     })
                     .collect();
-                RouteExecutionResult::ok_json(json!(out), 3600)
+                match paginate_slice(&out, page, 1000) {
+                    Ok((page_rows, total_pages)) => {
+                        RouteExecutionResult::ok_paginated_json(json!(page_rows), 3600, total_pages)
+                    }
+                    Err(e) => e,
+                }
             }))
         }
 
-        ("GET", "/corporations/{corporation_id}/containers/logs") => {
+        ("GET", "/corporations/{corporation_id}/divisions") => {
             let corp_id = match parse_path_i64(path_params, "corporation_id") {
                 Ok(v) => v,
                 Err(e) => return Some(e),
@@ -302,46 +273,21 @@ pub fn dispatch_corp_alliance_route(
                         format!("Corporation {corp_id} not found"),
                     );
                 };
-                let out = vec![json!({
-                    "logged_at": format_iso8601_utc(now),
-                    "container_id": 10_000_000_001_i64,
-                    "container_type_id": 17_366,
-                    "character_id": corp.ceo_id,
-                    "location_id": 60_003_760,
-                    "location_flag": "CorpSAG1",
-                    "action": "assemble",
-                })];
-                RouteExecutionResult::ok_json(json!(out), 600)
-            }))
-        }
-
-        ("GET", "/corporations/{corporation_id}/divisions") => {
-            let corp_id = match parse_path_i64(path_params, "corporation_id") {
-                Ok(v) => v,
-                Err(e) => return Some(e),
-            };
-            Some(ctx.db.with_snapshot(|snap| {
-                if !snap.corporations.contains_key(&corp_id) {
-                    return RouteExecutionResult::error(
-                        404,
-                        format!("Corporation {corp_id} not found"),
-                    );
-                }
-                let hangar: Vec<Value> = (1..=7)
-                    .map(|d| json!({ "division": d, "name": format!("Hangar Division {d}") }))
+                // DERIVED: CorporationRecord stores unified division names in wallet_divisions (updated by corpRegistry.UpdateDivisionNames).
+                let mut sorted_divs: Vec<_> = corp
+                    .wallet_divisions
+                    .iter()
+                    .filter(|w| (1..=7).contains(&w.division_id) && !w.name.is_empty())
                     .collect();
-                let wallet: Vec<Value> = (1..=7)
-                    .map(|d| {
-                        json!({
-                            "division": d,
-                            "name": if d == 1 { "Master Wallet".to_string() } else { format!("Wallet Division {d}") }
-                        })
-                    })
+                sorted_divs.sort_by_key(|w| w.division_id);
+                let entries: Vec<Value> = sorted_divs
+                    .into_iter()
+                    .map(|w| json!({ "division": w.division_id as i64, "name": w.name }))
                     .collect();
                 RouteExecutionResult::ok_json(
                     json!({
-                        "hangar": hangar,
-                        "wallet": wallet,
+                        "hangar": entries,
+                        "wallet": entries,
                     }),
                     3600,
                 )
@@ -363,7 +309,7 @@ pub fn dispatch_corp_alliance_route(
                 let mut facilities: Vec<Value> = snap
                     .structures
                     .values()
-                    .filter(|s| s.owner_corp_id == corp_id)
+                    .filter(|s| s.owner_corp_id == corp_id && s.state != "Destroyed")
                     .map(|s| {
                         json!({
                             "facility_id": s.structure_id,
@@ -372,13 +318,7 @@ pub fn dispatch_corp_alliance_route(
                         })
                     })
                     .collect();
-                if facilities.is_empty() {
-                    facilities.push(json!({
-                        "facility_id": 60_003_760,
-                        "type_id": 52_678,
-                        "system_id": 30_000_142,
-                    }));
-                }
+                facilities.sort_by_key(|f| f["facility_id"].as_i64().unwrap_or(0));
                 RouteExecutionResult::ok_json(json!(facilities), 3600)
             }))
         }
@@ -405,53 +345,6 @@ pub fn dispatch_corp_alliance_route(
                     }),
                     3600,
                 )
-            }))
-        }
-
-        ("GET", "/corporations/{corporation_id}/medals") => {
-            let corp_id = match parse_path_i64(path_params, "corporation_id") {
-                Ok(v) => v,
-                Err(e) => return Some(e),
-            };
-            Some(ctx.db.with_snapshot(|snap| {
-                let Some(corp) = snap.corporations.get(&corp_id) else {
-                    return RouteExecutionResult::error(
-                        404,
-                        format!("Corporation {corp_id} not found"),
-                    );
-                };
-                let out = vec![json!({
-                    "medal_id": 1,
-                    "title": "Corporation Service Medal",
-                    "description": "Awarded for dedicated service to the corporation.",
-                    "creator_id": corp.ceo_id,
-                    "created_at": "2025-01-01T00:00:00Z",
-                })];
-                RouteExecutionResult::ok_json(json!(out), 3600)
-            }))
-        }
-
-        ("GET", "/corporations/{corporation_id}/medals/issued") => {
-            let corp_id = match parse_path_i64(path_params, "corporation_id") {
-                Ok(v) => v,
-                Err(e) => return Some(e),
-            };
-            Some(ctx.db.with_snapshot(|snap| {
-                let Some(corp) = snap.corporations.get(&corp_id) else {
-                    return RouteExecutionResult::error(
-                        404,
-                        format!("Corporation {corp_id} not found"),
-                    );
-                };
-                let out = vec![json!({
-                    "medal_id": 1,
-                    "character_id": corp.ceo_id,
-                    "reason": "Founding leadership",
-                    "status": "public",
-                    "issuer_id": corp.ceo_id,
-                    "issued_at": "2025-01-01T00:00:00Z",
-                })];
-                RouteExecutionResult::ok_json(json!(out), 3600)
             }))
         }
 
@@ -482,35 +375,28 @@ pub fn dispatch_corp_alliance_route(
                 Err(e) => return Some(e),
             };
             Some(ctx.db.with_snapshot(|snap| {
-                if !snap.corporations.contains_key(&corp_id) {
-                    return RouteExecutionResult::error(
-                        404,
-                        format!("Corporation {corp_id} not found"),
-                    );
-                }
-                RouteExecutionResult::ok_json(json!(12600), 3600)
-            }))
-        }
-
-        ("GET", "/corporations/{corporation_id}/members/titles") => {
-            let corp_id = match parse_path_i64(path_params, "corporation_id") {
-                Ok(v) => v,
-                Err(e) => return Some(e),
-            };
-            Some(ctx.db.with_snapshot(|snap| {
                 let Some(corp) = snap.corporations.get(&corp_id) else {
                     return RouteExecutionResult::error(
                         404,
                         format!("Corporation {corp_id} not found"),
                     );
                 };
-                let mut members: Vec<i64> = corp.members.iter().copied().collect();
-                members.sort_unstable();
-                let out: Vec<Value> = members
-                    .into_iter()
-                    .map(|cid| json!({ "character_id": cid, "titles": [1] }))
-                    .collect();
-                RouteExecutionResult::ok_json(json!(out), 3600)
+                // DERIVED: Sum SDE dogma attribute 191 (`corporationMemberBonus`) across the CEO's trained
+                // corporation management skills; base limit is 20 when no bonus skills are trained.
+                let mut bonus_members: i64 = 0;
+                if let Some(ceo_skills) = snap.skills.get(&corp.ceo_id) {
+                    for s in ceo_skills.values() {
+                        if s.level > 0 {
+                            if let Some(ty) = ctx.sde.types.get(&s.type_id) {
+                                if let Some(&per_level) = ty.default_attributes.get(&191) {
+                                    bonus_members += (per_level.round() as i64) * (s.level as i64);
+                                }
+                            }
+                        }
+                    }
+                }
+                let limit = if bonus_members > 0 { bonus_members } else { 20 };
+                RouteExecutionResult::ok_json(json!(limit), 3600)
             }))
         }
 
@@ -527,28 +413,37 @@ pub fn dispatch_corp_alliance_route(
                     );
                 };
                 let mut members: Vec<i64> = corp.members.iter().copied().collect();
+                if !members.contains(&corp.ceo_id) {
+                    members.push(corp.ceo_id);
+                }
                 members.sort_unstable();
                 let out: Vec<Value> = members
                     .into_iter()
                     .map(|cid| {
-                        let ch = snap.characters.get(&cid);
-                        let loc_id = ch
-                            .and_then(|c| c.station_id.or(c.structure_id))
-                            .or_else(|| ch.map(|c| c.solar_system_id as i64))
-                            .unwrap_or(60_003_760);
-                        let ship_type_id = ch
-                            .and_then(|c| snap.items.get(&c.active_ship_id))
-                            .map(|i| i.type_id as i64)
-                            .unwrap_or(670);
-                        json!({
-                            "character_id": cid,
-                            "location_id": loc_id,
-                            "ship_type_id": ship_type_id,
-                            "start_date": "2024-01-01T00:00:00Z",
-                            "logon_date": format_iso8601_utc(now),
-                            "logoff_date": format_iso8601_utc(now.saturating_sub(3600)),
-                            "base_id": 60_003_760,
-                        })
+                        let mut obj = json!({ "character_id": cid });
+                        if let Some(ch) = snap.characters.get(&cid) {
+                            let loc_id = ch
+                                .station_id
+                                .or(ch.structure_id)
+                                .unwrap_or(ch.solar_system_id as i64);
+                            obj["location_id"] = json!(loc_id);
+                            if let Some(ship) = snap.items.get(&ch.active_ship_id) {
+                                obj["ship_type_id"] = json!(ship.type_id as i64);
+                            }
+                        }
+                        if let Some(hq) = corp.hq_station_id {
+                            obj["base_id"] = json!(hq);
+                        }
+                        if let Some(stats) = snap.character_login_stats.get(&cid) {
+                            if stats.last_login_unix > 0 {
+                                obj["logon_date"] = json!(format_iso8601_utc(stats.last_login_unix));
+                            }
+                            if stats.last_logout_unix > 0 {
+                                obj["logoff_date"] =
+                                    json!(format_iso8601_utc(stats.last_logout_unix));
+                            }
+                        }
+                        obj
                     })
                     .collect();
                 RouteExecutionResult::ok_json(json!(out), 3600)
@@ -567,69 +462,36 @@ pub fn dispatch_corp_alliance_route(
                         format!("Corporation {corp_id} not found"),
                     );
                 };
-                let roles = vec![
-                    "Director",
-                    "Accountant",
-                    "Station_Manager",
-                    "Personnel_Manager",
-                    "Factory_Manager",
-                ];
-                let out = vec![json!({
-                    "character_id": corp.ceo_id,
-                    "roles": roles,
-                    "grantable_roles": roles,
-                    "roles_at_hq": roles,
-                    "grantable_roles_at_hq": roles,
-                    "roles_at_base": roles,
-                    "grantable_roles_at_base": roles,
-                    "roles_at_other": roles,
-                    "grantable_roles_at_other": roles,
-                })];
-                RouteExecutionResult::ok_json(json!(out), 3600)
-            }))
-        }
-
-        ("GET", "/corporations/{corporation_id}/roles/history") => {
-            let corp_id = match parse_path_i64(path_params, "corporation_id") {
-                Ok(v) => v,
-                Err(e) => return Some(e),
-            };
-            Some(ctx.db.with_snapshot(|snap| {
-                let Some(corp) = snap.corporations.get(&corp_id) else {
-                    return RouteExecutionResult::error(
-                        404,
-                        format!("Corporation {corp_id} not found"),
-                    );
-                };
-                let out = vec![json!({
-                    "character_id": corp.ceo_id,
-                    "changed_at": "2024-01-01T00:00:00Z",
-                    "issuer_id": corp.ceo_id,
-                    "role_type": "roles",
-                    "old_roles": [],
-                    "new_roles": ["Director"],
-                })];
-                RouteExecutionResult::ok_json(json!(out), 3600)
-            }))
-        }
-
-        ("GET", "/corporations/{corporation_id}/shareholders") => {
-            let corp_id = match parse_path_i64(path_params, "corporation_id") {
-                Ok(v) => v,
-                Err(e) => return Some(e),
-            };
-            Some(ctx.db.with_snapshot(|snap| {
-                let Some(corp) = snap.corporations.get(&corp_id) else {
-                    return RouteExecutionResult::error(
-                        404,
-                        format!("Corporation {corp_id} not found"),
-                    );
-                };
-                let out = vec![json!({
-                    "shareholder_id": corp.ceo_id,
-                    "shareholder_type": "character",
-                    "share_count": 1000,
-                })];
+                let mut member_ids: Vec<i64> = corp.members.iter().copied().collect();
+                if !member_ids.contains(&corp.ceo_id) {
+                    member_ids.push(corp.ceo_id);
+                }
+                member_ids.sort_unstable();
+                let mut out = Vec::new();
+                for cid in member_ids {
+                    let mask = corp
+                        .member_roles
+                        .get(&cid)
+                        .copied()
+                        .unwrap_or_else(|| if cid == corp.ceo_id { u64::MAX } else { 0 });
+                    let roles: Vec<&str> = CORP_ROLE_TABLE
+                        .iter()
+                        .filter_map(|&(bit, name)| ((mask & bit) != 0).then_some(name))
+                        .collect();
+                    if !roles.is_empty() {
+                        out.push(json!({
+                            "character_id": cid,
+                            "roles": roles,
+                            "grantable_roles": roles,
+                            "roles_at_hq": roles,
+                            "grantable_roles_at_hq": roles,
+                            "roles_at_base": roles,
+                            "grantable_roles_at_base": roles,
+                            "roles_at_other": roles,
+                            "grantable_roles_at_other": roles,
+                        }));
+                    }
+                }
                 RouteExecutionResult::ok_json(json!(out), 3600)
             }))
         }
@@ -646,12 +508,36 @@ pub fn dispatch_corp_alliance_route(
                         format!("Corporation {corp_id} not found"),
                     );
                 }
-                let out = vec![json!({
-                    "from_id": 500_001,
-                    "from_type": "faction",
-                    "standing": 1.5,
-                })];
-                RouteExecutionResult::ok_json(json!(out), 3600)
+                let mut by_from: BTreeMap<i64, f64> = BTreeMap::new();
+                for tx in snap.standing_transactions.values().flatten() {
+                    if tx.to_id == corp_id {
+                        let entry = by_from.entry(tx.from_id).or_insert(0.0);
+                        *entry = (*entry + tx.modification).clamp(-10.0, 10.0);
+                    }
+                }
+                let out: Vec<Value> = by_from
+                    .into_iter()
+                    .map(|(from_id, standing)| {
+                        let from_type = if ctx.sde.agents.contains_key(&from_id) {
+                            "agent"
+                        } else if ctx.sde.npc_corporations.contains_key(&from_id) {
+                            "npc_corp"
+                        } else {
+                            "faction"
+                        };
+                        json!({
+                            "from_id": from_id,
+                            "from_type": from_type,
+                            "standing": (standing * 100.0).round() / 100.0,
+                        })
+                    })
+                    .collect();
+                match paginate_slice(&out, page, 1000) {
+                    Ok((page_rows, total_pages)) => {
+                        RouteExecutionResult::ok_paginated_json(json!(page_rows), 3600, total_pages)
+                    }
+                    Err(e) => e,
+                }
             }))
         }
 
@@ -667,53 +553,48 @@ pub fn dispatch_corp_alliance_route(
                         format!("Corporation {corp_id} not found"),
                     );
                 }
-                let out = vec![json!({
-                    "starbase_id": 10_000_000_100_i64,
-                    "type_id": 12_235,
-                    "system_id": 30_000_142,
-                    "moon_id": 40_009_082,
-                    "state": "online",
-                    "onlined_since": "2025-01-01T00:00:00Z",
-                })];
-                RouteExecutionResult::ok_json(json!(out), 300)
-            }))
-        }
-
-        ("GET", "/corporations/{corporation_id}/starbases/{starbase_id}") => {
-            let corp_id = match parse_path_i64(path_params, "corporation_id") {
-                Ok(v) => v,
-                Err(e) => return Some(e),
-            };
-            let _starbase_id = match parse_path_i64(path_params, "starbase_id") {
-                Ok(v) => v,
-                Err(e) => return Some(e),
-            };
-            Some(ctx.db.with_snapshot(|snap| {
-                if !snap.corporations.contains_key(&corp_id) {
-                    return RouteExecutionResult::error(
-                        404,
-                        format!("Corporation {corp_id} not found"),
-                    );
+                let mut towers: Vec<_> = snap
+                    .items
+                    .values()
+                    .filter_map(|it| {
+                        if it.owner_id != corp_id {
+                            return None;
+                        }
+                        if !ctx
+                            .sde
+                            .types
+                            .get(&it.type_id)
+                            .is_some_and(|t| t.category_id == 23)
+                        {
+                            return None;
+                        }
+                        let sys_id = u32::try_from(it.location_id)
+                            .ok()
+                            .filter(|sid| ctx.sde.solar_systems.contains_key(sid))?;
+                        let is_online = snap
+                            .module_online_states
+                            .get(&it.item_id)
+                            .copied()
+                            .unwrap_or(true);
+                        Some((
+                            it.item_id,
+                            json!({
+                                "starbase_id": it.item_id,
+                                "type_id": it.type_id as i64,
+                                "system_id": sys_id as i64,
+                                "state": if is_online { "online" } else { "offline" },
+                            }),
+                        ))
+                    })
+                    .collect();
+                towers.sort_by_key(|(id, _)| *id);
+                let out: Vec<Value> = towers.into_iter().map(|(_, v)| v).collect();
+                match paginate_slice(&out, page, 1000) {
+                    Ok((page_rows, total_pages)) => {
+                        RouteExecutionResult::ok_paginated_json(json!(page_rows), 300, total_pages)
+                    }
+                    Err(e) => e,
                 }
-                RouteExecutionResult::ok_json(
-                    json!({
-                        "fuel_bay_view": "corporation_member",
-                        "fuel_bay_take": "config_starbase_equipment_role",
-                        "anchor": "config_starbase_equipment_role",
-                        "unanchor": "config_starbase_equipment_role",
-                        "online": "config_starbase_equipment_role",
-                        "offline": "config_starbase_equipment_role",
-                        "allow_corporation_members": true,
-                        "allow_alliance_members": true,
-                        "use_alliance_standings": false,
-                        "attack_if_other_security_status_dropping": false,
-                        "attack_if_at_war": true,
-                        "fuels": [
-                            { "type_id": 4247, "quantity": 1200 }
-                        ]
-                    }),
-                    300,
-                )
             }))
         }
 
@@ -738,7 +619,45 @@ pub fn dispatch_corp_alliance_route(
                 let out: Vec<Value> = structs
                     .into_iter()
                     .map(|s| {
-                        json!({
+                        let mut fitted_services: Vec<(i64, Value)> = snap
+                            .items
+                            .values()
+                            .filter(|i| {
+                                i.location_id == s.structure_id
+                                    && matches!(
+                                        i.flag,
+                                        InventoryFlag::ServiceSlot0
+                                            | InventoryFlag::ServiceSlot1
+                                            | InventoryFlag::ServiceSlot2
+                                            | InventoryFlag::ServiceSlot3
+                                            | InventoryFlag::ServiceSlot4
+                                            | InventoryFlag::ServiceSlot5
+                                            | InventoryFlag::ServiceSlot6
+                                            | InventoryFlag::ServiceSlot7
+                                    )
+                            })
+                            .filter_map(|i| {
+                                let svc_name = ctx.sde.types.get(&i.type_id)?.name.clone();
+                                let is_online = snap
+                                    .module_online_states
+                                    .get(&i.item_id)
+                                    .copied()
+                                    .unwrap_or(true);
+                                Some((
+                                    i.item_id,
+                                    json!({
+                                        "name": svc_name,
+                                        "state": if is_online { "online" } else { "offline" },
+                                    }),
+                                ))
+                            })
+                            .collect();
+                        fitted_services.sort_by_key(|(id, _)| *id);
+                        let services: Vec<Value> =
+                            fitted_services.into_iter().map(|(_, v)| v).collect();
+
+                        // DERIVED: profile_id = 1 represents the structure's active ACL profile.
+                        let mut obj = json!({
                             "structure_id": s.structure_id,
                             "type_id": s.type_id as i64,
                             "corporation_id": s.owner_corp_id,
@@ -746,45 +665,51 @@ pub fn dispatch_corp_alliance_route(
                             "profile_id": 1,
                             "name": s.name,
                             "state": map_upwell_state(&s.state),
-                            "reinforce_hour": 18,
-                            "fuel_expires": format_iso8601_utc(now + (s.fuel_blocks as u64) * 3600),
-                            "services": [
-                                { "name": "Clone Bay", "state": "online" },
-                                { "name": "Market", "state": "online" }
-                            ]
-                        })
+                            "services": services,
+                        });
+
+                        let stored_win = snap.structure_vulnerability_windows.get(&s.structure_id);
+                        let timer_start = if s.last_damage_unix > 0 {
+                            Some(s.last_damage_unix)
+                        } else {
+                            stored_win.map(|(ws, _)| *ws).filter(|&ws| ws > 0)
+                        };
+                        let timer_end = if s.reinforced_until_unix > 0 {
+                            Some(s.reinforced_until_unix)
+                        } else {
+                            stored_win.map(|(_, we)| *we).filter(|&we| we > 0)
+                        };
+                        if let Some(ts) = timer_start {
+                            obj["state_timer_start"] = json!(format_iso8601_utc(ts));
+                        }
+                        if let Some(te) = timer_end {
+                            obj["state_timer_end"] = json!(format_iso8601_utc(te));
+                        }
+                        if let Some(&(ws, we)) = stored_win {
+                            let reinforce_hour = ((ws / 3600) % 24) as i64;
+                            let next_reinforce_hour = ((we / 3600) % 24) as i64;
+                            obj["reinforce_hour"] = json!(reinforce_hour);
+                            obj["next_reinforce_hour"] = json!(next_reinforce_hour);
+                            if we > 0 {
+                                obj["next_reinforce_apply"] = json!(format_iso8601_utc(we));
+                            }
+                        }
+                        if s.fuel_blocks > 0 {
+                            if let Some(anchor_unix) = timer_start.or(timer_end) {
+                                obj["fuel_expires"] = json!(format_iso8601_utc(
+                                    anchor_unix + (s.fuel_blocks as u64) * 3600
+                                ));
+                            }
+                        }
+                        obj
                     })
                     .collect();
-                RouteExecutionResult::ok_json(json!(out), 3600)
-            }))
-        }
-
-        ("GET", "/corporations/{corporation_id}/titles") => {
-            let corp_id = match parse_path_i64(path_params, "corporation_id") {
-                Ok(v) => v,
-                Err(e) => return Some(e),
-            };
-            Some(ctx.db.with_snapshot(|snap| {
-                if !snap.corporations.contains_key(&corp_id) {
-                    return RouteExecutionResult::error(
-                        404,
-                        format!("Corporation {corp_id} not found"),
-                    );
+                match paginate_slice(&out, page, 250) {
+                    Ok((page_rows, total_pages)) => {
+                        RouteExecutionResult::ok_paginated_json(json!(page_rows), 3600, total_pages)
+                    }
+                    Err(e) => e,
                 }
-                let roles = vec!["Director", "Station_Manager"];
-                let out = vec![json!({
-                    "title_id": 1,
-                    "name": "Chief Executive Officer",
-                    "roles": roles,
-                    "grantable_roles": roles,
-                    "roles_at_hq": roles,
-                    "grantable_roles_at_hq": roles,
-                    "roles_at_base": roles,
-                    "grantable_roles_at_base": roles,
-                    "roles_at_other": roles,
-                    "grantable_roles_at_other": roles,
-                })];
-                RouteExecutionResult::ok_json(json!(out), 3600)
             }))
         }
 
@@ -819,6 +744,7 @@ pub fn dispatch_corp_alliance_route(
         }
 
         ("GET", "/fleets/{fleet_id}/members") => {
+            let now = ctx.now_unix();
             let fleet_id = match parse_path_i64(path_params, "fleet_id") {
                 Ok(v) => v,
                 Err(e) => return Some(e),
@@ -855,7 +781,7 @@ pub fn dispatch_corp_alliance_route(
                     });
                     if let Some(c) = ch {
                         if let Some(station_id) = c.station_id {
-                            obj.as_object_mut().unwrap().insert("station_id".to_string(), json!(station_id));
+                            obj["station_id"] = json!(station_id);
                         }
                     }
                     out.push(obj);

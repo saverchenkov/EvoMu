@@ -137,7 +137,7 @@
   },
   "ESI-5": {
     "assessment": "PARTIAL",
-    "note": "Corporation and Alliance ESI routes partially implemented; open operations remain."
+    "note": "State-backed Alliance and Corporation ESI routes (corporations, icons, public info, blueprints, divisions, facilities, members, tracking, roles, standings, structures) closed; 10 routes remain open."
   },
   "ESI-6": {
     "assessment": "PARTIAL",
