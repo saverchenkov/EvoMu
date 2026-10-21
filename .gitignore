@@ -27,9 +27,8 @@ Thumbs.db
 # Independent review gate state (local; must not affect tree fingerprints)
 /.evomu-reviews/*
 
-# Generated runtime/SDE SQLite databases (raw .sqlite is local/gitignored; compressed golden archive .sqlite.xz is tracked)
+# Generated runtime/SDE SQLite databases, raw or compressed (client-derived; rebuilt locally via tools/sde-import; never committed)
 /data/*.sqlite*
-!/data/evomu_sde.sqlite.xz
 /data/quasar_descriptors.*
 
 

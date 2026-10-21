@@ -14,7 +14,7 @@ The project is complete when `/usr/bin/python3 .agents/skills/evomu-adversarial-
 - **100% Honest Closure** across all 6,110 rows in `.agents/skills/evomu-adversarial-review/references/parity/ledger.json` (either `DONE` backed by real, passing tests or `NA` backed by client-bytecode evidence in `supervisor_triage.json`).
 - An authoritative **`PASS` Review Verdict** from an independent LLM judge (`run_review.py`) and a **`CLEAN` Gap Audit**.
 - **Workspace Line Coverage $\ge 90\%$** and **Mutation Score $\ge 85\%$** (`cargo mutants`).
-- All 29 real-client journey benchmarks (`plan:T-6`) passing against the real V24.01 macOS client via `tools/client-harness` and `evomu-visual-check`.
+- All 29 real-client journey benchmarks (`plan:T-6`) passing against the real V24.01 client via `tools/client-harness` and `evomu-visual-check`.
 
 ---
 
@@ -27,7 +27,7 @@ flowchart TD
     subgraph Supervisor["Supervisor Agent (Conversation: 3d6533b5-943c-48df-8b5c-4ccec1132b65)"]
         direction TB
         SupLoop["Autonomous Steering Loop\n(30-min checks, 2-hr reflection)"]
-        Gates["Mechanical Gate Suite\n(preflight.py, pre_push_gate.py, review_lib.py)"]
+        Gates["Mechanical Gate Suite\n(preflight.py, run_review.py, review_lib.py)"]
         Ledger["Scope Triage & Ledger\n(ledger.json, supervisor_triage.json)"]
     end
 
@@ -49,7 +49,7 @@ flowchart TD
     end
 
     SupLoop -- "Periodic Steering (send_message)" --> Orch
-    Gates -- "Enforces pre-push & preflight" --> Coder
+    Gates -- "Enforces preflight & review" --> Coder
     Ledger -- "Triaged Scope (1,593 NA rows)" --> Coder
     Orch -- "Submits code + claims" --> Reviewer
     Reviewer -- "PASS / PASS_WITH_ISSUES / FAIL" --> Orch
@@ -62,7 +62,7 @@ flowchart TD
 | Dimension | Supervisor Agent (`3d6533b5-...`) | Coding Agent (Incoming Agent) |
 |---|---|---|
 | **Primary Mandate** | Quality assurance, gate enforcement, scope governance, and high-level steering. | Feature implementation, test authoring, claims generation, adversarial review, and merges. |
-| **Owned Paths** | `.agents/**`, gate scripts (`preflight.py`, `pre_push_gate.py`, `review_lib.py`, `run_review.py`, `final_gate.py`), `references/parity/*`, `AGENTS.md`. | `crates/**/*.rs`, `crates/eve-server/tests/it/*.rs`, `client-bridge/**`, `tools/**`, feature branches (`wip/*`). |
+| **Owned Paths** | `.agents/**`, gate scripts (`preflight.py`, `review_lib.py`, `run_review.py`, `final_gate.py`), `references/parity/*`, `AGENTS.md`. | `crates/**/*.rs`, `crates/eve-server/tests/it/*.rs`, `client-bridge/**`, `tools/**`, feature branches (`wip/*`). |
 | **Strict Invariants (NEVER)** | **Never** modifies `crates/**/*.rs` or test files.<br>**Never** commits directly to the coder's worktrees.<br>**Never** kills coder processes (`cargo`, `run_review.py`).<br>**Never** weakens gates or relaxes honesty standards.<br>**Never** force-pushes `main`. | **Never** modifies `.agents/**` or alters gate scripts.<br>**Never** bypasses gates (`--no-verify`, removing hooks).<br>**Never** pushes or merges unreviewed trees to `main`.<br>**Never** fakes tests (no hollow match arms, no shape-only assertions, no direct DB test fixtures).<br>**Never** commits client-derived data (`data/*.sqlite`). |
 | **Safe-Edit Protocol** | Uses temporary `GIT_INDEX_FILE` commits to `refs/heads/main` to push gate/doc updates without altering active working trees. | Works exclusively on dedicated `wip/*` branches in isolated worktrees. Merges to `main` only after non-FAIL review. |
 | **Communication** | Sends actionable, evidence-based steering messages every 30 minutes (`[Supervisor check HH:MM ...]`). | Reads steering, folds priorities into plan, and replies via `send_message` with technical evidence if blocked or disputing a finding. |
@@ -87,7 +87,7 @@ To prevent context contamination, lock contention, and accidental invalidation o
 
 ### Invariants for Worktrees
 1. **Single-Agent Invariant:** Exactly one agent writes to a given worktree at any time. Concurrent writes to the same working tree immediately invalidate running reviews and corrupt git index state.
-2. **Bundled Golden SDE Archive:** The repository includes `data/evomu_sde.sqlite.xz` (16.08 MB). On fresh checkouts or machines without the EVE client installed, `tools/unpack_sde.sh` (or `eve-sde::default_db_path()`) automatically decompresses it into `data/evomu_sde.sqlite`, allowing full test suites to execute out-of-the-box. Worktrees share the canonical SDE path:
+2. **Local SDE:** `data/evomu_sde.sqlite` is client-derived and never committed (raw or compressed). Build it with `tools/sde-import` from your own V24.01 client install, or copy it from another machine you control. Worktrees share the canonical SDE path:
    ```bash
    export EVOMU_SDE_PATH=/Users/sergeya/ai/EvoMu/data/evomu_sde.sqlite
    ```
@@ -95,9 +95,9 @@ To prevent context contamination, lock contention, and accidental invalidation o
 
 ---
 
-## 4. The Four Defense Rings (Gating System)
+## 4. The Three Defense Rings (Gating System)
 
-The codebase is protected by four consecutive rings of automated verification before any commit can reach `origin/main`:
+The codebase is protected by three consecutive rings of automated verification before any commit can reach `origin/main`:
 
 ```
 [ Incoming Code ]
@@ -132,14 +132,6 @@ The codebase is protected by four consecutive rings of automated verification be
 +-----------------------------------------------------------+
        |
        v
-+-----------------------------------------------------------+
-| Ring 4: Pre-Push Hook (pre_push_gate.py)                  |
-|   • Computes review_lib.code_tree_of(commit_tree)         |
-|   • Requires non-FAIL review covering that identical code |
-|   • Prevents pushing any unreviewed code to origin/main   |
-+-----------------------------------------------------------+
-       |
-       v
 [ origin/main ]
 ```
 
@@ -149,6 +141,7 @@ To ensure that supervisor doc/gate updates or untracked local data files do not 
 - `AGENTS.md` (supervisor-owned rules)
 - `docs/SUPERVISOR_CODER_ARCHITECTURE.md` (in-repo architecture manual)
 - `docs/ACTION_PLAN_STATUS.md` (machine-generated status document)
+- `docs/BLOCKERS.md` (supervisor-maintained environment notes)
 - `data/quasar_core_golden.json`, `data/quasar_descriptors.sqlite`, `data/evomu_sde.sqlite` (local client data)
 
 When `code_tree_of(tree_A) == code_tree_of(tree_B)`, a valid review of `tree_A` automatically covers `tree_B`.
@@ -212,32 +205,18 @@ async fn test_upwell_structure_lifecycle() {
 
 ---
 
-## 7. Current Project State & In-Flight Handoff
+## 7. Current Project State
 
-### State on `origin/main` (Commit `64fa6b2`)
-- **Parity:** **3,628 / 6,110 rows closed (59.38%)**, with 2,206 NA, 596 passed native workspace tests, 0 failures.
-- **27 Reviewed Merged Branches:**
-  - Latest Merged Branch 26: `wip/space-structures-sov-fw` ([`0b5b537`](https://github.com/saverchenkov/EvoMu/commit/0b5b537)) — Upwell structure lifecycle, Ansiblex liquid ozone validation, and SOV/FW runtime state isolation.
-  - Latest Merged Branch 27: `wip/features-destiny-plan-progression` ([`64fa6b2`](https://github.com/saverchenkov/EvoMu/commit/64fa6b2)) — Destiny physics state completion (37/52 closed, only 5 open remaining), plan progression, and feature suites.
-- **Category Breakdown on `origin/main`:**
-  - `esi`: **197 / 197 (100.0%)**
-  - `effect`: **1 / 1 (100.0%)**
-  - `quasar`: **1,405 / 1,455 closed (96.6% — 77 DONE, 1,328 NA, 50 open)**
-  - `sde`: **151 / 213 closed (70.9% — 91 DONE, 60 NA, 62 open)**
-  - `destiny`: **37 / 52 closed (71.2% — 37 DONE, 10 NA, 5 open)**
-  - `feat`: **981 / 1,513 closed (64.8% — 887 DONE, 94 NA, 532 open)**
-  - `notify`: **633 / 1,311 closed (48.3% — 30 DONE, 603 NA, 678 open)**
-  - `plan`: **38 / 109 closed (34.9% — 38 DONE, 71 open)**
-  - `rpc`: **175 / 1,230 closed (14.2% — 64 DONE, 111 NA, 1,055 open)**
-  - `journey`: **0 / 29 (0%)**
+### State on `origin/main` (2026-10-21, after the Windows session)
+- `main` was rewritten on 2026-10-21 (force-push authorized by the user) to remove `data/evomu_sde.sqlite.xz` from history. The old `cc2162d` became `8a133f5`, with identical content apart from the archive. **Any other clone must re-clone or `git fetch && git reset --hard origin/main`.**
+- The commits from the Windows session (Windows portability fixes, rpc:/plan: test tagging) are accepted by the user as reviewed and are the baseline.
+- Supervisor pre-flight on macOS with all local data (`cc2162d` content): **596 tests, 594 passed + 2 failed only because `data/quasar_core_golden.json` was not linked in the scratch worktree; 3,912 / 6,110 rows closed (64.03%)**, 2,206 NA.
+- Known quality debt: the bulk tagging commit `1556e2f` added incidental `rpc:` tags (RPCs a test calls only as setup). Prune these with evidence through normal reviewed branches; new tags must follow the 15-rows-per-test rule.
 
-### Pushed Remote Branches Available on GitHub
-All work developed across worktrees has been committed and pushed to remote branches on GitHub:
-1. `origin/main` (`64fa6b2`): Canonical mainline baseline.
-2. `origin/wip/features-destiny-plan-progression` (`64fa6b2`): Merged mainline equivalent.
-3. `origin/wip/rpc-closure-2-sde-regressions` (`9f73e4c`): Batch B2 RPC closure & regressions (`regressions_r9_r54.rs`, `rpc_batch_b2_part1.rs`, `rpc_batch_b2_part2.rs`, `rpc_closure_complete.rs`, `rpc_closure_part2.rs`, and `batch_b_services.rs`).
-4. `origin/wip/notifications-rpc-closure-1` (`727622f`): Batch G notifications & Part 1 RPC closure suites.
-5. `origin/wip/t6-client-harness` (`b0eeb8b`): Character selection & client login dispatch enhancements for `plan:T-6`.
+### Pending remote branches
+1. `origin/wip/notifications-rpc-closure-1` (`727622f`): Batch G notifications and Part 1 RPC closure suites (next to rebase, review and merge).
+2. `origin/wip/rpc-closure-2-sde-regressions` (`9f73e4c`): Batch B2 RPC closure and regressions.
+3. `origin/wip/t6-client-harness` (`b0eeb8b`): character selection and client login dispatch for `plan:T-6`.
 
 ---
 
@@ -249,7 +228,7 @@ When resuming work on any machine with GitHub access, follow this step-by-step w
 ```bash
 git clone https://github.com/saverchenkov/EvoMu.git
 cd EvoMu
-./tools/unpack_sde.sh
+# provide data/evomu_sde.sqlite (tools/sde-import from your own client, or copy it from another machine you control)
 /usr/bin/python3 .agents/skills/evomu-adversarial-review/scripts/preflight.py --early-only
 ```
 
@@ -260,8 +239,6 @@ Pick one of the active pushed branches or start a new feature track:
   git checkout -b wip/rpc-closure-2 origin/wip/rpc-closure-2-sde-regressions
   git rebase main
   ```
-- **Option B (Tagging Existing RPCs / Notifications):**
-  About 879 already-implemented RPCs and 180 notifications are called in `crates/eve-server/tests/it/*.rs` but lack `// parity: rpc:<svc>.<method>` docstring tags. Tagging them pushes honest parity past 75% with minimal code changes.
 - **Option C (Real-Client T-6 Harness):**
   ```bash
   git checkout -b wip/t6-harness origin/wip/t6-client-harness
@@ -292,4 +269,15 @@ git merge --ff-only wip/<track>
 /usr/bin/python3 .agents/skills/evomu-adversarial-review/scripts/preflight.py --claims .evomu-reviews/claims_<track>.md
 git push origin main
 ```
-The pre-push hook (`pre_push_gate.py`) verifies the code tree against `.evomu-reviews/state.json` and accepts the push.
+No git hooks are installed; the review gate is enforced by process (`AGENTS.md`), the Stop hook and the supervisor.
+
+---
+
+## 9. Platforms (macOS and Windows)
+
+- EvoMu supports both macOS and Windows. The project can move between them at any time with no extra discussion; the rules are identical on both.
+- All gates (pre-flight, `run_review.py`, `final_gate.py`) run **locally on the machine in use**. There are no git hooks.
+- Client-derived data never goes into git: `data/evomu_sde.sqlite`, `data/quasar_descriptors.sqlite`, `data/quasar_core_golden.json`, raw client files. A machine without some of them has test failures whose panics name the missing file. Those are acceptable in a review only when listed in the claims file. Rows closed only by tests that couldn't run aren't claimed. `final_gate.py` runs on a machine with all local data. Details: `AGENTS.md` ("Supported platforms") and `docs/BLOCKERS.md` §4.
+- Python scripts write files as UTF-8 and print through `safe_print`, so they work on Windows consoles. Use forward slashes in paths that go into SQLite URIs and TOML.
+- **Switching machines:** push all work (`main` reviewed, `wip/*` branches as needed). On the new machine: clone or `git reset --hard origin/main`, provide the local data files, run `preflight.py --early-only`, and resume. Update the supervisor conversation ID in `AGENTS.md` if the supervisor changes.
+- Handoff state lives in this document (§7). Don't add separate root-level handoff files.
