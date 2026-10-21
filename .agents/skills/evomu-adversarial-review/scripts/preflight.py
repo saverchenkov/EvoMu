@@ -29,6 +29,8 @@ import re
 import shutil
 import subprocess
 import sys
+import time
+import datetime
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -320,6 +322,61 @@ def lint_constant_arms(root, added):
             for f, ln, m in found]
 
 
+def timing_line(root):
+    try:
+        recs = [json.loads(l) for l in open(history_path(root)) if l.strip()]
+    except (OSError, ValueError):
+        return "(no timing recorded)"
+    mine = [r for r in recs if r.get("worktree") == os.path.basename(root)]
+    if not mine:
+        return "(no timing recorded)"
+    r = mine[-1]
+    return "cargo test wall %ss (build %ss, test run sum %ss over %d binaries) on %s@%s" % (
+        r["wall_s"], r["build_s"], r["run_sum_s"], r["binaries"], r["branch"], r["head"])
+
+
+def history_path(root):
+    """One preflight timing history shared by every worktree: <main checkout>/.evomu-reviews/preflight_history.jsonl."""
+    common = subprocess.run(["git", "rev-parse", "--git-common-dir"], cwd=root, capture_output=True, text=True).stdout.strip()
+    main_root = os.path.dirname(os.path.abspath(os.path.join(root, common))) if common else root
+    d = os.path.join(main_root, rl.STATE_DIRNAME)
+    os.makedirs(d, exist_ok=True)
+    return os.path.join(d, "preflight_history.jsonl")
+
+
+def record_timing(root, wall, out):
+    m = re.search(r"Finished `test` profile[^\n]* in (?:(\d+)m )?([\d.]+)s", out)
+    build = (int(m.group(1) or 0) * 60 + float(m.group(2))) if m else None
+    res = re.findall(r"test result: \w+\. (\d+) passed; (\d+) failed;.*?finished in ([\d.]+)s", out)
+    branch = subprocess.run(["git", "branch", "--show-current"], cwd=root, capture_output=True, text=True).stdout.strip()
+    head = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=root, capture_output=True, text=True).stdout.strip()
+    rec = {"ts": datetime.datetime.now().isoformat(timespec="seconds"), "worktree": os.path.basename(root),
+           "branch": branch, "head": head, "wall_s": round(wall, 1), "build_s": build,
+           "run_sum_s": round(sum(float(c) for *_, c in res), 1), "binaries": len(res),
+           "passed": sum(int(a) for a, _, _ in res), "failed": sum(int(b) for _, b, _ in res)}
+    try:
+        with open(history_path(root), "a") as fh:
+            fh.write(json.dumps(rec) + "\n")
+    except OSError:
+        pass
+    return rec
+
+
+def lint_new_test_files(root, base):
+    """Once eve-server has a single integration-test binary (tests/it/main.rs), new standalone files under
+    crates/eve-server/tests/*.rs would each relink the whole server again. Block them."""
+    if not os.path.exists(os.path.join(root, "crates/eve-server/tests/it/main.rs")):
+        return []
+    new = set()
+    if base:
+        new |= set(sh(["git", "diff", "--name-only", "--diff-filter=A", base], root)[1].split())
+    new |= set(sh(["git", "ls-files", "--others", "--exclude-standard"], root)[1].split())
+    pat = re.compile(r"^crates/eve-server/tests/[^/]+\.rs$")
+    return [("NEW_STANDALONE_TEST_BINARY",
+             "%s adds a separate test binary that relinks eve_server; put it in crates/eve-server/tests/it/ and "
+             "add `mod` to tests/it/main.rs" % f, f, 1) for f in sorted(new) if pat.match(f)]
+
+
 def run_early_gate(root, base, added, claims_path):
     violations = []
 
@@ -366,6 +423,9 @@ def run_early_gate(root, base, added, claims_path):
 
     # 2c. Constant-return RPC handler arms added in production code
     violations += lint_constant_arms(root, added)
+
+    # 2d. New standalone eve-server test binaries after the single-binary refactor
+    violations += lint_new_test_files(root, base)
 
     # 3. Claims citations & quotes check (if draft claims provided)
     if claims_path and os.path.exists(claims_path):
@@ -461,8 +521,11 @@ def main():
         env["EVOMU_PARITY_ATTEST_DIR"] = attest
         cargo = shutil.which("cargo", path=env.get("PATH")) or "/opt/homebrew/bin/cargo"
         print("[preflight] cargo test --workspace --no-fail-fast ...", flush=True)
+        t0 = time.time()
         rc, out = sh([cargo, "test", "--workspace", "--no-fail-fast"], root, env=env, timeout=a.test_timeout)
+        wall = time.time() - t0
         open(tests_txt, "w").write("exit=%d\n%s" % (rc, out))
+        record_timing(root, wall, out)
     out = open(tests_txt, errors="replace").read() if os.path.exists(tests_txt) else ""
     passed = sum(int(m) for m in re.findall(r"test result: \w+\. (\d+) passed", out))
     failed = sum(int(m) for m in re.findall(r"test result: \w+\. \d+ passed; (\d+) failed", out))
@@ -507,6 +570,7 @@ def main():
              " (A TEST BINARY ABORTED: some tests never ran: %s)" % aborted[0][:160] if aborted else ""),
          "- Parity: **%d / %d rows closed (%.2f%%)**, %d NA, %d tagged tests" % (
              summ["closed_rows"], summ["total_rows"], summ["percent_closed"], summ["na_rows"], summ["tagged_tests"]),
+         "- Test loop: %s" % timing_line(root),
          "- Baseline for the diff below: last review %s" % (prev_ts or "(none)"), "",
          "| Category | Total | DONE | NA | Open |", "|---|---|---|---|---|"]
     for k, c in sorted(summ["categories"].items()):
