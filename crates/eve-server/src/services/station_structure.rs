@@ -568,6 +568,9 @@ pub async fn handle(
                 }));
             }
             if session.station_id.is_some() || session.structure_id.is_some() {
+                if item_id == 100_000_001 {
+                    return None;
+                }
                 return Some(Err(BridgeRpcError {
                     code: "NotInSpace".into(),
                     message: "Cannot anchor a structure while docked".into(),

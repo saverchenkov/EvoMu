@@ -778,6 +778,26 @@ impl ServerContext {
         ) {
             return res;
         }
+        if let Some(res) = services::rpc_batch_a_part1::handle(
+            self,
+            session,
+            effective_service,
+            method,
+            args,
+            kwargs,
+        ) {
+            return res;
+        }
+        if let Some(res) = services::rpc_batch_a_part2::handle(
+            self,
+            session,
+            effective_service,
+            method,
+            args,
+            kwargs,
+        ) {
+            return res;
+        }
         if let Some(res) = services::pos_starbase::handle(
             self,
             session,
@@ -788,7 +808,28 @@ impl ServerContext {
         ) {
             return res;
         }
+        if let Some(res) = services::batch_b_services::handle(
+            self,
+            session,
+            bound_entry.as_ref(),
+            effective_service,
+            method,
+            args,
+            kwargs,
+        ) {
+            return res;
+        }
         if let Some(res) = services::corp_registry_ops::handle(
+            self,
+            session,
+            effective_service,
+            method,
+            args,
+            kwargs,
+        ) {
+            return res;
+        }
+        if let Some(res) = services::mail_contacts_ops::handle(
             self,
             session,
             effective_service,

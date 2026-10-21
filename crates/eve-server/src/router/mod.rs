@@ -8,9 +8,11 @@ pub mod cache_notifications;
 pub mod context;
 pub mod dispatch;
 pub mod session;
+pub mod upstream_notifications;
 
 #[cfg(test)]
 mod tests;
 
 pub use cache_notifications::*;
 pub use context::*;
+pub use upstream_notifications::*;

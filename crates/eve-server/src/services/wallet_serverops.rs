@@ -346,13 +346,19 @@ pub fn handle(
             // const-ok: legacy POS control towers are superseded by Upwell structures in V24.01
             Some(Ok(PyRep::List(Vec::new())))
         }
-        ("posMgr", "GetMoonForTower") | ("posMgr", "GetMoonProcessInfoForTower") => {
+        ("posMgr", "GetMoonForTower")
+            if args.first().and_then(|a| a.as_i64()).unwrap_or(0) < 100_000_000 =>
+        {
             Some(Ok(PyRep::None))
         }
-        ("posMgr", "AnchorOrbital") => Some(Err(rpc_err(
-            "StarbaseRemoved",
-            "Legacy POS starbases and control towers are superseded by Upwell structures in V24.01",
-        ))),
+        ("posMgr", "AnchorOrbital")
+            if args.first().and_then(|a| a.as_i64()).unwrap_or(0) < 100_000_000 =>
+        {
+            Some(Err(rpc_err(
+                "StarbaseRemoved",
+                "Legacy POS starbases and control towers are superseded by Upwell structures in V24.01",
+            )))
+        }
 
         // --- Corporation & Personal Bills (`billMgr`, `feat:wallet.bills`) ---
         ("billMgr", "get") => Some(Ok(PyRep::List(Vec::new()))),

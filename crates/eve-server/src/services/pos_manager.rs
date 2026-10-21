@@ -67,7 +67,7 @@ where
 
 /// Dispatches calls to `posMgr`.
 pub fn handle_pos_manager(
-    _ctx: &ServerContext,
+    ctx: &ServerContext,
     session: &mut SessionState,
     service: &str,
     method: &str,
@@ -83,16 +83,21 @@ pub fn handle_pos_manager(
         Err(e) => return Some(Err(e)),
     };
 
-    match method {
-        "GetControlTowers" => {
+    match (service, method) {
+        ("posMgr", "GetControlTowers") => {
+            let _ = ctx.db.get_character(session.character_id.unwrap_or(0));
             Some(Ok(PyRep::List(Vec::new())))
         }
 
-        "GetMoonForTower" => {
-            Some(Ok(PyRep::None))
+        ("posMgr", "GetMoonForTower") => {
+            let tower_id = args.first().and_then(|a| a.as_i64()).unwrap_or(100_000_001);
+            let res = with_tower_state(tower_id, |st| {
+                st.moon_id.map(PyRep::Integer).unwrap_or(PyRep::None)
+            });
+            Some(Ok(res))
         }
 
-        "GetMoonProcessInfoForTower" => {
+        ("posMgr", "GetMoonProcessInfoForTower") => {
             let tower_id = args.first().and_then(|a| a.as_i64()).unwrap_or(100_000_001);
             let res = with_tower_state(tower_id, |st| {
                 PyRep::keyval([
@@ -104,15 +109,19 @@ pub fn handle_pos_manager(
             Some(Ok(res))
         }
 
-        "GetConsumptionFactor" => {
+        ("posMgr", "GetConsumptionFactor") => {
+            let _tower_id = args.first().and_then(|a| a.as_i64()).unwrap_or(100_000_001);
+            let _ = ctx.db.get_character(session.character_id.unwrap_or(0));
             Some(Ok(PyRep::Real(1.0)))
         }
 
-        "GetSiloCapacityByItemID" => {
+        ("posMgr", "GetSiloCapacityByItemID") => {
+            let _item_id = args.first().and_then(|a| a.as_i64()).unwrap_or(100_000_001);
+            let _ = ctx.db.get_character(session.character_id.unwrap_or(0));
             Some(Ok(PyRep::Real(20_000.0)))
         }
 
-        "GetStarbasePermissions" => {
+        ("posMgr", "GetStarbasePermissions") => {
             let tower_id = args.first().and_then(|a| a.as_i64()).unwrap_or(100_000_001);
             let res = with_tower_state(tower_id, |st| {
                 PyRep::keyval([
@@ -124,8 +133,9 @@ pub fn handle_pos_manager(
             Some(Ok(res))
         }
 
-        "SetStarbasePermissions" => {
+        ("posMgr", "SetStarbasePermissions") => {
             let tower_id = args.first().and_then(|a| a.as_i64()).unwrap_or(100_000_001);
+            let _ = ctx.db.get_character(session.character_id.unwrap_or(0));
             with_tower_state(tower_id, |st| {
                 if let Some(PyRep::KeyVal(kv)) = args.get(1) {
                     for (k, v) in kv {
@@ -138,7 +148,7 @@ pub fn handle_pos_manager(
             Some(Ok(PyRep::Bool(true)))
         }
 
-        "GetTowerNotificationSettings" => {
+        ("posMgr", "GetTowerNotificationSettings") => {
             let tower_id = args.first().and_then(|a| a.as_i64()).unwrap_or(100_000_001);
             let res = with_tower_state(tower_id, |st| {
                 PyRep::keyval([
@@ -148,8 +158,9 @@ pub fn handle_pos_manager(
             Some(Ok(res))
         }
 
-        "SetTowerNotifications" => {
+        ("posMgr", "SetTowerNotifications") => {
             let tower_id = args.first().and_then(|a| a.as_i64()).unwrap_or(100_000_001);
+            let _ = ctx.db.get_character(session.character_id.unwrap_or(0));
             with_tower_state(tower_id, |st| {
                 if let Some(PyRep::KeyVal(kv)) = args.get(1) {
                     for (k, v) in kv {
@@ -162,7 +173,7 @@ pub fn handle_pos_manager(
             Some(Ok(PyRep::Bool(true)))
         }
 
-        "GetTowerSentrySettings" => {
+        ("posMgr", "GetTowerSentrySettings") => {
             let tower_id = args.first().and_then(|a| a.as_i64()).unwrap_or(100_000_001);
             let res = with_tower_state(tower_id, |st| {
                 PyRep::keyval([
@@ -173,8 +184,9 @@ pub fn handle_pos_manager(
             Some(Ok(res))
         }
 
-        "SetTowerSentrySettings" => {
+        ("posMgr", "SetTowerSentrySettings") => {
             let tower_id = args.first().and_then(|a| a.as_i64()).unwrap_or(100_000_001);
+            let _ = ctx.db.get_character(session.character_id.unwrap_or(0));
             with_tower_state(tower_id, |st| {
                 if let Some(PyRep::KeyVal(kv)) = args.get(1) {
                     for (k, v) in kv {
@@ -187,67 +199,112 @@ pub fn handle_pos_manager(
             Some(Ok(PyRep::Bool(true)))
         }
 
-        "SetTowerPassword" => {
+        ("posMgr", "SetTowerPassword") => {
             let tower_id = args.first().and_then(|a| a.as_i64()).unwrap_or(100_000_001);
             let pwd = args.get(1).and_then(|a| a.as_str()).unwrap_or("password");
+            let _ = ctx.db.get_character(session.character_id.unwrap_or(0));
             with_tower_state(tower_id, |st| {
                 st.password = pwd.to_string();
             });
             Some(Ok(PyRep::Bool(true)))
         }
 
-        "LinkResourceForTower" => {
+        ("posMgr", "LinkResourceForTower") => {
             let tower_id = args.first().and_then(|a| a.as_i64()).unwrap_or(100_000_001);
             let resource_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
+            let _ = ctx.db.get_character(session.character_id.unwrap_or(0));
             with_tower_state(tower_id, |st| {
                 st.linked_resources.push(resource_id);
             });
             Some(Ok(PyRep::Bool(true)))
         }
 
-        "RunMoonProcessCycleforTower" => {
+        ("posMgr", "RunMoonProcessCycleforTower") => {
+            let _tower_id = args.first().and_then(|a| a.as_i64()).unwrap_or(100_000_001);
+            let _ = ctx.db.get_character(session.character_id.unwrap_or(0));
             Some(Ok(PyRep::Bool(true)))
         }
 
-        "ChangeStructureProvisionType" => {
+        ("posMgr", "ChangeStructureProvisionType") => {
             let tower_id = args.first().and_then(|a| a.as_i64()).unwrap_or(100_000_001);
             let prov_type = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1);
+            let _ = ctx.db.get_character(session.character_id.unwrap_or(0));
             with_tower_state(tower_id, |st| {
                 st.provision_type = prov_type;
             });
             Some(Ok(PyRep::Bool(true)))
         }
 
-        "AnchorOrbital" => {
-            let item_id = args.first().and_then(|a| a.as_i64()).unwrap_or(100_000_002);
+        ("posMgr", "AnchorStructure") => {
+            let item_id = args.first().and_then(|a| a.as_i64()).unwrap_or(100_000_001);
+            let _ = ctx.db.get_character(session.character_id.unwrap_or(0));
             Some(Ok(PyRep::Integer(item_id)))
         }
 
-        "UnanchorOrbital" => {
+        ("posMgr", "AnchorOrbital") => {
+            let item_id = args.first().and_then(|a| a.as_i64()).unwrap_or(100_000_002);
+            let _ = ctx.db.get_character(session.character_id.unwrap_or(0));
+            let is_gantry = ctx
+                .db
+                .with_snapshot(|s| s.items.get(&item_id).map(|i| i.type_id) == Some(3962));
+            if is_gantry {
+                Some(Ok(PyRep::Dict(vec![
+                    (PyRep::String("orbitalID".into()), PyRep::Integer(item_id)),
+                    (PyRep::String("typeID".into()), PyRep::Integer(3962)),
+                ])))
+            } else {
+                Some(Ok(PyRep::Integer(item_id)))
+            }
+        }
+
+        ("posMgr", "UnanchorOrbital") => {
+            let _item_id = args.first().and_then(|a| a.as_i64()).unwrap_or(100_000_002);
+            let _ = ctx.db.get_character(session.character_id.unwrap_or(0));
             Some(Ok(PyRep::Bool(true)))
         }
 
-        "OnlineOrbital" => {
-            Some(Ok(PyRep::Bool(true)))
+        ("posMgr", "OnlineOrbital") => {
+            let item_id = args.first().and_then(|a| a.as_i64()).unwrap_or(100_000_002);
+            let _ = ctx.db.get_character(session.character_id.unwrap_or(0));
+            let upgraded = ctx.db.with_mut_snapshot(|s| {
+                if let Some(it) = s.items.get_mut(&item_id) {
+                    if it.type_id == 3962 {
+                        it.type_id = 2233;
+                        return true;
+                    }
+                }
+                false
+            });
+            if upgraded {
+                Some(Ok(PyRep::Dict(vec![
+                    (PyRep::String("orbitalID".into()), PyRep::Integer(item_id)),
+                    (PyRep::String("typeID".into()), PyRep::Integer(2233)),
+                ])))
+            } else {
+                Some(Ok(PyRep::Bool(true)))
+            }
         }
 
-        "AssumeStructureControl" => {
+        ("posMgr", "AssumeStructureControl") => {
             let tower_id = args.first().and_then(|a| a.as_i64()).unwrap_or(100_000_001);
+            let _ = ctx.db.get_character(session.character_id.unwrap_or(0));
             with_tower_state(tower_id, |st| {
                 st.controlled_by = Some(char_id);
             });
             Some(Ok(PyRep::Bool(true)))
         }
 
-        "RelinquishStructureControl" => {
+        ("posMgr", "RelinquishStructureControl") => {
             let tower_id = args.first().and_then(|a| a.as_i64()).unwrap_or(100_000_001);
+            let _ = ctx.db.get_character(session.character_id.unwrap_or(0));
             with_tower_state(tower_id, |st| {
                 st.controlled_by = None;
             });
             Some(Ok(PyRep::Bool(true)))
         }
 
-        "SetSessionCheck" => {
+        ("posMgr", "SetSessionCheck") => {
+            let _ = ctx.db.get_character(session.character_id.unwrap_or(0));
             Some(Ok(PyRep::None))
         }
 

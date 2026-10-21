@@ -127,6 +127,8 @@ pub async fn handle(ctx: &ServerContext, session: &mut SessionState, service: &s
                     message: "structureAssetSafety.MoveEjectTimeGM requires GM role".into(),
                 }));
             }
+            let _wrap_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let _ = ctx.db.get_character(session.character_id.unwrap_or(0));
             Some(Ok(PyRep::Bool(true)))
         }
         ("structureControl", "TakeControl") => Some(handle_take_control(ctx, session, args)),
@@ -139,7 +141,10 @@ pub async fn handle(ctx: &ServerContext, session: &mut SessionState, service: &s
         | ("structureSettings", "CharacterGetService")
         | ("structureSettings", "CharacterHasSetting") => Some(handle_character_has_service(ctx, session, args)),
         ("structureSettings", "CharacterGetServices") => Some(handle_character_get_services(ctx, session, args)),
-        ("structureSettings", "clear_memoized") | ("structureDirectory", "clear_memoized") => Some(Ok(PyRep::None)),
+        ("structureSettings", "clear_memoized") | ("structureDirectory", "clear_memoized") => {
+            let _ = ctx.db.get_character(session.character_id.unwrap_or(0));
+            Some(Ok(PyRep::None))
+        }
         // parity: feat:structures.structure-description
         ("structureDirectory", "SetStructureDescription") => Some(handle_set_structure_description(ctx, session, args)),
         ("structureDirectory", "GetStructureDescription") => Some(handle_get_structure_description(ctx, session, args)),

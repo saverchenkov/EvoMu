@@ -288,46 +288,77 @@ pub async fn handle(
         return Some(Ok(PyRep::List(content_pieces)));
     }
 
-    if service != "dungeonInstanceCacheMgr" {
+    if !service.ends_with("InstanceCacheMgr") {
         return None;
     }
 
-    if !matches!(
-        method,
-        "GetCombatAnomalyInstances"
-            | "GetOreAnomalyInstances"
-            | "GetIceBeltInstances"
-            | "GetSignatureInstances"
-    ) {
-        return None;
-    }
     if let Err(e) = ServerContext::require_character(session) {
         return Some(Err(e));
     }
     let Some(sys_id) = session.solar_system_id else {
         return Some(Err(BridgeRpcError {
             code: "UnknownSolarSystem".into(),
-            message: format!("dungeonInstanceCacheMgr.{method} requires a session solar system"),
+            message: format!("{service}.{method} requires a session solar system"),
         }));
     };
 
-    match method {
-        "GetCombatAnomalyInstances" => {
+    match (service, method) {
+        ("dungeonInstanceCacheMgr", "GetCombatAnomaliesCount") => {
+            ensure_system_pve_sites_seeded(ctx, sys_id).await;
+            let count: usize = registry_instances(ctx, sys_id, false).values().map(|v| v.len()).sum();
+            Some(Ok(PyRep::Integer(count as i64)))
+        }
+        ("dungeonInstanceCacheMgr", "GetOreAnomaliesCount") => {
+            seed_system_mining_sites_from_sde(ctx, sys_id).await;
+            let count: usize = anomaly_instances(ctx, sys_id, "OreAnomaly").values().map(|v| v.len()).sum();
+            Some(Ok(PyRep::Integer(count as i64)))
+        }
+        ("dungeonInstanceCacheMgr", "GetOreAnomaliesCountInRange") => {
+            seed_system_mining_sites_from_sde(ctx, sys_id).await;
+            let count: usize = anomaly_instances(ctx, sys_id, "OreAnomaly").values().map(|v| v.len()).sum();
+            Some(Ok(PyRep::Dict(vec![(
+                PyRep::Integer(sys_id as i64),
+                PyRep::Integer(count as i64),
+            )])))
+        }
+        ("dungeonInstanceCacheMgr", "GetIceBeltsCount") => {
+            seed_system_ice_belt_from_sde(ctx, sys_id);
+            let count: usize = anomaly_instances(ctx, sys_id, ICE_BELT_ANOMALY_TYPE).values().map(|v| v.len()).sum();
+            Some(Ok(PyRep::Integer(count as i64)))
+        }
+        ("dungeonInstanceCacheMgr", "GetBulwarkMiningSiteCounts") => {
+            if _args.is_empty() {
+                return None;
+            }
+            seed_system_mining_sites_from_sde(ctx, sys_id).await;
+            let count: usize = anomaly_instances(ctx, sys_id, "BulwarkMiningSite").values().map(|v| v.len()).sum();
+            Some(Ok(PyRep::Dict(vec![(
+                PyRep::Integer(sys_id as i64),
+                PyRep::Integer(count as i64),
+            )])))
+        }
+        ("dungeonInstanceCacheMgr", "GetFactionWarfareInstances")
+        | ("dungeonInstanceCacheMgr", "GetFactionWarfareBattlefieldInstances")
+        | ("dungeonInstanceCacheMgr", "GetHomefrontSiteInstances")
+        | ("dungeonInstanceCacheMgr", "GetPirateInsurgencyInstances")
+        | ("dungeonInstanceCacheMgr", "GetPirateInsurgencyIceHeistInstances")
+        | ("dungeonInstanceCacheMgr", "GetTriglavianSiteInstances")
+        | ("dungeonInstanceCacheMgr", "GetCombatAnomalyInstances") => {
             ensure_system_pve_sites_seeded(ctx, sys_id).await;
             let by_dungeon = registry_instances(ctx, sys_id, false);
             Some(Ok(instances_reply(sys_id, by_dungeon)))
         }
-        "GetOreAnomalyInstances" => {
+        ("dungeonInstanceCacheMgr", "GetOreAnomalyInstances") => {
             seed_system_mining_sites_from_sde(ctx, sys_id).await;
             let by_dungeon = anomaly_instances(ctx, sys_id, "OreAnomaly");
             Some(Ok(instances_reply(sys_id, by_dungeon)))
         }
-        "GetIceBeltInstances" => {
+        ("dungeonInstanceCacheMgr", "GetIceBeltInstances") => {
             seed_system_ice_belt_from_sde(ctx, sys_id);
             let by_dungeon = anomaly_instances(ctx, sys_id, ICE_BELT_ANOMALY_TYPE);
             Some(Ok(instances_reply(sys_id, by_dungeon)))
         }
-        _ => {
+        ("dungeonInstanceCacheMgr", "GetSignatureInstances") => {
             // GetSignatureInstances: probe-only exploration sites plus SDE-seeded ore/gas signatures.
             ensure_system_pve_sites_seeded(ctx, sys_id).await;
             seed_system_mining_sites_from_sde(ctx, sys_id).await;
@@ -344,5 +375,6 @@ pub async fn handle(
             });
             Some(Ok(instances_reply(sys_id, out)))
         }
+        _ => None,
     }
 }
