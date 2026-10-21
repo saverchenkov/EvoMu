@@ -352,4 +352,50 @@ impl SdeRegistry {
         }
         out
     }
+
+    /// Joins `fighter_abilities_by_type[fighter_type_id]` with `self.fighter_abilities` so server
+    /// fighter controllers can inspect both per-slot cooldowns/charges and ability metadata
+    /// (`target_mode`, `disallow_in_high_sec`, `disallow_in_low_sec`, `turret_graphic_id`,
+    /// `tooltip_text_id`; `res:/staticdata/fighterabilities.static` &
+    /// `res:/staticdata/fighterabilitiesbytype.static`).
+    pub fn fighter_ability_slots_with_info(
+        &self,
+        fighter_type_id: TypeId,
+    ) -> Vec<(FighterAbilitySlot, &FighterAbilityInfo)> {
+        let Some(slots) = self.fighter_abilities_by_type.get(&fighter_type_id) else {
+            return Vec::new();
+        };
+        slots
+            .iter()
+            .filter_map(|slot| {
+                let info = self.fighter_abilities.get(&slot.ability_id)?;
+                Some((slot.clone(), info))
+            })
+            .collect()
+    }
+
+    /// Resolves the on-disk V24.01 client `SharedCache/ResFiles` path for a `res:/...` static
+    /// data resource indexed in `self.resources` (overridable via `EVOMU_RESFILES_DIR`).
+    pub fn cdn_resource_path(&self, res_path: &str) -> Result<PathBuf, SdeError> {
+        let info = self.resources.get(res_path).ok_or_else(|| {
+            SdeError::InvalidSchema(format!("SDE resource not indexed: {res_path}"))
+        })?;
+        let base = if let Ok(dir) = std::env::var("EVOMU_RESFILES_DIR") {
+            if !dir.trim().is_empty() {
+                PathBuf::from(dir)
+            } else {
+                let home = std::env::var("HOME").unwrap_or_default();
+                PathBuf::from(home).join("Library/Application Support/EVE Online/SharedCache/ResFiles")
+            }
+        } else {
+            let home = std::env::var("HOME").unwrap_or_default();
+            PathBuf::from(home).join("Library/Application Support/EVE Online/SharedCache/ResFiles")
+        };
+        let path = base.join(&info.cdn_relative_path);
+        if !path.is_file() {
+            return Err(SdeError::MissingDatabase(path.display().to_string()));
+        }
+        Ok(path)
+    }
 }
+

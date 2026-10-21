@@ -430,3 +430,362 @@ fn test_t2_sde_fsdbinary_dogma_and_content_raw_client_verification() {
         "sde:res:/staticdata/requiredskillsindex.fsdbinary",
     ]);
 }
+
+const TYPES_RES: (&str, &str, u64) = (
+    "res:/staticdata/types.fsdbinary",
+    "c0ee9c292aa113737029c9ec63503233",
+    9_169_272,
+);
+const AGENTS_IN_SPACE: (&str, &str, u64) = (
+    "res:/staticdata/agentsinspace.fsdbinary",
+    "588bd7a75698b8d164b7dddbc5e50818",
+    11_576,
+);
+const NPC_CHARACTERS: (&str, &str, u64) = (
+    "res:/staticdata/npccharacters.fsdbinary",
+    "9a5efb6a18648808dc9b1ccffd8259ac",
+    1_873_264,
+);
+const CORP_ACTIVITIES: (&str, &str, u64) = (
+    "res:/staticdata/corporationactivities.fsdbinary",
+    "5c40c3ba3f7875dc257a1eda6ab43721",
+    296,
+);
+const NPC_CORP_DIVISIONS: (&str, &str, u64) = (
+    "res:/staticdata/npccorporationdivisions.fsdbinary",
+    "93187a5122247235d7f5b0e0d9c28719",
+    1_075,
+);
+const CONTRABAND_TYPES: (&str, &str, u64) = (
+    "res:/staticdata/contrabandtypes.fsdbinary",
+    "73e624f59b01d5230a5ecd00fe1669a9",
+    1_680,
+);
+const DOGMA_UNITS: (&str, &str, u64) = (
+    "res:/staticdata/dogmaunits.fsdbinary",
+    "bc428339035ee07dfebf376f4cd34ba9",
+    3_769,
+);
+const ACCOUNTING_ENTRY_TYPES: (&str, &str, u64) = (
+    "res:/staticdata/accountingentrytypes.fsdbinary",
+    "5ae04315ca2fbf678278fc0f47ac0c05",
+    27_051,
+);
+const ACCOUNTING_KEYS: (&str, &str, u64) = (
+    "res:/staticdata/accountingkeys.fsdbinary",
+    "6195face9aa40f4c3d253ddf5df0bcc8",
+    2_016,
+);
+const META_GROUPS: (&str, &str, u64) = (
+    "res:/staticdata/metagroups.fsdbinary",
+    "20d30e22d51debd9e46795d1da61a248",
+    984,
+);
+const GRAPHIC_IDS: (&str, &str, u64) = (
+    "res:/staticdata/graphicids.fsdbinary",
+    "016ae914e50fa2839fe1082616d91ec4",
+    1_535_928,
+);
+const ICON_IDS: (&str, &str, u64) = (
+    "res:/staticdata/iconids.fsdbinary",
+    "52ac1339c7a1cd0270e8df2d4d9020a4",
+    546_952,
+);
+const SOUND_IDS: (&str, &str, u64) = (
+    "res:/staticdata/soundids.fsdbinary",
+    "ee04e8241837c12838d952c3e5169494",
+    101_640,
+);
+
+#[test]
+fn test_t2_sde_fsdbinary_characters_economy_and_assets_verification() {
+    // parity: sde:res:/staticdata/types.fsdbinary, sde:res:/staticdata/fighterabilities.static
+    // parity: sde:res:/staticdata/agentsinspace.fsdbinary, sde:res:/staticdata/npccharacters.fsdbinary
+    // parity: sde:res:/staticdata/corporationactivities.fsdbinary, sde:res:/staticdata/npccorporationdivisions.fsdbinary
+    // parity: sde:res:/staticdata/contrabandtypes.fsdbinary, sde:res:/staticdata/dogmaunits.fsdbinary
+    // parity: sde:res:/staticdata/accountingentrytypes.fsdbinary, sde:res:/staticdata/accountingkeys.fsdbinary
+    // parity: sde:res:/staticdata/metagroups.fsdbinary, sde:res:/staticdata/graphicids.fsdbinary
+    // parity: sde:res:/staticdata/iconids.fsdbinary, sde:res:/staticdata/soundids.fsdbinary
+    let sde = SdeRegistry::open(&SdeRegistry::default_db_path()).expect("real V24.01 SDE");
+    let labels = load_en_us_labels(&sde);
+
+    // 1. types.fsdbinary localized typeNameID (@132) and descriptionID (@68) verification across all 53,288 types
+    let tf = load(&sde, TYPES_RES, 152);
+    assert_eq!(tf.records.len(), 53_288);
+    let mut resolved_descriptions = 0usize;
+    for &rec in &tf.records {
+        let tid = u64_at(&tf.raw, rec) as u32;
+        let desc_id = u32_at(&tf.raw, rec + 68);
+        let name_id = u32_at(&tf.raw, rec + 132);
+        let mask = u32_at(&tf.raw, rec + 148);
+        let inv = sde.types.get(&tid).expect("type in sde.types");
+        assert_eq!(
+            inv.name,
+            expected_name(&labels, name_id, "Type", u64::from(tid)),
+            "type {tid} localized name"
+        );
+        assert_eq!(inv.description_id, ((mask & 8) != 0).then_some(desc_id));
+        if let Some(did) = inv.description_id {
+            if labels.contains_key(&did) {
+                resolved_descriptions += 1;
+            }
+        }
+    }
+    assert_eq!(resolved_descriptions, 34_652);
+
+    // 2. fighterabilities.static joined with fighterabilitiesbytype.static via SdeRegistry::fighter_ability_slots_with_info
+    assert_eq!(sde.fighter_abilities.len(), 36);
+    assert_eq!(sde.fighter_abilities_by_type.len(), 94);
+    let mut total_fighter_slots = 0usize;
+    for (&ftid, raw_slots) in &sde.fighter_abilities_by_type {
+        let joined = sde.fighter_ability_slots_with_info(ftid);
+        assert_eq!(joined.len(), raw_slots.len(), "fighter {ftid} slot join");
+        for (slot, info) in joined {
+            total_fighter_slots += 1;
+            assert_eq!(slot.ability_id, info.ability_id);
+            assert!(
+                matches!(
+                    info.target_mode.as_str(),
+                    "untargeted" | "itemTargeted" | "pointTargeted"
+                ),
+                "unexpected fighter target_mode {}",
+                info.target_mode
+            );
+            if let Some(dnid) = info.display_name_id {
+                assert!(labels.contains_key(&dnid), "fighter ability display_name_id {dnid}");
+            }
+            if let Some(ttid) = info.tooltip_text_id {
+                assert!(labels.contains_key(&ttid), "fighter ability tooltip_text_id {ttid}");
+            }
+        }
+    }
+    assert!(total_fighter_slots >= 170);
+
+    // 3. agentsinspace.fsdbinary (360 records, stride 20)
+    let ais_raw = load(&sde, AGENTS_IN_SPACE, 20);
+    let ais = sde.load_agents_in_space().expect("load_agents_in_space");
+    assert_eq!(ais_raw.records.len(), 360);
+    assert_eq!(ais.len(), 360);
+    for &rec in &ais_raw.records {
+        let r = &ais_raw.raw;
+        let aid = u32_at(r, rec);
+        let entry = ais.get(&aid).expect("agent in space");
+        assert_eq!(entry.dungeon_id, u32_at(r, rec + 4));
+        assert_eq!(entry.solar_system_id, u32_at(r, rec + 8));
+        assert_eq!(entry.spawn_point_id, u32_at(r, rec + 12));
+        assert_eq!(entry.type_id, u32_at(r, rec + 16));
+        let ag = sde.agents.get(&i64::from(aid)).expect("agent in sde.agents");
+        assert_eq!(ag.solar_system_id, Some(entry.solar_system_id));
+        assert!(sde.solar_systems.contains_key(&entry.solar_system_id));
+        assert!(sde.types.contains_key(&entry.type_id));
+    }
+    assert_eq!(ais[&3_018_870].solar_system_id, 30_002_548);
+    assert_eq!(ais[&3_018_870].dungeon_id, 1_063);
+    assert_eq!(ais[&3_018_870].type_id, 26_176);
+
+    // 4. npccharacters.fsdbinary (11,424 records, stride 136; 10,972 agents in sde.agents)
+    let nc_raw = load(&sde, NPC_CHARACTERS, 136);
+    let nc = sde.load_npc_characters().expect("load_npc_characters");
+    assert_eq!(nc_raw.records.len(), 11_424);
+    assert_eq!(nc.len(), 11_424);
+    let mut agent_count = 0usize;
+    for &rec in &nc_raw.records {
+        let r = &nc_raw.raw;
+        let cid = u64_at(r, rec) as i64;
+        let ch = nc.get(&cid).expect("npc character");
+        assert!(sde.npc_corporations.contains_key(&ch.corporation_id));
+        assert!(sde.bloodlines.contains_key(&ch.bloodline_id));
+        if let Some(rid) = ch.race_id {
+            assert!(sde.races.contains_key(&rid));
+        }
+        if let Some(aid) = ch.ancestry_id {
+            assert!(sde.ancestries.contains_key(&aid));
+        }
+        if ch.is_agent {
+            agent_count += 1;
+            let ag = sde.agents.get(&cid).expect("agent in sde.agents");
+            assert_eq!(ag.corporation_id, ch.corporation_id);
+            assert_eq!(ag.division_id, ch.agent_division_id.unwrap());
+            assert_eq!(ag.level, ch.agent_level.unwrap() as u8);
+            assert_eq!(ag.agent_type_id, ch.agent_type_id.unwrap());
+            assert_eq!(ag.is_locator, ch.is_locator);
+            assert_eq!(
+                ag.name,
+                expected_name(&labels, ch.name_id, "Agent", cid as u64)
+            );
+        }
+    }
+    assert_eq!(agent_count, sde.agents.len());
+    assert_eq!(agent_count, 10_972);
+
+    // 5. corporationactivities.fsdbinary (20 records, stride 8)
+    let ca_raw = load(&sde, CORP_ACTIVITIES, 8);
+    let ca = sde
+        .load_corporation_activities()
+        .expect("load_corporation_activities");
+    assert_eq!(ca_raw.records.len(), 20);
+    assert_eq!(ca.len(), 20);
+    for &rec in &ca_raw.records {
+        let id = u32_at(&ca_raw.raw, rec);
+        let nid = u32_at(&ca_raw.raw, rec + 4);
+        assert_eq!(ca[&id].name_id, nid);
+        assert!(labels.contains_key(&nid));
+    }
+    for op in sde.station_operations.values() {
+        if let Some(act_id) = op.activity_id {
+            assert!(ca.contains_key(&act_id));
+        }
+    }
+
+    // 6. npccorporationdivisions.fsdbinary (10 records, stride 40)
+    let ncd_raw = load(&sde, NPC_CORP_DIVISIONS, 40);
+    let ncd = sde
+        .load_npc_corporation_divisions()
+        .expect("load_npc_corporation_divisions");
+    assert_eq!(ncd_raw.records.len(), 10);
+    assert_eq!(ncd.len(), 10);
+    for div in ncd.values() {
+        assert!(!div.internal_name.is_empty());
+        assert!(labels.contains_key(&div.name_id));
+        assert!(labels.contains_key(&div.leader_type_name_id));
+    }
+    assert_eq!(labels[&ncd[&24].name_id], "Security");
+
+    // 7. contrabandtypes.fsdbinary (8 records, stride 24)
+    let cb_raw = load(&sde, CONTRABAND_TYPES, 24);
+    let cb = sde.load_contraband_types().expect("load_contraband_types");
+    assert_eq!(cb_raw.records.len(), 8);
+    assert_eq!(cb.len(), 8);
+    let mut total_faction_rules = 0usize;
+    for (&tid, rules) in &cb {
+        assert!(sde.types.contains_key(&tid));
+        assert!(!rules.is_empty());
+        for (&fid, rule) in rules {
+            total_faction_rules += 1;
+            assert!(sde.factions.contains_key(&fid));
+            assert!(rule.fine_by_value >= 0.0);
+        }
+    }
+    assert!(total_faction_rules >= 40);
+    assert!(cb.contains_key(&3721)); // Slaves
+
+    // 8. dogmaunits.fsdbinary (60 records, stride 32)
+    let du_raw = load(&sde, DOGMA_UNITS, 32);
+    let du = sde.load_dogma_units().expect("load_dogma_units");
+    assert_eq!(du_raw.records.len(), 60);
+    assert_eq!(du.len(), 60);
+    for u in du.values() {
+        assert!(!u.name.is_empty());
+        if let Some(dnid) = u.display_name_id {
+            assert!(labels.contains_key(&dnid));
+        }
+    }
+    assert_eq!(du[&1].name, "Length");
+    assert_eq!(du[&101].name, "Milliseconds");
+
+    // 9. accountingentrytypes.fsdbinary (218 records, stride 40)
+    let aet_raw = load(&sde, ACCOUNTING_ENTRY_TYPES, 40);
+    let aet = sde
+        .load_accounting_entry_types()
+        .expect("load_accounting_entry_types");
+    assert_eq!(aet_raw.records.len(), 218);
+    assert_eq!(aet.len(), 218);
+    for e in aet.values() {
+        assert!(!e.name.is_empty());
+        assert!(labels.contains_key(&e.name_id));
+    }
+    assert_eq!(aet[&10].name, "Player Donation");
+    assert_eq!(aet[&85].name, "Bounty Prizes");
+    assert!(labels.contains_key(&aet[&10].journal_message_id));
+
+    // 10. accountingkeys.fsdbinary (19 records, stride 48)
+    let ak_raw = load(&sde, ACCOUNTING_KEYS, 48);
+    let ak = sde.load_accounting_keys().expect("load_accounting_keys");
+    assert_eq!(ak_raw.records.len(), 19);
+    assert_eq!(ak.len(), 19);
+    for k in ak.values() {
+        assert!(!k.key_name.is_empty());
+        assert!(!k.key_type.is_empty());
+    }
+    assert_eq!(ak[&1000].key_name, "cash");
+    assert_eq!(ak[&1000].currency.as_deref(), Some("ISK"));
+    assert!(labels.contains_key(&ak[&1000].name_id));
+
+    // 11. metagroups.fsdbinary (13 records, stride 48)
+    let mg_raw = load(&sde, META_GROUPS, 48);
+    let mg = sde.load_meta_groups().expect("load_meta_groups");
+    assert_eq!(mg_raw.records.len(), 13);
+    assert_eq!(mg.len(), 13);
+    for m in mg.values() {
+        assert!(labels.contains_key(&m.name_id));
+    }
+    for inv in sde.types.values() {
+        if let Some(mg_id) = inv.meta_group_id {
+            assert!(mg.contains_key(&mg_id), "type {} meta_group_id {mg_id}", inv.type_id);
+        }
+    }
+    assert_eq!(labels[&mg[&1].name_id], "Tech I");
+    assert_eq!(labels[&mg[&2].name_id], "Tech II");
+    assert_eq!(labels[&mg[&14].name_id], "Tech III");
+
+    // 12. graphicids.fsdbinary (6,159 records, stride 160), iconids.fsdbinary (4,804 records, stride 32), soundids.fsdbinary (1,470 records, stride 16)
+    let gid_raw = load(&sde, GRAPHIC_IDS, 160);
+    let gids = sde.load_graphic_ids().expect("load_graphic_ids");
+    assert_eq!(gid_raw.records.len(), 6_159);
+    assert_eq!(gids.len(), 6_159);
+
+    let iid_raw = load(&sde, ICON_IDS, 32);
+    let iids = sde.load_icon_ids().expect("load_icon_ids");
+    assert_eq!(iid_raw.records.len(), 4_804);
+    assert_eq!(iids.len(), 4_804);
+    for ic in iids.values() {
+        assert!(!ic.icon_file.is_empty());
+    }
+
+    let sid_raw = load(&sde, SOUND_IDS, 16);
+    let sids = sde.load_sound_ids().expect("load_sound_ids");
+    assert_eq!(sid_raw.records.len(), 1_470);
+    assert_eq!(sids.len(), 1_470);
+
+    let mut resolved_type_graphics = 0usize;
+    let mut resolved_type_icons = 0usize;
+    let mut resolved_type_sounds = 0usize;
+    for inv in sde.types.values() {
+        if let Some(gid) = inv.graphic_id {
+            if gids.contains_key(&gid) {
+                resolved_type_graphics += 1;
+            }
+        }
+        if let Some(iid) = inv.icon_id {
+            if iids.contains_key(&iid) {
+                resolved_type_icons += 1;
+            }
+        }
+        if let Some(sid) = inv.sound_id {
+            if sids.contains_key(&sid) {
+                resolved_type_sounds += 1;
+            }
+        }
+    }
+    assert_eq!(resolved_type_graphics, 18_816);
+    assert_eq!(resolved_type_icons, 23_088);
+    assert_eq!(resolved_type_sounds, 5_091);
+
+    eve_testkit::attest(&[
+        "sde:res:/staticdata/types.fsdbinary",
+        "sde:res:/staticdata/fighterabilities.static",
+        "sde:res:/staticdata/agentsinspace.fsdbinary",
+        "sde:res:/staticdata/npccharacters.fsdbinary",
+        "sde:res:/staticdata/corporationactivities.fsdbinary",
+        "sde:res:/staticdata/npccorporationdivisions.fsdbinary",
+        "sde:res:/staticdata/contrabandtypes.fsdbinary",
+        "sde:res:/staticdata/dogmaunits.fsdbinary",
+        "sde:res:/staticdata/accountingentrytypes.fsdbinary",
+        "sde:res:/staticdata/accountingkeys.fsdbinary",
+        "sde:res:/staticdata/metagroups.fsdbinary",
+        "sde:res:/staticdata/graphicids.fsdbinary",
+        "sde:res:/staticdata/iconids.fsdbinary",
+        "sde:res:/staticdata/soundids.fsdbinary",
+    ]);
+}
+

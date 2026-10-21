@@ -586,3 +586,514 @@ fn test_t2_sde_static_schema_and_pickle_domain_verification() {
         "sde:res:/staticdata/starmapcache.pickle",
     ]);
 }
+
+#[test]
+fn test_t2_sde_sqlite_and_bracket_static_domain_verification() {
+    // parity: sde:res:/staticdata/industry_activities.static, sde:res:/staticdata/industry_activity_modifier_sources.static
+    // parity: sde:res:/staticdata/industry_activity_target_filters.static, sde:res:/staticdata/industry_assembly_lines.static
+    // parity: sde:res:/staticdata/industry_installation_types.static, sde:res:/staticdata/infobubbles.static
+    // parity: sde:res:/staticdata/wrecks.static, sde:res:/staticdata/asteroidcountbytypeidbeltid.static
+    // parity: sde:res:/staticdata/asteroidtypesbysolarsystemid.pickle, sde:res:/staticdata/bracketsbycategory.static
+    // parity: sde:res:/staticdata/bracketsbygroup.static, sde:res:/staticdata/bracketsbytype.static
+    // parity: sde:res:/staticdata/brackets.static, sde:res:/staticdata/certificates.static
+    let sde = SdeRegistry::open(&SdeRegistry::default_db_path()).expect("real V24.01 SDE");
+
+    // 1. 6 SQLite3 `.static` industry & info-bubble resources
+    let _ = read_pinned_resource(
+        &sde,
+        "res:/staticdata/industry_activities.static",
+        "c132b2aa352d18b5a685b6fcb96df95b",
+        24_576,
+    );
+    let ind_acts = sde.load_industry_activities().expect("industry_activities");
+    assert_eq!(ind_acts.len(), 6);
+    assert_eq!(ind_acts[&1].activity_name, "Manufacturing");
+    assert_eq!(ind_acts[&3].activity_name, "Time Efficiency Research");
+    assert_eq!(ind_acts[&4].activity_name, "Material Efficiency Research");
+    assert_eq!(ind_acts[&5].activity_name, "Copying");
+    assert_eq!(ind_acts[&8].activity_name, "Invention");
+
+    let _ = read_pinned_resource(
+        &sde,
+        "res:/staticdata/industry_activity_target_filters.static",
+        "8528df44ac28cb3da0bd31db1b608efc",
+        24_576,
+    );
+    let filters = sde
+        .load_industry_activity_target_filters()
+        .expect("industry_activity_target_filters");
+    assert_eq!(filters.len(), 18);
+    for f in filters.values() {
+        assert!(!f.name.is_empty());
+        for &cid in &f.category_ids {
+            assert!(sde.categories.contains_key(&cid));
+        }
+        for &gid in &f.group_ids {
+            assert!(sde.groups.contains_key(&gid));
+        }
+    }
+    assert_eq!(filters[&11].name, "Capital Ships");
+    assert_eq!(filters[&11].group_ids, vec![485, 547, 883, 1538, 4594, 5120]);
+
+    let _ = read_pinned_resource(
+        &sde,
+        "res:/staticdata/industry_activity_modifier_sources.static",
+        "f57eed2f9502e5650be3018e8ff29aaf",
+        77_824,
+    );
+    let mod_sources = sde
+        .load_industry_activity_modifier_sources()
+        .expect("industry_activity_modifier_sources");
+    assert_eq!(mod_sources.len(), 220);
+    for (&tid, acts) in &mod_sources {
+        assert!(sde.types.contains_key(&tid));
+        for mods in acts.values() {
+            for entries in mods.values() {
+                for e in entries {
+                    assert!(sde.attributes.contains_key(&e.dogma_attribute_id));
+                    if let Some(fid) = e.filter_id {
+                        assert!(filters.contains_key(&fid));
+                    }
+                }
+            }
+        }
+    }
+    assert!(mod_sources.contains_key(&35_825)); // Raitaru
+
+    let _ = read_pinned_resource(
+        &sde,
+        "res:/staticdata/industry_assembly_lines.static",
+        "57c25af25a9b2af8d50fa47ad0898cd1",
+        385_024,
+    );
+    let lines = sde
+        .load_industry_assembly_lines()
+        .expect("industry_assembly_lines");
+    assert_eq!(lines.len(), 146);
+    for line in lines.values() {
+        assert!(!line.name.is_empty());
+        assert!(ind_acts.contains_key(&line.activity));
+        assert!(line.base_time_multiplier >= 0.0);
+        assert!(line.base_material_multiplier >= 0.0);
+    }
+    assert_eq!(lines[&133].name, "Minmatar Outpost Research PE Tier3");
+    assert_eq!(lines[&133].activity, 3);
+    assert_eq!(lines[&133].base_cost_multiplier, 0.729);
+
+    let _ = read_pinned_resource(
+        &sde,
+        "res:/staticdata/industry_installation_types.static",
+        "2e748b84f826048db06068f9935289e6",
+        40_960,
+    );
+    let inst_types = sde
+        .load_industry_installation_types()
+        .expect("industry_installation_types");
+    assert_eq!(inst_types.len(), 102);
+    for (&tid, line_ids) in &inst_types {
+        assert!(sde.types.contains_key(&tid));
+        assert!(!line_ids.is_empty());
+        for lid in line_ids {
+            assert!(lines.contains_key(lid));
+        }
+    }
+    assert!(inst_types.contains_key(&13_780));
+
+    let _ = read_pinned_resource(
+        &sde,
+        "res:/staticdata/infobubbles.static",
+        "cf2212228051fb33526ffa1d0b19bca2",
+        389_120,
+    );
+    let bubbles = sde.load_info_bubbles().expect("infobubbles");
+    assert_eq!(bubbles.len(), 5);
+    for k in [
+        "infoBubbleElements",
+        "infoBubbleFactions",
+        "infoBubbleGroups",
+        "infoBubbleTypeBonuses",
+        "infoBubbleTypeElements",
+    ] {
+        assert!(bubbles.contains_key(k), "missing infobubble key {k}");
+    }
+    for (fid_str, _) in bubbles["infoBubbleFactions"].as_object().unwrap() {
+        let fid: u32 = fid_str.parse().unwrap();
+        assert!(sde.factions.contains_key(&fid));
+    }
+
+    // 2. wrecks.static (294 groups)
+    let _ = read_pinned_resource(
+        &sde,
+        "res:/staticdata/wrecks.static",
+        "bd053df953208b60f5ec6d2b298be731",
+        15_756,
+    );
+    let wrecks_by_group = sde
+        .load_wrecks_by_group_and_race()
+        .expect("wrecks_by_group_and_race");
+    assert_eq!(wrecks_by_group.len(), 294);
+    let mut resolved_wreck_races = 0usize;
+    for (&gid, race_map) in &wrecks_by_group {
+        assert!(sde.groups.contains_key(&gid));
+        assert!(!race_map.is_empty());
+        for (&race_id, &wreck_tid) in race_map {
+            if sde.races.contains_key(&race_id) {
+                resolved_wreck_races += 1;
+            }
+            assert!(sde.types.contains_key(&wreck_tid));
+        }
+    }
+    assert!(resolved_wreck_races > 200);
+    assert_eq!(wrecks_by_group[&25][&1], 26_506); // Caldari Frigate Wreck
+    assert_eq!(wrecks_by_group[&25][&2], 26_550); // Minmatar Frigate Wreck
+    assert_eq!(wrecks_by_group[&25][&4], 26_484); // Amarr Frigate Wreck
+    assert_eq!(wrecks_by_group[&25][&8], 26_528); // Gallente Frigate Wreck
+
+    // 3. asteroidcountbytypeidbeltid.static (40,928 asteroid belts) & asteroidtypesbysolarsystemid.pickle (3,974 systems)
+    let _ = read_pinned_resource(
+        &sde,
+        "res:/staticdata/asteroidcountbytypeidbeltid.static",
+        "37125cf3e730bd50495239a6cda04879",
+        3_974_962,
+    );
+    let belt_counts = sde
+        .load_asteroid_counts_by_belt()
+        .expect("asteroid_counts_by_belt");
+    assert_eq!(belt_counts.len(), 40_928);
+    let loc_map = sde.location_solar_system_map();
+    for (&belt_id, type_counts) in &belt_counts {
+        assert!(loc_map.contains_key(&belt_id), "belt {belt_id} in sde_celestials");
+        assert!(!type_counts.is_empty());
+        for (&tid, &cnt) in type_counts {
+            assert!(sde.types.contains_key(&tid));
+            assert!(cnt > 0);
+        }
+    }
+
+    let ast_pickle_raw = read_pinned_resource(
+        &sde,
+        "res:/staticdata/asteroidtypesbysolarsystemid.pickle",
+        "8f9f9b1e28c0670a443b630c6408c590",
+        96_712,
+    );
+    let PyVal::Dict(ast_py) = unpickle(&ast_pickle_raw) else {
+        panic!("asteroidtypesbysolarsystemid dict");
+    };
+    let sys_asteroids = sde
+        .load_asteroid_types_by_solar_system()
+        .expect("asteroid_types_by_solar_system");
+    assert_eq!(sys_asteroids.len(), 3_974);
+    assert_eq!(ast_py.borrow().len(), 3_974);
+    for (k, v) in ast_py.borrow().iter() {
+        let sid = k.as_int().expect("sys id") as u32;
+        assert!(sde.solar_systems.contains_key(&sid));
+        let PyVal::Tuple(tup) = v else {
+            panic!("asteroid tuple");
+        };
+        let mut expected: Vec<u32> = tup
+            .iter()
+            .map(|x| x.as_int().expect("type id") as u32)
+            .collect();
+        expected.sort_unstable();
+        for &tid in &expected {
+            assert!(sde.types.contains_key(&tid));
+        }
+        assert_eq!(sys_asteroids.get(&sid), Some(&expected));
+    }
+
+    // 4. brackets.static (166), bracketsbycategory.static (7), bracketsbygroup.static (547), bracketsbytype.static (1,221)
+    let _ = read_pinned_resource(
+        &sde,
+        "res:/staticdata/brackets.static",
+        "1352c0194023fdd015ec6123bdee6cea",
+        18_455,
+    );
+    let brackets = sde.load_brackets().expect("brackets");
+    assert_eq!(brackets.len(), 166);
+    assert_eq!(brackets[&2313].name, "Planet");
+    assert_eq!(
+        brackets[&2313].texture_path,
+        "res:/UI/Texture/Shared/Brackets/planet.png"
+    );
+
+    let _ = read_pinned_resource(
+        &sde,
+        "res:/staticdata/bracketsbycategory.static",
+        "9807224845f886a08d8da797ca121d9c",
+        754,
+    );
+    let by_cat = sde.load_brackets_by_category().expect("brackets_by_category");
+    assert_eq!(by_cat.len(), 7);
+    for (&cid, &bid) in &by_cat {
+        assert!(sde.categories.contains_key(&cid));
+        assert!(brackets.contains_key(&bid));
+    }
+
+    let _ = read_pinned_resource(
+        &sde,
+        "res:/staticdata/bracketsbygroup.static",
+        "80c2635242d5cee2cd63bb54f9b0a9d9",
+        9_394,
+    );
+    let by_grp = sde.load_brackets_by_group().expect("brackets_by_group");
+    assert_eq!(by_grp.len(), 547);
+    let mut resolved_grp_brackets = 0usize;
+    for (&gid, &bid) in &by_grp {
+        if sde.groups.contains_key(&gid) {
+            resolved_grp_brackets += 1;
+        }
+        assert!(brackets.contains_key(&bid));
+    }
+    assert!(resolved_grp_brackets >= 500);
+
+    let _ = read_pinned_resource(
+        &sde,
+        "res:/staticdata/bracketsbytype.static",
+        "4da9229279bd4f27d35cd244598b440c",
+        20_178,
+    );
+    let by_type = sde.load_brackets_by_type().expect("brackets_by_type");
+    assert_eq!(by_type.len(), 1_221);
+    let mut resolved_type_brackets = 0usize;
+    for (&tid, &bid) in &by_type {
+        if sde.types.contains_key(&tid) {
+            resolved_type_brackets += 1;
+        }
+        assert!(brackets.contains_key(&bid));
+    }
+    assert!(resolved_type_brackets >= 1_100);
+
+    // 5. certificates.static (139 certificates, 477 ship masteries)
+    let _ = read_pinned_resource(
+        &sde,
+        "res:/staticdata/certificates.static",
+        "5a4326db67028b6cf56e9df3ec90d560",
+        161_213,
+    );
+    let certs = sde
+        .load_certificates_and_masteries()
+        .expect("certificates_and_masteries");
+    assert_eq!(certs.certificates.len(), 139);
+    assert_eq!(certs.masteries_by_ship_type.len(), 477);
+    for c in certs.certificates.values() {
+        assert!(sde.groups.contains_key(&c.group_id));
+    }
+    let mut resolved_mastery_ships = 0usize;
+    for (&ship_tid, levels) in &certs.masteries_by_ship_type {
+        if sde.types.contains_key(&ship_tid) {
+            resolved_mastery_ships += 1;
+        }
+        assert_eq!(levels.len(), 5);
+        for lvl in levels {
+            assert!(!lvl.is_empty());
+            for cid in lvl {
+                assert!(certs.certificates.contains_key(cid));
+            }
+        }
+    }
+    assert!(resolved_mastery_ships >= 450);
+
+    eve_testkit::attest(&[
+        "sde:res:/staticdata/industry_activities.static",
+        "sde:res:/staticdata/industry_activity_modifier_sources.static",
+        "sde:res:/staticdata/industry_activity_target_filters.static",
+        "sde:res:/staticdata/industry_assembly_lines.static",
+        "sde:res:/staticdata/industry_installation_types.static",
+        "sde:res:/staticdata/infobubbles.static",
+        "sde:res:/staticdata/wrecks.static",
+        "sde:res:/staticdata/asteroidcountbytypeidbeltid.static",
+        "sde:res:/staticdata/asteroidtypesbysolarsystemid.pickle",
+        "sde:res:/staticdata/bracketsbycategory.static",
+        "sde:res:/staticdata/bracketsbygroup.static",
+        "sde:res:/staticdata/bracketsbytype.static",
+        "sde:res:/staticdata/brackets.static",
+        "sde:res:/staticdata/certificates.static",
+    ]);
+}
+
+#[test]
+fn test_t2_sde_ui_and_content_static_domain_verification() {
+    // parity: sde:res:/staticdata/achievements.static, sde:res:/staticdata/landmarks.static
+    // parity: sde:res:/staticdata/empireselection.static, sde:res:/staticdata/empiretechnologies.static
+    // parity: sde:res:/staticdata/eventmessagetypes.static, sde:res:/staticdata/eventtypes.static
+    // parity: sde:res:/staticdata/podguide.static, sde:res:/staticdata/podguidegroups.static
+    // parity: sde:res:/staticdata/selectiongroups.static, sde:res:/staticdata/triggertypes.static
+    // parity: sde:res:/staticdata/dusticons.static, sde:res:/staticdata/skilltags.static
+    // parity: sde:res:/staticdata/dialogs.schema, sde:res:/staticdata/dialogs.static
+    let sde = SdeRegistry::open(&SdeRegistry::default_db_path()).expect("real V24.01 SDE");
+
+    let _ = read_pinned_resource(
+        &sde,
+        "res:/staticdata/achievements.static",
+        "0bc063a1b83ae2834f1d9fd3ef1f8a38",
+        7_854,
+    );
+    let achs = sde.load_achievements().expect("achievements");
+    assert_eq!(achs.len(), 68);
+    assert!(achs.values().any(|a| a.is_enabled));
+
+    let _ = read_pinned_resource(
+        &sde,
+        "res:/staticdata/landmarks.static",
+        "00f9d98b246c5c80f11cc6a15acb0314",
+        4_772,
+    );
+    let landmarks = sde.load_landmarks().expect("landmarks");
+    assert_eq!(landmarks.len(), 45);
+    for lm in landmarks.values() {
+        assert!(lm.landmark_name_id > 0);
+        assert!(lm.description_id > 0);
+        assert!(lm.position.iter().all(|c| c.is_finite()));
+    }
+
+    let _ = read_pinned_resource(
+        &sde,
+        "res:/staticdata/empireselection.static",
+        "4ef3848576ee65c37fce2f483859c55a",
+        2_619,
+    );
+    let emp_sel = sde.load_empire_selection().expect("empire_selection");
+    assert_eq!(emp_sel.len(), 4);
+    for race_id in [1u32, 2, 4, 8] {
+        assert!(sde.races.contains_key(&race_id));
+        let e = &emp_sel[&race_id];
+        assert!(e.logo_path.starts_with("res:/UI/Texture/"));
+        assert!(e.named_logo_path.starts_with("res:/UI/Texture/"));
+        assert!(e.seal_path.starts_with("res:/UI/Texture/"));
+    }
+
+    let _ = read_pinned_resource(
+        &sde,
+        "res:/staticdata/empiretechnologies.static",
+        "cc8169e8fbc5c9b5f6bc2e138d41181f",
+        6_738,
+    );
+    let emp_tech = sde.load_empire_technologies().expect("empire_technologies");
+    assert_eq!(emp_tech.len(), 4);
+    for tech_id in [1u32, 2, 4, 21] {
+        assert!(emp_tech[&tech_id].title_id > 0);
+        assert!(emp_tech[&tech_id].order > 0);
+    }
+
+    let _ = read_pinned_resource(
+        &sde,
+        "res:/staticdata/eventmessagetypes.static",
+        "c8b6d8793008779b495dafcf88ae7595",
+        968,
+    );
+    let emt = sde.load_event_message_types().expect("event_message_types");
+    assert_eq!(emt.len(), 8);
+    assert_eq!(emt[&1], "Imminent Danger");
+
+    let _ = read_pinned_resource(
+        &sde,
+        "res:/staticdata/eventtypes.static",
+        "4e2c9c1feed3a0a9724e494688be16e5",
+        3_869,
+    );
+    let evt = sde.load_event_types().expect("event_types");
+    assert_eq!(evt.len(), 72);
+    assert!(evt.values().all(|s| !s.is_empty()));
+
+    let _ = read_pinned_resource(
+        &sde,
+        "res:/staticdata/podguidegroups.static",
+        "ba6e2f099c8421e441093c4947f8038f",
+        1_302,
+    );
+    let pgg = sde.load_pod_guide_groups().expect("pod_guide_groups");
+    assert_eq!(pgg.len(), 14);
+
+    let _ = read_pinned_resource(
+        &sde,
+        "res:/staticdata/podguide.static",
+        "7209c6fc6f30a30ed6ea2ff7ec1908fb",
+        4_892,
+    );
+    let pg = sde.load_pod_guide().expect("pod_guide");
+    assert_eq!(pg.len(), 44);
+    for term in pg.values() {
+        assert!(pgg.contains_key(&term.group_id));
+        assert!(term.texture_path.starts_with("res:/"));
+    }
+
+    let _ = read_pinned_resource(
+        &sde,
+        "res:/staticdata/selectiongroups.static",
+        "72547dc56a2cf7b5f813c6f04695a54b",
+        4_231,
+    );
+    let sel_groups = sde.load_selection_groups().expect("selection_groups");
+    assert_eq!(sel_groups.len(), 66);
+    assert!(sel_groups.values().all(|g| !g.selection_group_name.is_empty()));
+
+    let _ = read_pinned_resource(
+        &sde,
+        "res:/staticdata/triggertypes.static",
+        "7e21f34b429d98dcb5a140e64301cd93",
+        3_199,
+    );
+    let trig_types = sde.load_trigger_types().expect("trigger_types");
+    assert_eq!(trig_types.len(), 51);
+    assert!(trig_types.values().all(|t| !t.trigger_type_name.is_empty()));
+
+    let _ = read_pinned_resource(
+        &sde,
+        "res:/staticdata/dusticons.static",
+        "033f8112da73bd30a482e6a9a8ee1ec7",
+        182_032,
+    );
+    let dust_icons = sde.load_dust_icons().expect("dust_icons");
+    assert_eq!(dust_icons.len(), 2_036);
+    assert!(dust_icons.values().all(|p| p.starts_with("res:/")));
+
+    let _ = read_pinned_resource(
+        &sde,
+        "res:/staticdata/skilltags.static",
+        "93b6f9285d2c7757f0c1a9292213c845",
+        594,
+    );
+    let skill_tags = sde.load_skill_tags().expect("skill_tags");
+    assert_eq!(skill_tags.len(), 0);
+
+    let dlg_schema_raw = read_pinned_resource(
+        &sde,
+        "res:/staticdata/dialogs.schema",
+        "8ed318cffe6d5b1983ee5ea2c84dae6b",
+        1_517,
+    );
+    let dlg_schema_txt = std::str::from_utf8(&dlg_schema_raw).expect("dialogs.schema UTF-8");
+    assert_eq!(yaml_top_level_key_count(dlg_schema_txt), 4);
+    assert!(dlg_schema_txt.contains("endOfFixedSizeData: 5"));
+
+    let _ = read_pinned_resource(
+        &sde,
+        "res:/staticdata/dialogs.static",
+        "fb291004ed6c80d8373b53391f0fd9c6",
+        317_606,
+    );
+    let dialogs = sde.load_dialogs().expect("dialogs");
+    assert_eq!(dialogs.len(), 4_223);
+    assert_eq!(dialogs["28DaysApplyCompleted"].dialog_id, 2_695);
+    assert_eq!(dialogs["28DaysApplyCompleted"].dialog_type, 4);
+    assert_eq!(dialogs["warning"].dialog_id, 1_796);
+    assert_eq!(dialogs["warning"].dialog_type, 5);
+
+    eve_testkit::attest(&[
+        "sde:res:/staticdata/achievements.static",
+        "sde:res:/staticdata/landmarks.static",
+        "sde:res:/staticdata/empireselection.static",
+        "sde:res:/staticdata/empiretechnologies.static",
+        "sde:res:/staticdata/eventmessagetypes.static",
+        "sde:res:/staticdata/eventtypes.static",
+        "sde:res:/staticdata/podguide.static",
+        "sde:res:/staticdata/podguidegroups.static",
+        "sde:res:/staticdata/selectiongroups.static",
+        "sde:res:/staticdata/triggertypes.static",
+        "sde:res:/staticdata/dusticons.static",
+        "sde:res:/staticdata/skilltags.static",
+        "sde:res:/staticdata/dialogs.schema",
+        "sde:res:/staticdata/dialogs.static",
+    ]);
+}
+
