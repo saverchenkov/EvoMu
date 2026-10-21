@@ -56,7 +56,13 @@ pub(super) async fn handle_fleet_ops(
             let item_id = args.get(2).and_then(|a| a.as_i64());
             let type_id = args.get(3).and_then(|a| a.as_i64());
 
-            let sender_sys = session.solar_system_id.unwrap_or(30_000_142);
+            // OnFleetBroadcast carries the sender's solarSystemID: no session system, no broadcast.
+            let Some(sender_sys) = session.solar_system_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "NotInSolarSystem".into(),
+                    message: "Fleet broadcasts require a session solar system".into(),
+                }));
+            };
             let members_info: Vec<(i64, u32, i64)> = ctx.db.with_snapshot(|snap| {
                 let Some(fleet) = snap.fleets.get(&fleet_id) else {
                     return Vec::new();
@@ -68,13 +74,9 @@ pub(super) async fn handle_fleet_ops(
                     .member_details
                     .values()
                     .filter(|m| notify::broadcast_group_allows(scope, sender, m))
-                    .map(|m| {
-                        let ch = snap.characters.get(&m.character_id);
-                        (
-                            m.character_id,
-                            ch.map(|c| c.solar_system_id).unwrap_or(sender_sys),
-                            ch.map(|c| c.active_ship_id).unwrap_or(0),
-                        )
+                    .filter_map(|m| {
+                        let ch = snap.characters.get(&m.character_id)?;
+                        Some((m.character_id, ch.solar_system_id, ch.active_ship_id))
                     })
                     .collect()
             });
@@ -108,16 +110,16 @@ pub(super) async fn handle_fleet_ops(
                         continue;
                     }
                     if location == 2 && m_id != char_id {
-                        if let Some(s_pos) = sender_pos {
-                            let in_bubble = sys
-                                .get_ball_snapshot(m_ship)
-                                .await
-                                .ok()
-                                .flatten()
-                                .is_some_and(|(_, b)| b.position.distance(s_pos) <= 250_000.0);
-                            if !in_bubble {
-                                continue;
-                            }
+                        // Without a sender ball there is no bubble to share: only the sender sees it.
+                        let Some(s_pos) = sender_pos else { continue };
+                        let in_bubble = sys
+                            .get_ball_snapshot(m_ship)
+                            .await
+                            .ok()
+                            .flatten()
+                            .is_some_and(|(_, b)| b.position.distance(s_pos) <= 250_000.0);
+                        if !in_bubble {
+                            continue;
                         }
                     }
                     recipient_ids.push(m_id);

@@ -57,9 +57,16 @@ pub fn is_character_online(ctx: &ServerContext, target_char_id: i64) -> bool {
     })
 }
 
-/// Emits `OnContactLoggedOn` to all online characters who have `logged_on_char_id` on their watchlist
-/// and are not blocked by `logged_on_char_id` (`feat:social.contacts-buddy-online`, `feat:social.contacts-block`).
+/// Emits `OnClientContactChange(charID, online)` to all online characters who have `logged_on_char_id`
+/// on their watchlist and are not blocked by it (`feat:social.contacts-buddy-online`, `feat:social.contacts-block`).
+/// Client: `eve/client/script/ui/shared/comtool/onlineStatus.pyj` `OnlineStatus.OnClientContactChange`
+/// calls its own `OnContactLoggedOn`/`OnContactLoggedOff` from the `online` flag.
 pub fn notify_watchlist_logon(ctx: &ServerContext, logged_on_char_id: i64) {
+    notify_watchlist_presence(ctx, logged_on_char_id, true);
+}
+
+/// See [`notify_watchlist_logon`]; `online == false` is sent when the watched character logs out.
+pub fn notify_watchlist_presence(ctx: &ServerContext, logged_on_char_id: i64, online: bool) {
     let watchers: Vec<i64> = ctx
         .esi_state
         .char_contacts
@@ -95,9 +102,9 @@ pub fn notify_watchlist_logon(ctx: &ServerContext, logged_on_char_id: i64) {
     for watcher_id in watchers {
         ctx.notify(
             NotificationTarget::Character(watcher_id),
-            "OnContactLoggedOn",
+            "OnClientContactChange",
             "charid",
-            vec![PyRep::Integer(logged_on_char_id)],
+            vec![PyRep::Integer(logged_on_char_id), PyRep::Bool(online)],
         );
     }
 }
@@ -557,14 +564,6 @@ pub fn handle_contacts(
                     _ => None,
                 })
                 .unwrap_or(false);
-            let notify_target = args
-                .get(3)
-                .and_then(|a| match a {
-                    PyRep::Bool(b) => Some(*b),
-                    PyRep::Integer(i) => Some(*i != 0),
-                    _ => None,
-                })
-                .unwrap_or(false);
             let contact_type = if (99_000_000..100_000_000).contains(&contact_id) {
                 "alliance"
             } else if (1_000_000..2_000_000).contains(&contact_id)
@@ -609,36 +608,24 @@ pub fn handle_contacts(
             };
             drop(guard);
 
-            ctx.notify(
-                NotificationTarget::Character(char_id),
-                "OnContactChange",
-                "charid",
-                vec![
-                    PyRep::List(vec![PyRep::Integer(contact_id)]),
-                    PyRep::String("addresses".into()),
-                ],
-            );
+            // AddressBookSvc.OnPersonalContactsAdded(contacts, relationshipID, watchlist, labelMask):
+            // each contact is read as `contact.contactID` / `contact.isOnline`. (`OnContactChange` is
+            // scattered client-side by that handler, so the server does not send it.)
+            let contact = PyRep::keyval([
+                ("contactID", PyRep::Integer(contact_id)),
+                ("isOnline", PyRep::Bool(is_character_online(ctx, contact_id))),
+            ]);
             ctx.notify(
                 NotificationTarget::Character(char_id),
                 "OnPersonalContactsAdded",
                 "charid",
                 vec![
-                    PyRep::List(vec![PyRep::Integer(contact_id)]),
+                    PyRep::List(vec![contact]),
                     PyRep::Real(standing),
                     PyRep::Bool(in_watchlist),
+                    PyRep::Integer(label_mask),
                 ],
             );
-            if notify_target && !is_blocked_by(ctx, contact_id, char_id) {
-                ctx.notify(
-                    NotificationTarget::Character(contact_id),
-                    "OnContactChange",
-                    "charid",
-                    vec![
-                        PyRep::List(vec![PyRep::Integer(char_id)]),
-                        PyRep::String("notify".into()),
-                    ],
-                );
-            }
 
             Some(Ok(PyRep::keyval([
                 ("contactID", PyRep::Integer(contact_id)),
@@ -702,20 +689,17 @@ pub fn handle_contacts(
                 }
             }
             let id_reps: Vec<PyRep> = contact_ids.iter().map(|&id| PyRep::Integer(id)).collect();
-            ctx.notify(
-                NotificationTarget::Character(char_id),
-                "OnContactChange",
-                "charid",
-                vec![
-                    PyRep::List(id_reps.clone()),
-                    PyRep::String("addresses".into()),
-                ],
-            );
+            // AddressBookSvc.OnPersonalContactsUpdated(contactIDs, standing, inWatchlist): `None` keeps
+            // the client's current value (EditContactsRelationshipID leaves the watchlist untouched).
             ctx.notify(
                 NotificationTarget::Character(char_id),
                 "OnPersonalContactsUpdated",
                 "charid",
-                vec![PyRep::List(id_reps.clone()), PyRep::Real(standing)],
+                vec![
+                    PyRep::List(id_reps.clone()),
+                    PyRep::Real(standing),
+                    watchlist_opt.map(PyRep::Bool).unwrap_or(PyRep::None),
+                ],
             );
             Some(Ok(PyRep::keyval([
                 ("updatedCount", PyRep::Integer(updated_count as i64)),
@@ -748,20 +732,16 @@ pub fn handle_contacts(
                 }
             }
             let id_reps: Vec<PyRep> = contact_ids.iter().map(|&id| PyRep::Integer(id)).collect();
-            ctx.notify(
-                NotificationTarget::Character(char_id),
-                "OnContactChange",
-                "charid",
-                vec![
-                    PyRep::List(id_reps.clone()),
-                    PyRep::String("addresses".into()),
-                ],
-            );
+            // AddressBookSvc.OnPersonalContactsDeleted(contacts): each entry is read as `contact.contactID`.
+            let deleted: Vec<PyRep> = contact_ids
+                .iter()
+                .map(|&id| PyRep::keyval([("contactID", PyRep::Integer(id))]))
+                .collect();
             ctx.notify(
                 NotificationTarget::Character(char_id),
                 "OnPersonalContactsDeleted",
                 "charid",
-                vec![PyRep::List(id_reps.clone())],
+                vec![PyRep::List(deleted)],
             );
             Some(Ok(PyRep::keyval([
                 ("deletedCount", PyRep::Integer(removed as i64)),
@@ -812,12 +792,7 @@ pub fn handle_contacts(
                 }
             }
             let id_reps: Vec<PyRep> = owner_ids.iter().map(|&id| PyRep::Integer(id)).collect();
-            ctx.notify(
-                NotificationTarget::Character(char_id),
-                "OnBlockContacts",
-                "charid",
-                vec![PyRep::List(id_reps.clone())],
-            );
+            // `OnBlockContacts` is scattered by the client itself (AddressBookSvc.BlockOwner).
             Some(Ok(PyRep::keyval([
                 ("blockedCount", PyRep::Integer(blocked_count as i64)),
                 ("blockedIDs", PyRep::List(id_reps)),
@@ -853,19 +828,10 @@ pub fn handle_contacts(
                 }
             }
             let id_reps: Vec<PyRep> = owner_ids.iter().map(|&id| PyRep::Integer(id)).collect();
-            ctx.notify(
-                NotificationTarget::Character(char_id),
-                "OnUnblockContacts",
-                "charid",
-                vec![PyRep::List(id_reps.clone())],
-            );
-            if let Some(&first_id) = owner_ids.first() {
-                ctx.notify(
-                    NotificationTarget::Character(char_id),
-                    "OnUnblockContact",
-                    "charid",
-                    vec![PyRep::Integer(first_id)],
-                );
+            // `OnUnblockContacts` is scattered by the client itself (AddressBookSvc.UnblockOwner);
+            // ContactsForm.OnUnblockContact(contactID) only reloads the contacts tab.
+            for &oid in &owner_ids {
+                ctx.notify(NotificationTarget::Character(char_id), "OnUnblockContact", "charid", vec![PyRep::Integer(oid)]);
             }
             Some(Ok(PyRep::keyval([
                 ("unblockedCount", PyRep::Integer(unblocked_count as i64)),
@@ -1051,13 +1017,6 @@ pub fn handle_contacts(
                     }
                 }
             }
-            let id_reps: Vec<PyRep> = contact_ids.iter().map(|&id| PyRep::Integer(id)).collect();
-            ctx.notify(
-                NotificationTarget::Character(char_id),
-                "OnPersonalContactsUpdated",
-                "charid",
-                vec![PyRep::List(id_reps), PyRep::Integer(label_mask)],
-            );
             Some(Ok(PyRep::keyval([
                 ("updatedCount", PyRep::Integer(updated as i64)),
                 ("labelMask", PyRep::Integer(label_mask)),
@@ -1091,13 +1050,6 @@ pub fn handle_contacts(
                     }
                 }
             }
-            let id_reps: Vec<PyRep> = contact_ids.iter().map(|&id| PyRep::Integer(id)).collect();
-            ctx.notify(
-                NotificationTarget::Character(char_id),
-                "OnPersonalContactsUpdated",
-                "charid",
-                vec![PyRep::List(id_reps), PyRep::Integer(0)],
-            );
             Some(Ok(PyRep::keyval([
                 ("updatedCount", PyRep::Integer(updated as i64)),
                 ("labelMask", PyRep::Integer(label_mask)),

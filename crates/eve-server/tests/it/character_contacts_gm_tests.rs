@@ -356,8 +356,8 @@ async fn test_ch3_ch4_paperdoll_contacts_blocklist_labels_and_watchlist() {
     .expect("Buddy SelectCharacterID");
     let notifs = ctx.drain_notifications_for_char(char_id);
     assert!(
-        notifs.iter().any(|n| n.event == "OnContactLoggedOn"),
-        "Watcher must receive OnContactLoggedOn when watchlisted buddy logs in"
+        notifs.iter().any(|n| n.event == "OnClientContactChange" && n.args == vec![PyRep::Integer(buddy_id), PyRep::Bool(true)]),
+        "Watcher must receive OnClientContactChange(buddy, True) when watchlisted buddy logs in"
     );
 
     // BlockOwners prevents mail and private conversation from blocked character (feat:social.contacts-block)

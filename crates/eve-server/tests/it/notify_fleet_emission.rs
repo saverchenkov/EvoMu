@@ -277,3 +277,30 @@ async fn test_fleet_motd_options_requests_broadcast_notifications() {
     assert_eq!(q.len(), 1);
     assert_eq!((q[0][0].clone(), q[0][5].clone(), q[0][10].clone()), (PyRep::Integer(P2), PyRep::Integer(0), PyRep::Integer(2)));
 }
+
+#[tokio::test]
+async fn test_fleet_accept_retry_broadcast_location_guards() {
+    // Regression for review 20261021-161834 P2 notes 1 and 3 (no ledger rows claimed here).
+    let ctx = ServerContext::new();
+    let (mut s1, mut s2, _s3, _p3) = three_pilots(&ctx).await;
+    const FH: &str = "fleetObjectHandler";
+    call(&ctx, &mut s1, "fleetMgr", "CreateFleet", &[]).await;
+    let wid = int(&call(&ctx, &mut s1, FH, "CreateWing", &[PyRep::String("W".into())]).await, "wingID");
+    let sid = int(&call(&ctx, &mut s1, FH, "CreateSquad", &[PyRep::Integer(wid), PyRep::String("S".into())]).await, "squadID");
+
+    // 1. A failed AcceptInvite (FleetFull) keeps the inviter's wing/squad/role choice for the retry.
+    call(&ctx, &mut s1, FH, "Invite", &[PyRep::Integer(P2), PyRep::Integer(wid), PyRep::Integer(sid), PyRep::Integer(3)]).await;
+    call(&ctx, &mut s1, FH, "SetFleetMaxSize", &[PyRep::Integer(1)]).await;
+    let full = ctx.dispatch_rpc(&mut s2, FH, None, "AcceptInvite", &[], &HashMap::new(), None).await;
+    assert_eq!(full.expect_err("fleet is full").code, "FleetFull");
+    call(&ctx, &mut s1, FH, "SetFleetMaxSize", &[PyRep::Integer(10)]).await;
+    ctx.drain_notifications_for_char(P1);
+    call(&ctx, &mut s2, FH, "AcceptInvite", &[]).await;
+    assert_eq!(events(&ctx, P1, "OnFleetJoin"), vec![vec![member(P2, wid, sid, 3, 0)]]);
+
+    // 2. BroadcastToBubble from a sender without a ball (docked) reaches only the sender, not the system.
+    ctx.drain_notifications_for_char(P1);
+    call(&ctx, &mut s1, FH, "BroadcastToBubble", &[PyRep::String("HealArmor".into()), PyRep::Integer(3), PyRep::None, PyRep::None]).await;
+    assert_eq!(events(&ctx, P1, "OnFleetBroadcast").len(), 1);
+    assert!(events(&ctx, P2, "OnFleetBroadcast").is_empty(), "bubble broadcast must not leak system-wide");
+}

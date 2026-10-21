@@ -218,6 +218,10 @@ pub async fn handle(
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     if (service, method) == ("authentication", "Logout") {
         let (removed_from_space, saved_sys) = save_location_and_leave_space(ctx, session).await;
+        if let Some(cid) = session.character_id {
+            // Watchers of this character get OnClientContactChange(charID, False).
+            crate::services::character_skills::notify_watchlist_presence(ctx, cid, false);
+        }
         if let Some(uid) = session.user_id {
             on_logout(ctx, uid);
             ctx.db.release_online_lock(uid, session.session_id);

@@ -754,10 +754,11 @@ pub(super) async fn handle_fleets(
             let fleet_id = invited_fleet(ctx, char_id, args.first().and_then(|a| a.as_i64()));
 
             let (max_size, auto_squad, invite_detail) = {
-                let mut ex = ctx.fleet_extras.lock().unwrap();
+                let ex = ctx.fleet_extras.lock().unwrap();
                 let ms = ex.max_sizes.get(&fleet_id).copied().unwrap_or(256);
                 let asq = ex.auto_join_squads.get(&fleet_id).copied().flatten();
-                let inv = ex.invite_details.remove(&(fleet_id, char_id));
+                // Read only: the inviter's wing/squad/role choice survives a failed accept.
+                let inv = ex.invite_details.get(&(fleet_id, char_id)).copied();
                 (ms, asq, inv)
             };
 
@@ -824,6 +825,7 @@ pub(super) async fn handle_fleets(
 
             match res {
                 Ok((wid, sid, role, motd)) => {
+                    ctx.fleet_extras.lock().unwrap().invite_details.remove(&(fleet_id, char_id));
                     session.fleet_id = Some(fleet_id);
                     notify::emit_join(ctx, fleet_id, char_id);
                     if !motd.is_empty() {
