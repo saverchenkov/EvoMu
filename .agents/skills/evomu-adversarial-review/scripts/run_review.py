@@ -2,7 +2,7 @@
 """EvoMu independent adversarial review orchestrator.
 
 Collects evidence (git diff, honest test run, metrics, toolchain audit), then launches a
-headless Jetski/Antigravity CLI reviewer (`agy -p ... --model opus-5.5-high --effort high`)
+headless Jetski/Antigravity CLI reviewer (`agy -p ... --model opus-5.5-medium --effort medium`)
 with a structured-output schema, validates that the reviewer did not touch the workspace,
 and records the verdict in <repo>/.evomu-reviews/ (gitignored).
 
@@ -41,9 +41,9 @@ UNAVAILABLE_EXIT = 4  # every reviewer model was out of quota/capacity: NOTHING 
 QUOTA_RE = re.compile(r"RESOURCE_EXHAUSTED|[Qq]uota|rate.?limit|\b429\b|No capacity|UNAVAILABLE \(code 503\)|"
                       r"\b503\b|overloaded|insufficient (?:credits|balance)|usage limit", re.I)
 FALLBACK_MODELS = [m.strip() for m in os.environ.get(
-    "EVOMU_REVIEW_FALLBACK_MODELS", "auto,gemini-launch-candidate-high,gemini-flash-next,fable-5.1-high,opus-5.5-high").split(",") if m.strip()]
+    "EVOMU_REVIEW_FALLBACK_MODELS", "gemini-launch-candidate-high,gemini-flash-next").split(",") if m.strip()]
 # Models whose agy selection has no effort levels (passing --effort makes agy refuse to start).
-NO_EFFORT_MODELS = {m.strip() for m in os.environ.get("EVOMU_REVIEW_NO_EFFORT_MODELS", "auto,gemini-flash-next").split(",") if m.strip()}
+NO_EFFORT_MODELS = {m.strip() for m in os.environ.get("EVOMU_REVIEW_NO_EFFORT_MODELS", "auto,gemini-flash-next,gemini-pro-coordinator").split(",") if m.strip()}
 MODEL_UNUSABLE_RE = re.compile(r"invalid model selection|not recognized as a known model|is not supported for model", re.I)
 CONTINUE_PROMPT = (
     "Continue the EvoMu review exactly where you left off. Do not restart and do not summarize progress. "
@@ -240,6 +240,9 @@ def launch_reviewer(first_cmd, root, sdir, run_dir, tree_before, ts, valid_verdi
         if model in NO_EFFORT_MODELS and "--effort" in cmd:
             j = cmd.index("--effort")
             del cmd[j:j + 2]  # agy rejects --effort for these models ("--effort is not supported for model ...")
+        elif "--effort" in cmd and re.search(r"-(low|medium|high|max)$", model):
+            # Effort is baked into the model id (e.g. opus-5.5-medium); agy rejects a conflicting --effort.
+            cmd[cmd.index("--effort") + 1] = re.search(r"-(low|medium|high|max)$", model).group(1)
         pfx = prefix if n == 0 else "%sfb%d_" % (prefix, n)
         verdict, so, conv, quota = _launch_one(cmd, root, sdir, run_dir, tree_before, ts, valid_verdicts, pfx,
                                                lock_name, check_tree)
@@ -448,7 +451,7 @@ def main():
     ap.add_argument("--base", help="Base ref for the diff (default: last reviewed HEAD, else root commit)")
     ap.add_argument("--mode", choices=["claims", "gap-audit"], default="claims",
                     help="claims = precision review of the change; gap-audit = recall audit of the parity ledger")
-    ap.add_argument("--model", default=os.environ.get("EVOMU_REVIEW_MODEL", "opus-5.5-high"))
+    ap.add_argument("--model", default=os.environ.get("EVOMU_REVIEW_MODEL", "opus-5.5-medium"))
     ap.add_argument("--effort", default=os.environ.get("EVOMU_REVIEW_EFFORT", "high"))
     ap.add_argument("--reviewer-timeout", default=os.environ.get("EVOMU_REVIEW_TIMEOUT", "0s"),
                     help="agy --print-timeout (0s = wait for completion)")
@@ -533,7 +536,7 @@ def main():
     if a.launcher == "jetski-chat":
         cmd = ["jetski", "chat", "-m", "agent", "-a", BRIEF, "-a", OPEN_FINDINGS,
                "Act as the reviewer described in the attached brief. Context directory: %s. "
-               "Select the model 'Claude Opus 5.5 (High)' before running. Do not modify files." % ctx]
+               "Select the model 'Claude Opus 5.5 (Medium)' before running. Do not modify files." % ctx]
         print("[review] jetski chat cannot pin a model or return structured output; launching interactive session:")
         print("  " + " ".join(cmd))
         if not a.dry_run:
