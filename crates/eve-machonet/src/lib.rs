@@ -523,6 +523,12 @@ impl VersionExchange {
     }
 }
 
+fn parse_bound_oid_str(rep: &PyRep) -> Option<u64> {
+    let s = rep.as_str()?;
+    let (_prefix, id_str) = s.rsplit_once(':')?;
+    id_str.parse::<u64>().ok().filter(|&id| id > 0)
+}
+
 /// Extracts `(bound_id, method, args, kwargs)` from a `macho.CallReq` packet payload (`PyRep`).
 pub fn extract_macho_call_req(
     payload: &PyRep,
@@ -539,21 +545,36 @@ pub fn extract_macho_call_req(
     let Some(first) = outer.first() else {
         return (bound_id, method, args, kwargs);
     };
-    let inner_call = match first {
-        PyRep::Tuple(t) if t.len() >= 2 => {
-            bound_id = t[0].as_i64().filter(|&v| v > 0).map(|v| v as u64);
-            match &t[1] {
-                PyRep::SubStream(s) => s.as_ref(),
-                other => other,
+    let mut inner_call = match first {
+        PyRep::Tuple(t) if t.len() >= 2 => match &t[1] {
+            PyRep::SubStream(s) => {
+                // In V24 `ObjectCall`, `t[0]` is `0` (ServiceCall) or `1` (ObjectCall); only treat
+                // `t[0] > 1` as an explicit numeric bound_id for synthetic test frames.
+                bound_id = t[0].as_i64().filter(|&v| v > 1).map(|v| v as u64);
+                s.as_ref()
             }
-        }
+            other => {
+                bound_id = t[0].as_i64().filter(|&v| v > 0).map(|v| v as u64);
+                other
+            }
+        },
         PyRep::SubStream(s) => s.as_ref(),
         other => other,
     };
+    if let PyRep::Tuple(t) = inner_call {
+        if t.len() == 2 {
+            if let PyRep::SubStream(s) = &t[1] {
+                inner_call = s.as_ref();
+            }
+        }
+    }
 
     if let PyRep::Tuple(call_items) = inner_call {
         // Support both 4-tuple `(remoteObject, method, args, kwargs)` and 3-tuple `(method, args, kwargs)`
-        let offset = if call_items.first().and_then(|v| v.as_str()).is_some() {
+        let offset = if let Some(oid) = call_items.first().and_then(parse_bound_oid_str) {
+            bound_id = Some(oid);
+            1
+        } else if call_items.first().and_then(|v| v.as_str()).is_some() {
             0
         } else {
             1

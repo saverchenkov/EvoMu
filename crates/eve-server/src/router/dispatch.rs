@@ -275,9 +275,19 @@ impl ServerContext {
             }
         }
 
+        // Handle universal `MachoResolveObject` moniker node lookup (`carbon/common/script/net/moniker.pyj`)
+        if method == "MachoResolveObject" {
+            let _ = Self::require_auth(session)?;
+            return Ok(PyRep::Integer(eve_machonet::MACHO_PROXY_NODE_ID as i64));
+        }
+
         // Handle universal `MachoBindObject` + optional piggybacked RPC call
         if method == "MachoBindObject" {
-            let _ = Self::require_character(session)?;
+            if effective_service != "populationCap" {
+                let _ = Self::require_character(session)?;
+            } else {
+                let _ = Self::require_auth(session)?;
+            }
             let obj_id = match args.first() {
                 Some(PyRep::Integer(id)) => *id,
                 Some(PyRep::String(s)) | Some(PyRep::Token(s)) if !s.is_empty() => s
@@ -368,7 +378,20 @@ impl ServerContext {
                 _ => PyRep::None,
             };
 
-            return Ok(PyRep::Tuple(vec![PyRep::Integer(bid as i64), call_result]));
+            let oid_rep = if caller_trace == Some("machoNet:26000") {
+                // `ObjectCall.GetObjectID` (`carbon/common/script/net/ObjectCallGPCS.pyj`) marshals
+                // bound objects as `SubStruct(SubStream((f"N={nodeID}:{boundID}", refID)))`, which
+                // `ParseObjectID` unmarshals into a `MachoObjectConnection`.
+                let oid_str = format!("N={}:{bid}", eve_machonet::MACHO_PROXY_NODE_ID);
+                let ref_id = (now_unix as i64 + 11_644_473_600).saturating_mul(10_000_000);
+                PyRep::SubStruct(Box::new(PyRep::SubStream(Box::new(PyRep::Tuple(vec![
+                    PyRep::ascii_bytes(oid_str),
+                    PyRep::Integer(ref_id),
+                ])))))
+            } else {
+                PyRep::Integer(bid as i64)
+            };
+            return Ok(PyRep::Tuple(vec![oid_rep, call_result]));
         }
 
         // Dispatch across the 12 domain modules in order

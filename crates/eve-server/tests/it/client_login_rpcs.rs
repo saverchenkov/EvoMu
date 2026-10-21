@@ -73,6 +73,48 @@ async fn login_path_rpcs_answer_before_character_selection() {
     assert_eq!(d, PyRep::None);
     assert_eq!(eve_server::services::client_login::delivered_bean_count(error_id), before + 3);
 
+    // Saturating addition prevents i64 overflow on repeated large counts, and registry sizes are
+    // strictly capped at ALERT_REGISTRY_CAP (1024) (T6H-P1-1).
+    let sat_id = 0x7000_0000_i64;
+    for delta in [i64::MAX - 2, 10] {
+        let sat_beans = PyRep::Dict(vec![(
+            PyRep::Integer(sat_id),
+            PyRep::Tuple(vec![PyRep::Integer(delta), PyRep::Integer(0)]),
+        )]);
+        ctx.dispatch_rpc(&mut sess, "alert", None, "BeanDelivery", &[sat_beans], &kw, None)
+            .await
+            .unwrap();
+    }
+    assert_eq!(eve_server::services::client_login::delivered_bean_count(sat_id), i64::MAX);
+
+    let cap = eve_server::services::client_login::ALERT_REGISTRY_CAP;
+    for i in 0..(cap + 32) {
+        let h = 0x7000_0000_i64 + i as i64;
+        let cap_stack = PyRep::Tuple(vec![PyRep::Integer(h), PyRep::ascii_bytes("cap")]);
+        ctx.dispatch_rpc(
+            &mut sess,
+            "alert",
+            None,
+            "SendClientStackTraceAlert",
+            &[cap_stack, PyRep::ascii_bytes("trace"), PyRep::ascii_bytes("Error"), PyRep::None],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap();
+        let cap_beans = PyRep::Dict(vec![(
+            PyRep::Integer(h),
+            PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(0)]),
+        )]);
+        ctx.dispatch_rpc(&mut sess, "alert", None, "BeanDelivery", &[cap_beans], &kw, None)
+            .await
+            .unwrap();
+    }
+    let (trace_len, bean_len) = eve_server::services::client_login::alert_registry_sizes();
+    assert_eq!(trace_len, cap);
+    assert_eq!(bean_len, cap);
+    assert_eq!(eve_server::services::client_login::delivered_bean_count(sat_id), i64::MAX);
+
     let planets = ctx.dispatch_rpc(&mut sess, "config", None, "GetBlackListedPlanets", &[], &kw, None).await.unwrap();
     assert_eq!(planets, PyRep::List(Vec::new()));
     let old = ctx.dispatch_rpc(&mut sess, "config", None, "GetOldStationData", &[], &kw, None).await.unwrap();
@@ -130,4 +172,220 @@ fn keyval_and_rowsets_use_v24_module_paths() {
     let denc = marshal::encode(&d);
     let ss = b"eve.common.script.sys.eveCfg.StackSize";
     assert!(denc.windows(ss.len()).any(|w| w == ss));
+}
+
+#[tokio::test]
+async fn alert_rpcs_enforce_auth_bounds_and_saturating_counts() {
+    let ctx = ServerContext::new();
+    let kw = HashMap::new();
+
+    // Unauthenticated callers must be rejected on all three alert endpoints (T6H-P1-1).
+    let mut unauth = SessionState::new(9_103);
+    for (m, args) in [
+        ("BeanCount", vec![PyRep::Integer(42)]),
+        (
+            "SendClientStackTraceAlert",
+            vec![
+                PyRep::Tuple(vec![PyRep::Integer(42), PyRep::ascii_bytes("k")]),
+                PyRep::ascii_bytes("trace"),
+                PyRep::ascii_bytes("Error"),
+                PyRep::None,
+            ],
+        ),
+        ("BeanDelivery", vec![PyRep::Dict(Vec::new())]),
+    ] {
+        let err = ctx
+            .dispatch_rpc(&mut unauth, "alert", None, m, &args, &kw, None)
+            .await
+            .expect_err("unauthenticated alert call must fail");
+        assert_eq!(err.code, "Unauthorized", "alert.{m} must require auth");
+    }
+
+    let mut sess = SessionState::new(9_104);
+    login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
+
+    // Negative counts in BeanDelivery must be rejected with InvalidArguments.
+    let neg_beans = PyRep::Dict(vec![(
+        PyRep::Integer(777_001),
+        PyRep::Tuple(vec![PyRep::Integer(-5), PyRep::Integer(0)]),
+    )]);
+    let err = ctx
+        .dispatch_rpc(&mut sess, "alert", None, "BeanDelivery", &[neg_beans], &kw, None)
+        .await
+        .expect_err("negative bean count must fail");
+    assert_eq!(err.code, "InvalidArguments");
+    assert_eq!(eve_server::services::client_login::delivered_bean_count(777_001), 0);
+}
+
+#[tokio::test]
+async fn character_selection_screen_and_entry_rpcs_work_end_to_end() {
+    let ctx = ServerContext::new();
+    let mut sess = SessionState::new(9_105);
+    login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
+    let user_id = sess.user_id.expect("logged in");
+    let chars = ctx.db.get_characters_for_user(user_id);
+    let char_id = chars[0].character_id;
+    let solar_system_id = chars[0].solar_system_id;
+    let kw = HashMap::new();
+
+    // 1. config.GetAverageMarketPrices derives {typeID: KeyVal(typeID, averagePrice, adjustedPrice)}
+    let prices = ctx
+        .dispatch_rpc(&mut sess, "config", None, "GetAverageMarketPrices", &[], &kw, None)
+        .await
+        .unwrap();
+    let PyRep::Dict(price_entries) = &prices else {
+        panic!("GetAverageMarketPrices must return a Dict")
+    };
+    assert!(!price_entries.is_empty(), "seeded market orders populate average prices");
+    let (first_tid, first_kv) = &price_entries[0];
+    let tid = first_tid.as_i64().expect("integer typeID key");
+    assert_eq!(kv_get(first_kv, "typeID"), Some(&PyRep::Integer(tid)));
+    let avg = kv_get(first_kv, "averagePrice").and_then(|v| v.as_f64()).expect("averagePrice");
+    let adj = kv_get(first_kv, "adjustedPrice").and_then(|v| v.as_f64()).expect("adjustedPrice");
+    assert!(avg > 0.0 && adj > 0.0);
+
+    // 2. Character-selection screen RPCs before SelectCharacterID
+    let camp = ctx
+        .dispatch_rpc(&mut sess, "loginCampaignManager", None, "get_client_campaign_state", &[], &kw, None)
+        .await
+        .unwrap();
+    assert_eq!(camp, PyRep::None);
+
+    let seasonal = ctx
+        .dispatch_rpc(&mut sess, "seasonalLoginCampaignManager", None, "get_active_campaign", &[], &kw, None)
+        .await
+        .unwrap();
+    assert_eq!(seasonal, PyRep::Tuple(vec![PyRep::None, PyRep::None, PyRep::None, PyRep::None]));
+
+    let cohorts = ctx
+        .dispatch_rpc(&mut sess, "charUnboundMgr", None, "GetCohortsForUser", &[], &kw, None)
+        .await
+        .unwrap();
+    assert_eq!(cohorts, PyRep::List(Vec::new()));
+
+    let tokens = ctx
+        .dispatch_rpc(&mut sess, "userSvc", None, "GetRedeemTokens", &[], &kw, None)
+        .await
+        .unwrap();
+    assert_eq!(tokens, PyRep::List(Vec::new()));
+
+    let downgrade = ctx
+        .dispatch_rpc(&mut sess, "charUnboundMgr", None, "GetCharOmegaDowngradeStatus", &[], &kw, None)
+        .await
+        .unwrap();
+    assert_eq!(downgrade, PyRep::Bool(false));
+
+    let mod_sys = ctx
+        .dispatch_rpc(&mut sess, "map", None, "GetSecurityModifiedSystems", &[], &kw, None)
+        .await
+        .unwrap();
+    let expected_mod_sys = eve_proto::DBRowDescriptor::new([
+        ("solarSystemID", eve_proto::DbColumnType::I4),
+        ("security", eve_proto::DbColumnType::R8),
+        ("modifiedSecurity", eve_proto::DbColumnType::R8),
+    ])
+    .build_crowset(Vec::new());
+    assert_eq!(mod_sys, expected_mod_sys);
+
+    // 3. Character entry: populationCap moniker resolve + bind + GetCharacterLoadSlot & GetCharacterLockType
+    let node_id = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "populationCap",
+            None,
+            "MachoResolveObject",
+            &[PyRep::Tuple(vec![PyRep::Integer(char_id), PyRep::Integer(1373)])],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(node_id, PyRep::Integer(eve_machonet::MACHO_PROXY_NODE_ID as i64));
+
+    let bind_rsp = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "populationCap",
+            None,
+            "MachoBindObject",
+            &[
+                PyRep::Tuple(vec![PyRep::Integer(char_id), PyRep::Integer(1373)]),
+                PyRep::Tuple(vec![
+                    PyRep::String("GetCharacterLoadSlot".into()),
+                    PyRep::Tuple(vec![PyRep::Integer(char_id)]),
+                    PyRep::Dict(Vec::new()),
+                ]),
+            ],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .unwrap();
+    let PyRep::Tuple(bind_parts) = &bind_rsp else { panic!("MachoBindObject 2-tuple") };
+    assert!(
+        matches!(bind_parts[0], PyRep::SubStruct(_)),
+        "native machoNet MachoBindObject must return a SubStruct OID"
+    );
+    assert_eq!(
+        bind_parts[1],
+        PyRep::Dict(vec![(PyRep::Integer(i64::from(solar_system_id)), PyRep::None)])
+    );
+
+    // Unowned character ID is rejected on both populationCap and GetCharacterLockType.
+    let unowned_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "charUnboundMgr",
+            None,
+            "GetCharacterLockType",
+            &[PyRep::Integer(char_id + 999_999)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("unowned character must be rejected");
+    assert_eq!(unowned_err.code, "CharacterOwnershipError");
+
+    let lock_type = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "charUnboundMgr",
+            None,
+            "GetCharacterLockType",
+            &[PyRep::Integer(char_id)],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(lock_type, PyRep::None);
+}
+
+#[tokio::test]
+async fn provision_starter_characters_creates_character_for_configured_account() {
+    let ctx = ServerContext::new();
+    ctx.db.provision_player_account("starter_acct", "starter_pw");
+    let mut cfg = eve_server::config::ServerConfig::default();
+    cfg.player_accounts = vec![eve_server::config::PlayerAccountConfig {
+        username: "starter_acct".into(),
+        password_token: "starter_pw".into(),
+        starter_character: Some(eve_server::config::StarterCharacterConfig {
+            name: "Starter Pilot".into(),
+            bloodline_id: 1,
+            gender: 0,
+            ancestry_id: 11,
+            school_id: 17,
+        }),
+    }];
+    let created = eve_server::starter_characters::provision_starter_characters(&ctx, &cfg).await;
+    assert_eq!(created.len(), 1);
+    let acct = ctx.db.authenticate("starter_acct", "starter_pw").unwrap();
+    let chars = ctx.db.get_characters_for_user(acct.user_id);
+    assert_eq!(chars.len(), 1);
+    assert_eq!(chars[0].character_id, created[0]);
+    assert_eq!(chars[0].name, "Starter Pilot");
+
+    // Second invocation is a no-op because the account now owns a character.
+    let again = eve_server::starter_characters::provision_starter_characters(&ctx, &cfg).await;
+    assert!(again.is_empty());
 }

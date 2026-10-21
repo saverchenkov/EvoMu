@@ -13,6 +13,7 @@ pub mod macho_listener;
 pub mod router;
 pub mod services;
 pub mod sso;
+pub mod starter_characters;
 pub mod system_actor;
 pub mod world_seeder;
 

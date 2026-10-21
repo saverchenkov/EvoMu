@@ -210,7 +210,10 @@ impl PyRep {
         {
             if let Self::Tuple(items) = header.as_ref() {
                 if let Some(Self::Tuple(args)) = items.first() {
-                    return args.first().and_then(Self::as_str) == Some("dbutil.CRowset");
+                    return matches!(
+                        args.first().and_then(Self::as_str),
+                        Some("dbutil.CRowset" | "carbon.common.script.sys.crowset.CRowset")
+                    );
                 }
             }
         }
@@ -226,7 +229,10 @@ impl PyRep {
         {
             if let Self::Tuple(items) = header.as_ref() {
                 if let Some(Self::Tuple(args)) = items.first() {
-                    return args.first().and_then(Self::as_str) == Some("dbutil.CIndexedRowset");
+                    return matches!(
+                        args.first().and_then(Self::as_str),
+                        Some("dbutil.CIndexedRowset" | "carbon.common.script.sys.crowset.CIndexedRowset")
+                    );
                 }
             }
         }
@@ -441,11 +447,11 @@ pub const MARSHAL_STRING_TABLE: &[&str] = &[
     "macho.SessionChangeNotification",
     "modules",
     "name",
-    "objectCaching",
+    "objectCaching", // rpc-lint: allow canonical eveMarshal 195-entry wire STRING_TABLE
     "objectCaching.CachedObject",
-    "OnChatJoin",
-    "OnChatLeave",
-    "OnChatSpeak",
+    "OnChatJoin", // rpc-lint: allow canonical eveMarshal 195-entry wire STRING_TABLE
+    "OnChatLeave", // rpc-lint: allow canonical eveMarshal 195-entry wire STRING_TABLE
+    "OnChatSpeak", // rpc-lint: allow canonical eveMarshal 195-entry wire STRING_TABLE
     "OnGodmaShipEffect",
     "OnItemChange",
     "OnModuleAttributeChange",
@@ -479,20 +485,20 @@ pub const MARSHAL_STRING_TABLE: &[&str] = &[
     "GetLocationsEx",
     "InvalidateCachedObjects",
     "JoinChannel",
-    "LSC",
+    "LSC", // rpc-lint: allow canonical eveMarshal 195-entry wire STRING_TABLE
     "LaunchMissile",
     "LeaveChannel",
     "OID+",
     "OID-",
-    "OnAggressionChange",
-    "OnCharGangChange",
+    "OnAggressionChange", // rpc-lint: allow canonical eveMarshal 195-entry wire STRING_TABLE
+    "OnCharGangChange", // rpc-lint: allow canonical eveMarshal 195-entry wire STRING_TABLE
     "OnCharNoLongerInStation",
     "OnCharNowInStation",
     "OnDamageMessage",
     "OnDamageStateChange",
-    "OnEffectHit",
-    "OnGangDamageStateChange",
-    "OnLSC",
+    "OnEffectHit", // rpc-lint: allow canonical eveMarshal 195-entry wire STRING_TABLE
+    "OnGangDamageStateChange", // rpc-lint: allow canonical eveMarshal 195-entry wire STRING_TABLE
+    "OnLSC", // rpc-lint: allow canonical eveMarshal 195-entry wire STRING_TABLE
     "OnSpecialFX",
     "OnTarget",
     "RemoveBalls",

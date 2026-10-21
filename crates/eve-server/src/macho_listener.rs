@@ -345,14 +345,34 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                             .await;
 
                         let rsp_pkt = match rpc_res {
-                            Ok(val) => MachoPacket {
-                                packet_type: MachoPacketType::CallRsp,
-                                source: pkt.destination.clone(),
-                                destination: pkt.source.clone(),
-                                user_id: session.user_id,
-                                payload: PyRep::Tuple(vec![PyRep::SubStream(Box::new(val))]),
-                                named_payload: HashMap::new(),
-                            },
+                            Ok(val) => {
+                                let mut named_payload = HashMap::new();
+                                if let PyRep::Tuple(items) = &val {
+                                    if let Some(PyRep::SubStruct(inner)) = items.first() {
+                                        if let PyRep::SubStream(sub) = inner.as_ref() {
+                                            if let PyRep::Tuple(oid_pair) = sub.as_ref() {
+                                                if oid_pair.len() == 2 {
+                                                    named_payload.insert(
+                                                        "OID+".into(),
+                                                        PyRep::Dict(vec![(
+                                                            oid_pair[0].clone(),
+                                                            oid_pair[1].clone(),
+                                                        )]),
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                MachoPacket {
+                                    packet_type: MachoPacketType::CallRsp,
+                                    source: pkt.destination.clone(),
+                                    destination: pkt.source.clone(),
+                                    user_id: session.user_id,
+                                    payload: PyRep::Tuple(vec![PyRep::SubStream(Box::new(val))]),
+                                    named_payload,
+                                }
+                            }
                             Err(err) => MachoPacket {
                                 packet_type: MachoPacketType::ErrorResponse,
                                 source: pkt.destination.clone(),
@@ -440,55 +460,4 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
     Ok(())
 }
 
-/// Extracts `(bound_id, method_name, positional_args, keyword_args)` from a `MachoPacket` `CallReq` payload.
-pub fn extract_macho_call_req(
-    payload: &PyRep,
-) -> (Option<u64>, String, Vec<PyRep>, HashMap<String, PyRep>) {
-    let mut bound_id = None;
-    let mut method = String::new();
-    let mut args = Vec::new();
-    let mut kwargs = HashMap::new();
-
-    let outer = match payload {
-        PyRep::Tuple(items) => items.as_slice(),
-        _ => return (bound_id, method, args, kwargs),
-    };
-    let Some(first) = outer.first() else {
-        return (bound_id, method, args, kwargs);
-    };
-    let inner_call = match first {
-        PyRep::Tuple(t) if t.len() >= 2 => {
-            bound_id = t[0].as_i64().filter(|&v| v > 0).map(|v| v as u64);
-            match &t[1] {
-                PyRep::SubStream(s) => s.as_ref(),
-                other => other,
-            }
-        }
-        PyRep::SubStream(s) => s.as_ref(),
-        other => other,
-    };
-
-    if let PyRep::Tuple(call_items) = inner_call {
-        // Support both 4-tuple `(remoteObject, method, args, kwargs)` and 3-tuple `(method, args, kwargs)`
-        let offset = if call_items.first().and_then(|v| v.as_str()).is_some() {
-            0
-        } else {
-            1
-        };
-        if let Some(m) = call_items.get(offset).and_then(|v| v.as_str()) {
-            method = m.to_owned();
-        }
-        if let Some(PyRep::Tuple(a) | PyRep::List(a)) = call_items.get(offset + 1) {
-            args = a.clone();
-        }
-        if let Some(PyRep::Dict(entries)) = call_items.get(offset + 2) {
-            for (k, v) in entries {
-                if let Some(ks) = k.as_str() {
-                    kwargs.insert(ks.to_owned(), v.clone());
-                }
-            }
-        }
-    }
-
-    (bound_id, method, args, kwargs)
-}
+pub use eve_machonet::extract_macho_call_req;

@@ -5,6 +5,9 @@ use eve_machonet::SessionState;
 use eve_proto::BridgeRpcError;
 use std::sync::atomic::Ordering;
 
+const ERR_BIND_AUTH_DENIED: &str = "BindAuthorizationDenied";
+const ERR_BOUND_OWNERSHIP: &str = "BoundObjectOwnershipViolation";
+
 impl ServerContext {
     /// Registers a disconnect notification channel for an active TCP client session (`session_id`).
     pub fn register_session_closer(
@@ -67,12 +70,37 @@ impl ServerContext {
         object_id: i64,
     ) -> Result<u64, BridgeRpcError> {
         let user_id = Self::require_auth(session)?;
-        let char_id = session.character_id.ok_or_else(|| BridgeRpcError {
-            code: "CharacterNotSelected".into(),
-            message: "Cannot bind object before selecting a character".into(),
-        })?;
+        let char_id = match session.character_id {
+            Some(cid) => cid,
+            None if service == "populationCap" => {
+                // `populationCap` is bound on the character-selection screen (`TryEnterGame`)
+                // before `SelectCharacterID` sets `session.character_id`; the bound character ID
+                // must belong to the authenticated account.
+                let owned = self
+                    .db
+                    .get_characters_for_user(user_id)
+                    .iter()
+                    .any(|c| c.character_id == object_id);
+                if !owned {
+                    return Err(BridgeRpcError {
+                        code: ERR_BIND_AUTH_DENIED.into(),
+                        message: format!(
+                            "Service '{service}' cannot be bound to character {object_id} not owned by user {user_id}"
+                        ),
+                    });
+                }
+                object_id
+            }
+            None => {
+                return Err(BridgeRpcError {
+                    code: "CharacterNotSelected".into(),
+                    message: "Cannot bind object before selecting a character".into(),
+                });
+            }
+        };
 
         let authorized = match service {
+            "populationCap" => object_id == char_id,
             "beyonce" | "scanMgr" => session.solar_system_id.map(|s| s as i64) == Some(object_id),
             "dogmaIM" | "ship" => {
                 session.ship_id == Some(object_id)
@@ -93,6 +121,12 @@ impl ServerContext {
             "skillMgr2" | "charMgr" | "jumpCloneSvc" => {
                 Some(object_id) == session.character_id || object_id == 0
             }
+            "crimewatch" => {
+                Some(object_id) == session.character_id
+                    || session.solar_system_id.map(|s| s as i64) == Some(object_id)
+                    || session.station_id == Some(object_id)
+                    || object_id == 0
+            }
             "agentMgr" | "keeper" | "planetMgr" | "posMgr" | "fleetObjectHandler"
             | "corpRegistry" | "allianceRegistry" | "warRegistry" | "warStatisticMgr"
             | "trademgr" | "voucher" => object_id > 0,
@@ -101,7 +135,7 @@ impl ServerContext {
 
         if !authorized {
             return Err(BridgeRpcError {
-                code: "BindAuthorizationDenied".into(),
+                code: ERR_BIND_AUTH_DENIED.into(),
                 message: format!(
                     "Service '{service}' cannot be bound to object_id {object_id} for current session state"
                 ),
@@ -143,12 +177,14 @@ impl ServerContext {
                 message: format!("Bound object {bound_id} does not exist"),
             })?;
 
+        let char_matches = Some(entry.character_id) == session.character_id
+            || (entry.service == "populationCap" && session.character_id.is_none());
         if entry.session_id != session.session_id
             || Some(entry.user_id) != session.user_id
-            || Some(entry.character_id) != session.character_id
+            || !char_matches
         {
             return Err(BridgeRpcError {
-                code: "BoundObjectOwnershipViolation".into(),
+                code: ERR_BOUND_OWNERSHIP.into(),
                 message: format!("Bound object {bound_id} is not owned by this session"),
             });
         }

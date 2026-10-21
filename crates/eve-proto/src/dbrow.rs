@@ -395,14 +395,14 @@ impl DBRowDescriptor {
         }
     }
 
-    /// Builds a `dbutil.CRowset` (`PyObjectEx2`) with `((Token("dbutil.CRowset"),), {"header": desc})` header.
+    /// Builds a `dbutil.CRowset` (`PyObjectEx2`) with `((Token("carbon.common.script.sys.crowset.CRowset"),), {"header": desc})` header.
     pub fn build_crowset(&self, rows: Vec<Vec<PyRep>>) -> PyRep {
         let header_rep = self.to_pyrep();
         let packed_rows = rows.into_iter().map(|r| self.build_dbrow(r)).collect();
         PyRep::ObjectEx {
             is_type_2: true,
             header: Box::new(PyRep::Tuple(vec![
-                PyRep::Tuple(vec![PyRep::Token("dbutil.CRowset".into())]),
+                PyRep::Tuple(vec![PyRep::Token("carbon.common.script.sys.crowset.CRowset".into())]),
                 PyRep::Dict(vec![(PyRep::String("header".into()), header_rep)]),
             ])),
             list: packed_rows,
@@ -410,7 +410,7 @@ impl DBRowDescriptor {
         }
     }
 
-    /// Builds a `dbutil.CIndexedRowset` (`PyObjectEx2`) with `((Token("dbutil.CIndexedRowset"),), {"header": desc, "columnName": key})` header.
+    /// Builds a `dbutil.CIndexedRowset` (`PyObjectEx2`) with `((Token("carbon.common.script.sys.crowset.CIndexedRowset"),), {"header": desc, "columnName": key})` header.
     pub fn build_cindexed_rowset(&self, key_column: &str, rows: Vec<Vec<PyRep>>) -> PyRep {
         let key_idx = self
             .columns
@@ -436,7 +436,7 @@ impl DBRowDescriptor {
         PyRep::ObjectEx {
             is_type_2: true,
             header: Box::new(PyRep::Tuple(vec![
-                PyRep::Tuple(vec![PyRep::Token("dbutil.CIndexedRowset".into())]),
+                PyRep::Tuple(vec![PyRep::Token("carbon.common.script.sys.crowset.CIndexedRowset".into())]),
                 PyRep::Dict(vec![
                     (PyRep::String("header".into()), header_rep),
                     (

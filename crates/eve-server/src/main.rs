@@ -38,6 +38,7 @@ async fn main() -> Result<()> {
     let cfg = eve_server::config::ServerConfig::load_default_or_env()
         .map_err(|e| anyhow::anyhow!(e))?;
     let ctx = Arc::new(ServerContext::from_config(&cfg).map_err(|e| anyhow::anyhow!(e))?);
+    eve_server::starter_characters::provision_starter_characters(&ctx, &cfg).await;
     if let Ok(admin_token) = std::env::var("EVOMU_ADMIN_TOKEN") {
         if !admin_token.trim().is_empty() {
             ctx.db

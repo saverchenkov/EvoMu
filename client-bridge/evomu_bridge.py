@@ -23,6 +23,7 @@ _INT_TYPES = (int, long) if PY2 else (int,)  # noqa: F821
 _TEXT_TYPE = unicode if PY2 else str  # noqa: F821
 
 MAX_FRAME_SIZE = 4 * 1024 * 1024  # 4 MiB
+_CINDEXED_NAMES = ("dbutil.CIndexedRowset", "carbon.common.script.sys.crowset.CIndexedRowset")
 DEFAULT_RPC_TIMEOUT = 10.0
 
 
@@ -177,11 +178,11 @@ def from_pyrep_json(node):
             and len(hdr_py) > 0
             and isinstance(hdr_py[0], tuple)
             and len(hdr_py[0]) > 0
-            and hdr_py[0][0] == "dbutil.CIndexedRowset"
+            and hdr_py[0][0] in _CINDEXED_NAMES
         ) or (
             isinstance(hdr_py, tuple)
             and len(hdr_py) > 0
-            and hdr_py[0] == "dbutil.CIndexedRowset"
+            and hdr_py[0] in _CINDEXED_NAMES
         )
         if is_indexed or (dict_items and not list_items):
             return dict_items

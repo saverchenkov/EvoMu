@@ -16,6 +16,7 @@ Supports:
 """
 
 import argparse
+import atexit
 import datetime
 import json
 import os
@@ -123,6 +124,15 @@ def client_executable(client_app):
     return os.path.join(client_app, "Contents", "MacOS", "EVE")
 
 
+# Processes this harness started; `_cleanup_spawned` (atexit + finally) tears them down.
+_SPAWNED = []
+
+
+def _pids_matching(pattern):
+    out = subprocess.run(["/usr/bin/pgrep", "-f", pattern], capture_output=True, text=True).stdout
+    return set(int(p) for p in out.split() if p.isdigit() and int(p) != os.getpid())
+
+
 def launch_real_client(client_app, host, macho_port, login, log_path):
     """Starts the unmodified V24.01 client pointed at EvoMu via its own command-line switches.
 
@@ -130,40 +140,78 @@ def launch_real_client(client_app, host, macho_port, login, log_path):
     honours `/login:<user>:<password>` (used by `connection.TryAutomaticLogin`). The client runs in
     its own session/process group so `kill_real_client` can always tear the whole tree down.
     """
-    cmd = [client_executable(client_app), "/server:%s" % host, "/port:%d" % macho_port]
+    cmd = [
+        client_executable(client_app),
+        "/server:%s" % host,
+        "/port:%d" % macho_port,
+        "/autoSelectCharacter:0",
+    ]
     if login:
         cmd.append("/login:%s" % login)
+    # eve_crashmon helpers that already exist belong to someone else; only new ones are ours.
+    preexisting_crashmon = _pids_matching("eve_crashmon")
     logf = open(log_path, "w")
-    return subprocess.Popen(cmd, stdout=logf, stderr=subprocess.STDOUT, start_new_session=True)
+    proc = subprocess.Popen(cmd, stdout=logf, stderr=subprocess.STDOUT, start_new_session=True)
+    proc.evomu_instance = "/port:%d" % macho_port
+    proc.evomu_preexisting_crashmon = preexisting_crashmon
+    _SPAWNED.append(proc)
+    return proc
 
 
 def kill_real_client(proc, client_app):
-    """Kills the client process group plus any helper (eve_crashmon) started from the bundle."""
-    if proc is not None:
+    """Kills only what this harness started: the client's process group, any process whose command
+    line carries this run's `/port:<n>` switch, and eve_crashmon helpers that appeared after launch."""
+    if proc is None:
+        return
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except Exception:
+        pass
+    try:
+        proc.wait(timeout=10)
+    except Exception:
         try:
-            os.killpg(proc.pid, signal.SIGTERM)
+            os.killpg(proc.pid, signal.SIGKILL)
         except Exception:
             pass
-        try:
-            proc.wait(timeout=10)
-        except Exception:
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except Exception:
-                pass
-    # Helpers re-parent away from the group, and crashpad respawns eve_crashmon when the client
-    # dies, so keep killing anything started from the bundle until nothing is left.
+    instance = getattr(proc, "evomu_instance", None)
+    before = getattr(proc, "evomu_preexisting_crashmon", set())
+    # crashpad re-parents and respawns eve_crashmon when the client dies, so repeat until clean.
     for _ in range(10):
-        out = subprocess.run(["/usr/bin/pgrep", "-f", client_app], capture_output=True, text=True).stdout
-        pids = [int(p) for p in out.split() if p.isdigit() and int(p) != os.getpid()]
-        if not pids:
+        ours = set()
+        if instance:
+            ours |= set(p for p in _pids_matching(client_app) if p in _pids_matching(instance))
+        ours |= _pids_matching("eve_crashmon") - before
+        if not ours:
             break
-        for pid in pids:
+        for pid in ours:
             try:
                 os.kill(pid, signal.SIGKILL)
             except Exception:
                 pass
         time.sleep(1)
+    if proc in _SPAWNED:
+        _SPAWNED.remove(proc)
+
+
+def _cleanup_spawned(client_app=DEFAULT_CLIENT_APP):
+    for proc in list(_SPAWNED):
+        if getattr(proc, "evomu_instance", None):
+            kill_real_client(proc, client_app)
+        else:
+            try:
+                proc.terminate()
+                proc.wait(timeout=5)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+            if proc in _SPAWNED:
+                _SPAWNED.remove(proc)
+
+
+atexit.register(_cleanup_spawned)
 
 
 def _raise_exit(signum, _frame):
@@ -399,6 +447,11 @@ def main():
                 # Accounts are only provisioned from config (`ServerContext` starts empty).
                 for user, pw in (("demo", "demo-secret"), ("other", "other-secret")):
                     cf.write('\n[[player_accounts]]\nusername = "%s"\npassword_token = "%s"\n' % (user, pw))
+                    if user == "demo":
+                        # Created at startup via charUnboundMgr.CreateCharacterWithDoll so the
+                        # real client's character selection lists a character for launch_login.
+                        cf.write('[player_accounts.starter_character]\nname = "Demo Pilot"\n'
+                                 'bloodline_id = 1\ngender = 0\nancestry_id = 11\nschool_id = 17\n')
             srv_bin = find_server_binary(args.server_bin)
             if srv_bin is None:
                 raise RuntimeError("Could not locate compiled eve-server binary")
@@ -412,6 +465,7 @@ def main():
                 stdout=slog,
                 stderr=subprocess.STDOUT,
             )
+            _SPAWNED.append(server_proc)
             if not wait_for_tcp(args.host, bridge_port, timeout_sec=20.0):
                 raise RuntimeError("Timed out waiting for eve-server bridge port %d" % bridge_port)
         else:
@@ -441,6 +495,8 @@ def main():
                 server_proc.wait(timeout=5)
             except Exception:
                 server_proc.kill()
+            if server_proc in _SPAWNED:
+                _SPAWNED.remove(server_proc)
 
     client_app_exists = os.path.exists(args.client_app)
     journeys_out = {}

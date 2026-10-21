@@ -301,7 +301,7 @@ fn test_p2_canonical_row_containers_golden_roundtrip() {
     let mutated_decoded = marshal::decode(&marshal::encode(&dbrow)).unwrap();
     assert_eq!(mutated_decoded.dbrow_get("typeID"), Some(&PyRep::Integer(36)));
 
-    // 2. CRowset (dbutil.CRowset) — verify ((Token("dbutil.CRowset"),), Dict) type-2 ObjectEx header
+    // 2. CRowset (dbutil.CRowset) — verify ((Token("carbon.common.script.sys.crowset.CRowset"),), Dict) type-2 ObjectEx header
     let crowset = desc.build_crowset(sample_rows.clone());
     assert!(crowset.is_crowset());
     assert_eq!(crowset.row_count(), Some(2));
@@ -312,7 +312,7 @@ fn test_p2_canonical_row_containers_golden_roundtrip() {
         };
         assert_eq!(
             hdr_items.first(),
-            Some(&PyRep::Tuple(vec![PyRep::Token("dbutil.CRowset".into())]))
+            Some(&PyRep::Tuple(vec![PyRep::Token("carbon.common.script.sys.crowset.CRowset".into())]))
         );
     } else {
         panic!("Expected ObjectEx for CRowset");
@@ -322,7 +322,7 @@ fn test_p2_canonical_row_containers_golden_roundtrip() {
     assert_eq!(crowset_decoded, crowset);
     assert_eq!(marshal::encode(&crowset_decoded), crowset_bytes);
 
-    // 3. CIndexedRowset (dbutil.CIndexedRowset) — verify ((Token("dbutil.CIndexedRowset"),), Dict) type-2 ObjectEx header
+    // 3. CIndexedRowset (dbutil.CIndexedRowset) — verify ((Token("carbon.common.script.sys.crowset.CIndexedRowset"),), Dict) type-2 ObjectEx header
     let cindexed = desc.build_cindexed_rowset("typeID", sample_rows.clone());
     assert!(cindexed.is_cindexed_rowset());
     assert_eq!(cindexed.row_count(), Some(2));
@@ -334,7 +334,7 @@ fn test_p2_canonical_row_containers_golden_roundtrip() {
         assert_eq!(
             hdr_items.first(),
             Some(&PyRep::Tuple(vec![PyRep::Token(
-                "dbutil.CIndexedRowset".into()
+                "carbon.common.script.sys.crowset.CIndexedRowset".into()
             )]))
         );
     } else {

@@ -31,6 +31,20 @@ fn default_admin_char_name() -> String {
 pub struct PlayerAccountConfig {
     pub username: String,
     pub password_token: String,
+    /// Optional character created for this account at startup (through
+    /// `charUnboundMgr.CreateCharacterWithDoll`) when the account owns no character yet.
+    #[serde(default)]
+    pub starter_character: Option<StarterCharacterConfig>,
+}
+
+/// `CreateCharacterWithDoll(charactername, bloodlineID, genderID, ancestryID, ..., schoolID)` inputs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StarterCharacterConfig {
+    pub name: String,
+    pub bloodline_id: i64,
+    pub gender: i64,
+    pub ancestry_id: i64,
+    pub school_id: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -207,6 +221,7 @@ impl ServerConfig {
                         cfg.player_accounts.push(PlayerAccountConfig {
                             username: u.to_string(),
                             password_token: p.to_string(),
+                            starter_character: None,
                         });
                     }
                 }

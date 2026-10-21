@@ -83,6 +83,7 @@ pub fn get_character_selection_data(
                 ("stationID", c.station_id.or(c.structure_id).map(PyRep::Integer).unwrap_or(PyRep::None)),
                 ("solarSystemID", PyRep::Integer(i64::from(c.solar_system_id))),
                 ("balance", PyRep::Real(c.balance.to_wire_f64())),
+                // DERIVED: wallet deltas since the previous session are not tracked, so no change.
                 ("balanceChange", PyRep::Real(0.0)),
                 ("skillPoints", PyRep::Real(c.skill_points)),
                 ("corporationID", PyRep::Integer(c.corporation_id)),
@@ -93,6 +94,7 @@ pub fn get_character_selection_data(
                 ("raceID", PyRep::Integer(i64::from(c.race_id))),
                 ("bloodlineID", PyRep::Integer(i64::from(c.bloodline_id))),
                 ("gender", PyRep::Integer(i64::from(c.gender))),
+                // DERIVED: no paperdoll recustomization is pending for any EvoMu character (state 0).
                 ("paperdollState", PyRep::Integer(0)),
                 ("finishedSkills", PyRep::List(Vec::new())),
                 ("skillTypeID", skill_type),
@@ -104,6 +106,8 @@ pub fn get_character_selection_data(
                 ("trainedSP", trained_sp),
                 ("deletePrepareDateTime", PyRep::None),
                 ("lockTypeID", PyRep::None),
+                // DERIVED: logoff times are not stored; the creation date stands in so the client's
+                // "most recently played first" sort is at least stable.
                 ("logoffDate", PyRep::Integer(unix_to_filetime(c.create_date_unix.max(1)))),
             ]));
             for w in snap.wars.values().filter(|w| w.active) {
