@@ -1,7 +1,7 @@
 //! Native V24.01 `machoNet` / `GPSTransport` TCP listener & connection state machine (`P-6`).
 //!
 //! Implements the full 4-step `GPSTransport` handshake over length-prefixed `blue.marshal` TCP frames:
-//! 1. `LowLevelVersionExchange` (`(birthday=170472, macho_version=409, user_count, version_number=24.01, build_version=3619879, project_version="EVE-EVE-TRANQUILITY@ccp")`)
+//! 1. `LowLevelVersionExchange` server 7-tuple (`(170472, macho_version=496, user_count, 24.01, build=3624425, "V24.01@ccp", update_info=None)`), matching the installed client's `start.ini` / `eveMachoNetVersion`
 //! 2. Command packet (`(None, "QC")` queue check, `(None, "VK", vipKey)` VIP key, `("placebo", {})` `CryptoRequestPacket` -> `"OK CC"`)
 //! 3. `CryptoChallengePacket` `(client_challenge, handshake_dict)` -> credential/SSO JWT verification against `WorldRepository`, `passwordVersion`, `CryptoServerHandshake`
 //! 4. `CryptoHandshakeResult` -> `CryptoHandshakeAck` + `SessionInitialStateNotification` (type 18) + `SessionChangeNotification` (type 16)

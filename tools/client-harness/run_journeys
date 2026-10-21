@@ -20,6 +20,7 @@ import datetime
 import json
 import os
 import re
+import signal
 import socket
 import subprocess
 import sys
@@ -116,6 +117,57 @@ class HarnessSM(object):
     def ScatterEvent(self, event_name, *args):
         self.events.append((event_name, args))
         self.logger.info("ScatterEvent %s args=%r" % (event_name, args))
+
+
+def client_executable(client_app):
+    return os.path.join(client_app, "Contents", "MacOS", "EVE")
+
+
+def launch_real_client(client_app, host, macho_port, login, log_path):
+    """Starts the unmodified V24.01 client pointed at EvoMu via its own command-line switches.
+
+    `utillib.GetServerName/GetServerPort` honour `/server:` and `/port:`; `GetLoginCredentials`
+    honours `/login:<user>:<password>` (used by `connection.TryAutomaticLogin`). The client runs in
+    its own session/process group so `kill_real_client` can always tear the whole tree down.
+    """
+    cmd = [client_executable(client_app), "/server:%s" % host, "/port:%d" % macho_port]
+    if login:
+        cmd.append("/login:%s" % login)
+    logf = open(log_path, "w")
+    return subprocess.Popen(cmd, stdout=logf, stderr=subprocess.STDOUT, start_new_session=True)
+
+
+def kill_real_client(proc, client_app):
+    """Kills the client process group plus any helper (eve_crashmon) started from the bundle."""
+    if proc is not None:
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except Exception:
+            pass
+        try:
+            proc.wait(timeout=10)
+        except Exception:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except Exception:
+                pass
+    # Helpers re-parent away from the group, and crashpad respawns eve_crashmon when the client
+    # dies, so keep killing anything started from the bundle until nothing is left.
+    for _ in range(10):
+        out = subprocess.run(["/usr/bin/pgrep", "-f", client_app], capture_output=True, text=True).stdout
+        pids = [int(p) for p in out.split() if p.isdigit() and int(p) != os.getpid()]
+        if not pids:
+            break
+        for pid in pids:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except Exception:
+                pass
+        time.sleep(1)
+
+
+def _raise_exit(signum, _frame):
+    raise SystemExit(128 + signum)
 
 
 def run_two_client_bridge_probe(host, bridge_port, client_1_log_path, client_2_log_path):
@@ -300,7 +352,11 @@ def main():
         action="store_true",
         help="Exit 0 when two-client bridge orchestration and log-hygiene checks pass (used by T-6 integration tests)",
     )
+    ap.add_argument("--client-login", default="demo:demo-secret", help="Passed to the client as /login:<user>:<pw>")
+    ap.add_argument("--client-wait", type=float, default=90.0, help="Seconds to let the real client run")
     args = ap.parse_args()
+    signal.signal(signal.SIGTERM, _raise_exit)
+    signal.signal(signal.SIGINT, _raise_exit)
 
     out_dir = os.path.abspath(args.out)
     os.makedirs(out_dir, exist_ok=True)
@@ -317,6 +373,9 @@ def main():
     client_2_log = os.path.join(out_dir, "client_2.log")
 
     server_proc = None
+    client_proc = None
+    real_client_log = os.path.join(out_dir, "real_client_1.log")
+    macho_port = None
     bridge_port = args.bridge_port
     try:
         if bridge_port == 0:
@@ -337,6 +396,9 @@ def main():
                 cf.write("enable_esi_http = true\n")
                 cf.write("enable_living_world = true\n")
                 cf.write("seed_demo = true\n")
+                # Accounts are only provisioned from config (`ServerContext` starts empty).
+                for user, pw in (("demo", "demo-secret"), ("other", "other-secret")):
+                    cf.write('\n[[player_accounts]]\nusername = "%s"\npassword_token = "%s"\n' % (user, pw))
             srv_bin = find_server_binary(args.server_bin)
             if srv_bin is None:
                 raise RuntimeError("Could not locate compiled eve-server binary")
@@ -357,10 +419,22 @@ def main():
                 with open(server_log_path, "w") as sf:
                     sf.write("[harness] attached to live eve-server bridge on %s:%d\n" % (args.host, bridge_port))
 
-        bridge_outcomes = run_two_client_bridge_probe(
-            args.host, bridge_port, client_1_log, client_2_log
-        )
+        if args.launch_real_client and macho_port and os.path.exists(client_executable(args.client_app)):
+            client_proc = launch_real_client(
+                args.client_app, args.host, macho_port, args.client_login, real_client_log
+            )
+            time.sleep(args.client_wait)
+            kill_real_client(client_proc, args.client_app)
+            client_proc = None
+        try:
+            bridge_outcomes = run_two_client_bridge_probe(
+                args.host, bridge_port, client_1_log, client_2_log
+            )
+        except Exception as exc:  # recorded, never counted as a pass
+            sys.stderr.write("[run_journeys] bridge probe failed: %r\n" % (exc,))
+            bridge_outcomes = {}
     finally:
+        kill_real_client(client_proc, args.client_app) if client_proc is not None else None
         if server_proc is not None:
             server_proc.terminate()
             try:
@@ -389,6 +463,8 @@ def main():
         }
 
     client_logs = [client_1_log, client_2_log]
+    if os.path.exists(real_client_log):
+        client_logs.append(real_client_log)
     log_errors = scan_logs_for_errors([server_log_path] + client_logs)
 
     result = {

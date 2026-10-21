@@ -53,6 +53,19 @@ impl MachoPacketType {
     }
 }
 
+/// `const.ADDRESS_TYPE_NODE` (V24 `carbon/common/lib/const.pyj`).
+pub const ADDRESS_TYPE_NODE: i64 = 1;
+/// `const.ADDRESS_TYPE_CLIENT`.
+pub const ADDRESS_TYPE_CLIENT: i64 = 2;
+/// `const.ADDRESS_TYPE_BROADCAST`.
+pub const ADDRESS_TYPE_BROADCAST: i64 = 4;
+/// `const.ADDRESS_TYPE_ANY`.
+pub const ADDRESS_TYPE_ANY: i64 = 8;
+/// Module path blue uses to unpickle `MachoAddress` on the V24 client (there is no `macho` module).
+pub const MACHO_ADDRESS_CLASS: &str = "carbon.common.script.net.machoNetAddress.MachoAddress";
+/// `session.SESSION_TYPE_GAME` (V24 `carbon/common/lib/session.pyj`).
+pub const SESSION_TYPE_GAME: i64 = 5;
+
 /// `macho.MachoAddress` endpoint representation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MachoAddress {
@@ -85,7 +98,7 @@ impl MachoAddress {
                 service,
                 call_id,
             } => vec![
-                PyRep::ascii_bytes("N"),
+                PyRep::Integer(ADDRESS_TYPE_NODE),
                 PyRep::Integer(*node_id as i64),
                 service
                     .as_ref()
@@ -98,7 +111,7 @@ impl MachoAddress {
                 call_id,
                 service,
             } => vec![
-                PyRep::ascii_bytes("C"),
+                PyRep::Integer(ADDRESS_TYPE_CLIENT),
                 PyRep::Integer(*client_id as i64),
                 PyRep::Integer(*call_id as i64),
                 service
@@ -111,7 +124,7 @@ impl MachoAddress {
                 id_type,
                 narrowcast,
             } => vec![
-                PyRep::ascii_bytes("B"),
+                PyRep::Integer(ADDRESS_TYPE_BROADCAST),
                 PyRep::ascii_bytes(broadcast_id),
                 PyRep::List(
                     narrowcast
@@ -122,7 +135,7 @@ impl MachoAddress {
                 PyRep::ascii_bytes(id_type),
             ],
             Self::Any { service, call_id } => vec![
-                PyRep::ascii_bytes("A"),
+                PyRep::Integer(ADDRESS_TYPE_ANY),
                 service
                     .as_ref()
                     .map(PyRep::ascii_bytes)
@@ -131,7 +144,7 @@ impl MachoAddress {
             ],
         };
         PyRep::Object {
-            type_name: "macho.MachoAddress".into(),
+            type_name: MACHO_ADDRESS_CLASS.into(),
             args: Box::new(PyRep::Tuple(tuple)),
         }
     }
@@ -152,7 +165,14 @@ impl MachoAddress {
             PyRep::Tuple(items) => items,
             _ => return None,
         };
-        let tag = tuple.first()?.as_str()?;
+        // V24 `MachoAddress.__getstate__` leads with `const.ADDRESS_TYPE_*`; older captures use letters.
+        let tag = match tuple.first()? {
+            PyRep::Integer(ADDRESS_TYPE_NODE) => "N",
+            PyRep::Integer(ADDRESS_TYPE_CLIENT) => "C",
+            PyRep::Integer(ADDRESS_TYPE_BROADCAST) => "B",
+            PyRep::Integer(ADDRESS_TYPE_ANY) => "A",
+            other => other.as_str()?,
+        };
         match tag {
             "N" => Some(Self::Node {
                 node_id: tuple.get(1)?.as_i64()? as u64,
@@ -207,23 +227,23 @@ pub struct MachoPacket {
 impl MachoPacket {
     pub fn class_name(packet_type: MachoPacketType) -> &'static str {
         match packet_type {
-            MachoPacketType::AuthenticationReq => "macho.AuthenticationReq",
-            MachoPacketType::AuthenticationRsp => "macho.AuthenticationRsp",
-            MachoPacketType::IdentificationReq => "macho.IdentificationReq",
-            MachoPacketType::IdentificationRsp => "macho.IdentificationRsp",
-            MachoPacketType::CallReq => "macho.CallReq",
-            MachoPacketType::CallRsp => "macho.CallRsp",
-            MachoPacketType::TransportClosed => "macho.TransportClosed",
-            MachoPacketType::ResolveReq => "macho.ResolveReq",
-            MachoPacketType::ResolveRsp => "macho.ResolveRsp",
-            MachoPacketType::Notification => "macho.Notification",
-            MachoPacketType::ErrorResponse => "macho.ErrorResponse",
-            MachoPacketType::SessionChangeNotification => "macho.SessionChangeNotification",
+            MachoPacketType::AuthenticationReq => "carbon.common.script.net.machoNetPacket.AuthenticationReq",
+            MachoPacketType::AuthenticationRsp => "carbon.common.script.net.machoNetPacket.AuthenticationRsp",
+            MachoPacketType::IdentificationReq => "carbon.common.script.net.machoNetPacket.IdentificationReq",
+            MachoPacketType::IdentificationRsp => "carbon.common.script.net.machoNetPacket.IdentificationRsp",
+            MachoPacketType::CallReq => "carbon.common.script.net.machoNetPacket.CallReq",
+            MachoPacketType::CallRsp => "carbon.common.script.net.machoNetPacket.CallRsp",
+            MachoPacketType::TransportClosed => "carbon.common.script.net.machoNetPacket.TransportClosed",
+            MachoPacketType::ResolveReq => "carbon.common.script.net.machoNetPacket.ResolveReq",
+            MachoPacketType::ResolveRsp => "carbon.common.script.net.machoNetPacket.ResolveRsp",
+            MachoPacketType::Notification => "carbon.common.script.net.machoNetPacket.Notification",
+            MachoPacketType::ErrorResponse => "carbon.common.script.net.machoNetPacket.ErrorResponse",
+            MachoPacketType::SessionChangeNotification => "carbon.common.script.net.machoNetPacket.SessionChangeNotification",
             MachoPacketType::SessionInitialStateNotification => {
-                "macho.SessionInitialStateNotification"
+                "carbon.common.script.net.machoNetPacket.SessionInitialStateNotification"
             }
-            MachoPacketType::PingReq => "macho.PingReq",
-            MachoPacketType::PingRsp => "macho.PingRsp",
+            MachoPacketType::PingReq => "carbon.common.script.net.machoNetPacket.PingReq",
+            MachoPacketType::PingRsp => "carbon.common.script.net.machoNetPacket.PingRsp",
         }
     }
 
@@ -249,6 +269,15 @@ impl MachoPacket {
                     .unwrap_or(PyRep::None),
                 self.payload.clone(),
                 named,
+                // contextKey, journeyID, trace_id, parent_span_id, sampled, ingress_id,
+                // sample_rate, cut_parent (V24 `MachoPacket.__getstate__` 14-tuple).
+                PyRep::None,
+                PyRep::None,
+                PyRep::None,
+                PyRep::None,
+                PyRep::None,
+                PyRep::None,
+                PyRep::None,
                 PyRep::None,
             ])),
         }
@@ -308,21 +337,64 @@ pub struct VersionExchange {
     pub project_version: String,
 }
 
+/// `GPSTransport.__HANDSHAKE_SECRET_KEY` in V24.01 `carbon/common/script/net/GPS.pyj`.
+pub const HANDSHAKE_SECRET_KEY: u32 = 170_472;
+/// `eveMachoNetVersion.machoVersion` in the installed V24.01 client
+/// (`eve/common/script/net/eveMachoNetVersion.pyj`, re-exported as `machobase.version`).
+pub const V24_MACHO_VERSION: u32 = 496;
+/// `[main] build` of the installed V24.01 client's `start.ini` (`boot.build`).
+pub const V24_BOOT_BUILD: u32 = 3_624_425;
+/// `[main] codename` + `@` + `[main] region` of the installed V24.01 client's `start.ini`.
+pub const V24_CODENAME_AT_REGION: &str = "V24.01@ccp";
+
 impl Default for VersionExchange {
-    /// Defaults to V24.01 (`build 3619879`, `EVE-EVE-TRANQUILITY@ccp`).
+    /// Defaults to the boot values of the installed V24.01 client (`start.ini`: `version = 24.01`,
+    /// `build = 3624425`, `codename = V24.01`, `region = ccp`) and `machoVersion = 496`.
+    /// `GPS.Authenticate` on the client rejects any server whose codename/region, version or macho
+    /// version differ, or whose build is newer than its own.
     fn default() -> Self {
         Self {
-            birthday: 170472,
-            macho_version: 409,
+            birthday: HANDSHAKE_SECRET_KEY,
+            macho_version: V24_MACHO_VERSION,
             user_count: 1,
             version_number: 24.01,
-            build_version: 3619879,
-            project_version: "EVE-EVE-TRANQUILITY@ccp".to_string(),
+            build_version: V24_BOOT_BUILD,
+            project_version: V24_CODENAME_AT_REGION.to_string(),
         }
     }
 }
 
 impl VersionExchange {
+    /// `boot.codename` half of `project_version` (`"<codename>@<region>"`).
+    pub fn codename(&self) -> &str {
+        self.project_version
+            .split_once('@')
+            .map(|(c, _)| c)
+            .unwrap_or(&self.project_version)
+    }
+
+    /// `boot.region` half of `project_version` (empty when there is no `@`, as in `GPS.pyj`).
+    pub fn region(&self) -> &str {
+        self.project_version
+            .split_once('@')
+            .map(|(_, r)| r)
+            .unwrap_or("")
+    }
+
+    /// Server-initiated 7-tuple written on accept by `GPSTransport.HandleClientAuthentication`:
+    /// `(secret, macho.version, loggedOnUserCount, boot.version, boot.build, codename@region,
+    /// updateInfo)`. The client's `GPS.Authenticate` reads `response[6]` as `update_info`; it is
+    /// `None` here because this server publishes no client code-hash updates
+    /// (`machoNet.GetValidClientCodeHash` has no row).
+    pub fn to_server_hello_pyrep(&self) -> PyRep {
+        let PyRep::Tuple(mut items) = self.to_pyrep() else {
+            unreachable!("VersionExchange::to_pyrep always yields a tuple")
+        };
+        items.push(PyRep::None);
+        PyRep::Tuple(items)
+    }
+
+    /// Client-side 6-tuple reply (`GPS.Authenticate` `request`).
     pub fn to_pyrep(&self) -> PyRep {
         PyRep::Tuple(vec![
             PyRep::Integer(self.birthday as i64),
@@ -392,23 +464,35 @@ impl VersionExchange {
                 "HANDSHAKE_INCOMPATIBLEVERSION",
             ));
         }
-        if client.build_version != self.build_version {
+        // `GPS.HandleClientAuthenticationStep1`: `if boot.build > response[4]` -> incompatible build
+        // (an older client is refused; a newer client build is accepted).
+        if self.build_version > client.build_version {
             return Err(GPSTransportClosed::new(
                 format!(
-                    "Handshake Failed - Build Mismatch - Build is {} but should be {}",
+                    "Handshake Failed - Insecure Boot Build Mismatch - Client: {} - Server: {}",
                     client.build_version, self.build_version
                 ),
                 "HANDSHAKE_INCOMPATIBLEBUILD",
             ));
         }
-        if client.project_version != self.project_version && client.project_version != "V24.01@ccp"
-        {
+        if client.region() != self.region() {
             return Err(GPSTransportClosed::new(
                 format!(
-                    "Handshake Failed - Project Version Mismatch - Project Version is {} but should be {}",
-                    client.project_version, self.project_version
+                    "Handshake Failed - Insecure Region Code Mismatch - Client: {} - Server: {}",
+                    client.region(),
+                    self.region()
                 ),
                 "HANDSHAKE_INCOMPATIBLEREGION",
+            ));
+        }
+        if client.codename() != self.codename() {
+            return Err(GPSTransportClosed::new(
+                format!(
+                    "Handshake Failed - Insecure Boot Code Name Mismatch - Client: {} - Server: {}",
+                    client.codename(),
+                    self.codename()
+                ),
+                "HANDSHAKE_INCOMPATIBLERELEASE",
             ));
         }
         Ok(())
@@ -722,7 +806,9 @@ impl SessionState {
             .into_iter()
             .map(|(k, (old_v, new_v))| (PyRep::ascii_bytes(k), PyRep::Tuple(vec![old_v, new_v])))
             .collect();
+        // `SessionChangeNotification` params: `('sid', 'change', 'nodesOfInterest?')`.
         Some(PyRep::Tuple(vec![
+            PyRep::Integer(self.session_id as i64),
             PyRep::Tuple(vec![PyRep::Integer(0), PyRep::Dict(dict_entries)]),
             PyRep::List(nodes_of_interest.into_iter().map(PyRep::Integer).collect()),
         ]))
@@ -773,10 +859,11 @@ impl SessionState {
                 service: None,
             },
             user_id: self.user_id,
+            // `SessionInitialStateNotification` params: `('sid', 'sessionType', 'initialstate')`.
             payload: PyRep::Tuple(vec![
-                values,
                 PyRep::Integer(self.session_id as i64),
-                PyRep::List(vec![PyRep::Integer(node_id as i64)]),
+                PyRep::Integer(SESSION_TYPE_GAME),
+                values,
             ]),
             named_payload,
         }
@@ -812,6 +899,7 @@ impl SessionState {
             },
             user_id: self.user_id,
             payload: PyRep::Tuple(vec![
+                PyRep::Integer(self.session_id as i64),
                 PyRep::Tuple(vec![PyRep::Integer(0), PyRep::Dict(dict_entries)]),
                 PyRep::List(vec![PyRep::Integer(node_id as i64)]),
             ]),

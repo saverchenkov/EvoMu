@@ -399,7 +399,7 @@ mod tests {
             .expect("version exchange");
         let ver_pyrep = marshal::decode(&ver_frame)?;
         let expected_ver = VersionExchange::default();
-        assert_eq!(ver_pyrep, expected_ver.to_pyrep());
+        assert_eq!(ver_pyrep, expected_ver.to_server_hello_pyrep());
 
         // Step 1: Client sends VersionExchangeClient
         write_bounded_frame(&mut m_stream, &marshal::encode(&expected_ver.to_pyrep())).await?;

@@ -8,7 +8,7 @@
 //! 5. `CryptoHandshakeResult` -> `CryptoHandshakeAck` + `SessionInitialStateNotification` + `SessionChangeNotification`
 
 use crate::{MachoPacket, SessionState, VersionExchange};
-use eve_proto::{marshal, PyRep};
+use eve_proto::PyRep;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -38,9 +38,31 @@ pub fn crc_hqx(data: &[u8], mut crc: u16) -> u16 {
 
 /// Computes V24 `evecrypto/placebo.pyj` `crypto_hash(challenge)`:
 /// `str(binascii.crc_hqx(blue.marshal.Save((challenge,)), 0))`.
+///
+/// The CRC is over the exact bytes `blue.marshal.Save` produces, so this builds them directly:
+/// header `0x7E` + `u32` save count 0, `PyOneTuple` (`0x25`), then the `str` as `PyLongString`
+/// (`0x13`, size-ex length, raw bytes). Captured real-client handshake frames show blue encoding
+/// its 64-byte challenge as `0x13 0x40 …`, not the `0x10` short-string form.
 pub fn placebo_crypto_hash(challenge: &[u8]) -> String {
-    let encoded = marshal::encode(&PyRep::Tuple(vec![PyRep::Bytes(challenge.to_vec())]));
-    crc_hqx(&encoded, 0).to_string()
+    let mut saved = vec![0x7E, 0, 0, 0, 0, 0x25];
+    match challenge.len() {
+        0 => saved.push(0x0E),
+        1 => {
+            saved.push(0x0F);
+            saved.push(challenge[0]);
+        }
+        len => {
+            saved.push(0x13);
+            if len < 0xFF {
+                saved.push(len as u8);
+            } else {
+                saved.push(0xFF);
+                saved.extend_from_slice(&(len as u32).to_le_bytes());
+            }
+            saved.extend_from_slice(challenge);
+        }
+    }
+    crc_hqx(&saved, 0).to_string()
 }
 
 /// `exceptions.GPSTransportClosed` wire packet sent before closing a transport on handshake/auth/kick failure.
@@ -67,8 +89,8 @@ impl GPSTransportClosed {
             macho_version: ver.macho_version,
             version: ver.version_number,
             build: ver.build_version,
-            codename: "EVE-EVE-TRANQUILITY".to_string(),
-            region: "ccp".to_string(),
+            codename: ver.codename().to_string(),
+            region: ver.region().to_string(),
             logged_on_user_count: ver.user_count,
         }
     }
@@ -178,8 +200,8 @@ impl GPSTransportClosed {
             macho_version: ver.macho_version,
             version: ver.version_number,
             build: ver.build_version,
-            codename: "EVE-EVE-TRANQUILITY".to_string(),
-            region: "ccp".to_string(),
+            codename: ver.codename().to_string(),
+            region: ver.region().to_string(),
             logged_on_user_count: ver.user_count,
         })
     }
@@ -303,8 +325,8 @@ impl CryptoChallengePacket {
             macho_version: ver.macho_version,
             boot_version: ver.version_number,
             boot_build: ver.build_version,
-            boot_codename: "EVE-EVE-TRANQUILITY".to_string(),
-            boot_region: "ccp".to_string(),
+            boot_codename: ver.codename().to_string(),
+            boot_region: ver.region().to_string(),
             user_name: Some(username.into()),
             user_password: Some(password.into()),
             user_password_hash: None,
@@ -321,8 +343,8 @@ impl CryptoChallengePacket {
             macho_version: ver.macho_version,
             boot_version: ver.version_number,
             boot_build: ver.build_version,
-            boot_codename: "EVE-EVE-TRANQUILITY".to_string(),
-            boot_region: "ccp".to_string(),
+            boot_codename: ver.codename().to_string(),
+            boot_region: ver.region().to_string(),
             user_name: Some("EVE-SSO-CONNECTION".to_string()),
             user_password: None,
             user_password_hash: None,
@@ -463,21 +485,25 @@ impl CryptoChallengePacket {
         })
     }
 
+    /// Mirrors `GPS.HandleClientAuthenticationStep3` version checks (region, codename, version,
+    /// macho version, then `boot.build > request['boot_build']`).
     pub fn validate_version(&self, expected: &VersionExchange) -> Result<(), GPSTransportClosed> {
-        if self.boot_region != "ccp" {
+        if self.boot_region != expected.region() {
             return Err(GPSTransportClosed::new(
                 format!(
-                    "Handshake Failed - Boot Region Mismatch - Boot Region is {} but should be ccp",
-                    self.boot_region
+                    "Handshake Failed - Boot Region Mismatch - Boot Region is {} but should be {}",
+                    self.boot_region,
+                    expected.region()
                 ),
                 "HANDSHAKE_INCOMPATIBLEREGION",
             ));
         }
-        if self.boot_codename != "EVE-EVE-TRANQUILITY" && self.boot_codename != "V24.01" {
+        if self.boot_codename != expected.codename() {
             return Err(GPSTransportClosed::new(
                 format!(
-                    "Handshake Failed - Boot Code Name Mismatch - Boot Code Name is {}",
-                    self.boot_codename
+                    "Handshake Failed - Boot Code Name Mismatch - Boot Code Name is {} but should be {}",
+                    self.boot_codename,
+                    expected.codename()
                 ),
                 "HANDSHAKE_INCOMPATIBLERELEASE",
             ));
@@ -500,10 +526,10 @@ impl CryptoChallengePacket {
                 "HANDSHAKE_INCOMPATIBLEPROTOCOL",
             ));
         }
-        if self.boot_build != expected.build_version {
+        if expected.build_version > self.boot_build {
             return Err(GPSTransportClosed::new(
                 format!(
-                    "Handshake Failed - Boot Build Mismatch - Boot Build is {} but should be {}",
+                    "Handshake Failed - Boot Build Mismatch - Boot Build is {} but should be at least {}",
                     self.boot_build, expected.build_version
                 ),
                 "HANDSHAKE_INCOMPATIBLEBUILD",
@@ -566,8 +592,8 @@ impl CryptoServerHandshake {
             macho_version: expected.macho_version,
             boot_version: expected.version_number,
             boot_build: expected.build_version,
-            boot_codename: "EVE-EVE-TRANQUILITY".to_string(),
-            boot_region: "ccp".to_string(),
+            boot_codename: expected.codename().to_string(),
+            boot_region: expected.region().to_string(),
             cluster_user_count,
             proxy_node_id,
             user_logon_queue_position: 1,
@@ -1030,7 +1056,7 @@ impl MachoHandshakeStateMachine {
 
     /// Initial server `LowLevelVersionExchange` frame written immediately on TCP accept.
     pub fn server_hello(&self) -> PyRep {
-        self.expected_version.to_pyrep()
+        self.expected_version.to_server_hello_pyrep()
     }
 
     /// Processes an incoming client `PyRep` frame according to the current handshake phase.
@@ -1074,9 +1100,18 @@ impl MachoHandshakeStateMachine {
                     ));
                 };
                 match cmd {
-                    HandshakeCommand::QueueCheck => Ok(
-                        HandshakeStepOutput::SendFramesAndContinue(vec![PyRep::Integer(1)]),
-                    ),
+                    // `GPS.HandleClientAuthenticationStep2` answers `(None, 'QC')` with the logon queue
+                    // position and returns; the transport then re-enters `HandleClientAuthentication`,
+                    // which writes the server version tuple again. The V24 client relies on this: after
+                    // `machoNet.GetServerStatus` it caches the half-open transport and
+                    // `ConnectToServer` -> `GPS.Authenticate` starts by reading that version tuple.
+                    HandshakeCommand::QueueCheck => {
+                        self.phase = HandshakePhase::AwaitingVersionExchange;
+                        Ok(HandshakeStepOutput::SendFramesAndContinue(vec![
+                            PyRep::Integer(1),
+                            self.server_hello(),
+                        ]))
+                    }
                     HandshakeCommand::VipKey(vk) => {
                         self.vip_key = Some(vk);
                         Ok(HandshakeStepOutput::SendFramesAndContinue(Vec::new()))
@@ -1087,6 +1122,20 @@ impl MachoHandshakeStateMachine {
                                 "Handshake Failed - Public Key Mismatch - Public Key Version is {} but should be placebo",
                                 req.key_version
                             );
+                            self.phase = HandshakePhase::Failed(reason.clone());
+                            return Err(GPSTransportClosed::new(
+                                reason,
+                                "HANDSHAKE_INCOMPATIBLEPUBLICKEY",
+                            ));
+                        }
+                        // `evecrypto.cryptoapi` sends `getattr(macho, 'publicKeyVersion', 'placebo')`
+                        // too, but its params carry the session key RSA-encrypted with CCP's key.
+                        // Every later frame is then AES-encrypted with a key this server cannot
+                        // recover, so refuse up front instead of replying "OK CC".
+                        if req.key_params.contains_key("crypting_sessionkey") {
+                            let reason = "Handshake Failed - client uses the CryptoAPI crypto pack; \
+                                          this server only speaks Placebo (set cryptoPack = Placebo)"
+                                .to_string();
                             self.phase = HandshakePhase::Failed(reason.clone());
                             return Err(GPSTransportClosed::new(
                                 reason,

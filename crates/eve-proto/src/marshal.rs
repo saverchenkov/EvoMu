@@ -253,7 +253,10 @@ fn encode_inner(rep: &PyRep, out: &mut Vec<u8>) {
         }
         PyRep::Object { type_name, args } => {
             out.push(MarshalOpcode::PyObject as u8);
-            encode_inner(&PyRep::Token(type_name.clone()), out);
+            // blue reads the `PyObject` class name as a plain string (the V24 client writes
+            // `0x17 0x13 <len> carbon.common...CallReq`); a `PyToken` here makes it fail with
+            // "expected string" when unpickling.
+            encode_inner(&PyRep::Bytes(type_name.clone().into_bytes()), out);
             encode_inner(args, out);
         }
         PyRep::ObjectEx {
@@ -281,6 +284,21 @@ fn encode_inner(rep: &PyRep, out: &mut Vec<u8>) {
     }
 }
 
+/// RFC 1950 header check: deflate method (`CMF & 0x0F == 8`), window <= 32K and `(CMF*256+FLG) % 31 == 0`.
+/// The V24 client's blue compresses with a small window, so its frames start `0x58 0x09`, not only
+/// the common `0x78`. A raw marshal stream always starts with `0x7E`, which fails this check.
+fn is_zlib_stream_header(input: &[u8]) -> bool {
+    if input.first() == Some(&ZLIB_HEADER_BYTE) {
+        return true;
+    }
+    match input {
+        [cmf, flg, ..] => {
+            cmf & 0x0F == 8 && (cmf >> 4) <= 7 && ((*cmf as u16) << 8 | *flg as u16) % 31 == 0
+        }
+        _ => false,
+    }
+}
+
 /// Decodes a raw or `zlib`-compressed `eveMarshal` payload with strict size, collection,
 /// recursion, node-budget, and trailing `save_count` map handling.
 pub fn decode(input: &[u8]) -> Result<PyRep, ProtoError> {
@@ -292,7 +310,7 @@ pub fn decode(input: &[u8]) -> Result<PyRep, ProtoError> {
     }
 
     let decompressed_buf: Vec<u8>;
-    let cursor: &[u8] = if input[0] == ZLIB_HEADER_BYTE {
+    let cursor: &[u8] = if is_zlib_stream_header(input) {
         let mut decoder = ZlibDecoder::new(input).take((MAX_FRAME_SIZE + 1) as u64);
         let mut out = Vec::new();
         decoder
