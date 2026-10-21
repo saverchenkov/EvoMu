@@ -364,51 +364,26 @@ impl PublicGatewayRouter {
             next_notice_seq: AtomicU64::new(1),
             pending_notices: Arc::new(RwLock::new(Vec::new())),
         };
-        router.register_builtin_core_handlers(Arc::clone(&db));
+        router.register_builtin_core_handlers(Arc::clone(&db), Arc::clone(&sde));
         crate::services::quasar_social::register_social_services(&router, Arc::clone(&db));
-        crate::services::quasar_market::register_market_handlers(
-            &router,
-            Arc::clone(&db),
-            Arc::clone(&sde),
-            Arc::clone(&router.descriptors),
-        );
-        crate::services::quasar_inventory_asset::register_inventory_asset_handlers(
-            &router,
-            Arc::clone(&db),
-            Arc::clone(&sde),
-            Arc::clone(&router.descriptors),
-        );
-        crate::services::quasar_assetholding_entitlements::register_assetholding_handlers(
-            &router,
-            Arc::clone(&db),
-            Arc::clone(&sde),
-            Arc::clone(&router.descriptors),
-        );
-        crate::services::quasar_economy_planetary_industry::register_economy_planetary_industry_handlers(
-            &router,
-            Arc::clone(&db),
-            Arc::clone(&sde),
-            Arc::clone(&router.descriptors),
-        );
+        let desc = &router.descriptors;
+        crate::services::quasar_market::register_market_handlers(&router, Arc::clone(&db), Arc::clone(&sde), Arc::clone(desc));
+        crate::services::quasar_inventory_asset::register_inventory_asset_handlers(&router, Arc::clone(&db), Arc::clone(&sde), Arc::clone(desc));
+        crate::services::quasar_assetholding_entitlements::register_assetholding_handlers(&router, Arc::clone(&db), Arc::clone(&sde), Arc::clone(desc));
+        crate::services::quasar_economy_planetary_industry::register_economy_planetary_industry_handlers(&router, Arc::clone(&db), Arc::clone(&sde), Arc::clone(desc));
         router
     }
 
     pub fn enqueue_notice(&self, scope: NoticeScope, payload: GoogleAny) {
-        self.pending_notices
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .push((scope, payload));
+        self.pending_notices.write().unwrap_or_else(|e| e.into_inner()).push((scope, payload));
     }
 
     pub fn register_handler(&self, full_name_or_type_url: &str, handler: QuasarHandlerFn) {
         let key = QuasarDescriptorRegistry::normalize_type_name(full_name_or_type_url).to_string();
-        self.handlers
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(key, handler);
+        self.handlers.write().unwrap_or_else(|e| e.into_inner()).insert(key, handler);
     }
 
-    fn register_builtin_core_handlers(&self, db: Arc<WorldRepository>) {
+    fn register_builtin_core_handlers(&self, db: Arc<WorldRepository>, sde: Arc<eve_sde::SdeRegistry>) {
         // 1. google.protobuf.Empty (Ping requests on PublicRequests / PublicNotices / PublicEvents gateway services)
         self.register_handler(
             "google.protobuf.Empty",
@@ -421,39 +396,32 @@ impl PublicGatewayRouter {
             "eve_public.character.GetNamesByUserRequest",
             Arc::new(move |ctx, _any, _dyn_msg| {
                 let Some(uid) = ctx.effective_user_id() else {
-                    return Err((
-                        STATUS_UNAUTHORIZED,
-                        "Authenticated user required".to_string(),
-                    ));
+                    return Err((STATUS_UNAUTHORIZED, "Authenticated user required".to_string()));
                 };
                 let chars = db_chars.get_characters_for_user(uid as u64);
                 let mut out = Vec::new();
                 for ch in chars {
                     let mut entry = Vec::new();
-                    let cid = EvePublicCharacterId {
-                        sequential: ch.character_id as u32,
-                    };
+                    let cid = EvePublicCharacterId { sequential: ch.character_id as u32 };
                     encode_bytes_field(1, &cid.encode_proto(), &mut entry);
                     encode_string_field(2, &ch.name, &mut entry);
                     encode_bytes_field(1, &entry, &mut out);
                 }
                 Ok(GoogleAny {
-                    type_url: format!(
-                        "{TYPE_GOOGLEAPIS_PREFIX}eve_public.character.GetNamesByUserResponse"
-                    ),
+                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.character.GetNamesByUserResponse"),
                     value: out,
                 })
             }),
         );
 
         // 3. Q-7: Space, Celestials, Navigation, Insurgency & DBS Services
-        crate::services::quasar_space_services::register_handlers(self, Arc::clone(&db));
+        crate::services::quasar_space_services::register_handlers(self, Arc::clone(&db), Arc::clone(&sde));
 
         // 4. Q-8: Sovereignty, Faction Warfare & Operations Services
-        crate::services::quasar_sov_services::register_handlers(self, Arc::clone(&db));
+        crate::services::quasar_sov_services::register_handlers(self, Arc::clone(&db), Arc::clone(&sde));
 
         // 5. Q-9: Cosmetics, SKINR, Titles, Heraldry & App Services
-        crate::services::quasar_cosmetics_services::register_handlers(self, Arc::clone(&db));
+        crate::services::quasar_cosmetics_services::register_handlers(self, Arc::clone(&db), Arc::clone(&sde));
 
         // 6. Q-3: Identity, Accounts, Entitlements, Store & Payment Services
         crate::services::quasar_auth_user::register_handlers(self, Arc::clone(&db));
@@ -461,10 +429,7 @@ impl PublicGatewayRouter {
         crate::services::quasar_payment_store::register_handlers(self, Arc::clone(&db));
 
         // 7. Quasar Character & Progression Track (Q-4) handlers
-        crate::services::quasar_progression::register_all_progression_handlers(
-            self,
-            Arc::clone(&db),
-        );
+        crate::services::quasar_progression::register_all_progression_handlers(self, Arc::clone(&db));
     }
 
     /// Server-side policy determining whether a Quasar request message type requires an active character.
@@ -537,6 +502,10 @@ impl PublicGatewayRouter {
             return false;
         }
         true
+    }
+
+    pub fn requires_admin_role(normalized_type_name: &str) -> bool {
+        normalized_type_name.contains(".admin.")
     }
 
     pub fn default_app_instance_uuid(session_id: u64) -> Vec<u8> {
@@ -884,13 +853,18 @@ impl PublicGatewayRouter {
             );
         }
 
-        // Enforce server-side active-character policy for character-scoped message types
+        // Enforce server-side active-character and admin/GM role policies
         if Self::requires_active_character(&norm_type) && session_cid.is_none() {
             return build_response(
                 STATUS_FORBIDDEN,
-                format!(
-                    "Active character selection required for character-scoped request '{norm_type}'"
-                ),
+                format!("Active character selection required for character-scoped request '{norm_type}'"),
+                None,
+            );
+        }
+        if Self::requires_admin_role(&norm_type) && !session.has_gm_role() {
+            return build_response(
+                STATUS_FORBIDDEN,
+                format!("Admin/GM role required for administrative gateway request '{norm_type}'"),
                 None,
             );
         }
@@ -927,7 +901,7 @@ impl PublicGatewayRouter {
             Some(session_uid),
             session_cid,
             session.corporation_id.map(|c| c as u32),
-            session.corp_role,
+            session.corp_role | (session.role & eve_machonet::service_roles::ROLE_GM_MASK),
             self.tenant.clone(),
             self.gateway_instance_uuid.clone(),
             now_unix,
@@ -1145,6 +1119,14 @@ pub fn notice_to_pyrep(notice: &EvePublicNotice) -> PyRep {
         ("payload", PyRep::Bytes(payload_bytes)),
         ("notice_proto", PyRep::Bytes(raw)),
     ])
+}
+
+pub fn require_admin_role(ctx: &AuthoritativeContext) -> Result<(), (u32, String)> {
+    let mask = ctx.identity.as_ref().and_then(|id| id.roles.as_ref()).map_or(0, |r| r.bitmask);
+    if (mask & eve_machonet::service_roles::ROLE_GM_MASK) == 0 {
+        return Err((STATUS_FORBIDDEN, "Admin/GM role required".into()));
+    }
+    Ok(())
 }
 
 /// Validates raw `WireMessage` sanity when decoding untrusted frames.

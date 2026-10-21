@@ -39,6 +39,7 @@ fn build_sess(sid: u64, cid: u32, corp_id: u32) -> SessionState {
     sess.character_id = Some(cid as i64);
     sess.corporation_id = Some(corp_id as i64);
     sess.solar_system_id = Some(30_000_142);
+    sess.role = eve_machonet::service_roles::ROLE_GM_DEFAULT;
     sess
 }
 
@@ -212,7 +213,18 @@ async fn quasar_daily_goals_lifecycle_and_rewards() {
     .await;
     assert_eq!(def_rsp.status_code, STATUS_OK);
 
-    // 3. Increment progress on goal #1 via eve_public.dailygoal.api.admin.ProgressRequest
+    // 3. Verify unprivileged session is rejected on .admin. endpoint, then increment with GM session
+    let mut unpriv_sess = sess.clone();
+    unpriv_sess.role = 0;
+    let unpriv_rsp = quasar_rpc(
+        &ctx,
+        &mut unpriv_sess,
+        "eve_public.dailygoal.api.admin.ProgressRequest",
+        make_admin_progress(target_uuid, 2),
+    )
+    .await;
+    assert_eq!(unpriv_rsp.status_code, eve_server::quasar_gateway::STATUS_FORBIDDEN);
+
     let prog_req_val = make_admin_progress(target_uuid, 2);
     let prog_rsp = quasar_rpc(
         &ctx,

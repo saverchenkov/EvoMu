@@ -219,7 +219,7 @@ async fn q2_gateway_envelope_framing_status_codes_tenancy_and_idempotency() {
 
     let mut unimpl_type_req = ping_req.clone();
     unimpl_type_req.payload = Some(GoogleAny {
-        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.tournament.arena.api.GetAllRequest"),
+        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.character.Identifier"),
         value: Vec::new(),
     });
     assert_eq!(

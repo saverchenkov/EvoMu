@@ -19,6 +19,7 @@ fn make_auth_session(session_id: u64, user_id: i32, char_id: u32, corp_id: u32) 
     s.character_id = Some(char_id as i64);
     s.corporation_id = Some(corp_id as i64);
     s.solar_system_id = Some(30000142);
+    s.role = eve_machonet::service_roles::ROLE_GM_DEFAULT;
     s
 }
 

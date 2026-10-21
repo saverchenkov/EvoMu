@@ -529,6 +529,7 @@ pub fn register_achievement_handlers(
     router.register_handler(
         "eve_public.achievement.api.admin.AddProgressRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
+            crate::quasar_gateway::require_admin_role(ctx)?;
             let Some(cid) = ctx.effective_character_id() else {
                 return Err((STATUS_FORBIDDEN, "Active character required".into()));
             };
@@ -559,6 +560,7 @@ pub fn register_achievement_handlers(
     router.register_handler(
         "eve_public.achievement.api.admin.CompleteRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
+            crate::quasar_gateway::require_admin_role(ctx)?;
             let Some(cid) = ctx.effective_character_id() else {
                 return Err((STATUS_FORBIDDEN, "Active character required".into()));
             };
@@ -580,6 +582,7 @@ pub fn register_achievement_handlers(
     router.register_handler(
         "eve_public.achievement.api.admin.ResetRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
+            crate::quasar_gateway::require_admin_role(ctx)?;
             let Some(cid) = ctx.effective_character_id() else {
                 return Err((STATUS_FORBIDDEN, "Active character required".into()));
             };
@@ -601,6 +604,7 @@ pub fn register_achievement_handlers(
     router.register_handler(
         "eve_public.achievement.api.admin.ResetAllRequest",
         Arc::new(move |ctx, _any, _dyn| {
+            crate::quasar_gateway::require_admin_role(ctx)?;
             if let Some(cid) = ctx.effective_character_id() {
                 mgr.reset_all(cid);
             }
@@ -613,6 +617,7 @@ pub fn register_achievement_handlers(
     router.register_handler(
         "eve_public.achievement.category.api.admin.ResetRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
+            crate::quasar_gateway::require_admin_role(ctx)?;
             let Some(cid) = ctx.effective_character_id() else {
                 return Err((STATUS_FORBIDDEN, "Active character required".into()));
             };

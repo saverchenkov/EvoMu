@@ -16,21 +16,25 @@
 //! - `eve_public.cosmetic.structure.paintwork.api.GetRequest`, `GetAllInSolarSystemRequest`
 //! - `eve_public.cosmetic.structure.paintwork.license.api.GetAllOwnedByCorporationRequest`
 //! - `eve.quasar.config.api.requests.GetConfigRequest`
-//! - `eve_public.app.eveonline.career.goal.GetAllRequest`, `ClaimRewardRequest`
 //! - App telemetry & lifecycle events acknowledgment
 
 #![forbid(unsafe_code)]
 
 use super::quasar_space_services::{
-    build_dynamic_response, effective_roles, get_int_field, get_string_field,
+    apply_sde_record, build_dynamic_response, effective_roles, get_int_field, get_string_field,
 };
-use crate::quasar_gateway::{PublicGatewayRouter, STATUS_FORBIDDEN};
+use crate::quasar_gateway::{require_admin_role, PublicGatewayRouter, STATUS_FORBIDDEN};
 use eve_db::WorldRepository;
 use eve_proto::quasar::{DynamicValue, GoogleEmpty, QuasarMessage};
+use eve_sde::SdeRegistry;
 use std::sync::Arc;
 
 /// Registers all Q-9 cosmetics, heraldry, and app service handlers on the gateway router.
-pub fn register_handlers(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
+pub fn register_handlers(
+    router: &PublicGatewayRouter,
+    db: Arc<WorldRepository>,
+    sde: Arc<SdeRegistry>,
+) {
     let desc = Arc::clone(&router.descriptors);
 
     // 1. eve_public.cosmetic.ship.logo handlers (emblem display/clear)
@@ -39,11 +43,18 @@ pub fn register_handlers(router: &PublicGatewayRouter, _db: Arc<WorldRepository>
         router.register_handler(
             "eve_public.cosmetic.ship.logo.DisplayRequest",
             Arc::new(move |ctx, _any, _dyn_msg| {
-                let _char_id = match ctx.effective_character_id() {
+                let char_id = match ctx.effective_character_id() {
                     Some(c) => c,
                     None => return Err((STATUS_FORBIDDEN, "Active character required".into())),
                 };
-                build_dynamic_response(&d, "eve_public.cosmetic.ship.logo.DisplayResponse", |_resp| {})
+                let corp_id = ctx.effective_corporation_id().unwrap_or(98_000_001);
+                build_dynamic_response(
+                    &d,
+                    "eve_public.cosmetic.ship.logo.DisplayResponse",
+                    |resp| {
+                        apply_sde_record(resp, char_id as u64, corp_id as u64, "ShipLogoDisplayed");
+                    },
+                )
             }),
         );
     }
@@ -52,11 +63,14 @@ pub fn register_handlers(router: &PublicGatewayRouter, _db: Arc<WorldRepository>
         router.register_handler(
             "eve_public.cosmetic.ship.logo.ClearRequest",
             Arc::new(move |ctx, _any, _dyn_msg| {
-                let _char_id = match ctx.effective_character_id() {
+                let char_id = match ctx.effective_character_id() {
                     Some(c) => c,
                     None => return Err((STATUS_FORBIDDEN, "Active character required".into())),
                 };
-                build_dynamic_response(&d, "eve_public.cosmetic.ship.logo.ClearResponse", |_resp| {})
+                let corp_id = ctx.effective_corporation_id().unwrap_or(98_000_001);
+                build_dynamic_response(&d, "eve_public.cosmetic.ship.logo.ClearResponse", |resp| {
+                    apply_sde_record(resp, char_id as u64, corp_id as u64, "ShipLogoCleared");
+                })
             }),
         );
     }
@@ -76,13 +90,17 @@ pub fn register_handlers(router: &PublicGatewayRouter, _db: Arc<WorldRepository>
     }
     {
         let d = Arc::clone(&desc);
+        let sde_skin = Arc::clone(&sde);
         router.register_handler(
             "eve.cosmetic.ship.api.request.GetAllInBubbleRequest",
             Arc::new(move |_ctx, _any, _dyn_msg| {
+                let skin_id = sde_skin.skins.keys().next().copied().unwrap_or(1) as u64;
                 build_dynamic_response(
                     &d,
                     "eve.cosmetic.ship.api.request.GetAllInBubbleResponse",
-                    |_resp| {},
+                    |resp| {
+                        apply_sde_record(resp, 1_000_001, skin_id, "BubbleShipCosmetics");
+                    },
                 )
             }),
         );
@@ -115,7 +133,9 @@ pub fn register_handlers(router: &PublicGatewayRouter, _db: Arc<WorldRepository>
                 build_dynamic_response(
                     &d,
                     "eve.cosmetic.ship.skin.thirdparty.sequencing.api.GetTierPricingResponse",
-                    |_resp| {},
+                    |resp| {
+                        apply_sde_record(resp, 1, 50, "Tier1PlexPricing");
+                    },
                 )
             }),
         );
@@ -128,7 +148,9 @@ pub fn register_handlers(router: &PublicGatewayRouter, _db: Arc<WorldRepository>
                 build_dynamic_response(
                     &d,
                     "eve.cosmetic.ship.skin.thirdparty.sequencing.api.GetTierDurationsForCharacterResponse",
-                    |_resp| {},
+                    |resp| {
+                        apply_sde_record(resp, 1, 3_600, "Tier1DurationSeconds");
+                    },
                 )
             }),
         );
@@ -141,7 +163,9 @@ pub fn register_handlers(router: &PublicGatewayRouter, _db: Arc<WorldRepository>
                 build_dynamic_response(
                     &d,
                     "eve.cosmetic.ship.skin.thirdparty.sequencing.api.GetEarlyCompletionPricingResponse",
-                    |_resp| {},
+                    |resp| {
+                        apply_sde_record(resp, 1, 25, "EarlyCompletionPlexPricing");
+                    },
                 )
             }),
         );
@@ -205,14 +229,16 @@ pub fn register_handlers(router: &PublicGatewayRouter, _db: Arc<WorldRepository>
         router.register_handler(
             "eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetAllSavedRequest",
             Arc::new(move |ctx, _any, _dyn_msg| {
-                let _char_id = match ctx.effective_character_id() {
+                let char_id = match ctx.effective_character_id() {
                     Some(c) => c,
                     None => return Err((STATUS_FORBIDDEN, "Active character required".into())),
                 };
                 build_dynamic_response(
                     &d,
                     "eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetAllSavedResponse",
-                    |_resp| {},
+                    |resp| {
+                        apply_sde_record(resp, char_id as u64, 12_345, "SavedSkinrDraft");
+                    },
                 )
             }),
         );
@@ -343,10 +369,13 @@ pub fn register_handlers(router: &PublicGatewayRouter, _db: Arc<WorldRepository>
                         "Corporation director role required to set corporation palette".into(),
                     ));
                 }
+                let corp_id = ctx.effective_corporation_id().unwrap_or(98_000_001) as u64;
                 build_dynamic_response(
                     &d,
                     "eve.cosmetic.corporation.palette.api.GetResponse",
-                    |_resp| {},
+                    |resp| {
+                        apply_sde_record(resp, corp_id, 1, "UpdatedPalette");
+                    },
                 )
             }),
         );
@@ -479,60 +508,20 @@ pub fn register_handlers(router: &PublicGatewayRouter, _db: Arc<WorldRepository>
         );
     }
 
-    // 10. eve.quasar.config.api.requests.GetConfigRequest
+    // 10. eve.quasar.config.api.GetRequest
     {
         let d = Arc::clone(&desc);
         router.register_handler(
             "eve.quasar.config.api.GetRequest",
             Arc::new(move |_ctx, _any, _dyn_msg| {
-                build_dynamic_response(&d, "eve.quasar.config.api.GetResponse", |_resp| {})
+                build_dynamic_response(&d, "eve.quasar.config.api.GetResponse", |resp| {
+                    apply_sde_record(resp, 1, 2401, "tranquility");
+                })
             }),
         );
     }
 
-    // 11. eve_public.app.eveonline.career.goal handlers
-    {
-        let d = Arc::clone(&desc);
-        router.register_handler(
-            "eve_public.app.eveonline.career.goal.GetAllRequest",
-            Arc::new(move |ctx, _any, _dyn_msg| {
-                let char_id = match ctx.effective_character_id() {
-                    Some(c) => c,
-                    None => return Err((STATUS_FORBIDDEN, "Active character required".into())),
-                };
-                build_dynamic_response(
-                    &d,
-                    "eve_public.app.eveonline.career.goal.GetAllResponse",
-                    |resp| {
-                        resp.set(1, DynamicValue::Uint32(char_id));
-                    },
-                )
-            }),
-        );
-    }
-    {
-        let d = Arc::clone(&desc);
-        router.register_handler(
-            "eve_public.app.eveonline.career.goal.ClaimRewardRequest",
-            Arc::new(move |ctx, _any, dyn_msg| {
-                let _char_id = match ctx.effective_character_id() {
-                    Some(c) => c,
-                    None => return Err((STATUS_FORBIDDEN, "Active character required".into())),
-                };
-                let goal_id = get_int_field(dyn_msg, 1).unwrap_or(1);
-                build_dynamic_response(
-                    &d,
-                    "eve_public.app.eveonline.career.goal.ClaimRewardResponse",
-                    |resp| {
-                        resp.set(1, DynamicValue::Int64(goal_id));
-                        resp.set(2, DynamicValue::Bool(true)); // Reward claimed
-                    },
-                )
-            }),
-        );
-    }
-
-    // 12. App telemetry lifecycle events acknowledgment
+    // 11. App telemetry lifecycle events acknowledgment
     router.register_handler(
         "eve_public.app.launcher.distribution.api.LauncherDistributionClientStartRequest",
         Arc::new(|_ctx, _any, _dyn_msg| Ok(GoogleEmpty.to_any())),
@@ -546,7 +535,7 @@ pub fn register_handlers(router: &PublicGatewayRouter, _db: Arc<WorldRepository>
         Arc::new(|_ctx, _any, _dyn_msg| Ok(GoogleEmpty.to_any())),
     );
 
-    // 13. Public eve_public.cosmetic.* request packages (market, SKINR, licenses, sequencing, palette)
+    // 12. Public eve_public.cosmetic.* request packages (market, SKINR, licenses, sequencing, palette)
     for (req_name, rsp_name) in [
         (
             "eve_public.cosmetic.corporation.palette.api.GetRequest",
@@ -726,9 +715,26 @@ pub fn register_handlers(router: &PublicGatewayRouter, _db: Arc<WorldRepository>
         ),
     ] {
         let d = Arc::clone(&desc);
+        let db_cosm = Arc::clone(&db);
+        let sde_cosm = Arc::clone(&sde);
         router.register_handler(
             req_name,
-            Arc::new(move |_ctx, _any, _dyn_msg| build_dynamic_response(&d, rsp_name, |_resp| {})),
+            Arc::new(move |ctx, _any, _dyn_msg| {
+                if req_name.contains(".admin.") {
+                    require_admin_role(ctx)?;
+                }
+                let cid = ctx.effective_character_id().unwrap_or(90_000_001) as i64;
+                let corp_id = db_cosm.with_snapshot(|s| {
+                    s.characters
+                        .get(&cid)
+                        .map(|c| c.corporation_id as u64)
+                        .unwrap_or(98_000_001)
+                });
+                let skin_id = sde_cosm.skins.keys().next().copied().unwrap_or(1) as u64;
+                build_dynamic_response(&d, rsp_name, |resp| {
+                    apply_sde_record(resp, skin_id, corp_id, "SKINRParagon");
+                })
+            }),
         );
     }
 }

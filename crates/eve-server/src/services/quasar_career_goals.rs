@@ -415,6 +415,7 @@ pub fn register_career_goal_handlers(
     router.register_handler(
         "eve_public.career.goal.api.admin.ProgressRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
+            crate::quasar_gateway::require_admin_role(ctx)?;
             let Some(cid) = ctx.effective_character_id() else {
                 return Err((STATUS_FORBIDDEN, "Active character required".into()));
             };
@@ -441,6 +442,7 @@ pub fn register_career_goal_handlers(
     router.register_handler(
         "eve_public.career.goal.api.admin.CompleteRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
+            crate::quasar_gateway::require_admin_role(ctx)?;
             let Some(cid) = ctx.effective_character_id() else {
                 return Err((STATUS_FORBIDDEN, "Active character required".into()));
             };
@@ -526,6 +528,7 @@ pub fn register_career_goal_handlers(
     router.register_handler(
         "eve.career.goal.api.admin.requests.GetAllByCharacterRequest",
         Arc::new(move |ctx, _any, _dyn| {
+            crate::quasar_gateway::require_admin_role(ctx)?;
             let Some(cid) = ctx.effective_character_id() else {
                 return Err((STATUS_FORBIDDEN, "Active character required".into()));
             };
@@ -550,6 +553,7 @@ pub fn register_career_goal_handlers(
     router.register_handler(
         "eve.career.goal.api.admin.requests.CompleteRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
+            crate::quasar_gateway::require_admin_role(ctx)?;
             let Some(cid) = ctx.effective_character_id() else {
                 return Err((STATUS_FORBIDDEN, "Active character required".into()));
             };

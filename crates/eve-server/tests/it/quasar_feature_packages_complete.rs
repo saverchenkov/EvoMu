@@ -21,10 +21,10 @@ use eve_proto::quasar::{
     QuasarDescriptorRegistry, QuasarMessage, TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_proto::PyRep;
-use eve_server::quasar_gateway::{NoticeScope, PublicGatewayRouter, STATUS_OK};
+use eve_server::quasar_gateway::{NoticeScope, STATUS_OK};
 use eve_server::router::ServerContext;
+use eve_server::services::quasar_space_services::populate_domain_model_messages;
 use std::collections::HashMap;
-use std::sync::Arc;
 
 fn extract_response_proto(rep: &PyRep) -> EvePublicResponse {
     if let PyRep::KeyVal(entries) = rep {
@@ -69,14 +69,16 @@ fn make_session(sid: u64, uid: u64, cid: i64, corp_id: i64) -> SessionState {
     sess.character_id = Some(cid);
     sess.corporation_id = Some(corp_id);
     sess.solar_system_id = Some(30_000_142);
+    sess.role = eve_machonet::service_roles::ROLE_GM_DEFAULT;
     sess
 }
 
 fn verify_domain_model_messages(
-    descriptors: &QuasarDescriptorRegistry,
+    ctx: &ServerContext,
     domain: &str,
     expected_files: usize,
 ) {
+    let descriptors = &ctx.quasar_gateway.descriptors;
     let file_indices = descriptors
         .files_by_domain
         .get(domain)
@@ -85,6 +87,13 @@ fn verify_domain_model_messages(
         file_indices.len(),
         expected_files,
         "File count mismatch for domain '{domain}'"
+    );
+
+    let populated = populate_domain_model_messages(&ctx.sde, &ctx.db, descriptors, domain)
+        .unwrap_or_else(|e| panic!("Server domain model population failed for {domain}: {e:?}"));
+    assert!(
+        !populated.is_empty(),
+        "Server must populate at least one model message for domain '{domain}'"
     );
 
     let mut total_messages_verified = 0;
@@ -97,61 +106,15 @@ fn verify_domain_model_messages(
         for msg in &fd.messages {
             assert!(!msg.name.is_empty());
             assert!(!msg.full_name.is_empty());
-
-            let sample = descriptors
-                .instantiate_populated_sample(&msg.full_name, 42)
-                .unwrap_or_else(|e| panic!("Failed to instantiate {}: {e}", msg.full_name));
-
-            if !msg.fields.is_empty() {
-                assert!(
-                    !sample.fields.is_empty(),
-                    "Sample for {} should have populated fields",
-                    msg.full_name
-                );
-            }
-
-            let wire = descriptors
-                .encode_dynamic(&sample)
-                .unwrap_or_else(|e| panic!("Failed to encode {}: {e}", msg.full_name));
-            let decoded = descriptors
-                .decode_dynamic(&msg.full_name, &wire)
-                .unwrap_or_else(|e| panic!("Failed to decode {}: {e}", msg.full_name));
-            assert_eq!(decoded, sample, "Roundtrip mismatch for {}", msg.full_name);
-
-            let any = GoogleAny {
-                type_url: sample.type_url(),
-                value: wire,
-            };
-            assert_eq!(any.normalized_type_name(), msg.full_name);
-
+            assert!(
+                populated.iter().any(|any| any.normalized_type_name() == msg.full_name),
+                "Populated server output missing {}",
+                msg.full_name
+            );
             total_messages_verified += 1;
         }
     }
-    assert!(total_messages_verified > 0, "At least one message verified for domain '{domain}'");
-}
-
-fn register_dynamic_handler(
-    router: &PublicGatewayRouter,
-    req_type: &str,
-    resp_type: &str,
-) {
-    let desc = Arc::clone(&router.descriptors);
-    let resp_name = resp_type.to_string();
-    router.register_handler(
-        req_type,
-        Arc::new(move |_ctx, _any, _dyn_msg| {
-            let sample = desc
-                .instantiate_populated_sample(&resp_name, 1001)
-                .map_err(|e| (eve_server::quasar_gateway::STATUS_INTERNAL_ERROR, e.to_string()))?;
-            let val = desc
-                .encode_dynamic(&sample)
-                .map_err(|e| (eve_server::quasar_gateway::STATUS_INTERNAL_ERROR, e.to_string()))?;
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}{resp_name}"),
-                value: val,
-            })
-        }),
-    );
+    assert_eq!(populated.len(), total_messages_verified);
 }
 
 async fn dispatch_and_verify_request(
@@ -257,43 +220,43 @@ async fn test_quasar_model_messages_batch1() {
 
     // 1. Agent (2 files)
     assert_eq!(reg.files_by_domain.get("agent").unwrap().len(), 2);
-    verify_domain_model_messages(reg, "agent", 2);
+    verify_domain_model_messages(&ctx, "agent", 2);
     // 2. Ancestry (1 files)
     assert_eq!(reg.files_by_domain.get("ancestry").unwrap().len(), 1);
-    verify_domain_model_messages(reg, "ancestry", 1);
+    verify_domain_model_messages(&ctx, "ancestry", 1);
     // 3. Battlepass (6 files)
     assert_eq!(reg.files_by_domain.get("battlepass").unwrap().len(), 6);
-    verify_domain_model_messages(reg, "battlepass", 6);
+    verify_domain_model_messages(&ctx, "battlepass", 6);
     // 4. Bloodline (1 files)
     assert_eq!(reg.files_by_domain.get("bloodline").unwrap().len(), 1);
-    verify_domain_model_messages(reg, "bloodline", 1);
+    verify_domain_model_messages(&ctx, "bloodline", 1);
     // 5. Capacitor (1 files)
     assert_eq!(reg.files_by_domain.get("capacitor").unwrap().len(), 1);
-    verify_domain_model_messages(reg, "capacitor", 1);
+    verify_domain_model_messages(&ctx, "capacitor", 1);
     // 6. Constellation (2 files)
     assert_eq!(reg.files_by_domain.get("constellation").unwrap().len(), 2);
-    verify_domain_model_messages(reg, "constellation", 2);
+    verify_domain_model_messages(&ctx, "constellation", 2);
     // 7. Contextualoffer (1 files)
     assert_eq!(reg.files_by_domain.get("contextualoffer").unwrap().len(), 1);
-    verify_domain_model_messages(reg, "contextualoffer", 1);
+    verify_domain_model_messages(&ctx, "contextualoffer", 1);
     // 8. Csat (1 files)
     assert_eq!(reg.files_by_domain.get("csat").unwrap().len(), 1);
-    verify_domain_model_messages(reg, "csat", 1);
+    verify_domain_model_messages(&ctx, "csat", 1);
     // 9. Dynamicbountysystem (2 files)
     assert_eq!(reg.files_by_domain.get("dynamicbountysystem").unwrap().len(), 2);
-    verify_domain_model_messages(reg, "dynamicbountysystem", 2);
+    verify_domain_model_messages(&ctx, "dynamicbountysystem", 2);
     // 10. Epicarc (1 files)
     assert_eq!(reg.files_by_domain.get("epicarc").unwrap().len(), 1);
-    verify_domain_model_messages(reg, "epicarc", 1);
+    verify_domain_model_messages(&ctx, "epicarc", 1);
     // 11. Fighter (1 files)
     assert_eq!(reg.files_by_domain.get("fighter").unwrap().len(), 1);
-    verify_domain_model_messages(reg, "fighter", 1);
+    verify_domain_model_messages(&ctx, "fighter", 1);
     // 12. Login (2 files)
     assert_eq!(reg.files_by_domain.get("login").unwrap().len(), 2);
-    verify_domain_model_messages(reg, "login", 2);
+    verify_domain_model_messages(&ctx, "login", 2);
     // 13. Membership (4 files)
     assert_eq!(reg.files_by_domain.get("membership").unwrap().len(), 4);
-    verify_domain_model_messages(reg, "membership", 4);
+    verify_domain_model_messages(&ctx, "membership", 4);
 }
 
 #[tokio::test]
@@ -319,40 +282,40 @@ async fn test_quasar_model_messages_batch2() {
 
     // 14. Module (2 files)
     assert_eq!(reg.files_by_domain.get("module").unwrap().len(), 2);
-    verify_domain_model_messages(reg, "module", 2);
+    verify_domain_model_messages(&ctx, "module", 2);
     // 15. Omega (1 files)
     assert_eq!(reg.files_by_domain.get("omega").unwrap().len(), 1);
-    verify_domain_model_messages(reg, "omega", 1);
+    verify_domain_model_messages(&ctx, "omega", 1);
     // 16. Operation (4 files)
     assert_eq!(reg.files_by_domain.get("operation").unwrap().len(), 4);
-    verify_domain_model_messages(reg, "operation", 4);
+    verify_domain_model_messages(&ctx, "operation", 4);
     // 17. Race (1 files)
     assert_eq!(reg.files_by_domain.get("race").unwrap().len(), 1);
-    verify_domain_model_messages(reg, "race", 1);
+    verify_domain_model_messages(&ctx, "race", 1);
     // 18. Raffle (1 files)
     assert_eq!(reg.files_by_domain.get("raffle").unwrap().len(), 1);
-    verify_domain_model_messages(reg, "raffle", 1);
+    verify_domain_model_messages(&ctx, "raffle", 1);
     // 19. Region (2 files)
     assert_eq!(reg.files_by_domain.get("region").unwrap().len(), 2);
-    verify_domain_model_messages(reg, "region", 2);
+    verify_domain_model_messages(&ctx, "region", 2);
     // 20. School (1 files)
     assert_eq!(reg.files_by_domain.get("school").unwrap().len(), 1);
-    verify_domain_model_messages(reg, "school", 1);
+    verify_domain_model_messages(&ctx, "school", 1);
     // 21. Seasonalevent (1 files)
     assert_eq!(reg.files_by_domain.get("seasonalevent").unwrap().len(), 1);
-    verify_domain_model_messages(reg, "seasonalevent", 1);
+    verify_domain_model_messages(&ctx, "seasonalevent", 1);
     // 22. Starbase (2 files)
     assert_eq!(reg.files_by_domain.get("starbase").unwrap().len(), 2);
-    verify_domain_model_messages(reg, "starbase", 2);
+    verify_domain_model_messages(&ctx, "starbase", 2);
     // 23. Ui (8 files)
     assert_eq!(reg.files_by_domain.get("ui").unwrap().len(), 8);
-    verify_domain_model_messages(reg, "ui", 8);
+    verify_domain_model_messages(&ctx, "ui", 8);
     // 24. Universe (3 files)
     assert_eq!(reg.files_by_domain.get("universe").unwrap().len(), 3);
-    verify_domain_model_messages(reg, "universe", 3);
+    verify_domain_model_messages(&ctx, "universe", 3);
     // 25. Wormhole (1 files)
     assert_eq!(reg.files_by_domain.get("wormhole").unwrap().len(), 1);
-    verify_domain_model_messages(reg, "wormhole", 1);
+    verify_domain_model_messages(&ctx, "wormhole", 1);
 }
 
 #[tokio::test]
@@ -373,12 +336,6 @@ async fn test_quasar_service_routing_batch1a() {
     let ctx = ServerContext::new();
     let reg = &ctx.quasar_gateway.descriptors;
     let mut sess = make_session(30_001, 101, 90_000_101, 98_000_001);
-
-    register_dynamic_handler(
-        &ctx.quasar_gateway,
-        "eve.client.host.GetRequest",
-        "eve.client.host.GetResponse",
-    );
 
     ctx.quasar_gateway.subscribe_session(&sess, Vec::new(), ctx.now_unix());
 
@@ -496,8 +453,6 @@ async fn test_quasar_service_routing_batch2a() {
     let reg = &ctx.quasar_gateway.descriptors;
     let mut sess = make_session(30_002, 102, 90_000_102, 98_000_002);
 
-    register_dynamic_handler(&ctx.quasar_gateway, "eve.ship.api.GetRequest", "eve.ship.api.GetResponse");
-
     ctx.quasar_gateway.subscribe_session(&sess, Vec::new(), ctx.now_unix());
 
     // 19. Pirate (13 files)
@@ -555,11 +510,6 @@ async fn test_quasar_service_routing_batch2b() {
     let ctx = ServerContext::new();
     let reg = &ctx.quasar_gateway.descriptors;
     let mut sess = make_session(30_012, 102, 90_000_102, 98_000_002);
-
-    register_dynamic_handler(&ctx.quasar_gateway, "eve.acl.api.GetRequest", "eve.acl.api.GetResponse");
-    register_dynamic_handler(&ctx.quasar_gateway, "eve.content.GetAllRequest", "eve.content.GetAllResponse");
-    register_dynamic_handler(&ctx.quasar_gateway, "eve.debug.monolith.externalqueue.EmitProtobufEventRequest", "eve.debug.monolith.externalqueue.EmitProtobufEventResponse");
-    register_dynamic_handler(&ctx.quasar_gateway, "eve.id.api.GetRequest", "eve.id.api.GetResponse");
 
     ctx.quasar_gateway.subscribe_session(&sess, Vec::new(), ctx.now_unix());
 
@@ -619,10 +569,6 @@ async fn test_quasar_service_routing_batch3a() {
     let ctx = ServerContext::new();
     let reg = &ctx.quasar_gateway.descriptors;
     let mut sess = make_session(30_003, 103, 90_000_103, 98_000_003);
-
-    register_dynamic_handler(&ctx.quasar_gateway, "eve.mission.api.GetCompletedCountRequest", "eve.mission.api.GetCompletedCountResponse");
-    register_dynamic_handler(&ctx.quasar_gateway, "eve.monolith.character.location.GetRequest", "eve.monolith.character.location.GetResponse");
-    register_dynamic_handler(&ctx.quasar_gateway, "eve.space.api.GetDefaultTagRegistryVersionRequest", "eve.space.api.GetDefaultTagRegistryVersionResponse");
 
     ctx.quasar_gateway.subscribe_session(&sess, Vec::new(), ctx.now_unix());
 
@@ -685,14 +631,6 @@ async fn test_quasar_service_routing_batch3b() {
     let ctx = ServerContext::new();
     let reg = &ctx.quasar_gateway.descriptors;
     let mut sess = make_session(30_013, 103, 90_000_103, 98_000_003);
-
-    register_dynamic_handler(&ctx.quasar_gateway, "eve.star.resources.api.GetPowerProductionRequest", "eve.star.resources.api.GetPowerProductionResponse");
-    register_dynamic_handler(&ctx.quasar_gateway, "eve.stargate.lock.api.admin.GetAllRequest", "eve.stargate.lock.api.admin.GetAllResponse");
-    register_dynamic_handler(&ctx.quasar_gateway, "eve.starterspace.admin.ResetJumpShipCasterRequest", "eve.starterspace.admin.ResetJumpShipCasterResponse");
-    register_dynamic_handler(&ctx.quasar_gateway, "eve.station.owner.GetStationOwnerRequest", "eve.station.owner.GetStationOwnerResponse");
-    register_dynamic_handler(&ctx.quasar_gateway, "eve.tournament.arena.api.GetAllRequest", "eve.tournament.arena.api.GetAllResponse");
-    register_dynamic_handler(&ctx.quasar_gateway, "eve.vanguard.commission.assignment.admin.api.TriggerCompletedEventRequest", "eve.vanguard.commission.assignment.admin.api.TriggerCompletedEventResponse");
-    register_dynamic_handler(&ctx.quasar_gateway, "eve.vendors.epic.api.GetUserByEveUserIDRequest", "eve.vendors.epic.api.GetUserByEveUserIDResponse");
 
     ctx.quasar_gateway.subscribe_session(&sess, Vec::new(), ctx.now_unix());
 

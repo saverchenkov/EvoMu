@@ -217,7 +217,11 @@ impl DailyGoalManager {
         character_id: u32,
         goal_uuid: &[u8; 16],
         now_unix: u64,
+        db: &Arc<WorldRepository>,
     ) -> Result<CharacterDailyGoal, (u32, String)> {
+        // DERIVED: Daily goal pay-for-completion buyout cost in ISK
+        const DAILY_GOAL_PAY_COMPLETION_COST_ISK: i64 = 100_000;
+
         let mut map = self
             .character_goals
             .write()
@@ -240,8 +244,28 @@ impl DailyGoalManager {
 
         for g in goals.iter_mut() {
             if &g.uuid == goal_uuid {
+                if g.completed {
+                    return Err((STATUS_BAD_REQUEST, "Daily goal already completed".into()));
+                }
+                let cost = IskCents::from_isk(DAILY_GOAL_PAY_COMPLETION_COST_ISK);
+                let mut payment_ok = false;
+                db.with_mut_snapshot(|snap| {
+                    if let Some(ch) = snap.characters.get_mut(&(character_id as i64)) {
+                        if ch.balance >= cost {
+                            ch.balance = ch.balance.checked_sub(cost).unwrap_or(ch.balance);
+                            payment_ok = true;
+                        }
+                    }
+                });
+                if !payment_ok {
+                    return Err((
+                        STATUS_BAD_REQUEST,
+                        "Insufficient funds to pay for daily goal completion".into(),
+                    ));
+                }
                 g.completed = true;
                 g.paid_completion = true;
+                g.current_progress = g.template.target;
                 g.completed_at_unix = Some(now_unix);
                 return Ok(g.clone());
             }
@@ -473,6 +497,7 @@ pub fn register_daily_goal_handlers(
 
     // 7. eve_public.dailygoal.api.PayForCompletionRequest -> PayForCompletionResponse
     let mgr = Arc::clone(&manager);
+    let db_pay = Arc::clone(&db);
     router.register_handler(
         "eve_public.dailygoal.api.PayForCompletionRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
@@ -482,7 +507,7 @@ pub fn register_daily_goal_handlers(
             let Some(target_uuid) = extract_uuid(dyn_msg, 1) else {
                 return Err((STATUS_BAD_REQUEST, "Missing goal Identifier.uuid".into()));
             };
-            let _ = mgr.pay_for_completion(cid, &target_uuid, ctx.now_unix())?;
+            let _ = mgr.pay_for_completion(cid, &target_uuid, ctx.now_unix(), &db_pay)?;
             Ok(GoogleEmpty.to_any())
         }),
     );
@@ -492,6 +517,7 @@ pub fn register_daily_goal_handlers(
     router.register_handler(
         "eve_public.dailygoal.api.admin.ProgressRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
+            crate::quasar_gateway::require_admin_role(ctx)?;
             let Some(cid) = ctx.effective_character_id() else {
                 return Err((STATUS_FORBIDDEN, "Active character required".into()));
             };
@@ -594,6 +620,7 @@ pub fn register_daily_goal_handlers(
     router.register_handler(
         "eve.dailygoal.api.admin.AutoRedeemRequest",
         Arc::new(move |ctx, _any, _dyn| {
+            crate::quasar_gateway::require_admin_role(ctx)?;
             if let Some(cid) = ctx.effective_character_id() {
                 let goals = mgr.get_or_init_goals(cid);
                 for g in goals.iter().filter(|g| g.completed && !g.claimed) {

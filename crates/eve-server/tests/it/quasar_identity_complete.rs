@@ -128,6 +128,7 @@ async fn test_q3_user_accounts_lifecycle() {
     assert!(rsp.payload.unwrap().type_url.ends_with("GetDetailsResponse"));
 
     // 3. eve.user.api.admin.SetEmailAddressRequest then eve.user.email.api.SendWelcomeRequest
+    session.role = eve_machonet::service_roles::ROLE_GM_DEFAULT;
     let mut email_set_body = Vec::new();
     encode_string_field(2, "new_pilot_email@evomu.local", &mut email_set_body);
     let req = build_public_request(ctx.now_unix(), "eve.user.api.admin.SetEmailAddressRequest", email_set_body);

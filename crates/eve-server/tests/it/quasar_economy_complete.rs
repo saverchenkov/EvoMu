@@ -542,6 +542,7 @@ async fn test_quasar_assetholding_entitlements() {
     assert_eq!(rsp.status_code, STATUS_OK, "Status: {}, message: {}", rsp.status_code, rsp.status_message);
 
     // 3. Admin Entitlement Handlers
+    sess.role = eve_machonet::service_roles::ROLE_GM_DEFAULT;
     let req = make_request("eve.assetholding.entitlement.api.admin.RedeemRequest", ent_payload.clone(), b"ah-13");
     let rep = ctx.dispatch_rpc(&mut sess, "publicGatewaySvc", None, "SendRequest", &[PyRep::Bytes(req.encode_proto())], &empty_kw, None).await.expect("rpc");
     let rsp = extract_response_proto(&rep);
@@ -740,6 +741,7 @@ async fn test_quasar_industry_planetary_moon_asteroidbelt() {
     assert_eq!(rsp.status_code, STATUS_OK, "Status: {}, message: {}", rsp.status_code, rsp.status_message);
     assert!(rsp.payload.unwrap().type_url.ends_with("GetPlanetsInSolarSystemResponse"));
 
+    sess.role = eve_machonet::service_roles::ROLE_GM_DEFAULT;
     let req = make_request("eve.planet.skyhook.admin.api.ChangeOwnerRequest", Vec::new(), b"pln-03");
     let rep = ctx.dispatch_rpc(&mut sess, "publicGatewaySvc", None, "SendRequest", &[PyRep::Bytes(req.encode_proto())], &empty_kw, None).await.expect("rpc");
     let rsp = extract_response_proto(&rep);
