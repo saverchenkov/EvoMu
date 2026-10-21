@@ -268,6 +268,9 @@ def main():
         "T-6": lambda rid: rid.startswith("journey:"),                    # harness drives every real-client journey
         "ESI-1": lambda rid: rid == "journey:launch_login",               # real client logs in via emulated launcher
         "ESI-7": lambda rid: rid.startswith("esi:") or rid == "journey:esi_external",  # Phase ESI exit gate + esi_external journey
+        "Q-9": lambda rid: rid.startswith(("quasar:", "feat:quasar.")) or rid in ("journey:daily_goals_events", "journey:cosmetics_store"),
+        "Z-7": lambda rid: rid.startswith("journey:"),                    # all 29 journeys pass on real client
+        "Z-8": lambda rid: rid != "plan:Z-8",                             # final gate: every other row DONE or NA
     }
     all_ids = [r["id"] for r in rows]
     for r in rows:
