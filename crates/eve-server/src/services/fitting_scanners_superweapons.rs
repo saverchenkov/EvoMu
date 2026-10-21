@@ -479,41 +479,32 @@ pub(crate) async fn handle_scanner_analyzer_entosis_activation(
                     message: "Data/Relic Analyzer requires a locked target container".into(),
                 }));
             };
+            if let Err(e) = scanner_range_check(ctx, sys, ship_id, target_id, mod_state, 54).await {
+                return Some(Err(e));
+            }
             let skills = ctx.character_skill_levels(char_id);
-            let hack_lvl = skills.get(&3405).copied().unwrap_or(0)
-                .max(skills.get(&3408).copied().unwrap_or(0));
-            let base_coherence = mod_state
-                .get_attribute(1909, &ctx.sde)
-                .max(mod_type.default_attributes.get(&1909).copied().unwrap_or(40.0));
-            let base_strength = mod_state
-                .get_attribute(1910, &ctx.sde)
-                .max(mod_type.default_attributes.get(&1910).copied().unwrap_or(20.0));
+            let hack_lvl = skills.get(&3405).copied().unwrap_or(0).max(skills.get(&3408).copied().unwrap_or(0));
+            let base_coherence = mod_state.get_attribute(1909, &ctx.sde).max(mod_type.default_attributes.get(&1909).copied().unwrap_or(40.0));
+            let base_strength = mod_state.get_attribute(1910, &ctx.sde).max(mod_type.default_attributes.get(&1910).copied().unwrap_or(20.0));
             let coherence = base_coherence + 10.0 * (hack_lvl as f64);
             let strength = base_strength + 2.0 * (hack_lvl as f64);
 
-            scanners_superweapons_state()
-                .write()
-                .unwrap_or_else(|e| e.into_inner())
-                .hacking_states
-                .insert(
-                    target_id,
-                    HackingSessionState {
-                        container_id: target_id,
-                        analyzer_module_id: module_id,
-                        virus_coherence: coherence,
-                        virus_strength: strength,
-                        core_hp_remaining: 0.0,
-                        unlocked: true,
-                    },
-                );
-            container_ship_state()
-                .write()
-                .unwrap_or_else(|e| e.into_inner())
-                .unlocked_containers
-                .insert((target_id, char_id));
+            scanners_superweapons_state().write().unwrap_or_else(|e| e.into_inner()).hacking_states.insert(
+                target_id,
+                HackingSessionState {
+                    container_id: target_id,
+                    analyzer_module_id: module_id,
+                    virus_coherence: coherence,
+                    virus_strength: strength,
+                    core_hp_remaining: 0.0,
+                    unlocked: true,
+                },
+            );
+            container_ship_state().write().unwrap_or_else(|e| e.into_inner()).unlocked_containers.insert((target_id, char_id));
             ctx.db.with_mut_snapshot(|snap| {
+                let locked_by_job = snap.is_item_locked_in_contract_or_job(target_id);
                 if let Some(cont) = snap.items.get_mut(&target_id) {
-                    if cont.flag == InventoryFlag::Locked {
+                    if !locked_by_job && (30_000_000..=39_999_999).contains(&cont.location_id) && cont.flag == InventoryFlag::Locked {
                         cont.flag = InventoryFlag::None;
                     }
                 }
@@ -985,6 +976,12 @@ pub(crate) async fn handle_superweapons_dbuffs_and_clones(
             let now_unix = ctx.now_unix_secs();
 
             if method == "ApplyBuffsToItems" {
+                if !session.has_gm_role() {
+                    return Some(Err(BridgeRpcError {
+                        code: "GMRoleRequired".into(),
+                        message: "ApplyBuffsToItems requires GM/Admin authority".into(),
+                    }));
+                }
                 let mut target_ships = Vec::new();
                 if let Some(PyRep::List(list) | PyRep::Tuple(list)) = args.first() {
                     for el in list {
@@ -1100,17 +1097,19 @@ pub(crate) async fn handle_superweapons_dbuffs_and_clones(
             let ship_id = session.ship_id.unwrap_or(0);
 
             if method == "ResetSystemWideEffects" {
+                if !session.has_gm_role() {
+                    return Some(Err(BridgeRpcError {
+                        code: "GMRoleRequired".into(),
+                        message: "ResetSystemWideEffects requires GM/Admin authority".into(),
+                    }));
+                }
                 let reset_sys = args
                     .first()
                     .and_then(|a| a.as_i64())
                     .filter(|&s| s >= 30_000_000)
                     .map(|s| s as u32)
                     .unwrap_or(sys_id);
-                let prev = scanners_superweapons_state()
-                    .write()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .system_wide_effects
-                    .remove(&reset_sys);
+                let prev = scanners_superweapons_state().write().unwrap_or_else(|e| e.into_inner()).system_wide_effects.remove(&reset_sys);
                 if ship_id > 0 {
                     ctx.invalidate_ship_fitting(ship_id);
                 }
@@ -1129,28 +1128,30 @@ pub(crate) async fn handle_superweapons_dbuffs_and_clones(
                 ])));
             }
 
-            let req_tid_opt = if args.len() >= 2 {
-                args.get(1).and_then(|a| a.as_i64())
-            } else {
-                args.first()
-                    .and_then(|a| a.as_i64())
-                    .filter(|&t| t < 30_000_000)
-            };
-            if let Some(req_tid) = req_tid_opt.filter(|&t| t > 0) {
-                scanners_superweapons_state()
-                    .write()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .system_wide_effects
-                    .insert(sys_id, req_tid as u32);
-                if ship_id > 0 {
-                    ctx.invalidate_ship_fitting(ship_id);
+            if method == "RefreshSystemWideEnvironment" {
+                if !session.has_gm_role() {
+                    return Some(Err(BridgeRpcError {
+                        code: "GMRoleRequired".into(),
+                        message: "RefreshSystemWideEnvironment requires GM/Admin authority".into(),
+                    }));
                 }
-                ctx.notify(
-                    crate::router::NotificationTarget::Character(char_id),
-                    "OnSystemWideEffectAdd",
-                    "charid",
-                    vec![PyRep::Integer(sys_id as i64), PyRep::Integer(req_tid)],
-                );
+                let req_tid_opt = if args.len() >= 2 {
+                    args.get(1).and_then(|a| a.as_i64())
+                } else {
+                    args.first().and_then(|a| a.as_i64()).filter(|&t| t < 30_000_000)
+                };
+                if let Some(req_tid) = req_tid_opt.filter(|&t| t > 0) {
+                    scanners_superweapons_state().write().unwrap_or_else(|e| e.into_inner()).system_wide_effects.insert(sys_id, req_tid as u32);
+                    if ship_id > 0 {
+                        ctx.invalidate_ship_fitting(ship_id);
+                    }
+                    ctx.notify(
+                        crate::router::NotificationTarget::Character(char_id),
+                        "OnSystemWideEffectAdd",
+                        "charid",
+                        vec![PyRep::Integer(sys_id as i64), PyRep::Integer(req_tid)],
+                    );
+                }
             }
 
             let active_tid_opt = scanners_superweapons_state()
@@ -1269,30 +1270,45 @@ pub(crate) async fn handle_superweapons_dbuffs_and_clones(
             }
 
             if method == "AcceptShipCloneInstallation" {
-                let offer_opt = scanners_superweapons_state()
-                    .write()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .ship_clone_offers
-                    .remove(&char_id);
-                let host_ship_id = offer_opt
-                    .map(|(_, sid)| sid)
-                    .or_else(|| args.first().and_then(|a| a.as_i64()))
-                    .or(session.ship_id)
-                    .unwrap_or(0);
-                if host_ship_id <= 0 {
+                let offer_opt = {
+                    let mut st = scanners_superweapons_state().write().unwrap_or_else(|e| e.into_inner());
+                    if let Some(off) = st.ship_clone_offers.remove(&char_id) {
+                        Some(off)
+                    } else {
+                        let self_key = st.ship_clone_offers.iter().find(|(_, (offerer, _))| *offerer == char_id).map(|(&k, _)| k);
+                        self_key.and_then(|k| st.ship_clone_offers.remove(&k))
+                    }
+                };
+                let Some((_, host_ship_id)) = offer_opt else {
                     return Some(Err(BridgeRpcError {
                         code: "NoCloneOfferFound".into(),
                         message: "No pending ship clone installation offer found".into(),
                     }));
-                }
-                let clone_id = ctx.db.with_mut_snapshot(|snap| {
+                };
+                let skills = ctx.character_skill_levels(char_id);
+                let max_clones = ((skills.get(&33399).copied().unwrap_or(0) + skills.get(&33407).copied().unwrap_or(0)) as usize).max(1);
+                let clone_res = ctx.db.try_with_mut_snapshot(|snap| {
+                    let valid_hull = snap.items.get(&host_ship_id).and_then(|s| ctx.sde.types.get(&s.type_id)).is_some_and(|t| matches!(t.group_id, 30 | 883));
+                    let has_mod = snap.items.values().any(|i| {
+                        i.location_id == host_ship_id
+                            && (i.type_id == 23735 || ctx.sde.types.get(&i.type_id).is_some_and(|t| t.group_id == 815))
+                            && snap.module_online_states.get(&i.item_id).copied().unwrap_or(true)
+                    });
+                    if !valid_hull || !has_mod {
+                        return Err(BridgeRpcError {
+                            code: "NoActiveCloneVatBay".into(),
+                            message: "Host ship does not have an online Clone Vat Bay".into(),
+                        });
+                    }
+                    let existing_count = snap.jump_clones.get(&char_id).map_or(0, |v| v.len());
+                    if existing_count >= max_clones {
+                        return Err(BridgeRpcError {
+                            code: "JumpCloneLimitReached".into(),
+                            message: format!("Character {char_id} has {existing_count} jump clones (max {max_clones})"),
+                        });
+                    }
                     // Consume 1 Liquid Ozone (16273) on host ship if present
-                    if let Some(oz_id) = snap
-                        .items
-                        .values()
-                        .find(|i| i.location_id == host_ship_id && i.type_id == 16273 && i.quantity > 0)
-                        .map(|i| i.item_id)
-                    {
+                    if let Some(oz_id) = snap.items.values().find(|i| i.location_id == host_ship_id && i.type_id == 16273 && i.quantity > 0).map(|i| i.item_id) {
                         let mut rem = 0;
                         if let Some(it) = snap.items.get_mut(&oz_id) {
                             it.quantity -= 1;
@@ -1304,17 +1320,18 @@ pub(crate) async fn handle_superweapons_dbuffs_and_clones(
                     }
                     snap.next_entity_id += 1;
                     let cid = snap.next_entity_id;
-                    snap.jump_clones
-                        .entry(char_id)
-                        .or_default()
-                        .push(eve_db::JumpCloneRecord {
-                            jump_clone_id: cid,
-                            character_id: char_id,
-                            location_id: host_ship_id,
-                            implants: Vec::new(),
-                        });
-                    cid
+                    snap.jump_clones.entry(char_id).or_default().push(eve_db::JumpCloneRecord {
+                        jump_clone_id: cid,
+                        character_id: char_id,
+                        location_id: host_ship_id,
+                        implants: Vec::new(),
+                    });
+                    Ok(cid)
                 });
+                let clone_id = match clone_res {
+                    Ok(c) => c,
+                    Err(e) => return Some(Err(e)),
+                };
                 ctx.notify(
                     crate::router::NotificationTarget::Character(char_id),
                     "OnShipJumpCloneCacheInvalidated",

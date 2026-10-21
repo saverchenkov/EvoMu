@@ -330,7 +330,7 @@ pub async fn handle(
             Some(Ok(PyRep::keyval([("deleted", PyRep::Bool(true))])))
         }
 
-        ("allianceRegistry", "Bind" | "SetSessionCheck") => {
+        ("allianceRegistry", "Bind") | ("allianceRegistry", "SetSessionCheck") => {
             Some(Ok(PyRep::None))
         }
 

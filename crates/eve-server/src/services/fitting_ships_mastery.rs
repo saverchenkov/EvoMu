@@ -231,6 +231,51 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
             ) {
                 return Some(Err(e));
             }
+            let store_auth = ctx.db.with_snapshot(|snap| {
+                let Some(it) = snap.items.get(&item_id) else {
+                    return Err(BridgeRpcError {
+                        code: "ItemNotFound".into(),
+                        message: format!("Item {item_id} not found"),
+                    });
+                };
+                let Some(host) = snap.items.get(&host_ship_id) else {
+                    return Err(BridgeRpcError {
+                        code: "ShipNotFound".into(),
+                        message: format!("Host ship {host_ship_id} not found"),
+                    });
+                };
+                if snap
+                    .characters
+                    .values()
+                    .any(|c| c.character_id != char_id && c.active_ship_id == item_id && c.station_id.is_none())
+                {
+                    return Err(BridgeRpcError {
+                        code: "ShipPiloted".into(),
+                        message: format!("Ship {item_id} is currently piloted by another character"),
+                    });
+                }
+                let ch_loc = snap
+                    .characters
+                    .get(&char_id)
+                    .and_then(|c| c.station_id.or(c.structure_id).or(Some(c.solar_system_id as i64)))
+                    .unwrap_or(0);
+                if it.owner_id != char_id && host.owner_id != char_id {
+                    return Err(BridgeRpcError {
+                        code: "OwnershipViolation".into(),
+                        message: format!("Character {char_id} does not own item {item_id} or host ship {host_ship_id}"),
+                    });
+                }
+                if it.location_id != ch_loc && it.location_id != host_ship_id && it.owner_id != char_id {
+                    return Err(BridgeRpcError {
+                        code: "InvalidLocation".into(),
+                        message: format!("Item {item_id} is not in range or at the same location"),
+                    });
+                }
+                Ok(())
+            });
+            if let Err(e) = store_auth {
+                return Some(Err(e));
+            }
             ctx.db.with_mut_snapshot(|snap| {
                 if let Some(it) = snap.items.get_mut(&item_id) {
                     it.location_id = host_ship_id;
@@ -276,18 +321,36 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                 args.first().and_then(|a| a.as_i64()).unwrap_or(0)
             };
             let res = ctx.db.try_with_mut_snapshot(|snap| {
-                let Some(it) = snap.items.get_mut(&item_id) else {
-                    return Err(BridgeRpcError {
-                        code: "ItemNotFound".into(),
-                        message: format!("Item {item_id} not found"),
-                    });
+                let (type_id, parent_id, item_owner) = {
+                    let Some(it) = snap.items.get(&item_id) else {
+                        return Err(BridgeRpcError {
+                            code: "ItemNotFound".into(),
+                            message: format!("Item {item_id} not found"),
+                        });
+                    };
+                    (it.type_id, it.location_id, it.owner_id)
                 };
-                let parent_id = it.location_id;
+                let corp_id = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
+                let parent_ok = if let Some(parent) = snap.items.get(&parent_id) {
+                    parent.location_id == sys_id as i64
+                        && (parent.owner_id == char_id
+                            || (corp_id > 0 && parent.owner_id == corp_id)
+                            || item_owner == char_id)
+                } else {
+                    false
+                };
+                if !parent_ok {
+                    return Err(BridgeRpcError {
+                        code: "LaunchAccessDenied".into(),
+                        message: format!("Item {item_id} is not inside an accessible container or ship bay in system {sys_id}"),
+                    });
+                }
+                let it = snap.items.get_mut(&item_id).unwrap();
                 it.location_id = sys_id as i64;
                 it.flag = InventoryFlag::None;
                 it.singleton = true;
                 it.version += 1;
-                Ok((it.type_id, parent_id))
+                Ok((type_id, parent_id))
             });
             let (type_id, parent_id) = match res {
                 Ok(v) => v,
@@ -680,6 +743,46 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                         }
                     }
                 }
+            }
+
+            let ship_check = ctx.db.with_snapshot(|snap| {
+                for &ship_id in &target_ship_ids {
+                    let Some(sh) = snap.items.get(&ship_id) else {
+                        return Err(BridgeRpcError {
+                            code: "ShipNotFound".into(),
+                            message: format!("Target ship {ship_id} not found"),
+                        });
+                    };
+                    let cat = ctx.sde.types.get(&sh.type_id).map(|t| t.category_id).unwrap_or(0);
+                    if sh.owner_id != char_id || sh.location_id != station_id || cat != 6 {
+                        return Err(BridgeRpcError {
+                            code: "InvalidFittingTarget".into(),
+                            message: format!("Target {ship_id} must be an owned ship at station {station_id}"),
+                        });
+                    }
+                }
+                for &(tid, flag, req_qty) in &desired_items {
+                    if req_qty <= 0 {
+                        return Err(BridgeRpcError {
+                            code: "InvalidQuantity".into(),
+                            message: "Fitting item quantity must be positive".into(),
+                        });
+                    }
+                    let flag_u16 = flag as u16;
+                    if matches!(flag_u16, 11..=34 | 92..=94 | 125..=132) {
+                        let cat = ctx.sde.types.get(&tid).map(|t| t.category_id).unwrap_or(0);
+                        if !matches!(cat, 7 | 8 | 32) || (cat != 8 && req_qty != 1) {
+                            return Err(BridgeRpcError {
+                                code: "ItemNotFittableModule".into(),
+                                message: format!("Type {tid} (qty {req_qty}) cannot be fitted to slot {flag_u16}"),
+                            });
+                        }
+                    }
+                }
+                Ok(())
+            });
+            if let Err(e) = ship_check {
+                return Some(Err(e));
             }
 
             let mut fitted_count = 0_i64;

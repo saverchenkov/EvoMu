@@ -160,37 +160,6 @@ pub async fn handle_corp_hangar_invbroker(
             }
         }
     }
-    if service == "beyonce" && method == "CmdJumpThroughFleet" {
-        let (_, char_id) = match ServerContext::require_character(session) {
-            Ok(v) => v,
-            Err(e) => return Some(Err(e)),
-        };
-        let other_char = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-        let other_ship = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
-        let same_fleet = ctx.db.with_snapshot(|s| {
-            let fa = s
-                .fleets
-                .values()
-                .find(|f| f.members.contains(&char_id))
-                .map(|f| f.fleet_id);
-            let fb = s
-                .fleets
-                .values()
-                .find(|f| f.members.contains(&other_char))
-                .map(|f| f.fleet_id);
-            fa.is_some() && fa == fb
-        });
-        if !same_fleet {
-            return Some(Err(BridgeRpcError {
-                code: "FleetNotInFleet".into(),
-                message: format!("Characters {char_id} and {other_char} are not in the same fleet"),
-            }));
-        }
-        return Some(Err(BridgeRpcError {
-            code: "NoActiveBridge".into(),
-            message: format!("Ship {other_ship} has no open jump portal"),
-        }));
-    }
     if service == "beyonce"
         && method == "CmdWarpToStuff"
         && args.first().and_then(|v| v.as_str()) == Some("bookmark")
