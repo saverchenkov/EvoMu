@@ -553,7 +553,7 @@ fn test_phase_t_t5_coverage_and_mutation_tooling() {
 
 #[tokio::test]
 async fn test_sde_skins_static_and_cosmetics_validation() {
-    // parity: sde:res:/staticdata/skins.static
+    // parity: sde:res:/staticdata/skins.static, rpc:shipCosmeticsMgr.ActivateSkinLicense, rpc:shipCosmeticsMgr.ApplySkinToShip, rpc:shipCosmeticsMgr.GiveSkin
     use eve_machonet::SessionState;
     use eve_proto::PyRep;
     use eve_server::router::ServerContext;

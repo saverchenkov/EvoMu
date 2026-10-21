@@ -119,7 +119,7 @@ fn fit(ctx: &ServerContext, item_id: i64, type_id: u32, location_id: i64, flag: 
 
 #[tokio::test]
 async fn test_set_state_emitted_on_update_state_request() {
-    // parity: destiny:SetState
+    // parity: destiny:SetState, rpc:beyonce.UpdateStateRequest
     eve_testkit::attest(&["destiny:SetState"]);
     let ctx = ServerContext::new();
     let (mut sess, beyonce, ship_id) = login_and_undock(&ctx, 8101).await;
@@ -155,7 +155,7 @@ async fn test_set_state_emitted_on_update_state_request() {
 
 #[tokio::test]
 async fn test_warp_to_and_warp_special_fx_emitted_on_warp() {
-    // parity: destiny:WarpTo, destiny:OnSpecialFX
+    // parity: destiny:WarpTo, destiny:OnSpecialFX, rpc:beyonce.CmdWarpToStuff
     eve_testkit::attest(&["destiny:WarpTo", "destiny:OnSpecialFX"]);
     let ctx = ServerContext::new();
     let (mut sess, beyonce, ship_id) = login_and_undock(&ctx, 8102).await;
@@ -214,7 +214,7 @@ async fn test_warp_to_and_warp_special_fx_emitted_on_warp() {
 
 #[tokio::test]
 async fn test_goto_point_emitted_by_cmd_goto_point() {
-    // parity: destiny:GotoPoint
+    // parity: destiny:GotoPoint, rpc:beyonce.CmdGotoPoint
     eve_testkit::attest(&["destiny:GotoPoint"]);
     let ctx = ServerContext::new();
     let (mut sess, beyonce, ship_id) = login_and_undock(&ctx, 8103).await;
@@ -306,7 +306,7 @@ async fn test_damage_state_change_emitted_on_damage() {
 
 #[tokio::test]
 async fn test_cloak_ball_emitted_on_cloak_toggle() {
-    // parity: destiny:CloakBall, destiny:OnShipStateUpdate
+    // parity: destiny:CloakBall, destiny:OnShipStateUpdate, rpc:beyonce.CmdStop
     eve_testkit::attest(&["destiny:CloakBall", "destiny:OnShipStateUpdate"]);
     let ctx = ServerContext::new();
     let (mut sess, beyonce, ship_id) = login_and_undock(&ctx, 8105).await;
@@ -351,7 +351,7 @@ async fn test_cloak_ball_emitted_on_cloak_toggle() {
 
 #[tokio::test]
 async fn test_drone_state_change_emitted_on_launch() {
-    // parity: destiny:OnDroneStateChange
+    // parity: destiny:OnDroneStateChange, rpc:ship.LaunchDrones
     eve_testkit::attest(&["destiny:OnDroneStateChange"]);
     let ctx = ServerContext::new();
     let (mut sess, _beyonce, ship_id) = login_and_undock(&ctx, 8106).await;
@@ -391,7 +391,7 @@ async fn test_drone_state_change_emitted_on_launch() {
 
 #[tokio::test]
 async fn test_on_dbuff_updated_and_on_dot_victim_updated() {
-    // parity: destiny:OnDbuffUpdated, destiny:OnDotVictimUpdated
+    // parity: destiny:OnDbuffUpdated, destiny:OnDotVictimUpdated, rpc:beyonce.UpdateStateRequest
     eve_testkit::attest(&["destiny:OnDbuffUpdated", "destiny:OnDotVictimUpdated"]);
     let ctx = ServerContext::new();
     let (mut sess, beyonce, ship_id) = login_and_undock(&ctx, 8107).await;
@@ -468,7 +468,7 @@ async fn test_on_dbuff_updated_and_on_dot_victim_updated() {
 
 #[tokio::test]
 async fn test_slim_item_interactive_and_packaged_action_on_eject_and_board() {
-    // parity: destiny:OnSlimItemChange, destiny:SetBallInteractive, destiny:PackagedAction
+    // parity: destiny:OnSlimItemChange, destiny:SetBallInteractive, destiny:PackagedAction, rpc:ship.Board, rpc:ship.Eject
     eve_testkit::attest(&[
         "destiny:OnSlimItemChange",
         "destiny:SetBallInteractive",
@@ -517,7 +517,7 @@ async fn test_slim_item_interactive_and_packaged_action_on_eject_and_board() {
 #[tokio::test]
 async fn test_set_ball_free_radius_harmonic_sovereignty_and_controller_event() {
     // parity: destiny:SetBallFree, destiny:SetBallRadius, destiny:SetBallHarmonic
-    // parity: destiny:OnSovereigntyChanged, destiny:OnClientControllerEvent
+    // parity: destiny:OnSovereigntyChanged, destiny:OnClientControllerEvent, rpc:beyonce.CmdStargateJump, rpc:posMgr.AnchorStructure, rpc:sovMgr.AcquireSkyhooks
     eve_testkit::attest(&[
         "destiny:SetBallFree",
         "destiny:SetBallRadius",

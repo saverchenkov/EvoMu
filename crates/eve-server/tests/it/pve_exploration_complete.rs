@@ -122,7 +122,7 @@ async fn create_in_space_session(
 // ============================================================================
 #[tokio::test]
 async fn test_pve_combat_anomalies_waves_and_escalations() {
-    // parity: feat:pve.combat-anomalies, feat:pve.escalations, feat:pve.expeditions
+    // parity: feat:pve.combat-anomalies, feat:pve.escalations, feat:pve.expeditions, rpc:dungeonExplorationMgr.GetEscalatingPathDungeonsEntered, rpc:dungeonExplorationMgr.GetMyEscalatingPathDetails, rpc:scanSvc.EnterCombatAnomaly, rpc:scanSvc.GetCombatAnomalyInstances
     eve_testkit::attest(&[
         "feat:pve.combat-anomalies",
         "feat:pve.escalations",
@@ -301,7 +301,7 @@ async fn test_pve_combat_anomalies_waves_and_escalations() {
 
 #[tokio::test]
 async fn test_pve_combat_signatures_and_ded_complexes_restrictions_and_loot() {
-    // parity: feat:pve.combat-signatures, feat:pve.ded-complexes
+    // parity: feat:pve.combat-signatures, feat:pve.ded-complexes, rpc:keeper.CanEnterDungeonInCurrentShip, rpc:keeper.EnterNextDungeonRoom, rpc:scanSvc.GetSignatureInstances, rpc:scanSvc.ScanSignature
     eve_testkit::attest(&["feat:pve.combat-signatures", "feat:pve.ded-complexes"]);
 
     let ctx = ServerContext::new();
@@ -463,7 +463,7 @@ async fn test_pve_combat_signatures_and_ded_complexes_restrictions_and_loot() {
 // ============================================================================
 #[tokio::test]
 async fn test_pve_data_relic_hacking_minigame_and_loot_spew() {
-    // parity: feat:pve.data-sites, feat:pve.relic-sites, feat:pve.hacking-minigame, feat:pve.loot-spew
+    // parity: feat:pve.data-sites, feat:pve.relic-sites, feat:pve.hacking-minigame, feat:pve.loot-spew, rpc:hackingMgr.ClickedOnTile, rpc:hackingMgr.GetMyHackProgress, rpc:hackingMgr.HackContainer, rpc:hackingMgr.StartNewGameInstance, rpc:hackingMgr.UsedUtilityElement, rpc:scanSvc.GetSignatureInstances, rpc:scanSvc.ScanSignature
     eve_testkit::attest(&[
         "feat:pve.data-sites",
         "feat:pve.relic-sites",
@@ -653,7 +653,7 @@ async fn test_pve_data_relic_hacking_minigame_and_loot_spew() {
 
 #[tokio::test]
 async fn test_pve_ghost_sites_sleeper_caches_and_wormhole_sites() {
-    // parity: feat:pve.ghost-sites, feat:pve.sleeper-caches, feat:pve.wormhole-sites
+    // parity: feat:pve.ghost-sites, feat:pve.sleeper-caches, feat:pve.wormhole-sites, rpc:hackingMgr.ClickedOnTile, rpc:hackingMgr.StartNewGameInstance, rpc:keeper.EnterNextDungeonRoom, rpc:scanSvc.EnterCombatAnomaly, rpc:scanSvc.GetCombatAnomalyInstances, rpc:scanSvc.ScanSignature
     eve_testkit::attest(&[
         "feat:pve.ghost-sites",
         "feat:pve.sleeper-caches",
@@ -838,7 +838,7 @@ async fn test_pve_ghost_sites_sleeper_caches_and_wormhole_sites() {
 // ============================================================================
 #[tokio::test]
 async fn test_pve_incursions_payouts_and_mothership_finale() {
-    // parity: feat:pve.incursion-system, feat:pve.incursion-payout, feat:pve.incursion-mothership
+    // parity: feat:pve.incursion-system, feat:pve.incursion-payout, feat:pve.incursion-mothership, rpc:incursion.GetAllIncursionSites, rpc:incursion.UpdateIncursionLPLog
     eve_testkit::attest(&[
         "feat:pve.incursion-system",
         "feat:pve.incursion-payout",
@@ -902,7 +902,7 @@ async fn test_pve_incursions_payouts_and_mothership_finale() {
 // ============================================================================
 #[tokio::test]
 async fn test_pve_abyssal_deadspace_pocket_gates_weather_and_tiers() {
-    // parity: feat:pve.abyssal-pocket, feat:pve.abyssal-gates, feat:pve.abyssal-weather, feat:pve.abyssal-tiers
+    // parity: feat:pve.abyssal-pocket, feat:pve.abyssal-gates, feat:pve.abyssal-weather, feat:pve.abyssal-tiers, rpc:abyssal_content_manager.AbyssalContentExpiration, rpc:abyssal_content_manager.AbyssalEndGateActivation, rpc:abyssal_content_manager.AbyssalGateActivation, rpc:abyssal_content_manager.ActivateAbyssalKey
     eve_testkit::attest(&[
         "feat:pve.abyssal-pocket",
         "feat:pve.abyssal-gates",
@@ -1129,7 +1129,7 @@ async fn test_pve_abyssal_deadspace_pocket_gates_weather_and_tiers() {
 
 #[tokio::test]
 async fn test_pve_homefront_storms_drifter_hives_triglavian_and_interference() {
-    // parity: feat:pve.homefront-ops, feat:pve.metaliminal-storms, feat:pve.drifter-hives, feat:pve.triglavian-sites, feat:pve.interference
+    // parity: feat:pve.homefront-ops, feat:pve.metaliminal-storms, feat:pve.drifter-hives, feat:pve.triglavian-sites, feat:pve.interference, rpc:dungeonInstanceCacheMgr.GetHomefrontSiteInstances, rpc:dungeonInstanceCacheMgr.GetTriglavianSiteInstances, rpc:keeper.EnterNextDungeonRoom, rpc:map.GetAllRoamingWeatherSystems, rpc:solarsystemInterferenceMgr.GetLocalInterferenceState
     eve_testkit::attest(&[
         "feat:pve.homefront-ops",
         "feat:pve.metaliminal-storms",

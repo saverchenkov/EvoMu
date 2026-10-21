@@ -25,6 +25,7 @@ fn root_dir() -> PathBuf {
 #[tokio::test]
 // parity: plan:P-2, plan:P-3, plan:P-4
 async fn test_z1_systematic_rpc_catalog_dispatch_closure_and_wire_formatting() {
+    // parity: rpc:bookmark.GetBookmarks, rpc:charFittingMgr.GetFittings, rpc:charUnboundMgr.GetCharacterInfo, rpc:charUnboundMgr.GetCharactersToSelect, rpc:charUnboundMgr.SelectCharacterID, rpc:corpmgr.CreateCorporation, rpc:corpmgr.GetMembers, rpc:corpmgr.GetWalletDivisions, rpc:fleetMgr.CreateFleet, rpc:fleetMgr.GetFleet, rpc:invbroker.MachoBindObject, rpc:lscService.JoinChannel, rpc:lscService.SendMessage, rpc:mailMgr.GetHeaders, rpc:marketProxy.GetCharOrders, rpc:marketProxy.GetOrders, rpc:slash.SlashCmd, rpc:stationSvc.GetStation
     let ctx = ServerContext::new();
     ctx.seed_demo_world_fixtures();
     let empty_kw = HashMap::new();
@@ -430,6 +431,7 @@ async fn test_z1_systematic_rpc_catalog_dispatch_closure_and_wire_formatting() {
 #[tokio::test]
 // parity: plan:P-5
 async fn test_z2_systematic_notification_emission_pipelines_and_scope_multicast() {
+    // parity: rpc:charUnboundMgr.SelectCharacterID
     let ctx = ServerContext::new();
     ctx.seed_demo_world_fixtures();
     let empty_kw = HashMap::new();

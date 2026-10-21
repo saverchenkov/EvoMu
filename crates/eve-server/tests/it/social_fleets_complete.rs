@@ -20,7 +20,7 @@ fn is_rowset(rep: &PyRep) -> bool {
 
 #[tokio::test]
 async fn test_so3_corporation_roles_public_info_governance_shares_votes_and_alliances() {
-    // parity: feat:corporation.corp-public-info, feat:corporation.corp-edit-details, feat:corporation.invitations, feat:corporation.kick-member, feat:corporation.leave-corp, feat:corporation.titles, feat:corporation.corp-tax, feat:corporation.corp-shares, feat:corporation.corp-votes, feat:corporation.ceo-change, feat:corporation.bulletins, feat:corporation.medals, feat:corporation.member-tracking, feat:corporation.member-audit
+    // parity: feat:corporation.corp-public-info, feat:corporation.corp-edit-details, feat:corporation.invitations, feat:corporation.kick-member, feat:corporation.leave-corp, feat:corporation.titles, feat:corporation.corp-tax, feat:corporation.corp-shares, feat:corporation.corp-votes, feat:corporation.ceo-change, feat:corporation.bulletins, feat:corporation.medals, feat:corporation.member-tracking, feat:corporation.member-audit, rpc:account.GetWalletDivisionsInfo, rpc:account.GiveCashFromCorpAccount, rpc:allianceRegistry.CreateAlliance, rpc:charUnboundMgr.SelectCharacterID, rpc:corpRegistry.AddBulletin, rpc:corpRegistry.AddCorporation, rpc:corpRegistry.GetBulletins, rpc:corpRegistry.InsertApplication, rpc:corpRegistry.MoveCompanyShares, rpc:corpRegistry.PayoutDividend, rpc:corpRegistry.UpdateApplicationOffer, rpc:corpRegistry.UpdateCorporation, rpc:corpRegistry.UpdateMember, rpc:corpRegistry.UpdateTitle, rpc:corpmgr.AuditMember, rpc:corpmgr.GetPublicInfo, rpc:corpmgr.UpdateDivisionNames, rpc:corporationSvc.CreateMedal, rpc:corporationSvc.GiveMedalToCharacters, rpc:voteManager.InsertVote, rpc:voteManager.InsertVoteCase
     eve_testkit::attest(&[
         "feat:corporation.corp-public-info",
         "feat:corporation.corp-edit-details",
@@ -600,7 +600,7 @@ async fn test_so3_corporation_roles_public_info_governance_shares_votes_and_alli
 
 #[tokio::test]
 async fn test_so6_wormholes_polarization_lifetime_mass_and_thera() {
-    // parity: feat:navigation.wormhole-jump, feat:navigation.wormhole-polarization, feat:navigation.wormhole-lifetime, feat:navigation.wormhole-statics, feat:navigation.wormhole-thera
+    // parity: feat:navigation.wormhole-jump, feat:navigation.wormhole-polarization, feat:navigation.wormhole-lifetime, feat:navigation.wormhole-statics, feat:navigation.wormhole-thera, rpc:charUnboundMgr.SelectCharacterID, rpc:scanMgr.GetSystemScanMgr, rpc:structureDeployment.Anchor, rpc:wormholeMgr.GetWormholePolarization, rpc:wormholeMgr.WormholeJump
     eve_testkit::attest(&[
         "feat:navigation.wormhole-jump",
         "feat:navigation.wormhole-polarization",
@@ -900,7 +900,7 @@ async fn test_so6_wormholes_polarization_lifetime_mass_and_thera() {
 
 #[tokio::test]
 async fn test_so_fleets_motd_options_wings_squads_broadcasts_watchlist_formations_boost_bridge_disband() {
-    // parity: feat:fleet.wings-squads, feat:fleet.roles-positions, feat:fleet.fleet-motd, feat:fleet.fleet-broadcasts, feat:fleet.fleet-warp-cmd, feat:fleet.fleet-composition, feat:fleet.fleet-watchlist, feat:fleet.fleet-advert, feat:fleet.fleet-free-move, feat:fleet.fleet-formations, feat:fleet.fleet-disband, feat:fleet.fleet-max-size, feat:fleet.fleet-boost-scope, feat:fleet.fleet-bridge, feat:fleet.fleet-registration
+    // parity: feat:fleet.wings-squads, feat:fleet.roles-positions, feat:fleet.fleet-motd, feat:fleet.fleet-broadcasts, feat:fleet.fleet-warp-cmd, feat:fleet.fleet-composition, feat:fleet.fleet-watchlist, feat:fleet.fleet-advert, feat:fleet.fleet-free-move, feat:fleet.fleet-formations, feat:fleet.fleet-disband, feat:fleet.fleet-max-size, feat:fleet.fleet-boost-scope, feat:fleet.fleet-bridge, feat:fleet.fleet-registration, rpc:beyonce.CmdJumpThroughFleet, rpc:beyonce.GetFormations, rpc:charUnboundMgr.SelectCharacterID, rpc:dogmaIM.Activate, rpc:fleetMgr.AddToWatchlist, rpc:fleetMgr.CreateFleet, rpc:fleetMgr.RegisterForDamageUpdates, rpc:fleetMgr.RemoveFromWatchlist, rpc:fleetObjectHandler.AcceptInvite, rpc:fleetObjectHandler.BroadcastToBubble, rpc:fleetObjectHandler.BroadcastToSystem, rpc:fleetObjectHandler.ChangeSquadName, rpc:fleetObjectHandler.ChangeWingName, rpc:fleetObjectHandler.CreateSquad, rpc:fleetObjectHandler.CreateWing, rpc:fleetObjectHandler.DeleteSquad, rpc:fleetObjectHandler.DeleteWing, rpc:fleetObjectHandler.DisbandFleet, rpc:fleetObjectHandler.FleetWarp, rpc:fleetObjectHandler.GetFleetComposition, rpc:fleetObjectHandler.GetFleetMaxSize, rpc:fleetObjectHandler.GetInitState, rpc:fleetObjectHandler.GetMotd, rpc:fleetObjectHandler.Invite, rpc:fleetObjectHandler.MoveMember, rpc:fleetObjectHandler.SetFleetMaxSize, rpc:fleetObjectHandler.SetMotdEx, rpc:fleetObjectHandler.SetOptions, rpc:fleetObjectHandler.SetTakesFleetWarp, rpc:fleetProxy.AddFleetFinderAdvert, rpc:fleetProxy.ApplyToJoinFleet, rpc:fleetProxy.GetAvailableFleetAds, rpc:fleetProxy.UpdateAdvertAllowedEntities
     eve_testkit::attest(&[
         "feat:fleet.wings-squads",
         "feat:fleet.roles-positions",
@@ -1087,7 +1087,7 @@ async fn test_so_fleets_motd_options_wings_squads_broadcasts_watchlist_formation
 
 #[tokio::test]
 async fn test_so_bookmarks_expiry_copy_move_corp_bookmarks_and_scanning_features() {
-    // parity: feat:bookmarks.copy-move, feat:bookmarks.warp-to-bm, feat:bookmarks.bm-expiry, feat:bookmarks.corp-bookmarks, feat:scanning.probe-formations, feat:scanning.signatures, feat:scanning.anomalies, feat:scanning.structure-signals, feat:scanning.system-scan, feat:scanning.sig-despawn, feat:scanning.scan-skills
+    // parity: feat:bookmarks.copy-move, feat:bookmarks.warp-to-bm, feat:bookmarks.bm-expiry, feat:bookmarks.corp-bookmarks, feat:scanning.probe-formations, feat:scanning.signatures, feat:scanning.anomalies, feat:scanning.structure-signals, feat:scanning.system-scan, feat:scanning.sig-despawn, feat:scanning.scan-skills, rpc:accessGroupBookmarkMgr.AddFolder, rpc:accessGroupBookmarkMgr.CopyBookmarksToFolderAndSubfolder, rpc:accessGroupBookmarkMgr.MoveBookmarksToFolderAndSubfolder, rpc:beyonce.CmdWarpToStuff, rpc:bookmark.BookmarkLocation, rpc:bookmark.GetBookmarks, rpc:charUnboundMgr.SelectCharacterID, rpc:corpRegistry.AddCorporation, rpc:corpRegistry.InsertApplication, rpc:corpRegistry.UpdateApplicationOffer, rpc:scanMgr.GetSignatures, rpc:scanMgr.LaunchProbes, rpc:scanMgr.SignalTrackerRegister
     eve_testkit::attest(&[
         "feat:bookmarks.copy-move",
         "feat:bookmarks.warp-to-bm",
@@ -1214,7 +1214,7 @@ async fn test_so_bookmarks_expiry_copy_move_corp_bookmarks_and_scanning_features
 
 #[tokio::test]
 async fn test_so_social_corp_mail_mailing_lists_cspa_calendar_and_chat_features() {
-    // parity: feat:social.mail-corp-alliance, feat:social.mailing-lists, feat:social.mailing-list-admin, feat:social.mailing-list-welcome, feat:social.cspa, feat:social.calendar-personal, feat:social.calendar-corp-alliance, feat:social.calendar-responses, feat:social.calendar-ccp-events, feat:social.calendar-auto-events, feat:social.chat-help-rookie, feat:social.chat-gm-mute, feat:social.chat-motd
+    // parity: feat:social.mail-corp-alliance, feat:social.mailing-lists, feat:social.mailing-list-admin, feat:social.mailing-list-welcome, feat:social.cspa, feat:social.calendar-personal, feat:social.calendar-corp-alliance, feat:social.calendar-responses, feat:social.calendar-ccp-events, feat:social.calendar-auto-events, feat:social.chat-help-rookie, feat:social.chat-gm-mute, feat:social.chat-motd, rpc:LSC.JoinChannel, rpc:LSC.SendMessage, rpc:XmppChatMgr.GMMute, rpc:XmppChatMgr.GMUnmute, rpc:XmppChatMgr.GetHelpChannel, rpc:XmppChatMgr.GetRookieChannel, rpc:XmppChatMgr.SetMotd, rpc:calendarMgr.CreateCorporationEvent, rpc:calendarMgr.CreatePersonalEvent, rpc:calendarMgr.DeleteEvent, rpc:calendarMgr.EditCorporationEvent, rpc:calendarMgr.EditPersonalEvent, rpc:calendarMgr.GetEventsByMonthYear, rpc:calendarMgr.GetResponsesForCharacter, rpc:calendarMgr.GetResponsesToEvent, rpc:calendarMgr.SendEventResponse, rpc:charMgr.CSPAChargedAction, rpc:charMgr.GetSettingsInfo, rpc:charMgr.LogSettings, rpc:charUnboundMgr.SelectCharacterID, rpc:corpRegistry.AddCorporation, rpc:corpRegistry.InsertApplication, rpc:corpRegistry.UpdateApplicationOffer, rpc:mailMgr.SendMail, rpc:mailingListsMgr.ClearEntityAccess, rpc:mailingListsMgr.ClearWelcomeMail, rpc:mailingListsMgr.Create, rpc:mailingListsMgr.GetJoinedLists, rpc:mailingListsMgr.GetMembers, rpc:mailingListsMgr.GetWelcomeMail, rpc:mailingListsMgr.Join, rpc:mailingListsMgr.KickMembers, rpc:mailingListsMgr.SaveWelcomeMail, rpc:mailingListsMgr.SetEntityAccess, rpc:mailingListsMgr.SetMembersMuted, rpc:mailingListsMgr.SetMembersOperator
     eve_testkit::attest(&[
         "feat:social.mail-corp-alliance",
         "feat:social.mailing-lists",

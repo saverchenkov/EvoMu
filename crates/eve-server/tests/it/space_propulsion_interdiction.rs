@@ -59,7 +59,7 @@ fn grant_all_test_skills(ctx: &ServerContext, char_id: i64) {
 #[tokio::test]
 async fn test_sp2_grid_bubble_splitting_interdiction_and_nullifier() {
     // parity: plan:SP-2
-    // parity: feat:navigation.bubbles-grid, feat:modules.interdiction-sphere, feat:modules.warp-disruption-field, feat:modules.mobile-warp-disruptor, feat:modules.interdiction-nullifier, feat:modules.mobile-warp-disruptor-anchoring-skill
+    // parity: feat:navigation.bubbles-grid, feat:modules.interdiction-sphere, feat:modules.warp-disruption-field, feat:modules.mobile-warp-disruptor, feat:modules.interdiction-nullifier, feat:modules.mobile-warp-disruptor-anchoring-skill, rpc:beyonce.AdminGetBubbleID, rpc:beyonce.CmdWarpToStuff, rpc:charUnboundMgr.SelectCharacterID, rpc:dogmaIM.Activate, rpc:dogmaIM.Deactivate, rpc:posMgr.AnchorStructure, rpc:stationSvc.Undock
     eve_testkit::attest(&[
         "plan:SP-2",
         "feat:navigation.bubbles-grid",
@@ -474,7 +474,7 @@ async fn test_sp2_grid_bubble_splitting_interdiction_and_nullifier() {
 #[tokio::test]
 async fn test_sp3_propulsion_agility_mjd_mjfg_and_approach() {
     // parity: plan:SP-3
-    // parity: feat:navigation.approach, feat:dogma.velocity-agility, feat:modules.afterburner, feat:modules.microwarpdrive, feat:modules.micro-jump-drive, feat:modules.micro-jump-field-generator, feat:modules.micro-jump-field-boosh-limit, feat:modules.mjfg-fleet-jump, feat:modules.capital-micro-jump-drive, feat:navigation.directional-jump-drive
+    // parity: feat:navigation.approach, feat:dogma.velocity-agility, feat:modules.afterburner, feat:modules.microwarpdrive, feat:modules.micro-jump-drive, feat:modules.micro-jump-field-generator, feat:modules.micro-jump-field-boosh-limit, feat:modules.mjfg-fleet-jump, feat:modules.capital-micro-jump-drive, feat:navigation.directional-jump-drive, rpc:beyonce.CmdFollowBall, rpc:beyonce.CmdGotoDirection, rpc:beyonce.CmdSetSpeedFraction, rpc:charUnboundMgr.SelectCharacterID, rpc:dogmaIM.Activate, rpc:dogmaIM.Deactivate, rpc:stationSvc.Undock
     eve_testkit::attest(&[
         "plan:SP-3",
         "feat:navigation.approach",
@@ -913,7 +913,7 @@ async fn test_sp3_propulsion_agility_mjd_mjfg_and_approach() {
 #[tokio::test]
 async fn test_sp3_cloaking_prototype_covert_decloak_and_stabilization() {
     // parity: plan:SP-3
-    // parity: feat:modules.cloak-prototype, feat:modules.cloak-decloak, feat:modules.covert-ops-cloak, feat:modules.cloak-stabilization-timer
+    // parity: feat:modules.cloak-prototype, feat:modules.cloak-decloak, feat:modules.covert-ops-cloak, feat:modules.cloak-stabilization-timer, rpc:beyonce.CmdWarpToStuff, rpc:beyonce.UpdateStateRequest, rpc:charUnboundMgr.SelectCharacterID, rpc:dogmaIM.Activate, rpc:stationSvc.Undock
     eve_testkit::attest(&[
         "plan:SP-3",
         "feat:modules.cloak-prototype",
@@ -1139,7 +1139,7 @@ async fn test_sp3_cloaking_prototype_covert_decloak_and_stabilization() {
 #[tokio::test]
 async fn test_sp3_subwarp_navigation_orbit_keep_at_range_align_goto_stop() {
     // parity: plan:SP-3, plan:S-1
-    // parity: feat:navigation.orbit, feat:navigation.keep-at-range, feat:navigation.align-to, feat:navigation.goto-point, feat:navigation.stop-ship
+    // parity: feat:navigation.orbit, feat:navigation.keep-at-range, feat:navigation.align-to, feat:navigation.goto-point, feat:navigation.stop-ship, rpc:beyonce.CmdAlignTo, rpc:beyonce.CmdFollowBall, rpc:beyonce.CmdGotoDirection, rpc:beyonce.CmdOrbit, rpc:beyonce.CmdSetSpeedFraction, rpc:beyonce.CmdStop, rpc:charUnboundMgr.SelectCharacterID, rpc:stationSvc.Undock
     eve_testkit::attest(&[
         "plan:S-1",
         "feat:navigation.orbit",

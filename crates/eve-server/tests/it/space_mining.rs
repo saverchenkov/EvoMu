@@ -232,7 +232,7 @@ async fn test_sp4_asteroid_belt_entities_collision_bounce_and_respawn_cycle() {
 
 #[tokio::test]
 async fn test_sp5_stargate_jumping_session_handoff_and_gate_cloak_invulnerability() {
-    // parity: plan:SP-5, feat:navigation.stargate-jump, feat:navigation.gate-cloak
+    // parity: plan:SP-5, feat:navigation.stargate-jump, feat:navigation.gate-cloak, rpc:authentication.Login, rpc:beyonce.CmdGotoDirection, rpc:beyonce.CmdStargateJump, rpc:charUnboundMgr.SelectCharacterID, rpc:stationSvc.Undock
     eve_testkit::attest(&["plan:SP-5", "feat:navigation.stargate-jump", "feat:navigation.gate-cloak"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();
@@ -378,7 +378,7 @@ async fn test_sp5_stargate_jumping_session_handoff_and_gate_cloak_invulnerabilit
 
 #[tokio::test]
 async fn test_mn01_mining_laser_cycle_yield_residue_and_ore_hold_deposit() {
-    // parity: feat:mining.mining-laser-cycle, feat:mining.strip-miner, feat:mining.mining-residue
+    // parity: feat:mining.mining-laser-cycle, feat:mining.strip-miner, feat:mining.mining-residue, rpc:authentication.Login, rpc:beyonce.CmdMineRepeatedly, rpc:charUnboundMgr.SelectCharacterID, rpc:stationSvc.Undock
     eve_testkit::attest(&["feat:mining.mining-laser-cycle", "feat:mining.strip-miner", "feat:mining.mining-residue"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();
@@ -487,7 +487,7 @@ async fn test_mn01_mining_laser_cycle_yield_residue_and_ore_hold_deposit() {
 
 #[tokio::test]
 async fn test_mn02_ice_harvesting_and_gas_harvesting_cycles() {
-    // parity: feat:mining.ice-harvester, feat:mining.gas-harvesting
+    // parity: feat:mining.ice-harvester, feat:mining.gas-harvesting, rpc:authentication.Login, rpc:beyonce.CmdMineRepeatedly, rpc:charUnboundMgr.SelectCharacterID, rpc:stationSvc.Undock
     eve_testkit::attest(&["feat:mining.ice-harvester", "feat:mining.gas-harvesting"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();
@@ -623,7 +623,7 @@ async fn test_mn02_ice_harvesting_and_gas_harvesting_cycles() {
 
 #[tokio::test]
 async fn test_mn03_mining_ledger_recording_and_char_mining_ledger_service() {
-    // parity: feat:mining.character-ledger
+    // parity: feat:mining.character-ledger, rpc:authentication.Login, rpc:beyonce.CmdMineRepeatedly, rpc:charUnboundMgr.SelectCharacterID, rpc:characterMiningLedger.GetCharacterLogs, rpc:stationSvc.Undock
     eve_testkit::attest(&["feat:mining.character-ledger"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();

@@ -9,6 +9,7 @@ use std::collections::HashMap;
 
 #[tokio::test]
 async fn test_blocking_findings_b01_to_b15_regressions() {
+    // parity: rpc:air_npe.AdvanceNode, rpc:authentication.Login, rpc:beyonce.CmdGotoDirection, rpc:beyonce.CmdStargateJump, rpc:beyonce.CmdStop, rpc:beyonce.CmdWarpToPoint, rpc:charUnboundMgr.SelectCharacterID, rpc:corpmgr.CreateCorporation, rpc:fighterMgr.CmdActivateAbilitySlots, rpc:fighterMgr.GetFightersForShip, rpc:home_station.set_home_station, rpc:industryManager.CompleteJob, rpc:industryManager.InstallJob, rpc:jumpCloneSvc.CloneJump, rpc:jumpCloneSvc.InstallCloneInStation, rpc:jumpCloneSvc.InstallCloneInStructure, rpc:planetMgr.Flush, rpc:planetMgr.UserUpdateNetwork, rpc:ship.Board, rpc:shipCosmeticsMgr.ActivateSkinLicense, rpc:shipCosmeticsMgr.ApplySkinToShip, rpc:stationSvc.Dock, rpc:stationSvc.Undock, rpc:structureControl.FuelStructure, rpc:structureCynoBeaconMgr.CmdJumpToStructureBeacon, rpc:structureDeployment.Anchor, rpc:structureDocking.Dock, rpc:structureDocking.Undock, rpc:taleMgr.MaterializeSystemLOD2
     use eve_db::{InventoryFlag, InventoryItemRecord, TrainedSkillRecord};
 
     let ctx = ServerContext::new();

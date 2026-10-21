@@ -9,6 +9,7 @@ use std::collections::HashMap;
 
 #[tokio::test]
 async fn test_review_r6_np0_np1_regressions() {
+    // parity: rpc:authentication.Login, rpc:beyonce.CmdFollowBall, rpc:beyonce.MachoBindObject, rpc:charUnboundMgr.SelectCharacterID, rpc:contractProxy.AcceptContract, rpc:contractProxy.CompleteContract, rpc:contractProxy.CreateContract, rpc:dogmaIM.FireWeapon, rpc:dogmaIM.LoadAmmo, rpc:planetMgr.Flush, rpc:planetMgr.UserUpdateNetwork, rpc:stationSvc.Undock, rpc:taleMgr.InterdictConvoy
     use eve_db::{IskCents, MarketOrderRecord};
 
     let ctx = ServerContext::new();

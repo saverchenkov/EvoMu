@@ -44,6 +44,7 @@ fn issue_token_with_scopes(ctx: &ServerContext, character_id: i64, scopes: Vec<S
 
 #[tokio::test]
 async fn test_ch1_skill_training_queue_engine() {
+    // parity: rpc:charUnboundMgr.SelectCharacterID
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let mut sess = SessionState::new(919);
@@ -365,6 +366,7 @@ async fn test_ch1_skill_training_queue_engine() {
 
 #[tokio::test]
 async fn test_ch2_character_creation_and_starter_assets() {
+    // parity: rpc:charUnboundMgr.CreateCharacterWithDoll
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let mut sess = SessionState::new(920);
@@ -464,6 +466,7 @@ async fn test_ch2_character_creation_and_starter_assets() {
 
 #[tokio::test]
 async fn test_ch3_jump_clones_implants_and_pod_death() {
+    // parity: rpc:charUnboundMgr.SelectCharacterID, rpc:jumpCloneSvc.CloneJump, rpc:jumpCloneSvc.InstallCloneInStation
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let mut sess = SessionState::new(921);
@@ -641,6 +644,7 @@ async fn test_ch3_jump_clones_implants_and_pod_death() {
 
 #[tokio::test]
 async fn test_ch4_slash_gm_commands() {
+    // parity: rpc:charUnboundMgr.SelectCharacterID, rpc:slash.SlashCmd
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let mut sess = SessionState::new(922);
@@ -807,7 +811,7 @@ async fn test_ch4_slash_gm_commands() {
 
 #[tokio::test]
 async fn test_ch5_neural_attribute_remap_and_cooldown() {
-    // parity: feat:attributes.neural-remap, feat:attributes.bonus-remap
+    // parity: feat:attributes.neural-remap, feat:attributes.bonus-remap, rpc:charMgr.RespecCharacter, rpc:charUnboundMgr.SelectCharacterID, rpc:skillMgr2.GetRespecInfo
     eve_testkit::attest(&[
         "feat:attributes.neural-remap",
         "feat:attributes.bonus-remap",

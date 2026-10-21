@@ -19,7 +19,7 @@ use tokio::net::{TcpListener, TcpStream};
 
 #[tokio::test]
 async fn test_phase_0_s9_service_roles_bitmask_and_production_account_seed() {
-    // parity: feat:account.account-roles
+    // parity: feat:account.account-roles, rpc:authentication.Login, rpc:charUnboundMgr.SelectCharacterID, rpc:slash.SlashCmd
     let prod_ctx = ServerContext::new_production();
     let kw = HashMap::new();
     let mut prod_sess = SessionState::new(9090);

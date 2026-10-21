@@ -11,7 +11,7 @@ use std::collections::HashMap;
 
 #[tokio::test]
 async fn test_ch5_gm_command_dispatcher() {
-    // parity: feat:admin.slash-dispatcher, feat:admin.gm-giveskill, feat:admin.gm-giveisk, feat:admin.gm-createitem, feat:admin.gm-tr
+    // parity: feat:admin.slash-dispatcher, feat:admin.gm-giveskill, feat:admin.gm-giveisk, feat:admin.gm-createitem, feat:admin.gm-tr, rpc:charUnboundMgr.SelectCharacterID, rpc:slash.SlashCmd
     eve_testkit::attest(&["feat:admin.slash-dispatcher", "feat:admin.gm-giveskill", "feat:admin.gm-giveisk", "feat:admin.gm-createitem", "feat:admin.gm-tr"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();
@@ -176,7 +176,7 @@ async fn test_ch5_gm_command_dispatcher() {
 
 #[tokio::test]
 async fn test_ch3_ch4_paperdoll_contacts_blocklist_labels_and_watchlist() {
-    // parity: feat:character.paperdoll-store, feat:social.contacts-add, feat:social.contacts-edit-delete, feat:social.contacts-block, feat:social.contacts-labels, feat:social.contacts-buddy-online, feat:character.sp-summary
+    // parity: feat:character.paperdoll-store, feat:social.contacts-add, feat:social.contacts-edit-delete, feat:social.contacts-block, feat:social.contacts-labels, feat:social.contacts-buddy-online, feat:character.sp-summary, rpc:charMgr.AddContact, rpc:charMgr.AssignLabels, rpc:charMgr.BlockOwners, rpc:charMgr.CreateLabel, rpc:charMgr.DeleteContacts, rpc:charMgr.EditContact, rpc:charMgr.GetContactList, rpc:charMgr.UnblockOwners, rpc:charUnboundMgr.SelectCharacterID, rpc:mailMgr.SendMail, rpc:paperDollServer.GetMyPaperDollData, rpc:paperDollServer.UpdateExistingCharacterFull
     eve_testkit::attest(&["feat:character.paperdoll-store", "feat:social.contacts-add", "feat:social.contacts-edit-delete", "feat:social.contacts-block", "feat:social.contacts-labels", "feat:social.contacts-buddy-online", "feat:character.sp-summary"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();
@@ -421,7 +421,7 @@ async fn test_ch3_ch4_paperdoll_contacts_blocklist_labels_and_watchlist() {
 
 #[tokio::test]
 async fn test_ch5_gm_spawn_attr_fit_kill_location_online_and_qa_tools() {
-    // parity: feat:admin.gm-heal, feat:admin.gm-spawn, feat:admin.gm-attr, feat:admin.gm-fit, feat:admin.gm-kill, feat:admin.gm-location-online, feat:admin.gm-qa-tools
+    // parity: feat:admin.gm-heal, feat:admin.gm-spawn, feat:admin.gm-attr, feat:admin.gm-fit, feat:admin.gm-kill, feat:admin.gm-location-online, feat:admin.gm-qa-tools, rpc:charUnboundMgr.SelectCharacterID, rpc:publicQaToolsServer.CanGiveItemForMultifit, rpc:publicQaToolsServer.MoveMeTo, rpc:slash.SlashCmd
     eve_testkit::attest(&["feat:admin.gm-heal", "feat:admin.gm-spawn", "feat:admin.gm-attr", "feat:admin.gm-fit", "feat:admin.gm-kill", "feat:admin.gm-location-online", "feat:admin.gm-qa-tools"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();

@@ -22,6 +22,7 @@ fn is_rowset(rep: &PyRep) -> bool {
 
 #[tokio::test]
 async fn test_so1_fleet_creation_hierarchy_broadcast_and_position_sharing() {
+    // parity: rpc:charUnboundMgr.SelectCharacterID, rpc:fleetMgr.AcceptInvite, rpc:fleetMgr.CreateFleet, rpc:fleetMgr.CreateSquad, rpc:fleetMgr.CreateWing, rpc:fleetMgr.GetInitState, rpc:fleetMgr.Invite, rpc:fleetMgr.KickMember, rpc:fleetMgr.LeaveFleet, rpc:fleetMgr.MoveMember, rpc:fleetMgr.SendBroadcast, rpc:fleetObjectHandler.GetFleetComposition
     let ctx = ServerContext::new();
     let kw = HashMap::new();
 
@@ -220,7 +221,7 @@ async fn test_so1_fleet_creation_hierarchy_broadcast_and_position_sharing() {
 
 #[tokio::test]
 async fn test_so2_corporation_roles_applications_and_wallet_divisions() {
-    // parity: feat:corporation.create-corp, feat:corporation.applications, feat:corporation.roles, feat:wallet.corp-divisions
+    // parity: feat:corporation.create-corp, feat:corporation.applications, feat:corporation.roles, feat:wallet.corp-divisions, rpc:account.GetWalletDivisionsInfo, rpc:account.GiveCashFromCorpAccount, rpc:charUnboundMgr.SelectCharacterID, rpc:corpRegistry.AddCorporation, rpc:corpRegistry.GetApplications, rpc:corpRegistry.GetMembers, rpc:corpRegistry.InsertApplication, rpc:corpRegistry.UpdateApplicationOffer, rpc:corpRegistry.UpdateMember
     eve_testkit::attest(&[
         "feat:corporation.create-corp",
         "feat:corporation.applications",
@@ -438,6 +439,7 @@ async fn test_so2_corporation_roles_applications_and_wallet_divisions() {
 
 #[tokio::test]
 async fn test_so3_chat_channel_join_leave_local_population_and_broadcast() {
+    // parity: rpc:LSC.JoinChannel, rpc:LSC.LeaveChannel, rpc:LSC.SendMessage, rpc:XmppChatMgr.CreatePrivateChannel, rpc:charUnboundMgr.SelectCharacterID
     let ctx = ServerContext::new();
     let kw = HashMap::new();
 
@@ -584,6 +586,7 @@ async fn test_so3_chat_channel_join_leave_local_population_and_broadcast() {
 
 #[tokio::test]
 async fn test_so4_in_game_mail_lifecycle() {
+    // parity: rpc:charUnboundMgr.SelectCharacterID, rpc:mailMgr.DeleteMail, rpc:mailMgr.GetBody, rpc:mailMgr.GetMailHeaders, rpc:mailMgr.MarkAsRead, rpc:mailMgr.SendMail
     let ctx = ServerContext::new();
     let kw = HashMap::new();
 
@@ -717,6 +720,7 @@ async fn test_so4_in_game_mail_lifecycle() {
 
 #[tokio::test]
 async fn test_so5_bookmarks_creation_entity_and_deletion() {
+    // parity: rpc:bookmark.BookmarkLocation, rpc:bookmark.DeleteBookmarks, rpc:bookmark.GetBookmarks, rpc:charUnboundMgr.SelectCharacterID
     let ctx = ServerContext::new();
     let kw = HashMap::new();
 
@@ -830,6 +834,7 @@ async fn test_so5_bookmarks_creation_entity_and_deletion() {
 
 #[tokio::test]
 async fn test_so6_cosmic_signatures_generation_and_probing_math() {
+    // parity: rpc:charUnboundMgr.SelectCharacterID, rpc:scanMgr.GetSignatures, rpc:scanMgr.RequestScans
     let ctx = ServerContext::new();
     let kw = HashMap::new();
 
@@ -937,6 +942,7 @@ async fn test_so6_cosmic_signatures_generation_and_probing_math() {
 
 #[tokio::test]
 async fn test_so7_wormhole_lifetime_mass_exhaustion_and_jump() {
+    // parity: rpc:charUnboundMgr.SelectCharacterID, rpc:scanMgr.GetSignatures, rpc:wormholeMgr.GetWormholePolarization, rpc:wormholeMgr.WormholeJump
     let ctx = ServerContext::new();
     let kw = HashMap::new();
 

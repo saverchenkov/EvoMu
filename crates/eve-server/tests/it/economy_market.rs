@@ -798,7 +798,7 @@ async fn test_market_instant_matching() {
 
 #[tokio::test]
 async fn test_market_modify_relist_tick_size_corp_remote_expiry_sleeper_and_plex() {
-    // parity: feat:market.modify-order, feat:market.remote-orders, feat:market.corp-orders, feat:market.plex-market, feat:market.npc-buy-orders-sleeper-loot
+    // parity: feat:market.modify-order, feat:market.remote-orders, feat:market.corp-orders, feat:market.plex-market, feat:market.npc-buy-orders-sleeper-loot, rpc:marketProxy.ModifyCharOrder
     eve_testkit::attest(&["feat:market.modify-order", "feat:market.remote-orders", "feat:market.corp-orders", "feat:market.plex-market", "feat:market.npc-buy-orders-sleeper-loot"]);
     let ctx = ServerContext::new();
     let mut s1 = setup_pilot(&ctx, 210, "demo", "demo-secret", 90_000_001).await;

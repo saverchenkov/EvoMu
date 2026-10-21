@@ -327,6 +327,7 @@ dependencies = [
  "eve-sde",
  "eve-server",
  "eve-testkit",
+ "getrandom 0.2.17",
  "glam",
  "rmp-serde",
  "rusqlite",

@@ -95,7 +95,7 @@ fn extract_attr_from_info(info_rep: &PyRep, attr_id: i64) -> f64 {
 
 #[tokio::test]
 async fn test_phase_4_dg6_ammo_loading_and_weapon_grouping() {
-    // parity: feat:fitting.ammo-load, feat:fitting.ammo-unload, feat:fitting.weapon-grouping, feat:modules.scripts-swap, rpc:dogmaIM.LoadAmmo, rpc:dogmaIM.UnloadAmmo, rpc:dogmaIM.LinkWeapons, rpc:dogmaIM.LinkAllWeapons, rpc:dogmaIM.UnlinkModule, rpc:dogmaIM.UnlinkAllModules, rpc:dogmaIM.PeelAndLink, rpc:dogmaIM.MergeModuleGroups, rpc:dogmaIM.DestroyWeaponBank
+    // parity: feat:fitting.ammo-load, feat:fitting.ammo-unload, feat:fitting.weapon-grouping, feat:modules.scripts-swap, rpc:dogmaIM.LoadAmmo, rpc:dogmaIM.UnloadAmmo, rpc:dogmaIM.LinkWeapons, rpc:dogmaIM.LinkAllWeapons, rpc:dogmaIM.UnlinkModule, rpc:dogmaIM.UnlinkAllModules, rpc:dogmaIM.PeelAndLink, rpc:dogmaIM.MergeModuleGroups, rpc:dogmaIM.DestroyWeaponBank, rpc:charUnboundMgr.SelectCharacterID, rpc:invbroker.Add
     eve_testkit::attest(&["feat:fitting.ammo-load", "feat:fitting.ammo-unload", "feat:fitting.weapon-grouping", "feat:modules.scripts-swap", "rpc:dogmaIM.LoadAmmo", "rpc:dogmaIM.UnloadAmmo", "rpc:dogmaIM.LinkWeapons", "rpc:dogmaIM.LinkAllWeapons", "rpc:dogmaIM.UnlinkModule", "rpc:dogmaIM.UnlinkAllModules", "rpc:dogmaIM.PeelAndLink", "rpc:dogmaIM.MergeModuleGroups", "rpc:dogmaIM.DestroyWeaponBank"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();
@@ -391,7 +391,7 @@ async fn test_phase_4_dg6_ammo_loading_and_weapon_grouping() {
 
 #[tokio::test]
 async fn test_dg4_siege_triage_bastion_industrial_core_phenomena_and_zpme() {
-    // parity: feat:modules.siege-module, feat:modules.triage-module, feat:modules.bastion-module, feat:modules.industrial-core, feat:modules.phenomena-generator, feat:modules.zero-point-mass-entangler
+    // parity: feat:modules.siege-module, feat:modules.triage-module, feat:modules.bastion-module, feat:modules.industrial-core, feat:modules.phenomena-generator, feat:modules.zero-point-mass-entangler, rpc:charUnboundMgr.SelectCharacterID, rpc:dogmaIM.Activate, rpc:dogmaIM.Deactivate, rpc:dogmaIM.ItemGetInfo, rpc:invbroker.Add, rpc:stationSvc.Undock
     eve_testkit::attest(&["feat:modules.siege-module", "feat:modules.triage-module", "feat:modules.bastion-module", "feat:modules.industrial-core", "feat:modules.phenomena-generator", "feat:modules.zero-point-mass-entangler"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();
@@ -787,7 +787,7 @@ async fn test_dg4_siege_triage_bastion_industrial_core_phenomena_and_zpme() {
 
 #[tokio::test]
 async fn test_dg6_heat_rack_thermodynamics_nanite_repair_and_crystal_volatility() {
-    // parity: feat:dogma.heat-rack-thermodynamics, feat:fitting.nanite-repair-paste-consumption, feat:modules.t2-crystal-volatility-destruction, notify:OnHeatAdded, notify:OnHeatRemoved, notify:OnMultiModuleRepairStarted, notify:OnRepairDone
+    // parity: feat:dogma.heat-rack-thermodynamics, feat:fitting.nanite-repair-paste-consumption, feat:modules.t2-crystal-volatility-destruction, notify:OnHeatAdded, notify:OnHeatRemoved, notify:OnMultiModuleRepairStarted, notify:OnRepairDone, rpc:charUnboundMgr.SelectCharacterID, rpc:dogmaIM.Deactivate, rpc:dogmaIM.ItemGetInfo, rpc:dogmaIM.LoadAmmo, rpc:dogmaIM.Overload, rpc:dogmaIM.OverloadRack, rpc:dogmaIM.RepairModule, rpc:dogmaIM.StopOverload, rpc:dogmaIM.StopOverloadRack, rpc:dogmaIM.StopRepairModule, rpc:invbroker.Add, rpc:stationSvc.Undock
     eve_testkit::attest(&["feat:dogma.heat-rack-thermodynamics", "feat:fitting.nanite-repair-paste-consumption", "feat:modules.t2-crystal-volatility-destruction", "notify:OnHeatAdded", "notify:OnHeatRemoved", "notify:OnMultiModuleRepairStarted", "notify:OnRepairDone"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();

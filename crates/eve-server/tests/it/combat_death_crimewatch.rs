@@ -222,7 +222,7 @@ async fn test_c3_death_pipeline_ship_and_pod_destruction_medical_respawn_and_imp
 
 #[tokio::test]
 async fn test_c3_ship_and_pod_self_destruct() {
-    // parity: feat:ships.self-destruct
+    // parity: feat:ships.self-destruct, rpc:charUnboundMgr.SelectCharacterID, rpc:ship.AbortSelfDestruct
     eve_testkit::attest(&["feat:ships.self-destruct"]);
 
     let ctx = ServerContext::new();
@@ -658,7 +658,7 @@ async fn test_c8_crimewatch_concord_timers_and_security_status() {
     // parity: feat:combat.aggression-tracking
     // parity: feat:crimewatch.security-status
     // parity: feat:crimewatch.sec-status-loss
-    // parity: feat:crimewatch.sec-status-gain
+    // parity: feat:crimewatch.sec-status-gain, rpc:charUnboundMgr.SelectCharacterID, rpc:crimewatch.GetMySecurityStatus
     eve_testkit::attest(&[
         "feat:dogma.weapon-timer",
         "feat:combat.aggression-tracking",

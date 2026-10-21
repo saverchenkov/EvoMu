@@ -11,7 +11,7 @@ use std::collections::HashMap;
 
 #[tokio::test]
 async fn test_account_bans_suspensions_and_gm_ban_live_session_kick() {
-    // parity: feat:account.account-bans, feat:admin.gm-ban
+    // parity: feat:account.account-bans, feat:admin.gm-ban, rpc:authentication.Login, rpc:charUnboundMgr.SelectCharacterID, rpc:slash.SlashCmd
     eve_testkit::attest(&["feat:account.account-bans", "feat:admin.gm-ban"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();
@@ -149,7 +149,7 @@ async fn test_account_bans_suspensions_and_gm_ban_live_session_kick() {
 
 #[tokio::test]
 async fn test_account_alpha_omega_switch_and_subscription_time() {
-    // parity: feat:account.alpha-omega-switch, feat:account.clone-state-subscription
+    // parity: feat:account.alpha-omega-switch, feat:account.clone-state-subscription, rpc:charUnboundMgr.SelectCharacterID, rpc:skillMgr2.GetSkills, rpc:slash.SlashCmd, rpc:subscriptionMgr.GetCloneGrade, rpc:subscriptionMgr.GetSubscriptionTime
     eve_testkit::attest(&["feat:account.alpha-omega-switch", "feat:account.clone-state-subscription"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();
@@ -261,7 +261,7 @@ fn skill_levels(rows: &[Vec<PyRep>], skill_id: u32) -> (i64, i64) {
 
 #[tokio::test]
 async fn test_account_kiring_disabled_and_accrued_playtime() {
-    // parity: feat:account.kiring-china, feat:account.underage-accrued-time
+    // parity: feat:account.kiring-china, feat:account.underage-accrued-time, rpc:authentication.AccruedTime, rpc:authentication.AmUnderage, rpc:authentication.Logout, rpc:charUnboundMgr.SelectCharacterID, rpc:kiringMgr.GetEveGuardServerAddress, rpc:kiringMgr.GetKiringConfiguration, rpc:slash.SlashCmd, rpc:userSvc.GetSessionPlaytimeMinutes
     eve_testkit::attest(&["feat:account.kiring-china", "feat:account.underage-accrued-time"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();
@@ -334,7 +334,7 @@ async fn test_account_kiring_disabled_and_accrued_playtime() {
 
 #[tokio::test]
 async fn test_account_redeem_tokens_claim_to_character_station() {
-    // parity: feat:account.redeem-tokens
+    // parity: feat:account.redeem-tokens, rpc:charUnboundMgr.SelectCharacterID, rpc:userSvc.ClaimRedeemTokens, rpc:userSvc.CreateRedeemTokenQA, rpc:userSvc.GetRedeemTokens
     eve_testkit::attest(&["feat:account.redeem-tokens"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();
@@ -407,7 +407,7 @@ async fn test_account_redeem_tokens_claim_to_character_station() {
 
 #[tokio::test]
 async fn test_account_logout_saves_location_and_removes_ship_from_space() {
-    // parity: feat:account.logout
+    // parity: feat:account.logout, rpc:authentication.Logout, rpc:charUnboundMgr.SelectCharacterID, rpc:skillMgr2.GetSkills, rpc:stationSvc.Undock
     eve_testkit::attest(&["feat:account.logout"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();
@@ -458,7 +458,7 @@ async fn test_account_logout_saves_location_and_removes_ship_from_space() {
 
 #[tokio::test]
 async fn test_petitions_player_and_gm_flow() {
-    // parity: feat:account.petitions, feat:admin.gm-petitions
+    // parity: feat:account.petitions, feat:admin.gm-petitions, rpc:charUnboundMgr.SelectCharacterID, rpc:petitioner.AddPetitionRating, rpc:petitioner.CancelPetition, rpc:petitioner.ClaimPetition, rpc:petitioner.CreatePetition, rpc:petitioner.GetLog, rpc:petitioner.GetMyPetitionsEx, rpc:petitioner.GetPetitionQueue
     eve_testkit::attest(&["feat:account.petitions", "feat:admin.gm-petitions"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();

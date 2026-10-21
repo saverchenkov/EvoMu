@@ -159,7 +159,7 @@ fn type_in_group(ctx: &ServerContext, group_name: &str, published: bool) -> u32 
 
 #[tokio::test]
 async fn test_esi_sovereignty_structures_reflect_live_sov_state() {
-    // parity: esi:GET /sovereignty/structures, feat:esi.sovereignty.structures
+    // parity: esi:GET /sovereignty/structures, feat:esi.sovereignty.structures, rpc:sovMgr.AcquireSkyhooks
     eve_testkit::attest(&[
         "esi:GET /sovereignty/structures",
         "feat:esi.sovereignty.structures",

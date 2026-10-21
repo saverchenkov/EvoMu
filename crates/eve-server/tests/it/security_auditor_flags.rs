@@ -22,7 +22,7 @@ use std::path::Path;
 
 #[tokio::test]
 async fn test_account_bans_real_enforcement_and_auto_clear() {
-    // parity: feat:account.account-bans
+    // parity: feat:account.account-bans, rpc:authentication.Login
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let now = ctx.now_unix();
@@ -143,7 +143,7 @@ async fn test_account_bans_real_enforcement_and_auto_clear() {
 
 #[tokio::test]
 async fn test_account_roles_bitmask_checks() {
-    // parity: plan:S-9, feat:account.account-roles, feat:admin.gm-role-gating
+    // parity: plan:S-9, feat:account.account-roles, feat:admin.gm-role-gating, rpc:authentication.Login, rpc:charUnboundMgr.SelectCharacterID, rpc:slash.SlashCmd
     let ctx = ServerContext::new();
     let kw = HashMap::new();
 
@@ -290,7 +290,7 @@ async fn test_account_roles_bitmask_checks() {
 
 #[tokio::test]
 async fn test_multi_login_block_enforcement() {
-    // parity: feat:account.multi-login-block
+    // parity: feat:account.multi-login-block, rpc:authentication.Login, rpc:charUnboundMgr.GetCharactersToSelect, rpc:charUnboundMgr.SelectCharacterID, rpc:multiLoginBlocker.Login
     let ctx = ServerContext::new();
     let kw = HashMap::new();
 
@@ -508,7 +508,7 @@ async fn test_multi_login_block_enforcement() {
 
 #[tokio::test]
 async fn test_gm_ban_slash_command() {
-    // parity: feat:admin.gm-ban
+    // parity: feat:admin.gm-ban, rpc:authentication.Login, rpc:charUnboundMgr.SelectCharacterID, rpc:slash.SlashCmd
     let ctx = ServerContext::new();
     let kw = HashMap::new();
 
@@ -930,7 +930,7 @@ async fn test_s10_doc_reconciliation_and_labels() {
 
 #[tokio::test]
 async fn test_s7_structures_skyhooks_pi_range_checks() {
-    // parity: plan:S-7
+    // parity: plan:S-7, rpc:charUnboundMgr.SelectCharacterID, rpc:mailMgr.SendMail, rpc:planetMgr.GetPlanetInfo, rpc:planetMgr.GetPlanetsForChar, rpc:planetMgr.UserUpdateNetwork, rpc:shipCosmeticsMgr.ApplySkinToShip, rpc:sovMgr.AcquireSkyhooks
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let mut sess = SessionState::new(20_701);
@@ -1083,6 +1083,7 @@ async fn test_s7_structures_skyhooks_pi_range_checks() {
 
 #[tokio::test]
 async fn test_z5_auditor_flagged_rows_closure_suite() {
+    // parity: rpc:authentication.Login, rpc:charUnboundMgr.SelectCharacterID, rpc:multiLoginBlocker.Login, rpc:slash.SlashCmd
     // Composite test closing the auditor-flagged ledger rows:
     // - feat:account.account-bans
     // - feat:account.account-roles

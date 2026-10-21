@@ -11,7 +11,7 @@ use std::collections::HashMap;
 
 #[tokio::test]
 async fn test_phase_0_s4_split_shared_handlers_and_jump_clones() {
-    // parity: plan:S-4
+    // parity: plan:S-4, rpc:charUnboundMgr.GetCharacterInfo, rpc:charUnboundMgr.GetCharactersToSelect, rpc:charUnboundMgr.SelectCharacterID, rpc:jumpCloneSvc.CloneJump, rpc:jumpCloneSvc.GetCloneState, rpc:jumpCloneSvc.GetPriceForClone, rpc:jumpCloneSvc.GetStationCloneState, rpc:jumpCloneSvc.InstallCloneInStation, rpc:jumpCloneSvc.InstallCloneInStructure, rpc:loginRewardFacilities.get_my_clone_grade, rpc:machoNet.GetInitVals, rpc:machoNet.GetServiceInfo, rpc:standingMgr.GetCharStandings, rpc:standingMgr.GetStandingTransactions, rpc:subscriptionMgr.GetCloneGrade
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let mut sess = SessionState::new(904);
@@ -360,7 +360,7 @@ async fn test_phase_0_s4_split_shared_handlers_and_jump_clones() {
 
 #[tokio::test]
 async fn test_p1_p2_wire_row_encoders_and_service_crowsets() {
-    // parity: plan:P-1, plan:P-2, feat:serverops.packed-rows
+    // parity: plan:P-1, plan:P-2, feat:serverops.packed-rows, rpc:charUnboundMgr.GetCharactersToSelect, rpc:charUnboundMgr.SelectCharacterID, rpc:invbroker.GetContainerContents, rpc:invbroker.GetItemDescriptor, rpc:invbroker.List, rpc:marketProxy.GetOrders, rpc:marketProxy.GetStationAsks
     use eve_proto::{marshal, DBRowDescriptor};
 
     let ctx = ServerContext::new();
@@ -530,6 +530,7 @@ async fn test_p1_p2_wire_row_encoders_and_service_crowsets() {
 
 #[tokio::test]
 async fn test_r50_p1_1_container_contents_ownership_and_range_enforcement() {
+    // parity: rpc:authentication.Login, rpc:charUnboundMgr.SelectCharacterID, rpc:invbroker.GetContainerContents
     use eve_destiny::{Ball, MovementMode};
     use glam::DVec3;
 
@@ -775,7 +776,7 @@ async fn test_r50_p1_1_container_contents_ownership_and_range_enforcement() {
 
 #[tokio::test]
 async fn test_p3_p4_p5_object_cache_config_service_and_notifications() {
-    // parity: plan:P-3, plan:P-4, plan:P-5, feat:serverops.object-cache, feat:serverops.config-svc, feat:serverops.notification-transport, feat:social.notifications-list, feat:social.notifications-mark, feat:social.notifications-delete, feat:social.notifications-generate
+    // parity: plan:P-3, plan:P-4, plan:P-5, feat:serverops.object-cache, feat:serverops.config-svc, feat:serverops.notification-transport, feat:social.notifications-list, feat:social.notifications-mark, feat:social.notifications-delete, feat:social.notifications-generate, rpc:authentication.Login, rpc:charUnboundMgr.SelectCharacterID, rpc:config.GetCelestialStatistic, rpc:config.GetMap, rpc:config.GetMapConnections, rpc:config.GetMapObjects, rpc:config.GetMultiCorpTickerNamesEx, rpc:config.GetMultiGraphicsEx, rpc:config.GetMultiInvTypesEx, rpc:config.GetMultiLocationsEx, rpc:config.GetMultiOwnersEx, rpc:config.GetMultiStationEx, rpc:config.GetStationSolarSystemsByOwner, rpc:notificationMgr.DeleteNotifications, rpc:notificationMgr.GetAllNotifications, rpc:notificationMgr.GetByGroupID, rpc:notificationMgr.GetUnprocessed, rpc:notificationMgr.MarkAsProcessed, rpc:objectCaching.GetCachableObject, rpc:objectCaching.InvalidateCachedObjects
     use eve_machonet::{MachoAddress, MachoPacket, MachoPacketType};
     use eve_proto::{marshal, DBRowDescriptor};
     use eve_server::router::NotificationTarget;

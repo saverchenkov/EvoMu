@@ -14,7 +14,7 @@ use std::collections::HashMap;
 #[tokio::test]
 async fn test_s2_fighter_manager_load_launch_recall_movement_abilities_abandon() {
     // parity: plan:S-2
-    // parity: feat:drones.fighter-load-tubes, feat:drones.fighter-launch-recall, feat:drones.fighter-movement, feat:drones.fighter-abilities, feat:drones.fighter-abandon
+    // parity: feat:drones.fighter-load-tubes, feat:drones.fighter-launch-recall, feat:drones.fighter-movement, feat:drones.fighter-abilities, feat:drones.fighter-abandon, rpc:charUnboundMgr.SelectCharacterID, rpc:fighterMgr.CmdAbandonFighter, rpc:fighterMgr.CmdActivateAbilitySlots, rpc:fighterMgr.ExecuteMovementCommandOnFighters, rpc:fighterMgr.GetFightersForShip, rpc:fighterMgr.LaunchFightersFromTubes, rpc:fighterMgr.LoadFightersToTube, rpc:fighterMgr.RecallFightersToTubes, rpc:fighterMgr.UnloadTubeToFighterBay, rpc:stationSvc.Undock
     eve_testkit::attest(&[
         "plan:S-2",
         "feat:drones.fighter-load-tubes",
@@ -889,7 +889,7 @@ async fn test_s2_fighter_manager_load_launch_recall_movement_abilities_abandon()
 #[tokio::test]
 async fn test_s3_pharolux_cyno_beacon_jump_bridge_and_group_jump() {
     // parity: plan:S-3
-    // parity: feat:navigation.pharolux-beacon
+    // parity: feat:navigation.pharolux-beacon, rpc:charUnboundMgr.SelectCharacterID, rpc:stationSvc.Undock, rpc:structureCynoBeaconMgr.CmdBridgeToStructureBeacon, rpc:structureCynoBeaconMgr.CmdGroupJumpToStructureBeacon, rpc:structureCynoBeaconMgr.CmdJumpToStructureBeacon, rpc:structureCynoBeaconMgr.GetMyAccessibleOnlineCynoBeaconStructures
     eve_testkit::attest(&["plan:S-3", "feat:navigation.pharolux-beacon"]);
 
     let ctx = ServerContext::new();

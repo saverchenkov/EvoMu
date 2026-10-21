@@ -91,7 +91,7 @@ fn get_dict_entry<'a>(dict: &'a PyRep, key: &str) -> Option<&'a PyRep> {
 
 #[tokio::test]
 async fn test_action_plan_ch1_to_ch5_character_skills_and_gm() {
-    // parity: plan:CH-1, plan:CH-3, plan:CH-4
+    // parity: plan:CH-1, plan:CH-3, plan:CH-4, rpc:charMgr.AddOwnerNote, rpc:charMgr.CreateLabel, rpc:charMgr.GetCharacterDescription, rpc:charMgr.GetContactList, rpc:charMgr.GetOwnerNote, rpc:charMgr.GetPublicInfo3, rpc:charMgr.RespecCharacter, rpc:charMgr.SetCharacterDescription, rpc:charUnboundMgr.CreateCharacterWithDoll, rpc:charUnboundMgr.SelectCharacterID, rpc:skillMgr2.ApplyFreeSkillPoints, rpc:skillMgr2.GetSkillHistory, rpc:skillMgr2.GetSkillQueue, rpc:skillMgr2.GetSkillQueueAndFreePoints, rpc:skillMgr2.InjectSkillIntoBrain, rpc:slash.SlashCmd
     eve_testkit::attest(&[
         "plan:CH-1",
         "plan:CH-3",
@@ -479,7 +479,7 @@ async fn test_action_plan_ch1_to_ch5_character_skills_and_gm() {
 
 #[tokio::test]
 async fn test_action_plan_p1_to_p5_wire_protocol_cache_notifications() {
-    // parity: plan:P-1, plan:P-2, plan:P-3, plan:P-4, plan:P-5
+    // parity: plan:P-1, plan:P-2, plan:P-3, plan:P-4, plan:P-5, rpc:charUnboundMgr.GetCharactersToSelect, rpc:charUnboundMgr.SelectCharacterID, rpc:config.GetMap, rpc:config.GetMultiCorpTickerNamesEx, rpc:config.GetMultiLocationsEx, rpc:config.GetMultiOwnersEx, rpc:config.GetStationSolarSystemsByOwner, rpc:invbroker.List, rpc:objectCaching.GetCachableObject
     eve_testkit::attest(&[
         "plan:P-1",
         "plan:P-2",
@@ -849,7 +849,7 @@ async fn test_action_plan_p6_p7_native_handshake_and_destiny_binary() {
 
 #[tokio::test]
 async fn test_action_plan_mn01_to_mn05_mining_static_belts_cycles_holds() {
-    // parity: plan:MN-01, plan:MN-02, plan:MN-03, plan:MN-04, plan:MN-05
+    // parity: plan:MN-01, plan:MN-02, plan:MN-03, plan:MN-04, plan:MN-05, rpc:dogmaIM.Activate, rpc:stationSvc.Undock
     eve_testkit::attest(&[
         "plan:MN-01",
         "plan:MN-02",
@@ -1041,7 +1041,7 @@ async fn test_action_plan_mn01_to_mn05_mining_static_belts_cycles_holds() {
 
 #[tokio::test]
 async fn test_action_plan_mn06_to_mn18_crystals_skills_ice_npc_missions() {
-    // parity: plan:MN-06, plan:MN-07, plan:MN-08, plan:MN-18
+    // parity: plan:MN-06, plan:MN-07, plan:MN-08, plan:MN-18, rpc:dogmaIM.Activate, rpc:stationSvc.Undock
     eve_testkit::attest(&[
         "plan:MN-06",
         "plan:MN-07",

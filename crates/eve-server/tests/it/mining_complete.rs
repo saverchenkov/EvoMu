@@ -236,7 +236,7 @@ async fn test_mn01_mn02_c5_static_data_and_belt_ore_distribution() {
 // ====================================================================
 #[tokio::test]
 async fn test_mn04_mn06_crits_crystals_residue() {
-    // parity: plan:MN-04, plan:MN-06, feat:mining.mining-laser-cycle, feat:mining.strip-miner, feat:mining.mining-crits, feat:mining.modulated-crystals, feat:mining.mining-residue
+    // parity: plan:MN-04, plan:MN-06, feat:mining.mining-laser-cycle, feat:mining.strip-miner, feat:mining.mining-crits, feat:mining.modulated-crystals, feat:mining.mining-residue, rpc:dogmaIM.Activate, rpc:stationSvc.Undock
     eve_testkit::attest(&["plan:MN-04", "plan:MN-06", "feat:mining.mining-laser-cycle", "feat:mining.strip-miner", "feat:mining.mining-crits", "feat:mining.modulated-crystals", "feat:mining.mining-residue"]);
     let ctx = ServerContext::new();
     let char_id = 90_000_001;
@@ -610,7 +610,7 @@ async fn test_mn04_mn06_crits_crystals_residue() {
 // ====================================================================
 #[tokio::test]
 async fn test_mn05_special_holds_and_mining_to_jetcan() {
-    // parity: plan:MN-05, feat:ships.special-holds, feat:mining.ore-hold, feat:mining.mining-to-jetcan
+    // parity: plan:MN-05, feat:ships.special-holds, feat:mining.ore-hold, feat:mining.mining-to-jetcan, rpc:dogmaIM.Activate, rpc:invbroker.Add, rpc:ship.Jettison, rpc:stationSvc.Undock
     eve_testkit::attest(&["plan:MN-05", "feat:ships.special-holds", "feat:mining.ore-hold", "feat:mining.mining-to-jetcan"]);
     let ctx = ServerContext::new();
     let char_id = 90_000_001;
@@ -898,7 +898,7 @@ async fn test_mn05_special_holds_and_mining_to_jetcan() {
 // ====================================================================
 #[tokio::test]
 async fn test_mn07_skills_upgrades_boosts_ore_ships_and_destroyers() {
-    // parity: plan:MN-07, feat:mining.mining-skills, feat:mining.mining-upgrades, feat:mining.mining-fleet-boosts, feat:mining.ore-ships, feat:mining.mining-destroyers
+    // parity: plan:MN-07, feat:mining.mining-skills, feat:mining.mining-upgrades, feat:mining.mining-fleet-boosts, feat:mining.ore-ships, feat:mining.mining-destroyers, rpc:dogmaIM.Activate, rpc:fleetSvc.InitFleet, rpc:stationSvc.Undock
     eve_testkit::attest(&["plan:MN-07", "feat:mining.mining-skills", "feat:mining.mining-upgrades", "feat:mining.mining-fleet-boosts", "feat:mining.ore-ships", "feat:mining.mining-destroyers"]);
     let ctx = ServerContext::new();
     let char_id = 90_000_001;
@@ -1206,7 +1206,7 @@ async fn test_mn07_skills_upgrades_boosts_ore_ships_and_destroyers() {
 // ====================================================================
 #[tokio::test]
 async fn test_mn08_ice_and_gas_harvesting() {
-    // parity: plan:MN-08, feat:mining.ice-belts, feat:mining.ice-harvester, feat:mining.gas-harvesting
+    // parity: plan:MN-08, feat:mining.ice-belts, feat:mining.ice-harvester, feat:mining.gas-harvesting, rpc:dogmaIM.Activate, rpc:stationSvc.Undock
     eve_testkit::attest(&["plan:MN-08", "feat:mining.ice-belts", "feat:mining.ice-harvester", "feat:mining.gas-harvesting"]);
     let ctx = ServerContext::new();
     let char_id = 90_000_001;

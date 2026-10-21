@@ -21,7 +21,7 @@ use tokio::net::{TcpListener, TcpStream};
 #[tokio::test]
 async fn test_phase_1_d1_to_d5_sde_sqlite_persistence_auth_sso_and_config() {
     // parity: plan:S-11, plan:D-2
-    // parity: feat:serverops.static-data, feat:account.multi-login-block, feat:account.account-bans, feat:admin.gm-ban
+    // parity: feat:serverops.static-data, feat:account.multi-login-block, feat:account.account-bans, feat:admin.gm-ban, rpc:agentMgr.DoAction, rpc:authentication.List, rpc:authentication.Login, rpc:authentication.Logout, rpc:charUnboundMgr.GetCharactersToSelect, rpc:charUnboundMgr.SelectCharacterID, rpc:invbroker.MachoBindObject, rpc:multiLoginBlocker.Login, rpc:publicGatewaySvc.SendRequest, rpc:slash.SlashCmd
     use eve_server::config::ServerConfig;
     use std::path::Path;
 

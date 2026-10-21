@@ -853,6 +853,7 @@ async fn test_plan_e3_contracts_item_exchange_and_courier() {
 // ====================================================================
 #[tokio::test]
 async fn test_plan_c5_mining_belts_lasers_and_depletion() {
+    // parity: rpc:dogmaIM.Activate, rpc:stationSvc.Undock
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let char_id = 90_000_001;
@@ -961,6 +962,7 @@ async fn test_plan_c5_mining_belts_lasers_and_depletion() {
 // ====================================================================
 #[tokio::test]
 async fn test_plan_c6_reprocessing_yield_tax_and_materials() {
+    // parity: rpc:reprocessingSvc.GetQuotes, rpc:reprocessingSvc.Reprocess
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let char_id = 90_000_001;

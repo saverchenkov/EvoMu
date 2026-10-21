@@ -101,7 +101,7 @@ fn get_dict_val<'a>(dict: &'a PyRep, key: &str) -> Option<&'a PyRep> {
 
 #[tokio::test]
 async fn test_phase_5m_mn08_survey_scanner() {
-    // parity: plan:MN-10, feat:modules.survey-scanner, feat:mining.survey-scan, rpc:miningScanMgr.perform_scan, notify:OnAsteroidRevealed
+    // parity: plan:MN-10, feat:modules.survey-scanner, feat:mining.survey-scan, rpc:miningScanMgr.perform_scan, notify:OnAsteroidRevealed, rpc:stationSvc.Undock
     eve_testkit::attest(&["plan:MN-10", "feat:modules.survey-scanner", "feat:mining.survey-scan", "rpc:miningScanMgr.perform_scan", "notify:OnAsteroidRevealed"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();
@@ -232,7 +232,7 @@ async fn test_phase_5m_mn08_survey_scanner() {
 // ====================================================================
 #[tokio::test]
 async fn test_mining_target_validity_mercoxit_deep_core() {
-    // parity: feat:mining.mining-module-target-validity, feat:mining.mercoxit-deep-core-restriction
+    // parity: feat:mining.mining-module-target-validity, feat:mining.mercoxit-deep-core-restriction, rpc:dogmaIM.Activate, rpc:stationSvc.Undock
     eve_testkit::attest(&["feat:mining.mining-module-target-validity", "feat:mining.mercoxit-deep-core-restriction"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();
@@ -384,7 +384,7 @@ async fn test_mining_target_validity_mercoxit_deep_core() {
 // ====================================================================
 #[tokio::test]
 async fn test_mining_crystals_and_ice_modifiers() {
-    // parity: feat:mining.crystal-tier-ore-compatibility, feat:mining.crystal-type-abc-modifiers, feat:mining.ice-harvester-cycle-modifiers
+    // parity: feat:mining.crystal-tier-ore-compatibility, feat:mining.crystal-type-abc-modifiers, feat:mining.ice-harvester-cycle-modifiers, rpc:dogmaIM.Activate, rpc:stationSvc.Undock
     eve_testkit::attest(&["feat:mining.crystal-tier-ore-compatibility", "feat:mining.crystal-type-abc-modifiers", "feat:mining.ice-harvester-cycle-modifiers"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();
@@ -538,7 +538,7 @@ async fn test_mining_crystals_and_ice_modifiers() {
 // ====================================================================
 #[tokio::test]
 async fn test_mining_bursts_and_reprocessing_curves() {
-    // parity: feat:mining.foreman-burst-charge-effects, feat:mining.npc-reprocessing-equipment-and-tax-curve, feat:mining.scrapmetal-yield-exclusions, feat:mining.prismaticite-reprocessing-and-unrefined-reactions
+    // parity: feat:mining.foreman-burst-charge-effects, feat:mining.npc-reprocessing-equipment-and-tax-curve, feat:mining.scrapmetal-yield-exclusions, feat:mining.prismaticite-reprocessing-and-unrefined-reactions, rpc:dogmaIM.Activate, rpc:reprocessingSvc.GetQuotes, rpc:reprocessingSvc.Reprocess, rpc:stationSvc.Undock
     eve_testkit::attest(&["feat:mining.foreman-burst-charge-effects", "feat:mining.npc-reprocessing-equipment-and-tax-curve", "feat:mining.scrapmetal-yield-exclusions", "feat:mining.prismaticite-reprocessing-and-unrefined-reactions"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();

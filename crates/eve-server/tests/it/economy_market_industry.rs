@@ -46,7 +46,7 @@ async fn setup_pilot(
 
 #[tokio::test]
 async fn test_market_broker_fee_and_sales_tax() {
-    // parity: feat:market.broker-fee, feat:market.sales-tax
+    // parity: feat:market.broker-fee, feat:market.sales-tax, rpc:facilityManager.SetFacilityTaxes, rpc:marketProxy.CancelCharOrder, rpc:marketProxy.PlaceBuyOrder, rpc:marketProxy.PlaceMultiSellOrder
     eve_testkit::attest(&["feat:market.broker-fee", "feat:market.sales-tax"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();
@@ -456,7 +456,7 @@ async fn test_market_broker_fee_and_sales_tax() {
 
 #[tokio::test]
 async fn test_effective_standing_and_broker_discount() {
-    // parity: feat:standings.effective-standing
+    // parity: feat:standings.effective-standing, rpc:marketProxy.CancelCharOrder, rpc:marketProxy.PlaceBuyOrder
     eve_testkit::attest(&["feat:standings.effective-standing"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();
@@ -552,7 +552,7 @@ async fn test_effective_standing_and_broker_discount() {
 
 #[tokio::test]
 async fn test_market_orders_limit_escrow_queries_cancellation() {
-    // parity: feat:market.escrow, feat:market.get-orders, feat:market.place-buy, feat:market.place-sell
+    // parity: feat:market.escrow, feat:market.get-orders, feat:market.place-buy, feat:market.place-sell, rpc:marketProxy.CancelCharOrder, rpc:marketProxy.GetCharEscrow, rpc:marketProxy.GetOrders, rpc:marketProxy.PlaceBuyOrder, rpc:marketProxy.PlaceMultiSellOrder
     eve_testkit::attest(&["feat:market.escrow", "feat:market.get-orders", "feat:market.place-buy", "feat:market.place-sell"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();

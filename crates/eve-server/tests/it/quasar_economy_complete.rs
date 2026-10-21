@@ -79,6 +79,7 @@ fn encode_uuid_field(tag: u32, uuid: &[u8], out: &mut Vec<u8>) {
 
 #[tokio::test]
 async fn test_quasar_market_complete() {
+    // parity: rpc:publicGatewaySvc.SendRequest, rpc:publicGatewaySvc.Subscribe
     let ctx = ServerContext::new();
     let empty_kw = HashMap::new();
     let mut sess = SessionState::new(1001);
@@ -269,6 +270,7 @@ async fn test_quasar_market_complete() {
 
 #[tokio::test]
 async fn test_quasar_inventory_asset_container_blueprint_ore() {
+    // parity: rpc:publicGatewaySvc.SendRequest
     let ctx = ServerContext::new();
     let empty_kw = HashMap::new();
     let mut sess = SessionState::new(1001);
@@ -432,7 +434,7 @@ async fn test_quasar_inventory_asset_container_blueprint_ore() {
 
 #[tokio::test]
 async fn test_quasar_assetholding_entitlements() {
-    // parity: quasar:eveProto/generated/eve_public/assetholding/entitlement/api/notices_pb2.pyj
+    // parity: quasar:eveProto/generated/eve_public/assetholding/entitlement/api/notices_pb2.pyj, rpc:publicGatewaySvc.SendRequest, rpc:publicGatewaySvc.Subscribe
     eve_testkit::attest(&[
         "quasar:eveProto/generated/eve_public/assetholding/entitlement/api/notices_pb2.pyj",
     ]);
@@ -584,6 +586,7 @@ async fn test_quasar_assetholding_entitlements() {
 
 #[tokio::test]
 async fn test_quasar_accounting_loyalty_contracts() {
+    // parity: rpc:publicGatewaySvc.SendRequest
     let ctx = ServerContext::new();
     let empty_kw = HashMap::new();
     let mut sess = SessionState::new(1001);
@@ -647,6 +650,7 @@ async fn test_quasar_accounting_loyalty_contracts() {
 
 #[tokio::test]
 async fn test_quasar_industry_planetary_moon_asteroidbelt() {
+    // parity: rpc:publicGatewaySvc.SendRequest
     let ctx = ServerContext::new();
     let empty_kw = HashMap::new();
     let mut sess = SessionState::new(1001);

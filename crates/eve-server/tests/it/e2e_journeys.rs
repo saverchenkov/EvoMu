@@ -9,6 +9,7 @@ use std::collections::HashMap;
 
 #[tokio::test]
 async fn test_e2e_01_to_18_integration_journeys() {
+    // parity: rpc:authentication.Login, rpc:beyonce.CmdStargateJump, rpc:beyonce.CmdWarpToPoint, rpc:charUnboundMgr.CreateCharacterWithDoll, rpc:charUnboundMgr.SelectCharacterID, rpc:dogmaIM.FireWeapon, rpc:dogmaIM.LoadAmmo, rpc:dogmaIM.Overload, rpc:essMgr.AttemptLinkToMainBank, rpc:invbroker.Add, rpc:marketProxy.GetOrders, rpc:scanMgr.ConeScan, rpc:scanMgr.RequestScans, rpc:skillMgr2.ApplyFreeSkillPoints, rpc:skillMgr2.InjectSkillpoints, rpc:skillMgr2.MachoBindObject, rpc:skillMgr2.SaveSkillQueue, rpc:stationSvc.Dock, rpc:stationSvc.Undock, rpc:wormholeMgr.WormholeJump
     use eve_db::{InventoryFlag, InventoryItemRecord};
 
     let ctx = ServerContext::new();

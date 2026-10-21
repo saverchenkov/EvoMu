@@ -9,6 +9,7 @@ use std::collections::HashMap;
 
 #[tokio::test]
 async fn test_review_r8_regressions() {
+    // parity: rpc:agentMgr.DoAction, rpc:agentMgr.RemoveOfferFromJournal, rpc:authentication.Login, rpc:beyonce.CmdStop, rpc:beyonce.CmdWarpToPoint, rpc:beyonce.CmdWarpToStuff, rpc:charFittingMgr.SaveFitting, rpc:charUnboundMgr.SelectCharacterID, rpc:contractProxy.AcceptContract, rpc:contractProxy.CompleteContract, rpc:contractProxy.CreateContract, rpc:contractProxy.DeleteContract, rpc:dogmaIM.FireWeapon, rpc:dogmaIM.LoadAmmo, rpc:dynamicItemService.CreateDynamicItem, rpc:fighterMgr.CmdActivateAbilitySlots, rpc:industryManager.CompleteJob, rpc:industryManager.InstallJob, rpc:invbroker.Add, rpc:jumpCloneSvc.GetPriceForClone, rpc:keeper.ActivateAccelerationGate, rpc:marketProxy.BuyMultipleItems, rpc:marketProxy.GetCharOrders, rpc:marketProxy.PlaceBuyOrder, rpc:marketProxy.PlaceMultiSellOrder, rpc:multiLoginBlocker.Login, rpc:planetMgr.UserUpdateNetwork, rpc:repackagingSvc.RepackageItems, rpc:ship.Board, rpc:shipCosmeticsMgr.ActivateSkinLicense, rpc:shipCosmeticsMgr.ApplySkinToShip, rpc:shipCosmeticsMgr.GiveSkin, rpc:skillMgr2.ApplyFreeSkillPoints, rpc:skillMgr2.SaveSkillQueue, rpc:standingMgr.GetStandingTransactions, rpc:station.GetStation, rpc:stationSvc.Dock, rpc:stationSvc.Undock, rpc:taleMgr.GetGlobalWorldEventTales, rpc:taleMgr.get_active_tales_by_template
     use eve_db::InventoryFlag;
 
     let ctx = ServerContext::new();

@@ -11,7 +11,7 @@ use std::collections::HashMap;
 
 #[tokio::test]
 async fn test_phase_0_s3_cyno_jump_unimplemented_rpc() {
-    // parity: plan:S-3
+    // parity: plan:S-3, rpc:authentication.Login, rpc:charUnboundMgr.SelectCharacterID, rpc:structureCynoBeaconMgr.CmdJumpToStructureBeacon
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let mut sess = SessionState::new(903);
@@ -123,7 +123,7 @@ async fn test_phase_0_s5_no_unconditional_demo_spawns_on_empty_world() {
 
 #[tokio::test]
 async fn test_phase_0_s6_request_scans_unimplemented_rpc() {
-    // parity: plan:S-6
+    // parity: plan:S-6, rpc:authentication.Login, rpc:charUnboundMgr.SelectCharacterID, rpc:scanMgr.RequestScans
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let mut sess = SessionState::new(906);
@@ -258,6 +258,7 @@ async fn test_sp1_jita_and_perimeter_celestials_gates_belts_stations_as_balls() 
 // parity: destiny:AddBalls2, destiny:RemoveBalls, destiny:RemoveBall
 // parity: destiny:GotoDirection, destiny:FollowBall, destiny:Orbit, destiny:Stop
 async fn test_p7_destiny_binary_stream_undock_movement_and_stargate_jump() {
+    // parity: rpc:authentication.Login, rpc:beyonce.AdminGetBubbleID, rpc:beyonce.CmdFollowBall, rpc:beyonce.CmdGotoDirection, rpc:beyonce.CmdOrbit, rpc:beyonce.CmdSetSpeedFraction, rpc:beyonce.CmdStargateJump, rpc:beyonce.CmdStop, rpc:beyonce.CmdWarpToStuff, rpc:beyonce.GetFormations, rpc:beyonce.GetState, rpc:beyonce.UpdateStateRequest, rpc:charUnboundMgr.SelectCharacterID, rpc:stationSvc.Undock
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let mut sess = SessionState::new(970);
@@ -1014,7 +1015,7 @@ async fn test_sp2_spatial_bubbles_10000km_isolation_and_inter_bubble_warp() {
 
 #[tokio::test]
 async fn test_p7_on_slim_item_change_when_pilot_in_space_changes_corp() {
-    // parity: destiny:OnSlimItemChange
+    // parity: destiny:OnSlimItemChange, rpc:authentication.Login, rpc:charUnboundMgr.SelectCharacterID, rpc:corpRegistry.AddCorporation, rpc:stationSvc.Undock
     eve_testkit::attest(&["destiny:OnSlimItemChange"]);
 
     let ctx = ServerContext::new();

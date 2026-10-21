@@ -19,7 +19,7 @@ fn is_rowset(rep: &PyRep) -> bool {
 
 #[tokio::test]
 async fn test_so1_mail_lifecycle_labels_mailing_lists_cspa_and_calendar() {
-    // parity: feat:social.mail-send, feat:social.mail-headers, feat:social.mail-body, feat:social.mail-read-state, feat:social.mail-labels, feat:social.mail-trash
+    // parity: feat:social.mail-send, feat:social.mail-headers, feat:social.mail-body, feat:social.mail-read-state, feat:social.mail-labels, feat:social.mail-trash, rpc:calendarMgr.CreateNewEvent, rpc:calendarMgr.RespondToEvent, rpc:charMgr.LogSettings, rpc:charUnboundMgr.SelectCharacterID, rpc:mailMgr.AssignLabels, rpc:mailMgr.CreateLabel, rpc:mailMgr.DeleteLabel, rpc:mailMgr.DeleteMail, rpc:mailMgr.EditLabel, rpc:mailMgr.EmptyTrash, rpc:mailMgr.GetBody, rpc:mailMgr.GetLabels, rpc:mailMgr.MarkAsRead, rpc:mailMgr.MarkAsUnread, rpc:mailMgr.MoveFromTrash, rpc:mailMgr.MoveToTrash, rpc:mailMgr.RemoveLabels, rpc:mailMgr.SendMail, rpc:mailMgr.SyncMail, rpc:mailingListsMgr.Create, rpc:mailingListsMgr.Join
     eve_testkit::attest(&[
         "feat:social.mail-send",
         "feat:social.mail-headers",
@@ -569,7 +569,7 @@ async fn test_so1_mail_lifecycle_labels_mailing_lists_cspa_and_calendar() {
 
 #[tokio::test]
 async fn test_so2_fleet_manager_hierarchy_broadcast_and_fleet_warp() {
-    // parity: feat:fleet.create-fleet, feat:fleet.invite-accept, feat:fleet.leave-kick, feat:navigation.warp-to-member, feat:navigation.fleet-warp
+    // parity: feat:fleet.create-fleet, feat:fleet.invite-accept, feat:fleet.leave-kick, feat:navigation.warp-to-member, feat:navigation.fleet-warp, rpc:charUnboundMgr.SelectCharacterID, rpc:fleetMgr.AddToWatchlist, rpc:fleetMgr.CreateFleet, rpc:fleetMgr.GetInitState, rpc:fleetMgr.LeaveFleet, rpc:fleetObjectHandler.AcceptInvite, rpc:fleetObjectHandler.CreateSquad, rpc:fleetObjectHandler.CreateWing, rpc:fleetObjectHandler.FleetWarp, rpc:fleetObjectHandler.GetInitState, rpc:fleetObjectHandler.Invite, rpc:fleetObjectHandler.KickMember, rpc:fleetObjectHandler.MachoBindObject, rpc:fleetObjectHandler.MoveMember, rpc:fleetObjectHandler.SendBroadcast, rpc:fleetObjectHandler.WarpToMember, rpc:fleetProxy.AddFleetFinderAdvert, rpc:fleetProxy.GetAvailableFleetAds
     eve_testkit::attest(&[
         "feat:fleet.create-fleet",
         "feat:fleet.invite-accept",
@@ -1115,7 +1115,7 @@ async fn test_so2_fleet_manager_hierarchy_broadcast_and_fleet_warp() {
 
 #[tokio::test]
 async fn test_so7_chat_channels_local_corp_fleet_player_and_private() {
-    // parity: feat:social.chat-xmpp-auth, feat:social.chat-local, feat:social.chat-corp-alliance-fleet, feat:social.chat-player-channels, feat:social.chat-private
+    // parity: feat:social.chat-xmpp-auth, feat:social.chat-local, feat:social.chat-corp-alliance-fleet, feat:social.chat-player-channels, feat:social.chat-private, rpc:LSC.AccessControl, rpc:LSC.JoinChannel, rpc:LSC.SendMessage, rpc:XmppChatMgr.CreatePlayerOwnedChannel, rpc:XmppChatMgr.CreatePrivateChannel, rpc:charUnboundMgr.SelectCharacterID, rpc:chatAuthenticationService.GetAuthenticationToken
     eve_testkit::attest(&[
         "feat:social.chat-xmpp-auth",
         "feat:social.chat-local",
