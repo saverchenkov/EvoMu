@@ -170,3 +170,5 @@ mod notify_fleet_corp_standings;
 mod notify_autopilot_session;
 mod rpc_abyssal_content;
 mod rpc_nodegraph_experts;
+mod rpc_fw_insurgency_crimewatch;
+mod rpc_milestones_telemetry_load;

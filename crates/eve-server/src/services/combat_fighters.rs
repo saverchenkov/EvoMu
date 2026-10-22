@@ -952,6 +952,57 @@ pub async fn handle_fighters(
             )))
         }
 
+        ("fighterMgr", "CmdScoopAbandonedFighterFromSpace") => {
+            let (_, _char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let Some(ship_id) = session.ship_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "NoActiveShip".into(),
+                    message: "Session has no active ship".into(),
+                }));
+            };
+            let Some(sys_id) = session.solar_system_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "NoSolarSystem".into(),
+                    message: "Session has no active solar system".into(),
+                }));
+            };
+            let target_fighter_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let sys_handle = ctx.systems.get_or_spawn(sys_id);
+            let mut scooped_ball_id = None;
+            let mut scooped_item_id = None;
+            {
+                let mut fighters = ctx.active_fighters.write().unwrap();
+                let found_key = fighters.iter().find_map(|(&k, f)| {
+                    if f.is_abandoned && (target_fighter_id == 0 || f.ball_id == target_fighter_id || f.item_id == target_fighter_id) {
+                        Some(k)
+                    } else {
+                        None
+                    }
+                });
+                if let Some(k) = found_key {
+                    let f = fighters.remove(&k).unwrap();
+                    scooped_ball_id = Some(f.ball_id);
+                    scooped_item_id = Some(f.item_id);
+                }
+            }
+            if let Some(iid) = scooped_item_id {
+                ctx.db.with_mut_snapshot(|snap| {
+                    if let Some(item) = snap.items.get_mut(&iid) {
+                        item.location_id = ship_id;
+                        item.flag = InventoryFlag::FighterBay;
+                        item.version += 1;
+                    }
+                });
+            }
+            if let Some(bid) = scooped_ball_id {
+                let _ = sys_handle.remove_ball(bid).await;
+            }
+            Some(Ok(PyRep::Bool(scooped_item_id.is_some())))
+        }
+
         _ => None,
     }
 }

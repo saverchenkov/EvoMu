@@ -1062,6 +1062,20 @@ pub fn handle(
             );
             Some(Ok(PyRep::None))
         }
+        ("externalQueueMgr", "PublishProxyEvent") => {
+            if let Err(e) = ServerContext::require_auth(session) {
+                return Some(Err(e));
+            }
+            debug!(
+                session_id = session.session_id,
+                char_id = ?session.character_id,
+                service,
+                method,
+                arg_count = args.len(),
+                "externalQueueMgr.PublishProxyEvent received"
+            );
+            Some(Ok(PyRep::Bool(true)))
+        }
         ("infoGatheringMgr", "GetStateAndConfig") => {
             // const-ok: client telemetry batching is disabled via static config
             Some(Ok(PyRep::keyval([

@@ -939,6 +939,30 @@ pub fn handle(
             Some(Ok(PyRep::List(logs)))
         }
 
+        ("rewardMgr", "GetDelayedRewardsByGroupIDs") => {
+            let (_, _char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let group_ids = match args.first() {
+                Some(PyRep::List(list)) | Some(PyRep::Tuple(list)) => {
+                    list.iter().filter_map(|v| v.as_i64()).collect::<Vec<i64>>()
+                }
+                Some(PyRep::Integer(gid)) => vec![*gid],
+                _ => Vec::new(),
+            };
+            let mut result = Vec::new();
+            for gid in group_ids {
+                let rewards = vec![PyRep::keyval([
+                    ("rewardGroupID", PyRep::Integer(gid)),
+                    ("rewardQuantity", PyRep::Integer(5000)),
+                    ("rewardTypeID", PyRep::Integer(1)),
+                ])];
+                result.push((PyRep::Integer(gid), PyRep::List(rewards)));
+            }
+            Some(Ok(PyRep::Dict(result)))
+        }
+
         _ => None,
     }
 }

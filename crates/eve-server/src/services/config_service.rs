@@ -926,6 +926,36 @@ pub fn handle(
             Some(Ok(PyRep::List(keys)))
         }
 
+        ("loadService", "GetTotalStats") => {
+            if let Err(e) = ServerContext::require_auth(session) {
+                return Some(Err(e));
+            }
+            let active_sessions = ctx.db.with_snapshot(|snap| {
+                snap.characters
+                    .values()
+                    .filter(|ch| ctx.is_character_online(ch.character_id, ch.user_id))
+                    .count() as i64
+            });
+            Some(Ok(PyRep::keyval([
+                ("cpuPercentage", PyRep::Real(1.5)),
+                ("memoryUsageMB", PyRep::Integer(256)),
+                ("activeSessions", PyRep::Integer(active_sessions)),
+                ("activeBallparks", PyRep::Integer(1)),
+                ("nodeID", PyRep::Integer(1001)),
+                ("isOverloaded", PyRep::Bool(false)),
+            ])))
+        }
+
+        ("loadService", "SetConfig") => {
+            if !session.has_gm_role() {
+                return Some(Err(BridgeRpcError {
+                    code: "InsufficientRole".into(),
+                    message: "loadService.SetConfig requires GM role".into(),
+                }));
+            }
+            Some(Ok(PyRep::Bool(true)))
+        }
+
         _ => None,
     }
 }
