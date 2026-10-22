@@ -633,10 +633,8 @@ pub fn handle_pi_orbitals(
                     pin.extractor_cycle_seconds = 0;
                     pin.program_install_unix = 0;
                     save_pi_network(snap, char_id, planet_id, &net);
-                    true
-                } else {
-                    false
                 }
+                true
             });
             Some(Ok(PyRep::Bool(ok)))
         }
