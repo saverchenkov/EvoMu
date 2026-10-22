@@ -234,6 +234,26 @@ async fn test_t6_client_harness_run_journeys_two_clients_and_log_hygiene() {
     let ctx = Arc::new(ServerContext::new());
     crate::common::pin_clock(&ctx);
     ctx.seed_demo_world_fixtures();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            100_000_019,
+            eve_db::InventoryItemRecord {
+                item_id: 100_000_019,
+                type_id: 47763,
+                owner_id: 90_000_001,
+                location_id: 100_000_001,
+                flag: eve_db::InventoryFlag::Cargo,
+                quantity: 5,
+                singleton: false,
+                version: 1,
+                dynamic_attributes: std::collections::HashMap::new(),
+                source_mutaplasmid_id: None,
+                insured_payout_isk: 0.0,
+                is_blueprint_copy: false,
+                blueprint_runs_remaining: None,
+            },
+        );
+    });
 
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
