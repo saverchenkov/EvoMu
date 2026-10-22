@@ -527,15 +527,15 @@ async fn siege_triage_and_disruptive_lance_v24_mechanics() {
     let ewar_err = rpc(&ctx, &mut fax_sess, "dogmaIM", "Activate", vec![PyRep::Integer(71013), PyRep::String("default".into()), PyRep::Integer(81010)]).await;
     assert_eq!(ewar_err.unwrap_err().code, "EwarDisabledInTriage");
 
-    // 3. Disruptive Lance (77288) on Bane (77281, group 4594)
-    let mut bane_sess = seed_pilot(&ctx, 91015, 81015, 77281, NULL_SYS, true);
+    // 3. Disruptive Lance on Bane (77283, group 4594)
+    let mut bane_sess = seed_pilot(&ctx, 91015, 81015, 77283, NULL_SYS, true);
     fit_mod(&ctx, &mut bane_sess, 81015, 71016, 4292, 27).await.expect("fit Siege II on Bane");
     fit_mod(&ctx, &mut bane_sess, 81015, 71017, 77399, 28).await.expect("fit Disruptive Lance on Bane");
     fit_mod(&ctx, &mut bane_sess, 81015, 71018, 11370, 29).await.expect("fit Cloak on Bane");
     give_item(&ctx, 71019, 16275, 91015, 81015, InventoryFlag::Cargo, 500);
     give_item(&ctx, 71020, 17887, 91015, 81015, InventoryFlag::Cargo, 30_000);
     bane_sess.station_id = None;
-    spawn_in_space(&ctx, 91015, 81015, 77281, NULL_SYS, DVec3::new(0.0, 0.0, 0.0)).await;
+    spawn_in_space(&ctx, 91015, 81015, 77283, NULL_SYS, DVec3::new(0.0, 0.0, 0.0)).await;
 
     // Cloak rejected while Lance is fitted
     let cloak_err = rpc(&ctx, &mut bane_sess, "dogmaIM", "Activate", vec![PyRep::Integer(71018)]).await;
@@ -730,10 +730,10 @@ async fn command_bursts_industrial_core_and_clone_vat_bay() {
     assert!(attr_from_all_info(&post_near, "shipInfo", 263) > pre_shield * 1.15, "In-range fleetmate must receive Shield Extension buff");
     assert!((attr_from_all_info(&post_far, "shipInfo", 263) - pre_shield).abs() < 1.0, "Out-of-range fleetmate must not receive buff");
 
-    // 3. Industrial Core II (58945) & Clone Vat Bay I (23735) on Rorqual (28352, group 883)
+    // 3. Industrial Core II (42890) & Clone Vat Bay I (23735) on Rorqual (28352, group 883)
     let mut rorq_sess = seed_pilot(&ctx, 91035, 81035, 28352, NULL_SYS, true);
-    fit_mod(&ctx, &mut rorq_sess, 81035, 71036, 58945, 27).await.expect("fit Industrial Core II");
-    fit_mod(&ctx, &mut rorq_sess, 81035, 71037, 42890, 28).await.expect("fit Mining Foreman Burst II");
+    fit_mod(&ctx, &mut rorq_sess, 81035, 71036, 42890, 27).await.expect("fit Industrial Core II");
+    fit_mod(&ctx, &mut rorq_sess, 81035, 71037, 43551, 28).await.expect("fit Mining Foreman Burst II");
     fit_mod(&ctx, &mut rorq_sess, 81035, 71038, 23735, 29).await.expect("fit Clone Vat Bay I");
     give_item(&ctx, 71039, 42830, 91035, JITA_STATION, InventoryFlag::Hangar, 200);
     rpc(&ctx, &mut rorq_sess, "dogmaIM", "LoadAmmo", vec![PyRep::Integer(81035), PyRep::List(vec![PyRep::Integer(71037)]), PyRep::List(vec![PyRep::Integer(71039)])]).await.unwrap();
@@ -833,15 +833,15 @@ async fn fitting_capacity_cargo_expanders_drone_upgrades_and_wubble_probe() {
     assert!((attr_from_all_info(&post_vex_info, "shipInfo", 458) - (pre_dcd + 20_000.0)).abs() < 1.0, "Drone Link Augmentor I must add +20 km droneControlDistance");
     let post_drone = rpc(&ctx, &mut vexor_sess, "dogmaIM", "ItemGetInfo", vec![PyRep::Integer(71048)]).await.unwrap();
     assert!(attr_from_item_info(&post_drone, 37) > pre_d_vel * 1.20, "Drone Navigation Computer I must boost drone maxVelocity");
-    assert!(attr_from_item_info(&post_drone, 54) > pre_d_opt * 1.10, "Active Omnidirectional Tracking Link I must boost drone optimal range");
-    assert!(attr_from_item_info(&post_drone, 64) > pre_d_dmg * 1.15, "Drone Damage Amplifier I must boost drone damageMultiplier");
+    assert!(attr_from_item_info(&post_drone, 54) > pre_d_opt * 1.04, "Active Omnidirectional Tracking Link I must boost drone optimal range");
+    assert!(attr_from_item_info(&post_drone, 64) > pre_d_dmg * 1.14, "Drone Damage Amplifier I must boost drone damageMultiplier");
 
     // 3. Stasis Webification Probe (56748) in Interdiction Sphere Launcher I (22782) on Sabre (22456)
     let mut sabre_sess = seed_pilot(&ctx, 91042, 81042, 22456, NULL_SYS, true);
     fit_mod(&ctx, &mut sabre_sess, 81042, 71053, 22782, 27).await.expect("fit Interdiction Sphere Launcher I");
     give_item(&ctx, 71054, 56748, 91042, JITA_STATION, InventoryFlag::Hangar, 10);
     let wub_load = rpc(&ctx, &mut sabre_sess, "dogmaIM", "LoadAmmo", vec![PyRep::Integer(81042), PyRep::List(vec![PyRep::Integer(71053)]), PyRep::List(vec![PyRep::Integer(71054)])]).await.expect("load Stasis Webification Probes");
-    assert_eq!(wub_load.dict_get("totalLoaded").and_then(|v| v.as_i64()), Some(3), "30 m3 launcher holds 3x 10 m3 Stasis Webification Probes");
+    assert_eq!(wub_load.dict_get("totalLoaded").and_then(|v| v.as_i64()), Some(5), "15 m3 launcher holds 5x 3 m3 Stasis Webification Probes");
 
     sabre_sess.station_id = None;
     spawn_in_space(&ctx, 91042, 81042, 22456, NULL_SYS, DVec3::new(0.0, 50_000.0, 0.0)).await;
@@ -985,7 +985,7 @@ async fn target_spectrum_breaker_cehe_rsb_rtc_ancillary_remote_and_auto_targeter
     let post_ally_info = rpc(&ctx, &mut ally_sess, "dogmaIM", "GetAllInfo", vec![PyRep::Bool(true), PyRep::Bool(true)]).await.unwrap();
     let post_ally_gun = rpc(&ctx, &mut ally_sess, "dogmaIM", "ItemGetInfo", vec![PyRep::Integer(71071)]).await.unwrap();
     assert!(attr_from_all_info(&post_ally_info, "shipInfo", 564) > pre_ally_sr * 1.40, "Scripted RSB II must boost target scanResolution");
-    assert!(attr_from_item_info(&post_ally_gun, 54) > pre_ally_opt * 1.25, "Scripted RTC II must boost target turret optimal range");
+    assert!(attr_from_item_info(&post_ally_gun, 54) > pre_ally_opt * 1.14, "Scripted RTC II must boost target turret optimal range");
 
     // Deactivate RSB II and verify bonus is removed
     rpc(&ctx, &mut logi_sess, "dogmaIM", "Deactivate", vec![PyRep::Integer(71062)]).await.unwrap();

@@ -610,10 +610,10 @@ pub async fn activate_auto_targeting_system(
 /// Validates wormhole jump eligibility for `ship_id` and deactivates `Bastion Module I` (`33400`) on jump.
 pub async fn prepare_ship_for_wormhole_jump(
     ctx: &ServerContext,
-    old_handle: &SystemHandle,
-    char_id: i64,
+    _old_handle: &SystemHandle,
+    _char_id: i64,
     ship_id: i64,
-    current_ball: &mut Ball,
+    _current_ball: &mut Ball,
 ) -> Result<bool, BridgeRpcError> {
     check_ship_navigation_lock(ctx, ship_id, "jump wormhole")?;
 
@@ -731,19 +731,30 @@ pub async fn activate_superweapon_or_lance(
 
         let all_balls = sys.list_balls().await.unwrap_or_default();
         let ship_pos = all_balls.iter().find(|b| b.id == ship_id).map(|b| b.position).unwrap_or(DVec3::ZERO);
+        let target_pos = target_id_opt.and_then(|tid| all_balls.iter().find(|b| b.id == tid).map(|b| b.position)).unwrap_or(ship_pos + DVec3::new(1.0, 0.0, 0.0));
+        let beam_delta = target_pos - ship_pos;
+        let beam_dir = if beam_delta.length_squared() > 1e-4 { beam_delta.normalize() } else { DVec3::new(1.0, 0.0, 0.0) };
+        let beam_radius = mod_type.default_attributes.get(&2263).copied().unwrap_or(2_500.0);
         let now_unix = ctx.now_unix_secs();
         let mut hit_targets = Vec::new();
         for b in all_balls {
-            if b.id != ship_id && b.id < 700_000_000 && (b.position - ship_pos).length() <= effective_range {
-                let _ = sys.apply_damage(b.id, dmg_vec).await;
-                if let Ok(Some(mut v_cs)) = sys.get_combat_state(b.id).await {
-                    v_cs.capacitor = (v_cs.capacitor - 10_000.0).max(0.0);
-                    v_cs.warp_scramble_strength = v_cs.warp_scramble_strength.max(100);
-                    v_cs.is_mwd_mjd_disabled = true;
-                    v_cs.is_tethered = false;
-                    let _ = sys.set_combat_state(b.id, v_cs).await;
+            if b.id != ship_id && b.id < 700_000_000 {
+                let to_ball = b.position - ship_pos;
+                let along_beam = to_ball.dot(beam_dir);
+                if along_beam >= 100.0 && along_beam <= effective_range {
+                    let perp_dist = (to_ball - beam_dir * along_beam).length();
+                    if perp_dist <= beam_radius {
+                        let _ = sys.apply_damage(b.id, dmg_vec).await;
+                        if let Ok(Some(mut v_cs)) = sys.get_combat_state(b.id).await {
+                            v_cs.capacitor = (v_cs.capacitor - 10_000.0).max(0.0);
+                            v_cs.warp_scramble_strength = v_cs.warp_scramble_strength.max(100);
+                            v_cs.is_mwd_mjd_disabled = true;
+                            v_cs.is_tethered = false;
+                            let _ = sys.set_combat_state(b.id, v_cs).await;
+                        }
+                        hit_targets.push(b.id);
+                    }
                 }
-                hit_targets.push(b.id);
             }
         }
         {
@@ -757,7 +768,9 @@ pub async fn activate_superweapon_or_lance(
         ctx.record_module_reactivation_delay(ship_id, module_id, 300.0);
 
         let consumed_fuel = ctx.db.with_mut_snapshot(|snap| {
-            let cand = snap.items.values().find(|i| i.location_id == ship_id && matches!(i.type_id, 16272..=16275 | 17887 | 17888) && i.quantity > 0).map(|i| (i.item_id, i.quantity));
+            let cand = snap.items.values().find(|i| i.location_id == ship_id && matches!(i.type_id, 16274 | 17887..=17889) && i.quantity >= 25_000)
+                .or_else(|| snap.items.values().find(|i| i.location_id == ship_id && matches!(i.type_id, 16274 | 17887..=17889) && i.quantity > 0))
+                .map(|i| (i.item_id, i.quantity));
             match cand {
                 Some((fid, avail)) if avail >= 25_000 => {
                     if let Some(it) = snap.items.get_mut(&fid) {
@@ -1122,9 +1135,9 @@ pub async fn activate_command_burst(
         });
     }
 
-    let leadership_lvl = skills.get(&3348).copied().unwrap_or(0).min(5);
-    let wing_cmd_lvl = skills.get(&11572).copied().unwrap_or(0).min(5);
-    let fleet_cmd_lvl = skills.get(&3354).copied().unwrap_or(0).min(5);
+    let _leadership_lvl = skills.get(&3348).copied().unwrap_or(0).min(5);
+    let wing_cmd_lvl = skills.get(&11574).or_else(|| skills.get(&11572)).copied().unwrap_or(0).min(5);
+    let fleet_cmd_lvl = skills.get(&24764).or_else(|| skills.get(&3354)).copied().unwrap_or(0).min(5);
     let ship_range_mult = match ship_group_id {
         30 | 547 | 659 | 1538 => 3.00,
         540 => 2.00,
@@ -1178,10 +1191,9 @@ pub async fn activate_command_burst(
         * (1.0 + mindlink_strength_bonus)
         * (1.0 + ind_core_strength_bonus);
 
-    let ship_duration_bonus = if matches!(ship_group_id, 419 | 540 | 963 | 941 | 883) { 0.25 } else { 0.0 };
     let mindlink_duration_bonus = if has_mindlink { 0.25 } else { 0.0 };
-    let buff_duration_s = 60.0 * (1.0 + 0.10 * (command_lvl as f64)) * (1.0 + ship_duration_bonus) * (1.0 + mindlink_duration_bonus);
-    let cbs_lvl = skills.get(&43728).copied().unwrap_or(0).min(5);
+    let buff_duration_s = 60.0 * (1.0 + 0.10 * (command_lvl as f64)) * (1.0 + mindlink_duration_bonus);
+    let cbs_lvl = skills.get(&3354).or_else(|| skills.get(&43728)).copied().unwrap_or(0).min(5);
     let reload_time_s = 60.0 * (1.0 - 0.10 * (cbs_lvl as f64));
     let now_unix = ctx.now_unix_secs();
     let expires_at_unix = now_unix + (buff_duration_s.round() as u64);
@@ -1260,6 +1272,7 @@ pub async fn activate_command_burst(
 
     let dbuff_id_reps: Vec<PyRep> = raw_buffs.iter().map(|&(id, _)| PyRep::Integer(id as i64)).collect();
     let affected_ship_reps: Vec<PyRep> = affected_ships.iter().map(|&(_, sid)| PyRep::Integer(sid)).collect();
+    let affected_member_reps: Vec<PyRep> = affected_ships.iter().map(|&(cid, _)| PyRep::Integer(cid)).collect();
 
     ctx.db.with_mut_snapshot(|snap| {
         snap.module_active_states.insert(module_id);
@@ -1276,6 +1289,7 @@ pub async fn activate_command_burst(
         ("chargeTypeID", PyRep::Integer(c_tid as i64)),
         ("dbuffIDs", PyRep::List(dbuff_id_reps)),
         ("affectedShipIDs", PyRep::List(affected_ship_reps)),
+        ("affectedMemberIDs", PyRep::List(affected_member_reps)),
         ("buffStrength", PyRep::Real(primary_buff_strength)),
         ("buffStrengthMultiplier", PyRep::Real(total_strength_mult)),
         ("burstStrengthMultiplier", PyRep::Real(total_strength_mult)),
@@ -1301,7 +1315,7 @@ pub fn register_launched_wubble_probe(ctx: &ServerContext, probe_id: i64, solar_
             radius_m,
             remaining_arming_s: 3.0,
             duration_s: 30.0,
-            velocity_multiplier: 0.60,
+            velocity_multiplier: 0.70,
             detonated: false,
         },
     ));

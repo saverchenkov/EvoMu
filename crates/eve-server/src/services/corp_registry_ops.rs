@@ -64,6 +64,15 @@ pub async fn handle_corp_hangar_invbroker(
     }
     if service == "dogmaIM" && method == "Activate" && session.fleet_id.is_some() {
         if let Some(module_id) = args.first().and_then(|a| a.as_i64()) {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let ship_id = session.ship_id.unwrap_or(0);
+            if ctx.get_or_rebuild_ship_fitting(char_id, ship_id).is_ok() {
+                // Defer to full tactical_modules handling
+                return None;
+            }
             let burst_info = ctx.db.with_snapshot(|snap| {
                 let mod_item = snap.items.get(&module_id)?;
                 let mod_type = ctx.sde.types.get(&mod_item.type_id)?;
@@ -90,10 +99,6 @@ pub async fn handle_corp_hangar_invbroker(
                 Some((ship_id, charge_tid, aoe_range))
             });
             if let Some((ship_id, charge_tid_opt, aoe_range)) = burst_info {
-                let (_, char_id) = match ServerContext::require_character(session) {
-                    Ok(v) => v,
-                    Err(e) => return Some(Err(e)),
-                };
                 let fid = session.fleet_id.unwrap_or(0);
                 let sys_id = session.solar_system_id.unwrap_or(30_000_142);
                 let candidates: Vec<(i64, i64)> = ctx.db.with_snapshot(|snap| {
