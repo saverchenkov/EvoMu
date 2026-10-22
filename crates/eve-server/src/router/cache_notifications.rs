@@ -156,7 +156,7 @@ pub struct PendingMachoNotification {
 }
 
 /// Persistent notification inbox record for `notificationMgr` (`NotificationMgrService.cpp:66-90`).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct NotificationRecord {
     pub notification_id: i64,
     pub type_id: i32,
@@ -928,6 +928,7 @@ impl ServerContext {
             .write()
             .unwrap_or_else(|e| e.into_inner())
             .push(rec.clone());
+        self.persist_notification_record(&rec);
         let _ = self.notify(
             NotificationTarget::Character(receiver_id),
             "OnNotificationReceived",
@@ -941,6 +942,63 @@ impl ServerContext {
             ],
         );
         rec
+    }
+
+    pub fn persist_notification_record(&self, rec: &NotificationRecord) {
+        let now = self.now_unix();
+        if let Ok(json) = serde_json::to_string(rec) {
+            let note_id = -(7_900_000_000_000 + rec.notification_id);
+            self.db.with_mut_snapshot(|snap| {
+                snap.owner_notes.insert(note_id, eve_db::OwnerNoteRecord {
+                    note_id, character_id: -79, item_id: rec.receiver_id,
+                    label: format!("notif:{}", rec.notification_id), note: json, timestamp_unix: now,
+                });
+            });
+        }
+    }
+
+    pub fn sync_character_notifications_to_db(&self, char_id: i64) {
+        let now = self.now_unix();
+        let char_recs: Vec<NotificationRecord> = self.notification_records.read().unwrap_or_else(|e| e.into_inner())
+            .iter().filter(|r| r.receiver_id == char_id).cloned().collect();
+        self.db.with_mut_snapshot(|snap| {
+            for rec in &char_recs {
+                if let Ok(json) = serde_json::to_string(rec) {
+                    let note_id = -(7_900_000_000_000 + rec.notification_id);
+                    snap.owner_notes.insert(note_id, eve_db::OwnerNoteRecord {
+                        note_id, character_id: -79, item_id: rec.receiver_id,
+                        label: format!("notif:{}", rec.notification_id), note: json, timestamp_unix: now,
+                    });
+                }
+            }
+        });
+    }
+
+    pub fn deliver_unprocessed_notifications_on_login(&self, char_id: i64) {
+        let user_id = self.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.user_id));
+        let unprocessed: Vec<NotificationRecord> = self.notification_records.read().unwrap_or_else(|e| e.into_inner())
+            .iter().filter(|r| r.receiver_id == char_id && !r.deleted && !r.processed).cloned().collect();
+        if unprocessed.is_empty() { return; }
+        let now_ft = self.now_blueos_filetime_ticks();
+        let mut queues = self.pending_notifications.write().unwrap_or_else(|e| e.into_inner());
+        let q = queues.entry(char_id).or_default();
+        for rec in unprocessed {
+            if q.iter().any(|n| n.event == "OnNotificationReceived" && n.args.first() == Some(&PyRep::Integer(rec.notification_id))) {
+                continue;
+            }
+            let args = vec![
+                PyRep::Integer(rec.notification_id), PyRep::Integer(rec.type_id as i64),
+                PyRep::Integer(rec.sender_id), PyRep::Integer(rec.created), PyRep::String(rec.data.clone()),
+            ];
+            let (packet, marshaled_packet) = Self::build_macho_notification_packet(char_id, user_id, "OnNotificationReceived", "charid", args.clone());
+            let notif = PendingMachoNotification {
+                recipient_char_id: char_id, event: "OnNotificationReceived".into(), id_type: "charid".into(),
+                args, packet, marshaled_packet, created_filetime: now_ft,
+            };
+            if q.len() >= MAX_PENDING_NOTIFICATIONS_PER_CHAR { q.remove(0); }
+            q.push(notif.clone());
+            let _ = self.notify_tx.send((char_id, notif));
+        }
     }
 
     /// Emits an `OnDamageStateChange` notification (`itemID`, `(shield, armor, structure)`) (`Z-2`).
@@ -1123,6 +1181,10 @@ impl ServerContext {
             chan.members.insert(char_id);
             Ok::<(), std::convert::Infallible>(())
         });
+
+        if old_sys.is_none() {
+            self.deliver_unprocessed_notifications_on_login(char_id);
+        }
 
         self.notify(
             NotificationTarget::SolarSystem(new_sys),

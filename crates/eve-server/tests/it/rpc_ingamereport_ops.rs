@@ -47,7 +47,6 @@ async fn test_ingame_reports_submission_and_persistence() {
 
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
-    ingamereport_ops::clear_reports();
 
     // 0. Verify unauthenticated session rejection
     let mut unauth_sess = SessionState::new(35_001);
@@ -199,7 +198,7 @@ async fn test_ingame_reports_submission_and_persistence() {
     assert_eq!(r8, PyRep::None);
 
     // State Assertions: verify all 8 reports were persisted with authentic metadata
-    let all_reports = ingamereport_ops::get_all_reports();
+    let all_reports = ingamereport_ops::get_persisted_reports(&ctx);
     assert_eq!(all_reports.len(), 8, "All 8 reports must be stored in state");
 
     let categories: Vec<&str> = all_reports.iter().map(|r| r.category.as_str()).collect();

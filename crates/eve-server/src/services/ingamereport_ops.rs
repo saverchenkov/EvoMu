@@ -8,8 +8,6 @@
 #![forbid(unsafe_code)]
 
 use std::collections::HashMap;
-use std::sync::LazyLock;
-use std::sync::Mutex;
 
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
@@ -30,17 +28,6 @@ pub struct InGameReportRecord {
     pub created_at: u64,
 }
 
-pub static IN_GAME_REPORTS: LazyLock<Mutex<HashMap<i64, InGameReportRecord>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-
-/// Returns a clone of all recorded in-game reports from the in-memory store.
-pub fn get_all_reports() -> Vec<InGameReportRecord> {
-    let g = IN_GAME_REPORTS.lock().unwrap();
-    let mut list: Vec<InGameReportRecord> = g.values().cloned().collect();
-    list.sort_by_key(|r| r.report_id);
-    list
-}
-
 /// Returns all persisted in-game reports from `ctx.db` (`owner_notes` under character `-78`),
 /// sorted by `report_id`.
 pub fn get_persisted_reports(ctx: &ServerContext) -> Vec<InGameReportRecord> {
@@ -54,11 +41,6 @@ pub fn get_persisted_reports(ctx: &ServerContext) -> Vec<InGameReportRecord> {
         list.sort_by_key(|r| r.report_id);
         list
     })
-}
-
-/// Clears all recorded in-game reports (test helper).
-pub fn clear_reports() {
-    IN_GAME_REPORTS.lock().unwrap().clear();
 }
 
 /// Dispatches `ingamereport.*` RPC calls.
@@ -133,7 +115,7 @@ fn submit_report(
         .to_string();
 
     let now = ctx.now_unix();
-    let record = ctx.db.with_mut_snapshot(|snap| {
+    ctx.db.with_mut_snapshot(|snap| {
         let report_id = snap.allocate_report_id();
         let rec = InGameReportRecord {
             report_id,
@@ -159,15 +141,7 @@ fn submit_report(
                 },
             );
         }
-        rec
     });
-
-    if ctx.db.sqlite_path().is_none() {
-        IN_GAME_REPORTS
-            .lock()
-            .unwrap()
-            .insert(record.report_id, record);
-    }
 
     Ok(PyRep::None)
 }

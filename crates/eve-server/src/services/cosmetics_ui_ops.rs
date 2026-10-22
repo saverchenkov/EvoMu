@@ -391,14 +391,6 @@ pub async fn handle(ctx: &ServerContext, session: &mut SessionState, service: &s
         ("crateService", "ClaimLootFromCrateStack") => Some(handle_crate_claim_loot_stack(ctx, session, args)),
         ("crateService", "GetCrateLocation") => Some(handle_crate_get_location(ctx, session, args)),
         ("crateService", "PeekInsideFixedCrate") => Some(handle_crate_peek(ctx, session, args)),
-        ("milestoneMgr", "ClaimRewards") => Some(Err(BridgeRpcError {
-            code: "UnimplementedRPC".into(),
-            message: "milestoneMgr.ClaimRewards is not implemented".into(),
-        })),
-        ("milestoneMgr", "ProcessCharacterLogon") => Some(Err(BridgeRpcError {
-            code: "UnimplementedRPC".into(),
-            message: "milestoneMgr.ProcessCharacterLogon is not implemented".into(),
-        })),
         // parity: feat:pve.login-campaign
         ("loginCampaignManager", "get_client_campaign_state") => Some(handle_login_campaign_get_state(ctx, session)),
         ("loginCampaignManager", "claim_reward") => Some(handle_login_campaign_claim_reward(ctx, session)),

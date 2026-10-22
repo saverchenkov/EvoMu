@@ -289,6 +289,37 @@ fn offer_to_pyrep(o: &LPOffer) -> PyRep {
     ])
 }
 
+fn check_corp_lp_role(
+    snap: &eve_db::WorldStateSnapshot,
+    session: &SessionState,
+    char_id: i64,
+    corp_id: i64,
+) -> Result<(), BridgeRpcError> {
+    if let Some(corp) = snap.corporations.get(&corp_id) {
+        if corp.ceo_id == char_id {
+            return Ok(());
+        }
+        let roles = corp
+            .member_roles
+            .get(&char_id)
+            .copied()
+            .unwrap_or(session.corp_role);
+        let allowed = eve_db::corp_roles::ROLE_DIRECTOR
+            | eve_db::corp_roles::ROLE_ACCOUNTANT
+            | eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT
+            | (1u64 << 42); // corpRoleBrandManager
+        if (roles & allowed) == 0 {
+            return Err(BridgeRpcError {
+                code: "InsufficientCorporationRole".into(),
+                message: format!(
+                    "Character {char_id} lacks Director, Accountant, Junior Accountant, or Brand Manager role in corporation {corp_id}"
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
 fn take_offer(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -305,12 +336,24 @@ fn take_offer(
     {
         let cid = args[0].as_i64().unwrap_or(1_000_035);
         let oid = args[1].as_i64().unwrap_or(0);
-        let q = args.get(2).and_then(|a| a.as_i64()).unwrap_or(1).max(1);
+        let q = args.get(2).and_then(|a| a.as_i64()).unwrap_or(1);
         (Some(cid), oid, q)
     } else {
         let oid = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-        let q = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1).max(1);
+        let q = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1);
         (None, oid, q)
+    };
+    if qty <= 0 {
+        return Some(Err(BridgeRpcError {
+            code: "InvalidQuantity".into(),
+            message: format!("LP store offer quantity must be positive (got {qty})"),
+        }));
+    }
+    let Ok(qty_i32) = i32::try_from(qty) else {
+        return Some(Err(BridgeRpcError {
+            code: "InvalidQuantity".into(),
+            message: format!("LP store offer quantity {qty} exceeds i32::MAX"),
+        }));
     };
 
     let all_offers = get_catalog_offers();
@@ -330,9 +373,25 @@ fn take_offer(
     // Check Triglavian (500026 / 1000298) or EDENCOM (500027 / 1000299) standing gate if applicable
     let is_trig_or_edencom = matches!(offer.corp_id, 500_026 | 500_027 | 1_000_298 | 1_000_299);
 
-    let total_lp_cost = offer.lp_cost.saturating_mul(qty);
-    let total_isk_cost = IskCents(offer.isk_cost.0.saturating_mul(qty));
-    let total_items_qty = offer.quantity.saturating_mul(qty as i32);
+    let Some(total_lp_cost) = offer.lp_cost.checked_mul(qty) else {
+        return Some(Err(BridgeRpcError {
+            code: "InvalidQuantity".into(),
+            message: "LP store total LP cost overflows i64".into(),
+        }));
+    };
+    let Some(total_isk_cents) = offer.isk_cost.0.checked_mul(qty) else {
+        return Some(Err(BridgeRpcError {
+            code: "InvalidQuantity".into(),
+            message: "LP store total ISK cost overflows i64".into(),
+        }));
+    };
+    let total_isk_cost = IskCents(total_isk_cents);
+    let Some(total_items_qty) = offer.quantity.checked_mul(qty_i32) else {
+        return Some(Err(BridgeRpcError {
+            code: "InvalidQuantity".into(),
+            message: "LP store delivered item quantity overflows i32".into(),
+        }));
+    };
 
     let Some((delivery_loc_id, delivery_flag)) = session
         .station_id
@@ -346,6 +405,7 @@ fn take_offer(
         }));
     };
 
+    let now_unix = ctx.now_unix();
     let res = ctx.db.try_with_mut_snapshot(|snap| {
         let Some(ch) = snap.characters.get(&char_id).cloned() else {
             return Err(BridgeRpcError {
@@ -368,20 +428,27 @@ fn take_offer(
         }
 
         // Verify required trade-in items (`req_items`) in hangar/cargo at `delivery_loc_id`
+        let mut unlocked_tradein_ids_per_req: Vec<(i32, Vec<i64>)> = Vec::with_capacity(offer.req_items.len());
         for &(req_tid, req_unit_qty) in &offer.req_items {
-            let needed = req_unit_qty.saturating_mul(qty as i32);
-            let available: i32 = snap
-                .items
-                .values()
-                .filter(|it| {
-                    it.owner_id == char_id
-                        && it.location_id == delivery_loc_id
-                        && it.type_id == req_tid
-                        && it.flag != InventoryFlag::Locked
-                        && !snap.is_item_locked_in_contract_or_job(it.item_id)
-                })
-                .map(|it| it.quantity)
-                .sum();
+            let Some(needed) = req_unit_qty.checked_mul(qty_i32) else {
+                return Err(BridgeRpcError {
+                    code: "InvalidQuantity".into(),
+                    message: "LP store required trade-in item quantity overflows i32".into(),
+                });
+            };
+            let mut matching_ids = Vec::new();
+            let mut available: i32 = 0;
+            for it in snap.items.values() {
+                if it.owner_id == char_id
+                    && it.location_id == delivery_loc_id
+                    && it.type_id == req_tid
+                    && it.flag == delivery_flag
+                    && !snap.is_item_locked_in_contract_or_job(it.item_id)
+                {
+                    available = available.saturating_add(it.quantity);
+                    matching_ids.push(it.item_id);
+                }
+            }
             if available < needed {
                 return Err(BridgeRpcError {
                     code: "MissingRequiredItems".into(),
@@ -391,10 +458,13 @@ fn take_offer(
                     ),
                 });
             }
+            matching_ids.sort_unstable();
+            unlocked_tradein_ids_per_req.push((needed, matching_ids));
         }
 
         let rem_lp = if is_corp_take {
             let player_corp_id = ch.corporation_id;
+            check_corp_lp_role(snap, session, char_id, player_corp_id)?;
             let mut corp_balances = load_corp_lp_balances(snap, player_corp_id);
             let current_lp = corp_balances.get(&offer.corp_id).copied().unwrap_or(0);
             if current_lp < total_lp_cost {
@@ -441,34 +511,44 @@ fn take_offer(
             if let Some(ch_mut) = snap.characters.get_mut(&char_id) {
                 ch_mut.loyalty_points.insert(offer.corp_id, rem);
             }
+            if total_lp_cost > 0 {
+                record_lp_reward_log(
+                    snap,
+                    char_id,
+                    offer.corp_id,
+                    -total_lp_cost,
+                    format!(
+                        "LP store purchase: offer {} ({}x type {})",
+                        offer.offer_id, total_items_qty, offer.type_id
+                    ),
+                    now_unix,
+                );
+            }
             rem
         };
 
-        // Consume required items
-        for &(req_tid, req_unit_qty) in &offer.req_items {
-            let mut remaining = req_unit_qty.saturating_mul(qty as i32);
-            let mut to_remove = Vec::new();
-            for it in snap.items.values_mut() {
+        // Consume required items strictly from pre-verified unlocked matching items
+        for (mut remaining, candidate_ids) in unlocked_tradein_ids_per_req {
+            for iid in candidate_ids {
                 if remaining <= 0 {
                     break;
                 }
-                if it.owner_id == char_id
-                    && it.location_id == delivery_loc_id
-                    && it.type_id == req_tid
-                    && it.flag != InventoryFlag::Locked
-                {
+                let remove_whole = if let Some(it) = snap.items.get_mut(&iid) {
                     if it.quantity <= remaining {
                         remaining -= it.quantity;
-                        to_remove.push(it.item_id);
+                        true
                     } else {
                         it.quantity -= remaining;
                         it.version += 1;
                         remaining = 0;
+                        false
                     }
+                } else {
+                    false
+                };
+                if remove_whole {
+                    snap.items.remove(&iid);
                 }
-            }
-            for iid in to_remove {
-                snap.items.remove(&iid);
             }
         }
 
@@ -617,6 +697,7 @@ fn transfer_lp(
         };
         let sender_remaining = if is_from_corp {
             let sender_corp_id = ch.corporation_id;
+            check_corp_lp_role(snap, session, char_id, sender_corp_id)?;
             let mut sender_bals = load_corp_lp_balances(snap, sender_corp_id);
             let cur = sender_bals.get(&npc_corp_id).copied().unwrap_or(0);
             if cur < amount {

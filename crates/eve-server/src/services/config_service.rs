@@ -715,17 +715,20 @@ pub fn handle(
             };
             let id_set: HashSet<i64> = ids.into_iter().collect();
             let mut updated = 0i64;
-            let mut records = ctx
-                .notification_records
-                .write()
-                .unwrap_or_else(|e| e.into_inner());
-            for n in records.iter_mut() {
-                if n.receiver_id == char_id && id_set.contains(&n.notification_id) && !n.processed {
-                    n.processed = true;
-                    updated += 1;
+            {
+                let mut records = ctx
+                    .notification_records
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner());
+                for n in records.iter_mut() {
+                    if n.receiver_id == char_id && id_set.contains(&n.notification_id) && !n.processed {
+                        n.processed = true;
+                        updated += 1;
+                    }
                 }
             }
             if updated > 0 {
+                ctx.sync_character_notifications_to_db(char_id);
                 let _ = ctx.notify(
                     crate::router::NotificationTarget::Character(char_id),
                     "OnNotificationChange",
@@ -742,17 +745,20 @@ pub fn handle(
                 Err(e) => return Some(Err(e)),
             };
             let mut updated = 0i64;
-            let mut records = ctx
-                .notification_records
-                .write()
-                .unwrap_or_else(|e| e.into_inner());
-            for n in records.iter_mut() {
-                if n.receiver_id == char_id && !n.deleted && !n.processed {
-                    n.processed = true;
-                    updated += 1;
+            {
+                let mut records = ctx
+                    .notification_records
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner());
+                for n in records.iter_mut() {
+                    if n.receiver_id == char_id && !n.deleted && !n.processed {
+                        n.processed = true;
+                        updated += 1;
+                    }
                 }
             }
             if updated > 0 {
+                ctx.sync_character_notifications_to_db(char_id);
                 let _ = ctx.notify(
                     crate::router::NotificationTarget::Character(char_id),
                     "OnNotificationChange",
@@ -775,21 +781,24 @@ pub fn handle(
                 }));
             };
             let mut updated = 0i64;
-            let mut records = ctx
-                .notification_records
-                .write()
-                .unwrap_or_else(|e| e.into_inner());
-            for n in records.iter_mut() {
-                if n.receiver_id == char_id
-                    && !n.deleted
-                    && n.group_id as i64 == group_id
-                    && !n.processed
-                {
-                    n.processed = true;
-                    updated += 1;
+            {
+                let mut records = ctx
+                    .notification_records
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner());
+                for n in records.iter_mut() {
+                    if n.receiver_id == char_id
+                        && !n.deleted
+                        && n.group_id as i64 == group_id
+                        && !n.processed
+                    {
+                        n.processed = true;
+                        updated += 1;
+                    }
                 }
             }
             if updated > 0 {
+                ctx.sync_character_notifications_to_db(char_id);
                 let _ = ctx.notify(
                     crate::router::NotificationTarget::Character(char_id),
                     "OnNotificationChange",
@@ -811,17 +820,20 @@ pub fn handle(
             };
             let id_set: HashSet<i64> = ids.into_iter().collect();
             let mut deleted = 0i64;
-            let mut records = ctx
-                .notification_records
-                .write()
-                .unwrap_or_else(|e| e.into_inner());
-            for n in records.iter_mut() {
-                if n.receiver_id == char_id && id_set.contains(&n.notification_id) && !n.deleted {
-                    n.deleted = true;
-                    deleted += 1;
+            {
+                let mut records = ctx
+                    .notification_records
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner());
+                for n in records.iter_mut() {
+                    if n.receiver_id == char_id && id_set.contains(&n.notification_id) && !n.deleted {
+                        n.deleted = true;
+                        deleted += 1;
+                    }
                 }
             }
             if deleted > 0 {
+                ctx.sync_character_notifications_to_db(char_id);
                 let _ = ctx.notify(
                     crate::router::NotificationTarget::Character(char_id),
                     "OnNotificationDeleted",
@@ -844,17 +856,20 @@ pub fn handle(
                 }));
             };
             let mut deleted = 0i64;
-            let mut records = ctx
-                .notification_records
-                .write()
-                .unwrap_or_else(|e| e.into_inner());
-            for n in records.iter_mut() {
-                if n.receiver_id == char_id && !n.deleted && n.group_id as i64 == group_id {
-                    n.deleted = true;
-                    deleted += 1;
+            {
+                let mut records = ctx
+                    .notification_records
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner());
+                for n in records.iter_mut() {
+                    if n.receiver_id == char_id && !n.deleted && n.group_id as i64 == group_id {
+                        n.deleted = true;
+                        deleted += 1;
+                    }
                 }
             }
             if deleted > 0 {
+                ctx.sync_character_notifications_to_db(char_id);
                 let _ = ctx.notify(
                     crate::router::NotificationTarget::Character(char_id),
                     "OnNotificationDeleted",
@@ -871,17 +886,20 @@ pub fn handle(
                 Err(e) => return Some(Err(e)),
             };
             let mut deleted = 0i64;
-            let mut records = ctx
-                .notification_records
-                .write()
-                .unwrap_or_else(|e| e.into_inner());
-            for n in records.iter_mut() {
-                if n.receiver_id == char_id && !n.deleted {
-                    n.deleted = true;
-                    deleted += 1;
+            {
+                let mut records = ctx
+                    .notification_records
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner());
+                for n in records.iter_mut() {
+                    if n.receiver_id == char_id && !n.deleted {
+                        n.deleted = true;
+                        deleted += 1;
+                    }
                 }
             }
             if deleted > 0 {
+                ctx.sync_character_notifications_to_db(char_id);
                 let _ = ctx.notify(
                     crate::router::NotificationTarget::Character(char_id),
                     "OnNotificationDeleted",
@@ -899,12 +917,19 @@ pub fn handle(
             };
             let notif_id = args.first().and_then(|a| a.as_i64());
             if let Some(nid) = notif_id {
-                let mut recs = ctx
-                    .notification_records
-                    .write()
-                    .unwrap_or_else(|e| e.into_inner());
-                if let Some(r) = recs.iter_mut().find(|r| r.notification_id == nid && r.receiver_id == char_id) {
-                    r.interacted = true;
+                let mut changed = false;
+                {
+                    let mut recs = ctx
+                        .notification_records
+                        .write()
+                        .unwrap_or_else(|e| e.into_inner());
+                    if let Some(r) = recs.iter_mut().find(|r| r.notification_id == nid && r.receiver_id == char_id) {
+                        r.interacted = true;
+                        changed = true;
+                    }
+                }
+                if changed {
+                    ctx.sync_character_notifications_to_db(char_id);
                 }
             }
             Some(Ok(PyRep::Bool(true)))

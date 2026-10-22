@@ -17,10 +17,9 @@ use eve_proto::quasar::{
     DynamicQuasarMessage, DynamicValue, GoogleAny, TYPE_GOOGLEAPIS_PREFIX,
 };
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CorpSkillPlanRecord {
     pub id: u64,
     pub corp_id: u32,
@@ -31,7 +30,7 @@ pub struct CorpSkillPlanRecord {
     pub milestones: Vec<(u64, String)>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CorpGoalRecord {
     pub id: u64,
     pub corp_id: u32,
@@ -43,34 +42,41 @@ pub struct CorpGoalRecord {
     pub contributors: HashMap<u32, (i64, bool)>, // char_id -> (progress, redeemed)
 }
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct QuasarCorpState {
+    pub db: Option<Arc<WorldRepository>>,
     pub skill_plans: RwLock<HashMap<u64, CorpSkillPlanRecord>>,
-    pub next_plan_id: AtomicU64,
-    pub next_milestone_id: AtomicU64,
     pub goals: RwLock<HashMap<u64, CorpGoalRecord>>,
-    pub next_goal_id: AtomicU64,
+    pub id_counters: RwLock<(u64, u64, u64)>,
 }
 
-fn encode_seq_id(field_num: u32, id: u64, out: &mut Vec<u8>) {
-    let mut id_bytes = Vec::with_capacity(8);
-    encode_varint_field(1, id, &mut id_bytes);
-    encode_bytes_field(field_num, &id_bytes, out);
-}
+impl QuasarCorpState {
+    pub fn from_db(db: Arc<WorldRepository>) -> Arc<Self> {
+        let (plans_map, mut goals_map, saved_counters) = db.with_snapshot(|snap| {
+            let mut plans = HashMap::new();
+            let mut goals = HashMap::new();
+            let mut counters = (1u64, 1u64, 101u64);
+            for n in snap.owner_notes.values() {
+                if n.character_id == -80 {
+                    if n.note_id == -8_000_000_000_000 {
+                        if let Ok(c) = serde_json::from_str::<(u64, u64, u64)>(&n.note) {
+                            counters = c;
+                        }
+                    } else if let Ok(p) = serde_json::from_str::<CorpSkillPlanRecord>(&n.note) {
+                        plans.insert(p.id, p);
+                    }
+                } else if n.character_id == -81 {
+                    if let Ok(g) = serde_json::from_str::<CorpGoalRecord>(&n.note) {
+                        goals.insert(g.id, g);
+                    }
+                }
+            }
+            (plans, goals, counters)
+        });
 
-pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
-    let state = Arc::new(QuasarCorpState::default());
-    state.next_plan_id.store(1, Ordering::SeqCst);
-    state.next_milestone_id.store(1, Ordering::SeqCst);
-    state.next_goal_id.store(100, Ordering::SeqCst);
-
-    // Seed default goal for test corporation 98000001
-    {
-        let mut goals = state.goals.write().unwrap_or_else(|e| e.into_inner());
-        let mut contribs = HashMap::new();
-        contribs.insert(90000001u32, (50i64, false));
-        goals.insert(
-            100,
+        goals_map.entry(100).or_insert_with(|| {
+            let mut contribs = HashMap::new();
+            contribs.insert(90000001u32, (50i64, false));
             CorpGoalRecord {
                 id: 100,
                 corp_id: 98000001,
@@ -80,9 +86,114 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
                 current_progress: 50,
                 active: true,
                 contributors: contribs,
-            },
-        );
+            }
+        });
+
+        let max_plan = plans_map.keys().copied().max().unwrap_or(0);
+        let max_ms = plans_map
+            .values()
+            .flat_map(|p| p.milestones.iter().map(|(mid, _)| *mid))
+            .max()
+            .unwrap_or(0);
+        let max_goal = goals_map.keys().copied().max().unwrap_or(100);
+
+        Arc::new(Self {
+            db: Some(db),
+            skill_plans: RwLock::new(plans_map),
+            goals: RwLock::new(goals_map),
+            id_counters: RwLock::new((
+                saved_counters.0.max(1).max(max_plan + 1),
+                saved_counters.1.max(1).max(max_ms + 1),
+                saved_counters.2.max(101).max(max_goal + 1),
+            )),
+        })
     }
+
+    pub fn alloc_plan_id(&self) -> u64 {
+        let mut c = self.id_counters.write().unwrap_or_else(|e| e.into_inner());
+        let id = c.0.max(1);
+        c.0 = id + 1;
+        id
+    }
+
+    pub fn alloc_milestone_id(&self) -> u64 {
+        let mut c = self.id_counters.write().unwrap_or_else(|e| e.into_inner());
+        let id = c.1.max(1);
+        c.1 = id + 1;
+        id
+    }
+
+    pub fn alloc_goal_id(&self) -> u64 {
+        let mut c = self.id_counters.write().unwrap_or_else(|e| e.into_inner());
+        let id = c.2.max(101);
+        c.2 = id + 1;
+        id
+    }
+
+    pub fn sync_to_db(&self) {
+        let Some(ref db) = self.db else { return };
+        let plans = self.skill_plans.read().unwrap_or_else(|e| e.into_inner()).clone();
+        let goals = self.goals.read().unwrap_or_else(|e| e.into_inner()).clone();
+        let counters = *self.id_counters.read().unwrap_or_else(|e| e.into_inner());
+        db.with_mut_snapshot(|snap| {
+            snap.owner_notes.retain(|_, n| n.character_id != -80 && n.character_id != -81);
+            if let Ok(c_json) = serde_json::to_string(&counters) {
+                snap.owner_notes.insert(
+                    -8_000_000_000_000,
+                    eve_db::OwnerNoteRecord {
+                        note_id: -8_000_000_000_000,
+                        character_id: -80,
+                        item_id: 0,
+                        label: "quasar_corp_counters".into(),
+                        note: c_json,
+                        timestamp_unix: 0,
+                    },
+                );
+            }
+            for p in plans.values() {
+                if let Ok(json) = serde_json::to_string(p) {
+                    let nid = -(8_000_000_000_000 + p.id as i64);
+                    snap.owner_notes.insert(
+                        nid,
+                        eve_db::OwnerNoteRecord {
+                            note_id: nid,
+                            character_id: -80,
+                            item_id: p.corp_id as i64,
+                            label: format!("skill_plan:{}", p.id),
+                            note: json,
+                            timestamp_unix: 0,
+                        },
+                    );
+                }
+            }
+            for g in goals.values() {
+                if let Ok(json) = serde_json::to_string(g) {
+                    let nid = -(8_100_000_000_000 + g.id as i64);
+                    snap.owner_notes.insert(
+                        nid,
+                        eve_db::OwnerNoteRecord {
+                            note_id: nid,
+                            character_id: -81,
+                            item_id: g.corp_id as i64,
+                            label: format!("corp_goal:{}", g.id),
+                            note: json,
+                            timestamp_unix: 0,
+                        },
+                    );
+                }
+            }
+        });
+    }
+}
+
+fn encode_seq_id(field_num: u32, id: u64, out: &mut Vec<u8>) {
+    let mut id_bytes = Vec::with_capacity(8);
+    encode_varint_field(1, id, &mut id_bytes);
+    encode_bytes_field(field_num, &id_bytes, out);
+}
+
+pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
+    let state = QuasarCorpState::from_db(db);
 
     // ========================================================================
     // ALLIANCE DOMAIN (5 protos)
@@ -162,7 +273,7 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
         "eve_public.corporation.skill.plan.CreateRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
             let corpid = ctx.effective_corporation_id().unwrap_or(98000001);
-            let plan_id = state_sp_create.next_plan_id.fetch_add(1, Ordering::SeqCst);
+            let plan_id = state_sp_create.alloc_plan_id();
 
             let (name, desc, cat_id) = match dyn_msg.get(1) {
                 Some(DynamicValue::Message(attr)) => {
@@ -197,6 +308,7 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
                 .write()
                 .unwrap_or_else(|e| e.into_inner())
                 .insert(plan_id, plan);
+            state_sp_create.sync_to_db();
 
             // Notice: CreatedNotice
             let mut notice_bytes = Vec::new();
@@ -280,6 +392,7 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
             let plan_id = extract_id(dyn_msg.get(1)).unwrap_or(0);
             let corpid = ctx.effective_corporation_id().unwrap_or(98000001);
             state_sp_del.skill_plans.write().unwrap_or_else(|e| e.into_inner()).remove(&plan_id);
+            state_sp_del.sync_to_db();
 
             let mut notice_bytes = Vec::new();
             encode_seq_id(1, plan_id, &mut notice_bytes);
@@ -313,6 +426,7 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
             if let Some(p) = state_sp_name.skill_plans.write().unwrap_or_else(|e| e.into_inner()).get_mut(&plan_id) {
                 p.name = new_name.clone();
             }
+            state_sp_name.sync_to_db();
 
             let mut notice_bytes = Vec::new();
             encode_seq_id(1, plan_id, &mut notice_bytes);
@@ -347,6 +461,7 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
             if let Some(p) = state_sp_desc.skill_plans.write().unwrap_or_else(|e| e.into_inner()).get_mut(&plan_id) {
                 p.description = new_desc.clone();
             }
+            state_sp_desc.sync_to_db();
 
             let mut notice_bytes = Vec::new();
             encode_seq_id(1, plan_id, &mut notice_bytes);
@@ -378,6 +493,7 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
             if let Some(p) = state_sp_cat.skill_plans.write().unwrap_or_else(|e| e.into_inner()).get_mut(&plan_id) {
                 p.category_id = cat_id;
             }
+            state_sp_cat.sync_to_db();
 
             let mut notice_bytes = Vec::new();
             encode_seq_id(1, plan_id, &mut notice_bytes);
@@ -408,6 +524,7 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
             if let Some(p) = state_sp_req.skill_plans.write().unwrap_or_else(|e| e.into_inner()).get_mut(&plan_id) {
                 p.requirements = vec![(3300, 5), (3302, 5)];
             }
+            state_sp_req.sync_to_db();
 
             let mut notice_bytes = Vec::new();
             encode_seq_id(1, plan_id, &mut notice_bytes);
@@ -456,7 +573,7 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
     router.register_handler(
         "eve_public.corporation.skill.plan.milestone.CreateRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
-            let mid = state_ms_create.next_milestone_id.fetch_add(1, Ordering::SeqCst);
+            let mid = state_ms_create.alloc_milestone_id();
             let corpid = ctx.effective_corporation_id().unwrap_or(98000001);
             let desc = match dyn_msg.get(1) {
                 Some(DynamicValue::Message(m)) => match m.get(1) {
@@ -469,6 +586,7 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
             if let Some(p) = state_ms_create.skill_plans.write().unwrap_or_else(|e| e.into_inner()).get_mut(&1) {
                 p.milestones.push((mid, desc.clone()));
             }
+            state_ms_create.sync_to_db();
 
             let mut notice_bytes = Vec::new();
             encode_seq_id(1, mid, &mut notice_bytes);
@@ -984,6 +1102,7 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
                     entry.1 = true; // redeemed
                 }
             }
+            state_cg_redeem.sync_to_db();
 
             // Notice: RedeemedNotice to character
             let mut notice_bytes = Vec::new();
@@ -1010,12 +1129,15 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
         "eve_public.corporationgoal.api.RedeemAllMyRewardsRequest",
         Arc::new(move |ctx, _any, _dyn_msg| {
             let cid = ctx.effective_character_id().unwrap_or(90000001);
-            let mut goals = state_cg_redeem_all.goals.write().unwrap_or_else(|e| e.into_inner());
-            for g in goals.values_mut() {
-                if let Some(entry) = g.contributors.get_mut(&cid) {
-                    entry.1 = true;
+            {
+                let mut goals = state_cg_redeem_all.goals.write().unwrap_or_else(|e| e.into_inner());
+                for g in goals.values_mut() {
+                    if let Some(entry) = g.contributors.get_mut(&cid) {
+                        entry.1 = true;
+                    }
                 }
             }
+            state_cg_redeem_all.sync_to_db();
             Ok(GoogleAny {
                 type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.corporationgoal.api.RedeemAllMyRewardsResponse"),
                 value: Vec::new(),

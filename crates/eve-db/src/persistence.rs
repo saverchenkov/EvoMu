@@ -241,6 +241,11 @@ impl Default for WorldRepository {
 }
 
 impl WorldRepository {
+    /// Returns `true` when this repository is an ephemeral `:memory:` instance with no backing SQLite or snapshot file.
+    pub fn is_ephemeral_in_memory(&self) -> bool {
+        self.sqlite_path.is_none() && self.snapshot_path.is_none()
+    }
+
     /// Returns the shared [`crate::clock::ServerClock`] for this repository (`T-7`).
     pub fn clock(&self) -> std::sync::Arc<dyn crate::clock::ServerClock> {
         self.clock

@@ -148,9 +148,29 @@ impl ServerContext {
             Arc::clone(&db),
             Arc::clone(&sde),
         ));
+        let persisted_notifications = db.with_snapshot(|snap| {
+            let mut list: Vec<crate::router::cache_notifications::NotificationRecord> = snap
+                .owner_notes
+                .values()
+                .filter(|n| n.character_id == -79)
+                .filter_map(|n| serde_json::from_str(&n.note).ok())
+                .collect();
+            list.sort_by_key(|r| r.notification_id);
+            list
+        });
+
+        let instance_id = NEXT_CTX_INSTANCE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if db.is_ephemeral_in_memory() {
+            db.with_mut_snapshot(|snap| {
+                let corp_floor = 98_100_000 + (instance_id as i64) * 10_000;
+                let al_floor = 99_000_000 + (instance_id as i64) * 1_000;
+                snap.next_corporation_id = snap.next_corporation_id.max(corp_floor);
+                snap.next_alliance_id = snap.next_alliance_id.max(al_floor);
+            });
+        }
 
         Self {
-            instance_id: NEXT_CTX_INSTANCE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            instance_id,
             sde,
             db,
             clock: RwLock::new(clock),
@@ -162,7 +182,7 @@ impl ServerContext {
             bound_objects: RwLock::new(HashMap::new()),
             object_cache: RwLock::new(HashMap::new()),
             object_cache_timestamps: RwLock::new(HashMap::new()),
-            notification_records: RwLock::new(Vec::new()),
+            notification_records: RwLock::new(persisted_notifications),
             pending_notifications: RwLock::new(HashMap::new()),
             notify_tx,
             map_landmarks: RwLock::new(Vec::new()),

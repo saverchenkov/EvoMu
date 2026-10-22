@@ -6,9 +6,12 @@
 //! - `feat:lifecycle.lp-durable`: Corporation LP wallets (`corp_lp_balances`) and character LP
 //!   reward logs (`char_lp_logs`) survive a SQLite server restart, and failed LP store purchases
 //!   leave LP, ISK, and inventory items unchanged.
+//! - `feat:lifecycle.notifications-durable`: Notifications already received stay in the notification
+//!   list after a server restart, notifications created while a character was offline (or before a
+//!   restart) are delivered at the next login, and notification IDs are never reused.
 //! - `feat:invariant.ids-monotonic-across-restart`: IDs allocated for alliances, corporations,
-//!   notifications, in-game reports, and persisted entities are strictly greater after a restart
-//!   than any ID allocated before the restart, never overwriting existing records.
+//!   notifications, in-game reports, fleets, corp projects, and persisted entities are strictly
+//!   greater after a restart than any ID allocated before the restart, never overwriting existing records.
 
 use crate::common;
 use eve_db::{
@@ -99,6 +102,15 @@ fn seed_corp_for_pilot(snap: &mut eve_db::WorldStateSnapshot, char_id: i64, corp
     }
 }
 
+fn seed_item(snap: &mut eve_db::WorldStateSnapshot, tid: TypeId, owner: i64, loc: i64, flag: InventoryFlag, qty: i32, singleton: bool) -> i64 {
+    snap.next_entity_id += 1;
+    let id = snap.next_entity_id;
+    snap.items.insert(id, InventoryItemRecord {
+        item_id: id, type_id: tid, owner_id: owner, location_id: loc, flag, quantity: qty, singleton, version: 1, ..Default::default()
+    });
+    id
+}
+
 fn cmd_pin(id: i64, tid: TypeId, lat: f64, lon: f64) -> PyRep {
     PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(id), PyRep::Integer(tid as i64), PyRep::Real(lat), PyRep::Real(lon)])
 }
@@ -116,11 +128,9 @@ fn cmd_schematic(id: i64, sid: i64) -> PyRep {
 }
 fn cmd_route(id: i64, path: &[i64], tid: TypeId, qty: i64) -> PyRep {
     PyRep::Tuple(vec![
-        PyRep::Integer(6),
-        PyRep::Integer(id),
+        PyRep::Integer(6), PyRep::Integer(id),
         PyRep::List(path.iter().map(|&p| PyRep::Integer(p)).collect()),
-        PyRep::Integer(tid as i64),
-        PyRep::Integer(qty),
+        PyRep::Integer(tid as i64), PyRep::Integer(qty),
     ])
 }
 fn cmd_extractor_program(id: i64, tid: TypeId, radius: f64, heads: i64) -> PyRep {
@@ -147,62 +157,21 @@ async fn test_d3_owner_notes_persistence_market_industry_and_pi_across_sqlite_re
             for (stid, lvl) in [(3443, 5), (16596, 5), (2505, 5), (2495, 4), (13279, 4), (2406, 3), (2403, 2)] {
                 sk.insert(stid, TrainedSkillRecord { type_id: stid, level: lvl, skill_points: 256_000.0 });
             }
-            snap.next_entity_id += 1;
-            let bp_id = snap.next_entity_id;
-            snap.items.insert(
-                bp_id,
-                InventoryItemRecord {
-                    item_id: bp_id,
-                    type_id: RIFTER_BP_TYPE_ID,
-                    owner_id: corp_id,
-                    location_id: JITA_STATION_ID,
-                    flag: InventoryFlag::Hangar,
-                    quantity: 1,
-                    singleton: true,
-                    version: 1,
-                    ..Default::default()
-                },
-            );
-            snap.next_entity_id += 1;
-            let mat_id = snap.next_entity_id;
-            snap.items.insert(
-                mat_id,
-                InventoryItemRecord {
-                    item_id: mat_id,
-                    type_id: TRITANIUM,
-                    owner_id: corp_id,
-                    location_id: JITA_STATION_ID,
-                    flag: InventoryFlag::Hangar,
-                    quantity: 100_000,
-                    singleton: false,
-                    version: 1,
-                    ..Default::default()
-                },
-            );
+            seed_item(snap, RIFTER_BP_TYPE_ID, corp_id, JITA_STATION_ID, InventoryFlag::Hangar, 1, true);
+            seed_item(snap, TRITANIUM, corp_id, JITA_STATION_ID, InventoryFlag::Hangar, 100_000, false);
         });
 
         let mut sess = login_select(&ctx, 7001, "demo", "demo-secret", P1).await;
 
         // 1. Place a corporate buy order with duration = 1 day, range = 5 jumps, accountKey = 1002 (Division 3)
         let buy_res = call(
-            &ctx,
-            &mut sess,
-            "marketProxy",
-            "PlaceBuyOrder",
+            &ctx, &mut sess, "marketProxy", "PlaceBuyOrder",
             &[
-                PyRep::Integer(JITA_STATION_ID),
-                PyRep::Integer(TRITANIUM as i64),
-                PyRep::Real(3.50),
-                PyRep::Integer(1_000),
-                PyRep::Integer(5),    // range = 5 jumps
-                PyRep::Integer(10),   // minVolume = 10
-                PyRep::Integer(1),    // duration = 1 day
-                PyRep::Bool(true),    // useCorp = true
-                PyRep::Integer(1002), // accountKey = 1002 (Division 3)
+                PyRep::Integer(JITA_STATION_ID), PyRep::Integer(TRITANIUM as i64), PyRep::Real(3.50),
+                PyRep::Integer(1_000), PyRep::Integer(5), PyRep::Integer(10),
+                PyRep::Integer(1), PyRep::Bool(true), PyRep::Integer(1002),
             ],
-        )
-        .await
-        .expect("PlaceBuyOrder duration=1 range=5 accountKey=1002");
+        ).await.expect("PlaceBuyOrder duration=1 range=5 accountKey=1002");
         let order_id = buy_res.dict_get("orderID").and_then(|v| v.as_i64()).expect("orderID");
 
         let corp_orders = rowset_maps(&call(&ctx, &mut sess, "marketProxy", "GetCorporationOrders", &[]).await.unwrap());
@@ -215,15 +184,10 @@ async fn test_d3_owner_notes_persistence_market_industry_and_pi_across_sqlite_re
 
         // 2. Install a corporation manufacturing job (`useCorp: true`)
         let install_res = call_kw(
-            &ctx,
-            &mut sess,
-            "industryManager",
-            "InstallJob",
+            &ctx, &mut sess, "industryManager", "InstallJob",
             &[PyRep::Integer(RIFTER_BP_TYPE_ID as i64), PyRep::Integer(1), PyRep::Integer(1)],
             &[("useCorp", PyRep::Bool(true))],
-        )
-        .await
-        .expect("InstallJob corp manufacturing");
+        ).await.expect("InstallJob corp manufacturing");
         let corp_job_id = install_res.dict_get("jobID").and_then(|v| v.as_i64()).expect("corp jobID");
 
         // 3. Undock into Jita space, seed Gas Command Center in active ship cargo, and build a full PI network
@@ -234,22 +198,7 @@ async fn test_d3_owner_notes_persistence_market_industry_and_pi_across_sqlite_re
                 ch.station_id = None;
                 ch.solar_system_id = JITA_SOLAR_SYSTEM_ID;
             }
-            snap.next_entity_id += 1;
-            let cc_item_id = snap.next_entity_id;
-            snap.items.insert(
-                cc_item_id,
-                InventoryItemRecord {
-                    item_id: cc_item_id,
-                    type_id: GAS_COMMAND_CENTER_TYPE_ID,
-                    owner_id: P1,
-                    location_id: ship_id,
-                    flag: InventoryFlag::Cargo,
-                    quantity: 1,
-                    singleton: false,
-                    version: 1,
-                    ..Default::default()
-                },
-            );
+            seed_item(snap, GAS_COMMAND_CENTER_TYPE_ID, P1, ship_id, InventoryFlag::Cargo, 1, false);
         });
 
         let res_info = call(&ctx, &mut sess, "planetMgr", "GetPlanetResourceInfo", &[PyRep::Integer(JITA_PLANET_ID)]).await.unwrap();
@@ -377,40 +326,12 @@ async fn test_d6_lp_durable_and_atomic_failed_purchase_across_sqlite_restart() {
                 ch.loyalty_points.insert(CONCORD_CORP_ID, 5_000);
             }
             snap.items.retain(|_, it| !(it.owner_id == P1 && it.location_id == JITA_STATION_ID && it.type_id == TRITANIUM));
-            snap.next_entity_id += 1;
-            let tid_item = snap.next_entity_id;
-            snap.items.insert(
-                tid_item,
-                InventoryItemRecord {
-                    item_id: tid_item,
-                    type_id: TRITANIUM,
-                    owner_id: P1,
-                    location_id: JITA_STATION_ID,
-                    flag: InventoryFlag::Hangar,
-                    quantity: 50,
-                    singleton: false,
-                    version: 1,
-                    ..Default::default()
-                },
-            );
+            seed_item(snap, TRITANIUM, P1, JITA_STATION_ID, InventoryFlag::Hangar, 50, false);
         });
 
         let mut sess = login_select(&ctx, 7101, "demo", "demo-secret", P1).await;
-
-        call(
-            &ctx,
-            &mut sess,
-            "LPSvc",
-            "TransferLPFromMyWalletToOtherCorp",
-            &[PyRep::Integer(corp_id), PyRep::Integer(CALDARI_NAVY_CORP_ID), PyRep::Integer(6_000)],
-        )
-        .await
-        .expect("TransferLPFromMyWalletToOtherCorp");
-
-        call(&ctx, &mut sess, "LPSvc", "ExchangeConcordLP", &[PyRep::Integer(FEDERATION_NAVY_CORP_ID), PyRep::Integer(1_000)])
-            .await
-            .expect("ExchangeConcordLP");
-
+        call(&ctx, &mut sess, "LPSvc", "TransferLPFromMyWalletToOtherCorp", &[PyRep::Integer(corp_id), PyRep::Integer(CALDARI_NAVY_CORP_ID), PyRep::Integer(6_000)]).await.unwrap();
+        call(&ctx, &mut sess, "LPSvc", "ExchangeConcordLP", &[PyRep::Integer(FEDERATION_NAVY_CORP_ID), PyRep::Integer(1_000)]).await.unwrap();
         let corp_lp = call(&ctx, &mut sess, "LPSvc", "GetAllMyCorporationWalletLPBalances", &[]).await.unwrap();
         let logs = call(&ctx, &mut sess, "rewardMgr", "GetRewardLPLogs", &[]).await.unwrap();
         (corp_lp, logs)
@@ -423,7 +344,6 @@ async fn test_d6_lp_durable_and_atomic_failed_purchase_across_sqlite_restart() {
 
         let corp_lp_after = call(&ctx, &mut sess, "LPSvc", "GetAllMyCorporationWalletLPBalances", &[]).await.unwrap();
         let logs_after = call(&ctx, &mut sess, "rewardMgr", "GetRewardLPLogs", &[]).await.unwrap();
-
         assert_eq!(corp_lp_after, corp_lp_before, "Corporation LP wallet balances must survive restart");
         assert_eq!(logs_after, logs_before, "Character LP reward logs must survive restart");
         let PyRep::List(log_entries) = &logs_after else { panic!("expected List of LP logs") };
@@ -432,76 +352,69 @@ async fn test_d6_lp_durable_and_atomic_failed_purchase_across_sqlite_restart() {
         let snap_state = |ctx: &ServerContext| {
             ctx.db.with_snapshot(|s| {
                 let ch = &s.characters[&P1];
-                let trit_qty: i32 = s
-                    .items
-                    .values()
-                    .filter(|i| i.owner_id == P1 && i.location_id == JITA_STATION_ID && i.type_id == TRITANIUM)
-                    .map(|i| i.quantity)
-                    .sum();
-                let bcs_qty: i32 = s
-                    .items
-                    .values()
-                    .filter(|i| i.owner_id == P1 && i.location_id == JITA_STATION_ID && i.type_id == 15810)
-                    .map(|i| i.quantity)
-                    .sum();
+                let trit_qty: i32 = s.items.values().filter(|i| i.owner_id == P1 && i.location_id == JITA_STATION_ID && i.type_id == TRITANIUM).map(|i| i.quantity).sum();
+                let bcs_qty: i32 = s.items.values().filter(|i| i.owner_id == P1 && i.location_id == JITA_STATION_ID && i.type_id == 15810).map(|i| i.quantity).sum();
                 (ch.loyalty_points.clone(), s.corp_lp_balances.clone(), ch.balance, trit_qty, bcs_qty)
             })
         };
         let before_fail = snap_state(&ctx);
 
         // 1. Fail on missing required trade-in items (Offer 1004 requires 100x Tritanium, pilot has 50x)
-        let err_items = call(
-            &ctx,
-            &mut sess,
-            "LPStoreMgr",
-            "TakeOfferForCharacter",
-            &[PyRep::Integer(CALDARI_NAVY_CORP_ID), PyRep::Integer(1004), PyRep::Integer(1)],
-        )
-        .await
-        .expect_err("Offer 1004 must fail when required trade-in items are insufficient");
+        let err_items = call(&ctx, &mut sess, "LPStoreMgr", "TakeOfferForCharacter", &[PyRep::Integer(CALDARI_NAVY_CORP_ID), PyRep::Integer(1004), PyRep::Integer(1)]).await.unwrap_err();
         assert_eq!(err_items.code, "MissingRequiredItems");
         assert_eq!(snap_state(&ctx), before_fail);
 
         // 2. Fail on insufficient character LP (Offer 1003 costs 10,000 LP, pilot has 9,000 LP)
-        let err_lp = call(
-            &ctx,
-            &mut sess,
-            "LPStoreMgr",
-            "TakeOfferForCharacter",
-            &[PyRep::Integer(CALDARI_NAVY_CORP_ID), PyRep::Integer(1003), PyRep::Integer(1)],
-        )
-        .await
-        .expect_err("Offer 1003 must fail when character LP is insufficient");
+        let err_lp = call(&ctx, &mut sess, "LPStoreMgr", "TakeOfferForCharacter", &[PyRep::Integer(CALDARI_NAVY_CORP_ID), PyRep::Integer(1003), PyRep::Integer(1)]).await.unwrap_err();
         assert_eq!(err_lp.code, "InsufficientLoyaltyPoints");
         assert_eq!(snap_state(&ctx), before_fail);
 
         // 3. Fail on insufficient corporation LP (Offer 1003 costs 10,000 LP, corp has 6,000 LP)
-        let err_corp_lp = call(
-            &ctx,
-            &mut sess,
-            "LPStoreMgr",
-            "TakeOfferForCorporation",
-            &[PyRep::Integer(CALDARI_NAVY_CORP_ID), PyRep::Integer(1003), PyRep::Integer(1)],
-        )
-        .await
-        .expect_err("Offer 1003 for corp must fail when corp LP is insufficient");
+        let err_corp_lp = call(&ctx, &mut sess, "LPStoreMgr", "TakeOfferForCorporation", &[PyRep::Integer(CALDARI_NAVY_CORP_ID), PyRep::Integer(1003), PyRep::Integer(1)]).await.unwrap_err();
         assert_eq!(err_corp_lp.code, "InsufficientLoyaltyPoints");
         assert_eq!(snap_state(&ctx), before_fail);
+
+        // 4. Fail on non-positive or overflowing quantity (`InvalidQuantity`)
+        for bad_qty in [0i64, -5, i64::MAX] {
+            let err_qty = call(&ctx, &mut sess, "LPStoreMgr", "TakeOfferForCharacter", &[PyRep::Integer(CALDARI_NAVY_CORP_ID), PyRep::Integer(1001), PyRep::Integer(bad_qty)]).await.unwrap_err();
+            assert_eq!(err_qty.code, "InvalidQuantity");
+            assert_eq!(snap_state(&ctx), before_fail);
+        }
+
+        // 5. Fail when non-director corp member attempts corp LP spend or transfer (`InsufficientCorporationRole`)
+        ctx.db.with_mut_snapshot(|snap| {
+            if let Some(c) = snap.corporations.get_mut(&corp_id) {
+                c.members.insert(P2);
+                c.member_roles.insert(P2, 0);
+            }
+            if let Some(ch2) = snap.characters.get_mut(&P2) {
+                ch2.corporation_id = corp_id;
+            }
+        });
+        let mut sess2 = login_select(&ctx, 7103, "other", "other-secret", P2).await;
+        let err_role_take = call(&ctx, &mut sess2, "LPStoreMgr", "TakeOfferForCorporation", &[PyRep::Integer(CALDARI_NAVY_CORP_ID), PyRep::Integer(1001), PyRep::Integer(1)]).await.unwrap_err();
+        assert_eq!(err_role_take.code, "InsufficientCorporationRole");
+        let err_role_xfer = call(&ctx, &mut sess2, "LPSvc", "TransferLPFromMyCorpWalletToOtherCorp", &[PyRep::Integer(CALDARI_NAVY_CORP_ID), PyRep::Integer(CALDARI_NAVY_CORP_ID), PyRep::Integer(100)]).await.unwrap_err();
+        assert_eq!(err_role_xfer.code, "InsufficientCorporationRole");
     }
 
     let _ = std::fs::remove_file(&path);
 }
 
 #[tokio::test]
-async fn test_d6_ids_monotonic_across_sqlite_restart_and_never_overwrite_alliances() {
+async fn test_d6_ids_monotonic_and_durable_notifications_across_sqlite_restart() {
     // parity: feat:invariant.ids-monotonic-across-restart
-    eve_testkit::attest(&["feat:invariant.ids-monotonic-across-restart"]);
+    // parity: feat:lifecycle.notifications-durable
+    eve_testkit::attest(&[
+        "feat:invariant.ids-monotonic-across-restart",
+        "feat:lifecycle.notifications-durable",
+    ]);
 
     let path = std::env::temp_dir().join(format!("evomu_d6_monotonic_ids_{}.sqlite", std::process::id()));
     let _ = std::fs::remove_file(&path);
     let demo = WorldRepository::with_demo_seed().with_snapshot(|s| s.clone());
 
-    let (corp_id_1, alliance_id_1, notif_id_1, report_id_1, entity_id_1) = {
+    let (corp_id_1, alliance_id_1, notif_id_1, notif_offline_id, notif_del_id, report_id_1, fleet_id_1, mail_id_1, plan_id_1, ms_id_1, goal_id_1) = {
         let ctx = open_ctx_at(&path, 1_750_200_000);
         ctx.db.with_mut_snapshot(|snap| {
             *snap = demo;
@@ -553,7 +466,12 @@ async fn test_d6_ids_monotonic_across_sqlite_restart_and_never_overwrite_allianc
         .expect("CreateAlliance 1");
         let alliance_id_1 = al_rep_1.dict_get("allianceID").and_then(|v| v.as_i64()).unwrap();
 
-        let notif_id_1 = ctx.create_character_notification(1_000_125, P1, 10, 1, "Pre-restart notification").notification_id;
+        // Create notification for online P1 and mark it processed; create notification for offline P2; create & delete a 3rd notification
+        let notif_id_1 = ctx.create_character_notification(1_000_125, P1, 10, 1, "Pre-restart processed notif").notification_id;
+        call(&ctx, &mut sess1, "notificationMgr", "MarkAsProcessed", &[PyRep::List(vec![PyRep::Integer(notif_id_1)])]).await.unwrap();
+        let notif_offline_id = ctx.create_character_notification(1_000_125, P2, 14, 2, "Offline pre-restart notif for P2").notification_id;
+        let notif_del_id = ctx.create_character_notification(1_000_125, P1, 10, 1, "Deleted pre-restart notif").notification_id;
+        call(&ctx, &mut sess1, "notificationMgr", "DeleteNotifications", &[PyRep::List(vec![PyRep::Integer(notif_del_id)])]).await.unwrap();
 
         call(
             &ctx,
@@ -564,20 +482,79 @@ async fn test_d6_ids_monotonic_across_sqlite_restart_and_never_overwrite_allianc
         )
         .await
         .expect("report_macro_use");
-        let reports_1 = ingamereport_ops::get_persisted_reports(&ctx);
-        assert_eq!(reports_1.len(), 1);
-        let report_id_1 = reports_1[0].report_id;
+        let report_id_1 = ingamereport_ops::get_persisted_reports(&ctx)[0].report_id;
 
         let fleet_rep_1 = call(&ctx, &mut sess1, "fleetSvc", "InitFleet", &[]).await.unwrap();
-        let entity_id_1 = fleet_rep_1.dict_get("fleetID").and_then(|v| v.as_i64()).unwrap();
+        let fleet_id_1 = fleet_rep_1.dict_get("fleetID").and_then(|v| v.as_i64()).unwrap();
 
-        (corp_id_1, alliance_id_1, notif_id_1, report_id_1, entity_id_1)
+        let mail_rep_1 = call(
+            &ctx,
+            &mut sess1,
+            "mailMgr",
+            "SendMail",
+            &[PyRep::List(vec![PyRep::Integer(P2)]), PyRep::None, PyRep::None, PyRep::String("Pre-Restart Mail".into()), PyRep::String("Body 1".into())],
+        )
+        .await
+        .unwrap();
+        let mail_id_1 = mail_rep_1.as_i64().unwrap();
+
+        let quasar_corp = eve_server::services::quasar_social_corp::QuasarCorpState::from_db(std::sync::Arc::clone(&ctx.db));
+        let plan_id_1 = quasar_corp.alloc_plan_id();
+        let ms_id_1 = quasar_corp.alloc_milestone_id();
+        let goal_id_1 = quasar_corp.alloc_goal_id();
+        quasar_corp.skill_plans.write().unwrap().insert(
+            plan_id_1,
+            eve_server::services::quasar_social_corp::CorpSkillPlanRecord {
+                id: plan_id_1,
+                corp_id: corp_id_1 as u32,
+                name: "Pre-Restart Doctrine".into(),
+                description: "Skill plan persisted before restart".into(),
+                category_id: 1,
+                requirements: vec![(3300, 5)],
+                milestones: vec![(ms_id_1, "Milestone Alpha".into())],
+            },
+        );
+        quasar_corp.goals.write().unwrap().insert(
+            goal_id_1,
+            eve_server::services::quasar_social_corp::CorpGoalRecord {
+                id: goal_id_1,
+                corp_id: corp_id_1 as u32,
+                name: "Pre-Restart Corp Goal".into(),
+                description: "Goal persisted before restart".into(),
+                target_progress: 250,
+                current_progress: 75,
+                active: true,
+                contributors: std::collections::HashMap::new(),
+            },
+        );
+        quasar_corp.sync_to_db();
+
+        (corp_id_1, alliance_id_1, notif_id_1, notif_offline_id, notif_del_id, report_id_1, fleet_id_1, mail_id_1, plan_id_1, ms_id_1, goal_id_1)
     };
 
     // === RESTART SERVER FROM SQLITE ===
     {
         let ctx = open_ctx_at(&path, 1_750_200_100);
-        let mut sess2 = login_select(&ctx, 7202, "other", "other-secret", P2).await;
+        let mut sess1 = login_select(&ctx, 7202, "demo", "demo-secret", P1).await;
+        let mut sess2 = login_select(&ctx, 7203, "other", "other-secret", P2).await;
+
+        // 1. Verify P1's already-received processed notification stayed in GetAllNotifications and deleted notification stayed deleted
+        let p1_all = call(&ctx, &mut sess1, "notificationMgr", "GetAllNotifications", &[]).await.unwrap();
+        let p1_rows = p1_all.crowset_rows().expect("CRowset");
+        assert_eq!(p1_rows.len(), 1);
+        assert_eq!(p1_rows[0].dbrow_get("notificationID"), Some(&PyRep::Integer(notif_id_1)));
+        assert_eq!(p1_rows[0].dbrow_get("processed"), Some(&PyRep::Bool(true)));
+
+        // 2. Verify P2's offline notification (created while P2 was offline before restart) was delivered at login (`OnNotificationReceived`)
+        let p2_login_notifs = ctx.drain_notifications_for_char(P2);
+        assert!(
+            p2_login_notifs.iter().any(|n| n.event == "OnNotificationReceived" && n.args.first() == Some(&PyRep::Integer(notif_offline_id))),
+            "Notification created while P2 was offline before restart must be delivered at next login"
+        );
+        let p2_unproc = call(&ctx, &mut sess2, "notificationMgr", "GetUnprocessed", &[]).await.unwrap();
+        let p2_rows = p2_unproc.crowset_rows().expect("CRowset");
+        assert_eq!(p2_rows.len(), 1);
+        assert_eq!(p2_rows[0].dbrow_get("notificationID"), Some(&PyRep::Integer(notif_offline_id)));
 
         let corp_rep_2 = call(
             &ctx,
@@ -630,23 +607,45 @@ async fn test_d6_ids_monotonic_across_sqlite_restart_and_never_overwrite_allianc
         let report_id_2 = reports_all.iter().find(|r| r.category == "exploit_abuse").unwrap().report_id;
 
         let fleet_rep_2 = call(&ctx, &mut sess2, "fleetSvc", "InitFleet", &[]).await.unwrap();
-        let entity_id_2 = fleet_rep_2.dict_get("fleetID").and_then(|v| v.as_i64()).unwrap();
+        let fleet_id_2 = fleet_rep_2.dict_get("fleetID").and_then(|v| v.as_i64()).unwrap();
+
+        let mail_rep_2 = call(
+            &ctx,
+            &mut sess2,
+            "mailMgr",
+            "SendMail",
+            &[PyRep::List(vec![PyRep::Integer(P1)]), PyRep::None, PyRep::None, PyRep::String("Post-Restart Mail".into()), PyRep::String("Body 2".into())],
+        )
+        .await
+        .unwrap();
+        let mail_id_2 = mail_rep_2.as_i64().unwrap();
+
+        let quasar_corp = eve_server::services::quasar_social_corp::QuasarCorpState::from_db(std::sync::Arc::clone(&ctx.db));
+        assert!(quasar_corp.skill_plans.read().unwrap().contains_key(&plan_id_1), "Pre-restart skill plan must survive restart");
+        assert!(quasar_corp.goals.read().unwrap().contains_key(&goal_id_1), "Pre-restart corp goal must survive restart");
+        let plan_id_2 = quasar_corp.alloc_plan_id();
+        let ms_id_2 = quasar_corp.alloc_milestone_id();
+        let goal_id_2 = quasar_corp.alloc_goal_id();
 
         assert!(corp_id_2 > corp_id_1, "corp_id_2 ({corp_id_2}) > corp_id_1 ({corp_id_1})");
         assert!(alliance_id_2 > alliance_id_1, "alliance_id_2 ({alliance_id_2}) > alliance_id_1 ({alliance_id_1})");
-        assert!(notif_id_2 > notif_id_1, "notif_id_2 ({notif_id_2}) > notif_id_1 ({notif_id_1})");
+        assert!(notif_id_2 > notif_del_id && notif_del_id > notif_offline_id && notif_offline_id > notif_id_1);
         assert!(report_id_2 > report_id_1, "report_id_2 ({report_id_2}) > report_id_1 ({report_id_1})");
-        assert!(entity_id_2 > entity_id_1, "entity_id_2 ({entity_id_2}) > entity_id_1 ({entity_id_1})");
+        assert!(fleet_id_2 > fleet_id_1, "fleet_id_2 ({fleet_id_2}) > fleet_id_1 ({fleet_id_1})");
+        assert!(mail_id_2 > mail_id_1, "mail_id_2 ({mail_id_2}) > mail_id_1 ({mail_id_1})");
+        assert!(plan_id_2 > plan_id_1, "plan_id_2 ({plan_id_2}) > plan_id_1 ({plan_id_1})");
+        assert!(ms_id_2 > ms_id_1, "ms_id_2 ({ms_id_2}) > ms_id_1 ({ms_id_1})");
+        assert!(goal_id_2 > goal_id_1, "goal_id_2 ({goal_id_2}) > goal_id_1 ({goal_id_1})");
 
         ctx.db.with_snapshot(|snap| {
             let a1 = snap.alliances.get(&alliance_id_1).expect("Pre-restart alliance must still exist intact");
             let a2 = snap.alliances.get(&alliance_id_2).expect("Post-restart alliance must exist");
             assert_eq!(a1.name, "First Horizon Alliance");
-            assert_eq!(a1.short_name, "FHAL1");
             assert_eq!(a1.executor_corp_id, corp_id_1);
             assert_eq!(a2.name, "Second Horizon Alliance");
-            assert_eq!(a2.short_name, "SHAL2");
             assert_eq!(a2.executor_corp_id, corp_id_2);
+            assert!(snap.fleets.contains_key(&fleet_id_1) && snap.fleets.contains_key(&fleet_id_2));
+            assert!(snap.mails.iter().any(|m| m.message_id == mail_id_1) && snap.mails.iter().any(|m| m.message_id == mail_id_2));
         });
     }
 
