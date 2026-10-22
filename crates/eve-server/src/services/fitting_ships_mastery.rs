@@ -195,17 +195,22 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
 
         ("ship", "BoardStoredShip") => Some(board_stored_ship(ctx, session, args).await),
 
-        ("ship", "StoreVessel") | ("ship", "ScoopToSMA") | ("ship", "ScoopToFleetHangar") => {
+        ("ship", "StoreVessel")
+        | ("ship", "ScoopToSMA")
+        | ("ship", "ScoopToFleetHangar")
+        | ("ship", "Scoop")
+        | ("ship", "ScoopToInfrastructureHold")
+        | ("ship", "ScoopToMobileDepotHold") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let is_sma = method != "ScoopToFleetHangar";
-            let target_flag_u16: u16 = if is_sma { 90 } else { 155 };
-            let target_flag = if is_sma {
-                InventoryFlag::SpecializedShipHold
-            } else {
-                InventoryFlag::Cargo
+            let (target_flag_u16, target_flag) = match method {
+                "ScoopToSMA" | "StoreVessel" => (90u16, InventoryFlag::SpecializedShipHold),
+                "ScoopToInfrastructureHold" => (185u16, InventoryFlag::SpecializedInfrastructureHold),
+                "ScoopToMobileDepotHold" => (179u16, InventoryFlag::SpecializedMobileDepotHold),
+                "Scoop" => (5u16, InventoryFlag::Cargo),
+                _ => (155u16, InventoryFlag::Cargo),
             };
             let (item_id, host_ship_id) = if args.len() >= 2 {
                 (
@@ -1077,7 +1082,7 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
             ])))
         }
 
-        ("ship", "GetDirtTimestamp") => {
+        ("ship", "GetDirtTimestamp") | ("ship", "ResetDirtTimestamp") => {
             if let Err(e) = ServerContext::require_character(session) {
                 return Some(Err(e));
             }
@@ -1101,6 +1106,53 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
             // `eveMoniker.GetShipAccess().GetDirtTimestamp(itemID)` → Windows filetime passed to
             // `gfxutils.CalcDirtLevelFromAge` (`eve/client/script/ui/view/hangarBehaviours/baseHangarBehaviours.pyj:128-130`).
             Some(Ok(PyRep::Integer(ctx.now_blueos_filetime_ticks())))
+        }
+
+        ("ship", "SafeLogoff") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let Some(ship_id) = session.ship_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "NoActiveShip".into(),
+                    message: "Session has no active ship".into(),
+                }));
+            };
+            let ticks = ctx.now_blueos_filetime_ticks() + 300_000_000;
+            ctx.notify(
+                crate::router::NotificationTarget::Character(char_id),
+                "OnSafeLogoffActivated",
+                "charid",
+                vec![PyRep::Integer(ship_id), PyRep::Integer(ticks)],
+            );
+            Some(Ok(PyRep::keyval([
+                ("logoffTime", PyRep::Integer(30)),
+                ("safeLogoffActive", PyRep::Bool(true)),
+                ("shipID", PyRep::Integer(ship_id)),
+            ])))
+        }
+
+        ("ship", "AbortSafeLogoff") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            ctx.notify(
+                crate::router::NotificationTarget::Character(char_id),
+                "OnSafeLogoffAborted",
+                "charid",
+                vec![],
+            );
+            Some(Ok(PyRep::Bool(true)))
+        }
+
+        ("ship", "SetSessionCheck") | ("ship", "clear_memoized") => {
+            let _ = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            Some(Ok(PyRep::Bool(true)))
         }
 
         _ => None,

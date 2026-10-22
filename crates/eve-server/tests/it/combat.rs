@@ -62,3 +62,151 @@ async fn test_phase_0_s2_fighter_mgr_unimplemented_rpc() {
         .expect("ship ball 100_000_001 must remain intact in ballpark");
     assert_eq!(ball_after.id, 100_000_001);
 }
+
+#[tokio::test]
+async fn test_ship_operations_logoff_scoop_drop_and_dirt() {
+    // parity: rpc:ship.ResetDirtTimestamp, rpc:ship.SetSessionCheck, rpc:ship.clear_memoized, rpc:ship.SafeLogoff, rpc:ship.AbortSafeLogoff, rpc:ship.Drop, rpc:ship.Scoop, rpc:ship.ScoopToInfrastructureHold, rpc:ship.ScoopToMobileDepotHold
+    let ctx = ServerContext::new();
+    let kw = HashMap::new();
+    let mut sess = SessionState::new(903);
+    common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
+    ctx.dispatch_rpc(
+        &mut sess,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(90_000_001)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("SelectCharacterID");
+
+    // 1. ResetDirtTimestamp
+    let dirt = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "ship",
+            None,
+            "ResetDirtTimestamp",
+            &[PyRep::Integer(100_000_001)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("ResetDirtTimestamp");
+    let dirt_ft = dirt.as_i64().expect("filetime");
+    assert!(dirt_ft > 116_444_736_000_000_000);
+
+    // 2. SetSessionCheck & clear_memoized
+    let sc = ctx
+        .dispatch_rpc(&mut sess, "ship", None, "SetSessionCheck", &[], &kw, None)
+        .await
+        .expect("SetSessionCheck");
+    assert_eq!(sc, PyRep::Bool(true));
+
+    let cm = ctx
+        .dispatch_rpc(&mut sess, "ship", None, "clear_memoized", &[], &kw, None)
+        .await
+        .expect("clear_memoized");
+    assert_eq!(cm, PyRep::Bool(true));
+
+    // 3. SafeLogoff & AbortSafeLogoff
+    let sl = ctx
+        .dispatch_rpc(&mut sess, "ship", None, "SafeLogoff", &[], &kw, None)
+        .await
+        .expect("SafeLogoff");
+    let PyRep::KeyVal(sl_kv) = sl else { panic!("expected KeyVal") };
+    assert_eq!(sl_kv.get("safeLogoffActive"), Some(&PyRep::Bool(true)));
+    assert_eq!(sl_kv.get("logoffTime"), Some(&PyRep::Integer(30)));
+    assert_eq!(sl_kv.get("shipID"), Some(&PyRep::Integer(100_000_001)));
+
+    let asl = ctx
+        .dispatch_rpc(&mut sess, "ship", None, "AbortSafeLogoff", &[], &kw, None)
+        .await
+        .expect("AbortSafeLogoff");
+    assert_eq!(asl, PyRep::Bool(true));
+
+    // Undock to space for Drop and Scoop tests
+    ctx.dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None)
+        .await
+        .expect("Undock");
+
+    // Seed item into ship cargo for Drop
+    let cargo_item_id = ctx.db.with_mut_snapshot(|snap| {
+        snap.next_entity_id += 1;
+        let id = snap.next_entity_id;
+        snap.items.insert(
+            id,
+            eve_db::InventoryItemRecord {
+                item_id: id,
+                type_id: 34,
+                owner_id: 90_000_001,
+                location_id: 100_000_001,
+                flag: eve_db::InventoryFlag::Cargo,
+                quantity: 50,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        id
+    });
+
+    // 4. Drop (jettison from cargo to space)
+    let drop_res = ctx
+        .dispatch_rpc(&mut sess, "ship", None, "Drop", &[PyRep::Integer(cargo_item_id)], &kw, None)
+        .await
+        .expect("Drop");
+    let PyRep::KeyVal(drop_kv) = drop_res else { panic!("expected KeyVal") };
+    let jetcan_id = drop_kv.get("jetcanID").and_then(|v| v.as_i64()).expect("jetcanID");
+    assert!(jetcan_id > 0);
+
+    // 5. Scoop (scoop back to cargo)
+    let scoop_res = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "ship",
+            None,
+            "Scoop",
+            &[PyRep::Integer(cargo_item_id), PyRep::Integer(100_000_001)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("Scoop");
+    let PyRep::KeyVal(sc_kv) = scoop_res else { panic!("expected KeyVal") };
+    assert_eq!(sc_kv.get("flagID"), Some(&PyRep::Integer(5)));
+
+    // 6. ScoopToInfrastructureHold
+    let infra_res = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "ship",
+            None,
+            "ScoopToInfrastructureHold",
+            &[PyRep::Integer(cargo_item_id), PyRep::Integer(100_000_001)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("ScoopToInfrastructureHold");
+    let PyRep::KeyVal(in_kv) = infra_res else { panic!("expected KeyVal") };
+    assert_eq!(in_kv.get("flagID"), Some(&PyRep::Integer(185)));
+
+    // 7. ScoopToMobileDepotHold
+    let depot_res = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "ship",
+            None,
+            "ScoopToMobileDepotHold",
+            &[PyRep::Integer(cargo_item_id), PyRep::Integer(100_000_001)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("ScoopToMobileDepotHold");
+    let PyRep::KeyVal(dp_kv) = depot_res else { panic!("expected KeyVal") };
+    assert_eq!(dp_kv.get("flagID"), Some(&PyRep::Integer(179)));
+}

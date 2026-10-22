@@ -886,6 +886,20 @@ async fn test_c7_drone_lifecycle_bandwidth_control_range_sentries_salvage_logi_e
         Some(warden_id)
     );
 
+    // Scoop another drone via `ship.ScoopDrone`
+    // parity: rpc:ship.ScoopDrone
+    let scoop_drone_res = dispatch_combat_rpc(
+        &ctx,
+        &mut sess,
+        "ship",
+        "ScoopDrone",
+        &[PyRep::Integer(balls2[2])],
+        &HashMap::new(),
+    )
+    .await
+    .expect("ScoopDrone");
+    assert!(dict_get(&scoop_drone_res, "scoopedDroneItemID").is_some());
+
     // Destroy one active drone in space via `apply_damage_to_drone_in_space` (`feat:drones.drone-hp-loss`)
     let victim_drone_ball = balls2[1];
     let (_dmg, destroyed) = apply_damage_to_drone_in_space(

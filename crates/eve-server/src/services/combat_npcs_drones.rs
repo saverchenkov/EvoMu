@@ -1132,7 +1132,7 @@ pub async fn handle_npcs_drones(
             )))
         }
 
-        ("ship", "ScoopToDroneBay") => {
+        ("ship", "ScoopToDroneBay") | ("ship", "ScoopDrone") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),

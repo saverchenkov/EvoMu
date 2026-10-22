@@ -962,7 +962,7 @@ pub async fn handle(
             }
         }
 
-        ("ship", "Jettison") | ("invbroker", "Jettison") => {
+        ("ship", "Jettison") | ("invbroker", "Jettison") | ("ship", "Drop") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
