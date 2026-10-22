@@ -968,6 +968,35 @@ pub(super) async fn handle_fleet_ops(
                     ("allowedCount", PyRep::Integer(entities.len() as i64)),
                 ])));
             }
+            if method == "UpdateFleetAdvertWithNewLeader" {
+                let new_leader = args.first().and_then(|a| a.as_i64()).unwrap_or(char_id);
+                if let Some(ad) = ctx.fleet_extras.lock().unwrap().adverts.get_mut(&fleet_id) {
+                    ad.leader_id = new_leader;
+                }
+                return Some(Ok(PyRep::keyval([
+                    ("fleetID", PyRep::Integer(fleet_id)),
+                    ("leaderID", PyRep::Integer(new_leader)),
+                ])));
+            }
+            if method == "UpdateAdvertInfo" {
+                let mut ex = ctx.fleet_extras.lock().unwrap();
+                if let Some(ad) = ex.adverts.get_mut(&fleet_id) {
+                    if let Some(s) = args.first().and_then(|a| a.as_str()) {
+                        ad.fleet_name = s.to_string();
+                    }
+                    if let Some(s) = args.get(1).and_then(|a| a.as_str()) {
+                        ad.description = s.to_string();
+                    }
+                    if let Some(s) = args.get(2).and_then(|a| a.as_i64()) {
+                        ad.invite_scope = s as u8;
+                    }
+                    return Some(Ok(PyRep::keyval([
+                        ("fleetID", PyRep::Integer(fleet_id)),
+                        ("fleetName", PyRep::String(ad.fleet_name.clone())),
+                        ("description", PyRep::String(ad.description.clone())),
+                    ])));
+                }
+            }
             let fleet_name = args
                 .first()
                 .and_then(|a| a.as_str())
@@ -1042,6 +1071,7 @@ pub(super) async fn handle_fleet_ops(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            let caller_fleet = session.fleet_id;
             let ads: Vec<FleetAdvertState> = ctx.fleet_extras
                 .lock()
                 .unwrap()
@@ -1056,8 +1086,8 @@ pub(super) async fn handle_fleet_ops(
                 let caller_sec = caller.map(|c| c.security_status).unwrap_or(0.0);
                 ads.into_iter()
                     .filter(|ad| {
-                        if method == "GetMyFleetFinderAdvert" || ad.leader_id == char_id {
-                            return true;
+                        if method == "GetMyFleetFinderAdvert" {
+                            return caller_fleet == Some(ad.fleet_id) || ad.leader_id == char_id;
                         }
                         if caller_sec < ad.min_security {
                             return false;

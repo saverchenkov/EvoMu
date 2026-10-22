@@ -164,3 +164,5 @@ mod rpc_pos_mgr_ops;
 mod rpc_agent_mgr_vote;
 mod rpc_account_air_banned;
 mod rpc_calendar_kiring_notifs;
+mod rpc_corprec_fleet_proxy;
+mod rpc_missions_industry_campaigns;

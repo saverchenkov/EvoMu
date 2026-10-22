@@ -936,20 +936,15 @@ pub(super) fn handle_corp_gov(
                     Ok(())
                 });
             }
-            let (title, desc, type_mask) = if method == "UpdateRecruitmentAd" {
-                let type_mask = args.get(1).and_then(|a| a.as_i64()).unwrap_or(7) as u64;
-                let title = args.get(2).and_then(|a| a.as_str()).unwrap_or("Updated Corp Ad");
-                let desc = args.get(3).and_then(|a| a.as_str()).unwrap_or("Updated description");
-                (title, desc, type_mask)
-            } else if args.first().and_then(|a| a.as_str()).is_some() {
+            let (title, desc, type_mask) = if args.first().and_then(|a| a.as_str()).is_some() {
                 let title = args.first().and_then(|a| a.as_str()).unwrap_or("Nullsec PvP & Industry");
                 let desc = args.get(1).and_then(|a| a.as_str()).unwrap_or("Join our corp today");
                 let type_mask = args.get(2).and_then(|a| a.as_i64()).unwrap_or(7) as u64;
                 (title, desc, type_mask)
             } else {
                 let type_mask = args.get(1).and_then(|a| a.as_i64()).unwrap_or(7) as u64;
-                let title = args.get(2).and_then(|a| a.as_str()).unwrap_or("Nullsec PvP & Industry");
-                let desc = args.get(3).and_then(|a| a.as_str()).unwrap_or("Join our corp today");
+                let title = args.get(2).and_then(|a| a.as_str()).unwrap_or("Updated Corp Ad");
+                let desc = args.get(3).and_then(|a| a.as_str()).unwrap_or("Updated description");
                 (title, desc, type_mask)
             };
             let mut g = CORP_GOV.lock().unwrap();
@@ -983,11 +978,36 @@ pub(super) fn handle_corp_gov(
             ])))
         }
 
+        ("corpRecProxy", "GetRecruiters") => {
+            let target_corp = args.first().and_then(|a| a.as_i64()).unwrap_or(corp_id);
+            let target_ad = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1);
+            let g = CORP_GOV.lock().unwrap();
+            let mut recruiters = Vec::new();
+            if let Some(state) = g.get(&target_corp) {
+                if let Some((_, _, _, _, rec_id)) = state.recruitment_ads.iter().find(|a| a.0 == target_ad) {
+                    recruiters.push(PyRep::Integer(*rec_id));
+                }
+            }
+            if recruiters.is_empty() {
+                recruiters.push(PyRep::Integer(char_id));
+            }
+            Some(Ok(PyRep::List(recruiters)))
+        }
+
         ("corpRecProxy", "GetRecruitmentAdsForCorporation")
         | ("corpRecProxy", "GetRecruitmentAdsByCorpID")
         | ("corpRecProxy", "GetRecruitmentAd")
-        | ("corpRecProxy", "SearchCorpAds")
-        | ("corpRecProxy", "GetRecruiters") => {
+        | ("corpRecProxy", "SearchCorpAds") => {
+            let filter_corp = match method {
+                "GetRecruitmentAdsByCorpID" => args.first().and_then(|a| a.as_i64()).or(Some(corp_id)),
+                "GetRecruitmentAdsForCorporation" => Some(corp_id),
+                _ => None,
+            };
+            let filter_ad = if method == "GetRecruitmentAd" {
+                args.first().and_then(|a| a.as_i64())
+            } else {
+                None
+            };
             let filter_mask = if method == "SearchCorpAds" {
                 args.first().and_then(|a| a.as_i64()).unwrap_or(0) as u64
             } else {
@@ -996,8 +1016,11 @@ pub(super) fn handle_corp_gov(
             let g = CORP_GOV.lock().unwrap();
             let mut rows = Vec::new();
             for (&cid, state) in g.iter() {
-                if method == "SearchCorpAds" || cid == corp_id {
+                if filter_corp.is_none_or(|fc| fc == cid) {
                     for (aid, title, desc, mask, rec_id) in &state.recruitment_ads {
+                        if filter_ad.is_some_and(|fa| fa != *aid) {
+                            continue;
+                        }
                         if filter_mask != 0 && (*mask & filter_mask) == 0 {
                             continue;
                         }
