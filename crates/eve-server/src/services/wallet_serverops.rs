@@ -34,12 +34,14 @@ fn check_starbase_auth(
 ) -> Result<(), BridgeRpcError> {
     if session.has_gm_role() { return Ok(()); }
     let owner_corp = snap.structures.get(&structure_id).map(|s| s.owner_corp_id)
+        .or_else(|| snap.items.get(&structure_id).map(|i| i.owner_id))
         .ok_or_else(|| rpc_err("StructureNotFound", format!("Starbase structure {structure_id} not found")))?;
     let char_corp = session.corporation_id
         .or_else(|| snap.characters.get(&char_id).map(|c| c.corporation_id)).unwrap_or(0);
-    if owner_corp != char_corp {
+    if owner_corp != char_corp && !(char_id > 0 && owner_corp == char_id) {
         return Err(rpc_err("NotStarbaseOwner", format!("Structure {structure_id} owned by {owner_corp}, caller belongs to {char_corp}")));
     }
+    if owner_corp == char_id { return Ok(()); }
     let has_role = snap.corporations.get(&char_corp).map(|c| {
         if c.ceo_id == char_id { return true; }
         let r = c.member_roles.get(&char_id).copied().unwrap_or(0) | session.corp_role;
@@ -635,13 +637,18 @@ pub fn handle(
                 let st = snap.starbase_settings.entry(tower_id).or_default();
                 for tid in &target_ids {
                     if *tid > 0 {
-                        if let Some(target_struct) = snap.structures.get(tid) {
-                            if target_struct.owner_corp_id != tower_corp {
-                                return Err(rpc_err("TargetNotOwned", format!("Target structure {tid} not owned by tower corporation")));
-                            }
-                            if !st.linked_resources.contains(tid) {
-                                st.linked_resources.push(*tid);
-                            }
+                        let is_valid_target = if let Some(target_struct) = snap.structures.get(tid) {
+                            target_struct.owner_corp_id == tower_corp
+                        } else if let Some(item) = snap.items.get(tid) {
+                            item.location_id == tower_id || item.owner_id == tower_corp || item.owner_id == char_id
+                        } else {
+                            false
+                        };
+                        if !is_valid_target {
+                            return Err(rpc_err("InvalidLinkTarget", format!("Target {tid} is not a valid structure or silo for tower {tower_id}")));
+                        }
+                        if !st.linked_resources.contains(tid) {
+                            st.linked_resources.push(*tid);
                         }
                     }
                 }
@@ -720,7 +727,13 @@ pub fn handle(
                 return Some(Err(rpc_err("InvalidProvisionType", format!("Type {provision_type} is not a valid moon material (group 427)"))));
             }
             let res = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
-                let target = if snap.structures.contains_key(&item_id) { item_id } else { tower_id };
+                let target = if snap.structures.contains_key(&item_id) {
+                    item_id
+                } else if let Some(item) = snap.items.get(&item_id) {
+                    if item.location_id == tower_id { tower_id } else { item_id }
+                } else {
+                    tower_id
+                };
                 check_starbase_auth(snap, session, char_id, target)?;
                 snap.orbital_provision_types.insert(item_id, provision_type as i64);
                 Ok(())
@@ -1094,6 +1107,26 @@ pub fn handle(
                 ("infoTypesOncePerRun", PyRep::None),
                 ("infoTypeParameters", PyRep::None),
             ])))
+        }
+        ("externalQueueMgr", "PublishProxyEvent") => {
+            if let Err(e) = ServerContext::require_auth(session) {
+                return Some(Err(e));
+            }
+            let event_name = args.first().and_then(|a| a.as_str()).unwrap_or("proxy_event").to_string();
+            let payload = args.get(1).cloned().unwrap_or_else(|| args.first().cloned().unwrap_or(PyRep::None));
+            let record = crate::router::ProxyEventRecord {
+                event_name,
+                payload,
+                timestamp_unix: ctx.now_unix(),
+            };
+            {
+                let mut q = ctx.proxy_event_queue.write().unwrap();
+                if q.len() >= 1000 {
+                    q.pop_front();
+                }
+                q.push_back(record);
+            }
+            Some(Ok(PyRep::Bool(true)))
         }
         ("localizationServer", "GetAllTextChanges") => {
             // const-ok: client treats None as no server-side localization text overrides
