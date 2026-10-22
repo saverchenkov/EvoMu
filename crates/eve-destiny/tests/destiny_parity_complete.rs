@@ -146,7 +146,11 @@ async fn test_destiny_ball_lifecycle_wire_actions_and_destruction() {
     assert_eq!(find_act("SetBallInteractive"), PyRep::Tuple(vec![PyRep::Integer(100_000_001), PyRep::Integer(0)]));
     assert_eq!(find_act("SetBallRadius"), PyRep::Tuple(vec![PyRep::Integer(100_000_001), PyRep::Real(150.0)]));
     assert_eq!(find_act("CloakBall"), PyRep::Tuple(vec![PyRep::Integer(100_000_001), PyRep::Bool(true)]));
-    assert!(matches!(find_act("PackagedAction"), PyRep::Bytes(_)));
+    let PyRep::Bytes(pkg_bytes) = find_act("PackagedAction") else { panic!("PackagedAction bytes") };
+    let PyRep::List(pkg_inner) = eve_proto::marshal::decode(&pkg_bytes).expect("decode PackagedAction") else {
+        panic!("PackagedAction list")
+    };
+    assert_eq!(pkg_inner.len(), 1);
 
     // 5. Destruction & TerminalPlayDestructionEffect emitted by apply_damage_to_ball
     park.deactivate_cloak(100_000_001);
@@ -318,8 +322,10 @@ async fn test_destiny_ballpark_state_events_fleet_and_controllers() {
         },
     );
     let station_id = 60_003_760;
+    let dock_ship_id = 100_000_031;
+    park.add_ball(make_test_ship(dock_ship_id, DVec3::new(100.0, 200.0, 300.0), MovementMode::Stop));
     park.add_static_ball(make_test_ship(station_id, DVec3::ZERO, MovementMode::Rigid), 15);
-    park.accept_docking(ship_id, station_id);
+    park.accept_docking(dock_ship_id, station_id);
 
     let evs = park.drain_observer_events(ship_id);
     let wire = encode_destiny_updates(park.current_tick as u32, &evs, Some(&park));
@@ -336,13 +342,29 @@ async fn test_destiny_ballpark_state_events_fleet_and_controllers() {
             })
             .unwrap_or_else(|| panic!("Missing {name}"))
     };
-    assert!(matches!(find_act("OnClientControllerEvent"), PyRep::Tuple(_)));
-    assert!(matches!(find_act("OnDamageStateChange"), PyRep::Tuple(_)));
-    assert!(matches!(find_act("OnFleetDamageStateChange"), PyRep::Tuple(_)));
-    assert!(matches!(find_act("OnShipStateUpdate"), PyRep::Tuple(_)));
-    assert!(matches!(find_act("OnSlimItemChange"), PyRep::Tuple(_)));
+    let find_args = |name: &str| -> Vec<PyRep> {
+        let PyRep::Tuple(args) = find_act(name) else { panic!("Expected tuple for {name}") };
+        args
+    };
+    assert_eq!(
+        find_args("OnClientControllerEvent"),
+        vec![
+            PyRep::Integer(ship_id),
+            PyRep::Integer(200_000_001),
+            PyRep::String("res_wars_power_up_play".into()),
+            PyRep::Integer(1),
+            PyRep::Real(0.25),
+        ]
+    );
+    assert_eq!(find_args("OnDamageStateChange")[0], PyRep::Integer(ship_id));
+    assert_eq!(find_args("OnFleetDamageStateChange")[0], PyRep::Integer(ship_id));
+    assert_eq!(find_args("OnShipStateUpdate").len(), 1);
+    assert_eq!(find_args("OnSlimItemChange")[0], PyRep::Integer(ship_id));
+    assert_eq!(find_args("OnSlimItemChange")[1].dict_get("corpID"), Some(&PyRep::Integer(98_000_099)));
     assert_eq!(find_act("OnSovereigntyChanged"), PyRep::Tuple(vec![PyRep::Integer(30_000_142), PyRep::Integer(99_000_001)]));
-    assert!(matches!(find_act("OnSpecialFX"), PyRep::Tuple(_)));
+    assert_eq!(find_args("OnSpecialFX")[0], PyRep::Integer(ship_id));
+    assert_eq!(find_args("OnSpecialFX")[1], PyRep::Integer(54_321));
+    assert_eq!(find_args("OnSpecialFX")[5], PyRep::String("effects.Laser".into()));
     assert_eq!(
         find_act("OnDockingAccepted"),
         PyRep::Tuple(vec![
@@ -433,7 +455,7 @@ async fn test_destiny_all_13_ball_physics_modes_and_wire_roundtrip() {
         make_test_ship(1, DVec3::new(100_000.0, 0.0, 0.0), MovementMode::GotoDirection { direction: DVec3::new(1.0, 0.0, 0.0) }),
         make_test_ship(2, DVec3::new(5_000.0, 0.0, 0.0), MovementMode::Follow { target_id: anchor_id, range: 1_500.0 }),
         make_test_ship(3, DVec3::new(200_000.0, 0.0, 0.0), MovementMode::Stop),
-        make_test_ship(4, DVec3::new(0.0, 300_000.0, 0.0), MovementMode::new_warp(DVec3::new(0.0, 300_000.0, 0.0), DVec3::new(0.0, 5.0 * AU_METERS, 0.0), 3.0)),
+        make_test_ship(4, DVec3::new(0.0, 300_000.0, 0.0), MovementMode::new_warp(DVec3::new(0.0, 300_000.0, 0.0), DVec3::new(0.0, 8.0 * AU_METERS, 0.0), 3.0)),
         make_test_ship(5, DVec3::new(0.0, 5_000.0, 0.0), MovementMode::Orbit { target_id: anchor_id, range: 5_000.0 }),
         make_test_ship(6, DVec3::new(0.0, 1_000.0, 0.0), MovementMode::Missile { target_id: anchor_id }),
         make_test_ship(7, DVec3::new(400_000.0, 0.0, 0.0), MovementMode::Mushroom),
@@ -468,10 +490,10 @@ async fn test_destiny_all_13_ball_physics_modes_and_wire_roundtrip() {
     // 3. DSTBALL_STOP: stop mode maintains near-zero velocity
     assert!(park.balls[&3].velocity.length() < 1e-3, "Stop mode remains stopped");
 
-    // 4. DSTBALL_WARP: ship reaches warp cruise and completes warp dropout at 5 AU destination
+    // 4. DSTBALL_WARP: ship reaches warp cruise and completes warp dropout at 8 AU destination
     assert_eq!(park.balls[&4].mode, MovementMode::Stop, "Warp ball dropped out of warp at destination");
-    assert!((park.balls[&4].position - DVec3::new(0.0, 5.0 * AU_METERS, 0.0)).length() <= 2_500.0);
-    let _ = saw_warp_cruise;
+    assert!((park.balls[&4].position - DVec3::new(0.0, 8.0 * AU_METERS, 0.0)).length() <= 2_500.0);
+    assert!(saw_warp_cruise, "WARP ball should reach cruise phase across ticks");
 
     // 5. DSTBALL_ORBIT: orbit mode converges near orbit radius (5074m) with high tangential speed
     let orb = &park.balls[&5];
