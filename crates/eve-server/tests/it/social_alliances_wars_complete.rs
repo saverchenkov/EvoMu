@@ -662,3 +662,151 @@ async fn test_corporation_deliveries_goals_freelance_fittings_assets_and_close()
     assert_eq!(field(&close_rep, "corporationClosed"), PyRep::Bool(true));
     assert!(ctx.db.with_snapshot(|s| !s.corporations.contains_key(&corp_id)), "Closed corporation must be removed from snapshot");
 }
+
+#[tokio::test]
+async fn test_access_group_bookmarks_full_lifecycle_and_management() {
+    // parity: rpc:accessGroupBookmarkMgr.BookmarkStaticLocation, rpc:accessGroupBookmarkMgr.UpdateBookmark, rpc:accessGroupBookmarkMgr.DeleteBookmarks, rpc:accessGroupBookmarkMgr.GetFolderInfo, rpc:accessGroupBookmarkMgr.SearchFoldersWithAdminAccess, rpc:accessGroupBookmarkMgr.UpdateFolder, rpc:accessGroupBookmarkMgr.UpdateSubfolder, rpc:accessGroupBookmarkMgr.UpdateKnownFolderState
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+    let kw = HashMap::new();
+    let mut sess1 = SessionState::new(981);
+    common::login_pilot(&ctx, &mut sess1, "demo", "demo-secret").await;
+    call(&ctx, &mut sess1, "charUnboundMgr", "SelectCharacterID", vec![PyRep::Integer(90_000_001)]).await.unwrap();
+
+    let corp_id = 98_000_555;
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut corp = eve_db::CorporationRecord {
+            corporation_id: corp_id,
+            name: "Bookmark Corp".into(),
+            ticker: "BKMC".into(),
+            ceo_id: 90_000_001,
+            ..Default::default()
+        };
+        corp.member_roles.insert(90_000_001, eve_db::corp_roles::ROLE_DIRECTOR);
+        snap.corporations.insert(corp_id, corp);
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.corporation_id = corp_id;
+        }
+    });
+    sess1.corporation_id = Some(corp_id);
+    sess1.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
+
+    // 1. Create personal and shared bookmark folders
+    let p_fold = ctx
+        .dispatch_rpc(&mut sess1, "accessGroupBookmarkMgr", None, "AddFolder", &[PyRep::String("Tacticals".into()), PyRep::Bool(false)], &kw, None)
+        .await
+        .expect("AddFolder");
+    let PyRep::KeyVal(p_kv) = p_fold else { panic!("expected KeyVal") };
+    let p_fid = p_kv.get("folderID").and_then(|v| v.as_i64()).unwrap();
+    assert_eq!(p_kv.get("folderName"), Some(&PyRep::String("Tacticals".into())));
+
+    let s_fold = ctx
+        .dispatch_rpc(&mut sess1, "accessGroupBookmarkMgr", None, "AddFolder", &[PyRep::String("Corp Ops".into()), PyRep::Bool(true)], &kw, None)
+        .await
+        .expect("Add shared folder");
+    let PyRep::KeyVal(s_kv) = s_fold else { panic!("expected KeyVal") };
+    let s_fid = s_kv.get("folderID").and_then(|v| v.as_i64()).unwrap();
+    assert_eq!(s_kv.get("folderName"), Some(&PyRep::String("Corp Ops".into())));
+
+    // 2. UpdateFolder: rename folder
+    let renamed = ctx
+        .dispatch_rpc(&mut sess1, "accessGroupBookmarkMgr", None, "UpdateFolder", &[PyRep::Integer(p_fid), PyRep::String("Renamed Tacticals".into())], &kw, None)
+        .await
+        .expect("UpdateFolder");
+    let PyRep::KeyVal(rn_kv) = renamed else { panic!("expected KeyVal") };
+    assert_eq!(rn_kv.get("folderName"), Some(&PyRep::String("Renamed Tacticals".into())));
+
+    // 3. CreateSubfolder and UpdateSubfolder
+    let sub = ctx
+        .dispatch_rpc(&mut sess1, "accessGroupBookmarkMgr", None, "CreateSubfolder", &[PyRep::Integer(p_fid), PyRep::String("Insta-Docks".into())], &kw, None)
+        .await
+        .expect("CreateSubfolder");
+    let PyRep::KeyVal(sub_kv) = sub else { panic!("expected KeyVal") };
+    let sub_fid = sub_kv.get("folderID").and_then(|v| v.as_i64()).unwrap();
+    assert_eq!(sub_kv.get("folderName"), Some(&PyRep::String("Renamed Tacticals/Insta-Docks".into())));
+
+    let sub_upd = ctx
+        .dispatch_rpc(&mut sess1, "accessGroupBookmarkMgr", None, "UpdateSubfolder", &[PyRep::Integer(p_fid), PyRep::String("Updated Docks".into())], &kw, None)
+        .await
+        .expect("UpdateSubfolder");
+    let PyRep::KeyVal(upd_kv) = sub_upd else { panic!("expected KeyVal") };
+    assert!(upd_kv.get("folderID").is_some());
+
+    // 4. BookmarkStaticLocation: create bookmark
+    let bm = ctx
+        .dispatch_rpc(
+            &mut sess1,
+            "accessGroupBookmarkMgr",
+            None,
+            "BookmarkStaticLocation",
+            &[
+                PyRep::String("Station 1 Perimeter".into()),
+                PyRep::Integer(60_003_760),
+                PyRep::String("Perimeter undock bookmark".into()),
+                PyRep::Integer(p_fid),
+                PyRep::Integer(sub_fid),
+                PyRep::Integer(0),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect("BookmarkStaticLocation");
+    let PyRep::KeyVal(bm_kv) = bm else { panic!("expected KeyVal") };
+    let bm_id = bm_kv.get("bookmarkID").and_then(|v| v.as_i64()).unwrap();
+    assert_eq!(bm_kv.get("label"), Some(&PyRep::String("Station 1 Perimeter".into())));
+
+    // 5. UpdateBookmark: change label and memo
+    let upd_bm = ctx
+        .dispatch_rpc(
+            &mut sess1,
+            "accessGroupBookmarkMgr",
+            None,
+            "UpdateBookmark",
+            &[
+                PyRep::Integer(bm_id),
+                PyRep::String("Station 1 Perimeter (Safe)".into()),
+                PyRep::String("Updated perimeter memo".into()),
+                PyRep::Integer(p_fid),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect("UpdateBookmark");
+    let PyRep::KeyVal(ub_kv) = upd_bm else { panic!("expected KeyVal") };
+    assert_eq!(ub_kv.get("updated"), Some(&PyRep::Bool(true)));
+
+    // 6. GetFolderInfo: returns folder metadata and subfolders
+    let finfo = ctx
+        .dispatch_rpc(&mut sess1, "accessGroupBookmarkMgr", None, "GetFolderInfo", &[PyRep::Integer(p_fid)], &kw, None)
+        .await
+        .expect("GetFolderInfo");
+    let PyRep::Rowset { rows: fi_rows, .. } = finfo else { panic!("expected Rowset") };
+    assert!(!fi_rows.is_empty(), "GetFolderInfo must return folder rows");
+
+    // 7. SearchFoldersWithAdminAccess: lists all folders character has admin rights to
+    let admin_folders = ctx
+        .dispatch_rpc(&mut sess1, "accessGroupBookmarkMgr", None, "SearchFoldersWithAdminAccess", &[], &kw, None)
+        .await
+        .expect("SearchFoldersWithAdminAccess");
+    let PyRep::Rowset { rows: af_rows, .. } = admin_folders else { panic!("expected Rowset") };
+    assert!(af_rows.iter().any(|r| r.first() == Some(&PyRep::Integer(p_fid))));
+    assert!(af_rows.iter().any(|r| r.first() == Some(&PyRep::Integer(s_fid))));
+
+    // 8. UpdateKnownFolderState: subscribe / activate known shared folder
+    let known_res = ctx
+        .dispatch_rpc(&mut sess1, "accessGroupBookmarkMgr", None, "UpdateKnownFolderState", &[PyRep::Integer(s_fid), PyRep::Bool(true)], &kw, None)
+        .await
+        .expect("UpdateKnownFolderState");
+    let PyRep::KeyVal(kr_kv) = known_res else { panic!("expected KeyVal") };
+    assert_eq!(kr_kv.get("folderID"), Some(&PyRep::Integer(s_fid)));
+
+    // 9. DeleteBookmarks: delete the created bookmark
+    let del_bm = ctx
+        .dispatch_rpc(&mut sess1, "accessGroupBookmarkMgr", None, "DeleteBookmarks", &[PyRep::List(vec![PyRep::Integer(bm_id)])], &kw, None)
+        .await
+        .expect("DeleteBookmarks");
+    let PyRep::KeyVal(db_kv) = del_bm else { panic!("expected KeyVal") };
+    assert_eq!(db_kv.get("deleted"), Some(&PyRep::Bool(true)));
+}
