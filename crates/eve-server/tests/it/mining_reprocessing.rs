@@ -793,9 +793,8 @@ async fn test_phase_5m_mn12_reprocessing_service() {
 
     // 2. Reprocess Veldspar: 1,050 units (portion_size 100 -> 10 portions of 400 Tritanium each = 4000 base Tritanium)
     // Yield rate = 0.50 * (1 + 0.15) * (1 + 0.08) * (1 + 0.08) = 0.50 * 1.15 * 1.08 * 1.08 = 0.67068
-    // Station tax (0 standing) = 5% (0.05)
-    // Net yield = 0.67068 * 0.95 = 0.637146
-    // Output Tritanium = floor(4000 * 0.637146) = 2548
+    // Station tax (0 standing) = 5% (0.05) charged in ISK
+    // Output Tritanium = floor(4000 * 0.67068) = 2682
     let veldspar_id = 100_000_860;
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(
@@ -883,7 +882,7 @@ async fn test_phase_5m_mn12_reprocessing_service() {
     let trit_qty = get_dict_val(trit_out.unwrap(), "quantity")
         .and_then(|v| v.as_i64())
         .expect("tritium quantity");
-    assert_eq!(trit_qty, 2548);
+    assert_eq!(trit_qty, 2682);
 
     // Remainder of 50 Veldspar remains in hangar
     let rem_veldspar = ctx.db.get_item(veldspar_id).expect("remainder veldspar");

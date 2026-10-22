@@ -310,8 +310,17 @@ async fn handle_bridge_client(stream: TcpStream, ctx: Arc<ServerContext>) -> Res
 
                         let _ = session.drain_notifications();
 
-                        if session.character_id.is_some() && session.station_id.is_none() {
-                            if let (Some(sys_id), Some(ship_id)) = (session.solar_system_id, session.ship_id) {
+                        let was_in_space = prev_session.character_id.is_some()
+                            && prev_session.station_id.is_none()
+                            && prev_session.structure_id.is_none();
+                        let is_in_space = session.character_id.is_some()
+                            && session.station_id.is_none()
+                            && session.structure_id.is_none();
+                        if was_in_space || is_in_space {
+                            if let (Some(sys_id), Some(ship_id)) = (
+                                session.solar_system_id.or(prev_session.solar_system_id),
+                                session.ship_id.or(prev_session.ship_id),
+                            ) {
                                 let handle = ctx.systems.get_or_spawn(sys_id);
                                 if let Ok((tick, events, pyrep)) = handle.drain_observer_updates(ship_id).await {
                                     if !events.is_empty() {

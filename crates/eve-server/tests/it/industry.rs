@@ -131,7 +131,7 @@ async fn test_phase_0_s1_reprocessing_sde_materials_and_remainders() {
     assert!(ctx.db.get_item(100_990_000).is_some());
 
     // 3. Reprocess 10,000 Veldspar (100_000_012, type 1230, portionSize = 100, 34 -> 400 per batch).
-    // With 0 skills, base_rate = 0.50 and Caldari Navy standing 2.0 -> station_tax_rate = 0.035 -> net_yield_rate = 0.4825 -> 100 * 400 * 0.4825 = 19,300 Tritanium.
+    // With 0 skills, base_rate = 0.50 and Caldari Navy standing 2.0 -> station_tax_rate = 0.035 (charged in ISK) -> yield_rate = 0.50 -> 100 * 400 * 0.50 = 20,000 Tritanium.
     let reproc_veld = ctx
         .dispatch_rpc(
             &mut sess,
@@ -159,15 +159,19 @@ async fn test_phase_0_s1_reprocessing_sde_materials_and_remainders() {
     assert_eq!(outputs.len(), 1, "Veldspar must yield exactly 1 material type per SDE invTypeMaterials");
     if let PyRep::KeyVal(mat_kv) = &outputs[0] {
         assert_eq!(mat_kv.get("typeID").and_then(|v| v.as_i64()), Some(34));
-        assert_eq!(mat_kv.get("quantity").and_then(|v| v.as_i64()), Some(19_300));
+        assert_eq!(mat_kv.get("quantity").and_then(|v| v.as_i64()), Some(20_000));
     } else {
         panic!("Expected KeyVal in outputs[0]");
     }
 
     assert_eq!(
         veld_kv.get("tritaniumQuantity").and_then(|v| v.as_i64()),
-        Some(19_300),
-        "S-1: 10,000 Veldspar at 0.50 facility yield and 3.5% standing-adjusted station tax must yield 19,300 Tritanium"
+        Some(20_000),
+        "S-1: 10,000 Veldspar at 0.50 facility yield must yield 20,000 Tritanium (with 3.5% station tax charged in ISK)"
+    );
+    assert!(
+        veld_kv.get("reprocessingTaxISK").and_then(|v| v.as_f64()).unwrap_or(0.0) > 0.0,
+        "S-1: NPC station reprocessing tax must be charged in ISK"
     );
     assert!(
         ctx.db.get_item(100_000_012).is_none(),
@@ -175,7 +179,7 @@ async fn test_phase_0_s1_reprocessing_sde_materials_and_remainders() {
     );
 
     // 4. Reprocess 250 Plagioclase (100_990_001, type 18, portionSize = 100, 34 -> 175, 36 -> 70):
-    // consumes 200 units (2 batches), leaves 50 remainder in stack, and outputs floor(2*175*0.4825)=168 Tritanium + floor(2*70*0.4825)=67 Mexallon.
+    // consumes 200 units (2 batches), leaves 50 remainder in stack, and outputs floor(2*175*0.50)=175 Tritanium + floor(2*70*0.50)=70 Mexallon.
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(
             100_990_001,
@@ -218,7 +222,7 @@ async fn test_phase_0_s1_reprocessing_sde_materials_and_remainders() {
     );
     assert_eq!(
         rp_kv.get("tritaniumQuantity").and_then(|v| v.as_i64()),
-        Some(168)
+        Some(175)
     );
     let Some(PyRep::List(outputs)) = rp_kv.get("outputs") else {
         panic!("Expected outputs list from Reprocess");
@@ -237,7 +241,7 @@ async fn test_phase_0_s1_reprocessing_sde_materials_and_remainders() {
             .sum::<i64>()
     });
     assert_eq!(
-        mexallon_qty, 67,
-        "S-1: Reprocessing 200 Plagioclase at 0.4825 net yield must deposit 67 Mexallon (36)"
+        mexallon_qty, 70,
+        "S-1: Reprocessing 200 Plagioclase at 0.50 yield must deposit 70 Mexallon (36)"
     );
 }

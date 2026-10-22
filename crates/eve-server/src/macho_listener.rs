@@ -442,9 +442,10 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                 sys_rx = ctx.systems.get_or_spawn(new_sys).subscribe();
                             }
                         }
-                        if session.station_id.is_some() || session.structure_id.is_some() {
-                            ballpark_ready = false;
-                        } else if method == "UpdateStateRequest" {
+                        if method == "UpdateStateRequest"
+                            && session.station_id.is_none()
+                            && session.structure_id.is_none()
+                        {
                             ballpark_ready = true;
                         }
 
@@ -521,13 +522,15 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                             }
                         }
 
-                        if ballpark_ready
-                            && session.station_id.is_none()
-                            && session.structure_id.is_none()
-                        {
-                            if let (Some(sys_id), Some(ship_id)) =
-                                (session.solar_system_id, session.ship_id)
-                            {
+                        let was_in_space = prev_session.station_id.is_none()
+                            && prev_session.structure_id.is_none();
+                        let is_in_space =
+                            session.station_id.is_none() && session.structure_id.is_none();
+                        if ballpark_ready && (was_in_space || is_in_space) {
+                            if let (Some(sys_id), Some(ship_id)) = (
+                                session.solar_system_id.or(prev_session.solar_system_id),
+                                session.ship_id.or(prev_session.ship_id),
+                            ) {
                                 let sys_handle = ctx.systems.get_or_spawn(sys_id);
                                 if let Ok((_tick, obs_evs, updates_pyrep)) =
                                     sys_handle.drain_observer_updates(ship_id).await
@@ -549,6 +552,9 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                     }
                                 }
                             }
+                        }
+                        if !is_in_space {
+                            ballpark_ready = false;
                         }
                     }
                     MachoPacketType::AuthenticationReq => {

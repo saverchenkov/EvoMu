@@ -1001,11 +1001,6 @@ pub async fn handle(
 
                 let (station_base_yield, yield_rate, station_tax_rate) =
                     compute_reprocessing_rates_for_item(&ctx.sde, snap, char_id, station_id, inv_type);
-                let net_yield_rate = if station_id >= 1_000_000_000_000 {
-                    yield_rate
-                } else {
-                    yield_rate * (1.0 - station_tax_rate)
-                };
 
                 let portions = item.quantity / portion_size;
                 let remainder = item.quantity % portion_size;
@@ -1030,7 +1025,7 @@ pub async fn handle(
                     gross_value_isk +=
                         (portions as f64) * (mat.quantity as f64) * yield_rate * unit_val;
                     let out_qty =
-                        ((portions as f64) * (mat.quantity as f64) * net_yield_rate).floor() as i32;
+                        ((portions as f64) * (mat.quantity as f64) * yield_rate).floor() as i32;
                     if out_qty <= 0 {
                         continue;
                     }
@@ -1183,16 +1178,12 @@ pub async fn handle(
                     };
                     let (station_base_yield, yield_rate, station_tax_rate) =
                         compute_reprocessing_rates_for_item(&ctx.sde, snap, char_id, station_id, inv_type);
-                    let net_yield_rate = if station_id >= 1_000_000_000_000 {
-                        yield_rate
-                    } else {
-                        yield_rate * (1.0 - station_tax_rate)
-                    };
+                    let net_yield_rate = yield_rate;
                     let portion_size = inv_type.portion_size.max(1) as i32;
                     let portions = item.quantity / portion_size;
                     let mut est_outputs = Vec::new();
                     for mat in &materials {
-                        let out_qty = ((portions as f64) * (mat.quantity as f64) * net_yield_rate).floor() as i32;
+                        let out_qty = ((portions as f64) * (mat.quantity as f64) * yield_rate).floor() as i32;
                         if out_qty > 0 {
                             est_outputs.push(PyRep::keyval([
                                 ("typeID", PyRep::Integer(mat.material_type_id as i64)),

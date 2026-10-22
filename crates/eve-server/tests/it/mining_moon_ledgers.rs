@@ -474,7 +474,7 @@ async fn test_mn12_c6_reprocessing_yield_tax_modules_and_structure() {
     let tax_rate = get_dict_val(&reproc_res, "stationTaxRate").unwrap().as_f64().unwrap();
     let expected_yield: f64 = 0.50 * 1.15 * 1.10 * 1.10; // 0.69575
     let expected_tax: f64 = 0.05 - 0.0075 * 2.0; // 0.035
-    let expected_trit = (10.0_f64 * 400.0 * expected_yield * (1.0 - expected_tax)).floor() as i64; // 2685
+    let expected_trit = (10.0_f64 * 400.0 * expected_yield).floor() as i64; // 2783 (tax charged in ISK, not deducted from mineral output)
     assert!((yield_rate - expected_yield).abs() < 1e-6);
     assert!((tax_rate - expected_tax).abs() < 1e-6);
     assert_eq!(trit_qty, expected_trit);
