@@ -11,10 +11,6 @@
     "disposition": "client_local",
     "evidence": "eve/client/script/remote/michelle.pyj:1581 Ballpark.OnDeactivatingWarp(): invoked by the local C++ destiny.Ballpark physics tick when a ball drops out of warp; never sent by server in DoDestinyUpdate (no Destiny.xmlp packet or evemu_Crucible server literal)."
   },
-  "destiny:OnDockingAccepted": {
-    "disposition": "client_local",
-    "evidence": "eve/client/script/remote/michelle.pyj:1699 Ballpark.OnDockingAccepted(): registered in Ballpark.__notifyevents__ and scattered locally by eve/client/script/parklife/spaceMgr.pyj:1012 SpaceMgr.OnDockingAccepted() after station.Dock RPC; not a server DoDestinyUpdate action."
-  },
   "destiny:OnDroneActivityChange": {
     "disposition": "client_local",
     "evidence": "eve/client/script/remote/michelle.pyj:1488 Ballpark.OnDroneActivityChange(): internal Ballpark helper method; no external caller in client bytecode and no Destiny.xmlp / evemu_Crucible server DoDestinyUpdate action."

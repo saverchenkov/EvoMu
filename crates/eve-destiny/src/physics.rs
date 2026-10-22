@@ -979,18 +979,25 @@ pub(crate) fn compute_subwarp_goal_velocity(
                 let delta = target_pos - ball.position;
                 let dist = delta.length();
                 let desired_dist = ball.radius + target_radius + *range;
+                let max_spd = ball.max_velocity * ball.speed_fraction;
                 if *range > 0.0 {
                     let err = dist - desired_dist;
-                    if err.abs() > 1.0 {
-                        let max_spd = ball.max_velocity * ball.speed_fraction;
+                    if err.abs() > 1.0 && max_spd > 0.0 {
                         let decel_dist = (max_spd * ball.time_constant().max(1.0)).max(50.0);
                         let factor = (err / decel_dist).clamp(-1.0, 1.0);
                         delta.normalize_or_zero() * (max_spd * factor)
                     } else {
                         DVec3::ZERO
                     }
-                } else if dist > desired_dist + 1.0 {
-                    delta.normalize_or_zero() * (ball.max_velocity * ball.speed_fraction)
+                } else if dist > desired_dist + 1e-3 && max_spd > 0.0 {
+                    let err = dist - desired_dist;
+                    let factor = if err < max_spd {
+                        let r = err / max_spd;
+                        r * r
+                    } else {
+                        1.0
+                    };
+                    delta.normalize_or_zero() * (max_spd * factor)
                 } else {
                     DVec3::ZERO
                 }

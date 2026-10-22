@@ -182,7 +182,9 @@ pub fn encode_single_ball_with_park(
             .map(|m| if m.alliance_id > 0 { m.alliance_id } else { -1 })
             .unwrap_or(-1);
         let corp_id = meta.map(|m| m.corp_id.max(0) as i32).unwrap_or(0);
-        let harmonic: i32 = -1;
+        let harmonic: i32 = park
+            .and_then(|p| p.ball_harmonics.get(&ball.id).copied())
+            .unwrap_or(-1);
         buf.extend_from_slice(&ball.mass.to_le_bytes());
         buf.push(cloak);
         buf.extend_from_slice(&alliance_id.to_le_bytes());
@@ -1188,10 +1190,25 @@ pub fn encode_destiny_event(stamp: u32, event: &DestinyEvent, park: Option<&Ball
             PyRep::String("SetBallFree".into()),
             PyRep::Tuple(vec![PyRep::Integer(*ball_id), PyRep::Integer(i64::from(*is_free))]),
         ]),
-        DestinyEvent::SetBallHarmonic { ball_id, harmonic } => PyRep::Tuple(vec![
-            PyRep::String("SetBallHarmonic".into()),
-            PyRep::Tuple(vec![PyRep::Integer(*ball_id), PyRep::Integer(*harmonic as i64)]),
-        ]),
+        DestinyEvent::SetBallHarmonic { ball_id, harmonic } => {
+            let meta = park.and_then(|p| p.ball_slim_meta(*ball_id));
+            let alliance_id = meta
+                .map(|m| if m.alliance_id > 0 { m.alliance_id } else { -1 })
+                .unwrap_or(-1);
+            let corp_id = meta
+                .map(|m| if m.corp_id > 0 { m.corp_id } else { -1 })
+                .unwrap_or(-1);
+            PyRep::Tuple(vec![
+                PyRep::String("SetBallHarmonic".into()),
+                PyRep::Tuple(vec![
+                    PyRep::Integer(*ball_id),
+                    PyRep::Integer(alliance_id),
+                    PyRep::Integer(corp_id),
+                    PyRep::Integer(-1),
+                    PyRep::Integer(*harmonic as i64),
+                ]),
+            ])
+        }
         DestinyEvent::SetBallInteractive { ball_id, is_interactive } => PyRep::Tuple(vec![
             PyRep::String("SetBallInteractive".into()),
             PyRep::Tuple(vec![PyRep::Integer(*ball_id), PyRep::Integer(i64::from(*is_interactive))]),
@@ -1211,12 +1228,12 @@ pub fn encode_destiny_event(stamp: u32, event: &DestinyEvent, park: Option<&Ball
         } => PyRep::Tuple(vec![
             PyRep::String("OnDockingAccepted".into()),
             PyRep::Tuple(vec![
-                PyRep::Tuple(vec![
+                PyRep::List(vec![
                     PyRep::Real(start_pos[0]),
                     PyRep::Real(start_pos[1]),
                     PyRep::Real(start_pos[2]),
                 ]),
-                PyRep::Tuple(vec![
+                PyRep::List(vec![
                     PyRep::Real(end_pos[0]),
                     PyRep::Real(end_pos[1]),
                     PyRep::Real(end_pos[2]),

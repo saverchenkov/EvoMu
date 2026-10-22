@@ -796,7 +796,20 @@ impl SystemRegistry {
                                 base_scramble_strengths.remove(&ball_id);
                                 base_core_strengths.remove(&ball_id);
                                 asteroids.remove(&ball_id);
+                                let docking_evs: Vec<DestinyEvent> = ballpark
+                                    .observer_events
+                                    .get(&ball_id)
+                                    .map(|evs| {
+                                        evs.iter()
+                                            .filter(|e| matches!(e, DestinyEvent::OnDockingAccepted { .. }))
+                                            .cloned()
+                                            .collect()
+                                    })
+                                    .unwrap_or_default();
                                 let removed = ballpark.remove_ball(ball_id);
+                                if !docking_evs.is_empty() {
+                                    ballpark.observer_events.insert(ball_id, docking_evs);
+                                }
                                 sync_ball_positions(&ballpark, &ball_positions_actor);
                                 let _ = reply.send(removed);
                             }
@@ -1205,27 +1218,9 @@ impl SystemRegistry {
                                 };
                                 let ok = ballpark.add_ball(ball);
                                 if ok {
-                                    ballpark.emit_event(
-                                        Some(id),
-                                        eve_destiny::DestinyEvent::SetBallFree {
-                                            ball_id: id,
-                                            is_free: false,
-                                        },
-                                    );
-                                    ballpark.emit_event(
-                                        Some(id),
-                                        eve_destiny::DestinyEvent::SetBallRadius {
-                                            ball_id: id,
-                                            radius,
-                                        },
-                                    );
-                                    ballpark.emit_event(
-                                        Some(id),
-                                        eve_destiny::DestinyEvent::SetBallHarmonic {
-                                            ball_id: id,
-                                            harmonic: 1,
-                                        },
-                                    );
+                                    ballpark.set_ball_free(id, false);
+                                    ballpark.set_ball_radius(id, radius);
+                                    ballpark.set_ball_harmonic(id, 1);
                                 }
                                 pending_anchoring_disruptors.push(PendingAnchoringDisruptor {
                                     id,

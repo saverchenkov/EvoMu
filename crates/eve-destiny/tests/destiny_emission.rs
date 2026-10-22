@@ -523,3 +523,117 @@ async fn test_slim_item_change_broadcast() {
     assert!(!park.change_slim_item(SHIP_A, meta));
     assert!(wire_for(&mut park, SHIP_B).is_empty());
 }
+
+#[tokio::test]
+async fn test_ball_flags_harmonic_packaged_action_and_docking_accepted() {
+    // parity: destiny:SetBallFree, destiny:SetBallHarmonic, destiny:SetBallInteractive
+    // parity: destiny:PackagedAction, destiny:OnDockingAccepted
+    eve_testkit::attest(&[
+        "destiny:SetBallFree",
+        "destiny:SetBallHarmonic",
+        "destiny:SetBallInteractive",
+        "destiny:PackagedAction",
+        "destiny:OnDockingAccepted",
+    ]);
+    let mut park = two_ship_park();
+    let mut meta = pilot_meta(90_000_001, 98_000_001);
+    meta.alliance_id = 99_000_001;
+    park.set_ball_slim_meta(SHIP_A, meta);
+    park.drain_all_observer_events();
+
+    assert!(park.set_ball_free(SHIP_A, false));
+    assert!(park.set_ball_harmonic(SHIP_A, 1));
+    assert!(park.set_ball_interactive(SHIP_A, false));
+    park.emit_packaged_actions(
+        Some(SHIP_A),
+        &[
+            DestinyEvent::OnSlimItemChange { ball_id: SHIP_A },
+            DestinyEvent::SetBallInteractive { ball_id: SHIP_A, is_interactive: false },
+        ],
+    );
+
+    for obs in [SHIP_A, SHIP_B] {
+        let actions = wire_for(&mut park, obs);
+        assert_eq!(names(&actions), vec!["SetBallFree", "SetBallHarmonic", "SetBallInteractive", "PackagedAction"]);
+        assert_eq!(args_of(&actions, "SetBallFree")[0], &[PyRep::Integer(SHIP_A), PyRep::Integer(0)]);
+        // Crucible Destiny.xmlp:655-668: (entityID, allianceID, corpID, -1, harmonic)
+        assert_eq!(
+            args_of(&actions, "SetBallHarmonic")[0],
+            &[PyRep::Integer(SHIP_A), PyRep::Integer(99_000_001), PyRep::Integer(98_000_001), PyRep::Integer(-1), PyRep::Integer(1)]
+        );
+        assert_eq!(args_of(&actions, "SetBallInteractive")[0], &[PyRep::Integer(SHIP_A), PyRep::Integer(0)]);
+        let PyRep::Bytes(pkg_bytes) = split(&actions[3]).2 else { panic!("PackagedAction bytes") };
+        let PyRep::List(inner) = eve_proto::marshal::decode(pkg_bytes).expect("decode PackagedAction") else { panic!("inner list") };
+        assert_eq!(names(&inner), vec!["OnSlimItemChange", "SetBallInteractive"]);
+    }
+
+    // Crucible Destiny.xmlp:697-715: ([ship_x, ship_y, ship_z], [station_x, station_y, station_z], stationID)
+    let station_id: BallId = 60_003_760;
+    let station_pos = DVec3::new(1_000.0, -500.0, 250.0);
+    park.add_static_ball(ship(station_id, station_pos, MovementMode::Rigid), 15);
+    let ship_pos = park.balls[&SHIP_A].position;
+    let removed = park.accept_docking(SHIP_A, station_id).expect("dock A");
+    assert_eq!(removed.id, SHIP_A);
+    assert!(!park.balls.contains_key(&SHIP_A));
+
+    let a_actions = wire_for(&mut park, SHIP_A);
+    assert_eq!(names(&a_actions), vec!["OnDockingAccepted"]);
+    assert_eq!(
+        args_of(&a_actions, "OnDockingAccepted")[0],
+        &[
+            PyRep::List(vec![PyRep::Real(ship_pos.x), PyRep::Real(ship_pos.y), PyRep::Real(ship_pos.z)]),
+            PyRep::List(vec![PyRep::Real(station_pos.x), PyRep::Real(station_pos.y), PyRep::Real(station_pos.z)]),
+            PyRep::Integer(station_id),
+        ]
+    );
+    let b_actions = wire_for(&mut park, SHIP_B);
+    assert_eq!(names(&b_actions), vec!["OnDockingAccepted", "RemoveBall"]);
+}
+
+#[tokio::test]
+async fn test_sov_controller_fleet_ship_state_dbuff_dot_and_drone_state_emission() {
+    // parity: destiny:OnSovereigntyChanged, destiny:OnClientControllerEvent
+    // parity: destiny:OnFleetDamageStateChange, destiny:OnShipStateUpdate
+    // parity: destiny:OnDbuffUpdated, destiny:OnDotVictimUpdated, destiny:OnDroneStateChange
+    eve_testkit::attest(&[
+        "destiny:OnSovereigntyChanged",
+        "destiny:OnClientControllerEvent",
+        "destiny:OnFleetDamageStateChange",
+        "destiny:OnShipStateUpdate",
+        "destiny:OnDbuffUpdated",
+        "destiny:OnDotVictimUpdated",
+        "destiny:OnDroneStateChange",
+    ]);
+    let mut park = two_ship_park();
+    let tick = park.current_tick as i64;
+
+    park.set_sovereignty(99_000_001);
+    assert!(park.emit_client_controller_event(SHIP_A, Some(SHIP_B), "GateActivate", 1, Some(0.25)));
+    park.apply_damage_to_ball(SHIP_B, DamageVector::new(90.0, 0.0, 0.0, 0.0));
+    assert!(park.update_ship_module_states(SHIP_A, vec![(90_000_001, 12_345, 100, 133_000_000_000, 1.0, 0.0)]));
+    assert!(park.update_dbuffs(SHIP_A, vec![(101, 1.25, 100), (102, 0.85, 200)]));
+    assert!(park.apply_breacher_dot(SHIP_B, 150.0, 0.05, 5));
+    let drone_id: BallId = 50_000_001;
+    park.add_ball(ship(drone_id, DVec3::new(100.0, 0.0, 0.0), MovementMode::Stop));
+    park.update_drone_state(drone_id, 90_000_001, SHIP_A, 1, 2_456, 90_000_001, Some(SHIP_B));
+
+    let actions = wire_for(&mut park, SHIP_A);
+    assert_eq!(args_of(&actions, "OnSovereigntyChanged")[0], &[PyRep::Integer(SYSTEM_ID as i64), PyRep::Integer(99_000_001)]);
+    assert_eq!(
+        args_of(&actions, "OnClientControllerEvent")[0],
+        &[PyRep::Integer(SHIP_A), PyRep::Integer(SHIP_B), PyRep::String("GateActivate".into()), PyRep::Integer(1), PyRep::Real(0.25)]
+    );
+    assert_eq!(args_of(&actions, "OnFleetDamageStateChange")[0], &[PyRep::Integer(SHIP_B), damage_tuple(0.8, 120_000.0, tick, 1.0, 1.0)]);
+    assert_eq!(args_of(&actions, "OnShipStateUpdate").len(), 1);
+    assert_eq!(args_of(&actions, "OnDbuffUpdated")[0][0], PyRep::Integer(SHIP_A));
+    assert_eq!(args_of(&actions, "OnDotVictimUpdated")[0][0], PyRep::Integer(SHIP_B));
+    assert_eq!(
+        args_of(&actions, "OnDroneStateChange")[0],
+        &[PyRep::Integer(drone_id), PyRep::Integer(90_000_001), PyRep::Integer(SHIP_A), PyRep::Integer(1), PyRep::Integer(2_456), PyRep::Integer(90_000_001), PyRep::Integer(SHIP_B)]
+    );
+
+    // Stepping the ballpark advances active_breacher_dot and emits the updated tick DoT event.
+    park.step(1.0);
+    let step_actions = wire_for(&mut park, SHIP_A);
+    assert_eq!(args_of(&step_actions, "OnDotVictimUpdated")[0][0], PyRep::Integer(SHIP_B));
+}

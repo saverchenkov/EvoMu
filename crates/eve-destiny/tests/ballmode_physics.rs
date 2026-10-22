@@ -454,3 +454,163 @@ async fn test_formation_follow_leader_basis_slot_and_quadratic_damping() {
     assert!((f.velocity - expect_v_near).length() < 1e-9);
     assert!((f.position - expect_pos_near).length() < 1e-9);
 }
+
+#[tokio::test]
+async fn test_orbit_multi_tick_radial_convergence_tangential_speed_and_angular_rotation() {
+    // parity: ballmode:DSTBALL_ORBIT
+    eve_testkit::attest(&["ballmode:DSTBALL_ORBIT"]);
+    let mut park = Ballpark::new(30_000_142);
+    let anchor_id: BallId = 9_200_001;
+    let orbiter_id: BallId = 9_200_002;
+    park.add_ball(ship(anchor_id, DVec3::ZERO, MovementMode::Stop));
+    park.add_ball(ship(orbiter_id, DVec3::new(8_000.0, 0.0, 0.0), MovementMode::Stop));
+
+    let orbit_range = 2_500.0;
+    let expected_radius = 37.0 + 37.0 + orbit_range;
+    park.set_mode(
+        orbiter_id,
+        MovementMode::Orbit {
+            target_id: anchor_id,
+            range: orbit_range,
+        },
+    )
+    .expect("set orbit");
+    park.set_speed_fraction(orbiter_id, 1.0);
+
+    let encoded = eve_destiny::wire::encode_add_balls_with_park(
+        0,
+        park.current_tick as u32,
+        &[&park.balls[&orbiter_id]],
+        Some(&park),
+    );
+    let (_, _, decoded) = eve_destiny::wire::decode_add_balls(&encoded).expect("decode orbit");
+    assert_eq!(decoded[0].mode, eve_destiny::wire::DSTBALL_ORBIT);
+    assert_eq!(decoded[0].target_id, Some(anchor_id));
+    assert_eq!(decoded[0].follow_range, Some(orbit_range as f32));
+
+    let mut total_angle = 0.0;
+    let mut prev_dir = park.balls[&orbiter_id].position.normalize();
+    for _ in 0..45 {
+        park.step(1.0);
+        let cur_dir = park.balls[&orbiter_id].position.normalize();
+        let dtheta = prev_dir.dot(cur_dir).clamp(-1.0, 1.0).acos();
+        assert!(dtheta > 0.0, "orbiter must advance in angle each tick");
+        total_angle += dtheta;
+        prev_dir = cur_dir;
+    }
+
+    let b = &park.balls[&orbiter_id];
+    let dist = b.position.length();
+    assert!(
+        (dist - expected_radius).abs() < 300.0,
+        "orbit radius {dist} must converge near {expected_radius}"
+    );
+    let r_hat = b.position / dist;
+    let v_rad = b.velocity.dot(r_hat).abs();
+    let v_tan = (b.velocity - r_hat * b.velocity.dot(r_hat)).length();
+    assert!(v_tan > 300.0 && v_rad < 80.0, "v_tan={v_tan}, v_rad={v_rad}");
+    assert!(total_angle > 3.0, "orbiter must sweep > 3.0 rad over 45 ticks, got {total_angle}");
+}
+
+#[tokio::test]
+async fn test_follow_multi_tick_stationary_convergence_quadratic_damping_and_moving_target() {
+    // parity: ballmode:DSTBALL_FOLLOW
+    eve_testkit::attest(&["ballmode:DSTBALL_FOLLOW"]);
+    let mut park = Ballpark::new(30_000_142);
+    let target_id: BallId = 9_200_010;
+    let follower_id: BallId = 9_200_011;
+    park.add_ball(ship(target_id, DVec3::new(6_000.0, 0.0, 0.0), MovementMode::Stop));
+    park.add_ball(ship(follower_id, DVec3::ZERO, MovementMode::Stop));
+
+    let follow_range = 1_500.0;
+    let desired_dist = 37.0 + 37.0 + follow_range;
+    park.set_mode(
+        follower_id,
+        MovementMode::Follow {
+            target_id,
+            range: follow_range,
+        },
+    )
+    .expect("set follow");
+    park.set_speed_fraction(follower_id, 1.0);
+
+    let encoded = eve_destiny::wire::encode_add_balls_with_park(
+        0,
+        park.current_tick as u32,
+        &[&park.balls[&follower_id]],
+        Some(&park),
+    );
+    let (_, _, decoded) = eve_destiny::wire::decode_add_balls(&encoded).expect("decode follow");
+    assert_eq!(decoded[0].mode, eve_destiny::wire::DSTBALL_FOLLOW);
+    assert_eq!(decoded[0].target_id, Some(target_id));
+    assert_eq!(decoded[0].follow_range, Some(follow_range as f32));
+
+    // 1. Stationary target: approaches from 6 km and damps velocity to zero near desired_dist.
+    for _ in 0..50 {
+        park.step(1.0);
+    }
+    let sep = (park.balls[&target_id].position - park.balls[&follower_id].position).length();
+    assert!((sep - desired_dist).abs() < 25.0, "stationary follow sep={sep} vs {desired_dist}");
+    assert!(park.balls[&follower_id].velocity.length() < 8.0);
+
+    // 2. Moving target: leader moves along +X at 182.5 m/s (50% speed), follower tracks and matches speed.
+    park.set_mode(target_id, MovementMode::GotoDirection { direction: DVec3::X })
+        .unwrap();
+    park.set_speed_fraction(target_id, 0.5);
+    for _ in 0..30 {
+        park.step(1.0);
+    }
+    let v_target = park.balls[&target_id].velocity.x;
+    let v_follow = park.balls[&follower_id].velocity.x;
+    let moving_sep = (park.balls[&target_id].position - park.balls[&follower_id].position).length();
+    assert!((v_follow - v_target).abs() < 15.0, "follower speed {v_follow} tracks {v_target}");
+    assert!(moving_sep > desired_dist && moving_sep < desired_dist + 800.0, "moving_sep={moving_sep}");
+}
+
+#[tokio::test]
+async fn test_warp_full_lifecycle_align_accelerate_cruise_decelerate_and_dropout() {
+    // parity: ballmode:DSTBALL_WARP
+    eve_testkit::attest(&["ballmode:DSTBALL_WARP"]);
+    let mut park = Ballpark::new(30_000_142);
+    let id: BallId = 9_200_020;
+    let dest = DVec3::new(8.0 * eve_destiny::AU_METERS, 0.0, 0.0);
+    park.add_ball(ship(id, DVec3::ZERO, MovementMode::Stop));
+    park.set_mode(id, MovementMode::new_warp(DVec3::ZERO, dest, 3.0))
+        .expect("start warp");
+
+    let encoded = eve_destiny::wire::encode_add_balls_with_park(
+        0,
+        park.current_tick as u32,
+        &[&park.balls[&id]],
+        Some(&park),
+    );
+    let (_, _, decoded) = eve_destiny::wire::decode_add_balls(&encoded).expect("decode warp");
+    assert_eq!(decoded[0].mode, eve_destiny::wire::DSTBALL_WARP);
+    assert_eq!(decoded[0].warp_destination, Some(dest));
+    assert_eq!(decoded[0].warp_speed_tenth_au_s, Some(30));
+
+    let (mut saw_align, mut saw_accel, mut saw_cruise, mut saw_decel, mut exited) =
+        (false, false, false, false, false);
+    let mut peak_speed = 0.0_f64;
+    for _ in 0..120 {
+        if let MovementMode::Warp { phase, .. } = park.balls[&id].mode {
+            match phase {
+                eve_destiny::WarpPhase::Aligning => saw_align = true,
+                eve_destiny::WarpPhase::Accelerating => saw_accel = true,
+                eve_destiny::WarpPhase::Cruising => saw_cruise = true,
+                eve_destiny::WarpPhase::Decelerating => saw_decel = true,
+            }
+        }
+        let evs = park.step(1.0);
+        peak_speed = peak_speed.max(park.balls[&id].velocity.x);
+        if evs.iter().any(|e| matches!(e, eve_destiny::DestinyEvent::OnDeactivatingWarp { ball_id } if *ball_id == id)) {
+            assert!(evs.iter().any(|e| matches!(e, eve_destiny::DestinyEvent::Stop { ball_id } if *ball_id == id)));
+            exited = true;
+            break;
+        }
+    }
+    assert!(saw_align && saw_accel && saw_cruise && saw_decel && exited);
+    assert!(close(peak_speed, 3.0 * eve_destiny::AU_METERS, 1.0));
+    assert_eq!(park.balls[&id].mode, MovementMode::Stop);
+    assert!((dest - park.balls[&id].position).length() <= 2_500.0);
+}

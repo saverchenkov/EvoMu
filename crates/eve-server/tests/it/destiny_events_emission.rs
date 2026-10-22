@@ -518,12 +518,13 @@ async fn test_slim_item_interactive_and_packaged_action_on_eject_and_board() {
 
 #[tokio::test]
 async fn test_set_ball_free_radius_harmonic_sovereignty_and_controller_event() {
-    // parity: destiny:SetBallFree, destiny:SetBallRadius, destiny:SetBallHarmonic
+    // parity: destiny:SetBallFree, destiny:SetBallRadius, destiny:SetBallHarmonic, destiny:OnDockingAccepted
     // parity: destiny:OnSovereigntyChanged, destiny:OnClientControllerEvent, rpc:posMgr.AnchorStructure, rpc:sovMgr.AcquireSkyhooks
     eve_testkit::attest(&[
         "destiny:SetBallFree",
         "destiny:SetBallRadius",
         "destiny:SetBallHarmonic",
+        "destiny:OnDockingAccepted",
         "destiny:OnSovereigntyChanged",
         "destiny:OnClientControllerEvent",
     ]);
@@ -667,7 +668,10 @@ async fn test_set_ball_free_radius_harmonic_sovereignty_and_controller_event() {
         .expect("AcquireSkyhooks");
     let acts = drain_actions(&null_handle, ship_id).await;
     assert_eq!(find(&acts, "SetBallFree")[0].as_slice(), &[PyRep::Integer(mwd_item), PyRep::Integer(0)]);
-    assert_eq!(find(&acts, "SetBallHarmonic")[0].as_slice(), &[PyRep::Integer(mwd_item), PyRep::Integer(1)]);
+    assert_eq!(
+        find(&acts, "SetBallHarmonic")[0].as_slice(),
+        &[PyRep::Integer(mwd_item), PyRep::Integer(-1), PyRep::Integer(-1), PyRep::Integer(-1), PyRep::Integer(1)]
+    );
     let rad = find(&acts, "SetBallRadius");
     assert_eq!(rad.len(), 1);
     assert_eq!(rad[0][0], PyRep::Integer(mwd_item));
@@ -675,4 +679,15 @@ async fn test_set_ball_free_radius_harmonic_sovereignty_and_controller_event() {
     let sov = find(&acts, "OnSovereigntyChanged");
     assert_eq!(sov.len(), 1);
     assert_eq!(sov[0].as_slice(), &[PyRep::Integer(null_sys as i64), PyRep::Integer(99_000_123)]);
+
+    // Docking into structure 1_049_500_001 emits OnDockingAccepted([ship_x, ship_y, ship_z], [station_x, station_y, station_z], stationID).
+    ctx.dispatch_rpc(&mut sess, "structureDocking", None, "Dock", &[PyRep::Integer(1_049_500_001)], &kw, None)
+        .await
+        .expect("Dock");
+    let dock_acts = drain_actions(&null_handle, ship_id).await;
+    let ship_pos_list = PyRep::List(vec![PyRep::Real(ball.position.x), PyRep::Real(ball.position.y), PyRep::Real(ball.position.z)]);
+    assert_eq!(
+        find(&dock_acts, "OnDockingAccepted")[0].as_slice(),
+        &[ship_pos_list.clone(), ship_pos_list, PyRep::Integer(1_049_500_001)]
+    );
 }

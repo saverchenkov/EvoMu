@@ -910,6 +910,8 @@ pub struct Ballpark {
     pub miniball_states: BTreeMap<BallId, MiniballState>,
     #[serde(default)]
     pub formation_states: BTreeMap<BallId, FormationState>,
+    #[serde(default)]
+    pub ball_harmonics: BTreeMap<BallId, i32>,
 }
 
 impl Ballpark {
@@ -1064,5 +1066,212 @@ impl Ballpark {
             },
         );
         Ok(())
+    }
+
+    /// Accepts docking of `ship_id` into `station_id` (`destiny:OnDockingAccepted`), emitting
+    /// `OnDockingAccepted([ship_x, ship_y, ship_z], [station_x, station_y, station_z], stationID)`
+    /// (`Destiny.xmlp:697-715`) to `ship_id` and its grid observers before removing `ship_id` from space.
+    pub fn accept_docking(&mut self, ship_id: BallId, station_id: BallId) -> Option<Ball> {
+        let station_pos = self
+            .balls
+            .get(&station_id)
+            .map(|b| b.position)
+            .unwrap_or(DVec3::ZERO);
+        self.accept_docking_at(ship_id, station_id, station_pos)
+    }
+
+    /// Accepts docking of `ship_id` into `station_id` at explicit `station_pos` (`destiny:OnDockingAccepted`).
+    pub fn accept_docking_at(
+        &mut self,
+        ship_id: BallId,
+        station_id: BallId,
+        station_pos: DVec3,
+    ) -> Option<Ball> {
+        let ship_pos = self.balls.get(&ship_id)?.position.to_array();
+        let ev = DestinyEvent::OnDockingAccepted {
+            start_pos: ship_pos,
+            end_pos: station_pos.to_array(),
+            station_id,
+        };
+        self.emit_event(Some(ship_id), ev);
+        let saved_obs = self.observer_events.remove(&ship_id).unwrap_or_default();
+        let removed = self.remove_ball(ship_id);
+        if !saved_obs.is_empty() {
+            self.observer_events.insert(ship_id, saved_obs);
+        }
+        removed
+    }
+
+    /// Updates `ball_id`'s force-field harmonic state and emits [`DestinyEvent::SetBallHarmonic`] (`destiny:SetBallHarmonic`).
+    pub fn set_ball_harmonic(&mut self, ball_id: BallId, harmonic: i32) -> bool {
+        if !self.balls.contains_key(&ball_id) {
+            return false;
+        }
+        self.ball_harmonics.insert(ball_id, harmonic);
+        self.emit_event(
+            Some(ball_id),
+            DestinyEvent::SetBallHarmonic { ball_id, harmonic },
+        );
+        true
+    }
+
+    /// Updates `ball_id`'s free-movement flag and emits [`DestinyEvent::SetBallFree`] (`destiny:SetBallFree`).
+    pub fn set_ball_free(&mut self, ball_id: BallId, is_free: bool) -> bool {
+        let Some(ball) = self.balls.get_mut(&ball_id) else {
+            return false;
+        };
+        if !is_free {
+            ball.velocity = DVec3::ZERO;
+            ball.speed_fraction = 0.0;
+            ball.mode = MovementMode::Stop;
+        }
+        self.emit_event(
+            Some(ball_id),
+            DestinyEvent::SetBallFree { ball_id, is_free },
+        );
+        true
+    }
+
+    /// Updates `ball_id`'s interactive flag and emits [`DestinyEvent::SetBallInteractive`] (`destiny:SetBallInteractive`).
+    pub fn set_ball_interactive(&mut self, ball_id: BallId, is_interactive: bool) -> bool {
+        if !self.balls.contains_key(&ball_id) {
+            return false;
+        }
+        self.emit_event(
+            Some(ball_id),
+            DestinyEvent::SetBallInteractive {
+                ball_id,
+                is_interactive,
+            },
+        );
+        true
+    }
+
+    /// Packages a batch of inner [`DestinyEvent`]s into marshaled `DoDestinyUpdate` bytes and emits [`DestinyEvent::PackagedAction`] (`destiny:PackagedAction`).
+    pub fn emit_packaged_actions(&mut self, ball_id: Option<BallId>, events: &[DestinyEvent]) {
+        let inner = crate::wire::encode_destiny_updates(self.current_tick as u32, events, Some(self));
+        let actions_bytes = eve_proto::marshal::encode(&inner);
+        self.emit_event(ball_id, DestinyEvent::PackagedAction { actions_bytes });
+    }
+
+    /// Broadcasts a solar-system sovereignty change (`destiny:OnSovereigntyChanged`).
+    pub fn set_sovereignty(&mut self, alliance_id: i64) {
+        self.emit_event(
+            None,
+            DestinyEvent::OnSovereigntyChanged {
+                solar_system_id: self.solar_system_id,
+                alliance_id,
+            },
+        );
+    }
+
+    /// Emits a client scene controller event on `ball_id` (`destiny:OnClientControllerEvent`).
+    pub fn emit_client_controller_event(
+        &mut self,
+        ball_id: BallId,
+        target_id: Option<BallId>,
+        event_name: impl Into<String>,
+        value: i64,
+        delay: Option<f64>,
+    ) -> bool {
+        if !self.balls.contains_key(&ball_id) {
+            return false;
+        }
+        self.emit_event(
+            Some(ball_id),
+            DestinyEvent::OnClientControllerEvent {
+                ball_id,
+                target_id,
+                event_name: event_name.into(),
+                value,
+                delay,
+            },
+        );
+        true
+    }
+
+    /// Broadcasts module attribute state updates for `ship_id` (`destiny:OnShipStateUpdate`).
+    pub fn update_ship_module_states(
+        &mut self,
+        ship_id: BallId,
+        module_states: Vec<(i64, i64, u32, i64, f64, f64)>,
+    ) -> bool {
+        if !self.balls.contains_key(&ship_id) {
+            return false;
+        }
+        self.emit_event(
+            Some(ship_id),
+            DestinyEvent::OnShipStateUpdate { module_states },
+        );
+        true
+    }
+
+    /// Updates dynamic dogma buffs on `ball_id` and emits [`DestinyEvent::OnDbuffUpdated`] (`destiny:OnDbuffUpdated`).
+    pub fn update_dbuffs(&mut self, ball_id: BallId, dbuffs: Vec<(i64, f64, i64)>) -> bool {
+        if !self.balls.contains_key(&ball_id) {
+            return false;
+        }
+        self.emit_event(
+            Some(ball_id),
+            DestinyEvent::OnDbuffUpdated { ball_id, dbuffs },
+        );
+        true
+    }
+
+    /// Applies or updates a Breacher Pod DoT on `ball_id` and emits [`DestinyEvent::OnDotVictimUpdated`] (`destiny:OnDotVictimUpdated`).
+    pub fn apply_breacher_dot(
+        &mut self,
+        ball_id: BallId,
+        flat_dps: f64,
+        pct_dps: f64,
+        duration_ticks: u32,
+    ) -> bool {
+        if !self.balls.contains_key(&ball_id) {
+            return false;
+        }
+        self.combat_states
+            .entry(ball_id)
+            .or_default()
+            .active_breacher_dot = if duration_ticks > 0 {
+            Some((flat_dps, pct_dps, duration_ticks))
+        } else {
+            None
+        };
+        self.emit_event(
+            Some(ball_id),
+            DestinyEvent::OnDotVictimUpdated {
+                ball_id,
+                flat_dps,
+                pct_dps,
+                remaining_ticks: duration_ticks,
+            },
+        );
+        true
+    }
+
+    /// Emits a drone state transition (`destiny:OnDroneStateChange`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_drone_state(
+        &mut self,
+        drone_id: BallId,
+        owner_id: i64,
+        controller_id: i64,
+        activity_state: i64,
+        type_id: u32,
+        controller_owner_id: i64,
+        target_id: Option<BallId>,
+    ) {
+        self.emit_event(
+            Some(drone_id),
+            DestinyEvent::OnDroneStateChange {
+                drone_id,
+                owner_id,
+                controller_id,
+                activity_state,
+                type_id,
+                controller_owner_id,
+                target_id,
+            },
+        );
     }
 }

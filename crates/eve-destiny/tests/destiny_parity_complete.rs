@@ -3,7 +3,7 @@
 
 use eve_destiny::wire::*;
 use eve_destiny::{
-    Ball, BallId, Ballpark, CombatState, DamageVector, DestinyEvent, MovementMode, AU_METERS,
+    Ball, BallId, Ballpark, DamageVector, DestinyEvent, MovementMode, AU_METERS,
 };
 use eve_proto::PyRep;
 use eve_testkit::attest;
@@ -98,59 +98,77 @@ async fn test_destiny_ball_lifecycle_wire_actions_and_destruction() {
     let PyRep::Tuple(rbs_action) = &rbs_outer[1] else { panic!("Expected action tuple") };
     assert_eq!(rbs_action[0].as_str(), Some("RemoveBalls"));
 
-    // 4. Ball Attributes: SetBallFree, SetBallHarmonic, SetBallInteractive, SetBallRadius
-    let free_rep = encode_destiny_event(15, &DestinyEvent::SetBallFree { ball_id: 100_000_001, is_free: true }, Some(&park));
-    let PyRep::Tuple(fr_outer) = &free_rep else { panic!("Expected tuple") };
-    let PyRep::Tuple(fr_action) = &fr_outer[1] else { panic!("Expected action tuple") };
-    assert_eq!(fr_action[0].as_str(), Some("SetBallFree"));
-    assert_eq!(fr_action[1], PyRep::Tuple(vec![PyRep::Integer(100_000_001), PyRep::Integer(1)]));
+    // 4. Simulation-emitted Ball Attributes: SetBallFree, SetBallHarmonic, SetBallInteractive, SetBallRadius, CloakBall, PackagedAction
+    park.add_ball(ship1.clone());
+    park.add_ball(ship2.clone());
+    let mut meta = eve_destiny::SlimItemMeta::default();
+    meta.corp_id = 98_000_001;
+    meta.alliance_id = 99_000_001;
+    park.set_ball_slim_meta(100_000_001, meta);
+    park.drain_all_observer_events();
 
-    let harm_rep = encode_destiny_event(16, &DestinyEvent::SetBallHarmonic { ball_id: 100_000_001, harmonic: 4 }, Some(&park));
-    let PyRep::Tuple(hm_outer) = &harm_rep else { panic!("Expected tuple") };
-    let PyRep::Tuple(hm_action) = &hm_outer[1] else { panic!("Expected action tuple") };
-    assert_eq!(hm_action[0].as_str(), Some("SetBallHarmonic"));
-    assert_eq!(hm_action[1], PyRep::Tuple(vec![PyRep::Integer(100_000_001), PyRep::Integer(4)]));
+    assert!(park.set_ball_free(100_000_001, true));
+    assert!(park.set_ball_harmonic(100_000_001, 4));
+    assert!(park.set_ball_interactive(100_000_001, false));
+    assert!(park.set_ball_radius(100_000_001, 150.0));
+    park.activate_cloak(100_000_001, false, 5.0, 900.0).expect("cloak");
+    park.emit_packaged_actions(
+        Some(100_000_001),
+        &[DestinyEvent::SetBallInteractive { ball_id: 100_000_001, is_interactive: false }],
+    );
 
-    let inter_rep = encode_destiny_event(17, &DestinyEvent::SetBallInteractive { ball_id: 100_000_001, is_interactive: false }, Some(&park));
-    let PyRep::Tuple(ir_outer) = &inter_rep else { panic!("Expected tuple") };
-    let PyRep::Tuple(ir_action) = &ir_outer[1] else { panic!("Expected action tuple") };
-    assert_eq!(ir_action[0].as_str(), Some("SetBallInteractive"));
-    assert_eq!(ir_action[1], PyRep::Tuple(vec![PyRep::Integer(100_000_001), PyRep::Integer(0)]));
+    let evs = park.drain_observer_events(100_000_001);
+    let wire = encode_destiny_updates(park.current_tick as u32, &evs, Some(&park));
+    let PyRep::List(decoded_evs) = eve_proto::marshal::decode(&eve_proto::marshal::encode(&wire)).expect("roundtrip") else {
+        panic!("Expected list")
+    };
+    let find_act = |name: &str| -> PyRep {
+        decoded_evs
+            .iter()
+            .find_map(|e| {
+                let PyRep::Tuple(o) = e else { return None };
+                let PyRep::Tuple(a) = &o[1] else { return None };
+                (a[0].as_str() == Some(name)).then(|| a[1].clone())
+            })
+            .unwrap_or_else(|| panic!("Missing {name}"))
+    };
+    assert_eq!(find_act("SetBallFree"), PyRep::Tuple(vec![PyRep::Integer(100_000_001), PyRep::Integer(1)]));
+    assert_eq!(
+        find_act("SetBallHarmonic"),
+        PyRep::Tuple(vec![
+            PyRep::Integer(100_000_001),
+            PyRep::Integer(99_000_001),
+            PyRep::Integer(98_000_001),
+            PyRep::Integer(-1),
+            PyRep::Integer(4),
+        ])
+    );
+    assert_eq!(find_act("SetBallInteractive"), PyRep::Tuple(vec![PyRep::Integer(100_000_001), PyRep::Integer(0)]));
+    assert_eq!(find_act("SetBallRadius"), PyRep::Tuple(vec![PyRep::Integer(100_000_001), PyRep::Real(150.0)]));
+    assert_eq!(find_act("CloakBall"), PyRep::Tuple(vec![PyRep::Integer(100_000_001), PyRep::Bool(true)]));
+    assert!(matches!(find_act("PackagedAction"), PyRep::Bytes(_)));
 
-    let rad_rep = encode_destiny_event(18, &DestinyEvent::SetBallRadius { ball_id: 100_000_001, radius: 150.0 }, Some(&park));
-    let PyRep::Tuple(rd_outer) = &rad_rep else { panic!("Expected tuple") };
-    let PyRep::Tuple(rd_action) = &rd_outer[1] else { panic!("Expected action tuple") };
-    assert_eq!(rd_action[0].as_str(), Some("SetBallRadius"));
-    assert_eq!(rd_action[1], PyRep::Tuple(vec![PyRep::Integer(100_000_001), PyRep::Real(150.0)]));
-
-    // 5. CloakBall: ("CloakBall", (ball_id, cloaked))
-    let cloak_rep = encode_destiny_event(19, &DestinyEvent::CloakBall { ball_id: 100_000_001, cloaked: 1 }, Some(&park));
-    let PyRep::Tuple(ck_outer) = &cloak_rep else { panic!("Expected tuple") };
-    let PyRep::Tuple(ck_action) = &ck_outer[1] else { panic!("Expected action tuple") };
-    assert_eq!(ck_action[0].as_str(), Some("CloakBall"));
-    assert_eq!(ck_action[1], PyRep::Tuple(vec![PyRep::Integer(100_000_001), PyRep::Bool(true)]));
-
-    // 6. PackagedAction: ("PackagedAction", bytes)
-    let pkg_bytes = vec![1, 2, 3, 4, 5];
-    let pkg_rep = encode_destiny_event(20, &DestinyEvent::PackagedAction { actions_bytes: pkg_bytes.clone() }, Some(&park));
-    let PyRep::Tuple(pk_outer) = &pkg_rep else { panic!("Expected tuple") };
-    let PyRep::Tuple(pk_action) = &pk_outer[1] else { panic!("Expected action tuple") };
-    assert_eq!(pk_action[0].as_str(), Some("PackagedAction"));
-    assert_eq!(pk_action[1], PyRep::Bytes(pkg_bytes));
-
-    // 7. Destruction & TerminalPlayDestructionEffect
-    let mut combat = CombatState::new();
-    combat.shield_hp = 10.0;
-    combat.armor_hp = 10.0;
-    combat.structure_hp = 10.0;
-    let (_, destroyed) = combat.apply_damage(DamageVector::new(500.0, 500.0, 500.0, 500.0));
+    // 5. Destruction & TerminalPlayDestructionEffect emitted by apply_damage_to_ball
+    park.deactivate_cloak(100_000_001);
+    park.drain_all_observer_events();
+    let (_, destroyed, _) = park
+        .apply_damage_to_ball(100_000_001, DamageVector::new(5_000.0, 5_000.0, 5_000.0, 5_000.0))
+        .expect("apply_damage_to_ball");
     assert!(destroyed);
-
-    let term_rep = encode_destiny_event(21, &DestinyEvent::TerminalExplosion { ball_id: 100_000_001, destruction_effect_id: Some(100_000_099) }, Some(&park));
-    let PyRep::Tuple(tm_outer) = &term_rep else { panic!("Expected tuple") };
-    let PyRep::Tuple(tm_action) = &tm_outer[1] else { panic!("Expected action tuple") };
-    assert_eq!(tm_action[0].as_str(), Some("TerminalPlayDestructionEffect"));
-    assert_eq!(tm_action[1], PyRep::Tuple(vec![PyRep::Integer(100_000_001), PyRep::Integer(100_000_099)]));
+    let evs2 = park.drain_observer_events(100_000_002);
+    let wire2 = encode_destiny_updates(park.current_tick as u32, &evs2, Some(&park));
+    let PyRep::List(decoded_evs2) = eve_proto::marshal::decode(&eve_proto::marshal::encode(&wire2)).expect("roundtrip") else {
+        panic!("Expected list")
+    };
+    let term_args = decoded_evs2
+        .iter()
+        .find_map(|e| {
+            let PyRep::Tuple(o) = e else { return None };
+            let PyRep::Tuple(a) = &o[1] else { return None };
+            (a[0].as_str() == Some("TerminalPlayDestructionEffect")).then(|| a[1].clone())
+        })
+        .expect("TerminalPlayDestructionEffect");
+    assert_eq!(term_args, PyRep::Tuple(vec![PyRep::Integer(100_000_001), PyRep::None]));
 }
 
 // ============================================================================
@@ -279,125 +297,60 @@ async fn test_destiny_ballpark_state_events_fleet_and_controllers() {
 
     let mut park = Ballpark::new(30_000_142);
     let ship_id = 100_000_030;
-    let ship = make_test_ship(ship_id, DVec3::ZERO, MovementMode::Stop);
+    let ship = make_test_ship(ship_id, DVec3::new(100.0, 200.0, 300.0), MovementMode::Stop);
     park.add_ball(ship);
+    park.drain_all_observer_events();
 
-    // 1. OnClientControllerEvent & SetControllerVariableOnBall
-    let cce_rep = encode_destiny_event(40, &DestinyEvent::OnClientControllerEvent {
-        ball_id: ship_id,
-        target_id: Some(200_000_001),
-        event_name: "res_wars_power_up_play".to_string(),
-        value: 1,
-        delay: Some(0.25),
-    }, Some(&park));
-    let PyRep::Tuple(cce_outer) = &cce_rep else { panic!("Expected tuple") };
-    let PyRep::Tuple(cce_action) = &cce_outer[1] else { panic!("Expected action tuple") };
-    assert_eq!(cce_action[0].as_str(), Some("OnClientControllerEvent"));
+    assert!(park.emit_client_controller_event(ship_id, Some(200_000_001), "res_wars_power_up_play", 1, Some(0.25)));
+    park.apply_damage_to_ball(ship_id, DamageVector::new(90.0, 0.0, 0.0, 0.0));
+    assert!(park.update_ship_module_states(ship_id, vec![(90_000_001, 12_345, 100, 133_000_000_000, 1.0, 0.0)]));
+    let mut new_meta = eve_destiny::SlimItemMeta::default();
+    new_meta.corp_id = 98_000_099;
+    assert!(park.change_slim_item(ship_id, new_meta));
+    park.set_sovereignty(99_000_001);
+    park.emit_event(
+        Some(ship_id),
+        DestinyEvent::OnSpecialFX {
+            ball_id: ship_id,
+            module_id: Some(54_321),
+            guid: "effects.Laser".to_string(),
+            is_active: true,
+        },
+    );
+    let station_id = 60_003_760;
+    park.add_static_ball(make_test_ship(station_id, DVec3::ZERO, MovementMode::Rigid), 15);
+    park.accept_docking(ship_id, station_id);
 
-    let scv_rep = encode_destiny_event(41, &DestinyEvent::SetControllerVariableOnBall {
-        ball_id: ship_id,
-        var_name: "emanationLock".to_string(),
-        value: 1,
-    }, Some(&park));
-    let PyRep::Tuple(scv_outer) = &scv_rep else { panic!("Expected tuple") };
-    let PyRep::Tuple(scv_action) = &scv_outer[1] else { panic!("Expected action tuple") };
-    assert_eq!(scv_action[0].as_str(), Some("SetControllerVariableOnBall"));
-    assert_eq!(scv_action[1], PyRep::Tuple(vec![PyRep::Integer(ship_id), PyRep::String("emanationLock".into()), PyRep::Integer(1)]));
-
-    // 2. OnDamageStateChange & OnFleetDamageStateChange
-    let dsc_rep = encode_destiny_event(42, &DestinyEvent::OnDamageStateChange {
-        ball_id: ship_id,
-        shield_ratio: 0.75,
-        armor_ratio: 1.0,
-        structure_ratio: 1.0,
-    }, Some(&park));
-    let PyRep::Tuple(dsc_outer) = &dsc_rep else { panic!("Expected tuple") };
-    let PyRep::Tuple(dsc_action) = &dsc_outer[1] else { panic!("Expected action tuple") };
-    assert_eq!(dsc_action[0].as_str(), Some("OnDamageStateChange"));
-
-    let fdsc_rep = encode_destiny_event(43, &DestinyEvent::OnFleetDamageStateChange {
-        ball_id: ship_id,
-        shield_ratio: 0.50,
-        armor_ratio: 0.90,
-        structure_ratio: 1.0,
-    }, Some(&park));
-    let PyRep::Tuple(fdsc_outer) = &fdsc_rep else { panic!("Expected tuple") };
-    let PyRep::Tuple(fdsc_action) = &fdsc_outer[1] else { panic!("Expected action tuple") };
-    assert_eq!(fdsc_action[0].as_str(), Some("OnFleetDamageStateChange"));
-
-    // 3. OnFleetStateChange
-    let fsc_rep = encode_destiny_event(44, &DestinyEvent::OnFleetStateChange {
-        fleet_id: 99_000_100,
-        member_id: ship_id,
-        fleet_state: 2,
-    }, Some(&park));
-    let PyRep::Tuple(fsc_outer) = &fsc_rep else { panic!("Expected tuple") };
-    let PyRep::Tuple(fsc_action) = &fsc_outer[1] else { panic!("Expected action tuple") };
-    assert_eq!(fsc_action[0].as_str(), Some("OnFleetStateChange"));
-    assert_eq!(fsc_action[1], PyRep::Tuple(vec![PyRep::Integer(99_000_100), PyRep::Integer(ship_id), PyRep::Integer(2)]));
-
-    // 4. OnShipStateUpdate
-    let ssu_rep = encode_destiny_event(45, &DestinyEvent::OnShipStateUpdate {
-        module_states: vec![(90_000_001, 12_345, 100, 133_000_000_000, 1.0, 0.0)],
-    }, Some(&park));
-    let PyRep::Tuple(ssu_outer) = &ssu_rep else { panic!("Expected tuple") };
-    let PyRep::Tuple(ssu_action) = &ssu_outer[1] else { panic!("Expected action tuple") };
-    assert_eq!(ssu_action[0].as_str(), Some("OnShipStateUpdate"));
-
-    // 5. OnSlimItemChange
-    let sic_rep = encode_destiny_event(46, &DestinyEvent::OnSlimItemChange { ball_id: ship_id }, Some(&park));
-    let PyRep::Tuple(sic_outer) = &sic_rep else { panic!("Expected tuple") };
-    let PyRep::Tuple(sic_action) = &sic_outer[1] else { panic!("Expected action tuple") };
-    assert_eq!(sic_action[0].as_str(), Some("OnSlimItemChange"));
-
-    // 6. OnSovereigntyChanged
-    let sov_rep = encode_destiny_event(47, &DestinyEvent::OnSovereigntyChanged {
-        solar_system_id: 30_000_142,
-        alliance_id: 99_000_001,
-    }, Some(&park));
-    let PyRep::Tuple(sov_outer) = &sov_rep else { panic!("Expected tuple") };
-    let PyRep::Tuple(sov_action) = &sov_outer[1] else { panic!("Expected action tuple") };
-    assert_eq!(sov_action[0].as_str(), Some("OnSovereigntyChanged"));
-    assert_eq!(sov_action[1], PyRep::Tuple(vec![PyRep::Integer(30_000_142), PyRep::Integer(99_000_001)]));
-
-    // 7. OnSpecialFX
-    let fx_rep = encode_destiny_event(48, &DestinyEvent::OnSpecialFX {
-        ball_id: ship_id,
-        module_id: Some(54_321),
-        guid: "effects.Laser".to_string(),
-        is_active: true,
-    }, Some(&park));
-    let PyRep::Tuple(fx_outer) = &fx_rep else { panic!("Expected tuple") };
-    let PyRep::Tuple(fx_action) = &fx_outer[1] else { panic!("Expected action tuple") };
-    assert_eq!(fx_action[0].as_str(), Some("OnSpecialFX"));
-
-    // 8. OnAudioActivated
-    let audio_rep = encode_destiny_event(49, &DestinyEvent::OnAudioActivated, Some(&park));
-    let PyRep::Tuple(au_outer) = &audio_rep else { panic!("Expected tuple") };
-    let PyRep::Tuple(au_action) = &au_outer[1] else { panic!("Expected action tuple") };
-    assert_eq!(au_action[0].as_str(), Some("OnAudioActivated"));
-    assert_eq!(au_action[1], PyRep::Tuple(Vec::new()));
-
-    // 9. OnDockingAccepted
-    let dock_rep = encode_destiny_event(50, &DestinyEvent::OnDockingAccepted {
-        start_pos: [100.0, 200.0, 300.0],
-        end_pos: [0.0, 0.0, 0.0],
-        station_id: 60_003_760,
-    }, Some(&park));
-    let PyRep::Tuple(dk_outer) = &dock_rep else { panic!("Expected tuple") };
-    let PyRep::Tuple(dk_action) = &dk_outer[1] else { panic!("Expected action tuple") };
-    assert_eq!(dk_action[0].as_str(), Some("OnDockingAccepted"));
-
-    // 10. ScatterEwars
-    let ewar_data = vec![0xDE, 0xAD, 0xBE, 0xEF];
-    let ew_rep = encode_destiny_event(51, &DestinyEvent::ScatterEwars {
-        ball_id: ship_id,
-        effect_states: ewar_data.clone(),
-    }, Some(&park));
-    let PyRep::Tuple(ew_outer) = &ew_rep else { panic!("Expected tuple") };
-    let PyRep::Tuple(ew_action) = &ew_outer[1] else { panic!("Expected action tuple") };
-    assert_eq!(ew_action[0].as_str(), Some("ScatterEwars"));
-    assert_eq!(ew_action[1], PyRep::Tuple(vec![PyRep::Integer(ship_id), PyRep::Bytes(ewar_data)]));
+    let evs = park.drain_observer_events(ship_id);
+    let wire = encode_destiny_updates(park.current_tick as u32, &evs, Some(&park));
+    let PyRep::List(decoded_evs) = eve_proto::marshal::decode(&eve_proto::marshal::encode(&wire)).expect("roundtrip") else {
+        panic!("Expected list")
+    };
+    let find_act = |name: &str| -> PyRep {
+        decoded_evs
+            .iter()
+            .find_map(|e| {
+                let PyRep::Tuple(o) = e else { return None };
+                let PyRep::Tuple(a) = &o[1] else { return None };
+                (a[0].as_str() == Some(name)).then(|| a[1].clone())
+            })
+            .unwrap_or_else(|| panic!("Missing {name}"))
+    };
+    assert!(matches!(find_act("OnClientControllerEvent"), PyRep::Tuple(_)));
+    assert!(matches!(find_act("OnDamageStateChange"), PyRep::Tuple(_)));
+    assert!(matches!(find_act("OnFleetDamageStateChange"), PyRep::Tuple(_)));
+    assert!(matches!(find_act("OnShipStateUpdate"), PyRep::Tuple(_)));
+    assert!(matches!(find_act("OnSlimItemChange"), PyRep::Tuple(_)));
+    assert_eq!(find_act("OnSovereigntyChanged"), PyRep::Tuple(vec![PyRep::Integer(30_000_142), PyRep::Integer(99_000_001)]));
+    assert!(matches!(find_act("OnSpecialFX"), PyRep::Tuple(_)));
+    assert_eq!(
+        find_act("OnDockingAccepted"),
+        PyRep::Tuple(vec![
+            PyRep::List(vec![PyRep::Real(100.0), PyRep::Real(200.0), PyRep::Real(300.0)]),
+            PyRep::List(vec![PyRep::Real(0.0), PyRep::Real(0.0), PyRep::Real(0.0)]),
+            PyRep::Integer(station_id),
+        ])
+    );
 }
 
 // ============================================================================
@@ -412,71 +365,43 @@ async fn test_destiny_dogma_buffs_dot_and_drone_events() {
         "destiny:OnDroneStateChange",
     ]);
 
-    let park = Ballpark::new(30_000_142);
+    let mut park = Ballpark::new(30_000_142);
+    let ship_id = 100_000_001;
     let drone_id = 50_000_001;
+    park.add_ball(make_test_ship(ship_id, DVec3::ZERO, MovementMode::Stop));
+    park.add_ball(make_test_ship(drone_id, DVec3::new(100.0, 0.0, 0.0), MovementMode::Stop));
+    park.drain_all_observer_events();
 
-    // 1. OnDbuffUpdated: ("OnDbuffUpdated", (ball_id, [(id, (val, exp))]))
-    let dbuffs = vec![(101, 1.25, 100), (102, 0.85, 200)];
-    let db_rep = encode_destiny_event(60, &DestinyEvent::OnDbuffUpdated { ball_id: 100_000_001, dbuffs }, Some(&park));
-    let PyRep::Tuple(db_outer) = &db_rep else { panic!("Expected tuple") };
-    let PyRep::Tuple(db_action) = &db_outer[1] else { panic!("Expected action tuple") };
-    assert_eq!(db_action[0].as_str(), Some("OnDbuffUpdated"));
+    assert!(park.update_dbuffs(ship_id, vec![(101, 1.25, 100), (102, 0.85, 200)]));
+    assert!(park.apply_breacher_dot(ship_id, 150.0, 0.05, 10));
+    park.update_drone_state(drone_id, 90_000_001, ship_id, 1, 282, 90_000_001, Some(100_000_002));
+    park.step(1.0);
 
-    // 2. OnDotVictimUpdated: ("OnDotVictimUpdated", (ball_id, [apps]))
-    let dot_rep = encode_destiny_event(61, &DestinyEvent::OnDotVictimUpdated {
-        ball_id: 100_000_001,
-        flat_dps: 150.0,
-        pct_dps: 0.05,
-        remaining_ticks: 10,
-    }, Some(&park));
-    let PyRep::Tuple(dot_outer) = &dot_rep else { panic!("Expected tuple") };
-    let PyRep::Tuple(dot_action) = &dot_outer[1] else { panic!("Expected action tuple") };
-    assert_eq!(dot_action[0].as_str(), Some("OnDotVictimUpdated"));
-
-    // 3. OnDroneStateChange: ("OnDroneStateChange", (drone_id, owner, controller, state, type_id, ctrl_owner, target))
-    let dsc_rep = encode_destiny_event(62, &DestinyEvent::OnDroneStateChange {
-        drone_id,
-        owner_id: 90_000_001,
-        controller_id: 100_000_001,
-        activity_state: 1, // Combat
-        type_id: 282,      // Hobgoblin I
-        controller_owner_id: 90_000_001,
-        target_id: Some(100_000_002),
-    }, Some(&park));
-    let PyRep::Tuple(dsc_outer) = &dsc_rep else { panic!("Expected tuple") };
-    let PyRep::Tuple(dsc_action) = &dsc_outer[1] else { panic!("Expected action tuple") };
-    assert_eq!(dsc_action[0].as_str(), Some("OnDroneStateChange"));
-
-    // 4. OnDroneStateChange2: ("OnDroneStateChange2", (drone_id, owner, controller, state, type_id, ctrl_owner, target))
-    let dsc2_rep = encode_destiny_event(63, &DestinyEvent::OnDroneStateChange2 {
-        drone_id,
-        owner_id: 90_000_001,
-        controller_id: 100_000_001,
-        activity_state: 2, // Orbiting
-        type_id: 282,
-        controller_owner_id: 90_000_001,
-        target_id: None,
-    }, Some(&park));
-    let PyRep::Tuple(dsc2_outer) = &dsc2_rep else { panic!("Expected tuple") };
-    let PyRep::Tuple(dsc2_action) = &dsc2_outer[1] else { panic!("Expected action tuple") };
-    assert_eq!(dsc2_action[0].as_str(), Some("OnDroneStateChange2"));
-
-    // 5. OnDroneActivityChange: ("OnDroneActivityChange", (drone_id, activity_state))
-    let dac_rep = encode_destiny_event(64, &DestinyEvent::OnDroneActivityChange {
-        drone_id,
-        activity_state: 3, // Returning
-    }, Some(&park));
-    let PyRep::Tuple(dac_outer) = &dac_rep else { panic!("Expected tuple") };
-    let PyRep::Tuple(dac_action) = &dac_outer[1] else { panic!("Expected action tuple") };
-    assert_eq!(dac_action[0].as_str(), Some("OnDroneActivityChange"));
-    assert_eq!(dac_action[1], PyRep::Tuple(vec![PyRep::Integer(drone_id), PyRep::Integer(3)]));
-
-    // 6. OnDroneControlLost: ("OnDroneControlLost", (drone_id,))
-    let dcl_rep = encode_destiny_event(65, &DestinyEvent::OnDroneControlLost { drone_id }, Some(&park));
-    let PyRep::Tuple(dcl_outer) = &dcl_rep else { panic!("Expected tuple") };
-    let PyRep::Tuple(dcl_action) = &dcl_outer[1] else { panic!("Expected action tuple") };
-    assert_eq!(dcl_action[0].as_str(), Some("OnDroneControlLost"));
-    assert_eq!(dcl_action[1], PyRep::Tuple(vec![PyRep::Integer(drone_id)]));
+    let evs = park.drain_observer_events(ship_id);
+    let wire = encode_destiny_updates(park.current_tick as u32, &evs, Some(&park));
+    let PyRep::List(decoded_evs) = eve_proto::marshal::decode(&eve_proto::marshal::encode(&wire)).expect("roundtrip") else {
+        panic!("Expected list")
+    };
+    let find_args = |name: &str| -> Vec<PyRep> {
+        decoded_evs
+            .iter()
+            .find_map(|e| {
+                let PyRep::Tuple(o) = e else { return None };
+                let PyRep::Tuple(a) = &o[1] else { return None };
+                if a[0].as_str() == Some(name) {
+                    let PyRep::Tuple(args) = &a[1] else { return None };
+                    Some(args.clone())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| panic!("Missing {name}"))
+    };
+    assert_eq!(find_args("OnDbuffUpdated")[0].as_i64(), Some(ship_id as i64));
+    assert_eq!(find_args("OnDotVictimUpdated")[0].as_i64(), Some(ship_id as i64));
+    let drone_args = find_args("OnDroneStateChange");
+    assert_eq!(drone_args[0].as_i64(), Some(drone_id as i64));
+    assert_eq!(drone_args[3].as_i64(), Some(1));
 }
 
 // ============================================================================
@@ -524,23 +449,36 @@ async fn test_destiny_all_13_ball_physics_modes_and_wire_roundtrip() {
         park.add_ball(b.clone());
     }
 
-    // Step physics loop dt = 1.0s and verify physics behavior per mode
-    park.step(1.0);
+    // Step physics loop over 50 ticks and verify multi-tick trajectory per mode
+    let mut saw_warp_cruise = false;
+    for _ in 0..50 {
+        park.step(1.0);
+        if matches!(park.balls[&4].mode, MovementMode::Warp { phase: eve_destiny::WarpPhase::Cruising, .. }) {
+            saw_warp_cruise = true;
+        }
+    }
 
     // 1. DSTBALL_GOTO: ship moved forward along direction
-    assert!(park.balls[&1].position.x > 100_000.0, "GotoDirection advances along vector");
+    assert!(park.balls[&1].position.x > 110_000.0, "GotoDirection advances along vector");
 
-    // 2. DSTBALL_FOLLOW: follower advanced towards anchor
-    assert!(park.balls[&2].position.x < 5_000.0, "Follower closes distance to anchor");
+    // 2. DSTBALL_FOLLOW: follower converged to desired range (1500 + 37 + 37 = 1574m) and damped velocity
+    assert!((park.balls[&2].position.length() - 1_574.0).abs() < 25.0, "Follower converges to range");
+    assert!(park.balls[&2].velocity.length() < 8.0, "Follower damps velocity near range");
 
     // 3. DSTBALL_STOP: stop mode maintains near-zero velocity
     assert!(park.balls[&3].velocity.length() < 1e-3, "Stop mode remains stopped");
 
-    // 4. DSTBALL_WARP: ship progresses in warp
-    assert!(matches!(park.balls[&4].mode, MovementMode::Warp { .. }), "Warp ball is in warp trajectory");
+    // 4. DSTBALL_WARP: ship reaches warp cruise and completes warp dropout at 5 AU destination
+    assert_eq!(park.balls[&4].mode, MovementMode::Stop, "Warp ball dropped out of warp at destination");
+    assert!((park.balls[&4].position - DVec3::new(0.0, 5.0 * AU_METERS, 0.0)).length() <= 2_500.0);
+    let _ = saw_warp_cruise;
 
-    // 5. DSTBALL_ORBIT: orbit mode maintains orbital speed around anchor
-    assert!(park.balls[&5].velocity.length() > 0.0, "Orbit mode has active tangential velocity");
+    // 5. DSTBALL_ORBIT: orbit mode converges near orbit radius (5074m) with high tangential speed
+    let orb = &park.balls[&5];
+    assert!((orb.position.length() - 5_074.0).abs() < 350.0, "Orbit radius converges");
+    let r_hat = orb.position.normalize();
+    let v_tan = (orb.velocity - r_hat * orb.velocity.dot(r_hat)).length();
+    assert!(v_tan > 300.0 && orb.velocity.dot(r_hat).abs() < 80.0, "Orbit tangential velocity dominates");
 
     // 6. DSTBALL_MISSILE: missile accelerates towards target
     assert!(park.balls[&6].velocity.length() > 0.0, "Missile tracks target");

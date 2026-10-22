@@ -40,6 +40,7 @@ impl Ballpark {
             troll_states: BTreeMap::new(),
             miniball_states: BTreeMap::new(),
             formation_states: BTreeMap::new(),
+            ball_harmonics: BTreeMap::new(),
         }
     }
 
@@ -316,7 +317,7 @@ impl Ballpark {
             .push(DestinyEvent::AddBall { ball: ball.clone() });
         self.balls.insert(ball_id, ball.clone());
         self.combat_states.entry(ball_id).or_default();
-        self.observer_events.entry(ball_id).or_default();
+        self.observer_events.insert(ball_id, Vec::new());
         let grid_id = self.find_or_create_grid_for_position(ball_pos);
         if let Some(g) = self.grids.get_mut(&grid_id) {
             g.members.insert(ball_id);
@@ -367,6 +368,7 @@ impl Ballpark {
         self.troll_states.remove(&ball_id);
         self.miniball_states.remove(&ball_id);
         self.formation_states.remove(&ball_id);
+        self.ball_harmonics.remove(&ball_id);
         self.target_locks.remove(&ball_id);
         for locks in self.target_locks.values_mut() {
             locks.retain(|l| l.target_id != ball_id);

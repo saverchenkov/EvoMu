@@ -91,7 +91,16 @@ async fn test_destiny_ball_lifecycle_wire_actions_and_destruction() {
     let PyRep::Tuple(hm_outer) = &harm_rep else { panic!("Expected tuple") };
     let PyRep::Tuple(hm_action) = &hm_outer[1] else { panic!("Expected action tuple") };
     assert_eq!(hm_action[0].as_str(), Some("SetBallHarmonic"));
-    assert_eq!(hm_action[1], PyRep::Tuple(vec![PyRep::Integer(100_000_001), PyRep::Integer(4)]));
+    assert_eq!(
+        hm_action[1],
+        PyRep::Tuple(vec![
+            PyRep::Integer(100_000_001),
+            PyRep::Integer(-1),
+            PyRep::Integer(-1),
+            PyRep::Integer(-1),
+            PyRep::Integer(4),
+        ])
+    );
 
     let inter_rep = encode_destiny_event(17, &DestinyEvent::SetBallInteractive { ball_id: 100_000_001, is_interactive: false }, Some(&park));
     let PyRep::Tuple(ir_outer) = &inter_rep else { panic!("Expected tuple") };
@@ -344,6 +353,14 @@ async fn test_destiny_ballpark_state_events_fleet_and_controllers() {
     let PyRep::Tuple(dk_outer) = &dock_rep else { panic!("Expected tuple") };
     let PyRep::Tuple(dk_action) = &dk_outer[1] else { panic!("Expected action tuple") };
     assert_eq!(dk_action[0].as_str(), Some("OnDockingAccepted"));
+    assert_eq!(
+        dk_action[1],
+        PyRep::Tuple(vec![
+            PyRep::List(vec![PyRep::Real(100.0), PyRep::Real(200.0), PyRep::Real(300.0)]),
+            PyRep::List(vec![PyRep::Real(0.0), PyRep::Real(0.0), PyRep::Real(0.0)]),
+            PyRep::Integer(60_003_760),
+        ])
+    );
 
     // 10. ScatterEwars
     let ewar_data = vec![0xDE, 0xAD, 0xBE, 0xEF];
