@@ -20,7 +20,7 @@ fn is_rowset(rep: &PyRep) -> bool {
 
 #[tokio::test]
 async fn test_so3_corporation_roles_public_info_governance_shares_votes_and_alliances() {
-    // parity: feat:corporation.corp-public-info, feat:corporation.corp-edit-details, feat:corporation.invitations, feat:corporation.kick-member, feat:corporation.leave-corp, feat:corporation.titles, feat:corporation.corp-tax, feat:corporation.corp-shares, feat:corporation.corp-votes, feat:corporation.ceo-change, feat:corporation.bulletins, feat:corporation.medals, feat:corporation.member-tracking, feat:corporation.member-audit, rpc:account.GetWalletDivisionsInfo, rpc:account.GiveCashFromCorpAccount, rpc:charUnboundMgr.SelectCharacterID, rpc:corpRegistry.AddBulletin, rpc:corpRegistry.AddCorporation, rpc:corpRegistry.GetBulletins, rpc:corpRegistry.InsertApplication, rpc:corpRegistry.MoveCompanyShares, rpc:corpRegistry.PayoutDividend, rpc:corpRegistry.UpdateApplicationOffer, rpc:corpRegistry.UpdateCorporation, rpc:corpRegistry.UpdateMember, rpc:corpRegistry.UpdateTitle, rpc:corpmgr.AuditMember, rpc:corpmgr.GetPublicInfo, rpc:corporationSvc.CreateMedal, rpc:corporationSvc.GiveMedalToCharacters, rpc:voteManager.InsertVote, rpc:voteManager.InsertVoteCase
+    // parity: feat:corporation.corp-public-info, feat:corporation.corp-edit-details, feat:corporation.invitations, feat:corporation.kick-member, feat:corporation.leave-corp, feat:corporation.titles, feat:corporation.corp-tax, feat:corporation.corp-shares, feat:corporation.corp-votes, feat:corporation.ceo-change, feat:corporation.bulletins, feat:corporation.medals, feat:corporation.member-tracking, feat:corporation.member-audit
     eve_testkit::attest(&[
         "feat:corporation.corp-public-info",
         "feat:corporation.corp-edit-details",
@@ -38,6 +38,7 @@ async fn test_so3_corporation_roles_public_info_governance_shares_votes_and_alli
         "feat:corporation.member-audit",
     ]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
 
     let mut sess1 = SessionState::new(301);
@@ -245,33 +246,61 @@ async fn test_so3_corporation_roles_public_info_governance_shares_votes_and_alli
         ]
     );
 
-    // 3. Public Info & Edit Details: verify all public info fields before and after UpdateCorporation
+    // 3. Public Info & Edit Details: verify all public info fields via corpmgr.GetPublicInfo & corporationSvc.GetCorpInfo
     let public_info = ctx
+        .dispatch_rpc(&mut sess2, "corpmgr", None, "GetPublicInfo", &[PyRep::Integer(corp_id)], &kw, None)
+        .await
+        .expect("GetPublicInfo");
+    let PyRep::KeyVal(pub_kv) = &public_info else { panic!("Expected KeyVal from GetPublicInfo") };
+    assert_eq!(pub_kv["corporationID"], PyRep::Integer(corp_id));
+    assert_eq!(pub_kv["corporationName"], PyRep::String("DeepSpace Logistics".into()));
+    assert_eq!(pub_kv["ticker"], PyRep::String("DSLOG".into()));
+    assert_eq!(pub_kv["tickerName"], PyRep::String("DSLOG".into()));
+    assert_eq!(pub_kv["ceoID"], PyRep::Integer(90_000_001));
+    assert_eq!(pub_kv["memberCount"], PyRep::Integer(1));
+    assert_eq!(pub_kv["taxRate"], PyRep::Real(0.075));
+    assert_eq!(pub_kv["allianceID"], PyRep::None);
+    assert_eq!(pub_kv["stationID"], PyRep::Integer(60_003_760));
+    assert_eq!(pub_kv["shares"], PyRep::Integer(1000));
+
+    let corp_info_svc = ctx
+        .dispatch_rpc(&mut sess2, "corporationSvc", None, "GetCorpInfo", &[PyRep::Integer(corp_id)], &kw, None)
+        .await
+        .expect("corporationSvc.GetCorpInfo");
+    let PyRep::KeyVal(ci_kv) = &corp_info_svc else { panic!() };
+    assert_eq!(ci_kv["ceoID"], PyRep::Integer(90_000_001));
+    assert_eq!(ci_kv["tickerName"], PyRep::String("DSLOG".into()));
+    assert_eq!(ci_kv["shares"], PyRep::Integer(1000));
+
+    // Non-CEO/non-Director (Pilot 2) must be rejected from UpdateCorporation
+    let unauth_edit = ctx
         .dispatch_rpc(
             &mut sess2,
-            "corpmgr",
+            "corpRegistry",
             None,
-            "GetPublicInfo",
-            &[PyRep::Integer(corp_id)],
+            "UpdateCorporation",
+            &[PyRep::Integer(corp_id), PyRep::String("Hijacked".into()), PyRep::String("https://bad.eve".into()), PyRep::Real(0.99)],
             &kw,
             None,
         )
         .await
-        .expect("GetPublicInfo");
-    let PyRep::KeyVal(pub_kv) = &public_info else {
-        panic!("Expected KeyVal from GetPublicInfo")
-    };
-    assert_eq!(pub_kv["corporationID"], PyRep::Integer(corp_id));
-    assert_eq!(
-        pub_kv["corporationName"],
-        PyRep::String("DeepSpace Logistics".into())
-    );
-    assert_eq!(pub_kv["ticker"], PyRep::String("DSLOG".into()));
-    assert_eq!(pub_kv["ceoID"], PyRep::Integer(90_000_001));
-    assert_eq!(pub_kv["memberCount"], PyRep::Integer(1));
-    assert_eq!(pub_kv["taxRate"], PyRep::Real(0.075));
+        .expect_err("Non-member/non-director must be denied UpdateCorporation");
+    assert!(!unauth_edit.code.is_empty());
 
-    // Pilot 1 updates corp details via V24 corpRegistry.UpdateCorporation
+    // Pilot 1 (CEO) updates corp logo via corpRegistry.UpdateLogo and corp details via corpRegistry.UpdateCorporation
+    let _ = ctx.drain_notifications_for_char(90_000_001);
+    ctx.dispatch_rpc(
+        &mut sess1,
+        "corpRegistry",
+        None,
+        "UpdateLogo",
+        &[PyRep::Integer(415), PyRep::Integer(416), PyRep::Integer(417), PyRep::Integer(681)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("corpRegistry.UpdateLogo");
+
     let update_corp = ctx
         .dispatch_rpc(
             &mut sess1,
@@ -290,32 +319,25 @@ async fn test_so3_corporation_roles_public_info_governance_shares_votes_and_alli
         .await
         .expect("UpdateCorporation");
     assert!(is_keyval(&update_corp));
+    let ceo_notifs = ctx.drain_notifications_for_char(90_000_001);
+    assert!(
+        ceo_notifs.iter().any(|n| n.event == "OnCorporationChanged"),
+        "UpdateCorporation / UpdateLogo must emit OnCorporationChanged"
+    );
 
-    // Re-read GetPublicInfo to verify persisted description, URL, and taxRate
+    // Re-read corpRegistry.GetCorporation and corpmgr.GetPublicInfo to verify persisted description, URL, taxRate, and logo
     let public_info_after = ctx
-        .dispatch_rpc(
-            &mut sess2,
-            "corpmgr",
-            None,
-            "GetPublicInfo",
-            &[PyRep::Integer(corp_id)],
-            &kw,
-            None,
-        )
+        .dispatch_rpc(&mut sess1, "corpRegistry", None, "GetCorporation", &[PyRep::Integer(corp_id)], &kw, None)
         .await
-        .expect("GetPublicInfo after UpdateCorporation");
-    let PyRep::KeyVal(pub_after_kv) = &public_info_after else {
-        panic!()
-    };
-    assert_eq!(
-        pub_after_kv["description"],
-        PyRep::String("Premier nullsec freight services".into())
-    );
-    assert_eq!(
-        pub_after_kv["url"],
-        PyRep::String("https://dslogistics.eve".into())
-    );
+        .expect("GetCorporation after UpdateCorporation");
+    let PyRep::KeyVal(pub_after_kv) = &public_info_after else { panic!() };
+    assert_eq!(pub_after_kv["description"], PyRep::String("Premier nullsec freight services".into()));
+    assert_eq!(pub_after_kv["url"], PyRep::String("https://dslogistics.eve".into()));
     assert_eq!(pub_after_kv["taxRate"], PyRep::Real(0.08));
+    assert_eq!(pub_after_kv["shape1"], PyRep::Integer(415));
+    assert_eq!(pub_after_kv["shape2"], PyRep::Integer(416));
+    assert_eq!(pub_after_kv["shape3"], PyRep::Integer(417));
+    assert_eq!(pub_after_kv["color1"], PyRep::Integer(681));
 
     // 4. Pilot 2 Application and Acceptance via V24 corpRegistry.InsertApplication / UpdateApplicationOffer
     let apply_rep = ctx

@@ -1109,6 +1109,7 @@ async fn handle_request_scans(
             ),
             ("signalStrength", PyRep::Real(sig.signal_strength)),
             ("certainty", PyRep::Real(sig.signal_strength)),
+            ("deviation", PyRep::Real(if resolved { 0.0 } else { (1.0 - sig.signal_strength) * 0.25 * AU_IN_METERS })),
             ("coveringProbes", PyRep::Integer(covering_probes as i64)),
             ("resolved", PyRep::Bool(resolved)),
             ("massStage", PyRep::String(mass_stage.into())),
@@ -1172,8 +1173,16 @@ async fn handle_recover_probes(
         target_probe_ids.push(pid);
     }
 
+    let now_unix = ctx.now_unix();
     let recovered_probes: Vec<crate::router::ActiveScannerProbe> =
         if let Ok(mut map) = ctx.active_scanner_probes.write() {
+            for p in map.values_mut() {
+                if p.owner_char_id == char_id
+                    && now_unix >= p.launched_at_unix.saturating_add(p.max_flight_time_s.max(0.0) as u64)
+                {
+                    p.state = 0;
+                }
+            }
             let ids: Vec<i64> = map
                 .values()
                 .filter(|p| {

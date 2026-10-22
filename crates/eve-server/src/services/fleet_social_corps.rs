@@ -219,7 +219,8 @@ pub(super) fn handle_corps(
             Some(Ok(PyRep::keyval([
                 ("corporationID", PyRep::Integer(cid)),
                 ("corporationName", PyRep::String(name)),
-                ("ticker", PyRep::String(ticker)),
+                ("ticker", PyRep::String(ticker.clone())),
+                ("tickerName", PyRep::String(ticker)),
                 ("ceoID", PyRep::Integer(ceo_id)),
                 ("memberCount", PyRep::Integer(m_count)),
                 ("taxRate", PyRep::Real(tax)),
@@ -227,6 +228,7 @@ pub(super) fn handle_corps(
                 ("stationID", PyRep::Integer(hq_station)),
                 ("description", PyRep::String(desc)),
                 ("url", PyRep::String(url)),
+                ("shares", PyRep::Integer(1000)),
                 ("shape1", PyRep::Integer(s1)),
                 ("shape2", PyRep::Integer(s2)),
                 ("shape3", PyRep::Integer(s3)),

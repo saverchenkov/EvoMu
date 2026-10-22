@@ -1125,215 +1125,216 @@ async fn test_so7_chat_channels_local_corp_fleet_player_and_private() {
         "feat:social.chat-private",
     ]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
 
     let mut sess1 = SessionState::new(701);
     common::login_pilot(&ctx, &mut sess1, "demo", "demo-secret").await;
-    ctx.dispatch_rpc(
-        &mut sess1,
-        "charUnboundMgr",
-        None,
-        "SelectCharacterID",
-        &[PyRep::Integer(90_000_001)],
-        &kw,
-        None,
-    )
-    .await
-    .expect("Select Pilot 1");
+    ctx.dispatch_rpc(&mut sess1, "charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(90_000_001)], &kw, None)
+        .await
+        .expect("Select Pilot 1");
 
     let mut sess2 = SessionState::new(702);
     common::login_pilot(&ctx, &mut sess2, "other", "other-secret").await;
-    ctx.dispatch_rpc(
-        &mut sess2,
-        "charUnboundMgr",
-        None,
-        "SelectCharacterID",
-        &[PyRep::Integer(90_000_002)],
-        &kw,
-        None,
-    )
-    .await
-    .expect("Select Pilot 2");
+    ctx.dispatch_rpc(&mut sess2, "charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(90_000_002)], &kw, None)
+        .await
+        .expect("Select Pilot 2");
 
     // 0. XMPP Authentication Token
     let auth_rep = ctx
-        .dispatch_rpc(
-            &mut sess1,
-            "chatAuthenticationService",
-            None,
-            "GetAuthenticationToken",
-            &[],
-            &kw,
-            None,
-        )
+        .dispatch_rpc(&mut sess1, "chatAuthenticationService", None, "GetAuthenticationToken", &[], &kw, None)
         .await
         .expect("GetAuthenticationToken");
     assert!(is_keyval(&auth_rep));
 
-    // 1. Local Chat population and movement sync
-    ctx.sync_character_local_chat(90_000_001, None, 30_000_142);
+    // 1. Local Chat (`feat:social.chat-local`): K-space immediate membership vs Wormhole/Pochven delayed local (unseen until speaking)
+    let resync_jita = ctx
+        .dispatch_rpc(&mut sess1, "XmppChatMgr", None, "ResyncSystemChannelAccess", &[], &kw, None)
+        .await
+        .expect("ResyncSystemChannelAccess Jita");
+    let PyRep::KeyVal(rj_kv) = &resync_jita else { panic!() };
+    assert_eq!(rj_kv["channelID"], PyRep::String("solarsystemid2:30000142".into()));
+    assert_eq!(rj_kv["isDelayedLocal"], PyRep::Bool(false));
     ctx.db.with_snapshot(|snap| {
-        let chan = &snap.chat_channels["solarsystemid2:30000142"];
-        assert!(chan.members.contains(&90_000_001));
+        assert!(snap.chat_channels["solarsystemid2:30000142"].members.contains(&90_000_001));
     });
 
-    // Move to wormhole system (delayed-mode local)
-    ctx.sync_character_local_chat(90_000_001, Some(30_000_142), 31_000_005);
+    // Move to wormhole system 31000005 (delayed local: unseen until speaking) and resync via XmppChatMgr.ResyncSystemChannelAccess
+    sess1.solar_system_id = Some(31_000_005);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&90_000_001).unwrap().solar_system_id = 31_000_005;
+    });
+    let resync_wh = ctx
+        .dispatch_rpc(&mut sess1, "XmppChatMgr", None, "ResyncSystemChannelAccess", &[], &kw, None)
+        .await
+        .expect("ResyncSystemChannelAccess Wormhole");
+    let PyRep::KeyVal(rw_kv) = &resync_wh else { panic!() };
+    assert_eq!(rw_kv["channelID"], PyRep::String("solarsystemid2:31000005".into()));
+    assert_eq!(rw_kv["isDelayedLocal"], PyRep::Bool(true));
     ctx.db.with_snapshot(|snap| {
-        let jita = &snap.chat_channels["solarsystemid2:30000142"];
-        assert!(!jita.members.contains(&90_000_001));
-        let wh_chan = &snap.chat_channels["solarsystemid2:31000005"];
-        assert!(
-            wh_chan.is_delayed_local,
-            "W-space local must be marked delayed local"
-        );
+        assert!(!snap.chat_channels["solarsystemid2:30000142"].members.contains(&90_000_001), "Old system local membership must be removed");
+        assert!(snap.chat_channels["solarsystemid2:31000005"].is_delayed_local);
     });
 
-    // 2. Corp, Alliance & Fleet chat channels via V24 LSC
-    let corp_chan = "corpid:1000001";
-    let join_corp1 = ctx
-        .dispatch_rpc(
-            &mut sess1,
-            "LSC",
-            None,
-            "JoinChannel",
-            &[PyRep::String(corp_chan.into())],
-            &kw,
-            None,
-        )
+    let wh_before_speak = ctx
+        .dispatch_rpc(&mut sess1, "XmppChatMgr", None, "AddCharacterToChannel", &[PyRep::String("solarsystemid2:31000005".into())], &kw, None)
         .await
-        .expect("Join Corp channel P1");
-    assert!(is_keyval(&join_corp1));
+        .expect("AddCharacterToChannel wormhole before speaking");
+    let PyRep::KeyVal(wbs_kv) = &wh_before_speak else { panic!() };
+    assert_eq!(wbs_kv["memberCount"], PyRep::Integer(0), "Pilot in wormhole delayed local must be unseen before speaking");
 
-    let join_corp2 = ctx
-        .dispatch_rpc(
-            &mut sess2,
-            "LSC",
-            None,
-            "JoinChannel",
-            &[PyRep::String(corp_chan.into())],
-            &kw,
-            None,
-        )
+    ctx.dispatch_rpc(&mut sess1, "LSC", None, "SendMessage", &[PyRep::String("solarsystemid2:31000005".into()), PyRep::String("o7 in J-space".into())], &kw, None)
         .await
-        .expect("Join Corp channel P2");
-    assert!(is_keyval(&join_corp2));
-
-    let send_corp = ctx
-        .dispatch_rpc(
-            &mut sess1,
-            "LSC",
-            None,
-            "SendMessage",
-            &[
-                PyRep::String(corp_chan.into()),
-                PyRep::String("All hands deploy to POS".into()),
-            ],
-            &kw,
-            None,
-        )
+        .expect("SendMessage in wormhole local");
+    let wh_after_speak = ctx
+        .dispatch_rpc(&mut sess1, "XmppChatMgr", None, "AddCharacterToChannel", &[PyRep::String("solarsystemid2:31000005".into())], &kw, None)
         .await
-        .expect("SendMessage Corp");
-    assert!(is_keyval(&send_corp));
+        .expect("AddCharacterToChannel wormhole after speaking");
+    let PyRep::KeyVal(was_kv) = &wh_after_speak else { panic!() };
+    assert_eq!(was_kv["memberCount"], PyRep::Integer(1), "Pilot in wormhole delayed local must become visible after speaking");
 
-    let p2_chat = ctx.drain_notifications_for_char(90_000_002);
-    assert!(
-        !p2_chat.is_empty(),
-        "Pilot 2 should receive chat notification for corp chat"
-    );
+    // Verify Pochven (30002086) also uses delayed local
+    sess1.solar_system_id = Some(30_002_086);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&90_000_001).unwrap().solar_system_id = 30_002_086;
+    });
+    let resync_poch = ctx
+        .dispatch_rpc(&mut sess1, "XmppChatMgr", None, "ResyncSystemChannelAccess", &[], &kw, None)
+        .await
+        .expect("ResyncSystemChannelAccess Pochven");
+    let PyRep::KeyVal(rp_kv) = &resync_poch else { panic!() };
+    assert_eq!(rp_kv["isDelayedLocal"], PyRep::Bool(true));
+    sess1.solar_system_id = Some(30_000_142);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&90_000_001).unwrap().solar_system_id = 30_000_142;
+    });
 
-    // 3. Player Created Custom Channels (`XmppChatMgr.CreatePlayerOwnedChannel` + `LSC.AccessControl`)
+    // 2. Corp, Alliance & Fleet chat channels (`feat:social.chat-corp-alliance-fleet`): automatic membership & revocation on change
+    let corp_rep = ctx
+        .dispatch_rpc(&mut sess1, "corpRegistry", None, "AddCorporation", &[PyRep::String("Comms Relay Corp".into()), PyRep::String("CRELY".into()), PyRep::Real(0.05)], &kw, None)
+        .await
+        .expect("AddCorporation for chat test");
+    let PyRep::KeyVal(cc_kv) = &corp_rep else { panic!() };
+    let new_corp_id = cc_kv["corporationID"].as_i64().unwrap();
+    sess1.alliance_id = Some(99_000_777);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&90_000_001).unwrap().alliance_id = Some(99_000_777);
+    });
+
+    let fleet_rep = ctx
+        .dispatch_rpc(&mut sess1, "fleetObjectHandler", None, "Init", &[PyRep::Integer(1)], &kw, None)
+        .await
+        .expect("fleetObjectHandler.Init");
+    let PyRep::KeyVal(fl_kv) = &fleet_rep else { panic!() };
+    let fleet_id = fl_kv["fleetID"].as_i64().unwrap();
+
+    ctx.dispatch_rpc(&mut sess1, "XmppChatMgr", None, "ResyncSystemChannelAccess", &[], &kw, None)
+        .await
+        .expect("ResyncSystemChannelAccess with new corp, alliance, and fleet");
+    let corp_chan_name = format!("corpid:{new_corp_id}");
+    let alliance_chan_name = "allianceid:99000777".to_string();
+    let fleet_chan_name = format!("fleetid:{fleet_id}");
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.chat_channels.get("corpid:1000009").is_some_and(|c| c.members.contains(&90_000_001)), "Old NPC corp chat access must be revoked");
+        assert!(snap.chat_channels[&corp_chan_name].members.contains(&90_000_001), "New corp chat must be auto-joined");
+        assert!(snap.chat_channels[&alliance_chan_name].members.contains(&90_000_001), "Alliance chat must be auto-joined");
+        assert!(snap.chat_channels[&fleet_chan_name].members.contains(&90_000_001), "Fleet chat must be auto-joined");
+    });
+
+    // Leave fleet and resync -> fleet chat access must be revoked
+    ctx.dispatch_rpc(&mut sess1, "fleetObjectHandler", None, "LeaveFleet", &[], &kw, None)
+        .await
+        .expect("LeaveFleet");
+    ctx.dispatch_rpc(&mut sess1, "XmppChatMgr", None, "ResyncSystemChannelAccess", &[], &kw, None)
+        .await
+        .expect("Resync after LeaveFleet");
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.chat_channels.get(&fleet_chan_name).is_some_and(|c| c.members.contains(&90_000_001)), "Fleet chat access must be revoked on LeaveFleet");
+    });
+
+    // 3. Player Created Custom Channels (`feat:social.chat-player-channels`): password, operators, mute/ban, GrantChannelOwnership
     let create_chan = ctx
         .dispatch_rpc(
             &mut sess1,
             "XmppChatMgr",
             None,
             "CreatePlayerOwnedChannel",
-            &[
-                PyRep::String("WormholeHunters".into()),
-                PyRep::None,
-                PyRep::String("Class 5 capital escalations".into()),
-            ],
+            &[PyRep::String("WormholeHunters".into()), PyRep::String("wh-pass".into()), PyRep::String("Class 5 capital escalations".into())],
             &kw,
             None,
         )
         .await
         .expect("CreatePlayerOwnedChannel");
-    assert!(is_keyval(&create_chan));
-    let custom_chan_id = match &create_chan {
-        PyRep::KeyVal(entries) => entries
-            .iter()
-            .find(|(k, _)| k.as_str() == "channelID")
-            .and_then(|(_, v)| v.as_str())
-            .unwrap()
-            .to_string(),
-        _ => "channel:wormholehunters".to_string(),
-    };
+    let PyRep::KeyVal(ch_kv) = &create_chan else { panic!() };
+    let custom_chan_id = ch_kv["channelID"].as_str().unwrap().to_string();
 
-    // Grant operator to Pilot 2 via LSC.AccessControl
-    let grant_op = ctx
-        .dispatch_rpc(
-            &mut sess1,
-            "LSC",
-            None,
-            "AccessControl",
-            &[
-                PyRep::String(custom_chan_id),
-                PyRep::Integer(90_000_002),
-                PyRep::Integer(2),
-            ],
-            &kw,
-            None,
-        )
+    // Wrong password rejected; right password accepted
+    let bad_pw = ctx
+        .dispatch_rpc(&mut sess2, "XmppChatMgr", None, "AddCharacterToChannel", &[PyRep::String(custom_chan_id.clone()), PyRep::String("wrong-pw".into())], &kw, None)
         .await
-        .expect("AccessControl");
-    assert!(is_keyval(&grant_op));
+        .expect_err("Joining password-protected player channel with wrong password must fail");
+    assert_eq!(bad_pw.code, "InvalidChannelPassword");
 
-    // 4. Private 1-on-1 Conversation (`XmppChatMgr.CreatePrivateChannel` + `LSC.SendMessage`)
+    ctx.dispatch_rpc(&mut sess2, "XmppChatMgr", None, "AddCharacterToChannel", &[PyRep::String(custom_chan_id.clone()), PyRep::String("wh-pass".into())], &kw, None)
+        .await
+        .expect("Join player channel with valid password");
+
+    // Mute and unmute Pilot 2 via XmppChatMgr.GMMute / GMUnmute, grant operator, and transfer ownership via GrantChannelOwnership
+    ctx.dispatch_rpc(&mut sess1, "XmppChatMgr", None, "GMMute", &[PyRep::Integer(90_000_002), PyRep::String(custom_chan_id.clone()), PyRep::Integer(300)], &kw, None)
+        .await
+        .expect("GMMute Pilot 2");
+    let muted_err = ctx
+        .dispatch_rpc(&mut sess2, "LSC", None, "SendMessage", &[PyRep::String(custom_chan_id.clone()), PyRep::String("Testing mute".into())], &kw, None)
+        .await
+        .expect_err("Muted member must not send messages");
+    assert_eq!(muted_err.code, "MutedInChannel");
+    ctx.dispatch_rpc(&mut sess1, "XmppChatMgr", None, "GMUnmute", &[PyRep::Integer(90_000_002), PyRep::String(custom_chan_id.clone())], &kw, None)
+        .await
+        .expect("GMUnmute Pilot 2");
+
+    ctx.dispatch_rpc(&mut sess1, "LSC", None, "AccessControl", &[PyRep::String(custom_chan_id.clone()), PyRep::Integer(90_000_002), PyRep::Integer(2)], &kw, None)
+        .await
+        .expect("AccessControl grant operator");
+    ctx.dispatch_rpc(&mut sess1, "XmppChatMgr", None, "GrantChannelOwnership", &[PyRep::String(custom_chan_id.clone()), PyRep::Integer(90_000_002)], &kw, None)
+        .await
+        .expect("GrantChannelOwnership");
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.chat_channels[&custom_chan_id].owner_id, Some(90_000_002), "Channel ownership must transfer to Pilot 2");
+    });
+
+    // 4. Private 1-on-1 Conversation (`feat:social.chat-private`): block list & CSPA fee enforcement
+    ctx.dispatch_rpc(&mut sess2, "charMgr", None, "BlockOwners", &[PyRep::List(vec![PyRep::Integer(90_000_001)])], &kw, None)
+        .await
+        .expect("Pilot 2 BlockOwners Pilot 1");
+    let blocked_err = ctx
+        .dispatch_rpc(&mut sess1, "XmppChatMgr", None, "CreatePrivateChannel", &[PyRep::Integer(90_000_002)], &kw, None)
+        .await
+        .expect_err("Blocked sender must be denied CreatePrivateChannel");
+    assert_eq!(blocked_err.code, "SenderBlockedByRecipient");
+
+    ctx.dispatch_rpc(&mut sess2, "charMgr", None, "UnblockOwners", &[PyRep::List(vec![PyRep::Integer(90_000_001)])], &kw, None)
+        .await
+        .expect("Pilot 2 UnblockOwners Pilot 1");
+    ctx.dispatch_rpc(&mut sess2, "charMgr", None, "LogSettings", &[PyRep::Real(50_000.0)], &kw, None)
+        .await
+        .expect("Pilot 2 sets 50,000 ISK CSPA fee");
+
+    let bal_before_cspa = ctx.db.with_snapshot(|snap| snap.characters[&90_000_001].balance);
     let priv_convo = ctx
-        .dispatch_rpc(
-            &mut sess1,
-            "XmppChatMgr",
-            None,
-            "CreatePrivateChannel",
-            &[PyRep::Integer(90_000_002)],
-            &kw,
-            None,
-        )
+        .dispatch_rpc(&mut sess1, "XmppChatMgr", None, "CreatePrivateChannel", &[PyRep::Integer(90_000_002)], &kw, None)
         .await
-        .expect("CreatePrivateChannel");
-    assert!(is_keyval(&priv_convo));
-    let priv_chan_id = match &priv_convo {
-        PyRep::KeyVal(entries) => entries
-            .iter()
-            .find(|(k, _)| k.as_str() == "channelID")
-            .and_then(|(_, v)| v.as_str())
-            .unwrap()
-            .to_string(),
-        _ => "private:90000001:90000002".to_string(),
-    };
+        .expect("CreatePrivateChannel with CSPA charge");
+    let PyRep::KeyVal(pc_kv) = &priv_convo else { panic!() };
+    let priv_chan_id = pc_kv["channelID"].as_str().unwrap().to_string();
+    let bal_after_cspa = ctx.db.with_snapshot(|snap| snap.characters[&90_000_001].balance);
+    assert_eq!(bal_before_cspa.0 - bal_after_cspa.0, 5_000_000, "CreatePrivateChannel must debit recipient's 50,000 ISK CSPA fee");
 
     let _ = ctx.drain_notifications_for_char(90_000_002);
     let send_priv = ctx
-        .dispatch_rpc(
-            &mut sess1,
-            "LSC",
-            None,
-            "SendMessage",
-            &[
-                PyRep::String(priv_chan_id),
-                PyRep::String("Cynosaural field is up".into()),
-            ],
-            &kw,
-            None,
-        )
+        .dispatch_rpc(&mut sess1, "LSC", None, "SendMessage", &[PyRep::String(priv_chan_id), PyRep::String("Cynosaural field is up".into())], &kw, None)
         .await
         .expect("SendMessage Private");
     assert!(is_keyval(&send_priv));
-
     let p2_priv = ctx.drain_notifications_for_char(90_000_002);
-    assert!(
-        !p2_priv.is_empty(),
-        "Pilot 2 should receive notification for private conversation"
-    );
+    assert!(!p2_priv.is_empty(), "Pilot 2 should receive notification for private conversation");
 }

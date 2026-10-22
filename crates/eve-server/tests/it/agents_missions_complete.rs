@@ -143,6 +143,7 @@ async fn test_agent_dialogue_and_access_standings() {
     // parity: feat:pve.agent-finder, feat:pve.agent-conversation, feat:pve.mission-levels, feat:pve.mission-standing-gate
     eve_testkit::attest(&["feat:pve.agent-finder", "feat:pve.agent-conversation", "feat:pve.mission-levels", "feat:pve.mission-standing-gate"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let char_id = 90_000_001;
     let mut sess = setup_pilot(&ctx, 501, "demo", "demo-secret", char_id).await;
 
@@ -205,8 +206,24 @@ async fn test_agent_dialogue_and_access_standings() {
         "DoAction",
         &[PyRep::Integer(1), PyRep::Integer(l1_agent_id)],
     )
-    .await;
-    assert!(l1_ok.is_ok(), "L1 agent must allow access at 0.0 standing");
+    .await
+    .expect("L1 agent must allow access at 0.0 standing");
+    let l1_mid = l1_ok.dict_get("missionID").and_then(|v| v.as_i64()).unwrap();
+    assert!(!l1_ok.dict_get("briefing").and_then(|v| v.as_str()).unwrap_or("").is_empty());
+    assert!(!l1_ok.dict_get("objectives").and_then(|v| v.as_str()).unwrap_or("").is_empty());
+    assert!(l1_ok.dict_get("iskReward").and_then(|v| v.as_i64()).unwrap_or(0) > 0);
+    assert!(l1_ok.dict_get("lpReward").and_then(|v| v.as_i64()).unwrap_or(0) > 0);
+    let briefing_info = rpc_call(
+        &ctx,
+        &mut sess,
+        "agentMgr",
+        "GetMissionBriefingInfo",
+        &[PyRep::Integer(l1_mid)],
+    )
+    .await
+    .expect("GetMissionBriefingInfo");
+    assert_eq!(briefing_info.dict_get("missionID").and_then(|v| v.as_i64()), Some(l1_mid));
+    assert!(!briefing_info.dict_get("briefing").and_then(|v| v.as_str()).unwrap_or("").is_empty());
 
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) {
@@ -422,8 +439,13 @@ async fn test_mission_lifecycle_offer_accept_complete_decline_abandon_and_expira
         accept_3.dict_get("state").and_then(|v| v.as_str()),
         Some("Accepted")
     );
-    assert!(accept_3.dict_get("bookmarkID").and_then(|v| v.as_i64()).unwrap_or(0) > 0);
+    let bm3_id = accept_3.dict_get("bookmarkID").and_then(|v| v.as_i64()).unwrap_or(0);
+    assert!(bm3_id > 0);
+    assert!(ctx.db.with_snapshot(|snap| snap.bookmarks.contains_key(&bm3_id)));
 
+    let st_before_quit = ctx.db.with_snapshot(|snap| {
+        snap.characters[&char_id].standings.get(&corp_id).copied().unwrap_or(0.0)
+    });
     let abandon_3 = rpc_call(
         &ctx,
         &mut sess,
@@ -433,22 +455,20 @@ async fn test_mission_lifecycle_offer_accept_complete_decline_abandon_and_expira
     )
     .await
     .expect("Abandon accepted mission");
-    assert_eq!(
-        abandon_3.dict_get("state").and_then(|v| v.as_str()),
-        Some("Quit")
-    );
-    assert_eq!(
-        abandon_3
-            .dict_get("standingPenaltyApplied")
-            .and_then(|v| v.as_bool()),
-        Some(true)
-    );
-    assert_eq!(
-        abandon_3
-            .dict_get("dungeonCleaned")
-            .and_then(|v| v.as_bool()),
-        Some(true)
-    );
+    assert_eq!(abandon_3.dict_get("state").and_then(|v| v.as_str()), Some("Quit"));
+    assert_eq!(abandon_3.dict_get("standingPenaltyApplied").and_then(|v| v.as_bool()), Some(true));
+    assert_eq!(abandon_3.dict_get("dungeonCleaned").and_then(|v| v.as_bool()), Some(true));
+    assert!(!ctx.db.with_snapshot(|snap| snap.bookmarks.contains_key(&bm3_id)));
+    let st_after_quit = ctx.db.with_snapshot(|snap| {
+        snap.characters[&char_id].standings.get(&corp_id).copied().unwrap_or(0.0)
+    });
+    assert!(st_after_quit < st_before_quit, "Quitting accepted mission must penalize standing");
+    let journal_after_quit = rpc_call(&ctx, &mut sess, "agentMgr", "GetMyJournalDetails", &[])
+        .await
+        .expect("GetMyJournalDetails after quit");
+    let PyRep::Tuple(jq_sections) = journal_after_quit else { panic!() };
+    let PyRep::List(jq_missions) = &jq_sections[0] else { panic!() };
+    assert!(jq_missions.is_empty(), "Abandoned mission must be removed from journal");
 
     // 4. Mission Expiration check
     let offer_4 = rpc_call(

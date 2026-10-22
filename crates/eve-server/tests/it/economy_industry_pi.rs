@@ -792,6 +792,7 @@ async fn test_pi_colony_command_center_pins_and_links() {
     // parity: feat:pi.planet-info, feat:pi.command-center, feat:pi.colony-limit, feat:pi.place-pins, feat:pi.links
     eve_testkit::attest(&["feat:pi.planet-info", "feat:pi.command-center", "feat:pi.colony-limit", "feat:pi.place-pins", "feat:pi.links"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let mut s1 = setup_pilot(&ctx, 502, "demo", "demo-secret", 90_000_001).await;
 
     let pinfo = rpc(&ctx, &mut s1, "planetMgr", "GetPlanetInfo", &[PyRep::Integer(JITA_PLANET_ID)],)
@@ -1086,17 +1087,14 @@ async fn test_pi_colony_command_center_pins_and_links() {
     assert_eq!(s1_bal_after_up1.0 - s1_bal_after_up.0, 213_000_000);
     assert_eq!(s1_bal_before_up1.0 - s1_bal_after_up.0, 271_000_000);
 
-    let cc_lvl = rpc(
-        &ctx,
-        &mut s1,
-        "planetMgr",
-        "GetCommandCenterLevel",
-        &[PyRep::Integer(JITA_PLANET_ID)],
-    )
-    .await
-    .expect("GetCommandCenterLevel");
+    let cc_lvl = rpc(&ctx, &mut s1, "planetMgr", "GetCommandCenterLevel", &[PyRep::Integer(JITA_PLANET_ID)])
+        .await
+        .expect("GetCommandCenterLevel");
     assert_eq!(cc_lvl, PyRep::Integer(3));
 
+    // Place all 6 required pin categories: Extractor Control Unit (2848), Basic factory (2469),
+    // Advanced factory (2480), High-Tech factory (2482), Storage facility (2541), and Launchpad (2544),
+    // plus links (including level-0 link and level-2 upgraded link) within CPU/PG budget with ISK cost
     let bal_before_pins_links = ctx.db.get_character(90_000_001).unwrap().balance;
     let net_res = rpc(
         &ctx,
@@ -1106,45 +1104,15 @@ async fn test_pi_colony_command_center_pins_and_links() {
         &[
             PyRep::Integer(JITA_PLANET_ID),
             PyRep::List(vec![
-                PyRep::Tuple(vec![
-                    PyRep::Integer(1),
-                    PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(2)]),
-                    PyRep::Integer(2848),
-                    PyRep::Real(0.36),
-                    PyRep::Real(-1.10),
-                ]),
-                PyRep::Tuple(vec![
-                    PyRep::Integer(1),
-                    PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(3)]),
-                    PyRep::Integer(2469),
-                    PyRep::Real(0.37),
-                    PyRep::Real(-1.09),
-                ]),
-                PyRep::Tuple(vec![
-                    PyRep::Integer(1),
-                    PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(4)]),
-                    PyRep::Integer(2469),
-                    PyRep::Real(0.38),
-                    PyRep::Real(-1.08),
-                ]),
-                PyRep::Tuple(vec![
-                    PyRep::Integer(3),
-                    PyRep::Integer(cc_pin_id),
-                    PyRep::Integer(2),
-                    PyRep::Integer(0),
-                ]),
-                PyRep::Tuple(vec![
-                    PyRep::Integer(3),
-                    PyRep::Integer(2),
-                    PyRep::Integer(3),
-                    PyRep::Integer(0),
-                ]),
-                PyRep::Tuple(vec![
-                    PyRep::Integer(5),
-                    PyRep::Integer(cc_pin_id),
-                    PyRep::Integer(2),
-                    PyRep::Integer(2),
-                ]),
+                PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(2)]), PyRep::Integer(2848), PyRep::Real(0.36), PyRep::Real(-1.10)]),
+                PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(3)]), PyRep::Integer(2469), PyRep::Real(0.37), PyRep::Real(-1.09)]),
+                PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(4)]), PyRep::Integer(2480), PyRep::Real(0.38), PyRep::Real(-1.08)]),
+                PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(5)]), PyRep::Integer(2482), PyRep::Real(0.39), PyRep::Real(-1.07)]),
+                PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(6)]), PyRep::Integer(2541), PyRep::Real(0.40), PyRep::Real(-1.06)]),
+                PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(7)]), PyRep::Integer(2544), PyRep::Real(0.41), PyRep::Real(-1.05)]),
+                PyRep::Tuple(vec![PyRep::Integer(3), PyRep::Integer(cc_pin_id), PyRep::Integer(2), PyRep::Integer(0)]),
+                PyRep::Tuple(vec![PyRep::Integer(3), PyRep::Integer(2), PyRep::Integer(3), PyRep::Integer(0)]),
+                PyRep::Tuple(vec![PyRep::Integer(5), PyRep::Integer(cc_pin_id), PyRep::Integer(2), PyRep::Integer(2)]),
             ]),
         ],
     )
@@ -1152,7 +1120,7 @@ async fn test_pi_colony_command_center_pins_and_links() {
     .expect("UserUpdateNetwork place pins and links");
 
     let PyRep::KeyVal(net_kv) = net_res else { panic!("Expected KeyVal"); };
-    assert_eq!(net_kv.get("pinsCount"), Some(&PyRep::Integer(4)));
+    assert_eq!(net_kv.get("pinsCount"), Some(&PyRep::Integer(7)));
     assert_eq!(net_kv.get("linksCount"), Some(&PyRep::Integer(2)));
     let bal_after_pins_links = ctx.db.get_character(90_000_001).unwrap().balance;
     let isk_spent_reported = net_kv.get("totalCostISK").and_then(|v| v.as_f64()).unwrap();
@@ -1162,6 +1130,19 @@ async fn test_pi_colony_command_center_pins_and_links() {
         IskCents::from_f64_isk(isk_spent_reported).0
     );
     let Some(PyRep::List(net_pins)) = net_kv.get("pins") else { panic!("Expected pins list"); };
+    let mut sum_pin_cpu = 0.0;
+    let mut sum_pin_pg = 0.0;
+    for p in net_pins {
+        let PyRep::KeyVal(pkv) = p else { panic!() };
+        sum_pin_cpu += pkv.get("cpuUsage").and_then(|v| v.as_f64()).unwrap();
+        sum_pin_pg += pkv.get("powergridUsage").and_then(|v| v.as_f64()).unwrap();
+    }
+    for req_type in [2848i64, 2469, 2480, 2482, 2541, 2544] {
+        assert!(
+            net_pins.iter().any(|p| matches!(p, PyRep::KeyVal(kv) if kv.get("typeID") == Some(&PyRep::Integer(req_type)))),
+            "Placed colony network must include pin type {req_type}"
+        );
+    }
     let proc_pin_id = net_pins
         .iter()
         .find_map(|p| match p {
@@ -1181,6 +1162,7 @@ async fn test_pi_colony_command_center_pins_and_links() {
         let PyRep::KeyVal(lkv) = link_rep else { panic!("Expected KeyVal"); };
         let lvl = lkv.get("level").and_then(|v| v.as_i64()).unwrap() as u8;
         let len_km = lkv.get("lengthKm").and_then(|v| v.as_f64()).unwrap();
+        assert!(len_km > 0.0, "Planetary link must have positive geodesic lengthKm");
         let l_cpu = lkv.get("cpuUsage").and_then(|v| v.as_f64()).unwrap();
         let l_pg = lkv.get("powergridUsage").and_then(|v| v.as_f64()).unwrap();
         let l_bw = lkv.get("bandwidth").and_then(|v| v.as_f64()).unwrap();
@@ -1193,8 +1175,8 @@ async fn test_pi_colony_command_center_pins_and_links() {
     }
     let cpu_used = net_kv.get("cpuUsed").and_then(|v| v.as_f64()).unwrap();
     let power_used = net_kv.get("powerUsed").and_then(|v| v.as_f64()).unwrap();
-    assert!((cpu_used - (800.0 + total_link_cpu)).abs() < 1e-5);
-    assert!((power_used - (4200.0 + total_link_pg)).abs() < 1e-5);
+    assert!((cpu_used - (sum_pin_cpu + total_link_cpu)).abs() < 1e-5);
+    assert!((power_used - (sum_pin_pg + total_link_pg)).abs() < 1e-5);
 
     let budget_err = rpc(
         &ctx,
@@ -1205,15 +1187,7 @@ async fn test_pi_colony_command_center_pins_and_links() {
             PyRep::Integer(JITA_PLANET_ID),
             PyRep::List(
                 (10..=14)
-                    .map(|idx| {
-                        PyRep::Tuple(vec![
-                            PyRep::Integer(1),
-                            PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(idx)]),
-                            PyRep::Integer(2848),
-                            PyRep::Real(0.40 + (idx as f64) * 0.005),
-                            PyRep::Real(-1.05),
-                        ])
-                    })
+                    .map(|idx| PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(idx)]), PyRep::Integer(2848), PyRep::Real(0.40 + (idx as f64) * 0.005), PyRep::Real(-1.05)]))
                     .collect(),
             ),
         ],
@@ -1232,7 +1206,7 @@ async fn test_pi_colony_command_center_pins_and_links() {
     .await
     .expect("GetFullNetworkForOwner");
     let PyRep::KeyVal(fn_kv) = full_net else { panic!("Expected KeyVal"); };
-    assert!(matches!(fn_kv.get("pins"), Some(PyRep::List(l)) if l.len() == 4));
+    assert!(matches!(fn_kv.get("pins"), Some(PyRep::List(l)) if l.len() == 7));
     assert!(matches!(fn_kv.get("links"), Some(PyRep::List(l)) if l.len() == 2));
 
     let extractors = rpc(

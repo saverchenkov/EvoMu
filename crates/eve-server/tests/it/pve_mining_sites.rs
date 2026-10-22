@@ -527,12 +527,12 @@ async fn test_e5_agent_finder_and_conversation_lifecycle() {
     // ------------------------------------------------------------------------
     // 4. Mission Quit via DoAction(11) (feat:pve.mission-quit)
     // ------------------------------------------------------------------------
-    let initial_corp_st = ctx.db.with_snapshot(|snap| {
-        snap.characters
-            .get(&char_id)
-            .and_then(|c| c.standings.get(&l1_agent[3].as_i64().unwrap()))
-            .copied()
-            .unwrap_or(0.0)
+    let (initial_agent_st, initial_corp_st) = ctx.db.with_snapshot(|snap| {
+        let ch = &snap.characters[&char_id];
+        (
+            ch.standings.get(&l1_agent_id).copied().unwrap_or(0.0),
+            ch.standings.get(&l1_agent[3].as_i64().unwrap()).copied().unwrap_or(0.0),
+        )
     });
 
     let quit_res = ctx
@@ -556,20 +556,24 @@ async fn test_e5_agent_finder_and_conversation_lifecycle() {
     assert_eq!(quit_kv["dungeonCleaned"], PyRep::Bool(true));
     assert_eq!(quit_kv["standingPenaltyApplied"], PyRep::Bool(true));
 
-    // Verify standing penalty (-0.1) was applied
-    let post_quit_corp_st = ctx.db.with_snapshot(|snap| {
-        snap.characters
-            .get(&char_id)
-            .and_then(|c| c.standings.get(&l1_agent[3].as_i64().unwrap()))
-            .copied()
-            .unwrap_or(0.0)
+    // Verify standing penalty (-0.1) was applied to both agent and corporation
+    let (post_quit_agent_st, post_quit_corp_st) = ctx.db.with_snapshot(|snap| {
+        let ch = &snap.characters[&char_id];
+        (
+            ch.standings.get(&l1_agent_id).copied().unwrap_or(0.0),
+            ch.standings.get(&l1_agent[3].as_i64().unwrap()).copied().unwrap_or(0.0),
+        )
     });
+    assert!(
+        (post_quit_agent_st - (initial_agent_st - 0.1)).abs() < 1e-4,
+        "Quitting must penalize agent standing by -0.1"
+    );
     assert!(
         (post_quit_corp_st - (initial_corp_st - 0.1)).abs() < 1e-4,
         "Quitting must penalize corporation standing by -0.1"
     );
 
-    // Verify bookmark was cleaned up
+    // Verify bookmark was cleaned up and mission was removed from journal
     let bm_exists_after_quit = ctx
         .db
         .with_snapshot(|snap| snap.bookmarks.contains_key(&bm_id));
@@ -577,6 +581,13 @@ async fn test_e5_agent_finder_and_conversation_lifecycle() {
         !bm_exists_after_quit,
         "Mission pocket bookmark must be cleaned up on quit"
     );
+    let journal_after_quit = ctx
+        .dispatch_rpc(&mut sess, "agentMgr", None, "GetMyJournalDetails", &[], &kw, None)
+        .await
+        .expect("GetMyJournalDetails after quit");
+    let PyRep::Tuple(jq_sections) = journal_after_quit else { panic!() };
+    let PyRep::List(jq_missions) = &jq_sections[0] else { panic!() };
+    assert!(jq_missions.is_empty(), "Quit mission must be removed from journal");
 
     // ------------------------------------------------------------------------
     // 5. Mission Decline via DoAction(9) (feat:pve.mission-decline)
@@ -622,6 +633,17 @@ async fn test_e5_agent_finder_and_conversation_lifecycle() {
         PyRep::Bool(false),
         "First decline in 4h incurs no standing penalty"
     );
+    let st_after_dec1 = ctx.db.with_snapshot(|snap| {
+        snap.characters[&char_id]
+            .standings
+            .get(&l1_agent[3].as_i64().unwrap())
+            .copied()
+            .unwrap_or(0.0)
+    });
+    assert!(
+        (st_after_dec1 - post_quit_corp_st).abs() < 1e-6,
+        "First decline in 4h must not change corporation standing"
+    );
 
     // Offer again immediately
     let offer3_res = ctx
@@ -663,6 +685,17 @@ async fn test_e5_agent_finder_and_conversation_lifecycle() {
         dec2_kv["standingPenaltyApplied"],
         PyRep::Bool(true),
         "Repeated decline within 4h MUST apply standing penalty"
+    );
+    let st_after_dec2 = ctx.db.with_snapshot(|snap| {
+        snap.characters[&char_id]
+            .standings
+            .get(&l1_agent[3].as_i64().unwrap())
+            .copied()
+            .unwrap_or(0.0)
+    });
+    assert!(
+        st_after_dec2 < st_after_dec1,
+        "Repeated decline within 4h must reduce corporation standing"
     );
 }
 

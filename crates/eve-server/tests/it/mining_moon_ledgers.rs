@@ -883,7 +883,7 @@ async fn test_mn12_c6_reprocessing_yield_tax_modules_and_structure() {
 // ====================================================================
 #[tokio::test]
 async fn test_mn13_mn14_mn16_moon_mining_probes_jackpot_decay_and_ledger() {
-    // parity: feat:scanning.moon-survey-probe, feat:mining.moon-resources, feat:mining.moon-extraction, feat:mining.moon-extraction-duration-yield, feat:mining.moon-fracture, feat:mining.moon-chunk-auto-fracture, feat:mining.moon-ore-types, feat:mining.moon-ore-class-by-security, feat:mining.moon-jackpot, feat:mining.moon-field-lifetime, feat:structures.service-moon-drill, feat:modules.mining-survey-chipset, feat:mining.metenox, feat:mining.corp-ledger, rpc:autoMoonMining.RequestMiningCycleOutput, rpc:autoMoonMining.RequestMiningDetails, rpc:corpMiningLedger.GetObserverLedger, rpc:corpMiningLedger.GetObserversWithMiningEvents, rpc:moonExtractions.CancelExtraction, rpc:moonExtractions.FractureChunkWithStructure, rpc:moonExtractions.GetExtractionAndEventIDFromStructureID, rpc:moonExtractions.GetExtractionsForCorp, rpc:moonExtractions.GetMoonResourcesForStructure, rpc:moonExtractions.StartNewExtraction
+    // parity: feat:scanning.moon-survey-probe, feat:mining.moon-resources, feat:mining.moon-extraction, feat:mining.moon-extraction-duration-yield, feat:mining.moon-fracture, feat:mining.moon-chunk-auto-fracture, feat:mining.moon-ore-types, feat:mining.moon-ore-class-by-security, feat:mining.moon-jackpot, feat:mining.moon-field-lifetime, feat:structures.service-moon-drill, feat:modules.mining-survey-chipset, feat:mining.metenox, feat:mining.corp-ledger
     eve_testkit::attest(&["feat:scanning.moon-survey-probe", "feat:mining.moon-resources", "feat:mining.moon-extraction", "feat:mining.moon-extraction-duration-yield", "feat:mining.moon-fracture", "feat:mining.moon-chunk-auto-fracture", "feat:mining.moon-ore-types", "feat:mining.moon-ore-class-by-security", "feat:mining.moon-jackpot", "feat:mining.moon-field-lifetime", "feat:structures.service-moon-drill", "feat:modules.mining-survey-chipset", "feat:mining.metenox", "feat:mining.corp-ledger"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
@@ -939,6 +939,7 @@ async fn test_mn13_mn14_mn16_moon_mining_probes_jackpot_decay_and_ledger() {
     });
     ctx.ship_fittings.write().unwrap().remove(&ship_id);
 
+    let _ = ctx.drain_notifications_for_char(char_id);
     let probe_res = ctx
         .dispatch_rpc(
             &mut session,
@@ -953,6 +954,18 @@ async fn test_mn13_mn14_mn16_moon_mining_probes_jackpot_decay_and_ledger() {
         .expect("Activate Survey Probe Launcher I");
     assert_eq!(get_dict_val(&probe_res, "moonID").unwrap().as_i64(), Some(40009087));
     assert_eq!(get_dict_val(&probe_res, "remainingInLauncher").unwrap().as_i64(), Some(4));
+    let moon_notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(moon_notifs.iter().any(|n| n.event == "OnNewMoonProbe"), "Must emit OnNewMoonProbe");
+    let scan_complete = moon_notifs
+        .iter()
+        .find(|n| n.event == "OnMoonScanComplete")
+        .expect("Moon survey probe impact must emit OnMoonScanComplete");
+    assert_eq!(scan_complete.args.first().and_then(|a| a.as_i64()), Some(40009087));
+    let Some(PyRep::Dict(scan_ores)) = scan_complete.args.get(1) else {
+        panic!("OnMoonScanComplete must include ore composition Dict");
+    };
+    assert!(!scan_ores.is_empty(), "OnMoonScanComplete composition Dict must not be empty");
+    assert!(moon_notifs.iter().any(|n| n.event == "OnRemoveMoonProbe"), "Must emit OnRemoveMoonProbe");
     let PyRep::List(probe_resources) = get_dict_val(&probe_res, "composition").unwrap() else {
         panic!("Expected composition list");
     };

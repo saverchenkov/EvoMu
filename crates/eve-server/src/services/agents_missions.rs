@@ -336,6 +336,8 @@ async fn abandon_or_decline_mission(
                         let cur = ch.standings.get(&corp_id).copied().unwrap_or(0.0);
                         let next = (cur - 0.1).max(-10.0);
                         ch.standings.insert(corp_id, next);
+                        let ag_cur = ch.standings.get(&m_agent_id).copied().unwrap_or(0.0);
+                        ch.standings.insert(m_agent_id, (ag_cur - 0.1).max(-10.0));
                         actual_delta = Some(if cur - 0.1 >= -10.0 { -0.1 } else { -10.0 - cur });
                     }
                     if let Some(delta) = actual_delta {
@@ -361,6 +363,8 @@ async fn abandon_or_decline_mission(
                         let cur = ch.standings.get(&corp_id).copied().unwrap_or(0.0);
                         let next = (cur - 0.05).max(-10.0);
                         ch.standings.insert(corp_id, next);
+                        let ag_cur = ch.standings.get(&m_agent_id).copied().unwrap_or(0.0);
+                        ch.standings.insert(m_agent_id, (ag_cur - 0.05).max(-10.0));
                         actual_delta = Some(if cur - 0.05 >= -10.0 { -0.05 } else { -10.0 - cur });
                     }
                     if let Some(delta) = actual_delta {

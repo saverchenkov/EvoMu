@@ -360,6 +360,7 @@ pub(super) async fn handle_bookmarks(
             let label_opt = args.get(1).and_then(|a| a.as_str());
             let memo_opt = args.get(2).and_then(|a| a.as_str());
             let folder_id_opt = args.get(3).and_then(|a| a.as_i64());
+            let expiry_hours_opt = args.get(4).and_then(|a| a.as_i64());
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let corp_id = session
@@ -369,16 +370,20 @@ pub(super) async fn handle_bookmarks(
                     .bookmarks
                     .get(&bm_id)
                     .and_then(|b| shared_bookmark_corp_id(snap, b));
+                let has_manage_access = corp_id.is_some_and(|cid| {
+                    bm_corp == Some(cid)
+                        && has_corp_bookmark_admin_role(snap, session, char_id, cid)
+                });
                 let Some(bm) = snap.bookmarks.get_mut(&bm_id) else {
                     return Err(BridgeRpcError {
                         code: "BookmarkNotFound".into(),
                         message: format!("Bookmark {bm_id} not found"),
                     });
                 };
-                if bm.owner_id != char_id && !(bm.is_shared && corp_id.is_some() && bm_corp == corp_id) {
+                if bm.owner_id != char_id && !(bm.is_shared && has_manage_access) {
                     return Err(BridgeRpcError {
                         code: "AccessDenied".into(),
-                        message: "Cannot edit another character's bookmark".into(),
+                        message: "Cannot edit another character's bookmark without manage/admin rights".into(),
                     });
                 }
                 if let Some(l) = label_opt {
@@ -394,6 +399,21 @@ pub(super) async fn handle_bookmarks(
             });
             match res {
                 Ok((is_shared, folder_id, corp_id)) => {
+                    let expiry_unix = {
+                        let mut s = BM_SCAN_STATE.lock().unwrap();
+                        if let Some(eh) = expiry_hours_opt {
+                            if eh > 0 {
+                                let exp = ctx.now_unix_secs() + (eh as u64) * 3600;
+                                s.bookmark_expiry.insert(bm_id, exp);
+                                exp
+                            } else {
+                                s.bookmark_expiry.remove(&bm_id);
+                                0
+                            }
+                        } else {
+                            s.bookmark_expiry.get(&bm_id).copied().unwrap_or(0)
+                        }
+                    };
                     ctx.notify(
                         NotificationTarget::Character(char_id),
                         "OnRefreshBookmarks",
@@ -416,6 +436,7 @@ pub(super) async fn handle_bookmarks(
                     Some(Ok(PyRep::keyval([
                         ("bookmarkID", PyRep::Integer(bm_id)),
                         ("updated", PyRep::Bool(true)),
+                        ("expiryUnix", PyRep::Integer(expiry_unix as i64)),
                     ])))
                 }
                 Err(e) => Some(Err(e)),
@@ -445,12 +466,14 @@ pub(super) async fn handle_bookmarks(
                         });
                     };
                     let bm_corp = shared_bookmark_corp_id(snap, bm);
-                    if bm.owner_id != char_id
-                        && !(bm.is_shared && corp_id.is_some() && bm_corp == corp_id)
-                    {
+                    let has_manage_access = corp_id.is_some_and(|cid| {
+                        bm_corp == Some(cid)
+                            && has_corp_bookmark_admin_role(snap, session, char_id, cid)
+                    });
+                    if bm.owner_id != char_id && !(bm.is_shared && has_manage_access) {
                         return Err(BridgeRpcError {
                             code: "AccessDenied".into(),
-                            message: "Cannot delete another character's bookmark".into(),
+                            message: "Cannot delete another character's bookmark without manage/admin rights".into(),
                         });
                     }
                     if bm.is_shared {

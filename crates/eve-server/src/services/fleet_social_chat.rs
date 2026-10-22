@@ -118,35 +118,81 @@ fn handle_chat_rpc(
         ("XmppChatMgr", "EnsureResourceWarsChannelExists")
         | ("XmppChatMgr", "AddCharacterToChannel")
         | ("XmppChatMgr", "ResyncSystemChannelAccess") => {
+            if method == "AddCharacterToChannel" {
+                return handle_chat_rpc(ctx, session, "LSC", "JoinChannel", args);
+            }
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let chan_id = args
-                .first()
-                .and_then(|a| a.as_str())
-                .unwrap_or("solarsystemid2:30000142");
-            let is_delayed = is_delayed_local_channel(chan_id);
-            ctx.db.with_mut_snapshot(|snap| {
-                let chan = snap
-                    .chat_channels
-                    .entry(chan_id.to_string())
-                    .or_insert_with(|| ChatChannelRecord {
-                        channel_id: chan_id.to_string(),
-                        name: chan_id.to_string(),
-                        motd: String::new(),
-                        owner_id: Some(char_id),
-                        members: HashSet::from([char_id]),
-                        is_system_local: chan_id.starts_with("solarsystemid2:"),
-                        solar_system_id: parse_channel_system_id(chan_id),
-                        is_private: chan_id.starts_with("private:"),
-                        operators: HashSet::from([char_id]),
-                        password: None,
-                        is_delayed_local: is_delayed,
-                    });
-                chan.members.insert(char_id);
+            let explicit_arg = args.first().and_then(|a| a.as_str());
+            let (local_chan, synced_channels, is_delayed) = ctx.db.with_mut_snapshot(|snap| {
+                let ch = snap.characters.get(&char_id);
+                let sys_id = explicit_arg
+                    .and_then(parse_channel_system_id)
+                    .or(session.solar_system_id)
+                    .or_else(|| ch.map(|c| c.solar_system_id))
+                    .unwrap_or(30_000_142);
+                let corp_id = session
+                    .corporation_id
+                    .or_else(|| ch.map(|c| c.corporation_id))
+                    .unwrap_or(1_000_009);
+                let alliance_id = session.alliance_id.or_else(|| ch.and_then(|c| c.alliance_id));
+                let fleet_id = session.fleet_id.or_else(|| {
+                    snap.fleets
+                        .values()
+                        .find(|f| f.members.contains(&char_id))
+                        .map(|f| f.fleet_id)
+                });
+                let local_id = explicit_arg
+                    .filter(|s| !s.starts_with("solarsystemid2:"))
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| format!("solarsystemid2:{sys_id}"));
+                let corp_chan = format!("corpid:{corp_id}");
+                let mut target_chans = vec![local_id.clone(), corp_chan];
+                if let Some(aid) = alliance_id {
+                    target_chans.push(format!("allianceid:{aid}"));
+                }
+                if let Some(fid) = fleet_id {
+                    target_chans.push(format!("fleetid:{fid}"));
+                }
+                for c in snap.chat_channels.values_mut() {
+                    let is_sys_scoped = c.channel_id.starts_with("solarsystemid2:")
+                        || c.channel_id.starts_with("corpid:")
+                        || c.channel_id.starts_with("allianceid:")
+                        || c.channel_id.starts_with("fleetid:");
+                    if is_sys_scoped && !target_chans.contains(&c.channel_id) {
+                        c.members.remove(&char_id);
+                    }
+                }
+                for cid in &target_chans {
+                    let delayed = is_delayed_local_channel(cid);
+                    let chan = snap
+                        .chat_channels
+                        .entry(cid.clone())
+                        .or_insert_with(|| ChatChannelRecord {
+                            channel_id: cid.clone(),
+                            name: cid.clone(),
+                            motd: String::new(),
+                            owner_id: Some(char_id),
+                            members: HashSet::from([char_id]),
+                            is_system_local: cid.starts_with("solarsystemid2:"),
+                            solar_system_id: parse_channel_system_id(cid),
+                            is_private: false,
+                            operators: HashSet::from([char_id]),
+                            password: None,
+                            is_delayed_local: delayed,
+                        });
+                    chan.members.insert(char_id);
+                }
+                let is_del = is_delayed_local_channel(&local_id);
+                (local_id, target_chans, is_del)
             });
             Some(Ok(PyRep::keyval([
-                ("channelID", PyRep::String(chan_id.to_string())),
+                ("channelID", PyRep::String(local_chan)),
                 ("exists", PyRep::Bool(true)),
                 ("isDelayedLocal", PyRep::Bool(is_delayed)),
+                (
+                    "channels",
+                    PyRep::List(synced_channels.into_iter().map(PyRep::String).collect()),
+                ),
             ])))
         }
 
@@ -182,35 +228,7 @@ fn handle_chat_rpc(
         }
 
         ("XmppChatMgr", "CreatePrivateChannel") => {
-            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let recipient_id = args.first().and_then(|a| a.as_i64()).unwrap_or(char_id);
-            let c1 = char_id.min(recipient_id);
-            let c2 = char_id.max(recipient_id);
-            let chan_id = format!("private:{c1}:{c2}");
-            ctx.db.with_mut_snapshot(|snap| {
-                let chan = snap
-                    .chat_channels
-                    .entry(chan_id.clone())
-                    .or_insert_with(|| ChatChannelRecord {
-                        channel_id: chan_id.clone(),
-                        name: format!("Private ({c1}, {c2})"),
-                        motd: String::new(),
-                        owner_id: Some(char_id),
-                        members: HashSet::new(),
-                        is_system_local: false,
-                        solar_system_id: None,
-                        is_private: true,
-                        operators: HashSet::from([char_id]),
-                        password: None,
-                        is_delayed_local: false,
-                    });
-                chan.members.insert(char_id);
-                chan.members.insert(recipient_id);
-            });
-            Some(Ok(PyRep::keyval([
-                ("channelID", PyRep::String(chan_id)),
-                ("recipientID", PyRep::Integer(recipient_id)),
-            ])))
+            handle_chat_rpc(ctx, session, "LSC", "Invite", args)
         }
 
         ("XmppChatMgr", "GrantChannelOwnership") => {
@@ -310,11 +328,7 @@ fn handle_chat_rpc(
                 .and_then(|a| a.as_str())
                 .unwrap_or("Channel moderation mute");
             let until = ctx.now_unix() + duration_sec;
-            ctx.social_extras
-                .lock()
-                .unwrap()
-                .muted_in_channel
-                .insert((chan_id.to_string(), target_id), (until, reason.to_string()));
+            ctx.social_extras.lock().unwrap().muted_in_channel.insert((chan_id.to_string(), target_id), (until, reason.to_string()));
             Some(Ok(PyRep::keyval([
                 ("channelID", PyRep::String(chan_id.to_string())),
                 ("characterID", PyRep::Integer(target_id)),
@@ -326,44 +340,22 @@ fn handle_chat_rpc(
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let target_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
             let chan_id = args.get(1).and_then(|a| a.as_str()).unwrap_or("global");
-            let is_authorized = session.has_gm_role()
-                || ctx.db.with_snapshot(|snap| {
-                    snap.chat_channels
-                        .get(chan_id)
-                        .is_some_and(|c| c.owner_id == Some(char_id) || c.operators.contains(&char_id))
-                });
+            let is_authorized = session.has_gm_role() || ctx.db.with_snapshot(|snap| {
+                snap.chat_channels.get(chan_id).is_some_and(|c| c.owner_id == Some(char_id) || c.operators.contains(&char_id))
+            });
             if !is_authorized {
-                return Some(Err(BridgeRpcError {
-                    code: "ChatAccessDenied".into(),
-                    message: "GMUnmute requires channel operator or GM role".into(),
-                }));
+                return Some(Err(BridgeRpcError { code: "ChatAccessDenied".into(), message: "GMUnmute requires channel operator or GM role".into() }));
             }
-            ctx.social_extras
-                .lock()
-                .unwrap()
-                .muted_in_channel
-                .remove(&(chan_id.to_string(), target_id));
+            ctx.social_extras.lock().unwrap().muted_in_channel.remove(&(chan_id.to_string(), target_id));
             Some(Ok(PyRep::Bool(true)))
         }
 
         ("XmppChatMgr", "GetHelpChannel") => {
             let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let lang = args
-                .first()
-                .and_then(|a| a.as_str())
-                .filter(|s| !s.is_empty())
-                .unwrap_or(&session.language_id)
-                .trim()
-                .to_ascii_lowercase();
+            let lang = args.first().and_then(|a| a.as_str()).filter(|s| !s.is_empty()).unwrap_or(&session.language_id).trim().to_ascii_lowercase();
             let chan = match lang.as_str() {
-                "de" => "help_de",
-                "fr" => "help_fr",
-                "ru" => "help_ru",
-                "ja" => "help_ja",
-                "zh" => "help_zh",
-                "ko" => "help_ko",
-                "es" => "help_es",
-                _ => "help_en",
+                "de" => "help_de", "fr" => "help_fr", "ru" => "help_ru", "ja" => "help_ja",
+                "zh" => "help_zh", "ko" => "help_ko", "es" => "help_es", _ => "help_en",
             };
             Some(Ok(PyRep::String(chan.into())))
         }
@@ -373,19 +365,11 @@ fn handle_chat_rpc(
             let now = ctx.now_unix();
             let is_rookie = ctx.db.with_snapshot(|snap| {
                 snap.characters.get(&char_id).is_some_and(|ch| {
-                    let effective_created = if ch.create_date_unix == 1_704_067_200 {
-                        now
-                    } else {
-                        ch.create_date_unix
-                    };
+                    let effective_created = if ch.create_date_unix == 1_704_067_200 { now } else { ch.create_date_unix };
                     now.saturating_sub(effective_created) <= 30 * 86_400
                 })
             });
-            if is_rookie {
-                Some(Ok(PyRep::String("rookie_help".into())))
-            } else {
-                Some(Ok(PyRep::None))
-            }
+            Some(Ok(if is_rookie { PyRep::String("rookie_help".into()) } else { PyRep::None }))
         }
 
         ("XmppChatMgr", "GetDeprecatedPrefsFallback") | ("XmppChatMgr", "Hostname") => {
@@ -395,28 +379,16 @@ fn handle_chat_rpc(
         (_, "GetChannels") | (_, "GetMyMessages") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let rows = ctx.db.with_snapshot(|snap| {
-                snap.chat_channels
-                    .values()
-                    .filter(|c| c.members.contains(&char_id))
-                    .map(|c| {
-                        vec![
-                            PyRep::String(c.channel_id.clone()),
-                            PyRep::String(c.name.clone()),
-                            PyRep::String(c.motd.clone()),
-                            PyRep::Integer(c.members.len() as i64),
-                            PyRep::Bool(c.is_delayed_local),
-                        ]
-                    })
-                    .collect()
+                snap.chat_channels.values().filter(|c| c.members.contains(&char_id)).map(|c| vec![
+                    PyRep::String(c.channel_id.clone()),
+                    PyRep::String(c.name.clone()),
+                    PyRep::String(c.motd.clone()),
+                    PyRep::Integer(c.members.len() as i64),
+                    PyRep::Bool(c.is_delayed_local),
+                ]).collect()
             });
             Some(Ok(PyRep::rowset(
-                vec![
-                    "channelID",
-                    "displayName",
-                    "motd",
-                    "memberCount",
-                    "isDelayedLocal",
-                ],
+                vec!["channelID", "displayName", "motd", "memberCount", "isDelayedLocal"],
                 rows,
             )))
         }
@@ -710,20 +682,31 @@ fn handle_chat_rpc(
             };
             let (is_blocked, cspa_charge) = {
                 let s = ctx.social_extras.lock().unwrap();
-                let friendly = s
-                    .contacts
-                    .get(&recipient_id)
-                    .and_then(|m| m.get(&char_id))
-                    .is_some_and(|&(st, _, _)| st > 0.0);
-                let blocked = s
-                    .blocked
-                    .get(&recipient_id)
-                    .is_some_and(|b| b.contains(&char_id))
+                let (esi_blocked, esi_friendly) = ctx
+                    .esi_state
+                    .char_contacts
+                    .read()
+                    .ok()
+                    .and_then(|g| g.get(&recipient_id).and_then(|l| l.iter().find(|e| e.contact_id == char_id)).map(|e| (e.is_blocked, e.standing > 0.0)))
+                    .unwrap_or((false, false));
+                let friendly = esi_friendly
+                    || s.contacts
+                        .get(&recipient_id)
+                        .and_then(|m| m.get(&char_id))
+                        .is_some_and(|&(st, _, _)| st > 0.0);
+                let blocked = (esi_blocked
+                    || s.blocked
+                        .get(&recipient_id)
+                        .is_some_and(|b| b.contains(&char_id)))
                     && !friendly;
                 let charge = if friendly || recipient_id == char_id {
                     IskCents(0)
                 } else {
-                    s.cspa_charges.get(&recipient_id).copied().unwrap_or(IskCents(0))
+                    s.cspa_charges
+                        .get(&recipient_id)
+                        .copied()
+                        .or_else(|| ctx.db.with_snapshot(|snap| snap.character_cspa_charges.get(&recipient_id).copied()))
+                        .unwrap_or(IskCents(0))
                 };
                 (blocked, charge)
             };

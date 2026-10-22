@@ -229,6 +229,7 @@ async fn test_so2_corporation_roles_applications_and_wallet_divisions() {
         "feat:wallet.corp-divisions",
     ]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
 
     // 1. Setup Pilot 1 (CEO) and Pilot 2 (Applicant -> Member)
@@ -260,40 +261,101 @@ async fn test_so2_corporation_roles_applications_and_wallet_divisions() {
     .await
     .expect("Select Pilot 2");
 
-    // 2. Pilot 1 creates corporation
+    // 2. Pilot 1 creates corporation: verify Corporation Management (3363) skill check, 1,599,800 ISK fee,
+    // duplicate name/ticker rejection, CEO assignment, and removal from old NPC corp (1000009)
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(skills) = snap.skills.get_mut(&90_000_001) {
+            skills.remove(&3363);
+        }
+    });
+    let no_skill = ctx
+        .dispatch_rpc(
+            &mut sess1,
+            "corpRegistry",
+            None,
+            "AddCorporation",
+            &[PyRep::String("Vanguard Industries".into()), PyRep::String("VANG".into()), PyRep::Real(0.05)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("AddCorporation without Corporation Management skill must fail");
+    assert_eq!(no_skill.code, "MissingCorporationManagementSkill");
+
+    let bal_before = ctx.db.with_mut_snapshot(|snap| {
+        snap.skills.entry(90_000_001).or_default().insert(
+            3363,
+            eve_db::TrainedSkillRecord { type_id: 3363, level: 1, skill_points: 250.0 },
+        );
+        snap.characters[&90_000_001].balance
+    });
+
     let create_corp = ctx
         .dispatch_rpc(
             &mut sess1,
             "corpRegistry",
             None,
             "AddCorporation",
-            &[
-                PyRep::String("Vanguard Industries".into()),
-                PyRep::String("VANG".into()),
-                PyRep::Real(0.05),
-            ],
+            &[PyRep::String("Vanguard Industries".into()), PyRep::String("VANG".into()), PyRep::Real(0.05)],
             &kw,
             None,
         )
         .await
         .expect("AddCorporation");
-    assert!(is_keyval(&create_corp));
+    let PyRep::KeyVal(cc_kv) = &create_corp else { panic!() };
     let corp_id = sess1.corporation_id.expect("sess1 corp_id set");
+    assert_eq!(cc_kv["corporationID"], PyRep::Integer(corp_id));
+    assert_eq!(cc_kv["ticker"], PyRep::String("VANG".into()));
 
-    // Verify 7 wallet divisions initialized
-    let divs_rep = ctx
+    ctx.db.with_snapshot(|snap| {
+        let ch = &snap.characters[&90_000_001];
+        assert_eq!(bal_before.0 - ch.balance.0, 159_980_000, "AddCorporation must deduct 1,599,800 ISK");
+        assert_eq!(ch.corporation_id, corp_id, "Creator must leave old NPC corp and join new corp");
+        assert_ne!(ch.corporation_id, 1_000_009);
+        assert_eq!(snap.corporations[&corp_id].ceo_id, 90_000_001);
+    });
+
+    // Duplicate name or ticker must be rejected
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.skills.entry(90_000_002).or_default().insert(
+            3363,
+            eve_db::TrainedSkillRecord { type_id: 3363, level: 1, skill_points: 250.0 },
+        );
+    });
+    let dup_err = ctx
         .dispatch_rpc(
-            &mut sess1,
-            "account",
+            &mut sess2,
+            "corpRegistry",
             None,
-            "GetWalletDivisionsInfo",
-            &[PyRep::Integer(corp_id)],
+            "AddCorporation",
+            &[PyRep::String("Vanguard Industries".into()), PyRep::String("VANG".into()), PyRep::Real(0.05)],
             &kw,
             None,
         )
         .await
+        .expect_err("Duplicate corporation name/ticker must be rejected");
+    assert_eq!(dup_err.code, "CorpNameOrTickerTaken");
+
+    // Verify 7 wallet divisions initialized and rename division 2 via corpRegistry.UpdateDivisionNames
+    let divs_rep = ctx
+        .dispatch_rpc(&mut sess1, "account", None, "GetWalletDivisionsInfo", &[PyRep::Integer(corp_id)], &kw, None)
+        .await
         .expect("GetWalletDivisionsInfo");
-    assert!(is_rowset(&divs_rep));
+    let PyRep::Rowset { rows: init_divs, .. } = &divs_rep else { panic!() };
+    assert_eq!(init_divs.len(), 7, "Corporation must have 7 wallet divisions (1000..1006 / 1..7)");
+    assert_eq!(init_divs[0], vec![PyRep::Integer(1), PyRep::String("Master Wallet".into()), PyRep::Real(0.0)]);
+
+    ctx.dispatch_rpc(
+        &mut sess1,
+        "corpRegistry",
+        None,
+        "UpdateDivisionNames",
+        &[PyRep::Integer(2), PyRep::String("Combat SRP".into())],
+        &kw,
+        None,
+    )
+    .await
+    .expect("UpdateDivisionNames");
 
     // 3. Pilot 2 applies for membership
     let apply_rep = ctx
@@ -302,10 +364,7 @@ async fn test_so2_corporation_roles_applications_and_wallet_divisions() {
             "corpRegistry",
             None,
             "InsertApplication",
-            &[
-                PyRep::Integer(corp_id),
-                PyRep::String("Combat pilot requesting invitation".into()),
-            ],
+            &[PyRep::Integer(corp_id), PyRep::String("Combat pilot requesting invitation".into())],
             &kw,
             None,
         )
@@ -315,26 +374,14 @@ async fn test_so2_corporation_roles_applications_and_wallet_divisions() {
 
     // 4. Pilot 1 checks applications
     let apps_rep = ctx
-        .dispatch_rpc(
-            &mut sess1,
-            "corpRegistry",
-            None,
-            "GetApplications",
-            &[PyRep::Integer(corp_id)],
-            &kw,
-            None,
-        )
+        .dispatch_rpc(&mut sess1, "corpRegistry", None, "GetApplications", &[PyRep::Integer(corp_id)], &kw, None)
         .await
         .expect("GetApplications");
-    assert!(is_rowset(&apps_rep));
+    let PyRep::Rowset { rows: app_rows, .. } = &apps_rep else { panic!() };
+    assert_eq!(app_rows.len(), 1);
 
     let app_id = ctx.db.with_snapshot(|snap| {
-        snap.corporations[&corp_id]
-            .applications
-            .keys()
-            .next()
-            .copied()
-            .unwrap()
+        snap.corporations[&corp_id].applications.keys().next().copied().unwrap()
     });
 
     // 5. Pilot 1 accepts Pilot 2's application
@@ -352,40 +399,14 @@ async fn test_so2_corporation_roles_applications_and_wallet_divisions() {
         .expect("UpdateApplicationOffer");
     assert!(is_keyval(&accept_rep));
 
-    // Verify Pilot 2 is now in corporation
+    // Verify Pilot 2 is now in corporation, and cannot transfer division funds before Accountant role is granted
     let members_rep = ctx
-        .dispatch_rpc(
-            &mut sess1,
-            "corpRegistry",
-            None,
-            "GetMembers",
-            &[PyRep::Integer(corp_id)],
-            &kw,
-            None,
-        )
+        .dispatch_rpc(&mut sess1, "corpRegistry", None, "GetMembers", &[PyRep::Integer(corp_id)], &kw, None)
         .await
         .expect("GetMembers");
-    assert!(is_rowset(&members_rep));
+    let PyRep::Rowset { rows: mem_rows, .. } = &members_rep else { panic!() };
+    assert_eq!(mem_rows.len(), 2);
 
-    // 6. Pilot 1 updates Pilot 2's roles to Accountant (ROLE_ACCOUNTANT = 1 << 8)
-    let update_roles = ctx
-        .dispatch_rpc(
-            &mut sess1,
-            "corpRegistry",
-            None,
-            "UpdateMember",
-            &[
-                PyRep::Integer(90_000_002),
-                PyRep::Integer(corp_roles::ROLE_ACCOUNTANT as i64),
-            ],
-            &kw,
-            None,
-        )
-        .await
-        .expect("UpdateMember");
-    assert!(is_keyval(&update_roles));
-
-    // Fund division 1 directly in snapshot for transfer test
     ctx.db
         .try_with_mut_snapshot(|snap| {
             let corp = snap.corporations.get_mut(&corp_id).unwrap();
@@ -394,8 +415,38 @@ async fn test_so2_corporation_roles_applications_and_wallet_divisions() {
         })
         .unwrap();
 
-    // 7. Pilot 2 transfers funds between division 1 and division 2
     sess2.corporation_id = Some(corp_id);
+    sess2.corp_role = 0;
+    let unauth_xfer = ctx
+        .dispatch_rpc(
+            &mut sess2,
+            "account",
+            None,
+            "GiveCashFromCorpAccount",
+            &[PyRep::Integer(1), PyRep::Integer(2), PyRep::Real(10_000_000.0)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Member without Accountant/Director role must be denied GiveCashFromCorpAccount");
+    assert_eq!(unauth_xfer.code, "CorpRoleDenied");
+
+    // 6. Pilot 1 updates Pilot 2's roles to Accountant (ROLE_ACCOUNTANT = 1 << 8)
+    let update_roles = ctx
+        .dispatch_rpc(
+            &mut sess1,
+            "corpRegistry",
+            None,
+            "UpdateMember",
+            &[PyRep::Integer(90_000_002), PyRep::Integer(corp_roles::ROLE_ACCOUNTANT as i64)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("UpdateMember");
+    assert!(is_keyval(&update_roles));
+
+    // 7. Pilot 2 transfers funds between division 1 and division 2 and verifies via GetWalletDivisionsInfo
     sess2.corp_role = corp_roles::ROLE_ACCOUNTANT;
     let transfer_rep = ctx
         .dispatch_rpc(
@@ -403,11 +454,7 @@ async fn test_so2_corporation_roles_applications_and_wallet_divisions() {
             "account",
             None,
             "GiveCashFromCorpAccount",
-            &[
-                PyRep::Integer(1),
-                PyRep::Integer(2),
-                PyRep::Real(10_000_000.0),
-            ],
+            &[PyRep::Integer(1), PyRep::Integer(2), PyRep::Real(10_000_000.0)],
             &kw,
             None,
         )
@@ -415,12 +462,13 @@ async fn test_so2_corporation_roles_applications_and_wallet_divisions() {
         .expect("GiveCashFromCorpAccount");
     assert!(is_keyval(&transfer_rep));
 
-    // Verify balances in snapshot
-    ctx.db.with_snapshot(|snap| {
-        let corp = &snap.corporations[&corp_id];
-        assert_eq!(corp.wallet_divisions[0].balance.to_wire_f64(), 40_000_000.0);
-        assert_eq!(corp.wallet_divisions[1].balance.to_wire_f64(), 10_000_000.0);
-    });
+    let divs_after = ctx
+        .dispatch_rpc(&mut sess1, "account", None, "GetWalletDivisionsInfo", &[PyRep::Integer(corp_id)], &kw, None)
+        .await
+        .expect("GetWalletDivisionsInfo after transfer");
+    let PyRep::Rowset { rows: divs_after_rows, .. } = &divs_after else { panic!() };
+    assert_eq!(divs_after_rows[0], vec![PyRep::Integer(1), PyRep::String("Master Wallet".into()), PyRep::Real(40_000_000.0)]);
+    assert_eq!(divs_after_rows[1], vec![PyRep::Integer(2), PyRep::String("Combat SRP".into()), PyRep::Real(10_000_000.0)]);
 
     // 8. Verify role bitmask enforcement: Pilot 2 (not director/CEO) cannot UpdateMember
     let denied = ctx

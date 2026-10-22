@@ -17,7 +17,7 @@ fn is_keyval(rep: &PyRep) -> bool {
 
 #[tokio::test]
 async fn test_so4_bookmarks_folders_shared_folders_and_scan_bookmarks() {
-    // parity: feat:bookmarks.create, feat:bookmarks.update-delete, feat:bookmarks.folders, feat:bookmarks.shared-folders, feat:scanning.scan-bookmark, rpc:accessGroupBookmarkMgr.AddFolder, rpc:accessGroupBookmarkMgr.AddToKnownFolders, rpc:accessGroupBookmarkMgr.CreateSubfolder, rpc:accessGroupBookmarkMgr.DeleteFolder, rpc:accessGroupBookmarkMgr.DeleteSubfolder, rpc:accessGroupBookmarkMgr.RemoveFromKnownFolders, rpc:charUnboundMgr.SelectCharacterID, rpc:corpRegistry.AddCorporation, rpc:corpRegistry.InsertApplication, rpc:corpRegistry.UpdateApplicationOffer, rpc:scanMgr.GetSystemScanMgr
+    // parity: feat:bookmarks.create, feat:bookmarks.update-delete, feat:bookmarks.folders, feat:bookmarks.shared-folders, feat:scanning.scan-bookmark, rpc:accessGroupBookmarkMgr.AddFolder, rpc:accessGroupBookmarkMgr.AddToKnownFolders, rpc:accessGroupBookmarkMgr.CreateSubfolder, rpc:accessGroupBookmarkMgr.DeleteFolder, rpc:accessGroupBookmarkMgr.DeleteSubfolder, rpc:accessGroupBookmarkMgr.RemoveFromKnownFolders, rpc:corpRegistry.AddCorporation, rpc:corpRegistry.InsertApplication, rpc:corpRegistry.UpdateApplicationOffer, rpc:scanMgr.GetSystemScanMgr
     eve_testkit::attest(&[
         "feat:bookmarks.create",
         "feat:bookmarks.update-delete",
@@ -26,6 +26,7 @@ async fn test_so4_bookmarks_folders_shared_folders_and_scan_bookmarks() {
         "feat:scanning.scan-bookmark",
     ]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
 
     let mut sess1 = SessionState::new(401);
@@ -116,74 +117,51 @@ async fn test_so4_bookmarks_folders_shared_folders_and_scan_bookmarks() {
         .expect_err("6th subfolder must fail with MaxSubfoldersReached");
     assert_eq!(sub_limit_err.code, "MaxSubfoldersReached");
 
-    // DeleteSubfolder and verify removal
-    for &sf_id in &subfolder_ids[1..] {
-        ctx.dispatch_rpc(
-            &mut sess1,
-            "accessGroupBookmarkMgr",
-            None,
-            "DeleteSubfolder",
-            &[PyRep::Integer(sf_id)],
-            &kw,
-            None,
-        )
+    // Verify all 5 subfolders via GetFolderInfo, then DeleteSubfolder and verify removal
+    let fi_before = ctx
+        .dispatch_rpc(&mut sess1, "accessGroupBookmarkMgr", None, "GetFolderInfo", &[PyRep::Integer(folder_id)], &kw, None)
         .await
-        .expect("DeleteSubfolder");
+        .expect("GetFolderInfo before DeleteSubfolder");
+    let PyRep::Rowset { rows: subs_b, .. } = &fi_before else { panic!() };
+    assert_eq!(subs_b.len(), 6, "GetFolderInfo must list 1 root folder + all 5 created subfolders");
+
+    for &sf_id in &subfolder_ids[1..] {
+        ctx.dispatch_rpc(&mut sess1, "accessGroupBookmarkMgr", None, "DeleteSubfolder", &[PyRep::Integer(sf_id)], &kw, None)
+            .await
+            .expect("DeleteSubfolder");
     }
+    let fi_after = ctx
+        .dispatch_rpc(&mut sess1, "accessGroupBookmarkMgr", None, "GetFolderInfo", &[PyRep::Integer(folder_id)], &kw, None)
+        .await
+        .expect("GetFolderInfo after DeleteSubfolder");
+    let PyRep::Rowset { rows: subs_a, .. } = &fi_after else { panic!() };
+    assert_eq!(subs_a.len(), 2, "GetFolderInfo must reflect subfolder deletion (1 root + 1 subfolder)");
 
     // Create 4 more personal root folders (total 5) and verify 6th personal folder fails with MaxPersonalFoldersReached
     let mut extra_folders = Vec::new();
     for idx in 2..=5 {
         let ef_rep = ctx
-            .dispatch_rpc(
-                &mut sess1,
-                "accessGroupBookmarkMgr",
-                None,
-                "AddFolder",
-                &[PyRep::String(format!("Personal Folder {idx}"))],
-                &kw,
-                None,
-            )
+            .dispatch_rpc(&mut sess1, "accessGroupBookmarkMgr", None, "AddFolder", &[PyRep::String(format!("Personal Folder {idx}"))], &kw, None)
             .await
             .expect("AddFolder within limit");
-        let PyRep::KeyVal(ef_kv) = &ef_rep else {
-            panic!()
-        };
+        let PyRep::KeyVal(ef_kv) = &ef_rep else { panic!() };
         extra_folders.push(ef_kv["folderID"].as_i64().unwrap());
     }
     let root_limit_err = ctx
-        .dispatch_rpc(
-            &mut sess1,
-            "accessGroupBookmarkMgr",
-            None,
-            "AddFolder",
-            &[PyRep::String("Personal Folder 6 Overflow".into())],
-            &kw,
-            None,
-        )
+        .dispatch_rpc(&mut sess1, "accessGroupBookmarkMgr", None, "AddFolder", &[PyRep::String("Personal Folder 6 Overflow".into())], &kw, None)
         .await
         .expect_err("6th personal root folder must fail with MaxPersonalFoldersReached");
     assert_eq!(root_limit_err.code, "MaxPersonalFoldersReached");
 
     for ef_id in extra_folders {
-        ctx.dispatch_rpc(
-            &mut sess1,
-            "accessGroupBookmarkMgr",
-            None,
-            "DeleteFolder",
-            &[PyRep::Integer(ef_id)],
-            &kw,
-            None,
-        )
-        .await
-        .expect("Delete extra folder");
+        ctx.dispatch_rpc(&mut sess1, "accessGroupBookmarkMgr", None, "DeleteFolder", &[PyRep::Integer(ef_id)], &kw, None)
+            .await
+            .expect("Delete extra folder");
     }
 
-    // 2. Create Bookmark in Folder (`BookmarkLocation`) and verify stored coordinates, item, and folder
+    // 2. Create Bookmark in Folder (`BookmarkLocation` & `accessGroupBookmarkMgr.BookmarkStaticLocation`) and verify stored coordinates, item, subfolder, and expiry
     let ship_id = sess1.ship_id.expect("Pilot 1 ship_id");
-    ctx.dispatch_rpc(&mut sess1, "stationSvc", None, "Undock", &[], &kw, None)
-        .await
-        .expect("Undock Pilot 1");
+    ctx.dispatch_rpc(&mut sess1, "stationSvc", None, "Undock", &[], &kw, None).await.expect("Undock Pilot 1");
     let sys = ctx.systems.get_or_spawn(30_000_142);
     let expected_pos = DVec3::new(125_000.0, -45_000.0, 80_000.0);
     let _ = sys.set_ball_position(ship_id, expected_pos).await;
@@ -191,83 +169,81 @@ async fn test_so4_bookmarks_folders_shared_folders_and_scan_bookmarks() {
     let bm1_rep = ctx
         .dispatch_rpc(
             &mut sess1,
-            "bookmark",
+            "accessGroupBookmarkMgr",
             None,
-            "BookmarkLocation",
+            "BookmarkStaticLocation",
             &[
                 PyRep::String("Deep Safe 1".into()),
                 PyRep::Integer(ship_id),
                 PyRep::String("100 AU off plane".into()),
                 PyRep::Integer(folder_id),
+                PyRep::Integer(subfolder_ids[0]),
+                PyRep::Integer(3),
             ],
             &kw,
             None,
         )
         .await
-        .expect("BookmarkLocation");
-    let PyRep::KeyVal(bm1_kv) = &bm1_rep else {
-        panic!("Expected KeyVal from BookmarkLocation")
-    };
+        .expect("BookmarkStaticLocation");
+    let PyRep::KeyVal(bm1_kv) = &bm1_rep else { panic!("Expected KeyVal from BookmarkStaticLocation") };
     let bm_id = bm1_kv["bookmarkID"].as_i64().unwrap();
+    assert_eq!(bm1_kv["label"], PyRep::String("Deep Safe 1".into()));
 
-    // Verify stored coordinates, itemID, memo, and folderID via GetBookmarks
+    // Verify stored coordinates, itemID, memo, folderID, and subfolderID via GetBookmarks and GetMyActiveBookmarks
     let bms_rep = ctx
-        .dispatch_rpc(&mut sess1, "bookmark", None, "GetBookmarks", &[], &kw, None)
+        .dispatch_rpc(&mut sess1, "accessGroupBookmarkMgr", None, "GetMyActiveBookmarks", &[], &kw, None)
         .await
-        .expect("GetBookmarks");
-    let PyRep::Rowset { rows: bm_rows, .. } = &bms_rep else {
-        panic!("Expected Rowset from GetBookmarks")
-    };
-    let bm_row = bm_rows
+        .expect("GetMyActiveBookmarks");
+    let PyRep::Tuple(bms_tup) = &bms_rep else { panic!("Expected 3-tuple from GetMyActiveBookmarks") };
+    let PyRep::List(bm_rows) = &bms_tup[1] else { panic!("Expected bookmarks list in GetMyActiveBookmarks[1]") };
+    let bm_kv = bm_rows
         .iter()
-        .find(|r| r[0] == PyRep::Integer(bm_id))
-        .expect("Created bookmark must appear in GetBookmarks");
-    assert_eq!(bm_row[1], PyRep::String("Deep Safe 1".into()));
-    assert_eq!(bm_row[2], PyRep::Integer(30_000_142));
-    assert_eq!(bm_row[3], PyRep::Real(expected_pos.x));
-    assert_eq!(bm_row[4], PyRep::Real(expected_pos.y));
-    assert_eq!(bm_row[5], PyRep::Real(expected_pos.z));
-    assert_eq!(bm_row[6], PyRep::Integer(ship_id));
-    assert_eq!(bm_row[7], PyRep::String("100 AU off plane".into()));
-    assert_eq!(bm_row[8], PyRep::Integer(folder_id));
+        .filter_map(|r| if let PyRep::KeyVal(kv) = r { Some(kv) } else { None })
+        .find(|kv| kv.get("bookmarkID") == Some(&PyRep::Integer(bm_id)))
+        .expect("Created bookmark must appear in GetMyActiveBookmarks");
+    assert_eq!(bm_kv["label"], PyRep::String("Deep Safe 1".into()));
+    assert_eq!(bm_kv["solarSystemID"], PyRep::Integer(30_000_142));
+    assert_eq!(bm_kv["locationID"], PyRep::Integer(30_000_142));
+    assert_eq!(bm_kv["x"], PyRep::Real(expected_pos.x));
+    assert_eq!(bm_kv["y"], PyRep::Real(expected_pos.y));
+    assert_eq!(bm_kv["z"], PyRep::Real(expected_pos.z));
+    assert_eq!(bm_kv["itemID"], PyRep::Integer(ship_id));
+    assert_eq!(bm_kv["memo"], PyRep::String("100 AU off plane".into()));
+    assert_eq!(bm_kv["folderID"], PyRep::Integer(folder_id));
+    assert_eq!(bm_kv["subfolderID"], PyRep::Integer(subfolder_ids[0]));
 
-    // 3. Update Bookmark and verify persisted change via GetBookmarks
+    // 3. Update Bookmark (memo/label, note, folder, and expiry) via accessGroupBookmarkMgr.UpdateBookmark
     let update_bm = ctx
         .dispatch_rpc(
             &mut sess1,
-            "bookmark",
+            "accessGroupBookmarkMgr",
             None,
             "UpdateBookmark",
             &[
                 PyRep::Integer(bm_id),
                 PyRep::String("Deep Safe 1 (Checked)".into()),
                 PyRep::String("Updated memo".into()),
+                PyRep::Integer(folder_id),
+                PyRep::Integer(48),
             ],
             &kw,
             None,
         )
         .await
         .expect("UpdateBookmark");
-    assert!(is_keyval(&update_bm));
+    let PyRep::KeyVal(upd_kv) = &update_bm else { panic!() };
+    assert!(upd_kv["expiryUnix"].as_i64().unwrap_or(0) > 0);
 
     let bms_after_update = ctx
         .dispatch_rpc(&mut sess1, "bookmark", None, "GetBookmarks", &[], &kw, None)
         .await
         .expect("GetBookmarks after UpdateBookmark");
-    let PyRep::Rowset {
-        rows: bm_rows_upd, ..
-    } = &bms_after_update
-    else {
-        panic!()
-    };
-    let bm_row_upd = bm_rows_upd
-        .iter()
-        .find(|r| r[0] == PyRep::Integer(bm_id))
-        .unwrap();
+    let PyRep::Rowset { rows: bm_rows_upd, .. } = &bms_after_update else { panic!() };
+    let bm_row_upd = bm_rows_upd.iter().find(|r| r[0] == PyRep::Integer(bm_id)).unwrap();
     assert_eq!(bm_row_upd[1], PyRep::String("Deep Safe 1 (Checked)".into()));
     assert_eq!(bm_row_upd[7], PyRep::String("Updated memo".into()));
 
-    // 4. Shared Bookmark Folders: create corporation via real RPCs, verify access-group rights,
+    // 4. Shared Bookmark Folders: create corporation via real RPCs, verify access-group rights (view/use vs manage/admin),
     // AddToKnownFolders / RemoveFromKnownFolders, and OnSharedBookmarksFolderUpdated notifications
     let create_corp_rep = ctx
         .dispatch_rpc(
@@ -275,150 +251,165 @@ async fn test_so4_bookmarks_folders_shared_folders_and_scan_bookmarks() {
             "corpRegistry",
             None,
             "AddCorporation",
-            &[
-                PyRep::String("Cartography Syndicate".into()),
-                PyRep::String("CARTO".into()),
-                PyRep::Real(0.05),
-            ],
+            &[PyRep::String("Cartography Syndicate".into()), PyRep::String("CARTO".into()), PyRep::Real(0.05)],
             &kw,
             None,
         )
         .await
         .expect("AddCorporation for shared bookmarks");
-    let PyRep::KeyVal(cc_kv) = &create_corp_rep else {
-        panic!()
-    };
+    let PyRep::KeyVal(cc_kv) = &create_corp_rep else { panic!() };
     let corp_id = cc_kv["corporationID"].as_i64().unwrap();
 
     let apply_rep = ctx
-        .dispatch_rpc(
-            &mut sess2,
-            "corpRegistry",
-            None,
-            "InsertApplication",
-            &[
-                PyRep::Integer(corp_id),
-                PyRep::String("Scout joining".into()),
-            ],
-            &kw,
-            None,
-        )
+        .dispatch_rpc(&mut sess2, "corpRegistry", None, "InsertApplication", &[PyRep::Integer(corp_id), PyRep::String("Scout joining".into())], &kw, None)
         .await
         .expect("Pilot 2 InsertApplication");
-    let PyRep::KeyVal(app_kv) = &apply_rep else {
-        panic!()
-    };
+    let PyRep::KeyVal(app_kv) = &apply_rep else { panic!() };
     let app_id = app_kv["applicationID"].as_i64().unwrap();
-    ctx.dispatch_rpc(
-        &mut sess1,
-        "corpRegistry",
-        None,
-        "UpdateApplicationOffer",
-        &[PyRep::Integer(app_id)],
-        &kw,
-        None,
-    )
-    .await
-    .expect("Pilot 1 UpdateApplicationOffer");
+    ctx.dispatch_rpc(&mut sess1, "corpRegistry", None, "UpdateApplicationOffer", &[PyRep::Integer(app_id)], &kw, None)
+        .await
+        .expect("Pilot 1 UpdateApplicationOffer");
 
-    // Pilot 2 (normal corp member without Director/CEO access-group rights) cannot create a shared corp folder
+    // Pilot 2 (normal corp member with view/use rights only) cannot create a shared corp folder
     let p2_denied_shared = ctx
-        .dispatch_rpc(
-            &mut sess2,
-            "accessGroupBookmarkMgr",
-            None,
-            "AddFolder",
-            &[
-                PyRep::String("Unauthorized Shared".into()),
-                PyRep::Bool(true),
-            ],
-            &kw,
-            None,
-        )
+        .dispatch_rpc(&mut sess2, "accessGroupBookmarkMgr", None, "AddFolder", &[PyRep::String("Unauthorized Shared".into()), PyRep::Bool(true)], &kw, None)
         .await
         .expect_err("Regular member without access-group rights must be denied shared AddFolder");
     assert_eq!(p2_denied_shared.code, "BookmarkAccessDenied");
 
-    // Pilot 1 (CEO) creates shared folder and emits OnSharedBookmarksFolderUpdated
+    // Pilot 1 (CEO) creates shared folder and shared bookmark, emitting OnSharedBookmarksFolderUpdated
     let _ = ctx.drain_notifications_for_char(90_000_002);
     let shared_folder_rep = ctx
+        .dispatch_rpc(&mut sess1, "accessGroupBookmarkMgr", None, "AddFolder", &[PyRep::String("Corp Tacticals".into()), PyRep::Bool(true)], &kw, None)
+        .await
+        .expect("AddFolder shared");
+    let PyRep::KeyVal(sf_kv) = &shared_folder_rep else { panic!() };
+    let shared_folder_id = sf_kv["folderID"].as_i64().unwrap();
+    assert_eq!(sf_kv["isShared"], PyRep::Bool(true));
+
+    let shared_bm_rep = ctx
         .dispatch_rpc(
             &mut sess1,
             "accessGroupBookmarkMgr",
             None,
-            "AddFolder",
-            &[PyRep::String("Corp Tacticals".into()), PyRep::Bool(true)],
+            "BookmarkStaticLocation",
+            &[PyRep::String("Corp Gate Ping".into()), PyRep::Integer(ship_id), PyRep::String("Shared tactical".into()), PyRep::Integer(shared_folder_id)],
             &kw,
             None,
         )
         .await
-        .expect("AddFolder shared");
-    let PyRep::KeyVal(sf_kv) = &shared_folder_rep else {
-        panic!()
-    };
-    let shared_folder_id = sf_kv["folderID"].as_i64().unwrap();
-    assert_eq!(sf_kv["isShared"], PyRep::Bool(true));
+        .expect("Create shared bookmark");
+    let PyRep::KeyVal(sbm1_kv) = &shared_bm_rep else { panic!() };
+    let shared_bm_id = sbm1_kv["bookmarkID"].as_i64().unwrap();
 
     // Pilot 2 subscribes to the shared folder via AddToKnownFolders and receives OnSharedBookmarksFolderUpdated
     let add_known_rep = ctx
+        .dispatch_rpc(&mut sess2, "accessGroupBookmarkMgr", None, "AddToKnownFolders", &[PyRep::Integer(shared_folder_id)], &kw, None)
+        .await
+        .expect("AddToKnownFolders");
+    let PyRep::KeyVal(ak_kv) = &add_known_rep else { panic!() };
+    assert_eq!(ak_kv["subscribed"], PyRep::Bool(true));
+    let p2_shared_notifs = ctx.drain_notifications_for_char(90_000_002);
+    assert!(
+        p2_shared_notifs.iter().any(|n| n.event == "OnSharedBookmarksFolderUpdated"),
+        "AddToKnownFolders must emit OnSharedBookmarksFolderUpdated"
+    );
+
+    // Pilot 2 has view/use access to the shared bookmark, but cannot edit or delete it without manage/admin role
+    let p2_active_bms = ctx
+        .dispatch_rpc(&mut sess2, "accessGroupBookmarkMgr", None, "GetMyActiveBookmarks", &[], &kw, None)
+        .await
+        .expect("Pilot 2 GetMyActiveBookmarks");
+    let PyRep::Tuple(p2_tup) = &p2_active_bms else { panic!() };
+    let PyRep::List(p2_bm_rows) = &p2_tup[1] else { panic!() };
+    assert!(
+        p2_bm_rows.iter().any(|r| matches!(r, PyRep::KeyVal(kv) if kv.get("bookmarkID") == Some(&PyRep::Integer(shared_bm_id)))),
+        "Subscribed corp member must see shared bookmark"
+    );
+
+    let p2_edit_denied = ctx
         .dispatch_rpc(
             &mut sess2,
             "accessGroupBookmarkMgr",
             None,
-            "AddToKnownFolders",
-            &[PyRep::Integer(shared_folder_id)],
+            "UpdateBookmark",
+            &[PyRep::Integer(shared_bm_id), PyRep::String("Tampered".into()), PyRep::String("No rights".into())],
             &kw,
             None,
         )
         .await
-        .expect("AddToKnownFolders");
-    let PyRep::KeyVal(ak_kv) = &add_known_rep else {
-        panic!()
-    };
-    assert_eq!(ak_kv["subscribed"], PyRep::Bool(true));
-    let p2_shared_notifs = ctx.drain_notifications_for_char(90_000_002);
-    assert!(
-        p2_shared_notifs
-            .iter()
-            .any(|n| n.event == "OnSharedBookmarksFolderUpdated"),
-        "AddToKnownFolders must emit OnSharedBookmarksFolderUpdated"
-    );
+        .expect_err("View/use member without manage/admin rights must not edit another member's shared bookmark");
+    assert_eq!(p2_edit_denied.code, "AccessDenied");
+
+    let p2_del_denied = ctx
+        .dispatch_rpc(
+            &mut sess2,
+            "accessGroupBookmarkMgr",
+            None,
+            "DeleteBookmarks",
+            &[PyRep::List(vec![PyRep::Integer(shared_bm_id)])],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("View/use member without manage/admin rights must not delete another member's shared bookmark");
+    assert_eq!(p2_del_denied.code, "AccessDenied");
+
+    // Grant Pilot 2 manage/admin role (ROLE_PERSONNEL_MANAGER = 128) and verify Pilot 2 can now edit and delete the shared bookmark
+    ctx.dispatch_rpc(
+        &mut sess1,
+        "corpRegistry",
+        None,
+        "UpdateMember",
+        &[PyRep::Integer(90_000_002), PyRep::Integer(128)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Grant Pilot 2 bookmark admin role");
+    ctx.dispatch_rpc(
+        &mut sess2,
+        "accessGroupBookmarkMgr",
+        None,
+        "UpdateBookmark",
+        &[PyRep::Integer(shared_bm_id), PyRep::String("Corp Gate Ping (Verified)".into()), PyRep::String("Admin updated".into())],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Admin member UpdateBookmark on shared bookmark");
+    ctx.dispatch_rpc(
+        &mut sess2,
+        "accessGroupBookmarkMgr",
+        None,
+        "DeleteBookmarks",
+        &[PyRep::List(vec![PyRep::Integer(shared_bm_id)])],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Admin member DeleteBookmarks on shared bookmark");
 
     let p2_shared = ctx
         .dispatch_rpc(&mut sess2, "bookmark", None, "GetFolders", &[], &kw, None)
         .await
         .expect("GetFolders");
-    let PyRep::Rowset { rows: sf_rows, .. } = &p2_shared else {
-        panic!()
-    };
+    let PyRep::Rowset { rows: sf_rows, .. } = &p2_shared else { panic!() };
     assert!(
-        sf_rows.iter().any(|r| r[0] == PyRep::Integer(shared_folder_id)
-            && r[1] == PyRep::String("Corp Tacticals".into())),
+        sf_rows.iter().any(|r| r[0] == PyRep::Integer(shared_folder_id) && r[1] == PyRep::String("Corp Tacticals".into())),
         "GetFolders must return Corp Tacticals for Pilot 2"
     );
 
     // Pilot 2 unsubscribes via RemoveFromKnownFolders and receives OnSharedBookmarksFolderUpdated
     let rem_known_rep = ctx
-        .dispatch_rpc(
-            &mut sess2,
-            "accessGroupBookmarkMgr",
-            None,
-            "RemoveFromKnownFolders",
-            &[PyRep::Integer(shared_folder_id)],
-            &kw,
-            None,
-        )
+        .dispatch_rpc(&mut sess2, "accessGroupBookmarkMgr", None, "RemoveFromKnownFolders", &[PyRep::Integer(shared_folder_id)], &kw, None)
         .await
         .expect("RemoveFromKnownFolders");
-    let PyRep::KeyVal(rk_kv) = &rem_known_rep else {
-        panic!()
-    };
+    let PyRep::KeyVal(rk_kv) = &rem_known_rep else { panic!() };
     assert_eq!(rk_kv["subscribed"], PyRep::Bool(false));
     let p2_unsub_notifs = ctx.drain_notifications_for_char(90_000_002);
     assert!(
-        p2_unsub_notifs
-            .iter()
-            .any(|n| n.event == "OnSharedBookmarksFolderUpdated"),
+        p2_unsub_notifs.iter().any(|n| n.event == "OnSharedBookmarksFolderUpdated"),
         "RemoveFromKnownFolders must emit OnSharedBookmarksFolderUpdated"
     );
 
@@ -569,11 +560,11 @@ async fn test_so4_bookmarks_folders_shared_folders_and_scan_bookmarks() {
         .expect("RequestScans in SO-4");
     }
 
-    // Bookmark the 100%-resolved signature and verify persisted coordinates in GetBookmarks
+    // Bookmark the 100%-resolved signature via scanMgr.BookmarkScanResult, verify persisted coordinates, and warp to it
     let scan_bm = ctx
         .dispatch_rpc(
             &mut sess1,
-            "bookmark",
+            "scanMgr",
             None,
             "BookmarkScanResult",
             &[
@@ -586,22 +577,14 @@ async fn test_so4_bookmarks_folders_shared_folders_and_scan_bookmarks() {
         )
         .await
         .expect("BookmarkScanResult");
-    let PyRep::KeyVal(sbm_kv) = &scan_bm else {
-        panic!()
-    };
+    let PyRep::KeyVal(sbm_kv) = &scan_bm else { panic!() };
     let scan_bm_id = sbm_kv["bookmarkID"].as_i64().unwrap();
 
     let bms_with_scan = ctx
         .dispatch_rpc(&mut sess1, "bookmark", None, "GetBookmarks", &[], &kw, None)
         .await
         .expect("GetBookmarks after BookmarkScanResult");
-    let PyRep::Rowset {
-        rows: bms_scan_rows,
-        ..
-    } = &bms_with_scan
-    else {
-        panic!()
-    };
+    let PyRep::Rowset { rows: bms_scan_rows, .. } = &bms_with_scan else { panic!() };
     let scan_row = bms_scan_rows
         .iter()
         .find(|r| r[0] == PyRep::Integer(scan_bm_id))
@@ -612,17 +595,23 @@ async fn test_so4_bookmarks_folders_shared_folders_and_scan_bookmarks() {
     assert_eq!(scan_row[5], PyRep::Real(wh_pos[2]));
     assert_eq!(scan_row[8], PyRep::Integer(folder_id));
 
+    ctx.dispatch_rpc(
+        &mut sess1,
+        "beyonce",
+        None,
+        "CmdWarpToStuff",
+        &[PyRep::String("bookmark".into()), PyRep::Integer(scan_bm_id), PyRep::Real(0.0)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("CmdWarpToStuff to scan bookmark");
+    let (_, scan_warp_ball) = sys.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    assert!(matches!(scan_warp_ball.mode, MovementMode::Warp { .. }), "Ship must warp to scan result bookmark");
+
     // 6. Delete Bookmark and Folder, then verify removal in GetBookmarks and GetFolders
     let del_bm = ctx
-        .dispatch_rpc(
-            &mut sess1,
-            "bookmark",
-            None,
-            "DeleteBookmarks",
-            &[PyRep::List(vec![PyRep::Integer(bm_id)])],
-            &kw,
-            None,
-        )
+        .dispatch_rpc(&mut sess1, "bookmark", None, "DeleteBookmarks", &[PyRep::List(vec![PyRep::Integer(bm_id)])], &kw, None)
         .await
         .expect("DeleteBookmarks");
     assert!(is_keyval(&del_bm));
@@ -631,27 +620,11 @@ async fn test_so4_bookmarks_folders_shared_folders_and_scan_bookmarks() {
         .dispatch_rpc(&mut sess1, "bookmark", None, "GetBookmarks", &[], &kw, None)
         .await
         .expect("GetBookmarks after DeleteBookmarks");
-    let PyRep::Rowset {
-        rows: bms_del_rows, ..
-    } = &bms_after_del
-    else {
-        panic!()
-    };
-    assert!(
-        !bms_del_rows.iter().any(|r| r[0] == PyRep::Integer(bm_id)),
-        "Deleted bookmark must be removed"
-    );
+    let PyRep::Rowset { rows: bms_del_rows, .. } = &bms_after_del else { panic!() };
+    assert!(!bms_del_rows.iter().any(|r| r[0] == PyRep::Integer(bm_id)), "Deleted bookmark must be removed");
 
     let del_folder = ctx
-        .dispatch_rpc(
-            &mut sess1,
-            "accessGroupBookmarkMgr",
-            None,
-            "DeleteFolder",
-            &[PyRep::Integer(folder_id)],
-            &kw,
-            None,
-        )
+        .dispatch_rpc(&mut sess1, "accessGroupBookmarkMgr", None, "DeleteFolder", &[PyRep::Integer(folder_id)], &kw, None)
         .await
         .expect("DeleteFolder");
     assert!(is_keyval(&del_folder));
@@ -660,16 +633,8 @@ async fn test_so4_bookmarks_folders_shared_folders_and_scan_bookmarks() {
         .dispatch_rpc(&mut sess1, "bookmark", None, "GetFolders", &[], &kw, None)
         .await
         .expect("GetFolders after DeleteFolder");
-    let PyRep::Rowset {
-        rows: f_del_rows, ..
-    } = &folders_after_del
-    else {
-        panic!()
-    };
-    assert!(
-        !f_del_rows.iter().any(|r| r[0] == PyRep::Integer(folder_id)),
-        "Deleted folder must be removed"
-    );
+    let PyRep::Rowset { rows: f_del_rows, .. } = &folders_after_del else { panic!() };
+    assert!(!f_del_rows.iter().any(|r| r[0] == PyRep::Integer(folder_id)), "Deleted folder must be removed");
 }
 
 #[tokio::test]
@@ -683,6 +648,7 @@ async fn test_so5_scanning_dscan_probes_and_acceleration_gates() {
         "feat:navigation.acceleration-gates",
     ]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
 
     let mut sess = SessionState::new(501);
@@ -886,32 +852,36 @@ async fn test_so5_scanning_dscan_probes_and_acceleration_gates() {
         "Merlin must appear in 15-deg forward ConeScan"
     );
 
-    // Narrow 15-degree cone backward (-Z) misses Merlin
+    // Narrow 15-degree cone backward (-Z) misses Merlin, and short range (5,000 km < 10,000 km) also misses Merlin
     let dscan_15_back = ctx
         .dispatch_rpc(
             &mut sess,
             "scanMgr",
             Some(scan_bound_id),
             "ConeScan",
-            &[
-                PyRep::Real(15.0),
-                PyRep::Real(14.3 * AU),
-                PyRep::Real(0.0),
-                PyRep::Real(0.0),
-                PyRep::Real(-1.0),
-            ],
+            &[PyRep::Real(15.0), PyRep::Real(14.3 * AU), PyRep::Real(0.0), PyRep::Real(0.0), PyRep::Real(-1.0)],
             &kw,
             None,
         )
         .await
         .expect("ConeScan 15 backward");
-    let PyRep::List(hits_15_back) = &dscan_15_back else {
-        panic!()
-    };
-    assert!(
-        !has_hit(hits_15_back, 500_000_002),
-        "Merlin must NOT appear in 15-deg backward ConeScan"
-    );
+    let PyRep::List(hits_15_back) = &dscan_15_back else { panic!() };
+    assert!(!has_hit(hits_15_back, 500_000_002), "Merlin must NOT appear in 15-deg backward ConeScan");
+
+    let dscan_short = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "scanMgr",
+            Some(scan_bound_id),
+            "ConeScan",
+            &[PyRep::Real(360.0), PyRep::Real(5_000_000.0), PyRep::Real(0.0), PyRep::Real(0.0), PyRep::Real(1.0)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("ConeScan short range");
+    let PyRep::List(hits_short) = &dscan_short else { panic!() };
+    assert!(!has_hit(hits_short, 500_000_002), "Merlin at 10,000 km must NOT appear in 5,000 km ConeScan");
 
     // 2. Load 8 Core Scanner Probe I (30013) into Core Probe Launcher I (17938) via dogmaIM.LoadAmmo
     let load_rep = ctx
@@ -920,24 +890,14 @@ async fn test_so5_scanning_dscan_probes_and_acceleration_gates() {
             "dogmaIM",
             None,
             "LoadAmmo",
-            &[
-                PyRep::Integer(ship_id),
-                PyRep::List(vec![PyRep::Integer(550_001)]),
-                PyRep::List(vec![PyRep::Integer(550_002)]),
-            ],
+            &[PyRep::Integer(ship_id), PyRep::List(vec![PyRep::Integer(550_001)]), PyRep::List(vec![PyRep::Integer(550_002)])],
             &kw,
             None,
         )
         .await
         .expect("LoadAmmo Core Scanner Probes");
-    let PyRep::KeyVal(load_kv) = &load_rep else {
-        panic!()
-    };
-    assert_eq!(
-        load_kv["totalLoaded"],
-        PyRep::Integer(8),
-        "Core Probe Launcher I (0.8 m3) must load exactly 8 probes (0.1 m3 each)"
-    );
+    let PyRep::KeyVal(load_kv) = &load_rep else { panic!() };
+    assert_eq!(load_kv["totalLoaded"], PyRep::Integer(8), "Core Probe Launcher I (0.8 m3) must load 8 probes");
 
     // Activate Core Probe Launcher I via dogmaIM.Activate to deploy an 8-probe Pinpoint formation
     let act_rep = ctx
@@ -946,25 +906,27 @@ async fn test_so5_scanning_dscan_probes_and_acceleration_gates() {
             "dogmaIM",
             None,
             "Activate",
-            &[
-                PyRep::Integer(550_001),
-                PyRep::String("launchScanners".into()),
-                PyRep::None,
-                PyRep::Integer(0),
-            ],
+            &[PyRep::Integer(550_001), PyRep::String("launchScanners".into()), PyRep::None, PyRep::Integer(0)],
             &kw,
             None,
         )
         .await
         .expect("Activate Core Probe Launcher I");
-    let PyRep::KeyVal(akv) = &act_rep else {
-        panic!("Expected KeyVal from probe launch")
-    };
-    let PyRep::List(probe_id_reps) = &akv["probeIDs"] else {
-        panic!("Expected probeIDs list")
-    };
+    let PyRep::KeyVal(akv) = &act_rep else { panic!("Expected KeyVal from probe launch") };
+    let PyRep::List(probe_id_reps) = &akv["probeIDs"] else { panic!("Expected probeIDs list") };
     let launched_probe_ids: Vec<i64> = probe_id_reps.iter().filter_map(|p| p.as_i64()).collect();
     assert_eq!(launched_probe_ids.len(), 8);
+
+    // Verify all 8 probes exist as space entities in Destiny ballpark and have finite lifetime (max_flight_time_s > 0)
+    for &pid in &launched_probe_ids {
+        assert!(sys.get_ball_snapshot(pid).await.unwrap().is_some(), "Launched probe {pid} must exist in space");
+    }
+    {
+        let pmap = ctx.active_scanner_probes.read().unwrap();
+        for &pid in &launched_probe_ids {
+            assert!(pmap[&pid].max_flight_time_s > 0.0, "Launched probe must have finite lifetime");
+        }
+    }
 
     // 2nd launch attempt when launcher is empty must fail with NoProbesLoaded
     let empty_err = ctx
@@ -973,12 +935,7 @@ async fn test_so5_scanning_dscan_probes_and_acceleration_gates() {
             "dogmaIM",
             None,
             "Activate",
-            &[
-                PyRep::Integer(550_001),
-                PyRep::String("launchScanners".into()),
-                PyRep::None,
-                PyRep::Integer(0),
-            ],
+            &[PyRep::Integer(550_001), PyRep::String("launchScanners".into()), PyRep::None, PyRep::Integer(0)],
             &kw,
             None,
         )
@@ -986,16 +943,47 @@ async fn test_so5_scanning_dscan_probes_and_acceleration_gates() {
         .expect_err("Launch must fail when launcher is empty");
     assert_eq!(empty_err.code, "NoProbesLoaded");
 
-    // 3. Probe Scan Math via real V24 scanMgr.RequestScans(probes_dict)
+    // 3. Probe Scan Math via real V24 scanMgr.RequestScans(probes_dict):
+    // First test partial 2-probe wide-range scan (trilateration cap 0.49, deviation > 0.0), then 8-probe pinpoint to 100% (deviation == 0.0)
     let (wh_sig_id, wh_pos) = ctx.db.with_snapshot(|snap| {
-        let sig = snap.cosmic_signatures[&30_000_142]
-            .iter()
-            .find(|s| s.sig_group == "Wormhole")
-            .unwrap();
+        let sig = snap.cosmic_signatures[&30_000_142].iter().find(|s| s.sig_group == "Wormhole").unwrap();
         (sig.signature_id.clone(), sig.position)
     });
 
     let center = DVec3::new(wh_pos[0], wh_pos[1], wh_pos[2]);
+    let partial_dict = PyRep::Dict(
+        launched_probe_ids
+            .iter()
+            .enumerate()
+            .map(|(idx, &pid)| {
+                let p = if idx < 2 { center + DVec3::new((idx as f64) * 0.2 * AU, 0.0, 0.0) } else { DVec3::new(50.0 * AU, 0.0, 0.0) };
+                (
+                    PyRep::Integer(pid),
+                    PyRep::keyval([
+                        ("pos", PyRep::Tuple(vec![PyRep::Real(p.x), PyRep::Real(p.y), PyRep::Real(p.z)])),
+                        ("scanRange", PyRep::Real(2.0 * AU)),
+                    ]),
+                )
+            })
+            .collect(),
+    );
+    let partial_rep = ctx
+        .dispatch_rpc(&mut sess, "scanMgr", Some(scan_bound_id), "RequestScans", &[partial_dict], &kw, None)
+        .await
+        .expect("RequestScans partial 2-probe");
+    let PyRep::List(partial_rows) = &partial_rep else { panic!() };
+    let wh_partial = partial_rows
+        .iter()
+        .find_map(|r| match r {
+            PyRep::KeyVal(kv) if kv.iter().any(|(k, v)| k == "id" && v.as_str() == Some(&wh_sig_id)) => Some(kv),
+            _ => None,
+        })
+        .expect("Wormhole must appear in partial scan results");
+    let partial_str = wh_partial.iter().find(|(k, _)| *k == "signalStrength").unwrap().1.as_f64().unwrap();
+    let partial_dev = wh_partial.iter().find(|(k, _)| *k == "deviation").unwrap().1.as_f64().unwrap();
+    assert!(partial_str > 0.0 && partial_str <= 0.49, "2-probe scan must be capped at <= 49% trilateration, got {partial_str}");
+    assert!(partial_dev > 0.0, "Unresolved scan result must have positive deviation, got {partial_dev}");
+
     let scan_radius = 0.25 * AU;
     let d = scan_radius * 0.4;
     let offsets = [
@@ -1017,14 +1005,7 @@ async fn test_so5_scanning_dscan_probes_and_acceleration_gates() {
                 (
                     PyRep::Integer(pid),
                     PyRep::keyval([
-                        (
-                            "pos",
-                            PyRep::Tuple(vec![
-                                PyRep::Real(p.x),
-                                PyRep::Real(p.y),
-                                PyRep::Real(p.z),
-                            ]),
-                        ),
+                        ("pos", PyRep::Tuple(vec![PyRep::Real(p.x), PyRep::Real(p.y), PyRep::Real(p.z)])),
                         ("scanRange", PyRep::Real(scan_radius)),
                     ]),
                 )
@@ -1032,42 +1013,30 @@ async fn test_so5_scanning_dscan_probes_and_acceleration_gates() {
             .collect(),
     );
 
+    let mut full_rows = Vec::new();
     for _ in 0..4 {
-        ctx.dispatch_rpc(
-            &mut sess,
-            "scanMgr",
-            Some(scan_bound_id),
-            "RequestScans",
-            &[probes_dict.clone()],
-            &kw,
-            None,
-        )
-        .await
-        .expect("RequestScans Pinpoint");
+        let full_rep = ctx
+            .dispatch_rpc(&mut sess, "scanMgr", Some(scan_bound_id), "RequestScans", &[probes_dict.clone()], &kw, None)
+            .await
+            .expect("RequestScans Pinpoint");
+        let PyRep::List(rows) = full_rep else { panic!() };
+        full_rows = rows;
     }
-
-    ctx.db.with_snapshot(|snap| {
-        let sig = snap.cosmic_signatures[&30_000_142]
-            .iter()
-            .find(|s| s.signature_id == wh_sig_id)
-            .unwrap();
-        assert_eq!(
-            sig.signal_strength, 1.0,
-            "Wormhole must reach 100% resolution"
-        );
-    });
+    let wh_full = full_rows
+        .iter()
+        .find_map(|r| match r {
+            PyRep::KeyVal(kv) if kv.iter().any(|(k, v)| k == "id" && v.as_str() == Some(&wh_sig_id)) => Some(kv),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(wh_full["signalStrength"], PyRep::Real(1.0));
+    assert_eq!(wh_full["deviation"], PyRep::Real(0.0));
 
     let scan_notifs = ctx.drain_notifications_for_char(char_id);
-    assert!(
-        scan_notifs.iter().any(|n| n.event == "OnSystemScanStarted"),
-        "RequestScans must emit OnSystemScanStarted"
-    );
-    assert!(
-        scan_notifs.iter().any(|n| n.event == "OnSystemScanStopped"),
-        "RequestScans must emit OnSystemScanStopped"
-    );
+    assert!(scan_notifs.iter().any(|n| n.event == "OnSystemScanStarted"), "RequestScans must emit OnSystemScanStarted");
+    assert!(scan_notifs.iter().any(|n| n.event == "OnSystemScanStopped"), "RequestScans must emit OnSystemScanStopped");
 
-    // 4. Probe Recall, Reconnect, and Destroy via real V24 scanMgr RPCs
+    // 4. Probe Reconnect, Recall, and Expiry after lifetime via real V24 scanMgr RPCs
     {
         let mut pmap = ctx.active_scanner_probes.write().unwrap();
         if let Some(p) = pmap.get_mut(&launched_probe_ids[0]) {
@@ -1075,39 +1044,14 @@ async fn test_so5_scanning_dscan_probes_and_acceleration_gates() {
         }
     }
     let recon_rep = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "scanMgr",
-            Some(scan_bound_id),
-            "ReconnectToLostProbes",
-            &[],
-            &kw,
-            None,
-        )
+        .dispatch_rpc(&mut sess, "scanMgr", Some(scan_bound_id), "ReconnectToLostProbes", &[], &kw, None)
         .await
         .expect("ReconnectToLostProbes");
-    let PyRep::KeyVal(recon_kv) = &recon_rep else {
-        panic!()
-    };
-    let PyRep::List(recon_list) = &recon_kv["reconnectedProbeIDs"] else {
-        panic!()
-    };
+    let PyRep::KeyVal(recon_kv) = &recon_rep else { panic!() };
+    let PyRep::List(recon_list) = &recon_kv["reconnectedProbeIDs"] else { panic!() };
     assert!(recon_list.contains(&PyRep::Integer(launched_probe_ids[0])));
 
-    // Destroy one probe via DestroyProbe
-    ctx.dispatch_rpc(
-        &mut sess,
-        "scanMgr",
-        Some(scan_bound_id),
-        "DestroyProbe",
-        &[PyRep::Integer(launched_probe_ids[7])],
-        &kw,
-        None,
-    )
-    .await
-    .expect("DestroyProbe");
-
-    // Recover remaining 7 probes back to ship (launcher / cargo) via RecoverProbes
+    // Recover 7 probes (0..7) back to ship (launcher / cargo) via RecoverProbes, leaving probe 7 in space to test lifetime expiry
     let recover_ids: Vec<PyRep> = launched_probe_ids[0..7]
         .iter()
         .map(|&id| PyRep::Integer(id))
@@ -1133,9 +1077,29 @@ async fn test_so5_scanning_dscan_probes_and_acceleration_gates() {
     assert_eq!(
         recovered_list.len(),
         7,
-        "Must recover all 7 remaining active probes"
+        "Must recover all 7 targeted active probes"
     );
     assert_eq!(rec_kv["recoveredCount"], PyRep::Integer(7));
+
+    // Advance virtual clock past max_flight_time_s (3600s) -> remaining probe in space expires!
+    ctx.advance_virtual_clock(4_000);
+    let expired_err = ctx
+        .dispatch_rpc(&mut sess, "scanMgr", Some(scan_bound_id), "RequestScans", &[probes_dict], &kw, None)
+        .await
+        .expect_err("Unrecovered probe must expire after its max_flight_time_s (3600s) has elapsed");
+    assert_eq!(expired_err.code, "NoActiveProbes");
+
+    ctx.dispatch_rpc(
+        &mut sess,
+        "scanMgr",
+        Some(scan_bound_id),
+        "DestroyProbe",
+        &[PyRep::Integer(launched_probe_ids[7])],
+        &kw,
+        None,
+    )
+    .await
+    .expect("DestroyProbe");
 
     // Verify ship (launcher + cargo hold) now has 8 (initial remaining) + 7 (recovered) = 15 probes
     let ship_probes: i32 = ctx.db.with_snapshot(|snap| {
