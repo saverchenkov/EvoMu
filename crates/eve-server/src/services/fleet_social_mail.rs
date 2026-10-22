@@ -836,8 +836,8 @@ pub(super) fn handle_mail_and_calendar(
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let s = ctx.social_extras.lock().unwrap();
             let req_list_id = args.first().and_then(|a| a.as_i64());
-            if method == "GetInfo" && req_list_id.is_some() {
-                let lid = req_list_id.unwrap();
+            if method == "GetInfo" {
+                let lid = req_list_id.unwrap_or(0);
                 if let Some(ml) = s.mailing_lists.get(&lid) {
                     return Some(Ok(PyRep::keyval([
                         ("listID", PyRep::Integer(ml.list_id)),
@@ -848,6 +848,11 @@ pub(super) fn handle_mail_and_calendar(
                         ("defaultRole", PyRep::Integer(ml.default_role)),
                         ("cost", PyRep::Integer(ml.cost)),
                     ])));
+                } else {
+                    return Some(Err(BridgeRpcError {
+                        code: "MailingListNotFound".into(),
+                        message: format!("Mailing list {lid} not found"),
+                    }));
                 }
             }
             let rows: Vec<Vec<PyRep>> = s

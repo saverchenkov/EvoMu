@@ -527,12 +527,28 @@ async fn test_rpc_pvp_filament_mgr_batch() {
         .expect("JoinPVPQueue");
     assert_eq!(res.as_bool(), Some(true));
 
+    // Verify queue persistent state in registry
+    let in_queue = eve_server::services::pvp_filament_mgr::PVP_FILAMENT_STATE
+        .lock()
+        .unwrap()
+        .get(&ctx.instance_id)
+        .is_some_and(|r| r.queue.contains_key(&90_000_001));
+    assert_eq!(in_queue, true, "Character must be present in queue state after JoinPVPQueue");
+
     // 2. LeavePVPQueue
     let res = ctx
         .dispatch_rpc(&mut sess, "pvpFilamentMgr", None, "LeavePVPQueue", &[], &kw, None)
         .await
         .expect("LeavePVPQueue");
     assert_eq!(matches!(res, PyRep::None), true);
+
+    // Verify queue removal persistent state in registry
+    let in_queue_after = eve_server::services::pvp_filament_mgr::PVP_FILAMENT_STATE
+        .lock()
+        .unwrap()
+        .get(&ctx.instance_id)
+        .is_some_and(|r| r.queue.contains_key(&90_000_001));
+    assert_eq!(in_queue_after, false, "Character must be removed from queue state after LeavePVPQueue");
 
     // 3. GetAllEvents
     let res = ctx
@@ -837,6 +853,20 @@ async fn test_rpc_mailing_lists_mgr_batch() {
         .await
         .expect("Delete");
     assert_eq!(res.as_bool(), Some(true));
+
+    // Verify persistent deletion: GetInfo must fail on deleted mailing list
+    let get_after_del = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "mailingListsMgr",
+            None,
+            "GetInfo",
+            &[PyRep::Integer(list_id)],
+            &kw,
+            None,
+        )
+        .await;
+    assert!(get_after_del.is_err(), "GetInfo must fail on deleted mailing list");
 }
 
 #[tokio::test]
