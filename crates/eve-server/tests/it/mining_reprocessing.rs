@@ -784,6 +784,7 @@ async fn test_phase_5m_mn11_space_and_structure_compression() {
     // parity: feat:mining.compression-space, feat:mining.compression-structure, rpc:dogmaIM.Activate, rpc:inSpaceCompressionMgr.CompressItemInSpace, rpc:stationSvc.Undock, rpc:structureCompressionMgr.CompressItemInStructure
     eve_testkit::attest(&["feat:mining.compression-space", "feat:mining.compression-structure"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let char_id = 90_000_001;
     let mut sess = setup_session(&ctx, char_id).await;

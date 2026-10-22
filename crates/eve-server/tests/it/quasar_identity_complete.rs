@@ -49,6 +49,7 @@ fn build_public_request(now_unix: u64, type_name: &str, payload_value: Vec<u8>) 
 async fn test_q3_auth_login_device() {
     // parity: rpc:publicGatewaySvc.SendRequest
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let empty_kw = HashMap::new();
 
     // 1. Unauthenticated session -> 401 STATUS_UNAUTHORIZED
@@ -114,6 +115,7 @@ async fn test_q3_auth_login_device() {
 async fn test_q3_user_accounts_lifecycle() {
     // parity: rpc:publicGatewaySvc.SendRequest
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let empty_kw = HashMap::new();
     let mut session = SessionState::new(2_003);
     session.user_id = Some(1);
@@ -177,6 +179,7 @@ async fn test_q3_user_license_and_subscription() {
     ]);
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let empty_kw = HashMap::new();
     let mut session = SessionState::new(2_004);
     session.user_id = Some(1);
@@ -258,6 +261,7 @@ async fn test_q3_entitlements_omega_and_membership() {
     ]);
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let empty_kw = HashMap::new();
     let mut session = SessionState::new(2_005);
     session.user_id = Some(1);
@@ -395,6 +399,7 @@ async fn test_q3_payment_purchase_and_schedules() {
     ]);
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let empty_kw = HashMap::new();
     let mut session = SessionState::new(2_006);
     session.user_id = Some(1);
@@ -501,6 +506,7 @@ async fn test_q3_plex_vault_and_isk_wallets() {
     ]);
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let empty_kw = HashMap::new();
     let mut session = SessionState::new(2_007);
     session.user_id = Some(1);
@@ -611,6 +617,7 @@ async fn test_q3_store_categories_and_products() {
     ]);
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let empty_kw = HashMap::new();
     let mut session = SessionState::new(2_008);
     session.user_id = Some(1);
@@ -673,6 +680,7 @@ async fn test_q3_store_offers_and_targetaudience() {
     ]);
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let empty_kw = HashMap::new();
     let mut session = SessionState::new(2_009);
     session.user_id = Some(1);
@@ -750,6 +758,7 @@ async fn test_q3_store_offers_and_targetaudience() {
 async fn test_q3_vendors_and_fulfillment() {
     // parity: rpc:publicGatewaySvc.SendRequest
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let empty_kw = HashMap::new();
     let mut session = SessionState::new(2_010);
     session.user_id = Some(1);
@@ -836,6 +845,7 @@ async fn test_q3_legal_pii_cdn_localization() {
     ]);
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let empty_kw = HashMap::new();
     let mut session = SessionState::new(2_011);
     session.user_id = Some(1);

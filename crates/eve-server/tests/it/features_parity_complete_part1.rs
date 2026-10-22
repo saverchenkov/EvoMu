@@ -76,6 +76,7 @@ async fn test_character_creation_lifecycle_selection_home_station() {
     ]);
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let mut sess = SessionState::new(41_001);
 
     // 1. Authenticate user demo
@@ -331,6 +332,7 @@ async fn test_skills_engine_queue_injectors_extractors() {
     ]);
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let mut sess = SessionState::new(41_002);
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
 
@@ -566,6 +568,7 @@ async fn test_attributes_remaps_implants_boosters() {
     ]);
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let mut sess = SessionState::new(41_003);
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
 

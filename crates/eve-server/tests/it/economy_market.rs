@@ -589,6 +589,7 @@ async fn test_market_instant_matching() {
     // parity: feat:market.instant-buy, feat:market.instant-sell
     eve_testkit::attest(&["feat:market.instant-buy", "feat:market.instant-sell"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let mut s1 = setup_pilot(&ctx, 203, "demo", "demo-secret", 90_000_001).await;
     let mut s2 = setup_pilot(&ctx, 204, "other", "other-secret", 90_000_002).await;
 
@@ -801,6 +802,7 @@ async fn test_market_modify_relist_tick_size_corp_remote_expiry_sleeper_and_plex
     // parity: feat:market.modify-order, feat:market.remote-orders, feat:market.corp-orders, feat:market.plex-market, feat:market.npc-buy-orders-sleeper-loot, rpc:marketProxy.ModifyCharOrder
     eve_testkit::attest(&["feat:market.modify-order", "feat:market.remote-orders", "feat:market.corp-orders", "feat:market.plex-market", "feat:market.npc-buy-orders-sleeper-loot"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let mut s1 = setup_pilot(&ctx, 210, "demo", "demo-secret", 90_000_001).await;
     let mut s2 = setup_pilot(&ctx, 211, "other", "other-secret", 90_000_002).await;
 

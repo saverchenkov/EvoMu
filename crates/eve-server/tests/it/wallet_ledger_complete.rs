@@ -120,6 +120,7 @@ async fn test_give_cash_from_corp_account_roles_and_journal() {
     // parity: feat:wallet.give-cash-corp, rpc:account.GiveCashFromCorpAccount
     eve_testkit::attest(&["feat:wallet.give-cash-corp", "rpc:account.GiveCashFromCorpAccount"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let mut s1 = pilot(&ctx, 801, "demo", "demo-secret", P1).await;
     let mut s2 = pilot(&ctx, 802, "other", "other-secret", P2).await;
     let corp = setup_corp(&ctx);
@@ -211,6 +212,7 @@ async fn test_journal_carries_ref_type_amounts_balance_parties_reason_and_contex
     // parity: feat:wallet.journal, feat:wallet.transactions, rpc:account.GetTransactions
     eve_testkit::attest(&["feat:wallet.journal", "feat:wallet.transactions", "rpc:account.GetTransactions"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let mut s1 = pilot(&ctx, 811, "demo", "demo-secret", P1).await;
     let mut s2 = pilot(&ctx, 812, "other", "other-secret", P2).await;
     ctx.db.with_mut_snapshot(|s| {

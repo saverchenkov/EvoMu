@@ -9,6 +9,7 @@ use std::collections::HashMap;
 async fn test_phase_0_s7_no_hardcoded_fallbacks_and_in_space_range_checks() {
     // parity: plan:S-7, rpc:authentication.Login, rpc:charUnboundMgr.SelectCharacterID, rpc:mailMgr.SendMail, rpc:planetMgr.Flush, rpc:planetMgr.GetPlanetInfo, rpc:planetMgr.GetPlanetResourceInfo, rpc:planetMgr.GetPlanetsForChar, rpc:planetMgr.UserUpdateNetwork, rpc:shipCosmeticsMgr.ApplySkinToShip, rpc:sovMgr.AcquireSkyhooks, rpc:stationSvc.Undock
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let mut sess = SessionState::new(907);
     ctx.dispatch_rpc(

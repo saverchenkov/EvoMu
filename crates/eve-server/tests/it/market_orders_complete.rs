@@ -60,6 +60,7 @@ async fn test_tick_size_relist_fee_broker_minimum_scc_surcharge_and_durations() 
     // parity: feat:market.tick-size-four-significant-digits, feat:market.relist-fee-formula, feat:market.broker-fee-minimum-and-scc-surcharge, feat:market.order-duration-options, feat:market.structure-markets, feat:market.broker-fee, feat:market.modify-order, feat:market.place-buy, feat:market.place-sell
     eve_testkit::attest(&["feat:market.tick-size-four-significant-digits", "feat:market.relist-fee-formula", "feat:market.broker-fee-minimum-and-scc-surcharge", "feat:market.order-duration-options", "feat:market.structure-markets", "feat:market.broker-fee", "feat:market.modify-order", "feat:market.place-buy", "feat:market.place-sell"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let mut s1 = setup_pilot(&ctx, 1101, "demo", "demo-secret", 90_000_001).await;
 
     let trit_item_id = ctx.db.with_mut_snapshot(|snap| {
@@ -587,6 +588,7 @@ async fn test_ranged_buy_orders_corp_divisions_multisell_multibuy_expiry_and_his
     // parity: feat:market.buy-order-range-fill, feat:market.corp-order-wallet-hangar-divisions, feat:market.multisell-quote-fees, feat:market.multibuy-import-order-matching, feat:market.order-expiry, feat:market.order-history, feat:market.remote-orders, feat:market.corp-orders, feat:market.price-history, feat:market.escrow
     eve_testkit::attest(&["feat:market.buy-order-range-fill", "feat:market.corp-order-wallet-hangar-divisions", "feat:market.multisell-quote-fees", "feat:market.multibuy-import-order-matching", "feat:market.order-expiry", "feat:market.order-history", "feat:market.remote-orders", "feat:market.corp-orders", "feat:market.price-history", "feat:market.escrow"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let mut s1 = setup_pilot(&ctx, 1102, "demo", "demo-secret", 90_000_001).await;
     let mut s2 = setup_pilot(&ctx, 1103, "other", "other-secret", 90_000_002).await;
 

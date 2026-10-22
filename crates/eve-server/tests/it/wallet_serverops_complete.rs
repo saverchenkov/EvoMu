@@ -211,6 +211,7 @@ async fn test_modify_order_relist_fee_and_five_minute_cooldown() {
     // parity: feat:market.modify-order
     eve_testkit::attest(&["feat:market.modify-order"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let mut s1 = setup_pilot(&ctx, 711, "demo", "demo-secret", P1).await;
     let ask = rpc(&ctx, &mut s1, "marketProxy", "PlaceMultiSellOrder", &sell_args(TRITANIUM, 50.0, 100))
         .await
@@ -439,6 +440,7 @@ async fn test_cspa_contact_cost_set_get_and_charged_to_strangers() {
     // parity: feat:wallet.cspa-cost
     eve_testkit::attest(&["feat:wallet.cspa-cost"]);
     let ctx = Arc::new(ServerContext::new());
+    crate::common::pin_clock(&ctx);
     let mut s2 = setup_pilot(&ctx, 752, "other", "other-secret", P2).await;
     assert_eq!(rpc(&ctx, &mut s2, "account", "GetDefaultContactCost", &[]).await.unwrap(), PyRep::None);
     rpc(&ctx, &mut s2, "account", "SetContactCost", &[PyRep::Integer(2_500)]).await.expect("SetContactCost");
@@ -511,6 +513,7 @@ async fn test_machonet_time_and_ping_are_authoritative_blue_time() {
     // parity: feat:serverops.machonet-time, feat:serverops.ping
     eve_testkit::attest(&["feat:serverops.machonet-time", "feat:serverops.ping"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let mut s1 = setup_pilot(&ctx, 761, "demo", "demo-secret", P1).await;
     // Blue time = 100 ns ticks since 1601-01-01 UTC.
     let blue = |unix: u64| (unix as i64 + 11_644_473_600) * 10_000_000;
@@ -627,6 +630,7 @@ async fn test_corporation_and_personal_bills_and_autopay() {
     // parity: feat:wallet.bills
     eve_testkit::attest(&["feat:wallet.bills"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let mut s1 = setup_pilot(&ctx, 881, "demo", "demo-secret", P1).await;
 
     let corp_id = ctx.db.with_snapshot(|s| s.characters[&P1].corporation_id);
@@ -853,6 +857,7 @@ async fn test_hypernet_relay_and_hypercore_scaling_and_expiry() {
     // parity: feat:wallet.hypernet-relay, feat:wallet.hypernet-hypercore-sizing-expiry
     eve_testkit::attest(&["feat:wallet.hypernet-relay", "feat:wallet.hypernet-hypercore-sizing-expiry"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let mut s1 = setup_pilot(&ctx, 885, "demo", "demo-secret", P1).await;
     let mut s2 = setup_pilot(&ctx, 886, "other", "other-secret", P2).await;
     s1.station_id = Some(JITA_STATION_ID);
@@ -977,6 +982,7 @@ async fn test_daily_downtime_and_maintenance_jobs() {
     // parity: feat:serverops.downtime, feat:serverops.daily-jobs
     eve_testkit::attest(&["feat:serverops.downtime", "feat:serverops.daily-jobs"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
 
     // Advance clock to 11:05 UTC (window 11:00-11:15 UTC)
     let current = ctx.now_unix();

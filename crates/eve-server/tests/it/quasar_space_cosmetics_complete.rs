@@ -71,6 +71,7 @@ fn call_req(
 #[tokio::test]
 async fn q7_space_celestials_navigation_and_dbs() {
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let empty_kw = HashMap::new();
 
     let mut session = SessionState::new(20_001);
@@ -225,6 +226,7 @@ async fn q7_bubble_presence_and_pirate_insurgency() {
     ]);
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let mut session = SessionState::new(20_002);
     session.user_id = Some(102);
     session.character_id = Some(90_000_102);
@@ -348,6 +350,7 @@ async fn q8_sovereignty_hub_skyhooks_and_workforce() {
     ]);
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let mut session = SessionState::new(20_003);
     session.user_id = Some(103);
     session.character_id = Some(90_000_103);
@@ -486,6 +489,7 @@ async fn q8_faction_warfare_and_operations() {
     ]);
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let mut session = SessionState::new(20_004);
     session.user_id = Some(104);
     session.character_id = Some(90_000_104);
@@ -556,6 +560,7 @@ async fn q9_ship_cosmetics_skinr_and_emblems() {
     ]);
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let mut session = SessionState::new(20_005);
     session.user_id = Some(105);
     session.character_id = Some(90_000_105);
@@ -623,6 +628,7 @@ async fn q9_corp_palette_titles_structure_paintwork_and_app_infra() {
     ]);
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let mut session = SessionState::new(20_006);
     session.user_id = Some(106);
     session.character_id = Some(90_000_106);

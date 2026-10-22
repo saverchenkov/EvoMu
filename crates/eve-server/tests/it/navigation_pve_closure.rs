@@ -64,6 +64,7 @@ async fn test_ansiblex_jump_bridge_access_liquid_ozone_and_destination() {
     ]);
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let char_id = 90_000_001;
     let ship_id = 100_000_001;
     let sys_a = 30_000_142; // Jita
@@ -452,6 +453,7 @@ async fn test_air_npe_state_persistence_and_career_goals() {
     ]);
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let char_id = 90_000_001;
     let mut sess = setup_pilot(&ctx, 8003, "demo", "demo-secret", char_id).await;
 
@@ -684,6 +686,7 @@ async fn test_daily_and_seasonal_login_campaign_rewards() {
     eve_testkit::attest(&["feat:pve.login-campaign", "feat:pve.seasonal-login"]);
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let char_id = 90_000_001;
     let mut sess = setup_pilot(&ctx, 8005, "demo", "demo-secret", char_id).await;
 

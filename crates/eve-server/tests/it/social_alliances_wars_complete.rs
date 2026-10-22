@@ -31,6 +31,7 @@ async fn test_alliances_lifecycle_governance_contacts_bulletins_and_rankings() {
     ]);
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let mut sess1 = SessionState::new(901);
     common::login_pilot(&ctx, &mut sess1, "demo", "demo-secret").await;
     call(&ctx, &mut sess1, "charUnboundMgr", "SelectCharacterID", vec![PyRep::Integer(90_000_001)]).await.unwrap();
@@ -274,8 +275,7 @@ async fn test_wars_declaration_hq_eligibility_mutual_peace_allies_and_stats() {
     ]);
 
     let ctx = ServerContext::new();
-    // Fixed virtual clock: invite timestamps are compared with ctx.now_unix() and must not race the host wall clock.
-    ctx.set_clock(std::sync::Arc::new(eve_db::VirtualServerClock::with_fixed_base(1_800_000_000)));
+    crate::common::pin_clock(&ctx);
     let mut sess1 = SessionState::new(911);
     common::login_pilot(&ctx, &mut sess1, "demo", "demo-secret").await;
     call(&ctx, &mut sess1, "charUnboundMgr", "SelectCharacterID", vec![PyRep::Integer(90_000_001)]).await.unwrap();
@@ -380,9 +380,9 @@ async fn test_wars_declaration_hq_eligibility_mutual_peace_allies_and_stats() {
 
     // war-stats: kills/ISK come from persisted killmails between the two sides.
     ctx.db.with_mut_snapshot(|snap| {
-        snap.killmails.insert(880_001, eve_db::KillmailRecord { kill_id: 880_001, victim_character_id: 90_000_002, attacker_character_id: 90_000_001, solar_system_id: 30_000_142, ship_type_id: 587, total_value_isk: 400_000.0 , ..Default::default()});
-        snap.killmails.insert(880_002, eve_db::KillmailRecord { kill_id: 880_002, victim_character_id: 90_000_001, attacker_character_id: 90_000_002, solar_system_id: 30_000_142, ship_type_id: 603, total_value_isk: 350_000.0 , ..Default::default()});
-        snap.killmails.insert(880_003, eve_db::KillmailRecord { kill_id: 880_003, victim_character_id: 90_000_001, attacker_character_id: p3_char, solar_system_id: 30_000_142, ship_type_id: 587, total_value_isk: 999.0 , ..Default::default()});
+        snap.killmails.insert(880_001, eve_db::KillmailRecord { kill_id: 880_001, victim_character_id: 90_000_002, attacker_character_id: 90_000_001, solar_system_id: 30_000_142, ship_type_id: 587, total_value_isk: 400_000.0 });
+        snap.killmails.insert(880_002, eve_db::KillmailRecord { kill_id: 880_002, victim_character_id: 90_000_001, attacker_character_id: 90_000_002, solar_system_id: 30_000_142, ship_type_id: 603, total_value_isk: 350_000.0 });
+        snap.killmails.insert(880_003, eve_db::KillmailRecord { kill_id: 880_003, victim_character_id: 90_000_001, attacker_character_id: p3_char, solar_system_id: 30_000_142, ship_type_id: 587, total_value_isk: 999.0 });
     });
     let base = call(&ctx, &mut sess1, "warStatisticMgr", "GetBaseInfo", vec![PyRep::Integer(war_id)]).await.unwrap();
     assert_eq!(field(&base, "killsForAggressor"), PyRep::Integer(1));
@@ -477,6 +477,7 @@ async fn test_corporation_deliveries_goals_freelance_fittings_assets_and_close()
         "feat:corporation.corp-close",
     ]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
 
     let mut sess1 = SessionState::new(921);

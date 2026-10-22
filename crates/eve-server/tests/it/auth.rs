@@ -437,6 +437,7 @@ async fn connect_loopback_with_retry(addr: std::net::SocketAddr) -> TcpStream {
 async fn test_phase_2_p6_native_machonet_handshake_state_machine() {
     // parity: plan:P-6, feat:account.native-handshake
     let ctx = Arc::new(ServerContext::new());
+    crate::common::pin_clock(&ctx);
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind macho listener");
@@ -776,6 +777,7 @@ async fn send_raw_http_request(
 async fn test_phase_2_esi1_sso_oauth2_pkce_http_server_and_macho_sso_login() {
     // parity: plan:ESI-1, feat:account.sso-login, feat:esi.core.sso-tokens
     let ctx = Arc::new(ServerContext::new());
+    crate::common::pin_clock(&ctx);
 
     let http_listener = TcpListener::bind("127.0.0.1:0")
         .await

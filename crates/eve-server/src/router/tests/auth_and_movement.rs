@@ -36,6 +36,8 @@ async fn test_authentication_and_ownership_enforcement() {
     );
 
     let ctx = ServerContext::new();
+    // Deterministic virtual time (T-7): time only moves via advance_virtual_clock.
+    ctx.set_clock(std::sync::Arc::new(eve_db::VirtualServerClock::with_fixed_base(1_800_000_000)));
     let mut session = SessionState::new(1);
 
     let unauth_res = ctx

@@ -17,6 +17,7 @@ async fn test_ch3_character_creation_and_starter_assets() {
     // parity: feat:character.list-characters, feat:character.select-character, feat:character.create-character, feat:character.starter-skills, feat:character.school-corp, feat:character.random-name, feat:character.name-validation, rpc:charUnboundMgr.CreateCharacterWithDoll, rpc:charUnboundMgr.GetCharacterInfo, rpc:charUnboundMgr.GetCharactersToSelect, rpc:charUnboundMgr.GetValidRandomName, rpc:charUnboundMgr.SelectCharacterID, rpc:charUnboundMgr.ValidateNameEx, rpc:invbroker.SetLabel
     eve_testkit::attest(&["feat:character.list-characters", "feat:character.select-character", "feat:character.create-character", "feat:character.starter-skills", "feat:character.school-corp", "feat:character.random-name", "feat:character.name-validation"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let mut sess = SessionState::new(933);
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
@@ -798,6 +799,7 @@ async fn test_s4_jump_clones_implants_and_cooldown() {
     // parity: plan:S-4, feat:clones.jump-clone-install, feat:clones.jump-clone-jump, feat:clones.jump-clone-destroy, rpc:charUnboundMgr.SelectCharacterID, rpc:jumpCloneSvc.CloneJump, rpc:jumpCloneSvc.DestroyInstalledClone, rpc:jumpCloneSvc.GetPriceForClone, rpc:jumpCloneSvc.InstallCloneInStation, rpc:jumpCloneSvc.InstallCloneInStructure
     eve_testkit::attest(&["plan:S-4", "feat:clones.jump-clone-install", "feat:clones.jump-clone-jump", "feat:clones.jump-clone-destroy"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let mut sess = SessionState::new(937);
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;

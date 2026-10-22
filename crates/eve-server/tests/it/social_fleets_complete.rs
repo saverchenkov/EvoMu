@@ -609,6 +609,7 @@ async fn test_so6_wormholes_polarization_lifetime_mass_and_thera() {
         "feat:navigation.wormhole-thera",
     ]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
 
     let mut sess = SessionState::new(601);
@@ -1102,6 +1103,7 @@ async fn test_so_bookmarks_expiry_copy_move_corp_bookmarks_and_scanning_features
         "feat:scanning.scan-skills",
     ]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let mut sess1 = SessionState::new(811);
     common::login_pilot(&ctx, &mut sess1, "demo", "demo-secret").await;
@@ -1231,6 +1233,7 @@ async fn test_so_social_corp_mail_mailing_lists_cspa_calendar_and_chat_features(
         "feat:social.chat-motd",
     ]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let mut sess1 = SessionState::new(821);
     common::login_pilot(&ctx, &mut sess1, "demo", "demo-secret").await;

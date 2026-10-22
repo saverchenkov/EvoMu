@@ -387,6 +387,7 @@ async fn test_mining_crystals_and_ice_modifiers() {
     // parity: feat:mining.crystal-tier-ore-compatibility, feat:mining.crystal-type-abc-modifiers, feat:mining.ice-harvester-cycle-modifiers, rpc:dogmaIM.Activate, rpc:stationSvc.Undock
     eve_testkit::attest(&["feat:mining.crystal-tier-ore-compatibility", "feat:mining.crystal-type-abc-modifiers", "feat:mining.ice-harvester-cycle-modifiers"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let char_id = 90_000_001;
     let mut sess = setup_session(&ctx, char_id).await;
@@ -541,6 +542,7 @@ async fn test_mining_bursts_and_reprocessing_curves() {
     // parity: feat:mining.foreman-burst-charge-effects, feat:mining.npc-reprocessing-equipment-and-tax-curve, feat:mining.scrapmetal-yield-exclusions, feat:mining.prismaticite-reprocessing-and-unrefined-reactions, rpc:dogmaIM.Activate, rpc:reprocessingSvc.GetQuotes, rpc:reprocessingSvc.Reprocess, rpc:stationSvc.Undock
     eve_testkit::attest(&["feat:mining.foreman-burst-charge-effects", "feat:mining.npc-reprocessing-equipment-and-tax-curve", "feat:mining.scrapmetal-yield-exclusions", "feat:mining.prismaticite-reprocessing-and-unrefined-reactions"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let char_id = 90_000_001;
     let mut sess = setup_session(&ctx, char_id).await;
@@ -713,6 +715,7 @@ async fn test_mining_wormhole_sites_phased_fields_and_market_goals() {
     // parity: feat:mining.wormhole-ore-sites, feat:mining.phased-asteroid-field-lifecycle, feat:mining.mobile-phase-anchor, feat:mining.mining-market, feat:mining.mining-goals
     eve_testkit::attest(&["feat:mining.wormhole-ore-sites", "feat:mining.phased-asteroid-field-lifecycle", "feat:mining.mobile-phase-anchor", "feat:mining.mining-market", "feat:mining.mining-goals"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
 
     // 1. Wormhole Ore Sites: Perimeter, Frontier, and Core Deposits
     use eve_server::services::mining_sites::{WORMHOLE_ORE_SITES, resolve_wormhole_ore_site, PhasedAsteroidFieldState};

@@ -99,6 +99,7 @@ async fn test_action_plan_ch1_to_ch5_character_skills_and_gm() {
     ]);
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let mut sess = SessionState::new(9101);
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
@@ -859,6 +860,7 @@ async fn test_action_plan_mn01_to_mn05_mining_static_belts_cycles_holds() {
     ]);
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let char_id = 90_000_001;
     let mut sess = setup_pilot_session(&ctx, 9103, char_id).await;
     let kw = HashMap::new();
@@ -922,7 +924,7 @@ async fn test_action_plan_mn01_to_mn05_mining_static_belts_cycles_holds() {
             .await
             .unwrap();
     }
-    ctx.set_clock(Arc::new(VirtualServerClock::new()));
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(crate::common::TEST_CLOCK_BASE_UNIX)));
     ctx.advance_secs(eve_server::system_actor::DEFAULT_BELT_RESPAWN_INTERVAL_SECS * 2);
     let _ = perim_sys.step_manual(1.0).await.unwrap();
 

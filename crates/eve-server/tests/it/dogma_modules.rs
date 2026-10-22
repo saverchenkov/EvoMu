@@ -835,6 +835,7 @@ async fn test_phase_4_dg5_targeting_lock_and_break() {
     // parity: plan:DG-5, feat:dogma.targeting-lock, feat:dogma.targeting-break, notify:OnTarget, notify:OnTargets, notify:OnTargetClear, rpc:charUnboundMgr.SelectCharacterID, rpc:dogmaIM.Activate, rpc:dogmaIM.AddTarget, rpc:dogmaIM.ClearTargets, rpc:dogmaIM.RemoveTarget, rpc:stationSvc.Undock
     eve_testkit::attest(&["feat:dogma.targeting-lock", "feat:dogma.targeting-break", "notify:OnTarget", "notify:OnTargets", "notify:OnTargetClear"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let mut sess = SessionState::new(4003);
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;

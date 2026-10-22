@@ -107,6 +107,7 @@ async fn test_quasar_campaign_requests_and_track_progress() {
     ]);
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let mut sess = make_session(31_001, 101, 90_000_101, 98_000_001);
 
     // 1. Campaign API (GetAllRequest, GetRequest)
@@ -218,6 +219,7 @@ async fn test_quasar_sovereignty_resources_mercenaryden_stargate_and_admin_reque
     ]);
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let empty_kw = HashMap::new();
     let mut sess = make_session(31_002, 102, 90_000_102, 98_000_001);
 

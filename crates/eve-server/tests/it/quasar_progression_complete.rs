@@ -128,6 +128,7 @@ async fn quasar_daily_goals_lifecycle_and_rewards() {
     ]);
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let mut sess = build_sess(10_001, 90_000_001, 98_000_001);
     let empty_kw = HashMap::new();
 
@@ -340,6 +341,7 @@ async fn quasar_career_goals_paths_and_milestones() {
     ]);
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let mut sess = build_sess(10_002, 90_000_001, 98_000_001);
     let empty_kw = HashMap::new();
 
@@ -475,6 +477,7 @@ async fn quasar_achievements_categories_scores_and_claims() {
     ]);
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let mut sess = build_sess(10_003, 90_000_001, 98_000_001);
     let empty_kw = HashMap::new();
 
@@ -633,6 +636,7 @@ async fn quasar_skills_plans_extractors_and_implants() {
     ]);
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let mut sess = build_sess(10_004, 90_000_001, 98_000_001);
 
     // 1. Create personal skill plan via eve_public.skill.plan.CreateRequest
@@ -815,6 +819,7 @@ async fn quasar_community_progression_tales_and_goals() {
     ]);
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let mut sess = build_sess(10_005, 90_000_001, 98_000_001);
     let empty_kw = HashMap::new();
 

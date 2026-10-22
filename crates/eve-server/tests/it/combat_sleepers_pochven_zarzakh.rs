@@ -271,6 +271,7 @@ async fn test_zarzakh_gate_guns_and_deathless_patrols() {
     eve_testkit::attest(&["feat:npc.zarzakh-gate-guns-patrols"]);
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let zarzakh_sys_id = 30_100_000; // Zarzakh solar system
     let char_id = 90_000_001i64;
     let ship_id = 103_000_201i64;
@@ -329,6 +330,7 @@ async fn test_pochven_hypnosian_sleepers_and_60pct_loot_drop() {
     ]);
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let pochven_sys_id = 30_000_157; // System in Pochven region (10_000_070, Otela)
     ctx.db.with_mut_snapshot(|snap| {
         snap.system_states.insert(
@@ -451,6 +453,7 @@ async fn test_insurance_voiding_and_12_week_expiry() {
     eve_testkit::attest(&["feat:combat.insurance-void-and-expiry"]);
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let char_id = 90_000_001i64;
     let ship_id = 103_000_401i64;
     let sys_id = 30_000_142;
@@ -553,6 +556,7 @@ async fn test_abyssal_filament_highsec_restrictions_and_suspect_flag() {
     eve_testkit::attest(&["feat:crimewatch.abyssal-suspect-flag-tier"]);
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let char_id = 90_000_001i64;
     let ship_id = 103_000_501i64;
 

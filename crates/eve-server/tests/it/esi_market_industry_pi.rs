@@ -225,6 +225,7 @@ async fn test_esi6_market_public_and_structure_routes() {
     ]);
 
     let ctx = Arc::new(ServerContext::new());
+    crate::common::pin_clock(&ctx);
     let router = EsiRouter::new(Arc::clone(&ctx));
     let spec = OpenApiSpec::pinned();
     let now = ctx.now_unix();
@@ -520,6 +521,7 @@ async fn test_esi6_market_character_and_corporation_orders_routes() {
     ]);
 
     let ctx = Arc::new(ServerContext::new());
+    crate::common::pin_clock(&ctx);
     let router = EsiRouter::new(Arc::clone(&ctx));
     let spec = OpenApiSpec::pinned();
     let now = ctx.now_unix();
@@ -737,6 +739,7 @@ async fn test_esi6_contracts_character_corporation_and_public_routes() {
     ]);
 
     let ctx = Arc::new(ServerContext::new());
+    crate::common::pin_clock(&ctx);
     let router = EsiRouter::new(Arc::clone(&ctx));
     let spec = OpenApiSpec::pinned();
     let now = ctx.now_unix();
@@ -979,6 +982,7 @@ async fn test_esi6_industry_and_mining_routes() {
     ]);
 
     let ctx = Arc::new(ServerContext::new());
+    crate::common::pin_clock(&ctx);
     let router = EsiRouter::new(Arc::clone(&ctx));
     let spec = OpenApiSpec::pinned();
     let now = ctx.now_unix();
@@ -1214,6 +1218,7 @@ async fn test_esi6_planetary_interaction_and_plan_closure() {
     ]);
 
     let ctx = Arc::new(ServerContext::new());
+    crate::common::pin_clock(&ctx);
     let router = EsiRouter::new(Arc::clone(&ctx));
     let spec = OpenApiSpec::pinned();
     let now = ctx.now_unix();

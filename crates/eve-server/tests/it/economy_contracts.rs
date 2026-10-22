@@ -56,6 +56,7 @@ async fn test_e3_contracts_lifecycle_item_exchange_courier_auction() {
     // parity: feat:contracts.item-exchange, feat:contracts.courier, feat:contracts.auction, plan:E-3
     eve_testkit::attest(&["feat:contracts.item-exchange", "feat:contracts.courier", "feat:contracts.auction"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let mut s1 = setup_pilot(&ctx, 301, "demo", "demo-secret", 90_000_001).await;
     let mut s2 = setup_pilot(&ctx, 302, "other", "other-secret", 90_000_002).await;
 
@@ -483,6 +484,7 @@ async fn test_contracts_auction_and_courier() {
     // parity: feat:contracts.auction, feat:contracts.courier, feat:contracts.courier-failure, feat:contracts.expiry
     eve_testkit::attest(&["feat:contracts.auction", "feat:contracts.courier", "feat:contracts.courier-failure", "feat:contracts.expiry"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let mut s1 = setup_pilot(&ctx, 306, "demo", "demo-secret", 90_000_001).await;
     let mut s2 = setup_pilot(&ctx, 307, "other", "other-secret", 90_000_002).await;
 
@@ -901,6 +903,7 @@ async fn test_contracts_visibility_search_fees_limits_reject_blueprints_and_gm_e
     // parity: feat:contracts.visibility, feat:contracts.search, feat:contracts.my-contracts, feat:contracts.fees-limits, feat:contracts.expiry, feat:contracts.reject, feat:admin.gm-contract-expire, feat:contracts.blueprint-singleton-preservation, feat:contracts.item-exchange-blueprints-metadata, feat:contracts.courier-plastic-wrap-break, rpc:contractProxy.GM_ExpireContract, rpc:contractProxy.CreateContract, rpc:contractProxy.GetMyCurrentContractList, rpc:contractProxy.SearchContracts
     eve_testkit::attest(&["feat:contracts.visibility", "feat:contracts.search", "feat:contracts.my-contracts", "feat:contracts.fees-limits", "feat:contracts.expiry", "feat:contracts.reject", "feat:admin.gm-contract-expire", "feat:contracts.blueprint-singleton-preservation", "feat:contracts.item-exchange-blueprints-metadata", "feat:contracts.courier-plastic-wrap-break", "rpc:contractProxy.GM_ExpireContract"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let mut s1 = setup_pilot(&ctx, 310, "demo", "demo-secret", 90_000_001).await;
     let mut s2 = setup_pilot(&ctx, 311, "other", "other-secret", 90_000_002).await;

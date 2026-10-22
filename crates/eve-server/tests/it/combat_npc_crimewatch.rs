@@ -182,6 +182,7 @@ async fn test_c3_wrecks_loot_50pct_ownership_killmails_esi_hash_pod_corpse_and_s
     ]);
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let attacker_id = 90_000_001;
     let ewar_helper_id = 90_000_003;
     let victim_id = 90_000_002;
@@ -620,6 +621,7 @@ async fn test_c8_crimewatch_safety_timers_restrictions_and_lowsec_pod() {
     ]);
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let char_a = 90_000_001;
     let char_b = 90_000_002;
     let ship_a = 100_000_001;
@@ -891,6 +893,7 @@ async fn test_c8_crimewatch_npc_timers_duels_logi_assistance_and_outlaw() {
     ]);
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let char_a = 90_000_001;
     let char_b = 90_000_002;
     let char_logi = 90_000_003;

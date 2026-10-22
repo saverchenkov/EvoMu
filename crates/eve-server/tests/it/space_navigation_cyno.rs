@@ -25,6 +25,7 @@ async fn test_s2_fighter_manager_load_launch_recall_movement_abilities_abandon()
     ]);
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let mut sess = SessionState::new(2004);
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
@@ -893,6 +894,7 @@ async fn test_s3_pharolux_cyno_beacon_jump_bridge_and_group_jump() {
     eve_testkit::attest(&["plan:S-3", "feat:navigation.pharolux-beacon"]);
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let mut sess = SessionState::new(2005);
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;

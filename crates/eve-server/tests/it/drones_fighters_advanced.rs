@@ -442,6 +442,7 @@ async fn test_fighter_tube_refuel_rearm_repair_and_space_superiority() {
     ]);
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let sys_id = 30_002_187;
     let carrier_char_id = 90_000_001i64;
     let carrier_ship_id = 104_000_301i64;

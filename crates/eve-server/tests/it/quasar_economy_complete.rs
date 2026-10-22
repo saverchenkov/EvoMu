@@ -81,6 +81,7 @@ fn encode_uuid_field(tag: u32, uuid: &[u8], out: &mut Vec<u8>) {
 async fn test_quasar_market_complete() {
     // parity: rpc:publicGatewaySvc.SendRequest, rpc:publicGatewaySvc.Subscribe
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let empty_kw = HashMap::new();
     let mut sess = SessionState::new(1001);
     sess.user_id = Some(1);
@@ -440,6 +441,7 @@ async fn test_quasar_assetholding_entitlements() {
     ]);
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let empty_kw = HashMap::new();
     let mut sess = SessionState::new(1001);
     sess.user_id = Some(1);

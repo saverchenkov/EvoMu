@@ -130,6 +130,7 @@ async fn test_pve_combat_anomalies_waves_and_escalations() {
     ]);
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let mut sess = create_in_space_session(&ctx, 8101, 30_000_142, 710_001_001, 587).await;
 
@@ -661,6 +662,7 @@ async fn test_pve_ghost_sites_sleeper_caches_and_wormhole_sites() {
     ]);
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let mut sess = create_in_space_session(&ctx, 8104, 30_000_142, 710_001_004, 587).await;
 
@@ -911,6 +913,7 @@ async fn test_pve_abyssal_deadspace_pocket_gates_weather_and_tiers() {
     ]);
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let ship_id = 710_001_006_i64;
     let mut sess = create_in_space_session(&ctx, 8106, 30_002_813, ship_id, 587).await;

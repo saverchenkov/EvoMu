@@ -25,6 +25,7 @@ async fn test_sp5_docking_and_undocking_station_structure_and_boarding() {
     ]);
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let mut sess = SessionState::new(2003);
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
@@ -806,6 +807,7 @@ async fn test_sp4_stargate_capital_restriction_session_timers_and_jump_cloak_imm
     ]);
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let mut sess = SessionState::new(3003);
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;

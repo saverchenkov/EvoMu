@@ -278,6 +278,7 @@ async fn test_esi_faction_warfare_routes_reflect_live_state() {
     ]);
 
     let ctx = Arc::new(ServerContext::new());
+    crate::common::pin_clock(&ctx);
     let router = EsiRouter::new(Arc::clone(&ctx));
     let now = ctx.now_unix();
     let fmt = eve_server::esi::sample_routes::format_iso8601_utc;
@@ -664,6 +665,7 @@ async fn test_esi_universe_celestials_stations_structures_and_jumps_kills() {
     ]);
 
     let ctx = Arc::new(ServerContext::new());
+    crate::common::pin_clock(&ctx);
     let router = EsiRouter::new(Arc::clone(&ctx));
     let now = ctx.now_unix();
 

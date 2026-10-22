@@ -20,6 +20,7 @@ async fn test_ch1_skill_training_engine_and_caps() {
     // parity: feat:skills.queue-training-engine, feat:skills.queue-pause, feat:skills.skill-levels-sp, feat:skills.alpha-skill-caps, feat:skills.alpha-training-speed, rpc:charUnboundMgr.GetCharacterInfo, rpc:charUnboundMgr.SelectCharacterID, rpc:skillMgr2.AbortTraining, rpc:skillMgr2.GetSkillQueue, rpc:skillMgr2.SaveSkillQueue
     eve_testkit::attest(&["feat:skills.queue-training-engine", "feat:skills.queue-pause", "feat:skills.skill-levels-sp", "feat:skills.alpha-skill-caps", "feat:skills.alpha-training-speed"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let mut sess = SessionState::new(931);
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
@@ -612,6 +613,7 @@ async fn test_ch2_skill_handling_and_prerequisites() {
     // parity: feat:skills.queue-get, feat:skills.queue-save, feat:skills.skill-history, feat:skills.inject-skillbook, feat:skills.prereq-check, rpc:charUnboundMgr.SelectCharacterID, rpc:skillMgr2.GetSkillHistory, rpc:skillMgr2.GetSkillQueue, rpc:skillMgr2.InjectSkillIntoBrain, rpc:skillMgr2.SaveSkillQueue
     eve_testkit::attest(&["feat:skills.queue-get", "feat:skills.queue-save", "feat:skills.skill-history", "feat:skills.inject-skillbook", "feat:skills.prereq-check"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let mut sess = SessionState::new(932);
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
@@ -1052,6 +1054,7 @@ async fn test_ch1_ch2_effective_attributes_catchup_and_2arg_free_sp() {
     // parity: feat:skills.skill-catch-up, feat:attributes.attributes-base, feat:skills.free-sp, rpc:charMgr.GetCharacterInfo, rpc:charUnboundMgr.SelectCharacterID, rpc:skillMgr2.ApplyFreeSkillPoints, rpc:skillMgr2.GetRespecInfo, rpc:skillMgr2.GetSkillQueueAndFreePoints
     eve_testkit::attest(&["feat:skills.skill-catch-up", "feat:attributes.attributes-base", "feat:skills.free-sp"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let mut sess = SessionState::new(940);
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;

@@ -206,6 +206,7 @@ async fn test_tactical_destroyer_ship_stances_and_cooldown_confessor_svipul_jack
     }
     // 3. Exercise live `shipStanceMgr::SetShipStance` and `shipStanceMgr::GetShipStance` RPC dispatch on Confessor (34317)
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let mut sess = SessionState::new(4700);
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;

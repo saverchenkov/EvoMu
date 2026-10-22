@@ -117,6 +117,7 @@ async fn test_mn13_moon_extraction_lifecycle_and_fracture() {
     // parity: plan:MN-13, feat:mining.moon-extraction, feat:mining.moon-fracture, feat:mining.moon-resources, rpc:moonExtractions.CancelExtraction, rpc:moonExtractions.FractureChunkWithStructure, rpc:moonExtractions.GetExtractionAndEventIDFromStructureID, rpc:moonExtractions.GetExtractionsForCorp, rpc:moonExtractions.GetMoonResourcesForStructure, rpc:moonExtractions.StartNewExtraction
     eve_testkit::attest(&["plan:MN-13", "feat:mining.moon-extraction", "feat:mining.moon-fracture", "feat:mining.moon-resources"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let mut sess = create_auth_session(&ctx, 1301).await;
 
@@ -354,6 +355,7 @@ async fn test_mn14_auto_moon_mining_service() {
     // parity: feat:mining.metenox, rpc:autoMoonMining.RequestMiningCycleOutput, rpc:autoMoonMining.RequestMiningDetails
     eve_testkit::attest(&["feat:mining.metenox"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let mut sess = create_auth_session(&ctx, 1401).await;
 
@@ -545,6 +547,7 @@ async fn test_mn15_corp_mining_ledger_service_and_observer_tracking() {
     // parity: plan:MN-16, feat:mining.corp-ledger, rpc:corpMiningLedger.GetObserverLedger, rpc:corpMiningLedger.GetObserversWithMiningEvents
     eve_testkit::attest(&["plan:MN-16", "feat:mining.corp-ledger"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let mut sess = create_auth_session(&ctx, 1501).await;
 
@@ -1247,6 +1250,7 @@ async fn test_mn18_mining_missions_and_career_goals_from_ledger() {
     // parity: feat:mining.mining-missions, feat:mining.mining-goals, rpc:agentMgr.DoAction, rpc:agentMgr.GetAgents, rpc:agentMgr.GetMyJournalDetails, rpc:agentMgr.MachoBindObject, rpc:seasonManager.get_character_progress_by_character_id
     eve_testkit::attest(&["feat:mining.mining-missions", "feat:mining.mining-goals"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let mut sess = create_auth_session(&ctx, 1801).await;
 

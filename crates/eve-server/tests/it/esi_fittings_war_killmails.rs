@@ -162,6 +162,7 @@ async fn test_esi_fittings_post_and_delete_scopes_errors_and_client_state() {
         "feat:esi.fittings.write",
     ]);
     let ctx = Arc::new(ServerContext::new());
+    crate::common::pin_clock(&ctx);
     let router = EsiRouter::new(Arc::clone(&ctx));
     let spec = OpenApiSpec::pinned();
     let now = ctx.now_unix();
@@ -378,6 +379,7 @@ async fn test_esi_war_killmails_pagination_caching_and_world_state() {
         "feat:esi.wars.killmails",
     ]);
     let ctx = Arc::new(ServerContext::new());
+    crate::common::pin_clock(&ctx);
     let router = EsiRouter::new(Arc::clone(&ctx));
     let op = OpenApiSpec::pinned()
         .match_operation("GET", "/v1/wars/1/killmails/")

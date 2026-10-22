@@ -762,6 +762,7 @@ async fn test_c8_crimewatch_state_machine_timers_flags_and_concord() {
     // suspect/criminal flags, CONCORD response timer by system security status).
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let mut cw_director = CrimeWatchDirector::new();
     let char_id = 90_000_001;
     let victim_char_id = 90_000_002;

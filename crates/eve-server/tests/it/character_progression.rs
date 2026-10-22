@@ -46,6 +46,7 @@ fn issue_token_with_scopes(ctx: &ServerContext, character_id: i64, scopes: Vec<S
 async fn test_ch1_skill_training_queue_engine() {
     // parity: rpc:charUnboundMgr.SelectCharacterID
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let mut sess = SessionState::new(919);
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
@@ -468,6 +469,7 @@ async fn test_ch2_character_creation_and_starter_assets() {
 async fn test_ch3_jump_clones_implants_and_pod_death() {
     // parity: rpc:charUnboundMgr.SelectCharacterID, rpc:jumpCloneSvc.CloneJump, rpc:jumpCloneSvc.InstallCloneInStation
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let mut sess = SessionState::new(921);
 
@@ -817,6 +819,7 @@ async fn test_ch5_neural_attribute_remap_and_cooldown() {
         "feat:attributes.bonus-remap",
     ]);
     let ctx = Arc::new(ServerContext::new());
+    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let mut sess = SessionState::new(923);
 

@@ -54,6 +54,7 @@ async fn test_esi_http_server_routing_versioning_meta_and_openapi_spec() {
     // parity: plan:ESI-2, feat:esi.core.meta, feat:esi.status.status
     // parity: esi:GET /status, esi:GET /meta/compatibility-dates
     let ctx = Arc::new(ServerContext::new());
+    crate::common::pin_clock(&ctx);
     let (addr, _router, _handle) = EsiServer::spawn(Arc::clone(&ctx), "127.0.0.1:0")
         .await
         .expect("spawn ESI HTTP server");
@@ -281,6 +282,7 @@ async fn test_esi_oauth2_bearer_sso_scopes_character_ownership_and_verify() {
     // parity: feat:esi.core.meta, feat:esi.wallet.char-balance
     // parity: esi:GET /characters/{character_id}/wallet
     let ctx = Arc::new(ServerContext::new());
+    crate::common::pin_clock(&ctx);
     let router = EsiRouter::new(Arc::clone(&ctx));
 
     let wallet_token = issue_token_with_scopes(
@@ -428,6 +430,7 @@ async fn test_esi_oauth2_bearer_sso_scopes_character_ownership_and_verify() {
 async fn test_esi_etag_caching_304_not_modified_and_pagination_x_pages() {
     // parity: esi:GET /universe/types, esi:GET /universe/types/{type_id}, esi:GET /characters/{character_id}/wallet
     let ctx = Arc::new(ServerContext::new());
+    crate::common::pin_clock(&ctx);
     let router = EsiRouter::new(Arc::clone(&ctx));
     let spec = OpenApiSpec::pinned();
 
@@ -591,6 +594,7 @@ async fn test_esi_etag_caching_304_not_modified_and_pagination_x_pages() {
 async fn test_esi_error_limit_window_headers_and_420_throttling() {
     // parity: feat:esi.core.rate-limits
     let ctx = Arc::new(ServerContext::new());
+    crate::common::pin_clock(&ctx);
     let router = EsiRouter::with_error_limit(Arc::clone(&ctx), 3, 60);
 
     // 3 client errors from 10.0.0.1 consume 10.0.0.1's 3-error budget in the current 60s window
@@ -658,6 +662,7 @@ async fn test_esi_all_31_openapi_tags_sample_routes_and_schema_validation() {
     // parity: esi:GET /markets/groups, esi:GET /universe/schematics/{schematic_id}
     // parity: esi:GET /wars
     let ctx = Arc::new(ServerContext::new());
+    crate::common::pin_clock(&ctx);
 
     // Seed rich world state so collection and detail routes exercise non-empty schemas
     let corp_id = 98_000_001_i64;

@@ -24,6 +24,7 @@ use std::path::Path;
 async fn test_account_bans_real_enforcement_and_auto_clear() {
     // parity: feat:account.account-bans, rpc:authentication.Login
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let now = ctx.now_unix();
 
@@ -510,6 +511,7 @@ async fn test_multi_login_block_enforcement() {
 async fn test_gm_ban_slash_command() {
     // parity: feat:admin.gm-ban, rpc:authentication.Login, rpc:charUnboundMgr.SelectCharacterID, rpc:slash.SlashCmd
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
 
     // 1. Provision GM and target user
@@ -1094,6 +1096,7 @@ async fn test_z5_auditor_flagged_rows_closure_suite() {
     // - plan:S-7
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let now = ctx.now_unix();
 

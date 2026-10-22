@@ -60,6 +60,7 @@ async fn test_quasar_chat_and_presence_complete() {
     ]);
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let now = ctx.now_unix();
     let sess = make_auth_session(101, 1, 90000001, 98000001);
 
@@ -149,6 +150,7 @@ async fn test_quasar_chat_and_presence_complete() {
 #[tokio::test]
 async fn test_quasar_alliance_complete() {
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let now = ctx.now_unix();
     let sess = make_auth_session(102, 1, 90000001, 98000001);
 
@@ -188,6 +190,7 @@ async fn test_quasar_corporation_skill_plans_complete() {
     ]);
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let now = ctx.now_unix();
     let sess = make_auth_session(103, 1, 90000001, 98000001);
     ctx.quasar_gateway.subscribe_session(&sess, vec![], now);
@@ -238,6 +241,7 @@ async fn test_quasar_corporation_skill_plans_complete() {
 #[tokio::test]
 async fn test_quasar_corporation_governance_complete() {
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let now = ctx.now_unix();
     let sess = make_auth_session(104, 1, 90000001, 98000001);
 
@@ -281,6 +285,7 @@ async fn test_quasar_corporation_goals_complete() {
     ]);
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let now = ctx.now_unix();
     let sess = make_auth_session(105, 1, 90000001, 98000001);
     ctx.quasar_gateway.subscribe_session(&sess, vec![], now);
@@ -330,6 +335,7 @@ async fn test_quasar_freelance_complete() {
     ]);
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let now = ctx.now_unix();
     let sess = make_auth_session(106, 1, 90000001, 98000001);
     ctx.quasar_gateway.subscribe_session(&sess, vec![], now);
@@ -382,6 +388,7 @@ async fn test_quasar_freelance_complete() {
 #[tokio::test]
 async fn test_quasar_mail_calendar_contacts_standings_complete() {
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let now = ctx.now_unix();
     let sess = make_auth_session(107, 1, 90000001, 98000001);
 
@@ -430,6 +437,7 @@ async fn test_quasar_mail_calendar_contacts_standings_complete() {
 #[tokio::test]
 async fn test_quasar_wars_tags_bookmarks_fleet_medal_security_complete() {
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let now = ctx.now_unix();
     let sess = make_auth_session(108, 1, 90000001, 98000001);
 

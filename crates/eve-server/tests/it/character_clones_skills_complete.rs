@@ -97,6 +97,7 @@ async fn character_delete_prepare_cancel_and_biomass_to_doomheim() {
     // parity: feat:character.delete-character
     eve_testkit::attest(&["feat:character.delete-character"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let mut s = SessionState::new(52_010);
     common::login_pilot(&ctx, &mut s, "demo", "demo-secret").await;
     let victim = create(&ctx, &mut s, "Biomass Candidate").await.unwrap().as_i64().unwrap();
@@ -265,6 +266,7 @@ async fn test_jump_clone_state_clones_implants_and_timers() {
     // parity: feat:clones.jump-clone-state
     eve_testkit::attest(&["feat:clones.jump-clone-state"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let mut s = SessionState::new(52_030);
     common::login_pilot(&ctx, &mut s, "demo", "demo-secret").await;
     rpc(&ctx, &mut s, "charUnboundMgr", "SelectCharacterID", vec![PyRep::Integer(PILOT)]).await.unwrap();
@@ -515,6 +517,7 @@ async fn test_booster_consume_and_side_effects_neurotoxin_skills() {
         "feat:attributes.booster-side-effects",
     ]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let mut s = SessionState::new(52_050);
     common::login_pilot(&ctx, &mut s, "demo", "demo-secret").await;
     rpc(&ctx, &mut s, "charUnboundMgr", "SelectCharacterID", vec![PyRep::Integer(PILOT)]).await.unwrap();

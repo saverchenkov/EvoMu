@@ -106,6 +106,7 @@ async fn test_manual_asset_safety_personal_and_corp_with_delay_and_fee() {
     eve_testkit::attest(&["feat:structures.asset-safety-manual"]);
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let char_id = 90_000_001;
     let mut sess = login_with_corp(&ctx, 3001, char_id).await;
     let struct_id = undock_and_anchor(&ctx, &mut sess, char_id, "Safety Astrahus").await;
@@ -207,6 +208,7 @@ async fn test_structure_description_deliveries_cargo_dropoff_guests_and_hangar_v
     ]);
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let char_id = 90_000_001;
     let other_id = 90_000_002;
     let mut sess = login_with_corp(&ctx, 3002, char_id).await;
@@ -289,6 +291,7 @@ async fn test_structure_unanchor_rename_control_and_schedule_regressions() {
     eve_testkit::attest(&["feat:structures.rename", "feat:structures.vulnerability-schedule", "feat:structures.structure-control"]);
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let char_id = 90_000_001;
     let mut sess = login_with_corp(&ctx, 3004, char_id).await;
     let struct_id = undock_and_anchor(&ctx, &mut sess, char_id, "Regression Astrahus").await;

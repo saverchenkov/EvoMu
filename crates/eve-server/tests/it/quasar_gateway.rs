@@ -45,6 +45,7 @@ async fn q2_gateway_envelope_framing_status_codes_tenancy_and_idempotency() {
         "quasar:eveProto/generated/eve_public/public_pb2.pyj",
     ]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let empty_kw = HashMap::new();
 
     // 1. Unauthenticated session -> 401 STATUS_UNAUTHORIZED
@@ -350,6 +351,7 @@ async fn q2_service_gateway_mgr_hijack_mode_and_internal_gateway_requests() {
         "quasar:eveProto/generated/eve_public/gateway_pb2.pyj",
     ]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let empty_kw = HashMap::new();
 
     // Non-GM/QA session cannot invoke serviceGatewayMgr.qa_enable_hijack_mode
@@ -590,6 +592,7 @@ async fn q2_scoped_notice_fan_out_and_notice_routing_cache_flush_on_session_chan
     // parity: plan:Q-2, feat:quasar.gateway-events
     eve_testkit::attest(&["plan:Q-2", "feat:quasar.gateway-events"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let empty_kw = HashMap::new();
 
     // Subscribe 3 distinct client sessions with different character / corp / alliance / solar_system / fleet scopes

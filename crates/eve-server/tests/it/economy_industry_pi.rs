@@ -62,6 +62,7 @@ async fn test_e4_industry_jobs_lifecycle_manufacturing_research_and_copying() {
     // parity: feat:industry.manufacturing, feat:industry.research-me, feat:industry.research-te, feat:industry.copying, plan:E-4
     eve_testkit::attest(&["feat:industry.manufacturing", "feat:industry.research-me", "feat:industry.research-te", "feat:industry.copying"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let mut s1 = setup_pilot(&ctx, 401, "demo", "demo-secret", 90_000_001).await;
 
     // 1. Manufacturing Job (activity_id = 1)
@@ -413,6 +414,7 @@ async fn test_industry_blueprint_data_facilities_jobs() {
     // parity: feat:industry.blueprint-data, feat:industry.facilities, feat:industry.facility-tax, feat:industry.install-job, feat:industry.job-cost
     eve_testkit::attest(&["feat:industry.blueprint-data", "feat:industry.facilities", "feat:industry.facility-tax", "feat:industry.install-job", "feat:industry.job-cost"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let mut s1 = setup_pilot(&ctx, 402, "demo", "demo-secret", 90_000_001).await;
 
     let (rifter_bpo_id, raitaru_id) = ctx.db.with_mut_snapshot(|snap| {

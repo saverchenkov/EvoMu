@@ -98,6 +98,7 @@ async fn test_phase_4_dg4_and_exit_gate_full_cycle_journey() {
     // parity: plan:DG-4, feat:dogma.module-cycle, notify:OnGodmaShipEffect, notify:OnModuleActivated, notify:OnModulesDeactivating, rpc:charUnboundMgr.SelectCharacterID, rpc:dogmaIM.Activate, rpc:dogmaIM.AddTarget, rpc:dogmaIM.Deactivate, rpc:dogmaIM.LinkAllWeapons, rpc:dogmaIM.LoadAmmo, rpc:invbroker.Add, rpc:stationSvc.Undock
     eve_testkit::attest(&["feat:dogma.module-cycle", "notify:OnGodmaShipEffect", "notify:OnModuleActivated", "notify:OnModulesDeactivating"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let mut sess = SessionState::new(4005);
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
@@ -1018,6 +1019,7 @@ async fn test_dg4_remote_logistics_mutadaptive_spool_and_impedance() {
     // parity: feat:modules.remote-shield, feat:modules.remote-armor, feat:modules.remote-hull, feat:modules.remote-cap, feat:modules.remote-assistance-impedance, rpc:charUnboundMgr.SelectCharacterID, rpc:dogmaIM.Activate, rpc:dogmaIM.Deactivate, rpc:invbroker.Add, rpc:stationSvc.Undock
     eve_testkit::attest(&["feat:modules.remote-shield", "feat:modules.remote-armor", "feat:modules.remote-hull", "feat:modules.remote-cap", "feat:modules.remote-assistance-impedance"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let mut sess = SessionState::new(4202);
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;

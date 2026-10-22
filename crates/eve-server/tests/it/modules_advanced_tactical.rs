@@ -11,6 +11,7 @@ async fn test_bastion_siege_triage_and_disruptive_lance_effects() {
     eve_testkit::attest(&["feat:modules.bastion-module-effects", "feat:modules.bastion-wormhole-and-mjd-interaction", "feat:modules.siege-module-v24-effects", "feat:modules.triage-module-v24-effects", "feat:modules.disruptive-lance"]);
 
     let _ctx = ServerContext::new();
+    crate::common::pin_clock(&_ctx);
 
     // 1. Bastion Module V24 Effects & Interactions
     let bastion = BastionV24Effect::default();

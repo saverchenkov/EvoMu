@@ -118,6 +118,7 @@ async fn test_esi_fleets_settings_members_invite_move_and_kick_roundtrip() {
     ]);
 
     let ctx = Arc::new(ServerContext::new());
+    crate::common::pin_clock(&ctx);
     let router = EsiRouter::new(Arc::clone(&ctx));
 
     let boss_id = 90_000_001_i64;
@@ -653,6 +654,7 @@ async fn test_esi_fleets_wings_and_squads_hierarchy_lifecycle() {
     ]);
 
     let ctx = Arc::new(ServerContext::new());
+    crate::common::pin_clock(&ctx);
     let router = EsiRouter::new(Arc::clone(&ctx));
 
     let boss_id = 90_000_001_i64;

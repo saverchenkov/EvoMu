@@ -506,6 +506,7 @@ async fn test_plan_dg1_dogma_modifier_engine_rifter_overdrives() {
 #[tokio::test]
 async fn test_plan_e1_e2_market_fees_order_lifecycle_escrow() {
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let mut s1 = setup_pilot(&ctx, 201, "demo", "demo-secret", 90_000_001).await;
     let mut s2 = setup_pilot(&ctx, 202, "other", "other-secret", 90_000_002).await;
 

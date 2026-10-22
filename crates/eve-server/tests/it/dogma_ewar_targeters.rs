@@ -120,6 +120,7 @@ async fn test_dg5_targeting_state_machine_sensor_strength_and_ewar() {
     // parity: plan:DG-5, feat:dogma.targeting-ships-sensor-strength, feat:modules.ecm, feat:modules.burst-jammer, feat:modules.sensor-dampener, feat:modules.tracking-disruptor, feat:modules.target-painter, rpc:charUnboundMgr.SelectCharacterID, rpc:dogmaIM.Activate, rpc:dogmaIM.AddTarget, rpc:dogmaIM.Deactivate, rpc:dogmaIM.ItemGetInfo, rpc:dogmaIM.Overload, rpc:invbroker.Add, rpc:stationSvc.Undock
     eve_testkit::attest(&["feat:dogma.targeting-ships-sensor-strength", "feat:modules.ecm", "feat:modules.burst-jammer", "feat:modules.sensor-dampener", "feat:modules.tracking-disruptor", "feat:modules.target-painter"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let mut sess = SessionState::new(4103);
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;

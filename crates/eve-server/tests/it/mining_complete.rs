@@ -613,6 +613,7 @@ async fn test_mn05_special_holds_and_mining_to_jetcan() {
     // parity: plan:MN-05, feat:ships.special-holds, feat:mining.ore-hold, feat:mining.mining-to-jetcan, rpc:dogmaIM.Activate, rpc:invbroker.Add, rpc:ship.Jettison, rpc:stationSvc.Undock
     eve_testkit::attest(&["plan:MN-05", "feat:ships.special-holds", "feat:mining.ore-hold", "feat:mining.mining-to-jetcan"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let char_id = 90_000_001;
     let mut session = setup_test_session(&ctx, char_id).await;
     let kw = HashMap::new();

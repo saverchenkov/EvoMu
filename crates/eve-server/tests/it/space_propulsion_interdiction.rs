@@ -490,6 +490,7 @@ async fn test_sp3_propulsion_agility_mjd_mjfg_and_approach() {
     ]);
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let mut sess = SessionState::new(2002);
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;

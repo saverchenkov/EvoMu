@@ -49,6 +49,7 @@ async fn test_market_broker_fee_and_sales_tax() {
     // parity: feat:market.broker-fee, feat:market.sales-tax, rpc:facilityManager.SetFacilityTaxes, rpc:marketProxy.CancelCharOrder, rpc:marketProxy.PlaceBuyOrder, rpc:marketProxy.PlaceMultiSellOrder
     eve_testkit::attest(&["feat:market.broker-fee", "feat:market.sales-tax"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
 
     let mut s1 = setup_pilot(&ctx, 101, "demo", "demo-secret", 90_000_001).await;

@@ -25,7 +25,9 @@ const ESS_BEACON_TYPE_ID: u32 = 32882; // Encounter Surveillance System
 const ESS_RESERVE_KEY_TYPE_ID: u32 = 57714; // ESS-NW-15 Reserve Security Key (group 4102)
 
 fn build_ctx() -> ServerContext {
-    ServerContext::new()
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+    ctx
 }
 
 fn make_session(

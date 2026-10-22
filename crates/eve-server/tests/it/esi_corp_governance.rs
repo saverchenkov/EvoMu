@@ -149,6 +149,7 @@ async fn test_esi5_alliance_info_history_divisions_and_shareholders() {
     ]);
 
     let ctx = Arc::new(ServerContext::new());
+    crate::common::pin_clock(&ctx);
     let router = EsiRouter::new(Arc::clone(&ctx));
     let spec = OpenApiSpec::pinned();
 
@@ -406,6 +407,7 @@ async fn test_esi5_corporation_medals_container_logs_and_projects() {
     ]);
 
     let ctx = Arc::new(ServerContext::new());
+    crate::common::pin_clock(&ctx);
     let router = EsiRouter::new(Arc::clone(&ctx));
     let spec = OpenApiSpec::pinned();
 
@@ -632,6 +634,7 @@ async fn test_esi5_corporation_members_limit_titles_and_roles_history() {
     ]);
 
     let ctx = Arc::new(ServerContext::new());
+    crate::common::pin_clock(&ctx);
     let router = EsiRouter::new(Arc::clone(&ctx));
     let spec = OpenApiSpec::pinned();
 
@@ -868,6 +871,7 @@ async fn test_esi5_corporation_structures_timers_starbase_detail_and_plan_closur
     ]);
 
     let ctx = Arc::new(ServerContext::new());
+    crate::common::pin_clock(&ctx);
     let router = EsiRouter::new(Arc::clone(&ctx));
     let spec = OpenApiSpec::pinned();
 

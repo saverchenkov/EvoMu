@@ -380,6 +380,7 @@ async fn test_industry_jobs_me_te_copy_invention_decryptors_t3_reactions_remote_
     // parity: feat:industry.research-me, feat:industry.research-te, feat:industry.copying, feat:industry.invention, feat:industry.decryptors, feat:industry.t3-invention, feat:industry.reactions, feat:industry.job-complete, feat:industry.job-cancel, feat:industry.job-list, feat:industry.job-range, feat:industry.industry-monitor, feat:industry.blueprint-lock, feat:structures.service-reactions, rpc:industryManager.CompleteJob, rpc:industryManager.CompleteManyJobs, rpc:industryManager.GetJobsByOwner, rpc:industryManager.InstallJob, rpc:industryMonitor.ConnectJob, rpc:repackagingSvc.RepackageItems
     eve_testkit::attest(&["feat:industry.research-me", "feat:industry.research-te", "feat:industry.copying", "feat:industry.invention", "feat:industry.decryptors", "feat:industry.t3-invention", "feat:industry.reactions", "feat:industry.job-complete", "feat:industry.job-cancel", "feat:industry.job-list", "feat:industry.job-range", "feat:industry.industry-monitor", "feat:industry.blueprint-lock", "feat:structures.service-reactions"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let char_id = 90_000_001;
     let corp_id = 98_000_002;
@@ -809,6 +810,7 @@ async fn test_pi_resources_heatmap_extractor_schematics_routes_simulation_transf
     // parity: feat:pi.extractor-program, feat:pi.pi-depletion, feat:pi.factory-cycles, feat:pi.routes, feat:pi.storage-overflow, feat:pi.colony-simulation, feat:pi.expedited-transfer, feat:pi.launch, feat:pi.customs-office, feat:pi.poco-settings, feat:pi.skyhook-pi, feat:pi.pi-skills, feat:pi.pi-notifications, feat:pi.abandon-colony, rpc:planetMgr.Flush, rpc:planetMgr.GetMyLaunchesDetails, rpc:planetMgr.GetPlanetResourceInfo, rpc:planetMgr.GetProgramResultInfo, rpc:planetMgr.GetResourceData, rpc:planetMgr.UserAbandonPlanet, rpc:planetMgr.UserLaunchCommodities, rpc:planetMgr.UserTransferCommodities, rpc:planetMgr.UserUpdateNetwork, rpc:planetOrbitalRegistryBroker.GetSettingsInfo, rpc:planetOrbitalRegistryBroker.GetTaxRate, rpc:planetOrbitalRegistryBroker.UpdateSettings, rpc:posMgr.AnchorOrbital, rpc:posMgr.OnlineOrbital
     eve_testkit::attest(&["feat:pi.extractor-program", "feat:pi.pi-depletion", "feat:pi.factory-cycles", "feat:pi.routes", "feat:pi.storage-overflow", "feat:pi.colony-simulation", "feat:pi.expedited-transfer", "feat:pi.launch", "feat:pi.customs-office", "feat:pi.poco-settings", "feat:pi.skyhook-pi", "feat:pi.pi-skills", "feat:pi.pi-notifications", "feat:pi.abandon-colony"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let char_id = 90_000_001;
     let corp_id = 98_000_003;

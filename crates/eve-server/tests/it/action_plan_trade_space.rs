@@ -288,6 +288,7 @@ async fn test_action_plan_t_trade_market_escrow_codecs_time() {
 async fn test_action_plan_s_space_structures_clones_mutations() {
     // parity: rpc:jumpCloneSvc.CloneJump, rpc:jumpCloneSvc.DestroyInstalledClone, rpc:jumpCloneSvc.GetCloneState, rpc:jumpCloneSvc.InstallCloneInStation, rpc:planetMgr.CancelInstallProgram, rpc:planetMgr.Flush, rpc:planetMgr.GetColony, rpc:planetMgr.GetCommandCenterLevel, rpc:planetMgr.GetPlanetInfo, rpc:planetMgr.GetPlanetResourceInfo, rpc:planetMgr.GetPlanetsForChar, rpc:planetMgr.UserAbandonPlanet, rpc:planetMgr.UserUpdateNetwork, rpc:posMgr.GetControlTowers, rpc:structureDeployment.RenameStructure, rpc:structureDirectory.GetStructureInfo, rpc:structureDirectory.GetStructures, rpc:structureVulnerability.UpdateReinforceTimesFromClient
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let empty_kw = HashMap::new();
 
     let mut sess = SessionState::new(10_003);

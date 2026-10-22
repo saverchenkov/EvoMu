@@ -1196,6 +1196,7 @@ async fn test_c4_bounty_tick_dbs_ess_split_encounter_waves_and_sentry_guns() {
     ]);
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let char_id = 91_000_030;
     let ship_id = 101_000_030;
     let nullsec_sys_id = 30_004_759; // 1DQ1-A (K-space null-sec <= 0.0)

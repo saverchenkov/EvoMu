@@ -119,6 +119,7 @@ async fn test_esi4_character_agents_research_medals_roles_and_loyalty_offers() {
     ]);
 
     let ctx = Arc::new(ServerContext::new());
+    crate::common::pin_clock(&ctx);
     let router = EsiRouter::new(Arc::clone(&ctx));
     let spec = OpenApiSpec::pinned();
 
@@ -389,6 +390,7 @@ async fn test_esi4_wallet_char_and_corp_journal_and_transactions() {
     ]);
 
     let ctx = Arc::new(ServerContext::new());
+    crate::common::pin_clock(&ctx);
     let router = EsiRouter::new(Arc::clone(&ctx));
     let spec = OpenApiSpec::pinned();
 

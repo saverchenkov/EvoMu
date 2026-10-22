@@ -96,6 +96,7 @@ fn call(router: &EsiRouter, req: EsiHttpRequest, expected: u16) -> Value {
 
 fn setup_ui_and_features_env() -> (Arc<ServerContext>, EsiRouter) {
     let ctx = Arc::new(ServerContext::new());
+    crate::common::pin_clock(&ctx);
     let now = ctx.now_unix();
     let char_id = 90_000_001_i64;
     let corp_id = 98_000_001_i64;

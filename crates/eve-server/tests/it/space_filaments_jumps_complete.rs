@@ -125,6 +125,7 @@ async fn test_upwell_tether_invulnerability_repair_and_breaks() {
     // parity: feat:navigation.tether, feat:navigation.tether-break, rpc:structureCynoBeaconMgr.CmdJumpToStructureBeacon
     eve_testkit::attest(&["feat:navigation.tether", "feat:navigation.tether-break"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let (mut sess, beyonce, ship_id) = login_and_undock(&ctx, 7101).await;
     let handle = ctx.systems.get_or_spawn(JITA);
     let astrahus = 35_832u32;
@@ -287,6 +288,7 @@ async fn test_jump_drive_range_fuel_fatigue_and_highsec_restriction() {
         "notify:OnJumpTimersUpdated",
     ]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let (mut sess, _beyonce, ship_id) = login_and_undock(&ctx, 7104).await;
     let corp = sess.corporation_id.unwrap();
     let kw = HashMap::new();
@@ -444,6 +446,7 @@ async fn test_zarzakh_entry_gate_lock() {
     // Not tagged: the Emanation Lock notices (`OnEmanationGateLockRemoved`, gate-lock details) are not
     // implemented, so `feat:navigation.zarzakh-gate-lock` stays open.
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let (mut sess, _beyonce, ship_id) = login_and_undock(&ctx, 7106).await;
     let turnur = 30_002_086u32;
     let zarzakh = 30_100_000u32;

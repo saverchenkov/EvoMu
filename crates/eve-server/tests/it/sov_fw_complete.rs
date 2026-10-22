@@ -90,6 +90,7 @@ async fn fw_direct_enlistment_standings_and_leave_cooldown() {
     // parity: feat:fw.enlist, feat:fw.leave-militia
     eve_testkit::attest(&["feat:fw.enlist", "feat:fw.leave-militia"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let mut sess = SessionState::new(41_001);
     select(&ctx, &mut sess, "demo", "demo-secret", PILOT).await;
 
@@ -168,6 +169,7 @@ async fn fw_corp_allowed_enlistment_factions_gate_member_enlistment() {
     // parity: feat:fw.corp-enlist
     eve_testkit::attest(&["feat:fw.corp-enlist"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let corp_id: i64 = 98_000_777;
     ctx.db.with_mut_snapshot(|s| {
         s.corporations.insert(
@@ -271,6 +273,7 @@ async fn sov_hub_anchoring_claims_unclaimed_nullsec_and_emits_notifications() {
     ]);
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let sys_id: u32 = 30000208; // LZ-6SU (null-sec system)
     let corp_id: i64 = 98_000_100;
     let alliance_id: i64 = 99_000_200;
@@ -372,6 +375,7 @@ async fn sov_info_adm_scaling_dev_indices_and_map_data() {
     ]);
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let sys_id: u32 = 30000208;
     let corp_id: i64 = 98_000_100;
     let alliance_id: i64 = 99_000_200;
@@ -539,6 +543,7 @@ async fn sov_hub_vulnerability_fuel_jammer_sites_and_hacking() {
     ]);
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let sys_id: u32 = 30000208;
     let corp_id: i64 = 98_000_100;
     let alliance_id: i64 = 99_000_200;
@@ -716,6 +721,7 @@ async fn sov_hub_vulnerability_fuel_jammer_sites_and_hacking() {
 #[tokio::test]
 async fn skyhook_acquisition_theft_and_reagent_loss() {
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let sys_id: u32 = 30000208;
     let corp_id: i64 = 98_000_100;
     let alliance_id: i64 = 99_000_200;
@@ -900,6 +906,7 @@ async fn fw_warzones_victory_points_and_advantage_scaling() {
 #[tokio::test]
 async fn pirate_insurgency_campaigns_corruption_suppression_and_instances() {
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let sys_id: u32 = 30000012; // Asabona
     let campaign_id: i64 = 880_001;
 

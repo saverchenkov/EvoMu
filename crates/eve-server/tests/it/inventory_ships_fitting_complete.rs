@@ -18,7 +18,9 @@ fn new_sqlite_ctx() -> ServerContext {
             .expect("open evomu_sde.sqlite"),
     );
     let db = std::sync::Arc::new(eve_db::WorldRepository::with_demo_seed());
-    ServerContext::with_sde_and_repository(sde, db)
+    let ctx = ServerContext::with_sde_and_repository(sde, db);
+    crate::common::pin_clock(&ctx);
+    ctx
 }
 
 fn seed_item(

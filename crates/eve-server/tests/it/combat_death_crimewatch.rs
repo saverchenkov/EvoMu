@@ -668,6 +668,7 @@ async fn test_c8_crimewatch_concord_timers_and_security_status() {
     ]);
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let char_id = 90_000_001;
     let victim_char_id = 90_000_002;
     let ship_id = 100_000_001;

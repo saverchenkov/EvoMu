@@ -13,6 +13,7 @@ async fn test_blocking_findings_b01_to_b15_regressions() {
     use eve_db::{InventoryFlag, InventoryItemRecord, TrainedSkillRecord};
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     ctx.seed_demo_world_fixtures();
     let mut sess = SessionState::new(1);
     let kw = HashMap::new();

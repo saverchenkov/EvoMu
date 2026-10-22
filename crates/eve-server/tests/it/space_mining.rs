@@ -130,6 +130,7 @@ async fn test_sp4_asteroid_belt_entities_collision_bounce_and_respawn_cycle() {
     // parity: feat:mining.depletion, feat:mining.belt-respawn
     eve_testkit::attest(&["feat:mining.depletion", "feat:mining.belt-respawn"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let perim = ctx.systems.get_or_spawn(30_000_144);
 
     // 1. Populate asteroid belt entities in Perimeter (has 3 SDE asteroid belts)
@@ -212,7 +213,7 @@ async fn test_sp4_asteroid_belt_entities_collision_bounce_and_respawn_cycle() {
             .await
             .unwrap();
     }
-    ctx.set_clock(std::sync::Arc::new(eve_db::VirtualServerClock::new()));
+    ctx.set_clock(std::sync::Arc::new(eve_db::VirtualServerClock::with_fixed_base(crate::common::TEST_CLOCK_BASE_UNIX)));
     ctx.advance_secs(eve_server::system_actor::DEFAULT_BELT_RESPAWN_INTERVAL_SECS * 2);
     let _ = perim.step_manual(1.0).await.unwrap();
 
@@ -626,6 +627,7 @@ async fn test_mn03_mining_ledger_recording_and_char_mining_ledger_service() {
     // parity: feat:mining.character-ledger, rpc:authentication.Login, rpc:beyonce.CmdMineRepeatedly, rpc:charUnboundMgr.SelectCharacterID, rpc:characterMiningLedger.GetCharacterLogs, rpc:stationSvc.Undock
     eve_testkit::attest(&["feat:mining.character-ledger"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let mut sess = SessionState::new(963);
 

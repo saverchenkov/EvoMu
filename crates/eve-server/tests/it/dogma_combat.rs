@@ -121,6 +121,7 @@ async fn test_dg4_module_cycle_capacitor_and_shield_booster() {
     // parity: plan:DG-4, feat:dogma.capacitor-recharge, feat:dogma.capacitor-stable, feat:modules.shield-booster, rpc:charUnboundMgr.SelectCharacterID, rpc:dogmaIM.Activate, rpc:invbroker.Add, rpc:stationSvc.Undock
     eve_testkit::attest(&["feat:dogma.capacitor-recharge", "feat:dogma.capacitor-stable", "feat:modules.shield-booster"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let mut sess = SessionState::new(4101);
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
@@ -319,6 +320,7 @@ async fn test_dg4_overheat_heat_damage_and_reactivation_delay() {
     // parity: plan:DG-4, feat:fitting.overheat, feat:dogma.reactivation-delay, rpc:charUnboundMgr.SelectCharacterID, rpc:dogmaIM.Activate, rpc:dogmaIM.Deactivate, rpc:invbroker.Add, rpc:stationSvc.Undock
     eve_testkit::attest(&["feat:fitting.overheat", "feat:dogma.reactivation-delay"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let mut sess = SessionState::new(4102);
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;

@@ -85,6 +85,7 @@ async fn test_admin_slash_dispatcher_gm_commands_asset_safety_skins() {
     ]);
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
 
     // 1. Slash dispatcher authorization check: unprivileged player gets error with no state change
     let mut player_sess = SessionState::new(60_001);
@@ -698,6 +699,7 @@ async fn test_account_sso_handshake_multilogin_roles_eula_language_status() {
     ]);
 
     let ctx = Arc::new(ServerContext::new());
+    crate::common::pin_clock(&ctx);
 
     // 1. SSO Login via OAuth2 PKCE S256 token exchange (feat:account.sso-login)
     let sso_user = "demo";

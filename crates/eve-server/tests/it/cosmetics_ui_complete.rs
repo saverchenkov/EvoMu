@@ -78,6 +78,7 @@ async fn test_skin_licences_activation_listing_and_timed_expiry() {
     eve_testkit::attest(&["feat:cosmetics.skin-licenses", "feat:cosmetics.skin-activate", "feat:cosmetics.skin-expiry"]);
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let char_id = 90_000_001;
     let mut sess = login(&ctx, 2001, "demo", "demo-secret", char_id).await;
     let station_id = sess.station_id.expect("docked");

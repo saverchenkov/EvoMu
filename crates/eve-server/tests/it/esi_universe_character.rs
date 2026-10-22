@@ -85,6 +85,7 @@ fn validate_and_json(
 #[tokio::test]
 async fn test_esi3_universe_status_meta_dogma_killmails_insurance_fw() {
     let ctx = Arc::new(ServerContext::new());
+    crate::common::pin_clock(&ctx);
     let router = EsiRouter::new(Arc::clone(&ctx));
     let spec = OpenApiSpec::pinned();
 
@@ -540,6 +541,7 @@ async fn test_esi3_universe_status_meta_dogma_killmails_insurance_fw() {
 #[tokio::test]
 async fn test_esi4_character_clones_skills_location_fittings_assets_wallet_loyalty_calendar_contacts() {
     let ctx = Arc::new(ServerContext::new());
+    crate::common::pin_clock(&ctx);
     let router = EsiRouter::new(Arc::clone(&ctx));
     let spec = OpenApiSpec::pinned();
 

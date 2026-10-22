@@ -40,6 +40,7 @@ async fn test_phase_1_d1_to_d5_sde_sqlite_persistence_auth_sso_and_config() {
     assert!(real_sde.solar_systems.contains_key(&30_000_142));
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
 
     // 1. D-1 & D-2: 213-resource SDE loaded at runtime from SQLite
@@ -984,6 +985,7 @@ async fn test_phase_1_d1_to_d5_sde_sqlite_persistence_auth_sso_and_config() {
 
     // R34-P0-1: Verify forged JWT (e.g. signed with another deployment's key or tampered payload) is strictly rejected
     let other_ctx = ServerContext::new();
+    crate::common::pin_clock(&other_ctx);
     let other_code = other_ctx
         .db
         .authorize_pkce(
@@ -1022,6 +1024,9 @@ async fn test_phase_1_d1_to_d5_sde_sqlite_persistence_auth_sso_and_config() {
         "R34-P0-1: SSO JWT signed by a different deployment key must be rejected"
     );
 
+    // Pinned virtual clock: the token was exchanged at `now_unix + 1` (its `iat`), so let that
+    // second pass explicitly instead of relying on Argon2 wall time elapsing before Login.
+    ctx.advance_secs(1);
     ctx.dispatch_rpc(
         &mut sess2,
         "authentication",
@@ -1080,6 +1085,7 @@ character_name = "ISD Config"
     let parsed_cfg = ServerConfig::from_toml_str(&custom_toml).expect("parse custom evomu.toml");
     let persisted_sso_token = {
         let cfg_ctx = ServerContext::from_config(&parsed_cfg).expect("ServerContext::from_config");
+        crate::common::pin_clock(&cfg_ctx);
         let acc = cfg_ctx
             .db
             .authenticate("capsuleer_toml", "toml-pass-123")

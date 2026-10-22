@@ -166,6 +166,7 @@ async fn test_esi_sovereignty_structures_reflect_live_sov_state() {
     ]);
 
     let ctx = Arc::new(ServerContext::new());
+    crate::common::pin_clock(&ctx);
     let router = EsiRouter::new(Arc::clone(&ctx));
     let now = ctx.now_unix();
 
@@ -489,6 +490,7 @@ async fn test_esi_sovereignty_campaigns_reflect_live_command_node_events() {
     ]);
 
     let ctx = Arc::new(ServerContext::new());
+    crate::common::pin_clock(&ctx);
     let router = EsiRouter::new(Arc::clone(&ctx));
     let now = ctx.now_unix();
 
@@ -661,6 +663,7 @@ async fn test_esi_incursions_wars_and_single_killmail_reflect_live_state() {
     ]);
 
     let ctx = Arc::new(ServerContext::new());
+    crate::common::pin_clock(&ctx);
     let router = EsiRouter::new(Arc::clone(&ctx));
     let now = ctx.now_unix();
     let fmt = eve_server::esi::sample_routes::format_iso8601_utc;

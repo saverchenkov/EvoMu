@@ -158,6 +158,7 @@ async fn test_warp_to_and_warp_special_fx_emitted_on_warp() {
     // parity: destiny:WarpTo, destiny:OnSpecialFX, rpc:beyonce.CmdWarpToStuff
     eve_testkit::attest(&["destiny:WarpTo", "destiny:OnSpecialFX"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let (mut sess, beyonce, ship_id) = login_and_undock(&ctx, 8102).await;
     let handle = ctx.systems.get_or_spawn(JITA);
     let _ = drain_actions(&handle, ship_id).await;
@@ -394,6 +395,7 @@ async fn test_on_dbuff_updated_and_on_dot_victim_updated() {
     // parity: destiny:OnDbuffUpdated, destiny:OnDotVictimUpdated, rpc:beyonce.UpdateStateRequest
     eve_testkit::attest(&["destiny:OnDbuffUpdated", "destiny:OnDotVictimUpdated"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let (mut sess, beyonce, ship_id) = login_and_undock(&ctx, 8107).await;
     let handle = ctx.systems.get_or_spawn(JITA);
     clear_invulnerability(&handle, ship_id).await;
@@ -526,6 +528,7 @@ async fn test_set_ball_free_radius_harmonic_sovereignty_and_controller_event() {
         "destiny:OnClientControllerEvent",
     ]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let (mut sess, beyonce, ship_id) = login_and_undock(&ctx, 8109).await;
     let kw = HashMap::new();
     // Stargate jump emits OnClientControllerEvent on the origin stargate ball.

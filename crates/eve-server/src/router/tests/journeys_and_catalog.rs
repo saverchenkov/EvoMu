@@ -12,6 +12,8 @@ use std::collections::HashMap;
 #[tokio::test]
 async fn test_all_18_e2e_journeys_and_catalog_coverage() {
     let ctx = ServerContext::new();
+    // Deterministic virtual time (T-7): time only moves via advance_virtual_clock.
+    ctx.set_clock(std::sync::Arc::new(eve_db::VirtualServerClock::with_fixed_base(1_800_000_000)));
     ctx.seed_demo_world_fixtures();
     let mut session = SessionState::new(100);
     let empty = HashMap::new();

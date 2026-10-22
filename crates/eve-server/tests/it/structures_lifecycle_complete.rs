@@ -275,6 +275,7 @@ async fn test_fuel_consumption_low_power_and_abandoned() {
     // parity: feat:structures.fuel-consumption, feat:structures.abandoned
     eve_testkit::attest(&["feat:structures.fuel-consumption", "feat:structures.abandoned"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let mut sess = pilot_in_space(&ctx, 4002).await;
     move_ship(&ctx, &sess, open_space(&ctx, 1.0)).await;
     let id = online_structure(&ctx, &mut sess, 35832, "Fuel Astrahus").await;
@@ -369,6 +370,7 @@ async fn test_low_power_large_structure_skips_armor_reinforcement() {
     // parity: feat:structures.low-power
     eve_testkit::attest(&["feat:structures.low-power"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let mut sess = pilot_in_space(&ctx, 4003).await;
     move_ship(&ctx, &sess, open_space(&ctx, 2.0)).await;
     // Full-power Fortizar: shield loss -> armor reinforcement.
@@ -435,6 +437,7 @@ async fn test_reinforcement_cycle_per_size_and_security_band() {
     assert_eq!(life::next_reinforce_exit(86_400 + 5 * 3_600, 19), 86_400 + 19 * 3_600);
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let mut sess = pilot_in_space(&ctx, 4004).await;
     move_ship(&ctx, &sess, open_space(&ctx, 3.0)).await;
 
@@ -491,6 +494,7 @@ async fn test_damage_cap_and_repair_timer_with_pause_threshold() {
     // parity: feat:structures.damage-cap, feat:structures.repair-timer
     eve_testkit::attest(&["feat:structures.damage-cap", "feat:structures.repair-timer"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let mut sess = pilot_in_space(&ctx, 4005).await;
     move_ship(&ctx, &sess, open_space(&ctx, 4.0)).await;
     let id = online_structure(&ctx, &mut sess, 35832, "Cap Astrahus").await;
@@ -551,6 +555,7 @@ async fn test_killmail_core_fitting_drop_and_automatic_asset_safety() {
     // parity: feat:structures.structure-killmail, feat:structures.asset-safety-auto
     eve_testkit::attest(&["feat:structures.structure-killmail", "feat:structures.asset-safety-auto"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let mut sess = pilot_in_space(&ctx, 4006).await;
     move_ship(&ctx, &sess, open_space(&ctx, 5.0)).await;
     let id = online_structure(&ctx, &mut sess, 35832, "Doomed Astrahus").await;

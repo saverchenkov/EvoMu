@@ -944,6 +944,7 @@ async fn test_so6_cosmic_signatures_generation_and_probing_math() {
 async fn test_so7_wormhole_lifetime_mass_exhaustion_and_jump() {
     // parity: rpc:charUnboundMgr.SelectCharacterID, rpc:scanMgr.GetSignatures, rpc:wormholeMgr.GetWormholePolarization, rpc:wormholeMgr.WormholeJump
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
 
     let mut sess = SessionState::new(701);

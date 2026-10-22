@@ -298,6 +298,7 @@ async fn test_inv2_stack_split_destroy_inventory() {
     // parity: feat:inventory.split-merge, feat:inventory.trash-items, rpc:charUnboundMgr.SelectCharacterID, rpc:invbroker.Add, rpc:invbroker.MultiMerge, rpc:invbroker.SplitStack, rpc:invbroker.StackAll, rpc:invbroker.TrashItems
     eve_testkit::attest(&["feat:inventory.split-merge", "feat:inventory.trash-items"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let mut sess = SessionState::new(925);
 

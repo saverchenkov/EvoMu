@@ -276,6 +276,7 @@ async fn test_mission_lifecycle_offer_accept_complete_decline_abandon_and_expira
     // parity: feat:pve.mission-accept, feat:pve.mission-decline, feat:pve.mission-quit, feat:pve.mission-complete, feat:pve.mission-expire, feat:pve.mission-journal, feat:pve.mission-tracker
     eve_testkit::attest(&["feat:pve.mission-accept", "feat:pve.mission-decline", "feat:pve.mission-quit", "feat:pve.mission-complete", "feat:pve.mission-expire", "feat:pve.mission-journal", "feat:pve.mission-tracker"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let char_id = 90_000_001;
     let mut sess = setup_pilot(&ctx, 502, "demo", "demo-secret", char_id).await;
 
@@ -726,6 +727,7 @@ async fn test_special_agents_storyline_epic_arcs_cosmos_datacenter_career_rd_and
     // parity: feat:pve.mission-storyline, feat:pve.epic-arcs, feat:pve.storyline-arcs-soe, feat:pve.data-centers, feat:pve.career-agents, feat:pve.research-agents, feat:pve.locator-agents
     eve_testkit::attest(&["feat:pve.mission-storyline", "feat:pve.epic-arcs", "feat:pve.storyline-arcs-soe", "feat:pve.data-centers", "feat:pve.career-agents", "feat:pve.research-agents", "feat:pve.locator-agents"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let char_id = 90_000_001;
     let mut sess = setup_pilot(&ctx, 504, "demo", "demo-secret", char_id).await;
 

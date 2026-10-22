@@ -154,6 +154,7 @@ async fn test_account_alpha_omega_switch_and_subscription_time() {
     // parity: feat:account.alpha-omega-switch, feat:account.clone-state-subscription, rpc:charUnboundMgr.SelectCharacterID, rpc:skillMgr2.GetSkills, rpc:slash.SlashCmd, rpc:subscriptionMgr.GetCloneGrade, rpc:subscriptionMgr.GetSubscriptionTime
     eve_testkit::attest(&["feat:account.alpha-omega-switch", "feat:account.clone-state-subscription"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let char_id = 90_000_001;
     let alt_id = 90_000_002;
@@ -266,6 +267,7 @@ async fn test_account_kiring_disabled_and_accrued_playtime() {
     // parity: feat:account.kiring-china, feat:account.underage-accrued-time, rpc:authentication.AccruedTime, rpc:authentication.AmUnderage, rpc:authentication.Logout, rpc:charUnboundMgr.SelectCharacterID, rpc:kiringMgr.GetEveGuardServerAddress, rpc:kiringMgr.GetKiringConfiguration, rpc:slash.SlashCmd, rpc:userSvc.GetSessionPlaytimeMinutes
     eve_testkit::attest(&["feat:account.kiring-china", "feat:account.underage-accrued-time"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let mut sess = SessionState::new(30_020);
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
