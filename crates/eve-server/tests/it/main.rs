@@ -130,3 +130,4 @@ mod mining_cycle_engine;
 mod mining_bonuses_bursts;
 mod rpc_market_contracts_bounty;
 mod rpc_core_services_batch;
+mod rpc_station_clones_facwar;

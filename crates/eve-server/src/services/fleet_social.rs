@@ -1166,12 +1166,6 @@ pub(super) fn handle_corp_gov_tail(
                 Err(e) => Some(Err(e)),
             }
         }
-        ("corpStationMgr", "DoStandingCheckForStationService") => {
-            let allowed = ctx.db.with_snapshot(|snap| {
-                snap.characters.contains_key(&char_id) && snap.corporations.contains_key(&corp_id)
-            });
-            Some(Ok(PyRep::Bool(allowed)))
-        }
         ("corpmgr", "GetAssetInventory")
         | ("corpmgr", "GetAssetInventoryForLocation")
         | ("corpmgr", "SearchAssets") => {

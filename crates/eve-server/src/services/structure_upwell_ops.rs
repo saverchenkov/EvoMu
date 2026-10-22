@@ -821,9 +821,14 @@ fn handle_get_hangar_view_state(ctx: &ServerContext, session: &mut SessionState)
 }
 
 fn handle_get_num_clones_in_structure(ctx: &ServerContext, session: &mut SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
-    let _ = ServerContext::require_character(session)?;
+    let (_, char_id) = ServerContext::require_character(session)?;
     let structure_id = arg_i64(args, 0).or(session.structure_id).ok_or_else(|| err("MissingStructureId", "GetNumClonesInPilotsStructure requires structureID"))?;
-    let count = ctx.db.with_snapshot(|snap| snap.jump_clones.values().map(|clones| clones.iter().filter(|jc| jc.location_id == structure_id).count()).sum::<usize>());
+    let count = ctx.db.with_snapshot(|snap| {
+        snap.jump_clones
+            .get(&char_id)
+            .map(|clones| clones.iter().filter(|jc| jc.location_id == structure_id).count())
+            .unwrap_or(0)
+    });
     Ok(PyRep::Integer(count as i64))
 }
 

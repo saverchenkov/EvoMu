@@ -34,18 +34,35 @@ pub async fn handle(
         ("stationSvc", "GetAllianceSystems") | ("stationSvc", "GetSystemsForAlliance") => {
             let aid = args.first().and_then(|a| a.as_i64()).or(session.alliance_id).unwrap_or(0);
             let systems = ctx.db.with_snapshot(|snap| {
-                snap.system_states.values()
+                let member_corps: std::collections::HashSet<i64> = snap
+                    .corporations
+                    .values()
+                    .filter(|c| c.alliance_id == Some(aid))
+                    .map(|c| c.corporation_id)
+                    .collect();
+                let mut sys_set: std::collections::BTreeSet<i64> = snap
+                    .system_states
+                    .values()
                     .filter(|s| s.sov_alliance_id == Some(aid))
-                    .map(|s| PyRep::Integer(s.solar_system_id as i64))
-                    .collect::<Vec<_>>()
+                    .map(|s| s.solar_system_id as i64)
+                    .collect();
+                for st in snap.structures.values() {
+                    if member_corps.contains(&st.owner_corp_id) {
+                        sys_set.insert(st.solar_system_id as i64);
+                    }
+                }
+                sys_set.into_iter().map(PyRep::Integer).collect::<Vec<_>>()
             });
             Some(Ok(PyRep::List(systems)))
         }
 
         ("stationSvc", "GetStationsForOwner") => {
             let owner_id = args.first().and_then(|a| a.as_i64()).unwrap_or(1000035);
-            let stations: Vec<PyRep> = ctx.sde.stations.values()
-                .filter(|st| st.owner_corporation_id == owner_id)
+            let mut stations: Vec<PyRep> = ctx
+                .sde
+                .stations
+                .values()
+                .filter(|st| st.owner_corporation_id == owner_id || st.owner_faction_id == Some(owner_id))
                 .take(50)
                 .map(|st| {
                     PyRep::keyval([
@@ -55,6 +72,20 @@ pub async fn handle(
                     ])
                 })
                 .collect();
+            let struct_stations: Vec<PyRep> = ctx.db.with_snapshot(|snap| {
+                snap.structures
+                    .values()
+                    .filter(|st| st.owner_corp_id == owner_id)
+                    .map(|st| {
+                        PyRep::keyval([
+                            ("stationID", PyRep::Integer(st.structure_id)),
+                            ("solarSystemID", PyRep::Integer(st.solar_system_id as i64)),
+                            ("corporationID", PyRep::Integer(st.owner_corp_id)),
+                        ])
+                    })
+                    .collect()
+            });
+            stations.extend(struct_stations);
             Some(Ok(PyRep::List(stations)))
         }
 
@@ -63,20 +94,36 @@ pub async fn handle(
                 Ok(u) => u,
                 Err(e) => return Some(Err(e)),
             };
-            let sys_id = match args.first().and_then(|a| a.as_i64()) {
-                Some(id) if id < 60_000_000 => id as u32,
+            let first_arg = args.first().and_then(|a| a.as_i64());
+            let (sys_id, is_station_lookup) = match first_arg {
+                Some(id) if id >= 60_000_000 => {
+                    let st = ctx.sde.stations.get(&id).map(|s| s.solar_system_id).or_else(|| {
+                        ctx.db.with_snapshot(|snap| snap.structures.get(&id).map(|s| s.solar_system_id))
+                    });
+                    match st {
+                        Some(s) => (s, true),
+                        None => {
+                            return Some(Err(BridgeRpcError {
+                                code: "StationNotFound".into(),
+                                message: format!("Station or structure {id} not found"),
+                            }));
+                        }
+                    }
+                }
+                Some(id) if id > 0 => (id as u32, false),
                 _ => match session.solar_system_id {
-                    Some(s) => s,
+                    Some(s) => (s, false),
                     None => {
                         return Some(Err(BridgeRpcError {
                             code: "NoSolarSystem".into(),
-                            message: "No solarSystemID argument or active session solar system"
-                                .into(),
+                            message: "No solarSystemID argument or active session solar system".into(),
                         }))
                     }
                 },
             };
-            if let Some(sys) = ctx.sde.solar_systems.get(&sys_id) {
+            if is_station_lookup {
+                Some(Ok(PyRep::Integer(sys_id as i64)))
+            } else if let Some(sys) = ctx.sde.solar_systems.get(&sys_id) {
                 Some(Ok(PyRep::keyval([
                     ("solarSystemID", PyRep::Integer(sys.solar_system_id as i64)),
                     ("solarSystemName", PyRep::String(sys.name.clone())),
@@ -169,45 +216,92 @@ pub async fn handle(
             ])))
         }
 
+        ("station", "GetGuests") => {
+            let _ = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let station_id = match args.first().and_then(|a| a.as_i64()).or(session.station_id) {
+                Some(sid) => sid,
+                None => {
+                    return Some(Err(BridgeRpcError {
+                        code: "NotDockedInStation".into(),
+                        message: "station.GetGuests requires being docked in a station".into(),
+                    }));
+                }
+            };
+            let rows = ctx.db.with_snapshot(|snap| {
+                let mut guests: Vec<_> = snap
+                    .characters
+                    .values()
+                    .filter(|c| c.station_id == Some(station_id))
+                    .map(|c| (c.character_id, c.corporation_id, c.alliance_id, c.war_faction_id))
+                    .collect();
+                guests.sort_by_key(|g| g.0);
+                let opt = |v: Option<i64>| v.map(PyRep::Integer).unwrap_or(PyRep::None);
+                guests
+                    .into_iter()
+                    .map(|(cid, corp, ally, fac)| {
+                        PyRep::Tuple(vec![
+                            PyRep::Integer(cid),
+                            PyRep::Integer(corp),
+                            opt(ally),
+                            opt(fac),
+                        ])
+                    })
+                    .collect::<Vec<_>>()
+            });
+            Some(Ok(PyRep::List(rows)))
+        }
+
         ("corpStationMgr", "DoStandingCheckForStationService") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let service_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0) as u32;
+            let raw_service_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0) as u32;
             let station_id = args.get(1).and_then(|a| a.as_i64()).or(session.station_id).unwrap_or(60_003_760);
-            let Some(st) = ctx.sde.stations.get(&station_id) else {
+            let service_id = if raw_service_id > 32 && raw_service_id.is_power_of_two() {
+                raw_service_id.trailing_zeros() + 1
+            } else {
+                raw_service_id
+            };
+            let (owner_corp, owner_fac) = if let Some(st) = ctx.sde.stations.get(&station_id) {
+                if raw_service_id > 0 {
+                    let has_service = ctx
+                        .sde
+                        .station_operations
+                        .get(&st.operation_id)
+                        .map(|op| op.services.contains(&service_id) || op.services.contains(&raw_service_id))
+                        .unwrap_or(false);
+                    if !has_service {
+                        return Some(Err(BridgeRpcError {
+                            code: "StationServiceUnavailable".into(),
+                            message: format!("Station {station_id} does not offer service {raw_service_id}"),
+                        }));
+                    }
+                }
+                (st.owner_corporation_id, st.owner_faction_id)
+            } else if let Some(struct_info) = ctx.db.with_snapshot(|s| s.structures.get(&station_id).map(|st| (st.owner_corp_id, None))) {
+                struct_info
+            } else {
                 return Some(Err(BridgeRpcError {
                     code: "StationNotFound".into(),
                     message: format!("Station {station_id} not found in SDE"),
                 }));
             };
-            if service_id > 0 {
-                let has_service = ctx
-                    .sde
-                    .station_operations
-                    .get(&st.operation_id)
-                    .map(|op| op.services.contains(&service_id))
-                    .unwrap_or(false);
-                if !has_service {
-                    return Some(Err(BridgeRpcError {
-                        code: "StationServiceUnavailable".into(),
-                        message: format!("Station {station_id} does not offer service {service_id}"),
-                    }));
-                }
-            }
             let (corp_st, fac_st) = ctx.db.with_snapshot(|snap| {
                 let ch = snap.characters.get(&char_id);
-                let cs = ch.and_then(|c| c.standings.get(&st.owner_corporation_id).copied()).unwrap_or(0.0);
-                let fs = ch.and_then(|c| st.owner_faction_id.and_then(|fid| c.standings.get(&fid).copied())).unwrap_or(0.0);
+                let cs = ch.and_then(|c| c.standings.get(&owner_corp).copied()).unwrap_or(0.0);
+                let fs = ch.and_then(|c| owner_fac.and_then(|fid| c.standings.get(&fid).copied())).unwrap_or(0.0);
                 (cs, fs)
             });
-            let min_standing = if service_id == 512 { 0.0 } else { -2.0 };
+            let min_standing = if service_id == 10 || raw_service_id == 512 { 0.0 } else { -2.0 };
             if corp_st < min_standing || fac_st < -2.0 {
                 return Some(Err(BridgeRpcError {
                     code: "StandingTooLowForStationService".into(),
                     message: format!(
-                        "Character {char_id} standing (corp {corp_st:.2}, faction {fac_st:.2}) is below required {min_standing:.1} for service {service_id} at station {station_id}"
+                        "Character {char_id} standing (corp {corp_st:.2}, faction {fac_st:.2}) is below required {min_standing:.1} for service {raw_service_id} at station {station_id}"
                     ),
                 }));
             }

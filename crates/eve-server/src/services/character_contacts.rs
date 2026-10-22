@@ -1290,7 +1290,7 @@ pub fn handle_contacts(
                     let hq_st = ctx.db.with_snapshot(|snap| {
                         snap.corporations.get(&ch.corporation_id).and_then(|c| c.hq_station_id).filter(|&id| id > 0)
                     });
-                    for st in [school_st, hq_st, session.station_id].into_iter().flatten() {
+                    for st in [school_st, hq_st, session.station_id, session.structure_id].into_iter().flatten() {
                         if !cands.contains(&st) {
                             cands.push(st);
                         }
@@ -1318,8 +1318,9 @@ pub fn handle_contacts(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            ctx.db.with_mut_snapshot(|snap| {
+            let _: Result<(), BridgeRpcError> = ctx.db.try_with_mut_snapshot(|snap| {
                 snap.owner_notes.remove(&(-10_000_099 - char_id));
+                Ok(())
             });
             Some(Ok(PyRep::Integer(0)))
         }
