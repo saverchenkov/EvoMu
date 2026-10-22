@@ -233,6 +233,14 @@ pub struct TypeShowInfo {
     pub race_id: Option<u32>,
     pub faction_id: Option<u32>,
     pub variation_parent_type_id: Option<TypeId>,
+    pub description_id: Option<u32>,
+    pub icon_id: Option<u32>,
+    pub graphic_id: Option<u32>,
+    pub sound_id: Option<u32>,
+    pub meta_group_id: Option<u32>,
+    pub meta_level: Option<i64>,
+    pub tech_level: Option<u32>,
+    pub description: String,
     pub variations: Vec<TypeId>,
     pub default_attributes: HashMap<AttributeId, f64>,
     pub effect_ids: Vec<EffectId>,
@@ -632,7 +640,7 @@ pub struct DbuffCollectionInfo {
     pub target_attribute_ids: Vec<AttributeId>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FighterAbilityInfo {
     pub ability_id: u32,
     pub target_mode: String,
@@ -641,9 +649,13 @@ pub struct FighterAbilityInfo {
     pub icon_id: Option<u32>,
     pub display_name_id: Option<u32>,
     #[serde(default)]
+    pub ability_name_id: Option<u32>,
+    #[serde(default)]
     pub tooltip_text_id: Option<u32>,
     #[serde(default)]
     pub turret_graphic_id: Option<u32>,
+    #[serde(default)]
+    pub raw_json: serde_json::Value,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1022,11 +1034,43 @@ impl SdeRegistry {
             race_id: t.race_id,
             faction_id: t.faction_id,
             variation_parent_type_id: t.variation_parent_type_id,
+            description_id: t.description_id,
+            icon_id: t.icon_id,
+            graphic_id: t.graphic_id,
+            sound_id: t.sound_id,
+            meta_group_id: t.meta_group_id,
+            meta_level: t.meta_level,
+            tech_level: t.tech_level,
+            description: t.description.clone(),
             variations,
             default_attributes: t.default_attributes.clone(),
             effect_ids: t.effect_ids.clone(),
         })
     }
+
+    pub fn get_type(&self, type_id: TypeId) -> Option<&InvType> { self.types.get(&type_id) }
+    pub fn group(&self, group_id: GroupId) -> Option<&GroupInfo> { self.groups.get(&group_id) }
+    pub fn category(&self, category_id: CategoryId) -> Option<&CategoryInfo> { self.categories.get(&category_id) }
+    pub fn dogma_attributes(&self) -> &HashMap<AttributeId, DogmaAttributeType> { &self.attributes }
+    pub fn dogma_attribute(&self, attr_id: AttributeId) -> Option<&DogmaAttributeType> { self.attributes.get(&attr_id) }
+    pub fn dogma_effects(&self) -> &HashMap<EffectId, DogmaEffectType> { &self.effects }
+    pub fn dogma_effect(&self, effect_id: EffectId) -> Option<&DogmaEffectType> { self.effects.get(&effect_id) }
+    pub fn type_materials_for(&self, type_id: TypeId) -> &[TypeMaterialEntry] {
+        self.type_materials.get(&type_id).map(Vec::as_slice).unwrap_or(&[])
+    }
+    pub fn blueprint(&self, bp_type_id: TypeId) -> Option<&BlueprintInfo> { self.blueprints.get(&bp_type_id) }
+    pub fn solar_system(&self, solar_system_id: SolarSystemId) -> Option<&SolarSystem> { self.solar_systems.get(&solar_system_id) }
+    pub fn stargates(&self) -> &HashMap<i64, StargateJump> { &self.jumps }
+    pub fn stargate(&self, stargate_id: i64) -> Option<&StargateJump> { self.jumps.get(&stargate_id) }
+    pub fn station(&self, station_id: i64) -> Option<&StationInfo> { self.stations.get(&station_id) }
+    pub fn agent(&self, agent_id: i64) -> Option<&AgentInfo> { self.agents.get(&agent_id) }
+    pub fn planet_schematic(&self, schematic_id: u32) -> Option<&PlanetSchematicInfo> { self.planet_schematics.get(&schematic_id) }
+    pub fn school(&self, school_id: u32) -> Option<&SchoolInfo> { self.schools.get(&school_id) }
+    pub fn race(&self, race_id: u32) -> Option<&RaceInfo> { self.races.get(&race_id) }
+    pub fn bloodline(&self, bloodline_id: u32) -> Option<&BloodlineInfo> { self.bloodlines.get(&bloodline_id) }
+    pub fn ancestry(&self, ancestry_id: u32) -> Option<&AncestryInfo> { self.ancestries.get(&ancestry_id) }
+    pub fn faction(&self, faction_id: u32) -> Option<&FactionInfo> { self.factions.get(&faction_id) }
+    pub fn npc_corporation(&self, corporation_id: i64) -> Option<&NpcCorporationInfo> { self.npc_corporations.get(&corporation_id) }
 }
 
 pub mod cfsd_domain_loaders;
@@ -1046,8 +1090,8 @@ mod tests {
     use super::*;
 
     #[test]
-    // parity: plan:D-2, plan:S-11, plan:S-1, feat:serverops.static-data
     fn test_real_sde_sqlite_open_and_counts() {
+        // parity: plan:D-2, plan:S-11, plan:S-1, feat:serverops.static-data, sde:res:/staticdata/types.fsdbinary
         // 1. Missing database path must fail clearly with SdeError::MissingDatabase (D-2)
         let missing = SdeRegistry::open("/tmp/nonexistent_evomu_sde_db_999999.sqlite");
         assert!(
@@ -1075,15 +1119,16 @@ mod tests {
         assert_eq!(sde.categories.len(), 48);
         assert_eq!(sde.groups.len(), 1611);
         assert_eq!(sde.types.len(), 53_288);
-        assert_eq!(sde.attributes.len(), 2871);
-        assert_eq!(sde.effects.len(), 3427);
+        assert_eq!(sde.dogma_attributes().len(), 2871);
+        assert_eq!(sde.dogma_effects().len(), 3427);
         assert_eq!(sde.type_materials.len(), 9866);
         assert_eq!(sde.blueprints.len(), 5100);
         assert_eq!(sde.regions.len(), 114);
         assert_eq!(sde.constellations.len(), 1184);
         assert_eq!(sde.solar_systems.len(), 8490);
         assert!(sde.solar_systems.len() >= 5_000);
-        assert_eq!(sde.jumps.len(), 13_978);
+        assert_eq!(sde.stations.len(), 5210);
+        assert_eq!(sde.stargates().len(), 13_978);
         assert_eq!(sde.celestial_count, 475_859);
         assert_eq!(sde.races.len(), 11);
         assert_eq!(sde.bloodlines.len(), 18);
@@ -1101,143 +1146,106 @@ mod tests {
         assert_eq!(sde.dynamic_item_attributes.len(), 441);
         assert_eq!(sde.compressible_types.len(), 212);
         assert_eq!(sde.type_lists.len(), 469);
-        assert_eq!(
-            sde.dungeon_asteroids
-                .values()
-                .map(|v| v.len())
-                .sum::<usize>(),
-            3054
-        );
-        assert_eq!(
-            sde.dungeon_gas_types
-                .values()
-                .map(|v| v.len())
-                .sum::<usize>(),
-            92
-        );
-        // Small Kernite and Omber Deposit (dungeon 1347): 4 Kernite (20) and 7 Omber (1227) asteroids
-        let skod = sde
-            .dungeon_asteroids
-            .get(&1347)
-            .expect("dungeon 1347 asteroid layout");
-        assert!(skod.contains(&DungeonAsteroidEntry {
-            room_id: 19522,
-            type_id: 20,
-            asteroid_count: 4
-        }));
-        assert!(skod.contains(&DungeonAsteroidEntry {
-            room_id: 19522,
-            type_id: 1227,
-            asteroid_count: 7
-        }));
-        // Type list 334 (Compression ALL Asteroid Ore) includes Veldspar (1230) but not Mercoxit (11396)
+        assert_eq!(sde.dungeon_asteroids.values().map(|v| v.len()).sum::<usize>(), 3054);
+        assert_eq!(sde.dungeon_gas_types.values().map(|v| v.len()).sum::<usize>(), 92);
+        let skod = sde.dungeon_asteroids.get(&1347).expect("dungeon 1347 asteroid layout");
+        assert!(skod.contains(&DungeonAsteroidEntry { room_id: 19522, type_id: 20, asteroid_count: 4 }));
+        assert!(skod.contains(&DungeonAsteroidEntry { room_id: 19522, type_id: 1227, asteroid_count: 7 }));
         let tl334 = sde.type_lists.get(&334).expect("type list 334");
-        assert!(tl334.contains(sde.types.get(&1230).unwrap()));
-        assert!(!tl334.contains(sde.types.get(&11396).unwrap()));
+        assert!(tl334.contains(sde.get_type(1230).unwrap()));
+        assert!(!tl334.contains(sde.get_type(11396).unwrap()));
         assert_eq!(sde.clone_grades.len(), 4);
         assert_eq!(sde.dungeons.len(), 5516);
         assert_eq!(sde.missions.len(), 2892);
         assert_eq!(sde.node_graphs.len(), 584);
         assert_eq!(sde.epic_arcs.len(), 21);
         assert!(!sde.variations_of(587).is_empty());
+        assert_eq!(sde.group(25).unwrap().name, "Frigate");
+        assert_eq!(sde.category(6).unwrap().name, "Ship");
+        assert_eq!(sde.dogma_attribute(attr_ids::MAX_VELOCITY).unwrap().attribute_id, attr_ids::MAX_VELOCITY);
+        assert_eq!(sde.dogma_effect(16).unwrap().effect_id, 16);
+        assert_eq!(sde.blueprint(688).unwrap().product_type_id, 638);
+        assert_eq!(sde.agent(3008416).unwrap().corporation_id, 1000002);
+        assert_eq!(sde.planet_schematic(65).unwrap().schematic_id, 65);
+        assert_eq!(sde.race(1).unwrap().corvette_type_id, Some(601));
+        assert_eq!(sde.race(16).unwrap().corvette_type_id, None);
+        assert_eq!(sde.bloodline(1).unwrap().race_id, 1);
+        assert_eq!(sde.ancestry(1).unwrap().bloodline_id, 5);
+        assert_eq!(sde.faction(500001).unwrap().name, "Caldari State");
+        assert_eq!(sde.npc_corporation(1000035).unwrap().faction_id, Some(500001));
 
-        // 3. Verify Rifter (587) attributes and reprocessing materials on real SDE
-        let rifter = sde.types.get(&587).expect("Rifter type 587 must exist");
+        // 3. Verify Rifter (587) attributes, 7 type metadata fields, and reprocessing materials on real SDE
+        let rifter = sde.get_type(587).expect("Rifter type 587 must exist");
         assert_eq!(rifter.name, "Rifter");
-        assert_eq!(
-            rifter.default_attributes.get(&attr_ids::MAX_VELOCITY),
-            Some(&365.0)
-        );
+        assert_eq!(rifter.default_attributes.get(&attr_ids::MAX_VELOCITY), Some(&365.0));
         assert_eq!(rifter.portion_size, 1);
+        assert_eq!(rifter.description_id, Some(93841));
+        assert_eq!(rifter.icon_id, None);
+        assert_eq!(rifter.graphic_id, Some(46));
+        assert_eq!(rifter.sound_id, Some(20078));
+        assert_eq!(rifter.meta_group_id, Some(1));
+        assert_eq!(rifter.meta_level, Some(0));
+        assert_eq!(rifter.tech_level, Some(1));
+        let rifter_info = sde.show_info_for_type(587).expect("Rifter show_info");
+        assert_eq!(rifter_info.description_id, Some(93841));
+        assert_eq!(rifter_info.graphic_id, Some(46));
+        assert_eq!(rifter_info.sound_id, Some(20078));
+        assert_eq!(rifter_info.meta_group_id, Some(1));
+        assert_eq!(rifter_info.meta_level, Some(0));
+        assert_eq!(rifter_info.tech_level, Some(1));
         assert_eq!(
-            sde.type_materials.get(&587),
-            Some(&vec![
-                TypeMaterialEntry {
-                    material_type_id: 34,
-                    quantity: 13333
-                },
-                TypeMaterialEntry {
-                    material_type_id: 35,
-                    quantity: 3333
-                },
-                TypeMaterialEntry {
-                    material_type_id: 36,
-                    quantity: 1333
-                },
-            ])
+            sde.type_materials_for(587),
+            &[
+                TypeMaterialEntry { material_type_id: 34, quantity: 13333 },
+                TypeMaterialEntry { material_type_id: 35, quantity: 3333 },
+                TypeMaterialEntry { material_type_id: 36, quantity: 1333 },
+            ]
         );
 
-        // 4. Verify Jita <-> Perimeter real gate pair (50001249 <-> 50002185) and stations (D-2)
-        let jita = sde
-            .solar_systems
-            .get(&30000142)
-            .expect("Jita 30000142 must exist");
+        // 4. Verify Jita <-> Perimeter real gate pair (50001249 <-> 50002185) and O(1) station lookup (D-2)
+        let jita = sde.solar_system(30000142).expect("Jita 30000142 must exist");
         assert_eq!(jita.name, "Jita");
-        let jita_44 = jita
-            .stations
-            .iter()
-            .find(|st| st.station_id == 60003760)
-            .expect("Jita IV - Moon 4 Caldari Navy Assembly Plant (60003760) must exist");
+        let jita_44 = sde.station(60003760).expect("Jita IV - Moon 4 Caldari Navy Assembly Plant (60003760) must exist");
         assert!(jita_44.has_clone_bay);
+        assert_eq!(jita_44.solar_system_id, 30000142);
+        assert_eq!(jita_44.constellation_id, 20000020);
+        assert_eq!(jita_44.region_id, 10000002);
+        assert_eq!(jita_44.operation_id, 14);
+        assert_eq!(jita_44.reprocessing_efficiency, 0.5);
+        assert_eq!(jita_44.reprocessing_stations_take, 0.05);
+        assert!(!jita_44.is_conquerable);
+        assert_eq!(jita_44.orbit_id, Some(40009087));
+        assert_eq!(jita_44.owner_faction_id, Some(500001));
+        assert_eq!(sde.station(60014839).unwrap().owner_faction_id, None);
 
-        let jita_to_perim = sde
-            .jumps
-            .get(&50001249)
-            .expect("Jita->Perimeter stargate 50001249 must exist");
+        let jita_to_perim = sde.stargate(50001249).expect("Jita->Perimeter stargate 50001249 must exist");
         assert_eq!(jita_to_perim.from_solar_system_id, 30000142);
         assert_eq!(jita_to_perim.to_solar_system_id, 30000144);
         assert_eq!(jita_to_perim.destination_stargate_id, 50002185);
 
-        let perim_to_jita = sde
-            .jumps
-            .get(&50002185)
-            .expect("Perimeter->Jita stargate 50002185 must exist");
+        let perim_to_jita = sde.stargate(50002185).expect("Perimeter->Jita stargate 50002185 must exist");
         assert_eq!(perim_to_jita.from_solar_system_id, 30000144);
         assert_eq!(perim_to_jita.to_solar_system_id, 30000142);
         assert_eq!(perim_to_jita.destination_stargate_id, 50001249);
 
         let jita_celestials = sde.celestials_in_system(30000142);
-        assert_eq!(
-            jita_celestials.len(),
-            49,
-            "Expected 49 Jita celestials from sde_celestials, got {}",
-            jita_celestials.len()
-        );
+        assert_eq!(jita_celestials.len(), 49);
 
         // 5. Verify school -> race/corp mapping and all 12 starter schools (11..=22) (D-2, S-11)
-        assert_eq!(sde.schools[&11].race_id, 4);
-        assert_eq!(sde.schools[&11].corporation_id, 1000166);
-        assert_eq!(sde.schools[&14].race_id, 2);
-        assert_eq!(sde.schools[&14].corporation_id, 1000170);
-        assert_eq!(sde.schools[&17].race_id, 1);
-        assert_eq!(sde.schools[&17].corporation_id, 1000167);
-        assert_eq!(sde.schools[&20].race_id, 8);
-        assert_eq!(sde.schools[&20].corporation_id, 1000168);
+        assert_eq!(sde.school(11).unwrap().race_id, 4);
+        assert_eq!(sde.school(11).unwrap().corporation_id, 1000166);
+        assert_eq!(sde.school(14).unwrap().race_id, 2);
+        assert_eq!(sde.school(14).unwrap().corporation_id, 1000170);
+        assert_eq!(sde.school(17).unwrap().race_id, 1);
+        assert_eq!(sde.school(17).unwrap().corporation_id, 1000167);
+        assert_eq!(sde.school(20).unwrap().race_id, 8);
+        assert_eq!(sde.school(20).unwrap().corporation_id, 1000168);
 
         for sid in 11..=22 {
-            let school = sde
-                .schools
-                .get(&sid)
-                .expect("Starter school 11..=22 must exist");
-            assert!(
-                (30_000_001..30_005_500).contains(&school.solar_system_id),
-                "School {} has out-of-range solar_system_id {}",
-                school.school_id,
-                school.solar_system_id
-            );
-            let sys = sde
-                .solar_systems
-                .get(&school.solar_system_id)
-                .expect("School solar system must exist in SDE");
-            assert!(
-                sys.stations
-                    .iter()
-                    .any(|st| st.station_id == school.station_id),
-                "School {} station {} missing from solar system {}",
-                school.school_id,
-                school.station_id,
-                school.solar_system_id
-            );
+            let school = sde.school(sid).expect("Starter school 11..=22 must exist");
+            assert!((30_000_001..30_005_500).contains(&school.solar_system_id));
+            let st = sde.station(school.station_id).expect("School station must exist in sde.stations");
+            assert_eq!(st.solar_system_id, school.solar_system_id);
         }
 
         // 6. Verify tracked data/sde_import_manifest.json table_counts match loaded sde (D-1, D-2)
@@ -1251,9 +1259,7 @@ mod tests {
             &std::fs::read_to_string(&manifest_path).expect("read data/sde_import_manifest.json"),
         )
         .expect("parse data/sde_import_manifest.json");
-        let tc = manifest_val
-            .get("table_counts")
-            .expect("table_counts in sde_import_manifest.json");
+        let tc = manifest_val.get("table_counts").expect("table_counts in sde_import_manifest.json");
         assert_eq!(tc["sde_resources"].as_u64(), Some(213));
         assert_eq!(tc["sde_categories"].as_u64(), Some(48));
         assert_eq!(tc["sde_groups"].as_u64(), Some(1611));
@@ -1281,7 +1287,7 @@ mod tests {
         assert_eq!(tc["sde_missions"].as_u64(), Some(2892));
         assert_eq!(tc["sde_node_graphs"].as_u64(), Some(584));
 
-        // Provenance verification: verify md5, byte_size, and record_count in sde_resources
+        // 7. Directly open and decode raw client res:/staticdata/types.fsdbinary and verify all 53,288 records
         let types_res = sde
             .resources
             .get("res:/staticdata/types.fsdbinary")
@@ -1289,5 +1295,37 @@ mod tests {
         assert_eq!(types_res.md5, "c0ee9c292aa113737029c9ec63503233");
         assert_eq!(types_res.byte_size, 9_169_272);
         assert_eq!(types_res.record_count, 53_288);
+        let (raw_len, raw_types) = sde.load_raw_types_fsdbinary().expect("open raw client types.fsdbinary");
+        assert_eq!(raw_len as u64, types_res.byte_size);
+        assert_eq!(raw_types.len(), 53_288);
+        for (&tid, rt) in &raw_types {
+            let inv = sde.get_type(tid).expect("raw types.fsdbinary record in sde.types");
+            assert_eq!(inv.group_id, rt.group_id);
+            assert_eq!(inv.base_price, rt.base_price);
+            assert_eq!(inv.mass, rt.mass);
+            assert_eq!(inv.volume, rt.volume);
+            assert_eq!(inv.capacity, rt.capacity);
+            assert_eq!(inv.description_id, rt.description_id);
+            assert_eq!(inv.icon_id, rt.icon_id);
+            assert_eq!(inv.graphic_id, rt.graphic_id);
+            assert_eq!(inv.sound_id, rt.sound_id);
+            assert_eq!(inv.meta_group_id, rt.meta_group_id);
+            assert_eq!(inv.meta_level, rt.meta_level);
+            assert_eq!(inv.tech_level, rt.tech_level);
+        }
+        assert_eq!(raw_types[&34].icon_id, Some(22));
+        assert_eq!(raw_types[&587].graphic_id, Some(46));
+        assert_eq!(raw_types[&638].graphic_id, Some(43));
+        assert_eq!(raw_types[&2410].meta_group_id, Some(2));
+        assert_eq!(raw_types[&2410].meta_level, Some(5));
+        assert_eq!(raw_types[&2410].tech_level, Some(2));
+
+        eve_testkit::attest(&[
+            "plan:D-2",
+            "plan:S-11",
+            "plan:S-1",
+            "feat:serverops.static-data",
+            "sde:res:/staticdata/types.fsdbinary",
+        ]);
     }
 }

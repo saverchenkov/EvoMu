@@ -166,7 +166,7 @@ fn cfsd_records(raw: &[u8], stride: usize) -> Vec<usize> {
 }
 
 impl SdeRegistry {
-    fn read_cfsd_bytes(&self, res_path: &str, stride: usize) -> Result<(Vec<u8>, Vec<usize>), SdeError> {
+    pub fn read_cfsd_bytes(&self, res_path: &str, stride: usize) -> Result<(Vec<u8>, Vec<usize>), SdeError> {
         let path = self.cdn_resource_path(res_path)?;
         let raw = std::fs::read(&path)
             .map_err(|_| SdeError::MissingDatabase(path.display().to_string()))?;
@@ -476,4 +476,73 @@ impl SdeRegistry {
             })
             .collect())
     }
+
+    /// Directly decodes `res:/staticdata/types.fsdbinary` (`53,288` item types, stride `152`) from
+    /// the raw client CFSD binary file, returning `(raw_byte_size, records_by_type_id)`.
+    pub fn load_raw_types_fsdbinary(&self) -> Result<(usize, HashMap<TypeId, RawCfsdTypeRecord>), SdeError> {
+        let (raw, recs) = self.read_cfsd_bytes("res:/staticdata/types.fsdbinary", 152)?;
+        let f64_at = |pos: usize| f64::from_le_bytes(raw[pos..pos + 8].try_into().expect("f64 slice"));
+        let i64_at = |pos: usize| i64::from_le_bytes(raw[pos..pos + 8].try_into().expect("i64 slice"));
+        let i32_at = |pos: usize| i32::from_le_bytes(raw[pos..pos + 4].try_into().expect("i32 slice"));
+        let mut out = HashMap::with_capacity(recs.len());
+        for rec in recs {
+            let tid = u64_le(&raw, rec) as TypeId;
+            let mask = u32_le(&raw, rec + 148);
+            out.insert(
+                tid,
+                RawCfsdTypeRecord {
+                    type_id: tid,
+                    group_id: i32_at(rec + 84) as GroupId,
+                    base_price: if (mask & (1 << 0)) != 0 { f64_at(rec + 8) } else { 0.0 },
+                    capacity: if (mask & (1 << 1)) != 0 { f64_at(rec + 16) } else { 0.0 },
+                    mass: if (mask & (1 << 11)) != 0 { f64_at(rec + 32) } else { 0.0 },
+                    portion_size: i64_at(rec + 40).max(1) as u64,
+                    radius: if (mask & (1 << 19)) != 0 { f64_at(rec + 48) } else { 0.0 },
+                    volume: if (mask & (1 << 23)) != 0 { f64_at(rec + 56) } else { 0.0 },
+                    published: raw[rec + 145] != 0,
+                    description_id: ((mask & (1 << 3)) != 0).then(|| i32_at(rec + 68) as u32),
+                    faction_id: ((mask & (1 << 5)) != 0).then(|| i32_at(rec + 72) as u32),
+                    graphic_id: ((mask & (1 << 6)) != 0).then(|| i32_at(rec + 80) as u32),
+                    icon_id: ((mask & (1 << 7)) != 0).then(|| i32_at(rec + 88) as u32),
+                    market_group_id: ((mask & (1 << 10)) != 0).then(|| i32_at(rec + 96) as u32),
+                    meta_group_id: ((mask & (1 << 12)) != 0).then(|| i32_at(rec + 100) as u32),
+                    meta_level: ((mask & (1 << 13)) != 0).then(|| i64::from(i32_at(rec + 104))),
+                    race_id: ((mask & (1 << 18)) != 0).then(|| i32_at(rec + 116) as u32),
+                    sound_id: ((mask & (1 << 20)) != 0).then(|| i32_at(rec + 120) as u32),
+                    tech_level: ((mask & (1 << 21)) != 0).then(|| i32_at(rec + 124) as u32),
+                    variation_parent_type_id: ((mask & (1 << 22)) != 0).then(|| i32_at(rec + 136) as TypeId),
+                    wreck_type_id: ((mask & (1 << 24)) != 0).then(|| i32_at(rec + 140) as TypeId),
+                    type_name_id: u32_le(&raw, rec + 132),
+                },
+            );
+        }
+        Ok((raw.len(), out))
+    }
+}
+
+/// Decoded 152-byte record from `res:/staticdata/types.fsdbinary`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RawCfsdTypeRecord {
+    pub type_id: TypeId,
+    pub group_id: GroupId,
+    pub base_price: f64,
+    pub capacity: f64,
+    pub mass: f64,
+    pub portion_size: u64,
+    pub radius: f64,
+    pub volume: f64,
+    pub published: bool,
+    pub description_id: Option<u32>,
+    pub faction_id: Option<u32>,
+    pub graphic_id: Option<u32>,
+    pub icon_id: Option<u32>,
+    pub market_group_id: Option<u32>,
+    pub meta_group_id: Option<u32>,
+    pub meta_level: Option<i64>,
+    pub race_id: Option<u32>,
+    pub sound_id: Option<u32>,
+    pub tech_level: Option<u32>,
+    pub variation_parent_type_id: Option<TypeId>,
+    pub wreck_type_id: Option<TypeId>,
+    pub type_name_id: u32,
 }

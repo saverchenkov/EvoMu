@@ -909,4 +909,69 @@ impl SdeRegistry {
         }
         Ok(out)
     }
+
+    /// Directly opens and parses `res:/staticdata/fighterabilities.static` (`36` SQLite `cache`
+    /// rows, `32,768` bytes) from the raw V24.01 client file.
+    pub fn load_raw_fighter_abilities_static(
+        &self,
+    ) -> Result<(usize, HashMap<u32, FighterAbilityInfo>), SdeError> {
+        let path = self.cdn_resource_path("res:/staticdata/fighterabilities.static")?;
+        let byte_size = std::fs::metadata(&path)
+            .map_err(|_| SdeError::MissingDatabase(path.display().to_string()))?
+            .len() as usize;
+        let uri = format!("file:{}?immutable=1", path.display());
+        let conn = Connection::open_with_flags(
+            &uri,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+        )?;
+        let mut stmt = conn.prepare("SELECT key, value FROM cache")?;
+        let rows = stmt.query_map([], |r| {
+            let id = r
+                .get::<_, i64>(0)
+                .or_else(|_| r.get::<_, String>(0).map(|s| s.parse::<i64>().unwrap_or(0)))?
+                as u32;
+            let val_str: String = r.get(1)?;
+            let val: serde_json::Value = crate::sqlite_loader_skins::parse_json_col(1, &val_str)?;
+            let target_mode = val
+                .get("targetMode")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let disallow_in_high_sec = val
+                .get("disallowInHighSec")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let disallow_in_low_sec = val
+                .get("disallowInLowSec")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let icon_id = val.get("iconID").and_then(|v| v.as_u64()).map(|v| v as u32);
+            let display_name_id = val.get("displayNameID").and_then(|v| v.as_u64()).map(|v| v as u32);
+            let ability_name_id = val
+                .get("abilityNameID")
+                .or_else(|| val.get("displayNameID"))
+                .and_then(|v| v.as_u64())
+                .map(|v| v as u32);
+            let tooltip_text_id = val.get("tooltipTextID").and_then(|v| v.as_u64()).map(|v| v as u32);
+            let turret_graphic_id = val.get("turretGraphicID").and_then(|v| v.as_u64()).map(|v| v as u32);
+            Ok(FighterAbilityInfo {
+                ability_id: id,
+                target_mode,
+                disallow_in_high_sec,
+                disallow_in_low_sec,
+                icon_id,
+                display_name_id,
+                ability_name_id,
+                tooltip_text_id,
+                turret_graphic_id,
+                raw_json: val,
+            })
+        })?;
+        let mut out = HashMap::new();
+        for r in rows {
+            let fa = r?;
+            out.insert(fa.ability_id, fa);
+        }
+        Ok((byte_size, out))
+    }
 }

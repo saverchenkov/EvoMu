@@ -141,6 +141,14 @@ pub(crate) async fn handle_activate_fighter_ability_slots(
     }
 
     let target_mode = fa.target_mode.clone();
+    let display_name_id = fa
+        .display_name_id
+        .map(|dn| PyRep::Integer(dn as i64))
+        .unwrap_or(PyRep::None);
+    let ability_name_id = fa
+        .ability_name_id
+        .map(|an| PyRep::Integer(an as i64))
+        .unwrap_or(PyRep::None);
     let tooltip_text_id = fa
         .tooltip_text_id
         .map(|tt| PyRep::Integer(tt as i64))
@@ -538,6 +546,8 @@ pub(crate) async fn handle_activate_fighter_ability_slots(
         ("chargeCount", PyRep::Integer(charge_count)),
         ("remainingCharges", PyRep::Integer(remaining_charges)),
         ("rearmTimeSeconds", PyRep::Real(rearm_time_sec)),
+        ("displayNameID", display_name_id),
+        ("abilityNameID", ability_name_id),
         ("tooltipTextID", tooltip_text_id),
         ("turretGraphicID", turret_graphic_id),
         ("success", PyRep::Bool(true)),
@@ -609,6 +619,12 @@ pub(crate) async fn handle_activate_fighter_ability_slots_on_point(
             message: format!("Slot {slot_id} not found"),
         }));
     };
+    let Some(fa) = ctx.sde.fighter_abilities.get(&slot_def.ability_id) else {
+        return Some(Err(BridgeRpcError {
+            code: "InvalidFighterAbilitySlot".into(),
+            message: format!("Fighter ability {} not found in SDE", slot_def.ability_id),
+        }));
+    };
 
     let charge_count = slot_def.charges.as_ref().map(|c| c.charge_count).unwrap_or(1);
     let remaining_charges = {
@@ -647,7 +663,12 @@ pub(crate) async fn handle_activate_fighter_ability_slots_on_point(
         ("fighterID", PyRep::Integer(fighter_ball_id)),
         ("slotID", PyRep::Integer(slot_id as i64)),
         ("abilityID", PyRep::Integer(slot_def.ability_id as i64)),
-        ("pointTargeted", PyRep::Bool(true)),
+        ("targetMode", PyRep::String(fa.target_mode.clone())),
+        ("pointTargeted", PyRep::Bool(fa.target_mode == "pointTargeted")),
+        ("displayNameID", fa.display_name_id.map(|id| PyRep::Integer(id as i64)).unwrap_or(PyRep::None)),
+        ("abilityNameID", fa.ability_name_id.map(|id| PyRep::Integer(id as i64)).unwrap_or(PyRep::None)),
+        ("tooltipTextID", fa.tooltip_text_id.map(|id| PyRep::Integer(id as i64)).unwrap_or(PyRep::None)),
+        ("turretGraphicID", fa.turret_graphic_id.map(|id| PyRep::Integer(id as i64)).unwrap_or(PyRep::None)),
         ("detonationPoint", PyRep::Tuple(vec![
             PyRep::Real(target_point.x),
             PyRep::Real(target_point.y),

@@ -920,6 +920,7 @@ fn test_t2_sde_ui_and_content_static_domain_verification() {
     // parity: sde:res:/staticdata/selectiongroups.static, sde:res:/staticdata/triggertypes.static
     // parity: sde:res:/staticdata/dusticons.static, sde:res:/staticdata/skilltags.static
     // parity: sde:res:/staticdata/dialogs.schema, sde:res:/staticdata/dialogs.static
+    // parity: sde:res:/staticdata/fighterabilities.static
     let sde = SdeRegistry::open(&SdeRegistry::default_db_path()).expect("real V24.01 SDE");
 
     let _ = read_pinned_resource(
@@ -1079,6 +1080,27 @@ fn test_t2_sde_ui_and_content_static_domain_verification() {
     assert_eq!(dialogs["warning"].dialog_id, 1_796);
     assert_eq!(dialogs["warning"].dialog_type, 5);
 
+    let _ = read_pinned_resource(
+        &sde,
+        "res:/staticdata/fighterabilities.static",
+        "79df7cd57376f58758ac973adb7854d7",
+        32_768,
+    );
+    let (fa_bytes, raw_fas) = sde
+        .load_raw_fighter_abilities_static()
+        .expect("fighterabilities.static");
+    assert_eq!(fa_bytes, 32_768);
+    assert_eq!(raw_fas.len(), 36);
+    assert_eq!(raw_fas, sde.fighter_abilities);
+    assert_eq!(raw_fas[&2].ability_name_id, Some(513_537));
+    assert_eq!(raw_fas[&2].tooltip_text_id, Some(516_650));
+    assert_eq!(raw_fas[&7].target_mode, "pointTargeted");
+    assert!(raw_fas[&7].disallow_in_high_sec);
+    assert!(raw_fas[&7].disallow_in_low_sec);
+    assert_eq!(raw_fas[&18].turret_graphic_id, Some(11_515));
+    assert_eq!(raw_fas[&18].tooltip_text_id, Some(516_660));
+    assert_eq!(raw_fas[&18].raw_json["turretGraphicID"], serde_json::json!(11_515));
+
     eve_testkit::attest(&[
         "sde:res:/staticdata/achievements.static",
         "sde:res:/staticdata/landmarks.static",
@@ -1094,6 +1116,7 @@ fn test_t2_sde_ui_and_content_static_domain_verification() {
         "sde:res:/staticdata/skilltags.static",
         "sde:res:/staticdata/dialogs.schema",
         "sde:res:/staticdata/dialogs.static",
+        "sde:res:/staticdata/fighterabilities.static",
     ]);
 }
 

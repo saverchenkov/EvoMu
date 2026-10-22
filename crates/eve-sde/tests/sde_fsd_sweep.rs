@@ -201,15 +201,15 @@ fn load_and_verify_cfsd_records(
 }
 
 #[test]
-// parity: plan:T-1, plan:D-2
-// parity: sde:res:/staticdata/types.fsdbinary, sde:res:/staticdata/categories.fsdbinary, sde:res:/staticdata/groups.fsdbinary
-// parity: sde:res:/staticdata/typematerials.fsdbinary, sde:res:/staticdata/compressibletypes.fsdbinary, sde:res:/staticdata/typelist.fsdbinary
-// parity: sde:res:/staticdata/races.fsdbinary, sde:res:/staticdata/bloodlines.fsdbinary, sde:res:/staticdata/ancestries.fsdbinary
-// parity: sde:res:/staticdata/schools.fsdbinary, sde:res:/staticdata/factions.fsdbinary, sde:res:/staticdata/npccorporations.fsdbinary
-// parity: sde:res:/staticdata/marketgroups.fsdbinary, sde:res:/staticdata/schematics.fsdbinary, sde:res:/staticdata/stationoperations.fsdbinary
-// parity: sde:res:/staticdata/stationservices.fsdbinary, sde:res:/staticdata/dynamicitemattributes.fsdbinary, sde:res:/staticdata/spacecomponentsbytype.fsdbinary
-// parity: sde:res:/staticdata/dogmaattributes.fsdbinary, sde:res:/staticdata/dogmaeffects.fsdbinary
 fn test_t2_sde_fsdbinary_raw_client_verification_sweep() {
+    // parity: plan:T-1, plan:D-2
+    // parity: sde:res:/staticdata/types.fsdbinary, sde:res:/staticdata/categories.fsdbinary, sde:res:/staticdata/groups.fsdbinary
+    // parity: sde:res:/staticdata/typematerials.fsdbinary, sde:res:/staticdata/compressibletypes.fsdbinary, sde:res:/staticdata/typelist.fsdbinary
+    // parity: sde:res:/staticdata/races.fsdbinary, sde:res:/staticdata/bloodlines.fsdbinary, sde:res:/staticdata/ancestries.fsdbinary
+    // parity: sde:res:/staticdata/schools.fsdbinary, sde:res:/staticdata/factions.fsdbinary, sde:res:/staticdata/npccorporations.fsdbinary
+    // parity: sde:res:/staticdata/marketgroups.fsdbinary, sde:res:/staticdata/schematics.fsdbinary, sde:res:/staticdata/stationoperations.fsdbinary
+    // parity: sde:res:/staticdata/stationservices.fsdbinary, sde:res:/staticdata/dynamicitemattributes.fsdbinary, sde:res:/staticdata/spacecomponentsbytype.fsdbinary
+    // parity: sde:res:/staticdata/dogmaattributes.fsdbinary, sde:res:/staticdata/dogmaeffects.fsdbinary
     let db_path = SdeRegistry::default_db_path();
     let sde = SdeRegistry::open(&db_path).expect("real V24.01 SDE database must open");
     let sde_uri = format!("file:{}?immutable=1", db_path.display());
@@ -524,76 +524,58 @@ fn test_t2_sde_fsdbinary_raw_client_verification_sweep() {
             let mask = read_u32_le(&types_raw, rec + 148);
 
             assert_eq!(rec_tid, tid);
-            let inv = sde
-                .types
-                .get(&tid)
-                .expect("type from types.fsdbinary must exist in sde.types");
+            let inv = sde.types.get(&tid).expect("type from types.fsdbinary must exist in sde.types");
             assert_eq!(inv.type_id, tid);
             assert_eq!(inv.group_id, group_id);
             assert_eq!(inv.category_id, sde.groups[&group_id].category_id);
             assert!(!inv.name.is_empty());
-            assert_eq!(
-                inv.base_price,
-                if (mask & (1 << 0)) != 0 { bp } else { 0.0 }
-            );
+            assert_eq!(inv.base_price, if (mask & (1 << 0)) != 0 { bp } else { 0.0 });
             assert_eq!(inv.capacity, if (mask & (1 << 1)) != 0 { cap } else { 0.0 });
             assert_eq!(inv.mass, if (mask & (1 << 11)) != 0 { mass } else { 0.0 });
             assert_eq!(inv.portion_size, psize);
             assert_eq!(inv.radius, if (mask & (1 << 19)) != 0 { rad } else { 0.0 });
             assert_eq!(inv.volume, if (mask & (1 << 23)) != 0 { vol } else { 0.0 });
             assert_eq!(inv.published, published);
-            assert_eq!(
-                inv.description_id,
-                ((mask & (1 << 3)) != 0).then_some(desc_id)
-            );
+            assert_eq!(inv.description_id, ((mask & (1 << 3)) != 0).then_some(desc_id));
             assert_eq!(inv.faction_id, ((mask & (1 << 5)) != 0).then_some(fac_id));
-            assert_eq!(
-                inv.graphic_id,
-                ((mask & (1 << 6)) != 0).then_some(graphic_id)
-            );
+            assert_eq!(inv.graphic_id, ((mask & (1 << 6)) != 0).then_some(graphic_id));
             assert_eq!(inv.icon_id, ((mask & (1 << 7)) != 0).then_some(icon_id));
-            assert_eq!(
-                inv.market_group_id,
-                ((mask & (1 << 10)) != 0).then_some(mkt_grp_id)
-            );
-            assert_eq!(
-                inv.meta_group_id,
-                ((mask & (1 << 12)) != 0).then_some(meta_grp_id)
-            );
-            assert_eq!(
-                inv.meta_level,
-                ((mask & (1 << 13)) != 0).then_some(meta_lvl)
-            );
+            assert_eq!(inv.market_group_id, ((mask & (1 << 10)) != 0).then_some(mkt_grp_id));
+            assert_eq!(inv.meta_group_id, ((mask & (1 << 12)) != 0).then_some(meta_grp_id));
+            assert_eq!(inv.meta_level, ((mask & (1 << 13)) != 0).then_some(meta_lvl));
             assert_eq!(inv.race_id, ((mask & (1 << 18)) != 0).then_some(race_id));
             assert_eq!(inv.sound_id, ((mask & (1 << 20)) != 0).then_some(sound_id));
-            assert_eq!(
-                inv.tech_level,
-                ((mask & (1 << 21)) != 0).then_some(tech_lvl)
-            );
-            assert_eq!(
-                inv.variation_parent_type_id,
-                ((mask & (1 << 22)) != 0).then_some(var_parent_tid)
-            );
-            assert_eq!(
-                sde.wrecks.get(&tid).copied(),
-                ((mask & (1 << 24)) != 0).then_some(wreck_tid)
-            );
+            assert_eq!(inv.tech_level, ((mask & (1 << 21)) != 0).then_some(tech_lvl));
+            assert_eq!(inv.variation_parent_type_id, ((mask & (1 << 22)) != 0).then_some(var_parent_tid));
+            assert_eq!(sde.wrecks.get(&tid).copied(), ((mask & (1 << 24)) != 0).then_some(wreck_tid));
             if let Some(parent_id) = inv.variation_parent_type_id {
                 assert!(sde.variations_of(parent_id).contains(&inv.type_id));
             }
         }
+        let (raw_bytes_len, raw_types_map) = sde.load_raw_types_fsdbinary().expect("load_raw_types_fsdbinary");
+        assert_eq!(raw_bytes_len, 9_169_272);
+        assert_eq!(raw_types_map.len(), 53_288);
         let raven = &sde.types[&638];
         assert_eq!(raven.name, "Raven");
         assert_eq!(raven.group_id, 27);
         assert_eq!(raven.category_id, 6);
+        assert_eq!(raven.description_id, Some(84205));
+        assert_eq!(raven.icon_id, None);
+        assert_eq!(raven.graphic_id, Some(43));
+        assert_eq!(raven.sound_id, Some(20068));
+        assert_eq!(raven.meta_group_id, Some(1));
+        assert_eq!(raven.meta_level, Some(0));
+        assert_eq!(raven.tech_level, Some(1));
         assert_eq!(raven.default_attributes[&attr_ids::MAX_VELOCITY], 113.0);
-        assert_eq!(
-            raven.default_attributes[&attr_ids::SHIELD_CAPACITY],
-            7_700.0
-        );
+        assert_eq!(raven.default_attributes[&attr_ids::SHIELD_CAPACITY], 7_700.0);
         assert_eq!(raven.default_attributes[&attr_ids::ARMOR_HP], 6_380.0);
         assert_eq!(raven.default_attributes[&attr_ids::HP_STRUCT], 7_040.0);
         assert_eq!(raven.default_attributes[&attr_ids::RIG_SIZE], 3.0);
+        assert_eq!(sde.types[&34].icon_id, Some(22));
+        assert_eq!(sde.types[&587].graphic_id, Some(46));
+        assert_eq!(sde.types[&2410].meta_group_id, Some(2));
+        assert_eq!(sde.types[&2410].meta_level, Some(5));
+        assert_eq!(sde.types[&2410].tech_level, Some(2));
         attested.push("sde:res:/staticdata/types.fsdbinary");
     }
 
@@ -1371,5 +1353,7 @@ fn test_t2_sde_fsdbinary_raw_client_verification_sweep() {
     }
 
     assert_eq!(attested.len(), 20);
+    attested.push("plan:T-1");
+    attested.push("plan:D-2");
     eve_testkit::attest(&attested);
 }

@@ -795,13 +795,13 @@ fn verify_client_sqlite_static_loaded_rows(
 }
 
 #[test]
-// parity: plan:T-1, plan:D-2
-// parity: sde:res:/staticdata/blueprints.static, sde:res:/staticdata/clonegrades.static, sde:res:/staticdata/dbuffcollections.static
-// parity: sde:res:/staticdata/fighterabilities.static, sde:res:/staticdata/fighterabilitiesbytype.static
-// parity: sde:res:/staticdata/skinlicenses.static, sde:res:/staticdata/skinmaterials.static, sde:res:/staticdata/skins.static
-// parity: sde:res:/staticdata/asteroidcountbytypeidroomiddungeonid.static, sde:res:/staticdata/gastypesbydungeonid.static
-// parity: sde:res:/staticdata/regions.static, sde:res:/staticdata/constellations.static, sde:res:/staticdata/jumps.static, sde:res:/staticdata/systems.static
 fn test_t2_sde_all_213_resources_and_domain_tables_sweep() {
+    // parity: plan:T-1, plan:D-2
+    // parity: sde:res:/staticdata/blueprints.static, sde:res:/staticdata/clonegrades.static, sde:res:/staticdata/dbuffcollections.static
+    // parity: sde:res:/staticdata/fighterabilities.static, sde:res:/staticdata/fighterabilitiesbytype.static
+    // parity: sde:res:/staticdata/skinlicenses.static, sde:res:/staticdata/skinmaterials.static, sde:res:/staticdata/skins.static
+    // parity: sde:res:/staticdata/asteroidcountbytypeidroomiddungeonid.static, sde:res:/staticdata/gastypesbydungeonid.static
+    // parity: sde:res:/staticdata/regions.static, sde:res:/staticdata/constellations.static, sde:res:/staticdata/jumps.static, sde:res:/staticdata/systems.static
     let root = repo_root();
     let db_path = SdeRegistry::default_db_path();
     let sde = SdeRegistry::open(&db_path).expect("real V24.01 SDE database must open");
@@ -1162,7 +1162,7 @@ fn test_t2_sde_all_213_resources_and_domain_tables_sweep() {
         assert!(sde.constellations.contains_key(&sta.constellation_id));
         assert!(sde.regions.contains_key(&sta.region_id));
     }
-    let jita_4_4 = &sde.stations[&60003760];
+    let jita_4_4 = sde.station(60003760).expect("O(1) station lookup for Jita 4-4");
     assert_eq!(
         jita_4_4.name,
         "Jita IV - Moon 4 - Caldari Navy Assembly Plant"
@@ -1178,7 +1178,7 @@ fn test_t2_sde_all_213_resources_and_domain_tables_sweep() {
     assert_eq!(jita_4_4.owner_faction_id, Some(500001));
 
     // Station without NPC corp faction_id must have None owner_faction_id (no hardcoded fallback 500001)
-    let non_empire_sta = &sde.stations[&60014839];
+    let non_empire_sta = sde.station(60014839).expect("O(1) station lookup for 60014839");
     assert_eq!(non_empire_sta.owner_faction_id, None);
 
     for gate in sde.jumps.values() {
@@ -1245,14 +1245,24 @@ fn test_t2_sde_all_213_resources_and_domain_tables_sweep() {
         .any(|d| !d.location_required_skill_modifiers.is_empty()));
 
     // parity: sde:res:/staticdata/fighterabilities.static
+    let (fa_raw_bytes, raw_fas) = sde
+        .load_raw_fighter_abilities_static()
+        .expect("open raw client fighterabilities.static");
+    assert_eq!(fa_raw_bytes, 32_768);
+    assert_eq!(raw_fas.len(), 36);
+    assert_eq!(raw_fas, sde.fighter_abilities);
     for fa in sde.fighter_abilities.values() {
         assert!(!fa.target_mode.is_empty());
+        assert_eq!(fa.ability_name_id, fa.display_name_id);
+        assert!(fa.raw_json.is_object());
     }
     let fa2 = &sde.fighter_abilities[&2];
+    assert_eq!(fa2.ability_name_id, Some(513537));
     assert_eq!(fa2.tooltip_text_id, Some(516650));
     let fa18 = &sde.fighter_abilities[&18];
     assert_eq!(fa18.turret_graphic_id, Some(11515));
     assert_eq!(fa18.tooltip_text_id, Some(516660));
+    assert_eq!(fa18.raw_json["turretGraphicID"], serde_json::json!(11515));
     for (&ftid, slots) in &sde.fighter_abilities_by_type {
         assert!(sde.types.contains_key(&ftid));
         assert!(!slots.is_empty());
@@ -1300,6 +1310,8 @@ fn test_t2_sde_all_213_resources_and_domain_tables_sweep() {
     //    verified against the raw client files in ResFiles/ for MD5, byte size, record count, and all loaded rows (R-P0-1).
     let unique_attested: HashSet<&str> = attested_sde_rows.iter().map(String::as_str).collect();
     assert_eq!(unique_attested.len(), 14);
-    let attested_refs: Vec<&str> = attested_sde_rows.iter().map(String::as_str).collect();
+    let mut attested_refs: Vec<&str> = attested_sde_rows.iter().map(String::as_str).collect();
+    attested_refs.push("plan:T-1");
+    attested_refs.push("plan:D-2");
     eve_testkit::attest(&attested_refs);
 }

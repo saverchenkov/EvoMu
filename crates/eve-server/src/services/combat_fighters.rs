@@ -298,9 +298,28 @@ pub async fn handle_fighters(
                 .write()
                 .unwrap()
                 .insert((ship_id, tube_idx), loaded_fighter_id);
+            let ability_slots: Vec<PyRep> = ctx
+                .sde
+                .fighter_ability_slots_with_info(item.type_id)
+                .into_iter()
+                .filter_map(|(slot, info)| {
+                    ctx.sde.fighter_abilities.get(&slot.ability_id).map(|fa| {
+                        PyRep::keyval([
+                            ("slotID", PyRep::Integer(i64::from(slot.slot_index))),
+                            ("abilityID", PyRep::Integer(i64::from(fa.ability_id))),
+                            ("targetMode", PyRep::String(fa.target_mode.clone())),
+                            ("displayNameID", info.display_name_id.map(|id| PyRep::Integer(i64::from(id))).unwrap_or(PyRep::None)),
+                            ("abilityNameID", info.ability_name_id.map(|id| PyRep::Integer(i64::from(id))).unwrap_or(PyRep::None)),
+                            ("tooltipTextID", info.tooltip_text_id.map(|id| PyRep::Integer(i64::from(id))).unwrap_or(PyRep::None)),
+                            ("turretGraphicID", info.turret_graphic_id.map(|id| PyRep::Integer(i64::from(id))).unwrap_or(PyRep::None)),
+                        ])
+                    })
+                })
+                .collect();
             Some(Ok(PyRep::keyval([
                 ("tubeIndex", PyRep::Integer(tube_idx as i64)),
                 ("fighterID", PyRep::Integer(loaded_fighter_id)),
+                ("abilitySlots", PyRep::List(ability_slots)),
                 ("success", PyRep::Bool(true)),
             ])))
         }

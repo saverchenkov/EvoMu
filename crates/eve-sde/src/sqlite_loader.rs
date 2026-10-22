@@ -991,18 +991,14 @@ impl SdeRegistry {
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
                 let icon_id = val.get("iconID").and_then(|v| v.as_u64()).map(|v| v as u32);
-                let display_name_id = val
-                    .get("displayNameID")
+                let display_name_id = val.get("displayNameID").and_then(|v| v.as_u64()).map(|v| v as u32);
+                let ability_name_id = val
+                    .get("abilityNameID")
+                    .or_else(|| val.get("displayNameID"))
                     .and_then(|v| v.as_u64())
                     .map(|v| v as u32);
-                let tooltip_text_id = val
-                    .get("tooltipTextID")
-                    .and_then(|v| v.as_u64())
-                    .map(|v| v as u32);
-                let turret_graphic_id = val
-                    .get("turretGraphicID")
-                    .and_then(|v| v.as_u64())
-                    .map(|v| v as u32);
+                let tooltip_text_id = val.get("tooltipTextID").and_then(|v| v.as_u64()).map(|v| v as u32);
+                let turret_graphic_id = val.get("turretGraphicID").and_then(|v| v.as_u64()).map(|v| v as u32);
                 Ok(FighterAbilityInfo {
                     ability_id: id,
                     target_mode,
@@ -1010,8 +1006,10 @@ impl SdeRegistry {
                     disallow_in_low_sec,
                     icon_id,
                     display_name_id,
+                    ability_name_id,
                     tooltip_text_id,
                     turret_graphic_id,
+                    raw_json: val,
                 })
             })?;
             for r in rows {
