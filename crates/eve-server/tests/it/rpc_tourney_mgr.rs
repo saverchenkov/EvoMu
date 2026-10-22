@@ -158,6 +158,25 @@ async fn test_tourney_match_lifecycle_and_teams() {
     assert_eq!(red_roster.len(), 1);
     assert_eq!(blue_roster.len(), 1);
 
+    // BF-02: verify active ship query from snap (Rifter type 587, active ship 100_000_001)
+    let PyRep::Tuple(p1_data) = &red_roster[0] else { panic!("expected pilot tuple"); };
+    assert_eq!(p1_data[0].as_i64(), Some(P1));
+    assert_eq!(p1_data[1].as_i64(), Some(587));
+    assert_eq!(p1_data[2].as_i64(), Some(100_000_001));
+    assert_eq!(p1_data[3].as_i64(), Some(2));
+
+    // BF-01: unauthenticated call must fail
+    let mut unauth_sess = SessionState::new(80_999);
+    let unauth_res = rpc(
+        &ctx,
+        &mut unauth_sess,
+        "tourneyMgr",
+        "AddPlayer",
+        &[PyRep::Integer(1001), PyRep::Integer(0), PyRep::Integer(P1)],
+    )
+    .await;
+    assert!(unauth_res.is_err(), "unauthenticated AddPlayer must be rejected");
+
     // 6. Remove player from blue team
     let rem_rep = rpc(
         &ctx,
@@ -479,13 +498,24 @@ async fn test_tourney_referee_overrides_and_teleport() {
     .expect("CompletePregameChecks");
     assert_eq!(pregame, PyRep::Bool(true));
 
-    // 3. Execute Member Change
+    // 3. Execute Member Change (BF-03: both empty and roster addition)
     let exec_res = rpc(&ctx, &mut sess, "tourneyMgr", "ExecuteMemberChange", &[])
         .await
         .expect("ExecuteMemberChange");
     assert_eq!(exec_res, PyRep::None);
 
-    // 4. Get Fancy Details
+    let exec_add = rpc(
+        &ctx,
+        &mut sess,
+        "tourneyMgr",
+        "ExecuteMemberChange",
+        &[PyRep::Integer(3001), PyRep::Integer(0), PyRep::Integer(P1), PyRep::Bool(true)],
+    )
+    .await
+    .expect("ExecuteMemberChange Add");
+    assert_eq!(exec_add, PyRep::None);
+
+    // 4. Get Fancy Details (BF-02: dynamic telemetry totals from team pilots)
     let fancy_rep = rpc(
         &ctx,
         &mut sess,
@@ -500,10 +530,15 @@ async fn test_tourney_referee_overrides_and_teleport() {
     };
 
     // Verify index access for team 0 (Red) and team 1 (Blue)
-    let red_bar = fancy_dict.iter().find(|(k, _)| k == &PyRep::Integer(0)).map(|(_, v)| v);
-    assert!(red_bar.is_some());
-    let blue_bar = fancy_dict.iter().find(|(k, _)| k == &PyRep::Integer(1)).map(|(_, v)| v);
-    assert!(blue_bar.is_some());
+    let red_bar = fancy_dict.iter().find(|(k, _)| k == &PyRep::Integer(0)).map(|(_, v)| v).expect("red bar");
+    let blue_bar = fancy_dict.iter().find(|(k, _)| k == &PyRep::Integer(1)).map(|(_, v)| v).expect("blue bar");
+
+    // Dynamic EHP and DPS for red team with P1 active
+    let PyRep::Tuple(red_stats) = red_bar else { panic!("expected red bar tuple"); };
+    assert!(red_stats[0].as_i64().unwrap_or(0) > 0, "dynamic totalEHP must be > 0");
+    assert!(red_stats[1].as_i64().unwrap_or(0) > 0, "dynamic totalDPS must be > 0");
+    let PyRep::Tuple(blue_stats) = blue_bar else { panic!("expected blue bar tuple"); };
+    assert_eq!(blue_stats[0].as_i64(), Some(0), "empty blue team has 0 EHP");
 
     let match_id_val = fancy_dict
         .iter()
@@ -604,7 +639,44 @@ async fn test_tourney_referee_overrides_and_teleport() {
     .expect("UpdateFleetDetails");
     assert_eq!(update_fleet, PyRep::Bool(true));
 
-    // 10. Cleanup Grid
+    // Seed a wreck entity in the match solar system (30000142) for BF-03
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            999_888_777,
+            eve_db::InventoryItemRecord {
+                item_id: 999_888_777,
+                type_id: 26557,
+                owner_id: P1,
+                location_id: 30000142,
+                flag: eve_db::InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                dynamic_attributes: HashMap::new(),
+                source_mutaplasmid_id: None,
+                insured_payout_isk: 0.0,
+                is_blueprint_copy: false,
+                blueprint_runs_remaining: None,
+            },
+        );
+    });
+    let jita_sys = ctx.systems.get_or_spawn(30000142);
+    let _ = jita_sys
+        .spawn_ball(eve_destiny::Ball {
+            id: 999_888_777,
+            type_id: 26557,
+            position: glam::DVec3::new(100.0, 200.0, 300.0),
+            velocity: glam::DVec3::ZERO,
+            max_velocity: 100.0,
+            inertia: 1.0,
+            mass: 1000.0,
+            radius: 50.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        })
+        .await;
+
+    // 10. Cleanup Grid (BF-03: cleans space entities & wrecks)
     let cleanup = rpc(
         &ctx,
         &mut sess,
@@ -615,6 +687,8 @@ async fn test_tourney_referee_overrides_and_teleport() {
     .await
     .expect("CleanupGrid");
     assert_eq!(cleanup, PyRep::Bool(true));
+    assert!(!ctx.db.with_snapshot(|snap| snap.items.contains_key(&999_888_777)));
+    assert!(jita_sys.get_ball_position_sync(999_888_777).is_none());
 
     // 11. Remove Self From Referees
     let rem_ref = rpc(
@@ -627,4 +701,10 @@ async fn test_tourney_referee_overrides_and_teleport() {
     .await
     .expect("RemoveSelfFromReferees");
     assert_eq!(rem_ref, PyRep::Bool(true));
+
+    // 12. Referee authorization check (BF-01): non-referee P2 is denied
+    let mut sess_other = select_pilot(&ctx, 80_004, "other", "other-secret", P2).await;
+    let denied_err = rpc(&ctx, &mut sess_other, "tourneyMgr", "ResetMatch", &[PyRep::Integer(3001)]).await;
+    assert!(denied_err.is_err(), "non-referee ResetMatch must be rejected");
+    assert_eq!(denied_err.unwrap_err().code, "AccessDenied");
 }

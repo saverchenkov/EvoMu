@@ -890,7 +890,7 @@ impl ServerContext {
             method,
             args,
             kwargs,
-        ) {
+        ).await {
             return res;
         }
 
