@@ -1180,10 +1180,7 @@ pub fn handle_contacts(
             };
             match ctx.db.get_character(char_id) {
                 Ok(ch) => Some(Ok(PyRep::Integer(ch.home_station_id))),
-                Err(e) => Some(Err(BridgeRpcError {
-                    code: "CharacterNotFound".into(),
-                    message: e.to_string(),
-                })),
+                Err(e) => Some(Err(BridgeRpcError { code: "CharacterNotFound".into(), message: e.to_string() })),
             }
         }
 
@@ -1192,24 +1189,12 @@ pub fn handle_contacts(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let Some(new_home_id) = args
-                .first()
-                .and_then(|a| a.as_i64())
-                .or(session.station_id)
-            else {
+            let Some(new_home_id) = args.first().and_then(|a| a.as_i64()).or(session.station_id) else {
                 return Some(Err(BridgeRpcError {
                     code: "MustBeDockedAtTargetStation".into(),
-                    message: "set_home_station requires being docked at the target station".into(),
+                    message: "set_home_station requires a target station ID".into(),
                 }));
             };
-            if session.station_id != Some(new_home_id) {
-                return Some(Err(BridgeRpcError {
-                    code: "MustBeDockedAtTargetStation".into(),
-                    message: format!(
-                        "Setting home station {new_home_id} requires being docked at that station"
-                    ),
-                }));
-            }
             let exists_in_sde = ctx
                 .sde
                 .solar_systems
@@ -1221,20 +1206,48 @@ pub fn handle_contacts(
                     message: format!("Station {new_home_id} does not exist in SDE"),
                 }));
             }
+            let now_unix = ctx.now_unix_secs();
+            let is_local_docked = session.station_id == Some(new_home_id);
             let res = ctx.db.try_with_mut_snapshot(|snap| {
-                let Some(ch) = snap.characters.get_mut(&char_id) else {
+                let Some(ch) = snap.characters.get(&char_id) else {
                     return Err(BridgeRpcError {
                         code: "CharacterNotFound".into(),
                         message: format!("Character {char_id} not found"),
                     });
                 };
+                let (school_id, corp_id) = (ch.school_id, ch.corporation_id);
+                if !is_local_docked {
+                    let school_st = ctx.sde.schools.get(&school_id).map(|s| s.station_id).filter(|&id| id > 0);
+                    let corp_hq_st = snap.corporations.get(&corp_id).and_then(|c| c.hq_station_id).filter(|&id| id > 0);
+                    if Some(new_home_id) != school_st && Some(new_home_id) != corp_hq_st {
+                        return Err(BridgeRpcError {
+                            code: "MustBeDockedAtTargetStation".into(),
+                            message: format!("Station {new_home_id} is not a remote candidate"),
+                        });
+                    }
+                    let cd_key = -10_000_099 - char_id;
+                    let next_allowed = snap.owner_notes.get(&cd_key).and_then(|n| n.note.parse::<u64>().ok()).unwrap_or(0);
+                    if now_unix < next_allowed {
+                        return Err(BridgeRpcError {
+                            code: "HomeStationRemoteCooldownActive".into(),
+                            message: format!("Remote home station change on cooldown until {next_allowed}"),
+                        });
+                    }
+                    let next_time = now_unix + 365 * 86_400;
+                    snap.owner_notes.insert(cd_key, eve_db::OwnerNoteRecord {
+                        note_id: cd_key,
+                        character_id: -char_id,
+                        item_id: new_home_id,
+                        label: "home_station_remote_cooldown".into(),
+                        note: next_time.to_string(),
+                        timestamp_unix: next_time,
+                    });
+                }
+                let ch = snap.characters.get_mut(&char_id).unwrap();
                 ch.home_station_id = new_home_id;
                 Ok(ch.home_station_id)
             });
-            match res {
-                Ok(hid) => Some(Ok(PyRep::Integer(hid))),
-                Err(e) => Some(Err(e)),
-            }
+            Some(res.map(PyRep::Integer))
         }
 
         // parity: feat:character.home-station
@@ -1245,35 +1258,42 @@ pub fn handle_contacts(
             };
             let list = match ctx.db.get_character(char_id) {
                 Ok(ch) => {
-                    let mut candidates = vec![PyRep::Integer(ch.home_station_id)];
-                    if let Some(docked_st) = session.station_id {
-                        if !candidates.contains(&PyRep::Integer(docked_st)) {
-                            candidates.push(PyRep::Integer(docked_st));
+                    let mut cands = vec![ch.home_station_id];
+                    let school_st = ctx.sde.schools.get(&ch.school_id).map(|s| s.station_id).filter(|&id| id > 0);
+                    let hq_st = ctx.db.with_snapshot(|snap| {
+                        snap.corporations.get(&ch.corporation_id).and_then(|c| c.hq_station_id).filter(|&id| id > 0)
+                    });
+                    for st in [school_st, hq_st, session.station_id].into_iter().flatten() {
+                        if !cands.contains(&st) {
+                            cands.push(st);
                         }
                     }
-                    PyRep::List(candidates)
+                    PyRep::List(cands.into_iter().map(PyRep::Integer).collect())
                 }
-                Err(e) => return Some(Err(BridgeRpcError {
-                    code: "CharacterNotFound".into(),
-                    message: e.to_string(),
-                })),
+                Err(e) => return Some(Err(BridgeRpcError { code: "CharacterNotFound".into(), message: e.to_string() })),
             };
             Some(Ok(list))
         }
 
         ("home_station", "get_next_remote_change_time") => {
-            let _ = match ServerContext::require_character(session) {
+            let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            Some(Ok(PyRep::Integer(0)))
+            let next_time = ctx.db.with_snapshot(|snap| {
+                snap.owner_notes.get(&(-10_000_099 - char_id)).and_then(|n| n.note.parse::<i64>().ok()).unwrap_or(0)
+            });
+            Some(Ok(PyRep::Integer(next_time)))
         }
 
         ("home_station", "reset_remote_change_time") => {
-            let _ = match ServerContext::require_character(session) {
+            let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            ctx.db.with_mut_snapshot(|snap| {
+                snap.owner_notes.remove(&(-10_000_099 - char_id));
+            });
             Some(Ok(PyRep::Integer(0)))
         }
 

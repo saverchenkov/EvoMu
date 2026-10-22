@@ -104,7 +104,7 @@ pub fn encode_add_balls_with_park(
                 }
             }
         }
-        encode_single_ball_with_meta(&mut buf, ball, stamp, meta.as_ref());
+        encode_single_ball_with_park(&mut buf, ball, stamp, meta.as_ref(), park);
     }
 
     buf
@@ -121,6 +121,17 @@ pub fn encode_single_ball_with_meta(
     ball: &Ball,
     stamp: u32,
     meta: Option<&SlimItemMeta>,
+) {
+    encode_single_ball_with_park(buf, ball, stamp, meta, None);
+}
+
+/// Encodes a single `Ball` entry into a binary `Destiny` buffer, reading mode-specific state from `park` when available.
+pub fn encode_single_ball_with_park(
+    buf: &mut Vec<u8>,
+    ball: &Ball,
+    stamp: u32,
+    meta: Option<&SlimItemMeta>,
+    park: Option<&Ballpark>,
 ) {
     let is_rigid = matches!(ball.mode, MovementMode::Rigid);
     let (mode_byte, flags) = match ball.mode {
@@ -249,25 +260,44 @@ pub fn encode_single_ball_with_meta(
         MovementMode::Mushroom => {
             // MUSHROOM_Struct (25 bytes, `DestinyStructs.h:181-187`):
             // uint8 formationID, float followRange, double unknown125, int32 effectStamp, int64 ownerID
+            let (max_r, dur_s, est, oid) = park
+                .and_then(|p| p.mushroom_states.get(&ball.id))
+                .map(|ms| {
+                    (
+                        ms.max_radius as f32,
+                        ms.duration_s,
+                        ms.effect_stamp as i32,
+                        ms.owner_id,
+                    )
+                })
+                .unwrap_or((ball.radius as f32, 1.0f64, effect_stamp, owner_id));
             buf.push(0xFFu8);
-            buf.extend_from_slice(&(ball.radius as f32).to_le_bytes());
-            buf.extend_from_slice(&1.0f64.to_le_bytes());
-            buf.extend_from_slice(&effect_stamp.to_le_bytes());
-            buf.extend_from_slice(&owner_id.to_le_bytes());
+            buf.extend_from_slice(&max_r.to_le_bytes());
+            buf.extend_from_slice(&dur_s.to_le_bytes());
+            buf.extend_from_slice(&est.to_le_bytes());
+            buf.extend_from_slice(&oid.to_le_bytes());
         }
         MovementMode::Troll => {
             // TROLL_Struct (5 bytes, `DestinyStructs.h:189-192`):
             // uint8 formationID, uint32 effectStamp
+            let troll_stamp = park
+                .and_then(|p| p.troll_states.get(&ball.id))
+                .map(|ts| ts.effect_stamp as u32)
+                .unwrap_or(stamp);
             buf.push(0xFFu8);
-            buf.extend_from_slice(&stamp.to_le_bytes());
+            buf.extend_from_slice(&troll_stamp.to_le_bytes());
         }
         MovementMode::Formation => {
             // FORMATION_Struct (17 bytes, `DestinyStructs.h:204-209`):
             // uint8 formationID, int64 followID, float followRange, int32 effectStamp
+            let (leader_id, follow_rng, est) = park
+                .and_then(|p| p.formation_states.get(&ball.id))
+                .map(|fs| (fs.leader_id, fs.follow_range as f32, fs.effect_stamp as i32))
+                .unwrap_or((0i64, 0.0f32, effect_stamp));
             buf.push(0xFFu8);
-            buf.extend_from_slice(&0i64.to_le_bytes());
-            buf.extend_from_slice(&0.0f32.to_le_bytes());
-            buf.extend_from_slice(&effect_stamp.to_le_bytes());
+            buf.extend_from_slice(&leader_id.to_le_bytes());
+            buf.extend_from_slice(&follow_rng.to_le_bytes());
+            buf.extend_from_slice(&est.to_le_bytes());
         }
     }
 }

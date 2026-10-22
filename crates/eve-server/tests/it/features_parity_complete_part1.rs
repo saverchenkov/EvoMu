@@ -232,11 +232,12 @@ async fn test_character_creation_lifecycle_selection_home_station() {
     assert_eq!(sess.corporation_id, Some(c2_record.corporation_id));
     assert!(sess.station_id.is_some() || sess.solar_system_id.is_some());
 
-    // 7. Home Station queries and candidate list
+    // 7. Home Station queries, candidate validation, set_home_station, and 365-day remote cooldown
+    let orig_home_id = c2_record.home_station_id;
     let home_st_rep = rpc(&ctx, &mut sess, "home_station", "get_home_station", vec![])
         .await
         .expect("get_home_station");
-    assert_eq!(home_st_rep, PyRep::Integer(c2_record.home_station_id));
+    assert_eq!(home_st_rep, PyRep::Integer(orig_home_id));
 
     let candidates_rep = rpc(&ctx, &mut sess, "home_station", "get_home_station_candidates", vec![])
         .await
@@ -244,12 +245,135 @@ async fn test_character_creation_lifecycle_selection_home_station() {
     let PyRep::List(cand_list) = candidates_rep else {
         panic!("Expected list from get_home_station_candidates");
     };
-    assert!(cand_list.contains(&PyRep::Integer(c2_record.home_station_id)));
+    assert!(cand_list.contains(&PyRep::Integer(orig_home_id)));
 
     let next_time_rep = rpc(&ctx, &mut sess, "home_station", "get_next_remote_change_time", vec![])
         .await
         .expect("get_next_remote_change_time");
-    assert!(matches!(next_time_rep, PyRep::Integer(_)));
+    assert_eq!(next_time_rep, PyRep::Integer(0));
+
+    // Non-candidate remote station where pilot is not docked must be rejected
+    let alt_station_id = if orig_home_id == 60_003_760 {
+        60_008_494
+    } else {
+        60_003_760
+    };
+    let non_cand_err = rpc(
+        &ctx,
+        &mut sess,
+        "home_station",
+        "set_home_station",
+        vec![PyRep::Integer(alt_station_id)],
+    )
+    .await
+    .expect_err("Remote set_home_station to non-candidate station must fail");
+    assert!(
+        non_cand_err.message.contains("not a remote candidate"),
+        "unexpected error: {non_cand_err:?}"
+    );
+
+    // Dock at alt_station_id: candidate list now includes both orig_home_id (school) and alt_station_id (docked)
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&c2_id) {
+            ch.station_id = Some(alt_station_id);
+        }
+    });
+    sess.station_id = Some(alt_station_id);
+    let PyRep::List(cand_list_docked) = rpc(&ctx, &mut sess, "home_station", "get_home_station_candidates", vec![])
+        .await
+        .expect("get_home_station_candidates docked")
+    else {
+        panic!("Expected list from get_home_station_candidates");
+    };
+    assert!(cand_list_docked.contains(&PyRep::Integer(orig_home_id)));
+    assert!(cand_list_docked.contains(&PyRep::Integer(alt_station_id)));
+
+    // Local set_home_station while docked at alt_station_id succeeds without incurring remote cooldown
+    let set_local_rep = rpc(
+        &ctx,
+        &mut sess,
+        "home_station",
+        "set_home_station",
+        vec![PyRep::Integer(alt_station_id)],
+    )
+    .await
+    .expect("local set_home_station");
+    assert_eq!(set_local_rep, PyRep::Integer(alt_station_id));
+    assert_eq!(
+        rpc(&ctx, &mut sess, "home_station", "get_home_station", vec![])
+            .await
+            .expect("get_home_station after local change"),
+        PyRep::Integer(alt_station_id)
+    );
+    assert_eq!(
+        rpc(&ctx, &mut sess, "home_station", "get_next_remote_change_time", vec![])
+            .await
+            .expect("get_next_remote_change_time after local change"),
+        PyRep::Integer(0)
+    );
+
+    // Remote set_home_station back to school station (orig_home_id) while docked at alt_station_id
+    let now_before_remote = ctx.now_unix_secs();
+    let set_remote_rep = rpc(
+        &ctx,
+        &mut sess,
+        "home_station",
+        "set_home_station",
+        vec![PyRep::Integer(orig_home_id)],
+    )
+    .await
+    .expect("remote set_home_station to school station");
+    assert_eq!(set_remote_rep, PyRep::Integer(orig_home_id));
+    assert_eq!(
+        rpc(&ctx, &mut sess, "home_station", "get_home_station", vec![])
+            .await
+            .expect("get_home_station after remote change"),
+        PyRep::Integer(orig_home_id)
+    );
+    let expected_cooldown_until = now_before_remote as i64 + 365 * 86_400;
+    assert_eq!(
+        rpc(&ctx, &mut sess, "home_station", "get_next_remote_change_time", vec![])
+            .await
+            .expect("get_next_remote_change_time after remote change"),
+        PyRep::Integer(expected_cooldown_until)
+    );
+
+    // Switch back locally to alt_station_id, then verify a second remote change during the 365d cooldown is rejected
+    rpc(
+        &ctx,
+        &mut sess,
+        "home_station",
+        "set_home_station",
+        vec![PyRep::Integer(alt_station_id)],
+    )
+    .await
+    .expect("local set_home_station 2");
+    let cooldown_err = rpc(
+        &ctx,
+        &mut sess,
+        "home_station",
+        "set_home_station",
+        vec![PyRep::Integer(orig_home_id)],
+    )
+    .await
+    .expect_err("Second remote set_home_station during 365-day cooldown must fail");
+    assert!(
+        cooldown_err.message.contains("cooldown"),
+        "unexpected error: {cooldown_err:?}"
+    );
+
+    // Advance virtual clock past the 365-day remote cooldown and verify remote change succeeds again
+    ctx.advance_virtual_clock(365 * 86_400 + 1);
+    let set_remote_after_cd = rpc(
+        &ctx,
+        &mut sess,
+        "home_station",
+        "set_home_station",
+        vec![PyRep::Integer(orig_home_id)],
+    )
+    .await
+    .expect("remote set_home_station after 365-day cooldown");
+    assert_eq!(set_remote_after_cd, PyRep::Integer(orig_home_id));
 
     // 8. Self-destruct clone back to home station
     let self_destruct_rep = rpc(&ctx, &mut sess, "home_station", "self_destruct_clone", vec![])

@@ -36,6 +36,10 @@ impl Ballpark {
             observer_events: BTreeMap::new(),
             target_locks: BTreeMap::new(),
             warp_bubble_mgr: WarpBubbleMgr::default(),
+            mushroom_states: BTreeMap::new(),
+            troll_states: BTreeMap::new(),
+            miniball_states: BTreeMap::new(),
+            formation_states: BTreeMap::new(),
         }
     }
 
@@ -352,6 +356,10 @@ impl Ballpark {
         self.ball_group_ids.remove(&ball_id);
         self.ball_slim_meta.remove(&ball_id);
         self.combat_states.remove(&ball_id);
+        self.mushroom_states.remove(&ball_id);
+        self.troll_states.remove(&ball_id);
+        self.miniball_states.remove(&ball_id);
+        self.formation_states.remove(&ball_id);
         self.target_locks.remove(&ball_id);
         for locks in self.target_locks.values_mut() {
             locks.retain(|l| l.target_id != ball_id);

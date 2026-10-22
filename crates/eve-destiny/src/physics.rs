@@ -16,6 +16,7 @@ impl Ballpark {
         }
         let dt = dt.min(60.0);
         self.current_tick += 1;
+        let current_tick = self.current_tick;
 
         let dynamic_ids: Vec<BallId> = self
             .balls
@@ -36,21 +37,90 @@ impl Ballpark {
             .map(|(&id, b)| (id, (b.position, b.radius)))
             .collect();
 
+        let leader_frames: BTreeMap<BallId, (DVec3, DVec3, DVec3, DVec3)> = self
+            .formation_states
+            .values()
+            .filter_map(|fs| {
+                self.balls
+                    .get(&fs.leader_id)
+                    .map(|lb| (fs.leader_id, formation_leader_frame(lb)))
+            })
+            .collect();
+        let mushroom_states = self.mushroom_states.clone();
+        let troll_states = self.troll_states.clone();
+        let formation_states = self.formation_states.clone();
+
         let mut warp_exit_stops = Vec::new();
+        let mut expired_mushrooms = Vec::new();
+        let mut frozen_trolls = Vec::new();
 
         for ball in self.balls.values_mut() {
-            // evemu_Crucible `DestinyManager::ProcessState` (`DestinyManager.cpp:250-258`) gives these
-            // modes no server-side movement: the server never integrates their position.
             if matches!(
                 ball.mode,
-                MovementMode::Rigid
-                    | MovementMode::Field
-                    | MovementMode::Mushroom
-                    | MovementMode::Boid
-                    | MovementMode::Troll
-                    | MovementMode::Miniball
-                    | MovementMode::Formation
+                MovementMode::Rigid | MovementMode::Field | MovementMode::Miniball
             ) {
+                continue;
+            }
+
+            if matches!(ball.mode, MovementMode::Mushroom) {
+                // `_destiny.so` `Ballpark::Evolve` (`0x2d170..0x2d1eb`): stationary shockwave whose
+                // radius expands by R(t) = R_max * (t / duration)^{0.25} and expires at t >= duration.
+                ball.velocity = DVec3::ZERO;
+                if let Some(ms) = mushroom_states.get(&ball.id) {
+                    let elapsed_s = (current_tick.saturating_sub(ms.effect_stamp) as f64) * dt;
+                    let t_norm = if ms.duration_s > 0.0 {
+                        elapsed_s / ms.duration_s
+                    } else {
+                        1.0
+                    };
+                    if t_norm >= 1.0 - 1e-12 {
+                        expired_mushrooms.push(ball.id);
+                    } else if t_norm > 0.0 {
+                        ball.radius = ms.max_radius * t_norm.sqrt().sqrt();
+                    }
+                }
+                continue;
+            }
+
+            if matches!(ball.mode, MovementMode::Troll) {
+                // `_destiny.so` `Ballpark::Evolve` (`0x2eff0`, `0x2d103..0x2d139`, `0x2da54..0x2dbb8`):
+                // free ball coasting with zero goal velocity until `current_tick >= effect_stamp`,
+                // then converting into `MovementMode::Rigid` (`DSTBALL_RIGID`).
+                integrate_subwarp(ball, DVec3::ZERO, dt);
+                if let Some(ts) = troll_states.get(&ball.id) {
+                    if current_tick >= ts.effect_stamp {
+                        ball.mode = MovementMode::Rigid;
+                        ball.velocity = DVec3::ZERO;
+                        ball.speed_fraction = 0.0;
+                        frozen_trolls.push(ball.id);
+                    }
+                }
+                continue;
+            }
+
+            if matches!(ball.mode, MovementMode::Boid) {
+                // `_destiny.so` `Ballpark::Evolve` (`0x2eff0`): free sub-warp ball integrating velocity/position
+                // under exponential drag without expiring into Rigid.
+                integrate_subwarp(ball, DVec3::ZERO, dt);
+                continue;
+            }
+
+            if matches!(ball.mode, MovementMode::Formation) {
+                // `_destiny.so` `Ballpark::Evolve` (`0x275e5..0x2782e`): steers toward the leader's local
+                // formation slot with quadratic damping inside one tick's travel distance.
+                let goal_vel = formation_states
+                    .get(&ball.id)
+                    .and_then(|fs| {
+                        leader_frames.get(&fs.leader_id).map(|&(lpos, right, up, fwd)| {
+                            let slot_pos = lpos
+                                + right * fs.slot_offset.x
+                                + up * fs.slot_offset.y
+                                + fwd * fs.slot_offset.z;
+                            compute_formation_goal_velocity(ball, slot_pos, dt)
+                        })
+                    })
+                    .unwrap_or(DVec3::ZERO);
+                integrate_subwarp(ball, goal_vel, dt);
                 continue;
             }
 
@@ -123,6 +193,28 @@ impl Ballpark {
             integrate_subwarp(ball, goal_velocity, dt);
         }
 
+        for id in expired_mushrooms {
+            let _ = self.remove_ball(id);
+        }
+        for id in frozen_trolls {
+            self.troll_states.remove(&id);
+            self.static_ball_ids.insert(id);
+        }
+        for (mb_id, ms) in self.miniball_states.clone() {
+            if let Some((ppos, pvel)) = self
+                .balls
+                .get(&ms.parent_id)
+                .map(|p| (p.position, p.velocity))
+            {
+                if let Some(mb) = self.balls.get_mut(&mb_id) {
+                    mb.position = ppos + ms.relative_offset;
+                    mb.velocity = pvel;
+                }
+            } else {
+                let _ = self.remove_ball(mb_id);
+            }
+        }
+
         // Collision bounce physics (`Destiny::Ball::Collision`, `SP-4`)
         let ball_keys: Vec<BallId> = self.balls.keys().copied().collect();
         let mut collision_events = Vec::new();
@@ -130,21 +222,35 @@ impl Ballpark {
 
         for i in 0..ball_keys.len() {
             let id_a = ball_keys[i];
-            let is_static_a = self.is_static_ball(id_a);
+            let is_static_a = self.is_static_ball(id_a)
+                || matches!(self.balls[&id_a].mode, MovementMode::Miniball);
 
             for j in (i + 1)..ball_keys.len() {
                 let id_b = ball_keys[j];
-                let is_static_b = self.is_static_ball(id_b);
+                let is_static_b = self.is_static_ball(id_b)
+                    || matches!(self.balls[&id_b].mode, MovementMode::Miniball);
 
-                // Skip static-static collisions
+                // Skip static-static collisions and self/sibling miniball collisions (`_destiny.so` `0x2a3cb..0x2a3dd`)
                 if is_static_a && is_static_b {
                     continue;
                 }
-
-                // Celestial spheres, stargates, stations, and intangible field bubbles do not have elastic bounce collision physics
-                if matches!(self.balls[&id_a].mode, MovementMode::Field)
-                    || matches!(self.balls[&id_b].mode, MovementMode::Field)
+                let mb_parent_a = self.miniball_states.get(&id_a).map(|m| m.parent_id);
+                let mb_parent_b = self.miniball_states.get(&id_b).map(|m| m.parent_id);
+                if mb_parent_a == Some(id_b)
+                    || mb_parent_b == Some(id_a)
+                    || (mb_parent_a.is_some() && mb_parent_a == mb_parent_b)
                 {
+                    continue;
+                }
+
+                // Celestial spheres, stargates, stations, intangible field bubbles, and mushroom shockwaves do not have elastic bounce collision physics
+                if matches!(
+                    self.balls[&id_a].mode,
+                    MovementMode::Field | MovementMode::Mushroom
+                ) || matches!(
+                    self.balls[&id_b].mode,
+                    MovementMode::Field | MovementMode::Mushroom
+                ) {
                     continue;
                 }
                 let group_a = self.ball_group_ids.get(&id_a).copied().unwrap_or(0);
@@ -233,7 +339,7 @@ impl Ballpark {
                         // Static A vs Dynamic B
                         if v_rel < 0.0 {
                             if let Some(bb) = self.balls.get_mut(&id_b) {
-                                bb.velocity -= normal * ((1.0 + restitution) * v_rel);
+                                bb.velocity += normal * ((1.0 + restitution) * v_rel);
                             }
                         }
                         if let Some(bb) = self.balls.get_mut(&id_b) {
@@ -933,6 +1039,43 @@ pub(crate) fn compute_subwarp_goal_velocity(
         | MovementMode::Warp { .. }
         | MovementMode::Field
         | MovementMode::Rigid => DVec3::ZERO,
+    }
+}
+
+/// Computes the leader's `(position, right, up, forward)` local orthonormal basis (`_destiny.so` `0x27620..0x27739`).
+pub(crate) fn formation_leader_frame(leader: &Ball) -> (DVec3, DVec3, DVec3, DVec3) {
+    let fwd = if leader.velocity.length_squared() > 1e-4 {
+        leader.velocity.normalize()
+    } else if let MovementMode::GotoDirection { direction } = leader.mode {
+        if direction.length_squared() > 1e-4 {
+            direction.normalize()
+        } else {
+            DVec3::X
+        }
+    } else {
+        DVec3::X
+    };
+    let ref_up = if fwd.y.abs() < 0.99 { DVec3::Y } else { DVec3::Z };
+    let right = ref_up.cross(fwd).normalize_or_zero();
+    let up = fwd.cross(right).normalize_or_zero();
+    (leader.position, right, up, fwd)
+}
+
+/// Computes `DSTBALL_FORMATION` goal velocity toward `slot_pos` with quadratic damping inside one tick (`_destiny.so` `0x2773e..0x277ed`).
+pub(crate) fn compute_formation_goal_velocity(ball: &Ball, slot_pos: DVec3, dt: f64) -> DVec3 {
+    let delta = slot_pos - ball.position;
+    let dist = delta.length();
+    let v_max = ball.max_velocity * ball.speed_fraction;
+    let step_dist = v_max * dt;
+    if dist <= 1e-9 || v_max <= 0.0 || step_dist <= 1e-9 {
+        return DVec3::ZERO;
+    }
+    let dir = delta / dist;
+    if dist >= step_dist {
+        dir * v_max
+    } else {
+        let ratio = dist / step_dist;
+        dir * (v_max * ratio * ratio)
     }
 }
 

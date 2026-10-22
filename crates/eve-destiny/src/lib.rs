@@ -86,7 +86,7 @@ pub enum MovementMode {
     Formation,
 }
 
-impl MovementMode {
+    impl MovementMode {
     pub fn new_warp(origin: DVec3, destination: DVec3, warp_speed_au_s: f64) -> Self {
         let total_distance = (destination - origin).length();
         Self::Warp {
@@ -98,6 +98,51 @@ impl MovementMode {
             elapsed_warp_time: 0.0,
         }
     }
+}
+
+/// State for a `DSTBALL_MUSHROOM` (`MovementMode::Mushroom`) expanding shockwave ball (`_destiny.so` `AddMushroom` / `Ballpark::Evolve`).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct MushroomState {
+    /// Target maximum radius (`followRange` in `MUSHROOM_Struct`, `_destiny.so` `0x370c6`).
+    pub max_radius: f64,
+    /// Expansion duration in seconds (`unknown125` in `MUSHROOM_Struct`, `_destiny.so` `0x370d6`).
+    pub duration_s: f64,
+    /// Simulation tick at which the mushroom started (`effectStamp` in `MUSHROOM_Struct`, `_destiny.so` `0x370d2`).
+    pub effect_stamp: u64,
+    /// Owner entity ID (`ownerID` in `MUSHROOM_Struct`, `_destiny.so` `0x370e5`).
+    pub owner_id: i64,
+}
+
+/// State for a `DSTBALL_TROLL` (`MovementMode::Troll`) free coasting ball that freezes into `DSTBALL_RIGID`
+/// at `effect_stamp` (`_destiny.so` `SetBallTroll` `0x3cea0`, `Ballpark::Evolve` `0x2d103`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrollState {
+    /// Simulation tick (`effectStamp` in `TROLL_Struct`) at which the troll ball becomes `MovementMode::Rigid`.
+    pub effect_stamp: u64,
+}
+
+/// State for a `DSTBALL_MINIBALL` (`MovementMode::Miniball`) collision sub-sphere attached to a parent ball
+/// (`_destiny.so` `AddMiniball` `0x36130`).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct MiniballState {
+    /// Parent ball ID (`owner_id` at `+0x60` in `_destiny.so` `AddMiniball` `0x36243`).
+    pub parent_id: BallId,
+    /// Offset from the parent ball's center (`+0x120..+0x130` in `_destiny.so` `AddMiniball` `0x36222`).
+    pub relative_offset: DVec3,
+}
+
+/// State for a `DSTBALL_FORMATION` (`MovementMode::Formation`) formation-following ball
+/// (`_destiny.so` `FormationFollow` `0x37a90`, `Ballpark::Evolve` `0x275e5`).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct FormationState {
+    /// Leader ball ID (`followID` in `FORMATION_Struct`, `_destiny.so` `0x37c0e`).
+    pub leader_id: BallId,
+    /// Slot offset `(right, up, forward)` in the leader's local heading basis (`_destiny.so` `0x27620..0x27739`).
+    pub slot_offset: DVec3,
+    /// Follow range parameter (`followRange` in `FORMATION_Struct`).
+    pub follow_range: f64,
+    /// Simulation tick stamp (`effectStamp` in `FORMATION_Struct`).
+    pub effect_stamp: u64,
 }
 
 /// 4-channel damage vector (`EM`, `Thermal`, `Kinetic`, `Explosive`).
@@ -857,4 +902,167 @@ pub struct Ballpark {
     pub target_locks: BTreeMap<BallId, Vec<TargetLock>>,
     #[serde(default)]
     pub warp_bubble_mgr: WarpBubbleMgr,
+    #[serde(default)]
+    pub mushroom_states: BTreeMap<BallId, MushroomState>,
+    #[serde(default)]
+    pub troll_states: BTreeMap<BallId, TrollState>,
+    #[serde(default)]
+    pub miniball_states: BTreeMap<BallId, MiniballState>,
+    #[serde(default)]
+    pub formation_states: BTreeMap<BallId, FormationState>,
+}
+
+impl Ballpark {
+    /// Spawns a `DSTBALL_MUSHROOM` (`MovementMode::Mushroom`) expanding shockwave ball (`_destiny.so` `Ballpark::AddMushroom` `0x36fd0`).
+    /// Starts at `radius = 0.0` with `velocity = DVec3::ZERO` and expands by $R(t) = R_{\max} (t / T)^{0.25}$ until expiring at $t \ge T$.
+    pub fn add_mushroom_ball(
+        &mut self,
+        id: BallId,
+        type_id: u32,
+        position: DVec3,
+        max_radius: f64,
+        duration_s: f64,
+        mass: f64,
+        owner_id: i64,
+    ) -> bool {
+        if duration_s <= 0.0 || !duration_s.is_finite() || self.balls.contains_key(&id) {
+            return false;
+        }
+        let ball = Ball {
+            id,
+            type_id,
+            position,
+            velocity: DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 1.0,
+            mass: mass.max(1.0),
+            radius: 0.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Mushroom,
+        };
+        self.mushroom_states.insert(
+            id,
+            MushroomState {
+                max_radius: max_radius.max(0.0),
+                duration_s,
+                effect_stamp: self.current_tick,
+                owner_id,
+            },
+        );
+        let added = self.add_ball(ball);
+        if let Some(meta) = self.ball_slim_meta.get_mut(&id) {
+            meta.owner_id = owner_id;
+        }
+        added
+    }
+
+    /// Configures `ball_id` into `DSTBALL_TROLL` (`MovementMode::Troll`, `_destiny.so` `Ballpark::SetBallTroll` `0x3cea0`):
+    /// a free sub-warp coasting ball (`speed_fraction = 0.0`) that freezes into `MovementMode::Rigid` after `duration_ticks`.
+    pub fn set_ball_troll(&mut self, ball_id: BallId, duration_ticks: u64) -> Result<u64, String> {
+        let Some(ball) = self.balls.get_mut(&ball_id) else {
+            return Err(format!("Ball {ball_id} not found in ballpark"));
+        };
+        let effect_stamp = self.current_tick + duration_ticks.max(1);
+        ball.mode = MovementMode::Troll;
+        ball.speed_fraction = 0.0;
+        self.static_ball_ids.remove(&ball_id);
+        self.troll_states
+            .insert(ball_id, TrollState { effect_stamp });
+        Ok(effect_stamp)
+    }
+
+    /// Turns `DSTBALL_BOID` (`MovementMode::Boid`) mode on or off for `ball_id` (`_destiny.so` `Ballpark::SetBoid` `0x71870`).
+    /// When `enabled` is `false`, transitions `ball_id` to `MovementMode::Stop` (`speed_fraction = 0.0`).
+    pub fn set_boid(&mut self, ball_id: BallId, enabled: bool) -> Result<(), String> {
+        if !self.balls.contains_key(&ball_id) {
+            return Err(format!("Ball {ball_id} not found in ballpark"));
+        }
+        if enabled {
+            if let Some(ball) = self.balls.get_mut(&ball_id) {
+                ball.mode = MovementMode::Boid;
+            }
+            Ok(())
+        } else {
+            self.set_mode(ball_id, MovementMode::Stop)
+        }
+    }
+
+    /// Attaches a `DSTBALL_MINIBALL` (`MovementMode::Miniball`) collision sub-sphere to `parent_id` at `relative_offset`
+    /// (`_destiny.so` `Ballpark::AddMiniball` `0x36130`).
+    pub fn add_miniball(
+        &mut self,
+        id: BallId,
+        parent_id: BallId,
+        relative_offset: DVec3,
+        radius: f64,
+    ) -> Result<(), String> {
+        if radius <= 0.0 || !radius.is_finite() {
+            return Err("Miniball radius must be positive".into());
+        }
+        if self.balls.contains_key(&id) {
+            return Err(format!("Ball {id} already exists in ballpark"));
+        }
+        let Some((parent_pos, parent_vel, parent_mass, parent_type)) = self
+            .balls
+            .get(&parent_id)
+            .map(|b| (b.position, b.velocity, b.mass, b.type_id))
+        else {
+            return Err(format!("Parent ball {parent_id} not found in ballpark"));
+        };
+        let ball = Ball {
+            id,
+            type_id: parent_type,
+            position: parent_pos + relative_offset,
+            velocity: parent_vel,
+            max_velocity: 0.0,
+            inertia: 1.0,
+            mass: parent_mass.max(1.0),
+            radius,
+            speed_fraction: 0.0,
+            mode: MovementMode::Miniball,
+        };
+        self.miniball_states.insert(
+            id,
+            MiniballState {
+                parent_id,
+                relative_offset,
+            },
+        );
+        self.add_ball(ball);
+        Ok(())
+    }
+
+    /// Places `ball_id` into `DSTBALL_FORMATION` (`MovementMode::Formation`) tracking `leader_id` at local `slot_offset`
+    /// `(right, up, forward)` in the leader's heading basis (`_destiny.so` `Ballpark::FormationFollow` `0x37a90`).
+    pub fn formation_follow(
+        &mut self,
+        ball_id: BallId,
+        leader_id: BallId,
+        slot_offset: DVec3,
+        follow_range: f64,
+    ) -> Result<(), String> {
+        if ball_id == leader_id {
+            return Err("Ball cannot formation-follow itself".into());
+        }
+        if !self.balls.contains_key(&leader_id) {
+            return Err(format!("Leader ball {leader_id} not found in ballpark"));
+        }
+        let Some(ball) = self.balls.get_mut(&ball_id) else {
+            return Err(format!("Ball {ball_id} not found in ballpark"));
+        };
+        ball.mode = MovementMode::Formation;
+        if ball.speed_fraction <= 0.0 {
+            ball.speed_fraction = 1.0;
+        }
+        self.formation_states.insert(
+            ball_id,
+            FormationState {
+                leader_id,
+                slot_offset,
+                follow_range,
+                effect_stamp: self.current_tick,
+            },
+        );
+        Ok(())
+    }
 }
