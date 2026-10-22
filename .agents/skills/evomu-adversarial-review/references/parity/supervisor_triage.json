@@ -377,6 +377,50 @@
       "disposition": "dead_client_code",
       "evidence": "All 1 Quasar proto files in package 'wormhole' (e.g. eveProto/generated/eve/wormhole/wormhole_pb2.pyj) are internal eve/* or unreachable in V24 code.ccp import graph (0 reachable eve_public protos)."
     },
+    "notify:OnBlockContacts": {
+      "disposition": "client_local",
+      "evidence": "V24.01 code.ccp disassembly: eve/client/script/ui/shared/neocom/addressBook/addressbookService.pyj AddressBookSvc.BlockOwner@307-310 (after RemoteSvc('charMgr').BlockOwners: LOAD_ATTR ScatterEvent; LOAD_CONST 'OnBlockContacts'). No server emitter needed: in a full scan of code.ccp the name appears only in the listed local ScatterEvent / method-call sites and in handler classes' __notifyevents__ lists."
+    },
+    "notify:OnContactChange": {
+      "disposition": "client_local",
+      "evidence": "V24.01 code.ccp disassembly: eve/client/script/ui/shared/neocom/addressBook/addressbookService.pyj AddressBookSvc.OnPersonalContactsAdded@205-208 (LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnContactChange'); eve/client/script/ui/shared/neocom/addressBook/addressbookService.pyj AddressBookSvc.OnPersonalContactsUpdated@315-318 (LOAD_ATTR ScatterEvent; LOAD_CONST 'OnContactChange'); eve/client/script/ui/shared/neocom/addressBook/addressbookService.pyj AddressBookSvc.OnPersonalContactsDeleted@110-113 (LOAD_ATTR ScatterEvent; LOAD_CONST 'OnContactChange'). No server emitter needed: in a full scan of code.ccp the name appears only in the listed local ScatterEvent / method-call sites and in handler classes' __notifyevents__ lists. The server sends OnPersonalContactsAdded/Updated/Deleted, whose client handlers re-scatter OnContactChange."
+    },
+    "notify:OnContactLoggedOff": {
+      "disposition": "client_local",
+      "evidence": "V24.01 code.ccp disassembly: eve/client/script/ui/shared/comtool/onlineStatus.pyj OnlineStatus.OnClientContactChange@25 (LOAD_FAST self; LOAD_ATTR OnContactLoggedOff; LOAD_FAST charID; CALL_FUNCTION 1 (branch online == False)); notifications/client/generator/notificationGenerator.pyj FakeCharacterNotification.generate@44-47 (LOAD_ATTR ScatterEvent; LOAD_CONST 'OnContactLoggedOff' (test-notification generator)). The server notification is OnClientContactChange(charID, online); OnlineStatus.OnClientContactChange(charID, online) calls self.OnContactLoggedOff(charID) locally when online is false. No server emitter needed: in a full scan of code.ccp the name appears only in the listed local ScatterEvent / method-call sites and in handler classes' __notifyevents__ lists."
+    },
+    "notify:OnContactLoggedOn": {
+      "disposition": "client_local",
+      "evidence": "V24.01 code.ccp disassembly: eve/client/script/ui/shared/comtool/onlineStatus.pyj OnlineStatus.OnClientContactChange@9 (LOAD_FAST self; LOAD_ATTR OnContactLoggedOn; LOAD_FAST charID; CALL_FUNCTION 1 (branch online == True)); eve/client/script/ui/shared/userentry.pyj User.OnClientContactChange@9 (LOAD_ATTR OnContactLoggedOn (method call)); notifications/client/generator/notificationGenerator.pyj FakeCharacterNotification.generate@25-28 (LOAD_ATTR ScatterEvent; LOAD_CONST 'OnContactLoggedOn' (test-notification generator)). The server notification is OnClientContactChange(charID, online); OnlineStatus.OnClientContactChange(charID, online) calls self.OnContactLoggedOn(charID) locally when online is true. No server emitter needed: in a full scan of code.ccp the name appears only in the listed local ScatterEvent / method-call sites and in handler classes' __notifyevents__ lists."
+    },
+    "notify:OnFleetFinderAdvertChanged": {
+      "disposition": "client_local",
+      "evidence": "V24.01 code.ccp disassembly: eve/client/script/parklife/fleetSvc.pyj FleetSvc.OnFleetOptionsChanged@46-49 (LOAD_ATTR ScatterEvent; LOAD_CONST 'OnFleetFinderAdvertChanged' (when options.isRegistered changes)); eve/client/script/parklife/fleetSvc.pyj FleetSvc._FinializeRegistration@9-12 (LOAD_ATTR ScatterEvent; LOAD_CONST 'OnFleetFinderAdvertChanged'). No server emitter needed: in a full scan of code.ccp the name appears only in the listed local ScatterEvent / method-call sites and in handler classes' __notifyevents__ lists. The server sends OnFleetOptionsChanged(oldOptions, options)."
+    },
+    "notify:OnFleetMemberChanging": {
+      "disposition": "client_local",
+      "evidence": "V24.01 code.ccp disassembly: eve/client/script/parklife/fleetSvc.pyj FleetSvc.MoveMember@77-80 (LOAD_ATTR ScatterEvent; LOAD_CONST 'OnFleetMemberChanging' (before calling fleet.MoveMember)). No server emitter needed: in a full scan of code.ccp the name appears only in the listed local ScatterEvent / method-call sites and in handler classes' __notifyevents__ lists."
+    },
+    "notify:OnFleetSetupChanged": {
+      "disposition": "client_local",
+      "evidence": "V24.01 code.ccp disassembly: eve/client/script/parklife/fleetSvc.pyj FleetSvc.SaveSetupOnServer@55-58 (LOAD_ATTR ScatterEvent; LOAD_CONST 'OnFleetSetupChanged'). No server emitter needed: in a full scan of code.ccp the name appears only in the listed local ScatterEvent / method-call sites and in handler classes' __notifyevents__ lists."
+    },
+    "notify:OnMailCountersUpdate": {
+      "disposition": "client_local",
+      "evidence": "V24.01 code.ccp disassembly: eve/client/script/ui/services/mail/mailSvc.pyj mailSvc.MarkMessagesAsRead@114-117 (LOAD_ATTR ScatterEvent; LOAD_CONST 'OnMailCountersUpdate'); eve/client/script/ui/services/mail/mailSvc.pyj mailSvc.MarkMessagesAsUnread@115-118 (LOAD_ATTR ScatterEvent; LOAD_CONST 'OnMailCountersUpdate'); eve/client/script/ui/services/mail/mailSvc.pyj mailSvc._RefreshTrashedStatusWhenMovingFromTrash@25-28 (LOAD_ATTR ScatterEvent; LOAD_CONST 'OnMailCountersUpdate'). No server emitter needed: in a full scan of code.ccp the name appears only in the listed local ScatterEvent / method-call sites and in handler classes' __notifyevents__ lists. The only handler is MailForm.OnMailCountersUpdate(*args)."
+    },
+    "notify:OnNewMailReceived": {
+      "disposition": "client_local",
+      "evidence": "V24.01 code.ccp disassembly: eve/client/script/ui/services/mail/mailSvc.pyj mailSvc.OnMailSent@497 (LOAD_FAST self; LOAD_ATTR OnNewMailReceived; ... CALL_FUNCTION 1 (unread mail just filed from the server's OnMailSent)); eve/client/script/ui/services/mail/mailSvc.pyj mailSvc.OnNewMailReceived@29-32 (LOAD_ATTR ScatterEvent; LOAD_CONST 'OnNewMailReceived' (fan-out to MailWindow/MailForm)); eve/client/script/ui/services/mail/mailSvc.pyj mailSvc.OnMailUndeleted@13-16 (LOAD_ATTR ScatterEvent; LOAD_CONST 'OnNewMailReceived'). No server emitter needed: in a full scan of code.ccp the name appears only in the listed local ScatterEvent / method-call sites and in handler classes' __notifyevents__ lists. The server sends OnMailSent(messageID, senderID, sentDate, toCharacterIDs, toListID, toCorpOrAllianceID, title, statusMask)."
+    },
+    "notify:OnReloadCalendar": {
+      "disposition": "client_local",
+      "evidence": "V24.01 code.ccp disassembly: eve/client/script/ui/services/eveCalendarsvc.pyj CalendarSvc.OnNewCalendarEvent@368-371 (LOAD_ATTR ScatterEvent; LOAD_CONST 'OnReloadCalendar'); eve/client/script/ui/services/eveCalendarsvc.pyj CalendarSvc.OnRemoveCalendarEvent@283-286 (LOAD_ATTR ScatterEvent; LOAD_CONST 'OnReloadCalendar'); eve/client/script/ui/services/eveCalendarsvc.pyj CalendarSvc._RespondToEvent@225-228 (LOAD_ATTR ScatterEvent; LOAD_CONST 'OnReloadCalendar'). No server emitter needed: in a full scan of code.ccp the name appears only in the listed local ScatterEvent / method-call sites and in handler classes' __notifyevents__ lists."
+    },
+    "notify:OnUnblockContacts": {
+      "disposition": "client_local",
+      "evidence": "V24.01 code.ccp disassembly: eve/client/script/ui/shared/neocom/addressBook/addressbookService.pyj AddressBookSvc.UnblockOwner@107-110 (after RemoteSvc('charMgr').UnblockOwners(blocked): LOAD_ATTR ScatterEvent; LOAD_CONST 'OnUnblockContacts'). No server emitter needed: in a full scan of code.ccp the name appears only in the listed local ScatterEvent / method-call sites and in handler classes' __notifyevents__ lists."
+    },
     "quasar:eveProto/generated/eve/academy/ships/events_pb2.pyj": {
       "class": "unreachable",
       "disposition": "client_local",
