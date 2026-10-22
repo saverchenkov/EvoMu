@@ -883,6 +883,16 @@ impl ServerContext {
         ) {
             return res;
         }
+        if let Some(res) = services::tourney_service::handle(
+            self,
+            session,
+            effective_service,
+            method,
+            args,
+            kwargs,
+        ) {
+            return res;
+        }
 
         warn!(
             service = effective_service,

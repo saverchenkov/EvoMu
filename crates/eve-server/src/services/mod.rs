@@ -76,6 +76,7 @@ pub mod space_entity_mining;
 pub mod space_entity_ops;
 pub mod station_structure;
 pub mod tactical_modules;
+pub mod tourney_service;
 pub mod wallet_ledger;
 pub mod wallet_serverops;
 pub mod wallet_services_ext;
