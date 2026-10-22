@@ -926,6 +926,9 @@ impl ServerContext {
             .with_boosters(active_boosters);
         fit.booster_side_effects = active_booster_side_effects;
         fit.projected_ewar = active_projected;
+        for (&attr_id, &val) in &ship_item.dynamic_attributes {
+            fit.ship.base_attributes.insert(attr_id, val);
+        }
 
         let (online_states, active_states, active_charges) = self.db.with_snapshot(|s| {
             (

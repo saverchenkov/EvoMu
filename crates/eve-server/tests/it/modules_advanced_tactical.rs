@@ -582,7 +582,13 @@ async fn entosis_link_restrictions_warmup_and_contest() {
 
     // 1. Interceptor (Crow 11176, group 831) cannot activate Entosis Link
     let mut crow_sess = seed_pilot(&ctx, 91020, 81020, 11176, NULL_SYS, true);
+    set_item_dyn_attr(&ctx, 81020, 48, 10000.0); // CPU_OUTPUT
+    set_item_dyn_attr(&ctx, 81020, 11, 10000.0); // POWER_OUTPUT
     give_item(&ctx, 71021, 34593, 91020, 81020, InventoryFlag::HiSlot0, 1);
+    ctx.db.try_with_mut_snapshot(|snap| {
+        snap.module_online_states.insert(71021, true);
+        Ok::<(), ()>(())
+    }).unwrap();
     crow_sess.station_id = None;
     spawn_in_space(&ctx, 91020, 81020, 11176, NULL_SYS, DVec3::ZERO).await;
     let node_id = 88001i64;
