@@ -717,7 +717,7 @@ pub(super) fn handle_corp_gov(
                 for (&cid, state) in g.iter() {
                     for (mid, rid, iid, reason, status) in &state.medal_recipients {
                         if (method == "GetMedalsReceived" && *rid == target_char && *status > 1)
-                            || (method == "GetRecipientsOfMedal" && *mid == target_char)
+                            || (method == "GetRecipientsOfMedal" && *mid == target_char && cid == corp_id)
                         {
                             let title = state
                                 .medals

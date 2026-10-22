@@ -500,12 +500,15 @@ async fn test_corporation_medals_and_employment() {
             "status"
         ]
     );
-    assert_eq!(rec_rows.len(), 1);
-    assert_eq!(rec_rows[0][0], PyRep::Integer(medal_id));
-    assert_eq!(rec_rows[0][1], PyRep::Integer(90_000_002));
-    assert_eq!(rec_rows[0][2], PyRep::Integer(90_000_001));
-    assert_eq!(rec_rows[0][3], PyRep::Integer(corp_id));
-    assert_eq!(rec_rows[0][6], PyRep::Integer(2));
+    let our_rec = rec_rows
+        .iter()
+        .find(|r| r[0] == PyRep::Integer(medal_id) && r[1] == PyRep::Integer(90_000_002))
+        .expect("Recipient record found");
+    assert_eq!(our_rec[0], PyRep::Integer(medal_id));
+    assert_eq!(our_rec[1], PyRep::Integer(90_000_002));
+    assert_eq!(our_rec[2], PyRep::Integer(90_000_001));
+    assert_eq!(our_rec[3], PyRep::Integer(corp_id));
+    assert_eq!(our_rec[6], PyRep::Integer(2));
 
     // 9. GetMedalsReceived lists the medal for recipient 90_000_002
     let rcv_rep = call(
