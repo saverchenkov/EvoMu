@@ -462,7 +462,12 @@ pub async fn handle_pve_hacking(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let container_id = args.first().and_then(|a| a.as_i64()).unwrap_or(1_870_000_000);
+            let Some(container_id) = args.first().and_then(|a| a.as_i64()) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidArguments".into(),
+                    message: "QuitHackingAttempt requires a container_id argument".into(),
+                }));
+            };
             let removed = with_pve_exploration_reg(ctx, |reg| {
                 reg.hacking_games.remove(&(char_id, container_id)).is_some()
             });

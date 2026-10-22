@@ -12,10 +12,6 @@ use eve_server::services::sov_services::TYPE_ORBITAL_SKYHOOK;
 
 use crate::common;
 
-fn is_keyval(rep: &PyRep) -> bool {
-    matches!(rep, PyRep::KeyVal(_))
-}
-
 fn make_test_ball(id: i64, type_id: u32, pos: glam::DVec3) -> eve_destiny::Ball {
     eve_destiny::Ball {
         id,
@@ -391,20 +387,8 @@ async fn test_rewards_sov_and_epic_arc_status() {
     });
     assert!(found, "LP logs should contain seeded corp 1000125 LP entry");
 
-    // 2. rewardMgr.GetDelayedRewardsByGroupIDs
-    ctx.db.with_mut_snapshot(|snap| {
-        eve_server::services::cosmetics_ui_ops::seed_delayed_reward(
-            snap,
-            char_id,
-            eve_server::services::cosmetics_ui_ops::DelayedRewardEntry {
-                reward_group_id: 501,
-                reward_type_id: 1,
-                quantity: 5000,
-            },
-        );
-    });
-
-    let delayed_rep = ctx
+    // 2. rewardMgr.GetDelayedRewardsByGroupIDs returns UnimplementedRPC
+    let delayed_err = ctx
         .dispatch_rpc(
             &mut sess,
             "rewardMgr",
@@ -415,17 +399,8 @@ async fn test_rewards_sov_and_epic_arc_status() {
             None,
         )
         .await
-        .expect("GetDelayedRewardsByGroupIDs");
-    let PyRep::Dict(delayed_dict) = &delayed_rep else { panic!("Expected Dict") };
-    let group_501 = delayed_dict.iter().find(|(k, _)| k == &PyRep::Integer(501)).expect("Group 501 delayed rewards found");
-    let (_, PyRep::List(rew_501)) = group_501 else { panic!("Expected List") };
-    assert_eq!(rew_501.len(), 1);
-    assert_eq!(rew_501[0].dict_get("rewardGroupID"), Some(&PyRep::Integer(501)));
-    assert_eq!(rew_501[0].dict_get("rewardQuantity"), Some(&PyRep::Integer(5000)));
-
-    let group_999 = delayed_dict.iter().find(|(k, _)| k == &PyRep::Integer(999)).expect("Group 999 delayed rewards found");
-    let (_, PyRep::List(rew_999)) = group_999 else { panic!("Expected List") };
-    assert!(rew_999.is_empty(), "Unseeded group 999 should have empty reward list");
+        .unwrap_err();
+    assert_eq!(delayed_err.code, "UnimplementedRPC");
 
     // 3. colonyResourcesMgr.GetMyCorporationSkyhooks
     let skyhook_id = 60_000_501i64;
@@ -518,9 +493,6 @@ async fn test_rewards_sov_and_epic_arc_status() {
 }
 
 #[tokio::test]
-// parity: rpc:infoGatheringMgr.GetStateAndConfig
-// parity: rpc:infoGatheringMgr.LogInfoEventsFromClient
-// parity: rpc:clientStatLogger.LogString
 async fn test_telemetry_logging_and_load_service() {
     let ctx = ServerContext::new();
     let kw = HashMap::new();
@@ -538,17 +510,15 @@ async fn test_telemetry_logging_and_load_service() {
     .await
     .expect("SelectCharacterID");
 
-    // 1. infoGatheringMgr.GetStateAndConfig
-    let cfg_rep = ctx
+    // 1. infoGatheringMgr.GetStateAndConfig returns UnimplementedRPC
+    let cfg_err = ctx
         .dispatch_rpc(&mut sess, "infoGatheringMgr", None, "GetStateAndConfig", &[], &kw, None)
         .await
-        .expect("GetStateAndConfig");
-    assert!(is_keyval(&cfg_rep));
-    assert_eq!(cfg_rep.dict_get("isEnabled"), Some(&PyRep::Integer(0)));
-    assert_eq!(cfg_rep.dict_get("clientWorkerInterval"), Some(&PyRep::Integer(600_000)));
+        .unwrap_err();
+    assert_eq!(cfg_err.code, "UnimplementedRPC");
 
-    // 2. infoGatheringMgr.LogInfoEventsFromClient
-    let log_info = ctx
+    // 2. infoGatheringMgr.LogInfoEventsFromClient returns UnimplementedRPC
+    let log_info_err = ctx
         .dispatch_rpc(
             &mut sess,
             "infoGatheringMgr",
@@ -559,11 +529,11 @@ async fn test_telemetry_logging_and_load_service() {
             None,
         )
         .await
-        .expect("LogInfoEventsFromClient");
-    assert_eq!(log_info, PyRep::None);
+        .unwrap_err();
+    assert_eq!(log_info_err.code, "UnimplementedRPC");
 
-    // 3. clientStatLogger.LogString
-    let log_str = ctx
+    // 3. clientStatLogger.LogString returns UnimplementedRPC
+    let log_str_err = ctx
         .dispatch_rpc(
             &mut sess,
             "clientStatLogger",
@@ -574,11 +544,11 @@ async fn test_telemetry_logging_and_load_service() {
             None,
         )
         .await
-        .expect("LogString");
-    assert_eq!(log_str, PyRep::None);
+        .unwrap_err();
+    assert_eq!(log_str_err.code, "UnimplementedRPC");
 
-    // 4. externalQueueMgr.PublishProxyEvent
-    let pub_rep = ctx
+    // 4. externalQueueMgr.PublishProxyEvent returns UnimplementedRPC
+    let pub_err = ctx
         .dispatch_rpc(
             &mut sess,
             "externalQueueMgr",
@@ -589,11 +559,6 @@ async fn test_telemetry_logging_and_load_service() {
             None,
         )
         .await
-        .expect("PublishProxyEvent");
-    assert_eq!(pub_rep, PyRep::Bool(true));
-    {
-        let q = ctx.proxy_event_queue.read().unwrap();
-        let found = q.iter().any(|r| r.event_name == "ClusterNodeHeartbeat" && r.payload == PyRep::Integer(1001));
-        assert!(found, "Event record should be queued in ctx.proxy_event_queue");
-    }
+        .unwrap_err();
+    assert_eq!(pub_err.code, "UnimplementedRPC");
 }

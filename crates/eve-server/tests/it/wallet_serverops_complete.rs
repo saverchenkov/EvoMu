@@ -574,10 +574,8 @@ async fn test_client_telemetry_sinks_and_localization_server() {
         ("eventLog", "LogClientEvent", vec![s("autopilot"), PyRep::List(vec![s("jumps")]), s("start")]),
         ("eventLog", "LogClientStats", vec![PyRep::Dict(vec![(s("fps"), PyRep::Real(60.0))])]),
         ("eventLog", "LogPlayerRequestedDisconnect", vec![]),
-        ("clientStatLogger", "LogString", vec![s("jump monitor: session change complete")]),
         ("alert", "BeanDelivery", vec![PyRep::Dict(vec![])]),
         ("alert", "GroupBeanDelivery", vec![PyRep::Buffer(vec![0x78, 0x9c])]),
-        ("infoGatheringMgr", "LogInfoEventsFromClient", vec![PyRep::List(vec![])]),
         ("eveguard_report", "heartbeat_started", vec![]),
         ("eveguard_report", "heartbeat_stopped", vec![]),
     ];
@@ -597,9 +595,8 @@ async fn test_client_telemetry_sinks_and_localization_server() {
     assert!(matches!(trace_res, PyRep::Tuple(_)));
     let bean = rpc(&ctx, &mut s1, "alert", "BeanCount", &[PyRep::Integer(1)]).await.expect("BeanCount");
     assert!(matches!(bean, PyRep::Tuple(_)));
-    let cfg = rpc(&ctx, &mut s1, "infoGatheringMgr", "GetStateAndConfig", &[]).await.expect("GetStateAndConfig");
-    assert_eq!(kv_i64(&cfg, "isEnabled"), 0);
-    assert_eq!(kv_i64(&cfg, "clientWorkerInterval"), 600_000);
+    let cfg_err = rpc(&ctx, &mut s1, "infoGatheringMgr", "GetStateAndConfig", &[]).await.unwrap_err();
+    assert_eq!(cfg_err.code, "UnimplementedRPC");
 
     let text = rpc(&ctx, &mut s1, "localizationServer", "GetAllTextChanges", &[PyRep::Dict(vec![])])
         .await

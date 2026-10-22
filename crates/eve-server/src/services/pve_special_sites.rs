@@ -1299,16 +1299,15 @@ pub async fn handle_pve_special_sites(
 
         // parity: feat:pve.interference
         ("solarsystemInterferenceMgr", "GetLocalInterferenceState")
-        | ("solarsystemInterferenceMgr", "GetSolarSystemInterferenceBand")
-        | ("solarsystemInterferenceMgr", "GetAllInterferenceBands") => {
+        | ("solarsystemInterferenceMgr", "GetSolarSystemInterferenceBand") => {
             if let Err(e) = ServerContext::require_character(session) { return Some(Err(e)); }
             let sys_id = args.first().and_then(|a| a.as_i64()).map(|v| v as SolarSystemId).or(session.solar_system_id).unwrap_or(30_000_142);
 
             let (level, band) = with_pve_special_reg(ctx, |reg| {
-                let entry = reg.interference_by_system.entry(sys_id).or_insert(SystemInterferenceRecord {
-                    solar_system_id: sys_id, interference_level: 0.10, band: 1,
-                });
-                (entry.interference_level, entry.band)
+                reg.interference_by_system
+                    .get(&sys_id)
+                    .map(|entry| (entry.interference_level, entry.band))
+                    .unwrap_or((0.10, 1))
             });
 
             let band_label = match band { 1 => "Low", 2 => "Medium", _ => "High" };
@@ -1319,6 +1318,11 @@ pub async fn handle_pve_special_sites(
                 ("bandLabel", PyRep::String(band_label.into())),
             ])))
         }
+
+        ("solarsystemInterferenceMgr", "GetAllInterferenceBands") => Some(Err(BridgeRpcError {
+            code: "UnimplementedRPC".into(),
+            message: "solarsystemInterferenceMgr.GetAllInterferenceBands is not implemented".into(),
+        })),
 
         _ => None,
     }

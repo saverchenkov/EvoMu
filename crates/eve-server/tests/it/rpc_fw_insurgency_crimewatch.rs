@@ -154,7 +154,6 @@ async fn test_fw_insurgency_and_security_mgr() {
 // parity: rpc:killRightMgr.ActivateKillRight
 // parity: rpc:killRightMgr.BuyKillRight
 // parity: rpc:hackingMgr.QuitHackingAttempt
-// parity: rpc:solarsystemInterferenceMgr.GetAllInterferenceBands
 async fn test_killrights_hacking_and_interference() {
     let ctx = ServerContext::new();
     let kw = HashMap::new();
@@ -337,7 +336,13 @@ async fn test_killrights_hacking_and_interference() {
         .unwrap_err();
     assert_eq!(util_err.code, "UnimplementedRPC");
 
-    // 2b. hackingMgr.QuitHackingAttempt
+    // 2b. hackingMgr.QuitHackingAttempt requires explicit container_id argument
+    let missing_arg_err = ctx
+        .dispatch_rpc(&mut sess1, "hackingMgr", None, "QuitHackingAttempt", &[], &kw, None)
+        .await
+        .unwrap_err();
+    assert_eq!(missing_arg_err.code, "InvalidArguments");
+
     let quit_rep = ctx
         .dispatch_rpc(
             &mut sess1,
@@ -370,15 +375,12 @@ async fn test_killrights_hacking_and_interference() {
         .unwrap_err();
     assert_eq!(re_quit_err.code, "NoActiveHackingGame");
 
-    // 3. solarsystemInterferenceMgr.GetAllInterferenceBands
+    // 3. solarsystemInterferenceMgr.GetAllInterferenceBands returns UnimplementedRPC
     let sys_id = 30_000_142u32;
     sess1.solar_system_id = Some(sys_id);
-    let band_rep = ctx
+    let band_err = ctx
         .dispatch_rpc(&mut sess1, "solarsystemInterferenceMgr", None, "GetAllInterferenceBands", &[], &kw, None)
         .await
-        .expect("GetAllInterferenceBands");
-    assert!(is_keyval(&band_rep));
-    assert_eq!(band_rep.dict_get("solarSystemID"), Some(&PyRep::Integer(sys_id as i64)));
-    assert_eq!(band_rep.dict_get("interferenceBand"), Some(&PyRep::Integer(1)));
-    assert_eq!(band_rep.dict_get("bandLabel"), Some(&PyRep::String("Low".into())));
+        .unwrap_err();
+    assert_eq!(band_err.code, "UnimplementedRPC");
 }

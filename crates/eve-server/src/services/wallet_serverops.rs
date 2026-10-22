@@ -1035,9 +1035,7 @@ pub fn handle(
         ("account", "GetDefaultContactCost") => Some(get_default_contact_cost(ctx, session)),
         ("machoNet", "GetClusterGameStatisticsForClient") => Some(Ok(cluster_statistics(ctx))),
         ("pingService", "Ping") => Some(Ok(PyRep::Integer(ctx.now_blueos_filetime_ticks()))),
-        ("clientStatLogger", "LogString")
-        | ("infoGatheringMgr", "LogInfoEventsFromClient")
-        | ("eveguard_report", "heartbeat_started")
+        ("eveguard_report", "heartbeat_started")
         | ("eveguard_report", "heartbeat_stopped") => {
             // const-ok: fire-and-forget client telemetry sink returns None after logging
             debug!(
@@ -1050,37 +1048,19 @@ pub fn handle(
             );
             Some(Ok(PyRep::None))
         }
-        ("infoGatheringMgr", "GetStateAndConfig") => {
-            // const-ok: client telemetry batching is disabled via static config
-            Some(Ok(PyRep::keyval([
-                ("isEnabled", PyRep::Integer(0)),
-                ("clientWorkerInterval", PyRep::Integer(600_000)),
-                ("infoTypes", PyRep::List(Vec::new())),
-                ("infoTypeAggregates", PyRep::None),
-                ("infoTypesOncePerRun", PyRep::None),
-                ("infoTypeParameters", PyRep::None),
-            ])))
-        }
-        ("externalQueueMgr", "PublishProxyEvent") => {
-            if let Err(e) = ServerContext::require_auth(session) {
-                return Some(Err(e));
-            }
-            let event_name = args.first().and_then(|a| a.as_str()).unwrap_or("proxy_event").to_string();
-            let payload = args.get(1).cloned().unwrap_or_else(|| args.first().cloned().unwrap_or(PyRep::None));
-            let record = crate::router::ProxyEventRecord {
-                event_name,
-                payload,
-                timestamp_unix: ctx.now_unix(),
-            };
-            {
-                let mut q = ctx.proxy_event_queue.write().unwrap();
-                if q.len() >= 1000 {
-                    q.pop_front();
-                }
-                q.push_back(record);
-            }
-            Some(Ok(PyRep::Bool(true)))
-        }
+        ("clientStatLogger", "LogString")
+        | ("infoGatheringMgr", "LogInfoEventsFromClient") => Some(Err(BridgeRpcError {
+            code: "UnimplementedRPC".into(),
+            message: format!("{service}.{method} is not implemented"),
+        })),
+        ("infoGatheringMgr", "GetStateAndConfig") => Some(Err(BridgeRpcError {
+            code: "UnimplementedRPC".into(),
+            message: "infoGatheringMgr.GetStateAndConfig is not implemented".into(),
+        })),
+        ("externalQueueMgr", "PublishProxyEvent") => Some(Err(BridgeRpcError {
+            code: "UnimplementedRPC".into(),
+            message: "externalQueueMgr.PublishProxyEvent is not implemented".into(),
+        })),
         ("localizationServer", "GetAllTextChanges") => {
             // const-ok: client treats None as no server-side localization text overrides
             Some(Ok(PyRep::None))

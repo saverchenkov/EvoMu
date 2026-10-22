@@ -429,12 +429,17 @@ pub async fn handle_crimewatch(
                     });
                 }
                 let fee = kr.activation_fee;
-                if !snap.characters.contains_key(&kr.owner_id) {
+                let Some(owner) = snap.characters.get(&kr.owner_id) else {
                     return Err(BridgeRpcError {
                         code: "OwnerNotFound".into(),
                         message: format!("Kill right owner {} not found", kr.owner_id),
                     });
-                }
+                };
+                let new_owner_bal =
+                    owner.balance.checked_add(fee).ok_or_else(|| BridgeRpcError {
+                        code: "BalanceOverflow".into(),
+                        message: "Kill right owner ISK balance would overflow".into(),
+                    })?;
                 let Some(caller) = snap.characters.get_mut(&char_id) else {
                     return Err(BridgeRpcError {
                         code: "CharacterNotFound".into(),
@@ -447,8 +452,8 @@ pub async fn handle_crimewatch(
                         message: "Insufficient ISK to pay kill right activation fee".into(),
                     })?;
                 caller.balance = new_caller_bal;
-                if let Some(owner) = snap.characters.get_mut(&kr.owner_id) {
-                    owner.balance = owner.balance.checked_add(fee).unwrap_or(owner.balance);
+                if let Some(owner_mut) = snap.characters.get_mut(&kr.owner_id) {
+                    owner_mut.balance = new_owner_bal;
                 }
                 if let Some(kr_mut) = snap.kill_rights.get_mut(&kr_id) {
                     kr_mut.is_active_suspect = true;
@@ -994,15 +999,9 @@ pub async fn handle_crimewatch(
             });
             ctx.db.with_snapshot(|snap| {
                 for (&sid, st) in &snap.system_states {
-                    if st.insurgency_corruption_stage > 0 {
-                        if let Some(base_sec) = ctx.sde.solar_systems.get(&sid).map(|s| s.security_status) {
-                            let eff_sec = if st.insurgency_corruption_stage >= 5 {
-                                0.0
-                            } else {
-                                (base_sec - 0.1 * (st.insurgency_corruption_stage as f64)).max(0.0)
-                            };
-                            sec_map.insert(sid, eff_sec);
-                        }
+                    if st.insurgency_corruption_stage >= 5 {
+                        // Havoc Pirate Insurgency Stage 5 sets effective system security to lawless (0.0)
+                        sec_map.insert(sid, 0.0);
                     }
                 }
             });

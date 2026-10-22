@@ -75,15 +75,6 @@ pub struct ServerContext {
     pub(crate) fleet_extras: std::sync::Mutex<crate::services::fleet_social::fleet_social_fleets::FleetExtrasState>,
     /// Per-world social state not persisted in `WorldRepository` (mailing lists, calendar, chat moderation).
     pub(crate) social_extras: std::sync::Mutex<crate::services::fleet_social::fleet_social_chat::SocialExtrasState>,
-    pub proxy_event_queue: RwLock<std::collections::VecDeque<ProxyEventRecord>>,
-    pub load_sample_interval_ms: std::sync::atomic::AtomicU64,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct ProxyEventRecord {
-    pub event_name: String,
-    pub payload: eve_proto::PyRep,
-    pub timestamp_unix: u64,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -198,8 +189,6 @@ impl ServerContext {
             social_extras: std::sync::Mutex::new(
                 crate::services::fleet_social::fleet_social_chat::SocialExtrasState::new(),
             ),
-            proxy_event_queue: RwLock::new(std::collections::VecDeque::new()),
-            load_sample_interval_ms: std::sync::atomic::AtomicU64::new(1000),
         }
     }
 
