@@ -1093,16 +1093,23 @@ pub(super) fn handle_corp_gov_tail(
                         message: format!("Corporation {corp_id} has no office at station {station_id}"),
                     });
                 }
-                corp.hq_station_id = Some(station_id);
-                Ok(())
+                let old_hq = corp.hq_station_id.replace(station_id);
+                Ok(old_hq)
             });
             match res {
-                Ok(()) => {
+                Ok(old_hq) => {
+                    let change = PyRep::Dict(vec![(
+                        PyRep::String(("stationID").into()),
+                        PyRep::Tuple(vec![
+                            old_hq.map_or(PyRep::None, PyRep::Integer),
+                            PyRep::Integer(station_id),
+                        ]),
+                    )]);
                     ctx.notify(
                         NotificationTarget::Corporation(corp_id),
                         "OnCorporationChanged",
                         "corpid",
-                        vec![PyRep::Integer(corp_id), PyRep::Integer(station_id)],
+                        vec![PyRep::Integer(corp_id), change],
                     );
                     Some(Ok(PyRep::keyval([
                         ("corporationID", PyRep::Integer(corp_id)),
@@ -1236,21 +1243,18 @@ pub(super) fn handle_corp_gov_tail(
                 let state = g.entry(corp_id).or_default();
                 state.pending_friendly_fire = Some((ff, effective_at));
             }
+            let settings_kv = PyRep::keyval([
+                ("corporationID", PyRep::Integer(corp_id)),
+                ("isFriendlyFireLegal", PyRep::Bool(ff)),
+                ("changeAtTime", PyRep::Integer(effective_at as i64)),
+            ]);
             ctx.notify(
                 NotificationTarget::Corporation(corp_id),
                 "OnCorpAggressionSettingsChange",
                 "corpid",
-                vec![
-                    PyRep::Integer(corp_id),
-                    PyRep::Bool(ff),
-                    PyRep::Integer(effective_at as i64),
-                ],
+                vec![settings_kv.clone()],
             );
-            Some(Ok(PyRep::keyval([
-                ("corporationID", PyRep::Integer(corp_id)),
-                ("isFriendlyFireLegal", PyRep::Bool(ff)),
-                ("changeAtTime", PyRep::Integer(effective_at as i64)),
-            ])))
+            Some(Ok(settings_kv))
         }
         _ => None,
     }

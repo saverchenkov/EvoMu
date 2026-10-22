@@ -121,7 +121,45 @@ fn sync_wars(ctx: &ServerContext) {
     });
     drop(st);
     for wid in ended {
-        ctx.notify(NotificationTarget::All, "OnWarChanged", "warid", vec![PyRep::Integer(wid), PyRep::Bool(false)]);
+        emit_war_changed(
+            ctx,
+            wid,
+            vec![("active", PyRep::Bool(true), PyRep::Bool(false))],
+        );
+    }
+}
+
+fn emit_war_changed(ctx: &ServerContext, war_id: i64, change_entries: Vec<(&str, PyRep, PyRep)>) {
+    let now = ctx.now_unix();
+    let Some(w) = ctx.db.with_snapshot(|snap| snap.wars.get(&war_id).cloned()) else {
+        return;
+    };
+    let meta = WAR_STATE.lock().unwrap().wars.get(&war_id).cloned().unwrap_or_default();
+    let war_kv = PyRep::keyval(WAR_COLUMNS.iter().copied().zip(war_row(&w, &meta, now)));
+    let owner_ids = PyRep::List(vec![
+        PyRep::Integer(w.aggressor_corp_id),
+        PyRep::Integer(w.defender_corp_id),
+    ]);
+    let change = PyRep::Dict(
+        change_entries
+            .into_iter()
+            .map(|(k, old_v, new_v)| (PyRep::String((k).into()), PyRep::Tuple(vec![old_v, new_v])))
+            .collect(),
+    );
+    let args = vec![war_kv, owner_ids, change];
+    ctx.notify(
+        NotificationTarget::Corporation(w.aggressor_corp_id),
+        "OnWarChanged",
+        "corpid",
+        args.clone(),
+    );
+    if w.defender_corp_id != w.aggressor_corp_id {
+        ctx.notify(
+            NotificationTarget::Corporation(w.defender_corp_id),
+            "OnWarChanged",
+            "corpid",
+            args,
+        );
     }
 }
 
@@ -282,7 +320,15 @@ pub(super) fn handle_wars(
                 Err(e) => return Some(Err(e)),
             };
             WAR_STATE.lock().unwrap().wars.insert(war_id, WarMeta { war_hq_id: Some(hq), ..Default::default() });
-            ctx.notify(NotificationTarget::All, "OnWarChanged", "warid", vec![PyRep::Integer(war_id), PyRep::Integer(my_corp), PyRep::Integer(defender)]);
+            emit_war_changed(
+                ctx,
+                war_id,
+                vec![
+                    ("warID", PyRep::None, PyRep::Integer(war_id)),
+                    ("declaredByID", PyRep::None, PyRep::Integer(my_corp)),
+                    ("againstID", PyRep::None, PyRep::Integer(defender)),
+                ],
+            );
             Some(Ok(PyRep::keyval([
                 ("warID", PyRep::Integer(war_id)),
                 ("declaredByID", PyRep::Integer(my_corp)),
@@ -452,7 +498,11 @@ pub(super) fn handle_wars(
                 }
             }
             drop(st);
-            ctx.notify(NotificationTarget::All, "OnWarChanged", "warid", vec![PyRep::Integer(n.war_id)]);
+            emit_war_changed(
+                ctx,
+                n.war_id,
+                vec![("timeFinished", PyRep::None, PyRep::Integer(effective as i64))],
+            );
             Some(Ok(PyRep::keyval(out)))
         }
 
@@ -472,7 +522,11 @@ pub(super) fn handle_wars(
             }
             let finish = now + WAR_TIMER_SECS;
             WAR_STATE.lock().unwrap().wars.entry(war_id).or_default().finish_at_unix = Some(finish);
-            ctx.notify(NotificationTarget::All, "OnWarChanged", "warid", vec![PyRep::Integer(war_id)]);
+            emit_war_changed(
+                ctx,
+                war_id,
+                vec![("timeFinished", PyRep::None, PyRep::Integer(finish as i64))],
+            );
             Some(Ok(PyRep::keyval([("warID", PyRep::Integer(war_id)), ("timeFinished", PyRep::Integer(finish as i64))])))
         }
 
@@ -488,7 +542,16 @@ pub(super) fn handle_wars(
             if my_corp != w.defender_corp_id {
                 return err("NotWarDefender", "Only the defender can open a war for allies");
             }
-            WAR_STATE.lock().unwrap().wars.entry(war_id).or_default().open_for_allies = open;
+            let prev = {
+                let mut st = WAR_STATE.lock().unwrap();
+                let m = st.wars.entry(war_id).or_default();
+                std::mem::replace(&mut m.open_for_allies, open)
+            };
+            emit_war_changed(
+                ctx,
+                war_id,
+                vec![("openForAllies", PyRep::Bool(prev), PyRep::Bool(open))],
+            );
             Some(Ok(PyRep::keyval([("warID", PyRep::Integer(war_id)), ("openForAllies", PyRep::Bool(open))])))
         }
 
@@ -595,7 +658,16 @@ pub(super) fn handle_wars(
                 wid
             });
             WAR_STATE.lock().unwrap().wars.insert(war_id, WarMeta::default());
-            ctx.notify(NotificationTarget::All, "OnWarChanged", "warid", vec![PyRep::Integer(war_id), PyRep::Integer(from_corp), PyRep::Integer(my_corp)]);
+            emit_war_changed(
+                ctx,
+                war_id,
+                vec![
+                    ("warID", PyRep::None, PyRep::Integer(war_id)),
+                    ("declaredByID", PyRep::None, PyRep::Integer(from_corp)),
+                    ("againstID", PyRep::None, PyRep::Integer(my_corp)),
+                    ("mutual", PyRep::None, PyRep::Bool(true)),
+                ],
+            );
             Some(Ok(PyRep::keyval([("accepted", PyRep::Bool(true)), ("warID", PyRep::Integer(war_id)), ("mutual", PyRep::Bool(true))])))
         }
 

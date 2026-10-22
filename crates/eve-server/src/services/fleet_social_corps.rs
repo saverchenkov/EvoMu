@@ -292,22 +292,23 @@ pub(super) fn handle_corps(
                         message: "Only CEO or Director can update corporation details".into(),
                     });
                 }
+                let (old_desc, old_url, old_tax) = (corp.description.clone(), corp.url.clone(), corp.tax_rate);
                 corp.description = desc.to_string();
                 corp.url = url.to_string();
                 if let Some(t) = tax_rate_opt {
                     corp.tax_rate = t.clamp(0.0, 1.0);
                 }
-                Ok((corp.description.clone(), corp.url.clone(), corp.tax_rate))
+                Ok((old_desc, old_url, old_tax, corp.description.clone(), corp.url.clone(), corp.tax_rate))
             });
 
             match res {
-                Ok((desc, url, tax)) => {
-                    ctx.notify(
-                        NotificationTarget::All,
-                        "OnCorporationChanged",
-                        "corpid",
-                        vec![PyRep::Integer(corp_id)],
-                    );
+                Ok((old_desc, old_url, old_tax, desc, url, tax)) => {
+                    let change = PyRep::Dict(vec![
+                        (PyRep::String(("description").into()), PyRep::Tuple(vec![PyRep::String(old_desc), PyRep::String(desc.clone())])),
+                        (PyRep::String(("url").into()), PyRep::Tuple(vec![PyRep::String(old_url), PyRep::String(url.clone())])),
+                        (PyRep::String(("taxRate").into()), PyRep::Tuple(vec![PyRep::Real(old_tax), PyRep::Real(tax)])),
+                    ]);
+                    ctx.notify(NotificationTarget::Corporation(corp_id), "OnCorporationChanged", "corpid", vec![PyRep::Integer(corp_id), change]);
                     Some(Ok(PyRep::keyval([
                         ("corporationID", PyRep::Integer(corp_id)),
                         ("description", PyRep::String(desc)),
@@ -320,10 +321,7 @@ pub(super) fn handle_corps(
         }
 
         ("corpRegistry", "UpdateLogo") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let corp_id = session.corporation_id.unwrap_or(0);
             let s1 = args.first().and_then(|a| a.as_i64()).unwrap_or(10);
             let s2 = args.get(1).and_then(|a| a.as_i64()).unwrap_or(20);
@@ -331,37 +329,25 @@ pub(super) fn handle_corps(
             let c1 = args.get(3).and_then(|a| a.as_i64()).unwrap_or(5);
             let is_ceo_or_dir = ctx.db.with_snapshot(|snap| {
                 snap.corporations.get(&corp_id).is_some_and(|c| {
-                    char_id == c.ceo_id
-                        || corp_roles::has_role(
-                            c.member_roles.get(&char_id).copied().unwrap_or(0),
-                            corp_roles::ROLE_DIRECTOR,
-                        )
+                    char_id == c.ceo_id || corp_roles::has_role(c.member_roles.get(&char_id).copied().unwrap_or(0), corp_roles::ROLE_DIRECTOR)
                 })
             });
             if !is_ceo_or_dir {
-                return Some(Err(BridgeRpcError {
-                    code: "CorpRoleDenied".into(),
-                    message: "Only CEO or Director can update the corporation logo".into(),
-                }));
+                return Some(Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Only CEO or Director can update the corporation logo".into() }));
             }
-            CORP_GOV
-                .lock()
-                .unwrap()
-                .entry(corp_id)
-                .or_default()
-                .logo = (s1, s2, s3, c1);
-            ctx.notify(
-                NotificationTarget::Corporation(corp_id),
-                "OnCorpLogoReady",
-                "corpid",
-                vec![PyRep::Integer(corp_id)],
-            );
-            ctx.notify(
-                NotificationTarget::All,
-                "OnCorporationChanged",
-                "corpid",
-                vec![PyRep::Integer(corp_id)],
-            );
+            let old_logo = {
+                let mut g = CORP_GOV.lock().unwrap();
+                let state = g.entry(corp_id).or_default();
+                std::mem::replace(&mut state.logo, (s1, s2, s3, c1))
+            };
+            ctx.notify(NotificationTarget::Corporation(corp_id), "OnCorpLogoReady", "corpid", vec![PyRep::Integer(corp_id)]);
+            let change = PyRep::Dict(vec![
+                (PyRep::String(("shape1").into()), PyRep::Tuple(vec![PyRep::Integer(old_logo.0), PyRep::Integer(s1)])),
+                (PyRep::String(("shape2").into()), PyRep::Tuple(vec![PyRep::Integer(old_logo.1), PyRep::Integer(s2)])),
+                (PyRep::String(("shape3").into()), PyRep::Tuple(vec![PyRep::Integer(old_logo.2), PyRep::Integer(s3)])),
+                (PyRep::String(("color1").into()), PyRep::Tuple(vec![PyRep::Integer(old_logo.3), PyRep::Integer(c1)])),
+            ]);
+            ctx.notify(NotificationTarget::Corporation(corp_id), "OnCorporationChanged", "corpid", vec![PyRep::Integer(corp_id), change]);
             Some(Ok(PyRep::keyval([
                 ("corporationID", PyRep::Integer(corp_id)),
                 ("shape1", PyRep::Integer(s1)),
@@ -374,55 +360,35 @@ pub(super) fn handle_corps(
         ("corpRegistry", "UpdateDivisionNames")
         | ("corpmgr", "UpdateDivisionNames")
         | ("corporationSvc", "UpdateDivisionNames") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let corp_id = match session.corporation_id {
-                Some(c) => c,
-                None => {
-                    return Some(Err(BridgeRpcError {
-                        code: "NoCorporation".into(),
-                        message: "Character has no active corporation".into(),
-                    }))
-                }
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let Some(corp_id) = session.corporation_id else {
+                return Some(Err(BridgeRpcError { code: "NoCorporation".into(), message: "Character has no active corporation".into() }));
             };
             let div_id = args.first().and_then(|a| a.as_i64()).unwrap_or(1) as u8;
             let new_name = args.get(1).and_then(|a| a.as_str()).unwrap_or("Division");
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(corp) = snap.corporations.get_mut(&corp_id) else {
-                    return Err(BridgeRpcError {
-                        code: "CorporationNotFound".into(),
-                        message: format!("Corporation {corp_id} not found"),
-                    });
+                    return Err(BridgeRpcError { code: "CorporationNotFound".into(), message: format!("Corporation {corp_id} not found") });
                 };
                 let caller_role = corp.member_roles.get(&char_id).copied().unwrap_or(0);
                 if char_id != corp.ceo_id && !corp_roles::has_role(caller_role, corp_roles::ROLE_DIRECTOR) {
-                    return Err(BridgeRpcError {
-                        code: "CorpRoleDenied".into(),
-                        message: "Only CEO or Director can update division names".into(),
-                    });
+                    return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Only CEO or Director can update division names".into() });
                 }
                 if let Some(div) = corp.wallet_divisions.iter_mut().find(|d| d.division_id == div_id) {
-                    div.name = new_name.to_string();
+                    Ok(std::mem::replace(&mut div.name, new_name.to_string()))
                 } else {
-                    return Err(BridgeRpcError {
-                        code: "DivisionNotFound".into(),
-                        message: format!("Division {div_id} not found"),
-                    });
+                    Err(BridgeRpcError { code: "DivisionNotFound".into(), message: format!("Division {div_id} not found") })
                 }
-                Ok(())
             });
 
             match res {
-                Ok(()) => {
-                    ctx.notify(
-                        NotificationTarget::Corporation(corp_id),
-                        "OnCorporationChanged",
-                        "corpid",
-                        vec![PyRep::Integer(corp_id)],
-                    );
+                Ok(old_name) => {
+                    let change = PyRep::Dict(vec![(
+                        PyRep::String(format!("division{div_id}")),
+                        PyRep::Tuple(vec![PyRep::String(old_name), PyRep::String(new_name.to_string())]),
+                    )]);
+                    ctx.notify(NotificationTarget::Corporation(corp_id), "OnCorporationChanged", "corpid", vec![PyRep::Integer(corp_id), change]);
                     Some(Ok(PyRep::keyval([
                         ("divisionID", PyRep::Integer(div_id as i64)),
                         ("name", PyRep::String(new_name.to_string())),
@@ -595,16 +561,15 @@ pub(super) fn handle_corps(
 
             match res {
                 Ok(old_roles) => {
+                    let change = PyRep::Dict(vec![(
+                        PyRep::String(("roles").into()),
+                        PyRep::Tuple(vec![PyRep::Integer(old_roles as i64), PyRep::Integer(new_roles as i64)]),
+                    )]);
                     ctx.notify(
                         NotificationTarget::Corporation(corp_id),
                         "OnCorporationMemberChanged",
                         "corpid",
-                        vec![
-                            PyRep::Integer(corp_id),
-                            PyRep::Integer(target_char_id),
-                            PyRep::Integer(old_roles as i64),
-                            PyRep::Integer(new_roles as i64),
-                        ],
+                        vec![PyRep::Integer(corp_id), PyRep::Integer(target_char_id), change],
                     );
                     Some(Ok(PyRep::keyval([
                         ("characterID", PyRep::Integer(target_char_id)),
@@ -695,15 +660,31 @@ pub(super) fn handle_corps(
             });
             match res {
                 Ok(app_id) => {
+                    let app_kv = PyRep::keyval([
+                        ("applicationID", PyRep::Integer(app_id)),
+                        ("corporationID", PyRep::Integer(corp_id)),
+                        ("characterID", PyRep::Integer(char_id)),
+                        ("applicationText", PyRep::String(message.to_string())),
+                        ("status", PyRep::String("Applied".into())),
+                        ("applicationDateTime", PyRep::Integer(now_unix as i64)),
+                    ]);
+                    let app_args = vec![
+                        PyRep::Integer(corp_id),
+                        PyRep::Integer(char_id),
+                        PyRep::Integer(app_id),
+                        app_kv,
+                    ];
                     ctx.notify(
                         NotificationTarget::Corporation(corp_id),
                         "OnCorporationApplicationChanged",
                         "corpid",
-                        vec![
-                            PyRep::Integer(corp_id),
-                            PyRep::Integer(char_id),
-                            PyRep::Integer(app_id),
-                        ],
+                        app_args.clone(),
+                    );
+                    ctx.notify(
+                        NotificationTarget::Character(char_id),
+                        "OnCorporationApplicationChanged",
+                        "charid",
+                        app_args,
                     );
                     Some(Ok(PyRep::keyval([
                         ("applicationID", PyRep::Integer(app_id)),
@@ -838,14 +819,19 @@ pub(super) fn handle_corps(
                 };
                 let ceo_id = corp.ceo_id;
                 let caller_role = corp.member_roles.get(&char_id).copied().unwrap_or(0);
-                let applicant_id = corp
+                let (applicant_id, app_msg, app_ts) = corp
                     .applications
                     .get(&app_id)
-                    .map(|a| a.character_id)
+                    .map(|a| (a.character_id, a.message.clone(), a.created_unix))
                     .ok_or_else(|| BridgeRpcError {
                         code: "ApplicationNotFound".into(),
                         message: format!("Application {app_id} not found"),
                     })?;
+                let old_corp_id = snap
+                    .characters
+                    .get(&applicant_id)
+                    .map(|c| c.corporation_id)
+                    .unwrap_or(1_000_009);
 
                 if action.eq_ignore_ascii_case("withdrawn") {
                     if char_id != applicant_id {
@@ -858,7 +844,7 @@ pub(super) fn handle_corps(
                     if let Some(app) = corp_mut.applications.get_mut(&app_id) {
                         app.status = "Withdrawn".into();
                     }
-                    return Ok((corp_id, applicant_id, "Withdrawn".to_string(), ceo_id));
+                    return Ok((corp_id, applicant_id, old_corp_id, "Withdrawn".to_string(), app_msg, app_ts));
                 }
 
                 if char_id != ceo_id
@@ -877,7 +863,7 @@ pub(super) fn handle_corps(
                     if let Some(app) = corp_mut.applications.get_mut(&app_id) {
                         app.status = "Rejected".into();
                     }
-                    return Ok((corp_id, applicant_id, "Rejected".to_string(), ceo_id));
+                    return Ok((corp_id, applicant_id, old_corp_id, "Rejected".to_string(), app_msg, app_ts));
                 }
 
                 let max_members = compute_corp_member_limit(ctx, snap, corp_id, ceo_id);
@@ -926,25 +912,51 @@ pub(super) fn handle_corps(
                     snap.mail_assigned_labels.insert((applicant_id, mid), vec![1]);
                 }
 
-                Ok((corp_id, applicant_id, "Accepted".to_string(), ceo_id))
+                Ok((corp_id, applicant_id, old_corp_id, "Accepted".to_string(), app_msg, app_ts))
             });
 
             match res {
-                Ok((corp_id, applicant_id, status_str, _ceo_id)) => {
+                Ok((corp_id, applicant_id, old_corp_id, status_str, app_msg, app_ts)) => {
                     if status_str == "Accepted" {
                         record_corp_join(applicant_id, corp_id, now_unix);
+                        let m_change = PyRep::Dict(vec![(
+                            PyRep::String(("corporationID").into()),
+                            PyRep::Tuple(vec![PyRep::Integer(old_corp_id), PyRep::Integer(corp_id)]),
+                        )]);
                         ctx.notify(
                             NotificationTarget::Corporation(corp_id),
                             "OnCorporationMemberChanged",
                             "corpid",
-                            vec![PyRep::Integer(corp_id), PyRep::Integer(applicant_id)],
+                            vec![PyRep::Integer(corp_id), PyRep::Integer(applicant_id), m_change],
+                        );
+                    }
+                    let app_kv = PyRep::keyval([
+                        ("applicationID", PyRep::Integer(app_id)),
+                        ("corporationID", PyRep::Integer(corp_id)),
+                        ("characterID", PyRep::Integer(applicant_id)),
+                        ("applicationText", PyRep::String(app_msg)),
+                        ("status", PyRep::String(status_str.clone())),
+                        ("applicationDateTime", PyRep::Integer(app_ts as i64)),
+                    ]);
+                    let app_args = vec![
+                        PyRep::Integer(corp_id),
+                        PyRep::Integer(applicant_id),
+                        PyRep::Integer(app_id),
+                        app_kv,
+                    ];
+                    if status_str != "Accepted" {
+                        ctx.notify(
+                            NotificationTarget::Character(applicant_id),
+                            "OnCorporationApplicationChanged",
+                            "charid",
+                            app_args.clone(),
                         );
                     }
                     ctx.notify(
-                        NotificationTarget::Character(applicant_id),
+                        NotificationTarget::Corporation(corp_id),
                         "OnCorporationApplicationChanged",
-                        "charid",
-                        vec![PyRep::Integer(corp_id), PyRep::Integer(app_id)],
+                        "corpid",
+                        app_args,
                     );
                     Some(Ok(PyRep::keyval([
                         ("applicationID", PyRep::Integer(app_id)),
@@ -1021,11 +1033,25 @@ pub(super) fn handle_corps(
                     if accept_now {
                         record_corp_join(target_id, corp_id, now_unix);
                     }
+                    let inv_status = if accept_now { "Accepted" } else { "Invited" };
+                    let app_kv = PyRep::keyval([
+                        ("applicationID", PyRep::Integer(app_id)),
+                        ("corporationID", PyRep::Integer(corp_id)),
+                        ("characterID", PyRep::Integer(target_id)),
+                        ("applicationText", PyRep::String(("Corporation Invitation").into())),
+                        ("status", PyRep::String((inv_status).into())),
+                        ("applicationDateTime", PyRep::Integer(now_unix as i64)),
+                    ]);
                     ctx.notify(
                         NotificationTarget::Character(target_id),
                         "OnCorporationApplicationChanged",
                         "charid",
-                        vec![PyRep::Integer(corp_id), PyRep::Integer(app_id)],
+                        vec![
+                            PyRep::Integer(corp_id),
+                            PyRep::Integer(target_id),
+                            PyRep::Integer(app_id),
+                            app_kv,
+                        ],
                     );
                     Some(Ok(PyRep::keyval([
                         ("applicationID", PyRep::Integer(app_id)),
@@ -1178,15 +1204,26 @@ pub(super) fn handle_corps(
                     }
                     if removed {
                         record_corp_join(target_id, 1_000_009, now_unix);
+                        let m_change = PyRep::Dict(vec![(
+                            PyRep::String(("corporationID").into()),
+                            PyRep::Tuple(vec![PyRep::Integer(corp_id), PyRep::Integer(1_000_009)]),
+                        )]);
+                        let m_args = vec![
+                            PyRep::Integer(corp_id),
+                            PyRep::Integer(target_id),
+                            m_change,
+                        ];
+                        ctx.notify(
+                            NotificationTarget::Corporation(corp_id),
+                            "OnCorporationMemberChanged",
+                            "corpid",
+                            m_args.clone(),
+                        );
                         ctx.notify(
                             NotificationTarget::Character(target_id),
                             "OnCorporationMemberChanged",
                             "charid",
-                            vec![
-                                PyRep::Integer(corp_id),
-                                PyRep::Integer(target_id),
-                                PyRep::Integer(1_000_009),
-                            ],
+                            m_args,
                         );
                     }
                     Some(Ok(PyRep::keyval([
