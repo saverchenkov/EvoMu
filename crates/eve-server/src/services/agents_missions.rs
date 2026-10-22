@@ -816,18 +816,27 @@ pub async fn handle(
                             let title = ctx.sde.missions.get(&mid).map(|t| t.title.clone()).unwrap_or_default();
                             return Ok((mid, title));
                         }
-                        let next_tmpl = ctx.sde.missions
-                            .values().filter(|m| {
-                                mission_matches_agent_pool(m, agent_info)
-                                    && m.has_standing_rewards
-                                    && !snap.active_missions.contains_key(&(char_id, m.mission_id))
-                            }).min_by_key(|m| m.mission_id).or_else(|| {
-                                ctx.sde.missions
-                                    .values().filter(|m| {
-                                        mission_matches_agent_pool(m, agent_info)
-                                            && !snap.active_missions.contains_key(&(char_id, m.mission_id))
-                                    }).min_by_key(|m| m.mission_id)
-                            });
+                        let is_heraldry_agent = agent_info.agent_type_id == 13 || agent_info.division_id == 37;
+                        let next_tmpl = if is_heraldry_agent && explicit_agent {
+                            ctx.sde.missions
+                                .values().filter(|m| {
+                                    m.content_template.as_deref().unwrap_or_default().contains("Heraldry")
+                                        && !snap.active_missions.contains_key(&(char_id, m.mission_id))
+                                }).min_by_key(|m| m.mission_id)
+                        } else {
+                            ctx.sde.missions
+                                .values().filter(|m| {
+                                    mission_matches_agent_pool(m, agent_info)
+                                        && m.has_standing_rewards
+                                        && !snap.active_missions.contains_key(&(char_id, m.mission_id))
+                                }).min_by_key(|m| m.mission_id).or_else(|| {
+                                    ctx.sde.missions
+                                        .values().filter(|m| {
+                                            mission_matches_agent_pool(m, agent_info)
+                                                && !snap.active_missions.contains_key(&(char_id, m.mission_id))
+                                        }).min_by_key(|m| m.mission_id)
+                                })
+                        };
                         let Some(tmpl) = next_tmpl else {
                             return Err(BridgeRpcError { code: "NoMissionsAvailable".into(), message: format!("No unoffered missions remaining in SDE pool for agent {agent_id} and character {char_id}") });
                         };
@@ -840,9 +849,7 @@ pub async fn handle(
                         let is_courier = ct.contains("BasicCourier");
                         let is_trade = ct.contains("BasicTrade");
                         let is_data_center = agent_info.agent_type_id == 5;
-                        let is_heraldry = agent_info.agent_type_id == 13
-                            || agent_info.division_id == 37
-                            || ct.contains("Heraldry");
+                        let is_heraldry = ct.contains("Heraldry");
                         let npcs_remaining =
                             if is_mining || is_courier || is_trade || is_data_center || is_heraldry { 0 } else { 1 };
                         let (req_tid, req_qty) = if is_data_center {

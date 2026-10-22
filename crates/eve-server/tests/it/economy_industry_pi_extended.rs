@@ -1101,9 +1101,8 @@ async fn test_industry_invention_decryptors_rng_roll_pause_and_mutaplasmids() {
             None,
         )
         .await
-        .expect("Complete failed invention roll");
-    assert_eq!(done_fail.dict_get("inventionSucceeded"), Some(&PyRep::Bool(false)));
-    assert_eq!(done_fail.dict_get("createdBpcItemID"), Some(&PyRep::None));
+        .expect_err("Failed invention roll returns InventionAttemptFailed");
+    assert_eq!(done_fail.code, "InventionAttemptFailed");
 
     // 3. Job pause on structure service offline
     let pause_job = ctx
