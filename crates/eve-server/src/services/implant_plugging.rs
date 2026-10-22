@@ -30,6 +30,39 @@ pub const SKILL_NEUROTOXIN_RECOVERY: TypeId = 25530;
 /// SDE skill type ID for `Neurotoxin Control` (`-5%` booster side-effect penalty severity per level via attribute `1126`).
 pub const SKILL_NEUROTOXIN_CONTROL: TypeId = 25538;
 
+/// Side-store key in `item_custom_names` for Alpha Injector cooldowns (`char_id -> last_injection_filetime_ticks`).
+pub const ALPHA_INJECTOR_COOLDOWNS_KEY: i64 = -10_000_008;
+
+/// Daily Alpha Injector 24h cooldown duration in 100ns BlueOS ticks (`24 * 3600 * 10_000_000`).
+pub const ALPHA_INJECTOR_COOLDOWN_TICKS: i64 = 864_000_000_000;
+
+/// Daily Alpha Injector type ID.
+pub const TYPE_DAILY_ALPHA_INJECTOR: TypeId = 47414;
+/// Large Skill Injector type ID.
+pub const TYPE_LARGE_SKILL_INJECTOR: TypeId = 40520;
+/// Small Skill Injector type ID.
+pub const TYPE_SMALL_SKILL_INJECTOR: TypeId = 45635;
+
+pub fn load_alpha_injector_cooldowns(snap: &WorldStateSnapshot) -> HashMap<i64, i64> {
+    snap.item_custom_names
+        .get(&ALPHA_INJECTOR_COOLDOWNS_KEY)
+        .and_then(|s| serde_json::from_str::<HashMap<i64, i64>>(s).ok())
+        .unwrap_or_default()
+}
+
+pub fn save_alpha_injector_cooldown(
+    snap: &mut WorldStateSnapshot,
+    char_id: i64,
+    timestamp_ft: i64,
+) {
+    let mut map = load_alpha_injector_cooldowns(snap);
+    map.insert(char_id, timestamp_ft);
+    if let Ok(serialized) = serde_json::to_string(&map) {
+        snap.item_custom_names
+            .insert(ALPHA_INJECTOR_COOLDOWNS_KEY, serialized);
+    }
+}
+
 /// Dynamic attribute key storing the Unix timestamp (seconds) when an active `InventoryFlag::Booster` item expires.
 pub const DYN_ATTR_BOOSTER_EXPIRY_UNIX: u16 = 9901;
 /// Dynamic attribute key storing the duration in seconds computed when a booster was consumed.
@@ -828,10 +861,109 @@ pub fn apply_active_booster_side_effect_adjustments(
     }
 }
 
+/// Consumes a Skill Injector (Large, Small, or Daily Alpha) and applies free SP (`feat:skills.alpha-injector`).
+pub fn inject_skillpoints(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let current_dock = session.station_id.or(session.structure_id);
+    let current_ship = session.ship_id;
+    let now_ft = ctx.now_blueos_filetime_ticks();
+
+    let (yielded, new_free_sp) = ctx.db.try_with_mut_snapshot(|snap| {
+        let ch = snap.characters.get(&char_id).cloned().ok_or_else(|| BridgeRpcError {
+            code: "CharacterNotFound".into(),
+            message: format!("Character {char_id} not found"),
+        })?;
+
+        // Locate an owned, unlocked, reachable Skill Injector (Large: 40520, Small: 45635, Daily Alpha: 47414)
+        let requested_item_id = args.first().and_then(|a| a.as_i64());
+        let injector_info = snap
+            .items
+            .values()
+            .find(|i| {
+                let matches_req = requested_item_id.map(|req| req == i.item_id).unwrap_or(true);
+                matches_req
+                    && (i.type_id == TYPE_LARGE_SKILL_INJECTOR
+                        || i.type_id == TYPE_SMALL_SKILL_INJECTOR
+                        || i.type_id == TYPE_DAILY_ALPHA_INJECTOR)
+                    && i.quantity >= 1
+                    && snap.is_item_consumable_by(i, char_id, current_dock, current_ship)
+            })
+            .map(|i| (i.item_id, i.type_id));
+
+        let Some((item_id, type_id)) = injector_info else {
+            return Err(BridgeRpcError {
+                code: "InjectorNotFound".into(),
+                message: "Character does not own an accessible Skill Injector (typeID 40520, 45635, or 47414)".into(),
+            });
+        };
+
+        let y = if type_id == TYPE_DAILY_ALPHA_INJECTOR {
+            // parity: feat:skills.alpha-injector (enforces one per 24h for Alphas)
+            if ch.clone_grade > 1 {
+                return Err(BridgeRpcError {
+                    code: "AlphaCloneRequired".into(),
+                    message: "Daily Alpha Injectors can only be used by Alpha clone characters".into(),
+                });
+            }
+            let cooldowns = load_alpha_injector_cooldowns(snap);
+            if let Some(&last_ft) = cooldowns.get(&char_id) {
+                if now_ft < last_ft + ALPHA_INJECTOR_COOLDOWN_TICKS {
+                    return Err(BridgeRpcError {
+                        code: "DailyAlphaInjectorCooldownActive".into(),
+                        message: "Only one Daily Alpha Injector may be used per 24 hours".into(),
+                    });
+                }
+            }
+            save_alpha_injector_cooldown(snap, char_id, now_ft);
+            50_000.0
+        } else {
+            let total_sp = ch.skill_points + ch.free_skill_points;
+            let base_yield = crate::formulas::skill_injector_sp_yield(total_sp);
+            if type_id == TYPE_SMALL_SKILL_INJECTOR {
+                base_yield / 5.0
+            } else {
+                base_yield
+            }
+        };
+
+        if let Some(item) = snap.items.get_mut(&item_id) {
+            if item.quantity > 1 {
+                item.quantity -= 1;
+                item.version += 1;
+            } else {
+                snap.items.remove(&item_id);
+            }
+        }
+
+        if let Some(ch_mut) = snap.characters.get_mut(&char_id) {
+            ch_mut.free_skill_points += y;
+            Ok((y, ch_mut.free_skill_points))
+        } else {
+            Err(BridgeRpcError {
+                code: "CharacterNotFound".into(),
+                message: format!("Character {char_id} not found"),
+            })
+        }
+    })?;
+
+    ctx.notify(
+        NotificationTarget::Character(char_id),
+        "OnFreeSkillPointsChanged",
+        "charid",
+        vec![PyRep::Real(new_free_sp)],
+    );
+    Ok(PyRep::Real(yielded))
+}
+
 /// Station-entry skill notification check (`skillMgr2.CheckAndSendNotifications`,
 /// `notifications/client/development/skillHistoryProvider.pyj:22`) and non-diminishing
 /// skill injection lookup (`nonDiminishingInjectionMgr.GetAvailableNonDiminishingInjections`,
-/// `eve/client/script/ui/services/nonDiminishingInjectionService.pyj:24-31`).
+/// `eve/client/script/ui/services/nonDiminishingInjectionService.pyj:24-31`), plus
+/// Daily Alpha Injector availability (`alphaInjectorMgr.GetNextAvailableInjection`, `feat:skills.alpha-injector`).
 pub fn handle_skill_notifications_and_injections(
     ctx: &ServerContext,
     session: &SessionState,
@@ -854,6 +986,24 @@ pub fn handle_skill_notifications_and_injections(
                 Err(e) => return Some(Err(e)),
             };
             Some(Ok(PyRep::Dict(Vec::new())))
+        }
+        ("alphaInjectorMgr", "GetNextAvailableInjection") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let now_ft = ctx.now_blueos_filetime_ticks();
+            let next_available = ctx.db.with_snapshot(|snap| {
+                let cooldowns = load_alpha_injector_cooldowns(snap);
+                if let Some(&last_ft) = cooldowns.get(&char_id) {
+                    let cd_end = last_ft + ALPHA_INJECTOR_COOLDOWN_TICKS;
+                    if now_ft < cd_end {
+                        return cd_end;
+                    }
+                }
+                0
+            });
+            Some(Ok(PyRep::Integer(next_available)))
         }
         _ => None,
     }

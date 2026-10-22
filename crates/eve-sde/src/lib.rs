@@ -951,7 +951,10 @@ impl SdeRegistry {
         }
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         if let Some(repo_root) = manifest_dir.parent().and_then(Path::parent) {
-            return repo_root.join("data").join("evomu_sde.sqlite");
+            let candidate = repo_root.join("data").join("evomu_sde.sqlite");
+            if candidate.exists() {
+                return candidate;
+            }
         }
         PathBuf::from("data/evomu_sde.sqlite")
     }

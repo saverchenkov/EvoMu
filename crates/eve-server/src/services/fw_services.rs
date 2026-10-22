@@ -235,6 +235,55 @@ pub fn spawn_battlefield_site(ctx: &ServerContext, sys_id: u32, faction_id: i64,
     })
 }
 
+/// Scales FW LP reward based on solar system frontline status (`feat:fw.fw-lp`).
+pub fn calculate_fw_lp_reward(base_lp: i64, status: i64) -> i64 {
+    let mult = match status {
+        STATUS_FRONTLINE => 1.5,
+        STATUS_COMMAND => 1.0,
+        STATUS_REARGUARD => 0.75,
+        _ => 1.0,
+    };
+    ((base_lp as f64) * mult).round() as i64
+}
+
+/// Awards FW LP for an enemy kill in a warzone solar system, scaled by system status (`feat:fw.fw-lp`).
+pub fn award_fw_kill_lp(
+    ctx: &ServerContext,
+    killer_char_id: i64,
+    sys_id: u32,
+    victim_ship_value_isk: f64,
+) -> i64 {
+    let contested_pct = ctx.db.with_snapshot(|snap| {
+        snap.system_states.get(&sys_id).map(|s| s.fw_contested_pct).unwrap_or(0.0)
+    });
+    let status = if contested_pct > 75.0 {
+        STATUS_FRONTLINE
+    } else if contested_pct > 25.0 {
+        STATUS_COMMAND
+    } else {
+        STATUS_REARGUARD
+    };
+    let base_lp = (victim_ship_value_isk * 0.0001).clamp(100.0, 50_000.0) as i64;
+    let final_lp = calculate_fw_lp_reward(base_lp, status);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&killer_char_id) {
+            let fid = ch.war_faction_id.unwrap_or(FACTION_CALDARI);
+            let militia_corp = ctx
+                .sde
+                .factions
+                .get(&(fid as u32))
+                .and_then(|f| f.militia_corporation_id)
+                .map(|c| c as i64)
+                .unwrap_or(fid);
+            *ch.loyalty_points.entry(militia_corp).or_insert(0) += final_lp;
+            *ch.loyalty_points.entry(fid).or_insert(0) += final_lp;
+        }
+    });
+
+    final_lp
+}
+
 pub async fn handle(
     ctx: &ServerContext,
     session: &mut SessionState,

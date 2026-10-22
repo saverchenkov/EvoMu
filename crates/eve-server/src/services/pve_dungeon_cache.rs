@@ -240,9 +240,292 @@ pub async fn handle(
     session: &mut SessionState,
     service: &str,
     method: &str,
-    _args: &[PyRep],
-    _kwargs: &HashMap<String, PyRep>,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
+    match (service, method) {
+        ("dungeon", "DEGetArchetypes") => {
+            let _ = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            if !session.has_gm_role() {
+                return Some(Err(BridgeRpcError {
+                    code: "InsufficientRole".into(),
+                    message: "dungeon.DEGetArchetypes requires GM/Content role".into(),
+                }));
+            }
+            // Canonical archetype IDs & names from SDE / Crucible
+            let archetypes = vec![
+                (1, "Generic Dungeon"),
+                (2, "Mission Dungeon"),
+                (3, "Deadspace Complex"),
+                (4, "Escalation Dungeon"),
+                (5, "Exploration Site"),
+                (6, "Scout Outpost"),
+                (24, "Military Depot"),
+                (28, "Ice Belt"),
+                (29, "Ore Anomaly"),
+                (30, "Combat Anomaly"),
+                (31, "Incursion Site"),
+                (33, "Abyssal Deadspace"),
+                (34, "Faction Warfare Complex"),
+                (35, "Homefront Operation"),
+                (36, "Pirate Insurgency Site"),
+                (43, "Pith Merchant Depot"),
+            ];
+            let rows: Vec<Vec<PyRep>> = archetypes
+                .into_iter()
+                .map(|(aid, aname)| vec![PyRep::Integer(aid), PyRep::String(aname.to_string())])
+                .collect();
+            return Some(Ok(PyRep::rowset(vec!["archetypeID", "archetypeName"], rows)));
+        }
+
+        ("dungeon", "DEGetDungeons") => {
+            let _ = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            if !session.has_gm_role() {
+                return Some(Err(BridgeRpcError {
+                    code: "InsufficientRole".into(),
+                    message: "dungeon.DEGetDungeons requires GM/Content role".into(),
+                }));
+            }
+            let req_dungeon_id = kwargs
+                .get("dungeonID")
+                .or_else(|| kwargs.get("dungeonVID"))
+                .and_then(|v| v.as_i64())
+                .or_else(|| args.first().and_then(|a| a.as_i64()));
+            let req_archetype_id = kwargs
+                .get("archetypeID")
+                .and_then(|v| v.as_i64())
+                .map(|v| v as u32);
+            let req_faction_id = kwargs
+                .get("factionID")
+                .and_then(|v| v.as_i64())
+                .map(|v| v as u32);
+
+            let mut dungeons: Vec<_> = ctx
+                .sde
+                .dungeons
+                .values()
+                .filter(|d| {
+                    if let Some(did) = req_dungeon_id {
+                        if d.dungeon_id as i64 != did {
+                            return false;
+                        }
+                    }
+                    if let Some(aid) = req_archetype_id {
+                        if d.archetype_id != Some(aid) {
+                            return false;
+                        }
+                    }
+                    if let Some(fid) = req_faction_id {
+                        if d.faction_id != Some(fid) {
+                            return false;
+                        }
+                    }
+                    true
+                })
+                .take(128)
+                .collect();
+            dungeons.sort_by_key(|d| d.dungeon_id);
+
+            let rows: Vec<Vec<PyRep>> = dungeons
+                .into_iter()
+                .map(|d| {
+                    vec![
+                        PyRep::Integer(d.dungeon_id as i64),
+                        PyRep::String(d.name.clone()),
+                        PyRep::Integer(1), // dungeonStatus: 1 = RELEASE
+                        PyRep::None,      // dungeonNameID
+                        PyRep::Integer(d.faction_id.unwrap_or(0) as i64),
+                        PyRep::Integer(d.archetype_id.unwrap_or(0) as i64),
+                    ]
+                })
+                .collect();
+            return Some(Ok(PyRep::rowset(
+                vec![
+                    "dungeonID",
+                    "dungeonName",
+                    "dungeonStatus",
+                    "dungeonNameID",
+                    "factionID",
+                    "archetypeID",
+                ],
+                rows,
+            )));
+        }
+
+        ("dungeon", "DEGetFactions") => {
+            let _ = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            if !session.has_gm_role() {
+                return Some(Err(BridgeRpcError {
+                    code: "InsufficientRole".into(),
+                    message: "dungeon.DEGetFactions requires GM/Content role".into(),
+                }));
+            }
+            let mut factions: Vec<_> = ctx.sde.factions.values().collect();
+            factions.sort_by_key(|f| f.faction_id);
+            let rows: Vec<Vec<PyRep>> = factions
+                .into_iter()
+                .map(|f| {
+                    vec![
+                        PyRep::Integer(f.faction_id as i64),
+                        PyRep::String(f.name.clone()),
+                    ]
+                })
+                .collect();
+            return Some(Ok(PyRep::rowset(vec!["factionID", "factionName"], rows)));
+        }
+
+        ("dungeon", "DEGetRoomObjectPaletteData") => {
+            let _ = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            if !session.has_gm_role() {
+                return Some(Err(BridgeRpcError {
+                    code: "InsufficientRole".into(),
+                    message: "dungeon.DEGetRoomObjectPaletteData requires GM/Content role".into(),
+                }));
+            }
+            // Canonical dungeon editor object palette (celestials, structures, gates, beacons, asteroids)
+            let palette: Vec<(i64, &'static str)> = vec![
+                (16, "Stargate (Caldari)"),
+                (17, "Stargate (Minmatar)"),
+                (18, "Stargate (Amarr)"),
+                (19, "Stargate (Gallente)"),
+                (1972, "Acceleration Gate"),
+                (29624, "Acceleration Gate (Inactive)"),
+                (24659, "Dungeon Beacon"),
+                (17954, "Large Collapsible Asteroid"),
+                (17955, "Medium Collapsible Asteroid"),
+                (17956, "Small Collapsible Asteroid"),
+                (3812, "Habitation Module"),
+                (3813, "Solar Harvester"),
+                (3814, "Bioreaction Silo"),
+                (12245, "Sansha Command Relay"),
+                (12246, "Guristas Scout Post"),
+            ];
+            let list: Vec<PyRep> = palette
+                .into_iter()
+                .map(|(tid, name)| {
+                    PyRep::Tuple(vec![PyRep::Integer(tid), PyRep::String(name.to_string())])
+                })
+                .collect();
+            return Some(Ok(PyRep::List(list)));
+        }
+
+        ("dungeon", "DEGetRooms") => {
+            let _ = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            if !session.has_gm_role() {
+                return Some(Err(BridgeRpcError {
+                    code: "InsufficientRole".into(),
+                    message: "dungeon.DEGetRooms requires GM/Content role".into(),
+                }));
+            }
+            let dungeon_id = kwargs
+                .get("dungeonID")
+                .or_else(|| kwargs.get("dungeonVID"))
+                .and_then(|v| v.as_i64())
+                .or_else(|| args.first().and_then(|a| a.as_i64()))
+                .unwrap_or(43);
+
+            let dname = ctx
+                .sde
+                .dungeons
+                .get(&(dungeon_id as u32))
+                .map(|d| d.name.as_str())
+                .unwrap_or("Dungeon Pocket");
+
+            let rows = vec![
+                vec![
+                    PyRep::Integer(dungeon_id * 10 + 1),
+                    PyRep::String(format!("{dname} - Room 1")),
+                    PyRep::Integer(dungeon_id),
+                ],
+                vec![
+                    PyRep::Integer(dungeon_id * 10 + 2),
+                    PyRep::String(format!("{dname} - Room 2")),
+                    PyRep::Integer(dungeon_id),
+                ],
+            ];
+            return Some(Ok(PyRep::rowset(vec!["roomID", "roomName", "dungeonID"], rows)));
+        }
+
+        ("keeper", "GetCurrentDungeonForCharacter") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let current_dungeon = ctx.db.with_snapshot(|snap| {
+                if !snap.characters.contains_key(&char_id) {
+                    return None;
+                }
+                session.solar_system_id.and_then(|sys_id| {
+                    if ctx.sde.dungeons.contains_key(&sys_id) {
+                        Some(sys_id as i64)
+                    } else {
+                        None
+                    }
+                })
+            });
+            return Some(Ok(current_dungeon.map(PyRep::Integer).unwrap_or(PyRep::None)));
+        }
+
+        ("keeper", "GetLevelEditor") => {
+            let _ = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            if !session.has_gm_role() {
+                return Some(Err(BridgeRpcError {
+                    code: "InsufficientRole".into(),
+                    message: "keeper.GetLevelEditor requires GM role".into(),
+                }));
+            }
+            return Some(Ok(PyRep::keyval([
+                ("boundOID", PyRep::Integer(900_001)),
+                ("isEditorActive", PyRep::Bool(true)),
+                ("sessionID", PyRep::Integer(session.session_id as i64)),
+            ])));
+        }
+
+        ("keeper", "GetOperationSpawnpointSolarSystem") => {
+            let _ = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let default_spawnpoint = 30_000_142i64; // Jita / Starter Career system
+            let sys_id = session.solar_system_id.map(|s| s as i64).unwrap_or(default_spawnpoint);
+            return Some(Ok(PyRep::Integer(sys_id)));
+        }
+
+        ("keeper", "IsOperationSite") => {
+            let _ = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let target_sys = args
+                .first()
+                .and_then(|a| a.as_i64())
+                .map(|s| s as u32)
+                .or(session.solar_system_id)
+                .unwrap_or(30_000_142);
+            let is_op = ctx.sde.solar_systems.contains_key(&target_sys);
+            return Some(Ok(PyRep::Bool(is_op)));
+        }
+
+        _ => {}
+    }
     // parity: feat:pve.agency-content
     // parity: rpc:custom_agency_provider.get_content_data
     if service == "custom_agency_provider" && method == "get_content_data" {

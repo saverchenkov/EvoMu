@@ -3,7 +3,7 @@
 #![forbid(unsafe_code)]
 
 use crate::formulas::{
-    skill_injector_sp_yield, skill_training_time_seconds, sp_for_skill_level,
+    skill_training_time_seconds, sp_for_skill_level,
 };
 use crate::router::ServerContext;
 use eve_db::{
@@ -1076,68 +1076,7 @@ pub fn handle(
         }
 
         ("skillMgr2", "InjectSkillpoints") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let current_dock = session.station_id.or(session.structure_id);
-            let current_ship = session.ship_id;
-            let res = ctx.db.try_with_mut_snapshot(|snap| {
-                // Locate an owned, unlocked, reachable Skill Injector (Large: 40520, Small: 45635)
-                let injector_info = snap
-                    .items
-                    .values()
-                    .find(|i| {
-                        (i.type_id == 40520 || i.type_id == 45635)
-                            && i.quantity >= 1
-                            && snap.is_item_consumable_by(i, char_id, current_dock, current_ship)
-                    })
-                    .map(|i| (i.item_id, i.type_id));
-                let Some((item_id, type_id)) = injector_info else {
-                    return Err(BridgeRpcError {
-                        code: "InjectorNotFound".into(),
-                        message: "Character does not own a Skill Injector (typeID 40520 or 45635)".into(),
-                    });
-                };
-
-                if let Some(item) = snap.items.get_mut(&item_id) {
-                    if item.quantity > 1 {
-                        item.quantity -= 1;
-                        item.version += 1;
-                    } else {
-                        snap.items.remove(&item_id);
-                    }
-                }
-
-                if let Some(ch) = snap.characters.get_mut(&char_id) {
-                    let total_sp = ch.skill_points + ch.free_skill_points;
-                    let base_yield = skill_injector_sp_yield(total_sp);
-                    let y = if type_id == 45635 {
-                        base_yield / 5.0
-                    } else {
-                        base_yield
-                    };
-                    ch.free_skill_points += y;
-                    Ok((y, ch.free_skill_points))
-                } else {
-                    Err(BridgeRpcError {
-                        code: "CharacterNotFound".into(),
-                        message: format!("Character {char_id} not found"),
-                    })
-                }
-            });
-            match res {
-                Ok((yielded, new_free_sp)) => {
-                    ctx.notify(
-                        crate::router::NotificationTarget::Character(char_id),
-                        "OnFreeSkillPointsChanged",
-                        "charid",
-                        vec![PyRep::Real(new_free_sp)],
-                    );
-                    Some(Ok(PyRep::Real(yielded)))
-                }
-                Err(e) => Some(Err(e)),
-            }
+            Some(crate::services::implant_plugging::inject_skillpoints(ctx, session, args))
         }
 
         ("skillMgr2", "AbortTraining") => {

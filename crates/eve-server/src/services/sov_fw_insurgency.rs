@@ -683,8 +683,17 @@ pub async fn handle(
                             .min(100.0);
                     st.insurgency_corruption_stage =
                         ((st.fw_contested_pct / 20.0).ceil() as u8).clamp(1, 5);
+                    let status_mult = if st.fw_contested_pct > 75.0 {
+                        1.5 // Frontline
+                    } else if st.fw_contested_pct > 25.0 {
+                        1.0 // Command Operations
+                    } else {
+                        0.75 // Rearguard
+                    };
+                    let base_lp = 15_000.0;
                     let lp_awarded = if st.fw_capture_seconds_elapsed >= duration {
-                        15_000i64
+                        // parity: feat:fw.fw-lp (LP paid for complexes scaled by system status)
+                        (base_lp * status_mult) as i64
                     } else {
                         0i64
                     };
@@ -698,6 +707,8 @@ pub async fn handle(
                     if lp_awarded > 0 {
                         if let Some(ch) = snap.characters.get_mut(&char_id) {
                             *ch.loyalty_points.entry(fid).or_insert(0) += lp_awarded;
+                            let militia_corp = ctx.sde.factions.get(&(fid as u32)).and_then(|f| f.militia_corporation_id).map(|c| c as i64).unwrap_or(fid);
+                            *ch.loyalty_points.entry(militia_corp).or_insert(0) += lp_awarded;
                         }
                     }
                     Ok(Ok(res_tuple))

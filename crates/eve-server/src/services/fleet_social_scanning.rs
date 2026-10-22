@@ -1035,52 +1035,10 @@ pub(super) async fn handle_scanning_and_wormholes(
             ])))
         }
 
-        ("keeper", "Bind")
-        | ("keeper", "GetLevelEditor") => {
+        ("keeper", "Bind") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let _ = ctx.db.with_snapshot(|snap| snap.characters.contains_key(&char_id));
             Some(Ok(PyRep::None))
-        }
-
-        ("keeper", "GetCurrentDungeonForCharacter")
-        | ("keeper", "IsOperationSite")
-        | ("keeper", "GetOperationSpawnpointSolarSystem") => {
-            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let sys_id = session.solar_system_id.unwrap_or(30_000_142);
-            let is_op = ctx.db.with_snapshot(|snap| snap.characters.contains_key(&char_id))
-                && ctx.sde.dungeons.contains_key(&(sys_id));
-            Some(Ok(PyRep::keyval([
-                ("solarSystemID", PyRep::Integer(sys_id as i64)),
-                ("isOperationSite", PyRep::Bool(is_op)),
-            ])))
-        }
-
-        ("dungeon", "DEGetDungeons")
-        | ("dungeon", "DEGetRooms")
-        | ("dungeon", "DEGetArchetypes")
-        | ("dungeon", "DEGetFactions")
-        | ("dungeon", "DEGetRoomObjectPaletteData") => {
-            let _ = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let rows: Vec<Vec<PyRep>> = ctx
-                .sde
-                .dungeons
-                .values()
-                .take(16)
-                .map(|d| {
-                    vec![
-                        PyRep::Integer(d.dungeon_id as i64),
-                        PyRep::String(d.name.clone()),
-                        PyRep::Integer(d.difficulty.unwrap_or(1) as i64),
-                    ]
-                })
-                .collect();
-            Some(Ok(PyRep::rowset(
-                vec!["dungeonID", "dungeonName", "difficulty"],
-                rows,
-            )))
         }
 
         ("dungeonExplorationMgr", "GetMyEscalatingPathDetails") => {
