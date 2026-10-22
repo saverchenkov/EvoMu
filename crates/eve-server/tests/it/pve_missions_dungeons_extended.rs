@@ -121,7 +121,7 @@ async fn test_mission_lp_isk_reward_formula() {
         .sde
         .agents
         .values()
-        .find(|a| a.level == 1 && a.division_id == 24 && a.solar_system_id.is_some())
+        .find(|a| a.level == 1 && a.agent_type_id == 2 && a.division_id == 24 && a.solar_system_id.is_some())
         .expect("Level 1 security agent");
     colocate_with_agent(&ctx, &mut sess, char_id, agent.agent_id);
 
@@ -243,7 +243,7 @@ async fn test_mission_bonus_timer() {
         .sde
         .agents
         .values()
-        .find(|a| a.level == 2 && a.division_id == 24 && a.solar_system_id.is_some())
+        .find(|a| a.level == 2 && a.agent_type_id == 2 && a.division_id == 24 && a.solar_system_id.is_some())
         .expect("Level 2 agent");
     colocate_with_agent(&ctx, &mut sess, char_id, agent.agent_id);
 
@@ -313,7 +313,7 @@ async fn test_mission_bonus_timer() {
         .sde
         .agents
         .values()
-        .find(|a| a.level == 1 && a.division_id == 24 && a.agent_id != agent.agent_id && a.solar_system_id.is_some())
+        .find(|a| a.level == 1 && a.agent_type_id == 2 && a.division_id == 24 && a.agent_id != agent.agent_id && a.solar_system_id.is_some())
         .expect("Level 1 agent");
     colocate_with_agent(&ctx, &mut sess, char_id, agent_l1.agent_id);
 
@@ -384,7 +384,7 @@ async fn test_mission_offer_expiry_no_penalty() {
         .sde
         .agents
         .values()
-        .find(|a| a.level == 1 && a.solar_system_id.is_some())
+        .find(|a| a.level == 1 && a.agent_type_id == 2 && a.division_id != 18 && a.solar_system_id.is_some())
         .expect("Level 1 agent");
     colocate_with_agent(&ctx, &mut sess, char_id, agent.agent_id);
 
