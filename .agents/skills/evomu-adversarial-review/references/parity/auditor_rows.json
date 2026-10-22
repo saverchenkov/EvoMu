@@ -6132,6 +6132,11 @@
       "flagged_by_audit": "20261019-110620"
     },
     {
+      "evidence": "Acceptance requires: 'home_station.get_home_station/set_home_station with remote change cooldown (get_next_remote_change_time) and candidate list.' In crates/eve-server/tests/it/features_parity_complete_part1.rs:234-252, test_character_creation_lifecycle_selection_home_station only invokes get_home_station, get_home_station_candidates, and get_next_remote_change_time (merely asserting matches!(next_time_rep, PyRep::Integer(_))). set_home_station is never called, candidate station validation is omitted, and remote station cooldown enforcement is untested.",
+      "id": "feat:character.home-station",
+      "flagged_by_audit": "20261021-191230"
+    },
+    {
       "evidence": "crates/eve-server/tests/social_fleets_corps.rs:392-409 asserts only is_keyval on UpdateCorporationDetails. Neither the persisted description/URL/tax nor any re-read is verified.",
       "id": "feat:corporation.corp-edit-details",
       "flagged_by_audit": "20261019-110620"
@@ -6262,9 +6267,69 @@
       "flagged_by_audit": "20261019-222106"
     },
     {
-      "evidence": "dogma_combat.rs:522-579 computes jam chance with a library function. Lock breaking calls ballpark.apply_ecm_jam directly, and the burst AoE uses the filter `|_| true` (:578). No ECM module is activated against a target through dogma.",
-      "id": "feat:modules.ecm",
-      "flagged_by_audit": "20261019-145905"
+      "evidence": "crates/eve-server/tests/it/modules_advanced_tactical.rs:16-29 instantiates BastionV24Effect::default() (hardcoded literals in crates/eve-server/src/services/tactical_modules.rs:48-67) and asserts identical values (assert_eq!(bastion.cycle_duration_sec, 60.0), assert_eq!(bastion.rof_multiplier, 0.50), assert_eq!(bastion.resistance_bonus, 0.30)). No module is fitted to a Marauder, no dogma effect is executed, and no combat or ship state is modified. Pure tautology.",
+      "id": "feat:modules.bastion-module-effects",
+      "flagged_by_audit": "20261021-185230"
+    },
+    {
+      "evidence": "crates/eve-server/tests/it/modules_advanced_tactical.rs:30-34 asserts static boolean fields on isolated BastionV24Effect::default() (assert!(bastion.deactivates_on_wormhole_jump), assert!(!bastion.allows_mjd)). No ship is undocked, no wormhole jump is performed, and neither MJD blocking nor MJFG movement is exercised in the simulation.",
+      "id": "feat:modules.bastion-wormhole-and-mjd-interaction",
+      "flagged_by_audit": "20261021-185230"
+    },
+    {
+      "evidence": "crates/eve-server/tests/it/modules_advanced_tactical.rs:165-168 asserts local variable let cargo_exp_bonus = 0.27; assert!(cargo_exp_bonus > 0.0);. Egregious hollow assertion; no expanded cargohold module is fitted to expand cargo capacity or apply speed/structure penalties.",
+      "id": "feat:modules.cargo-expanders",
+      "flagged_by_audit": "20261021-185230"
+    },
+    {
+      "evidence": "crates/eve-server/tests/it/modules_advanced_tactical.rs:87-122 tags feat:modules.command-burst-duration-reload in test_entosis_link_command_bursts_and_industrial_core, but the test contains zero assertions exercising command burst duration or reload mechanics.",
+      "id": "feat:modules.command-burst-duration-reload",
+      "flagged_by_audit": "20261021-185230"
+    },
+    {
+      "evidence": "crates/eve-server/tests/it/modules_advanced_tactical.rs:87-122 tags feat:modules.command-burst-fitting-and-clone-restrictions in test_entosis_link_command_bursts_and_industrial_core, but the test contains zero assertions validating fitting restrictions or clone restrictions.",
+      "id": "feat:modules.command-burst-fitting-and-clone-restrictions",
+      "flagged_by_audit": "20261021-185230"
+    },
+    {
+      "evidence": "crates/eve-server/tests/it/modules_advanced_tactical.rs:107-115 evaluates mathematical formula inside compute_command_burst_range(5, 5, 5, 1.0, 0.60) against arithmetic written inside the test itself (tautology). No command burst module is fitted or pulsed in a fleet ballpark.",
+      "id": "feat:modules.command-burst-range",
+      "flagged_by_audit": "20261021-185230"
+    },
+    {
+      "evidence": "crates/eve-server/tests/it/modules_advanced_tactical.rs:116-118 calls isolated helper compute_command_burst_strength and asserts assert!(burst_str > 0.10). No fleet members are buffed, no dogma attributes are applied, and no module is fitted to a boosting ship.",
+      "id": "feat:modules.command-burst-strength-formula",
+      "flagged_by_audit": "20261021-185230"
+    },
+    {
+      "evidence": "crates/eve-server/tests/it/modules_advanced_tactical.rs:72-83 asserts fields on isolated arithmetic helper eval_disruptive_lance(300_000.0, 5, 5, true, 0.3). No lancer dreadnought or titan module is activated, no beam geometry or cone collision is computed in destiny, and no 5-minute warp suppression or tether block is applied to target vessels.",
+      "id": "feat:modules.disruptive-lance",
+      "flagged_by_audit": "20261021-185230"
+    },
+    {
+      "evidence": "crates/eve-server/tests/it/modules_advanced_tactical.rs:169-172 asserts local variable let dda_damage_mult = 1.23; assert!(dda_damage_mult > 1.0);. Egregious hollow assertion; no DDA module is fitted to scale drone damage attributes.",
+      "id": "feat:modules.drone-upgrade-modules",
+      "flagged_by_audit": "20261021-185230"
+    },
+    {
+      "evidence": "crates/eve-server/tests/it/modules_advanced_tactical.rs:90-98 asserts static logic in isolated helper eval_entosis_activation(11172, false, true, 0, true, 1). No entosis link is fitted to a ship, no ship class validation is performed via SDE dogma, and no structure target validation is executed.",
+      "id": "feat:modules.entosis-activation-restrictions",
+      "flagged_by_audit": "20261021-185230"
+    },
+    {
+      "evidence": "crates/eve-server/tests/it/modules_advanced_tactical.rs:99-105 asserts arithmetic and boolean fields of isolated helper eval_entosis_activation(626, false, false, 0, true, 2). No structure node contest cycle or progression is simulated in the sov/structure engine.",
+      "id": "feat:modules.entosis-warmup-and-contest",
+      "flagged_by_audit": "20261021-185230"
+    },
+    {
+      "evidence": "crates/eve-server/tests/it/modules_advanced_tactical.rs:160-164 asserts local variables let coprocessor_cpu_mult = 1.10; let rcu_pg_mult = 1.10; assert!(coprocessor_cpu_mult > 1.0 && rcu_pg_mult > 1.0);. Egregious hollow assertion; no module is fitted to modify CPU or PG budgets.",
+      "id": "feat:modules.fitting-capacity-mods",
+      "flagged_by_audit": "20261021-185230"
+    },
+    {
+      "evidence": "crates/eve-server/tests/it/modules_advanced_tactical.rs:120-122 asserts local variable let ind_core_range_bonus = 0.60; assert!(ind_core_range_bonus > 0.0);. Egregious hollow assertion with no module, ship, or burst interaction.",
+      "id": "feat:modules.industrial-core-burst-bonus",
+      "flagged_by_audit": "20261021-185230"
     },
     {
       "evidence": "space_navigation_cyno.rs:111-121 sets the immunity directly with sys_handle.set_interdiction_nullified(ship, true). No Interdiction Nullifier module, subsystem or interceptor hull bonus is involved.",
@@ -6292,19 +6357,24 @@
       "flagged_by_audit": "20261019-145905"
     },
     {
-      "evidence": "Acceptance: 'Reduce target lock range or scan resolution per script.' crates/eve-server/tests/dogma_combat.rs:891-904 only calls the library function eval_scripted_sensor_dampener on a DogmaItemState. No dampener is fitted or activated, and no target's lock range or scan resolution is read. In the same test, ECM and TD/GD are activated through dogmaIM.Activate, but the dampener is not.",
-      "id": "feat:modules.sensor-dampener",
-      "flagged_by_audit": "20261019-222106"
+      "evidence": "crates/eve-server/tests/it/modules_advanced_tactical.rs:36-52 asserts return values of standalone helper get_siege_v24_effect(false, 5) returning hardcoded literals. Module is never fitted to a dreadnought, dogma attribute modifiers are not applied to weapons or local tank, and dreadnought immobilisation is unexercised.",
+      "id": "feat:modules.siege-module-v24-effects",
+      "flagged_by_audit": "20261021-185230"
     },
     {
-      "evidence": "Acceptance: 'Increase target signature radius.' crates/eve-server/tests/dogma_combat.rs:1314-1322 only calls eval_target_painter_with_overload on a DogmaItemState. No painter is activated on a target and no target signature radius is read.",
-      "id": "feat:modules.target-painter",
-      "flagged_by_audit": "20261019-222106"
+      "evidence": "crates/eve-server/tests/it/modules_advanced_tactical.rs:140-146 asserts static literals on isolated struct get_stasis_web_probe_spec(). No probe is launched, no area-of-effect sphere is deployed in destiny, and no target ships are slowed.",
+      "id": "feat:modules.stasis-webification-probe",
+      "flagged_by_audit": "20261021-185230"
     },
     {
       "evidence": "Acceptance requires tracking disruptors and guidance disruptors to reduce target turret (optimal range, falloff, tracking speed) and missile (flight time, velocity, explosion radius, explosion velocity) stats per script. In crates/eve-server/tests/it/modules_advanced_tactical.rs:357-360, the test tagged with // parity: feat:modules.tracking-disruptor asserts a pure tautology: `let tracking_scripted = true; let guidance_scripted = true; assert!(tracking_scripted && guidance_scripted);`. No weapon disruptor module is fitted or activated, and no weapon or missile attributes are evaluated or modified on the target.",
       "id": "feat:modules.tracking-disruptor",
       "flagged_by_audit": "20261021-185849"
+    },
+    {
+      "evidence": "crates/eve-server/tests/it/modules_advanced_tactical.rs:54-70 asserts return values of standalone helper get_triage_v24_effect(false, 5). No FAX or carrier module is fitted, dogma remote repair bonuses and locking speed buffs are unapplied to any ship state, and immobility/weapons timer rules are unverified.",
+      "id": "feat:modules.triage-module-v24-effects",
+      "flagged_by_audit": "20261021-185230"
     },
     {
       "evidence": "Acceptance: 'HIC infinite point/bubble mode with penalties.' tests/destiny_binary_stream.rs:437-574 only adds generic ballpark bubbles (add_warp_bubble). There is no HIC module, no infinite point and no penalties.",

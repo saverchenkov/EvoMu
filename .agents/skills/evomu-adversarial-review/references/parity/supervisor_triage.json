@@ -8648,6 +8648,144 @@
     "sde:res:/staticdata/warzonespositiondata.fsdbinary": {
       "disposition": "client_local",
       "evidence": "Client FW warzone 2D map widget coordinate layout table (fwwarzone/client/data/warzoneMapPositionsDataLoader.pyj)."
+    },
+    "notify:OnBookmarkCreated": {
+      "status": "NA",
+      "reason": "Client-internal UI scatter event (sm.ScatterEvent); never sent by the server over machoNet.",
+      "evidence": "code.ccp bytecode verification: eve/client/script/ui/shared/bookmarks/bookmarkSvc.pyj:BookmarkSvc.NewBookmarkCreated (offsets 163-181: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnBookmarkCreated'; LOAD_FAST bookmark; LOAD_Attr bookmarkID; LOAD_FAST comment; LOAD_FAST itemTypeID; CALL_FUNCTION 4). No server emitter needed: BookmarkSvc.NewBookmarkCreated locally scatters OnBookmarkCreated.",
+      "triaged_by": "supervisor"
+    },
+    "notify:OnBoosterUpdated": {
+      "status": "NA",
+      "reason": "Client-internal UI scatter event (sm.ScatterEvent); never sent by the server over machoNet.",
+      "evidence": "code.ccp bytecode verification: eve/client/script/ui/services/skillsvc.pyj:SkillsSvc.OnServerBoostersChanged (offsets 22-31: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnBoosterUpdated'; CALL_FUNCTION 1); eve/client/script/ui/services/skillsvc.pyj:SkillsSvc.OnCloneDestruction (offsets 13-22: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnBoosterUpdated'; CALL_FUNCTION 1). No server emitter needed: server sends OnServerBoostersChanged / OnCloneDestruction; SkillsSvc locally scatters OnBoosterUpdated.",
+      "triaged_by": "supervisor"
+    },
+    "notify:OnClientEvent_MarketItemReceived": {
+      "status": "NA",
+      "reason": "Client-internal UI scatter event (sm.ScatterEvent); never sent by the server over machoNet.",
+      "evidence": "code.ccp bytecode verification: eve/client/script/ui/services/marketsvc.pyj:MarketQuote.OnMarketItemReceived (offsets 0-21: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnClientEvent_MarketItemReceived'; LOAD_FAST itemID; LOAD_FAST typeID; LOAD_FAST flagID; LOAD_FAST locationID; CALL_FUNCTION 5). No server emitter needed: server sends OnMarketItemReceived; MarketQuote.OnMarketItemReceived locally scatters OnClientEvent_MarketItemReceived.",
+      "triaged_by": "supervisor"
+    },
+    "notify:OnCloneJumpUpdate": {
+      "status": "NA",
+      "reason": "Client-internal UI scatter event (sm.ScatterEvent); never sent by the server over machoNet.",
+      "evidence": "code.ccp bytecode verification: eve/client/script/ui/services/clonejumpsvc.pyj:CloneJump.OnJumpCloneCacheInvalidated (offsets 27-36: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnCloneJumpUpdate'; CALL_FUNCTION 1); eve/client/script/ui/services/clonejumpsvc.pyj:CloneJump.OnStationJumpCloneCacheInvalidated (offsets 24-33: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnCloneJumpUpdate'; CALL_FUNCTION 1). No server emitter needed: server sends OnJumpCloneCacheInvalidated / OnStationJumpCloneCacheInvalidated; CloneJump locally scatters OnCloneJumpUpdate.",
+      "triaged_by": "supervisor"
+    },
+    "notify:OnContractCacheCleared": {
+      "status": "NA",
+      "reason": "Client-internal UI scatter event (sm.ScatterEvent); never sent by the server over machoNet.",
+      "evidence": "code.ccp bytecode verification: eve/client/script/ui/shared/neocom/contracts/contracts.pyj:ContractsSvc.ClearCache (offsets 114-123: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnContractCacheCleared'; CALL_FUNCTION 1). No server emitter needed: server sends OnContractCreated / OnContractAccepted / OnContractCompleted / etc.; ContractsSvc.ClearCache locally scatters OnContractCacheCleared.",
+      "triaged_by": "supervisor"
+    },
+    "notify:OnContractEscrowChanged": {
+      "status": "NA",
+      "reason": "Client-internal UI scatter event (sm.ScatterEvent); never sent by the server over machoNet.",
+      "evidence": "code.ccp bytecode verification: eve/client/script/ui/shared/neocom/contracts/contracts.pyj:ContractsSvc._NotifyOfEscrowChange (offsets 0-9: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnContractEscrowChanged'; CALL_FUNCTION 1). No server emitter needed: ContractsSvc._NotifyOfEscrowChange locally scatters OnContractEscrowChanged.",
+      "triaged_by": "supervisor"
+    },
+    "notify:OnCorpAccountChangedClient": {
+      "status": "NA",
+      "reason": "Client-internal UI scatter event (sm.ScatterEvent); never sent by the server over machoNet.",
+      "evidence": "code.ccp bytecode verification: eve/client/script/ui/shared/neocom/wallet/walletSvc.pyj:WalletSvc._OnCorpAccountChange (offsets 135-153: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnCorpAccountChangedClient'; LOAD_FAST balance; LOAD_FAST accountKey; LOAD_FAST difference; CALL_FUNCTION 4). No server emitter needed: server sends OnAccountChange; WalletSvc._OnCorpAccountChange locally scatters OnCorpAccountChangedClient.",
+      "triaged_by": "supervisor"
+    },
+    "notify:OnCorpWalletBillsChanged": {
+      "status": "NA",
+      "reason": "Client-internal UI scatter event (sm.ScatterEvent); never sent by the server over machoNet.",
+      "evidence": "code.ccp bytecode verification: eve/client/script/ui/shared/neocom/wallet/walletSvc.pyj:WalletSvc.TriggerOnCorpBillsChanged (offsets 0-9: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnCorpWalletBillsChanged'; CALL_FUNCTION 1). No server emitter needed: server sends OnBillReceived; WalletSvc.OnBillReceived calls TriggerOnCorpBillsChanged which locally scatters OnCorpWalletBillsChanged.",
+      "triaged_by": "supervisor"
+    },
+    "notify:OnDeleteContracts": {
+      "status": "NA",
+      "reason": "Client-internal UI scatter event (sm.ScatterEvent); never sent by the server over machoNet.",
+      "evidence": "code.ccp bytecode verification: eve/client/script/ui/shared/neocom/contracts/contracts.pyj:ContractsSvc.DeleteContract (offsets 204-219: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnDeleteContracts'; LOAD_FAST contractID; BUILD_LIST 1; CALL_FUNCTION 2); eve/client/script/ui/shared/neocom/contracts/contracts.pyj:ContractsSvc.DeleteMultipleContracts (offsets 214-226: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnDeleteContracts'; LOAD_FAST contractsDeleted; CALL_FUNCTION 2). No server emitter needed: ContractsSvc.DeleteContract / DeleteMultipleContracts locally scatters OnDeleteContracts.",
+      "triaged_by": "supervisor"
+    },
+    "notify:OnImplantsChanged": {
+      "status": "NA",
+      "reason": "Client-internal UI scatter event (sm.ScatterEvent); never sent by the server over machoNet.",
+      "evidence": "code.ccp bytecode verification: eve/client/script/ui/services/skillsvc.pyj:SkillsSvc.OnServerImplantsChanged (offsets 56-65: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnImplantsChanged'; CALL_FUNCTION 1). No server emitter needed: server sends OnServerImplantsChanged; SkillsSvc locally scatters OnImplantsChanged.",
+      "triaged_by": "supervisor"
+    },
+    "notify:OnIndustryJobClient": {
+      "status": "NA",
+      "reason": "Client-internal UI scatter event (sm.ScatterEvent); never sent by the server over machoNet.",
+      "evidence": "code.ccp bytecode verification: eve/client/script/industry/industrySvc.pyj:IndustryService.OnIndustryJob (offsets 147-192: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnIndustryJobClient'; CALL_FUNCTION_KW 1). No server emitter needed: server sends OnIndustryJob; IndustryService.OnIndustryJob locally scatters OnIndustryJobClient.",
+      "triaged_by": "supervisor"
+    },
+    "notify:OnMarketEscrowChanged": {
+      "status": "NA",
+      "reason": "Client-internal UI scatter event (sm.ScatterEvent); never sent by the server over machoNet.",
+      "evidence": "code.ccp bytecode verification: eve/client/script/ui/services/marketsvc.pyj:MarketQuote.OnOwnOrdersChanged (offsets 199-208: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnMarketEscrowChanged'; CALL_FUNCTION 1). No server emitter needed: server sends OnOwnOrdersChanged; MarketQuote.OnOwnOrdersChanged locally scatters OnMarketEscrowChanged.",
+      "triaged_by": "supervisor"
+    },
+    "notify:OnNPCStandingChange": {
+      "status": "NA",
+      "reason": "Client-internal UI scatter event (sm.ScatterEvent); never sent by the server over machoNet.",
+      "evidence": "code.ccp bytecode verification: eve/client/script/ui/services/standingsvc.pyj:Standing.OnStandingSet (offsets 76-104: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnNPCStandingChange'; LOAD_FAST fromID; LOAD_FAST newStanding; LOAD_FAST oldStanding; CALL_FUNCTION 4). No server emitter needed: server sends OnStandingSet; Standing.OnStandingSet locally scatters OnNPCStandingChange.",
+      "triaged_by": "supervisor"
+    },
+    "notify:OnOfficeRentalChanged": {
+      "status": "NA",
+      "reason": "Client-internal UI scatter event (sm.ScatterEvent); never sent by the server over machoNet.",
+      "evidence": "code.ccp bytecode verification: eve/client/script/ui/services/corporation/officeManager.pyj:OfficeManager.OnOfficeRentalChange (offsets 102-117: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnOfficeRentalChanged'; LOAD_FAST corporationID; LOAD_FAST officeID; CALL_FUNCTION 3). No server emitter needed: server sends OnOfficeRentalChange; OfficeManager.OnOfficeRentalChange locally scatters OnOfficeRentalChanged.",
+      "triaged_by": "supervisor"
+    },
+    "notify:OnPersonalAccountChangedClient": {
+      "status": "NA",
+      "reason": "Client-internal UI scatter event (sm.ScatterEvent); never sent by the server over machoNet.",
+      "evidence": "code.ccp bytecode verification: eve/client/script/ui/shared/neocom/wallet/walletSvc.pyj:WalletSvc._OnCharAccountChange (offsets 75-90: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnPersonalAccountChangedClient'; LOAD_FAST b; LOAD_FAST transactionType; CALL_FUNCTION 3). No server emitter needed: server sends OnAccountChange; WalletSvc._OnCharAccountChange locally scatters OnPersonalAccountChangedClient.",
+      "triaged_by": "supervisor"
+    },
+    "notify:OnRefreshBookmarks": {
+      "status": "NA",
+      "reason": "Client-internal UI scatter event (sm.ScatterEvent); never sent by the server over machoNet.",
+      "evidence": "code.ccp bytecode verification: eve/client/script/ui/shared/bookmarks/bookmarkSvc.pyj:BookmarkSvc.RefreshUIOnUpdate (offsets 0-9: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnRefreshBookmarks'; CALL_FUNCTION 1). No server emitter needed: BookmarkSvc.RefreshUIOnUpdate locally scatters OnRefreshBookmarks.",
+      "triaged_by": "supervisor"
+    },
+    "notify:OnRespecInfoUpdated": {
+      "status": "NA",
+      "reason": "Client-internal UI scatter event (sm.ScatterEvent); never sent by the server over machoNet.",
+      "evidence": "code.ccp bytecode verification: eve/client/script/ui/services/skillsvc.pyj:SkillsSvc.OnRespecInfoChanged (offsets 22-31: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnRespecInfoUpdated'; CALL_FUNCTION 1). No server emitter needed: server sends OnRespecInfoChanged; SkillsSvc locally scatters OnRespecInfoUpdated.",
+      "triaged_by": "supervisor"
+    },
+    "notify:OnShipCloneJumpUpdate": {
+      "status": "NA",
+      "reason": "Client-internal UI scatter event (sm.ScatterEvent); never sent by the server over machoNet.",
+      "evidence": "code.ccp bytecode verification: eve/client/script/ui/services/clonejumpsvc.pyj:CloneJump.OnShipJumpCloneCacheInvalidated (offsets 27-36: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnShipCloneJumpUpdate'; CALL_FUNCTION 1); eve/client/script/ui/services/clonejumpsvc.pyj:CloneJump.OnShipJumpCloneInstallationDone (offsets 55-64: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnShipCloneJumpUpdate'; CALL_FUNCTION 1). No server emitter needed: server sends OnShipJumpCloneCacheInvalidated / OnShipJumpCloneInstallationDone; CloneJump locally scatters OnShipCloneJumpUpdate.",
+      "triaged_by": "supervisor"
+    },
+    "notify:OnSkillPointsInjected_Local": {
+      "status": "NA",
+      "reason": "Client-internal UI scatter event (sm.ScatterEvent); never sent by the server over machoNet.",
+      "evidence": "code.ccp bytecode verification: eve/client/script/ui/services/skillsvc.pyj:SkillsSvc.ActivateSkillInjector (offsets 44-59: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnSkillPointsInjected_Local'; LOAD_FAST quantity; LOAD_FAST points; CALL_FUNCTION 3). No server emitter needed: SkillsSvc.ActivateSkillInjector locally scatters OnSkillPointsInjected_Local.",
+      "triaged_by": "supervisor"
+    },
+    "notify:OnSkillQueueChanged": {
+      "status": "NA",
+      "reason": "Client-internal UI scatter event (sm.ScatterEvent); never sent by the server over machoNet.",
+      "evidence": "code.ccp bytecode verification: eve/client/script/ui/services/skillQueueSvc.pyj:SkillQueueService.OnNewSkillQueueSaved (offsets 33-42: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnSkillQueueChanged'; CALL_FUNCTION 1). No server emitter needed: server sends OnNewSkillQueueSaved; SkillQueueService locally scatters OnSkillQueueChanged.",
+      "triaged_by": "supervisor"
+    },
+    "notify:OnSkillQueuePaused": {
+      "status": "NA",
+      "reason": "Client-internal UI scatter event (sm.ScatterEvent); never sent by the server over machoNet.",
+      "evidence": "code.ccp bytecode verification: eve/client/script/ui/services/skillQueueSvc.pyj:SkillQueueService.OnSkillQueuePausedServer (offsets 75-84: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnSkillQueuePaused'; CALL_FUNCTION 1). No server emitter needed: server sends OnSkillQueuePausedServer; SkillQueueService locally scatters OnSkillQueuePaused.",
+      "triaged_by": "supervisor"
+    },
+    "notify:OnSkillQueueRefreshed": {
+      "status": "NA",
+      "reason": "Client-internal UI scatter event (sm.ScatterEvent); never sent by the server over machoNet.",
+      "evidence": "code.ccp bytecode verification: eve/client/script/ui/services/skillsvc.pyj:SkillsSvc.OnServerBoostersChanged (offsets 35-44: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnSkillQueueRefreshed'; CALL_FUNCTION 1); eve/client/script/ui/services/skillsvc.pyj:SkillsSvc.OnServerImplantsChanged (offsets 40-49: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnSkillQueueRefreshed'; CALL_FUNCTION 1). No server emitter needed: server sends OnServerBoostersChanged / OnServerImplantsChanged; SkillsSvc locally scatters OnSkillQueueRefreshed.",
+      "triaged_by": "supervisor"
+    },
+    "notify:OnSkillsChanged": {
+      "status": "NA",
+      "reason": "Client-internal UI scatter event (sm.ScatterEvent); never sent by the server over machoNet.",
+      "evidence": "code.ccp bytecode verification: eve/client/script/ui/services/skillsvc.pyj:SkillsSvc.OnServerSkillsChanged (offsets 136-148: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnSkillsChanged'; LOAD_FAST skillInfos; CALL_FUNCTION 2); eve/client/script/ui/services/skillsvc.pyj:SkillsSvc.OnServerSkillsRemoved (offsets 48-60: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnSkillsChanged'; LOAD_FAST skillInfos; CALL_FUNCTION 2). No server emitter needed: server sends OnServerSkillsChanged / OnServerSkillsRemoved; SkillsSvc locally scatters OnSkillsChanged.",
+      "triaged_by": "supervisor"
     }
   }
 }
