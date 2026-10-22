@@ -549,20 +549,27 @@ pub(super) fn handle_mail_and_calendar(
                 Err(e) => return Some(Err(e)),
             };
             let mail_ids = extract_id_list(args.first());
+            let mut restored_ids = Vec::new();
             {
                 let mut s = ctx.social_extras.lock().unwrap();
                 if mail_ids.is_empty() || method == "MoveAllFromTrash" {
+                    let before: Vec<i64> = s.trashed_mails.iter().filter(|(cid, _)| *cid == char_id).map(|(_, mid)| *mid).collect();
                     s.trashed_mails.retain(|&(cid, _)| cid != char_id);
+                    restored_ids = before;
                 } else {
                     for &mid in &mail_ids {
-                        s.trashed_mails.remove(&(char_id, mid));
+                        if s.trashed_mails.remove(&(char_id, mid)) {
+                            restored_ids.push(mid);
+                        }
                     }
                 }
             }
-            let mail_id_reps = PyRep::List(mail_ids.iter().copied().map(PyRep::Integer).collect());
-            ctx.notify(NotificationTarget::Character(char_id), "OnMailRestored", "charid", vec![mail_id_reps]);
+            if !restored_ids.is_empty() {
+                let mail_id_reps = PyRep::List(restored_ids.iter().copied().map(PyRep::Integer).collect());
+                ctx.notify(NotificationTarget::Character(char_id), "OnMailRestored", "charid", vec![mail_id_reps]);
+            }
             Some(Ok(PyRep::keyval([
-                ("restored", PyRep::Bool(true)),
+                ("restored", PyRep::Bool(!restored_ids.is_empty())),
                 ("inTrash", PyRep::Bool(false)),
             ])))
         }

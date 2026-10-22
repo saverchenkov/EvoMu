@@ -254,6 +254,43 @@ async fn test_fleet_proxy_and_fleet_mgr_rpcs() {
     .expect_err("Non-boss non-leader cannot update allowed entities");
     assert_eq!(unauth_entities.code, "FleetRoleDenied");
 
+    // BF-FLEET-01 / BF-FLEET-03: Non-boss non-leader cannot update advert info
+    let unauth_info = rpc(
+        &ctx,
+        &mut sess2,
+        "fleetProxy",
+        "UpdateAdvertInfo",
+        &[PyRep::String("Rogue advert".into())],
+    )
+    .await
+    .expect_err("Non-boss non-leader cannot update advert info");
+    assert_eq!(unauth_info.code, "FleetRoleDenied");
+
+    // BF-FLEET-01 / BF-FLEET-03: Non-boss non-leader cannot update advert leader
+    let unauth_lead = rpc(
+        &ctx,
+        &mut sess2,
+        "fleetProxy",
+        "UpdateFleetAdvertWithNewLeader",
+        &[PyRep::Integer(PILOT_2)],
+    )
+    .await
+    .expect_err("Non-boss non-leader cannot update advert leader");
+    assert_eq!(unauth_lead.code, "FleetRoleDenied");
+
+    // BF-FLEET-01 / BF-FLEET-03: Boss cannot set non-member as new advert leader
+    let non_member_lead = rpc(
+        &ctx,
+        &mut sess1,
+        "fleetProxy",
+        "UpdateFleetAdvertWithNewLeader",
+        &[PyRep::Integer(99_999_999)],
+    )
+    .await
+    .expect_err("Non-member cannot be set as new advert leader");
+    assert_eq!(non_member_lead.code, "CustomError");
+    assert!(non_member_lead.message.contains("New advert leader must be an active member of the fleet"));
+
     // Boss can update allowed entities
     let auth_entities = rpc(
         &ctx,

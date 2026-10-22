@@ -1250,8 +1250,8 @@ pub async fn handle_gm_slash_ext(
             None => 5.0,
         };
         let valid_entity = ctx.db.with_snapshot(|snap| {
-            snap.characters.contains_key(&target_id) || snap.corporations.contains_key(&target_id) || snap.alliances.contains_key(&target_id) || target_id >= 1_000
-        });
+            snap.characters.contains_key(&target_id) || snap.corporations.contains_key(&target_id) || snap.alliances.contains_key(&target_id)
+        }) || ctx.sde.npc_corporations.contains_key(&target_id) || ctx.sde.factions.contains_key(&(target_id as u32));
         if !valid_entity {
             return Some(Err(BridgeRpcError { code: "ContactNotFound".into(), message: format!("Target {target_id} not found") }));
         }

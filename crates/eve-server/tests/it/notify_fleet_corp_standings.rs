@@ -161,7 +161,7 @@ async fn test_standings_and_contacts_notifications() {
     // 4. OnSetPlayerStanding via slash.SlashCmd with GM role
     s1.role = eve_db::service_roles::ROLE_ADMIN | eve_db::service_roles::ROLE_GMS;
     // Negative tests for invalid target and NaN standing
-    let bad_target = ctx.dispatch_rpc(&mut s1, "slash", None, "SlashCmd", &[PyRep::String("/contact 999 5.0".into())], &HashMap::new(), None).await;
+    let bad_target = ctx.dispatch_rpc(&mut s1, "slash", None, "SlashCmd", &[PyRep::String("/contact 95000000 5.0".into())], &HashMap::new(), None).await;
     assert!(bad_target.is_err(), "SlashCmd with non-existent target must fail");
     let bad_nan = ctx.dispatch_rpc(&mut s1, "slash", None, "SlashCmd", &[PyRep::String("/contact 90000002 NaN".into())], &HashMap::new(), None).await;
     assert!(bad_nan.is_err(), "SlashCmd with NaN standing must fail");
