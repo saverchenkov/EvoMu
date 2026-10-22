@@ -24,6 +24,7 @@ pub mod fleet_social;
 pub mod fw_enlistment;
 pub mod fw_services;
 pub mod implant_plugging;
+pub mod ingamereport_ops;
 pub mod industry_pi;
 pub mod insurgency_services;
 pub mod inventory_bound;

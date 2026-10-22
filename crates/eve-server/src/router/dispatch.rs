@@ -873,25 +873,16 @@ impl ServerContext {
         ) {
             return res;
         }
-        if let Some(res) = services::map_service::handle(
-            self,
-            session,
-            effective_service,
-            method,
-            args,
-            kwargs,
-        ) {
+        if let Some(res) = services::map_service::handle(self, session, effective_service, method, args, kwargs) {
             return res;
         }
-        if let Some(res) = services::tourney_service::handle(
-            self,
-            session,
-            effective_service,
-            method,
-            args,
-            kwargs,
-        ).await {
+        if let Some(res) = services::tourney_service::handle(self, session, effective_service, method, args, kwargs).await {
             return res;
+        }
+        if effective_service == "ingamereport" {
+            if let Some(res) = services::ingamereport_ops::handle(self, session, method, args, kwargs) {
+                return res;
+            }
         }
 
         warn!(

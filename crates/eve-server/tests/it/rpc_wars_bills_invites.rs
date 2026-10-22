@@ -172,6 +172,10 @@ async fn test_corp_bills_and_war_registry_timestamps() {
     assert!(rec_rows.iter().any(|r| r.first() == Some(&PyRep::Integer(p_bill))));
     assert!(rec_rows.iter().any(|r| r.first() == Some(&PyRep::Integer(c_bill))));
 
+    // BF-BILLS-01: querying foreign corporation bills is denied
+    let foreign_err = rpc(&ctx, &mut sess1, "billMgr", "GetCorporationBills", &[PyRep::Integer(corp2_id)]).await;
+    assert_eq!(foreign_err.unwrap_err().code, "CorpAccessDenied");
+
     // 2. CharPayBill pays personal bill
     let p1_before = ctx.db.get_character(PILOT_1).unwrap().balance;
     let pay_p = rpc(&ctx, &mut sess1, "billMgr", "CharPayBill", &[PyRep::Integer(p_bill)]).await.expect("CharPayBill");
@@ -237,13 +241,17 @@ async fn test_war_registry_unbind_stats_and_wars_info() {
     // parity: rpc:warsInfoMgr.GetWarsByOwnerID
     // parity: rpc:warsInfoMgr.GetWarsByOwners
 
-    let (ctx, mut sess1, _sess2, corp1_id, corp2_id) =
+    let (ctx, mut sess1, mut sess2, corp1_id, corp2_id) =
         setup_two_corps(64_000, "Apex Security Div", "ASD", "Titan Syndicate", "TSC").await;
 
     // 1. warRegistry Bind & UnBind
     let bound = rpc(&ctx, &mut sess1, "warRegistry", "Bind", &[PyRep::Integer(corp1_id)]).await.expect("Bind warRegistry");
     let bound_id = bound.as_i64().expect("bound_id");
     assert!(bound_id > 0);
+
+    // BF-WARS-01: unbinding another session's bound object is denied
+    let unbind_foreign = rpc(&ctx, &mut sess2, "warRegistry", "UnBind", &[PyRep::Integer(bound_id)]).await;
+    assert_eq!(unbind_foreign.unwrap_err().code, "BoundObjectOwnershipViolation");
 
     let unbind = rpc(&ctx, &mut sess1, "warRegistry", "UnBind", &[PyRep::Integer(bound_id)]).await.expect("UnBind warRegistry");
     assert_eq!(unbind, PyRep::None);

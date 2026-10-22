@@ -155,3 +155,5 @@ mod rpc_sov_fw_warzone;
 mod rpc_wars_bills_invites;
 mod rpc_store_cosmetics;
 mod rpc_crates_offers;
+mod rpc_upwell_structures_ops;
+mod rpc_ingamereport_ops;

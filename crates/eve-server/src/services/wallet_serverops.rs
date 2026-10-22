@@ -401,13 +401,40 @@ pub fn handle(
                 Err(e) => return Some(Err(e)),
             };
             let is_receivable = method == "GetCorporationBillsReceivable";
-            let rows = ctx.db.with_snapshot(|snap| {
+            let res = ctx.db.with_snapshot(|snap| {
                 let caller_corp = snap
                     .characters
                     .get(&char_id)
                     .map(|c| c.corporation_id)
                     .unwrap_or(0);
-                let corp_id = args.first().and_then(|a| a.as_i64()).filter(|&id| id > 0).unwrap_or(caller_corp);
+                let target_corp = args.first().and_then(|a| a.as_i64()).filter(|&id| id > 0);
+                let corp_id = match target_corp {
+                    Some(cid) if cid != caller_corp => {
+                        return Err(rpc_err(
+                            "CorpAccessDenied",
+                            "Cannot query bills for a foreign corporation",
+                        ));
+                    }
+                    Some(cid) => cid,
+                    None => caller_corp,
+                };
+                if corp_id != 0 {
+                    let corp = snap.corporations.get(&corp_id);
+                    let is_ceo = corp.map(|c| c.ceo_id == char_id).unwrap_or(false);
+                    let roles = corp
+                        .and_then(|c| c.member_roles.get(&char_id).copied())
+                        .unwrap_or(0);
+                    let has_privs = is_ceo
+                        || eve_db::corp_roles::has_role(roles, eve_db::corp_roles::ROLE_DIRECTOR)
+                        || eve_db::corp_roles::has_role(roles, eve_db::corp_roles::ROLE_ACCOUNTANT)
+                        || eve_db::corp_roles::has_role(roles, eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT);
+                    if !has_privs {
+                        return Err(rpc_err(
+                            "CorpRoleRequired",
+                            "Director or accountant role required to view corporation bills",
+                        ));
+                    }
+                }
                 let mut bills: Vec<CorpBillRecord> = snap
                     .owner_notes
                     .values()
@@ -422,9 +449,12 @@ pub fn handle(
                     })
                     .collect();
                 bills.sort_by_key(|b| b.bill_id);
-                bills.iter().map(bill_to_row).collect()
+                Ok(bills.iter().map(bill_to_row).collect())
             });
-            Some(Ok(PyRep::rowset(bill_columns(), rows)))
+            match res {
+                Ok(rows) => Some(Ok(PyRep::rowset(bill_columns(), rows))),
+                Err(e) => Some(Err(e)),
+            }
         }
         ("billMgr", "CharPayBill") => {
             let (_, char_id) = match ServerContext::require_character(session) {
