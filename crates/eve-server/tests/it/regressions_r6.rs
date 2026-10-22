@@ -369,17 +369,28 @@ async fn test_review_r6_np0_np1_regressions() {
     };
     let cid2 = c2_kv.get("contractID").unwrap().as_i64().unwrap();
 
-    ctx.dispatch_rpc(
-        &mut s2,
-        "contractProxy",
-        None,
-        "AcceptContract",
-        &[PyRep::Integer(cid2)],
-        &kw,
-        None,
-    )
-    .await
-    .unwrap();
+    let acc_c2 = ctx
+        .dispatch_rpc(
+            &mut s2,
+            "contractProxy",
+            None,
+            "AcceptContract",
+            &[PyRep::Integer(cid2)],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap();
+    let PyRep::KeyVal(acc_c2_kv) = acc_c2 else {
+        panic!("Expected acc_c2 KeyVal");
+    };
+    let wrap_id_c2 = acc_c2_kv.get("courierPackageID").unwrap().as_i64().unwrap();
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(w) = snap.items.get_mut(&wrap_id_c2) {
+            w.location_id = 100_000_002;
+            w.flag = eve_db::InventoryFlag::Cargo;
+        }
+    });
 
     // Completing while still at 60003760 (not 60008494) is rejected with CourierNotAtDestinationStation
     let early_comp = ctx

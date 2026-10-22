@@ -364,17 +364,28 @@ async fn test_e2e_journeys_13_to_18_and_catalog_coverage() {
         )
         .await;
     assert_eq!(self_acc.unwrap_err().code, "CannotAcceptOwnContract");
-    ctx.dispatch_rpc(
-        &mut session,
-        "contractProxy",
-        None,
-        "AcceptContract",
-        &[PyRep::Integer(cid)],
-        &empty,
-        None,
-    )
-    .await
-    .unwrap();
+    let acc_rep = ctx
+        .dispatch_rpc(
+            &mut session,
+            "contractProxy",
+            None,
+            "AcceptContract",
+            &[PyRep::Integer(cid)],
+            &empty,
+            None,
+        )
+        .await
+        .unwrap();
+    let PyRep::KeyVal(acc_kv) = acc_rep else {
+        panic!("Expected accept KeyVal");
+    };
+    let wrap_id = acc_kv.get("courierPackageID").unwrap().as_i64().unwrap();
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(w) = snap.items.get_mut(&wrap_id) {
+            w.location_id = session.ship_id.unwrap();
+            w.flag = eve_db::InventoryFlag::Cargo;
+        }
+    });
     // Attempting to complete at `st_id` before delivering to `60_003_760` must fail
     let early_complete = ctx
         .dispatch_rpc(

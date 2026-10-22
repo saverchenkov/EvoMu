@@ -1011,37 +1011,35 @@ pub fn handle_orders_escrow(
                 }));
             }
 
-            let mut parsed_requests: Vec<(TypeId, i32, Option<IskCents>)> =
+            let mut parsed_requests: Vec<(TypeId, i32, Option<IskCents>, i64, i64)> =
                 Vec::with_capacity(raw_entries.len());
             for entry in raw_entries {
-                let (tid_i64, qty_i64, max_price_f64) = match entry {
+                let (tid_i64, qty_i64, max_price_f64, ent_st, ord_rng) = match entry {
                     PyRep::Tuple(els) | PyRep::List(els) => (
                         els.first().and_then(|e| e.as_i64()).unwrap_or(0),
                         els.get(1).and_then(|e| e.as_i64()).unwrap_or(0),
                         els.get(2).and_then(|e| e.as_f64()),
+                        station_id,
+                        -1,
                     ),
                     PyRep::KeyVal(kv) => (
                         kv.get("typeID").and_then(|e| e.as_i64()).unwrap_or(0),
                         kv.get("quantity").and_then(|e| e.as_i64()).unwrap_or(0),
-                        kv.get("maxPrice")
-                            .or_else(|| kv.get("price"))
-                            .and_then(|e| e.as_f64()),
+                        kv.get("maxPrice").or_else(|| kv.get("price")).and_then(|e| e.as_f64()),
+                        kv.get("stationID").and_then(|e| e.as_i64()).unwrap_or(station_id),
+                        kv.get("orderRange").or_else(|| kv.get("range")).and_then(|e| e.as_i64()).unwrap_or(-1),
                     ),
                     PyRep::Dict(kv) => {
-                        let find_key = |k: &str| {
-                            kv.iter()
-                                .find(|(ek, _)| ek.as_str() == Some(k))
-                                .map(|(_, ev)| ev)
-                        };
+                        let find_key = |k: &str| kv.iter().find(|(ek, _)| ek.as_str() == Some(k)).map(|(_, ev)| ev);
                         (
                             find_key("typeID").and_then(|e| e.as_i64()).unwrap_or(0),
                             find_key("quantity").and_then(|e| e.as_i64()).unwrap_or(0),
-                            find_key("maxPrice")
-                                .or_else(|| find_key("price"))
-                                .and_then(|e| e.as_f64()),
+                            find_key("maxPrice").or_else(|| find_key("price")).and_then(|e| e.as_f64()),
+                            find_key("stationID").and_then(|e| e.as_i64()).unwrap_or(station_id),
+                            find_key("orderRange").or_else(|| find_key("range")).and_then(|e| e.as_i64()).unwrap_or(-1),
                         )
                     }
-                    _ => (0, 0, None),
+                    _ => (0, 0, None, station_id, -1),
                 };
                 let Ok(tid_u32) = u32::try_from(tid_i64) else {
                     return Some(Err(BridgeRpcError {
@@ -1081,10 +1079,11 @@ pub fn handle_orders_escrow(
                     Some(p) => Some(IskCents::from_f64_isk(p)),
                     None => None,
                 };
-                parsed_requests.push((tid_u32, qty_i32, max_price_cents));
+                parsed_requests.push((tid_u32, qty_i32, max_price_cents, ent_st, ord_rng));
             }
 
             let now_unix = ctx.now_unix();
+            let region_id = session.region_id.unwrap_or(10_000_002);
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let mut avail_isk = snap
                     .characters
@@ -1098,28 +1097,41 @@ pub fn handle_orders_escrow(
                 let mut virtual_rem: HashMap<i64, i32> = snap
                     .market_orders
                     .values()
-                    .filter(|o| !o.is_bid && o.station_id == station_id && o.vol_remaining > 0)
+                    .filter(|o| !o.is_bid && o.region_id == region_id && o.vol_remaining > 0)
                     .map(|o| (o.order_id, o.vol_remaining))
                     .collect();
 
-                let mut planned_fills: Vec<(i64, TypeId, i32, IskCents, i64, bool, IskCents)> = Vec::new();
+                let mut planned_fills: Vec<(i64, TypeId, i32, IskCents, i64, bool, IskCents, i64)> = Vec::new();
                 let mut item_statuses: Vec<PyRep> = Vec::with_capacity(parsed_requests.len());
                 let mut total_cost = IskCents(0);
                 let mut total_qty_bought: i64 = 0;
                 let mut purchased_lines: i64 = 0;
 
-                for (req_tid, req_qty, max_price_opt) in &parsed_requests {
-                    let mut candidate_orders: Vec<(i64, IskCents, i64, bool)> = snap
+                for (req_tid, req_qty, max_price_opt, ent_st, ord_rng) in &parsed_requests {
+                    let mut candidate_orders: Vec<(i64, IskCents, i64, bool, i64)> = snap
                         .market_orders
                         .values()
                         .filter(|o| {
+                            let in_range = if *ord_rng < 0 {
+                                o.station_id == *ent_st
+                            } else if *ord_rng >= 32767 {
+                                o.region_id == region_id
+                            } else {
+                                let s1 = super::resolve_station_solar_system(ctx, snap, *ent_st);
+                                let s2 = super::resolve_station_solar_system(ctx, snap, o.station_id);
+                                match (s1, s2) {
+                                    (Some(a), Some(b)) if a == b => true,
+                                    (Some(a), Some(b)) if *ord_rng > 0 => super::solar_system_jump_distance(ctx, a, b).is_some_and(|d| (d as i64) <= *ord_rng),
+                                    _ => false,
+                                }
+                            };
                             !o.is_bid
-                                && o.station_id == station_id
+                                && in_range
                                 && o.type_id == *req_tid
                                 && virtual_rem.get(&o.order_id).copied().unwrap_or(0) > 0
                                 && max_price_opt.map(|mp| o.price.0 <= mp.0).unwrap_or(true)
                         })
-                        .map(|o| (o.order_id, o.price, o.owner_id, o.is_npc))
+                        .map(|o| (o.order_id, o.price, o.owner_id, o.is_npc, o.station_id))
                         .collect();
                     candidate_orders
                         .sort_by(|a, b| a.1.0.cmp(&b.1.0).then_with(|| a.0.cmp(&b.0)));
@@ -1127,7 +1139,7 @@ pub fn handle_orders_escrow(
                     let mut rem = *req_qty;
                     let mut filled_for_type: i32 = 0;
                     let mut stopped_by_isk = false;
-                    for (oid, ask_price, seller_id, is_npc) in candidate_orders {
+                    for (oid, ask_price, seller_id, is_npc, ord_st_id) in candidate_orders {
                         if rem <= 0 {
                             break;
                         }
@@ -1169,7 +1181,7 @@ pub fn handle_orders_escrow(
                         rem -= fill_qty;
                         filled_for_type += fill_qty;
                         total_qty_bought += fill_qty as i64;
-                        planned_fills.push((oid, *req_tid, fill_qty, fill_gross, seller_id, is_npc, ask_price));
+                        planned_fills.push((oid, *req_tid, fill_qty, fill_gross, seller_id, is_npc, ask_price, ord_st_id));
                     }
 
                     if filled_for_type > 0 {
@@ -1196,7 +1208,7 @@ pub fn handle_orders_escrow(
                 let mut total_sales_tax = IskCents(0);
                 let mut orders_created = Vec::with_capacity(planned_fills.len());
 
-                for (oid, fill_tid, fill_qty, fill_gross, seller_id, is_npc, ask_price) in planned_fills {
+                for (oid, fill_tid, fill_qty, fill_gross, seller_id, is_npc, ask_price, ord_st_id) in planned_fills {
                     if let Some(buyer) = snap.characters.get_mut(&char_id) {
                         buyer.balance = buyer
                             .balance
@@ -1273,7 +1285,7 @@ pub fn handle_orders_escrow(
                             item_id: new_item_id,
                             type_id: fill_tid,
                             owner_id: char_id,
-                            location_id: station_id,
+                            location_id: ord_st_id,
                             flag: InventoryFlag::Hangar,
                             quantity: fill_qty,
                             singleton: false,

@@ -663,7 +663,6 @@ pub fn handle(
                     return Ok(("Completed", c.expiration_unix, None, c.issuer_id));
                 }
 
-                let ship_id = caller_ship.unwrap();
                 snap.next_entity_id += 1;
                 let wrap_id = snap.next_entity_id;
                 snap.items.insert(
@@ -672,8 +671,8 @@ pub fn handle(
                         item_id: wrap_id,
                         type_id: 3468, // SDE Plastic Wrap (group 649)
                         owner_id: char_id,
-                        location_id: ship_id,
-                        flag: InventoryFlag::Cargo,
+                        location_id: c.start_station_id,
+                        flag: InventoryFlag::Hangar,
                         quantity: 1,
                         singleton: true,
                         version: 1,

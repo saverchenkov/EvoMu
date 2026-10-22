@@ -186,6 +186,39 @@ async fn test_market_broker_fee_and_sales_tax() {
     .await
     .expect("CancelCharOrder");
 
+    // Verify faction (-0.03%/pt) and corp (-0.02%/pt) standing discount + minimum 100 ISK broker fee
+    let st_def = ctx.sde.stations.get(&JITA_STATION_ID).unwrap();
+    let (owner_corp, owner_fac) = (st_def.owner_corporation_id, st_def.owner_faction_id.unwrap_or(500_001));
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.standings.insert(owner_fac, 5.0);
+            ch.standings.insert(owner_corp, 5.0);
+        }
+    });
+    let order_st = ctx
+        .dispatch_rpc(
+            &mut s1, "marketProxy", None, "PlaceBuyOrder",
+            &[PyRep::Integer(JITA_STATION_ID), PyRep::Integer(TRITANIUM_TYPE_ID as i64), PyRep::Real(1.0), PyRep::Integer(10_000), PyRep::Integer(90), PyRep::Integer(1)],
+            &kw, None,
+        )
+        .await
+        .expect("PlaceBuyOrder with faction and corp standing");
+    assert!((order_st.dict_get("brokerFeeISK").and_then(|v| v.as_f64()).unwrap() - 125.0).abs() < 0.01);
+    let oid_st = order_st.dict_get("orderID").and_then(|v| v.as_i64()).unwrap();
+    ctx.dispatch_rpc(&mut s1, "marketProxy", None, "CancelCharOrder", &[PyRep::Integer(oid_st)], &kw, None).await.unwrap();
+
+    let order_min = ctx
+        .dispatch_rpc(
+            &mut s1, "marketProxy", None, "PlaceBuyOrder",
+            &[PyRep::Integer(JITA_STATION_ID), PyRep::Integer(TRITANIUM_TYPE_ID as i64), PyRep::Real(1.0), PyRep::Integer(10), PyRep::Integer(90), PyRep::Integer(1)],
+            &kw, None,
+        )
+        .await
+        .expect("PlaceBuyOrder min 100 ISK broker fee");
+    assert!((order_min.dict_get("brokerFeeISK").and_then(|v| v.as_f64()).unwrap() - 100.0).abs() < 0.01);
+    let oid_min = order_min.dict_get("orderID").and_then(|v| v.as_i64()).unwrap();
+    ctx.dispatch_rpc(&mut s1, "marketProxy", None, "CancelCharOrder", &[PyRep::Integer(oid_min)], &kw, None).await.unwrap();
+
     let has_broker_journal = ctx.db.with_snapshot(|snap| {
         snap.wallet_journal
             .iter()
@@ -556,10 +589,25 @@ async fn test_market_orders_limit_escrow_queries_cancellation() {
     // parity: feat:market.escrow, feat:market.get-orders, feat:market.place-buy, feat:market.place-sell, rpc:marketProxy.CancelCharOrder, rpc:marketProxy.GetCharEscrow, rpc:marketProxy.GetOrders, rpc:marketProxy.PlaceBuyOrder, rpc:marketProxy.PlaceMultiSellOrder
     eve_testkit::attest(&["feat:market.escrow", "feat:market.get-orders", "feat:market.place-buy", "feat:market.place-sell"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
 
     let mut s1 = setup_pilot(&ctx, 201, "demo", "demo-secret", 90_000_001).await;
     let mut s2 = setup_pilot(&ctx, 202, "other", "other-secret", 90_000_002).await;
+
+    // Verify PlaceBuyOrder stores station (-1), solar system (0), N jumps (5), and region (32767) ranges
+    for &rng in &[-1_i64, 0, 32767] {
+        let r_ord = ctx.dispatch_rpc(
+            &mut s1, "marketProxy", None, "PlaceBuyOrder",
+            &[PyRep::Integer(JITA_STATION_ID), PyRep::Integer(TRITANIUM_TYPE_ID as i64), PyRep::Real(0.20), PyRep::Integer(100), PyRep::Integer(rng), PyRep::Integer(10), PyRep::Integer(14), PyRep::Bool(false)],
+            &kw, None,
+        ).await.expect("PlaceBuyOrder range check");
+        assert_eq!(r_ord.dict_get("range").and_then(|v| v.as_i64()), Some(rng));
+        assert_eq!(r_ord.dict_get("duration").and_then(|v| v.as_i64()), Some(14));
+        assert_eq!(r_ord.dict_get("minVolume").and_then(|v| v.as_i64()), Some(10));
+        let roid = r_ord.dict_get("orderID").and_then(|v| v.as_i64()).unwrap();
+        ctx.dispatch_rpc(&mut s1, "marketProxy", None, "CancelCharOrder", &[PyRep::Integer(roid)], &kw, None).await.unwrap();
+    }
 
     let s1_bal_initial = ctx.db.get_character(90_000_001).unwrap().balance;
 
@@ -746,6 +794,7 @@ async fn test_market_orders_limit_escrow_queries_cancellation() {
 
     let sell_price = 25.0;
     let sell_qty = 2_000;
+    let s2_bal_before_sell = ctx.db.get_character(90_000_002).unwrap().balance;
     let sell_order = ctx
         .dispatch_rpc(
             &mut s2,
@@ -774,6 +823,30 @@ async fn test_market_orders_limit_escrow_queries_cancellation() {
     };
     assert_eq!(sell_kv.get("filledImmediately"), Some(&PyRep::Bool(false)));
     let sell_oid = sell_kv.get("orderID").and_then(|v| v.as_i64()).unwrap();
+    let sell_broker_isk = sell_kv.get("brokerFeeISK").and_then(|v| v.as_f64()).unwrap();
+    let s2_bal_after_sell = ctx.db.get_character(90_000_002).unwrap().balance;
+    assert_eq!(s2_bal_before_sell.0 - s2_bal_after_sell.0, IskCents::from_f64_isk(sell_broker_isk).0);
+
+    // Verify placed sell order appears in GetOrders sell book with station, range, volRemaining, issueDate, and duration
+    let orders_after_sell = ctx
+        .dispatch_rpc(&mut s1, "marketProxy", None, "GetOrders", &[PyRep::Integer(TRITANIUM_TYPE_ID as i64)], &kw, None)
+        .await
+        .expect("GetOrders after sell");
+    let PyRep::Tuple(ref books2) = orders_after_sell else { panic!("Expected Tuple") };
+    let PyRep::ObjectEx { list: ref ask_rows, .. } = books2[0] else { panic!("Expected CRowset") };
+    let sell_row_cols = ask_rows
+        .iter()
+        .find_map(|r| match r {
+            PyRep::DBRow { columns, .. } if columns.get(3).and_then(|(_, c)| c.as_i64()) == Some(sell_oid) => Some(columns),
+            _ => None,
+        })
+        .expect("Placed sell order must appear in GetOrders sell rowset");
+    assert_eq!(sell_row_cols.get(0).map(|(_, v)| v), Some(&PyRep::Real(25.0)));
+    assert_eq!(sell_row_cols.get(1).map(|(_, v)| v), Some(&PyRep::Real(2_000.0)));
+    assert_eq!(sell_row_cols.get(7).map(|(_, v)| v), Some(&PyRep::Integer(JITA_STATION_ID)));
+    assert_eq!(sell_row_cols.get(9).map(|(_, v)| v), Some(&PyRep::Integer(32767)));
+    assert!(sell_row_cols.get(10).and_then(|(_, c)| c.as_i64()).unwrap_or(0) > 0);
+    assert_eq!(sell_row_cols.get(11).map(|(_, v)| v), Some(&PyRep::Integer(90)));
 
     let s2_hangar_trit = ctx.db.with_snapshot(|snap| {
         snap.items
@@ -975,8 +1048,8 @@ async fn test_market_orders_limit_escrow_queries_cancellation() {
             &[
                 PyRep::Integer(JITA_STATION_ID),
                 PyRep::Integer(TRITANIUM_TYPE_ID as i64),
-                PyRep::Real(1.0),
-                PyRep::Integer(10_000),
+                PyRep::Real(2.0),
+                PyRep::Integer(5_000),
                 PyRep::Integer(-1),
                 PyRep::Integer(1),
                 PyRep::Integer(90),
@@ -995,17 +1068,86 @@ async fn test_market_orders_limit_escrow_queries_cancellation() {
         .db
         .with_snapshot(|snap| snap.market_orders[&mt_oid].escrow);
     assert_eq!(mt_escrow, IskCents(316_406));
-    ctx.dispatch_rpc(
-        &mut s1,
-        "marketProxy",
-        None,
-        "CancelCharOrder",
-        &[PyRep::Integer(mt_oid)],
-        &kw,
-        None,
-    )
-    .await
-    .expect("Cancel Margin Trading buy order");
+
+    // Margin Trading fill balance check:
+    // 1) When buyer's wallet cannot cover the un-escrowed 6,835.94 ISK shortfall on fill, the order is cancelled and escrow refunded
+    let s1_saved_bal = ctx.db.get_character(90_000_001).unwrap().balance;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&90_000_001).unwrap().balance = IskCents::from_isk(1_000);
+        snap.skills.entry(90_000_002).or_default().insert(
+            3443, // Trade V so s2 can place additional orders
+            TrainedSkillRecord { type_id: 3443, level: 5, skill_points: 256_000.0 },
+        );
+    });
+    let insolvent_fill = ctx
+        .dispatch_rpc(
+            &mut s2, "marketProxy", None, "PlaceMultiSellOrder",
+            &[
+                PyRep::List(vec![PyRep::keyval([
+                    ("stationID", PyRep::Integer(JITA_STATION_ID)),
+                    ("typeID", PyRep::Integer(TRITANIUM_TYPE_ID as i64)),
+                    ("price", PyRep::Real(2.0)),
+                    ("quantity", PyRep::Integer(5_000)),
+                ])]),
+                PyRep::Bool(false), PyRep::Integer(90), PyRep::Real(0.0),
+            ],
+            &kw, None,
+        )
+        .await
+        .expect("PlaceMultiSellOrder when buyer is insolvent cancels buyer's Margin Trading order");
+    assert_eq!(insolvent_fill.dict_get("filledImmediately").and_then(|v| v.as_bool()), Some(false));
+    assert_eq!(ctx.db.with_snapshot(|snap| snap.market_orders[&mt_oid].vol_remaining), 0);
+    assert_eq!(
+        ctx.db.get_character(90_000_001).unwrap().balance,
+        IskCents::from_isk(1_000).checked_add(mt_escrow).unwrap(),
+        "Insolvent Margin Trading order cancellation must refund escrowed ISK"
+    );
+    let resting_sell_from_insolvent = insolvent_fill.dict_get("orderID").and_then(|v| v.as_i64()).unwrap();
+    ctx.dispatch_rpc(&mut s2, "marketProxy", None, "CancelCharOrder", &[PyRep::Integer(resting_sell_from_insolvent)], &kw, None).await.unwrap();
+
+    // 2) Restore s1's wallet balance, place a second Margin Trading 4 buy order (4,000 @ 2.0 ISK), and fill it
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&90_000_001).unwrap().balance = s1_saved_bal;
+    });
+    let mt_buy2 = ctx
+        .dispatch_rpc(
+            &mut s1, "marketProxy", None, "PlaceBuyOrder",
+            &[
+                PyRep::Integer(JITA_STATION_ID), PyRep::Integer(TRITANIUM_TYPE_ID as i64),
+                PyRep::Real(2.0), PyRep::Integer(4_000), PyRep::Integer(-1),
+                PyRep::Integer(1), PyRep::Integer(90), PyRep::Bool(false),
+            ],
+            &kw, None,
+        )
+        .await
+        .expect("Place second Margin Trading buy order");
+    let mt_oid2 = mt_buy2.dict_get("orderID").and_then(|v| v.as_i64()).unwrap();
+    let mt_escrow2 = ctx.db.with_snapshot(|snap| snap.market_orders[&mt_oid2].escrow);
+    assert_eq!(mt_escrow2, IskCents(253_125)); // 8,000 ISK * 0.75^4 = 2,531.25 ISK
+    let s1_bal_before_mt_fill = ctx.db.get_character(90_000_001).unwrap().balance;
+    let solvent_fill = ctx
+        .dispatch_rpc(
+            &mut s2, "marketProxy", None, "PlaceMultiSellOrder",
+            &[
+                PyRep::List(vec![PyRep::keyval([
+                    ("stationID", PyRep::Integer(JITA_STATION_ID)),
+                    ("typeID", PyRep::Integer(TRITANIUM_TYPE_ID as i64)),
+                    ("price", PyRep::Real(2.0)),
+                    ("quantity", PyRep::Integer(4_000)),
+                ])]),
+                PyRep::Bool(false), PyRep::Integer(0), PyRep::Real(0.0),
+            ],
+            &kw, None,
+        )
+        .await
+        .expect("Solvent Margin Trading fill must succeed");
+    assert_eq!(solvent_fill.dict_get("filledImmediately").and_then(|v| v.as_bool()), Some(true));
+    let s1_bal_after_mt_fill = ctx.db.get_character(90_000_001).unwrap().balance;
+    assert_eq!(
+        s1_bal_before_mt_fill.0 - s1_bal_after_mt_fill.0,
+        IskCents::from_isk(8_000).0 - mt_escrow2.0,
+        "Un-escrowed remainder (5,468.75 ISK) must be debited from buyer wallet on fill"
+    );
 
     ctx.dispatch_rpc(
         &mut s2,
@@ -1031,5 +1173,5 @@ async fn test_market_orders_limit_escrow_queries_cancellation() {
             .map(|i| i.quantity)
             .sum::<i32>()
     });
-    assert_eq!(s2_hangar_after_cancel, 10_000);
+    assert_eq!(s2_hangar_after_cancel, 6_000);
 }

@@ -155,7 +155,8 @@ async fn test_e3_contracts_lifecycle_item_exchange_courier_auction() {
     });
     assert_eq!(item_transferred, Some(true));
 
-    // 2. Courier Contract
+    // 2. Courier Contract (Jita 60_003_760 -> Perimeter 60_003_766)
+    let dest_station_id = 60_003_766_i64;
     let courier_item_id = ctx.db.with_mut_snapshot(|snap| {
         snap.next_entity_id += 1;
         let id = snap.next_entity_id;
@@ -188,7 +189,7 @@ async fn test_e3_contracts_lifecycle_item_exchange_courier_auction() {
             PyRep::Integer(1440),
             PyRep::Integer(1),
             PyRep::Integer(JITA_STATION_ID),
-            PyRep::Integer(JITA_STATION_ID),
+            PyRep::Integer(dest_station_id),
             PyRep::Real(0.0),
             PyRep::Real(20_000.0),  // reward
             PyRep::Real(100_000.0), // collateral
@@ -210,9 +211,25 @@ async fn test_e3_contracts_lifecycle_item_exchange_courier_auction() {
     ).await.expect("Accept Courier Contract");
     let PyRep::KeyVal(ac_kv) = accept_courier else { panic!("Expected KeyVal"); };
     assert_eq!(ac_kv.get("status"), Some(&PyRep::String("InProgress".into())));
+    let wrap_id = ac_kv.get("courierPackageID").and_then(|v| v.as_i64()).unwrap();
+    let wrap_item = ctx.db.get_item(wrap_id).unwrap();
+    assert_eq!(wrap_item.type_id, 3468);
+    assert_eq!(wrap_item.owner_id, 90_000_002);
+    assert_eq!(wrap_item.location_id, JITA_STATION_ID);
+    assert_eq!(wrap_item.flag, InventoryFlag::Hangar);
+    assert_eq!(ctx.db.get_item(courier_item_id).unwrap().location_id, wrap_id);
 
     let s2_bal_post_accept = ctx.db.get_character(90_000_002).unwrap().balance;
     assert_eq!(s2_bal_pre_courier.0 - s2_bal_post_accept.0, 10_000_000);
+
+    // Move hauler and courier package to destination station 60_003_766
+    let s2_ship_id = s2.ship_id.unwrap();
+    s2.station_id = Some(dest_station_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_002) { ch.station_id = Some(dest_station_id); }
+        if let Some(sh) = snap.items.get_mut(&s2_ship_id) { sh.location_id = dest_station_id; }
+        if let Some(w) = snap.items.get_mut(&wrap_id) { w.location_id = dest_station_id; }
+    });
 
     let complete_courier = rpc(
         &ctx,
@@ -228,6 +245,17 @@ async fn test_e3_contracts_lifecycle_item_exchange_courier_auction() {
 
     let s2_bal_post_complete = ctx.db.get_character(90_000_002).unwrap().balance;
     assert_eq!(s2_bal_post_complete.0 - s2_bal_post_accept.0, 12_000_000);
+    assert!(ctx.db.get_item(wrap_id).is_none());
+    let delivered_item = ctx.db.get_item(courier_item_id).unwrap();
+    assert_eq!(delivered_item.owner_id, 90_000_001);
+    assert_eq!(delivered_item.location_id, dest_station_id);
+    assert_eq!(delivered_item.flag, InventoryFlag::Hangar);
+
+    s2.station_id = Some(JITA_STATION_ID);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_002) { ch.station_id = Some(JITA_STATION_ID); }
+        if let Some(sh) = snap.items.get_mut(&s2_ship_id) { sh.location_id = JITA_STATION_ID; }
+    });
 
     // 3. Auction Contract
     let auction_item_id = ctx.db.with_mut_snapshot(|snap| {
@@ -337,6 +365,7 @@ async fn test_contracts_item_exchange_and_request() {
     // parity: feat:contracts.item-exchange, feat:contracts.item-exchange-request, feat:removed.loan-contracts
     eve_testkit::attest(&["feat:contracts.item-exchange", "feat:contracts.item-exchange-request", "feat:removed.loan-contracts"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let mut s1 = setup_pilot(&ctx, 304, "demo", "demo-secret", 90_000_001).await;
     let mut s2 = setup_pilot(&ctx, 305, "other", "other-secret", 90_000_002).await;
 
@@ -391,6 +420,12 @@ async fn test_contracts_item_exchange_and_request() {
     let PyRep::KeyVal(cx_kv) = c_exchange else { panic!("Expected KeyVal"); };
     let exchange_cid = cx_kv.get("contractID").and_then(|v| v.as_i64()).unwrap();
 
+    // Creating an item exchange locks the items into the contract escrow
+    let locked_state = ctx.db.with_snapshot(|snap| {
+        snap.items.get(&100_000_003).map(|i| (i.location_id, i.flag))
+    });
+    assert_eq!(locked_state, Some((exchange_cid, InventoryFlag::Locked)));
+
     let s1_bal_before_accept = ctx.db.get_character(90_000_001).unwrap().balance;
     let s2_bal_before_accept = ctx.db.get_character(90_000_002).unwrap().balance;
 
@@ -404,8 +439,8 @@ async fn test_contracts_item_exchange_and_request() {
     assert_eq!(s1_bal_after.0 - s1_bal_before_accept.0, 7_500_000);
     assert_eq!(s2_bal_before_accept.0 - s2_bal_after.0, 7_500_000);
 
-    let item_owner = ctx.db.with_snapshot(|snap| { snap.items.get(&100_000_003).map(|i| (i.owner_id, i.flag)) });
-    assert_eq!(item_owner, Some((90_000_002, InventoryFlag::Hangar)));
+    let item_owner = ctx.db.with_snapshot(|snap| { snap.items.get(&100_000_003).map(|i| (i.owner_id, i.location_id, i.flag)) });
+    assert_eq!(item_owner, Some((90_000_002, JITA_STATION_ID, InventoryFlag::Hangar)));
 
     let requested_items = PyRep::List(vec![PyRep::Tuple(vec![
         PyRep::Integer(TRITANIUM_TYPE_ID as i64),
@@ -444,7 +479,8 @@ async fn test_contracts_item_exchange_and_request() {
     .unwrap_err();
     assert_eq!(missing_req_err.code, "MissingRequestedContractItems");
 
-    ctx.db.with_mut_snapshot(|snap| {
+    // Acceptor owns 1,000 Tritanium at a DIFFERENT station (60_003_766) -> still rejected because acceptor must have them at the contract location
+    let req_item_id = ctx.db.with_mut_snapshot(|snap| {
         snap.next_entity_id += 1;
         let item_id = snap.next_entity_id;
         snap.items.insert(
@@ -453,7 +489,7 @@ async fn test_contracts_item_exchange_and_request() {
                 item_id,
                 type_id: TRITANIUM_TYPE_ID,
                 owner_id: 90_000_002,
-                location_id: JITA_STATION_ID,
+                location_id: 60_003_766,
                 flag: InventoryFlag::Hangar,
                 quantity: 1_000,
                 singleton: false,
@@ -461,6 +497,24 @@ async fn test_contracts_item_exchange_and_request() {
                 ..Default::default()
             },
         );
+        item_id
+    });
+    let wrong_loc_err = rpc(&ctx, &mut s2, "contractProxy", "AcceptContract", &[PyRep::Integer(req_cid)]).await.unwrap_err();
+    assert_eq!(wrong_loc_err.code, "MissingRequestedContractItems");
+
+    // Move the Tritanium to JITA_STATION_ID so acceptor has them at the contract location
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(it) = snap.items.get_mut(&req_item_id) {
+            it.location_id = JITA_STATION_ID;
+        }
+    });
+    let s1_trit_before = ctx.db.with_snapshot(|snap| {
+        snap.items.values().filter(|i| {
+            i.owner_id == 90_000_001
+                && i.location_id == JITA_STATION_ID
+                && i.flag == InventoryFlag::Hangar
+                && i.type_id == TRITANIUM_TYPE_ID
+        }).map(|i| i.quantity).sum::<i32>()
     });
 
     let accept_req = rpc(&ctx, &mut s2, "contractProxy", "AcceptContract", &[PyRep::Integer(req_cid)],).await
@@ -476,7 +530,8 @@ async fn test_contracts_item_exchange_and_request() {
                     && i.type_id == TRITANIUM_TYPE_ID
             }).map(|i| i.quantity).sum::<i32>()
     });
-    assert!(s1_trit_qty >= 500);
+    assert_eq!(s1_trit_qty - s1_trit_before, 500);
+    assert_eq!(ctx.db.get_item(req_item_id).unwrap().quantity, 500);
 }
 
 #[tokio::test]
@@ -650,9 +705,7 @@ async fn test_contracts_auction_and_courier() {
     let auc2_cid = auc2_kv.get("contractID").and_then(|v| v.as_i64()).unwrap();
     rpc(&ctx, &mut s2, "contractProxy", "PlaceBid", &[PyRep::Integer(auc2_cid), PyRep::Real(120_000.0)],).await
     .expect("PlaceBid on 2nd auction");
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(c) = snap.contracts.get_mut(&auc2_cid) { c.expiration_unix = 1; }
-    });
+    ctx.advance_secs(20_160 * 60 + 10);
     let settled_auc = rpc(&ctx, &mut s1, "contractProxy", "GetContract", &[PyRep::Integer(auc2_cid)],).await
     .expect("GetContract settles expired auction");
     let PyRep::KeyVal(sauc_kv) = settled_auc else { panic!("Expected KeyVal"); };
@@ -707,8 +760,8 @@ async fn test_contracts_auction_and_courier() {
     let wrap_item = ctx.db.get_item(wrap_id).unwrap();
     assert_eq!(wrap_item.type_id, 3468);
     assert_eq!(wrap_item.owner_id, 90_000_002);
-    assert_eq!(wrap_item.location_id, s2_ship_id);
-    assert_eq!(wrap_item.flag, InventoryFlag::Cargo);
+    assert_eq!(wrap_item.location_id, JITA_STATION_ID);
+    assert_eq!(wrap_item.flag, InventoryFlag::Hangar);
     assert_eq!(ctx.db.get_item(cour_item_id).unwrap().location_id, wrap_id);
 
     let s2_bal_after_accept_cour = ctx.db.get_character(90_000_002).unwrap().balance;
@@ -842,8 +895,10 @@ async fn test_contracts_auction_and_courier() {
     let PyRep::KeyVal(cfail_kv) = c_fail_courier else { panic!("Expected KeyVal"); };
     let fail_cid = cfail_kv.get("contractID").and_then(|v| v.as_i64()).unwrap();
 
-    rpc(&ctx, &mut s2, "contractProxy", "AcceptContract", &[PyRep::Integer(fail_cid)],).await
+    let acc_fail = rpc(&ctx, &mut s2, "contractProxy", "AcceptContract", &[PyRep::Integer(fail_cid)],).await
     .expect("Accept Courier Contract to fail");
+    let PyRep::KeyVal(acc_fail_kv) = acc_fail else { panic!("Expected KeyVal"); };
+    let fail_wrap_id = acc_fail_kv.get("courierPackageID").and_then(|v| v.as_i64()).unwrap();
 
     let s1_bal_before_fail = ctx.db.get_character(90_000_001).unwrap().balance;
     let fail_res = rpc(&ctx, &mut s2, "contractProxy", "FailContract", &[PyRep::Integer(fail_cid)],).await
@@ -853,6 +908,10 @@ async fn test_contracts_auction_and_courier() {
 
     let s1_bal_after_fail = ctx.db.get_character(90_000_001).unwrap().balance;
     assert_eq!(s1_bal_after_fail.0 - s1_bal_before_fail.0, 35_000_000);
+    assert!(ctx.db.get_item(fail_wrap_id).is_none());
+    let fail_item = ctx.db.get_item(fail_item_id).unwrap();
+    assert_eq!(fail_item.owner_id, 90_000_002);
+    assert_eq!(fail_item.flag, InventoryFlag::Hangar);
 
     let c_exp_courier = rpc(
         &ctx,
@@ -880,12 +939,13 @@ async fn test_contracts_auction_and_courier() {
     ).await.expect("Create Courier Contract for deadline expiry");
     let PyRep::KeyVal(cexp_kv) = c_exp_courier else { panic!("Expected KeyVal"); };
     let exp_cour_cid = cexp_kv.get("contractID").and_then(|v| v.as_i64()).unwrap();
-    rpc(&ctx, &mut s2, "contractProxy", "AcceptContract", &[PyRep::Integer(exp_cour_cid)],).await
+    let acc_exp = rpc(&ctx, &mut s2, "contractProxy", "AcceptContract", &[PyRep::Integer(exp_cour_cid)],).await
     .expect("Accept overdue courier");
+    let PyRep::KeyVal(acc_exp_kv) = acc_exp else { panic!("Expected KeyVal"); };
+    let exp_wrap_id = acc_exp_kv.get("courierPackageID").and_then(|v| v.as_i64()).unwrap();
     let s1_bal_before_overdue = ctx.db.get_character(90_000_001).unwrap().balance;
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(c) = snap.contracts.get_mut(&exp_cour_cid) { c.expiration_unix = 1; }
-    });
+    // Advance clock past the 1-day courier delivery deadline (86,400 seconds)
+    ctx.advance_secs(86_400 + 10);
     let overdue_err = rpc(
         &ctx,
         &mut s2,
@@ -896,6 +956,12 @@ async fn test_contracts_auction_and_courier() {
     assert_eq!(overdue_err.code, "ContractExpired");
     let s1_bal_after_overdue = ctx.db.get_character(90_000_001).unwrap().balance;
     assert_eq!(s1_bal_after_overdue.0 - s1_bal_before_overdue.0, 12_500_000);
+    assert_eq!(ctx.db.with_snapshot(|snap| snap.contracts[&exp_cour_cid].status.clone()), "Failed");
+    assert!(ctx.db.get_item(exp_wrap_id).is_none());
+    let resolved_exp_item = ctx.db.get_item(exp_item_id).unwrap();
+    assert_eq!(resolved_exp_item.owner_id, 90_000_002);
+    assert_eq!(resolved_exp_item.location_id, JITA_STATION_ID);
+    assert_eq!(resolved_exp_item.flag, InventoryFlag::Hangar);
 }
 
 #[tokio::test]

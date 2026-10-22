@@ -123,6 +123,7 @@ async fn test_industry_blueprint_data_owner_limits_facilities_taxes_and_sci() {
     // parity: feat:industry.blueprint-data, feat:industry.blueprint-limits, feat:industry.facilities, feat:industry.facility-tax, feat:industry.cost-index, feat:industry.structure-rigs, feat:industry.structure-standup-rig-security-multipliers, feat:industry.job-slots, feat:industry.corp-industry, rpc:blueprintManager.GetBlueprintDataByOwner, rpc:blueprintManager.GetLimits, rpc:facilityManager.GetFacility, rpc:facilityManager.GetFacilityTaxes, rpc:facilityManager.SetFacilityTaxes, rpc:map.GetIndustryCostModifier
     eve_testkit::attest(&["feat:industry.blueprint-data", "feat:industry.blueprint-limits", "feat:industry.facilities", "feat:industry.facility-tax", "feat:industry.cost-index", "feat:industry.structure-rigs", "feat:industry.structure-standup-rig-security-multipliers", "feat:industry.job-slots", "feat:industry.corp-industry"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let char_id = 90_000_001;
     let corp_id = 98_000_001;
@@ -135,7 +136,7 @@ async fn test_industry_blueprint_data_owner_limits_facilities_taxes_and_sci() {
 
     // Seed corporation, skills, a Raitaru in Jita (High-Sec, 1.0x rig multiplier) with a Standup M-Set Basic Material Efficiency I rig (37146),
     // and an Azbel in Low-Sec (1.9x rig multiplier) with the same rig.
-    let bp_item_id = ctx.db.with_mut_snapshot(|snap| {
+    let (bp_item_id, bpc_item_id) = ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.corporation_id = corp_id;
             ch.balance = IskCents::from_isk(500_000_000);
@@ -160,54 +161,13 @@ async fn test_industry_blueprint_data_owner_limits_facilities_taxes_and_sci() {
             },
         );
         let sk = snap.skills.entry(char_id).or_default();
-        sk.insert(
-            MASS_PRODUCTION_SKILL,
-            TrainedSkillRecord {
-                type_id: MASS_PRODUCTION_SKILL,
-                level: 5,
-                skill_points: 256_000.0,
-            },
-        );
-        sk.insert(
-            ADV_MASS_PRODUCTION_SKILL,
-            TrainedSkillRecord {
-                type_id: ADV_MASS_PRODUCTION_SKILL,
-                level: 4,
-                skill_points: 100_000.0,
-            },
-        );
-        sk.insert(
-            LABORATORY_OPERATION_SKILL,
-            TrainedSkillRecord {
-                type_id: LABORATORY_OPERATION_SKILL,
-                level: 5,
-                skill_points: 256_000.0,
-            },
-        );
-        sk.insert(
-            ADV_LABORATORY_OPERATION_SKILL,
-            TrainedSkillRecord {
-                type_id: ADV_LABORATORY_OPERATION_SKILL,
-                level: 3,
-                skill_points: 60_000.0,
-            },
-        );
-        sk.insert(
-            MASS_REACTIONS_SKILL,
-            TrainedSkillRecord {
-                type_id: MASS_REACTIONS_SKILL,
-                level: 5,
-                skill_points: 256_000.0,
-            },
-        );
-        sk.insert(
-            ADV_MASS_REACTIONS_SKILL,
-            TrainedSkillRecord {
-                type_id: ADV_MASS_REACTIONS_SKILL,
-                level: 2,
-                skill_points: 40_000.0,
-            },
-        );
+        sk.insert(3380, TrainedSkillRecord { type_id: 3380, level: 5, skill_points: 256_000.0 });
+        sk.insert(MASS_PRODUCTION_SKILL, TrainedSkillRecord { type_id: MASS_PRODUCTION_SKILL, level: 5, skill_points: 256_000.0 });
+        sk.insert(ADV_MASS_PRODUCTION_SKILL, TrainedSkillRecord { type_id: ADV_MASS_PRODUCTION_SKILL, level: 4, skill_points: 100_000.0 });
+        sk.insert(LABORATORY_OPERATION_SKILL, TrainedSkillRecord { type_id: LABORATORY_OPERATION_SKILL, level: 5, skill_points: 256_000.0 });
+        sk.insert(ADV_LABORATORY_OPERATION_SKILL, TrainedSkillRecord { type_id: ADV_LABORATORY_OPERATION_SKILL, level: 3, skill_points: 60_000.0 });
+        sk.insert(MASS_REACTIONS_SKILL, TrainedSkillRecord { type_id: MASS_REACTIONS_SKILL, level: 5, skill_points: 256_000.0 });
+        sk.insert(ADV_MASS_REACTIONS_SKILL, TrainedSkillRecord { type_id: ADV_MASS_REACTIONS_SKILL, level: 2, skill_points: 40_000.0 });
 
         for (sid, stype, ssys) in [
             (hs_raitaru_id, 35_825_u32, JITA_SOLAR_SYSTEM_ID),
@@ -221,43 +181,45 @@ async fn test_industry_blueprint_data_owner_limits_facilities_taxes_and_sci() {
             seed_item(snap, 37_146, corp_id, sid, InventoryFlag::RigSlot0, 1, true, false, None);
         }
 
-        // Seed a Rifter BPO owned by corp
+        // Seed a Rifter BPO owned by corp at hs_raitaru_id and a Rifter BPC owned by char at JITA_STATION_ID
         let bpid = seed_item(snap, RIFTER_BP_TYPE_ID, corp_id, hs_raitaru_id, InventoryFlag::Hangar, 1, true, false, None);
         if let Some(bp) = snap.items.get_mut(&bpid) {
             bp.dynamic_attributes = HashMap::from([(1112, 10.0), (1113, 20.0)]);
         }
-        bpid
+        let bpcid = seed_item(snap, RIFTER_BP_TYPE_ID, char_id, JITA_STATION_ID, InventoryFlag::Hangar, 1, true, true, Some(4));
+        if let Some(bpc) = snap.items.get_mut(&bpcid) {
+            bpc.dynamic_attributes = HashMap::from([(1112, 8.0), (1113, 16.0)]);
+        }
+        if let Some(sde_bp) = ctx.sde.blueprints.get(&RIFTER_BP_TYPE_ID) {
+            for m in &sde_bp.materials {
+                seed_item(snap, m.type_id, corp_id, hs_raitaru_id, InventoryFlag::Hangar, (m.quantity as i32) * 10, false, false, None);
+                seed_item(snap, m.type_id, char_id, JITA_STATION_ID, InventoryFlag::Hangar, (m.quantity as i32) * 10, false, false, None);
+            }
+        }
+        (bpid, bpcid)
     });
 
     // 1. GetLimits: 1 + 5 + 4 = 10 mfg, 1 + 5 + 3 = 9 science, 1 + 5 + 2 = 8 reactions
     let limits = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "blueprintManager",
-            None,
-            "GetLimits",
-            &[],
-            &kw,
-            None,
-        )
+        .dispatch_rpc(&mut sess, "blueprintManager", None, "GetLimits", &[], &kw, None)
         .await
         .expect("GetLimits");
-    assert_eq!(
-        limits
-            .dict_get("maxManufacturingJobs")
-            .and_then(|v| v.as_i64()),
-        Some(10)
-    );
-    assert_eq!(
-        limits.dict_get("maxResearchJobs").and_then(|v| v.as_i64()),
-        Some(9)
-    );
-    assert_eq!(
-        limits.dict_get("maxReactionsJobs").and_then(|v| v.as_i64()),
-        Some(8)
-    );
+    assert_eq!(limits.dict_get("maxManufacturingJobs").and_then(|v| v.as_i64()), Some(10));
+    assert_eq!(limits.dict_get("maxResearchJobs").and_then(|v| v.as_i64()), Some(9));
+    assert_eq!(limits.dict_get("maxReactionsJobs").and_then(|v| v.as_i64()), Some(8));
 
-    // 2. GetBlueprintDataByOwner for corporation
+    // 2. GetBlueprintData & GetBlueprintDataByOwner return BPO/BPC, ME, TE, runs remaining, and location
+    let bpc_data = ctx
+        .dispatch_rpc(&mut sess, "blueprintManager", None, "GetBlueprintData", &[PyRep::Integer(bpc_item_id)], &kw, None)
+        .await
+        .expect("GetBlueprintData BPC");
+    assert_eq!(bpc_data.dict_get("blueprintID").and_then(|v| v.as_i64()), Some(bpc_item_id));
+    assert_eq!(bpc_data.dict_get("original").and_then(|v| v.as_bool()), Some(false));
+    assert_eq!(bpc_data.dict_get("materialEfficiency").and_then(|v| v.as_i64()), Some(8));
+    assert_eq!(bpc_data.dict_get("timeEfficiency").and_then(|v| v.as_i64()), Some(16));
+    assert_eq!(bpc_data.dict_get("runsRemaining").and_then(|v| v.as_i64()), Some(4));
+    assert_eq!(bpc_data.dict_get("facilityID").and_then(|v| v.as_i64()), Some(JITA_STATION_ID));
+
     let corp_bps = ctx
         .dispatch_rpc(
             &mut sess,
@@ -274,44 +236,39 @@ async fn test_industry_blueprint_data_owner_limits_facilities_taxes_and_sci() {
         panic!("Expected List of blueprints from GetBlueprintDataByOwner");
     };
     assert_eq!(bp_list.len(), 1);
-    assert_eq!(
-        bp_list[0].dict_get("itemID").and_then(|v| v.as_i64()),
-        Some(bp_item_id)
-    );
+    assert_eq!(bp_list[0].dict_get("itemID").and_then(|v| v.as_i64()), Some(bp_item_id));
+    assert_eq!(bp_list[0].dict_get("original").and_then(|v| v.as_bool()), Some(true));
+    assert_eq!(bp_list[0].dict_get("materialEfficiency").and_then(|v| v.as_i64()), Some(10));
+    assert_eq!(bp_list[0].dict_get("timeEfficiency").and_then(|v| v.as_i64()), Some(20));
+    assert_eq!(bp_list[0].dict_get("runsRemaining").and_then(|v| v.as_i64()), Some(-1));
+    assert_eq!(bp_list[0].dict_get("facilityID").and_then(|v| v.as_i64()), Some(hs_raitaru_id));
 
-    // 3. Compare Structure Rig security multiplier: High-Sec Raitaru (1.0x rig) vs Low-Sec Azbel (1.9x rig)
+    // 3. GetFacilities & GetFacility: NPC stations and structures with activities, bonuses, and taxes
+    let all_facs = ctx
+        .dispatch_rpc(&mut sess, "facilityManager", None, "GetFacilities", &[], &kw, None)
+        .await
+        .expect("GetFacilities");
+    let PyRep::List(fac_list) = all_facs else { panic!("Expected List from GetFacilities") };
+    let jita_fac = fac_list.iter().find(|f| f.dict_get("facilityID").and_then(|v| v.as_i64()) == Some(JITA_STATION_ID)).expect("Jita NPC station in GetFacilities");
+    assert_eq!(jita_fac.dict_get("materialModifier").and_then(|v| v.as_f64()), Some(1.0));
+    assert_eq!(jita_fac.dict_get("timeModifier").and_then(|v| v.as_f64()), Some(1.0));
+    assert_eq!(jita_fac.dict_get("costModifier").and_then(|v| v.as_f64()), Some(1.0));
+    assert_eq!(jita_fac.dict_get("tax").and_then(|v| v.as_f64()), Some(0.10));
+    let PyRep::List(jita_acts) = jita_fac.dict_get("activities").expect("Jita activities") else { panic!("Expected List") };
+    assert!(jita_acts.contains(&PyRep::Integer(1)) && jita_acts.contains(&PyRep::Integer(8)));
+    assert!(fac_list.iter().any(|f| f.dict_get("facilityID").and_then(|v| v.as_i64()) == Some(hs_raitaru_id)));
+
+    // Compare Structure Rig security multiplier: High-Sec Raitaru (1.0x rig) vs Low-Sec Azbel (1.9x rig)
     let hs_fac = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "facilityManager",
-            None,
-            "GetFacility",
-            &[PyRep::Integer(hs_raitaru_id)],
-            &kw,
-            None,
-        )
+        .dispatch_rpc(&mut sess, "facilityManager", None, "GetFacility", &[PyRep::Integer(hs_raitaru_id)], &kw, None)
         .await
         .expect("GetFacility HS Raitaru");
     let ls_fac = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "facilityManager",
-            None,
-            "GetFacility",
-            &[PyRep::Integer(ls_azbel_id)],
-            &kw,
-            None,
-        )
+        .dispatch_rpc(&mut sess, "facilityManager", None, "GetFacility", &[PyRep::Integer(ls_azbel_id)], &kw, None)
         .await
         .expect("GetFacility LS Azbel");
-    let hs_mat_mod = hs_fac
-        .dict_get("materialModifier")
-        .and_then(|v| v.as_f64())
-        .unwrap();
-    let ls_mat_mod = ls_fac
-        .dict_get("materialModifier")
-        .and_then(|v| v.as_f64())
-        .unwrap();
+    let hs_mat_mod = hs_fac.dict_get("materialModifier").and_then(|v| v.as_f64()).unwrap();
+    let ls_mat_mod = ls_fac.dict_get("materialModifier").and_then(|v| v.as_f64()).unwrap();
     assert!(
         ls_mat_mod < hs_mat_mod,
         "Low-sec 1.9x rig multiplier ({ls_mat_mod}) must yield stronger material reduction than High-sec 1.0x ({hs_mat_mod})"
@@ -332,44 +289,75 @@ async fn test_industry_blueprint_data_owner_limits_facilities_taxes_and_sci() {
     assert_eq!(react_rig_hs.0, 0.0, "Reaction rigs give 0.0x bonus in high-sec");
     assert_eq!(react_rig_hs.2, 0.0, "Reaction rig security multiplier is 0.0 in high-sec");
 
-    // 4. GetFacilityTaxes & SetFacilityTaxes + map.GetIndustryCostModifier
+    // 4. GetFacilityTaxes & SetFacilityTaxes per activity + charged on InstallJob at structure (3.5%) vs NPC station (10% fixed)
     ctx.dispatch_rpc(
         &mut sess,
         "facilityManager",
         None,
         "SetFacilityTaxes",
-        &[PyRep::Integer(hs_raitaru_id), PyRep::Real(0.035)],
+        &[
+            PyRep::Integer(hs_raitaru_id),
+            PyRep::Dict(vec![(PyRep::Integer(1), PyRep::Real(0.035)), (PyRep::Integer(4), PyRep::Real(0.02))]),
+        ],
         &kw,
         None,
     )
     .await
     .expect("SetFacilityTaxes");
     let taxes = ctx
+        .dispatch_rpc(&mut sess, "facilityManager", None, "GetFacilityTaxes", &[PyRep::Integer(hs_raitaru_id)], &kw, None)
+        .await
+        .expect("GetFacilityTaxes");
+    assert!((taxes.dict_get("tax").and_then(|v| v.as_f64()).unwrap() - 0.035).abs() < 1e-6);
+    assert!((taxes.dict_get("4").and_then(|v| v.as_f64()).unwrap() - 0.02).abs() < 1e-6);
+
+    let corp_job = ctx
         .dispatch_rpc(
             &mut sess,
-            "facilityManager",
+            "industryManager",
             None,
-            "GetFacilityTaxes",
-            &[PyRep::Integer(hs_raitaru_id)],
+            "InstallJob",
+            &[PyRep::keyval([
+                ("blueprintID", PyRep::Integer(bp_item_id)),
+                ("blueprintTypeID", PyRep::Integer(RIFTER_BP_TYPE_ID as i64)),
+                ("facilityID", PyRep::Integer(hs_raitaru_id)),
+                ("activityID", PyRep::Integer(1)),
+                ("runs", PyRep::Integer(1)),
+                ("useCorp", PyRep::Bool(true)),
+            ])],
             &kw,
             None,
         )
         .await
-        .expect("GetFacilityTaxes");
-    assert!(
-        (taxes.dict_get("tax").and_then(|v| v.as_f64()).unwrap() - 0.035).abs() < 1e-6
-    );
+        .expect("InstallJob at structure with 3.5% tax");
+    let struct_base = corp_job.dict_get("baseJobCost").and_then(|v| v.as_f64()).unwrap();
+    let struct_tax = corp_job.dict_get("facilityTaxISK").and_then(|v| v.as_f64()).unwrap();
+    assert!((struct_tax - (struct_base * 0.035 * 100.0).round() / 100.0).abs() < 0.02);
 
-    let sci = ctx
+    let npc_job = ctx
         .dispatch_rpc(
             &mut sess,
-            "map",
+            "industryManager",
             None,
-            "GetIndustryCostModifier",
-            &[PyRep::Integer(JITA_SOLAR_SYSTEM_ID as i64)],
+            "InstallJob",
+            &[PyRep::keyval([
+                ("blueprintID", PyRep::Integer(bpc_item_id)),
+                ("blueprintTypeID", PyRep::Integer(RIFTER_BP_TYPE_ID as i64)),
+                ("facilityID", PyRep::Integer(JITA_STATION_ID)),
+                ("activityID", PyRep::Integer(1)),
+                ("runs", PyRep::Integer(1)),
+            ])],
             &kw,
             None,
         )
+        .await
+        .expect("InstallJob at NPC station with 10% fixed tax");
+    let npc_base = npc_job.dict_get("baseJobCost").and_then(|v| v.as_f64()).unwrap();
+    let npc_tax = npc_job.dict_get("facilityTaxISK").and_then(|v| v.as_f64()).unwrap();
+    assert!((npc_tax - (npc_base * 0.10 * 100.0).round() / 100.0).abs() < 0.02);
+
+    let sci = ctx
+        .dispatch_rpc(&mut sess, "map", None, "GetIndustryCostModifier", &[PyRep::Integer(JITA_SOLAR_SYSTEM_ID as i64)], &kw, None)
         .await
         .expect("GetIndustryCostModifier");
     assert!(sci.dict_get("1").and_then(|v| v.as_f64()).unwrap_or(0.0) > 0.0);

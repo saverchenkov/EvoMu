@@ -376,6 +376,13 @@ async fn test_review_r8_regressions() {
     let PyRep::KeyVal(accin_kv) = acc_in else {
         panic!("Expected accin_kv");
     };
+    let wrap_id_in = accin_kv.get("courierPackageID").unwrap().as_i64().unwrap();
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(w) = snap.items.get_mut(&wrap_id_in) {
+            w.location_id = 100_000_002;
+            w.flag = InventoryFlag::Cargo;
+        }
+    });
     let delivery_exp = accin_kv.get("expirationUnix").unwrap().as_i64().unwrap();
     assert!((delivery_exp - (create_exp + 80_000)).abs() <= 2);
     // Advance past the new 24h delivery deadline (86,405s) and call CompleteContract

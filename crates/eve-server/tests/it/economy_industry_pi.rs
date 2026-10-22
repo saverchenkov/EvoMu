@@ -417,7 +417,7 @@ async fn test_industry_blueprint_data_facilities_jobs() {
     crate::common::pin_clock(&ctx);
     let mut s1 = setup_pilot(&ctx, 402, "demo", "demo-secret", 90_000_001).await;
 
-    let (rifter_bpo_id, raitaru_id) = ctx.db.with_mut_snapshot(|snap| {
+    let (rifter_bpo_id, rifter_bpc_id, raitaru_id) = ctx.db.with_mut_snapshot(|snap| {
         let corp_id = snap.characters[&90_000_001].corporation_id;
         snap.next_entity_id += 1;
         let bpo_id = snap.next_entity_id;
@@ -431,6 +431,9 @@ async fn test_industry_blueprint_data_facilities_jobs() {
                 flag: InventoryFlag::Hangar,
                 quantity: 1,
                 singleton: true,
+                is_blueprint_copy: false,
+                blueprint_runs_remaining: None,
+                dynamic_attributes: HashMap::from([(1112, 8.0), (1113, 16.0)]),
                 version: 1,
                 ..Default::default()
             },
@@ -451,70 +454,99 @@ async fn test_industry_blueprint_data_facilities_jobs() {
                 ..Default::default()
             },
         );
+        snap.next_entity_id += 1;
+        let bpc_id = snap.next_entity_id;
+        snap.items.insert(
+            bpc_id,
+            InventoryItemRecord {
+                item_id: bpc_id,
+                type_id: RIFTER_BP_TYPE_ID,
+                owner_id: 90_000_001,
+                location_id: struct_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                is_blueprint_copy: true,
+                blueprint_runs_remaining: Some(5),
+                dynamic_attributes: HashMap::from([(1112, 10.0), (1113, 20.0)]),
+                version: 1,
+                ..Default::default()
+            },
+        );
         snap.skills.entry(90_000_001).or_default().remove(&3387);
         snap.skills.entry(90_000_001).or_default().remove(&24625);
-        (bpo_id, struct_id)
+        (bpo_id, bpc_id, struct_id)
     });
 
-    let bp_data = rpc(
-        &ctx,
-        &mut s1,
-        "blueprintManager",
-        "GetBlueprintData",
-        &[PyRep::Integer(rifter_bpo_id)],
-    )
-    .await
-    .expect("blueprintManager.GetBlueprintData");
-    let PyRep::KeyVal(bp_kv) = bp_data else { panic!("Expected KeyVal"); };
-    assert_eq!(bp_kv.get("blueprintID"), Some(&PyRep::Integer(rifter_bpo_id)));
-    assert_eq!(bp_kv.get("blueprintTypeID"), Some(&PyRep::Integer(RIFTER_BP_TYPE_ID as i64)));
-    assert_eq!(bp_kv.get("productTypeID"), Some(&PyRep::Integer(587)));
-    assert!(bp_kv.get("manufacturingTime").and_then(|v| v.as_i64()).unwrap() > 0);
-    assert!(matches!(bp_kv.get("materials"), Some(PyRep::List(m)) if !m.is_empty()));
-    assert!(matches!(bp_kv.get("skills"), Some(PyRep::List(_))));
-
-    let owner_bps = rpc(
-        &ctx,
-        &mut s1,
-        "blueprintManager",
-        "GetBlueprintDataByOwner",
-        &[PyRep::Integer(90_000_001), PyRep::Integer(JITA_STATION_ID)],
-    )
-    .await
-    .expect("GetBlueprintDataByOwner");
-    assert!(matches!(owner_bps, PyRep::List(l) if !l.is_empty()));
-
-    let limits_rep = rpc(&ctx, &mut s1, "blueprintManager", "GetLimits", &[])
+    // 1. GetBlueprintData & GetBlueprintDataByOwner return BPO/BPC, ME, TE, runs remaining, and location
+    let bp_data = rpc(&ctx, &mut s1, "blueprintManager", "GetBlueprintData", &[PyRep::Integer(rifter_bpo_id)])
         .await
-        .expect("GetLimits");
-    assert!(matches!(limits_rep, PyRep::KeyVal(kv) if !kv.is_empty()));
+        .expect("blueprintManager.GetBlueprintData BPO");
+    assert_eq!(bp_data.dict_get("blueprintID").and_then(|v| v.as_i64()), Some(rifter_bpo_id));
+    assert_eq!(bp_data.dict_get("blueprintTypeID").and_then(|v| v.as_i64()), Some(RIFTER_BP_TYPE_ID as i64));
+    assert_eq!(bp_data.dict_get("productTypeID").and_then(|v| v.as_i64()), Some(587));
+    assert_eq!(bp_data.dict_get("original").and_then(|v| v.as_bool()), Some(true));
+    assert_eq!(bp_data.dict_get("materialEfficiency").and_then(|v| v.as_i64()), Some(8));
+    assert_eq!(bp_data.dict_get("timeEfficiency").and_then(|v| v.as_i64()), Some(16));
+    assert_eq!(bp_data.dict_get("runsRemaining").and_then(|v| v.as_i64()), Some(-1));
+    assert_eq!(bp_data.dict_get("facilityID").and_then(|v| v.as_i64()), Some(JITA_STATION_ID));
+    assert_eq!(bp_data.dict_get("locationID").and_then(|v| v.as_i64()), Some(JITA_STATION_ID));
+    let PyRep::List(bp_mats) = bp_data.dict_get("materials").expect("materials") else { panic!("Expected List") };
+    assert!(bp_mats.iter().any(|m| m.dict_get("typeID").and_then(|v| v.as_i64()) == Some(TRITANIUM_TYPE_ID as i64) && m.dict_get("quantity").and_then(|v| v.as_i64()) == Some(32_000)));
+    let PyRep::List(bp_skills) = bp_data.dict_get("skills").expect("skills") else { panic!("Expected List") };
+    assert!(bp_skills.iter().any(|sk| sk.dict_get("typeID").and_then(|v| v.as_i64()) == Some(3380) && sk.dict_get("level").and_then(|v| v.as_i64()) == Some(1)));
 
-    let facilities_rep = rpc(&ctx, &mut s1, "facilityManager", "GetFacilities", &[])
+    let owner_bps = rpc(&ctx, &mut s1, "blueprintManager", "GetBlueprintDataByOwner", &[PyRep::Integer(90_000_001)])
         .await
-        .expect("GetFacilities");
-    assert!(matches!(facilities_rep, PyRep::List(l) if l.len() >= 2));
+        .expect("GetBlueprintDataByOwner");
+    let PyRep::List(owner_bp_list) = owner_bps else { panic!("Expected List") };
+    let bpo_entry = owner_bp_list.iter().find(|b| b.dict_get("itemID").and_then(|v| v.as_i64()) == Some(rifter_bpo_id)).expect("BPO in GetBlueprintDataByOwner");
+    assert_eq!(bpo_entry.dict_get("original").and_then(|v| v.as_bool()), Some(true));
+    assert_eq!(bpo_entry.dict_get("materialEfficiency").and_then(|v| v.as_i64()), Some(8));
+    assert_eq!(bpo_entry.dict_get("timeEfficiency").and_then(|v| v.as_i64()), Some(16));
+    assert_eq!(bpo_entry.dict_get("runsRemaining").and_then(|v| v.as_i64()), Some(-1));
+    assert_eq!(bpo_entry.dict_get("facilityID").and_then(|v| v.as_i64()), Some(JITA_STATION_ID));
+    let bpc_entry = owner_bp_list.iter().find(|b| b.dict_get("itemID").and_then(|v| v.as_i64()) == Some(rifter_bpc_id)).expect("BPC in GetBlueprintDataByOwner");
+    assert_eq!(bpc_entry.dict_get("original").and_then(|v| v.as_bool()), Some(false));
+    assert_eq!(bpc_entry.dict_get("materialEfficiency").and_then(|v| v.as_i64()), Some(10));
+    assert_eq!(bpc_entry.dict_get("timeEfficiency").and_then(|v| v.as_i64()), Some(20));
+    assert_eq!(bpc_entry.dict_get("runsRemaining").and_then(|v| v.as_i64()), Some(5));
+    assert_eq!(bpc_entry.dict_get("facilityID").and_then(|v| v.as_i64()), Some(raitaru_id));
 
-    let raitaru_fac = rpc(&ctx, &mut s1, "facilityManager", "GetFacility", &[PyRep::Integer(raitaru_id)],)
-    .await
-    .expect("GetFacility Raitaru");
-    let PyRep::KeyVal(raitaru_kv) = raitaru_fac else { panic!("Expected KeyVal"); };
-    assert_eq!(raitaru_kv.get("facilityID"), Some(&PyRep::Integer(raitaru_id)));
-    assert_eq!(raitaru_kv.get("typeID"), Some(&PyRep::Integer(35825)));
-    assert_eq!(raitaru_kv.get("costModifier"), Some(&PyRep::Real(0.97)));
-    assert_eq!(raitaru_kv.get("materialModifier"), Some(&PyRep::Real(0.99)));
-    assert_eq!(raitaru_kv.get("timeModifier"), Some(&PyRep::Real(0.85)));
+    let limits_rep = rpc(&ctx, &mut s1, "blueprintManager", "GetLimits", &[]).await.expect("GetLimits");
+    assert_eq!(limits_rep.dict_get("maxManufacturingJobs").and_then(|v| v.as_i64()), Some(1));
 
-    let max_mods = rpc(&ctx, &mut s1, "facilityManager", "GetMaxActivityModifiers", &[])
-        .await
-        .expect("GetMaxActivityModifiers");
-    assert!(matches!(max_mods, PyRep::KeyVal(_)));
+    // 2. GetFacilities / GetFacility return NPC stations and structures with activities, bonuses, and taxes
+    let facilities_rep = rpc(&ctx, &mut s1, "facilityManager", "GetFacilities", &[]).await.expect("GetFacilities");
+    let PyRep::List(fac_list) = facilities_rep else { panic!("Expected List") };
+    let npc_fac = fac_list.iter().find(|f| f.dict_get("facilityID").and_then(|v| v.as_i64()) == Some(JITA_STATION_ID)).expect("NPC station in GetFacilities");
+    assert_eq!(npc_fac.dict_get("materialModifier").and_then(|v| v.as_f64()), Some(1.0));
+    assert_eq!(npc_fac.dict_get("timeModifier").and_then(|v| v.as_f64()), Some(1.0));
+    assert_eq!(npc_fac.dict_get("costModifier").and_then(|v| v.as_f64()), Some(1.0));
+    assert_eq!(npc_fac.dict_get("tax").and_then(|v| v.as_f64()), Some(0.10));
+    let PyRep::List(npc_acts) = npc_fac.dict_get("activities").expect("NPC activities") else { panic!("Expected List") };
+    assert!(npc_acts.contains(&PyRep::Integer(1)) && npc_acts.contains(&PyRep::Integer(8)));
+    let struct_fac_in_list = fac_list.iter().find(|f| f.dict_get("facilityID").and_then(|v| v.as_i64()) == Some(raitaru_id)).expect("Structure in GetFacilities");
+    assert_eq!(struct_fac_in_list.dict_get("typeID").and_then(|v| v.as_i64()), Some(35825));
+
+    let raitaru_fac = rpc(&ctx, &mut s1, "facilityManager", "GetFacility", &[PyRep::Integer(raitaru_id)]).await.expect("GetFacility Raitaru");
+    assert_eq!(raitaru_fac.dict_get("facilityID").and_then(|v| v.as_i64()), Some(raitaru_id));
+    assert_eq!(raitaru_fac.dict_get("typeID").and_then(|v| v.as_i64()), Some(35825));
+    assert_eq!(raitaru_fac.dict_get("costModifier").and_then(|v| v.as_f64()), Some(0.97));
+    assert_eq!(raitaru_fac.dict_get("materialModifier").and_then(|v| v.as_f64()), Some(0.99));
+    assert_eq!(raitaru_fac.dict_get("timeModifier").and_then(|v| v.as_f64()), Some(0.85));
+    let PyRep::List(r_acts) = raitaru_fac.dict_get("activities").expect("Raitaru activities") else { panic!("Expected List") };
+    assert!(r_acts.contains(&PyRep::Integer(1)));
+
+    let max_mods = rpc(&ctx, &mut s1, "facilityManager", "GetMaxActivityModifiers", &[]).await.expect("GetMaxActivityModifiers");
+    assert_eq!(max_mods.dict_get("materialMultiplier").and_then(|v| v.as_f64()), Some(0.99));
 
     let neg_tax_err = rpc(
         &ctx,
         &mut s1,
         "facilityManager",
         "SetFacilityTaxes",
-        &[PyRep::Integer(raitaru_id), PyRep::Dict(vec![(PyRep::Integer(1), PyRep::Real(-0.02))]),],
+        &[PyRep::Integer(raitaru_id), PyRep::Dict(vec![(PyRep::Integer(1), PyRep::Real(-0.02))])],
     )
     .await
     .unwrap_err();
@@ -525,29 +557,107 @@ async fn test_industry_blueprint_data_facilities_jobs() {
         &mut s1,
         "facilityManager",
         "SetFacilityTaxes",
-        &[PyRep::Integer(raitaru_id), PyRep::Dict(vec![(PyRep::Integer(1), PyRep::Real(0.05))]),],
+        &[PyRep::Integer(raitaru_id), PyRep::Dict(vec![(PyRep::Integer(1), PyRep::Real(0.05)), (PyRep::Integer(4), PyRep::Real(0.025))])],
     )
     .await
     .expect("SetFacilityTaxes");
 
-    let taxes_rep = rpc(
+    let taxes_rep = rpc(&ctx, &mut s1, "facilityManager", "GetFacilityTaxes", &[PyRep::Integer(raitaru_id), PyRep::None]).await.expect("GetFacilityTaxes");
+    assert!((taxes_rep.dict_get("1").and_then(|v| v.as_f64()).unwrap() - 0.05).abs() < 1e-6);
+    assert!((taxes_rep.dict_get("4").and_then(|v| v.as_f64()).unwrap() - 0.025).abs() < 1e-6);
+
+    // 3. InstallJob validations: remote range, skills, materials, wallet, blueprint ownership/lock, and BOM consumption
+    let remote_err = rpc(
         &ctx,
         &mut s1,
-        "facilityManager",
-        "GetFacilityTaxes",
-        &[PyRep::Integer(raitaru_id), PyRep::None],
+        "industryManager",
+        "InstallJob",
+        &[PyRep::keyval([
+            ("blueprintID", PyRep::Integer(rifter_bpo_id)),
+            ("blueprintTypeID", PyRep::Integer(RIFTER_BP_TYPE_ID as i64)),
+            ("facilityID", PyRep::Integer(60_008_494)), // Amarr VIII
+            ("activityID", PyRep::Integer(1)),
+            ("runs", PyRep::Integer(1)),
+        ])],
     )
     .await
-    .expect("GetFacilityTaxes");
-    let PyRep::KeyVal(taxes_kv) = taxes_rep else { panic!("Expected KeyVal"); };
-    let mfg_tax_rate = taxes_kv
-        .get("1")
-        .or_else(|| taxes_kv.get("manufacturing"))
-        .and_then(|v| v.as_f64())
-        .unwrap();
-    assert!((mfg_tax_rate - 0.05).abs() < 1e-6);
+    .unwrap_err();
+    assert_eq!(remote_err.code, "FacilityOutOfRemoteRange");
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.skills.entry(90_000_001).or_default().remove(&3380);
+    });
+    let skill_err = rpc(
+        &ctx,
+        &mut s1,
+        "industryManager",
+        "InstallJob",
+        &[PyRep::keyval([
+            ("blueprintID", PyRep::Integer(rifter_bpo_id)),
+            ("blueprintTypeID", PyRep::Integer(RIFTER_BP_TYPE_ID as i64)),
+            ("facilityID", PyRep::Integer(raitaru_id)),
+            ("activityID", PyRep::Integer(1)),
+            ("runs", PyRep::Integer(1)),
+        ])],
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(skill_err.code, "MissingIndustrySkills");
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.skills.entry(90_000_001).or_default().insert(
+            3380,
+            TrainedSkillRecord { type_id: 3380, level: 5, skill_points: 256_000.0 },
+        );
+    });
+
+    let trit_before_all = ctx.db.with_snapshot(|snap| {
+        snap.items
+            .values()
+            .filter(|i| i.owner_id == 90_000_001 && i.location_id == JITA_STATION_ID && i.type_id == TRITANIUM_TYPE_ID)
+            .map(|i| i.quantity)
+            .sum::<i32>()
+    });
+    let mat_err = rpc(
+        &ctx,
+        &mut s1,
+        "industryManager",
+        "InstallJob",
+        &[PyRep::keyval([
+            ("blueprintID", PyRep::Integer(rifter_bpo_id)),
+            ("blueprintTypeID", PyRep::Integer(RIFTER_BP_TYPE_ID as i64)),
+            ("facilityID", PyRep::Integer(raitaru_id)),
+            ("activityID", PyRep::Integer(1)),
+            ("runs", PyRep::Integer(1_000)),
+        ])],
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(mat_err.code, "InsufficientManufacturingMaterials");
 
     let s1_bal_before_job = ctx.db.get_character(90_000_001).unwrap().balance;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&90_000_001).unwrap().balance = IskCents(100);
+    });
+    let wallet_err = rpc(
+        &ctx,
+        &mut s1,
+        "industryManager",
+        "InstallJob",
+        &[PyRep::keyval([
+            ("blueprintID", PyRep::Integer(rifter_bpo_id)),
+            ("blueprintTypeID", PyRep::Integer(RIFTER_BP_TYPE_ID as i64)),
+            ("facilityID", PyRep::Integer(raitaru_id)),
+            ("activityID", PyRep::Integer(1)),
+            ("runs", PyRep::Integer(2)),
+        ])],
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(wallet_err.code, "InsufficientFunds");
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&90_000_001).unwrap().balance = s1_bal_before_job;
+    });
+
     let job_arg = PyRep::keyval([
         ("blueprintID", PyRep::Integer(rifter_bpo_id)),
         ("blueprintTypeID", PyRep::Integer(RIFTER_BP_TYPE_ID as i64)),
@@ -565,6 +675,7 @@ async fn test_industry_blueprint_data_facilities_jobs() {
         .expect("InstallJob V24");
     let PyRep::KeyVal(mfg_kv) = mfg_install else { panic!("Expected KeyVal"); };
     let mfg_job_id = mfg_kv.get("jobID").and_then(|v| v.as_i64()).unwrap();
+    let job_dur = mfg_kv.get("durationSeconds").and_then(|v| v.as_i64()).unwrap() as u64;
     let eiv = mfg_kv.get("estimatedItemValue").and_then(|v| v.as_f64()).unwrap();
     let sci = mfg_kv.get("systemCostIndex").and_then(|v| v.as_f64()).unwrap();
     let struct_mod = mfg_kv.get("structureCostModifier").and_then(|v| v.as_f64()).unwrap();
@@ -572,6 +683,21 @@ async fn test_industry_blueprint_data_facilities_jobs() {
     let fac_tax_isk = mfg_kv.get("facilityTaxISK").and_then(|v| v.as_f64()).unwrap();
     let scc_isk = mfg_kv.get("sccSurchargeISK").and_then(|v| v.as_f64()).unwrap();
     let total_cost_isk = mfg_kv.get("totalJobCost").and_then(|v| v.as_f64()).unwrap();
+    let expected_trit = mfg_kv.get("tritaniumRequired").and_then(|v| v.as_i64()).unwrap() as i32;
+
+    // Verify blueprint locked on install & materials consumed on install
+    let (bp_flag_during, trit_after_install) = ctx.db.with_snapshot(|snap| {
+        let f = snap.items.get(&rifter_bpo_id).map(|i| i.flag);
+        let t = snap
+            .items
+            .values()
+            .filter(|i| i.owner_id == 90_000_001 && i.location_id == JITA_STATION_ID && i.type_id == TRITANIUM_TYPE_ID)
+            .map(|i| i.quantity)
+            .sum::<i32>();
+        (f, t)
+    });
+    assert_eq!(bp_flag_during, Some(InventoryFlag::Locked));
+    assert_eq!(trit_before_all - trit_after_install, expected_trit);
 
     assert!(eiv > 0.0);
     assert!(sci > 0.0 && sci <= 0.50);
@@ -588,6 +714,16 @@ async fn test_industry_blueprint_data_facilities_jobs() {
     let s1_bal_after_job = ctx.db.get_character(90_000_001).unwrap().balance;
     let debited_isk = (s1_bal_before_job.0 - s1_bal_after_job.0) as f64 / 100.0;
     assert!((debited_isk - total_cost_isk).abs() < 0.02);
+
+    // Verify job cost components are journaled in wallet_journal
+    let (has_base_j, has_tax_j, has_scc_j) = ctx.db.with_snapshot(|snap| {
+        (
+            snap.wallet_journal.iter().any(|e| e.character_id == 90_000_001 && e.entry_type == "IndustryJobInstallationFee" && e.amount == IskCents::from_f64_isk(base_job_cost)),
+            snap.wallet_journal.iter().any(|e| e.character_id == 90_000_001 && e.entry_type == "IndustryFacilityTax" && e.amount == IskCents::from_f64_isk(fac_tax_isk)),
+            snap.wallet_journal.iter().any(|e| e.character_id == 90_000_001 && e.entry_type == "IndustrySccSurcharge" && e.amount == IskCents::from_f64_isk(scc_isk)),
+        )
+    });
+    assert!(has_base_j && has_tax_j && has_scc_j, "Job base cost, facility tax, and SCC surcharge must be journaled");
 
     let slot_err = rpc(
         &ctx,
@@ -606,33 +742,49 @@ async fn test_industry_blueprint_data_facilities_jobs() {
     .unwrap_err();
     assert_eq!(slot_err.code, "IndustrySlotsFull");
 
-    let counts_rep = rpc(&ctx, &mut s1, "industryManager", "GetJobCounts", &[PyRep::Integer(90_000_001)],)
-    .await
-    .expect("GetJobCounts");
-    assert!(matches!(counts_rep, PyRep::KeyVal(_)));
+    let counts_rep = rpc(&ctx, &mut s1, "industryManager", "GetJobCounts", &[PyRep::Integer(90_000_001)])
+        .await
+        .expect("GetJobCounts");
+    assert_eq!(counts_rep.dict_get("manufacturingUsed").and_then(|v| v.as_i64()), Some(1));
 
-    let job_detail = rpc(&ctx, &mut s1, "industryManager", "GetJob", &[PyRep::Integer(mfg_job_id)],)
-    .await
-    .expect("GetJob");
-    let PyRep::KeyVal(jd_kv) = job_detail else { panic!("Expected KeyVal"); };
-    assert_eq!(jd_kv.get("jobID"), Some(&PyRep::Integer(mfg_job_id)));
+    let job_detail = rpc(&ctx, &mut s1, "industryManager", "GetJob", &[PyRep::Integer(mfg_job_id)])
+        .await
+        .expect("GetJob");
+    assert_eq!(job_detail.dict_get("jobID").and_then(|v| v.as_i64()), Some(mfg_job_id));
 
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(j) = snap.industry_jobs.get_mut(&mfg_job_id) { j.start_unix = 0; }
-    });
+    ctx.advance_secs(job_dur + 5);
 
-    let complete_res = rpc(&ctx, &mut s1, "industryManager", "CompleteJob", &[PyRep::Integer(mfg_job_id)],)
-    .await
-    .expect("CompleteJob");
-    let PyRep::KeyVal(cres_kv) = complete_res else { panic!("Expected KeyVal"); };
-    assert_eq!(cres_kv.get("productTypeID"), Some(&PyRep::Integer(587)));
-    let delivered_id = cres_kv.get("deliveredItemID").and_then(|v| v.as_i64()).unwrap();
+    let complete_res = rpc(&ctx, &mut s1, "industryManager", "CompleteJob", &[PyRep::Integer(mfg_job_id)])
+        .await
+        .expect("CompleteJob");
+    assert_eq!(complete_res.dict_get("productTypeID").and_then(|v| v.as_i64()), Some(587));
+    let delivered_id = complete_res.dict_get("deliveredItemID").and_then(|v| v.as_i64()).unwrap();
     let delivered_item = ctx.db.with_snapshot(|snap| {
         snap.items
             .get(&delivered_id)
             .map(|i| (i.owner_id, i.location_id, i.flag, i.quantity))
     });
     assert_eq!(delivered_item, Some((90_000_001, JITA_STATION_ID, InventoryFlag::Hangar, 2)));
+
+    // Also install a job at NPC station JITA_STATION_ID to verify fixed NPC facility tax (10%) is charged on install
+    let npc_install = rpc(
+        &ctx,
+        &mut s1,
+        "industryManager",
+        "InstallJob",
+        &[PyRep::keyval([
+            ("blueprintID", PyRep::Integer(rifter_bpo_id)),
+            ("blueprintTypeID", PyRep::Integer(RIFTER_BP_TYPE_ID as i64)),
+            ("facilityID", PyRep::Integer(JITA_STATION_ID)),
+            ("activityID", PyRep::Integer(1)),
+            ("runs", PyRep::Integer(1)),
+        ])],
+    )
+    .await
+    .expect("InstallJob at NPC station");
+    let npc_base = npc_install.dict_get("baseJobCost").and_then(|v| v.as_f64()).unwrap();
+    let npc_tax = npc_install.dict_get("facilityTaxISK").and_then(|v| v.as_f64()).unwrap();
+    assert!((npc_tax - (npc_base * 0.10 * 100.0).round() / 100.0).abs() < 0.02);
 }
 
 #[tokio::test]
