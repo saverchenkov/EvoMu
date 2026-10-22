@@ -101,6 +101,22 @@ pub(crate) fn record_session_change_timer(
             PyRep::Integer(10),
         ],
     );
+    let change = PyRep::Dict(vec![
+        (
+            PyRep::String("solarsystemid".into()),
+            PyRep::Tuple(vec![PyRep::Integer(system_id as i64), PyRep::Integer(system_id as i64)]),
+        ),
+        (
+            PyRep::String("charid".into()),
+            PyRep::Tuple(vec![PyRep::Integer(char_id), PyRep::Integer(char_id)]),
+        ),
+    ]);
+    ctx.notify(
+        crate::router::NotificationTarget::Character(char_id),
+        "DoSessionChanging",
+        "charid",
+        vec![PyRep::Bool(true), PyRep::None, change],
+    );
 }
 
 pub fn wormhole_item_id_for_signature(sys_id: u32, sig_id: &str) -> i64 {
@@ -249,7 +265,7 @@ pub async fn handle(
         // parity: rpc:beyonce.UpdateStateRequest, rpc:beyonce.AdminGetBubbleID, rpc:beyonce.GetFormations
         // parity: destiny:AddBalls2, destiny:RemoveBalls, destiny:RemoveBall
         // parity: destiny:GotoDirection, destiny:FollowBall, destiny:Orbit, destiny:Stop
-        // parity: notify:DoDestinyUpdate
+        // parity: notify:DoDestinyUpdate, notify:DoDestinyUpdates, notify:DoSessionChanging
         ("beyonce", "CmdGotoDirection") | ("beyonce", "CmdSteerDirection") => {
             Some(handle_cmd_goto_direction(ctx, session, bound_entry, args).await)
         }
@@ -967,14 +983,33 @@ pub(crate) async fn handle_update_state_request(
     if matches!(ship_ball.mode, MovementMode::Warp { .. }) {
         return Ok(PyRep::None);
     }
-    handle
+    let res = handle
         .push_set_state(ship_id)
         .await
         .map(|_tick| PyRep::None)
         .map_err(|e| BridgeRpcError {
             code: "DestinyQueryFailed".into(),
             message: e,
-        })
+        });
+    if res.is_ok() {
+        let update_entry = PyRep::Tuple(vec![
+            PyRep::Integer(ctx.now_blueos_filetime_ticks()),
+            PyRep::Tuple(vec![
+                PyRep::String("SetState".into()),
+                PyRep::Tuple(vec![PyRep::Integer(ship_id)]),
+            ]),
+        ]);
+        ctx.notify(
+            crate::router::NotificationTarget::Character(char_id),
+            "DoDestinyUpdates",
+            "charid",
+            vec![PyRep::List(vec![PyRep::Tuple(vec![
+                PyRep::List(vec![update_entry]),
+                PyRep::Bool(false),
+            ])])],
+        );
+    }
+    res
 }
 
 async fn handle_admin_get_bubble_id(

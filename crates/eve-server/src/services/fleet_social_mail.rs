@@ -525,20 +525,28 @@ pub(super) fn handle_mail_and_calendar(
                 Err(e) => return Some(Err(e)),
             };
             let mail_ids = crate::services::mail_notify::resolve_mail_targets(ctx, char_id, method, args.first());
+            let mut trashed_ids = Vec::new();
             {
                 let mut s = ctx.social_extras.lock().unwrap();
-                for &mid in &mail_ids {
-                    s.trashed_mails.insert((char_id, mid));
-                }
+                ctx.db.with_snapshot(|snap| {
+                    for &mid in &mail_ids {
+                        let is_mine = snap.mails.iter().any(|m| m.message_id == mid && (m.recipient_id == char_id || m.sender_id == char_id));
+                        if is_mine && s.trashed_mails.insert((char_id, mid)) {
+                            trashed_ids.push(mid);
+                        }
+                    }
+                });
             }
-            ctx.notify(
-                NotificationTarget::Character(char_id),
-                "OnMailTrashed",
-                "charid",
-                vec![PyRep::List(mail_ids.iter().copied().map(PyRep::Integer).collect())],
-            );
+            if !trashed_ids.is_empty() {
+                ctx.notify(
+                    NotificationTarget::Character(char_id),
+                    "OnMailTrashed",
+                    "charid",
+                    vec![PyRep::List(trashed_ids.iter().copied().map(PyRep::Integer).collect())],
+                );
+            }
             Some(Ok(PyRep::keyval([
-                ("trashed", PyRep::Bool(true)),
+                ("trashed", PyRep::Bool(!trashed_ids.is_empty())),
                 ("inTrash", PyRep::Bool(true)),
             ])))
         }

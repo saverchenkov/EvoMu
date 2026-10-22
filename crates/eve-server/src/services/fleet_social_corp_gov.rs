@@ -1080,7 +1080,7 @@ pub(super) fn handle_corp_gov(
         | ("corpRegistry", "EditCorporateContact")
         | ("corpRegistry", "EditContactsRelationshipID") => {
             let has_role = ctx.db.with_snapshot(|snap| {
-                snap.corporations.get(&corp_id).is_none_or(|c| {
+                snap.corporations.get(&corp_id).is_some_and(|c| {
                     let r = c.member_roles.get(&char_id).copied().unwrap_or(0);
                     char_id == c.ceo_id
                         || corp_roles::has_role(r, corp_roles::ROLE_DIRECTOR | (1u64 << 42))
@@ -1129,7 +1129,7 @@ pub(super) fn handle_corp_gov(
 
         ("corpRegistry", "RemoveCorporateContacts") => {
             let has_role = ctx.db.with_snapshot(|snap| {
-                snap.corporations.get(&corp_id).is_none_or(|c| {
+                snap.corporations.get(&corp_id).is_some_and(|c| {
                     let r = c.member_roles.get(&char_id).copied().unwrap_or(0);
                     char_id == c.ceo_id
                         || corp_roles::has_role(r, corp_roles::ROLE_DIRECTOR | (1u64 << 42))
@@ -1183,7 +1183,7 @@ pub(super) fn handle_corp_gov(
 
         ("corpRegistry", "CreateLabel") | ("corpRegistry", "EditLabel") => {
             let has_role = ctx.db.with_snapshot(|snap| {
-                snap.corporations.get(&corp_id).is_none_or(|c| {
+                snap.corporations.get(&corp_id).is_some_and(|c| {
                     let r = c.member_roles.get(&char_id).copied().unwrap_or(0);
                     char_id == c.ceo_id
                         || corp_roles::has_role(r, corp_roles::ROLE_DIRECTOR | (1u64 << 42))
@@ -1263,7 +1263,7 @@ pub(super) fn handle_corp_gov(
         | ("corpRegistry", "AssignLabels")
         | ("corpRegistry", "RemoveLabels") => {
             let has_role = ctx.db.with_snapshot(|snap| {
-                snap.corporations.get(&corp_id).is_none_or(|c| {
+                snap.corporations.get(&corp_id).is_some_and(|c| {
                     let r = c.member_roles.get(&char_id).copied().unwrap_or(0);
                     char_id == c.ceo_id
                         || corp_roles::has_role(r, corp_roles::ROLE_DIRECTOR | (1u64 << 42))

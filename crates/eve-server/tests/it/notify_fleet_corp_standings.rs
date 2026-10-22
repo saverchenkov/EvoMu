@@ -49,7 +49,7 @@ async fn test_standings_and_contacts_notifications() {
 
     let ctx = ServerContext::new();
     let mut s1 = select(&ctx, 801, "demo", "demo-secret", P1).await;
-    let _s2 = select(&ctx, 802, "other", "other-secret", P2).await;
+    let mut s2 = select(&ctx, 802, "other", "other-secret", P2).await;
 
     let corp_id = 2_000_001;
     let ally_id = 3_000_001;
@@ -59,6 +59,29 @@ async fn test_standings_and_contacts_notifications() {
             c.corporation_id = corp_id;
             c.alliance_id = Some(ally_id);
         }
+        if let Some(c) = snap.characters.get_mut(&P2) {
+            c.corporation_id = corp_id;
+            c.alliance_id = Some(ally_id);
+        }
+        snap.corporations.insert(
+            corp_id,
+            CorporationRecord {
+                corporation_id: corp_id,
+                name: "Test Corp".into(),
+                ticker: "TEST".into(),
+                ceo_id: P1,
+                alliance_id: Some(ally_id),
+                tax_rate: 0.0,
+                master_wallet: eve_db::IskCents(0),
+                members: HashSet::from([P1, P2]),
+                member_roles: HashMap::from([(P1, u64::MAX), (P2, 0)]),
+                applications: HashMap::new(),
+                wallet_divisions: Vec::new(),
+                description: String::new(),
+                url: String::new(),
+                hq_station_id: Some(STATION_JITA),
+            },
+        );
         snap.alliances.insert(
             ally_id,
             AllianceRecord {
@@ -72,9 +95,28 @@ async fn test_standings_and_contacts_notifications() {
     });
     s1.corporation_id = Some(corp_id);
     s1.alliance_id = Some(ally_id);
+    s2.corporation_id = Some(corp_id);
+    s2.alliance_id = Some(ally_id);
 
     ctx.drain_notifications_for_char(P1);
     ctx.drain_notifications_for_char(P2);
+
+    // BF-CORPCONTACT-AUTH-01: member P2 without diplomat role cannot AddCorporateContact
+    let denied = ctx
+        .dispatch_rpc(
+            &mut s2,
+            "corpRegistry",
+            None,
+            "AddCorporateContact",
+            &[PyRep::Integer(P1), PyRep::Real(5.0), PyRep::Integer(1)],
+            &HashMap::new(),
+            None,
+        )
+        .await;
+    assert!(denied.is_err(), "Non-diplomat AddCorporateContact must be denied");
+    assert_eq!(denied.unwrap_err().code, "CorpRoleDenied");
+    assert!(ctx.drain_notifications_for_char(P2).is_empty());
+    assert!(ctx.drain_notifications_for_char(P1).is_empty());
 
     // 1. OnSetPlayerStanding: via charMgr.AddContact
     call(
@@ -287,10 +329,8 @@ async fn test_corp_enlistment_and_logo_notifications() {
 
 #[tokio::test]
 async fn test_missions_and_mail_notifications() {
-    // parity: notify:OnAgentMissionObjectivesCompleted, notify:OnAgentMissionObjectivesFailed, notify:OnMissionsUpdated, notify:OnMailRestored, notify:OnMailTrashed
+    // parity: notify:OnMissionsUpdated, notify:OnMailRestored, notify:OnMailTrashed
     eve_testkit::attest(&[
-        "notify:OnAgentMissionObjectivesCompleted",
-        "notify:OnAgentMissionObjectivesFailed",
         "notify:OnMissionsUpdated",
         "notify:OnMailRestored",
         "notify:OnMailTrashed",
@@ -438,6 +478,21 @@ async fn test_missions_and_mail_notifications() {
     );
 
     // 5. OnMailTrashed: seed a mail and MoveToTrash
+    // BF-NOTIFY-TRASH-01 negative test: trashing foreign or non-existent mail emits zero notifications
+    call(
+        &ctx,
+        &mut s1,
+        "mailMgr",
+        "MoveToTrash",
+        &[PyRep::List(vec![PyRep::Integer(999_999)])],
+    )
+    .await;
+    let n_trash_neg = ctx.drain_notifications_for_char(P1);
+    assert!(
+        events_from(&n_trash_neg, "OnMailTrashed").is_empty(),
+        "Trashing non-existent mail must emit zero notifications"
+    );
+
     let mail_id = 888_001;
     ctx.db.with_mut_snapshot(|snap| {
         snap.mails.push(MailRecord {
@@ -462,6 +517,21 @@ async fn test_missions_and_mail_notifications() {
         trashed_ev,
         vec![vec![PyRep::List(vec![PyRep::Integer(mail_id)])]],
         "MoveToTrash must emit OnMailTrashed with mail IDs"
+    );
+
+    // BF-NOTIFY-TRASH-01 negative test: trashing already-trashed mail emits zero notifications
+    call(
+        &ctx,
+        &mut s1,
+        "mailMgr",
+        "MoveToTrash",
+        &[PyRep::List(vec![PyRep::Integer(mail_id)])],
+    )
+    .await;
+    let n_trash_dup = ctx.drain_notifications_for_char(P1);
+    assert!(
+        events_from(&n_trash_dup, "OnMailTrashed").is_empty(),
+        "Trashing already-trashed mail must emit zero notifications"
     );
 
     // 7. OnMailRestored: MoveFromTrash
