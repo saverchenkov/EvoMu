@@ -442,7 +442,7 @@ async fn test_mn11_compression_space_and_structure_and_gas() {
 // ====================================================================
 #[tokio::test]
 async fn test_mn12_c6_reprocessing_yield_tax_modules_and_structure() {
-    // parity: feat:mining.reprocessing-yield, feat:mining.reprocessing-tax, feat:mining.reprocessing-modules, feat:structures.service-reprocessing, feat:mining.upwell-refinery-base-yield, feat:structures.reprocessing-rig-security-multipliers, rpc:reprocessingSvc.GetQuotes, rpc:reprocessingSvc.Reprocess, rpc:structureCompressionMgr.CompressItemInStructure
+    // parity: feat:mining.reprocessing-yield, feat:mining.reprocessing-tax, feat:mining.reprocessing-modules, feat:structures.service-reprocessing, feat:mining.upwell-refinery-base-yield, feat:structures.reprocessing-rig-security-multipliers, rpc:structureCompressionMgr.CompressItemInStructure
     eve_testkit::attest(&["feat:mining.reprocessing-yield", "feat:mining.reprocessing-tax", "feat:mining.reprocessing-modules", "feat:structures.service-reprocessing", "feat:mining.upwell-refinery-base-yield", "feat:structures.reprocessing-rig-security-multipliers"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);

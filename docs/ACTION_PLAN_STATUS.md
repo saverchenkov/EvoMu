@@ -4,19 +4,19 @@
 
 The canonical plan is `.agents/skills/evomu-adversarial-review/references/action_plan.md`. This file is regenerated from the latest pre-flight parity run, so it can't go stale or be overstated.
 
-**Parity: 4280 / 6128 ledger rows closed (69.84%)**, 2253 NA, 524 tagged tests, 632 passing tests. Flagged fake by the gap auditor: 21.
+**Parity: 4333 / 6128 ledger rows closed (70.71%)**, 2253 NA, 541 tagged tests, 649 passing tests. Flagged fake by the gap auditor: 0.
 
 | Category | Total | DONE | NA | Open |
 |---|---|---|---|---|
 | destiny | 52 | 42 | 10 | 0 |
 | effect | 1 | 1 | 0 | 0 |
 | esi | 197 | 197 | 0 | 0 |
-| feat | 1531 | 986 | 94 | 451 |
+| feat | 1531 | 1031 | 94 | 406 |
 | journey | 29 | 0 | 0 | 29 |
 | notify | 1311 | 179 | 650 | 482 |
 | plan | 109 | 50 | 0 | 59 |
-| quasar | 1455 | 77 | 1328 | 50 |
-| rpc | 1230 | 342 | 111 | 777 |
+| quasar | 1455 | 84 | 1328 | 43 |
+| rpc | 1230 | 343 | 111 | 776 |
 | sde | 213 | 153 | 60 | 0 |
 
 Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = mapped `feat:` rows closed/total; **Assessment** = the agent's own judgement from `docs/parity/task_notes.json` (DONE is accepted only when the ledger row is DONE).
@@ -34,7 +34,7 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 | S-7 | Remote mutations (AttackStructure, ClaimSovereignty, CaptureComplex, PI writers) | DONE | 0/0 | test_phase_0_s7_no_hardcoded_fallbacks_and_in_space_range_checks, test_s7_structures_skyhooks_pi_range_checks | PARTIAL | Replaced hardcoded fallbacks with SDE Dogma attribute lookups; enforced in-space proximity, system match, and planet-resource validation for structures and skyhooks. | a7e5196 2026-10-18 |
 | S-8 | Remaining with_mut_snapshot mutators (52 call sites) | DONE | 0/0 | test_phase_0_s8_transactional_snapshot_mutation_and_no_early_return_err | DONE | — | — |
 | S-9 | GM role | DONE | 2/2 | test_account_roles_bitmask_checks | PARTIAL | Player accounts receive no GM roles; CCP role bitmasks (ROLE_ADMIN, ROLE_GML, etc.) enforced on privileged commands; auditor-flagged account feat rows pending clearance. | 5a55036 2026-10-18 |
-| S-10 | Docs honesty | DONE | 0/0 | test_phase_0_s10_doc_reconciliation_and_labels, test_s10_doc_reconciliation_and_labels | PARTIAL | Reconciled documentation status labels, live candidate method ratios, handler and arm breakdown summaries, and relative links across project markdown files. | 1c94dca 2026-10-21 |
+| S-10 | Docs honesty | DONE | 0/0 | test_phase_0_s10_doc_reconciliation_and_labels, test_s10_doc_reconciliation_and_labels | PARTIAL | Reconciled documentation status labels, live candidate method ratios, handler and arm breakdown summaries, and relative links across project markdown files. | 01c9b07 2026-10-21 |
 | S-11 | Seed lineage data (duplicate ancestry, shifted IDs) | DONE | 0/0 | test_phase_1_d1_to_d5_sde_sqlite_persistence_auth_sso_and_config, test_real_sde_sqlite_open_and_counts | DONE | — | af425cc 2026-10-18 |
 
 ## Phase 1: Data and persistence foundation (blocks almost everything)
@@ -145,9 +145,9 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 | E-1 | Fee inputs | DONE | 4/4 | test_e1_broker_fee_and_sales_tax_skill_discounts | PARTIAL | Broker fee calculation with Broker Relations and faction/corp standings discount, sales tax with Accounting discount, and escrow deduction tested; auditor-flagged feat:market.broker-fee pending cleara | 0dd62e6 2026-10-21 |
 | E-2 | Order lifecycle | BLOCKED_BY_FEATURES | 21/22 | test_e2_market_order_matching_queries_and_cancellation | PARTIAL | Limit orders, immediate buy and sell matching against order book, regional order book queries, order cancellation, and escrow refund tested; blocked by remaining features. | 02ea9ce 2026-10-21 |
 | E-3 | Contracts | DONE | 14/14 | test_e3_contracts_lifecycle_item_exchange_courier_auction | PARTIAL | Item Exchange, Courier with collateral hold and delivery failure, and Auction contracts with bidding and escrow refund tested; blocked by remaining features. | 02ea9ce 2026-10-21 |
-| E-4 | Industry | BLOCKED_BY_FEATURES | 26/32 | test_e4_industry_jobs_lifecycle_manufacturing_research_and_copying | PARTIAL | Industry blueprint data, facilities lookup, job cost with facility tax, manufacturing, TE/ME research, copying, and delivery tested; blocked by remaining features. | 6555841 2026-10-21 |
+| E-4 | Industry | BLOCKED_BY_FEATURES | 31/32 | test_e4_industry_jobs_lifecycle_manufacturing_research_and_copying | PARTIAL | Industry blueprint data, facilities lookup, job cost with facility tax, manufacturing, TE/ME research, copying, and delivery tested; blocked by remaining features. | 6555841 2026-10-21 |
 | E-5 | Agents and missions | DONE | 25/25 | test_e5_agent_finder_and_conversation_lifecycle | PARTIAL | PVE agent finder, agent conversation, mission offer/accept/decline/quit state machine, and standing calculations; blocked by remaining features. | 0dd62e6 2026-10-21 |
-| E-6 | PI basics | MISSING | 18/21 | — | PARTIAL | Planetary Interaction planet info, command center placement, colony limit from skill, pin placement, links, and production routing tested; blocked by remaining features. | 1fcaa57 2026-10-21 |
+| E-6 | PI basics | MISSING | 21/21 | — | PARTIAL | Planetary Interaction planet info, command center placement, colony limit from skill, pin placement, links, and production routing tested; blocked by remaining features. | 1fcaa57 2026-10-21 |
 
 ## Phase 8: Social and exploration
 

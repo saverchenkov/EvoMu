@@ -693,7 +693,7 @@ async fn test_mn08_ice_harvester_cycle_duration_modifiers() {
 
 #[tokio::test]
 async fn test_mn09_mining_drones_and_excavators() {
-    // parity: feat:drones.mining-drones, feat:mining.mining-drones-yield, feat:mining.excavator-drones, rpc:authentication.Login, rpc:charUnboundMgr.SelectCharacterID, rpc:dogmaIM.Activate, rpc:entity.CmdMineRepeatedly, rpc:entity.CmdReturnBay, rpc:ship.LaunchDrones, rpc:stationSvc.Undock
+    // parity: feat:drones.mining-drones, feat:mining.mining-drones-yield, feat:mining.excavator-drones, rpc:authentication.Login, rpc:charUnboundMgr.SelectCharacterID, rpc:entity.CmdMineRepeatedly, rpc:entity.CmdReturnBay, rpc:ship.LaunchDrones, rpc:ship.Undock
     eve_testkit::attest(&[
         "feat:drones.mining-drones",
         "feat:mining.mining-drones-yield",
