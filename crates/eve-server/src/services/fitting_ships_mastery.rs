@@ -1194,7 +1194,7 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
             Some(Ok(PyRep::Bool(true)))
         }
 
-        ("ship", "SetSessionCheck") | ("ship", "clear_memoized") => {
+        ("ship", "SetSessionCheck") | ("ship", "clear_memoized") | ("dogmaIM", "SetSessionCheck") => {
             // const-ok: session check confirmation
             let _ = match ServerContext::require_character(session) {
                 Ok(v) => v,

@@ -897,8 +897,18 @@ fn handle_character_get_services(ctx: &ServerContext, session: &mut SessionState
 fn handle_character_has_service(ctx: &ServerContext, session: &mut SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
     use super::structure_lifecycle as life;
     let _ = ServerContext::require_character(session)?;
-    let structure_id = arg_i64(args, 0).or(session.structure_id).ok_or_else(|| err("MissingStructureId", "CharacterHasService requires structureID"))?;
-    let service_id = arg_i64(args, 1).ok_or_else(|| err("MissingServiceId", "CharacterHasService requires serviceID"))?;
+    let (structure_id, service_id) = if args.len() >= 2 {
+        (
+            arg_i64(args, 0).ok_or_else(|| err("MissingStructureId", "CharacterHasService requires structureID"))?,
+            arg_i64(args, 1).ok_or_else(|| err("MissingServiceId", "CharacterHasService requires serviceID"))?,
+        )
+    } else if args.len() == 1 {
+        let sid = session.structure_id.ok_or_else(|| err("MissingStructureId", "CharacterHasService requires structureID when not docked"))?;
+        let svcid = arg_i64(args, 0).ok_or_else(|| err("MissingServiceId", "CharacterHasService requires serviceID"))?;
+        (sid, svcid)
+    } else {
+        return Err(err("MissingArguments", "CharacterHasService requires arguments"));
+    };
     ctx.db.with_snapshot(|snap| {
         let Some(st) = snap.structures.get(&structure_id) else {
             return Ok(PyRep::Bool(false));

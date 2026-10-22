@@ -377,6 +377,14 @@ pub fn handle(
             // const-ok: legacy POS moon processes are superseded by Upwell Moon Mining refineries in V24.01
             Some(Ok(PyRep::None))
         }
+        ("posMgr", "SetSessionCheck") => {
+            // const-ok: session check confirmation
+            let _ = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            Some(Ok(PyRep::Bool(true)))
+        }
         ("posMgr", "AnchorOrbital") => Some(Err(rpc_err(
             "StarbaseRemoved",
             "Legacy POS starbases and control towers are superseded by Upwell structures in V24.01",
