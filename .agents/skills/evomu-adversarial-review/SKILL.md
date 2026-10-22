@@ -4,7 +4,7 @@ description: >-
   Independent adversarial code review gate for the EvoMu repository. The coding agent MUST use
   this skill before it (a) claims any milestone, fix, or review finding is done, implemented,
   "verified", or "passing"; (b) runs `git commit` or `git push`; (c) edits status claims in
-  PLAN.md / README.md / docs/AGENT_HANDOFF.md; or (d) ends a turn in which EvoMu source changed.
+  PLAN.md / README.md / docs/; or (d) ends a turn in which EvoMu source changed.
   It launches a separate headless Jetski CLI (`agy`) reviewer pinned to Claude Opus 5.5 (Medium)
   (`opus-5.5-medium`), which verifies claims against the code, runs tests honestly,
   audits exploits, and returns PASS / PASS_WITH_ISSUES / FAIL.
@@ -82,5 +82,4 @@ Per-change reviews check **precision** (is what you claim true?). Completeness i
 - Canonical plan: [references/action_plan.md](references/action_plan.md)
 - Parity ledger, sources and client journeys: [references/parity/](references/parity/)
 - Open findings carried forward: [references/open_findings.md](references/open_findings.md)
-- Previous review reports: [references/history/](references/history/)
 - Output schemas: [scripts/verdict_schema.json](scripts/verdict_schema.json), [scripts/gap_schema.json](scripts/gap_schema.json)
