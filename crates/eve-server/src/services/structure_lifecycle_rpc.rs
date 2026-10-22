@@ -44,7 +44,7 @@ pub async fn handle_anchor(ctx: &ServerContext, session: &mut SessionState, args
         .ok_or_else(|| err("ShipNotInSpace", format!("Active ship {ship_id} is not spawned in space in system {sys_id}")))?;
     let anchor_pos: DVec3 = ship_ball.position;
     let now = ctx.now_unix();
-    let structure_id = ctx.db.try_with_mut_snapshot(|snap| {
+    let (structure_id, owner_corp_id) = ctx.db.try_with_mut_snapshot(|snap| {
         let corp_id = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
         if corp_id < 98_000_000 || !snap.corporations.contains_key(&corp_id) {
             return Err(err("NpcCorpCannotAnchorStructure", format!("Character {char_id} is in NPC corporation {corp_id}; only player corporations may anchor Upwell structures")));
@@ -91,9 +91,38 @@ pub async fn handle_anchor(ctx: &ServerContext, session: &mut SessionState, args
         // DERIVED: the client picks the reinforcement hour when deploying; this server-side
         // Anchor signature carries none, so the anchoring UTC hour/weekday is used.
         snap.structure_vulnerability_windows.insert(id, ((now / 3_600) % 24, ((now / 86_400) + 4) % 7));
-        Ok(id)
+        Ok((id, corp_id))
     })?;
     ensure_structure_ball_in_space(ctx, sys_id, structure_id).await;
+    ctx.notify(
+        crate::router::NotificationTarget::SolarSystem(sys_id),
+        "OnStructureAdded",
+        "solarsystemid",
+        vec![PyRep::Integer(i64::from(sys_id)), PyRep::Integer(structure_id)],
+    );
+    ctx.notify(
+        crate::router::NotificationTarget::Corporation(owner_corp_id),
+        "OnCorporationStructuresUpdated",
+        "corpid",
+        vec![],
+    );
+    let state_args = vec![
+        PyRep::Integer(i64::from(sys_id)),
+        PyRep::Integer(structure_id),
+        PyRep::String(STATE_ANCHOR_VULNERABLE.into()),
+    ];
+    ctx.notify(
+        crate::router::NotificationTarget::SolarSystem(sys_id),
+        "OnStructureStateChanged",
+        "solarsystemid",
+        state_args.clone(),
+    );
+    ctx.notify(
+        crate::router::NotificationTarget::SolarSystem(sys_id),
+        "OnCurrentStructureStateChanged",
+        "solarsystemid",
+        state_args,
+    );
     Ok(PyRep::keyval([
         ("structureID", PyRep::Integer(structure_id)),
         ("state", PyRep::String(STATE_ANCHOR_VULNERABLE.into())),

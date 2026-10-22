@@ -366,6 +366,31 @@ pub async fn handle(
                     )]),
                 ],
             );
+            if station_id >= 1_000_000_000_000 {
+                ctx.notify(
+                    crate::router::NotificationTarget::Station(station_id),
+                    "OnCharacterLeftStructure",
+                    "stationid",
+                    vec![PyRep::Integer(char_id)],
+                );
+                ctx.notify(
+                    crate::router::NotificationTarget::Character(char_id),
+                    "OnCharacterLeftStructure",
+                    "charid",
+                    vec![PyRep::Integer(char_id)],
+                );
+            }
+            let invuln_end_ft = ctx.now_blueos_filetime_ticks() + 300_000_000;
+            ctx.notify(
+                crate::router::NotificationTarget::Character(char_id),
+                "OnInvulunOnUndockingUpdated",
+                "charid",
+                vec![
+                    PyRep::Integer(ship.item_id),
+                    PyRep::Integer(invuln_end_ft),
+                    PyRep::Integer(30_000),
+                ],
+            );
             let beyonce_bound_id =
                 match ctx.bind_object(session, "beyonce", ch.solar_system_id as i64) {
                     Ok(b) => b,
@@ -585,6 +610,51 @@ pub async fn handle(
                             )]),
                         ],
                     );
+                    ctx.notify(
+                        crate::router::NotificationTarget::Character(char_id),
+                        "OnDockingAccepted",
+                        "charid",
+                        vec![PyRep::Integer(dock_id)],
+                    );
+                    ctx.notify(
+                        crate::router::NotificationTarget::Character(char_id),
+                        "OnDockingFinished",
+                        "charid",
+                        vec![PyRep::Integer(dock_id)],
+                    );
+                    if is_structure {
+                        let (corp_id, ally_id, fac_id, st_type_id) = ctx.db.with_snapshot(|snap| {
+                            let c = snap.characters.get(&char_id);
+                            let corp = c.map(|ch| ch.corporation_id).unwrap_or(0);
+                            let ally = c.and_then(|ch| ch.alliance_id);
+                            let fac = c.and_then(|ch| ch.war_faction_id);
+                            let st_tid = snap.structures.get(&dock_id).map(|s| s.type_id).unwrap_or(35832);
+                            (corp, ally, fac, st_tid)
+                        });
+                        ctx.notify(
+                            crate::router::NotificationTarget::Station(dock_id),
+                            "OnCharacterEnteredStructure",
+                            "stationid",
+                            vec![
+                                PyRep::Integer(char_id),
+                                PyRep::Integer(corp_id),
+                                ally_id.map(PyRep::Integer).unwrap_or(PyRep::None),
+                                fac_id.map(PyRep::Integer).unwrap_or(PyRep::None),
+                            ],
+                        );
+                        let hv_state = PyRep::keyval([
+                            ("characterID", PyRep::Integer(char_id)),
+                            ("structureID", PyRep::Integer(dock_id)),
+                            ("structureTypeID", PyRep::Integer(i64::from(st_type_id))),
+                            ("shipID", PyRep::Integer(ship_id)),
+                        ]);
+                        ctx.notify(
+                            crate::router::NotificationTarget::Character(char_id),
+                            "OnHangarViewStateUpdated",
+                            "charid",
+                            vec![PyRep::Integer(dock_id), hv_state],
+                        );
+                    }
                     Some(Ok(PyRep::keyval([
                         ("locationID", PyRep::Integer(dock_id)),
                         ("isStructure", PyRep::Bool(is_structure)),

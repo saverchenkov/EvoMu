@@ -158,6 +158,41 @@ pub fn init_insurgency_campaign(
 
     for sys in &systems {
         emit_campaign_started(ctx, *sys, campaign_id);
+        ctx.notify(
+            NotificationTarget::SolarSystem(*sys),
+            "OnInsurgencyStateChangedForFaction",
+            "solarsystemid",
+            vec![
+                PyRep::Integer(1),
+                PyRep::Integer(pirate_faction),
+                PyRep::Integer(i64::from(fob_system)),
+            ],
+        );
+    }
+}
+
+/// Ends an active pirate insurgency campaign and emits `OnInsurgencyCampaignEndingForLocation` and `OnInsurgencyStateChangedForFaction`.
+pub fn end_insurgency_campaign(ctx: &ServerContext, campaign_id: i64) {
+    let removed = with_insurgency_runtime(ctx, |rt| rt.campaigns.remove(&campaign_id));
+    if let Some(c) = removed {
+        for sys in &c.systems {
+            ctx.notify(
+                NotificationTarget::SolarSystem(*sys),
+                "OnInsurgencyCampaignEndingForLocation",
+                "solarsystemid",
+                vec![PyRep::Integer(i64::from(*sys))],
+            );
+            ctx.notify(
+                NotificationTarget::SolarSystem(*sys),
+                "OnInsurgencyStateChangedForFaction",
+                "solarsystemid",
+                vec![
+                    PyRep::Integer(0),
+                    PyRep::Integer(c.pirate_faction_id),
+                    PyRep::Integer(i64::from(c.fob_solar_system_id)),
+                ],
+            );
+        }
     }
 }
 
@@ -174,14 +209,14 @@ pub fn get_campaign_phase_and_timer(campaign: &InsurgencyCampaign, now: u64) -> 
 
 /// Advances corruption points in a system and updates corruption stage (1..5).
 pub fn add_system_corruption(ctx: &ServerContext, campaign_id: i64, sys_id: u32, points: i64) -> (i64, u8) {
-    let (pts, stage) = with_insurgency_runtime(ctx, |rt| {
+    let (pts, stage, pirate_faction) = with_insurgency_runtime(ctx, |rt| {
         let Some(c) = rt.campaigns.get_mut(&campaign_id) else {
-            return (0, 1);
+            return (0, 1, FACTION_GURISTAS);
         };
         let p = c.corruption_points.entry(sys_id).or_insert(0);
         *p = (*p + points).max(0);
         let s = ((*p as f64 / 200.0).ceil() as u8).clamp(1, 5);
-        (*p, s)
+        (*p, s, c.pirate_faction_id)
     });
 
     ctx.db.with_mut_snapshot(|snap| {
@@ -191,6 +226,19 @@ pub fn add_system_corruption(ctx: &ServerContext, campaign_id: i64, sys_id: u32,
     });
 
     emit_campaign_updated(ctx, sys_id, campaign_id, stage);
+    if stage >= 5 {
+        ctx.notify(
+            NotificationTarget::SolarSystem(sys_id),
+            "OnSystemFullyCorruptedForFaction",
+            "solarsystemid",
+            vec![
+                PyRep::Integer(i64::from(sys_id)),
+                PyRep::Integer(pirate_faction),
+                PyRep::Integer(pts),
+                PyRep::Integer(1000),
+            ],
+        );
+    }
     (pts, stage)
 }
 
@@ -213,6 +261,18 @@ pub fn add_system_suppression(ctx: &ServerContext, campaign_id: i64, sys_id: u32
     });
 
     emit_campaign_updated(ctx, sys_id, campaign_id, stage);
+    if stage >= 5 {
+        ctx.notify(
+            NotificationTarget::SolarSystem(sys_id),
+            "OnSystemFullySuppressedForFaction",
+            "solarsystemid",
+            vec![
+                PyRep::Integer(i64::from(sys_id)),
+                PyRep::Integer(pts),
+                PyRep::Integer(1000),
+            ],
+        );
+    }
     (pts, stage)
 }
 

@@ -201,7 +201,113 @@ pub fn claim_system_sovereignty(
     emit_sovereignty_changed(ctx, sys_id, Some(alliance_id), Some(corp_id));
     let structs = collect_sov_structures(ctx, sys_id);
     emit_sov_structures_updated(ctx, sys_id, structs);
+    ctx.notify(
+        NotificationTarget::SolarSystem(sys_id),
+        "OnCapitalSystemChanged",
+        "solarsystemid",
+        vec![PyRep::Tuple(vec![
+            PyRep::Integer(alliance_id),
+            PyRep::None,
+            PyRep::Integer(i64::from(sys_id)),
+        ])],
+    );
+    ctx.notify(
+        NotificationTarget::SolarSystem(sys_id),
+        "OnSovereigntyAudioEvent",
+        "solarsystemid",
+        vec![
+            PyRep::Integer(1),
+            PyRep::Dict(vec![
+                (PyRep::String("solarSystemID".into()), PyRep::Integer(i64::from(sys_id))),
+                (PyRep::String("allianceID".into()), PyRep::Integer(alliance_id)),
+            ]),
+        ],
+    );
+    ctx.notify(
+        NotificationTarget::SolarSystem(sys_id),
+        "ProcessSovStatusChanged",
+        "solarsystemid",
+        vec![
+            PyRep::Integer(i64::from(sys_id)),
+            PyRep::keyval([
+                ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
+                ("allianceID", PyRep::Integer(alliance_id)),
+                ("corporationID", PyRep::Integer(corp_id)),
+            ]),
+        ],
+    );
     Ok(())
+}
+
+/// Activates an Orbital Skyhook on a planet for the first time and emits `OnSkyhookFirstActivation`.
+pub fn activate_skyhook(ctx: &ServerContext, sys_id: u32, skyhook_id: i64, planet_id: i64) {
+    with_sov_runtime(ctx, |rt| {
+        rt.skyhook_reagents.entry(skyhook_id).or_insert((TYPE_MAGMATIC_GAS, 500));
+    });
+    ctx.notify(
+        NotificationTarget::SolarSystem(sys_id),
+        "OnSkyhookFirstActivation",
+        "solarsystemid",
+        vec![
+            PyRep::Integer(skyhook_id),
+            PyRep::Integer(planet_id),
+        ],
+    );
+}
+
+/// Processes Mercenary Den registration and emits `OnMercenaryDenRegistrationSuccess` or `OnMercenaryDenRegistrationInvalid`.
+pub fn register_mercenary_den(ctx: &ServerContext, char_id: i64, den_id: i64, valid: bool) {
+    let event = if valid {
+        "OnMercenaryDenRegistrationSuccess"
+    } else {
+        "OnMercenaryDenRegistrationInvalid"
+    };
+    ctx.notify(
+        NotificationTarget::Character(char_id),
+        event,
+        "charid",
+        vec![
+            PyRep::String("MercenaryDen".into()),
+            PyRep::Dict(vec![(
+                PyRep::String("mercenary_den_id".into()),
+                PyRep::Integer(den_id),
+            )]),
+        ],
+    );
+}
+
+/// Removes a character's Mercenary Den and emits `OnMyMercenaryDenRemoved`.
+pub fn remove_mercenary_den(ctx: &ServerContext, char_id: i64, den_id: i64) {
+    ctx.notify(
+        NotificationTarget::Character(char_id),
+        "OnMyMercenaryDenRemoved",
+        "charid",
+        vec![
+            PyRep::String("MercenaryDen".into()),
+            PyRep::Dict(vec![(
+                PyRep::String("mercenary_den_id".into()),
+                PyRep::Integer(den_id),
+            )]),
+        ],
+    );
+}
+
+/// Updates the Dynamic Bounty System (DBS) multiplier in `sys_id` and emits `OnSystemDynamicBountyStateChanged`.
+pub fn update_system_dynamic_bounty_rate(ctx: &ServerContext, sys_id: u32, rate: f64) {
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(st) = snap.system_states.get_mut(&sys_id) {
+            st.dbs_multiplier = rate;
+        }
+    });
+    ctx.notify(
+        NotificationTarget::SolarSystem(sys_id),
+        "OnSystemDynamicBountyStateChanged",
+        "solarsystemid",
+        vec![
+            PyRep::Integer(i64::from(sys_id)),
+            PyRep::Real(rate),
+        ],
+    );
 }
 
 fn collect_sov_structures(ctx: &ServerContext, sys_id: u32) -> Vec<PyRep> {

@@ -7,165 +7,6 @@
 
 use super::*;
 
-/// Claims up to 20% of the destroyed ship's reference value from the victim's (and corp/alliance)
-/// bounty pool and credits the final-blow killer (`feat:combat.player-bounties`, `feat:combat.bounty-leaderboards`).
-pub fn claim_player_bounty_on_kill(
-    ctx: &ServerContext,
-    killer_char_id: i64,
-    victim_char_id: i64,
-    victim_ship_type_id: u32,
-) -> f64 {
-    if killer_char_id <= 0 || victim_char_id <= 0 || killer_char_id == victim_char_id {
-        return 0.0;
-    }
-    let (vic_corp, vic_all, kil_corp, kil_all) = ctx.db.with_snapshot(|snap| {
-        let vc = snap
-            .characters
-            .get(&victim_char_id)
-            .map(|c| c.corporation_id)
-            .unwrap_or(0);
-        let va = snap
-            .corporations
-            .get(&vc)
-            .and_then(|co| co.alliance_id)
-            .unwrap_or(0);
-        let kc = snap
-            .characters
-            .get(&killer_char_id)
-            .map(|c| c.corporation_id)
-            .unwrap_or(0);
-        let ka = snap
-            .corporations
-            .get(&kc)
-            .and_then(|co| co.alliance_id)
-            .unwrap_or(0);
-        (vc, va, kc, ka)
-    });
-    let ref_val = compute_ship_insurance_reference_value(&ctx.sde, victim_ship_type_id).max(250_000.0);
-    let max_claim = 0.20 * ref_val;
-    let claimed_isk = with_mut_combat_runtime(ctx, |rt| {
-        let mut remaining_cap = max_claim;
-        let mut claimed = 0.0;
-        for tid in [victim_char_id, vic_corp, vic_all] {
-            if tid <= 0 || remaining_cap <= 0.0 {
-                continue;
-            }
-            if let Some(pool) = rt.player_bounty_pool.get_mut(&tid) {
-                let take = (*pool).min(remaining_cap);
-                if take > 0.0 {
-                    *pool -= take;
-                    remaining_cap -= take;
-                    claimed += take;
-                }
-                if *pool <= 1e-6 {
-                    rt.player_bounty_pool.remove(&tid);
-                }
-            }
-        }
-        if claimed > 0.0 {
-            *rt.bounty_hunter_claimed.entry(killer_char_id).or_insert(0.0) += claimed;
-            if kil_corp > 0 {
-                *rt.bounty_hunter_claimed.entry(kil_corp).or_insert(0.0) += claimed;
-            }
-            if kil_all > 0 {
-                *rt.bounty_hunter_claimed.entry(kil_all).or_insert(0.0) += claimed;
-            }
-        }
-        claimed
-    });
-    if claimed_isk > 0.0 {
-        let new_bal = ctx.db.with_mut_snapshot(|snap| {
-            if let Some(ch) = snap.characters.get_mut(&killer_char_id) {
-                let add = IskCents::from_f64_isk(claimed_isk);
-                ch.balance = ch.balance.checked_add(add).unwrap_or(ch.balance);
-                Some(ch.balance.to_wire_f64())
-            } else {
-                None
-            }
-        });
-        if let Some(bal) = new_bal {
-            let _ = ctx.notify_account_change(killer_char_id, "cash", killer_char_id, bal);
-        }
-        ctx.notify(
-            NotificationTarget::Character(killer_char_id),
-            "OnBountyAddedToPayout",
-            "charid",
-            vec![PyRep::Integer(victim_char_id), PyRep::Real(claimed_isk)],
-        );
-    }
-    claimed_isk
-}
-
-/// GM/Admin bounty manipulation tool (`set`, `clear`, `reimburse`) (`feat:admin.gm-bounty-tools`).
-pub fn gm_admin_bounty_action(
-    ctx: &ServerContext,
-    session: &SessionState,
-    action: &str,
-    target_id: i64,
-    amount_isk: f64,
-) -> Result<f64, BridgeRpcError> {
-    if !session.has_gm_role() && (session.role & eve_machonet::service_roles::ROLE_QA) == 0 {
-        return Err(BridgeRpcError {
-            code: "InsufficientRole".into(),
-            message: "GM bounty tools require a GM/Admin/QA role".into(),
-        });
-    }
-    match action {
-        "set" => {
-            let val = amount_isk.max(0.0);
-            with_mut_combat_runtime(ctx, |rt| {
-                if val > 0.0 {
-                    rt.player_bounty_pool.insert(target_id, val);
-                } else {
-                    rt.player_bounty_pool.remove(&target_id);
-                }
-            });
-            Ok(val)
-        }
-        "clear" => {
-            let prev = with_mut_combat_runtime(ctx, |rt| {
-                if target_id > 0 {
-                    rt.bounty_contributions.remove(&target_id);
-                    rt.player_bounty_pool.remove(&target_id).unwrap_or(0.0)
-                } else {
-                    let sum: f64 = rt.player_bounty_pool.values().sum();
-                    rt.player_bounty_pool.clear();
-                    rt.bounty_contributions.clear();
-                    sum
-                }
-            });
-            Ok(prev)
-        }
-        "reimburse" => {
-            let refunds = with_mut_combat_runtime(ctx, |rt| {
-                if target_id > 0 {
-                    rt.player_bounty_pool.remove(&target_id);
-                    rt.bounty_contributions.remove(&target_id).unwrap_or_default()
-                } else {
-                    rt.player_bounty_pool.clear();
-                    let all = std::mem::take(&mut rt.bounty_contributions);
-                    all.into_values().flatten().collect()
-                }
-            });
-            let mut total_reimbursed = 0.0;
-            ctx.db.with_mut_snapshot(|snap| {
-                for (cid, amt) in refunds {
-                    if let Some(ch) = snap.characters.get_mut(&cid) {
-                        let add = IskCents::from_f64_isk(amt);
-                        ch.balance = ch.balance.checked_add(add).unwrap_or(ch.balance);
-                        total_reimbursed += amt;
-                    }
-                }
-            });
-            Ok(total_reimbursed)
-        }
-        _ => Err(BridgeRpcError {
-            code: "InvalidGmBountyAction".into(),
-            message: format!("Unknown GM bounty action '{action}'"),
-        }),
-    }
-}
-
 /// Evaluates Faction Police security status threshold for a given high-security system (`feat:crimewatch.faction-police-thresholds`).
 pub fn faction_police_sec_threshold(system_security: f64) -> Option<f64> {
     let rounded = (system_security * 10.0).round() / 10.0;
@@ -522,6 +363,24 @@ pub async fn handle_crimewatch(
                         .unwrap_or_else(|e| e.into_inner())
                         .get_or_create(target_id)
                         .suspect_flag_until_unix = now_unix.saturating_add(900);
+                    ctx.notify(
+                        NotificationTarget::Character(char_id),
+                        "OnKillRightActivated",
+                        "charid",
+                        vec![],
+                    );
+                    ctx.notify(
+                        NotificationTarget::Character(char_id),
+                        "OnKillRightUsed",
+                        "charid",
+                        vec![PyRep::Integer(kr_id), PyRep::Integer(target_id)],
+                    );
+                    ctx.notify(
+                        NotificationTarget::Character(target_id),
+                        "OnKillRightUsed",
+                        "charid",
+                        vec![PyRep::Integer(kr_id), PyRep::Integer(target_id)],
+                    );
                     Some(Ok(PyRep::keyval([
                         ("killRightID", PyRep::Integer(kr_id)),
                         ("suspectFlagActive", PyRep::Bool(true)),
@@ -576,14 +435,34 @@ pub async fn handle_crimewatch(
                 if let Some(kr_mut) = snap.kill_rights.get_mut(&kr_id) {
                     kr_mut.is_active_suspect = true;
                 }
-                Ok(fee.to_wire_f64())
+                Ok((fee.to_wire_f64(), kr.owner_id, kr.target_id))
             });
             match res {
-                Ok(fee_paid) => Some(Ok(PyRep::keyval([
-                    ("killRightID", PyRep::Integer(kr_id)),
-                    ("feePaidISK", PyRep::Real(fee_paid)),
-                    ("suspectFlagActive", PyRep::Bool(true)),
-                ]))),
+                Ok((fee_paid, owner_id, target_id)) => {
+                    ctx.notify(
+                        NotificationTarget::Character(owner_id),
+                        "OnKillRightForYouSold",
+                        "charid",
+                        vec![PyRep::Integer(kr_id)],
+                    );
+                    ctx.notify(
+                        NotificationTarget::Character(char_id),
+                        "OnKillRightActivated",
+                        "charid",
+                        vec![],
+                    );
+                    ctx.notify(
+                        NotificationTarget::Character(char_id),
+                        "OnKillRightUsed",
+                        "charid",
+                        vec![PyRep::Integer(kr_id), PyRep::Integer(target_id)],
+                    );
+                    Some(Ok(PyRep::keyval([
+                        ("killRightID", PyRep::Integer(kr_id)),
+                        ("feePaidISK", PyRep::Real(fee_paid)),
+                        ("suspectFlagActive", PyRep::Bool(true)),
+                    ])))
+                }
                 Err(e) => Some(Err(e)),
             }
         }
@@ -782,13 +661,28 @@ pub async fn handle_crimewatch(
                     message: "StartDuelChallenge requires target characterID".into(),
                 }));
             };
-            let _ = ctx
-                .db
-                .with_snapshot(|s| s.characters.get(&target_char_id).map(|c| c.character_id));
-            let now_unix = ctx.now_unix();
-            with_mut_combat_runtime(ctx, |rt| {
-                rt.duel_challenges.insert((char_id, target_char_id), now_unix);
+            let (from_corp_id, from_alliance_id) = ctx.db.with_snapshot(|s| {
+                let _ = s.characters.get(&target_char_id).map(|c| c.character_id);
+                let corp = s.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
+                let all = s.characters.get(&char_id).and_then(|c| c.alliance_id);
+                (corp, all)
             });
+            let now_unix = ctx.now_unix();
+            let expiry_ft = ctx.now_blueos_filetime_ticks() + 600_000_000;
+            with_mut_combat_runtime(ctx, |rt| {
+                rt.duel_challenges.insert((char_id, target_char_id), now_unix.saturating_add(60));
+            });
+            ctx.notify(
+                NotificationTarget::Character(target_char_id),
+                "OnDuelChallenge",
+                "charid",
+                vec![
+                    PyRep::Integer(char_id),
+                    PyRep::Integer(from_corp_id),
+                    from_alliance_id.map(PyRep::Integer).unwrap_or(PyRep::None),
+                    PyRep::Integer(expiry_ft),
+                ],
+            );
             Some(Ok(PyRep::keyval([
                 ("challengerID", PyRep::Integer(char_id)),
                 ("targetID", PyRep::Integer(target_char_id)),
@@ -832,6 +726,19 @@ pub async fn handle_crimewatch(
                 }));
             }
             if accept {
+                let timeout_ft = ctx.now_blueos_filetime_ticks() + 3_000_000_000;
+                ctx.notify(
+                    NotificationTarget::Character(char_id),
+                    "OnCrimewatchEngagementCreated",
+                    "charid",
+                    vec![PyRep::Integer(challenger_id), PyRep::Integer(timeout_ft)],
+                );
+                ctx.notify(
+                    NotificationTarget::Character(challenger_id),
+                    "OnCrimewatchEngagementCreated",
+                    "charid",
+                    vec![PyRep::Integer(char_id), PyRep::Integer(timeout_ft)],
+                );
                 ctx.notify(
                     NotificationTarget::Character(char_id),
                     "OnCrimewatchEngagementUpdated",
@@ -943,6 +850,12 @@ pub async fn handle_crimewatch(
                                 solar_system_id: sys_id,
                             });
                     });
+                    ctx.notify(
+                        NotificationTarget::Character(char_id),
+                        "OnSecurityStatusUpdate",
+                        "charid",
+                        vec![PyRep::Real(new_sec)],
+                    );
                     Some(Ok(PyRep::keyval([
                         ("oldSecurityStatus", PyRep::Real(old_sec)),
                         ("newSecurityStatus", PyRep::Real(new_sec)),

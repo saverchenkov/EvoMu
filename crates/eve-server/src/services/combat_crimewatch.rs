@@ -841,3 +841,346 @@ pub async fn dispatch_combat_rpc(
     ctx.dispatch_rpc(session, service, None, method, args, kwargs, None)
         .await
 }
+
+/// Claims up to 20% of the destroyed ship's reference value from the victim's (and corp/alliance)
+/// bounty pool and credits the final-blow killer (`feat:combat.player-bounties`, `feat:combat.bounty-leaderboards`).
+pub fn claim_player_bounty_on_kill(
+    ctx: &ServerContext,
+    killer_char_id: i64,
+    victim_char_id: i64,
+    victim_ship_type_id: u32,
+) -> f64 {
+    if killer_char_id <= 0 || victim_char_id <= 0 || killer_char_id == victim_char_id {
+        return 0.0;
+    }
+    let (vic_corp, vic_all, kil_corp, kil_all) = ctx.db.with_snapshot(|snap| {
+        let vc = snap.characters.get(&victim_char_id).map(|c| c.corporation_id).unwrap_or(0);
+        let va = snap.corporations.get(&vc).and_then(|co| co.alliance_id).unwrap_or(0);
+        let kc = snap.characters.get(&killer_char_id).map(|c| c.corporation_id).unwrap_or(0);
+        let ka = snap.corporations.get(&kc).and_then(|co| co.alliance_id).unwrap_or(0);
+        (vc, va, kc, ka)
+    });
+    let ref_val = compute_ship_insurance_reference_value(&ctx.sde, victim_ship_type_id).max(250_000.0);
+    let max_claim = 0.20 * ref_val;
+    let claimed_isk = with_mut_combat_runtime(ctx, |rt| {
+        let mut remaining_cap = max_claim;
+        let mut claimed = 0.0;
+        for tid in [victim_char_id, vic_corp, vic_all] {
+            if tid <= 0 || remaining_cap <= 0.0 {
+                continue;
+            }
+            if let Some(pool) = rt.player_bounty_pool.get_mut(&tid) {
+                let take = (*pool).min(remaining_cap);
+                if take > 0.0 {
+                    *pool -= take;
+                    remaining_cap -= take;
+                    claimed += take;
+                }
+                if *pool <= 1e-6 {
+                    rt.player_bounty_pool.remove(&tid);
+                }
+            }
+        }
+        if claimed > 0.0 {
+            *rt.bounty_hunter_claimed.entry(killer_char_id).or_insert(0.0) += claimed;
+            if kil_corp > 0 {
+                *rt.bounty_hunter_claimed.entry(kil_corp).or_insert(0.0) += claimed;
+            }
+            if kil_all > 0 {
+                *rt.bounty_hunter_claimed.entry(kil_all).or_insert(0.0) += claimed;
+            }
+        }
+        claimed
+    });
+    if claimed_isk > 0.0 {
+        let new_bal = ctx.db.with_mut_snapshot(|snap| {
+            if let Some(ch) = snap.characters.get_mut(&killer_char_id) {
+                let add = IskCents::from_f64_isk(claimed_isk);
+                ch.balance = ch.balance.checked_add(add).unwrap_or(ch.balance);
+                Some(ch.balance.to_wire_f64())
+            } else {
+                None
+            }
+        });
+        if let Some(bal) = new_bal {
+            let _ = ctx.notify_account_change(killer_char_id, "cash", killer_char_id, bal);
+        }
+        let now_ft = ctx.now_blueos_filetime_ticks();
+        ctx.notify(
+            NotificationTarget::Character(killer_char_id),
+            "OnBountyAddedToPayout",
+            "charid",
+            vec![PyRep::Dict(vec![
+                (PyRep::String("amount".into()), PyRep::Real(claimed_isk)),
+                (PyRep::String("payoutTime".into()), PyRep::Integer(now_ft)),
+                (
+                    PyRep::String("enemyTypeID".into()),
+                    PyRep::Integer(i64::from(victim_ship_type_id)),
+                ),
+                (PyRep::String("isModified".into()), PyRep::Bool(false)),
+            ])],
+        );
+    }
+    claimed_isk
+}
+
+/// GM/Admin bounty manipulation tool (`set`, `clear`, `reimburse`) (`feat:admin.gm-bounty-tools`).
+pub fn gm_admin_bounty_action(
+    ctx: &ServerContext,
+    session: &SessionState,
+    action: &str,
+    target_id: i64,
+    amount_isk: f64,
+) -> Result<f64, BridgeRpcError> {
+    if !session.has_gm_role() && (session.role & eve_machonet::service_roles::ROLE_QA) == 0 {
+        return Err(BridgeRpcError {
+            code: "InsufficientRole".into(),
+            message: "GM bounty tools require a GM/Admin/QA role".into(),
+        });
+    }
+    match action {
+        "set" => {
+            let val = amount_isk.max(0.0);
+            with_mut_combat_runtime(ctx, |rt| {
+                if val > 0.0 {
+                    rt.player_bounty_pool.insert(target_id, val);
+                } else {
+                    rt.player_bounty_pool.remove(&target_id);
+                }
+            });
+            Ok(val)
+        }
+        "clear" => {
+            let prev = with_mut_combat_runtime(ctx, |rt| {
+                if target_id > 0 {
+                    rt.bounty_contributions.remove(&target_id);
+                    rt.player_bounty_pool.remove(&target_id).unwrap_or(0.0)
+                } else {
+                    let sum: f64 = rt.player_bounty_pool.values().sum();
+                    rt.player_bounty_pool.clear();
+                    rt.bounty_contributions.clear();
+                    sum
+                }
+            });
+            Ok(prev)
+        }
+        "reimburse" => {
+            let refunds = with_mut_combat_runtime(ctx, |rt| {
+                if target_id > 0 {
+                    rt.player_bounty_pool.remove(&target_id);
+                    rt.bounty_contributions.remove(&target_id).unwrap_or_default()
+                } else {
+                    rt.player_bounty_pool.clear();
+                    let all = std::mem::take(&mut rt.bounty_contributions);
+                    all.into_values().flatten().collect()
+                }
+            });
+            let mut total_reimbursed = 0.0;
+            ctx.db.with_mut_snapshot(|snap| {
+                for (cid, amt) in refunds {
+                    if let Some(ch) = snap.characters.get_mut(&cid) {
+                        let add = IskCents::from_f64_isk(amt);
+                        ch.balance = ch.balance.checked_add(add).unwrap_or(ch.balance);
+                        total_reimbursed += amt;
+                    }
+                }
+            });
+            Ok(total_reimbursed)
+        }
+        _ => Err(BridgeRpcError {
+            code: "InvalidGmBountyAction".into(),
+            message: format!("Unknown GM bounty action '{action}'"),
+        }),
+    }
+}
+
+/// Creates a kill right from `owner_id` against `target_id` and emits `OnKillRightCreated`.
+pub fn create_kill_right(ctx: &ServerContext, kr_id: i64, owner_id: i64, target_id: i64, fee_isk: f64) {
+    let expiry_ft = ctx.now_blueos_filetime_ticks() + (30 * 86_400 * 10_000_000);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.kill_rights.insert(
+            kr_id,
+            KillRightRecord {
+                kill_right_id: kr_id,
+                owner_id,
+                target_id,
+                activation_fee: IskCents::from_f64_isk(fee_isk.max(0.0)),
+                is_active_suspect: false,
+            },
+        );
+    });
+    let args = vec![
+        PyRep::Integer(kr_id),
+        PyRep::Integer(owner_id),
+        PyRep::Integer(target_id),
+        PyRep::Integer(expiry_ft),
+    ];
+    ctx.notify(
+        NotificationTarget::Character(owner_id),
+        "OnKillRightCreated",
+        "charid",
+        args.clone(),
+    );
+    ctx.notify(
+        NotificationTarget::Character(target_id),
+        "OnKillRightCreated",
+        "charid",
+        args,
+    );
+}
+
+/// Emits limited engagement timeout start/stop and end notifications to `char_id`.
+pub fn update_crimewatch_engagement_timers(ctx: &ServerContext, char_id: i64, other_char_id: i64) {
+    let timeout_ft = ctx.now_blueos_filetime_ticks() + 3_000_000_000;
+    ctx.notify(
+        NotificationTarget::Character(char_id),
+        "OnCrimewatchEngagementStartTimeout",
+        "charid",
+        vec![PyRep::Integer(other_char_id), PyRep::Integer(timeout_ft)],
+    );
+    ctx.notify(
+        NotificationTarget::Character(char_id),
+        "OnCrimewatchEngagementStopTimeout",
+        "charid",
+        vec![PyRep::Integer(other_char_id)],
+    );
+    with_mut_combat_runtime(ctx, |rt| {
+        if let Some(m) = rt.limited_engagements.get_mut(&char_id) {
+            m.remove(&other_char_id);
+        }
+    });
+    ctx.notify(
+        NotificationTarget::Character(char_id),
+        "OnCrimewatchEngagementEnded",
+        "charid",
+        vec![PyRep::Integer(other_char_id)],
+    );
+}
+
+/// Updates and emits all combat timers (`Weapons`, `PvP`, `NPC`, `Criminal`, `Disapproval`) and system flag updates.
+pub fn emit_combat_and_flag_timer_updates(ctx: &ServerContext, char_id: i64, sys_id: u32) {
+    let now_unix = ctx.now_unix();
+    let now_ft = ctx.now_blueos_filetime_ticks();
+    {
+        let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
+        let st = cw.get_or_create(char_id);
+        st.weapon_timer_until_unix = now_unix.saturating_add(60);
+        st.pvp_timer_until_unix = now_unix.saturating_add(900);
+        st.suspect_flag_until_unix = now_unix.saturating_add(900);
+    }
+    with_mut_combat_runtime(ctx, |rt| {
+        rt.npc_timers.insert(char_id, now_unix.saturating_add(300));
+        rt.disapproval_flags.insert(char_id, now_unix.saturating_add(300));
+    });
+    ctx.notify(
+        NotificationTarget::Character(char_id),
+        "OnWeaponsTimerUpdate",
+        "charid",
+        vec![PyRep::Integer(101), PyRep::Integer(now_ft + 600_000_000)],
+    );
+    ctx.notify(
+        NotificationTarget::Character(char_id),
+        "OnPvpTimerUpdate",
+        "charid",
+        vec![PyRep::Integer(201), PyRep::Integer(now_ft + 9_000_000_000)],
+    );
+    ctx.notify(
+        NotificationTarget::Character(char_id),
+        "OnNpcTimerUpdate",
+        "charid",
+        vec![PyRep::Integer(401), PyRep::Integer(now_ft + 3_000_000_000)],
+    );
+    ctx.notify(
+        NotificationTarget::Character(char_id),
+        "OnCriminalTimerUpdate",
+        "charid",
+        vec![PyRep::Integer(302), PyRep::Integer(now_ft + 9_000_000_000)],
+    );
+    ctx.notify(
+        NotificationTarget::Character(char_id),
+        "OnDisapprovalTimerUpdate",
+        "charid",
+        vec![PyRep::Integer(501), PyRep::Integer(now_ft + 3_000_000_000)],
+    );
+    ctx.notify(
+        NotificationTarget::SolarSystem(sys_id),
+        "OnSystemCriminalFlagUpdates",
+        "solarsystemid",
+        vec![
+            PyRep::List(vec![]),
+            PyRep::List(vec![PyRep::Integer(char_id)]),
+            PyRep::List(vec![]),
+        ],
+    );
+    ctx.notify(
+        NotificationTarget::SolarSystem(sys_id),
+        "OnSystemDisapprovalFlagUpdates",
+        "solarsystemid",
+        vec![PyRep::List(vec![PyRep::Integer(char_id)]), PyRep::List(vec![])],
+    );
+}
+
+/// Emits ship invulnerability, jump cloak, and safe logoff timer notifications to `char_id`.
+pub fn emit_ship_cloak_and_logoff_timers(ctx: &ServerContext, char_id: i64, ship_id: i64) {
+    let now_ft = ctx.now_blueos_filetime_ticks();
+    ctx.notify(
+        NotificationTarget::Character(char_id),
+        "OnRestoringInvulnUpdated",
+        "charid",
+        vec![
+            PyRep::Integer(ship_id),
+            PyRep::Integer(now_ft + 300_000_000),
+            PyRep::Integer(30_000),
+        ],
+    );
+    ctx.notify(
+        NotificationTarget::Character(char_id),
+        "OnInvulnCancelled",
+        "charid",
+        vec![PyRep::Integer(ship_id)],
+    );
+    ctx.notify(
+        NotificationTarget::Character(char_id),
+        "OnJumpCloakUpdated",
+        "charid",
+        vec![
+            PyRep::Integer(ship_id),
+            PyRep::Integer(now_ft + 600_000_000),
+            PyRep::Integer(60_000),
+        ],
+    );
+    ctx.notify(
+        NotificationTarget::Character(char_id),
+        "OnJumpCloakCancelled",
+        "charid",
+        vec![PyRep::Integer(ship_id)],
+    );
+    ctx.notify(
+        NotificationTarget::Character(char_id),
+        "OnSafeLogoffTimerStarted",
+        "charid",
+        vec![PyRep::Integer(now_ft + 300_000_000)],
+    );
+}
+
+/// Updates modified solar system security status and emits `OnSecurityModified`.
+pub fn modify_solar_system_security(
+    ctx: &ServerContext,
+    sys_id: u32,
+    modifier_amount: f64,
+    new_security: f64,
+) {
+    with_mut_combat_runtime(ctx, |rt| {
+        rt.modified_system_securities.insert(sys_id, new_security);
+    });
+    ctx.notify(
+        NotificationTarget::SolarSystem(sys_id),
+        "OnSecurityModified",
+        "solarsystemid",
+        vec![
+            PyRep::Integer(i64::from(sys_id)),
+            PyRep::Real(modifier_amount),
+            PyRep::Real(new_security),
+        ],
+    );
+}

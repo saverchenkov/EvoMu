@@ -65,6 +65,7 @@ async fn test_corporation_lifecycle_recruitment_and_aggression_notifications() {
         "notify:OnCorpAggressionSettingsChange",
     ]);
     let ctx = Arc::new(ServerContext::new());
+    common::pin_clock(&ctx);
     fund_pilot(&ctx, P1, 500_000_000);
     let mut s1 = select(&ctx, 801, "demo", "demo-secret", P1).await;
     let mut s2 = select(&ctx, 802, "other", "other-secret", P2).await;
@@ -342,6 +343,7 @@ async fn test_corporation_governance_shares_titles_votes_and_medals_notification
         "notify:OnMedalStatusChanged",
     ]);
     let ctx = Arc::new(ServerContext::new());
+    common::pin_clock(&ctx);
     fund_pilot(&ctx, P1, 500_000_000);
     let mut s1 = select(&ctx, 811, "demo", "demo-secret", P1).await;
     let mut s2 = select(&ctx, 812, "other", "other-secret", P2).await;
@@ -644,6 +646,7 @@ async fn test_alliance_and_war_notifications() {
         "notify:OnWarChanged",
     ]);
     let ctx = Arc::new(ServerContext::new());
+    common::pin_clock(&ctx);
     fund_pilot(&ctx, P1, 5_000_000_000);
     fund_pilot(&ctx, P2, 5_000_000_000);
     let mut s1 = select(&ctx, 821, "demo", "demo-secret", P1).await;

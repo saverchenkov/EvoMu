@@ -1007,6 +1007,171 @@
           }
         ],
         "server_sender": "No server emitter needed: server sends OnStandingSet; Standing.OnStandingSet locally scatters OnNPCStandingChange."
+      },
+      "notify:OnDockingProgressChanged": {
+        "sites": [
+          {
+            "client_module": "eve/client/script/ui/shared/dockedUI/undockingSvc.pyj",
+            "function": "UndockingSvc._Undock_Thread",
+            "bytecode_offsets": "9-24",
+            "instructions": "LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnDockingProgressChanged'; LOAD_CONST 0.0; CALL_FUNCTION 2"
+          }
+        ],
+        "server_sender": "No server emitter needed: UndockingSvc._Undock_Thread locally scatters OnDockingProgressChanged during undock animation."
+      },
+      "notify:OnDockingRequestWasDenied": {
+        "sites": [
+          {
+            "client_module": "eve/client/script/ui/services/structure/structureDocking.pyj",
+            "function": "StructureDocking.Dock.RequestDocking",
+            "bytecode_offsets": "119-134",
+            "instructions": "LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnDockingRequestWasDenied'; LOAD_DEREF 0; CALL_FUNCTION 2"
+          }
+        ],
+        "server_sender": "No server emitter needed: StructureDocking.Dock.RequestDocking locally scatters OnDockingRequestWasDenied when the Dock RPC raises an exception."
+      },
+      "notify:OnUndockingStarted": {
+        "sites": [
+          {
+            "client_module": "eve/client/script/ui/shared/dockedUI/undockingSvc.pyj",
+            "function": "UndockingSvc._Undock_Thread",
+            "bytecode_offsets": "29-44",
+            "instructions": "LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnUndockingStarted'; LOAD_FAST session; LOAD_ATTR stationid; LOAD_ATTR structureid; CALL_FUNCTION 2"
+          }
+        ],
+        "server_sender": "No server emitter needed: UndockingSvc._Undock_Thread locally scatters OnUndockingStarted when the player clicks Undock."
+      },
+      "notify:OnUndockingCompleted": {
+        "sites": [
+          {
+            "client_module": "eve/client/script/ui/shared/dockedUI/undockingSvc.pyj",
+            "function": "UndockingSvc.UndockAttempt",
+            "bytecode_offsets": "133-148",
+            "instructions": "LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnUndockingCompleted'; LOAD_FAST stationID; CALL_FUNCTION 2"
+          }
+        ],
+        "server_sender": "No server emitter needed: UndockingSvc.UndockAttempt locally scatters OnUndockingCompleted after the Undock RPC returns."
+      },
+      "notify:OnUndockingAborted": {
+        "sites": [
+          {
+            "client_module": "eve/client/script/ui/shared/dockedUI/undockingSvc.pyj",
+            "function": "UndockingSvc.AbortUndock",
+            "bytecode_offsets": "81-96",
+            "instructions": "LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnUndockingAborted'; LOAD_FAST stationID; CALL_FUNCTION 2"
+          }
+        ],
+        "server_sender": "No server emitter needed: UndockingSvc.AbortUndock locally scatters OnUndockingAborted when the player aborts undocking."
+      },
+      "notify:OnSlimItemUpdated": {
+        "sites": [
+          {
+            "client_module": "eve/client/script/remote/michelle.pyj",
+            "function": "Park.OnSlimItemChange",
+            "bytecode_offsets": "87-114",
+            "instructions": "LOAD_FAST ball; LOAD_ATTR OnSlimItemUpdated; LOAD_FAST newSlim; CALL_FUNCTION 1"
+          }
+        ],
+        "server_sender": "No server emitter needed: server sends OnSlimItemChange(itemID, newSlim); Park.OnSlimItemChange invokes ball.OnSlimItemUpdated(newSlim) locally."
+      },
+      "notify:OnSolarsystemAdvantageStateUpdated_Local": {
+        "sites": [
+          {
+            "client_module": "eve/client/script/ui/services/fwAdvantageSvc.pyj",
+            "function": "FwAdvantageSvc._OnSolarSystemScoresUpdated",
+            "bytecode_offsets": "149-162",
+            "instructions": "LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnSolarsystemAdvantageStateUpdated_Local'; CALL_FUNCTION 1"
+          }
+        ],
+        "server_sender": "No server emitter needed: FwAdvantageSvc._OnSolarSystemScoresUpdated locally scatters OnSolarsystemAdvantageStateUpdated_Local."
+      },
+      "notify:OnCollapsed": {
+        "sites": [
+          {
+            "client_module": "carbonui/control/window.pyj",
+            "function": "Window.Collapse",
+            "bytecode_offsets": "535-547",
+            "instructions": "LOAD_FAST self; LOAD_ATTR sr; LOAD_ATTR stack; LOAD_ATTR OnCollapsed; LOAD_FAST self; CALL_FUNCTION 1"
+          }
+        ],
+        "server_sender": "No server emitter needed: CarbonUI Window.Collapse locally calls OnCollapsed on the window/stack."
+      },
+      "notify:OnExpanded": {
+        "sites": [
+          {
+            "client_module": "carbonui/control/window.pyj",
+            "function": "Window.Expand",
+            "bytecode_offsets": "481-493",
+            "instructions": "LOAD_FAST self; LOAD_ATTR sr; LOAD_ATTR stack; LOAD_ATTR OnExpanded; LOAD_FAST self; CALL_FUNCTION 1"
+          }
+        ],
+        "server_sender": "No server emitter needed: CarbonUI Window.Expand locally calls OnExpanded on the window/stack."
+      },
+      "notify:OnFleetFavoriteAdded": {
+        "sites": [
+          {
+            "client_module": "eve/client/script/parklife/fleetSvc.pyj",
+            "function": "FleetSvc.AddFavorite",
+            "bytecode_offsets": "368-381",
+            "instructions": "LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnFleetFavoriteAdded'; LOAD_FAST charIDs; CALL_FUNCTION 2"
+          }
+        ],
+        "server_sender": "No server emitter needed: FleetSvc.AddFavorite locally scatters OnFleetFavoriteAdded when the player adds a watchlist favorite."
+      },
+      "notify:OnFleetFavoriteRemoved": {
+        "sites": [
+          {
+            "client_module": "eve/client/script/parklife/fleetSvc.pyj",
+            "function": "FleetSvc.RemoveFavorite",
+            "bytecode_offsets": "79-94",
+            "instructions": "LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnFleetFavoriteRemoved'; LOAD_FAST charID; CALL_FUNCTION 2"
+          }
+        ],
+        "server_sender": "No server emitter needed: FleetSvc.RemoveFavorite locally scatters OnFleetFavoriteRemoved when the player removes a watchlist favorite."
+      },
+      "notify:OnFleetFormationWndChanged": {
+        "sites": [
+          {
+            "client_module": "eve/client/script/ui/shared/fleet/fleetFormations.pyj",
+            "function": "FleetFormationsPanel.DetachPanel",
+            "bytecode_offsets": "32-45",
+            "instructions": "LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnFleetFormationWndChanged'; CALL_FUNCTION 1"
+          }
+        ],
+        "server_sender": "No server emitter needed: FleetFormationsPanel.DetachPanel / FleetFormationWnd.Close locally scatters OnFleetFormationWndChanged."
+      },
+      "notify:OnClientContactChangeOnBlockContacts": {
+        "sites": [
+          {
+            "client_module": "eve/client/script/ui/shared/killRights.pyj",
+            "function": "KillRightsEntry",
+            "bytecode_offsets": "18-33",
+            "instructions": "LOAD_CONST 'OnContactNoLongerContact'; LOAD_CONST 'OnContactChange'; LOAD_CONST 'OnClientContactChangeOnBlockContacts'; LOAD_CONST 'OnUnblockContacts'; BUILD_LIST 6; STORE_NAME __notifyevents__"
+          }
+        ],
+        "server_sender": "No server emitter needed: dead string-concatenation typo in KillRightsEntry.__notifyevents__ with no handler method anywhere in code.ccp (server sends OnContactChange)."
+      },
+      "notify:OnCombatTimersUpdated": {
+        "sites": [
+          {
+            "client_module": "eve/client/script/ui/services/crimewatchSvc.pyj",
+            "function": "CrimewatchService.ProcessSessionChange",
+            "bytecode_offsets": "196-209",
+            "instructions": "LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnCombatTimersUpdated'; CALL_FUNCTION 1"
+          }
+        ],
+        "server_sender": "No server emitter needed: CrimewatchService.ProcessSessionChange locally scatters OnCombatTimersUpdated after fetching GetClientStates."
+      },
+      "notify:OnCrimewatchEngagementUpdated": {
+        "sites": [
+          {
+            "client_module": "eve/client/script/ui/services/crimewatchSvc.pyj",
+            "function": "CrimewatchService.OnCrimewatchEngagementCreated",
+            "bytecode_offsets": "32-47",
+            "instructions": "LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnCrimewatchEngagementUpdated'; LOAD_FAST otherCharId; LOAD_FAST timeout; CALL_FUNCTION 3"
+          }
+        ],
+        "server_sender": "No server emitter needed: server sends OnCrimewatchEngagementCreated / OnCrimewatchEngagementEnded / OnCrimewatchEngagementStartTimeout / OnCrimewatchEngagementStopTimeout; CrimewatchService locally scatters OnCrimewatchEngagementUpdated."
       }
     }
   }

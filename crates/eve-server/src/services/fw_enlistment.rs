@@ -212,7 +212,27 @@ fn remove_direct(ctx: &ServerContext, session: &mut SessionState) -> Result<PyRe
 fn cooldown_timestamp(ctx: &ServerContext, session: &SessionState) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
     let now = ctx.now_unix();
-    let until = ctx.db.with_snapshot(|s| load_store(s).cooldown_until.get(&char_id).copied());
+    let mut expired = false;
+    let until = ctx.db.with_mut_snapshot(|s| {
+        let mut store = load_store(s);
+        let u = store.cooldown_until.get(&char_id).copied();
+        if let Some(ts) = u {
+            if ts <= now {
+                store.cooldown_until.remove(&char_id);
+                save_store(s, &store);
+                expired = true;
+            }
+        }
+        u
+    });
+    if expired {
+        ctx.notify(
+            NotificationTarget::Character(char_id),
+            "OnEnlistmentCooldownCleared",
+            "charid",
+            vec![],
+        );
+    }
     Ok(match until {
         Some(u) if u > now => PyRep::Integer(unix_to_filetime(u)),
         _ => PyRep::None,

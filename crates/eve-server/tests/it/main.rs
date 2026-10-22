@@ -82,6 +82,7 @@ mod notify_corp_emission;
 mod notify_econ_char_emission;
 mod notify_fleet_emission;
 mod notify_mail_emission;
+mod notify_space_sov_fleet_emission;
 mod pve_agency_events_complete;
 mod pve_exploration_complete;
 mod pve_mining_sites;

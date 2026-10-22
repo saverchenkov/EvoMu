@@ -188,7 +188,7 @@ fn handle_structure_unanchor(ctx: &ServerContext, session: &mut SessionState, ar
     let (_, char_id) = ServerContext::require_character(session)?;
     let structure_id = arg_i64(args, 0).ok_or_else(|| err("MissingStructureId", "Unanchor requires structureID"))?;
     let now_unix = ctx.now_unix();
-    ctx.db.try_with_mut_snapshot(|snap| {
+    let (st, until, home_moved_chars) = ctx.db.try_with_mut_snapshot(|snap| {
         let st = require_structure_corp_member(snap, char_id, structure_id)?;
         if st.state == "ArmorReinforced" || st.state == "HullReinforced" || now_unix < st.reinforced_until_unix {
             return Err(err("CannotUnanchorReinforcedStructure", format!("Structure {structure_id} cannot be unanchored while reinforced")));
@@ -200,12 +200,72 @@ fn handle_structure_unanchor(ctx: &ServerContext, session: &mut SessionState, ar
         let until = now_unix + UNANCHOR_TIMER_SECS;
         ext.unanchoring_until_unix.insert(structure_id, until);
         save_ext_state(snap, &ext);
-        Ok(PyRep::keyval([
-            ("structureID", PyRep::Integer(structure_id)),
-            ("state", PyRep::String("Unanchoring".into())),
-            ("unanchorCompleteUnix", PyRep::Integer(until as i64)),
-        ]))
-    })
+        let mut moved = Vec::new();
+        for ch in snap.characters.values_mut() {
+            if ch.home_station_id == structure_id {
+                ch.home_station_id = 60_003_760;
+                moved.push(ch.character_id);
+            }
+        }
+        Ok((st, until, moved))
+    })?;
+    ctx.notify(
+        crate::router::NotificationTarget::Corporation(st.owner_corp_id),
+        "OnCorporationStructuresUpdated",
+        "corpid",
+        vec![],
+    );
+    let state_args = vec![
+        PyRep::Integer(i64::from(st.solar_system_id)),
+        PyRep::Integer(structure_id),
+        PyRep::String("Unanchoring".into()),
+    ];
+    ctx.notify(
+        crate::router::NotificationTarget::SolarSystem(st.solar_system_id),
+        "OnStructureStateChanged",
+        "solarsystemid",
+        state_args.clone(),
+    );
+    ctx.notify(
+        crate::router::NotificationTarget::SolarSystem(st.solar_system_id),
+        "OnCurrentStructureStateChanged",
+        "solarsystemid",
+        state_args,
+    );
+    ctx.notify(
+        crate::router::NotificationTarget::SolarSystem(st.solar_system_id),
+        "OnStructureRemoved",
+        "solarsystemid",
+        vec![PyRep::Integer(i64::from(st.solar_system_id)), PyRep::Integer(structure_id)],
+    );
+    ctx.notify(
+        crate::router::NotificationTarget::Corporation(st.owner_corp_id),
+        "OnStructureRemovedFromSpace",
+        "corpid",
+        vec![PyRep::Integer(structure_id)],
+    );
+    if home_moved_chars.is_empty() {
+        ctx.notify(
+            crate::router::NotificationTarget::Character(char_id),
+            "OnHomeStationMovedFromStructure",
+            "charid",
+            vec![],
+        );
+    } else {
+        for cid in home_moved_chars {
+            ctx.notify(
+                crate::router::NotificationTarget::Character(cid),
+                "OnHomeStationMovedFromStructure",
+                "charid",
+                vec![],
+            );
+        }
+    }
+    Ok(PyRep::keyval([
+        ("structureID", PyRep::Integer(structure_id)),
+        ("state", PyRep::String("Unanchoring".into())),
+        ("unanchorCompleteUnix", PyRep::Integer(until as i64)),
+    ]))
 }
 
 fn handle_structure_cancel_unanchor(ctx: &ServerContext, session: &mut SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
@@ -236,14 +296,35 @@ fn handle_structure_rename(ctx: &ServerContext, session: &mut SessionState, args
         .filter(|s| !s.is_empty() && s.chars().count() <= 100)
         .ok_or_else(|| err("InvalidStructureName", "Structure name must be 1..=100 non-whitespace characters"))?
         .to_string();
-    ctx.db.try_with_mut_snapshot(|snap| {
-        require_structure_corp_member(snap, char_id, structure_id)?;
-        if let Some(st) = snap.structures.get_mut(&structure_id) {
-            st.name = new_name.clone();
+    let st = ctx.db.try_with_mut_snapshot(|snap| {
+        let st = require_structure_corp_member(snap, char_id, structure_id)?;
+        if let Some(st_mut) = snap.structures.get_mut(&structure_id) {
+            st_mut.name = new_name.clone();
         }
         snap.item_custom_names.insert(structure_id, new_name.clone());
-        Ok(PyRep::keyval([("structureID", PyRep::Integer(structure_id)), ("name", PyRep::String(new_name))]))
-    })
+        Ok(st)
+    })?;
+    ctx.notify(
+        crate::router::NotificationTarget::Corporation(st.owner_corp_id),
+        "OnCorporationStructuresUpdated",
+        "corpid",
+        vec![],
+    );
+    ctx.notify(
+        crate::router::NotificationTarget::SolarSystem(st.solar_system_id),
+        "OnSlimItemChange",
+        "solarsystemid",
+        vec![
+            PyRep::Integer(structure_id),
+            PyRep::keyval([
+                ("itemID", PyRep::Integer(structure_id)),
+                ("typeID", PyRep::Integer(i64::from(st.type_id))),
+                ("ownerID", PyRep::Integer(st.owner_corp_id)),
+                ("name", PyRep::String(new_name.clone())),
+            ]),
+        ],
+    );
+    Ok(PyRep::keyval([("structureID", PyRep::Integer(structure_id)), ("name", PyRep::String(new_name))]))
 }
 
 fn handle_update_reinforce_times(ctx: &ServerContext, session: &mut SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
@@ -255,20 +336,37 @@ fn handle_update_reinforce_times(ctx: &ServerContext, session: &mut SessionState
         return Err(err("InvalidReinforceSchedule", format!("Reinforce hour ({hour}) must be 0..23 and weekday ({weekday}) 0..6")));
     }
     let now_unix = ctx.now_unix();
-    ctx.db.try_with_mut_snapshot(|snap| {
-        require_structure_corp_member(snap, char_id, structure_id)?;
+    let (st, cur_hour, cur_day, apply_after) = ctx.db.try_with_mut_snapshot(|snap| {
+        let st = require_structure_corp_member(snap, char_id, structure_id)?;
         let mut ext = load_ext_state(snap);
         apply_pending_reinforce_schedule(snap, &mut ext, structure_id, now_unix);
+        let (ch, cd) = snap.structure_vulnerability_windows.get(&structure_id).copied().unwrap_or((18, 5));
         let apply_after = now_unix + REINFORCE_CHANGE_DELAY_SECS;
         ext.pending_reinforce_schedule.insert(structure_id, (hour as u8, weekday as u8, apply_after));
         save_ext_state(snap, &ext);
-        Ok(PyRep::keyval([
-            ("structureID", PyRep::Integer(structure_id)),
-            ("nextReinforceHour", PyRep::Integer(hour)),
-            ("nextReinforceWeekday", PyRep::Integer(weekday)),
-            ("applyAfterUnix", PyRep::Integer(apply_after as i64)),
-        ]))
-    })
+        Ok((st, ch as i64, cd as i64, apply_after))
+    })?;
+    ctx.notify(
+        crate::router::NotificationTarget::SolarSystem(st.solar_system_id),
+        "OnStructureHacked",
+        "solarsystemid",
+        vec![
+            PyRep::Integer(structure_id),
+            PyRep::Tuple(vec![
+                PyRep::Integer(cur_day),
+                PyRep::Integer(cur_hour),
+                PyRep::Integer(weekday),
+                PyRep::Integer(hour),
+                PyRep::Integer(apply_after as i64),
+            ]),
+        ],
+    );
+    Ok(PyRep::keyval([
+        ("structureID", PyRep::Integer(structure_id)),
+        ("nextReinforceHour", PyRep::Integer(hour)),
+        ("nextReinforceWeekday", PyRep::Integer(weekday)),
+        ("applyAfterUnix", PyRep::Integer(apply_after as i64)),
+    ]))
 }
 
 fn handle_move_assets_to_safety(ctx: &ServerContext, session: &mut SessionState, args: &[PyRep], is_corp: bool) -> Result<PyRep, BridgeRpcError> {
@@ -321,9 +419,28 @@ fn handle_move_assets_to_safety(ctx: &ServerContext, session: &mut SessionState,
             },
         );
         save_ext_state(snap, &ext);
-        Ok((wrap_id, owner_id, item_ids.len()))
+        Ok((wrap_id, owner_id, st.solar_system_id, item_ids.len()))
     })?;
-    let (wrap_id, owner_id, count) = res;
+    let (wrap_id, owner_id, sys_id, count) = res;
+    let as_args = vec![
+        PyRep::Integer(owner_id),
+        PyRep::Integer(i64::from(sys_id)),
+        PyRep::Integer(structure_id),
+    ];
+    ctx.notify(
+        crate::router::NotificationTarget::Character(char_id),
+        "OnAssetSafetyCreated",
+        "charid",
+        as_args.clone(),
+    );
+    if is_corp {
+        ctx.notify(
+            crate::router::NotificationTarget::Corporation(owner_id),
+            "OnAssetSafetyCreated",
+            "corpid",
+            as_args,
+        );
+    }
     Ok(PyRep::keyval([
         ("wrapID", PyRep::Integer(wrap_id)),
         ("ownerID", PyRep::Integer(owner_id)),
@@ -396,7 +513,7 @@ fn handle_move_safety_wrap_to_structure(ctx: &ServerContext, session: &mut Sessi
     let dest_id = arg_i64(args, 1).ok_or_else(|| err("MissingDestinationId", "MoveSafetyWrapToStructure requires destination ID"))?;
     let dest_is_station = ctx.sde.stations.contains_key(&dest_id);
     let now_unix = ctx.now_unix();
-    ctx.db.try_with_mut_snapshot(|snap| {
+    let res = ctx.db.try_with_mut_snapshot(|snap| {
         if !dest_is_station && !snap.structures.get(&dest_id).map(|s| s.state != "Destroyed").unwrap_or(false) {
             return Err(err("InvalidAssetSafetyDestination", format!("Destination {dest_id} is not a station or live structure")));
         }
@@ -430,13 +547,33 @@ fn handle_move_safety_wrap_to_structure(ctx: &ServerContext, session: &mut Sessi
             w.delivered_to_id = Some(dest_id);
         }
         save_ext_state(snap, &ext);
-        Ok(PyRep::keyval([
-            ("wrapID", PyRep::Integer(wrap_id)),
-            ("destinationID", PyRep::Integer(dest_id)),
-            ("deliveredItemCount", PyRep::Integer(wrap.item_ids.len() as i64)),
-            ("feePaidISK", PyRep::Real(fee.to_wire_f64())),
-        ]))
-    })
+        Ok((
+            wrap.owner_id,
+            wrap.is_corp,
+            PyRep::keyval([
+                ("wrapID", PyRep::Integer(wrap_id)),
+                ("destinationID", PyRep::Integer(dest_id)),
+                ("deliveredItemCount", PyRep::Integer(wrap.item_ids.len() as i64)),
+                ("feePaidISK", PyRep::Real(fee.to_wire_f64())),
+            ]),
+        ))
+    })?;
+    let (owner_id, is_corp, resp) = res;
+    ctx.notify(
+        crate::router::NotificationTarget::Character(char_id),
+        "OnAssetSafetyDelivered",
+        "charid",
+        vec![PyRep::Integer(owner_id)],
+    );
+    if is_corp {
+        ctx.notify(
+            crate::router::NotificationTarget::Corporation(owner_id),
+            "OnAssetSafetyDelivered",
+            "corpid",
+            vec![PyRep::Integer(owner_id)],
+        );
+    }
+    Ok(resp)
 }
 
 fn require_structure_control_role(snap: &WorldStateSnapshot, char_id: i64, st: &UpwellStructureRecord) -> Result<(), BridgeRpcError> {
@@ -510,6 +647,7 @@ fn handle_eject_from_structure(ctx: &ServerContext, session: &mut SessionState, 
 fn handle_release_control(ctx: &ServerContext, session: &mut SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
     let structure_id = arg_i64(args, 0).or(session.structure_id).ok_or_else(|| err("MissingStructureId", "ReleaseControl requires structureID"))?;
+    let target_id = arg_i64(args, 1).unwrap_or(0);
     ctx.db.try_with_mut_snapshot(|snap| {
         let mut ext = load_ext_state(snap);
         if ext.active_pilot_by_structure.get(&structure_id) != Some(&char_id) {
@@ -517,8 +655,15 @@ fn handle_release_control(ctx: &ServerContext, session: &mut SessionState, args:
         }
         ext.active_pilot_by_structure.remove(&structure_id);
         save_ext_state(snap, &ext);
-        Ok(PyRep::None)
-    })
+        Ok(())
+    })?;
+    ctx.notify(
+        crate::router::NotificationTarget::Character(char_id),
+        "OnStructureTargetRemoved",
+        "charid",
+        vec![PyRep::Integer(structure_id), PyRep::Integer(target_id)],
+    );
+    Ok(PyRep::None)
 }
 
 fn handle_get_structure_pilot(ctx: &ServerContext, session: &mut SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
@@ -531,13 +676,32 @@ fn handle_set_structure_description(ctx: &ServerContext, session: &mut SessionSt
     let (_, char_id) = ServerContext::require_character(session)?;
     let structure_id = arg_i64(args, 0).ok_or_else(|| err("MissingStructureId", "SetStructureDescription requires structureID"))?;
     let desc = args.get(1).and_then(|a| a.as_str()).unwrap_or("").to_string();
-    ctx.db.try_with_mut_snapshot(|snap| {
-        require_structure_corp_member(snap, char_id, structure_id)?;
+    let st = ctx.db.try_with_mut_snapshot(|snap| {
+        let st = require_structure_corp_member(snap, char_id, structure_id)?;
         let mut ext = load_ext_state(snap);
         ext.descriptions.insert(structure_id, desc);
         save_ext_state(snap, &ext);
-        Ok(PyRep::None)
-    })
+        Ok(st)
+    })?;
+    ctx.notify(
+        crate::router::NotificationTarget::Corporation(st.owner_corp_id),
+        "OnProfileSettingsChange",
+        "corpid",
+        vec![PyRep::List(vec![PyRep::Integer(structure_id)])],
+    );
+    ctx.notify(
+        crate::router::NotificationTarget::Corporation(st.owner_corp_id),
+        "OnOwnerGroupsUpdated",
+        "corpid",
+        vec![PyRep::Dict(vec![(PyRep::Integer(st.owner_corp_id), PyRep::Integer(structure_id))])],
+    );
+    ctx.notify(
+        crate::router::NotificationTarget::SolarSystem(st.solar_system_id),
+        "OnDockingAccessChangedForCurrentSolarSystem",
+        "solarsystemid",
+        vec![],
+    );
+    Ok(PyRep::None)
 }
 
 fn handle_get_structure_description(ctx: &ServerContext, session: &mut SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {

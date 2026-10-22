@@ -1119,6 +1119,12 @@ pub(super) async fn handle_fleets(
                     for mid in &member_ids {
                         ctx.notify(NotificationTarget::Character(*mid), "OnFleetDisbanded", "charid", vec![ids.clone()]);
                     }
+                    ctx.notify(
+                        NotificationTarget::Character(char_id),
+                        "OnMemberlessFleetUnregistered",
+                        "charid",
+                        vec![],
+                    );
                     Some(Ok(PyRep::keyval([
                         ("fleetID", PyRep::Integer(fleet_id)),
                         ("disbanded", PyRep::Bool(true)),
@@ -1251,6 +1257,12 @@ pub(super) async fn handle_fleets(
             match res {
                 Ok((before, after, only)) => {
                     notify::emit_member_changed(ctx, fleet_id, &before, &after, only);
+                    ctx.notify(
+                        NotificationTarget::Character(target_id),
+                        "OnFleetMove",
+                        "charid",
+                        vec![],
+                    );
                     Some(Ok(PyRep::keyval([
                         ("characterID", PyRep::Integer(target_id)),
                         ("wingID", PyRep::Integer(new_wing_id)),
@@ -1258,7 +1270,15 @@ pub(super) async fn handle_fleets(
                         ("role", PyRep::Integer(new_role_num)),
                     ])))
                 }
-                Err(e) => Some(Err(e)),
+                Err(e) => {
+                    ctx.notify(
+                        NotificationTarget::Character(char_id),
+                        "OnFleetMoveFailed",
+                        "charid",
+                        vec![PyRep::Integer(target_id), PyRep::Bool(false)],
+                    );
+                    Some(Err(e))
+                }
             }
         }
 

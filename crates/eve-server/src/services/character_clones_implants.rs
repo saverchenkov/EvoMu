@@ -1064,7 +1064,15 @@ pub fn handle_clones_and_sheet(
                 }
             });
             match res {
-                Ok(new_sec) => Some(Ok(PyRep::Real(new_sec))),
+                Ok(new_sec) => {
+                    ctx.notify(
+                        crate::router::NotificationTarget::Character(char_id),
+                        "OnSecurityStatusUpdate",
+                        "charid",
+                        vec![PyRep::Real(new_sec)],
+                    );
+                    Some(Ok(PyRep::Real(new_sec)))
+                }
                 Err(e) => Some(Err(e)),
             }
         }

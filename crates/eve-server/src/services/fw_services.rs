@@ -116,7 +116,101 @@ pub fn add_victory_points(ctx: &ServerContext, sys_id: u32, vp: i64) -> (i64, f6
             st.fw_contested_pct = contested;
         }
     });
+    let vp_state = PyRep::keyval([
+        ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
+        ("victoryPoints", PyRep::Integer(new_vp)),
+        ("contestedPercentage", PyRep::Real(contested)),
+        ("threshold", PyRep::Integer(3000)),
+    ]);
+    ctx.notify(
+        NotificationTarget::SolarSystem(sys_id),
+        "OnVictoryPointStateUpdated",
+        "solarsystemid",
+        vec![PyRep::Integer(i64::from(sys_id)), vp_state],
+    );
+    let front = if contested > 75.0 {
+        STATUS_FRONTLINE
+    } else if contested > 25.0 {
+        STATUS_COMMAND
+    } else {
+        STATUS_REARGUARD
+    };
+    let occ_state = PyRep::keyval([
+        ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
+        ("ownerFactionID", PyRep::Integer(FACTION_CALDARI)),
+        ("occupierFactionID", PyRep::Integer(FACTION_CALDARI)),
+        ("frontlineStatus", PyRep::Integer(front)),
+        ("contestedPercentage", PyRep::Real(contested)),
+    ]);
+    ctx.notify(
+        NotificationTarget::SolarSystem(sys_id),
+        "OnWarzoneOccupationStateUpdated",
+        "solarsystemid",
+        vec![PyRep::Integer(i64::from(sys_id)), occ_state],
+    );
     (new_vp, contested)
+}
+
+/// Transitions a Faction Warfare bunker's vulnerability state and emits `OnFacWarBunkerVulnerable` or `OnFacWarBunkerNonVulnerable`.
+pub fn set_facwar_bunker_vulnerable(ctx: &ServerContext, sys_id: u32, attacker_id: i64, vulnerable: bool) {
+    let event = if vulnerable {
+        "OnFacWarBunkerVulnerable"
+    } else {
+        "OnFacWarBunkerNonVulnerable"
+    };
+    ctx.notify(
+        NotificationTarget::SolarSystem(sys_id),
+        event,
+        "solarsystemid",
+        vec![PyRep::Integer(attacker_id)],
+    );
+}
+
+/// Completes a Faction Warfare dungeon, objective, and scoreboard in `sys_id`.
+pub fn complete_fw_dungeon_and_objective(
+    ctx: &ServerContext,
+    sys_id: u32,
+    faction_id: i64,
+    was_conquered: bool,
+    objective_mode: i64,
+    scoreboard_item_id: i64,
+) {
+    ctx.notify(
+        NotificationTarget::SolarSystem(sys_id),
+        "OnFacWarDungeonCompleted",
+        "solarsystemid",
+        vec![PyRep::Bool(was_conquered), PyRep::Integer(faction_id)],
+    );
+    ctx.notify(
+        NotificationTarget::SolarSystem(sys_id),
+        "OnFwObjectiveCompletedInSolarSystem",
+        "solarsystemid",
+        vec![
+            PyRep::Integer(i64::from(sys_id)),
+            PyRep::Integer(faction_id),
+            PyRep::Integer(objective_mode),
+        ],
+    );
+    ctx.notify(
+        NotificationTarget::SolarSystem(sys_id),
+        "OnFwScoreboardWon",
+        "solarsystemid",
+        vec![
+            PyRep::Integer(i64::from(sys_id)),
+            PyRep::Integer(scoreboard_item_id),
+            PyRep::Integer(faction_id),
+        ],
+    );
+}
+
+/// Records an LP donation to a warzone solar system hub and emits `OnSolarSystemLPChange`.
+pub fn donate_solar_system_lp(ctx: &ServerContext, sys_id: u32, old_points: i64, new_points: i64) {
+    ctx.notify(
+        NotificationTarget::SolarSystem(sys_id),
+        "OnSolarSystemLPChange",
+        "solarsystemid",
+        vec![PyRep::Integer(old_points), PyRep::Integer(new_points)],
+    );
 }
 
 /// Scales capture speed by advantage.

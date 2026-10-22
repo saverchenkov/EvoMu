@@ -1074,6 +1074,25 @@ pub(crate) async fn handle_containers_ships_and_fitting(
                     },
                 );
             }
+            let as_args = vec![
+                PyRep::Integer(owner_id),
+                PyRep::Integer(i64::from(sys_id)),
+                PyRep::Integer(structure_id),
+            ];
+            ctx.notify(
+                crate::router::NotificationTarget::Character(char_id),
+                "OnAssetSafetyCreated",
+                "charid",
+                as_args.clone(),
+            );
+            if is_corp {
+                ctx.notify(
+                    crate::router::NotificationTarget::Corporation(owner_id),
+                    "OnAssetSafetyCreated",
+                    "corpid",
+                    as_args,
+                );
+            }
             Some(Ok(PyRep::keyval([
                 ("wrapID", PyRep::Integer(wrap_id)),
                 ("structureID", PyRep::Integer(structure_id)),
@@ -1245,6 +1264,20 @@ pub(crate) async fn handle_containers_ships_and_fitting(
                 if let Some(w) = st.asset_safety_wraps.get_mut(&wrap_id) {
                     w.delivered_to_id = Some(dest_id);
                 }
+            }
+            ctx.notify(
+                crate::router::NotificationTarget::Character(char_id),
+                "OnAssetSafetyDelivered",
+                "charid",
+                vec![PyRep::Integer(wrap.owner_id)],
+            );
+            if wrap.is_corp {
+                ctx.notify(
+                    crate::router::NotificationTarget::Corporation(wrap.owner_id),
+                    "OnAssetSafetyDelivered",
+                    "corpid",
+                    vec![PyRep::Integer(wrap.owner_id)],
+                );
             }
             Some(Ok(PyRep::keyval([
                 ("wrapID", PyRep::Integer(wrap_id)),

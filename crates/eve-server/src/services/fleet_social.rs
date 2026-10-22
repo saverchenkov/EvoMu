@@ -23,7 +23,7 @@ pub(crate) mod fleet_social_fleets;
 #[path = "fleet_social_mail.rs"]
 mod fleet_social_mail;
 #[path = "fleet_social_notify.rs"]
-mod fleet_social_notify;
+pub mod fleet_social_notify;
 #[path = "fleet_social_scanning.rs"]
 mod fleet_social_scanning;
 
@@ -972,6 +972,23 @@ pub(super) fn handle_fleet_ops_tail(
                 "OnFleetJoinRejected",
                 "charid",
                 vec![PyRep::Integer(char_id)],
+            );
+            let remaining_requests = ctx.db.with_snapshot(|snap| {
+                snap.fleets
+                    .get(&fleet_id)
+                    .map(|f| {
+                        f.invites
+                            .iter()
+                            .map(|&cid| (PyRep::Integer(cid), PyRep::keyval([("charID", PyRep::Integer(cid))])))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default()
+            });
+            ctx.notify(
+                NotificationTarget::Character(char_id),
+                "OnJoinRequestUpdate",
+                "charid",
+                vec![PyRep::Dict(remaining_requests)],
             );
             Some(Ok(PyRep::keyval([
                 ("characterID", PyRep::Integer(applicant_id)),
