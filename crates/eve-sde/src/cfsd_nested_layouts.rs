@@ -11,7 +11,7 @@
 use super::cfsd_nested_tables::{CfsdAttr, CfsdNestedLayout, CfsdObject, CfsdType};
 use CfsdType::{Bool, Dict, List, Obj, Str, F32, F64, U32, U64};
 
-const fn a(name: &'static str, offset: usize, ty: CfsdType, bit: u32) -> CfsdAttr {
+pub(crate) const fn a(name: &'static str, offset: usize, ty: CfsdType, bit: u32) -> CfsdAttr {
     CfsdAttr {
         name,
         offset,
@@ -20,7 +20,11 @@ const fn a(name: &'static str, offset: usize, ty: CfsdType, bit: u32) -> CfsdAtt
     }
 }
 
-const fn obj(stride: usize, mask_offset: Option<usize>, attrs: &'static [CfsdAttr]) -> CfsdObject {
+pub(crate) const fn obj(
+    stride: usize,
+    mask_offset: Option<usize>,
+    attrs: &'static [CfsdAttr],
+) -> CfsdObject {
     CfsdObject {
         stride,
         mask_offset,
@@ -28,7 +32,7 @@ const fn obj(stride: usize, mask_offset: Option<usize>, attrs: &'static [CfsdAtt
     }
 }
 
-const fn rec(
+pub(crate) const fn rec(
     res_path: &'static str,
     key: CfsdType,
     record: CfsdObject,
@@ -39,10 +43,11 @@ const fn rec(
         key,
         record,
         bare,
+        single: false,
     }
 }
 
-const U32_LIST: CfsdType = List(&U32, 4);
+pub(crate) const U32_LIST: CfsdType = List(&U32, 4);
 
 static MILESTONE: CfsdObject = obj(
     12,
@@ -55,6 +60,33 @@ static TAX_BY_VALUE: CfsdObject = obj(
     None,
     &[a("taxModifierByValue", 0, Dict(&U32, &F32, 8, 4), 0)],
 );
+static TYPE_AMOUNT: CfsdObject = obj(8, None, &[a("amount", 0, U32, 0), a("typeID", 4, U32, 0)]);
+static PLAYER_QUANTITY: CfsdObject = obj(
+    8,
+    None,
+    &[a("playerCount", 0, U32, 0), a("quantity", 4, U32, 0)],
+);
+static REWARD_TABLE: CfsdObject = obj(
+    32,
+    None,
+    &[
+        a("description", 0, Str, 0),
+        a("entries", 8, List(&Obj(&PLAYER_QUANTITY), 8), 0),
+        a("rewardType", 16, U32, 0),
+        a("securityCriteria", 20, U32, 0),
+        a("delayed", 24, Bool, 0),
+    ],
+);
+static TASK_PARAMETER: CfsdObject = obj(
+    24,
+    None,
+    &[
+        a("parameterKey", 0, Str, 0),
+        a("parameterType", 8, Str, 0),
+        a("isRequired", 16, Bool, 0),
+    ],
+);
+pub(crate) const STR_LIST: CfsdType = List(&Str, 8);
 static RACE_DUNGEONS: CfsdObject = obj(
     16,
     None,
@@ -310,6 +342,103 @@ pub static CFSD_NESTED_LAYOUTS: &[CfsdNestedLayout] = &[
                 a("durationDays", 40, U32, 0),
                 a("esHidden", 44, Bool, 0),
                 a("esRetired", 45, Bool, 0),
+            ],
+        ),
+        false,
+    ),
+    rec(
+        "res:/staticdata/itemtraderrecipes.fsdbinary",
+        U64,
+        obj(
+            72,
+            Some(64),
+            &[
+                a("groupID", 8, Str, 2),
+                a("inputItems", 16, Dict(&U32, &U32, 8, 4), 0),
+                a("internalName", 32, Str, 0),
+                a("outputItems", 40, Dict(&U32, &U32, 8, 4), 0),
+                a("displayNameID", 56, U32, 1),
+                a("inputIsk", 60, U32, 0),
+            ],
+        ),
+        false,
+    ),
+    rec(
+        "res:/staticdata/archetypes.fsdbinary",
+        U64,
+        obj(
+            40,
+            Some(32),
+            &[
+                a("contentTags", 8, STR_LIST, 1),
+                a("location", 16, Str, 4),
+                a("descriptionID", 24, U32, 2),
+                a("titleID", 28, U32, 8),
+            ],
+        ),
+        false,
+    ),
+    rec(
+        "res:/staticdata/pvpfilamentmatchtypes.fsdbinary",
+        U64,
+        obj(
+            96,
+            Some(92),
+            &[
+                a("rewards", 8, List(&Obj(&TYPE_AMOUNT), 8), 0),
+                a("bannedModulesTypeListID", 16, U32, 1),
+                a("eventDescriptionID", 20, U32, 0),
+                a("eventNameID", 24, U32, 0),
+                a("filamentDescriptionID", 28, U32, 0),
+                a("filamentTypeID", 32, U32, 0),
+                a("fleetSize", 36, U32, 0),
+                a("limitedAmountOfModulesTypeListID", 40, U32, 2),
+                a("maxOfShipGroupRestriction", 44, U32, 0),
+                a("maxOfShipTypeRestriction", 48, U32, 0),
+                a("minimumQueueSizeMultiplier", 52, U32, 0),
+                a("moduleAndImplantMetaLevelRestrictions", 56, U32, 0),
+                a("numberOfFleets", 60, U32, 0),
+                a("numberOfLimitedModules", 64, U32, 0),
+                a("provingGroundLootTableID", 68, U32, 0),
+                a("restrictionsDescriptionID", 72, U32, 0),
+                a("rewardsHintID", 76, U32, 0),
+                a("rulesHintID", 80, U32, 0),
+                a("shipRestrictions", 84, U32, 0),
+                a("shipRestrictionsHintID", 88, U32, 0),
+            ],
+        ),
+        false,
+    ),
+    rec(
+        "res:/staticdata/grouprewards.fsdbinary",
+        U64,
+        obj(
+            56,
+            None,
+            &[
+                a("description", 8, Str, 0),
+                a("name", 16, Str, 0),
+                a("tables", 24, List(&Obj(&REWARD_TABLE), 32), 0),
+                a("damageContributionMultiplier", 32, F32, 0),
+                a("lpLogTypeNameID", 36, U32, 0),
+                a("minimumContribution", 40, U32, 0),
+                a("repairContributionMultiplier", 44, F32, 0),
+                a("rewardingNpcCorporationID", 48, U32, 0),
+            ],
+        ),
+        false,
+    ),
+    rec(
+        "res:/staticdata/objectivetasktypes.fsdbinary",
+        U64,
+        obj(
+            48,
+            Some(40),
+            &[
+                a("icon", 8, Str, 1),
+                a("inputParameters", 16, List(&Obj(&TASK_PARAMETER), 24), 0),
+                a("tags", 24, STR_LIST, 0),
+                a("title", 32, Str, 2),
             ],
         ),
         false,

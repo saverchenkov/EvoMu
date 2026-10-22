@@ -377,6 +377,279 @@ const GROUP_B: &[Nested] = &[
     },
 ];
 
+const GROUP_C: &[Nested] = &[
+    Nested {
+        path: "res:/staticdata/itemtraderrecipes.fsdbinary",
+        md5: "f1f2a40ef0070eda09473d257d83d4e0",
+        bytes: 104384,
+        stride: 72,
+        str_key: false,
+        count: 544,
+        spots: &[
+            (
+                "9",
+                r#"{"inputIsk":0,"inputItems":{"34552":1},"internalName":"typeID 34499","outputItems":{"34557":10}}"#,
+            ),
+            (
+                "1",
+                r#"{"inputIsk":0,"inputItems":{"78848":1},"internalName":"for typeID 78868","outputItems":{"78867":1}}"#,
+            ),
+        ],
+    },
+    Nested {
+        path: "res:/staticdata/archetypes.fsdbinary",
+        md5: "d6aeac91bdd7842fadf7b12cd84c856e",
+        bytes: 5563,
+        stride: 40,
+        str_key: false,
+        count: 71,
+        spots: &[("0", r#"{}"#), ("38", r#"{}"#)],
+    },
+    Nested {
+        path: "res:/staticdata/pvpfilamentmatchtypes.fsdbinary",
+        md5: "411f9990cd6a41ece7390625c0c391e8",
+        bytes: 14104,
+        stride: 96,
+        str_key: false,
+        count: 86,
+        spots: &[
+            (
+                "4",
+                r#"{"eventDescriptionID":567539,"eventNameID":567538,"filamentDescriptionID":567543,"filamentTypeID":53965,"fleetSize":1,"maxOfShipGroupRestriction":0,"maxOfShipTypeRestriction":0,"minimumQueueSizeMultiplier":1,"moduleAndImplantMetaLevelRestrictions":5,"numberOfFleets":2,"numberOfLimitedModules":1,"provingGroundLootTableID":10479,"restrictionsDescriptionID":567544,"rewards":[{"amount":1,"typeID":53965}],"rewardsHintID":567540,"rulesHintID":567542,"shipRestrictions":41,"shipRestrictionsHintID":567541}"#,
+            ),
+            (
+                "6",
+                r#"{"eventDescriptionID":567586,"eventNameID":567585,"filamentDescriptionID":567590,"filamentTypeID":55820,"fleetSize":1,"maxOfShipGroupRestriction":0,"maxOfShipTypeRestriction":0,"minimumQueueSizeMultiplier":1,"moduleAndImplantMetaLevelRestrictions":5,"numberOfFleets":5,"numberOfLimitedModules":1,"provingGroundLootTableID":10479,"restrictionsDescriptionID":567591,"rewards":[{"amount":5,"typeID":55820}],"rewardsHintID":567587,"rulesHintID":567589,"shipRestrictions":41,"shipRestrictionsHintID":567588}"#,
+            ),
+        ],
+    },
+    Nested {
+        path: "res:/staticdata/grouprewards.fsdbinary",
+        md5: "94288a4e85f72ab3f5769dd6ff61d1d6",
+        bytes: 97048,
+        stride: 56,
+        str_key: false,
+        count: 161,
+        spots: &[
+            (
+                "213",
+                r#"{"damageContributionMultiplier":1.0,"description":"","lpLogTypeNameID":1042072,"minimumContribution":0,"name":"AIR Epic Arc - Amarr - Low","repairContributionMultiplier":1.0,"rewardingNpcCorporationID":1000084,"tables":[{"delayed":0,"description":"","entries":[{"playerCount":1,"quantity":1000000},{"playerCount":2,"quantity":1000000},{"playerCount":3,"quantity":0}],"rewardType":2,"securityCriteria":0}]}"#,
+            ),
+            (
+                "215",
+                r#"{"damageContributionMultiplier":1.0,"description":"","lpLogTypeNameID":1042074,"minimumContribution":0,"name":"AIR Epic Arc - Amarr - High","repairContributionMultiplier":1.0,"rewardingNpcCorporationID":1000084,"tables":[{"delayed":0,"description":"","entries":[{"playerCount":1,"quantity":3000000},{"playerCount":2,"quantity":3000000},{"playerCount":3,"quantity":0}],"rewardType":2,"securityCriteria":0}]}"#,
+            ),
+        ],
+    },
+    Nested {
+        path: "res:/staticdata/objectivetasktypes.fsdbinary",
+        md5: "e244996360967c48006817c63976d2fd",
+        bytes: 8534,
+        stride: 48,
+        str_key: false,
+        count: 53,
+        spots: &[
+            ("38", r#"{"inputParameters":[],"tags":[]}"#),
+            (
+                "56",
+                r#"{"icon":"jump_to","inputParameters":[],"tags":["abyss"]}"#,
+            ),
+        ],
+    },
+    Nested {
+        path: "res:/staticdata/seasonalcampaignsloginrewards.fsdbinary",
+        md5: "6761598164933b945de712fa8fb3be37",
+        bytes: 227128,
+        stride: 64,
+        str_key: false,
+        count: 129,
+        spots: &[
+            (
+                "2215",
+                r#"{"alphaRewards":{},"autoClaim":0,"campaignName":585921,"omegaRewards":{},"retroClaim":0}"#,
+            ),
+            (
+                "2212",
+                r#"{"alphaRewards":{},"autoClaim":0,"campaignName":637145,"omegaRewards":{},"retroClaim":1,"windowHeaderBackground":"res:/UI/Texture/classes/NewFeatureNotify/triglavianInvasion.png"}"#,
+            ),
+        ],
+    },
+    Nested {
+        path: "res:/staticdata/ship_skin_design_components.fsdbinary",
+        md5: "8d7fe8dfba7cdfc2a2970e87dd03e27d",
+        bytes: 216574,
+        stride: 112,
+        str_key: false,
+        count: 613,
+        spots: &[
+            (
+                "2056",
+                r#"{"associated_type_ids":[{"license_uses_granted":1,"type_id":95813}],"category":2,"disallowed_slots":[],"finish":"Matte","icon_file":"res:/UI/Texture/classes/Cosmetics/Ship/patterns/cosm_horde_mode_128.png","internal_name":"Horde Mode","name":1048898,"projection_type_u":"Clamp","projection_type_v":"Clamp","published":1,"rarity":3,"resource_file":"res:/texture/projection/cosm_horde_mode.dds","sequence_binder":{"count":5000,"item_type_id":81348}}"#,
+            ),
+            (
+                "1702",
+                r#"{"associated_type_ids":[{"license_uses_granted":1,"type_id":87842}],"category":2,"disallowed_slots":[],"finish":"Matte","icon_file":"res:/UI/Texture/classes/Cosmetics/Ship/patterns/cosm_XXII_t1_01_128.png","internal_name":"XXII Unending","name":1010332,"projection_type_u":"Clamp","projection_type_v":"Repeat","published":1,"rarity":3,"resource_file":"res:/texture/projection/cosm_XXII_t1_01.dds","sequence_binder":{"count":1200,"item_type_id":81348}}"#,
+            ),
+        ],
+    },
+    Nested {
+        path: "res:/staticdata/crates.fsdbinary",
+        md5: "5f5d1dca29bf7bbf6823e02772392d68",
+        bytes: 133320,
+        stride: 168,
+        str_key: false,
+        count: 636,
+        spots: &[
+            (
+                "447",
+                r#"{"descriptionID":552791,"lootPresentationType":"fixed","lootTableType":"byType","nameID":552792,"typeID":53053}"#,
+            ),
+            (
+                "449",
+                r#"{"descriptionID":552810,"lootPresentationType":"fixed","lootTableType":"byType","nameID":552811,"typeID":53056}"#,
+            ),
+        ],
+    },
+    Nested {
+        path: "res:/staticdata/manufacturableitems.fsdbinary",
+        md5: "89b40fd1c22f0c0e06458b36834cc2ce",
+        bytes: 19592,
+        stride: 16,
+        str_key: true,
+        count: 1,
+        spots: &[],
+    },
+];
+
+const GROUP_D: &[Nested] = &[
+    Nested {
+        path: "res:/staticdata/atoms.fsdbinary",
+        md5: "7157224e7f66d7b34479141a2472b2e9",
+        bytes: 242304,
+        stride: 64,
+        str_key: false,
+        count: 580,
+        spots: &[
+            (
+                "608",
+                r#"{"atomType":3,"description":"","name":"Total ACP Points Changed","parameters":{"inputs":[],"outputs":[]},"tags":["client","acp"]}"#,
+            ),
+            (
+                "140",
+                r#"{"atomType":2,"description":"Check if the player is Omega","name":"Is Omega","parameters":{"inputs":[],"outputs":[]},"tags":["client"]}"#,
+            ),
+        ],
+    },
+    Nested {
+        path: "res:/staticdata/nodetypes.fsdbinary",
+        md5: "124b6197161ed9b57476548c25ab7a6a",
+        bytes: 23224,
+        stride: 96,
+        str_key: false,
+        count: 45,
+        spots: &[
+            (
+                "12",
+                r#"{"color":[1.0,0.3176470696926117,1.0,1.0],"description":"Stops the node graph instance.","name":"Stop Node Graph","parameters":{"inputs":[],"outputs":[]},"ports":{"inPorts":["input"],"outPorts":[]},"tags":["client","server"]}"#,
+            ),
+            (
+                "1",
+                r#"{"color":[1.0,0.3176470696926117,1.0,1.0],"description":"Gets triggered when the node graph starts","name":"Root","parameters":{"inputs":[],"outputs":[]},"ports":{"inPorts":[],"outPorts":["output"]},"tags":["client","server"]}"#,
+            ),
+        ],
+    },
+    Nested {
+        path: "res:/staticdata/objectivechains.fsdbinary",
+        md5: "26370e8225ff55f03f34a6101bbe3e60",
+        bytes: 239256,
+        stride: 40,
+        str_key: false,
+        count: 111,
+        spots: &[
+            (
+                "102",
+                r#"{"contextParameters":[{"isRequired":0,"parameterKey":"personal_only","parameterType":"boolType"}],"objectives":[{"inputParametersMap":{},"key":"hack","objectiveType":81,"showCompleted":1,"startActive":1,"triggers":{}}],"tags":[]}"#,
+            ),
+            (
+                "94",
+                r#"{"contextParameters":[{"isRequired":1,"parameterKey":"location_id","parameterType":"locationIdType"}],"objectives":[{"inputParametersMap":{"location_id":"location_id"},"key":"travel","objectiveType":15,"showCompleted":1,"startActive":1,"triggers":{}}],"tags":[]}"#,
+            ),
+        ],
+    },
+    Nested {
+        path: "res:/staticdata/objectivetypes.fsdbinary",
+        md5: "e63adb15b99147fa5a0bb7c595ebf73e",
+        bytes: 61024,
+        stride: 40,
+        str_key: false,
+        count: 95,
+        spots: &[
+            (
+                "3",
+                r#"{"inputParameters":[],"tags":[],"tasks":[],"title":"UI/Objectives/Titles/Objective"}"#,
+            ),
+            (
+                "158",
+                r#"{"inputParameters":[],"tags":[],"tasks":[],"title":"UI/Objectives/Titles/TravelToSite"}"#,
+            ),
+        ],
+    },
+    Nested {
+        path: "res:/staticdata/operations.fsdbinary",
+        md5: "62c1a316eaacfaa6e7d0a6ac2e671454",
+        bytes: 97040,
+        stride: 152,
+        str_key: false,
+        count: 325,
+        spots: &[
+            (
+                "158",
+                r#"{"description":540306,"isReplayable":1,"iskReward":0,"name":"Pod Loss","onActivationRewards":[],"onCompletionRewards":[],"skillRewards":[],"tasksInOperation":[347,348],"title":540305}"#,
+            ),
+            (
+                "157",
+                r#"{"description":540304,"isReplayable":1,"iskReward":0,"name":"Ship Loss","onActivationRewards":[],"onCompletionRewards":[],"skillRewards":[],"tasksInOperation":[344,345,346],"title":540303}"#,
+            ),
+        ],
+    },
+    Nested {
+        path: "res:/staticdata/operationtasks.fsdbinary",
+        md5: "b14845027715ab6c99fe75f16469f512",
+        bytes: 114112,
+        stride: 120,
+        str_key: false,
+        count: 397,
+        spots: &[
+            (
+                "4146",
+                r#"{"achievementEventType":132,"clientSkipConditions":[],"delayBefore":1.0,"description":582797,"eventConditions":{},"isCheckpoint":0,"isOptional":0,"isSiteRelevant":0,"isSupreme":0,"name":"Send a Mail","onCompletionRewards":[],"serverSkipConditions":[],"targetValue":1,"title":582798}"#,
+            ),
+            (
+                "4117",
+                r#"{"achievementEventType":152,"clientSkipConditions":[],"delayBefore":1.0,"description":581150,"eventConditions":{},"isCheckpoint":0,"isOptional":0,"isSiteRelevant":0,"isSupreme":0,"name":"Enter a Wormhole","onCompletionRewards":[],"serverSkipConditions":[],"targetValue":1,"title":581151}"#,
+            ),
+        ],
+    },
+    Nested {
+        path: "res:/staticdata/conversations.fsdbinary",
+        md5: "c1e6da3bd83185bc67a90812504639b0",
+        bytes: 319116,
+        stride: 24,
+        str_key: false,
+        count: 1275,
+        spots: &[
+            (
+                "2648",
+                r#"{"lines":[],"name":"Exit the Station (Clearing the Air)"}"#,
+            ),
+            (
+                "381",
+                r#"{"lines":[{"agentID":5,"lineHints":[],"menuHighlights":[],"spaceObjectHighlights":[155],"text":534288,"uiHighlights":[]}],"name":"AS0101"}"#,
+            ),
+        ],
+    },
+];
+
 #[test]
 fn test_t2_sde_fsdbinary_nested_dicts_economy_and_content_tags() {
     // parity: sde:res:/staticdata/globaltypes.fsdbinary, sde:res:/staticdata/ship_skin_design_component_point_values.fsdbinary
@@ -549,3 +822,244 @@ fn test_t2_sde_fsdbinary_nested_skills_operations_and_encounters() {
         "sde:res:/staticdata/expertsystems.fsdbinary",
     ]);
 }
+
+fn type_ids(v: &Value) -> Vec<u32> {
+    v.as_object()
+        .expect("dict")
+        .keys()
+        .map(|k| k.parse().expect("type id key"))
+        .collect()
+}
+
+#[test]
+fn test_t2_sde_fsdbinary_nested_rewards_cosmetics_and_crates() {
+    // parity: sde:res:/staticdata/itemtraderrecipes.fsdbinary, sde:res:/staticdata/archetypes.fsdbinary
+    // parity: sde:res:/staticdata/pvpfilamentmatchtypes.fsdbinary, sde:res:/staticdata/grouprewards.fsdbinary
+    // parity: sde:res:/staticdata/objectivetasktypes.fsdbinary, sde:res:/staticdata/seasonalcampaignsloginrewards.fsdbinary
+    // parity: sde:res:/staticdata/ship_skin_design_components.fsdbinary, sde:res:/staticdata/crates.fsdbinary
+    // parity: sde:res:/staticdata/manufacturableitems.fsdbinary
+    let sde = SdeRegistry::open(&SdeRegistry::default_db_path()).expect("real V24.01 SDE");
+    let t: Vec<BTreeMap<String, Value>> = GROUP_C.iter().map(|n| verify(&sde, n)).collect();
+    // itemtraderrecipes: every input and output item is an SDE type.
+    for r in t[0].values() {
+        for side in ["inputItems", "outputItems"] {
+            assert!(
+                type_ids(&r[side])
+                    .iter()
+                    .all(|tid| sde.types.contains_key(tid)),
+                "recipe {side}"
+            );
+        }
+    }
+    // archetypes reference contenttags keys.
+    let tags = sde
+        .load_cfsd_nested("res:/staticdata/contenttags.fsdbinary")
+        .unwrap();
+    for r in t[1].values() {
+        if let Some(list) = r.get("contentTags") {
+            assert!(list
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|x| tags.contains_key(x.as_str().unwrap())));
+        }
+    }
+    // pvpfilamentmatchtypes: filament and reward types are SDE types.
+    for r in t[2].values() {
+        assert!(sde
+            .types
+            .contains_key(&(r["filamentTypeID"].as_u64().unwrap() as u32)));
+        for rw in r["rewards"].as_array().unwrap() {
+            assert!(sde
+                .types
+                .contains_key(&(rw["typeID"].as_u64().unwrap() as u32)));
+        }
+    }
+    // grouprewards are paid by SDE NPC corporations.
+    for r in t[3].values() {
+        let corp = r["rewardingNpcCorporationID"].as_i64().unwrap();
+        assert!(
+            sde.npc_corporations.contains_key(&corp),
+            "rewarding corp {corp}"
+        );
+    }
+    assert!(t[4].values().all(|r| r["inputParameters"].is_array()));
+    // seasonal login rewards: every alpha/omega reward is an SDE type.
+    let mut rewards = 0usize;
+    for r in t[5].values() {
+        for side in ["alphaRewards", "omegaRewards"] {
+            for rw in r[side].as_object().unwrap().values() {
+                assert!(sde
+                    .types
+                    .contains_key(&(rw["typeID"].as_u64().unwrap() as u32)));
+                rewards += 1;
+            }
+        }
+    }
+    assert!(rewards > t[5].len());
+    // ship skin design components: licence types are SDE types; categories are client categories.
+    let cats = sde
+        .load_cfsd_table("res:/staticdata/ship_skin_design_component_categories.fsdbinary")
+        .unwrap();
+    for r in t[6].values() {
+        assert!(cats.contains_key(&r["category"].as_i64().unwrap()));
+        for g in r["associated_type_ids"].as_array().unwrap() {
+            assert!(sde
+                .types
+                .contains_key(&(g["type_id"].as_u64().unwrap() as u32)));
+        }
+    }
+    // crates are SDE types.
+    assert!(t[7].values().all(|r| sde
+        .types
+        .contains_key(&(r["typeID"].as_u64().unwrap() as u32))));
+    // manufacturableitems: one list (4,867 entries) of SDE blueprint product types.
+    let items = ints(&t[8]["ManufacturableItems"]);
+    assert_eq!(items.len(), 4_867);
+    let products: BTreeSet<u64> = sde
+        .blueprints
+        .values()
+        .map(|b| u64::from(b.product_type_id))
+        .collect();
+    assert!(
+        items.iter().all(|tid| products.contains(tid)),
+        "manufacturable item without blueprint"
+    );
+
+    eve_testkit::attest(&[
+        "sde:res:/staticdata/itemtraderrecipes.fsdbinary",
+        "sde:res:/staticdata/archetypes.fsdbinary",
+        "sde:res:/staticdata/pvpfilamentmatchtypes.fsdbinary",
+        "sde:res:/staticdata/grouprewards.fsdbinary",
+        "sde:res:/staticdata/objectivetasktypes.fsdbinary",
+        "sde:res:/staticdata/seasonalcampaignsloginrewards.fsdbinary",
+        "sde:res:/staticdata/ship_skin_design_components.fsdbinary",
+        "sde:res:/staticdata/crates.fsdbinary",
+        "sde:res:/staticdata/manufacturableitems.fsdbinary",
+    ]);
+}
+
+#[test]
+fn test_t2_sde_fsdbinary_nested_unions_operations_and_conversations() {
+    // parity: sde:res:/staticdata/atoms.fsdbinary, sde:res:/staticdata/nodetypes.fsdbinary
+    // parity: sde:res:/staticdata/objectivechains.fsdbinary, sde:res:/staticdata/objectivetypes.fsdbinary
+    // parity: sde:res:/staticdata/operations.fsdbinary, sde:res:/staticdata/operationtasks.fsdbinary
+    // parity: sde:res:/staticdata/conversations.fsdbinary, sde:res:/staticdata/seasonselection.fsdbinary
+    let sde = SdeRegistry::open(&SdeRegistry::default_db_path()).expect("real V24.01 SDE");
+    let t: Vec<BTreeMap<String, Value>> = GROUP_D.iter().map(|n| verify(&sde, n)).collect();
+    // atoms/nodetypes: tagged-union default values decode to the parameter's declared type.
+    for table in [&t[0], &t[1]] {
+        for r in table.values() {
+            for p in r["parameters"]["inputs"].as_array().unwrap() {
+                if let Some(dv) = p.get("defaultValue") {
+                    match p["parameterType"].as_str().unwrap() {
+                        "floatType" => assert!(dv.is_f64(), "{p}"),
+                        "stringType" => assert!(dv.is_string(), "{p}"),
+                        "boolType" => assert!(dv.as_u64().is_some_and(|b| b <= 1), "{p}"),
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+    // objectivechains: objective keys are unique per chain; triggers name keys of that chain.
+    let mut dangling = Vec::new();
+    for (chain, r) in &t[2] {
+        let objs = r["objectives"].as_array().unwrap();
+        let keys: BTreeSet<&str> = objs.iter().map(|o| o["key"].as_str().unwrap()).collect();
+        assert_eq!(keys.len(), objs.len());
+        let groups: BTreeSet<&str> = objs
+            .iter()
+            .flat_map(|o| {
+                o.get("groups")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+            })
+            .map(|g| g.as_str().unwrap())
+            .collect();
+        for o in objs {
+            for list in o["triggers"].as_object().unwrap().values() {
+                for trig in list.as_array().unwrap() {
+                    // `objectiveKey` names an objective or, for `*_group` actions, a group.
+                    let target = trig["objectiveKey"].as_str().unwrap();
+                    if !keys.contains(target) && !groups.contains(target) {
+                        dangling.push((chain.clone(), target.to_string()));
+                    }
+                }
+            }
+        }
+    }
+    // The V24.01 client data has exactly one trigger naming an objective absent from its chain.
+    assert_eq!(
+        dangling,
+        vec![("7".to_string(), "hack_container".to_string())]
+    );
+    // objectivetypes: task triggers name task keys of the same objective type.
+    for r in t[3].values() {
+        let tasks = r["tasks"].as_array().unwrap();
+        let keys: BTreeSet<&str> = tasks.iter().map(|x| x["key"].as_str().unwrap()).collect();
+        for task in tasks {
+            for list in task["triggers"].as_object().unwrap().values() {
+                for trig in list.as_array().unwrap() {
+                    assert!(keys.contains(trig["taskKey"].as_str().unwrap()), "{trig}");
+                }
+            }
+        }
+    }
+    // operations reference operationtasks; tasks reference conversations.
+    for r in t[4].values() {
+        assert!(ints(&r["tasksInOperation"])
+            .iter()
+            .all(|id| t[5].contains_key(&id.to_string())));
+    }
+    for r in t[5].values() {
+        if let Some(c) = r.get("conversationOnTaskStarted") {
+            assert!(t[6].contains_key(&c.to_string()), "conversation {c}");
+        }
+    }
+    // conversations: every speaking agent is a client conversation agent.
+    let agents = sde
+        .load_cfsd_table("res:/staticdata/conversationagents.fsdbinary")
+        .unwrap();
+    for r in t[6].values() {
+        for line in r["lines"].as_array().unwrap() {
+            assert!(
+                agents.contains_key(&line["agentID"].as_i64().unwrap()),
+                "{line}"
+            );
+        }
+    }
+    // seasonselection is one top-level object (not a dict): raw bytes, importer row, server map.
+    let path = "res:/staticdata/seasonselection.fsdbinary";
+    let info = &sde.resources[path];
+    let raw = std::fs::read(resfiles_dir().join(&info.cdn_relative_path)).unwrap();
+    assert_eq!(
+        (raw.len(), md5_hex(&raw).as_str()),
+        (166, "f86f1144b0fd11aa3f11783c0c2f4c90")
+    );
+    assert_eq!(
+        cfsd_str(&raw, u64_at(&raw, 32)).unwrap(),
+        "res:/UI/Texture/classes/agency/navigationCards/CrimsonHarvest2026_Agency_Navicons_400x666.png"
+    );
+    assert_eq!((u32_at(&raw, 40), u32_at(&raw, 52)), (583_380, 583_333));
+    let season = sde.load_cfsd_nested(path).unwrap();
+    assert_eq!(season.len(), info.record_count);
+    assert!(season.contains_key(&info.spot));
+    let client: Value = serde_json::from_str(SEASON_SELECTION).unwrap();
+    assert_eq!(Value::Object(season.into_iter().collect()), client);
+
+    eve_testkit::attest(&[
+        "sde:res:/staticdata/atoms.fsdbinary",
+        "sde:res:/staticdata/nodetypes.fsdbinary",
+        "sde:res:/staticdata/objectivechains.fsdbinary",
+        "sde:res:/staticdata/objectivetypes.fsdbinary",
+        "sde:res:/staticdata/operations.fsdbinary",
+        "sde:res:/staticdata/operationtasks.fsdbinary",
+        "sde:res:/staticdata/conversations.fsdbinary",
+        "sde:res:/staticdata/seasonselection.fsdbinary",
+    ]);
+}
+
+/// Client-loader output for `seasonselection.fsdbinary` (a single top-level object).
+const SEASON_SELECTION: &str = r#"{"agencyLargeSeasonSelectionTitleID":583380,"navigation_card_picture_path":"res:/UI/Texture/classes/agency/navigationCards/CrimsonHarvest2026_Agency_Navicons_400x666.png","seasonSelectionDescriptionID":583334,"seasonSelectionHintID":583335,"seasonSelectionTitleID":583333}"#;

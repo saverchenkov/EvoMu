@@ -1032,6 +1032,7 @@ impl SdeRegistry {
 pub mod cfsd_domain_loaders;
 pub mod cfsd_flat_tables;
 pub mod cfsd_nested_layouts;
+pub mod cfsd_nested_layouts_ops;
 pub mod cfsd_nested_tables;
 pub mod sqlite_loader;
 pub mod sqlite_loader_skins;
