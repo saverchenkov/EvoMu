@@ -376,6 +376,10 @@ async fn test_t6_client_harness_run_journeys_two_clients_and_log_hygiene() {
         "multiplayer_presence",
         "local_chat",
         "wormholes_filaments",
+        "market_trade",
+        "pve_combat",
+        "daily_goals_events",
+        "cosmetics_store",
     ] {
         assert_eq!(
             journeys_map

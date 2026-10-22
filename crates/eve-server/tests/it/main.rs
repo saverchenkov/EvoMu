@@ -23,6 +23,7 @@ mod character_skills_clones;
 mod client_handshake_v24;
 mod client_login_rpcs;
 mod client_harness;
+mod client_journeys_expansion;
 mod combat;
 mod combat_death_crimewatch;
 mod combat_drones_npcs;

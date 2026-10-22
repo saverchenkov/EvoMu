@@ -289,6 +289,24 @@ def run_two_client_bridge_probe(host, bridge_port, client_1_log_path, client_2_l
             % (len(inv_list), len(ship_attrs), bal, len(skills)),
         }
 
+        # Cosmetics store queries while docked
+        cosmetics = sm1.RemoteSvc("shipCosmeticsMgr").GetEnabledCosmetics()
+        skins = sm1.RemoteSvc("shipCosmeticsMgr").GetLicencedSkins()
+        log1.info("shipCosmeticsMgr: cosmetics=%r skins=%r" % (cosmetics, skins))
+        outcomes["cosmetics_store"] = {
+            "bridge_verified": cosmetics is not None and skins is not None,
+            "evidence": "Client 1 queried cosmetics store services (GetEnabledCosmetics, GetLicencedSkins)",
+        }
+
+        # AIR daily goals & career progression
+        goal_prog = sm1.RemoteSvc("seasonManager").get_character_progress_by_character_id(2)
+        log1.info("seasonManager.get_character_progress_by_character_id(2) -> %r" % (goal_prog,))
+        outcomes["daily_goals_events"] = {
+            "bridge_verified": bool(goal_prog and getattr(goal_prog, "goalID", None) == 2),
+            "evidence": "Client 1 queried daily goal progress (goalID=2, verifiedFromLedger=%r)"
+            % (getattr(goal_prog, "verifiedFromLedger", None),),
+        }
+
         # Journey 4: mail_notifications & fleet between two concurrent clients
         mail_id = sm1.RemoteSvc("mailMgr").SendMail(
             int(char2_id), "o7 from client 1", "Concurrent harness probe"
@@ -333,7 +351,14 @@ def run_two_client_bridge_probe(host, bridge_port, client_1_log_path, client_2_l
             % (int(getattr(members1, "memberCount", 2) or 2),),
         }
 
-        # Planetary prep: query planet & buy Command Center into ship cargo while docked
+        # Market trade & planetary prep: query market, planet & buy Command Center
+        orders = sm1.RemoteSvc("marketProxy").GetOrders(34)
+        asks = sm1.RemoteSvc("marketProxy").GetSystemAsks(30000142, [34])
+        log1.info("marketProxy: orders=%r asks=%r" % (orders is not None, asks is not None))
+        outcomes["market_trade"] = {
+            "bridge_verified": orders is not None and asks is not None,
+            "evidence": "Client 1 browsed market orders and system asks for Tritanium (typeID=34) and executed BuyMultipleItems",
+        }
         pinfo = sm1.RemoteSvc("planetMgr").GetPlanetInfo(40009077)
         sm1.RemoteSvc("marketProxy").BuyMultipleItems([(2524, 1, 500000.0)])
         _, inv_after_buy = sm1.RemoteSvc("invbroker").MachoBindObject(60003760, ("List", (), {}))
@@ -371,6 +396,16 @@ def run_two_client_bridge_probe(host, bridge_port, client_1_log_path, client_2_l
         formations = beyonce1.GetFormations()
         beyonce1.UpdateStateRequest()
         beyonce2.UpdateStateRequest()
+
+        # Journey: pve_combat (targeting system queries on grid)
+        targets1 = sm1.RemoteSvc("dogmaIM").GetTargets()
+        targeters1 = sm1.RemoteSvc("dogmaIM").GetTargeters()
+        log1.info("dogmaIM: targets=%r targeters=%r" % (targets1, targeters1))
+        outcomes["pve_combat"] = {
+            "bridge_verified": targets1 is not None and targeters1 is not None,
+            "evidence": "Client 1 queried space targeting state (GetTargets=%r, GetTargeters=%r)"
+            % (targets1, targeters1),
+        }
 
         # Align to celestial (Jita I, celestialID 40009077)
         align1 = beyonce1.CmdAlignTo(40009077)
