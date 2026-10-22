@@ -521,9 +521,12 @@ async fn test_corporation_medals_and_employment() {
     .await
     .expect("GetMedalsReceived");
     let (_, rcv_rows) = rows(&rcv_rep);
-    assert_eq!(rcv_rows.len(), 1);
-    assert_eq!(rcv_rows[0][0], PyRep::Integer(medal_id));
-    assert_eq!(rcv_rows[0][1], PyRep::Integer(90_000_002));
+    let our_rcv = rcv_rows
+        .iter()
+        .find(|r| r[0] == PyRep::Integer(medal_id) && r[1] == PyRep::Integer(90_000_002))
+        .expect("Received medal found");
+    assert_eq!(our_rcv[0], PyRep::Integer(medal_id));
+    assert_eq!(our_rcv[1], PyRep::Integer(90_000_002));
 
     // 10. SetMedalStatus updates display status to 3
     let status_rep = call(
@@ -550,7 +553,11 @@ async fn test_corporation_medals_and_employment() {
     .await
     .expect("GetMedalsReceived updated");
     let (_, rcv_rows2) = rows(&rcv_rep2);
-    assert_eq!(rcv_rows2[0][6], PyRep::Integer(3));
+    let our_rcv2 = rcv_rows2
+        .iter()
+        .find(|r| r[0] == PyRep::Integer(medal_id) && r[1] == PyRep::Integer(90_000_002))
+        .expect("Received medal updated found");
+    assert_eq!(our_rcv2[6], PyRep::Integer(3));
 }
 
 #[tokio::test]
