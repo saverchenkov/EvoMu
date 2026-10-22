@@ -16,6 +16,21 @@ fn is_keyval(rep: &PyRep) -> bool {
     matches!(rep, PyRep::KeyVal(_))
 }
 
+fn make_test_ball(id: i64, type_id: u32, pos: glam::DVec3) -> eve_destiny::Ball {
+    eve_destiny::Ball {
+        id,
+        type_id,
+        position: pos,
+        velocity: glam::DVec3::ZERO,
+        max_velocity: 100.0,
+        inertia: 1.0,
+        mass: 1e6,
+        radius: 100.0,
+        speed_fraction: 0.0,
+        mode: eve_destiny::MovementMode::Stop,
+    }
+}
+
 #[tokio::test]
 // parity: rpc:milestoneMgr.ClaimRewards
 // parity: rpc:milestoneMgr.ProcessCharacterLogon
@@ -39,18 +54,45 @@ async fn test_milestones_task_tracker_and_fighters() {
     .await
     .expect("SelectCharacterID");
 
+    let char_id = sess.character_id.unwrap();
     let ship_id = 100_000_001i64;
     let sys_id = 30_000_142u32;
+    sess.solar_system_id = Some(sys_id);
+    sess.ship_id = Some(ship_id);
+    sess.station_id = None;
+    sess.structure_id = None;
 
-    // 1. milestoneMgr.ProcessCharacterLogon
-    let logon_rep = ctx
+    // 1. milestoneMgr.ClaimRewards: uncompleted milestone rejects with MilestoneNotCompleted
+    let uncompleted_claim = ctx
+        .dispatch_rpc(&mut sess, "milestoneMgr", None, "ClaimRewards", &[PyRep::Integer(1)], &kw, None)
+        .await;
+    assert!(uncompleted_claim.is_err());
+    assert_eq!(uncompleted_claim.unwrap_err().code, "MilestoneNotCompleted");
+
+    // 1b. milestoneMgr.ProcessCharacterLogon: initial state has no active or claimed milestones
+    let logon_initial = ctx
         .dispatch_rpc(&mut sess, "milestoneMgr", None, "ProcessCharacterLogon", &[], &kw, None)
         .await
-        .expect("ProcessCharacterLogon");
-    assert!(is_keyval(&logon_rep));
-    assert_eq!(logon_rep.dict_get("characterID"), Some(&PyRep::Integer(sess.character_id.unwrap())));
+        .expect("ProcessCharacterLogon initial");
+    assert!(is_keyval(&logon_initial));
+    assert_eq!(logon_initial.dict_get("characterID"), Some(&PyRep::Integer(char_id)));
+    assert_eq!(logon_initial.dict_get("activeMilestoneIDs"), Some(&PyRep::List(vec![])));
+    assert_eq!(logon_initial.dict_get("claimedMilestoneIDs"), Some(&PyRep::List(vec![])));
 
-    // 2. milestoneMgr.ClaimRewards
+    // Mark milestone 1 completed
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ext = eve_server::services::cosmetics_ui_ops::load_cosmetics_ui_state(snap);
+        ext.completed_milestones.entry(char_id).or_default().push(1);
+        eve_server::services::cosmetics_ui_ops::save_cosmetics_ui_state(snap, &ext);
+    });
+
+    let logon_active = ctx
+        .dispatch_rpc(&mut sess, "milestoneMgr", None, "ProcessCharacterLogon", &[], &kw, None)
+        .await
+        .expect("ProcessCharacterLogon with active milestone");
+    assert_eq!(logon_active.dict_get("activeMilestoneIDs"), Some(&PyRep::List(vec![PyRep::Integer(1)])));
+
+    // Claim rewards for completed milestone 1
     let claim_rep = ctx
         .dispatch_rpc(&mut sess, "milestoneMgr", None, "ClaimRewards", &[PyRep::Integer(1)], &kw, None)
         .await
@@ -58,14 +100,44 @@ async fn test_milestones_task_tracker_and_fighters() {
     assert!(is_keyval(&claim_rep));
     assert_eq!(claim_rep.dict_get("milestoneID"), Some(&PyRep::Integer(1)));
 
-    // 3. monolithTaskTrackerMgr.HasEverWarped
-    let warped_rep = ctx
+    // Claiming again fails with MilestoneAlreadyClaimed
+    let reclaim_err = ctx
+        .dispatch_rpc(&mut sess, "milestoneMgr", None, "ClaimRewards", &[PyRep::Integer(1)], &kw, None)
+        .await
+        .unwrap_err();
+    assert_eq!(reclaim_err.code, "MilestoneAlreadyClaimed");
+
+    let logon_claimed = ctx
+        .dispatch_rpc(&mut sess, "milestoneMgr", None, "ProcessCharacterLogon", &[], &kw, None)
+        .await
+        .expect("ProcessCharacterLogon after claim");
+    assert_eq!(logon_claimed.dict_get("activeMilestoneIDs"), Some(&PyRep::List(vec![])));
+    assert_eq!(logon_claimed.dict_get("claimedMilestoneIDs"), Some(&PyRep::List(vec![PyRep::Integer(1)])));
+
+    // 2. monolithTaskTrackerMgr.HasEverWarped
+    // Fresh character has not warped
+    let warped_rep1 = ctx
         .dispatch_rpc(&mut sess, "monolithTaskTrackerMgr", None, "HasEverWarped", &[], &kw, None)
         .await
-        .expect("HasEverWarped");
-    assert_eq!(warped_rep, PyRep::Bool(true));
+        .expect("HasEverWarped fresh");
+    assert_eq!(warped_rep1, PyRep::Bool(false));
 
-    // 4. monolithTaskTrackerMgr.UpdateClientAchievmentsAndCounters
+    // Pilot records warp
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ext = eve_server::services::cosmetics_ui_ops::load_cosmetics_ui_state(snap);
+        if !ext.characters_warped.contains(&char_id) {
+            ext.characters_warped.push(char_id);
+            eve_server::services::cosmetics_ui_ops::save_cosmetics_ui_state(snap, &ext);
+        }
+    });
+
+    let warped_rep2 = ctx
+        .dispatch_rpc(&mut sess, "monolithTaskTrackerMgr", None, "HasEverWarped", &[], &kw, None)
+        .await
+        .expect("HasEverWarped after warp");
+    assert_eq!(warped_rep2, PyRep::Bool(true));
+
+    // 3. monolithTaskTrackerMgr.UpdateClientAchievmentsAndCounters
     let update_rep = ctx
         .dispatch_rpc(
             &mut sess,
@@ -83,17 +155,85 @@ async fn test_milestones_task_tracker_and_fighters() {
         .expect("UpdateClientAchievmentsAndCounters");
     assert_eq!(update_rep, PyRep::None);
 
-    // 5. fighterMgr.CmdScoopAbandonedFighterFromSpace
+    // Verify achievement state was persisted
+    let achievements_rep = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "monolithTaskTrackerMgr",
+            None,
+            "GetCompletedAchievementsAndClientEventCount",
+            &[],
+            &kw,
+            None,
+        )
+        .await
+        .expect("GetCompletedAchievementsAndClientEventCount");
+    let completed_dict = achievements_rep.dict_get("completedDict").expect("completedDict");
+    let has_101 = match completed_dict {
+        PyRep::Dict(entries) => entries.iter().any(|(k, v)| k.as_i64() == Some(101) && v == &PyRep::Bool(true)),
+        _ => false,
+    };
+    assert!(has_101, "Achievement 101 should be completed in completedDict");
+    let event_dict = achievements_rep.dict_get("eventDict").expect("eventDict");
+    assert_eq!(event_dict.dict_get("jumps"), Some(&PyRep::Integer(10)));
+
+    // 4. fighterMgr.CmdScoopAbandonedFighterFromSpace
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.solar_system_id = sys_id;
+            ch.active_ship_id = ship_id;
+        }
+        if let Some(ship) = snap.items.get_mut(&ship_id) {
+            ship.type_id = 23757; // Archon carrier hull with fighter bay
+        } else {
+            snap.items.insert(
+                ship_id,
+                eve_db::InventoryItemRecord {
+                    item_id: ship_id,
+                    type_id: 23757, // Archon carrier hull
+                    owner_id: char_id,
+                    location_id: sys_id as i64,
+                    flag: eve_db::InventoryFlag::None,
+                    quantity: 1,
+                    ..Default::default()
+                },
+            );
+        }
+    });
+    sess.station_id = None;
+    sess.structure_id = None;
+    sess.solar_system_id = Some(sys_id);
+    sess.ship_id = Some(ship_id);
     let fighter_ball_id = 88_001i64;
     let fighter_item_id = 99_001i64;
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    sys_handle.spawn_ball(make_test_ball(ship_id, 23757, glam::DVec3::ZERO)).await.unwrap();
+    sys_handle.spawn_ball(make_test_ball(fighter_ball_id, 40_555, glam::DVec3::new(100.0, 0.0, 0.0))).await.unwrap();
+
+    // Negative 1: invalid ID <= 0
+    let err_invalid = ctx
+        .dispatch_rpc(&mut sess, "fighterMgr", None, "CmdScoopAbandonedFighterFromSpace", &[PyRep::Integer(0)], &kw, None)
+        .await
+        .unwrap_err();
+    assert_eq!(err_invalid.code, "InvalidFighterID");
+
+    // Negative 2: fighter not found
+    let err_not_found = ctx
+        .dispatch_rpc(&mut sess, "fighterMgr", None, "CmdScoopAbandonedFighterFromSpace", &[PyRep::Integer(999_999)], &kw, None)
+        .await
+        .unwrap_err();
+    assert_eq!(err_not_found.code, "FighterNotFound");
 
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(
             fighter_item_id,
             eve_db::InventoryItemRecord {
                 item_id: fighter_item_id,
-                type_id: 40_555, // Fighter type
-                owner_id: sess.character_id.unwrap(),
+                type_id: 40_555,
+                owner_id: char_id,
                 location_id: sys_id as i64,
                 flag: eve_db::InventoryFlag::None,
                 quantity: 1,
@@ -110,16 +250,108 @@ async fn test_milestones_task_tracker_and_fighters() {
             ball_id: fighter_ball_id,
             item_id: fighter_item_id,
             type_id: 40_555,
-            owner_char_id: sess.character_id.unwrap(),
+            owner_char_id: char_id,
             parent_ship_id: ship_id,
             tube_index: 0,
+            squadron_size: 9,
+            target_id: None,
+            is_abandoned: false,
+            mwd_active: false,
+        },
+    );
+
+    // Negative 3: fighter is not abandoned
+    let err_not_abandoned = ctx
+        .dispatch_rpc(&mut sess, "fighterMgr", None, "CmdScoopAbandonedFighterFromSpace", &[PyRep::Integer(fighter_ball_id)], &kw, None)
+        .await
+        .unwrap_err();
+    assert_eq!(err_not_abandoned.code, "FighterNotAbandoned");
+
+    // Negative 4: fighter owned by another pilot in a different corporation
+    ctx.active_fighters.write().unwrap().get_mut(&fighter_ball_id).unwrap().is_abandoned = true;
+    ctx.active_fighters.write().unwrap().get_mut(&fighter_ball_id).unwrap().owner_char_id = 90_000_999;
+    let err_not_owner = ctx
+        .dispatch_rpc(&mut sess, "fighterMgr", None, "CmdScoopAbandonedFighterFromSpace", &[PyRep::Integer(fighter_ball_id)], &kw, None)
+        .await
+        .unwrap_err();
+    assert_eq!(err_not_owner.code, "NotFighterOwner");
+
+    // Negative 5: cannot scoop while docked
+    ctx.active_fighters.write().unwrap().get_mut(&fighter_ball_id).unwrap().owner_char_id = char_id;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = Some(60_003_760);
+        }
+    });
+    let err_docked = ctx
+        .dispatch_rpc(&mut sess, "fighterMgr", None, "CmdScoopAbandonedFighterFromSpace", &[PyRep::Integer(fighter_ball_id)], &kw, None)
+        .await
+        .unwrap_err();
+    assert_eq!(err_docked.code, "ShipDocked");
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = None;
+        }
+    });
+    sess.station_id = None;
+
+    // Negative 6: fighter out of range (> 2500m)
+    let far_fighter_ball_id = 88_002i64;
+    sys_handle.spawn_ball(make_test_ball(far_fighter_ball_id, 40_555, glam::DVec3::new(5000.0, 0.0, 0.0))).await.unwrap();
+    ctx.active_fighters.write().unwrap().insert(
+        far_fighter_ball_id,
+        ActiveFighterSquadron {
+            ball_id: far_fighter_ball_id,
+            item_id: fighter_item_id,
+            type_id: 40_555,
+            owner_char_id: char_id,
+            parent_ship_id: ship_id,
+            tube_index: 1,
             squadron_size: 9,
             target_id: None,
             is_abandoned: true,
             mwd_active: false,
         },
     );
+    let err_range = ctx
+        .dispatch_rpc(&mut sess, "fighterMgr", None, "CmdScoopAbandonedFighterFromSpace", &[PyRep::Integer(far_fighter_ball_id)], &kw, None)
+        .await
+        .unwrap_err();
+    assert_eq!(err_range.code, "FighterOutOfRange");
 
+    // Negative 7: ship with no fighter bay capacity
+    let no_bay_ship_id = 100_000_099i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(no_bay_ship_id, eve_db::InventoryItemRecord {
+            item_id: no_bay_ship_id,
+            type_id: 606, // Corvette with no fighter bay
+            owner_id: char_id,
+            location_id: sys_id as i64,
+            flag: eve_db::InventoryFlag::None,
+            quantity: 1,
+            ..Default::default()
+        });
+    });
+    sys_handle.spawn_ball(make_test_ball(no_bay_ship_id, 606, glam::DVec3::ZERO)).await.unwrap();
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.active_ship_id = no_bay_ship_id;
+        }
+    });
+    sess.ship_id = Some(no_bay_ship_id);
+    let err_no_bay = ctx
+        .dispatch_rpc(&mut sess, "fighterMgr", None, "CmdScoopAbandonedFighterFromSpace", &[PyRep::Integer(fighter_ball_id)], &kw, None)
+        .await
+        .unwrap_err();
+    assert_eq!(err_no_bay.code, "NoFighterBay");
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.active_ship_id = ship_id;
+        }
+    });
+    sess.ship_id = Some(ship_id);
+
+    // Positive: successfully scoop abandoned fighter
     let scoop_rep = ctx
         .dispatch_rpc(
             &mut sess,
@@ -146,7 +378,6 @@ async fn test_milestones_task_tracker_and_fighters() {
 
 #[tokio::test]
 // parity: rpc:rewardMgr.GetRewardLPLogs
-// parity: rpc:rewardMgr.GetDelayedRewardsByGroupIDs
 // parity: rpc:colonyResourcesMgr.GetMyCorporationSkyhooks
 // parity: rpc:devIndexManager.GetAllDevelopmentIndices
 // parity: rpc:epicArcStatus.AgentHasEpicMissionsForCharacter
@@ -174,31 +405,59 @@ async fn test_rewards_sov_and_epic_arc_status() {
     sess.solar_system_id = Some(sys_id);
 
     // 1. rewardMgr.GetRewardLPLogs
+    let test_corp_id = 1000125i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.loyalty_points.insert(test_corp_id, 25_000);
+        }
+    });
     let lplogs_rep = ctx
         .dispatch_rpc(&mut sess, "rewardMgr", None, "GetRewardLPLogs", &[], &kw, None)
         .await
         .expect("GetRewardLPLogs");
     let PyRep::List(logs) = &lplogs_rep else { panic!("Expected List") };
-    assert!(logs.is_empty() || is_keyval(&logs[0]));
+    assert!(!logs.is_empty(), "LP logs should contain seeded corp LP");
+    let found = logs.iter().any(|l| {
+        l.dict_get("corpID") == Some(&PyRep::Integer(test_corp_id))
+            && l.dict_get("amount") == Some(&PyRep::Integer(25_000))
+    });
+    assert!(found, "LP logs should contain seeded corp 1000125 LP entry");
 
     // 2. rewardMgr.GetDelayedRewardsByGroupIDs
+    ctx.db.with_mut_snapshot(|snap| {
+        eve_server::services::cosmetics_ui_ops::seed_delayed_reward(
+            snap,
+            char_id,
+            eve_server::services::cosmetics_ui_ops::DelayedRewardEntry {
+                reward_group_id: 501,
+                reward_type_id: 1,
+                quantity: 5000,
+            },
+        );
+    });
+
     let delayed_rep = ctx
         .dispatch_rpc(
             &mut sess,
             "rewardMgr",
             None,
             "GetDelayedRewardsByGroupIDs",
-            &[PyRep::List(vec![PyRep::Integer(501)])],
+            &[PyRep::List(vec![PyRep::Integer(501), PyRep::Integer(999)])],
             &kw,
             None,
         )
         .await
         .expect("GetDelayedRewardsByGroupIDs");
     let PyRep::Dict(delayed_dict) = &delayed_rep else { panic!("Expected Dict") };
-    let group_rewards = delayed_dict.iter().find(|(k, _)| k == &PyRep::Integer(501));
-    assert!(group_rewards.is_some(), "Group 501 delayed rewards found");
-    let (_, PyRep::List(rew_list)) = group_rewards.unwrap() else { panic!("Expected List") };
-    assert_eq!(rew_list[0].dict_get("rewardQuantity"), Some(&PyRep::Integer(5000)));
+    let group_501 = delayed_dict.iter().find(|(k, _)| k == &PyRep::Integer(501)).expect("Group 501 delayed rewards found");
+    let (_, PyRep::List(rew_501)) = group_501 else { panic!("Expected List") };
+    assert_eq!(rew_501.len(), 1);
+    assert_eq!(rew_501[0].dict_get("rewardGroupID"), Some(&PyRep::Integer(501)));
+    assert_eq!(rew_501[0].dict_get("rewardQuantity"), Some(&PyRep::Integer(5000)));
+
+    let group_999 = delayed_dict.iter().find(|(k, _)| k == &PyRep::Integer(999)).expect("Group 999 delayed rewards found");
+    let (_, PyRep::List(rew_999)) = group_999 else { panic!("Expected List") };
+    assert!(rew_999.is_empty(), "Unseeded group 999 should have empty reward list");
 
     // 3. colonyResourcesMgr.GetMyCorporationSkyhooks
     let skyhook_id = 60_000_501i64;
@@ -257,6 +516,21 @@ async fn test_rewards_sov_and_epic_arc_status() {
     assert_eq!(idx_kv.dict_get("industrial"), Some(&PyRep::Integer(2)));
 
     // 5. epicArcStatus.AgentHasEpicMissionsForCharacter
+    // Non-epic agent returns false
+    let non_epic = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "epicArcStatus",
+            None,
+            "AgentHasEpicMissionsForCharacter",
+            &[PyRep::Integer(999_999_999)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("AgentHasEpicMissionsForCharacter non-epic");
+    assert_eq!(non_epic, PyRep::Bool(false));
+
     let agent_id = 3_019_356i64; // Blood-Stained Stars starter agent
     let epic_rep = ctx
         .dispatch_rpc(
@@ -270,20 +544,13 @@ async fn test_rewards_sov_and_epic_arc_status() {
         )
         .await
         .expect("AgentHasEpicMissionsForCharacter");
-    if ctx.sde.agents.contains_key(&agent_id) {
-        assert_eq!(epic_rep, PyRep::Bool(true));
-    } else {
-        assert!(matches!(epic_rep, PyRep::Bool(_)));
-    }
+    assert_eq!(epic_rep, PyRep::Bool(true));
 }
 
 #[tokio::test]
 // parity: rpc:infoGatheringMgr.GetStateAndConfig
 // parity: rpc:infoGatheringMgr.LogInfoEventsFromClient
 // parity: rpc:clientStatLogger.LogString
-// parity: rpc:externalQueueMgr.PublishProxyEvent
-// parity: rpc:loadService.GetTotalStats
-// parity: rpc:loadService.SetConfig
 async fn test_telemetry_logging_and_load_service() {
     let ctx = ServerContext::new();
     let kw = HashMap::new();
@@ -354,24 +621,20 @@ async fn test_telemetry_logging_and_load_service() {
         .await
         .expect("PublishProxyEvent");
     assert_eq!(pub_rep, PyRep::Bool(true));
+    {
+        let q = ctx.proxy_event_queue.read().unwrap();
+        let found = q.iter().any(|r| r.event_name == "ClusterNodeHeartbeat" && r.payload == PyRep::Integer(1001));
+        assert!(found, "Event record should be queued in ctx.proxy_event_queue");
+    }
 
-    // 5. loadService.GetTotalStats
-    let stats_rep = ctx
-        .dispatch_rpc(&mut sess, "loadService", None, "GetTotalStats", &[], &kw, None)
-        .await
-        .expect("GetTotalStats");
-    assert!(is_keyval(&stats_rep));
-    assert_eq!(stats_rep.dict_get("isOverloaded"), Some(&PyRep::Bool(false)));
-    assert_eq!(stats_rep.dict_get("nodeID"), Some(&PyRep::Integer(1001)));
-
-    // 6. loadService.SetConfig (GM role required)
+    // 5. loadService.SetConfig (GM role required)
     let unauth_set = ctx
         .dispatch_rpc(
             &mut sess,
             "loadService",
             None,
             "SetConfig",
-            &[PyRep::Dict(vec![(PyRep::String("sampleInterval".into()), PyRep::Integer(1000))])],
+            &[PyRep::Dict(vec![(PyRep::String("sampleInterval".into()), PyRep::Integer(2500))])],
             &kw,
             None,
         )
@@ -386,11 +649,24 @@ async fn test_telemetry_logging_and_load_service() {
             "loadService",
             None,
             "SetConfig",
-            &[PyRep::Dict(vec![(PyRep::String("sampleInterval".into()), PyRep::Integer(1000))])],
+            &[PyRep::Dict(vec![(PyRep::String("sampleInterval".into()), PyRep::Integer(2500))])],
             &kw,
             None,
         )
         .await
         .expect("SetConfig GM");
     assert_eq!(auth_set, PyRep::Bool(true));
+
+    // 6. loadService.GetTotalStats returns configured sampleInterval and live server stats
+    let stats_rep = ctx
+        .dispatch_rpc(&mut sess, "loadService", None, "GetTotalStats", &[], &kw, None)
+        .await
+        .expect("GetTotalStats");
+    assert!(is_keyval(&stats_rep));
+    assert_eq!(stats_rep.dict_get("isOverloaded"), Some(&PyRep::Bool(false)));
+    assert_eq!(stats_rep.dict_get("nodeID"), Some(&PyRep::Integer(1001)));
+    assert_eq!(stats_rep.dict_get("sampleInterval"), Some(&PyRep::Integer(2500)));
+    assert!(stats_rep.dict_get("currentTick").is_some());
+    assert!(stats_rep.dict_get("activeSessions").is_some());
+    assert!(stats_rep.dict_get("activeBallparks").is_some());
 }

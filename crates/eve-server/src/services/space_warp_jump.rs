@@ -252,7 +252,16 @@ async fn handle_legacy_warp_to_point(
         let _ = handle.break_gate_cloak(ship_id).await;
     }
     match handle.set_movement_mode(ship_id, mode).await {
-        Ok(tick) => Ok(PyRep::Integer(tick as i64)),
+        Ok(tick) => {
+            ctx.db.with_mut_snapshot(|snap| {
+                let mut ext = crate::services::cosmetics_ui_ops::load_cosmetics_ui_state(snap);
+                if !ext.characters_warped.contains(&char_id) {
+                    ext.characters_warped.push(char_id);
+                    crate::services::cosmetics_ui_ops::save_cosmetics_ui_state(snap, &ext);
+                }
+            });
+            Ok(PyRep::Integer(tick as i64))
+        }
         Err(e) => {
             let code = if e.contains("WarpScrambled") {
                 "WarpScrambled"
@@ -563,6 +572,13 @@ async fn handle_cmd_warp_to_stuff(
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .insert((ctx_scope_id(ctx), ship_id), char_id);
+            ctx.db.with_mut_snapshot(|snap| {
+                let mut ext = crate::services::cosmetics_ui_ops::load_cosmetics_ui_state(snap);
+                if !ext.characters_warped.contains(&char_id) {
+                    ext.characters_warped.push(char_id);
+                    crate::services::cosmetics_ui_ops::save_cosmetics_ui_state(snap, &ext);
+                }
+            });
             ctx.notify(
                 crate::router::NotificationTarget::Character(char_id),
                 "OnWarpStarted",

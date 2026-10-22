@@ -32,6 +32,13 @@ pub struct StoredLinkRecord {
     pub data: PyRep,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DelayedRewardEntry {
+    pub reward_group_id: i64,
+    pub reward_type_id: i64,
+    pub quantity: i64,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CosmeticsUiExtendedState {
     pub skin_license_entries: HashMap<i64, Vec<SkinLicenseEntry>>,
@@ -45,6 +52,12 @@ pub struct CosmeticsUiExtendedState {
     pub opened_crates: HashMap<i64, u64>,
     pub claimed_crate_loot: HashMap<i64, Vec<i64>>,
     pub claimed_milestones: HashMap<i64, Vec<i64>>,
+    #[serde(default)]
+    pub completed_milestones: HashMap<i64, Vec<i64>>,
+    #[serde(default)]
+    pub characters_warped: Vec<i64>,
+    #[serde(default)]
+    pub delayed_rewards: HashMap<i64, Vec<DelayedRewardEntry>>,
     pub login_campaign_claimed_days: HashMap<i64, Vec<u64>>,
     pub seasonal_claimed_days: HashMap<i64, Vec<u64>>,
 }
@@ -60,6 +73,12 @@ pub fn save_cosmetics_ui_state(snap: &mut WorldStateSnapshot, state: &CosmeticsU
     if let Ok(json) = serde_json::to_string(state) {
         snap.item_custom_names.insert(COSMETICS_UI_STATE_KEY, json);
     }
+}
+
+pub fn seed_delayed_reward(snap: &mut WorldStateSnapshot, char_id: i64, entry: DelayedRewardEntry) {
+    let mut ext = load_cosmetics_ui_state(snap);
+    ext.delayed_rewards.entry(char_id).or_default().push(entry);
+    save_cosmetics_ui_state(snap, &ext);
 }
 
 fn err(code: &str, message: impl Into<String>) -> BridgeRpcError {
@@ -362,12 +381,14 @@ pub async fn handle(ctx: &ServerContext, session: &mut SessionState, service: &s
         ("monolithTaskTrackerMgr", "GetCompletedAchievementsAndClientEventCount") => Some(handle_achievements_get(ctx, session)),
         ("monolithTaskTrackerMgr", "UpdateClientAchievmentsAndCounters") => Some(handle_achievements_update(ctx, session, args)),
         ("monolithTaskTrackerMgr", "HasEverWarped") => {
-            // const-ok: active characters default to has_ever_warped=true for tutorial tracking
-            let _ = match ServerContext::require_character(session) {
+            let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            Some(Ok(PyRep::Bool(true)))
+            let warped = ctx.db.with_snapshot(|snap| {
+                load_cosmetics_ui_state(snap).characters_warped.contains(&char_id)
+            });
+            Some(Ok(PyRep::Bool(warped)))
         }
         // parity: feat:ui.contextual-offers
         ("contextualOfferMgr", "TrackOfferBuyPress")
@@ -875,10 +896,12 @@ fn handle_milestone_process_logon(ctx: &ServerContext, session: &mut SessionStat
     let (_, char_id) = ServerContext::require_character(session)?;
     ctx.db.with_snapshot(|snap| {
         let ext = load_cosmetics_ui_state(snap);
+        let completed = ext.completed_milestones.get(&char_id).cloned().unwrap_or_default();
         let claimed = ext.claimed_milestones.get(&char_id).cloned().unwrap_or_default();
+        let active: Vec<i64> = completed.into_iter().filter(|id| !claimed.contains(id)).collect();
         Ok(PyRep::keyval([
             ("characterID", PyRep::Integer(char_id)),
-            ("activeMilestoneIDs", PyRep::List(vec![PyRep::Integer(1), PyRep::Integer(2)])),
+            ("activeMilestoneIDs", PyRep::List(active.into_iter().map(PyRep::Integer).collect())),
             ("claimedMilestoneIDs", PyRep::List(claimed.into_iter().map(PyRep::Integer).collect())),
         ]))
     })
@@ -887,11 +910,15 @@ fn handle_milestone_process_logon(ctx: &ServerContext, session: &mut SessionStat
 fn handle_milestone_claim_rewards(ctx: &ServerContext, session: &mut SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
     let milestone_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-    if milestone_id != 1 && milestone_id != 2 {
-        return Err(err("InvalidMilestone", format!("Milestone {milestone_id} is not an active completed milestone")));
+    if milestone_id <= 0 {
+        return Err(err("InvalidMilestone", "Milestone ID must be a positive integer"));
     }
     ctx.db.try_with_mut_snapshot(|snap| {
         let mut ext = load_cosmetics_ui_state(snap);
+        let completed = ext.completed_milestones.get(&char_id).cloned().unwrap_or_default();
+        if !completed.contains(&milestone_id) {
+            return Err(err("MilestoneNotCompleted", format!("Milestone {milestone_id} has not been completed by character {char_id}")));
+        }
         let claimed = ext.claimed_milestones.entry(char_id).or_default();
         if claimed.contains(&milestone_id) {
             return Err(err("MilestoneAlreadyClaimed", format!("Milestone {milestone_id} rewards have already been claimed")));

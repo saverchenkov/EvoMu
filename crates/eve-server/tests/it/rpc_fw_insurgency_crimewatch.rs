@@ -236,6 +236,9 @@ async fn test_killrights_hacking_and_interference() {
     assert_eq!(act_rep.dict_get("suspectFlagActive"), Some(&PyRep::Bool(true)));
 
     // 1b. Pilot 2 buys public kr2
+    let p1_bal_before = ctx.db.with_snapshot(|snap| {
+        snap.characters.get(&p1_char).map(|c| c.balance.0).unwrap_or(0)
+    });
     let buy_rep = ctx
         .dispatch_rpc(&mut sess2, "killRightMgr", None, "BuyKillRight", &[PyRep::Integer(kr2_id)], &kw, None)
         .await
@@ -243,6 +246,15 @@ async fn test_killrights_hacking_and_interference() {
     assert!(is_keyval(&buy_rep));
     assert_eq!(buy_rep.dict_get("killRightID"), Some(&PyRep::Integer(kr2_id)));
     assert_eq!(buy_rep.dict_get("suspectFlagActive"), Some(&PyRep::Bool(true)));
+
+    let (p1_bal_after, p2_bal_after) = ctx.db.with_snapshot(|snap| {
+        (
+            snap.characters.get(&p1_char).map(|c| c.balance.0).unwrap_or(0),
+            snap.characters.get(&p2_char).map(|c| c.balance.0).unwrap_or(0),
+        )
+    });
+    assert_eq!(p2_bal_after, 50_000_000_00, "Buyer ISK balance should decrease by 50M ISK");
+    assert_eq!(p1_bal_after, p1_bal_before + 50_000_000_00, "Owner ISK balance should increase by 50M ISK");
 
     // Buying already activated kill right fails
     let rebuy_err = ctx

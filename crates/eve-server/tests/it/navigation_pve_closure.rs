@@ -597,6 +597,11 @@ async fn test_crates_claim_loot_and_milestones_one_time_rewards() {
     ));
 
     // 4. Milestone Logon & Claim
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ext = eve_server::services::cosmetics_ui_ops::load_cosmetics_ui_state(snap);
+        ext.completed_milestones.entry(char_id).or_default().push(1);
+        eve_server::services::cosmetics_ui_ops::save_cosmetics_ui_state(snap, &ext);
+    });
     let logon_res = rpc(&ctx, &mut sess, "milestoneMgr", "ProcessCharacterLogon", &[])
         .await
         .expect("ProcessCharacterLogon");

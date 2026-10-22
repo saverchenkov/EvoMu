@@ -34,6 +34,7 @@ fn check_starbase_auth(
 ) -> Result<(), BridgeRpcError> {
     if session.has_gm_role() { return Ok(()); }
     let owner_corp = snap.structures.get(&structure_id).map(|s| s.owner_corp_id)
+        .or_else(|| snap.items.get(&structure_id).map(|i| i.owner_id))
         .ok_or_else(|| rpc_err("StructureNotFound", format!("Starbase structure {structure_id} not found")))?;
     let char_corp = session.corporation_id
         .or_else(|| snap.characters.get(&char_id).map(|c| c.corporation_id)).unwrap_or(0);
@@ -659,13 +660,17 @@ pub fn handle(
                     return Err(rpc_err("StarbaseNoFuel", "Starbase requires fuel blocks for moon harvesting"));
                 }
                 st.fuel_blocks = st.fuel_blocks.saturating_sub(5);
-                let st = snap.starbase_settings.entry(tower_id).or_default();
-                if st.last_moon_process_unix > 0 && now_unix < st.last_moon_process_unix.saturating_add(3600) {
+                let st_settings = snap.starbase_settings.entry(tower_id).or_default();
+                if st_settings.linked_resources.is_empty() {
+                    return Err(rpc_err("NoLinkedResources", "Starbase requires linked moon harvesting silo/resources"));
+                }
+                if st_settings.last_moon_process_unix > 0 && now_unix < st_settings.last_moon_process_unix.saturating_add(3600) {
                     return Err(rpc_err("CycleInProgress", "Moon harvesting cycle is in progress"));
                 }
-                st.last_moon_process_unix = now_unix;
-                let target_loc = st.linked_resources.first().copied().unwrap_or(tower_id);
-                let existing = snap.items.values_mut().find(|i| i.location_id == target_loc && i.type_id == 16633);
+                st_settings.last_moon_process_unix = now_unix;
+                let target_loc = st_settings.linked_resources[0];
+                let moon_mat_type = snap.orbital_provision_types.get(&target_loc).copied().unwrap_or(16633) as u32;
+                let existing = snap.items.values_mut().find(|i| i.location_id == target_loc && i.type_id == moon_mat_type);
                 let qty = if let Some(item) = existing {
                     item.quantity += 100;
                     item.quantity
@@ -674,7 +679,7 @@ pub fn handle(
                     let nid = snap.next_entity_id;
                     snap.items.insert(nid, InventoryItemRecord {
                         item_id: nid,
-                        type_id: 16633,
+                        type_id: moon_mat_type,
                         owner_id: session.corporation_id.unwrap_or(char_id),
                         location_id: target_loc,
                         flag: InventoryFlag::Hangar,
@@ -1066,14 +1071,20 @@ pub fn handle(
             if let Err(e) = ServerContext::require_auth(session) {
                 return Some(Err(e));
             }
-            debug!(
-                session_id = session.session_id,
-                char_id = ?session.character_id,
-                service,
-                method,
-                arg_count = args.len(),
-                "externalQueueMgr.PublishProxyEvent received"
-            );
+            let event_name = args.first().and_then(|a| a.as_str()).unwrap_or("proxy_event").to_string();
+            let payload = args.get(1).cloned().unwrap_or_else(|| args.first().cloned().unwrap_or(PyRep::None));
+            let record = crate::router::ProxyEventRecord {
+                event_name,
+                payload,
+                timestamp_unix: ctx.now_unix(),
+            };
+            {
+                let mut q = ctx.proxy_event_queue.write().unwrap();
+                if q.len() >= 1000 {
+                    q.pop_front();
+                }
+                q.push_back(record);
+            }
             Some(Ok(PyRep::Bool(true)))
         }
         ("infoGatheringMgr", "GetStateAndConfig") => {

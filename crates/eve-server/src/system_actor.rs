@@ -566,6 +566,10 @@ impl SystemRegistry {
         None
     }
 
+    pub fn active_systems_count(&self) -> usize {
+        self.systems.read().unwrap_or_else(|e| e.into_inner()).len()
+    }
+
     /// Spawns or retrieves a running Solar System Actor for `solar_system_id`.
     /// Populates static SDE celestials, stargates, and stations (`SP-1`), and hibernates (`LOD 0`)
     /// with zero timer wakes until dynamic balls are spawned on grid.

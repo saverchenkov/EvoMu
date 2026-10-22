@@ -953,10 +953,16 @@ pub async fn handle_fighters(
         }
 
         ("fighterMgr", "CmdScoopAbandonedFighterFromSpace") => {
-            let (_, _char_id) = match ServerContext::require_character(session) {
+            let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            if session.station_id.is_some() || session.structure_id.is_some() {
+                return Some(Err(BridgeRpcError {
+                    code: "ShipDocked".into(),
+                    message: "Cannot scoop abandoned fighters while docked".into(),
+                }));
+            }
             let Some(ship_id) = session.ship_id else {
                 return Some(Err(BridgeRpcError {
                     code: "NoActiveShip".into(),
@@ -969,38 +975,98 @@ pub async fn handle_fighters(
                     message: "Session has no active solar system".into(),
                 }));
             };
-            let target_fighter_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let sys_handle = ctx.systems.get_or_spawn(sys_id);
-            let mut scooped_ball_id = None;
-            let mut scooped_item_id = None;
+            let target_fighter_id = match args.first().and_then(|a| a.as_i64()) {
+                Some(id) if id > 0 => id,
+                _ => {
+                    return Some(Err(BridgeRpcError {
+                        code: "InvalidFighterID".into(),
+                        message: "CmdScoopAbandonedFighterFromSpace requires a valid target fighter squadron ID".into(),
+                    }));
+                }
+            };
+            let squad = {
+                let fighters = ctx.active_fighters.read().unwrap();
+                let Some(squad) = fighters.get(&target_fighter_id).cloned() else {
+                    return Some(Err(BridgeRpcError {
+                        code: "FighterNotFound".into(),
+                        message: format!("Fighter squadron {target_fighter_id} not found in space"),
+                    }));
+                };
+                if !squad.is_abandoned {
+                    return Some(Err(BridgeRpcError {
+                        code: "FighterNotAbandoned".into(),
+                        message: format!("Fighter squadron {target_fighter_id} is active and cannot be scooped"),
+                    }));
+                }
+                if squad.owner_char_id != char_id {
+                    let authorized = ctx.db.with_snapshot(|snap| {
+                        let caller_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
+                        let owner_corp = snap.characters.get(&squad.owner_char_id).map(|c| c.corporation_id).unwrap_or(0);
+                        caller_corp != 0 && caller_corp == owner_corp
+                    });
+                    if !authorized {
+                        return Some(Err(BridgeRpcError {
+                            code: "NotFighterOwner".into(),
+                            message: "Cannot scoop an abandoned fighter squadron belonging to another pilot or corporation".into(),
+                        }));
+                    }
+                }
+                squad
+            };
+
+            let has_fighter_bay = ctx.db.with_snapshot(|snap| {
+                let ship_type = snap.items.get(&ship_id).map(|s| s.type_id).unwrap_or(0);
+                let dogma_bay = ctx.sde.types.get(&ship_type).map(|t| {
+                    t.default_attributes.get(&2055).copied().unwrap_or(0.0) > 0.0
+                        || t.default_attributes.get(&2216).copied().unwrap_or(0.0) > 0.0
+                }).unwrap_or(false);
+                dogma_bay
+                    || snap.items.values().any(|it| it.location_id == ship_id && it.flag == InventoryFlag::FighterBay)
+            });
+            if !has_fighter_bay {
+                return Some(Err(BridgeRpcError {
+                    code: "NoFighterBay".into(),
+                    message: "Caller ship has no fighter bay capacity".into(),
+                }));
+            }
+
+            let f_pos = ctx.systems.get_ball_position_sync(sys_id, squad.ball_id);
+            let s_pos = ctx.systems.get_ball_position_sync(sys_id, ship_id);
+            let Some(f_pos) = f_pos else {
+                return Some(Err(BridgeRpcError {
+                    code: "FighterNotInSystem".into(),
+                    message: format!("Fighter ball {} not found in system {sys_id}", squad.ball_id),
+                }));
+            };
+            let Some(s_pos) = s_pos else {
+                return Some(Err(BridgeRpcError {
+                    code: "ShipNotInSystem".into(),
+                    message: format!("Ship ball {ship_id} not found in system {sys_id}"),
+                }));
+            };
+            let dist = (f_pos - s_pos).length();
+            if dist > 2500.0 {
+                return Some(Err(BridgeRpcError {
+                    code: "FighterOutOfRange".into(),
+                    message: format!("Fighter squadron is {dist:.1}m away, must be within 2500m to scoop"),
+                }));
+            }
+
             {
                 let mut fighters = ctx.active_fighters.write().unwrap();
-                let found_key = fighters.iter().find_map(|(&k, f)| {
-                    if f.is_abandoned && (target_fighter_id == 0 || f.ball_id == target_fighter_id || f.item_id == target_fighter_id) {
-                        Some(k)
-                    } else {
-                        None
-                    }
-                });
-                if let Some(k) = found_key {
-                    let f = fighters.remove(&k).unwrap();
-                    scooped_ball_id = Some(f.ball_id);
-                    scooped_item_id = Some(f.item_id);
+                fighters.remove(&target_fighter_id);
+            }
+
+            ctx.db.with_mut_snapshot(|snap| {
+                if let Some(item) = snap.items.get_mut(&squad.item_id) {
+                    item.location_id = ship_id;
+                    item.flag = InventoryFlag::FighterBay;
+                    item.version += 1;
                 }
-            }
-            if let Some(iid) = scooped_item_id {
-                ctx.db.with_mut_snapshot(|snap| {
-                    if let Some(item) = snap.items.get_mut(&iid) {
-                        item.location_id = ship_id;
-                        item.flag = InventoryFlag::FighterBay;
-                        item.version += 1;
-                    }
-                });
-            }
-            if let Some(bid) = scooped_ball_id {
-                let _ = sys_handle.remove_ball(bid).await;
-            }
-            Some(Ok(PyRep::Bool(scooped_item_id.is_some())))
+            });
+            let sys_handle = ctx.systems.get_or_spawn(sys_id);
+            let _ = sys_handle.remove_ball(squad.ball_id).await;
+            Some(Ok(PyRep::Bool(true)))
         }
 
         _ => None,

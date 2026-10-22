@@ -940,7 +940,7 @@ pub fn handle(
         }
 
         ("rewardMgr", "GetDelayedRewardsByGroupIDs") => {
-            let (_, _char_id) = match ServerContext::require_character(session) {
+            let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
@@ -951,15 +951,30 @@ pub fn handle(
                 Some(PyRep::Integer(gid)) => vec![*gid],
                 _ => Vec::new(),
             };
-            let mut result = Vec::new();
-            for gid in group_ids {
-                let rewards = vec![PyRep::keyval([
-                    ("rewardGroupID", PyRep::Integer(gid)),
-                    ("rewardQuantity", PyRep::Integer(5000)),
-                    ("rewardTypeID", PyRep::Integer(1)),
-                ])];
-                result.push((PyRep::Integer(gid), PyRep::List(rewards)));
-            }
+            let result = ctx.db.with_snapshot(|snap| {
+                let ext = crate::services::cosmetics_ui_ops::load_cosmetics_ui_state(snap);
+                let char_rewards = ext.delayed_rewards.get(&char_id);
+                let mut dict = Vec::new();
+                for gid in group_ids {
+                    let matching: Vec<PyRep> = char_rewards
+                        .map(|rewards| {
+                            rewards
+                                .iter()
+                                .filter(|r| r.reward_group_id == gid)
+                                .map(|r| {
+                                    PyRep::keyval([
+                                        ("rewardGroupID", PyRep::Integer(r.reward_group_id)),
+                                        ("rewardQuantity", PyRep::Integer(r.quantity)),
+                                        ("rewardTypeID", PyRep::Integer(r.reward_type_id)),
+                                    ])
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    dict.push((PyRep::Integer(gid), PyRep::List(matching)));
+                }
+                dict
+            });
             Some(Ok(PyRep::Dict(result)))
         }
 
