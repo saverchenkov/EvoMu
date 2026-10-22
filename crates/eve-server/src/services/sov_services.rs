@@ -5,7 +5,7 @@
 use crate::router::NotificationTarget;
 use crate::router::ServerContext;
 use eve_machonet::SessionState;
-use eve_proto::{BridgeRpcError, DBRowDescriptor, DbColumnType, PyRep};
+use eve_proto::{BridgeRpcError, PyRep};
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock, RwLock, Weak};
 
@@ -467,16 +467,8 @@ pub async fn handle(
         }
 
         ("map", "GetCurrentSovData") => {
-            let desc = DBRowDescriptor::new([
-                ("locationID", DbColumnType::I4),
-                ("solarSystemID", DbColumnType::I4),
-                ("allianceID", DbColumnType::I4),
-                ("corporationID", DbColumnType::I4),
-                ("infrastructureHubID", DbColumnType::I8),
-                ("stationCount", DbColumnType::I4),
-            ]);
-            let rows = ctx.db.with_snapshot(|snap| {
-                let mut r = snap
+            let sov_data = ctx.db.with_snapshot(|snap| {
+                let mut list = snap
                     .system_states
                     .iter()
                     .filter_map(|(&sys_id, st)| {
@@ -488,37 +480,34 @@ pub async fn handle(
                                     s.solar_system_id == sys_id
                                         && (s.type_id == TYPE_SOVEREIGNTY_HUB || s.type_id == 32226)
                                 })
-                                .map(|s| s.structure_id)
-                                .unwrap_or(0);
+                                .map(|s| s.structure_id);
                             let corp_id = snap
                                 .alliances
                                 .get(&aid)
                                 .map(|al| al.executor_corp_id)
                                 .unwrap_or(0);
-                            vec![
-                                PyRep::Integer(i64::from(sys_id)),
-                                PyRep::Integer(i64::from(sys_id)),
-                                PyRep::Integer(aid),
-                                PyRep::Integer(corp_id),
-                                PyRep::Integer(hub_id),
-                                PyRep::Integer(0),
-                            ]
+                            PyRep::keyval([
+                                ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
+                                ("allianceID", PyRep::Integer(aid)),
+                                ("corporationID", PyRep::Integer(corp_id)),
+                                ("infrastructureHubID", hub_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
+                                ("stationCount", PyRep::Integer(0)),
+                            ])
                         })
                     })
-                    .collect::<Vec<Vec<PyRep>>>();
-                if r.is_empty() {
-                    r.push(vec![
-                        PyRep::Integer(30_000_142),
-                        PyRep::Integer(30_000_142),
-                        PyRep::Integer(99_000_001),
-                        PyRep::Integer(98_000_001),
-                        PyRep::Integer(0),
-                        PyRep::Integer(0),
-                    ]);
+                    .collect::<Vec<PyRep>>();
+                if list.is_empty() {
+                    list.push(PyRep::keyval([
+                        ("solarSystemID", PyRep::Integer(30_000_142)),
+                        ("allianceID", PyRep::Integer(99_000_001)),
+                        ("corporationID", PyRep::Integer(98_000_001)),
+                        ("infrastructureHubID", PyRep::None),
+                        ("stationCount", PyRep::Integer(0)),
+                    ]));
                 }
-                r
+                list
             });
-            Some(Ok(desc.build_crowset(rows)))
+            Some(Ok(PyRep::List(sov_data)))
         }
 
         ("beyonce", "GetCynoJammerState") => {

@@ -315,7 +315,10 @@ async fn test_rpc_char_unbound_mgr_batch() {
         .dispatch_rpc(&mut sess, "charUnboundMgr", None, "GetNumCharacters", &[], &kw, None)
         .await
         .expect("GetNumCharacters");
-    let num_chars = res.as_i64().expect("num characters int");
+    let num_chars = match &res {
+        PyRep::Tuple(v) => v.first().and_then(PyRep::as_i64).expect("num characters int"),
+        other => other.as_i64().expect("num characters int"),
+    };
     assert_eq!(num_chars >= 1, true);
 
     // 2. GetCharOmegaDowngradeStatus
@@ -485,7 +488,7 @@ async fn test_rpc_char_unbound_mgr_batch() {
         )
         .await
         .expect("DeleteCharacter");
-    assert_eq!(matches!(res, PyRep::None), true);
+    assert_eq!(matches!(res, PyRep::KeyVal(_) | PyRep::Bool(true)), true);
     let is_biomassed = ctx
         .db
         .with_snapshot(|s| s.characters.get(&temp_char_id).unwrap().user_id == 0);
@@ -911,10 +914,9 @@ async fn test_rpc_map_svc_part1_batch() {
         .dispatch_rpc(&mut sess, "map", None, "GetCurrentSovData", &[], &kw, None)
         .await
         .expect("GetCurrentSovData");
-    assert_eq!(res.is_crowset(), true);
-    assert_eq!(crowset_header_has_column(&res, "locationID"), true);
-    let sov_rows = res.crowset_rows().expect("sov rows");
+    let sov_rows = as_list(&res);
     assert_eq!(sov_rows.is_empty(), false);
+    assert_eq!(sov_rows[0].dict_get("solarSystemID").is_some(), true);
 
     // 4. GetDeadspaceAgentsMap
     let res = ctx

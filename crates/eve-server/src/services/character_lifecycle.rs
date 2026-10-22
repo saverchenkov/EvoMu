@@ -108,7 +108,10 @@ pub fn handle(
     match (service, method) {
         ("charUnboundMgr", "GetNumCharacters") => {
             let n = ctx.db.get_characters_for_user(user_id).len();
-            Some(Ok(PyRep::Integer(n as i64)))
+            Some(Ok(PyRep::Tuple(vec![
+                PyRep::Integer(n as i64),
+                PyRep::Integer(MAX_CHARACTERS_PER_ACCOUNT as i64),
+            ])))
         }
         ("charUnboundMgr", "CreateCharacterWithDoll") => {
             if ctx.db.get_characters_for_user(user_id).len() >= MAX_CHARACTERS_PER_ACCOUNT {
@@ -245,7 +248,10 @@ fn delete(ctx: &ServerContext, session: &SessionState, user_id: u64, args: &[PyR
         ch.version += 1;
         Ok(())
     })?;
-    Ok(PyRep::None)
+    Ok(PyRep::keyval([
+        ("deleted", PyRep::Bool(true)),
+        ("characterID", PyRep::Integer(char_id)),
+    ]))
 }
 
 fn handle_char_mgr(
