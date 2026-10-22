@@ -532,7 +532,7 @@ async fn test_e2e_journeys_13_to_18_and_catalog_coverage() {
     };
     assert_eq!(ckv.get("completed"), Some(&PyRep::Bool(true)));
 
-    // Undock via RPC and test Abyssal Filament consumption (`abyssalMgr.ActivateFilament`)
+    // Undock via RPC and test Abyssal Filament consumption (`abyssalMgr.AbyssalEntranceDeployment`)
     ctx.dispatch_rpc(
         &mut session,
         "stationSvc",
@@ -548,7 +548,7 @@ async fn test_e2e_journeys_13_to_18_and_catalog_coverage() {
         &mut session,
         "abyssalMgr",
         None,
-        "ActivateFilament", // rpc-lint: allow legacy/negative-test RPC (abyssalMgr.ActivateFilament)
+        "AbyssalEntranceDeployment",
         &[],
         &empty,
         None,

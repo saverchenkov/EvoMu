@@ -168,4 +168,5 @@ mod rpc_corprec_fleet_proxy;
 mod rpc_missions_industry_campaigns;
 mod notify_fleet_corp_standings;
 mod notify_autopilot_session;
-
+mod rpc_abyssal_content;
+mod rpc_nodegraph_experts;

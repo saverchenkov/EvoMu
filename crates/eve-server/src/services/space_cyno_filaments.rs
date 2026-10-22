@@ -13,8 +13,6 @@ use std::collections::HashMap;
 use super::{execute_cosmic_wormhole_jump, AU_IN_METERS};
 
 const BEYONCE_SVC: &str = "beyonce";
-const ABYSSAL_SVC: &str = "abyssalMgr";
-const VOID_SVC: &str = "voidSpaceMgr";
 const BEACON_SVC: &str = "structureCynoBeaconMgr";
 const DRONE_SVC: &str = "droneMgr";
 const MINING_SVC: &str = "miningMgr";
@@ -33,16 +31,10 @@ pub(crate) async fn handle(
         // parity: rpc:wormholeMgr.WormholeJump
         ("wormholeMgr", "WormholeJump") => Some(handle_wormhole_jump(ctx, session, args).await),
 
-        // parity: feat:navigation.filament-abyssal, feat:navigation.filament-void
-        // parity: rpc:abyssalMgr.AbyssalEntranceDeployment, rpc:abyssalMgr.AbyssalEntranceGateActivation, rpc:voidSpaceMgr.VoidSpacePlayerJump
-        ("abyssalMgr", "AbyssalEntranceDeployment")
-        | ("abyssalMgr", "AbyssalEntranceGateActivation")
-        | ("voidSpaceMgr", "VoidSpacePlayerJump") => {
+        ("abyssalMgr", "AbyssalEntranceDeployment") => {
             Some(handle_filament_deployment(ctx, session).await)
         }
 
-        // parity: feat:navigation.filament-needlejack
-        // parity: rpc:randomJumpMgr.ActivateRandomJumpFilament
         ("randomJumpMgr", "ActivateRandomJumpFilament") => {
             Some(handle_random_jump_filament(ctx, session).await)
         }
@@ -78,9 +70,6 @@ pub(crate) async fn handle(
         }
 
         _ => {
-            if (service == ABYSSAL_SVC || service == VOID_SVC) && method.ends_with("Filament") {
-                return Some(handle_filament_deployment(ctx, session).await);
-            }
             if service == BEACON_SVC && method.ends_with("BeaconFleet") {
                 return Some(handle_get_beacon_structures(ctx, session));
             }
@@ -292,6 +281,7 @@ async fn handle_filament_deployment(
     ctx: &ServerContext,
     session: &mut SessionState,
 ) -> Result<PyRep, BridgeRpcError> {
+    const GROUP_ABYSSAL_FILAMENTS: u32 = 1979;
     let (_, char_id) = ServerContext::require_character(session)?;
     if session.station_id.is_some() || session.structure_id.is_some() {
         return Err(BridgeRpcError {
@@ -299,6 +289,7 @@ async fn handle_filament_deployment(
             message: "Cannot activate filament while docked".into(),
         });
     }
+
     let Some(old_sys) = session.solar_system_id else {
         return Err(BridgeRpcError {
             code: "NoSolarSystem".into(),
@@ -353,7 +344,11 @@ async fn handle_filament_deployment(
                 i.owner_id == char_id
                     && i.location_id == ship_id
                     && i.flag == eve_db::InventoryFlag::Cargo
-                    && (i.type_id == 47763 || i.type_id == 56133 || (i.type_id >= 47761 && i.type_id <= 47915))
+                    && ctx
+                        .sde
+                        .types
+                        .get(&i.type_id)
+                        .is_some_and(|t| t.group_id == GROUP_ABYSSAL_FILAMENTS)
                     && i.quantity >= 1
             })
             .map(|i| i.item_id);
@@ -361,7 +356,7 @@ async fn handle_filament_deployment(
             return Err(BridgeRpcError {
                 code: "FilamentNotInCargo".into(),
                 message: format!(
-                    "Activating a filament requires filament item (47763) in active ship {ship_id} Cargo"
+                    "Activating an Abyssal filament requires an Abyssal Filaments item in active ship {ship_id} Cargo"
                 ),
             });
         };
@@ -376,7 +371,17 @@ async fn handle_filament_deployment(
         Ok(())
     })?;
 
-    let dest_sys_id: SolarSystemId = 32_000_001;
+    let dest_sys_id: SolarSystemId = ctx
+        .sde
+        .solar_systems
+        .values()
+        .filter(|s| (12_000_000..13_000_000).contains(&s.region_id))
+        .map(|s| s.solar_system_id)
+        .min()
+        .ok_or_else(|| BridgeRpcError {
+            code: "NoAbyssalSystemInSde".into(),
+            message: "No Abyssal Deadspace solar system found in SDE".into(),
+        })?;
     let updated_ch = ctx
         .db
         .set_character_solar_system(char_id, dest_sys_id, &ctx.sde)
@@ -471,6 +476,7 @@ async fn handle_random_jump_filament(
         }
     }
 
+    const GROUP_JUMP_FILAMENTS: u32 = 4041;
     ctx.db.try_with_mut_snapshot(|snap| {
         let fil_id = snap
             .items
@@ -479,7 +485,11 @@ async fn handle_random_jump_filament(
                 i.owner_id == char_id
                     && i.location_id == ship_id
                     && i.flag == eve_db::InventoryFlag::Cargo
-                    && (i.type_id == 54930 || i.type_id == 54931 || i.type_id == 47763)
+                    && ctx
+                        .sde
+                        .types
+                        .get(&i.type_id)
+                        .is_some_and(|t| t.group_id == GROUP_JUMP_FILAMENTS)
                     && i.quantity >= 1
             })
             .map(|i| i.item_id);

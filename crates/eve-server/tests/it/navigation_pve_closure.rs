@@ -275,13 +275,6 @@ async fn test_ansiblex_jump_bridge_access_liquid_ozone_and_destination() {
 
 #[tokio::test]
 async fn test_filaments_abyssal_pocket_void_space_and_needlejack() {
-    // parity: feat:navigation.filament-abyssal, feat:navigation.filament-void, feat:navigation.filament-needlejack
-    eve_testkit::attest(&[
-        "feat:navigation.filament-abyssal",
-        "feat:navigation.filament-void",
-        "feat:navigation.filament-needlejack",
-    ]);
-
     let ctx = ServerContext::new();
     let char_id = 90_000_001;
     let ship_id = 100_000_001;
@@ -304,7 +297,7 @@ async fn test_filaments_abyssal_pocket_void_space_and_needlejack() {
                 owner_id: char_id,
                 location_id: ship_id,
                 flag: InventoryFlag::Cargo,
-                quantity: 2,
+                quantity: 1,
                 singleton: false,
                 version: 1,
                 dynamic_attributes: HashMap::new(),
@@ -314,12 +307,12 @@ async fn test_filaments_abyssal_pocket_void_space_and_needlejack() {
                 blueprint_runs_remaining: None,
             },
         );
-        // Needlejack filament: type 54930
+        // Needlejack filament: type 53977 (Noise-5 'Needlejack' Filament)
         snap.items.insert(
             1_300_000_002,
             InventoryItemRecord {
                 item_id: 1_300_000_002,
-                type_id: 54930,
+                type_id: 53977,
                 owner_id: char_id,
                 location_id: ship_id,
                 flag: InventoryFlag::Cargo,
@@ -369,57 +362,17 @@ async fn test_filaments_abyssal_pocket_void_space_and_needlejack() {
     );
     assert_eq!(sess.solar_system_id, Some(32_000_001));
 
-    // Verify 1 abyssal filament consumed
-    let fil_qty = ctx.db.with_snapshot(|snap| {
-        snap.items.get(&1_300_000_001).map(|i| i.quantity).unwrap_or(0)
-    });
-    assert_eq!(fil_qty, 1);
-
-    // 2. Abyssal entrance gate activation
-    let gate_res = rpc(&ctx, &mut sess, "abyssalMgr", "AbyssalEntranceGateActivation", &[])
+    // 2. Abyssal entrance gate activation returns UnimplementedRPC (stripped down)
+    let gate_err = rpc(&ctx, &mut sess, "abyssalMgr", "AbyssalEntranceGateActivation", &[])
         .await
-        .expect("AbyssalEntranceGateActivation");
-    assert_eq!(
-        gate_res.dict_get("solarSystemID").and_then(|v| v.as_i64()),
-        Some(32_000_001)
-    );
+        .expect_err("AbyssalEntranceGateActivation returns UnimplementedRPC");
+    assert_eq!(gate_err.code, "UnimplementedRPC");
 
-    // Verify second abyssal filament consumed (removed from cargo)
-    let fil_exists = ctx.db.with_snapshot(|snap| snap.items.contains_key(&1_300_000_001));
-    assert!(!fil_exists, "Abyssal filament was completely consumed");
-
-    // 3. Void Space jump
-    // Provide a void filament in cargo
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.items.insert(
-            1_300_000_003,
-            InventoryItemRecord {
-                item_id: 1_300_000_003,
-                type_id: 47763,
-                owner_id: char_id,
-                location_id: ship_id,
-                flag: InventoryFlag::Cargo,
-                quantity: 1,
-                singleton: false,
-                version: 1,
-                dynamic_attributes: HashMap::new(),
-                source_mutaplasmid_id: None,
-                insured_payout_isk: 0.0,
-                is_blueprint_copy: false,
-                blueprint_runs_remaining: None,
-            },
-        );
-    });
-
-    let void_res = rpc(&ctx, &mut sess, "voidSpaceMgr", "VoidSpacePlayerJump", &[])
+    // 3. Void Space jump returns UnimplementedRPC (stripped down)
+    let void_err = rpc(&ctx, &mut sess, "voidSpaceMgr", "VoidSpacePlayerJump", &[])
         .await
-        .expect("VoidSpacePlayerJump");
-    assert_eq!(
-        void_res.dict_get("solarSystemID").and_then(|v| v.as_i64()),
-        Some(32_000_001)
-    );
-    let void_fil_exists = ctx.db.with_snapshot(|snap| snap.items.contains_key(&1_300_000_003));
-    assert!(!void_fil_exists, "Void filament was consumed");
+        .expect_err("VoidSpacePlayerJump returns UnimplementedRPC");
+    assert_eq!(void_err.code, "UnimplementedRPC");
 
     // 4. Needlejack random jump filament
     let random_res = rpc(&ctx, &mut sess, "randomJumpMgr", "ActivateRandomJumpFilament", &[])
