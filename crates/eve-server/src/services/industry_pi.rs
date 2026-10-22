@@ -15,6 +15,10 @@ pub use industry_facilities_bps::*;
 pub mod industry_jobs;
 pub use industry_jobs::*;
 
+#[path = "pi_helpers.rs"]
+pub mod pi_helpers;
+pub use pi_helpers::*;
+
 #[path = "pi_colonies.rs"]
 pub mod pi_colonies;
 pub use pi_colonies::*;

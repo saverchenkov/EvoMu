@@ -10,288 +10,14 @@
 
 use crate::formulas::compute_pi_link_cost;
 use crate::router::ServerContext;
-use crate::services::industry_pi::{
-    ATTR_PLANET_RESTRICTION, extractor_overlap_factor, list_sde_planet_p0_resources,
-    pi_schematic_recipe, resolve_sde_planet_p0_extraction,
-};
+use crate::services::industry_pi::{ATTR_PLANET_RESTRICTION, resolve_sde_planet_p0_extraction};
 use eve_db::{InventoryFlag, InventoryItemRecord, IskCents, PlanetaryColonyRecord};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::TypeId;
 use std::collections::HashMap;
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
-pub struct PiPinState {
-    pub pin_id: i64,
-    pub type_id: TypeId,
-    pub latitude: f64,
-    pub longitude: f64,
-    pub schematic_id: Option<u32>,
-    pub cpu_usage: f64,
-    pub pg_usage: f64,
-    #[serde(default)]
-    pub extractor_resource_type_id: Option<TypeId>,
-    #[serde(default)]
-    pub extractor_cycle_seconds: u64,
-    #[serde(default)]
-    pub extractor_head_count: u8,
-    #[serde(default)]
-    pub extractor_heads: Vec<(i64, f64, f64)>,
-    #[serde(default)]
-    pub extractor_head_radius: f64,
-    #[serde(default)]
-    pub program_install_unix: u64,
-    #[serde(default)]
-    pub last_expedited_transfer_unix: u64,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
-pub struct PiLinkState {
-    pub source_pin_id: i64,
-    pub dest_pin_id: i64,
-    pub level: u8,
-    pub length_km: f64,
-    pub cpu_usage: f64,
-    pub pg_usage: f64,
-    pub bandwidth: f64,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
-pub struct PiRouteState {
-    pub route_id: i64,
-    pub path: Vec<i64>,
-    pub commodity_type_id: TypeId,
-    pub quantity: u32,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
-pub struct PiColonyNetworkState {
-    pub pins: Vec<PiPinState>,
-    pub links: Vec<PiLinkState>,
-    pub routes: Vec<PiRouteState>,
-    pub cpu_used: f64,
-    pub cpu_max: f64,
-    pub pg_used: f64,
-    pub pg_max: f64,
-    #[serde(default)]
-    pub last_simulated_unix: u64,
-}
-
-pub fn cc_level_info(level: u8) -> (f64, f64, f64) {
-    match level {
-        0 => (1_675.0, 6_000.0, 0.0),
-        1 => (7_057.0, 9_000.0, 580_000.0),
-        2 => (12_136.0, 12_000.0, 1_510_000.0),
-        3 => (17_215.0, 15_000.0, 2_710_000.0),
-        4 => (21_315.0, 17_000.0, 4_210_000.0),
-        _ => (25_415.0, 19_000.0, 6_310_000.0),
-    }
-}
-
-pub fn cc_level_cpu_pg(level: u8) -> (f64, f64) {
-    let (cpu, pg, _) = cc_level_info(level);
-    (cpu, pg)
-}
-
-pub fn cc_upgrade_cost_isk(current_level: u8, desired_level: u8) -> f64 {
-    if desired_level <= current_level {
-        return 0.0;
-    }
-    let (_, _, cur_cum) = cc_level_info(current_level);
-    let (_, _, des_cum) = cc_level_info(desired_level);
-    (des_cum - cur_cum).max(0.0)
-}
-
-pub fn is_command_center_type(ctx: &ServerContext, type_id: TypeId) -> bool {
-    ctx.sde.types.get(&type_id).map(|t| t.group_id == 1027).unwrap_or(false)
-}
-
-pub fn extract_pi_pin_id(rep: Option<&PyRep>) -> i64 {
-    match rep {
-        Some(PyRep::Integer(id)) => *id,
-        Some(PyRep::Tuple(els) | PyRep::List(els)) => els
-            .last()
-            .and_then(|v| v.as_i64())
-            .or_else(|| els.first().and_then(|v| v.as_i64()))
-            .unwrap_or(0),
-        _ => 0,
-    }
-}
-
-pub fn resolve_pi_pin_stats(ctx: &ServerContext, type_id: TypeId) -> (f64, f64, f64) {
-    if is_command_center_type(ctx, type_id) {
-        return (0.0, 0.0, 0.0);
-    }
-    if let Some(inv_type) = ctx.sde.types.get(&type_id) {
-        let cpu = inv_type
-            .default_attributes
-            .get(&49)
-            .copied()
-            .or_else(|| inv_type.default_attributes.get(&50).copied())
-            .filter(|&v| v > 0.0);
-        let pg = inv_type
-            .default_attributes
-            .get(&15)
-            .copied()
-            .or_else(|| inv_type.default_attributes.get(&11).copied())
-            .filter(|&v| v > 0.0);
-        let base_isk = if inv_type.base_price > 0.0 { inv_type.base_price } else { 45_000.0 };
-        let (fallback_cpu, fallback_pg) = match inv_type.group_id {
-            1026 => (400.0, 2_600.0),
-            1028 => (200.0, 800.0),
-            1029 => (500.0, 700.0),
-            1030 => (3_600.0, 700.0),
-            _ => (200.0, 800.0),
-        };
-        (cpu.unwrap_or(fallback_cpu), pg.unwrap_or(fallback_pg), base_isk)
-    } else {
-        (200.0, 800.0, 45_000.0)
-    }
-}
-
-pub fn pi_network_note_id(char_id: i64, planet_id: i64) -> i64 {
-    let mixed = ((char_id.unsigned_abs() & 0xFFFF_FFFF) << 24)
-        ^ (planet_id.unsigned_abs() & 0xFFFF_FFFF);
-    -((mixed as i64).max(1) + 3_000_000_000_000)
-}
-
-pub fn load_pi_network(
-    snap: &eve_db::WorldStateSnapshot,
-    char_id: i64,
-    planet_id: i64,
-    cc_level: u8,
-) -> PiColonyNetworkState {
-    let nid = pi_network_note_id(char_id, planet_id);
-    if let Some(note) = snap.owner_notes.get(&nid) {
-        if let Ok(mut net) = serde_json::from_str::<PiColonyNetworkState>(&note.note) {
-            let (c_max, p_max) = cc_level_cpu_pg(cc_level);
-            if net.cpu_max < c_max {
-                net.cpu_max = c_max;
-            }
-            if net.pg_max < p_max {
-                net.pg_max = p_max;
-            }
-            return net;
-        }
-    }
-    let (cpu_max, pg_max) = cc_level_cpu_pg(cc_level);
-    PiColonyNetworkState {
-        cpu_max,
-        pg_max,
-        ..Default::default()
-    }
-}
-
-pub fn save_pi_network(
-    snap: &mut eve_db::WorldStateSnapshot,
-    char_id: i64,
-    planet_id: i64,
-    net: &PiColonyNetworkState,
-) {
-    let nid = pi_network_note_id(char_id, planet_id);
-    if let Ok(js) = serde_json::to_string(net) {
-        snap.owner_notes.insert(
-            nid,
-            eve_db::OwnerNoteRecord {
-                note_id: nid,
-                character_id: -1,
-                item_id: planet_id,
-                label: format!("pi_net:{char_id}:{planet_id}"),
-                note: js,
-                timestamp_unix: 0,
-            },
-        );
-    }
-}
-
-pub fn format_pi_pins_links(net: &PiColonyNetworkState) -> (Vec<PyRep>, Vec<PyRep>, Vec<PyRep>) {
-    let pins_rep = net.pins.iter().map(|p| PyRep::keyval([
-        ("pinID", PyRep::Integer(p.pin_id)), ("typeID", PyRep::Integer(p.type_id as i64)),
-        ("latitude", PyRep::Real(p.latitude)), ("longitude", PyRep::Real(p.longitude)),
-        ("cpuUsage", PyRep::Real(p.cpu_usage)), ("powergridUsage", PyRep::Real(p.pg_usage)),
-        ("schematicID", PyRep::Integer(p.schematic_id.unwrap_or(0) as i64)), ("headCount", PyRep::Integer(p.extractor_head_count as i64)),
-    ])).collect();
-    let links_rep = net.links.iter().map(|l| PyRep::keyval([
-        ("endpoint1", PyRep::Integer(l.source_pin_id)), ("endpoint2", PyRep::Integer(l.dest_pin_id)),
-        ("sourcePinID", PyRep::Integer(l.source_pin_id)), ("destPinID", PyRep::Integer(l.dest_pin_id)),
-        ("level", PyRep::Integer(l.level as i64)), ("lengthKm", PyRep::Real(l.length_km)),
-        ("cpuUsage", PyRep::Real(l.cpu_usage)), ("powergridUsage", PyRep::Real(l.pg_usage)), ("bandwidth", PyRep::Real(l.bandwidth)),
-    ])).collect();
-    let routes_rep = net.routes.iter().map(|r| PyRep::keyval([
-        ("routeID", PyRep::Integer(r.route_id)), ("commodityTypeID", PyRep::Integer(r.commodity_type_id as i64)),
-        ("quantity", PyRep::Integer(r.quantity as i64)), ("path", PyRep::List(r.path.iter().map(|&id| PyRep::Integer(id)).collect())),
-    ])).collect();
-    (pins_rep, links_rep, routes_rep)
-}
-
-pub fn advance_colony_simulation(
-    ctx: &ServerContext,
-    col: &mut PlanetaryColonyRecord,
-    net: &mut PiColonyNetworkState,
-    elapsed_sec: u64,
-    now_unix: u64,
-) -> (u64, u64) {
-    if elapsed_sec == 0 {
-        return (0, 0);
-    }
-    let default_p0 = list_sde_planet_p0_resources(ctx, col.solar_system_id, col.planet_id)
-        .first()
-        .copied()
-        .unwrap_or(2268);
-    let mut extracted_total = 0_u64;
-    let mut processed_total = 0_u64;
-
-    for pin in &net.pins {
-        let is_ext = pin.type_id == 2848
-            || ctx.sde.types.get(&pin.type_id).map(|t| t.group_id == 1026).unwrap_or(false);
-        if is_ext && pin.extractor_cycle_seconds > 0 && pin.extractor_head_count > 0 {
-            let cyc_secs = pin.extractor_cycle_seconds.max(60);
-            let cycles = (elapsed_sec / cyc_secs).min(200);
-            let p0_tid = pin.extractor_resource_type_id.unwrap_or(default_p0);
-            let heads = u64::from(pin.extractor_head_count.clamp(1, 10));
-            let overlap = extractor_overlap_factor(&pin.extractor_heads, pin.extractor_head_radius.max(0.02));
-            for c in 0..cycles {
-                let decay = (-0.015 * (c as f64)).exp();
-                let batch = ((1_000.0 * (heads as f64) * overlap * decay).round() as u64).max(10);
-                *col.extracted_commodities.entry(p0_tid).or_insert(0) += batch;
-                extracted_total += batch;
-            }
-        }
-    }
-
-    for pin in &net.pins {
-        let Some(schem_id) = pin.schematic_id else { continue };
-        let (cyc_secs, inputs, out_tid, out_qty) = pi_schematic_recipe(schem_id, default_p0);
-        let all_inputs_routed = inputs.iter().all(|&(in_tid, _)| {
-            net.routes.iter().any(|r| {
-                r.path.last() == Some(&pin.pin_id) && r.commodity_type_id == in_tid && r.path.len() >= 2
-            })
-        });
-        let output_routed = net.routes.iter().any(|r| {
-            r.path.first() == Some(&pin.pin_id) && r.commodity_type_id == out_tid && r.path.len() >= 2
-        });
-        if !all_inputs_routed || !output_routed {
-            continue;
-        }
-        let max_cycles = (elapsed_sec / cyc_secs).min(100);
-        for _ in 0..max_cycles {
-            if !inputs.iter().all(|&(in_tid, in_qty)| {
-                col.extracted_commodities.get(&in_tid).copied().unwrap_or(0) >= in_qty
-            }) {
-                break;
-            }
-            for &(in_tid, in_qty) in &inputs {
-                *col.extracted_commodities.entry(in_tid).or_insert(0) -= in_qty;
-            }
-            *col.extracted_commodities.entry(out_tid).or_insert(0) += out_qty;
-            processed_total += out_qty;
-        }
-    }
-
-    net.last_simulated_unix = now_unix;
-    col.last_extracted_unix = now_unix;
-    (extracted_total, processed_total)
-}
+pub use crate::services::industry_pi::pi_helpers::*;
 
 pub fn handle_pi_colonies(
     ctx: &ServerContext,
@@ -302,10 +28,7 @@ pub fn handle_pi_colonies(
     _kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
-        ("planetMgr", "GetColony")
-        | ("planetMgr", "GetFullNetworkForOwner")
-        | ("planetMgr", "GetCommandPinsForPlanet")
-        | ("planetMgr", "GetExtractorsForPlanet") => {
+        ("planetMgr", "GetColony") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -313,13 +36,12 @@ pub fn handle_pi_colonies(
             let Some(planet_id) = args.first().and_then(|a| a.as_i64()) else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidPlanetID".into(),
-                    message: format!("{method} requires an explicit integer planetID"),
+                    message: "GetColony requires an explicit integer planetID".into(),
                 }));
             };
             let now_unix = ctx.now_unix();
             let res = ctx.db.try_with_mut_snapshot(|snap| {
-                let Some(mut col) = snap.planetary_colonies.get(&(char_id, planet_id)).cloned()
-                else {
+                let Some(mut col) = snap.planetary_colonies.get(&(char_id, planet_id)).cloned() else {
                     return Err(BridgeRpcError {
                         code: "ColonyNotFound".into(),
                         message: format!("No planetary colony found on planet {planet_id}"),
@@ -332,36 +54,13 @@ pub fn handle_pi_colonies(
                     0
                 };
                 let (sim_extracted, sim_processed) = if elapsed > 0 {
-                    let res = advance_colony_simulation(ctx, &mut col, &mut net, elapsed, now_unix);
+                    let r = advance_colony_simulation(ctx, &mut col, &mut net, elapsed, now_unix);
                     snap.planetary_colonies.insert((char_id, planet_id), col.clone());
                     save_pi_network(snap, char_id, planet_id, &net);
-                    res
+                    r
                 } else {
                     (0, 0)
                 };
-                if method == "GetExtractorsForPlanet" {
-                    let ext_rep: Vec<PyRep> = net
-                        .pins
-                        .iter()
-                        .filter(|p| {
-                            p.type_id == 2848
-                                || ctx.sde.types.get(&p.type_id).map(|t| t.group_id == 1026).unwrap_or(false)
-                        })
-                        .map(|p| {
-                            PyRep::keyval([
-                                ("pinID", PyRep::Integer(p.pin_id)),
-                                ("typeID", PyRep::Integer(p.type_id as i64)),
-                                ("latitude", PyRep::Real(p.latitude)),
-                                ("longitude", PyRep::Real(p.longitude)),
-                                ("cpuUsage", PyRep::Real(p.cpu_usage)),
-                                ("powergridUsage", PyRep::Real(p.pg_usage)),
-                                ("headCount", PyRep::Integer(p.extractor_head_count as i64)),
-                                ("cycleTimeSeconds", PyRep::Integer(p.extractor_cycle_seconds as i64)),
-                            ])
-                        })
-                        .collect();
-                    return Ok(PyRep::List(ext_rep));
-                }
                 let (pins_rep, links_rep, routes_rep) = format_pi_pins_links(&net);
                 let stored_entries: Vec<(PyRep, PyRep)> = col
                     .extracted_commodities
@@ -369,22 +68,143 @@ pub fn handle_pi_colonies(
                     .map(|(&tid, &q)| (PyRep::Integer(tid as i64), PyRep::Integer(q as i64)))
                     .collect();
                 Ok(PyRep::keyval([
-                    ("planetID", PyRep::Integer(planet_id)),
-                    ("ownerID", PyRep::Integer(char_id)),
+                    ("planetID", PyRep::Integer(planet_id)), ("ownerID", PyRep::Integer(char_id)),
                     ("solarSystemID", PyRep::Integer(col.solar_system_id as i64)),
                     ("commandCenterLevel", PyRep::Integer(col.command_center_level as i64)),
                     ("pinsCount", PyRep::Integer(col.pins_count as i64)),
-                    ("cpuUsed", PyRep::Real(net.cpu_used)),
-                    ("cpuMax", PyRep::Real(net.cpu_max)),
-                    ("powergridUsed", PyRep::Real(net.pg_used)),
-                    ("powergridMax", PyRep::Real(net.pg_max)),
+                    ("cpuUsed", PyRep::Real(net.cpu_used)), ("cpuMax", PyRep::Real(net.cpu_max)),
+                    ("powergridUsed", PyRep::Real(net.pg_used)), ("powergridMax", PyRep::Real(net.pg_max)),
                     ("simulatedExtractedQuantity", PyRep::Integer(sim_extracted as i64)),
                     ("simulatedProcessedQuantity", PyRep::Integer(sim_processed as i64)),
                     ("storedCommodities", PyRep::Dict(stored_entries)),
-                    ("pins", PyRep::List(pins_rep)),
-                    ("links", PyRep::List(links_rep)),
-                    ("routes", PyRep::List(routes_rep)),
+                    ("pins", PyRep::List(pins_rep)), ("links", PyRep::List(links_rep)), ("routes", PyRep::List(routes_rep)),
                 ]))
+            });
+            Some(res)
+        }
+
+        ("planetMgr", "GetFullNetworkForOwner") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let planet_id_opt = args.first().and_then(|a| a.as_i64());
+            let res = ctx.db.with_snapshot(|snap| {
+                let mut all_pins = Vec::new();
+                let mut all_links = Vec::new();
+                let mut all_routes = Vec::new();
+                let mut rep_pid = 0i64;
+                let mut rep_cc_lvl = 0u8;
+                for (&(cid, pid), col) in &snap.planetary_colonies {
+                    if cid != char_id {
+                        continue;
+                    }
+                    if let Some(target) = planet_id_opt {
+                        if pid != target {
+                            continue;
+                        }
+                    }
+                    rep_pid = pid;
+                    rep_cc_lvl = rep_cc_lvl.max(col.command_center_level);
+                    let net = load_pi_network(snap, char_id, pid, col.command_center_level);
+                    let (p_rep, l_rep, r_rep) = format_pi_pins_links(&net);
+                    all_pins.extend(p_rep);
+                    all_links.extend(l_rep);
+                    all_routes.extend(r_rep);
+                }
+                if let Some(target) = planet_id_opt {
+                    rep_pid = target;
+                }
+                Ok(PyRep::keyval([
+                    ("planetID", PyRep::Integer(rep_pid)),
+                    ("ownerID", PyRep::Integer(char_id)),
+                    ("commandCenterLevel", PyRep::Integer(rep_cc_lvl as i64)),
+                    ("pins", PyRep::List(all_pins)),
+                    ("links", PyRep::List(all_links)),
+                    ("routes", PyRep::List(all_routes)),
+                ]))
+            });
+            Some(res)
+        }
+
+        ("planetMgr", "GetCommandPinsForPlanet") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let Some(planet_id) = args.first().and_then(|a| a.as_i64()) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidPlanetID".into(),
+                    message: "GetCommandPinsForPlanet requires an explicit integer planetID".into(),
+                }));
+            };
+            let res = ctx.db.with_snapshot(|snap| {
+                let Some(col) = snap.planetary_colonies.get(&(char_id, planet_id)) else {
+                    return Ok(PyRep::List(Vec::new()));
+                };
+                let net = load_pi_network(snap, char_id, planet_id, col.command_center_level);
+                let cmd_pins: Vec<PyRep> = net
+                    .pins
+                    .iter()
+                    .filter(|p| {
+                        is_command_center_type(ctx, p.type_id)
+                            || ctx.sde.types.get(&p.type_id).map(|t| t.group_id == 1027 || t.group_id == 1026).unwrap_or(false)
+                    })
+                    .map(|p| {
+                        PyRep::keyval([
+                            ("pinID", PyRep::Integer(p.pin_id)),
+                            ("typeID", PyRep::Integer(p.type_id as i64)),
+                            ("latitude", PyRep::Real(p.latitude)),
+                            ("longitude", PyRep::Real(p.longitude)),
+                            ("cpuUsage", PyRep::Real(p.cpu_usage)),
+                            ("powergridUsage", PyRep::Real(p.pg_usage)),
+                            ("level", PyRep::Integer(col.command_center_level as i64)),
+                        ])
+                    })
+                    .collect();
+                Ok(PyRep::List(cmd_pins))
+            });
+            Some(res)
+        }
+
+        ("planetMgr", "GetExtractorsForPlanet") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let Some(planet_id) = args.first().and_then(|a| a.as_i64()) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidPlanetID".into(),
+                    message: "GetExtractorsForPlanet requires an explicit integer planetID".into(),
+                }));
+            };
+            let res = ctx.db.with_snapshot(|snap| {
+                let Some(col) = snap.planetary_colonies.get(&(char_id, planet_id)) else {
+                    return Ok(PyRep::List(Vec::new()));
+                };
+                let net = load_pi_network(snap, char_id, planet_id, col.command_center_level);
+                let ext_pins: Vec<PyRep> = net
+                    .pins
+                    .iter()
+                    .filter(|p| {
+                        p.type_id == 2848
+                            || p.extractor_head_count > 0
+                            || ctx.sde.types.get(&p.type_id).map(|t| t.group_id == 1026 || t.group_id == 1063).unwrap_or(false)
+                    })
+                    .map(|p| {
+                        PyRep::keyval([
+                            ("pinID", PyRep::Integer(p.pin_id)),
+                            ("typeID", PyRep::Integer(p.type_id as i64)),
+                            ("latitude", PyRep::Real(p.latitude)),
+                            ("longitude", PyRep::Real(p.longitude)),
+                            ("cpuUsage", PyRep::Real(p.cpu_usage)),
+                            ("powergridUsage", PyRep::Real(p.pg_usage)),
+                            ("headCount", PyRep::Integer(p.extractor_head_count as i64)),
+                            ("cycleTimeSeconds", PyRep::Integer(p.extractor_cycle_seconds as i64)),
+                        ])
+                    })
+                    .collect();
+                Ok(PyRep::List(ext_pins))
             });
             Some(res)
         }
@@ -589,31 +409,10 @@ pub fn handle_pi_colonies(
                             PyRep::KeyVal(kv) => {
                                 let cid = kv.get("commandID").or_else(|| kv.get("cmd")).and_then(|v| v.as_i64()).unwrap_or(0);
                                 match cid {
-                                    1 => vec![
-                                        PyRep::Integer(1),
-                                        kv.get("pinID").cloned().unwrap_or(PyRep::Integer(0)),
-                                        kv.get("typeID").cloned().unwrap_or(PyRep::Integer(0)),
-                                        kv.get("latitude").cloned().unwrap_or(PyRep::Real(0.0)),
-                                        kv.get("longitude").cloned().unwrap_or(PyRep::Real(0.0)),
-                                    ],
-                                    3 | 5 => vec![
-                                        PyRep::Integer(cid),
-                                        kv.get("endpoint1").or_else(|| kv.get("sourcePinID")).cloned().unwrap_or(PyRep::Integer(0)),
-                                        kv.get("endpoint2").or_else(|| kv.get("destPinID")).cloned().unwrap_or(PyRep::Integer(0)),
-                                        kv.get("level").cloned().unwrap_or(PyRep::Integer(0)),
-                                    ],
-                                    9 => vec![
-                                        PyRep::Integer(9),
-                                        kv.get("pinID").cloned().unwrap_or(PyRep::Integer(1)),
-                                        kv.get("level").or_else(|| kv.get("targetLevel")).cloned().unwrap_or(PyRep::Integer(1)),
-                                    ],
-                                    10 => vec![
-                                        PyRep::Integer(10),
-                                        kv.get("pinID").cloned().unwrap_or(PyRep::Integer(0)),
-                                        kv.get("resourceTypeID").cloned().unwrap_or(PyRep::Integer(0)),
-                                        kv.get("cycleTimeSeconds").cloned().unwrap_or(PyRep::Integer(300)),
-                                        kv.get("headCount").cloned().unwrap_or(PyRep::Integer(1)),
-                                    ],
+                                    1 => vec![PyRep::Integer(1), kv.get("pinID").cloned().unwrap_or(PyRep::Integer(0)), kv.get("typeID").cloned().unwrap_or(PyRep::Integer(0)), kv.get("latitude").cloned().unwrap_or(PyRep::Real(0.0)), kv.get("longitude").cloned().unwrap_or(PyRep::Real(0.0))],
+                                    3 | 5 => vec![PyRep::Integer(cid), kv.get("endpoint1").or_else(|| kv.get("sourcePinID")).cloned().unwrap_or(PyRep::Integer(0)), kv.get("endpoint2").or_else(|| kv.get("destPinID")).cloned().unwrap_or(PyRep::Integer(0)), kv.get("level").cloned().unwrap_or(PyRep::Integer(0))],
+                                    9 => vec![PyRep::Integer(9), kv.get("pinID").cloned().unwrap_or(PyRep::Integer(1)), kv.get("level").or_else(|| kv.get("targetLevel")).cloned().unwrap_or(PyRep::Integer(1))],
+                                    10 => vec![PyRep::Integer(10), kv.get("pinID").cloned().unwrap_or(PyRep::Integer(0)), kv.get("resourceTypeID").cloned().unwrap_or(PyRep::Integer(0)), kv.get("cycleTimeSeconds").cloned().unwrap_or(PyRep::Integer(300)), kv.get("headCount").cloned().unwrap_or(PyRep::Integer(1))],
                                     _ => vec![PyRep::Integer(cid)],
                                 }
                             }
@@ -1336,21 +1135,13 @@ pub fn handle_pi_colonies(
                 Ok((
                     net.pins.len(),
                     PyRep::keyval([
-                        ("planetID", PyRep::Integer(planet_id)),
-                        ("currentLevel", PyRep::Integer(col.command_center_level as i64)),
-                        ("commandCenterLevel", PyRep::Integer(col.command_center_level as i64)),
-                        ("pinsCount", PyRep::Integer(net.pins.len() as i64)),
-                        ("linksCount", PyRep::Integer(net.links.len() as i64)),
-                        ("cpuUsed", PyRep::Real(net.cpu_used)),
-                        ("cpuMax", PyRep::Real(net.cpu_max)),
-                        ("cpuCapacity", PyRep::Integer(net.cpu_max.round() as i64)),
-                        ("powerUsed", PyRep::Real(net.pg_used)),
-                        ("powergridUsed", PyRep::Real(net.pg_used)),
-                        ("powergridMax", PyRep::Real(net.pg_max)),
-                        ("powerCapacity", PyRep::Integer(net.pg_max.round() as i64)),
-                        ("totalCostISK", PyRep::Real(total_isk_spent)),
-                        ("pins", PyRep::List(pins_rep)),
-                        ("links", PyRep::List(links_rep)),
+                        ("planetID", PyRep::Integer(planet_id)), ("currentLevel", PyRep::Integer(col.command_center_level as i64)),
+                        ("commandCenterLevel", PyRep::Integer(col.command_center_level as i64)), ("pinsCount", PyRep::Integer(net.pins.len() as i64)),
+                        ("linksCount", PyRep::Integer(net.links.len() as i64)), ("cpuUsed", PyRep::Real(net.cpu_used)),
+                        ("cpuMax", PyRep::Real(net.cpu_max)), ("cpuCapacity", PyRep::Integer(net.cpu_max.round() as i64)),
+                        ("powerUsed", PyRep::Real(net.pg_used)), ("powergridUsed", PyRep::Real(net.pg_used)),
+                        ("powergridMax", PyRep::Real(net.pg_max)), ("powerCapacity", PyRep::Integer(net.pg_max.round() as i64)),
+                        ("totalCostISK", PyRep::Real(total_isk_spent)), ("pins", PyRep::List(pins_rep)), ("links", PyRep::List(links_rep)),
                     ]),
                 ))
             });

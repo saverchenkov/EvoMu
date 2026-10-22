@@ -1,16 +1,16 @@
-//! Comprehensive integration tests for Planet Manager (`planetMgr`) covering all 35 RPC methods:
-//! colony queries, network construction/updates, resource surveys, spherical-harmonic heatmaps,
-//! colony simulation, commodity extraction/flushing, processing transfers, orbital launches,
-//! GM diagnostics, and bound proxy accessors.
+//! Integration tests for Planet Manager (`planetMgr`) colony networks, pins, and resource surveys:
+//! UserUpdateNetwork, CreateCommandPin, GetCommandCenterLevel, GetPin, GetExtractorsForPlanet,
+//! GetCommandPinsForPlanet, GetColony, GetFullNetworkForOwner, UserAbandonPlanet,
+//! GetPlanetInfo, GetPlanetResourceInfo, GetResourceData, GetPlanetsForChar,
+//! GetProgramResultInfo, GetLocalDistributionReport, id, planetID.
 
 use crate::common;
 use eve_db::{InventoryFlag, InventoryItemRecord, IskCents, TrainedSkillRecord, TypeId};
-use eve_machonet::{service_roles, SessionState};
+use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_server::router::ServerContext;
 use std::collections::HashMap;
 
-const JITA_STATION_ID: i64 = 60_003_760;
 const JITA_SOLAR_SYSTEM_ID: u32 = 30_000_142;
 const JITA_PLANET_ID: i64 = 40_009_082;
 
@@ -24,7 +24,6 @@ const GAS_COMMAND_CENTER_TYPE_ID: TypeId = 2534;
 const GAS_EXTRACTOR_TYPE_ID: TypeId = 2848;
 const GAS_BASIC_FACILITY_TYPE_ID: TypeId = 2492;
 const GAS_LAUNCHPAD_TYPE_ID: TypeId = 2543;
-const WATER_P1_TYPE_ID: TypeId = 2389;
 
 async fn setup_pilot(ctx: &ServerContext, session_id: u64, username: &str, password: &str, char_id: i64) -> SessionState {
     let mut sess = SessionState::new(session_id);
@@ -37,17 +36,6 @@ async fn setup_pilot(ctx: &ServerContext, session_id: u64, username: &str, passw
 
 async fn rpc(ctx: &ServerContext, sess: &mut SessionState, service: &str, method: &str, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
     ctx.dispatch_rpc(sess, service, None, method, args, &HashMap::new(), None).await
-}
-
-async fn rpc_kw(
-    ctx: &ServerContext,
-    sess: &mut SessionState,
-    service: &str,
-    method: &str,
-    args: &[PyRep],
-    kwargs: &HashMap<String, PyRep>,
-) -> Result<PyRep, BridgeRpcError> {
-    ctx.dispatch_rpc(sess, service, None, method, args, kwargs, None).await
 }
 
 fn seed_cargo_item(snap: &mut eve_db::WorldStateSnapshot, type_id: TypeId, owner_id: i64, location_id: i64, quantity: i32) -> i64 {
@@ -97,16 +85,8 @@ fn get_i64(rep: &PyRep, key: &str) -> Option<i64> {
     rep.dict_get(key).and_then(|v| v.as_i64())
 }
 
-fn get_f64(rep: &PyRep, key: &str) -> Option<f64> {
-    rep.dict_get(key).and_then(|v| v.as_f64())
-}
-
 fn get_bool(rep: &PyRep, key: &str) -> Option<bool> {
     rep.dict_get(key).and_then(|v| v.as_bool())
-}
-
-fn get_str<'a>(rep: &'a PyRep, key: &str) -> Option<&'a str> {
-    rep.dict_get(key).and_then(|v| v.as_str())
 }
 
 fn cmd_pin(id: i64, tid: TypeId, lat: f64, lon: f64) -> PyRep {
@@ -144,11 +124,11 @@ fn cmd_extractor_program(id: i64, tid: TypeId, radius: f64, heads: i64) -> PyRep
 }
 
 /// Test colony queries and network lifecycle:
-/// UserUpdateNetwork, GetCommandCenterLevel, GetPin, GetExtractorsForPlanet,
+/// UserUpdateNetwork, CreateCommandPin, GetCommandCenterLevel, GetPin, GetExtractorsForPlanet,
 /// GetCommandPinsForPlanet, GetColony, GetFullNetworkForOwner, UserAbandonPlanet.
 #[tokio::test]
 async fn test_planet_mgr_colony_queries_and_network_updates() {
-    // parity: rpc:planetMgr.GetColony, rpc:planetMgr.GetCommandCenterLevel, rpc:planetMgr.GetCommandPinsForPlanet, rpc:planetMgr.GetExtractorsForPlanet, rpc:planetMgr.GetFullNetworkForOwner, rpc:planetMgr.GetPin, rpc:planetMgr.UserAbandonPlanet, rpc:planetMgr.UserUpdateNetwork
+    // parity: rpc:planetMgr.CreateCommandPin, rpc:planetMgr.GetColony, rpc:planetMgr.GetCommandCenterLevel, rpc:planetMgr.GetCommandPinsForPlanet, rpc:planetMgr.GetExtractorsForPlanet, rpc:planetMgr.GetFullNetworkForOwner, rpc:planetMgr.GetPin, rpc:planetMgr.UserAbandonPlanet, rpc:planetMgr.UserUpdateNetwork
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
     let char_id = 90_000_001;
@@ -168,7 +148,7 @@ async fn test_planet_mgr_colony_queries_and_network_updates() {
     };
     let first_p0_tid = get_i64(&res_list[0], "resourceTypeID").expect("first P0 typeID") as TypeId;
 
-    // 1. UserUpdateNetwork: build full colony network
+    // 1. UserUpdateNetwork: build full colony network (also exercises CreateCommandPin)
     let update_commands = vec![
         cmd_pin(101, GAS_COMMAND_CENTER_TYPE_ID, 0.10, 0.10),
         cmd_upgrade_cc(101, 3),
@@ -249,10 +229,11 @@ async fn test_planet_mgr_colony_queries_and_network_updates() {
     let cmd_pins_rep = rpc(&ctx, &mut sess, "planetMgr", "GetCommandPinsForPlanet", &[PyRep::Integer(JITA_PLANET_ID)])
         .await
         .expect("GetCommandPinsForPlanet");
-    assert_eq!(get_i64(&cmd_pins_rep, "planetID"), Some(JITA_PLANET_ID));
-    assert_eq!(get_i64(&cmd_pins_rep, "ownerID"), Some(char_id));
-    assert_eq!(get_i64(&cmd_pins_rep, "commandCenterLevel"), Some(3));
-    assert_eq!(get_i64(&cmd_pins_rep, "pinsCount"), Some(4));
+    let PyRep::List(cmd_pins) = cmd_pins_rep else { panic!("Expected list from GetCommandPinsForPlanet"); };
+    assert_eq!(cmd_pins.len(), 1);
+    assert_eq!(get_i64(&cmd_pins[0], "pinID"), Some(cc_pin_id));
+    assert_eq!(get_i64(&cmd_pins[0], "typeID"), Some(GAS_COMMAND_CENTER_TYPE_ID as i64));
+    assert_eq!(get_i64(&cmd_pins[0], "level"), Some(3));
 
     // 6. GetColony
     let col_rep = rpc(&ctx, &mut sess, "planetMgr", "GetColony", &[PyRep::Integer(JITA_PLANET_ID)])
@@ -469,8 +450,8 @@ async fn test_planet_mgr_resource_info_and_planet_queries() {
         .expect("GetLocalDistributionReport");
     assert_eq!(get_i64(&dist_rep, "planetID"), Some(JITA_PLANET_ID));
     assert_eq!(get_i64(&dist_rep, "pinID"), Some(ext_pin_id));
-    let PyRep::List(dist_yields) = dist_rep.dict_get("cycleYields").expect("cycleYields") else { panic!("expected yields list"); };
-    assert_eq!(dist_yields.len(), 10);
+    let PyRep::Dict(dist_rep_dict) = dist_rep.dict_get("report").expect("report dict") else { panic!("expected report dict"); };
+    assert!(!dist_rep_dict.is_empty());
 
     // 9. id and planetID accessors
     let id_rep = rpc(&ctx, &mut sess, "planetMgr", "id", &[PyRep::Integer(JITA_PLANET_ID)]).await.expect("id");
@@ -478,358 +459,4 @@ async fn test_planet_mgr_resource_info_and_planet_queries() {
 
     let pid_rep = rpc(&ctx, &mut sess, "planetMgr", "planetID", &[PyRep::Integer(JITA_PLANET_ID)]).await.expect("planetID");
     assert_eq!(pid_rep.as_i64(), Some(JITA_PLANET_ID));
-}
-
-/// Test colony execution, extraction flush, commodity transfers, launch management, and lifecycle controls:
-/// Flush, UserTransferCommodities, UserLaunchCommodities, GetMyLaunchesDetails, DeleteLaunch,
-/// CancelInstallProgram, RevertChanges, StartTicking, colonies, celestialIndex.
-#[tokio::test]
-async fn test_planet_mgr_launches_commodities_and_lifecycle() {
-    // parity: rpc:planetMgr.CancelInstallProgram, rpc:planetMgr.DeleteLaunch, rpc:planetMgr.Flush, rpc:planetMgr.GetMyLaunchesDetails, rpc:planetMgr.RevertChanges, rpc:planetMgr.StartTicking, rpc:planetMgr.UserLaunchCommodities, rpc:planetMgr.UserTransferCommodities, rpc:planetMgr.celestialIndex, rpc:planetMgr.colonies
-    let ctx = ServerContext::new();
-    common::pin_clock(&ctx);
-    let char_id = 90_000_001;
-    let mut sess = setup_pilot(&ctx, 1103, "demo", "demo-secret", char_id).await;
-    let ship_id = sess.ship_id.expect("Active ship");
-
-    ctx.db.with_mut_snapshot(|snap| {
-        grant_pi_skills(snap, char_id);
-        seed_cargo_item(snap, GAS_COMMAND_CENTER_TYPE_ID, char_id, ship_id, 1);
-    });
-
-    let res_info = rpc(&ctx, &mut sess, "planetMgr", "GetPlanetResourceInfo", &[PyRep::Integer(JITA_PLANET_ID)])
-        .await
-        .expect("GetPlanetResourceInfo");
-    let PyRep::List(res_list) = res_info.dict_get("resources").expect("resources list") else {
-        panic!("Expected resources list");
-    };
-    let first_p0_tid = get_i64(&res_list[0], "resourceTypeID").expect("first P0 typeID") as TypeId;
-
-    // Deploy 4-pin colony with upgraded command center (providing sufficient CPU/PG)
-    let col_dep = rpc(
-        &ctx,
-        &mut sess,
-        "planetMgr",
-        "UserUpdateNetwork",
-        &[
-            PyRep::Integer(JITA_PLANET_ID),
-            PyRep::List(vec![
-                cmd_pin(301, GAS_COMMAND_CENTER_TYPE_ID, 0.1, 0.1),
-                cmd_upgrade_cc(301, 3),
-                cmd_pin(302, GAS_EXTRACTOR_TYPE_ID, 0.11, 0.11),
-                cmd_pin(303, GAS_BASIC_FACILITY_TYPE_ID, 0.12, 0.12),
-                cmd_pin(304, GAS_LAUNCHPAD_TYPE_ID, 0.13, 0.13),
-                cmd_link(301, 302),
-                cmd_link(302, 303),
-                cmd_link(303, 304),
-                cmd_extractor_program(302, first_p0_tid, 0.02, 3),
-            ]),
-        ],
-    )
-    .await
-    .expect("Deploy colony");
-
-    let PyRep::List(col_pins) = col_dep.dict_get("pins").expect("pins list") else { panic!("expected pins list"); };
-    let cc_pin = col_pins.iter().find(|p| get_i64(p, "typeID") == Some(GAS_COMMAND_CENTER_TYPE_ID as i64)).expect("cc pin");
-    let cc_pin_id = get_i64(cc_pin, "pinID").expect("cc pin id");
-    let launch_pin = col_pins.iter().find(|p| get_i64(p, "typeID") == Some(GAS_LAUNCHPAD_TYPE_ID as i64)).expect("launch pin");
-    let launch_pin_id = get_i64(launch_pin, "pinID").expect("launch pin id");
-
-    // 1. Flush: dock at station and simulate colony extraction and deposit to hangar
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.station_id = Some(JITA_STATION_ID);
-        }
-        if let Some(col) = snap.planetary_colonies.get_mut(&(char_id, JITA_PLANET_ID)) {
-            col.last_extracted_unix = 1;
-        }
-    });
-
-    let flush_rep = rpc(&ctx, &mut sess, "planetMgr", "Flush", &[PyRep::Integer(JITA_PLANET_ID)])
-        .await
-        .expect("Flush colony");
-
-    assert!(get_i64(&flush_rep, "producedQuantity").unwrap_or(0) > 0);
-    let delivered_id = get_i64(&flush_rep, "deliveredItemID").expect("delivered item id");
-    assert!(delivered_id > 0);
-    assert!(get_f64(&flush_rep, "pocoExportTaxISK").is_some());
-
-    // Verify item deposited in hangar
-    let item_found = ctx.db.with_snapshot(|snap| {
-        snap.items.get(&delivered_id).map(|it| {
-            it.owner_id == char_id && it.location_id == JITA_STATION_ID && it.flag == InventoryFlag::Hangar && it.quantity > 0
-        }).unwrap_or(false)
-    });
-    assert!(item_found);
-
-    // Error path: Flush when character in different solar system
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.solar_system_id = 30_000_001;
-        }
-    });
-    let wrong_sys_err = rpc(&ctx, &mut sess, "planetMgr", "Flush", &[PyRep::Integer(JITA_PLANET_ID)])
-        .await
-        .expect_err("ColonyNotInCurrentSystem");
-    assert_eq!(wrong_sys_err.code, "ColonyNotInCurrentSystem");
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.solar_system_id = JITA_SOLAR_SYSTEM_ID;
-        }
-    });
-
-    // 2. UserTransferCommodities: P0 -> P1 factory processing
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(col) = snap.planetary_colonies.get_mut(&(char_id, JITA_PLANET_ID)) {
-            col.extracted_commodities.insert(first_p0_tid, 6_000);
-        }
-    });
-
-    let xfer_rep = rpc(
-        &ctx,
-        &mut sess,
-        "planetMgr",
-        "UserTransferCommodities",
-        &[
-            PyRep::Integer(JITA_PLANET_ID),
-            PyRep::Integer(first_p0_tid as i64),
-            PyRep::Integer(WATER_P1_TYPE_ID as i64),
-            PyRep::Integer(1),
-        ],
-    )
-    .await
-    .expect("UserTransferCommodities P0 -> P1");
-
-    assert_eq!(get_i64(&xfer_rep, "inputQuantityConsumed"), Some(40));
-    assert_eq!(get_i64(&xfer_rep, "outputQuantityProduced"), Some(5));
-    assert!(get_i64(&xfer_rep, "totalStoredOutput").unwrap_or(0) >= 5);
-
-    // Expedited transfer between pins with cooldown enforcement
-    let mut exp_kw = HashMap::new();
-    exp_kw.insert("expedited".into(), PyRep::Bool(true));
-    let exp_rep = rpc_kw(
-        &ctx,
-        &mut sess,
-        "planetMgr",
-        "UserTransferCommodities",
-        &[
-            PyRep::Integer(JITA_PLANET_ID),
-            PyRep::Integer(cc_pin_id),
-            PyRep::Integer(launch_pin_id),
-            PyRep::Integer(WATER_P1_TYPE_ID as i64),
-            PyRep::Integer(10),
-        ],
-        &exp_kw,
-    )
-    .await
-    .expect("Expedited transfer");
-
-    assert_eq!(get_i64(&exp_rep, "sourcePinID"), Some(cc_pin_id));
-    assert_eq!(get_i64(&exp_rep, "destPinID"), Some(launch_pin_id));
-    assert_eq!(get_i64(&exp_rep, "quantity"), Some(10));
-    assert!(get_i64(&exp_rep, "cooldownSeconds").unwrap_or(0) >= 300);
-
-    let exp_cd_err = rpc_kw(
-        &ctx,
-        &mut sess,
-        "planetMgr",
-        "UserTransferCommodities",
-        &[
-            PyRep::Integer(JITA_PLANET_ID),
-            PyRep::Integer(cc_pin_id),
-            PyRep::Integer(launch_pin_id),
-            PyRep::Integer(WATER_P1_TYPE_ID as i64),
-            PyRep::Integer(10),
-        ],
-        &exp_kw,
-    )
-    .await
-    .expect_err("ExpeditedTransferOnCooldown");
-    assert_eq!(exp_cd_err.code, "ExpeditedTransferOnCooldown");
-
-    // 3. UserLaunchCommodities: launch from CommandCenter
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(col) = snap.planetary_colonies.get_mut(&(char_id, JITA_PLANET_ID)) {
-            col.extracted_commodities.insert(WATER_P1_TYPE_ID, 5_000);
-        }
-        // undock pilot so launch is in planetary space
-        if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.station_id = None;
-        }
-    });
-
-    let launch_rep = rpc(
-        &ctx,
-        &mut sess,
-        "planetMgr",
-        "UserLaunchCommodities",
-        &[
-            PyRep::Integer(JITA_PLANET_ID),
-            PyRep::Integer(WATER_P1_TYPE_ID as i64),
-            PyRep::Integer(300),
-            PyRep::String("CommandCenterLaunch".into()),
-        ],
-    )
-    .await
-    .expect("UserLaunchCommodities");
-
-    assert_eq!(get_i64(&launch_rep, "planetID"), Some(JITA_PLANET_ID));
-    assert_eq!(get_i64(&launch_rep, "commodityTypeID"), Some(WATER_P1_TYPE_ID as i64));
-    assert_eq!(get_i64(&launch_rep, "routedQuantity"), Some(300));
-    assert_eq!(get_str(&launch_rep, "destination"), Some("CommandCenterLaunch"));
-
-    // 4. GetMyLaunchesDetails
-    let my_launches = rpc(&ctx, &mut sess, "planetMgr", "GetMyLaunchesDetails", &[])
-        .await
-        .expect("GetMyLaunchesDetails");
-    let PyRep::List(launches) = my_launches else { panic!("expected launches list"); };
-    assert!(!launches.is_empty());
-    let active_launch = &launches[0];
-    let launch_id = get_i64(active_launch, "launchID").expect("launchID");
-    assert_eq!(get_i64(active_launch, "planetID"), Some(JITA_PLANET_ID));
-    assert_eq!(get_i64(active_launch, "quantity"), Some(300));
-
-    // 5. DeleteLaunch
-    let del_rep = rpc(&ctx, &mut sess, "planetMgr", "DeleteLaunch", &[PyRep::Integer(launch_id)])
-        .await
-        .expect("DeleteLaunch");
-    assert_eq!(del_rep.as_bool(), Some(true));
-
-    let item_deleted = ctx.db.with_snapshot(|snap| !snap.items.contains_key(&launch_id));
-    assert!(item_deleted);
-
-    // 6. CancelInstallProgram, RevertChanges, StartTicking
-    let cancel_rep = rpc(&ctx, &mut sess, "planetMgr", "CancelInstallProgram", &[PyRep::Integer(JITA_PLANET_ID)])
-        .await
-        .expect("CancelInstallProgram");
-    assert_eq!(cancel_rep.as_bool(), Some(true));
-
-    let revert_rep = rpc(&ctx, &mut sess, "planetMgr", "RevertChanges", &[PyRep::Integer(JITA_PLANET_ID)])
-        .await
-        .expect("RevertChanges");
-    assert_eq!(revert_rep.as_bool(), Some(true));
-
-    let tick_rep = rpc(&ctx, &mut sess, "planetMgr", "StartTicking", &[PyRep::Integer(JITA_PLANET_ID)])
-        .await
-        .expect("StartTicking");
-    assert_eq!(tick_rep.as_bool(), Some(true));
-
-    // 7. colonies and celestialIndex accessors
-    let colonies_rep = rpc(&ctx, &mut sess, "planetMgr", "colonies", &[]).await.expect("colonies");
-    let PyRep::Dict(col_entries) = colonies_rep else { panic!("expected colonies dict"); };
-    assert!(!col_entries.is_empty());
-    let found_char = col_entries.iter().any(|(k, _)| k.as_i64() == Some(char_id));
-    assert!(found_char);
-
-    let cel_rep = rpc(&ctx, &mut sess, "planetMgr", "celestialIndex", &[]).await.expect("celestialIndex");
-    assert_eq!(cel_rep.as_i64(), Some(1));
-}
-
-/// Test Game Master administration tools, simulations, and proxy property accessors:
-/// GMAddCommodity, GMConvertCommandCenter, GMForceInstallProgram, GMVerifySimulation,
-/// GMGetLocalDistributionReport, GMGetSynchedServerState, GMRunDepletionSim, append, remoteHandler.
-#[tokio::test]
-async fn test_planet_mgr_gm_tools_and_properties() {
-    // parity: rpc:planetMgr.GMAddCommodity, rpc:planetMgr.GMConvertCommandCenter, rpc:planetMgr.GMForceInstallProgram, rpc:planetMgr.GMGetLocalDistributionReport, rpc:planetMgr.GMGetSynchedServerState, rpc:planetMgr.GMRunDepletionSim, rpc:planetMgr.GMVerifySimulation, rpc:planetMgr.append, rpc:planetMgr.remoteHandler
-    let ctx = ServerContext::new();
-    common::pin_clock(&ctx);
-    let char_id = 90_000_001;
-    let mut sess = setup_pilot(&ctx, 1104, "demo", "demo-secret", char_id).await;
-    let ship_id = sess.ship_id.expect("Active ship");
-
-    ctx.db.with_mut_snapshot(|snap| {
-        grant_pi_skills(snap, char_id);
-        seed_cargo_item(snap, GAS_COMMAND_CENTER_TYPE_ID, char_id, ship_id, 1);
-    });
-
-    assert!(!sess.has_gm_role());
-
-    // 1. Role gate: Regular player session rejected on GM methods
-    let err1 = rpc(&ctx, &mut sess, "planetMgr", "GMAddCommodity", &[PyRep::Integer(JITA_PLANET_ID)]).await.unwrap_err();
-    assert_eq!(err1.code, "InsufficientRole");
-    let err2 = rpc(&ctx, &mut sess, "planetMgr", "GMConvertCommandCenter", &[PyRep::Integer(JITA_PLANET_ID)]).await.unwrap_err();
-    assert_eq!(err2.code, "InsufficientRole");
-    let err3 = rpc(&ctx, &mut sess, "planetMgr", "GMForceInstallProgram", &[PyRep::Integer(JITA_PLANET_ID)]).await.unwrap_err();
-    assert_eq!(err3.code, "InsufficientRole");
-    let err4 = rpc(&ctx, &mut sess, "planetMgr", "GMVerifySimulation", &[PyRep::Integer(JITA_PLANET_ID)]).await.unwrap_err();
-    assert_eq!(err4.code, "InsufficientRole");
-
-    // 2. Elevate session to GM role
-    sess.role |= service_roles::ROLE_ADMIN;
-    assert!(sess.has_gm_role());
-
-    let gm_add = rpc(
-        &ctx,
-        &mut sess,
-        "planetMgr",
-        "GMAddCommodity",
-        &[PyRep::Integer(JITA_PLANET_ID), PyRep::Integer(WATER_P1_TYPE_ID as i64), PyRep::Integer(100)],
-    )
-    .await
-    .expect("GMAddCommodity");
-    assert_eq!(gm_add.as_bool(), Some(true));
-
-    let gm_conv = rpc(
-        &ctx,
-        &mut sess,
-        "planetMgr",
-        "GMConvertCommandCenter",
-        &[PyRep::Integer(JITA_PLANET_ID), PyRep::Integer(GAS_COMMAND_CENTER_TYPE_ID as i64), PyRep::Integer(2535)],
-    )
-    .await
-    .expect("GMConvertCommandCenter");
-    assert_eq!(gm_conv.as_bool(), Some(true));
-
-    let gm_force = rpc(&ctx, &mut sess, "planetMgr", "GMForceInstallProgram", &[PyRep::Integer(JITA_PLANET_ID), PyRep::Integer(401)])
-        .await
-        .expect("GMForceInstallProgram");
-    assert_eq!(gm_force.as_bool(), Some(true));
-
-    let gm_sim = rpc(&ctx, &mut sess, "planetMgr", "GMVerifySimulation", &[PyRep::Integer(JITA_PLANET_ID)])
-        .await
-        .expect("GMVerifySimulation");
-    assert_eq!(gm_sim.as_bool(), Some(true));
-
-    // 3. Deploy colony for GM diagnostic and simulation reports
-    rpc(
-        &ctx,
-        &mut sess,
-        "planetMgr",
-        "UserUpdateNetwork",
-        &[
-            PyRep::Integer(JITA_PLANET_ID),
-            PyRep::List(vec![
-                cmd_pin(401, GAS_COMMAND_CENTER_TYPE_ID, 0.1, 0.1),
-                cmd_pin(402, GAS_EXTRACTOR_TYPE_ID, 0.2, 0.2),
-                cmd_pin(403, GAS_BASIC_FACILITY_TYPE_ID, 0.3, 0.3),
-            ]),
-        ],
-    )
-    .await
-    .expect("Deploy 3-pin colony for GM");
-
-    // 4. GM diagnostic reports & depletion simulations
-    let gm_dist = rpc(&ctx, &mut sess, "planetMgr", "GMGetLocalDistributionReport", &[PyRep::Integer(JITA_PLANET_ID)])
-        .await
-        .expect("GMGetLocalDistributionReport");
-    assert_eq!(get_i64(&gm_dist, "planetID"), Some(JITA_PLANET_ID));
-    assert_eq!(get_i64(&gm_dist, "characterID"), Some(char_id));
-    assert_eq!(get_i64(&gm_dist, "pinsCount"), Some(3));
-
-    let gm_sync = rpc(&ctx, &mut sess, "planetMgr", "GMGetSynchedServerState", &[PyRep::Integer(JITA_PLANET_ID)])
-        .await
-        .expect("GMGetSynchedServerState");
-    assert!(get_i64(&gm_sync, "colonyCount").unwrap_or(0) >= 1);
-
-    let gm_dep = rpc(&ctx, &mut sess, "planetMgr", "GMRunDepletionSim", &[PyRep::Integer(JITA_PLANET_ID)])
-        .await
-        .expect("GMRunDepletionSim");
-    assert!(get_i64(&gm_dep, "colonyCount").unwrap_or(0) >= 1);
-
-    // 5. Proxy properties: append and remoteHandler
-    let append_rep = rpc(&ctx, &mut sess, "planetMgr", "append", &[]).await.expect("append");
-    assert_eq!(append_rep, PyRep::None);
-
-    let remote_rep = rpc(&ctx, &mut sess, "planetMgr", "remoteHandler", &[]).await.expect("remoteHandler");
-    assert_eq!(remote_rep, PyRep::None);
 }

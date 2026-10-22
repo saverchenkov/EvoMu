@@ -140,4 +140,5 @@ mod rpc_petitioner_raffle;
 mod rpc_operations_dungeons;
 mod rpc_discovery_seasons;
 mod rpc_space_inventory_entity;
-mod rpc_planet_mgr;
+mod rpc_planet_mgr_colonies;
+mod rpc_planet_mgr_orbitals;
