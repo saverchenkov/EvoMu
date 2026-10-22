@@ -6,7 +6,7 @@
 // parity: feat:pve.mission-standing-gate, feat:pve.mission-faction-standing-loss
 // parity: feat:pve.mission-lp-isk-reward-formula, feat:pve.mission-bonus-timer
 // parity: feat:pve.mission-offer-expiry-no-penalty, feat:pve.mission-level-clone-and-space-restrictions
-// parity: feat:pve.research-agent-daily-mission, feat:fw.fw-missions
+// parity: feat:pve.research-agent-daily-mission
 
 #![forbid(unsafe_code)]
 

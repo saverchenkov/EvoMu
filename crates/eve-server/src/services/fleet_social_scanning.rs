@@ -1055,60 +1055,32 @@ pub(super) async fn handle_scanning_and_wormholes(
             ])))
         }
 
-        ("dungeon", "DEGetDungeons") => {
-            let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+        ("dungeon", "DEGetDungeons")
+        | ("dungeon", "DEGetRooms")
+        | ("dungeon", "DEGetArchetypes")
+        | ("dungeon", "DEGetFactions")
+        | ("dungeon", "DEGetRoomObjectPaletteData") => {
+            let _ = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             let rows: Vec<Vec<PyRep>> = ctx
                 .sde
                 .dungeons
                 .values()
-                .take(25)
+                .take(16)
                 .map(|d| {
                     vec![
                         PyRep::Integer(d.dungeon_id as i64),
                         PyRep::String(d.name.clone()),
                         PyRep::Integer(d.difficulty.unwrap_or(1) as i64),
-                        PyRep::Integer(111),
                     ]
                 })
                 .collect();
             Some(Ok(PyRep::rowset(
-                vec!["dungeonID", "dungeonName", "difficulty", "archetypeID"],
+                vec!["dungeonID", "dungeonName", "difficulty"],
                 rows,
             )))
-        }
-
-        ("dungeon", "DEGetRooms") => {
-            let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let dungeon_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let rows = vec![
-                vec![PyRep::Integer(1), PyRep::Integer(dungeon_id), PyRep::String("Entry Pocket".into())],
-                vec![PyRep::Integer(2), PyRep::Integer(dungeon_id), PyRep::String("Inner Sanctum".into())],
-                vec![PyRep::Integer(3), PyRep::Integer(dungeon_id), PyRep::String("Final Chamber".into())],
-            ];
-            Some(Ok(PyRep::rowset(vec!["roomID", "dungeonID", "roomName"], rows)))
-        }
-
-        ("dungeon", "DEGetArchetypes") => {
-            let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let rows = vec![
-                vec![PyRep::Integer(1), PyRep::String("Deadspace Complex".into())],
-                vec![PyRep::Integer(2), PyRep::String("Agent Mission".into())],
-                vec![PyRep::Integer(3), PyRep::String("Combat Anomaly".into())],
-                vec![PyRep::Integer(28), PyRep::String("Ice Belt".into())],
-            ];
-            Some(Ok(PyRep::rowset(vec!["archetypeID", "archetypeName"], rows)))
-        }
-
-        ("dungeon", "DEGetFactions")
-        | ("dungeon", "DEGetRoomObjectPaletteData") => {
-            let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let rows = vec![
-                vec![PyRep::Integer(500001), PyRep::String("Caldari State".into())],
-                vec![PyRep::Integer(500002), PyRep::String("Minmatar Republic".into())],
-                vec![PyRep::Integer(500003), PyRep::String("Amarr Empire".into())],
-                vec![PyRep::Integer(500004), PyRep::String("Gallente Federation".into())],
-            ];
-            Some(Ok(PyRep::rowset(vec!["factionID", "factionName"], rows)))
         }
 
         ("dungeonExplorationMgr", "GetMyEscalatingPathDetails") => {

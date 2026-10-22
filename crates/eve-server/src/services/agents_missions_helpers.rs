@@ -25,8 +25,7 @@ pub fn is_storyline_template(tmpl: &eve_sde::MissionTemplate) -> bool {
 }
 
 pub fn is_storyline_agent_type(agent_type_id: u32) -> bool {
-    // Storyline agents in SDE are type 3 (Generic Storyline Mission Agent)
-    agent_type_id == 3
+    matches!(agent_type_id, 6 | 7)
 }
 
 pub fn is_unsupported_direct_agent_type(agent_type_id: u32) -> bool {
@@ -38,12 +37,10 @@ pub fn is_rnd_agent(agent: &eve_sde::AgentInfo) -> bool {
 }
 
 pub fn is_fw_agent(agent: &eve_sde::AgentInfo) -> bool {
-    agent.agent_type_id == 6
-        || agent.agent_type_id == 7
-        || matches!(
-            agent.corporation_id,
-            1000121 | 1000147 | 1000085 | 1000009
-        )
+    matches!(
+        agent.corporation_id,
+        1000121 | 1000147 | 1000085 | 1000009
+    )
 }
 
 pub fn rnd_tritanium_required_qty(agent_level: u8) -> i32 {
@@ -108,94 +105,130 @@ pub fn resolve_agent_and_corp_for_system(
     char_id: i64,
     sys_id: u32,
     station_id: Option<i64>,
-    storyline: bool,
+    is_storyline: bool,
 ) -> (i64, i64) {
-    if let Some(st_id) = station_id {
-        if let Some(agent) = ctx.sde.agents.values().find(|a| {
-            a.station_id == Some(st_id)
-                && if storyline {
-                    is_storyline_agent_type(a.agent_type_id)
-                } else {
-                    !is_storyline_agent_type(a.agent_type_id)
-                        && !is_unsupported_direct_agent_type(a.agent_type_id)
-                }
-        }) {
-            return (agent.agent_id, agent.corporation_id);
-        }
-    }
-    let corp_id = ctx.db.with_snapshot(|snap| {
-        snap.characters
-            .get(&char_id)
-            .map_or(1000044, |c| c.corporation_id)
+    let preferred_station = station_id.or_else(|| {
+        ctx.db
+            .get_character(char_id)
+            .ok()
+            .map(|ch| ch.home_station_id)
     });
-    let agent_id = if storyline {
-        let primary_corp = corp_id;
+    let cur_sys = ctx.sde.solar_systems.get(&sys_id);
+    let cur_constellation = cur_sys.map(|s| s.constellation_id);
+    let cur_region = cur_sys.map(|s| s.region_id);
+    let primary_corp = cur_sys
+        .and_then(|s| {
+            preferred_station
+                .and_then(|sid| s.stations.iter().find(|st| st.station_id == sid))
+                .or_else(|| s.stations.first())
+        })
+        .map(|st| st.owner_corporation_id)
+        .or_else(|| ctx.sde.npc_corporations.keys().copied().min())
+        .unwrap_or(0);
+
+    let agent = if is_storyline {
         ctx.sde
             .agents
             .values()
             .filter(|a| a.solar_system_id == Some(sys_id) && is_storyline_agent_type(a.agent_type_id))
             .min_by_key(|a| a.agent_id)
             .or_else(|| {
-                ctx.sde.agents.values().find(|a| {
+                ctx.sde.agents.values().filter(|a| {
                     a.corporation_id == primary_corp && is_storyline_agent_type(a.agent_type_id)
-                })
+                }).min_by_key(|a| a.agent_id)
             })
             .or_else(|| {
-                ctx.sde.agents.values().find(|a| {
+                ctx.sde.agents.values().filter(|a| {
                     is_storyline_agent_type(a.agent_type_id)
-                        && ctx
-                            .sde
-                            .npc_corporations
-                            .get(&a.corporation_id)
-                            .and_then(|c| c.faction_id)
-                            == ctx.sde.npc_corporations.get(&primary_corp).and_then(|c| c.faction_id)
-                })
+                        && a.solar_system_id.and_then(|s| ctx.sde.solar_systems.get(&s)).map(|s| s.constellation_id)
+                            == cur_constellation
+                }).min_by_key(|a| a.agent_id)
             })
-            .or_else(|| ctx.sde.agents.values().find(|a| is_storyline_agent_type(a.agent_type_id)))
-            .map_or(3009793, |a| a.agent_id)
-    } else {
-        ctx.sde
-            .agents
-            .values()
-            .filter(|a| {
-                a.solar_system_id == Some(sys_id)
-                    && !is_storyline_agent_type(a.agent_type_id)
-                    && !is_unsupported_direct_agent_type(a.agent_type_id)
-            })
-            .min_by_key(|a| a.agent_id)
             .or_else(|| {
-                ctx.sde.agents.values().find(|a| {
-                    a.corporation_id == corp_id
-                        && !is_storyline_agent_type(a.agent_type_id)
-                        && !is_unsupported_direct_agent_type(a.agent_type_id)
-                })
+                ctx.sde.agents.values().filter(|a| {
+                    is_storyline_agent_type(a.agent_type_id)
+                        && a.solar_system_id.and_then(|s| ctx.sde.solar_systems.get(&s)).map(|s| s.region_id)
+                            == cur_region
+                }).min_by_key(|a| a.agent_id)
             })
-            .map_or(3008416, |a| a.agent_id)
+    } else {
+        let is_eligible_regular = |a: &eve_sde::AgentInfo| -> bool {
+            !is_storyline_agent_type(a.agent_type_id)
+                && !is_unsupported_direct_agent_type(a.agent_type_id)
+        };
+        station_id
+            .and_then(|sid| {
+                ctx.sde.agents.values().filter(|a| {
+                    a.solar_system_id == Some(sys_id)
+                        && a.station_id == Some(sid)
+                        && is_eligible_regular(a)
+                }).min_by_key(|a| (a.level, a.agent_id))
+            })
+            .or_else(|| {
+                ctx.sde.agents.values().filter(|a| {
+                    a.solar_system_id == Some(sys_id)
+                        && a.corporation_id == primary_corp
+                        && is_eligible_regular(a)
+                }).min_by_key(|a| (a.level, a.agent_id))
+            })
+            .or_else(|| {
+                ctx.sde.agents
+                    .values()
+                    .filter(|a| a.solar_system_id == Some(sys_id) && is_eligible_regular(a))
+                    .min_by_key(|a| (a.level, a.agent_id))
+            })
     };
-    (agent_id, corp_id)
+
+    match agent {
+        Some(a) => (a.agent_id, a.corporation_id),
+        None => (0, primary_corp),
+    }
 }
 
 pub fn resolve_mission_npc_type(ctx: &ServerContext) -> u32 {
-    fn is_l1_frigate_rat(t: &eve_sde::InvType) -> bool {
-        let n = t.name.to_lowercase();
-        (n.contains("pirate") || n.contains("raider") || n.contains("corpii") || n.contains("pithi"))
-            && (n.contains("frigate") || n.contains("scout"))
-    }
-    if let Some(t) = ctx.sde.types.get(&10515) {
-        if t.category_id == 11 && is_l1_frigate_rat(t) {
-            return 10515;
+    let is_l1_frigate_rat = |inv: &eve_sde::InvType| -> bool {
+        if !inv
+            .default_attributes
+            .contains_key(&eve_sde::attr_ids::ENTITY_KILL_BOUNTY)
+            || inv.radius < 25.0
+        {
+            return false;
         }
-    }
-    for &candidate in &[20914, 20915, 23974, 23975] {
-        if let Some(t) = ctx.sde.types.get(&candidate) {
-            if t.category_id == 11 && is_l1_frigate_rat(t) {
-                return candidate;
+        let shield = inv
+            .default_attributes
+            .get(&eve_sde::attr_ids::SHIELD_CAPACITY)
+            .copied()
+            .unwrap_or(0.0);
+        let armor = inv
+            .default_attributes
+            .get(&eve_sde::attr_ids::ARMOR_HP)
+            .copied()
+            .unwrap_or(0.0);
+        let hull = inv
+            .default_attributes
+            .get(&eve_sde::attr_ids::HP_STRUCT)
+            .copied()
+            .unwrap_or(0.0);
+        (50.0..=450.0).contains(&(shield + armor + hull))
+    };
+
+    let mut group_ids: Vec<u32> = ctx
+        .sde
+        .npc_spawn_groups
+        .values()
+        .filter(|sg| sg.ship_class == 1)
+        .map(|sg| sg.group_id)
+        .collect();
+    group_ids.sort_unstable();
+    for gid in group_ids {
+        if let Some(sg) = ctx.sde.npc_spawn_groups.get(&gid) {
+            for &tid in &sg.npc_type_ids {
+                if let Some(inv) = ctx.sde.types.get(&tid) {
+                    if is_l1_frigate_rat(inv) {
+                        return tid;
+                    }
+                }
             }
-        }
-    }
-    for (&tid, t) in &ctx.sde.types {
-        if t.category_id == 11 && is_l1_frigate_rat(t) {
-            return tid;
         }
     }
     ctx.sde

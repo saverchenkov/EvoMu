@@ -659,18 +659,6 @@ impl ServerContext {
         {
             return res;
         }
-        if let Some(res) = Box::pin(services::pve_dungeon_system::handle(
-            self,
-            session,
-            effective_service,
-            method,
-            args,
-            kwargs,
-        ))
-        .await
-        {
-            return res;
-        }
         if let Some(res) = Box::pin(services::combat_crimewatch::handle(
             self,
             session,

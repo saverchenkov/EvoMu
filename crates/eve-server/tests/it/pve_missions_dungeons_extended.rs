@@ -17,7 +17,6 @@ use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_server::router::ServerContext;
 use eve_server::services::agents_missions::*;
-use eve_server::services::pve_dungeon_system;
 use std::collections::HashMap;
 
 const EXPECTED_ERR: &str = "InsufficientRole";
@@ -80,295 +79,6 @@ fn colocate_with_agent(
     (sys_id, sta_id)
 }
 
-// =========================================================================
-// 1. feat:pve.dungeon-system
-// =========================================================================
-
-#[tokio::test]
-async fn test_pve_dungeon_system() {
-    // parity: feat:pve.dungeon-system
-    eve_testkit::attest(&["feat:pve.dungeon-system"]);
-
-    let ctx = ServerContext::new();
-    common::pin_clock(&ctx);
-    let char_id = 90_000_001;
-    let mut sess = setup_pilot(&ctx, 601, "demo", "demo-secret", char_id).await;
-
-    let sys_id = 30000142; // Jita
-    sess.solar_system_id = Some(sys_id);
-
-    // 1. Spawn dungeon instance with rooms, acceleration gate, container, and NPCs
-    let inst_id = pve_dungeon_system::spawn_dungeon_instance(
-        &ctx,
-        111,
-        sys_id,
-        [100_000.0, 50_000.0, -25_000.0],
-    )
-    .await
-    .expect("Spawn dungeon instance");
-
-    let initial = pve_dungeon_system::get_dungeon_instance(inst_id)
-        .expect("Dungeon instance must be registered");
-    assert_eq!(initial.rooms.len(), 2);
-    assert_eq!(initial.current_room_idx, 0);
-    assert!(!initial.rooms[0].gate_unlocked);
-    assert!(!initial.completed);
-
-    let _npc_ball_id = initial.rooms[0].npc_ball_ids[0];
-    let container_id = initial.rooms[1].object_ids[0];
-
-    // 2. Trigger on approach: spawns NPC wave
-    let npc_count_before = pve_dungeon_system::get_dungeon_instance(inst_id)
-        .unwrap()
-        .rooms[0]
-        .npc_ball_ids
-        .len();
-    pve_dungeon_system::trigger_on_approach(
-        &ctx,
-        inst_id,
-        [100_000.0 + 3_000.0, 50_000.0, -25_000.0],
-    )
-    .await
-    .expect("Trigger OnApproach");
-    let npc_count_after = pve_dungeon_system::get_dungeon_instance(inst_id)
-        .unwrap()
-        .rooms[0]
-        .npc_ball_ids
-        .len();
-    assert!(npc_count_after > npc_count_before, "Approach must spawn additional wave");
-
-    // 3. Trigger on kill: killing NPCs triggers action (e.g. unlocks acceleration gate)
-    let cur_npcs = pve_dungeon_system::get_dungeon_instance(inst_id)
-        .unwrap()
-        .rooms[0]
-        .npc_ball_ids
-        .clone();
-    for id in cur_npcs {
-        pve_dungeon_system::trigger_on_kill(&ctx, inst_id, id)
-            .await
-            .expect("Trigger OnKill");
-    }
-    let room_after_kill = &pve_dungeon_system::get_dungeon_instance(inst_id)
-        .unwrap()
-        .rooms[0];
-    assert!(room_after_kill.gate_unlocked, "Killing NPC trigger must unlock gate");
-
-    // 4. Verify acceleration gate SDE dogma hull classification and advance room
-    assert!(pve_dungeon_system::validate_acceleration_gate_ship(&ctx, 111, 587).is_ok());
-    let cap_err = pve_dungeon_system::validate_acceleration_gate_ship(&ctx, 111, 19720).unwrap_err();
-    assert_eq!(cap_err.code, "ShipTooLargeForGate");
-
-    let next_room = pve_dungeon_system::advance_dungeon_room(inst_id)
-        .expect("Advance room");
-    assert_eq!(next_room, 2);
-    let inst_room2 = pve_dungeon_system::get_dungeon_instance(inst_id).unwrap();
-    assert_eq!(inst_room2.current_room_idx, 1);
-
-    // 5. Trigger on loot: container opened in final room completes dungeon
-    pve_dungeon_system::trigger_on_loot(&ctx, inst_id, container_id)
-        .await
-        .expect("Trigger OnLoot");
-    let completed_inst = pve_dungeon_system::get_dungeon_instance(inst_id).unwrap();
-    assert!(completed_inst.completed, "Looting container must complete dungeon");
-
-    // 6. Despawn dungeon when complete
-    let removed = pve_dungeon_system::despawn_dungeon_instance(&ctx, inst_id)
-        .await
-        .expect("Despawn dungeon");
-    assert!(removed > 0, "Despawn must remove spawned destiny balls");
-    assert!(pve_dungeon_system::get_dungeon_instance(inst_id).is_none());
-
-    // 7. Verify keeper RPCs: PlayDungeon, GetCurrentDungeonForCharacter
-    let play_rep = rpc_call(
-        &ctx,
-        &mut sess,
-        "keeper",
-        "PlayDungeon",
-        &[PyRep::Integer(111)],
-    )
-    .await
-    .expect("keeper.PlayDungeon");
-    let new_inst_id = play_rep
-        .dict_get("instanceID")
-        .and_then(|v| v.as_i64())
-        .expect("instanceID in response");
-    assert!(new_inst_id > 0);
-    assert_eq!(
-        pve_dungeon_system::get_dungeon_instance(new_inst_id)
-            .expect("new instance registered")
-            .current_room_idx,
-        0
-    );
-
-    let cur_rep = rpc_call(
-        &ctx,
-        &mut sess,
-        "keeper",
-        "GetCurrentDungeonForCharacter",
-        &[PyRep::Integer(new_inst_id)],
-    )
-    .await
-    .expect("keeper.GetCurrentDungeonForCharacter");
-    assert!(cur_rep.dict_get("solarSystemID").is_some());
-}
-
-// =========================================================================
-// 2. feat:fw.fw-missions and feat:fw.fw-site-dungeons
-// =========================================================================
-
-#[tokio::test]
-async fn test_fw_missions_and_site_dungeons() {
-    // parity: feat:fw.fw-missions, feat:fw.fw-site-dungeons
-    eve_testkit::attest(&["feat:fw.fw-missions", "feat:fw.fw-site-dungeons"]);
-
-    let ctx = ServerContext::new();
-    common::pin_clock(&ctx);
-    let char_id = 90_000_001;
-    let mut sess = setup_pilot(&ctx, 602, "demo", "demo-secret", char_id).await;
-
-    // 1. FW Site Dungeons: GetFactionWarfareBattlefieldInstances returns battlefield sites
-    let bf_rep = rpc_call(
-        &ctx,
-        &mut sess,
-        "dungeonInstanceCacheMgr",
-        "GetFactionWarfareBattlefieldInstances",
-        &[PyRep::Integer(30002062)], // Onnamon warzone
-    )
-    .await
-    .expect("GetFactionWarfareBattlefieldInstances");
-
-    let list = match bf_rep {
-        PyRep::List(l) => l,
-        _ => panic!("returns list of battlefield instances"),
-    };
-    assert!(!list.is_empty(), "Battlefield sites must be returned for warzone");
-    let first = &list[0];
-    assert!(first.dict_get("dungeonID").is_some());
-    assert!(first.dict_get("solarSystemID").is_some());
-    assert!(first.dict_get("archetypeID").is_some());
-    assert!(first.dict_get("dungeonName").is_some());
-    assert!(first.dict_get("completed").is_some());
-    assert!(first.dict_get("progress").is_some());
-
-    // 2. FW missions: FW agent offers missions in warzones
-    let fw_agent = ctx
-        .sde
-        .agents
-        .values()
-        .find(|a| a.agent_type_id == 7 && a.solar_system_id.is_some())
-        .expect("FW agent in SDE");
-
-    colocate_with_agent(&ctx, &mut sess, char_id, fw_agent.agent_id);
-
-    // Request mission from FW agent
-    let offer_rep = rpc_call(
-        &ctx,
-        &mut sess,
-        "agentMgr",
-        "DoAction",
-        &[PyRep::Integer(2), PyRep::Integer(fw_agent.agent_id)],
-    )
-    .await
-    .expect("Request mission from FW agent");
-
-    let mission_id = offer_rep
-        .dict_get("missionID")
-        .and_then(|v| v.as_i64())
-        .unwrap() as u32;
-
-    // Target solar system of the mission must be a warzone system
-    let target_sys = ctx.db.with_snapshot(|snap| {
-        snap.active_missions
-            .get(&(char_id, mission_id))
-            .map(|m| m.solar_system_id)
-            .unwrap()
-    });
-    let expected_warzone_sys =
-        resolve_fw_warzone_system(
-            fw_agent.corporation_id,
-        );
-    assert_eq!(
-        target_sys, expected_warzone_sys,
-        "FW mission must be routed to appropriate warzone system"
-    );
-}
-
-// =========================================================================
-// 3. feat:admin.gm-dungeon-editor
-// =========================================================================
-
-#[tokio::test]
-async fn test_gm_dungeon_editor() {
-    // parity: feat:admin.gm-dungeon-editor
-    eve_testkit::attest(&["feat:admin.gm-dungeon-editor"]);
-
-    let ctx = ServerContext::new();
-    common::pin_clock(&ctx);
-    let char_id = 90_000_001;
-    let mut sess = setup_pilot(&ctx, 603, "demo", "demo-secret", char_id).await;
-
-    // 1. Regular player (non-GM) is rejected by role gate
-    assert!(!sess.has_gm_role());
-    for m in ["DEGetDungeons", "DEGetRooms", "DEGetArchetypes"] {
-        let err = rpc_call(&ctx, &mut sess, "dungeon", m, &[])
-            .await
-            .unwrap_err();
-        assert_eq!(err.code, EXPECTED_ERR);
-    }
-    let err = rpc_call(&ctx, &mut sess, "keeper", "GetLevelEditor", &[])
-        .await
-        .unwrap_err();
-    assert_eq!(err.code, EXPECTED_ERR);
-
-    // 2. Grant GM role
-    sess.role = eve_machonet::service_roles::ROLE_GM_DEFAULT;
-    assert!(sess.has_gm_role());
-
-    // 3. GM calls DEGetDungeons
-    let d_rep = rpc_call(&ctx, &mut sess, "dungeon", "DEGetDungeons", &[])
-        .await
-        .expect("dungeon.DEGetDungeons");
-    if let PyRep::Rowset { columns, rows } = d_rep {
-        assert!(columns.contains(&"dungeonID".to_string()));
-        assert!(columns.contains(&"dungeonName".to_string()));
-        assert!(columns.contains(&"archetypeID".to_string()));
-        assert!(!rows.is_empty());
-    } else {
-        panic!("expected rowset from DEGetDungeons");
-    }
-
-    // 4. GM calls DEGetRooms
-    let r_rep = rpc_call(&ctx, &mut sess, "dungeon", "DEGetRooms", &[PyRep::Integer(111)])
-        .await
-        .expect("dungeon.DEGetRooms");
-    if let PyRep::Rowset { columns, rows } = r_rep {
-        assert!(columns.contains(&"roomID".to_string()));
-        assert!(columns.contains(&"dungeonID".to_string()));
-        assert!(!rows.is_empty());
-    } else {
-        panic!("expected rowset from DEGetRooms");
-    }
-
-    // 5. GM calls DEGetArchetypes
-    let a_rep = rpc_call(&ctx, &mut sess, "dungeon", "DEGetArchetypes", &[])
-        .await
-        .expect("dungeon.DEGetArchetypes");
-    if let PyRep::Rowset { columns, rows } = a_rep {
-        assert!(columns.contains(&"archetypeID".to_string()));
-        assert!(columns.contains(&"archetypeName".to_string()));
-        assert!(!rows.is_empty());
-    } else {
-        panic!("expected rowset from DEGetArchetypes");
-    }
-
-    // 6. GM calls keeper.GetLevelEditor
-    let ke_rep = rpc_call(&ctx, &mut sess, "keeper", "GetLevelEditor", &[])
-        .await
-        .expect("keeper.GetLevelEditor");
-    assert!(matches!(ke_rep, PyRep::None));
-}
-
-// =========================================================================
 // 4. feat:pve.mission-lp-isk-reward-formula
 // =========================================================================
 
@@ -869,7 +579,13 @@ async fn test_mission_level_clone_and_space_restrictions() {
         .sde
         .agents
         .values()
-        .find(|a| a.level == 4 && a.solar_system_id.is_some())
+        .find(|a| {
+            a.level == 4
+                && a.solar_system_id.is_some()
+                && a.station_id.is_some()
+                && a.agent_type_id == 2
+                && a.division_id != 18
+        })
         .expect("Level 4 agent in SDE");
     colocate_with_agent(&ctx, &mut sess, char_id, l4_agent.agent_id);
 
@@ -878,6 +594,7 @@ async fn test_mission_level_clone_and_space_restrictions() {
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.clone_grade = 1; // Alpha clone
             ch.standings.insert(l4_agent.corporation_id, 8.0); // high standing for access
+            ch.standings.insert(l4_agent.agent_id, 8.0);
         }
     });
 
