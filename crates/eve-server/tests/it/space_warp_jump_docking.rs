@@ -494,9 +494,9 @@ async fn test_sp5_docking_and_undocking_station_structure_and_boarding() {
 
 #[tokio::test]
 async fn test_sp3_warp_to_disrupted_capacitor_cost_and_exit_invulnerability() {
-    // parity: plan:SP-3, plan:S-1
+    // parity: plan:SP-3
     // parity: feat:navigation.warp-to, feat:navigation.warp-disrupted, feat:navigation.warp-capacitor-cost, feat:navigation.warp-exit-invulnerability, rpc:beyonce.UpdateStateRequest, rpc:charUnboundMgr.SelectCharacterID
-    eve_testkit::attest(&["plan:S-1", "feat:navigation.warp-to", "feat:navigation.warp-disrupted", "feat:navigation.warp-capacitor-cost", "feat:navigation.warp-exit-invulnerability"]);
+    eve_testkit::attest(&["feat:navigation.warp-to", "feat:navigation.warp-disrupted", "feat:navigation.warp-capacitor-cost", "feat:navigation.warp-exit-invulnerability"]);
 
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
@@ -885,9 +885,9 @@ async fn test_sp3_warp_to_disrupted_capacitor_cost_and_exit_invulnerability() {
 
 #[tokio::test]
 async fn test_sp4_stargate_capital_restriction_session_timers_and_jump_cloak_immunities() {
-    // parity: plan:SP-4, plan:S-1
+    // parity: plan:SP-4
     // parity: feat:navigation.stargate-capital-restriction, feat:navigation.jump-cloak-immunities, rpc:beyonce.SetSessionCheck, rpc:charUnboundMgr.SelectCharacterID
-    eve_testkit::attest(&["plan:S-1", "feat:navigation.stargate-capital-restriction", "feat:navigation.jump-cloak-immunities"]);
+    eve_testkit::attest(&["feat:navigation.stargate-capital-restriction", "feat:navigation.jump-cloak-immunities"]);
 
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);

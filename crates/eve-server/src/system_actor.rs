@@ -229,6 +229,17 @@ pub enum SystemCommand {
         ball_id: BallId,
         reply: oneshot::Sender<Option<Ball>>,
     },
+    AcceptDocking {
+        ship_id: BallId,
+        station_id: BallId,
+        station_pos: DVec3,
+        reply: oneshot::Sender<Option<Ball>>,
+    },
+    EmitPackagedActions {
+        ball_id: BallId,
+        events: Vec<DestinyEvent>,
+        reply: oneshot::Sender<bool>,
+    },
     SetMovementMode {
         ball_id: BallId,
         mode: MovementMode,
@@ -813,6 +824,34 @@ impl SystemRegistry {
                                 sync_ball_positions(&ballpark, &ball_positions_actor);
                                 let _ = reply.send(removed);
                             }
+                            SystemCommand::AcceptDocking {
+                                ship_id,
+                                station_id,
+                                station_pos,
+                                reply,
+                            } => {
+                                base_scramble_strengths.remove(&ship_id);
+                                base_core_strengths.remove(&ship_id);
+                                asteroids.remove(&ship_id);
+                                let removed = if ballpark.balls.contains_key(&station_id) {
+                                    ballpark.accept_docking(ship_id, station_id)
+                                } else {
+                                    ballpark.accept_docking_at(ship_id, station_id, station_pos)
+                                };
+                                sync_ball_positions(&ballpark, &ball_positions_actor);
+                                let _ = reply.send(removed);
+                            }
+                            SystemCommand::EmitPackagedActions {
+                                ball_id,
+                                events,
+                                reply,
+                            } => {
+                                let known = ballpark.balls.contains_key(&ball_id);
+                                if known {
+                                    ballpark.emit_packaged_actions(Some(ball_id), &events);
+                                }
+                                let _ = reply.send(known);
+                            }
                             SystemCommand::SetMovementMode { ball_id, mode, reply } => {
                                 if ballpark.balls.contains_key(&ball_id) {
                                     match ballpark.set_mode(ball_id, mode) {
@@ -887,13 +926,80 @@ impl SystemRegistry {
                                 let known = ballpark.balls.contains_key(&ball_id)
                                     || matches!(event, DestinyEvent::OnSovereigntyChanged { .. });
                                 if known {
-                                    if let DestinyEvent::OnSlimItemChange { ball_id: slim_id } = &event {
-                                        if let Some(meta) = ballpark.ball_slim_meta.get_mut(slim_id) {
-                                            meta.char_id = (*slim_id == ball_id).then_some(meta.owner_id);
+                                    let scope = ballpark.balls.contains_key(&ball_id).then_some(ball_id);
+                                    match event {
+                                        DestinyEvent::SetBallFree { ball_id: id, is_free } if id == ball_id => {
+                                            ballpark.set_ball_free(id, is_free);
+                                        }
+                                        DestinyEvent::SetBallHarmonic { ball_id: id, harmonic } if id == ball_id => {
+                                            ballpark.set_ball_harmonic(id, harmonic);
+                                        }
+                                        DestinyEvent::SetBallInteractive { ball_id: id, is_interactive } if id == ball_id => {
+                                            ballpark.set_ball_interactive(id, is_interactive);
+                                        }
+                                        DestinyEvent::SetBallRadius { ball_id: id, radius } if id == ball_id => {
+                                            ballpark.set_ball_radius(id, radius);
+                                        }
+                                        DestinyEvent::OnSovereigntyChanged { alliance_id, .. } => {
+                                            ballpark.set_sovereignty(alliance_id);
+                                        }
+                                        DestinyEvent::OnClientControllerEvent {
+                                            ball_id: id,
+                                            target_id,
+                                            event_name,
+                                            value,
+                                            delay,
+                                        } if id == ball_id => {
+                                            ballpark.emit_client_controller_event(
+                                                id,
+                                                target_id,
+                                                event_name,
+                                                value,
+                                                delay,
+                                            );
+                                        }
+                                        DestinyEvent::OnShipStateUpdate { module_states } => {
+                                            ballpark.update_ship_module_states(ball_id, module_states);
+                                        }
+                                        DestinyEvent::OnDbuffUpdated { ball_id: id, dbuffs } if id == ball_id => {
+                                            ballpark.update_dbuffs(id, dbuffs);
+                                        }
+                                        DestinyEvent::OnDotVictimUpdated {
+                                            ball_id: id,
+                                            flat_dps,
+                                            pct_dps,
+                                            remaining_ticks,
+                                        } if id == ball_id => {
+                                            ballpark.apply_breacher_dot(id, flat_dps, pct_dps, remaining_ticks);
+                                        }
+                                        DestinyEvent::OnDroneStateChange {
+                                            drone_id,
+                                            owner_id,
+                                            controller_id,
+                                            activity_state,
+                                            type_id,
+                                            controller_owner_id,
+                                            target_id,
+                                        } if drone_id == ball_id => {
+                                            ballpark.update_drone_state(
+                                                drone_id,
+                                                owner_id,
+                                                controller_id,
+                                                activity_state,
+                                                type_id,
+                                                controller_owner_id,
+                                                target_id,
+                                            );
+                                        }
+                                        other => {
+                                            if let DestinyEvent::OnSlimItemChange { ball_id: slim_id } = &other {
+                                                if let Some(meta) = ballpark.ball_slim_meta.get_mut(slim_id) {
+                                                    meta.char_id = (*slim_id == ball_id).then_some(meta.owner_id);
+                                                }
+                                            }
+                                            ballpark.emit_event(scope, other);
                                         }
                                     }
-                                    let scope = ballpark.balls.contains_key(&ball_id).then_some(ball_id);
-                                    ballpark.emit_event(scope, event);
                                 }
                                 let _ = reply.send(known);
                             }

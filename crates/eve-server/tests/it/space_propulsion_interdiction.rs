@@ -1007,9 +1007,9 @@ async fn test_sp3_cloaking_prototype_covert_decloak_and_stabilization() {
 
 #[tokio::test]
 async fn test_sp3_subwarp_navigation_orbit_keep_at_range_align_goto_stop() {
-    // parity: plan:SP-3, plan:S-1
+    // parity: plan:SP-3
     // parity: feat:navigation.orbit, feat:navigation.keep-at-range, feat:navigation.align-to, feat:navigation.goto-point, feat:navigation.stop-ship, rpc:charUnboundMgr.SelectCharacterID
-    eve_testkit::attest(&["plan:S-1", "feat:navigation.orbit", "feat:navigation.keep-at-range", "feat:navigation.align-to", "feat:navigation.goto-point", "feat:navigation.stop-ship"]);
+    eve_testkit::attest(&["feat:navigation.orbit", "feat:navigation.keep-at-range", "feat:navigation.align-to", "feat:navigation.goto-point", "feat:navigation.stop-ship"]);
 
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);

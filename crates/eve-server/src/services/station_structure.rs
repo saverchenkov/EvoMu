@@ -705,17 +705,7 @@ pub async fn handle(
             }
             match ctx.db.dock_character(char_id, dock_id, is_structure) {
                 Ok(_) => {
-                    let _ = handle
-                        .emit_destiny_event(
-                            ship_id,
-                            eve_destiny::DestinyEvent::OnDockingAccepted {
-                                start_pos: ball.position.to_array(),
-                                end_pos: target_pos.to_array(),
-                                station_id: dock_id,
-                            },
-                        )
-                        .await;
-                    let _ = handle.remove_ball(ship_id).await;
+                    let _ = handle.accept_docking(ship_id, dock_id, target_pos).await;
                     if is_structure {
                         session.structure_id = Some(dock_id);
                         session.station_id = None;

@@ -6,7 +6,7 @@ use eve_db::types::{
     AllianceRecord, CorporationRecord, InventoryFlag, InventoryItemRecord, IskCents,
     SystemDynamicState, TrainedSkillRecord, UpwellStructureRecord,
 };
-use eve_destiny::{Ball, CombatState, DamageVector, MovementMode};
+use eve_destiny::{Ball, DamageVector, DestinyEvent, MovementMode};
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
@@ -450,10 +450,18 @@ async fn test_on_dbuff_updated_and_on_dot_victim_updated() {
     assert_eq!(db_off.len(), 1);
     assert_eq!(db_off[0].as_slice(), &[PyRep::Integer(ship_id), PyRep::List(Vec::new())]);
 
-    let mut cs: CombatState = handle.get_combat_state(ship_id).await.unwrap().unwrap();
-    cs.is_tethered = false;
-    cs.active_breacher_dot = Some((200.0, 0.01, 5));
-    handle.set_combat_state(ship_id, cs).await.unwrap();
+    handle
+        .emit_destiny_event(
+            ship_id,
+            DestinyEvent::OnDotVictimUpdated {
+                ball_id: ship_id,
+                flat_dps: 200.0,
+                pct_dps: 0.01,
+                remaining_ticks: 5,
+            },
+        )
+        .await;
+    let _ = drain_actions(&handle, ship_id).await;
     let tb = handle.step_manual(1.0).await.unwrap();
     let acts = parse_actions(tb.observer_updates_pyrep.get(&ship_id).expect("observer updates"));
     let dot = find(&acts, "OnDotVictimUpdated");
@@ -634,7 +642,7 @@ async fn test_set_ball_free_radius_harmonic_sovereignty_and_controller_event() {
                 name: "Sov Hub".into(),
                 solar_system_id: null_sys,
                 owner_corp_id: corp,
-                position: [ball.position.x, ball.position.y, ball.position.z],
+                position: [ball.position.x + 500.0, ball.position.y - 250.0, ball.position.z + 100.0],
                 state: "ShieldVulnerable".into(),
                 quantum_core_installed: true,
                 fuel_blocks: 50,
@@ -686,8 +694,13 @@ async fn test_set_ball_free_radius_harmonic_sovereignty_and_controller_event() {
         .expect("Dock");
     let dock_acts = drain_actions(&null_handle, ship_id).await;
     let ship_pos_list = PyRep::List(vec![PyRep::Real(ball.position.x), PyRep::Real(ball.position.y), PyRep::Real(ball.position.z)]);
+    let struct_pos_list = PyRep::List(vec![
+        PyRep::Real(ball.position.x + 500.0),
+        PyRep::Real(ball.position.y - 250.0),
+        PyRep::Real(ball.position.z + 100.0),
+    ]);
     assert_eq!(
         find(&dock_acts, "OnDockingAccepted")[0].as_slice(),
-        &[ship_pos_list.clone(), ship_pos_list, PyRep::Integer(1_049_500_001)]
+        &[ship_pos_list, struct_pos_list, PyRep::Integer(1_049_500_001)]
     );
 }

@@ -10,6 +10,7 @@ use std::collections::HashMap;
 #[tokio::test]
 async fn test_phase_0_s1_reprocessing_sde_materials_and_remainders() {
     // parity: plan:S-1, rpc:authentication.Login, rpc:charUnboundMgr.SelectCharacterID
+    eve_testkit::attest(&["plan:S-1"]);
     use eve_db::{InventoryFlag, InventoryItemRecord};
 
     let ctx = ServerContext::new();

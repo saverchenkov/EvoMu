@@ -396,7 +396,7 @@ async fn test_destiny_dogma_buffs_dot_and_drone_events() {
 
     assert!(park.update_dbuffs(ship_id, vec![(101, 1.25, 100), (102, 0.85, 200)]));
     assert!(park.apply_breacher_dot(ship_id, 150.0, 0.05, 10));
-    park.update_drone_state(drone_id, 90_000_001, ship_id, 1, 282, 90_000_001, Some(100_000_002));
+    park.update_drone_state(drone_id, 90_000_001, ship_id, 1, 2_454, 90_000_001, Some(100_000_002));
     park.step(1.0);
 
     let evs = park.drain_observer_events(ship_id);

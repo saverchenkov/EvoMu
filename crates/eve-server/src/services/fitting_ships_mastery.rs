@@ -149,19 +149,9 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                         ball_id: old_ship_id,
                         is_interactive: false,
                     };
-                    let pkg_bytes = eve_proto::marshal::encode(&eve_destiny::wire::encode_destiny_updates(
-                        1,
-                        &[slim_ev.clone(), inter_ev.clone()],
-                        None,
-                    ));
-                    let _ = sys.emit_destiny_event(capsule_id, slim_ev).await;
-                    let _ = sys.emit_destiny_event(capsule_id, inter_ev).await;
-                    let _ = sys
-                        .emit_destiny_event(
-                            capsule_id,
-                            eve_destiny::DestinyEvent::PackagedAction { actions_bytes: pkg_bytes },
-                        )
-                        .await;
+                    let _ = sys.emit_destiny_event(capsule_id, slim_ev.clone()).await;
+                    let _ = sys.emit_destiny_event(capsule_id, inter_ev.clone()).await;
+                    let _ = sys.emit_packaged_actions(capsule_id, vec![slim_ev, inter_ev]).await;
                 }
             }
 

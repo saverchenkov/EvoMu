@@ -931,23 +931,9 @@ pub(crate) async fn handle_ships_and_services(
                                         ball_id: sid,
                                         is_interactive: true,
                                     };
-                                    let pkg_bytes = eve_proto::marshal::encode(
-                                        &eve_destiny::wire::encode_destiny_updates(
-                                            1,
-                                            &[slim_ev.clone(), inter_ev.clone()],
-                                            None,
-                                        ),
-                                    );
-                                    let _ = sys.emit_destiny_event(sid, slim_ev).await;
-                                    let _ = sys.emit_destiny_event(sid, inter_ev).await;
-                                    let _ = sys
-                                        .emit_destiny_event(
-                                            sid,
-                                            eve_destiny::DestinyEvent::PackagedAction {
-                                                actions_bytes: pkg_bytes,
-                                            },
-                                        )
-                                        .await;
+                                    let _ = sys.emit_destiny_event(sid, slim_ev.clone()).await;
+                                    let _ = sys.emit_destiny_event(sid, inter_ev.clone()).await;
+                                    let _ = sys.emit_packaged_actions(sid, vec![slim_ev, inter_ev]).await;
                                 }
                             }
                         }

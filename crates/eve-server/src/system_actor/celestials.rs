@@ -200,6 +200,50 @@ impl SystemHandle {
         rx.await.ok().flatten()
     }
 
+    pub async fn accept_docking(
+        &self,
+        ship_id: BallId,
+        station_id: BallId,
+        station_pos: DVec3,
+    ) -> Option<Ball> {
+        self.ball_positions
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&ship_id);
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .cmd_tx
+            .send(SystemCommand::AcceptDocking {
+                ship_id,
+                station_id,
+                station_pos,
+                reply: tx,
+            })
+            .await;
+        rx.await.ok().flatten()
+    }
+
+    pub async fn emit_packaged_actions(
+        &self,
+        ball_id: BallId,
+        events: Vec<DestinyEvent>,
+    ) -> bool {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(SystemCommand::EmitPackagedActions {
+                ball_id,
+                events,
+                reply: tx,
+            })
+            .await
+            .is_err()
+        {
+            return false;
+        }
+        rx.await.unwrap_or(false)
+    }
+
     pub fn try_remove_ball(&self, ball_id: BallId) {
         self.ball_positions
             .write()
