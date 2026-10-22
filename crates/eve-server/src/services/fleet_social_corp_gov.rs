@@ -831,7 +831,7 @@ pub(super) fn handle_corp_gov(
             }
         }
 
-        ("corpRegistry", "AddBulletin") | ("corpRegistry", "UpdateBulletinOrder") => {
+        ("corpRegistry", "AddBulletin") => {
             if !has_comms { return deny_role("Managing corporation bulletins requires Communications Officer or Director role"); }
             let title = args.first().and_then(|a| a.as_str()).unwrap_or("Corporation Bulletin");
             let body = args.get(1).and_then(|a| a.as_str()).unwrap_or("All hands on deck");
@@ -846,6 +846,24 @@ pub(super) fn handle_corp_gov(
                 ("title", PyRep::String(title.to_string())),
                 ("body", PyRep::String(body.to_string())),
             ])))
+        }
+
+        ("corpRegistry", "UpdateBulletinOrder") => {
+            if !has_comms { return deny_role("Managing corporation bulletins requires Communications Officer or Director role"); }
+            let order_ids: Vec<i64> = match args.first() {
+                Some(PyRep::List(l)) | Some(PyRep::Tuple(l)) => l.iter().filter_map(|x| x.as_i64()).collect(),
+                _ => args.iter().filter_map(|x| x.as_i64()).collect(),
+            };
+            let is_alliance = matches!(args.get(1), Some(PyRep::Bool(true)));
+            let owner_key = if is_alliance { session.alliance_id.unwrap_or(corp_id) } else { corp_id };
+            let mut g = CORP_GOV.lock().unwrap();
+            let state = g.entry(owner_key).or_default();
+            if !order_ids.is_empty() {
+                state.bulletins.sort_by_key(|(bid, ..)| {
+                    order_ids.iter().position(|id| id == bid).unwrap_or(usize::MAX)
+                });
+            }
+            Some(Ok(PyRep::Bool(true)))
         }
 
         ("corpRegistry", "GetBulletins") => {

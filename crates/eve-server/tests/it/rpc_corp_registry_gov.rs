@@ -415,12 +415,12 @@ async fn test_corp_titles_and_bulletins() {
         PyRep::String("Strategic Deployment".into())
     );
 
-    // 6. UpdateBulletinOrder (Add a second bulletin)
+    // 5b. AddBulletin (Add second bulletin)
     let b2 = rpc(
         &ctx,
         &mut sess,
         "corpRegistry",
-        "UpdateBulletinOrder",
+        "AddBulletin",
         &[
             PyRep::String("Mining Fleet Schedule".into()),
             PyRep::String("Moon mining belt 2 tomorrow morning".into()),
@@ -428,10 +428,22 @@ async fn test_corp_titles_and_bulletins() {
         ],
     )
     .await
-    .expect("UpdateBulletinOrder");
+    .expect("AddBulletin 2");
     assert_eq!(field(&b2, "bulletinID"), PyRep::Integer(2));
 
-    // 7. GetBulletins
+    // 6. UpdateBulletinOrder (Reorder bulletins to [2, 1])
+    let reorder_res = rpc(
+        &ctx,
+        &mut sess,
+        "corpRegistry",
+        "UpdateBulletinOrder",
+        &[PyRep::List(vec![PyRep::Integer(2), PyRep::Integer(1)])],
+    )
+    .await
+    .expect("UpdateBulletinOrder");
+    assert_eq!(reorder_res, PyRep::Bool(true));
+
+    // 7. GetBulletins (verify updated order)
     let bulletins = rpc(
         &ctx,
         &mut sess,
@@ -444,6 +456,8 @@ async fn test_corp_titles_and_bulletins() {
     let (b_cols, b_rows) = rowset_data(&bulletins);
     assert!(b_cols.contains(&"bulletinID".to_string()));
     assert_eq!(b_rows.len(), 2);
+    assert_eq!(b_rows[0][0], PyRep::Integer(2));
+    assert_eq!(b_rows[1][0], PyRep::Integer(1));
 
     // 8. DeleteBulletin (Delete Bulletin 1)
     let del_b = rpc(

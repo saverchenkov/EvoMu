@@ -239,6 +239,19 @@ async fn test_corp_creation_info_branding_and_members() {
     assert_eq!(m_rows[1][0], PyRep::Integer(PILOT_2));
     assert_eq!(m_rows[2][0], PyRep::Integer(PILOT_3));
 
+    // External corporation lookup must be denied (BF-03)
+    assert!(
+        rpc(
+            &ctx,
+            &mut sess,
+            "corpRegistry",
+            "GetMember",
+            &[PyRep::Integer(98_999_999)],
+        )
+        .await
+        .is_err()
+    );
+
     // 8. GetMembersPaged (authentically sliced by page and pageSize)
     let paged1 = rpc(
         &ctx,

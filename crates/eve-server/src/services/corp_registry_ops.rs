@@ -531,10 +531,76 @@ pub fn handle(
         }
 
         "ExecuteActions" => {
-            let _ = match ServerContext::require_character(session) {
+            let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            let (corp_id, action_items) = if let Some(cid) = args.first().and_then(|a| a.as_i64()).filter(|&id| id >= 98_000_000 || id == 1_000_009) {
+                let items = match args.get(1) {
+                    Some(PyRep::List(l)) | Some(PyRep::Tuple(l)) => l.clone(),
+                    Some(single) => vec![single.clone()],
+                    None => Vec::new(),
+                };
+                (cid, items)
+            } else {
+                let items = match args.first() {
+                    Some(PyRep::List(l)) | Some(PyRep::Tuple(l)) => l.clone(),
+                    Some(single) => vec![single.clone()],
+                    None => Vec::new(),
+                };
+                (session.corporation_id.unwrap_or(1_000_009), items)
+            };
+
+            if session.corporation_id.is_some() && session.corporation_id != Some(corp_id) {
+                return Some(Err(BridgeRpcError {
+                    code: "CorpAccessDenied".into(),
+                    message: "Cannot execute actions on an external corporation".into(),
+                }));
+            }
+
+            let now_unix = ctx.now_unix();
+            let mut g = crate::services::fleet_social::fleet_social_corps::CORP_GOV.lock().unwrap();
+            let state = g.entry(corp_id).or_default();
+
+            for act in &action_items {
+                match act {
+                    PyRep::Tuple(t) | PyRep::List(t) => {
+                        let name = t.first().and_then(|x| x.as_str()).unwrap_or("");
+                        match name {
+                            "SetAccountKey" | "setAccountKey" => {
+                                if let (Some(target), Some(key)) = (t.get(1).and_then(|x| x.as_i64()), t.get(2).and_then(|x| x.as_i64())) {
+                                    if (1000..=1006).contains(&key) {
+                                        state.member_account_keys.insert(target, key);
+                                    }
+                                }
+                            }
+                            "SetTitle" | "setTitle" => {
+                                if let (Some(target), Some(mask)) = (t.get(1).and_then(|x| x.as_i64()), t.get(2).and_then(|x| x.as_i64())) {
+                                    state.member_titles.insert(target, mask as u64);
+                                }
+                            }
+                            "SetNote" | "setNote" => {
+                                if let (Some(target), Some(note)) = (t.get(1).and_then(|x| x.as_i64()), t.get(2).and_then(|x| x.as_str())) {
+                                    state.member_notes.insert(target, note.to_string());
+                                }
+                            }
+                            "SetFriendlyFire" | "setFriendlyFire" => {
+                                if let Some(flag) = t.get(1).and_then(|x| match x { PyRep::Bool(b) => Some(*b), _ => None }) {
+                                    state.friendly_fire_legal = flag;
+                                }
+                            }
+                            other => {
+                                state.action_log.push((other.to_string(), char_id, now_unix));
+                            }
+                        }
+                    }
+                    PyRep::String(s) => {
+                        state.action_log.push((s.to_string(), char_id, now_unix));
+                    }
+                    _ => {}
+                }
+            }
+
             Some(Ok(PyRep::Bool(true)))
         }
 

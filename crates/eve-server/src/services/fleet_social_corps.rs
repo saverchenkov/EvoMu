@@ -13,8 +13,10 @@ pub struct CorpGovState {
     pub(super) pending_role_grants: HashMap<i64, (u64, u64)>,  // char_id -> (pending_roles, effective_unix)
     pub(super) pending_auto_kicks: HashMap<i64, u64>,          // char_id -> queued_unix
     pub member_account_keys: HashMap<i64, i64>,                // char_id -> active account key
+    pub member_notes: HashMap<i64, String>,                    // char_id -> note
+    pub action_log: Vec<(String, i64, u64)>,                   // (action_name, issuer_id, timestamp)
     pub(super) titles: HashMap<i64, (String, u64)>,            // title_id -> (title_name, roles_mask)
-    pub(super) member_titles: HashMap<i64, u64>,               // char_id -> title_bitmask
+    pub member_titles: HashMap<i64, u64>,               // char_id -> title_bitmask
     pub(super) shares: HashMap<i64, i64>,                      // owner_id -> share_count
     pub(super) company_shares: i64,
     pub(super) bulletins: Vec<(i64, String, String, i64, u64)>, // (bulletin_id, title, body, author_id, timestamp)
@@ -25,7 +27,7 @@ pub struct CorpGovState {
     pub(super) restrict_corp_mails: bool,
     pub(super) accept_structures: bool,
     pub(super) reinforce_hour: u8,
-    pub(super) friendly_fire_legal: bool,
+    pub friendly_fire_legal: bool,
     pub(super) pending_friendly_fire: Option<(bool, u64)>,
     pub(super) member_limit: Option<usize>,
     #[allow(dead_code)]
@@ -129,7 +131,41 @@ const MEMBER_COLS: [&str; 8] = [
     "characterID", "name", "role", "title", "corporationID", "locationID", "shipTypeID", "logonDateTime",
 ];
 
-fn get_corp_member_snapshot(ctx: &ServerContext, corp_id: i64) -> Vec<(i64, String, u64, String, i64, i64, i64, u64)> {
+fn require_corp_caller(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    target_corp_arg: Option<i64>,
+) -> Result<(i64, i64, bool), BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    if session.corporation_id.is_none() || session.corporation_id == Some(0) {
+        if let Some(cid) = ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.corporation_id).filter(|id| s.corporations.contains_key(id))) {
+            session.corporation_id = Some(cid);
+        }
+    }
+    let caller_corp = match session.corporation_id {
+        Some(cid) if cid > 0 => cid,
+        _ => return Err(BridgeRpcError { code: "CorpAccessDenied".into(), message: "Character does not belong to a corporation".into() }),
+    };
+    if let Some(target) = target_corp_arg {
+        if target != caller_corp {
+            return Err(BridgeRpcError { code: "CorpAccessDenied".into(), message: "Access denied to external corporation members".into() });
+        }
+    }
+    let has_director = ctx.db.with_snapshot(|s| {
+        let corp = s.corporations.get(&caller_corp);
+        let is_ceo = corp.map(|c| c.ceo_id == char_id).unwrap_or(false);
+        let roles = corp.and_then(|c| c.member_roles.get(&char_id)).copied().unwrap_or(0);
+        is_ceo || (roles & (corp_roles::ROLE_DIRECTOR | corp_roles::ROLE_PERSONNEL_MANAGER) != 0)
+    });
+    Ok((caller_corp, char_id, has_director))
+}
+
+fn get_corp_member_snapshot(
+    ctx: &ServerContext,
+    corp_id: i64,
+    viewer_id: i64,
+    has_director: bool,
+) -> Vec<(i64, String, u64, String, i64, i64, i64, u64)> {
     let now_unix = ctx.now_unix();
     let gov_map = CORP_GOV.lock().unwrap();
     let gov_opt = gov_map.get(&corp_id);
@@ -151,8 +187,13 @@ fn get_corp_member_snapshot(ctx: &ServerContext, corp_id: i64) -> Vec<(i64, Stri
                     }
                 }
                 let title = if mid == corp.ceo_id { "CEO" } else { "Member" };
-                let ship_id = snap.items.get(&ch.active_ship_id).map(|i| i.type_id as i64).unwrap_or(606);
-                (ch.character_id, ch.name.clone(), role_mask, title.to_string(), corp_id, ch.solar_system_id as i64, ship_id, now_unix)
+                let (loc_id, ship_id, logon_ts) = if has_director || mid == viewer_id {
+                    let s_id = snap.items.get(&ch.active_ship_id).map(|i| i.type_id as i64).unwrap_or(606);
+                    (ch.solar_system_id as i64, s_id, now_unix)
+                } else {
+                    (0, 0, 0)
+                };
+                (ch.character_id, ch.name.clone(), role_mask, title.to_string(), corp_id, loc_id, ship_id, logon_ts)
             })
         }).collect()
     })
@@ -426,65 +467,65 @@ pub(super) fn handle_corps(
         | ("corpRegistry", "GetMember")
         | ("corpRegistry", "GetMemberTrackingInfo")
         | ("corpRegistry", "GetMemberTrackingInfoSimple") => {
-            let _ = match ServerContext::require_character(session) {
+            let target_cid = args.first().and_then(|a| a.as_i64()).filter(|&id| id >= 98_000_000 || id == 1_000_009);
+            let (corp_id, viewer_id, has_director) = match require_corp_caller(ctx, session, target_cid) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let corp_id = args.first().and_then(|a| a.as_i64()).filter(|&id| id >= 98_000_000 || id == 1_000_009).or(session.corporation_id).unwrap_or(0);
-            let members = get_corp_member_snapshot(ctx, corp_id);
+            let members = get_corp_member_snapshot(ctx, corp_id, viewer_id, has_director);
             let rows: Vec<Vec<PyRep>> = members.iter().map(member_row_rep).collect();
             Some(Ok(PyRep::rowset(MEMBER_COLS.to_vec(), rows)))
         }
 
         ("corpRegistry", "GetMembersPaged") => {
-            let _ = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let (corp_id, page, page_size) = if let Some(cid) = args.first().and_then(|a| a.as_i64()).filter(|&id| id >= 98_000_000 || id == 1_000_009) {
+            let (target_cid, page, page_size) = if let Some(cid) = args.first().and_then(|a| a.as_i64()).filter(|&id| id >= 98_000_000 || id == 1_000_009) {
                 (
-                    cid,
+                    Some(cid),
                     args.get(1).and_then(|a| a.as_i64()).unwrap_or(1).max(1) as usize,
                     args.get(2).and_then(|a| a.as_i64()).unwrap_or(50).max(1) as usize,
                 )
             } else {
                 (
-                    session.corporation_id.unwrap_or(0),
+                    None,
                     args.first().and_then(|a| a.as_i64()).unwrap_or(1).max(1) as usize,
                     args.get(1).and_then(|a| a.as_i64()).unwrap_or(50).max(1) as usize,
                 )
             };
-            let members = get_corp_member_snapshot(ctx, corp_id);
+            let (corp_id, viewer_id, has_director) = match require_corp_caller(ctx, session, target_cid) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let members = get_corp_member_snapshot(ctx, corp_id, viewer_id, has_director);
             let offset = (page.saturating_sub(1)) * page_size;
             let rows: Vec<Vec<PyRep>> = members.iter().skip(offset).take(page_size).map(member_row_rep).collect();
             Some(Ok(PyRep::rowset(MEMBER_COLS.to_vec(), rows)))
         }
 
         ("corpRegistry", "GetMembersByIds") => {
-            let _ = match ServerContext::require_character(session) {
+            let target_cid = args.first().and_then(|a| a.as_i64()).filter(|&id| id >= 98_000_000 || id == 1_000_009);
+            let (corp_id, viewer_id, has_director) = match require_corp_caller(ctx, session, target_cid) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let corp_id = args.first().and_then(|a| a.as_i64()).filter(|&id| id >= 98_000_000 || id == 1_000_009).or(session.corporation_id).unwrap_or(0);
             let target_ids: HashSet<i64> = match args.get(1).or_else(|| args.first()) {
                 Some(PyRep::List(l)) | Some(PyRep::Tuple(l)) => l.iter().filter_map(|x| x.as_i64()).collect(),
                 _ => HashSet::new(),
             };
-            let members = get_corp_member_snapshot(ctx, corp_id);
+            let members = get_corp_member_snapshot(ctx, corp_id, viewer_id, has_director);
             let rows: Vec<Vec<PyRep>> = members.iter().filter(|m| target_ids.contains(&m.0)).map(member_row_rep).collect();
             Some(Ok(PyRep::rowset(MEMBER_COLS.to_vec(), rows)))
         }
 
         ("corpRegistry", "GetMemberIDsByQuery") => {
-            let _ = match ServerContext::require_character(session) {
+            let target_cid = args.first().and_then(|a| a.as_i64()).filter(|&id| id >= 98_000_000 || id == 1_000_009);
+            let (corp_id, viewer_id, has_director) = match require_corp_caller(ctx, session, target_cid) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let corp_id = args.first().and_then(|a| a.as_i64()).filter(|&id| id >= 98_000_000 || id == 1_000_009).or(session.corporation_id).unwrap_or(0);
             let query = args.iter().find_map(|a| match a { PyRep::String(s) => Some(s.to_lowercase()), _ => None })
                 .or_else(|| kwargs.get("query").and_then(|v| match v { PyRep::String(s) => Some(s.to_lowercase()), _ => None }))
                 .unwrap_or_default();
-            let members = get_corp_member_snapshot(ctx, corp_id);
+            let members = get_corp_member_snapshot(ctx, corp_id, viewer_id, has_director);
             let rows: Vec<Vec<PyRep>> = members.into_iter()
                 .filter(|m| query.is_empty() || m.1.to_lowercase().contains(&query) || m.0.to_string().contains(&query))
                 .map(|m| vec![PyRep::Integer(m.0)]).collect();
@@ -492,27 +533,9 @@ pub(super) fn handle_corps(
         }
 
         ("corpRegistry", "UpdateMember") | ("corpRegistry", "UpdateMembers") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
+            let (corp_id, char_id, _) = match require_corp_caller(ctx, session, None) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
-            };
-            let db_corp_id = ctx.db.with_snapshot(|snap| {
-                snap.characters
-                    .get(&char_id)
-                    .map(|c| c.corporation_id)
-                    .filter(|cid| snap.corporations.contains_key(cid))
-            });
-            if let Some(cid) = db_corp_id {
-                session.corporation_id = Some(cid);
-            }
-            let corp_id = match session.corporation_id {
-                Some(c) => c,
-                None => {
-                    return Some(Err(BridgeRpcError {
-                        code: "NoCorporation".into(),
-                        message: "Character has no active corporation".into(),
-                    }))
-                }
             };
             let Some(target_char_id) = args.first().and_then(|a| a.as_i64()) else {
                 return Some(Err(BridgeRpcError {
@@ -723,12 +746,9 @@ pub(super) fn handle_corps(
                         for app in corp.applications.values() {
                             if app.character_id == char_id {
                                 out.push(vec![
-                                    PyRep::Integer(app.application_id),
-                                    PyRep::Integer(app.corporation_id),
-                                    PyRep::Integer(app.character_id),
-                                    PyRep::String(app.message.clone()),
-                                    PyRep::String(app.status.clone()),
-                                    PyRep::Integer(app.created_unix as i64),
+                                    PyRep::Integer(app.application_id), PyRep::Integer(app.corporation_id),
+                                    PyRep::Integer(app.character_id), PyRep::String(app.message.clone()),
+                                    PyRep::String(app.status.clone()), PyRep::Integer(app.created_unix as i64),
                                 ]);
                             }
                         }
@@ -736,59 +756,26 @@ pub(super) fn handle_corps(
                     out
                 });
                 return Some(Ok(PyRep::rowset(
-                    vec![
-                        "applicationID",
-                        "corporationID",
-                        "characterID",
-                        "message",
-                        "status",
-                        "createdDate",
-                    ],
+                    vec!["applicationID", "corporationID", "characterID", "message", "status", "createdDate"],
                     rows,
                 )));
             }
-            let corp_id = args
-                .first()
-                .and_then(|a| a.as_i64())
-                .or(session.corporation_id)
-                .unwrap_or(0);
+            let corp_id = args.first().and_then(|a| a.as_i64()).or(session.corporation_id).unwrap_or(0);
             let res = ctx.db.with_snapshot(|snap| {
                 let Some(corp) = snap.corporations.get(&corp_id) else {
-                    return Err(BridgeRpcError {
-                        code: "CorporationNotFound".into(),
-                        message: format!("Corporation {corp_id} not found"),
-                    });
+                    return Err(BridgeRpcError { code: "CorporationNotFound".into(), message: format!("Corporation {corp_id} not found") });
                 };
                 let caller_role = corp.member_roles.get(&char_id).copied().unwrap_or(0);
-                if char_id != corp.ceo_id
-                    && !corp_roles::has_role(caller_role, corp_roles::ROLE_PERSONNEL_MANAGER)
-                {
-                    return Err(BridgeRpcError {
-                        code: "CorpRoleDenied".into(),
-                        message: "Viewing applications requires Personnel Manager or Director role"
-                            .into(),
-                    });
+                if char_id != corp.ceo_id && !corp_roles::has_role(caller_role, corp_roles::ROLE_PERSONNEL_MANAGER) {
+                    return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Viewing applications requires Personnel Manager or Director role".into() });
                 }
-                let rows: Vec<Vec<PyRep>> = corp
-                    .applications
-                    .values()
-                    .map(|app| {
-                        vec![
-                            PyRep::Integer(app.application_id),
-                            PyRep::Integer(app.character_id),
-                            PyRep::String(app.message.clone()),
-                            PyRep::String(app.status.clone()),
-                            PyRep::Integer(app.created_unix as i64),
-                        ]
-                    })
-                    .collect();
+                let rows: Vec<Vec<PyRep>> = corp.applications.values().map(|app| {
+                    vec![PyRep::Integer(app.application_id), PyRep::Integer(app.character_id), PyRep::String(app.message.clone()), PyRep::String(app.status.clone()), PyRep::Integer(app.created_unix as i64)]
+                }).collect();
                 Ok(rows)
             });
             match res {
-                Ok(rows) => Some(Ok(PyRep::rowset(
-                    vec!["applicationID", "characterID", "message", "status", "createdDate"],
-                    rows,
-                ))),
+                Ok(rows) => Some(Ok(PyRep::rowset(vec!["applicationID", "characterID", "message", "status", "createdDate"], rows))),
                 Err(e) => Some(Err(e)),
             }
         }
@@ -912,13 +899,7 @@ pub(super) fn handle_corps(
                 if welcome.0 && !welcome.1.is_empty() {
                     snap.next_entity_id += 1;
                     let mid = snap.next_entity_id;
-                    snap.mails.push(MailRecord {
-                        message_id: mid,
-                        sender_id: ceo_id,
-                        recipient_id: applicant_id,
-                        subject: welcome.1,
-                        body: welcome.2,
-                    });
+                    snap.mails.push(MailRecord { message_id: mid, sender_id: ceo_id, recipient_id: applicant_id, subject: welcome.1, body: welcome.2 });
                     snap.mail_timestamps.insert(mid, now_unix);
                     snap.mail_assigned_labels.insert((applicant_id, mid), vec![1]);
                 }
@@ -930,31 +911,15 @@ pub(super) fn handle_corps(
                 Ok((corp_id, applicant_id, old_corp_id, status_str, app_msg, app_ts)) => {
                     if status_str == "Accepted" {
                         record_corp_join(applicant_id, corp_id, now_unix);
-                        let m_change = PyRep::Dict(vec![(
-                            PyRep::String(("corporationID").into()),
-                            PyRep::Tuple(vec![PyRep::Integer(old_corp_id), PyRep::Integer(corp_id)]),
-                        )]);
-                        ctx.notify(
-                            NotificationTarget::Corporation(corp_id),
-                            "OnCorporationMemberChanged",
-                            "corpid",
-                            vec![PyRep::Integer(corp_id), PyRep::Integer(applicant_id), m_change],
-                        );
+                        let m_change = PyRep::Dict(vec![(PyRep::String(("corporationID").into()), PyRep::Tuple(vec![PyRep::Integer(old_corp_id), PyRep::Integer(corp_id)]))]);
+                        ctx.notify(NotificationTarget::Corporation(corp_id), "OnCorporationMemberChanged", "corpid", vec![PyRep::Integer(corp_id), PyRep::Integer(applicant_id), m_change]);
                     }
                     let app_kv = PyRep::keyval([
-                        ("applicationID", PyRep::Integer(app_id)),
-                        ("corporationID", PyRep::Integer(corp_id)),
-                        ("characterID", PyRep::Integer(applicant_id)),
-                        ("applicationText", PyRep::String(app_msg)),
-                        ("status", PyRep::String(status_str.clone())),
-                        ("applicationDateTime", PyRep::Integer(app_ts as i64)),
+                        ("applicationID", PyRep::Integer(app_id)), ("corporationID", PyRep::Integer(corp_id)),
+                        ("characterID", PyRep::Integer(applicant_id)), ("applicationText", PyRep::String(app_msg)),
+                        ("status", PyRep::String(status_str.clone())), ("applicationDateTime", PyRep::Integer(app_ts as i64)),
                     ]);
-                    let app_args = vec![
-                        PyRep::Integer(corp_id),
-                        PyRep::Integer(applicant_id),
-                        PyRep::Integer(app_id),
-                        app_kv,
-                    ];
+                    let app_args = vec![PyRep::Integer(corp_id), PyRep::Integer(applicant_id), PyRep::Integer(app_id), app_kv.clone()];
                     if status_str != "Accepted" {
                         ctx.notify(
                             NotificationTarget::Character(applicant_id),

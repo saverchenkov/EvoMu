@@ -181,6 +181,7 @@ async fn test_corp_registry_kills_naming_and_owners() {
     // parity: rpc:corpRegistry.GetRecentKills
     // parity: rpc:corpRegistry.GetRecentLosses
     // parity: rpc:corpRegistry.GetEveOwners
+    // parity: rpc:corpRegistry.ExecuteActions
 
     let ctx = ServerContext::new();
     let mut sess = select_pilot(&ctx, 62_002, "demo", "demo-secret", PILOT_1).await;
@@ -227,11 +228,46 @@ async fn test_corp_registry_kills_naming_and_owners() {
             .is_err()
     );
 
-    // 2. ExecuteActions (verified baseline call)
-    let exec = rpc(&ctx, &mut sess, "corpRegistry", "ExecuteActions", &[])
+    // 2. ExecuteActions (verified state-backed batch execution)
+    let batch = vec![
+        PyRep::Tuple(vec![
+            PyRep::String("SetAccountKey".into()),
+            PyRep::Integer(PILOT_1),
+            PyRep::Integer(1002),
+        ]),
+        PyRep::Tuple(vec![
+            PyRep::String("SetNote".into()),
+            PyRep::Integer(PILOT_1),
+            PyRep::String("Lead Fleet Commander".into()),
+        ]),
+        PyRep::Tuple(vec![
+            PyRep::String("SetFriendlyFire".into()),
+            PyRep::Bool(true),
+        ]),
+    ];
+    let exec = rpc(&ctx, &mut sess, "corpRegistry", "ExecuteActions", &[PyRep::List(batch)])
         .await
-        .expect("ExecuteActions");
+        .expect("ExecuteActions batch");
     assert_eq!(exec, PyRep::Bool(true));
+    {
+        let g = eve_server::services::fleet_social::fleet_social_corps::CORP_GOV.lock().unwrap();
+        let state = g.get(&corp_id).unwrap();
+        assert_eq!(state.member_account_keys.get(&PILOT_1).copied(), Some(1002));
+        assert_eq!(state.member_notes.get(&PILOT_1).map(|s| s.as_str()), Some("Lead Fleet Commander"));
+        assert!(state.friendly_fire_legal);
+    }
+    // Denial when executing on external corporation
+    assert!(
+        rpc(
+            &ctx,
+            &mut sess,
+            "corpRegistry",
+            "ExecuteActions",
+            &[PyRep::Integer(98_999_999), PyRep::List(vec![])],
+        )
+        .await
+        .is_err()
+    );
 
     // 3. GetSuggestedTickerNames
     let tickers = rpc(

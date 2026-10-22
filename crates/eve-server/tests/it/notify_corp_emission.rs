@@ -940,8 +940,7 @@ async fn test_corp_registry_governance_structures_contacts_and_reinforce() {
     // 4. Bulletins (UpdateBulletinOrder, DeleteBulletin)
     let _b1 = ctx.dispatch_rpc(&mut s1, "corpRegistry", None, "AddBulletin", &[PyRep::String("Welcome".into()), PyRep::String("Fly safe".into())], &kw, None).await.expect("AddBulletin");
     let ord = ctx.dispatch_rpc(&mut s1, "corpRegistry", None, "UpdateBulletinOrder", &[PyRep::Integer(1), PyRep::Integer(0)], &kw, None).await.expect("UpdateBulletinOrder");
-    let PyRep::KeyVal(ord_kv) = ord else { panic!("expected KeyVal") };
-    assert_eq!(ord_kv.get("bulletinID"), Some(&PyRep::Integer(2)));
+    assert_eq!(ord, PyRep::Bool(true));
 
     let del_b = ctx.dispatch_rpc(&mut s1, "corpRegistry", None, "DeleteBulletin", &[PyRep::Integer(1)], &kw, None).await.expect("DeleteBulletin");
     let PyRep::KeyVal(db_kv) = del_b else { panic!("expected KeyVal") };
