@@ -60,7 +60,7 @@ async fn handle_cmd_unanchor(
     args: &[PyRep],
     kwargs: &HashMap<String, PyRep>,
 ) -> Result<PyRep, BridgeRpcError> {
-    let (_, _char_id) = ServerContext::require_character(session)?;
+    let (_, char_id) = ServerContext::require_character(session)?;
     let Some(sys_id) = session
         .solar_system_id
         .or_else(|| bound_entry.and_then(|b| u32::try_from(b.object_id).ok()))
@@ -68,6 +68,15 @@ async fn handle_cmd_unanchor(
         return Err(BridgeRpcError {
             code: "NoSolarSystem".into(),
             message: "Session has no active solar system".into(),
+        });
+    };
+    let Some(ship_id) = session.ship_id.or_else(|| {
+        ctx.db
+            .with_snapshot(|s| s.characters.get(&char_id).map(|c| c.active_ship_id))
+    }) else {
+        return Err(BridgeRpcError {
+            code: "NoActiveShip".into(),
+            message: "Session has no active ship".into(),
         });
     };
 
@@ -96,6 +105,48 @@ async fn handle_cmd_unanchor(
             message: format!("Target ball {target_id} is not in space in system {sys_id}"),
         });
     };
+
+    let ship_pos = sys_handle
+        .get_ball_snapshot(ship_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|(_, b)| b.position)
+        .unwrap_or(glam::DVec3::ZERO);
+    let dist = ship_pos.distance(target_ball.position);
+    if dist > 5_000.0 {
+        return Err(BridgeRpcError {
+            code: "TargetOutOfRange".into(),
+            message: format!("Target {target_id} is {dist:.1} m away (max interaction distance 5,000 m)"),
+        });
+    }
+
+    let caller_corp_id = session.corporation_id;
+    let is_owner = with_combat_runtime(ctx, |rt| {
+        if let Some(d) = rt.active_drones_in_space.get(&target_id) {
+            return Some(d.owner_char_id == char_id);
+        }
+        None
+    })
+    .unwrap_or_else(|| {
+        ctx.db.with_snapshot(|snap| {
+            if let Some(item) = snap.items.get(&target_id) {
+                return item.owner_id == char_id
+                    || caller_corp_id.is_some_and(|cid| item.owner_id == cid);
+            }
+            if let Some(st) = snap.structures.get(&target_id) {
+                return caller_corp_id.is_some_and(|cid| st.owner_corp_id == cid);
+            }
+            false
+        })
+    });
+
+    if !is_owner {
+        return Err(BridgeRpcError {
+            code: "AccessDenied".into(),
+            message: format!("Character {char_id} does not own entity {target_id}"),
+        });
+    }
 
     let _ = sys_handle.set_movement_mode(target_id, MovementMode::Stop).await;
     let _ = sys_handle
@@ -136,6 +187,13 @@ fn handle_enable_behavior_debugging(
         rt.behavior_debugging_active.insert(entity_id);
     });
 
+    tracing::info!(
+        target: "ai::behavior",
+        char_id,
+        entity_id,
+        "Enabled AI behavior debugging trace"
+    );
+
     Ok(PyRep::keyval([
         ("behaviorDebuggingEnabled", PyRep::Bool(true)),
         ("targetEntityID", PyRep::Integer(entity_id)),
@@ -158,6 +216,13 @@ fn handle_disable_behavior_debugging(
     with_mut_combat_runtime(ctx, |rt| {
         rt.behavior_debugging_active.remove(&entity_id);
     });
+
+    tracing::info!(
+        target: "ai::behavior",
+        char_id,
+        entity_id,
+        "Disabled AI behavior debugging trace"
+    );
 
     Ok(PyRep::keyval([
         ("behaviorDebuggingEnabled", PyRep::Bool(false)),

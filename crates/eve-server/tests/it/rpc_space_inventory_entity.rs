@@ -129,6 +129,70 @@ async fn test_space_cyno_and_inventory_vault_containers() {
         .expect("GetCynoJammerState cleared");
     assert_eq!(dict_get(&cleared_state, "isJammed"), Some(&PyRep::Bool(false)));
 
+    // Deploy Pharolux Cyno Beacon (35841) -> beacon allows cyno generation and does NOT jam
+    let beacon_structure_id = 920_002;
+    ctx.db.with_mut_snapshot(|s| {
+        s.structures.insert(
+            beacon_structure_id,
+            eve_db::UpwellStructureRecord {
+                structure_id: beacon_structure_id,
+                type_id: 35841, // Pharolux Cyno Beacon
+                owner_corp_id: 1_000_170,
+                solar_system_id: SYS_JITA,
+                name: "Pharolux Beacon".into(),
+                position: [1_000.0, 1_000.0, 1_000.0],
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 100,
+                shield_hp: 1.0,
+                armor_hp: 1.0,
+                hull_hp: 1.0,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+            },
+        );
+    });
+    let beacon_state = rpc_call(&ctx, &mut sess, "beyonce", "GetCynoJammerState", &[], &kw)
+        .await
+        .expect("GetCynoJammerState with beacon");
+    assert_eq!(dict_get(&beacon_state, "isJammed"), Some(&PyRep::Bool(false)));
+
+    // Deploy Tenebrex Cyno Jammer (37534) -> flex jammer actively jams system cynos
+    let jammer_structure_id = 920_003;
+    ctx.db.with_mut_snapshot(|s| {
+        s.structures.insert(
+            jammer_structure_id,
+            eve_db::UpwellStructureRecord {
+                structure_id: jammer_structure_id,
+                type_id: 37534, // Tenebrex Cyno Jammer
+                owner_corp_id: 1_000_170,
+                solar_system_id: SYS_JITA,
+                name: "Tenebrex Jammer".into(),
+                position: [2_000.0, 2_000.0, 2_000.0],
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 100,
+                shield_hp: 1.0,
+                armor_hp: 1.0,
+                hull_hp: 1.0,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+            },
+        );
+    });
+    let tenebrex_state = rpc_call(&ctx, &mut sess, "beyonce", "GetCynoJammerState", &[], &kw)
+        .await
+        .expect("GetCynoJammerState with Tenebrex");
+    assert_eq!(dict_get(&tenebrex_state, "isJammed"), Some(&PyRep::Bool(true)));
+
+    // Clean up structures
+    ctx.db.with_mut_snapshot(|s| {
+        s.structures.remove(&beacon_structure_id);
+        s.structures.remove(&jammer_structure_id);
+    });
+
     // 3. rpc:invbroker.WithdrawPlexFromVault: credit vault with 500 PLEX
     ctx.db.with_mut_snapshot(|s| {
         let cur = s.plex_vault_balance(char_id);
@@ -194,6 +258,19 @@ async fn test_space_cyno_and_inventory_vault_containers() {
     .await
     .unwrap_err();
     assert_eq!(withdraw_excess.code, "NotEnoughPlex");
+
+    // Attempting to withdraw to a remote location where pilot is not docked returns NotDockedAtLocation
+    let remote_loc_err = rpc_call(
+        &ctx,
+        &mut sess,
+        "invbroker",
+        "WithdrawPlexFromVault",
+        &[PyRep::Integer(60_000_001), PyRep::Integer(10)], // remote station
+        &kw,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(remote_loc_err.code, "NotDockedAtLocation");
 
     // 4. rpc:invbroker.ValidateItemCanBeOpened and rpc:invbroker.ValidateItemListCanBeOpened:
     // Create packaged container item (singleton = false)
@@ -557,6 +634,38 @@ async fn test_entity_drone_space_commands() {
     });
     assert_eq!(reconnected_owner, Some((false, char_id)));
 
+    // A drone farther than 250km is out of control range and cannot be reconnected
+    let distant_drone_id = 930_995;
+    let _ = sys_handle
+        .spawn_ball(Ball {
+            id: distant_drone_id,
+            type_id: HOBGOBLIN_I,
+            position: DVec3::new(300_000.0, 0.0, 0.0), // 290km away from ship at 10km
+            velocity: DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 1.0,
+            mass: 1000.0,
+            radius: 10.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await;
+    with_mut_combat_runtime(&ctx, |rt| {
+        let mut d = rt.active_drones_in_space.get(&drone_ball_id).cloned().expect("drone");
+        d.ball_id = distant_drone_id;
+        d.drone_item_id = distant_drone_id;
+        d.is_abandoned = true;
+        rt.active_drones_in_space.insert(distant_drone_id, d);
+    });
+    let reconnect_distant = rpc_call(&ctx, &mut sess, "entity", "CmdReconnectToDrones", &[], &kw)
+        .await
+        .expect("CmdReconnectToDrones distant check");
+    let rec_distant_ids: Vec<i64> = match reconnect_distant {
+        PyRep::List(l) => l.iter().filter_map(|x| x.as_i64()).collect(),
+        _ => Vec::new(),
+    };
+    assert!(!rec_distant_ids.contains(&distant_drone_id), "Distant drone > 250km cannot be reconnected");
+
     // 6. rpc:entity.CmdSalvage: command salvage drone to salvage an in-space wreck
     let wreck_id = 930_600;
     let _ = sys_handle
@@ -617,6 +726,95 @@ async fn test_entity_drone_space_commands() {
     assert_eq!(dict_get(&unanchor_res, "targetID"), Some(&PyRep::Integer(drone_ball_id)));
     assert_eq!(dict_get(&unanchor_res, "unanchored"), Some(&PyRep::Bool(true)));
     assert_eq!(dict_get(&unanchor_res, "isDrone"), Some(&PyRep::Bool(true)));
+
+    // Out of range unanchor (> 5,000m) rejects with TargetOutOfRange
+    let distant_unanchor_id = 930_990;
+    let _ = sys_handle
+        .spawn_ball(Ball {
+            id: distant_unanchor_id,
+            type_id: HOBGOBLIN_I,
+            position: DVec3::new(30_000.0, 0.0, 0.0), // 20km away from ship at 10km
+            velocity: DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 1.0,
+            mass: 1000.0,
+            radius: 10.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await;
+    ctx.db.with_mut_snapshot(|s| {
+        s.items.insert(
+            distant_unanchor_id,
+            InventoryItemRecord {
+                item_id: distant_unanchor_id,
+                type_id: HOBGOBLIN_I,
+                owner_id: char_id,
+                location_id: SYS_JITA as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+    let range_err = rpc_call(
+        &ctx,
+        &mut sess,
+        "entity",
+        "CmdUnanchor",
+        &[PyRep::Integer(distant_unanchor_id)],
+        &kw,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(range_err.code, "TargetOutOfRange");
+
+    // Unowned entity unanchor rejects with AccessDenied
+    let other_pilot_id = 90_000_002;
+    let unowned_ball_id = 930_991;
+    let _ = sys_handle
+        .spawn_ball(Ball {
+            id: unowned_ball_id,
+            type_id: HOBGOBLIN_I,
+            position: DVec3::new(10_100.0, 0.0, 0.0), // 100m away from ship
+            velocity: DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 1.0,
+            mass: 1000.0,
+            radius: 10.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await;
+    ctx.db.with_mut_snapshot(|s| {
+        s.items.insert(
+            unowned_ball_id,
+            InventoryItemRecord {
+                item_id: unowned_ball_id,
+                type_id: HOBGOBLIN_I,
+                owner_id: other_pilot_id,
+                location_id: SYS_JITA as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+    let access_err = rpc_call(
+        &ctx,
+        &mut sess,
+        "entity",
+        "CmdUnanchor",
+        &[PyRep::Integer(unowned_ball_id)],
+        &kw,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(access_err.code, "AccessDenied");
 }
 
 #[tokio::test]

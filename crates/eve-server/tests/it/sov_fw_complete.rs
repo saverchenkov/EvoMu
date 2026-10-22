@@ -11,7 +11,7 @@ use eve_proto::PyRep;
 use eve_server::router::ServerContext;
 use eve_server::services::fw_services::{self, HQ_SYSTEM_AMO, HQ_SYSTEM_INTAKI, HQ_SYSTEM_MEHATOOR, HQ_SYSTEM_ONNAMON};
 use eve_server::services::insurgency_services;
-use eve_server::services::sov_services::{self, TYPE_ORBITAL_SKYHOOK, TYPE_PHAROLUX_CYNO_BEACON, TYPE_SOVEREIGNTY_HUB};
+use eve_server::services::sov_services::{self, TYPE_ORBITAL_SKYHOOK, TYPE_SOVEREIGNTY_HUB, TYPE_TENEBREX_CYNO_JAMMER};
 use eve_server::services::station_structure::structure_lifecycle as life;
 use std::collections::{HashMap, HashSet};
 
@@ -613,7 +613,7 @@ async fn sov_hub_vulnerability_fuel_jammer_sites_and_hacking() {
             jammer_id,
             UpwellStructureRecord {
                 structure_id: jammer_id,
-                type_id: TYPE_PHAROLUX_CYNO_BEACON,
+                type_id: TYPE_TENEBREX_CYNO_JAMMER,
                 owner_corp_id: corp_id,
                 solar_system_id: sys_id,
                 name: "Cyno Jammer".into(),

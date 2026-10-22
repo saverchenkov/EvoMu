@@ -424,6 +424,40 @@ pub async fn apply_damage_to_drone_in_space(
 }
 
 
+fn pilot_drone_capacity(
+    ctx: &ServerContext,
+    char_id: i64,
+    ship_id: i64,
+    ship_fit: Option<&eve_dogma::ShipFittingEngine>,
+) -> (usize, f64) {
+    let max_drones = ctx.db.with_snapshot(|s| {
+        s.skills.get(&char_id).and_then(|m| m.get(&3436)).map(|sk| (sk.level as usize).clamp(1, 5)).unwrap_or(5)
+    });
+    let triage = ship_fit.is_some_and(|f| {
+        f.modules.values().any(|m| {
+            matches!(m.state, eve_dogma::ModuleState::Active | eve_dogma::ModuleState::Overloaded)
+                && matches!(m.type_id, 27951 | 4294)
+        })
+    });
+    let bw = if triage {
+        0.0
+    } else {
+        ship_fit
+            .map(|f| f.ship.get_attribute(1271, &ctx.sde))
+            .filter(|&b| b > 0.0)
+            .unwrap_or_else(|| {
+                ctx.db.with_snapshot(|s| {
+                    s.items
+                        .get(&ship_id)
+                        .and_then(|i| ctx.sde.types.get(&i.type_id))
+                        .and_then(|t| t.default_attributes.get(&1271).copied())
+                })
+                .unwrap_or(50.0)
+            })
+    };
+    (max_drones, bw)
+}
+
 /// Handles all V24 client Drone RPCs (`ship.LaunchDrones`, `ship.ScoopToDroneBay`, `entity.CmdReturnBay`,
 /// `entity.CmdReturnHome`, `entity.CmdReturnAndOrbit`, `entity.CmdEngage`, `entity.CmdAssist`, `entity.CmdGuard`,
 /// `entity.ChangeDroneSettings`, `entity.SetAggressive`, `entity.CmdAbandonDrone`, `entity.CmdReconnectToDrones`, `entity.CmdSalvage`).
@@ -464,15 +498,13 @@ pub async fn handle_npcs_drones(
                 _ => Vec::new(),
             };
 
-            // Check pilot max active drones from Drones skill (`3436`, 1 per level up to 5; defaults to 5 if not explicitly restricted)
-            let max_drones_allowed = ctx.db.with_snapshot(|snap| {
-                snap.skills
-                    .get(&char_id)
-                    .and_then(|m| m.get(&3436))
-                    .map(|s| (s.level as usize).clamp(1, 5))
-                    .unwrap_or(5)
-            });
-
+            let mut ship_fit_opt = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).ok();
+            let snap_type_id = ctx.db.with_snapshot(|snap| snap.items.get(&ship_id).map(|s| s.type_id)).unwrap_or(0);
+            if snap_type_id > 0 && ship_fit_opt.as_ref().map(|f| f.ship.type_id) != Some(snap_type_id) {
+                ctx.invalidate_ship_fitting(ship_id);
+                ship_fit_opt = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).ok();
+            }
+            let (max_drones_allowed, ship_bw) = pilot_drone_capacity(ctx, char_id, ship_id, ship_fit_opt.as_ref());
             let (cur_count, cur_bw) = with_combat_runtime(ctx, |rt| {
                 let active: Vec<&DroneSpaceState> = rt
                     .active_drones_in_space
@@ -491,42 +523,6 @@ pub async fn handle_npcs_drones(
                     ),
                 }));
             }
-
-            let mut ship_fit_opt = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).ok();
-            let snap_type_id = ctx.db.with_snapshot(|snap| snap.items.get(&ship_id).map(|s| s.type_id)).unwrap_or(0);
-            if snap_type_id > 0 && ship_fit_opt.as_ref().map(|f| f.ship.type_id) != Some(snap_type_id) {
-                ctx.invalidate_ship_fitting(ship_id);
-                ship_fit_opt = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).ok();
-            }
-            let triage_active = ship_fit_opt
-                .as_ref()
-                .map(|f| {
-                    f.modules.values().any(|m| {
-                        matches!(
-                            m.state,
-                            eve_dogma::ModuleState::Active
-                                | eve_dogma::ModuleState::Overloaded
-                        ) && matches!(m.type_id, 27951 | 4294)
-                    })
-                })
-                .unwrap_or(false);
-            let ship_bw = if triage_active {
-                0.0
-            } else {
-                ship_fit_opt
-                    .as_ref()
-                    .map(|f| f.ship.get_attribute(1271, &ctx.sde))
-                    .filter(|&bw| bw > 0.0)
-                    .or_else(|| {
-                        ctx.db.with_snapshot(|snap| {
-                            snap.items
-                                .get(&ship_id)
-                                .and_then(|s| ctx.sde.types.get(&s.type_id))
-                                .and_then(|t| t.default_attributes.get(&1271).copied())
-                        })
-                    })
-                    .unwrap_or(50.0)
-            };
 
             let drone_records: Vec<InventoryItemRecord> = match ctx.db.with_snapshot(|snap| {
                 let mut recs = Vec::new();
@@ -1269,33 +1265,76 @@ pub async fn handle_npcs_drones(
                     message: "Session has no active solar system".into(),
                 }));
             };
-            let _ = ctx
-                .db
-                .with_snapshot(|s| s.characters.get(&char_id).map(|c| c.character_id));
+
+            let mut ship_fit_opt = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).ok();
+            let snap_type_id = ctx.db.with_snapshot(|snap| snap.items.get(&ship_id).map(|s| s.type_id)).unwrap_or(0);
+            if snap_type_id > 0 && ship_fit_opt.as_ref().map(|f| f.ship.type_id) != Some(snap_type_id) {
+                ctx.invalidate_ship_fitting(ship_id);
+                ship_fit_opt = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).ok();
+            }
+            let (max_drones_allowed, ship_bw) = pilot_drone_capacity(ctx, char_id, ship_id, ship_fit_opt.as_ref());
+            let (mut cur_count, mut cur_bw) = with_combat_runtime(ctx, |rt| {
+                let active: Vec<&DroneSpaceState> = rt
+                    .active_drones_in_space
+                    .values()
+                    .filter(|d| d.parent_ship_id == ship_id && !d.is_abandoned)
+                    .collect();
+                (active.len(), active.iter().map(|d| d.bandwidth_used).sum::<f64>())
+            });
+
+            let sys_handle = ctx.systems.get_or_spawn(sys_id);
+            let ship_pos = sys_handle
+                .get_ball_snapshot(ship_id)
+                .await
+                .ok()
+                .flatten()
+                .map(|(_, b)| b.position)
+                .unwrap_or(glam::DVec3::ZERO);
+
+            let candidates: Vec<(i64, f64, u32)> = with_combat_runtime(ctx, |rt| {
+                rt.active_drones_in_space
+                    .values()
+                    .filter(|d| d.solar_system_id == sys_id && d.is_abandoned && d.original_owner_char_id == char_id)
+                    .map(|d| (d.ball_id, d.bandwidth_used, d.type_id))
+                    .collect()
+            });
+
             let mut reconnected = Vec::new();
-            with_mut_combat_runtime(ctx, |rt| {
-                for d in rt.active_drones_in_space.values_mut() {
-                    if d.solar_system_id == sys_id
-                        && d.is_abandoned
-                        && d.original_owner_char_id == char_id
-                        && reconnected.len() < 5
-                    {
+            for (bid, bw, tid) in candidates {
+                if cur_count >= max_drones_allowed || cur_bw + bw > ship_bw {
+                    continue;
+                }
+                let drone_pos = sys_handle
+                    .get_ball_snapshot(bid)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|(_, b)| b.position);
+                if let Some(pos) = drone_pos {
+                    if pos.distance(ship_pos) > 250_000.0 {
+                        continue;
+                    }
+                }
+                with_mut_combat_runtime(ctx, |rt| {
+                    if let Some(d) = rt.active_drones_in_space.get_mut(&bid) {
                         d.is_abandoned = false;
                         d.owner_char_id = char_id;
                         d.parent_ship_id = ship_id;
-                        reconnected.push(d.ball_id);
+                        cur_count += 1;
+                        cur_bw += bw;
+                        reconnected.push((bid, tid));
                     }
-                }
-            });
-            let sys_handle = ctx.systems.get_or_spawn(sys_id);
-            for &bid in &reconnected {
+                });
+            }
+
+            for &(bid, tid) in &reconnected {
                 let _ = sys_handle.emit_destiny_event(bid, eve_destiny::DestinyEvent::OnDroneStateChange {
                     drone_id: bid, owner_id: char_id, controller_id: ship_id, activity_state: 0,
-                    type_id: 0, controller_owner_id: char_id, target_id: None,
+                    type_id: tid, controller_owner_id: char_id, target_id: None,
                 }).await;
             }
             Some(Ok(PyRep::List(
-                reconnected.into_iter().map(PyRep::Integer).collect(),
+                reconnected.into_iter().map(|(bid, _)| PyRep::Integer(bid)).collect(),
             )))
         }
 

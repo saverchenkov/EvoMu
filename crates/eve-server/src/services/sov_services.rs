@@ -15,6 +15,7 @@ pub const TYPE_ORBITAL_SKYHOOK: u32 = 81080;
 pub const TYPE_SOVEREIGNTY_HUB: u32 = 32458;
 /// SDE Type ID for Pharolux Cyno Beacon.
 pub const TYPE_PHAROLUX_CYNO_BEACON: u32 = 35840;
+pub const TYPE_TENEBREX_CYNO_JAMMER: u32 = 37534;
 
 /// Reagents produced by Skyhooks: Magmatic Gas (81143) and Superionic Ice (81144).
 pub const TYPE_MAGMATIC_GAS: u32 = 81143;
@@ -511,7 +512,13 @@ pub async fn handle(
             let (is_jammed, cyno_suppressed, inhibitor_active) = ctx.db.with_snapshot(|snap| {
                 let structure_jammed = snap.structures.values().any(|s| {
                     s.solar_system_id == sys_id
-                        && (s.type_id == TYPE_PHAROLUX_CYNO_BEACON || s.type_id == 81926 || s.type_id == 35841)
+                        && (s.type_id == TYPE_TENEBREX_CYNO_JAMMER
+                            || s.type_id == 81926
+                            || ctx.sde.types.get(&s.type_id).is_some_and(|t| {
+                                t.default_attributes.get(&3038).copied().unwrap_or(0.0) > 0.0
+                            }))
+                        && s.type_id != TYPE_PHAROLUX_CYNO_BEACON
+                        && s.type_id != 35841
                         && s.state != "Destroyed"
                         && s.state != "Anchoring"
                         && s.fuel_blocks > 0

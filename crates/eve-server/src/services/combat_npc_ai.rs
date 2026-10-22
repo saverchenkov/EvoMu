@@ -13,6 +13,7 @@
 use super::*;
 use eve_db::WalletJournalEntry;
 use eve_destiny::{Ball, MovementMode};
+use tracing::info;
 
 /// Spawns a specialized NPC combat entity from SDE (`feat:npc.drifters`, `feat:npc.triglavians`, `feat:npc.sleepers`,
 /// `feat:npc.edencom-npc`, `feat:npc.rogue-drones`, `feat:npc.incursion-npc`, `feat:npc.navy-npc`,
@@ -219,6 +220,22 @@ pub async fn step_extended_npc_ai(ctx: &ServerContext, solar_system_id: u32) {
             });
             continue;
         };
+
+        let is_debugged = with_combat_runtime(ctx, |rt| {
+            rt.behavior_debugging_active.contains(&nid)
+                || rt.behavior_debugging_active.contains(&(solar_system_id as i64))
+                || !rt.behavior_debugging_active.is_empty()
+        });
+        if is_debugged {
+            info!(
+                target: "ai::behavior",
+                npc_id = nid,
+                solar_system_id,
+                archetype = %npc.archetype,
+                target_id = ?npc.target_id,
+                "NPC behavior decision execution tick"
+            );
+        }
 
         // 0. Sleeper spawn leash (`feat:npc.sleeper-capacitor-immunity-and-leash`):
         // Pulling a Sleeper > 200 km from its spawn position triggers immediate teleport back to spawn.

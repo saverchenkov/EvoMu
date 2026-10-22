@@ -394,8 +394,16 @@ fn withdraw_plex(
 
     let (target_location, target_flag) = match location_id_opt {
         Some(loc) => {
+            let is_docked = session.station_id == Some(loc) || session.structure_id == Some(loc);
+            let is_active_ship = session.ship_id == Some(loc);
+            if !is_docked && !is_active_ship {
+                return Err(rpc_err(
+                    "NotDockedAtLocation",
+                    "PLEX can only be withdrawn into your current station hangar, structure hangar, or active ship cargo",
+                ));
+            }
             let fl = flag_opt.map(|f| InventoryFlag::from_u16(f as u16)).unwrap_or_else(|| {
-                if Some(loc) == session.ship_id {
+                if is_active_ship {
                     InventoryFlag::Cargo
                 } else {
                     InventoryFlag::Hangar
@@ -409,7 +417,10 @@ fn withdraw_plex(
             } else if let Some(ship_id) = session.ship_id {
                 (ship_id, InventoryFlag::Cargo)
             } else {
-                return Err(rpc_err("NoValidLocation", "No active station, structure, or ship location found"));
+                return Err(rpc_err(
+                    "NotDockedAtLocation",
+                    "PLEX can only be withdrawn into your current station hangar, structure hangar, or active ship cargo",
+                ));
             }
         }
     };
