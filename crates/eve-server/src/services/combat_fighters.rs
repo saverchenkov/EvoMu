@@ -1014,22 +1014,6 @@ pub async fn handle_fighters(
                 squad
             };
 
-            let has_fighter_bay = ctx.db.with_snapshot(|snap| {
-                let ship_type = snap.items.get(&ship_id).map(|s| s.type_id).unwrap_or(0);
-                let dogma_bay = ctx.sde.types.get(&ship_type).map(|t| {
-                    t.default_attributes.get(&2055).copied().unwrap_or(0.0) > 0.0
-                        || t.default_attributes.get(&2216).copied().unwrap_or(0.0) > 0.0
-                }).unwrap_or(false);
-                dogma_bay
-                    || snap.items.values().any(|it| it.location_id == ship_id && it.flag == InventoryFlag::FighterBay)
-            });
-            if !has_fighter_bay {
-                return Some(Err(BridgeRpcError {
-                    code: "NoFighterBay".into(),
-                    message: "Caller ship has no fighter bay capacity".into(),
-                }));
-            }
-
             let f_pos = ctx.systems.get_ball_position_sync(sys_id, squad.ball_id);
             let s_pos = ctx.systems.get_ball_position_sync(sys_id, ship_id);
             let Some(f_pos) = f_pos else {
@@ -1052,18 +1036,53 @@ pub async fn handle_fighters(
                 }));
             }
 
+            let db_res = ctx.db.try_with_mut_snapshot(|snap| {
+                let ship_type = snap.items.get(&ship_id).map(|s| s.type_id).unwrap_or(0);
+                let bay_capacity = ctx.sde.types.get(&ship_type).and_then(|t| {
+                    t.default_attributes.get(&2055).copied().or_else(|| t.default_attributes.get(&2216).copied())
+                }).unwrap_or(0.0);
+                let has_fighter_bay = bay_capacity > 0.0
+                    || snap.items.values().any(|it| it.location_id == ship_id && it.flag == InventoryFlag::FighterBay);
+                if !has_fighter_bay {
+                    return Err(BridgeRpcError {
+                        code: "NoFighterBay".into(),
+                        message: "Caller ship has no fighter bay capacity".into(),
+                    });
+                }
+                let fighter_unit_vol = ctx.sde.types.get(&squad.type_id).map(|t| t.volume).unwrap_or(100.0);
+                let squad_size = snap.items.get(&squad.item_id).map(|it| it.quantity as f64).unwrap_or(1.0);
+                let total_fighter_vol = fighter_unit_vol * squad_size;
+                let current_used_vol: f64 = snap.items.values()
+                    .filter(|it| it.location_id == ship_id && it.flag == InventoryFlag::FighterBay)
+                    .map(|it| {
+                        let unit_v = ctx.sde.types.get(&it.type_id).map(|t| t.volume).unwrap_or(100.0);
+                        unit_v * (it.quantity as f64)
+                    })
+                    .sum();
+                if bay_capacity > 0.0 && current_used_vol + total_fighter_vol > bay_capacity {
+                    return Err(BridgeRpcError {
+                        code: "FighterBayFull".into(),
+                        message: format!("Fighter bay volume full: requires {total_fighter_vol:.1}m3, available {:.1}m3", bay_capacity - current_used_vol),
+                    });
+                }
+
+                // DB update FIRST before in-memory active fighter removal
+                if let Some(item) = snap.items.get_mut(&squad.item_id) {
+                    item.location_id = ship_id;
+                    item.owner_id = char_id;
+                    item.flag = InventoryFlag::FighterBay;
+                    item.version += 1;
+                }
+                Ok(())
+            });
+            if let Err(e) = db_res {
+                return Some(Err(e));
+            }
+
             {
                 let mut fighters = ctx.active_fighters.write().unwrap();
                 fighters.remove(&target_fighter_id);
             }
-
-            ctx.db.with_mut_snapshot(|snap| {
-                if let Some(item) = snap.items.get_mut(&squad.item_id) {
-                    item.location_id = ship_id;
-                    item.flag = InventoryFlag::FighterBay;
-                    item.version += 1;
-                }
-            });
             let sys_handle = ctx.systems.get_or_spawn(sys_id);
             let _ = sys_handle.remove_ball(squad.ball_id).await;
             Some(Ok(PyRep::Bool(true)))

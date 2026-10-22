@@ -340,8 +340,8 @@ pub async fn handle(
                         let (phase, end_time) = get_campaign_phase_and_timer(c, now);
                         let c_pts = c.corruption_points.get(&sys_id).copied().unwrap_or(0);
                         let s_pts = c.suppression_points.get(&sys_id).copied().unwrap_or(0);
-                        let c_stage = ((c_pts as f64 / 200.0).ceil() as u8).clamp(1, 5);
-                        let s_stage = ((s_pts as f64 / 200.0).ceil() as u8).clamp(1, 5);
+                        let c_stage = if c_pts == 0 { 0 } else { ((c_pts as f64 / 200.0).ceil() as u8).clamp(1, 5) };
+                        let s_stage = if s_pts == 0 { 0 } else { ((s_pts as f64 / 200.0).ceil() as u8).clamp(1, 5) };
                         let is_fob = c.fob_solar_system_id == sys_id;
 
                         PyRep::keyval([
