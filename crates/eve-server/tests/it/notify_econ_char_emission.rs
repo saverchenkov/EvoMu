@@ -187,6 +187,34 @@ async fn test_skills_implants_boosters_respec_clones_and_insurance_notifications
     let extractor_id = 910_002i64;
     seed_item(&ctx, extractor_id, 40519, P1, STATION_JITA, InventoryFlag::Hangar, 1, true);
     let extract_map = vec![(PyRep::Integer(skill_tid as i64), PyRep::Integer(256_000))];
+
+    // EVOMU-P0-01: verify missing/invalid extractor, wrong owner, wrong type, and insufficient SP are rejected
+    let err_missing = ctx.dispatch_rpc(&mut s1, "skillMgr2", None, "ExtractSkills", &[PyRep::Dict(extract_map.clone()), PyRep::None], &HashMap::new(), None).await;
+    assert_eq!(err_missing.unwrap_err().code, "MissingSkillExtractor");
+
+    let stolen_extractor = 910_003i64;
+    seed_item(&ctx, stolen_extractor, 40519, P2, STATION_JITA, InventoryFlag::Hangar, 1, false);
+    let err_owner = ctx.dispatch_rpc(&mut s1, "skillMgr2", None, "ExtractSkills", &[PyRep::Dict(extract_map.clone()), PyRep::Integer(stolen_extractor)], &HashMap::new(), None).await;
+    assert_eq!(err_owner.unwrap_err().code, "MissingSkillExtractor");
+
+    let wrong_type = 910_004i64;
+    seed_item(&ctx, wrong_type, 3300, P1, STATION_JITA, InventoryFlag::Hangar, 1, false);
+    let err_type = ctx.dispatch_rpc(&mut s1, "skillMgr2", None, "ExtractSkills", &[PyRep::Dict(extract_map.clone()), PyRep::Integer(wrong_type)], &HashMap::new(), None).await;
+    assert_eq!(err_type.unwrap_err().code, "MissingSkillExtractor");
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&P1) {
+            ch.free_skill_points = 0.0;
+        }
+    });
+    let err_sp = ctx.dispatch_rpc(&mut s1, "skillMgr2", None, "ExtractSkills", &[PyRep::Dict(extract_map.clone()), PyRep::Integer(extractor_id)], &HashMap::new(), None).await;
+    assert_eq!(err_sp.unwrap_err().code, "InsufficientSkillPoints");
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&P1) {
+            ch.free_skill_points = 344_000.0;
+        }
+    });
+
     call(
         &ctx,
         &mut s1,
@@ -204,6 +232,11 @@ async fn test_skills_implants_boosters_respec_clones_and_insurance_notifications
     assert_eq!(rem_dict[0].0, PyRep::Integer(skill_tid as i64));
     assert_eq!(rem_dict[0].1.dict_get("typeID"), Some(&PyRep::Integer(skill_tid as i64)));
     assert!(ctx.drain_notifications_for_char(P2).is_empty());
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.items.contains_key(&extractor_id), "extractor must be consumed from hangar");
+        let has_injector = snap.items.values().any(|it| it.owner_id == P1 && it.type_id == 40520);
+        assert!(has_injector, "Large Skill Injector (type 40520) must be minted");
+    });
 
     // 2. RespecCharacter -> OnRespecInfoChanged()
     call(

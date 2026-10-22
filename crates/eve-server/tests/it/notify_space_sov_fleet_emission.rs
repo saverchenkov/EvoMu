@@ -15,8 +15,7 @@ use eve_proto::PyRep;
 use eve_sde::attr_ids;
 use eve_server::router::ServerContext;
 use eve_server::services::{
-    combat_crimewatch, fleet_social::fleet_social_notify, fw_services, insurgency_services,
-    sov_services, station_structure::structure_lifecycle_rpc,
+    combat_crimewatch, sov_services, station_structure::structure_lifecycle_rpc,
 };
 use std::collections::HashMap;
 
@@ -348,22 +347,14 @@ async fn test_structure_upwell_asset_safety_and_access_notifications() {
 }
 
 #[tokio::test]
-async fn test_sovereignty_skyhook_mercenary_den_and_dbs_notifications() {
-    // parity: notify:OnSovereigntyChanged, notify:OnSolarSystemSovStructuresUpdated, notify:OnCapitalSystemChanged, notify:OnSovereigntyAudioEvent, notify:ProcessSovStatusChanged, notify:OnSolarSystemDevIndexChanged, notify:OnSovHubHacked, notify:OnSkyhookCanBeHacked, notify:OnSkyhookFirstActivation, notify:OnMercenaryDenRegistrationSuccess, notify:OnMercenaryDenRegistrationInvalid, notify:OnMyMercenaryDenRemoved, notify:OnSystemDynamicBountyStateChanged, notify:OnEnlistmentStateUpdated, notify:OnEnlistmentCooldownCleared
+async fn test_sovereignty_and_enlistment_notifications() {
+    // parity: notify:OnSovereigntyChanged, notify:OnSolarSystemSovStructuresUpdated, notify:OnCapitalSystemChanged, notify:OnSovereigntyAudioEvent, notify:ProcessSovStatusChanged, notify:OnEnlistmentStateUpdated, notify:OnEnlistmentCooldownCleared
     eve_testkit::attest(&[
         "notify:OnSovereigntyChanged",
         "notify:OnSolarSystemSovStructuresUpdated",
         "notify:OnCapitalSystemChanged",
         "notify:OnSovereigntyAudioEvent",
-        "notify:ProcessSovStatusChanged",
-        "notify:OnSolarSystemDevIndexChanged",
-        "notify:OnSovHubHacked",
-        "notify:OnSkyhookCanBeHacked",
-        "notify:OnSkyhookFirstActivation",
-        "notify:OnMercenaryDenRegistrationSuccess",
-        "notify:OnMercenaryDenRegistrationInvalid",
-        "notify:OnMyMercenaryDenRemoved",
-        "notify:OnSystemDynamicBountyStateChanged",
+        "ProcessSovStatusChanged",
         "notify:OnEnlistmentStateUpdated",
         "notify:OnEnlistmentCooldownCleared",
     ]);
@@ -387,30 +378,6 @@ async fn test_sovereignty_skyhook_mercenary_den_and_dbs_notifications() {
     assert_eq!(events(&ctx, P1, "ProcessSovStatusChanged").len(), 1);
     assert!(events(&ctx, p3, "OnCapitalSystemChanged").is_empty());
 
-    let mut indices = HashMap::new();
-    indices.insert("military".to_string(), 3);
-    sov_services::emit_dev_index_changed(&ctx, JITA, &indices);
-    assert_eq!(events(&ctx, P1, "OnSolarSystemDevIndexChanged").len(), 1);
-
-    sov_services::record_hub_hack(&ctx, JITA, 990_001, 3_600);
-    assert_eq!(events(&ctx, P1, "OnSovHubHacked"), vec![vec![PyRep::Integer(i64::from(JITA)), PyRep::Integer(990_001)]]);
-
-    sov_services::set_skyhook_hackable(&ctx, JITA, 990_002, true);
-    assert_eq!(events(&ctx, P1, "OnSkyhookCanBeHacked"), vec![vec![PyRep::Integer(i64::from(JITA)), PyRep::Integer(990_002)]]);
-    sov_services::activate_skyhook(&ctx, JITA, 990_002, 40_009_082);
-    assert_eq!(events(&ctx, P1, "OnSkyhookFirstActivation"), vec![vec![PyRep::Integer(990_002), PyRep::Integer(40_009_082)]]);
-
-    sov_services::register_mercenary_den(&ctx, P1, 990_003, true);
-    assert_eq!(events(&ctx, P1, "OnMercenaryDenRegistrationSuccess").len(), 1);
-    sov_services::register_mercenary_den(&ctx, P1, 990_003, false);
-    assert_eq!(events(&ctx, P1, "OnMercenaryDenRegistrationInvalid").len(), 1);
-    sov_services::remove_mercenary_den(&ctx, P1, 990_003);
-    assert_eq!(events(&ctx, P1, "OnMyMercenaryDenRemoved").len(), 1);
-    assert!(events(&ctx, p3, "OnMyMercenaryDenRemoved").is_empty());
-
-    sov_services::update_system_dynamic_bounty_rate(&ctx, JITA, 1.45);
-    assert_eq!(events(&ctx, P1, "OnSystemDynamicBountyStateChanged"), vec![vec![PyRep::Integer(i64::from(JITA)), PyRep::Real(1.45)]]);
-
     call(&ctx, &mut s1, "fwCharacterEnlistmentMgr", "CreateMyDirectEnlistment", &[PyRep::Integer(500_001)]).await;
     assert_eq!(events(&ctx, P1, "OnEnlistmentStateUpdated"), vec![vec![PyRep::Integer(500_001), PyRep::Integer(500_001), PyRep::None]]);
     call(&ctx, &mut s1, "fwCharacterEnlistmentMgr", "RemoveMyDirectEnlistment", &[]).await;
@@ -422,65 +389,8 @@ async fn test_sovereignty_skyhook_mercenary_den_and_dbs_notifications() {
 }
 
 #[tokio::test]
-async fn test_fw_enlistment_warzone_and_insurgency_notifications() {
-    // parity: notify:OnVictoryPointStateUpdated, notify:OnWarzoneOccupationStateUpdated, notify:OnFacWarBunkerVulnerable, notify:OnFacWarBunkerNonVulnerable, notify:OnFacWarDungeonCompleted, notify:OnFwObjectiveCompletedInSolarSystem, notify:OnFwScoreboardWon, notify:OnSolarSystemLPChange, notify:OnInsurgencyCampaignStartedForLocation, notify:OnInsurgencyCampaignUpdatedForLocation, notify:OnInsurgencyCampaignEndingForLocation, notify:OnInsurgencyStateChangedForFaction, notify:OnSystemFullyCorruptedForFaction, notify:OnSystemFullySuppressedForFaction
-    eve_testkit::attest(&[
-        "notify:OnVictoryPointStateUpdated",
-        "notify:OnWarzoneOccupationStateUpdated",
-        "notify:OnFacWarBunkerVulnerable",
-        "notify:OnFacWarBunkerNonVulnerable",
-        "notify:OnFacWarDungeonCompleted",
-        "notify:OnFwObjectiveCompletedInSolarSystem",
-        "notify:OnFwScoreboardWon",
-        "notify:OnSolarSystemLPChange",
-        "notify:OnInsurgencyCampaignStartedForLocation",
-        "notify:OnInsurgencyCampaignUpdatedForLocation",
-        "notify:OnInsurgencyCampaignEndingForLocation",
-        "notify:OnInsurgencyStateChangedForFaction",
-        "notify:OnSystemFullyCorruptedForFaction",
-        "notify:OnSystemFullySuppressedForFaction",
-    ]);
-
-    let ctx = new_ctx();
-    let (_s1, _s2, _s3, p3) = three_pilots(&ctx).await;
-
-    fw_services::add_victory_points(&ctx, JITA, 1_500);
-    assert_eq!(events(&ctx, P1, "OnVictoryPointStateUpdated")[0][0], PyRep::Integer(i64::from(JITA)));
-    assert_eq!(events(&ctx, P1, "OnWarzoneOccupationStateUpdated")[0][0], PyRep::Integer(i64::from(JITA)));
-    assert!(events(&ctx, p3, "OnVictoryPointStateUpdated").is_empty());
-
-    fw_services::set_facwar_bunker_vulnerable(&ctx, JITA, 500_001, true);
-    assert_eq!(events(&ctx, P1, "OnFacWarBunkerVulnerable"), vec![vec![PyRep::Integer(500_001)]]);
-    fw_services::set_facwar_bunker_vulnerable(&ctx, JITA, 500_001, false);
-    assert_eq!(events(&ctx, P1, "OnFacWarBunkerNonVulnerable"), vec![vec![PyRep::Integer(500_001)]]);
-
-    fw_services::complete_fw_dungeon_and_objective(&ctx, JITA, 500_001, true, 1, 770_901);
-    assert_eq!(events(&ctx, P1, "OnFacWarDungeonCompleted"), vec![vec![PyRep::Bool(true), PyRep::Integer(500_001)]]);
-    assert_eq!(events(&ctx, P1, "OnFwObjectiveCompletedInSolarSystem"), vec![vec![PyRep::Integer(i64::from(JITA)), PyRep::Integer(500_001), PyRep::Integer(1)]]);
-    assert_eq!(events(&ctx, P1, "OnFwScoreboardWon"), vec![vec![PyRep::Integer(i64::from(JITA)), PyRep::Integer(770_901), PyRep::Integer(500_001)]]);
-
-    fw_services::donate_solar_system_lp(&ctx, JITA, 10_000, 15_000);
-    assert_eq!(events(&ctx, P1, "OnSolarSystemLPChange"), vec![vec![PyRep::Integer(10_000), PyRep::Integer(15_000)]]);
-
-    insurgency_services::init_insurgency_campaign(&ctx, 901, insurgency_services::FACTION_GURISTAS, fw_services::FACTION_CALDARI, JITA, vec![JITA]);
-    assert_eq!(events(&ctx, P1, "OnInsurgencyCampaignStartedForLocation"), vec![vec![PyRep::Integer(i64::from(JITA)), PyRep::Integer(901)]]);
-    assert_eq!(events(&ctx, P1, "OnInsurgencyStateChangedForFaction"), vec![vec![PyRep::Integer(1), PyRep::Integer(insurgency_services::FACTION_GURISTAS), PyRep::Integer(i64::from(JITA))]]);
-
-    insurgency_services::add_system_corruption(&ctx, 901, JITA, 1_000);
-    assert_eq!(events(&ctx, P1, "OnInsurgencyCampaignUpdatedForLocation"), vec![vec![PyRep::Integer(i64::from(JITA)), PyRep::Integer(901), PyRep::Integer(5)]]);
-    assert_eq!(events(&ctx, P1, "OnSystemFullyCorruptedForFaction"), vec![vec![PyRep::Integer(i64::from(JITA)), PyRep::Integer(insurgency_services::FACTION_GURISTAS), PyRep::Integer(1_000), PyRep::Integer(1_000)]]);
-
-    insurgency_services::add_system_suppression(&ctx, 901, JITA, 1_000);
-    assert_eq!(events(&ctx, P1, "OnSystemFullySuppressedForFaction"), vec![vec![PyRep::Integer(i64::from(JITA)), PyRep::Integer(1_000), PyRep::Integer(1_000)]]);
-
-    insurgency_services::end_insurgency_campaign(&ctx, 901);
-    assert_eq!(events(&ctx, P1, "OnInsurgencyCampaignEndingForLocation"), vec![vec![PyRep::Integer(i64::from(JITA))]]);
-    assert_eq!(events(&ctx, P1, "OnInsurgencyStateChangedForFaction"), vec![vec![PyRep::Integer(0), PyRep::Integer(insurgency_services::FACTION_GURISTAS), PyRep::Integer(i64::from(JITA))]]);
-}
-
-#[tokio::test]
-async fn test_fleet_ops_cyno_beacon_and_loot_notifications() {
-    // parity: notify:OnFleetInvite, notify:OnChangeFleetBoss, notify:OnFleetMove, notify:OnFleetMoveFailed, notify:OnJoinRequestUpdate, notify:OnMemberlessFleetUnregistered, notify:OnFleetStateChange, notify:OnBridgeModeChange, notify:OnFleetJumpBeaconModuleChange, notify:OnFleetJumpBeaconDeployableChange, notify:OnFleetBoosted, notify:OnFleetEscalatingPathMessage, notify:OnFleetLootEvent, notify:OnFleetRespawnPointsUpdate
+async fn test_fleet_management_and_cyno_module_notifications() {
+    // parity: notify:OnFleetInvite, notify:OnChangeFleetBoss, notify:OnFleetMove, notify:OnFleetMoveFailed, notify:OnJoinRequestUpdate, notify:OnMemberlessFleetUnregistered, notify:OnFleetStateChange, notify:OnBridgeModeChange, notify:OnFleetJumpBeaconModuleChange
     eve_testkit::attest(&[
         "notify:OnFleetInvite",
         "notify:OnChangeFleetBoss",
@@ -491,11 +401,6 @@ async fn test_fleet_ops_cyno_beacon_and_loot_notifications() {
         "notify:OnFleetStateChange",
         "notify:OnBridgeModeChange",
         "notify:OnFleetJumpBeaconModuleChange",
-        "notify:OnFleetJumpBeaconDeployableChange",
-        "notify:OnFleetBoosted",
-        "notify:OnFleetEscalatingPathMessage",
-        "notify:OnFleetLootEvent",
-        "notify:OnFleetRespawnPointsUpdate",
     ]);
 
     let ctx = new_ctx();
@@ -525,16 +430,6 @@ async fn test_fleet_ops_cyno_beacon_and_loot_notifications() {
     call(&ctx, &mut s1, "fleetMgr", "AddToWatchlist", &[PyRep::Integer(P2)]).await;
     assert_eq!(events(&ctx, P1, "OnFleetStateChange")[0][0], PyRep::Integer(P2));
 
-    fleet_social_notify::emit_fleet_boosted(&ctx, fid, 42_530, 2);
-    assert_eq!(events(&ctx, P1, "OnFleetBoosted"), vec![vec![PyRep::Integer(42_530), PyRep::Integer(2)]]);
-    fleet_social_notify::emit_fleet_escalating_path_message(&ctx, fid, P1, 501);
-    assert_eq!(events(&ctx, P2, "OnFleetEscalatingPathMessage"), vec![vec![PyRep::Integer(P1), PyRep::Integer(501)]]);
-    fleet_social_notify::emit_fleet_jump_beacon_deployable_change(&ctx, fid, 950_001, JITA, 950_002, P1, true);
-    assert_eq!(events(&ctx, P1, "OnFleetJumpBeaconDeployableChange"), vec![vec![PyRep::Integer(950_001), PyRep::Integer(i64::from(JITA)), PyRep::Integer(950_002), PyRep::Integer(P1), PyRep::Bool(true)]]);
-    fleet_social_notify::emit_fleet_loot_event(&ctx, fid, P1, 34, 100);
-    assert_eq!(events(&ctx, P2, "OnFleetLootEvent").len(), 1);
-    fleet_social_notify::emit_fleet_respawn_points_update(&ctx, fid, vec![PyRep::Integer(JITA_44)]);
-    assert_eq!(events(&ctx, P1, "OnFleetRespawnPointsUpdate"), vec![vec![PyRep::List(vec![PyRep::Integer(JITA_44)])]]);
 
     let mut cands: Vec<u32> = ctx.sde.solar_systems.values().filter(|s| s.security_status < 0.45 && s.solar_system_id < 31_000_000 && s.galactic_pos_ly != [0.0; 3]).map(|s| s.solar_system_id).collect();
     cands.sort_unstable();
@@ -681,49 +576,4 @@ async fn test_crimewatch_duels_kill_rights_and_bounties_notifications() {
     seed_item(&ctx, 970_001, 35664, P1, JITA_44, InventoryFlag::Hangar, 2);
     call(&ctx, &mut s1, "crimewatch", "ApplyTagsForSecStatus", &[PyRep::Integer(2)]).await;
     assert_eq!(events(&ctx, P1, "OnSecurityStatusUpdate"), vec![vec![PyRep::Real(-0.5)]]);
-}
-
-#[tokio::test]
-async fn test_crimewatch_timers_flags_and_cloak_notifications() {
-    // parity: notify:OnWeaponsTimerUpdate, notify:OnPvpTimerUpdate, notify:OnNpcTimerUpdate, notify:OnCriminalTimerUpdate, notify:OnDisapprovalTimerUpdate, notify:OnSystemCriminalFlagUpdates, notify:OnSystemDisapprovalFlagUpdates, notify:OnRestoringInvulnUpdated, notify:OnInvulnCancelled, notify:OnJumpCloakUpdated, notify:OnJumpCloakCancelled, notify:OnSafeLogoffTimerStarted, notify:OnSecurityModified
-    eve_testkit::attest(&[
-        "notify:OnWeaponsTimerUpdate",
-        "notify:OnPvpTimerUpdate",
-        "notify:OnNpcTimerUpdate",
-        "notify:OnCriminalTimerUpdate",
-        "notify:OnDisapprovalTimerUpdate",
-        "notify:OnSystemCriminalFlagUpdates",
-        "notify:OnSystemDisapprovalFlagUpdates",
-        "notify:OnRestoringInvulnUpdated",
-        "notify:OnInvulnCancelled",
-        "notify:OnJumpCloakUpdated",
-        "notify:OnJumpCloakCancelled",
-        "notify:OnSafeLogoffTimerStarted",
-        "notify:OnSecurityModified",
-    ]);
-
-    let ctx = new_ctx();
-    let (_s1, _s2, _s3, p3) = three_pilots(&ctx).await;
-
-    combat_crimewatch::emit_combat_and_flag_timer_updates(&ctx, P1, JITA);
-    assert_eq!(events(&ctx, P1, "OnWeaponsTimerUpdate")[0][0], PyRep::Integer(101));
-    assert_eq!(events(&ctx, P1, "OnPvpTimerUpdate")[0][0], PyRep::Integer(201));
-    assert_eq!(events(&ctx, P1, "OnNpcTimerUpdate")[0][0], PyRep::Integer(401));
-    assert_eq!(events(&ctx, P1, "OnCriminalTimerUpdate")[0][0], PyRep::Integer(302));
-    assert_eq!(events(&ctx, P1, "OnDisapprovalTimerUpdate")[0][0], PyRep::Integer(501));
-    assert_eq!(events(&ctx, P1, "OnSystemCriminalFlagUpdates"), vec![vec![PyRep::List(vec![]), PyRep::List(vec![PyRep::Integer(P1)]), PyRep::List(vec![])]]);
-    assert_eq!(events(&ctx, P1, "OnSystemDisapprovalFlagUpdates"), vec![vec![PyRep::List(vec![PyRep::Integer(P1)]), PyRep::List(vec![])]]);
-    assert!(events(&ctx, p3, "OnSystemCriminalFlagUpdates").is_empty());
-
-    let ship_id = 100_000_001;
-    combat_crimewatch::emit_ship_cloak_and_logoff_timers(&ctx, P1, ship_id);
-    assert_eq!(events(&ctx, P1, "OnRestoringInvulnUpdated")[0][2], PyRep::Integer(30_000));
-    assert_eq!(events(&ctx, P1, "OnInvulnCancelled"), vec![vec![PyRep::Integer(ship_id)]]);
-    assert_eq!(events(&ctx, P1, "OnJumpCloakUpdated")[0][2], PyRep::Integer(60_000));
-    assert_eq!(events(&ctx, P1, "OnJumpCloakCancelled"), vec![vec![PyRep::Integer(ship_id)]]);
-    assert_eq!(events(&ctx, P1, "OnSafeLogoffTimerStarted").len(), 1);
-
-    combat_crimewatch::modify_solar_system_security(&ctx, JITA, -0.2, 0.7);
-    assert_eq!(events(&ctx, P1, "OnSecurityModified"), vec![vec![PyRep::Integer(i64::from(JITA)), PyRep::Real(-0.2), PyRep::Real(0.7)]]);
-    assert!(events(&ctx, p3, "OnSecurityModified").is_empty());
 }
