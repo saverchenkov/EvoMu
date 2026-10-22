@@ -1,6 +1,6 @@
 //! Mail & Mailing Lists (`SO-1`: `mailMgr`, `mailingListsMgr`) and Calendar (`P-5`: `calendarMgr`).
 
-use super::fleet_social_chat::{extract_id_list, CalendarEventState, MailingListState, SOCIAL_EXTRAS};
+use super::fleet_social_chat::{extract_id_list, CalendarEventState, MailingListState};
 use crate::router::{cache_notifications::NotificationTarget, ServerContext};
 use eve_db::{IskCents, MailLabelRecord, MailRecord};
 use eve_machonet::SessionState;
@@ -23,10 +23,18 @@ pub(super) fn handle_mail_and_calendar(
         ("mailMgr", "SendMail") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let mut recipient_ids: Vec<i64> = extract_id_list(args.first());
+            // Client layout (mailSvc.SendMail): (toCharacterIDs, toListID, toCorpOrAllianceID, title,
+            // body, isReplyTo, isForwardedFrom); kept as sent for OnMailSent.
+            let to_character_ids = recipient_ids.clone();
+            let (to_list_id, to_corp_or_alliance_id) = if args.len() >= 5 {
+                (args.get(1).and_then(|a| a.as_i64()).filter(|&id| id > 0), args.get(2).and_then(|a| a.as_i64()))
+            } else {
+                (None, None)
+            };
             let mut target_label = 1i64; // 1 = Inbox, 4 = Corp, 8 = Alliance
             let (subject, body) = if args.len() >= 5 {
                 if let Some(list_id) = args.get(1).and_then(|a| a.as_i64()).filter(|&id| id > 0) {
-                    let s = SOCIAL_EXTRAS.lock().unwrap();
+                    let s = ctx.social_extras.lock().unwrap();
                     if let Some(ml) = s.mailing_lists.get(&list_id) {
                         if ml.members.get(&char_id).copied() == Some(1) {
                             return Some(Err(BridgeRpcError {
@@ -173,7 +181,7 @@ pub(super) fn handle_mail_and_calendar(
 
             let mut total_cspa = IskCents(0);
             {
-                let s = SOCIAL_EXTRAS.lock().unwrap();
+                let s = ctx.social_extras.lock().unwrap();
                 for &rec_id in &recipient_ids {
                     if rec_id == char_id {
                         continue;
@@ -259,20 +267,18 @@ pub(super) fn handle_mail_and_calendar(
 
             match res {
                 Ok(mid) => {
-                    for &rec_id in &recipient_ids {
-                        ctx.notify(
-                            NotificationTarget::Character(rec_id),
-                            "OnNewMailReceived",
-                            "charid",
-                            vec![PyRep::Integer(mid), PyRep::Integer(char_id)],
-                        );
-                    }
-                    ctx.notify(
-                        NotificationTarget::Character(char_id),
-                        "OnMailSent",
-                        "charid",
-                        vec![PyRep::Integer(mid), PyRep::Integer(primary_recipient)],
-                    );
+                    // The sender's own mailSvc.SendMail already calls OnMailSent locally.
+                    let others: Vec<i64> = recipient_ids.iter().copied().filter(|&r| r != char_id).collect();
+                    let sent = crate::services::mail_notify::SentMail {
+                        message_id: mid,
+                        sender_id: char_id,
+                        to_character_ids: &to_character_ids,
+                        to_list_id,
+                        to_corp_or_alliance_id,
+                        title: subject,
+                        status_mask: 0,
+                    };
+                    crate::services::mail_notify::emit_mail_sent(ctx, &sent, &others);
                     Some(Ok(PyRep::Integer(mid)))
                 }
                 Err(e) => Some(Err(e)),
@@ -450,7 +456,7 @@ pub(super) fn handle_mail_and_calendar(
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let mail_ids = extract_id_list(args.first());
             {
-                let mut s = SOCIAL_EXTRAS.lock().unwrap();
+                let mut s = ctx.social_extras.lock().unwrap();
                 for &mid in &mail_ids {
                     s.trashed_mails.insert((char_id, mid));
                 }
@@ -471,7 +477,7 @@ pub(super) fn handle_mail_and_calendar(
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let mail_ids = extract_id_list(args.first());
             {
-                let mut s = SOCIAL_EXTRAS.lock().unwrap();
+                let mut s = ctx.social_extras.lock().unwrap();
                 if mail_ids.is_empty() {
                     s.trashed_mails.retain(|&(cid, _)| cid != char_id);
                 } else {
@@ -496,7 +502,7 @@ pub(super) fn handle_mail_and_calendar(
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let mut ids = extract_id_list(args.first());
             if method == "EmptyTrash" {
-                let mut s = SOCIAL_EXTRAS.lock().unwrap();
+                let mut s = ctx.social_extras.lock().unwrap();
                 let trashed_for_char: Vec<i64> = s
                     .trashed_mails
                     .iter()
@@ -755,7 +761,7 @@ pub(super) fn handle_mail_and_calendar(
             let default_role = args.get(2).and_then(|a| a.as_i64()).unwrap_or(0);
             let cost = args.get(3).and_then(|a| a.as_i64()).unwrap_or(0).max(0);
             let list_id = {
-                let mut s = SOCIAL_EXTRAS.lock().unwrap();
+                let mut s = ctx.social_extras.lock().unwrap();
                 s.next_id += 1;
                 let lid = s.next_id;
                 let mut members = HashMap::new();
@@ -785,7 +791,7 @@ pub(super) fn handle_mail_and_calendar(
 
         ("mailingListsMgr", "GetJoinedLists") | ("mailingListsMgr", "GetInfo") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let s = SOCIAL_EXTRAS.lock().unwrap();
+            let s = ctx.social_extras.lock().unwrap();
             let rows: Vec<Vec<PyRep>> = s
                 .mailing_lists
                 .values()
@@ -808,7 +814,7 @@ pub(super) fn handle_mail_and_calendar(
         ("mailingListsMgr", "Join") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let list_id_or_name = args.first();
-            let mut s = SOCIAL_EXTRAS.lock().unwrap();
+            let mut s = ctx.social_extras.lock().unwrap();
             let ml_opt = match list_id_or_name {
                 Some(PyRep::Integer(id)) => s.mailing_lists.get_mut(id),
                 Some(PyRep::String(name)) => s.mailing_lists.values_mut().find(|m| m.name.eq_ignore_ascii_case(name)),
@@ -834,6 +840,7 @@ pub(super) fn handle_mail_and_calendar(
             drop(s);
 
             if let Some((subj, body)) = welcome {
+                let subj_title = subj.clone();
                 let mid = ctx.db.with_mut_snapshot(|snap| {
                     snap.next_entity_id += 1;
                     let mid = snap.next_entity_id;
@@ -841,18 +848,22 @@ pub(super) fn handle_mail_and_calendar(
                         message_id: mid,
                         sender_id: owner_id,
                         recipient_id: char_id,
-                        subject: subj,
+                        subject: subj.clone(),
                         body,
                     });
                     snap.mail_assigned_labels.insert((char_id, mid), vec![1]);
                     mid
                 });
-                ctx.notify(
-                    NotificationTarget::Character(char_id),
-                    "OnNewMailReceived",
-                    "charid",
-                    vec![PyRep::Integer(mid)],
-                );
+                let sent = crate::services::mail_notify::SentMail {
+                    message_id: mid,
+                    sender_id: owner_id,
+                    to_character_ids: &[char_id],
+                    to_list_id: Some(lid),
+                    to_corp_or_alliance_id: None,
+                    title: &subj_title,
+                    status_mask: crate::services::mail_notify::MAIL_STATUS_AUTOMATED,
+                };
+                crate::services::mail_notify::emit_mail_sent(ctx, &sent, &[char_id]);
             }
             Some(Ok(PyRep::keyval([
                 ("listID", PyRep::Integer(lid)),
@@ -863,7 +874,7 @@ pub(super) fn handle_mail_and_calendar(
         ("mailingListsMgr", "Leave") | ("mailingListsMgr", "Delete") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let list_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let mut s = SOCIAL_EXTRAS.lock().unwrap();
+            let mut s = ctx.social_extras.lock().unwrap();
             if method == "Delete" {
                 s.mailing_lists.remove(&list_id);
             } else if let Some(ml) = s.mailing_lists.get_mut(&list_id) {
@@ -875,7 +886,7 @@ pub(super) fn handle_mail_and_calendar(
         ("mailingListsMgr", "GetMembers") => {
             let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let list_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let s = SOCIAL_EXTRAS.lock().unwrap();
+            let s = ctx.social_extras.lock().unwrap();
             let rows: Vec<Vec<PyRep>> = s
                 .mailing_lists
                 .get(&list_id)
@@ -896,7 +907,7 @@ pub(super) fn handle_mail_and_calendar(
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let list_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
             let targets = extract_id_list(args.get(1));
-            let mut s = SOCIAL_EXTRAS.lock().unwrap();
+            let mut s = ctx.social_extras.lock().unwrap();
             if let Some(ml) = s.mailing_lists.get_mut(&list_id) {
                 let caller_role = ml.members.get(&char_id).copied().unwrap_or(0);
                 if ml.owner_id != char_id && caller_role < 2 {
@@ -926,7 +937,7 @@ pub(super) fn handle_mail_and_calendar(
         | ("mailingListsMgr", "GetSettings") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let list_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let mut s = SOCIAL_EXTRAS.lock().unwrap();
+            let mut s = ctx.social_extras.lock().unwrap();
             let Some(ml) = s.mailing_lists.get_mut(&list_id) else {
                 return Some(Err(BridgeRpcError {
                     code: "MailingListNotFound".into(),
@@ -973,7 +984,7 @@ pub(super) fn handle_mail_and_calendar(
         | ("mailingListsMgr", "ClearWelcomeMail") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let list_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let mut s = SOCIAL_EXTRAS.lock().unwrap();
+            let mut s = ctx.social_extras.lock().unwrap();
             let Some(ml) = s.mailing_lists.get_mut(&list_id) else {
                 return Some(Err(BridgeRpcError {
                     code: "MailingListNotFound".into(),
@@ -1060,7 +1071,7 @@ pub(super) fn handle_mail_and_calendar(
                 _ => ("Personal".to_string(), char_id),
             };
             let eid = {
-                let mut s = SOCIAL_EXTRAS.lock().unwrap();
+                let mut s = ctx.social_extras.lock().unwrap();
                 s.next_id += 1;
                 let id = s.next_id;
                 let mut responses = HashMap::new();
@@ -1114,7 +1125,7 @@ pub(super) fn handle_mail_and_calendar(
             });
             let corp_opt = session.corporation_id.or(char_corp);
             let ally_opt = session.alliance_id.or(char_ally);
-            let s = SOCIAL_EXTRAS.lock().unwrap();
+            let s = ctx.social_extras.lock().unwrap();
             if method == "GetEventDetails" {
                 let eid = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
                 let Some(ev) = s.calendar_events.get(&eid) else {
@@ -1224,7 +1235,7 @@ pub(super) fn handle_mail_and_calendar(
         | ("calendarMgr", "DeleteEvent") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let eid = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let mut s = SOCIAL_EXTRAS.lock().unwrap();
+            let mut s = ctx.social_extras.lock().unwrap();
             if method == "DeleteEvent" {
                 s.calendar_events.remove(&eid);
                 return Some(Ok(PyRep::keyval([("eventID", PyRep::Integer(eid)), ("deleted", PyRep::Bool(true))])));
@@ -1271,7 +1282,7 @@ fn handle_mail_headers(
         Ok(v) => v,
         Err(e) => return Some(Err(e)),
     };
-    let trashed = SOCIAL_EXTRAS.lock().unwrap().trashed_mails.clone();
+    let trashed = ctx.social_extras.lock().unwrap().trashed_mails.clone();
     let (rows, status_rows) = ctx.db.with_snapshot(|snap| {
         let mut hdrs = Vec::new();
         let mut statuses = Vec::new();

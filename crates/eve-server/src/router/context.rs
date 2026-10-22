@@ -70,6 +70,8 @@ pub struct ServerContext {
     pub esi_state: Arc<crate::esi::runtime_state::EsiRuntimeState>,
     /// Per-world fleet state not persisted in `WorldRepository` (names, invites, adverts, watchlists).
     pub(crate) fleet_extras: std::sync::Mutex<crate::services::fleet_social::fleet_social_fleets::FleetExtrasState>,
+    /// Per-world social state not persisted in `WorldRepository` (mailing lists, calendar, chat moderation).
+    pub(crate) social_extras: std::sync::Mutex<crate::services::fleet_social::fleet_social_chat::SocialExtrasState>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -169,6 +171,9 @@ impl ServerContext {
             esi_port: 26_004,
             esi_state: Arc::new(crate::esi::runtime_state::EsiRuntimeState::new()),
             fleet_extras: std::sync::Mutex::new(Default::default()),
+            social_extras: std::sync::Mutex::new(
+                crate::services::fleet_social::fleet_social_chat::SocialExtrasState::new(),
+            ),
         }
     }
 

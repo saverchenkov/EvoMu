@@ -99,4 +99,15 @@ async fn test_personal_contacts_and_watchlist_presence_notifications() {
     let list = call(&ctx, &mut s1, "charMgr", "GetContactList", &[]).await;
     let Some(PyRep::Rowset { rows, .. }) = list.dict_get("addresses") else { panic!("addresses rowset") };
     assert!(rows.is_empty(), "deleted contact must be gone: {rows:?}");
+
+    // Review 20261021-170325 R-CONTACTS-1: P2 (online again) has blocked P1, so re-adding P2 must
+    // not reveal P2's presence: isOnline is False.
+    let _s2 = select(&ctx, 605, "other", "other-secret", P2).await;
+    ctx.drain_notifications_for_char(P1);
+    call(&ctx, &mut s1, "charMgr", "AddContact", &[PyRep::Integer(P2), PyRep::Real(0.0), PyRep::Bool(false), PyRep::Bool(false), PyRep::String(String::new())]).await;
+    let hidden = PyRep::keyval([("contactID", PyRep::Integer(P2)), ("isOnline", PyRep::Bool(false))]);
+    assert_eq!(
+        events(&ctx, P1, "OnPersonalContactsAdded"),
+        vec![vec![PyRep::List(vec![hidden]), PyRep::Real(0.0), PyRep::Bool(false), PyRep::Integer(0)]]
+    );
 }

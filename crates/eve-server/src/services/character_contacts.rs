@@ -41,19 +41,12 @@ pub fn is_character_online(ctx: &ServerContext, target_char_id: i64) -> bool {
     let uid_opt = ctx.db.with_snapshot(|snap| {
         snap.characters.get(&target_char_id).map(|c| c.user_id)
     });
-    if let Some(uid) = uid_opt {
-        if ctx
-            .db
+    // Online means the account's active session has this character selected (chat-channel
+    // membership is not presence).
+    uid_opt.is_some_and(|uid| {
+        ctx.db
             .get_online_session(uid)
             .is_some_and(|os| os.character_id == Some(target_char_id))
-        {
-            return true;
-        }
-    }
-    ctx.db.with_snapshot(|snap| {
-        snap.chat_channels
-            .values()
-            .any(|ch| ch.members.contains(&target_char_id))
     })
 }
 
@@ -613,7 +606,8 @@ pub fn handle_contacts(
             // scattered client-side by that handler, so the server does not send it.)
             let contact = PyRep::keyval([
                 ("contactID", PyRep::Integer(contact_id)),
-                ("isOnline", PyRep::Bool(is_character_online(ctx, contact_id))),
+                // A contact that has blocked us never reveals presence (as notify_watchlist_presence).
+                ("isOnline", PyRep::Bool(!is_blocked_by(ctx, contact_id, char_id) && is_character_online(ctx, contact_id))),
             ]);
             ctx.notify(
                 NotificationTarget::Character(char_id),

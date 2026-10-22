@@ -11,7 +11,7 @@ use std::collections::HashMap;
 #[path = "fleet_social_bookmarks.rs"]
 mod fleet_social_bookmarks;
 #[path = "fleet_social_chat.rs"]
-mod fleet_social_chat;
+pub(crate) mod fleet_social_chat;
 #[path = "fleet_social_corp_gov.rs"]
 mod fleet_social_corp_gov;
 #[path = "fleet_social_corps.rs"]
@@ -28,6 +28,17 @@ mod fleet_social_notify;
 mod fleet_social_scanning;
 
 pub const AU_IN_METERS: f64 = 149_597_870_700.0;
+
+/// Character IDs currently in mailing list `list_id` (per-`ServerContext` `mailingListsMgr` state).
+pub fn mailing_list_member_ids(ctx: &ServerContext, list_id: i64) -> Vec<i64> {
+    ctx.social_extras
+        .lock()
+        .unwrap()
+        .mailing_lists
+        .get(&list_id)
+        .map(|ml| ml.members.keys().copied().collect())
+        .unwrap_or_default()
+}
 
 #[allow(dead_code)]
 pub(crate) fn is_in_fleet_boost_scope(

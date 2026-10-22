@@ -637,11 +637,11 @@ async fn test_so4_in_game_mail_lifecycle() {
         .expect("SendMail");
     let mail_id = send_rep.as_i64().expect("mail_id integer");
 
-    // Verify OnNewMailReceived notification emitted
+    // Verify OnMailSent notification emitted to the recipient
     let p2_notifs = ctx.drain_notifications_for_char(90_000_002);
     assert!(
-        p2_notifs.iter().any(|n| n.event == "OnNewMailReceived"),
-        "Expected OnNewMailReceived notification"
+        p2_notifs.iter().any(|n| n.event == "OnMailSent"),
+        "Expected OnMailSent notification"
     );
 
     // 2. Pilot 2 fetches mail headers

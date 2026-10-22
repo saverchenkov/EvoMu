@@ -600,6 +600,7 @@ pub fn dispatch_character_mail_routes(
                 }
             }
             let now = ctx.now_unix();
+            let specs_for_notify = recipient_specs.clone();
             let res: Result<i64, RouteExecutionResult> = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(sender) = snap.characters.get(&char_id).cloned() else {
                     return Err(RouteExecutionResult::error(
@@ -705,6 +706,9 @@ pub fn dispatch_character_mail_routes(
                 }
                 Ok(mail_id)
             });
+            if let Ok(mail_id) = res {
+                notify_esi_mail_sent(ctx, char_id, mail_id, subject, &specs_for_notify);
+            }
             Some(match res {
                 Ok(mail_id) => RouteExecutionResult::created_json(json!(mail_id)),
                 Err(e) => e,
@@ -829,6 +833,10 @@ pub fn dispatch_character_mail_routes(
                 ctx.esi_state.mark_mail_deleted(char_id, mail_id);
                 Ok(())
             });
+            if res.is_ok() {
+                // Deleted outside the game client: mailSvc.OnMailDeleted(messageIDs).
+                crate::services::mail_notify::emit_mail_deleted(ctx, char_id, &[mail_id]);
+            }
             Some(match res {
                 Ok(()) => RouteExecutionResult::no_content(0),
                 Err(e) => e,
@@ -837,4 +845,42 @@ pub fn dispatch_character_mail_routes(
 
         _ => None,
     }
+}
+
+/// `mailSvc.OnMailSent` for a mail sent through ESI. The sender's game client did not send it, so
+/// the sender is notified too; character recipients plus the members of corporation / alliance /
+/// mailing-list recipients get it as well (DERIVED: mailing-list membership is the server's
+/// `mailingListsMgr` state).
+fn notify_esi_mail_sent(ctx: &ServerContext, sender_id: i64, mail_id: i64, subject: &str, specs: &[(i64, String)]) {
+    let to_chars: Vec<i64> = specs.iter().filter(|(_, t)| t == "character").map(|(id, _)| *id).collect();
+    let to_list = specs.iter().find(|(_, t)| t == "mailing_list").map(|(id, _)| *id);
+    let to_org = specs.iter().find(|(_, t)| t == "corporation" || t == "alliance").map(|(id, _)| *id);
+    let mut recipients = vec![sender_id];
+    recipients.extend(&to_chars);
+    ctx.db.with_snapshot(|snap| {
+        for (id, t) in specs {
+            match t.as_str() {
+                "corporation" => recipients.extend(snap.corporations.get(id).into_iter().flat_map(|c| c.members.iter().copied())),
+                "alliance" => {
+                    for corp in snap.alliances.get(id).into_iter().flat_map(|a| a.member_corp_ids.iter()) {
+                        recipients.extend(snap.corporations.get(corp).into_iter().flat_map(|c| c.members.iter().copied()));
+                    }
+                }
+                _ => {}
+            }
+        }
+    });
+    if let Some(list_id) = to_list {
+        recipients.extend(crate::services::fleet_social::mailing_list_member_ids(ctx, list_id));
+    }
+    let sent = crate::services::mail_notify::SentMail {
+        message_id: mail_id,
+        sender_id,
+        to_character_ids: &to_chars,
+        to_list_id: to_list,
+        to_corp_or_alliance_id: to_org,
+        title: subject,
+        status_mask: 0,
+    };
+    crate::services::mail_notify::emit_mail_sent(ctx, &sent, &recipients);
 }

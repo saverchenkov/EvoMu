@@ -30,6 +30,7 @@ pub mod inventory_fitting;
 pub mod inventory_stacking;
 pub mod jump_clone_names;
 pub mod lp_store;
+pub mod mail_notify;
 pub mod market_contracts;
 pub mod market_trading;
 pub mod mining_advanced;

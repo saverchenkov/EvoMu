@@ -321,7 +321,12 @@ async fn handle_bridge_client(stream: TcpStream, ctx: Arc<ServerContext>) -> Res
     reader_task.abort();
     ctx.unregister_session_closer(session_id);
     if let Some(uid) = session.user_id {
-        ctx.db.release_online_lock(uid, session.session_id);
+        // A dropped connection that still held the character online is a log-off for watchers.
+        if ctx.db.release_online_lock(uid, session.session_id) {
+            if let Some(cid) = session.character_id {
+                eve_server::services::character_skills::notify_watchlist_presence(&ctx, cid, false);
+            }
+        }
     }
     ctx.release_session_bindings(session.session_id);
     res

@@ -159,6 +159,7 @@ pub fn process_ship_insurance_payout(
             } else {
                 None
             };
+            let mut mail_id = None;
             if let Some(ba) = bal_after {
                 snap.next_entity_id += 1;
                 let jid = snap.next_entity_id;
@@ -184,17 +185,27 @@ pub fn process_ship_insurance_payout(
                 });
                 snap.mail_timestamps.insert(mid, now_unix);
                 snap.mail_assigned_labels.insert((victim_char_id, mid), vec![1]);
+                mail_id = Some(mid);
             }
-            bal_after.map(|b| b.to_wire_f64())
+            bal_after.map(|b| (b.to_wire_f64(), mail_id))
         });
-        if let Some(bal) = new_bal {
+        if let Some((bal, mail_id)) = new_bal {
             let _ = ctx.notify_account_change(victim_char_id, "cash", victim_char_id, bal);
-            ctx.notify(
-                NotificationTarget::Character(victim_char_id),
-                "OnNewMailReceived",
-                "charid",
-                vec![PyRep::Integer(victim_char_id), PyRep::Real(payout_isk)],
-            );
+            if let Some(mid) = mail_id {
+                // mailSvc.OnMailSent for the automated insurance mail (the client raises its own
+                // OnNewMailReceived from it).
+                let title = format!("Insurance Payout for Ship {ship_id}");
+                let sent = crate::services::mail_notify::SentMail {
+                    message_id: mid,
+                    sender_id: 1_000_132,
+                    to_character_ids: &[victim_char_id],
+                    to_list_id: None,
+                    to_corp_or_alliance_id: None,
+                    title: &title,
+                    status_mask: crate::services::mail_notify::MAIL_STATUS_AUTOMATED,
+                };
+                crate::services::mail_notify::emit_mail_sent(ctx, &sent, &[victim_char_id]);
+            }
         }
     }
     payout_isk

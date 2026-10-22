@@ -454,7 +454,12 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
     ctx.unregister_session_closer(session_id);
     ctx.release_session_bindings(session_id);
     if let Some(uid) = session.user_id {
-        ctx.db.release_online_lock(uid, session_id);
+        // A dropped connection that still held the character online is a log-off for watchers.
+        if ctx.db.release_online_lock(uid, session_id) {
+            if let Some(cid) = session.character_id {
+                crate::services::character_skills::notify_watchlist_presence(&ctx, cid, false);
+            }
+        }
     }
 
     Ok(())

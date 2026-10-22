@@ -1259,7 +1259,7 @@ async fn test_so_social_corp_mail_mailing_lists_cspa_calendar_and_chat_features(
     let _ = ctx.drain_notifications_for_char(90_000_002);
     let corp_mail_id = ctx.dispatch_rpc(&mut sess1, "mailMgr", None, "SendMail", &[PyRep::List(vec![]), PyRep::Integer(0), PyRep::Integer(corp_id), PyRep::String("Corp CTA".into()), PyRep::String("Form up in Jita".into())], &kw, None).await.unwrap();
     assert!(corp_mail_id.as_i64().is_some());
-    assert!(ctx.drain_notifications_for_char(90_000_002).iter().any(|n| n.event == "OnNewMailReceived"), "Corp mail must reach all corp members");
+    assert!(ctx.drain_notifications_for_char(90_000_002).iter().any(|n| n.event == "OnMailSent"), "Corp mail must reach all corp members");
 
     // CSPA (`feat:social.cspa`): Pilot 3 configures 50,000 ISK CSPA charge via `charMgr.LogSettings`; `GetSettingsInfo` reads it without mutating; `CSPAChargedAction` & `mailMgr.SendMail` enforce and debit CSPA
     ctx.dispatch_rpc(&mut sess3, "charMgr", None, "LogSettings", &[PyRep::Real(50_000.0)], &kw, None).await.unwrap();
@@ -1279,7 +1279,7 @@ async fn test_so_social_corp_mail_mailing_lists_cspa_calendar_and_chat_features(
     assert_eq!(wm_rep.dict_get("title"), Some(&PyRep::String("Welcome to IntelList".into())));
     let _ = ctx.drain_notifications_for_char(90_000_002);
     ctx.dispatch_rpc(&mut sess2, "mailingListsMgr", None, "Join", &[PyRep::Integer(list_id)], &kw, None).await.unwrap();
-    assert!(ctx.drain_notifications_for_char(90_000_002).iter().any(|n| n.event == "OnNewMailReceived"), "Joining mailing list must deliver welcome mail");
+    assert!(ctx.drain_notifications_for_char(90_000_002).iter().any(|n| n.event == "OnMailSent"), "Joining mailing list must deliver welcome mail");
     assert_eq!(ctx.dispatch_rpc(&mut sess2, "mailingListsMgr", None, "KickMembers", &[PyRep::Integer(list_id), PyRep::List(vec![PyRep::Integer(90_000_001)])], &kw, None).await.unwrap_err().code, "MailingListAccessDenied");
     ctx.dispatch_rpc(&mut sess1, "mailingListsMgr", None, "SetMembersOperator", &[PyRep::Integer(list_id), PyRep::List(vec![PyRep::Integer(90_000_002)])], &kw, None).await.unwrap();
     ctx.dispatch_rpc(&mut sess1, "mailingListsMgr", None, "SetMembersMuted", &[PyRep::Integer(list_id), PyRep::List(vec![PyRep::Integer(90_000_002)])], &kw, None).await.unwrap();

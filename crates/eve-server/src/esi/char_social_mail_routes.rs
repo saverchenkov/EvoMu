@@ -476,6 +476,7 @@ pub fn dispatch_char_social_mail_route(
             } else {
                 None
             };
+            let label_mask_for_notify = new_labels.clone();
             if new_read.is_none() && new_labels.is_none() {
                 return Some(RouteExecutionResult::error(
                     400,
@@ -526,6 +527,12 @@ pub fn dispatch_char_social_mail_route(
                 ctx.esi_state.set_mail_meta(char_id, mail_id, meta);
                 Ok(())
             });
+            if res.is_ok() {
+                // Changed outside the game client: mailSvc.OnMailUpdatedByExternal(messageIDs,
+                // is_read, new_label); mail label IDs are bit values, so the mask is their OR.
+                let label_mask = label_mask_for_notify.map(|l| l.iter().fold(0i64, |m, id| m | id));
+                crate::services::mail_notify::emit_mail_updated_by_external(ctx, char_id, &[mail_id], new_read, label_mask);
+            }
             Some(match res {
                 Ok(()) => RouteExecutionResult::no_content(0),
                 Err(e) => e,

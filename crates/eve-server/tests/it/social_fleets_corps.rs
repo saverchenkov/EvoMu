@@ -184,16 +184,17 @@ async fn test_so1_mail_lifecycle_labels_mailing_lists_cspa_and_calendar() {
         .expect("SendMail");
     let mail_id = send_rep.as_i64().expect("mail_id integer");
 
-    // Notifications check: Pilot 2 gets OnNewMailReceived, Pilot 1 gets OnMailSent
+    // Notifications check: Pilot 2 gets OnMailSent (its client raises OnNewMailReceived itself);
+    // Pilot 1's own client ran OnMailSent locally, so the server does not echo it back.
     let p2_notifs = ctx.drain_notifications_for_char(90_000_002);
     assert!(
-        p2_notifs.iter().any(|n| n.event == "OnNewMailReceived"),
-        "Expected OnNewMailReceived for Pilot 2"
+        p2_notifs.iter().any(|n| n.event == "OnMailSent" && n.args[0] == PyRep::Integer(mail_id)),
+        "Expected OnMailSent for Pilot 2"
     );
     let p1_notifs = ctx.drain_notifications_for_char(90_000_001);
     assert!(
-        p1_notifs.iter().any(|n| n.event == "OnMailSent"),
-        "Expected OnMailSent for Pilot 1"
+        !p1_notifs.iter().any(|n| n.event == "OnMailSent"),
+        "Sender must not be re-notified"
     );
 
     // 4. Pilot 2 fetches mail headers via SyncMail -> util.KeyVal { oldMail, newMail, mailStatus }

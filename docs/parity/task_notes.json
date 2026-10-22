@@ -434,5 +434,251 @@
   "Z-8": {
     "assessment": "NOT STARTED",
     "note": ""
+  },
+  "client_local_notify_evidence": {
+    "source": "client code.ccp (V24.01) disassembly",
+    "rows": {
+      "notify:OnContactChange": {
+        "sites": [
+          {
+            "client_module": "eve/client/script/ui/shared/neocom/addressBook/addressbookService.pyj",
+            "function": "AddressBookSvc.OnPersonalContactsAdded",
+            "bytecode_offsets": "205-208",
+            "instructions": "LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnContactChange'"
+          },
+          {
+            "client_module": "eve/client/script/ui/shared/neocom/addressBook/addressbookService.pyj",
+            "function": "AddressBookSvc.OnPersonalContactsUpdated",
+            "bytecode_offsets": "315-318",
+            "instructions": "LOAD_ATTR ScatterEvent; LOAD_CONST 'OnContactChange'"
+          },
+          {
+            "client_module": "eve/client/script/ui/shared/neocom/addressBook/addressbookService.pyj",
+            "function": "AddressBookSvc.OnPersonalContactsDeleted",
+            "bytecode_offsets": "110-113",
+            "instructions": "LOAD_ATTR ScatterEvent; LOAD_CONST 'OnContactChange'"
+          },
+          {
+            "client_module": "eve/client/script/ui/shared/neocom/addressBook/addressbookService.pyj",
+            "function": "AddressBookSvc.AddToAddressBook",
+            "bytecode_offsets": "1572-1575",
+            "instructions": "LOAD_ATTR ScatterEvent; LOAD_CONST 'OnContactChange'"
+          },
+          {
+            "client_module": "eve/client/script/ui/shared/neocom/addressBook/addressbookService.pyj",
+            "function": "AddressBookSvc.EditContacts",
+            "bytecode_offsets": "285-288",
+            "instructions": "LOAD_ATTR ScatterEvent; LOAD_CONST 'OnContactChange'"
+          },
+          {
+            "client_module": "eve/client/script/ui/shared/neocom/addressBook/addressbookService.pyj",
+            "function": "AddressBookSvc.RemoveFromAddressBook",
+            "bytecode_offsets": "768-771",
+            "instructions": "LOAD_ATTR ScatterEvent; LOAD_CONST 'OnContactChange'"
+          },
+          {
+            "client_module": "eve/client/script/ui/shared/neocom/addressBook/addressbookService.pyj",
+            "function": "AddressBookSvc.OnContactSlashCommand",
+            "bytecode_offsets": "153-156",
+            "instructions": "LOAD_ATTR ScatterEvent; LOAD_CONST 'OnContactChange'"
+          }
+        ],
+        "server_sender": "No server emitter needed: in a full scan of code.ccp the name appears only in the listed local ScatterEvent / method-call sites and in handler classes' __notifyevents__ lists. The server sends OnPersonalContactsAdded/Updated/Deleted, whose client handlers re-scatter OnContactChange."
+      },
+      "notify:OnBlockContacts": {
+        "sites": [
+          {
+            "client_module": "eve/client/script/ui/shared/neocom/addressBook/addressbookService.pyj",
+            "function": "AddressBookSvc.BlockOwner",
+            "bytecode_offsets": "307-310",
+            "instructions": "after RemoteSvc('charMgr').BlockOwners: LOAD_ATTR ScatterEvent; LOAD_CONST 'OnBlockContacts'"
+          }
+        ],
+        "server_sender": "No server emitter needed: in a full scan of code.ccp the name appears only in the listed local ScatterEvent / method-call sites and in handler classes' __notifyevents__ lists."
+      },
+      "notify:OnUnblockContacts": {
+        "sites": [
+          {
+            "client_module": "eve/client/script/ui/shared/neocom/addressBook/addressbookService.pyj",
+            "function": "AddressBookSvc.UnblockOwner",
+            "bytecode_offsets": "107-110",
+            "instructions": "after RemoteSvc('charMgr').UnblockOwners(blocked): LOAD_ATTR ScatterEvent; LOAD_CONST 'OnUnblockContacts'"
+          }
+        ],
+        "server_sender": "No server emitter needed: in a full scan of code.ccp the name appears only in the listed local ScatterEvent / method-call sites and in handler classes' __notifyevents__ lists."
+      },
+      "notify:OnContactLoggedOn": {
+        "sites": [
+          {
+            "client_module": "eve/client/script/ui/shared/comtool/onlineStatus.pyj",
+            "function": "OnlineStatus.OnClientContactChange",
+            "bytecode_offsets": "9",
+            "instructions": "LOAD_FAST self; LOAD_ATTR OnContactLoggedOn; LOAD_FAST charID; CALL_FUNCTION 1 (branch online == True)"
+          },
+          {
+            "client_module": "eve/client/script/ui/shared/userentry.pyj",
+            "function": "User.OnClientContactChange",
+            "bytecode_offsets": "9",
+            "instructions": "LOAD_ATTR OnContactLoggedOn (method call)"
+          },
+          {
+            "client_module": "notifications/client/generator/notificationGenerator.pyj",
+            "function": "FakeCharacterNotification.generate",
+            "bytecode_offsets": "25-28",
+            "instructions": "LOAD_ATTR ScatterEvent; LOAD_CONST 'OnContactLoggedOn' (test-notification generator)"
+          }
+        ],
+        "server_sender": "The server notification is OnClientContactChange(charID, online); OnlineStatus.OnClientContactChange(charID, online) calls self.OnContactLoggedOn(charID) locally when online is true. No server emitter needed: in a full scan of code.ccp the name appears only in the listed local ScatterEvent / method-call sites and in handler classes' __notifyevents__ lists."
+      },
+      "notify:OnContactLoggedOff": {
+        "sites": [
+          {
+            "client_module": "eve/client/script/ui/shared/comtool/onlineStatus.pyj",
+            "function": "OnlineStatus.OnClientContactChange",
+            "bytecode_offsets": "25",
+            "instructions": "LOAD_FAST self; LOAD_ATTR OnContactLoggedOff; LOAD_FAST charID; CALL_FUNCTION 1 (branch online == False)"
+          },
+          {
+            "client_module": "notifications/client/generator/notificationGenerator.pyj",
+            "function": "FakeCharacterNotification.generate",
+            "bytecode_offsets": "44-47",
+            "instructions": "LOAD_ATTR ScatterEvent; LOAD_CONST 'OnContactLoggedOff' (test-notification generator)"
+          }
+        ],
+        "server_sender": "The server notification is OnClientContactChange(charID, online); OnlineStatus.OnClientContactChange(charID, online) calls self.OnContactLoggedOff(charID) locally when online is false. No server emitter needed: in a full scan of code.ccp the name appears only in the listed local ScatterEvent / method-call sites and in handler classes' __notifyevents__ lists."
+      },
+      "notify:OnFleetFinderAdvertChanged": {
+        "sites": [
+          {
+            "client_module": "eve/client/script/parklife/fleetSvc.pyj",
+            "function": "FleetSvc.OnFleetOptionsChanged",
+            "bytecode_offsets": "46-49",
+            "instructions": "LOAD_ATTR ScatterEvent; LOAD_CONST 'OnFleetFinderAdvertChanged' (when options.isRegistered changes)"
+          },
+          {
+            "client_module": "eve/client/script/parklife/fleetSvc.pyj",
+            "function": "FleetSvc._FinializeRegistration",
+            "bytecode_offsets": "9-12",
+            "instructions": "LOAD_ATTR ScatterEvent; LOAD_CONST 'OnFleetFinderAdvertChanged'"
+          }
+        ],
+        "server_sender": "No server emitter needed: in a full scan of code.ccp the name appears only in the listed local ScatterEvent / method-call sites and in handler classes' __notifyevents__ lists. The server sends OnFleetOptionsChanged(oldOptions, options)."
+      },
+      "notify:OnFleetMemberChanging": {
+        "sites": [
+          {
+            "client_module": "eve/client/script/parklife/fleetSvc.pyj",
+            "function": "FleetSvc.MoveMember",
+            "bytecode_offsets": "77-80",
+            "instructions": "LOAD_ATTR ScatterEvent; LOAD_CONST 'OnFleetMemberChanging' (before calling fleet.MoveMember)"
+          }
+        ],
+        "server_sender": "No server emitter needed: in a full scan of code.ccp the name appears only in the listed local ScatterEvent / method-call sites and in handler classes' __notifyevents__ lists."
+      },
+      "notify:OnFleetSetupChanged": {
+        "sites": [
+          {
+            "client_module": "eve/client/script/parklife/fleetSvc.pyj",
+            "function": "FleetSvc.SaveSetupOnServer",
+            "bytecode_offsets": "55-58",
+            "instructions": "LOAD_ATTR ScatterEvent; LOAD_CONST 'OnFleetSetupChanged'"
+          }
+        ],
+        "server_sender": "No server emitter needed: in a full scan of code.ccp the name appears only in the listed local ScatterEvent / method-call sites and in handler classes' __notifyevents__ lists."
+      },
+      "notify:OnNewMailReceived": {
+        "sites": [
+          {
+            "client_module": "eve/client/script/ui/services/mail/mailSvc.pyj",
+            "function": "mailSvc.OnMailSent",
+            "bytecode_offsets": "497",
+            "instructions": "LOAD_FAST self; LOAD_ATTR OnNewMailReceived; ... CALL_FUNCTION 1 (unread mail just filed from the server's OnMailSent)"
+          },
+          {
+            "client_module": "eve/client/script/ui/services/mail/mailSvc.pyj",
+            "function": "mailSvc.OnNewMailReceived",
+            "bytecode_offsets": "29-32",
+            "instructions": "LOAD_ATTR ScatterEvent; LOAD_CONST 'OnNewMailReceived' (fan-out to MailWindow/MailForm)"
+          },
+          {
+            "client_module": "eve/client/script/ui/services/mail/mailSvc.pyj",
+            "function": "mailSvc.OnMailUndeleted",
+            "bytecode_offsets": "13-16",
+            "instructions": "LOAD_ATTR ScatterEvent; LOAD_CONST 'OnNewMailReceived'"
+          }
+        ],
+        "server_sender": "No server emitter needed: in a full scan of code.ccp the name appears only in the listed local ScatterEvent / method-call sites and in handler classes' __notifyevents__ lists. The server sends OnMailSent(messageID, senderID, sentDate, toCharacterIDs, toListID, toCorpOrAllianceID, title, statusMask)."
+      },
+      "notify:OnMailCountersUpdate": {
+        "sites": [
+          {
+            "client_module": "eve/client/script/ui/services/mail/mailSvc.pyj",
+            "function": "mailSvc.MarkMessagesAsRead",
+            "bytecode_offsets": "114-117",
+            "instructions": "LOAD_ATTR ScatterEvent; LOAD_CONST 'OnMailCountersUpdate'"
+          },
+          {
+            "client_module": "eve/client/script/ui/services/mail/mailSvc.pyj",
+            "function": "mailSvc.MarkMessagesAsUnread",
+            "bytecode_offsets": "115-118",
+            "instructions": "LOAD_ATTR ScatterEvent; LOAD_CONST 'OnMailCountersUpdate'"
+          },
+          {
+            "client_module": "eve/client/script/ui/services/mail/mailSvc.pyj",
+            "function": "mailSvc._RefreshTrashedStatusWhenMovingFromTrash",
+            "bytecode_offsets": "25-28",
+            "instructions": "LOAD_ATTR ScatterEvent; LOAD_CONST 'OnMailCountersUpdate'"
+          },
+          {
+            "client_module": "eve/client/script/ui/services/mail/mailSvc.pyj",
+            "function": "mailSvc.AssignLabels",
+            "bytecode_offsets": "211-214",
+            "instructions": "LOAD_ATTR ScatterEvent; LOAD_CONST 'OnMailCountersUpdate'"
+          },
+          {
+            "client_module": "eve/client/script/ui/services/mail/mailSvc.pyj",
+            "function": "mailSvc.RemoveLabels",
+            "bytecode_offsets": "218-221",
+            "instructions": "LOAD_ATTR ScatterEvent; LOAD_CONST 'OnMailCountersUpdate'"
+          },
+          {
+            "client_module": "eve/client/script/ui/services/mail/mailSvc.pyj",
+            "function": "mailSvc.ReplaceLabels",
+            "bytecode_offsets": "181-184",
+            "instructions": "LOAD_ATTR ScatterEvent; LOAD_CONST 'OnMailCountersUpdate'"
+          }
+        ],
+        "server_sender": "No server emitter needed: in a full scan of code.ccp the name appears only in the listed local ScatterEvent / method-call sites and in handler classes' __notifyevents__ lists. The only handler is MailForm.OnMailCountersUpdate(*args)."
+      },
+      "notify:OnReloadCalendar": {
+        "sites": [
+          {
+            "client_module": "eve/client/script/ui/services/eveCalendarsvc.pyj",
+            "function": "CalendarSvc.OnNewCalendarEvent",
+            "bytecode_offsets": "368-371",
+            "instructions": "LOAD_ATTR ScatterEvent; LOAD_CONST 'OnReloadCalendar'"
+          },
+          {
+            "client_module": "eve/client/script/ui/services/eveCalendarsvc.pyj",
+            "function": "CalendarSvc.OnRemoveCalendarEvent",
+            "bytecode_offsets": "283-286",
+            "instructions": "LOAD_ATTR ScatterEvent; LOAD_CONST 'OnReloadCalendar'"
+          },
+          {
+            "client_module": "eve/client/script/ui/services/eveCalendarsvc.pyj",
+            "function": "CalendarSvc._RespondToEvent",
+            "bytecode_offsets": "225-228",
+            "instructions": "LOAD_ATTR ScatterEvent; LOAD_CONST 'OnReloadCalendar'"
+          },
+          {
+            "client_module": "eve/client/script/ui/services/eveCalendarsvc.pyj",
+            "function": "CalendarSvc.OnSessionChanged",
+            "bytecode_offsets": "67-70",
+            "instructions": "LOAD_ATTR ScatterEvent; LOAD_CONST 'OnReloadCalendar'"
+          }
+        ],
+        "server_sender": "No server emitter needed: in a full scan of code.ccp the name appears only in the listed local ScatterEvent / method-call sites and in handler classes' __notifyevents__ lists."
+      }
+    }
   }
 }

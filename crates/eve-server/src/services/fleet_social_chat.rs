@@ -5,7 +5,6 @@ use eve_db::{ChatChannelRecord, IskCents};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use std::collections::{HashMap, HashSet};
-use std::sync::{LazyLock, Mutex};
 
 #[derive(Clone, Debug, Default)]
 pub(super) struct MailingListState {
@@ -46,7 +45,7 @@ pub(super) struct NotificationItem {
 }
 
 #[derive(Clone, Debug, Default)]
-pub(super) struct SocialExtrasState {
+pub(crate) struct SocialExtrasState {
     pub(super) next_id: i64,
     pub(super) cspa_charges: HashMap<i64, IskCents>, // char_id -> CSPA charge
     pub(super) trashed_mails: HashSet<(i64, i64)>,   // (char_id, mail_id)
@@ -62,12 +61,12 @@ pub(super) struct SocialExtrasState {
     pub(super) chat_rate_window: HashMap<i64, (u64, u32)>,              // char_id -> (unix_sec, count)
 }
 
-pub(super) static SOCIAL_EXTRAS: LazyLock<Mutex<SocialExtrasState>> = LazyLock::new(|| {
-    Mutex::new(SocialExtrasState {
-        next_id: 700_000,
-        ..Default::default()
-    })
-});
+impl SocialExtrasState {
+    /// Fresh per-`ServerContext` state; local IDs (mailing lists, calendar events) start at 700,000.
+    pub(crate) fn new() -> Self {
+        Self { next_id: 700_000, ..Default::default() }
+    }
+}
 
 pub(super) fn handle_chat_and_social(
     ctx: &ServerContext,
@@ -311,7 +310,7 @@ fn handle_chat_rpc(
                 .and_then(|a| a.as_str())
                 .unwrap_or("Channel moderation mute");
             let until = ctx.now_unix() + duration_sec;
-            SOCIAL_EXTRAS
+            ctx.social_extras
                 .lock()
                 .unwrap()
                 .muted_in_channel
@@ -339,7 +338,7 @@ fn handle_chat_rpc(
                     message: "GMUnmute requires channel operator or GM role".into(),
                 }));
             }
-            SOCIAL_EXTRAS
+            ctx.social_extras
                 .lock()
                 .unwrap()
                 .muted_in_channel
@@ -442,7 +441,7 @@ fn handle_chat_rpc(
             let password_arg = args.get(1).and_then(|a| a.as_str());
             let motd_arg = args.get(2).and_then(|a| a.as_str()).unwrap_or("");
 
-            if SOCIAL_EXTRAS
+            if ctx.social_extras
                 .lock()
                 .unwrap()
                 .blocked_in_channel
@@ -487,7 +486,7 @@ fn handle_chat_rpc(
                 }
                 chan.members.insert(char_id);
                 let visible_count = if chan.is_delayed_local {
-                    SOCIAL_EXTRAS
+                    ctx.social_extras
                         .lock()
                         .unwrap()
                         .delayed_local_speakers
@@ -546,7 +545,7 @@ fn handle_chat_rpc(
                 }
                 Ok::<(), std::convert::Infallible>(())
             });
-            SOCIAL_EXTRAS
+            ctx.social_extras
                 .lock()
                 .unwrap()
                 .delayed_local_speakers
@@ -582,7 +581,7 @@ fn handle_chat_rpc(
             }
             let now_unix = ctx.now_unix();
             {
-                let mut s = SOCIAL_EXTRAS.lock().unwrap();
+                let mut s = ctx.social_extras.lock().unwrap();
                 if let Some(&(until, ref reason)) =
                     s.muted_in_channel.get(&(chan_id.to_string(), char_id))
                 {
@@ -710,7 +709,7 @@ fn handle_chat_rpc(
                 }));
             };
             let (is_blocked, cspa_charge) = {
-                let s = SOCIAL_EXTRAS.lock().unwrap();
+                let s = ctx.social_extras.lock().unwrap();
                 let friendly = s
                     .contacts
                     .get(&recipient_id)
@@ -822,7 +821,7 @@ fn handle_chat_rpc(
                 }));
             };
             let visible_members: Vec<i64> = if chan.is_delayed_local {
-                let speakers = SOCIAL_EXTRAS
+                let speakers = ctx.social_extras
                     .lock()
                     .unwrap()
                     .delayed_local_speakers
@@ -956,7 +955,7 @@ fn handle_chat_rpc(
                                 chan.operators.insert(target_id);
                             }
                             -1 => {
-                                SOCIAL_EXTRAS.lock().unwrap().muted_in_channel.insert(
+                                ctx.social_extras.lock().unwrap().muted_in_channel.insert(
                                     (chan_key.clone(), target_id),
                                     (ctx.now_unix() + 3600, "Operator mute".into()),
                                 );
@@ -964,7 +963,7 @@ fn handle_chat_rpc(
                             -2 => {
                                 chan.members.remove(&target_id);
                                 chan.operators.remove(&target_id);
-                                SOCIAL_EXTRAS
+                                ctx.social_extras
                                     .lock()
                                     .unwrap()
                                     .blocked_in_channel
@@ -973,14 +972,14 @@ fn handle_chat_rpc(
                                     .insert(target_id);
                             }
                             _ => {
-                                SOCIAL_EXTRAS
+                                ctx.social_extras
                                     .lock()
                                     .unwrap()
                                     .blocked_in_channel
                                     .entry(chan_key.clone())
                                     .or_default()
                                     .remove(&target_id);
-                                SOCIAL_EXTRAS
+                                ctx.social_extras
                                     .lock()
                                     .unwrap()
                                     .muted_in_channel
@@ -1038,7 +1037,7 @@ fn handle_contacts_notifications_calendar(
         | ("notificationMgr", "GetByGroupID")
         | ("notificationMgr", "FormatNotifications") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let items = SOCIAL_EXTRAS
+            let items = ctx.social_extras
                 .lock()
                 .unwrap()
                 .notifications
@@ -1079,7 +1078,7 @@ fn handle_contacts_notifications_calendar(
         | ("notificationMgr", "MarkGroupAsProcessed") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let ids = extract_id_list(args.first());
-            if let Some(list) = SOCIAL_EXTRAS.lock().unwrap().notifications.get_mut(&char_id) {
+            if let Some(list) = ctx.social_extras.lock().unwrap().notifications.get_mut(&char_id) {
                 for n in list.iter_mut() {
                     if ids.is_empty() || ids.contains(&n.notification_id) {
                         n.processed = true;
@@ -1099,7 +1098,7 @@ fn handle_contacts_notifications_calendar(
         | ("notificationMgr", "DeleteGroupNotifications")
         | ("notificationMgr", "DeleteNotifications") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            SOCIAL_EXTRAS
+            ctx.social_extras
                 .lock()
                 .unwrap()
                 .notifications
@@ -1115,7 +1114,7 @@ fn handle_contacts_notifications_calendar(
 
         ("addressbook", "GetContactList") | ("charMgr", "GetContactList") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let s = SOCIAL_EXTRAS.lock().unwrap();
+            let s = ctx.social_extras.lock().unwrap();
             let contacts: Vec<Vec<PyRep>> = s
                 .contacts
                 .get(&char_id)
@@ -1163,7 +1162,7 @@ fn handle_contacts_notifications_calendar(
                 .clamp(-10.0, 10.0);
             let watch = matches!(args.get(2), Some(PyRep::Bool(true)) | Some(PyRep::Integer(1)));
             let mask = args.get(3).and_then(|a| a.as_i64()).unwrap_or(0) as u64;
-            SOCIAL_EXTRAS
+            ctx.social_extras
                 .lock()
                 .unwrap()
                 .contacts
@@ -1189,7 +1188,7 @@ fn handle_contacts_notifications_calendar(
         ("addressbook", "DeleteContacts") | ("charMgr", "DeleteContacts") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let ids = extract_id_list(args.first());
-            if let Some(m) = SOCIAL_EXTRAS.lock().unwrap().contacts.get_mut(&char_id) {
+            if let Some(m) = ctx.social_extras.lock().unwrap().contacts.get_mut(&char_id) {
                 for id in &ids {
                     m.remove(id);
                 }
@@ -1207,7 +1206,7 @@ fn handle_contacts_notifications_calendar(
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let ids = extract_id_list(args.first());
             {
-                let mut s = SOCIAL_EXTRAS.lock().unwrap();
+                let mut s = ctx.social_extras.lock().unwrap();
                 let b = s.blocked.entry(char_id).or_default();
                 for &id in &ids {
                     b.insert(id);
@@ -1225,7 +1224,7 @@ fn handle_contacts_notifications_calendar(
         ("addressbook", "UnblockOwners") | ("charMgr", "UnblockOwners") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let ids = extract_id_list(args.first());
-            if let Some(b) = SOCIAL_EXTRAS.lock().unwrap().blocked.get_mut(&char_id) {
+            if let Some(b) = ctx.social_extras.lock().unwrap().blocked.get_mut(&char_id) {
                 for id in &ids {
                     b.remove(id);
                 }
@@ -1241,7 +1240,7 @@ fn handle_contacts_notifications_calendar(
 
         ("charMgr", "GetSettingsInfo") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let cspa = SOCIAL_EXTRAS
+            let cspa = ctx.social_extras
                 .lock()
                 .unwrap()
                 .cspa_charges
@@ -1260,7 +1259,7 @@ fn handle_contacts_notifications_calendar(
                 .unwrap_or(2_950.0)
                 .clamp(0.0, 1_000_000.0);
             let charge = IskCents::from_f64_isk(isk);
-            SOCIAL_EXTRAS
+            ctx.social_extras
                 .lock()
                 .unwrap()
                 .cspa_charges
@@ -1288,7 +1287,7 @@ fn handle_contacts_notifications_calendar(
             };
             let mut total_cspa = IskCents(0);
             {
-                let s = SOCIAL_EXTRAS.lock().unwrap();
+                let s = ctx.social_extras.lock().unwrap();
                 for &rec_id in &target_ids {
                     if rec_id == char_id || rec_id <= 0 {
                         continue;
@@ -1351,14 +1350,14 @@ fn handle_contacts_notifications_calendar(
             let item_id = args.first().and_then(|a| a.as_i64()).unwrap_or(char_id);
             if method == "SetNote" {
                 let note = args.get(1).and_then(|a| a.as_str()).unwrap_or("");
-                SOCIAL_EXTRAS
+                ctx.social_extras
                     .lock()
                     .unwrap()
                     .char_notes
                     .insert((char_id, item_id), note.to_string());
                 Some(Ok(PyRep::Bool(true)))
             } else {
-                let note = SOCIAL_EXTRAS
+                let note = ctx.social_extras
                     .lock()
                     .unwrap()
                     .char_notes
