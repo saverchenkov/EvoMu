@@ -708,7 +708,7 @@ pub fn handle_contacts(
                     PyRep::Integer(label_mask),
                 ],
             );
-            ctx.notify(NotificationTarget::Character(char_id), "OnSetPlayerStanding", "charid", vec![]);
+            ctx.notify(NotificationTarget::Character(char_id), "OnSetPlayerStanding", "charid", vec![PyRep::Integer(contact_id), PyRep::Real(standing)]);
 
             Some(Ok(PyRep::keyval([
                 ("contactID", PyRep::Integer(contact_id)),
@@ -784,7 +784,9 @@ pub fn handle_contacts(
                     watchlist_opt.map(PyRep::Bool).unwrap_or(PyRep::None),
                 ],
             );
-            ctx.notify(NotificationTarget::Character(char_id), "OnSetPlayerStanding", "charid", vec![]);
+            for &cid in &contact_ids {
+                ctx.notify(NotificationTarget::Character(char_id), "OnSetPlayerStanding", "charid", vec![PyRep::Integer(cid), PyRep::Real(standing)]);
+            }
             Some(Ok(PyRep::keyval([
                 ("updatedCount", PyRep::Integer(updated_count as i64)),
                 ("standing", PyRep::Real(standing)),

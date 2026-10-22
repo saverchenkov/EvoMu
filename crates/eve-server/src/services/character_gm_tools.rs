@@ -1240,7 +1240,10 @@ pub async fn handle_gm_slash_ext(
 
     if cmd.starts_with("/contact ") || cmd.starts_with("/standing ") {
         let parts: Vec<&str> = cmd.split_whitespace().collect();
-        let target_id = parts.get(1).and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
+        let target_id = match parts.get(1).and_then(|s| s.parse::<i64>().ok()) {
+            Some(tid) if tid > 0 => tid,
+            _ => return Some(Err(BridgeRpcError { code: "InvalidArguments".into(), message: "Usage: /contact <targetID> <standing>".into() })),
+        };
         let standing = parts.get(2).and_then(|s| s.parse::<f64>().ok()).unwrap_or(5.0).clamp(-10.0, 10.0);
         if let Ok(mut guard) = ctx.esi_state.char_contacts.write() {
             let list = guard.entry(cid).or_default();
@@ -1253,7 +1256,7 @@ pub async fn handle_gm_slash_ext(
             }
         }
         ctx.notify(crate::router::NotificationTarget::Character(cid), "OnContactSlashCommand", "charid", vec![PyRep::Integer(target_id), PyRep::Real(standing)]);
-        ctx.notify(crate::router::NotificationTarget::Character(cid), "OnSetPlayerStanding", "charid", vec![]);
+        ctx.notify(crate::router::NotificationTarget::Character(cid), "OnSetPlayerStanding", "charid", vec![PyRep::Integer(target_id), PyRep::Real(standing)]);
         return Some(Ok(PyRep::keyval([("contactID", PyRep::Integer(target_id)), ("standing", PyRep::Real(standing))])));
     }
 

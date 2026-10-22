@@ -242,6 +242,30 @@ async fn test_fleet_proxy_and_fleet_mgr_rpcs() {
     }
 
     // 6. fleetProxy.UpdateFleetAdvertWithNewLeader: updates leader in advert
+    // BF-FLEET-02: Non-boss non-leader caller cannot update allowed entities
+    let unauth_entities = rpc(
+        &ctx,
+        &mut sess2,
+        "fleetProxy",
+        "UpdateAdvertAllowedEntities",
+        &[PyRep::List(vec![PyRep::Integer(999)])],
+    )
+    .await
+    .expect_err("Non-boss non-leader cannot update allowed entities");
+    assert_eq!(unauth_entities.code, "FleetRoleDenied");
+
+    // Boss can update allowed entities
+    let auth_entities = rpc(
+        &ctx,
+        &mut sess1,
+        "fleetProxy",
+        "UpdateAdvertAllowedEntities",
+        &[PyRep::List(vec![PyRep::Integer(999)])],
+    )
+    .await
+    .expect("Boss can update allowed entities");
+    assert_eq!(field(&auth_entities, "allowedCount").as_i64(), Some(1));
+
     let update_lead_rep = rpc(
         &ctx,
         &mut sess1,

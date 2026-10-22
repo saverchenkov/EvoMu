@@ -943,6 +943,13 @@ pub(super) async fn handle_fleet_ops(
                 Some(fid) => fid,
                 None => return Some(Err(BridgeRpcError { code: "NotInFleet".into(), message: "Character is not in a fleet".into() })),
             };
+            let is_auth = ctx.db.with_snapshot(|snap| {
+                snap.fleets.get(&fleet_id).is_some_and(|fl| fl.boss_id == char_id)
+                    || ctx.fleet_extras.lock().unwrap().adverts.get(&fleet_id).is_some_and(|ad| ad.leader_id == char_id)
+            });
+            if !is_auth {
+                return Some(Err(BridgeRpcError { code: "FleetRoleDenied".into(), message: "Only fleet boss or advert leader can modify advert".into() }));
+            }
             if method == "UpdateAdvertAllowedEntities" {
                 let mut entities = std::collections::HashSet::new();
                 if let Some(PyRep::List(list) | PyRep::Tuple(list)) = args.first() {
@@ -957,15 +964,6 @@ pub(super) async fn handle_fleet_ops(
                     ("fleetID", PyRep::Integer(fleet_id)),
                     ("allowedCount", PyRep::Integer(entities.len() as i64)),
                 ])));
-            }
-            if matches!(method, "UpdateFleetAdvertWithNewLeader" | "UpdateAdvertInfo") {
-                let is_auth = ctx.db.with_snapshot(|snap| {
-                    snap.fleets.get(&fleet_id).is_some_and(|fl| fl.boss_id == char_id)
-                        || ctx.fleet_extras.lock().unwrap().adverts.get(&fleet_id).is_some_and(|ad| ad.leader_id == char_id)
-                });
-                if !is_auth {
-                    return Some(Err(BridgeRpcError { code: "FleetRoleDenied".into(), message: "Only fleet boss or advert leader can modify advert".into() }));
-                }
             }
             if method == "UpdateFleetAdvertWithNewLeader" {
                 let new_leader = args.first().and_then(|a| a.as_i64()).unwrap_or(char_id);
