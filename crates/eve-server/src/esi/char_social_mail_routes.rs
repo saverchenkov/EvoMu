@@ -661,19 +661,36 @@ pub fn dispatch_char_social_mail_route(
                 ));
             }
             let label_id = ctx.esi_state.alloc_id();
-            let mut map = ctx
-                .esi_state
-                .mail_labels
-                .write()
-                .unwrap_or_else(|e| e.into_inner());
-            let list = map
-                .entry(char_id)
-                .or_insert_with(crate::esi::runtime_state::EsiRuntimeState::default_mail_labels);
-            list.push(EsiMailLabel {
-                label_id,
-                name: trimmed.to_string(),
-                color: color.to_string(),
+            {
+                let mut map = ctx
+                    .esi_state
+                    .mail_labels
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner());
+                let list = map
+                    .entry(char_id)
+                    .or_insert_with(crate::esi::runtime_state::EsiRuntimeState::default_mail_labels);
+                list.push(EsiMailLabel {
+                    label_id,
+                    name: trimmed.to_string(),
+                    color: color.to_string(),
+                });
+            }
+            ctx.db.with_mut_snapshot(|snap| {
+                let list = snap.mail_labels.entry(char_id).or_default();
+                list.push(eve_db::MailLabelRecord {
+                    label_id,
+                    name: trimmed.to_string(),
+                    color: color.to_string(),
+                });
             });
+            crate::services::mail_notify::emit_labels_created_by_external(
+                ctx,
+                char_id,
+                label_id,
+                trimmed,
+                color,
+            );
             Some(RouteExecutionResult::created_json(json!(label_id)))
         }
 

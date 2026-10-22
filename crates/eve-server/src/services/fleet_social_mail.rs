@@ -1,6 +1,6 @@
 //! Mail & Mailing Lists (`SO-1`: `mailMgr`, `mailingListsMgr`) and Calendar (`P-5`: `calendarMgr`).
 
-use super::fleet_social_chat::{extract_id_list, CalendarEventState, MailingListState};
+use super::fleet_social_chat::{extract_id_list, MailingListState};
 use crate::router::{cache_notifications::NotificationTarget, ServerContext};
 use eve_db::{IskCents, MailLabelRecord, MailRecord};
 use eve_machonet::SessionState;
@@ -876,7 +876,22 @@ pub(super) fn handle_mail_and_calendar(
             let list_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
             let mut s = ctx.social_extras.lock().unwrap();
             if method == "Delete" {
-                s.mailing_lists.remove(&list_id);
+                let Some(ml) = s.mailing_lists.get(&list_id) else {
+                    return Some(Err(BridgeRpcError {
+                        code: "MailingListNotFound".into(),
+                        message: "Mailing list not found".into(),
+                    }));
+                };
+                if ml.owner_id != char_id {
+                    return Some(Err(BridgeRpcError {
+                        code: "MailingListAccessDenied".into(),
+                        message: "Only the mailing list owner may delete it".into(),
+                    }));
+                }
+                let removed = s.mailing_lists.remove(&list_id).unwrap();
+                let other_members: Vec<i64> = removed.members.keys().copied().filter(|&cid| cid != char_id).collect();
+                drop(s);
+                crate::services::mail_notify::emit_mailing_list_list_id(ctx, "OnMailingListDeleted", list_id, &other_members);
             } else if let Some(ml) = s.mailing_lists.get_mut(&list_id) {
                 ml.members.remove(&char_id);
             }
@@ -907,24 +922,41 @@ pub(super) fn handle_mail_and_calendar(
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let list_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
             let targets = extract_id_list(args.get(1));
-            let mut s = ctx.social_extras.lock().unwrap();
-            if let Some(ml) = s.mailing_lists.get_mut(&list_id) {
-                let caller_role = ml.members.get(&char_id).copied().unwrap_or(0);
-                if ml.owner_id != char_id && caller_role < 2 {
-                    return Some(Err(BridgeRpcError {
-                        code: "MailingListAccessDenied".into(),
-                        message: "Mailing list operator or owner role required".into(),
-                    }));
-                }
-                for tid in targets {
-                    match method {
-                        "SetMembersMuted" => { ml.members.insert(tid, 1); }
-                        "SetMembersOperator" => { ml.members.insert(tid, 2); }
-                        "SetMembersClear" => { ml.members.insert(tid, 0); }
-                        "KickMembers" => { ml.members.remove(&tid); }
-                        _ => {}
+            let mut affected = Vec::new();
+            {
+                let mut s = ctx.social_extras.lock().unwrap();
+                if let Some(ml) = s.mailing_lists.get_mut(&list_id) {
+                    let caller_role = ml.members.get(&char_id).copied().unwrap_or(0);
+                    if ml.owner_id != char_id && caller_role < 2 {
+                        return Some(Err(BridgeRpcError {
+                            code: "MailingListAccessDenied".into(),
+                            message: "Mailing list operator or owner role required".into(),
+                        }));
+                    }
+                    for tid in targets {
+                        if tid == ml.owner_id || !ml.members.contains_key(&tid) {
+                            continue;
+                        }
+                        match method {
+                            "SetMembersMuted" => { ml.members.insert(tid, 1); affected.push(tid); }
+                            "SetMembersOperator" => { ml.members.insert(tid, 2); affected.push(tid); }
+                            "SetMembersClear" => { ml.members.insert(tid, 0); affected.push(tid); }
+                            "KickMembers" => {
+                                if ml.members.remove(&tid).is_some() {
+                                    affected.push(tid);
+                                }
+                            }
+                            _ => {}
+                        }
                     }
                 }
+            }
+            match method {
+                "SetMembersOperator" => crate::services::mail_notify::emit_mailing_list_list_id(ctx, "OnMailingListSetOperator", list_id, &affected),
+                "SetMembersMuted" => crate::services::mail_notify::emit_mailing_list_list_id(ctx, "OnMailingListSetMuted", list_id, &affected),
+                "SetMembersClear" => crate::services::mail_notify::emit_mailing_list_list_id(ctx, "OnMailingListSetClear", list_id, &affected),
+                "KickMembers" => crate::services::mail_notify::emit_mailing_list_leave(ctx, list_id, &affected),
+                _ => {}
             }
             Some(Ok(PyRep::Bool(true)))
         }
@@ -1041,74 +1073,7 @@ pub(super) fn handle_mail_and_calendar(
         | ("calendarMgr", "CreateCorporationEvent")
         | ("calendarMgr", "CreateAllianceEvent")
         | ("calendarMgr", "CreateNewEvent") => {
-            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let date_time = args.first().and_then(|a| a.as_i64()).unwrap_or(133_000_000_000_000_000);
-            let duration = args.get(1).and_then(|a| a.as_i64()).unwrap_or(60);
-            let title = args.get(2).and_then(|a| a.as_str()).unwrap_or("Fleet Op");
-            let desc = args.get(3).and_then(|a| a.as_str()).unwrap_or("Formup in Jita");
-            let importance = args.get(4).and_then(|a| a.as_i64()).unwrap_or(0);
-            let (char_corp, char_ally) = ctx.db.with_snapshot(|snap| {
-                snap.characters
-                    .get(&char_id)
-                    .map(|c| (c.corporation_id, c.alliance_id))
-                    .unwrap_or((session.corporation_id.unwrap_or(char_id), session.alliance_id))
-            });
-            let corp_id = session.corporation_id.unwrap_or(char_corp);
-            let ally_id = session.alliance_id.or(char_ally).unwrap_or(corp_id);
-            if matches!(method, "CreateCorporationEvent" | "CreateAllianceEvent") {
-                let (is_ceo, roles) =
-                    crate::services::fleet_social::get_effective_corp_roles(ctx, corp_id, char_id);
-                if !is_ceo && !eve_db::corp_roles::has_role(roles, eve_db::corp_roles::ROLE_DIRECTOR | (1u64 << 40)) {
-                    return Some(Err(BridgeRpcError {
-                        code: "CalendarAccessDenied".into(),
-                        message: "Creating corporation or alliance calendar events requires Communications Officer or Director role".into(),
-                    }));
-                }
-            }
-            let (scope, owner_id) = match method {
-                "CreateCorporationEvent" => ("Corporation".to_string(), corp_id),
-                "CreateAllianceEvent" => ("Alliance".to_string(), ally_id),
-                _ => ("Personal".to_string(), char_id),
-            };
-            let eid = {
-                let mut s = ctx.social_extras.lock().unwrap();
-                s.next_id += 1;
-                let id = s.next_id;
-                let mut responses = HashMap::new();
-                responses.insert(char_id, 1);
-                s.calendar_events.insert(
-                    id,
-                    CalendarEventState {
-                        event_id: id,
-                        owner_id,
-                        creator_id: char_id,
-                        event_date_time: date_time,
-                        duration,
-                        importance,
-                        title: title.to_string(),
-                        description: desc.to_string(),
-                        _scope: scope,
-                        responses,
-                    },
-                );
-                id
-            };
-            let target = match method {
-                "CreateCorporationEvent" => NotificationTarget::Corporation(corp_id),
-                "CreateAllianceEvent" => NotificationTarget::Alliance(ally_id),
-                _ => NotificationTarget::Character(char_id),
-            };
-            ctx.notify(
-                target,
-                "OnNewCalendarEvent",
-                "charid",
-                vec![PyRep::Integer(eid), PyRep::String(title.to_string())],
-            );
-            Some(Ok(PyRep::keyval([
-                ("eventID", PyRep::Integer(eid)),
-                ("ownerID", PyRep::Integer(owner_id)),
-                ("title", PyRep::String(title.to_string())),
-            ])))
+            Some(super::handle_calendar_create(ctx, session, method, args))
         }
 
         ("calendarMgr", "GetEventsByMonthYear")
@@ -1164,6 +1129,7 @@ pub(super) fn handle_mail_and_calendar(
                 .values()
                 .filter(|ev| {
                     ev.owner_id == char_id
+                        || ev.responses.contains_key(&char_id)
                         || Some(ev.owner_id) == corp_opt
                         || Some(ev.owner_id) == ally_opt
                 })
@@ -1233,40 +1199,7 @@ pub(super) fn handle_mail_and_calendar(
         | ("calendarMgr", "EditCorporationEvent")
         | ("calendarMgr", "EditAllianceEvent")
         | ("calendarMgr", "DeleteEvent") => {
-            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let eid = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let mut s = ctx.social_extras.lock().unwrap();
-            if method == "DeleteEvent" {
-                s.calendar_events.remove(&eid);
-                return Some(Ok(PyRep::keyval([("eventID", PyRep::Integer(eid)), ("deleted", PyRep::Bool(true))])));
-            }
-            let mut resp_val = 1i64;
-            if let Some(ev) = s.calendar_events.get_mut(&eid) {
-                if method == "SendEventResponse" || method == "RespondToEvent" {
-                    resp_val = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1);
-                    ev.responses.insert(char_id, resp_val);
-                } else {
-                    if let Some(dt) = args.get(1).and_then(|a| a.as_i64()).filter(|&v| v > 10_000) {
-                        ev.event_date_time = dt;
-                    }
-                    if let Some(dur) = args.get(2).and_then(|a| a.as_i64()).filter(|&v| v > 0 && v <= 10_000) {
-                        ev.duration = dur;
-                    }
-                    if let Some(t) = args.get(3).and_then(|a| a.as_str()).or_else(|| args.get(1).and_then(|a| a.as_str())) {
-                        ev.title = t.to_string();
-                    }
-                    if let Some(d) = args.get(4).and_then(|a| a.as_str()).or_else(|| args.get(2).and_then(|a| a.as_str())) {
-                        ev.description = d.to_string();
-                    }
-                    if let Some(imp) = args.get(5).and_then(|a| a.as_i64()) {
-                        ev.importance = imp;
-                    }
-                }
-            }
-            Some(Ok(PyRep::keyval([
-                ("eventID", PyRep::Integer(eid)),
-                ("status", PyRep::Integer(resp_val)),
-            ])))
+            Some(super::handle_calendar_mutate(ctx, session, method, args))
         }
 
         _ => None,

@@ -1,5 +1,7 @@
-//! EVE mail notifications in the argument layout of the V24 client's
-//! `eve/client/script/ui/services/mail/mailSvc.pyj` (`mailSvc.On…` handlers).
+//! EVE mail, mailing-list, and calendar notifications in the argument layout of the V24 client's
+//! `eve/client/script/ui/services/mail/mailSvc.pyj`,
+//! `eve/client/script/ui/services/mail/mailingListsSvc.pyj`, and
+//! `eve/client/script/ui/services/eveCalendarsvc.pyj`.
 //!
 //! `OnNewMailReceived` and `OnMailCountersUpdate` are *not* sent from here: `mailSvc.OnMailSent`
 //! calls `self.OnNewMailReceived(header)` and `mailSvc` scatters `OnMailCountersUpdate` itself.
@@ -70,4 +72,139 @@ pub(crate) fn emit_mail_updated_by_external(
         new_label.map(PyRep::Integer).unwrap_or(PyRep::None),
     ];
     ctx.notify(NotificationTarget::Character(char_id), "OnMailUpdatedByExternal", "charid", args);
+}
+
+/// `mailSvc.OnLabelsCreatedByExternal(label)`: unpacks `label.labelID`, `label.name`, `label.color`
+/// when a custom mail label is created via ESI `POST /characters/{character_id}/mail/labels`.
+pub(crate) fn emit_labels_created_by_external(
+    ctx: &ServerContext,
+    char_id: i64,
+    label_id: i64,
+    name: &str,
+    color: &str,
+) {
+    let label = PyRep::keyval([
+        ("labelID", PyRep::Integer(label_id)),
+        ("name", PyRep::String(name.to_string())),
+        ("color", PyRep::String(color.to_string())),
+    ]);
+    ctx.notify(NotificationTarget::Character(char_id), "OnLabelsCreatedByExternal", "charid", vec![label]);
+}
+
+/// `mailingListsSvc.OnMailingListSetOperator(listID)` / `OnMailingListSetMuted(listID)` /
+/// `OnMailingListSetClear(listID)` / `OnMailingListDeleted(listID)`.
+pub(crate) fn emit_mailing_list_list_id(ctx: &ServerContext, event: &str, list_id: i64, recipients: &[i64]) {
+    let args = vec![PyRep::Integer(list_id)];
+    for &cid in recipients {
+        ctx.notify(NotificationTarget::Character(cid), event, "charid", args.clone());
+    }
+}
+
+/// `mailingListsSvc.OnMailingListLeave(listID, characterID)`: sent to a member kicked from `listID`.
+pub(crate) fn emit_mailing_list_leave(ctx: &ServerContext, list_id: i64, kicked_ids: &[i64]) {
+    for &cid in kicked_ids {
+        let args = vec![PyRep::Integer(list_id), PyRep::Integer(cid)];
+        ctx.notify(NotificationTarget::Character(cid), "OnMailingListLeave", "charid", args);
+    }
+}
+
+/// `eveCalendarsvc.OnNewCalendarEvent(eventID, ownerID, eventDateTime, eventDuration, eventTitle,
+/// importance, autoEventType=None, doBlink=True)`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn emit_new_calendar_event(
+    ctx: &ServerContext,
+    target: NotificationTarget,
+    event_id: i64,
+    owner_id: i64,
+    event_date_time: i64,
+    duration: i64,
+    title: &str,
+    importance: i64,
+    do_blink: bool,
+) {
+    let args = vec![
+        PyRep::Integer(event_id),
+        PyRep::Integer(owner_id),
+        PyRep::Integer(event_date_time),
+        PyRep::Integer(duration),
+        PyRep::String(title.to_string()),
+        PyRep::Integer(importance),
+        PyRep::None,
+        PyRep::Bool(do_blink),
+    ];
+    ctx.notify(target, "OnNewCalendarEvent", "charid", args);
+}
+
+/// `eveCalendarsvc.OnEditCalendarEvent(eventID, ownerID, oldEventDateTime, eventDateTime,
+/// eventDuration, eventTitle, importance, autoEventType=None)`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn emit_edit_calendar_event(
+    ctx: &ServerContext,
+    target: NotificationTarget,
+    event_id: i64,
+    owner_id: i64,
+    old_event_date_time: i64,
+    event_date_time: i64,
+    duration: i64,
+    title: &str,
+    importance: i64,
+) {
+    let args = vec![
+        PyRep::Integer(event_id),
+        PyRep::Integer(owner_id),
+        PyRep::Integer(old_event_date_time),
+        PyRep::Integer(event_date_time),
+        PyRep::Integer(duration),
+        PyRep::String(title.to_string()),
+        PyRep::Integer(importance),
+        PyRep::None,
+    ];
+    ctx.notify(target, "OnEditCalendarEvent", "charid", args);
+}
+
+/// `eveCalendarsvc.OnRemoveCalendarEvent(eventID, eventDateTime, isDeleted)`.
+pub(crate) fn emit_remove_calendar_event(
+    ctx: &ServerContext,
+    target: NotificationTarget,
+    event_id: i64,
+    event_date_time: i64,
+    is_deleted: bool,
+) {
+    let args = vec![
+        PyRep::Integer(event_id),
+        PyRep::Integer(event_date_time),
+        PyRep::Bool(is_deleted),
+    ];
+    ctx.notify(target, "OnRemoveCalendarEvent", "charid", args);
+}
+
+/// `eveCalendarsvc.OnEventResponseByExternal(eventID, eventKV, response)`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn emit_event_response_by_external(
+    ctx: &ServerContext,
+    char_id: i64,
+    event_id: i64,
+    owner_id: i64,
+    event_date_time: i64,
+    duration: i64,
+    title: &str,
+    importance: i64,
+    response_code: i64,
+) {
+    let event_kv = PyRep::keyval([
+        ("eventID", PyRep::Integer(event_id)),
+        ("ownerID", PyRep::Integer(owner_id)),
+        ("eventDateTime", PyRep::Integer(event_date_time)),
+        ("eventDuration", PyRep::Integer(duration)),
+        ("eventTitle", PyRep::String(title.to_string())),
+        ("importance", PyRep::Integer(importance)),
+        ("flag", PyRep::Integer(owner_id)),
+        ("isDeleted", PyRep::Bool(false)),
+    ]);
+    let args = vec![
+        PyRep::Integer(event_id),
+        event_kv,
+        PyRep::Integer(response_code),
+    ];
+    ctx.notify(NotificationTarget::Character(char_id), "OnEventResponseByExternal", "charid", args);
 }

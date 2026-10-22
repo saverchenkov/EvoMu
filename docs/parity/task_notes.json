@@ -678,6 +678,46 @@
           }
         ],
         "server_sender": "No server emitter needed: in a full scan of code.ccp the name appears only in the listed local ScatterEvent / method-call sites and in handler classes' __notifyevents__ lists."
+      },
+      "notify:OnReloadToDo": {
+        "sites": [
+          {
+            "client_module": "eve/client/script/ui/services/eveCalendarsvc.pyj",
+            "function": "CalendarSvc._RespondToEvent",
+            "bytecode_offsets": "199-202",
+            "instructions": "LOAD_ATTR ScatterEvent; LOAD_CONST 'OnReloadToDo'"
+          },
+          {
+            "client_module": "eve/client/script/ui/services/eveCalendarsvc.pyj",
+            "function": "CalendarSvc.OnNewCalendarEvent",
+            "bytecode_offsets": "381-384",
+            "instructions": "LOAD_ATTR ScatterEvent; LOAD_CONST 'OnReloadToDo'"
+          },
+          {
+            "client_module": "eve/client/script/ui/services/eveCalendarsvc.pyj",
+            "function": "CalendarSvc.OnRemoveCalendarEvent",
+            "bytecode_offsets": "270-273",
+            "instructions": "LOAD_ATTR ScatterEvent; LOAD_CONST 'OnReloadToDo'"
+          },
+          {
+            "client_module": "eve/client/script/ui/services/eveCalendarsvc.pyj",
+            "function": "CalendarSvc.OnSessionChanged",
+            "bytecode_offsets": "54-57",
+            "instructions": "LOAD_ATTR ScatterEvent; LOAD_CONST 'OnReloadToDo'"
+          }
+        ],
+        "server_sender": "No server emitter needed: in a full scan of code.ccp the name appears only in the listed local ScatterEvent / method-call sites and in handler classes' __notifyevents__ lists."
+      },
+      "notify:OnRespondToEvent": {
+        "sites": [
+          {
+            "client_module": "eve/client/script/ui/services/eveCalendarsvc.pyj",
+            "function": "CalendarSvc._RespondToEvent",
+            "bytecode_offsets": "212-215",
+            "instructions": "LOAD_ATTR ScatterEvent; LOAD_CONST 'OnRespondToEvent'"
+          }
+        ],
+        "server_sender": "No server emitter needed: in a full scan of code.ccp the name appears only in the listed local ScatterEvent / method-call sites and in handler classes' __notifyevents__ lists."
       }
     }
   }

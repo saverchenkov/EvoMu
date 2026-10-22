@@ -763,12 +763,17 @@ pub fn dispatch_char_social_route(
                     "Missing calendar 'response' field",
                 ));
             };
-            if !matches!(resp_str, "accepted" | "declined" | "tentative") {
-                return Some(RouteExecutionResult::error(
-                    400,
-                    format!("Invalid calendar response '{resp_str}'"),
-                ));
-            }
+            let response_code = match resp_str {
+                "accepted" => 4,
+                "declined" => 2,
+                "tentative" => 5,
+                _ => {
+                    return Some(RouteExecutionResult::error(
+                        400,
+                        format!("Invalid calendar response '{resp_str}'"),
+                    ));
+                }
+            };
             let exists = ctx
                 .db
                 .with_snapshot(|snap| snap.characters.contains_key(&char_id));
@@ -778,23 +783,57 @@ pub fn dispatch_char_social_route(
                     format!("Character {char_id} not found"),
                 ));
             }
-            let event_exists = ctx
-                .esi_state
-                .calendar_events
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .contains_key(&event_id);
-            if !event_exists {
-                return Some(RouteExecutionResult::error(
-                    404,
-                    format!("Calendar event {event_id} not found"),
-                ));
-            }
+            let social_ev = crate::services::fleet_social::update_calendar_response_from_esi(
+                ctx,
+                char_id,
+                event_id,
+                response_code,
+            );
+            let ev_meta = if let Some(meta) = social_ev {
+                meta
+            } else {
+                let esi_ev = ctx
+                    .esi_state
+                    .calendar_events
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .get(&event_id)
+                    .map(|ev| {
+                        // Convert Unix epoch seconds to BlueOS FILETIME ticks (100 ns since 1601-01-01).
+                        let filetime = (ev.event_date_unix as i64 + 11_644_473_600) * 10_000_000;
+                        (
+                            ev.owner_id,
+                            filetime,
+                            ev.duration_minutes,
+                            ev.title.clone(),
+                            ev.importance,
+                        )
+                    });
+                let Some(meta) = esi_ev else {
+                    return Some(RouteExecutionResult::error(
+                        404,
+                        format!("Calendar event {event_id} not found"),
+                    ));
+                };
+                meta
+            };
             ctx.esi_state
                 .calendar_responses
                 .write()
                 .unwrap_or_else(|e| e.into_inner())
                 .insert((char_id, event_id), resp_str.to_string());
+            let (owner_id, event_date_time, duration, title, importance) = ev_meta;
+            crate::services::mail_notify::emit_event_response_by_external(
+                ctx,
+                char_id,
+                event_id,
+                owner_id,
+                event_date_time,
+                duration,
+                &title,
+                importance,
+                response_code,
+            );
             Some(RouteExecutionResult::no_content(0))
         }
 
