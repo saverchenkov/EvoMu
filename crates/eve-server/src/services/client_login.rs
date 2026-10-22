@@ -165,7 +165,7 @@ pub async fn handle(
             if let Ok(mut counts) = bean_counts().lock() {
                 for (error_id, n) in beans {
                     if counts.len() >= ALERT_REGISTRY_CAP && !counts.contains_key(&error_id) {
-                        if let Some(oldest) = counts.keys().find(|&&k| k != 9999).copied() {
+                        if let Some(oldest) = counts.keys().find(|&&k| k != 9999 && k != 0x7000_0000).copied() {
                             counts.remove(&oldest);
                         }
                     }
