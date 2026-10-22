@@ -1,6 +1,6 @@
 {
  "version": 1,
- "row_count": 5738,
+ "row_count": 5740,
  "rows": [
   {
    "id": "rpc:FastCheckoutService.BuyOffer",
@@ -72175,6 +72175,14 @@
    "attest_ok": false
   },
   {
+   "id": "plan:D-6",
+   "category": "plan",
+   "title": "D-6",
+   "acceptance": "Canonical task D-6 meets every 'Done when' criterion in action_plan.md.",
+   "na_allowed": false,
+   "attest_ok": false
+  },
+  {
    "id": "plan:DG-1",
    "category": "plan",
    "title": "DG-1",
@@ -72779,6 +72787,14 @@
    "category": "plan",
    "title": "SP-5",
    "acceptance": "Canonical task SP-5 meets every 'Done when' criterion in action_plan.md.",
+   "na_allowed": false,
+   "attest_ok": false
+  },
+  {
+   "id": "plan:SP-6",
+   "category": "plan",
+   "title": "SP-6",
+   "acceptance": "Canonical task SP-6 meets every 'Done when' criterion in action_plan.md.",
    "na_allowed": false,
    "attest_ok": false
   },
