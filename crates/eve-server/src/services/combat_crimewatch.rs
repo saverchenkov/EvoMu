@@ -1115,7 +1115,7 @@ pub fn create_kill_right(ctx: &ServerContext, kr_id: i64, owner_id: i64, target_
 
 pub(crate) fn validate_kill_right_live_preconditions(
     ctx: &ServerContext,
-    snap: &mut eve_db::WorldStateSnapshot,
+    snap: &eve_db::WorldStateSnapshot,
     kr_id: i64,
     caller_id: i64,
     target_id: i64,
@@ -1123,7 +1123,6 @@ pub(crate) fn validate_kill_right_live_preconditions(
     let exp_opt = with_combat_runtime(ctx, |rt| rt.kill_right_expires_unix.get(&kr_id).copied());
     if let Some(exp) = exp_opt {
         if ctx.now_unix() >= exp {
-            snap.kill_rights.remove(&kr_id);
             return Err(BridgeRpcError {
                 code: "KillRightExpired".into(),
                 message: format!("Kill right {kr_id} has expired (30-day lifetime)"),

@@ -297,6 +297,11 @@ async fn test_killrights_hacking_and_interference() {
         .await
         .unwrap_err();
     assert_eq!(exp_err.code, "KillRightExpired");
+    let exp_err_repeat = ctx
+        .dispatch_rpc(&mut sess1, "killRightMgr", None, "ActivateKillRight", &[PyRep::Integer(kr_exp_id)], &kw, None)
+        .await
+        .unwrap_err();
+    assert_eq!(exp_err_repeat.code, "KillRightExpired");
 
     // Owner activates kr1 when both undocked in same system
     let act_rep = ctx
