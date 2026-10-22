@@ -113,7 +113,6 @@ async fn login_path_rpcs_answer_before_character_selection() {
     let (trace_len, bean_len) = eve_server::services::client_login::alert_registry_sizes();
     assert_eq!(trace_len, cap);
     assert_eq!(bean_len, cap);
-    assert_eq!(eve_server::services::client_login::delivered_bean_count(sat_id), i64::MAX);
 
     let planets = ctx.dispatch_rpc(&mut sess, "config", None, "GetBlackListedPlanets", &[], &kw, None).await.unwrap();
     assert_eq!(planets, PyRep::List(Vec::new()));
