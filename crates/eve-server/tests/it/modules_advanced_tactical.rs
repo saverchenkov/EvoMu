@@ -310,14 +310,16 @@ async fn spawn_in_space(
 }
 
 fn attr_from_all_info(info: &PyRep, section: &str, attr_id: u16) -> f64 {
-    let dict_opt = if let Some(sec) = info.dict_get(section) {
+    let dict_opt = if let Some(sec) = info.dict_get("shipAttributes") {
+        Some(sec)
+    } else if let Some(sec) = info.dict_get(section) {
         if let Some(sub) = sec.dict_get("attributes") {
             Some(sub)
+        } else if let PyRep::Dict(entries) = sec {
+            entries.first().and_then(|(_, item_data)| item_data.dict_get("attributes")).or(Some(sec))
         } else {
             Some(sec)
         }
-    } else if let Some(sec) = info.dict_get("shipAttributes") {
-        Some(sec)
     } else {
         info.dict_get("attributes")
     };
@@ -348,7 +350,6 @@ fn attr_from_item_info(info: &PyRep, attr_id: u16) -> f64 {
             _ => None,
         })
         .unwrap_or(0.0)
-}
 }
 
 #[tokio::test]

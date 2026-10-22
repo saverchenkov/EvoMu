@@ -1257,7 +1257,7 @@ pub async fn activate_command_burst(
     {
         let mut st = scanners_superweapons_state().write().unwrap_or_else(|e| e.into_inner());
         for &(_, target_sid) in &affected_ships {
-            let list = st.ship_dbuffs.entry(target_sid).or_default();
+            let list = st.ship_dbuffs.entry((ctx.instance_id, target_sid)).or_default();
             for &(dbuff_id, val) in &raw_buffs {
                 list.retain(|e| !(e.dbuff_id == dbuff_id && e.source_module_id == module_id));
                 list.push(ActiveDbuffEntry {

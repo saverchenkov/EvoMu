@@ -27,17 +27,11 @@ pub(crate) async fn handle_module_cycles(
             let repeat = args.get(3).and_then(|a| a.as_i64()).unwrap_or(1) as i32;
 
             let Some(ship_id) = session.ship_id else {
-                return Some(Err(BridgeRpcError {
-                    code: "NoActiveShip".into(),
-                    message: "No active ship in session".into(),
-                }));
+                return Some(Err(BridgeRpcError { code: "NoActiveShip".into(), message: "No active ship in session".into() }));
             };
 
             let Some(sys_id) = session.solar_system_id else {
-                return Some(Err(BridgeRpcError {
-                    code: "NoSolarSystem".into(),
-                    message: "Cannot activate modules outside of space".into(),
-                }));
+                return Some(Err(BridgeRpcError { code: "NoSolarSystem".into(), message: "Cannot activate modules outside of space".into() }));
             };
             let sys = ctx.systems.get_or_spawn(sys_id);
 
@@ -108,10 +102,7 @@ pub(crate) async fn handle_module_cycles(
                 if method == "Activate" && args.len() == 1 && raw_module_id > 0 && has_online_weapon {
                     return None;
                 }
-                return Some(Err(BridgeRpcError {
-                    code: "ModuleNotFound".into(),
-                    message: format!("Module {module_id} not found on ship"),
-                }));
+                return Some(Err(BridgeRpcError { code: "ModuleNotFound".into(), message: format!("Module {module_id} not found on ship") }));
             };
             let is_burned = m.damage_hp >= m.max_hp - 1e-6
                 || ctx.db.with_snapshot(|s| {
@@ -122,34 +113,22 @@ pub(crate) async fn handle_module_cycles(
                         >= 39.9
                 });
             if is_burned {
-                return Some(Err(BridgeRpcError {
-                    code: "ModuleBurnedOut".into(),
-                    message: format!("Module {module_id} is burned out and cannot be activated"),
-                }));
+                return Some(Err(BridgeRpcError { code: "ModuleBurnedOut".into(), message: format!("Module {module_id} is burned out and cannot be activated") }));
             }
             if m.state == eve_dogma::ModuleState::Offline
                 || !ctx.db.with_snapshot(|s| s.module_online_states.get(&module_id).copied().unwrap_or(true))
             {
-                return Some(Err(BridgeRpcError {
-                    code: "ModuleOffline".into(),
-                    message: format!("Module {module_id} is offline"),
-                }));
+                return Some(Err(BridgeRpcError { code: "ModuleOffline".into(), message: format!("Module {module_id} is offline") }));
             }
 
             let Some(mod_type) = ctx.sde.types.get(&m.type_id) else {
-                return Some(Err(BridgeRpcError {
-                    code: "ModuleNotFound".into(),
-                    message: format!("Module type {} not found in SDE", m.type_id),
-                }));
+                return Some(Err(BridgeRpcError { code: "ModuleNotFound".into(), message: format!("Module type {} not found in SDE", m.type_id) }));
             };
 
             // Mining lasers, strip miners, ice and gas harvesters run on the repeating MN-04 cycle engine.
             if crate::services::mining_cycle::mining_kind_of(&ctx.sde, mod_type).is_some() {
                 let Some(target_id) = target_id_opt.filter(|&t| t > 0) else {
-                    return Some(Err(BridgeRpcError {
-                        code: "TargetNotLocked".into(),
-                        message: "Mining modules require a locked target asteroid".into(),
-                    }));
+                    return Some(Err(BridgeRpcError { code: "TargetNotLocked".into(), message: "Mining modules require a locked target asteroid".into() }));
                 };
                 return Some(
                     crate::services::mining_cycle::activate(ctx, char_id, ship_id, sys_id, module_id, target_id).await,
@@ -158,40 +137,22 @@ pub(crate) async fn handle_module_cycles(
 
             if mod_type.group_id == 330 {
                 if fit.modules.values().any(|fm| ctx.sde.types.get(&fm.type_id).is_some_and(|t| t.group_id == 588)) {
-                    return Some(Err(BridgeRpcError {
-                        code: "CannotCloakWithLanceFitted".into(),
-                        message: "Cannot activate a cloaking device while a Disruptive Lance or Superweapon is fitted".into(),
-                    }));
+                    return Some(Err(BridgeRpcError { code: "CannotCloakWithLanceFitted".into(), message: "Cannot activate a cloaking device while a Disruptive Lance or Superweapon is fitted".into() }));
                 }
                 if let Err(e) = crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "cloak") {
                     return Some(Err(e));
                 }
             }
             if mod_type.group_id == 588 {
-                return Some(
-                    crate::services::tactical_modules::activate_superweapon_or_lance(
-                        ctx, char_id, ship_id, sys_id, module_id, true, target_id_opt,
-                    )
-                    .await,
-                );
+                return Some(crate::services::tactical_modules::activate_superweapon_or_lance(ctx, char_id, ship_id, sys_id, module_id, true, target_id_opt).await);
             }
             if mod_type.group_id == 1154 {
                 let mod_state = fit.build_effective_module_state(module_id, m.type_id, false, &ctx.sde);
-                return Some(
-                    crate::services::tactical_modules::activate_target_spectrum_breaker(
-                        ctx, &sys, char_id, ship_id, module_id, mod_type, &mod_state,
-                    )
-                    .await,
-                );
+                return Some(crate::services::tactical_modules::activate_target_spectrum_breaker(ctx, &sys, char_id, ship_id, module_id, mod_type, &mod_state).await);
             }
             if mod_type.group_id == 96 {
                 let mod_state = fit.build_effective_module_state(module_id, m.type_id, false, &ctx.sde);
-                return Some(
-                    crate::services::tactical_modules::activate_auto_targeting_system(
-                        ctx, &sys, char_id, ship_id, module_id, mod_type, &mod_state, &fit,
-                    )
-                    .await,
-                );
+                return Some(crate::services::tactical_modules::activate_auto_targeting_system(ctx, &sys, char_id, ship_id, module_id, mod_type, &mod_state, &fit).await);
             }
 
             if let Some(res) =
@@ -261,10 +222,7 @@ pub(crate) async fn handle_module_cycles(
                         .map(|i| (i.item_id, i.type_id, i.quantity))
                 });
                 let Some((charge_item_id, probe_type_id, loaded_qty)) = loaded_charge_opt else {
-                    return Some(Err(BridgeRpcError {
-                        code: "NoProbesLoaded".into(),
-                        message: "Scan probe launcher has no scanner probes loaded".into(),
-                    }));
+                    return Some(Err(BridgeRpcError { code: "NoProbesLoaded".into(), message: "Scan probe launcher has no scanner probes loaded".into() }));
                 };
 
                 let existing_active_count = ctx
@@ -275,10 +233,7 @@ pub(crate) async fn handle_module_cycles(
                     .filter(|p| p.owner_char_id == char_id && p.solar_system_id == sys_id)
                     .count();
                 if existing_active_count >= 8 {
-                    return Some(Err(BridgeRpcError {
-                        code: "MaxProbesLaunched".into(),
-                        message: "Maximum of 8 active scanner probes already in space".into(),
-                    }));
+                    return Some(Err(BridgeRpcError { code: "MaxProbesLaunched".into(), message: "Maximum of 8 active scanner probes already in space".into() }));
                 }
 
                 let max_can_launch = (8 - existing_active_count) as i32;
@@ -440,10 +395,7 @@ pub(crate) async fn handle_module_cycles(
                     .map(|t| t.group_id)
                     .unwrap_or(0);
                 if ship_group_id != 541 {
-                    return Some(Err(BridgeRpcError {
-                        code: "InvalidShipGroup".into(),
-                        message: "Interdiction Sphere Launcher can only be activated on Interdictors (group 541)".into(),
-                    }));
+                    return Some(Err(BridgeRpcError { code: "InvalidShipGroup".into(), message: "Interdiction Sphere Launcher can only be activated on Interdictors (group 541)".into() }));
                 }
                 let loaded_charge_opt = ctx.db.with_snapshot(|snap| {
                     snap.items
@@ -458,10 +410,7 @@ pub(crate) async fn handle_module_cycles(
                         .map(|i| (i.item_id, i.type_id))
                 });
                 let Some((charge_item_id, probe_type_id)) = loaded_charge_opt else {
-                    return Some(Err(BridgeRpcError {
-                        code: "NoProbesLoaded".into(),
-                        message: "Interdiction Sphere Launcher has no Warp Disrupt Probe loaded".into(),
-                    }));
+                    return Some(Err(BridgeRpcError { code: "NoProbesLoaded".into(), message: "Interdiction Sphere Launcher has no Warp Disrupt Probe loaded".into() }));
                 };
 
                 let (probe_id, remaining_in_launcher) = ctx.db.with_mut_snapshot(|snap| {
@@ -498,10 +447,7 @@ pub(crate) async fn handle_module_cycles(
                         ctx, probe_id, sys_id, ship_pos, bubble_radius,
                     );
                 } else if let Err(e) = sys.add_interdiction_sphere(probe_id, ship_pos, bubble_radius).await {
-                    return Some(Err(BridgeRpcError {
-                        code: "SystemActorError".into(),
-                        message: e,
-                    }));
+                    return Some(Err(BridgeRpcError { code: "SystemActorError".into(), message: e }));
                 }
 
                 // V24 client derives `OnModuleActivated` from `OnGodmaShipEffect` (active=1).
@@ -608,10 +554,7 @@ pub(crate) async fn handle_module_cycles(
                     Some((snap.next_entity_id, probe_type_id, rem, auto_reloaded))
                 });
                 let Some((probe_id, probe_type_id, remaining_in_launcher, auto_reloaded)) = launch_res else {
-                    return Some(Err(BridgeRpcError {
-                        code: "NoProbesLoaded".into(),
-                        message: "Survey probe launcher has no survey probes loaded".into(),
-                    }));
+                    return Some(Err(BridgeRpcError { code: "NoProbesLoaded".into(), message: "Survey probe launcher has no survey probes loaded".into() }));
                 };
                 ctx.invalidate_ship_fitting(ship_id);
 
@@ -726,10 +669,7 @@ pub(crate) async fn handle_module_cycles(
 
             {
                 if ctx.is_module_in_reactivation_delay(ship_id, module_id) {
-                    return Some(Err(BridgeRpcError {
-                        code: "ModuleReactivationDelay".into(),
-                        message: format!("Module {module_id} cannot reactivate before delay expires"),
-                    }));
+                    return Some(Err(BridgeRpcError { code: "ModuleReactivationDelay".into(), message: format!("Module {module_id} cannot reactivate before delay expires") }));
                 }
                 if let Some(target_id) = target_id_opt {
                     if mod_type.group_id == 82 {
@@ -753,10 +693,7 @@ pub(crate) async fn handle_module_cycles(
                     } else if mod_type.group_id != 842 {
                         let locks = sys.get_target_locks(ship_id).await.unwrap_or_default();
                         if !locks.iter().any(|l| l.target_id == target_id && l.locked) {
-                            return Some(Err(BridgeRpcError {
-                                code: "TargetNotLocked".into(),
-                                message: format!("Target {target_id} is not locked"),
-                            }));
+                            return Some(Err(BridgeRpcError { code: "TargetNotLocked".into(), message: format!("Target {target_id} is not locked") }));
                         }
                     }
                 }
@@ -804,10 +741,7 @@ pub(crate) async fn handle_module_cycles(
                 if is_mwd_or_mjd {
                     if let Ok(Some(cs)) = sys.get_combat_state(ship_id).await {
                         if cs.is_mwd_mjd_disabled || (is_mjd && cs.is_warp_scrambled()) {
-                            return Some(Err(BridgeRpcError {
-                                code: "WarpScrambled".into(),
-                                message: "Cannot activate Microwarpdrive or Micro Jump Drive while warp scrambled".into(),
-                            }));
+                            return Some(Err(BridgeRpcError { code: "WarpScrambled".into(), message: "Cannot activate Microwarpdrive or Micro Jump Drive while warp scrambled".into() }));
                         }
                     }
                 }
@@ -1004,10 +938,7 @@ pub(crate) async fn handle_module_cycles(
                     }
                 });
                 let Some(charge_tid) = charge_tid_opt else {
-                    return Some(Err(BridgeRpcError {
-                        code: "NoChargesLoaded".into(),
-                        message: "Capacitor Booster has no Cap Booster charges loaded".into(),
-                    }));
+                    return Some(Err(BridgeRpcError { code: "NoChargesLoaded".into(), message: "Capacitor Booster has no Cap Booster charges loaded".into() }));
                 };
                 cap_booster_inject_amount = ctx
                     .sde
@@ -1210,10 +1141,7 @@ pub(crate) async fn handle_module_cycles(
             if mod_type.group_id == 201 {
                 let Some(target_id) = target_id_opt else {
                     let _ = sys.remove_module_cycle(ship_id, module_id).await;
-                    return Some(Err(BridgeRpcError {
-                        code: "TargetRequired".into(),
-                        message: "ECM module requires a locked target".into(),
-                    }));
+                    return Some(Err(BridgeRpcError { code: "TargetRequired".into(), message: "ECM module requires a locked target".into() }));
                 };
                 let mut distance_m = 0.0;
                 if let (Ok(Some((_, ship_ball))), Ok(Some((_, target_ball)))) = (
