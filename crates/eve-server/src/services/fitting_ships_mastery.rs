@@ -1082,7 +1082,7 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
             ])))
         }
 
-        ("ship", "GetDirtTimestamp") | ("ship", "ResetDirtTimestamp") => {
+        ("ship", "GetDirtTimestamp") => {
             if let Err(e) = ServerContext::require_character(session) {
                 return Some(Err(e));
             }
@@ -1096,16 +1096,63 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                     message: "ship.GetDirtTimestamp expects (itemID,)".into(),
                 }));
             };
-            let exists = ctx.db.with_snapshot(|snap| snap.items.contains_key(&ship_id));
-            if !exists {
+            let ts = ctx.db.with_snapshot(|snap| {
+                snap.items.get(&ship_id).and_then(|item| {
+                    item.dynamic_attributes
+                        .get(&1969)
+                        .copied()
+                        .map(|v| v as i64)
+                })
+            });
+            match ts {
+                Some(t) => Some(Ok(PyRep::Integer(t))),
+                None => {
+                    let exists = ctx.db.with_snapshot(|snap| snap.items.contains_key(&ship_id));
+                    if exists {
+                        Some(Ok(PyRep::Integer(ctx.now_blueos_filetime_ticks())))
+                    } else {
+                        Some(Err(BridgeRpcError {
+                            code: "ItemNotFound".into(),
+                            message: format!("ship {ship_id} not found"),
+                        }))
+                    }
+                }
+            }
+        }
+
+        ("ship", "ResetDirtTimestamp") => {
+            if let Err(e) = ServerContext::require_character(session) {
+                return Some(Err(e));
+            }
+            let Some(ship_id) = args
+                .first()
+                .and_then(|a| a.as_i64())
+                .or(session.ship_id)
+            else {
                 return Some(Err(BridgeRpcError {
+                    code: "InvalidArguments".into(),
+                    message: "ship.ResetDirtTimestamp expects (itemID,)".into(),
+                }));
+            };
+            let now = ctx.now_blueos_filetime_ticks();
+            let ts_i64 = (now as f64) as i64;
+            let updated = ctx.db.with_mut_snapshot(|snap| {
+                if let Some(item) = snap.items.get_mut(&ship_id) {
+                    item.dynamic_attributes.insert(1969, ts_i64 as f64);
+                    item.version += 1;
+                    true
+                } else {
+                    false
+                }
+            });
+            if updated {
+                Some(Ok(PyRep::Integer(ts_i64)))
+            } else {
+                Some(Err(BridgeRpcError {
                     code: "ItemNotFound".into(),
                     message: format!("ship {ship_id} not found"),
-                }));
+                }))
             }
-            // `eveMoniker.GetShipAccess().GetDirtTimestamp(itemID)` → Windows filetime passed to
-            // `gfxutils.CalcDirtLevelFromAge` (`eve/client/script/ui/view/hangarBehaviours/baseHangarBehaviours.pyj:128-130`).
-            Some(Ok(PyRep::Integer(ctx.now_blueos_filetime_ticks())))
         }
 
         ("ship", "SafeLogoff") => {

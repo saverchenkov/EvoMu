@@ -78,6 +78,10 @@ pub struct AccountServicesStore {
     pub subscription_expiry: HashMap<u64, u64>,
     #[serde(default)]
     pub mct_slots: HashMap<u64, Vec<u64>>,
+    #[serde(default)]
+    pub votes: HashMap<(u64, String), i64>,
+    #[serde(default)]
+    pub resculpt_pending: HashSet<i64>,
 }
 
 impl AccountServicesStore {
@@ -656,7 +660,12 @@ fn handle_inner(
             Ok(Some(PyRep::Bool(true)))
         }
         ("userSvc", "CastUpvote") | ("userSvc", "CastDownvote") => {
-            let _ = ServerContext::require_auth(session)?;
+            let uid = ServerContext::require_auth(session)?;
+            let target = args.first().and_then(|a| a.as_str()).unwrap_or("general");
+            let delta = if method == "CastUpvote" { 1i64 } else { -1i64 };
+            with_store(ctx, |_, store| {
+                *store.votes.entry((uid, target.to_string())).or_default() += delta;
+            });
             Ok(Some(PyRep::Bool(true)))
         }
         ("userSvc", "ReportBot") | ("userSvc", "ReportISKSpammer") => {
@@ -680,7 +689,30 @@ fn handle_inner(
         }
         ("userSvc", "ActivateMultiTraining") | ("userSvc", "ActivateSoulboundMultiTraining") => {
             let uid = ServerContext::require_auth(session)?;
-            let _ = ServerContext::require_character(session)?;
+            let (_, char_id) = ServerContext::require_character(session)?;
+            let res: Result<(), BridgeRpcError> = ctx.db.try_with_mut_snapshot(|snap| {
+                let cert_found = snap.items.values_mut().find(|it| {
+                    (it.type_id == 34189 || it.type_id == 48582)
+                        && it.owner_id == char_id
+                        && it.quantity >= 1
+                });
+                if let Some(cert) = cert_found {
+                    cert.quantity -= 1;
+                    cert.version += 1;
+                    let cert_id = cert.item_id;
+                    let qty = cert.quantity;
+                    if qty == 0 {
+                        snap.items.remove(&cert_id);
+                    }
+                    Ok(())
+                } else {
+                    Err(BridgeRpcError {
+                        code: "UserError".into(),
+                        message: "NoMultiTrainingCertificateFound".into(),
+                    })
+                }
+            });
+            res?;
             let now_unix = ctx.now_unix();
             let expiry = now_unix + 30 * 86_400;
             with_store(ctx, |_, store| {
@@ -704,10 +736,31 @@ fn handle_inner(
         }
         ("userSvc", "ActivateCharacterReSculpt") => {
             let (_, char_id) = ServerContext::require_character(session)?;
-            let res = ctx.db.with_mut_snapshot(|snap| {
-                snap.characters.contains_key(&char_id)
+            let res: Result<(), BridgeRpcError> = ctx.db.try_with_mut_snapshot(|snap| {
+                let cert_found = snap.items.values_mut().find(|it| {
+                    it.type_id == 28662 && it.owner_id == char_id && it.quantity >= 1
+                });
+                if let Some(cert) = cert_found {
+                    cert.quantity -= 1;
+                    cert.version += 1;
+                    let cert_id = cert.item_id;
+                    let qty = cert.quantity;
+                    if qty == 0 {
+                        snap.items.remove(&cert_id);
+                    }
+                    Ok(())
+                } else {
+                    Err(BridgeRpcError {
+                        code: "UserError".into(),
+                        message: "NoResculptCertificateFound".into(),
+                    })
+                }
             });
-            Ok(Some(PyRep::Bool(res)))
+            res?;
+            with_store(ctx, |_, store| {
+                store.resculpt_pending.insert(char_id);
+            });
+            Ok(Some(PyRep::Bool(true)))
         }
         ("kiringMgr", "GetKiringConfiguration") => {
             let is_underage = session
@@ -715,14 +768,14 @@ fn handle_inner(
                 .is_some_and(|uid| with_store(ctx, |_, st| st.underage_users.contains(&uid)));
             Ok(Some(PyRep::keyval([
                 ("enabled", PyRep::Bool(false)),
-                ("antiAddictionEnabled", PyRep::Bool(is_underage && false)),
+                ("antiAddictionEnabled", PyRep::Bool(is_underage)),
                 ("region", PyRep::String("TQ".into())),
             ])))
         }
         ("kiringMgr", "GetAntiAddictionCode") | ("kiringMgr", "GetSAuthAid") => {
             let code = session
                 .user_id
-                .map(|uid| with_store(ctx, |_, st| i64::from(st.underage_users.contains(&uid)) * 0))
+                .map(|uid| with_store(ctx, |_, st| if st.underage_users.contains(&uid) { 1 } else { 0 }))
                 .unwrap_or(0);
             Ok(Some(PyRep::Integer(code)))
         }
@@ -735,7 +788,7 @@ fn handle_inner(
         ("kiringMgr", "IsMonochromeStyleEnabled") | ("kiringMgr", "ShouldKickCheater") => {
             let banned = session
                 .user_id
-                .is_some_and(|uid| with_store(ctx, |_, st| st.underage_users.contains(&uid) && false));
+                .is_some_and(|uid| with_store(ctx, |_, st| st.underage_users.contains(&uid)));
             Ok(Some(PyRep::Bool(banned)))
         }
         ("petitioner", "CreatePetition") => {
@@ -1098,24 +1151,15 @@ fn handle_inner(
             ])])))
         }
         ("petitioner", "GetCategoryProperties") => {
-            let (_, cid) = ServerContext::require_character(session)?;
-            let cat_id = args.first().and_then(|a| a.as_i64()).unwrap_or(1);
-            let exists = ctx.db.get_character(cid).is_ok() && cat_id > 0;
+            let _ = ServerContext::require_character(session)?;
             Ok(Some(PyRep::Dict(vec![(
                 PyRep::String("isSubcategoryRequired".into()),
-                PyRep::Bool(!exists && false),
+                PyRep::Bool(false),
             )])))
         }
         ("petitioner", "GetClientPickerInfo") => {
-            let (_, cid) = ServerContext::require_character(session)?;
-            let rows = ctx.db.with_snapshot(|snap| {
-                if snap.characters.contains_key(&cid) {
-                    Vec::new()
-                } else {
-                    Vec::new()
-                }
-            });
-            Ok(Some(PyRep::List(rows)))
+            let _ = ServerContext::require_character(session)?;
+            Ok(Some(PyRep::List(Vec::new())))
         }
         ("petitioner", "GetQueues") => {
             let _ = ServerContext::require_character(session)?;
@@ -1137,26 +1181,24 @@ fn handle_inner(
             Ok(Some(PyRep::Integer(unread as i64)))
         }
         ("petitioner", "GetUserCatalogCountry") => {
-            let (_, cid) = ServerContext::require_character(session)?;
-            let _ = ctx.db.get_character(cid);
+            let _ = ServerContext::require_character(session)?;
             Ok(Some(PyRep::String("US".into())))
         }
         ("petitioner", "GetZendeskJwtLink") => {
-            let (_, cid) = ServerContext::require_character(session)?;
-            let _ = ctx.db.get_character(cid);
+            let _ = ServerContext::require_character(session)?;
             Ok(Some(PyRep::None))
         }
         ("petitioner", "IsSerenity") => {
-            let active = with_store(ctx, |_, st| st.next_id == i64::MAX);
-            Ok(Some(PyRep::Bool(active)))
+            let _ = ServerContext::require_character(session)?;
+            Ok(Some(PyRep::Bool(false)))
         }
         ("petitioner", "IsZendeskEnabled") => {
-            let active = with_store(ctx, |_, st| st.next_id == i64::MAX);
-            Ok(Some(PyRep::Bool(active)))
+            let _ = ServerContext::require_character(session)?;
+            Ok(Some(PyRep::Bool(false)))
         }
         ("petitioner", "IsZendeskSwapEnabled") => {
-            let active = with_store(ctx, |_, st| st.next_id == i64::MAX);
-            Ok(Some(PyRep::Bool(active)))
+            let _ = ServerContext::require_character(session)?;
+            Ok(Some(PyRep::Bool(false)))
         }
         ("petitioner", "MarkAsRead") => {
             let (_, cid) = ServerContext::require_character(session)?;

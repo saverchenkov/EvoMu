@@ -1230,6 +1230,7 @@ pub(super) fn handle_corps(
                     }
                     Some(Ok(PyRep::keyval([
                         ("characterID", PyRep::Integer(target_id)),
+                        ("corporationID", PyRep::Integer(corp_id)),
                         ("removed", PyRep::Bool(removed)),
                         ("queuedAutoKick", PyRep::Bool(queued)),
                         ("corporationClosed", PyRep::Bool(closed)),

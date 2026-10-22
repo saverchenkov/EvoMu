@@ -419,6 +419,7 @@ pub fn handle(
         }
 
         "GetRecentKills" => {
+            let corp_id = session.corporation_id.unwrap_or(0);
             let columns = vec![
                 "killID".into(),
                 "victimCharacterID".into(),
@@ -427,13 +428,25 @@ pub fn handle(
                 "solarSystemID".into(),
                 "killTime".into(),
             ];
-            Some(Ok(PyRep::Rowset {
-                columns,
-                rows: Vec::new(),
-            }))
+            let rows = ctx.db.with_snapshot(|snap| {
+                snap.killmails
+                    .values()
+                    .filter(|km| km.attacker_corp_id == corp_id)
+                    .map(|km| vec![
+                        PyRep::Integer(km.kill_id),
+                        PyRep::Integer(km.victim_character_id),
+                        PyRep::Integer(km.victim_corp_id),
+                        PyRep::Integer(km.ship_type_id as i64),
+                        PyRep::Integer(km.solar_system_id as i64),
+                        PyRep::Integer(km.killed_unix as i64),
+                    ])
+                    .collect()
+            });
+            Some(Ok(PyRep::Rowset { columns, rows }))
         }
 
         "GetRecentLosses" => {
+            let corp_id = session.corporation_id.unwrap_or(0);
             let columns = vec![
                 "killID".into(),
                 "victimCharacterID".into(),
@@ -442,10 +455,21 @@ pub fn handle(
                 "solarSystemID".into(),
                 "killTime".into(),
             ];
-            Some(Ok(PyRep::Rowset {
-                columns,
-                rows: Vec::new(),
-            }))
+            let rows = ctx.db.with_snapshot(|snap| {
+                snap.killmails
+                    .values()
+                    .filter(|km| km.victim_corp_id == corp_id)
+                    .map(|km| vec![
+                        PyRep::Integer(km.kill_id),
+                        PyRep::Integer(km.victim_character_id),
+                        PyRep::Integer(km.victim_corp_id),
+                        PyRep::Integer(km.ship_type_id as i64),
+                        PyRep::Integer(km.solar_system_id as i64),
+                        PyRep::Integer(km.killed_unix as i64),
+                    ])
+                    .collect()
+            });
+            Some(Ok(PyRep::Rowset { columns, rows }))
         }
 
         "GetSuggestedAllianceShortNames" => {
@@ -494,11 +518,28 @@ pub fn handle(
                     message: format!("Account key {key} must be between 1000 and 1006"),
                 }));
             }
+            let char_id = session.character_id.unwrap_or(0);
+            let corp_id = session.corporation_id.unwrap_or(0);
+            ctx.db.with_mut_snapshot(|snap| {
+                snap.item_custom_names.insert(
+                    -((corp_id << 16) | (char_id & 0xFFFF)),
+                    format!("accountKey:{key}"),
+                );
+            });
             Some(Ok(PyRep::None))
         }
 
         "ExecuteActions" => {
-            Some(Ok(PyRep::Bool(true)))
+            let corp_id = session.corporation_id.unwrap_or(0);
+            let updated = ctx.db.with_mut_snapshot(|snap| {
+                if let Some(corp) = snap.corporations.get_mut(&corp_id) {
+                    corp.tax_rate = corp.tax_rate.clamp(0.0, 1.0);
+                    true
+                } else {
+                    false
+                }
+            });
+            Some(Ok(PyRep::Bool(updated)))
         }
 
         "Bind" => {

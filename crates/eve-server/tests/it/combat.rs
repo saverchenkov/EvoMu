@@ -65,7 +65,7 @@ async fn test_phase_0_s2_fighter_mgr_unimplemented_rpc() {
 
 #[tokio::test]
 async fn test_ship_operations_logoff_scoop_drop_and_dirt() {
-    // parity: rpc:ship.ResetDirtTimestamp, rpc:ship.SetSessionCheck, rpc:ship.clear_memoized, rpc:ship.SafeLogoff, rpc:ship.AbortSafeLogoff, rpc:ship.Drop, rpc:ship.Scoop, rpc:ship.ScoopToInfrastructureHold, rpc:ship.ScoopToMobileDepotHold
+    // parity: rpc:ship.ResetDirtTimestamp, rpc:ship.SafeLogoff, rpc:ship.AbortSafeLogoff, rpc:ship.Drop, rpc:ship.Scoop, rpc:ship.ScoopToInfrastructureHold, rpc:ship.ScoopToMobileDepotHold
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let mut sess = SessionState::new(903);
@@ -82,7 +82,7 @@ async fn test_ship_operations_logoff_scoop_drop_and_dirt() {
     .await
     .expect("SelectCharacterID");
 
-    // 1. ResetDirtTimestamp
+    // 1. ResetDirtTimestamp and GetDirtTimestamp
     let dirt = ctx
         .dispatch_rpc(
             &mut sess,
@@ -97,6 +97,27 @@ async fn test_ship_operations_logoff_scoop_drop_and_dirt() {
         .expect("ResetDirtTimestamp");
     let dirt_ft = dirt.as_i64().expect("filetime");
     assert!(dirt_ft > 116_444_736_000_000_000);
+
+    // Verify dynamic attribute 1969 was mutated in snapshot
+    let dirt_dyn = ctx.db.with_snapshot(|snap| {
+        snap.items.get(&100_000_001).and_then(|it| it.dynamic_attributes.get(&1969).copied())
+    });
+    assert_eq!(dirt_dyn, Some(dirt_ft as f64));
+
+    // Verify GetDirtTimestamp reads the persisted timestamp
+    let get_dirt = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "ship",
+            None,
+            "GetDirtTimestamp",
+            &[PyRep::Integer(100_000_001)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("GetDirtTimestamp");
+    assert_eq!(get_dirt.as_i64(), Some(dirt_ft));
 
     // 2. SetSessionCheck & clear_memoized
     let sc = ctx

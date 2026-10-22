@@ -629,7 +629,47 @@ async fn test_user_svc_profile_logoff_feedback_and_multi_training() {
         .expect("ReportISKSpammer");
     assert!(rspam.as_i64().is_some());
 
-    // 4. ActivateMultiTraining, ActivateSoulboundMultiTraining
+    // 4. ActivateMultiTraining, ActivateSoulboundMultiTraining (requires MCT certificate)
+    // First, verify error when pilot has no certificate
+    let no_cert_err = ctx
+        .dispatch_rpc(&mut sess, "userSvc", None, "ActivateMultiTraining", &[], &kw, None)
+        .await;
+    assert!(no_cert_err.is_err(), "Must fail when pilot has no MCT certificate");
+
+    // Seed 2 MCT certificates (typeID 34189) and 1 Resculpt certificate (typeID 28662) for 90_000_001
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(600_001, eve_db::InventoryItemRecord {
+            item_id: 600_001,
+            type_id: 34189,
+            owner_id: 90_000_001,
+            location_id: 60003760,
+            flag: eve_db::InventoryFlag::Hangar,
+            quantity: 2,
+            singleton: false,
+            version: 1,
+            dynamic_attributes: HashMap::new(),
+            source_mutaplasmid_id: None,
+            insured_payout_isk: 0.0,
+            is_blueprint_copy: false,
+            blueprint_runs_remaining: None,
+        });
+        snap.items.insert(600_002, eve_db::InventoryItemRecord {
+            item_id: 600_002,
+            type_id: 28662,
+            owner_id: 90_000_001,
+            location_id: 60003760,
+            flag: eve_db::InventoryFlag::Hangar,
+            quantity: 1,
+            singleton: false,
+            version: 1,
+            dynamic_attributes: HashMap::new(),
+            source_mutaplasmid_id: None,
+            insured_payout_isk: 0.0,
+            is_blueprint_copy: false,
+            blueprint_runs_remaining: None,
+        });
+    });
+
     let mct1 = ctx
         .dispatch_rpc(&mut sess, "userSvc", None, "ActivateMultiTraining", &[], &kw, None)
         .await
@@ -637,12 +677,20 @@ async fn test_user_svc_profile_logoff_feedback_and_multi_training() {
     let PyRep::KeyVal(mct1_kv) = mct1 else { panic!("expected KeyVal") };
     assert_eq!(mct1_kv.get("slotActivated"), Some(&PyRep::Bool(true)));
 
+    // Verify item quantity decreased to 1
+    let qty_after_1 = ctx.db.with_snapshot(|snap| snap.items.get(&600_001).map(|it| it.quantity));
+    assert_eq!(qty_after_1, Some(1));
+
     let mct2 = ctx
         .dispatch_rpc(&mut sess, "userSvc", None, "ActivateSoulboundMultiTraining", &[], &kw, None)
         .await
         .expect("ActivateSoulboundMultiTraining");
     let PyRep::KeyVal(mct2_kv) = mct2 else { panic!("expected KeyVal") };
     assert_eq!(mct2_kv.get("slotActivated"), Some(&PyRep::Bool(true)));
+
+    // Verify certificate item was fully consumed/removed
+    let exists_after_2 = ctx.db.with_snapshot(|snap| snap.items.contains_key(&600_001));
+    assert!(!exists_after_2);
 
     // 5. GetUpdatedMultiCharacterTraining, InvalidateMultiCharacterTrainingCache
     let slots = ctx
@@ -665,6 +713,8 @@ async fn test_user_svc_profile_logoff_feedback_and_multi_training() {
         .await
         .expect("ActivateCharacterReSculpt");
     assert_eq!(sculpt, PyRep::Bool(true));
+    let resculpt_consumed = ctx.db.with_snapshot(|snap| snap.items.contains_key(&600_002));
+    assert!(!resculpt_consumed, "Resculpt cert must be consumed");
 
     // 7. Mint redeem tokens using GM session then TrashRedeemTokens and ReverseRedeem
     ctx.db.provision_gm_account("gm_user_test", "gm-pass", 90_000_004, "GM User Test");

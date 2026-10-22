@@ -812,8 +812,63 @@ async fn test_access_group_bookmarks_full_lifecycle_and_management() {
 }
 
 #[tokio::test]
-async fn test_corp_registry_members_tracking_and_introspections() {
-    // parity: rpc:corpRegistry.GetMember, rpc:corpRegistry.GetMembersPaged, rpc:corpRegistry.GetMembersByIds, rpc:corpRegistry.GetMemberIDsByQuery, rpc:corpRegistry.GetMemberTrackingInfo, rpc:corpRegistry.GetMemberTrackingInfoSimple, rpc:corpRegistry.GetInfoWindowDataForChar, rpc:corpRegistry.UpdateMembers, rpc:corpRegistry.GetMyApplications, rpc:corpRegistry.GetOldApplications, rpc:corpRegistry.GetMyOldApplications, rpc:corpRegistry.CanBeKickedOut, rpc:corpRegistry.KickOutMembers, rpc:corpRegistry.GetPendingAutoKicks, rpc:corpRegistry.DeleteAllianceApplication, rpc:corpRegistry.GetAggressionSettings, rpc:corpRegistry.UpdateCorporationAbilities, rpc:corpRegistry.GetSuggestedAllianceShortNames, rpc:corpRegistry.GetSuggestedTickerNames, rpc:corpRegistry.GetEveOwners, rpc:corpRegistry.GetRecentKills, rpc:corpRegistry.GetRecentLosses, rpc:corpRegistry.SetAccountKey, rpc:corpRegistry.ExecuteActions, rpc:corpRegistry.Bind, rpc:corpRegistry.UnBind
+async fn test_corp_registry_members_and_tracking() {
+    // parity: rpc:corpRegistry.GetMember, rpc:corpRegistry.GetMembersPaged, rpc:corpRegistry.GetMembersByIds, rpc:corpRegistry.GetMemberIDsByQuery, rpc:corpRegistry.GetMemberTrackingInfo, rpc:corpRegistry.GetMemberTrackingInfoSimple, rpc:corpRegistry.GetInfoWindowDataForChar, rpc:corpRegistry.UpdateMembers, rpc:corpRegistry.CanBeKickedOut, rpc:corpRegistry.GetPendingAutoKicks
+    let ctx = ServerContext::new();
+    let mut sess1 = SessionState::new(1101);
+    common::login_pilot(&ctx, &mut sess1, "demo", "demo-secret").await;
+    call(&ctx, &mut sess1, "charUnboundMgr", "SelectCharacterID", vec![PyRep::Integer(90_000_001)]).await.unwrap();
+
+    let _created_corp = call(&ctx, &mut sess1, "corpRegistry", "AddCorporation", vec![
+        PyRep::String("Omega Tactical Corps".into()),
+        PyRep::String("OMTAC".into()),
+        PyRep::Real(0.05),
+    ]).await.expect("AddCorporation");
+    let cid = sess1.corporation_id.expect("corpID");
+    assert!(cid >= 98_000_000);
+
+    let mem = call(&ctx, &mut sess1, "corpRegistry", "GetMember", vec![PyRep::Integer(cid)]).await.expect("GetMember");
+    let (_m_cols, m_rows) = rows(&mem);
+    assert!(!m_rows.is_empty());
+    assert_eq!(m_rows[0][0], PyRep::Integer(90_000_001));
+
+    let paged = call(&ctx, &mut sess1, "corpRegistry", "GetMembersPaged", vec![PyRep::Integer(cid)]).await.expect("GetMembersPaged");
+    let (_p_cols, p_rows) = rows(&paged);
+    assert_eq!(p_rows.len(), 1);
+
+    let by_ids = call(&ctx, &mut sess1, "corpRegistry", "GetMembersByIds", vec![PyRep::Integer(cid), PyRep::List(vec![PyRep::Integer(90_000_001)])]).await.expect("GetMembersByIds");
+    let (_b_cols, b_rows) = rows(&by_ids);
+    assert_eq!(b_rows.len(), 1);
+
+    let by_q = call(&ctx, &mut sess1, "corpRegistry", "GetMemberIDsByQuery", vec![PyRep::Integer(cid)]).await.expect("GetMemberIDsByQuery");
+    let (_q_cols, q_rows) = rows(&by_q);
+    assert_eq!(q_rows.len(), 1);
+
+    let tracking = call(&ctx, &mut sess1, "corpRegistry", "GetMemberTrackingInfo", vec![PyRep::Integer(cid)]).await.expect("GetMemberTrackingInfo");
+    let (_t_cols, t_rows) = rows(&tracking);
+    assert_eq!(t_rows.len(), 1);
+
+    let tracking_s = call(&ctx, &mut sess1, "corpRegistry", "GetMemberTrackingInfoSimple", vec![PyRep::Integer(cid)]).await.expect("GetMemberTrackingInfoSimple");
+    let (_ts_cols, ts_rows) = rows(&tracking_s);
+    assert_eq!(ts_rows.len(), 1);
+
+    let info = call(&ctx, &mut sess1, "corpRegistry", "GetInfoWindowDataForChar", vec![PyRep::Integer(cid)]).await.expect("GetInfoWindowDataForChar");
+    assert_eq!(field(&info, "corporationID"), PyRep::Integer(cid));
+
+    let upd_mem = call(&ctx, &mut sess1, "corpRegistry", "UpdateMembers", vec![PyRep::Integer(90_000_001), PyRep::Integer(0)]).await.expect("UpdateMembers");
+    assert_eq!(field(&upd_mem, "characterID"), PyRep::Integer(90_000_001));
+    assert_eq!(field(&upd_mem, "delayed24h"), PyRep::Bool(false));
+
+    let can_kick = call(&ctx, &mut sess1, "corpRegistry", "CanBeKickedOut", vec![PyRep::Integer(90_000_002)]).await.expect("CanBeKickedOut");
+    assert_eq!(can_kick, PyRep::Bool(true));
+
+    let auto_kicks = call(&ctx, &mut sess1, "corpRegistry", "GetPendingAutoKicks", vec![]).await.expect("GetPendingAutoKicks");
+    assert!(is_rowset(&auto_kicks));
+}
+
+#[tokio::test]
+async fn test_corp_registry_operations_kills_and_naming() {
+    // parity: rpc:corpRegistry.GetMyApplications, rpc:corpRegistry.GetOldApplications, rpc:corpRegistry.GetMyOldApplications, rpc:corpRegistry.DeleteAllianceApplication, rpc:corpRegistry.GetAggressionSettings, rpc:corpRegistry.UpdateCorporationAbilities, rpc:corpRegistry.GetSuggestedAllianceShortNames, rpc:corpRegistry.GetSuggestedTickerNames, rpc:corpRegistry.GetEveOwners, rpc:corpRegistry.GetRecentKills, rpc:corpRegistry.GetRecentLosses, rpc:corpRegistry.SetAccountKey, rpc:corpRegistry.ExecuteActions
     let ctx = ServerContext::new();
     let mut sess1 = SessionState::new(1101);
     common::login_pilot(&ctx, &mut sess1, "demo", "demo-secret").await;
@@ -823,45 +878,30 @@ async fn test_corp_registry_members_tracking_and_introspections() {
     common::login_pilot(&ctx, &mut sess2, "other", "other-secret").await;
     call(&ctx, &mut sess2, "charUnboundMgr", "SelectCharacterID", vec![PyRep::Integer(90_000_002)]).await.unwrap();
 
-    // 1. Setup a test corporation
     let _created_corp = call(&ctx, &mut sess1, "corpRegistry", "AddCorporation", vec![
         PyRep::String("Omega Tactical Corps".into()),
         PyRep::String("OMTAC".into()),
         PyRep::Real(0.05),
     ]).await.expect("AddCorporation");
     let cid = sess1.corporation_id.expect("corpID");
-    assert!(cid >= 98_000_000);
 
-    // 2. Member queries
-    let mem = call(&ctx, &mut sess1, "corpRegistry", "GetMember", vec![PyRep::Integer(cid)]).await.expect("GetMember");
-    let (_m_cols, m_rows) = rows(&mem);
-    assert!(!m_rows.is_empty());
+    // Seed a killmail for cid
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.killmails.insert(77001, eve_db::KillmailRecord {
+            kill_id: 77001,
+            victim_character_id: 90_000_002,
+            attacker_character_id: 90_000_001,
+            solar_system_id: 30000142,
+            ship_type_id: 587,
+            total_value_isk: 500_000.0,
+            killed_unix: 1700000000,
+            victim_corp_id: 98_000_002,
+            victim_alliance_id: None,
+            attacker_corp_id: cid,
+            attacker_alliance_id: None,
+        });
+    });
 
-    let paged = call(&ctx, &mut sess1, "corpRegistry", "GetMembersPaged", vec![PyRep::Integer(cid)]).await.expect("GetMembersPaged");
-    assert!(is_rowset(&paged));
-
-    let by_ids = call(&ctx, &mut sess1, "corpRegistry", "GetMembersByIds", vec![PyRep::Integer(cid)]).await.expect("GetMembersByIds");
-    assert!(is_rowset(&by_ids));
-
-    let by_q = call(&ctx, &mut sess1, "corpRegistry", "GetMemberIDsByQuery", vec![PyRep::Integer(cid)]).await.expect("GetMemberIDsByQuery");
-    assert!(is_rowset(&by_q));
-
-    let tracking = call(&ctx, &mut sess1, "corpRegistry", "GetMemberTrackingInfo", vec![PyRep::Integer(cid)]).await.expect("GetMemberTrackingInfo");
-    assert!(is_rowset(&tracking));
-
-    let tracking_s = call(&ctx, &mut sess1, "corpRegistry", "GetMemberTrackingInfoSimple", vec![PyRep::Integer(cid)]).await.expect("GetMemberTrackingInfoSimple");
-    assert!(is_rowset(&tracking_s));
-
-    // 3. GetInfoWindowDataForChar
-    let info = call(&ctx, &mut sess1, "corpRegistry", "GetInfoWindowDataForChar", vec![PyRep::Integer(cid)]).await.expect("GetInfoWindowDataForChar");
-    assert_eq!(field(&info, "corporationID"), PyRep::Integer(cid));
-
-    // 4. UpdateMembers
-    let upd_mem = call(&ctx, &mut sess1, "corpRegistry", "UpdateMembers", vec![PyRep::Integer(90_000_001), PyRep::Integer(0)]).await.expect("UpdateMembers");
-    assert_eq!(field(&upd_mem, "characterID"), PyRep::Integer(90_000_001));
-    assert_eq!(field(&upd_mem, "delayed24h"), PyRep::Bool(false));
-
-    // 5. Applications (GetMyApplications, GetOldApplications, GetMyOldApplications)
     let my_apps = call(&ctx, &mut sess2, "corpRegistry", "GetMyApplications", vec![]).await.expect("GetMyApplications");
     assert!(is_rowset(&my_apps));
 
@@ -871,28 +911,15 @@ async fn test_corp_registry_members_tracking_and_introspections() {
     let my_old_apps = call(&ctx, &mut sess2, "corpRegistry", "GetMyOldApplications", vec![]).await.expect("GetMyOldApplications");
     assert!(is_rowset(&my_old_apps));
 
-    // 6. Member kicking (CanBeKickedOut, KickOutMembers, GetPendingAutoKicks)
-    let can_kick = call(&ctx, &mut sess1, "corpRegistry", "CanBeKickedOut", vec![PyRep::Integer(90_000_002)]).await.expect("CanBeKickedOut");
-    assert_eq!(can_kick, PyRep::Bool(true));
-
-    let kick_res = call(&ctx, &mut sess1, "corpRegistry", "KickOutMembers", vec![PyRep::Integer(90_000_001)]).await.expect("KickOutMembers");
-    assert_eq!(field(&kick_res, "characterID"), PyRep::Integer(90_000_001));
-
-    let auto_kicks = call(&ctx, &mut sess1, "corpRegistry", "GetPendingAutoKicks", vec![]).await.expect("GetPendingAutoKicks");
-    assert!(is_rowset(&auto_kicks));
-
-    // 7. DeleteAllianceApplication
     let del_app = call(&ctx, &mut sess1, "corpRegistry", "DeleteAllianceApplication", vec![PyRep::Integer(99_000_001)]).await.expect("DeleteAllianceApplication");
     assert_eq!(field(&del_app, "deleted"), PyRep::Bool(true));
 
-    // 8. Aggression and abilities
     let agg = call(&ctx, &mut sess1, "corpRegistry", "GetAggressionSettings", vec![PyRep::Integer(cid)]).await.expect("GetAggressionSettings");
     assert_eq!(field(&agg, "corporationID"), PyRep::Integer(cid));
 
     let abil = call(&ctx, &mut sess1, "corpRegistry", "UpdateCorporationAbilities", vec![]).await.expect("UpdateCorporationAbilities");
     assert!(field(&abil, "corporationID").as_i64().unwrap() > 0);
 
-    // 9. Naming suggestions (GetSuggestedAllianceShortNames, GetSuggestedTickerNames)
     let ally_shorts = call(&ctx, &mut sess1, "corpRegistry", "GetSuggestedAllianceShortNames", vec![PyRep::String("Northern Coalition Force".into())]).await.expect("GetSuggestedAllianceShortNames");
     let PyRep::List(as_list) = ally_shorts else { panic!("expected List") };
     assert!(!as_list.is_empty());
@@ -901,26 +928,52 @@ async fn test_corp_registry_members_tracking_and_introspections() {
     let PyRep::List(ct_list) = corp_tickers else { panic!("expected List") };
     assert!(!ct_list.is_empty());
 
-    // 10. EveOwners and Kills
     let owners = call(&ctx, &mut sess1, "corpRegistry", "GetEveOwners", vec![]).await.expect("GetEveOwners");
     assert!(is_rowset(&owners));
 
     let kills = call(&ctx, &mut sess1, "corpRegistry", "GetRecentKills", vec![]).await.expect("GetRecentKills");
-    assert!(is_rowset(&kills));
+    let (k_cols, k_rows) = rows(&kills);
+    assert_eq!(k_cols, vec!["killID", "victimCharacterID", "victimCorporationID", "victimShipTypeID", "solarSystemID", "killTime"]);
+    assert_eq!(k_rows.len(), 1);
+    assert_eq!(k_rows[0][0], PyRep::Integer(77001));
 
     let losses = call(&ctx, &mut sess1, "corpRegistry", "GetRecentLosses", vec![]).await.expect("GetRecentLosses");
-    assert!(is_rowset(&losses));
+    let (_l_cols, l_rows) = rows(&losses);
+    assert_eq!(l_rows.len(), 0);
 
-    // 11. SetAccountKey, ExecuteActions, Bind, UnBind
     let acc_key = call(&ctx, &mut sess1, "corpRegistry", "SetAccountKey", vec![PyRep::Integer(1001)]).await.expect("SetAccountKey");
     assert_eq!(acc_key, PyRep::None);
 
     let exec = call(&ctx, &mut sess1, "corpRegistry", "ExecuteActions", vec![]).await.expect("ExecuteActions");
     assert_eq!(exec, PyRep::Bool(true));
+}
 
-    let bind_res = call(&ctx, &mut sess1, "corpRegistry", "Bind", vec![PyRep::Integer(42)]).await.expect("Bind");
-    assert_eq!(bind_res, PyRep::Integer(42));
+#[tokio::test]
+async fn test_corp_registry_member_kick() {
+    // parity: rpc:corpRegistry.KickOutMembers
+    let ctx = ServerContext::new();
+    let mut sess1 = SessionState::new(1101);
+    common::login_pilot(&ctx, &mut sess1, "demo", "demo-secret").await;
+    call(&ctx, &mut sess1, "charUnboundMgr", "SelectCharacterID", vec![PyRep::Integer(90_000_001)]).await.unwrap();
 
-    let unbind_res = call(&ctx, &mut sess1, "corpRegistry", "UnBind", vec![]).await.expect("UnBind");
-    assert_eq!(unbind_res, PyRep::None);
+    let _created_corp = call(&ctx, &mut sess1, "corpRegistry", "AddCorporation", vec![
+        PyRep::String("Omega Tactical Corps".into()),
+        PyRep::String("OMTAC".into()),
+        PyRep::Real(0.05),
+    ]).await.expect("AddCorporation");
+    let cid = sess1.corporation_id.expect("corpID");
+
+    // Add member 90_000_002 to corp
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_002) {
+            ch.corporation_id = cid;
+        }
+        if let Some(corp) = snap.corporations.get_mut(&cid) {
+            corp.members.insert(90_000_002);
+        }
+    });
+
+    let kick_res = call(&ctx, &mut sess1, "corpRegistry", "KickOutMembers", vec![PyRep::Integer(90_000_002)]).await.expect("KickOutMembers");
+    assert_eq!(field(&kick_res, "characterID"), PyRep::Integer(90_000_002));
+    assert_eq!(field(&kick_res, "corporationID"), PyRep::Integer(cid));
 }

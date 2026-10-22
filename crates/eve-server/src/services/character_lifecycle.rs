@@ -349,20 +349,39 @@ fn handle_char_mgr(
             ])))
         }
         "GetRecentShipKillsAndLosses" => {
-            let _ = match ServerContext::require_character(session) {
+            let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            Some(Ok(PyRep::rowset(
-                vec!["killID", "victimID", "solarSystemID", "killTime"],
-                vec![],
-            )))
+            let rows = ctx.db.with_snapshot(|snap| {
+                snap.killmails
+                    .values()
+                    .filter(|km| km.victim_character_id == char_id || km.attacker_character_id == char_id)
+                    .map(|km| vec![
+                        PyRep::Integer(km.kill_id),
+                        PyRep::Integer(km.victim_character_id),
+                        PyRep::Integer(km.solar_system_id as i64),
+                        PyRep::Integer(km.killed_unix as i64),
+                    ])
+                    .collect()
+            });
+            Some(Ok(PyRep::Rowset {
+                columns: vec!["killID".into(), "victimID".into(), "solarSystemID".into(), "killTime".into()],
+                rows,
+            }))
         }
         "SetActivityStatus" => {
-            let _ = match ServerContext::require_character(session) {
+            let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            let status = args.first().and_then(|a| a.as_str()).unwrap_or("active");
+            ctx.db.with_mut_snapshot(|snap| {
+                snap.item_custom_names.insert(
+                    -(char_id & 0x7FFF_FFFF),
+                    format!("activityStatus:{status}"),
+                );
+            });
             Some(Ok(PyRep::Bool(true)))
         }
         "GetCohortsForCharacter" => {

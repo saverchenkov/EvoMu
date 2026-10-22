@@ -648,7 +648,7 @@ async fn test_ch5_gm_spawn_attr_fit_kill_location_online_and_qa_tools() {
 
 #[tokio::test]
 async fn test_char_mgr_character_profile_info_and_lifecycle() {
-    // parity: rpc:charMgr.GetCharacterCreationDate, rpc:charMgr.GetHomeStationRow, rpc:charMgr.stationID, rpc:charMgr.GetOrganizationInfoForCharacters, rpc:charMgr.GetPrivateInfoOnCorpChange, rpc:charMgr.GetPublicInfo, rpc:charMgr.GetRecentShipKillsAndLosses, rpc:charMgr.SetActivityStatus, rpc:charMgr.GetCohortsForCharacter, rpc:charMgr.SetSessionCheck, rpc:charMgr.clear_memoized, rpc:charMgr.GetPaperdollState, rpc:charMgr.SetNote, rpc:charMgr.GetNote
+    // parity: rpc:charMgr.GetCharacterCreationDate, rpc:charMgr.GetHomeStationRow, rpc:charMgr.stationID, rpc:charMgr.GetOrganizationInfoForCharacters, rpc:charMgr.GetPrivateInfoOnCorpChange, rpc:charMgr.GetPublicInfo, rpc:charMgr.GetRecentShipKillsAndLosses, rpc:charMgr.SetActivityStatus, rpc:charMgr.GetCohortsForCharacter, rpc:charMgr.GetPaperdollState, rpc:charMgr.SetNote, rpc:charMgr.GetNote
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let mut sess = SessionState::new(1001);
@@ -721,20 +721,42 @@ async fn test_char_mgr_character_profile_info_and_lifecycle() {
     assert_eq!(pub_kv.get("characterID"), Some(&PyRep::Integer(90_000_001)));
     assert_eq!(pub_kv.get("characterName"), Some(&PyRep::String("Aura Capsuleer".into())));
 
-    // 7. GetRecentShipKillsAndLosses
+    // 7. GetRecentShipKillsAndLosses (queries real killmails)
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.killmails.insert(88001, eve_db::KillmailRecord {
+            kill_id: 88001,
+            victim_character_id: 90_000_001,
+            attacker_character_id: 90_000_002,
+            solar_system_id: 30000142,
+            ship_type_id: 587,
+            total_value_isk: 1_200_000.0,
+            killed_unix: 1700000000,
+            victim_corp_id: 98_000_001,
+            victim_alliance_id: None,
+            attacker_corp_id: 98_000_002,
+            attacker_alliance_id: None,
+        });
+    });
     let kills = ctx
         .dispatch_rpc(&mut sess, "charMgr", None, "GetRecentShipKillsAndLosses", &[PyRep::Integer(90_000_001)], &kw, None)
         .await
         .expect("GetRecentShipKillsAndLosses");
-    let PyRep::Rowset { rows, .. } = kills else { panic!("expected Rowset") };
-    assert!(rows.is_empty());
+    let PyRep::Rowset { columns, rows } = kills else { panic!("expected Rowset") };
+    assert_eq!(columns, vec!["killID", "victimID", "solarSystemID", "killTime"]);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0][0], PyRep::Integer(88001));
+    assert_eq!(rows[0][1], PyRep::Integer(90_000_001));
 
-    // 8. SetActivityStatus
+    // 8. SetActivityStatus (persists to snapshot)
     let act = ctx
-        .dispatch_rpc(&mut sess, "charMgr", None, "SetActivityStatus", &[PyRep::Integer(1)], &kw, None)
+        .dispatch_rpc(&mut sess, "charMgr", None, "SetActivityStatus", &[PyRep::String("online".into())], &kw, None)
         .await
         .expect("SetActivityStatus");
     assert_eq!(act, PyRep::Bool(true));
+    let status_val = ctx.db.with_snapshot(|snap| {
+        snap.item_custom_names.get(&-(90_000_001 & 0x7FFF_FFFF)).cloned()
+    });
+    assert_eq!(status_val, Some("activityStatus:online".into()));
 
     // 9. GetCohortsForCharacter
     let cohorts = ctx
