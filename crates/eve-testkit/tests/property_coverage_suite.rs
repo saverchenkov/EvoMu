@@ -150,6 +150,7 @@ proptest! {
         prop_assert_eq!(&ext_args[0], &PyRep::Integer(arg_val));
     }
 
+    /// // parity-lint: allow: fuzz test verifying no panic on arbitrary bytes
     /// // parity: plan:T-3
     #[test]
     fn prop_t3_macho_fuzz_never_panics(fuzz_bytes in proptest::collection::vec(any::<u8>(), 0..256)) {
@@ -178,6 +179,7 @@ proptest! {
         prop_assert_eq!(decoded.unwrap(), raw_bytes);
     }
 
+    /// // parity-lint: allow: fuzz test verifying no panic on arbitrary bytes
     /// // parity: plan:T-3
     #[test]
     fn prop_t3_rle_fuzz_never_panics(
@@ -188,6 +190,7 @@ proptest! {
         let _ = decode_rle(&fuzz_bytes, expected_len);
     }
 
+    /// // parity-lint: allow: dbrow container structure verification
     /// // parity: plan:T-3
     #[test]
     fn prop_t3_dbrow_pack_unpack_roundtrip(
@@ -301,6 +304,7 @@ proptest! {
         prop_assert!((dec_balls[0].position.z - z).abs() < 1.0);
     }
 
+    /// // parity-lint: allow: fuzz test verifying no panic on arbitrary bytes
     /// // parity: plan:T-3
     #[test]
     fn prop_t3_destiny_decoder_fuzz_never_panics(fuzz_bytes in proptest::collection::vec(any::<u8>(), 0..512)) {
@@ -308,6 +312,7 @@ proptest! {
         let _ = decode_add_balls(&fuzz_bytes);
     }
 
+    /// // parity-lint: allow: destiny event and update shape encoding
     /// // parity: plan:T-3
     #[test]
     fn prop_t3_destiny_event_and_updates_encoding(
@@ -516,6 +521,7 @@ proptest! {
         prop_assert_eq!(dec_rsp.status_message, status_msg);
     }
 
+    /// // parity-lint: allow: fuzz test verifying no panic on arbitrary bytes
     /// // parity: plan:T-3
     #[test]
     fn prop_t3_quasar_fuzz_never_panics(fuzz_bytes in proptest::collection::vec(any::<u8>(), 0..256)) {

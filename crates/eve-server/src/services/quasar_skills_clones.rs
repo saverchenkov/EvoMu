@@ -10,7 +10,7 @@
 
 use crate::formulas::skill_injector_sp_yield;
 use crate::quasar_gateway::{
-    PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN, STATUS_NOT_FOUND,
+    PublicGatewayRouter, QuasarHandlerFn, STATUS_BAD_REQUEST, STATUS_FORBIDDEN, STATUS_NOT_FOUND,
 };
 use eve_db::WorldRepository;
 use eve_proto::quasar::{
@@ -377,34 +377,33 @@ pub fn register_skill_handlers(
         }),
     );
 
-    // 8. eve_public.corporation.skill.plan.GetResponse -> GetResponse
+    // 8. eve_public.corporation.skill.plan.GetRequest -> GetResponse
     let mgr = Arc::clone(&manager);
-    router.register_handler(
-        "eve_public.corporation.skill.plan.GetResponse",
-        Arc::new(move |ctx, _any, dyn_msg| {
-            let corp_id = ctx.effective_corporation_id().unwrap_or(98_000_001);
-            let Some(target_uuid) = extract_uuid(dyn_msg, 1) else {
-                return Err((STATUS_BAD_REQUEST, "Missing skill_plan Identifier.uuid".into()));
-            };
-            let plans = mgr.get_corp_plans(corp_id);
-            let p = plans
-                .iter()
-                .find(|x| x.uuid == target_uuid)
-                .ok_or_else(|| (STATUS_NOT_FOUND, "Corp skill plan not found".into()))?;
+    let handler: QuasarHandlerFn = Arc::new(move |ctx, _any, dyn_msg| {
+        let corp_id = ctx.effective_corporation_id().unwrap_or(98_000_001);
+        let Some(target_uuid) = extract_uuid(dyn_msg, 1) else {
+            return Err((STATUS_BAD_REQUEST, "Missing skill_plan Identifier.uuid".into()));
+        };
+        let plans = mgr.get_corp_plans(corp_id);
+        let p = plans
+            .iter()
+            .find(|x| x.uuid == target_uuid)
+            .ok_or_else(|| (STATUS_NOT_FOUND, "Corp skill plan not found".into()))?;
 
-            let mut out = Vec::new();
-            let mut attr_bytes = Vec::new();
-            encode_skill_plan_attributes(p, &mut attr_bytes);
-            encode_bytes_field(1, &attr_bytes, &mut out);
+        let mut out = Vec::new();
+        let mut attr_bytes = Vec::new();
+        encode_skill_plan_attributes(p, &mut attr_bytes);
+        encode_bytes_field(1, &attr_bytes, &mut out);
 
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.corporation.skill.plan.GetResponse"
-                ),
-                value: out,
-            })
-        }),
-    );
+        Ok(GoogleAny {
+            type_url: format!(
+                "{TYPE_GOOGLEAPIS_PREFIX}eve_public.corporation.skill.plan.GetResponse"
+            ),
+            value: out,
+        })
+    });
+    router.register_handler("eve_public.corporation.skill.plan.GetRequest", Arc::clone(&handler));
+    router.register_handler("eve_public.corporation.skill.plan.GetResponse", handler);
 
     // 9. eve_public.corporation.skill.plan.CreateRequest -> CreateResponse
     let mgr = Arc::clone(&manager);
@@ -458,32 +457,31 @@ pub fn register_skill_handlers(
     );
 
     // 11. eve.skilltype.GetRequest -> GetResponse
-    router.register_handler(
-        "eve.skilltype.GetRequest",
-        Arc::new(move |_ctx, _any, dyn_msg| {
-            let tid = dyn_msg
-                .get(1)
-                .and_then(|v| match v {
-                    DynamicValue::Uint32(u) => Some(*u),
-                    DynamicValue::Int32(i) => Some(*i as u32),
-                    _ => None,
-                })
-                .unwrap_or(3300); // Gunnery
-
-            let mut out = Vec::new();
-            let mut attr_bytes = Vec::new();
-            encode_varint_field(1, tid as u64, &mut attr_bytes); // type_id
-            encode_varint_field(2, 1, &mut attr_bytes);          // rank = 1
-            encode_varint_field(3, 275, &mut attr_bytes);        // primary_attribute = perception
-            encode_varint_field(4, 276, &mut attr_bytes);        // secondary_attribute = willpower
-            encode_bytes_field(1, &attr_bytes, &mut out);
-
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.skilltype.GetResponse"),
-                value: out,
+    let skilltype_handler: QuasarHandlerFn = Arc::new(move |_ctx, _any, dyn_msg| {
+        let tid = dyn_msg
+            .get(1)
+            .and_then(|v| match v {
+                DynamicValue::Uint32(u) => Some(*u),
+                DynamicValue::Int32(i) => Some(*i as u32),
+                _ => None,
             })
-        }),
-    );
+            .unwrap_or(3300); // Gunnery
+
+        let mut out = Vec::new();
+        let mut attr_bytes = Vec::new();
+        encode_varint_field(1, tid as u64, &mut attr_bytes); // type_id
+        encode_varint_field(2, 1, &mut attr_bytes);          // rank = 1
+        encode_varint_field(3, 275, &mut attr_bytes);        // primary_attribute = perception
+        encode_varint_field(4, 276, &mut attr_bytes);        // secondary_attribute = willpower
+        encode_bytes_field(1, &attr_bytes, &mut out);
+
+        Ok(GoogleAny {
+            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.skilltype.GetResponse"),
+            value: out,
+        })
+    });
+    router.register_handler("eve.skilltype.GetRequest", Arc::clone(&skilltype_handler));
+    router.register_handler("eve_public.skilltype.GetRequest", skilltype_handler);
 
     // 12. eve.skillcategory.GetAllRequest -> GetAllResponse
     router.register_handler(
