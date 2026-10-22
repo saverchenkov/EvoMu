@@ -6112,44 +6112,9 @@
   "rejected_triage": [],
   "fake_done": [
     {
-      "evidence": "crates/eve-server/tests/social_fleets_corps.rs:504-516 asserts only is_keyval on bookmark.BookmarkLocation. The stored coordinates, item and folder are not checked.",
-      "id": "feat:bookmarks.create",
-      "flagged_by_audit": "20261019-110620"
-    },
-    {
-      "evidence": "Acceptance: 'AddFolder/DeleteFolder/CreateSubfolder/DeleteSubfolder with per-character folder limits'. crates/eve-server/tests/social_fleets_corps.rs:488-501 uses CreateFolder/GetFolders (is_rowset only). No subfolders and no limits are tested.",
-      "id": "feat:bookmarks.folders",
-      "flagged_by_audit": "20261019-110620"
-    },
-    {
-      "evidence": "Acceptance requires access-group rights, AddToKnownFolders/RemoveFromKnownFolders and the OnSharedBookmarksFolderUpdated notification. crates/eve-server/tests/social_fleets_corps.rs:539-553 mutates session corp/role directly and asserts only is_keyval/is_rowset.",
-      "id": "feat:bookmarks.shared-folders",
-      "flagged_by_audit": "20261019-110620"
-    },
-    {
-      "evidence": "crates/eve-server/tests/social_fleets_corps.rs:523-535 and 585-589 assert only is_keyval for UpdateBookmark and DeleteBookmark. No persisted change or removal is verified.",
-      "id": "feat:bookmarks.update-delete",
-      "flagged_by_audit": "20261019-110620"
-    },
-    {
       "evidence": "Acceptance requires: 'home_station.get_home_station/set_home_station with remote change cooldown (get_next_remote_change_time) and candidate list.' In crates/eve-server/tests/it/features_parity_complete_part1.rs:234-252, test_character_creation_lifecycle_selection_home_station only invokes get_home_station, get_home_station_candidates, and get_next_remote_change_time (merely asserting matches!(next_time_rep, PyRep::Integer(_))). set_home_station is never called, candidate station validation is omitted, and remote station cooldown enforcement is untested.",
       "id": "feat:character.home-station",
       "flagged_by_audit": "20261021-191230"
-    },
-    {
-      "evidence": "crates/eve-server/tests/social_fleets_corps.rs:392-409 asserts only is_keyval on UpdateCorporationDetails. Neither the persisted description/URL/tax nor any re-read is verified.",
-      "id": "feat:corporation.corp-edit-details",
-      "flagged_by_audit": "20261019-110620"
-    },
-    {
-      "evidence": "crates/eve-server/tests/social_fleets_corps.rs:385-389 asserts only is_keyval on corpmgr.GetPublicInfo; no field values are checked.",
-      "id": "feat:corporation.corp-public-info",
-      "flagged_by_audit": "20261019-110620"
-    },
-    {
-      "evidence": "crates/eve-server/tests/social_fleets_corps.rs:347-360 calls corpmgr.CreateCorporation and asserts is_keyval plus sess.corporation_id only. Creation cost, the skill requirement and starting divisions are not asserted.",
-      "id": "feat:corporation.create-corp",
-      "flagged_by_audit": "20261019-110620"
     },
     {
       "evidence": "Acceptance: 'Max velocity, inertia and mass determine acceleration and align time.' crates/eve-server/tests/space_navigation_cyno.rs:679-693 reads SDE attributes and computes tau = inertia*mass/1e6 and the align time inside the test itself, which is a tautology. No production acceleration or align computation is asserted.",
@@ -6387,11 +6352,6 @@
       "flagged_by_audit": "20261019-053529"
     },
     {
-      "evidence": "Acceptance names keeper.ActivateAccelerationGate with per-gate ship restrictions and keys. crates/eve-server/tests/social_fleets_corps.rs:746-775 calls dungeonMgr.ActivateAccelerationGate and checks a hard-coded mass threshold (comment :752 'ship mass > 500,000,000 kg') instead of dungeon data. Keys are untested.",
-      "id": "feat:navigation.acceleration-gates",
-      "flagged_by_audit": "20261019-110620"
-    },
-    {
       "evidence": "Acceptance: 'Dock within docking range; docking refused with weapons timer/criminal in some cases.' crates/eve-server/tests/space_navigation_cyno.rs:1179-1218 tests only range (refused at 50 km, accepted at 1 km). The weapons-timer and criminal refusals are never exercised.",
       "id": "feat:navigation.dock-station",
       "flagged_by_audit": "20261019-222106"
@@ -6432,99 +6392,14 @@
       "flagged_by_audit": "20261019-053529"
     },
     {
-      "evidence": "tests/economy_market_industry.rs:1555-1579 calls the invented planetMgr.CreateLink with a client-supplied distance and asserts only linkPowergrid > 0 and linkCPU > 0. Length-based cost and bandwidth upgrades are not verified.",
-      "id": "feat:pi.links",
-      "flagged_by_audit": "20261019-053529"
-    },
-    {
-      "evidence": "tests/economy_market_industry.rs:1532-1553 calls the invented planetMgr.PlacePins(planet, typeID, count) with no coordinates. Acceptance requires placement within CPU/PG with ISK cost; only pinsCount is asserted.",
-      "id": "feat:pi.place-pins",
-      "flagged_by_audit": "20261019-053529"
-    },
-    {
-      "evidence": "pve_mining_sites.rs:312-335 calls agentMgr.StartConversation, which is NOT_IN_CLIENT (metrics :317; production handler agents_missions.rs:403 is also flagged). It asserts an invented KeyVal (missionID/state 'Offered'/briefing/iskReward/lpReward/expiryUnix).",
-      "id": "feat:pve.agent-conversation",
-      "flagged_by_audit": "20261019-145905"
-    },
-    {
-      "evidence": "pve_mining_sites.rs:340-365 calls agentMgr.AcceptMission (NOT_IN_CLIENT metrics :345; agents_missions.rs:631) and asserts an invented state string 'Accepted'.",
-      "id": "feat:pve.mission-accept",
-      "flagged_by_audit": "20261019-145905"
-    },
-    {
-      "evidence": "pve_mining_sites.rs:426-480 calls agentMgr.DeclineMission (NOT_IN_CLIENT metrics :431,469; agents_missions.rs:876).",
-      "id": "feat:pve.mission-decline",
-      "flagged_by_audit": "20261019-145905"
-    },
-    {
       "evidence": "test_mn18 relies on agentMgr.AcceptMission and agentMgr.CompleteMission, both NOT_IN_CLIENT (metrics_rpc_names.txt: mining_advanced.rs:806, 837, 875). V24 agent interaction goes through the agent moniker's DoAction, so the accept/complete path is invented.",
       "id": "feat:pve.mission-mining",
       "flagged_by_audit": "20261019-145905"
     },
     {
-      "evidence": "pve_mining_sites.rs:374-402 calls agentMgr.QuitMission (NOT_IN_CLIENT metrics :379; agents_missions.rs:878) and asserts an invented KeyVal (dungeonCleaned/standingPenaltyApplied).",
-      "id": "feat:pve.mission-quit",
-      "flagged_by_audit": "20261019-145905"
-    },
-    {
-      "evidence": "tests/social_fleets_corps.rs:650-667 calls directionalScanMgr.PerformDirectionalScan(angle, range). That service is absent from the V24 catalog (nothing between devIndexManager and dogmaIM in context/parity.json). The scan direction comes from ship velocity rather than a client-supplied vector.",
-      "id": "feat:scanning.dscan",
-      "flagged_by_audit": "20261019-053529"
-    },
-    {
-      "evidence": "mining_complete.rs:1221-1238 calls moonExtractions.LaunchMoonProbe, which is NOT_IN_CLIENT (metrics :1226). The V24 moonExtractions catalog has only CancelExtraction, FractureChunkWithStructure, GetExtractionAndEventIDFromStructureID, GetExtractionsForCorp, GetMoonResourcesForStructure and StartNewExtraction (context/parity.json:4029-4058). Moon probes are launched from a probe launcher module.",
-      "id": "feat:scanning.moon-survey-probe",
-      "flagged_by_audit": "20261019-145905"
-    },
-    {
-      "evidence": "tests/social_fleets_corps.rs:669-674 calls probeMgr.LaunchProbes and asserts only is_keyval. The V24 RPC catalog has no probeMgr service (nothing between posMgr and publicQaToolsServer in context/parity.json); probes are launched by the probe-launcher module.",
-      "id": "feat:scanning.probe-launch",
-      "flagged_by_audit": "20261019-053529"
-    },
-    {
-      "evidence": "tests/social_fleets_corps.rs:723-728 calls the invented probeMgr.RecallProbes and asserts only is_keyval.",
-      "id": "feat:scanning.probe-recall",
-      "flagged_by_audit": "20261019-053529"
-    },
-    {
-      "evidence": "tests/social_fleets_corps.rs:676-721 uses scanMgr.GetSystemSignatures and scanMgr.ScanWithProbes. In the V24 catalog scanMgr exposes only GetSystemScanMgr and SignalTrackerRegister (context/parity.json), and plan:S-6 still expects RequestScans to be unimplemented.",
-      "id": "feat:scanning.probe-scan-math",
-      "flagged_by_audit": "20261019-053529"
-    },
-    {
-      "evidence": "crates/eve-server/tests/social_fleets_corps.rs:556-582 relies on scanMgr.GetSystemSignatures, which is already flagged as not a V24 method, and asserts only is_keyval on BookmarkScanResult.",
-      "id": "feat:scanning.scan-bookmark",
-      "flagged_by_audit": "20261019-110620"
-    },
-    {
-      "evidence": "crates/eve-server/tests/social_fleets_corps.rs:923-950 uses lscService.JoinChannel/SendMessage, legacy LSC names the V24 XMPP chat does not use, and asserts only is_keyval plus an 'OnLSC' event.",
-      "id": "feat:social.chat-corp-alliance-fleet",
-      "flagged_by_audit": "20261019-110620"
-    },
-    {
-      "evidence": "crates/eve-server/tests/social_fleets_corps.rs:906-919 calls the internal ctx.sync_character_local_chat directly; no client RPC is involved. V24 chat runs over XMPP, and feat:social.chat-xmpp-auth is still MISSING.",
-      "id": "feat:social.chat-local",
-      "flagged_by_audit": "20261019-110620"
-    },
-    {
-      "evidence": "crates/eve-server/tests/social_fleets_corps.rs:953-984 uses chatMgr.CreateChannel/GrantChannelOwnership and asserts only is_keyval. No channel membership, access or operator behaviour is checked.",
-      "id": "feat:social.chat-player-channels",
-      "flagged_by_audit": "20261019-110620"
-    },
-    {
-      "evidence": "crates/eve-server/tests/social_fleets_corps.rs:987-1002 uses lscService.StartConversation, a non-V24 chat path, and asserts is_keyval plus an OnLSC event only.",
-      "id": "feat:social.chat-private",
-      "flagged_by_audit": "20261019-110620"
-    },
-    {
       "evidence": "crates/eve-server/tests/mining_complete.rs:2346-2392 asserts that the Athanor (35835) base reprocessing yield is 0.52. wiki:Reprocessing gives Athanor 51%, Tatara 52% and citadels/Engineering Complexes 50%, so the test pins wrong data. No reprocessing is actually run in the structure; only GetQuotes is called.",
       "id": "feat:structures.service-reprocessing",
       "flagged_by_audit": "20261019-222106"
-    },
-    {
-      "evidence": "crates/eve-server/tests/social_fleets_corps.rs:363-382 asserts only is_rowset on GetWalletDivisions and is_keyval on UpdateDivisionNames. The new division name is never read back and balances are never checked.",
-      "id": "feat:wallet.corp-divisions",
-      "flagged_by_audit": "20261019-110620"
     }
   ]
 }
