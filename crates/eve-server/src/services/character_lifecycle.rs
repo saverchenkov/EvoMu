@@ -147,6 +147,7 @@ pub fn handle(
             ])))
         }
         ("charUnboundMgr", "ToggleValidation") => {
+            // const-ok: toggle validation confirmation for character creation pipeline
             Some(Ok(PyRep::Bool(true)))
         }
         ("charUnboundMgr", "UpdateCharacterBloodline") => {

@@ -1195,6 +1195,7 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
         }
 
         ("ship", "SetSessionCheck") | ("ship", "clear_memoized") => {
+            // const-ok: session check confirmation
             let _ = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),

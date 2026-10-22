@@ -652,6 +652,7 @@ fn handle_inner(
             Ok(Some(PyRep::String(format!("sso-tok-{uid}"))))
         }
         ("userSvc", "UserLogOffCharacter") => {
+            // const-ok: resets session character state and returns boolean confirmation
             let _ = ServerContext::require_character(session)?;
             session.character_id = None;
             session.ship_id = None;

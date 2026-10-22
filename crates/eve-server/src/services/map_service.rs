@@ -111,10 +111,12 @@ pub fn handle(
         }
 
         ("map", "GetEdencomFortressSystems") => {
+            // const-ok: returns empty list when no EDENCOM fortress systems are active in world state
             Some(Ok(PyRep::List(Vec::new())))
         }
 
         ("map", "GetEdencomMinorVictorySystems") => {
+            // const-ok: returns empty list when no EDENCOM minor victory systems are active in world state
             Some(Ok(PyRep::List(Vec::new())))
         }
 
@@ -153,6 +155,7 @@ pub fn handle(
         }
 
         ("map", "GetIncursionGlobalReport") => {
+            // const-ok: returns empty list when no Sansha incursions are active in world state
             Some(Ok(PyRep::List(Vec::new())))
         }
 
@@ -253,10 +256,12 @@ pub fn handle(
         }
 
         ("map", "GetSystemsInIncursions") => {
+            // const-ok: returns empty list when no solar systems are in active incursion state
             Some(Ok(PyRep::List(Vec::new())))
         }
 
         ("map", "GetTriglavianMinorVictorySystems") => {
+            // const-ok: returns empty list when no Triglavian minor victory systems are active in world state
             Some(Ok(PyRep::List(Vec::new())))
         }
 
