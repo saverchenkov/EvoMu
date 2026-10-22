@@ -186,7 +186,7 @@ async fn test_corp_shares_dividends_and_ceo_transition() {
     assert!(s_cols.contains(&"shareholderID".to_string()));
     assert!(s_rows.len() >= 2);
 
-    // 4. GetSharesByShareholder
+    // 4. GetSharesByShareholder (authentically filtered by queried shareholderID)
     let by_sh = rpc(
         &ctx,
         &mut sess1,
@@ -197,7 +197,35 @@ async fn test_corp_shares_dividends_and_ceo_transition() {
     .await
     .expect("GetSharesByShareholder");
     let (_, bsh_rows) = rowset_data(&by_sh);
-    assert!(bsh_rows.len() >= 2);
+    assert_eq!(bsh_rows.len(), 1);
+    assert_eq!(bsh_rows[0][0], PyRep::Integer(PILOT_2));
+    assert_eq!(bsh_rows[0][2], PyRep::Integer(200));
+
+    let by_sh3 = rpc(
+        &ctx,
+        &mut sess1,
+        "corpRegistry",
+        "GetSharesByShareholder",
+        &[PyRep::Integer(corp_id), PyRep::Integer(PILOT_3)],
+    )
+    .await
+    .expect("GetSharesByShareholder pilot 3");
+    let (_, bsh3_rows) = rowset_data(&by_sh3);
+    assert_eq!(bsh3_rows.len(), 1);
+    assert_eq!(bsh3_rows[0][0], PyRep::Integer(PILOT_3));
+    assert_eq!(bsh3_rows[0][2], PyRep::Integer(50));
+
+    let by_sh_none = rpc(
+        &ctx,
+        &mut sess1,
+        "corpRegistry",
+        "GetSharesByShareholder",
+        &[PyRep::Integer(corp_id), PyRep::Integer(999_999)],
+    )
+    .await
+    .expect("GetSharesByShareholder empty");
+    let (_, empty_rows) = rowset_data(&by_sh_none);
+    assert_eq!(empty_rows.len(), 0);
 
     // 5. GetMemberIDsWithMoreThanAvgShares
     let avg_sh = rpc(

@@ -203,6 +203,25 @@ async fn test_corp_creation_info_branding_and_members() {
         PyRep::String("Strategic Reserves".into())
     );
 
+    // Add additional members to test multi-member corporate directory, pagination, query and filtering
+    ctx.db.with_mut_snapshot(|snap| {
+        let corp = snap.corporations.get_mut(&corp_id).unwrap();
+        corp.members.insert(PILOT_2);
+        corp.member_roles.insert(PILOT_2, 0);
+        corp.members.insert(PILOT_3);
+        corp.member_roles.insert(PILOT_3, 0);
+        if let Some(ch2) = snap.characters.get_mut(&PILOT_2) {
+            ch2.corporation_id = corp_id;
+            ch2.name = "Bravo Pilot".into();
+        }
+        if let Some(mut ch3) = snap.characters.get(&PILOT_2).cloned() {
+            ch3.character_id = PILOT_3;
+            ch3.corporation_id = corp_id;
+            ch3.name = "Charlie Scout".into();
+            snap.characters.insert(PILOT_3, ch3);
+        }
+    });
+
     // 7. GetMember
     let mem_res = rpc(
         &ctx,
@@ -215,11 +234,13 @@ async fn test_corp_creation_info_branding_and_members() {
     .expect("GetMember");
     let (m_cols, m_rows) = rowset_data(&mem_res);
     assert!(m_cols.contains(&"characterID".to_string()));
-    assert_eq!(m_rows.len(), 1);
+    assert_eq!(m_rows.len(), 3);
     assert_eq!(m_rows[0][0], PyRep::Integer(PILOT_1));
+    assert_eq!(m_rows[1][0], PyRep::Integer(PILOT_2));
+    assert_eq!(m_rows[2][0], PyRep::Integer(PILOT_3));
 
-    // 8. GetMembersPaged
-    let paged_res = rpc(
+    // 8. GetMembersPaged (authentically sliced by page and pageSize)
+    let paged1 = rpc(
         &ctx,
         &mut sess,
         "corpRegistry",
@@ -227,16 +248,50 @@ async fn test_corp_creation_info_branding_and_members() {
         &[
             PyRep::Integer(corp_id),
             PyRep::Integer(1),
-            PyRep::Integer(50),
+            PyRep::Integer(2),
         ],
     )
     .await
-    .expect("GetMembersPaged");
-    let (_, p_rows) = rowset_data(&paged_res);
-    assert_eq!(p_rows.len(), 1);
-    assert_eq!(p_rows[0][0], PyRep::Integer(PILOT_1));
+    .expect("GetMembersPaged page 1");
+    let (_, p1_rows) = rowset_data(&paged1);
+    assert_eq!(p1_rows.len(), 2);
+    assert_eq!(p1_rows[0][0], PyRep::Integer(PILOT_1));
+    assert_eq!(p1_rows[1][0], PyRep::Integer(PILOT_2));
 
-    // 9. GetMembersByIds
+    let paged2 = rpc(
+        &ctx,
+        &mut sess,
+        "corpRegistry",
+        "GetMembersPaged",
+        &[
+            PyRep::Integer(corp_id),
+            PyRep::Integer(2),
+            PyRep::Integer(2),
+        ],
+    )
+    .await
+    .expect("GetMembersPaged page 2");
+    let (_, p2_rows) = rowset_data(&paged2);
+    assert_eq!(p2_rows.len(), 1);
+    assert_eq!(p2_rows[0][0], PyRep::Integer(PILOT_3));
+
+    let paged3 = rpc(
+        &ctx,
+        &mut sess,
+        "corpRegistry",
+        "GetMembersPaged",
+        &[
+            PyRep::Integer(corp_id),
+            PyRep::Integer(3),
+            PyRep::Integer(2),
+        ],
+    )
+    .await
+    .expect("GetMembersPaged page 3");
+    let (_, p3_rows) = rowset_data(&paged3);
+    assert_eq!(p3_rows.len(), 0);
+
+    // 9. GetMembersByIds (authentically filtered by requested ID list)
     let by_ids = rpc(
         &ctx,
         &mut sess,
@@ -244,17 +299,87 @@ async fn test_corp_creation_info_branding_and_members() {
         "GetMembersByIds",
         &[
             PyRep::Integer(corp_id),
-            PyRep::List(vec![PyRep::Integer(PILOT_1)]),
+            PyRep::List(vec![PyRep::Integer(PILOT_2)]),
         ],
     )
     .await
     .expect("GetMembersByIds");
     let (_, i_rows) = rowset_data(&by_ids);
     assert_eq!(i_rows.len(), 1);
-    assert_eq!(i_rows[0][0], PyRep::Integer(PILOT_1));
+    assert_eq!(i_rows[0][0], PyRep::Integer(PILOT_2));
 
-    // 10. GetMemberIDsByQuery
-    let by_query = rpc(
+    let by_multi_ids = rpc(
+        &ctx,
+        &mut sess,
+        "corpRegistry",
+        "GetMembersByIds",
+        &[
+            PyRep::Integer(corp_id),
+            PyRep::List(vec![PyRep::Integer(PILOT_1), PyRep::Integer(PILOT_3)]),
+        ],
+    )
+    .await
+    .expect("GetMembersByIds multi");
+    let (_, mi_rows) = rowset_data(&by_multi_ids);
+    assert_eq!(mi_rows.len(), 2);
+    assert_eq!(mi_rows[0][0], PyRep::Integer(PILOT_1));
+    assert_eq!(mi_rows[1][0], PyRep::Integer(PILOT_3));
+
+    let by_absent_id = rpc(
+        &ctx,
+        &mut sess,
+        "corpRegistry",
+        "GetMembersByIds",
+        &[
+            PyRep::Integer(corp_id),
+            PyRep::List(vec![PyRep::Integer(999_999)]),
+        ],
+    )
+    .await
+    .expect("GetMembersByIds absent");
+    let (_, no_rows) = rowset_data(&by_absent_id);
+    assert_eq!(no_rows.len(), 0);
+
+    // 10. GetMemberIDsByQuery (authentically matched by name and id)
+    let by_q_bravo = rpc(
+        &ctx,
+        &mut sess,
+        "corpRegistry",
+        "GetMemberIDsByQuery",
+        &[PyRep::Integer(corp_id), PyRep::String("bravo".into())],
+    )
+    .await
+    .expect("GetMemberIDsByQuery bravo");
+    let (_, q_bravo_rows) = rowset_data(&by_q_bravo);
+    assert_eq!(q_bravo_rows.len(), 1);
+    assert_eq!(q_bravo_rows[0][0], PyRep::Integer(PILOT_2));
+
+    let by_q_id = rpc(
+        &ctx,
+        &mut sess,
+        "corpRegistry",
+        "GetMemberIDsByQuery",
+        &[PyRep::Integer(corp_id), PyRep::String(PILOT_3.to_string())],
+    )
+    .await
+    .expect("GetMemberIDsByQuery id");
+    let (_, q_id_rows) = rowset_data(&by_q_id);
+    assert_eq!(q_id_rows.len(), 1);
+    assert_eq!(q_id_rows[0][0], PyRep::Integer(PILOT_3));
+
+    let by_q_none = rpc(
+        &ctx,
+        &mut sess,
+        "corpRegistry",
+        "GetMemberIDsByQuery",
+        &[PyRep::Integer(corp_id), PyRep::String("nonexistent_pilot_name".into())],
+    )
+    .await
+    .expect("GetMemberIDsByQuery none");
+    let (_, q_none_rows) = rowset_data(&by_q_none);
+    assert_eq!(q_none_rows.len(), 0);
+
+    let by_q_all = rpc(
         &ctx,
         &mut sess,
         "corpRegistry",
@@ -262,10 +387,9 @@ async fn test_corp_creation_info_branding_and_members() {
         &[PyRep::Integer(corp_id)],
     )
     .await
-    .expect("GetMemberIDsByQuery");
-    let (_, q_rows) = rowset_data(&by_query);
-    assert_eq!(q_rows.len(), 1);
-    assert_eq!(q_rows[0][0], PyRep::Integer(PILOT_1));
+    .expect("GetMemberIDsByQuery all");
+    let (_, q_all_rows) = rowset_data(&by_q_all);
+    assert_eq!(q_all_rows.len(), 3);
 }
 
 #[tokio::test]

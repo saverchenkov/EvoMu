@@ -868,7 +868,7 @@ async fn test_corp_registry_members_and_tracking() {
 
 #[tokio::test]
 async fn test_corp_registry_operations_kills_and_naming() {
-    // parity: rpc:corpRegistry.GetMyApplications, rpc:corpRegistry.GetOldApplications, rpc:corpRegistry.GetMyOldApplications, rpc:corpRegistry.DeleteAllianceApplication, rpc:corpRegistry.GetAggressionSettings, rpc:corpRegistry.UpdateCorporationAbilities, rpc:corpRegistry.GetSuggestedAllianceShortNames, rpc:corpRegistry.GetSuggestedTickerNames, rpc:corpRegistry.GetEveOwners, rpc:corpRegistry.GetRecentKills, rpc:corpRegistry.GetRecentLosses, rpc:corpRegistry.SetAccountKey, rpc:corpRegistry.ExecuteActions
+    // parity: rpc:corpRegistry.GetMyApplications, rpc:corpRegistry.GetOldApplications, rpc:corpRegistry.GetMyOldApplications, rpc:corpRegistry.DeleteAllianceApplication, rpc:corpRegistry.GetAggressionSettings, rpc:corpRegistry.UpdateCorporationAbilities, rpc:corpRegistry.GetSuggestedAllianceShortNames, rpc:corpRegistry.GetSuggestedTickerNames, rpc:corpRegistry.GetEveOwners, rpc:corpRegistry.GetRecentKills, rpc:corpRegistry.GetRecentLosses, rpc:corpRegistry.SetAccountKey
     let ctx = ServerContext::new();
     let mut sess1 = SessionState::new(1101);
     common::login_pilot(&ctx, &mut sess1, "demo", "demo-secret").await;

@@ -1,6 +1,6 @@
-//! Authentic state-backed integration tests for `corpRegistry` moniker binding, reflection, kill reports, and naming RPC methods:
-//! - Moniker binding & reflection: `Bind`, `UnBind`, `Unbind`, `SetSessionCheck`, `columns`, `header`, `itervalues`, `clear_memoized`
-//! - Actions, kills, naming & owners: `SetAccountKey`, `ExecuteActions`, `GetSuggestedTickerNames`, `GetSuggestedAllianceShortNames`, `GetRecentKills`, `GetRecentLosses`, `GetEveOwners`
+//! Authentic state-backed integration tests for `corpRegistry` moniker binding, division account keys, kill reports, and naming RPC methods:
+//! - Moniker binding: `Bind`, `UnBind`, `Unbind`
+//! - Division keys, kills, naming & owners: `SetAccountKey`, `GetSuggestedTickerNames`, `GetSuggestedAllianceShortNames`, `GetRecentKills`, `GetRecentLosses`, `GetEveOwners`
 
 #![forbid(unsafe_code)]
 
@@ -71,14 +71,10 @@ async fn test_corp_registry_monikers_introspection_and_actions() {
     // parity: rpc:corpRegistry.Bind
     // parity: rpc:corpRegistry.UnBind
     // parity: rpc:corpRegistry.Unbind
-    // parity: rpc:corpRegistry.SetSessionCheck
-    // parity: rpc:corpRegistry.columns
-    // parity: rpc:corpRegistry.header
-    // parity: rpc:corpRegistry.itervalues
-    // parity: rpc:corpRegistry.clear_memoized
 
     let ctx = ServerContext::new();
     let mut sess = select_pilot(&ctx, 62_001, "demo", "demo-secret", PILOT_1).await;
+    let corp_id = sess.corporation_id.unwrap_or(1_000_009);
 
     // 1. Bind
     let bind_res = rpc(
@@ -86,11 +82,13 @@ async fn test_corp_registry_monikers_introspection_and_actions() {
         &mut sess,
         "corpRegistry",
         "Bind",
-        &[PyRep::Integer(77_889)],
+        &[PyRep::Integer(corp_id)],
     )
     .await
     .expect("Bind");
-    assert_eq!(bind_res, PyRep::Integer(77_889));
+    let bound_id = bind_res.as_i64().expect("bound_id as i64") as u64;
+    assert!(bound_id > 0);
+    assert!(ctx.bound_objects.read().unwrap().contains_key(&bound_id));
 
     // 2. UnBind
     let unbind_res = rpc(
@@ -98,23 +96,37 @@ async fn test_corp_registry_monikers_introspection_and_actions() {
         &mut sess,
         "corpRegistry",
         "UnBind",
-        &[PyRep::Integer(77_889)],
+        &[PyRep::Integer(bound_id as i64)],
     )
     .await
     .expect("UnBind");
     assert_eq!(unbind_res, PyRep::None);
+    assert!(!ctx.bound_objects.read().unwrap().contains_key(&bound_id));
 
     // 3. Unbind (lowercase variant)
+    let bind2 = rpc(
+        &ctx,
+        &mut sess,
+        "corpRegistry",
+        "Bind",
+        &[PyRep::Integer(corp_id)],
+    )
+    .await
+    .expect("Bind 2");
+    let bound2_id = bind2.as_i64().expect("bound2 as i64") as u64;
+    assert!(ctx.bound_objects.read().unwrap().contains_key(&bound2_id));
+
     let unbind_lower = rpc(
         &ctx,
         &mut sess,
         "corpRegistry",
         "Unbind",
-        &[PyRep::Integer(77_889)],
+        &[PyRep::Integer(bound2_id as i64)],
     )
     .await
     .expect("Unbind");
     assert_eq!(unbind_lower, PyRep::None);
+    assert!(!ctx.bound_objects.read().unwrap().contains_key(&bound2_id));
 
     // 4. SetSessionCheck
     let check_res = rpc(&ctx, &mut sess, "corpRegistry", "SetSessionCheck", &[])
@@ -164,7 +176,6 @@ async fn test_corp_registry_monikers_introspection_and_actions() {
 #[tokio::test]
 async fn test_corp_registry_kills_naming_and_owners() {
     // parity: rpc:corpRegistry.SetAccountKey
-    // parity: rpc:corpRegistry.ExecuteActions
     // parity: rpc:corpRegistry.GetSuggestedTickerNames
     // parity: rpc:corpRegistry.GetSuggestedAllianceShortNames
     // parity: rpc:corpRegistry.GetRecentKills
@@ -203,8 +214,20 @@ async fn test_corp_registry_kills_naming_and_owners() {
     .await
     .expect("SetAccountKey");
     assert_eq!(key_res, PyRep::None);
+    {
+        let g = eve_server::services::fleet_social::fleet_social_corps::CORP_GOV.lock().unwrap();
+        assert_eq!(
+            g.get(&corp_id).and_then(|s| s.member_account_keys.get(&PILOT_1)).copied(),
+            Some(1005)
+        );
+    }
+    assert!(
+        rpc(&ctx, &mut sess, "corpRegistry", "SetAccountKey", &[PyRep::Integer(999)])
+            .await
+            .is_err()
+    );
 
-    // 2. ExecuteActions
+    // 2. ExecuteActions (verified baseline call)
     let exec = rpc(&ctx, &mut sess, "corpRegistry", "ExecuteActions", &[])
         .await
         .expect("ExecuteActions");

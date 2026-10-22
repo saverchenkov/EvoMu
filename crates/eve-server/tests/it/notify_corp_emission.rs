@@ -877,7 +877,6 @@ async fn test_alliance_and_war_notifications() {
 
 #[tokio::test]
 async fn test_corp_registry_governance_structures_contacts_and_reinforce() {
-    // parity: rpc:corpRegistry.MovePrivateShares, rpc:corpRegistry.GetShareholders, rpc:corpRegistry.GetSharesByShareholder, rpc:corpRegistry.GetMemberIDsWithMoreThanAvgShares, rpc:corpRegistry.UpdateTitles, rpc:corpRegistry.GetTitles, rpc:corpRegistry.ResignFromCEO, rpc:corpRegistry.GetNumberOfPotentialCEOs, rpc:corpRegistry.UpdateBulletinOrder, rpc:corpRegistry.DeleteBulletin, rpc:corpRegistry.EditCorporateContact, rpc:corpRegistry.EditContactsRelationshipID, rpc:corpRegistry.GetLabels, rpc:corpRegistry.GetCorpWelcomeMail, rpc:corpRegistry.RegisterNewCorpMailRestrictionSettings, rpc:corpRegistry.DoesCorpRestrictCorpMails, rpc:corpRegistry.RegisterNewAcceptStructureSettings, rpc:corpRegistry.DoesMyCorpAcceptStructures, rpc:corpRegistry.SetStructureReinforceDefault, rpc:corpRegistry.GetStructureReinforceDefault, rpc:corpRegistry.Unbind, rpc:corpRegistry.SetSessionCheck, rpc:corpRegistry.clear_memoized, rpc:corpRegistry.columns, rpc:corpRegistry.header, rpc:corpRegistry.itervalues
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let mut s1 = select(&ctx, 1201, "demo", "demo-secret", P1).await;

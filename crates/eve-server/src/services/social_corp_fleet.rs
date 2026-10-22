@@ -8,6 +8,7 @@ use eve_db::{corp_roles, AllianceRecord, CorpProjectRecord, FleetRecord, Invento
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{LazyLock, Mutex};
 
 #[path = "social_wars.rs"]
@@ -33,6 +34,7 @@ struct AllianceWarState {
     project_meta: HashMap<i64, (String, bool, bool)>,
 }
 
+static NEXT_ALLIANCE_ID: AtomicI64 = AtomicI64::new(99_000_000);
 static ALLIANCE_WAR_STATE: LazyLock<Mutex<AllianceWarState>> =
     LazyLock::new(|| Mutex::new(AllianceWarState::default()));
 
@@ -215,7 +217,7 @@ pub async fn handle(
                     return Err(BridgeRpcError { code: "InsufficientFunds".into(), message: "Creating an alliance requires 1,000,000,000 ISK in the corporation master wallet".into() });
                 }
                 snap.next_entity_id += 1;
-                let aid = 99_000_000 + snap.next_entity_id;
+                let aid = NEXT_ALLIANCE_ID.fetch_add(1, Ordering::Relaxed) + 1;
                 corp.alliance_id = Some(aid);
                 let members_snapshot: Vec<i64> = corp.members.iter().copied().collect();
                 for mid in members_snapshot {
@@ -237,12 +239,13 @@ pub async fn handle(
                     session.alliance_id = Some(aid);
                     {
                         let mut st = ALLIANCE_WAR_STATE.lock().unwrap();
-                        let meta = st.alliances.entry(aid).or_default();
+                        let mut meta = AllianceMeta::default();
                         meta.description = description.to_string();
                         meta.url = url.to_string();
                         meta.emblem_entitlements = true;
                         meta.executor_votes.insert(corp_id, corp_id);
                         meta.employment_history.push((corp_id, now_unix, None));
+                        st.alliances.insert(aid, meta);
                     }
                     let change = PyRep::Dict(vec![
                         (PyRep::String(("allianceID").into()), PyRep::Tuple(vec![PyRep::None, PyRep::Integer(aid)])),

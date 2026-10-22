@@ -15,7 +15,7 @@ pub(crate) mod fleet_social_chat;
 #[path = "fleet_social_corp_gov.rs"]
 mod fleet_social_corp_gov;
 #[path = "fleet_social_corps.rs"]
-pub(crate) mod fleet_social_corps;
+pub mod fleet_social_corps;
 #[path = "fleet_social_fleet_ops.rs"]
 mod fleet_social_fleet_ops;
 #[path = "fleet_social_fleets.rs"]

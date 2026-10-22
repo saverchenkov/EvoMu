@@ -520,38 +520,49 @@ pub fn handle(
             }
             let char_id = session.character_id.unwrap_or(0);
             let corp_id = session.corporation_id.unwrap_or(0);
-            ctx.db.with_mut_snapshot(|snap| {
-                snap.item_custom_names.insert(
-                    -((corp_id << 16) | (char_id & 0xFFFF)),
-                    format!("accountKey:{key}"),
-                );
-            });
+            crate::services::fleet_social::fleet_social_corps::CORP_GOV
+                .lock()
+                .unwrap()
+                .entry(corp_id)
+                .or_default()
+                .member_account_keys
+                .insert(char_id, key);
             Some(Ok(PyRep::None))
         }
 
         "ExecuteActions" => {
-            let corp_id = session.corporation_id.unwrap_or(0);
-            let updated = ctx.db.with_mut_snapshot(|snap| {
-                if let Some(corp) = snap.corporations.get_mut(&corp_id) {
-                    corp.tax_rate = corp.tax_rate.clamp(0.0, 1.0);
-                    true
-                } else {
-                    false
-                }
-            });
-            Some(Ok(PyRep::Bool(updated)))
+            let _ = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            Some(Ok(PyRep::Bool(true)))
         }
 
         "Bind" => {
-            let bound_id = args.first().and_then(|a| a.as_i64()).unwrap_or(1);
-            Some(Ok(PyRep::Integer(bound_id)))
+            let object_id = args
+                .first()
+                .and_then(|a| a.as_i64())
+                .unwrap_or_else(|| session.corporation_id.unwrap_or(1_000_009));
+            match ctx.bind_object(session, "corpRegistry", object_id) {
+                Ok(bound_id) => Some(Ok(PyRep::Integer(bound_id as i64))),
+                Err(e) => Some(Err(e)),
+            }
         }
 
         "UnBind" | "Unbind" => {
+            let bound_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0) as u64;
+            ctx.bound_objects
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&bound_id);
             Some(Ok(PyRep::None))
         }
 
         "SetSessionCheck" => {
+            let _ = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             Some(Ok(PyRep::None))
         }
 

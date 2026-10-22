@@ -296,8 +296,27 @@ pub(super) fn handle_corp_gov(
             ])))
         }
 
+        ("corpRegistry", "GetSharesByShareholder") => {
+            let target_sh_id = if args.len() >= 2 {
+                args.get(1).and_then(|a| a.as_i64()).unwrap_or(char_id)
+            } else {
+                args.first().and_then(|a| a.as_i64()).unwrap_or(char_id)
+            };
+            let mut g = CORP_GOV.lock().unwrap();
+            let state = g.entry(corp_id).or_default();
+            if state.shares.is_empty() {
+                state.shares.insert(char_id, 1_000);
+            }
+            let rows: Vec<Vec<PyRep>> = state
+                .shares
+                .iter()
+                .filter(|(&oid, _)| oid == target_sh_id)
+                .map(|(&oid, &cnt)| vec![PyRep::Integer(oid), PyRep::Integer(corp_id), PyRep::Integer(cnt)])
+                .collect();
+            Some(Ok(PyRep::rowset(vec!["shareholderID", "corporationID", "shares"], rows)))
+        }
+
         ("corpRegistry", "GetShareholders")
-        | ("corpRegistry", "GetSharesByShareholder")
         | ("corpRegistry", "GetMemberIDsWithMoreThanAvgShares") => {
             let mut g = CORP_GOV.lock().unwrap();
             let state = g.entry(corp_id).or_default();
@@ -318,18 +337,9 @@ pub(super) fn handle_corp_gov(
             let rows: Vec<Vec<PyRep>> = state
                 .shares
                 .iter()
-                .map(|(&oid, &cnt)| {
-                    vec![
-                        PyRep::Integer(oid),
-                        PyRep::Integer(corp_id),
-                        PyRep::Integer(cnt),
-                    ]
-                })
+                .map(|(&oid, &cnt)| vec![PyRep::Integer(oid), PyRep::Integer(corp_id), PyRep::Integer(cnt)])
                 .collect();
-            Some(Ok(PyRep::rowset(
-                vec!["shareholderID", "corporationID", "shares"],
-                rows,
-            )))
+            Some(Ok(PyRep::rowset(vec!["shareholderID", "corporationID", "shares"], rows)))
         }
 
         ("corpRegistry", "PayoutDividend") => {
