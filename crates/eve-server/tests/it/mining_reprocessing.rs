@@ -100,8 +100,8 @@ fn get_dict_val<'a>(dict: &'a PyRep, key: &str) -> Option<&'a PyRep> {
 
 #[tokio::test]
 async fn test_phase_5m_mn05_specialized_holds_volume_and_stack_merging() {
-    // parity: feat:ships.special-holds, feat:mining.ore-hold
-    eve_testkit::attest(&["feat:ships.special-holds", "feat:mining.ore-hold"]);
+    // parity: feat:mining.ore-hold
+    eve_testkit::attest(&["feat:mining.ore-hold"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let kw = HashMap::new();

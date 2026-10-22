@@ -25,8 +25,7 @@ pub fn handle_clones_and_sheet(
     _kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
-        ("charUnboundMgr", "GetCharacterInfo")
-        | ("charMgr", "GetCharacterInfo") => {
+        ("charUnboundMgr", "GetCharacterInfo") | ("charMgr", "GetCharacterInfo") => {
             let user_id = match ServerContext::require_auth(session) {
                 Ok(u) => u,
                 Err(e) => return Some(Err(e)),
@@ -175,6 +174,9 @@ pub fn handle_clones_and_sheet(
                     ),
                 ]);
 
+                let (medals_list, decorations_list) =
+                    crate::services::fleet_social::fleet_social_corps::get_character_medals_and_decorations(cid);
+
                 PyRep::keyval([
                     ("characterID", PyRep::Integer(c.character_id)),
                     ("characterName", PyRep::String(c.name)),
@@ -219,8 +221,8 @@ pub fn handle_clones_and_sheet(
                     ("jumpClones", PyRep::List(jump_clones_list)),
                     ("standings", PyRep::List(standings_list)),
                     ("killRights", PyRep::List(kill_rights_list)),
-                    ("medals", PyRep::List(Vec::new())),
-                    ("decorations", PyRep::List(Vec::new())),
+                    ("medals", PyRep::List(medals_list)),
+                    ("decorations", PyRep::List(decorations_list)),
                 ])
             });
             Some(Ok(sheet))

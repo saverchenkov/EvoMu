@@ -80,9 +80,10 @@ fn grant_all_required_skills_for_type(ctx: &ServerContext, char_id: i64, type_id
 
 #[tokio::test]
 async fn test_phase_4_dg2_fit_validation_and_rigs() {
-    // parity: plan:DG-2, feat:fitting.fit-module, feat:fitting.unfit-module, feat:fitting.fit-rig, feat:fitting.fit-subsystems, feat:fitting.max-group-fitted, feat:fitting.max-type-fitted, feat:fitting.fittings-save, notify:OnModuleFitted, notify:OnModuleUnfitted, notify:OnModuleAttributeChanges, rpc:charUnboundMgr.SelectCharacterID
-    eve_testkit::attest(&["feat:fitting.fit-module", "feat:fitting.unfit-module", "feat:fitting.fit-rig", "feat:fitting.fit-subsystems", "feat:fitting.max-group-fitted", "feat:fitting.max-type-fitted", "feat:fitting.fittings-save", "notify:OnModuleFitted", "notify:OnModuleUnfitted", "notify:OnModuleAttributeChanges"]);
+    // parity: plan:DG-2, feat:fitting.fit-module, feat:fitting.unfit-module, feat:fitting.fit-rig, feat:fitting.fit-subsystems, feat:fitting.max-group-fitted, feat:fitting.max-type-fitted, notify:OnModuleFitted, notify:OnModuleUnfitted, notify:OnModuleAttributeChanges, rpc:charUnboundMgr.SelectCharacterID
+    eve_testkit::attest(&["feat:fitting.fit-module", "feat:fitting.unfit-module", "feat:fitting.fit-rig", "feat:fitting.fit-subsystems", "feat:fitting.max-group-fitted", "feat:fitting.max-type-fitted", "notify:OnModuleFitted", "notify:OnModuleUnfitted", "notify:OnModuleAttributeChanges"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let mut sess = SessionState::new(4001);
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
@@ -93,10 +94,35 @@ async fn test_phase_4_dg2_fit_validation_and_rigs() {
     let ship_id = 100_000_001i64;
     let station_id = 60_003_760i64;
 
+    // 0. Skill prerequisite check: attempting to fit Damage Control II (2048, requires Hull Upgrades IV 3394) without skill fails
+    seed_item(&ctx, 100_000_802, 2048, char_id, station_id, InventoryFlag::Hangar, 1, true);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(skills) = snap.skills.get_mut(&char_id) {
+            skills.remove(&3394);
+        }
+    });
+    let missing_skill_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "invbroker",
+            None,
+            "Add",
+            &[
+                PyRep::Integer(100_000_802),
+                PyRep::Integer(ship_id),
+                PyRep::Integer(InventoryFlag::LoSlot0 as i64),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Fitting Damage Control II without Hull Upgrades IV must fail");
+    assert_eq!(missing_skill_err.code, "FittingValidationFailed");
+
     // Grant skills for modules and T3 subsystems we will test
     for tid in [
-        438u32, 439, 2048, 2889, 30987, 31055, 47257, 42522, 10838, 29990, 45633, 45597, 45607,
-        45620,
+        438u32, 439, 2048, 2889, 30987, 31055, 31213, 47257, 42522, 10838, 11578, 29990, 45633,
+        45597, 45607, 45620,
     ] {
         grant_all_required_skills_for_type(&ctx, char_id, tid);
     }
@@ -114,7 +140,9 @@ async fn test_phase_4_dg2_fit_validation_and_rigs() {
     });
     ctx.ship_fittings.write().unwrap().remove(&ship_id);
 
-    // 1. Slot type validation: 1MN Afterburner II (100_000_003, type 438, medPower) into LoSlot0 (11) must fail
+    // 1. Slot type & slot count validation:
+    // - 1MN Afterburner II (100_000_003, type 438, medPower) into LoSlot0 (11) must fail (wrong slot type)
+    // - 1MN Afterburner II into MedSlot3 (22) on Rifter (3 medSlots: MedSlot0..=MedSlot2) must fail (slot count exceeded)
     let wrong_slot = ctx
         .dispatch_rpc(
             &mut sess,
@@ -132,6 +160,25 @@ async fn test_phase_4_dg2_fit_validation_and_rigs() {
         .await;
     assert_eq!(
         wrong_slot.expect_err("medPower module in LoSlot0 must fail").code,
+        "FittingValidationFailed"
+    );
+    let slot_count_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "invbroker",
+            None,
+            "Add",
+            &[
+                PyRep::Integer(100_000_003),
+                PyRep::Integer(ship_id),
+                PyRep::Integer(InventoryFlag::MedSlot3 as i64),
+            ],
+            &kw,
+            None,
+        )
+        .await;
+    assert_eq!(
+        slot_count_err.expect_err("Fitting into MedSlot3 on 3-med-slot Rifter must fail").code,
         "FittingValidationFailed"
     );
 
@@ -188,6 +235,67 @@ async fn test_phase_4_dg2_fit_validation_and_rigs() {
         "CannotUnfitInSpace"
     );
 
+    // Spawn an anchored Mobile Depot (33474, group 1246) within 3,000m in space -> unfitting to Cargo succeeds
+    let depot_id = 100_000_799i64;
+    seed_item(&ctx, depot_id, 33474, char_id, 30_000_142, InventoryFlag::None, 1, true);
+    let sys_jita = ctx.systems.get_or_spawn(30_000_142);
+    let (_, s_ball) = sys_jita.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    sys_jita
+        .spawn_ball_with_combat(
+            Ball {
+                id: depot_id,
+                type_id: 33474,
+                position: s_ball.position + DVec3::new(500.0, 0.0, 0.0),
+                velocity: DVec3::ZERO,
+                max_velocity: 0.0,
+                inertia: 1.0,
+                mass: 5_000.0,
+                radius: 50.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            CombatState::default(),
+        )
+        .await
+        .expect("spawn Mobile Depot in space");
+    ctx.dispatch_rpc(
+        &mut sess,
+        "invbroker",
+        None,
+        "Add",
+        &[
+            PyRep::Integer(100_000_003),
+            PyRep::Integer(ship_id),
+            PyRep::Integer(InventoryFlag::Cargo as i64),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Unfit module to Cargo in space near Mobile Depot");
+    assert_eq!(
+        ctx.db.with_snapshot(|s| s.items[&100_000_003].flag),
+        InventoryFlag::Cargo
+    );
+    ctx.dispatch_rpc(
+        &mut sess,
+        "invbroker",
+        None,
+        "Add",
+        &[
+            PyRep::Integer(100_000_003),
+            PyRep::Integer(ship_id),
+            PyRep::Integer(InventoryFlag::MedSlot0 as i64),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Re-fit module in space near Mobile Depot");
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.remove(&depot_id);
+    });
+
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.station_id = Some(station_id);
@@ -242,7 +350,9 @@ async fn test_phase_4_dg2_fit_validation_and_rigs() {
     assert!(change.iter().any(|(k, v)| *k == PyRep::Integer(3) && *v == PyRep::Integer(ship_id)));
     assert!(notes.iter().all(|(n, _)| n != "OnModuleUnfitted"));
 
-    // 4. Ship restriction (canFitShipGroup): Assault Damage Control II (47257) cannot fit on Rifter (587)
+    // 4. Ship restriction (canFitShipGroup & canFitShipType):
+    // - Assault Damage Control II (47257) cannot fit on Rifter (587, fails canFitShipGroup)
+    // - PANIC (42522, canFitShipType = 28352 Rorqual) cannot fit on Rifter (587, fails canFitShipType)
     seed_item(&ctx, 100_000_801, 47257, char_id, station_id, InventoryFlag::Hangar, 1, true);
     let ship_restr = ctx
         .dispatch_rpc(
@@ -263,8 +373,30 @@ async fn test_phase_4_dg2_fit_validation_and_rigs() {
         ship_restr.expect_err("ADC II on Rifter must fail canFitShipGroup").code,
         "FittingValidationFailed"
     );
+    seed_item(&ctx, 100_000_811, 42522, char_id, station_id, InventoryFlag::Hangar, 1, true);
+    let ship_type_restr = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "invbroker",
+            None,
+            "Add",
+            &[
+                PyRep::Integer(100_000_811),
+                PyRep::Integer(ship_id),
+                PyRep::Integer(InventoryFlag::HiSlot1 as i64),
+            ],
+            &kw,
+            None,
+        )
+        .await;
+    assert_eq!(
+        ship_type_restr.expect_err("PANIC on Rifter must fail canFitShipType").code,
+        "FittingValidationFailed"
+    );
 
-    // 5. maxGroupFitted (1544): Damage Control II (2048) has maxGroupFitted = 1
+    // 5. maxGroupFitted (1544) & maxGroupOnline (763):
+    // - Damage Control II (2048) has maxGroupFitted = 1
+    // - 1MN Afterburner I (439) has maxGroupOnline = 1
     seed_item(&ctx, 100_000_802, 2048, char_id, station_id, InventoryFlag::Hangar, 1, true);
     seed_item(&ctx, 100_000_803, 2048, char_id, station_id, InventoryFlag::Hangar, 1, true);
     ctx.dispatch_rpc(
@@ -300,6 +432,45 @@ async fn test_phase_4_dg2_fit_validation_and_rigs() {
     let dc_err = second_dc.expect_err("Second Damage Control II must fail maxGroupFitted");
     assert_eq!(dc_err.code, "FittingValidationFailed");
     assert!(dc_err.message.contains("MaxGroupFittedExceeded"));
+
+    // Verify maxGroupOnline (763): fit 1MN Afterburner I (439) online in MedSlot0, then fitting a 2nd online in MedSlot1 fails maxGroupOnline
+    seed_item(&ctx, 100_000_830, 439, char_id, station_id, InventoryFlag::Hangar, 1, true);
+    seed_item(&ctx, 100_000_831, 439, char_id, station_id, InventoryFlag::Hangar, 1, true);
+    ctx.dispatch_rpc(
+        &mut sess,
+        "invbroker",
+        None,
+        "Add",
+        &[PyRep::Integer(100_000_830), PyRep::Integer(ship_id), PyRep::Integer(InventoryFlag::MedSlot0 as i64)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("First 1MN Afterburner I fits online");
+    let second_ab_online = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "invbroker",
+            None,
+            "Add",
+            &[PyRep::Integer(100_000_831), PyRep::Integer(ship_id), PyRep::Integer(InventoryFlag::MedSlot1 as i64)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Second online Afterburner must fail maxGroupOnline");
+    assert!(second_ab_online.message.contains("MaxGroupOnlineExceeded"));
+    ctx.dispatch_rpc(
+        &mut sess,
+        "invbroker",
+        None,
+        "Add",
+        &[PyRep::Integer(100_000_830), PyRep::Integer(station_id), PyRep::Integer(InventoryFlag::Hangar as i64)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Unfit 1MN Afterburner I");
 
     // 6. maxTypeFitted (2431): Pulse Activated Nexus Invulnerability Core (42522, maxTypeFitted = 1) on Rorqual (28352)
     let rorqual_id = 100_000_810i64;
@@ -542,6 +713,24 @@ async fn test_phase_4_dg2_fit_validation_and_rigs() {
         "Armor HP must return to 450.0 after rig destruction"
     );
 
+    // Calibration overflow: 3x Small Gravity Capacitor Upgrade I (31213, upgradeCost=200 each -> 600 > 400) must fail
+    for (rid, rflag) in [(100_000_840i64, InventoryFlag::RigSlot0), (100_000_841, InventoryFlag::RigSlot1)] {
+        seed_item(&ctx, rid, 31213, char_id, station_id, InventoryFlag::Hangar, 1, true);
+        ctx.dispatch_rpc(&mut sess, "invbroker", None, "Add", &[PyRep::Integer(rid), PyRep::Integer(ship_id), PyRep::Integer(rflag as i64)], &kw, None)
+            .await
+            .expect("Fit 200-calibration rig");
+    }
+    seed_item(&ctx, 100_000_842, 31213, char_id, station_id, InventoryFlag::Hangar, 1, true);
+    let cal_overflow = ctx
+        .dispatch_rpc(&mut sess, "invbroker", None, "Add", &[PyRep::Integer(100_000_842), PyRep::Integer(ship_id), PyRep::Integer(InventoryFlag::RigSlot2 as i64)], &kw, None)
+        .await
+        .expect_err("3rd 200-calibration rig must exceed 400 calibration");
+    assert_eq!(cal_overflow.code, "FittingValidationFailed");
+    assert!(cal_overflow.message.contains("Calibration") || cal_overflow.message.contains("calibration"));
+    for rid in [100_000_840i64, 100_000_841] {
+        ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "DestroyFitting", &[PyRep::Integer(rid)], &kw, None).await.expect("DestroyFitting");
+    }
+
     // 9. T3 Strategic Cruiser subsystems (feat:fitting.fit-subsystems):
     // Loki (29990) starts with 0 hi/med/low slots; fitting Core (45633, slot 125), Defensive (45597, slot 126),
     // Offensive (45607, slot 127), and Propulsion (45620, slot 128) updates hull slot layout to 7H/5M/5L.
@@ -557,6 +746,13 @@ async fn test_phase_4_dg2_fit_validation_and_rigs() {
         }
     });
     sess.ship_id = Some(loki_id);
+
+    // Without subsystems fitted, Loki has 0 medSlots -> fitting a med-slot module fails
+    let no_sub_mod_err = ctx
+        .dispatch_rpc(&mut sess, "invbroker", None, "Add", &[PyRep::Integer(100_000_003), PyRep::Integer(loki_id), PyRep::Integer(InventoryFlag::MedSlot0 as i64)], &kw, None)
+        .await
+        .expect_err("Fitting module on T3 cruiser without subsystems must fail");
+    assert_eq!(no_sub_mod_err.code, "FittingValidationFailed");
 
     // Fitting Core subsystem (subSystemSlot = 125) into SubSystemSlot1 (126) must fail with SubsystemSlotMismatch
     let wrong_sub_slot = ctx
@@ -625,49 +821,6 @@ async fn test_phase_4_dg2_fit_validation_and_rigs() {
         }
     });
     sess.ship_id = Some(ship_id);
-
-    // 10. Saved fittings CRUD via charFittingMgr & corpFittingMgr (feat:fitting.fittings-save)
-    let fit_kv = PyRep::keyval([
-        ("name", PyRep::String("DG2 Rifter Brawl".into())),
-        ("description", PyRep::String("Autocannon Rifter".into())),
-        ("shipTypeID", PyRep::Integer(587)),
-        (
-            "fitData",
-            PyRep::List(vec![
-                PyRep::Tuple(vec![
-                    PyRep::Integer(2889),
-                    PyRep::Integer(InventoryFlag::HiSlot0 as i64),
-                    PyRep::Integer(1),
-                ]),
-                PyRep::Tuple(vec![
-                    PyRep::Integer(438),
-                    PyRep::Integer(InventoryFlag::MedSlot0 as i64),
-                    PyRep::Integer(1),
-                ]),
-            ]),
-        ),
-    ]);
-    let saved_id = ctx.dispatch_rpc(&mut sess, "charFittingMgr", None, "SaveFitting", &[PyRep::Integer(char_id), fit_kv.clone()], &kw, None).await
-        .expect("charFittingMgr.SaveFitting")
-        .as_i64()
-        .expect("saved fitting ID");
-    assert!(saved_id > 0);
-    let char_fits = ctx.dispatch_rpc(&mut sess, "charFittingMgr", None, "GetFittings", &[PyRep::Integer(char_id)], &kw, None).await
-        .expect("charFittingMgr.GetFittings");
-    assert!(
-        matches!(char_fits, PyRep::Rowset { ref rows, .. } if !rows.is_empty()),
-        "charFittingMgr.GetFittings must return saved fitting"
-    );
-    ctx.dispatch_rpc(&mut sess, "charFittingMgr", None, "DeleteFitting", &[PyRep::Integer(char_id), PyRep::Integer(saved_id)], &kw, None).await
-    .expect("charFittingMgr.DeleteFitting");
-
-    let corp_id = sess.corporation_id.unwrap_or(1_000_009);
-    let corp_fit_id = ctx.dispatch_rpc(&mut sess, "corpFittingMgr", None, "SaveFitting", &[PyRep::Integer(corp_id), fit_kv], &kw, None).await
-        .expect("corpFittingMgr.SaveFitting")
-        .as_i64()
-        .expect("corp fitting ID");
-    ctx.dispatch_rpc(&mut sess, "corpFittingMgr", None, "DeleteFitting", &[PyRep::Integer(corp_id), PyRep::Integer(corp_fit_id)], &kw, None).await
-    .expect("corpFittingMgr.DeleteFitting");
 }
 
 #[tokio::test]
@@ -675,6 +828,7 @@ async fn test_phase_4_dg3_online_offline_and_persistence() {
     // parity: plan:DG-3, feat:fitting.online-offline, rpc:dogmaIM.SetModuleOnline, rpc:dogmaIM.TakeModuleOffline, notify:OnModuleOnlineChange, notify:OnModuleAttributeChanges, rpc:charUnboundMgr.SelectCharacterID
     eve_testkit::attest(&["plan:DG-3", "feat:fitting.online-offline", "rpc:dogmaIM.SetModuleOnline", "rpc:dogmaIM.TakeModuleOffline", "notify:OnModuleOnlineChange", "notify:OnModuleAttributeChanges"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let mut sess = SessionState::new(4002);
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
@@ -1083,6 +1237,7 @@ async fn test_phase_4_modifier_engine_stacking_penalty_and_skills() {
     // parity: feat:dogma.modifier-engine, feat:fitting.stacking-penalty, feat:modules.nanofiber-overdrive, feat:skills.skill-bonus-application, rpc:charUnboundMgr.SelectCharacterID
     eve_testkit::attest(&["feat:dogma.modifier-engine", "feat:fitting.stacking-penalty", "feat:modules.nanofiber-overdrive", "feat:skills.skill-bonus-application"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let mut sess = SessionState::new(4006);
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;

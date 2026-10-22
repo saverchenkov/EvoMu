@@ -257,7 +257,7 @@ pub async fn handle(
             };
             let raw_flag_opt = args.get(2).and_then(|a| a.as_i64()).or_else(|| kwargs.get("flag").and_then(|v| v.as_i64()));
             if let Some(rf) = raw_flag_opt {
-                if !matches!(rf, 4 | 5 | 11..=34 | 87 | 90 | 92..=94 | 125..=151 | 155 | 179 | 181 | 182) {
+                if !matches!(rf, 4 | 5 | 11..=34 | 87 | 90 | 92..=94 | 125..=151 | 155 | 179 | 181 | 182 | 185) {
                     return Some(Err(BridgeRpcError { code: "InvalidInventoryFlag".into(), message: format!("Invalid or restricted inventory flag {rf}") }));
                 }
             }
@@ -627,7 +627,7 @@ pub async fn handle(
                 return Some(Err(e));
             }
 
-            let dest_is_ship_hold = matches!(flag_u16, 5 | 133..=151 | 181 | 182);
+            let dest_is_ship_hold = matches!(flag_u16, 5 | 133..=151 | 179 | 181 | 182 | 185);
             if dest_is_ship_hold {
                 let cap_check = ctx.db.with_snapshot(|snap| {
                     let Some(moving_item) = snap.items.get(&item_id) else { return Ok(()); };
@@ -638,9 +638,13 @@ pub async fn handle(
                     }
                     let Some(item_type) = ctx.sde.types.get(&moving_item.type_id) else { return Ok(()); };
 
-                    // Enforce specialized hold item-group / category restrictions (`feat:mining.ore-mineral-holds`)
+                    // Enforce specialized hold item-group / category restrictions (`feat:ships.special-holds`, `feat:mining.ore-mineral-holds`)
                     let allowed_in_hold = match flag_u16 {
                         5 => true,
+                        133 => {
+                            // SpecializedFuelBay: Fuel Blocks (group 1136), Ice Products (group 423), or Fuel (group 497)
+                            matches!(item_type.group_id, 423 | 497 | 1136)
+                        }
                         134 | 151 => {
                             // SpecializedOreHold / GeneralMiningHold: asteroid ores, moon ores, ice (cat 25), or gas (group 711 / 4168)
                             item_type.category_id == 25 || matches!(item_type.group_id, 711 | 4168)
@@ -653,10 +657,6 @@ pub async fn handle(
                             // SpecializedMineralHold: refined minerals (group 18)
                             item_type.group_id == 18
                         }
-                        181 => {
-                            // SpecializedIceHold: raw/compressed ice (group 465)
-                            item_type.group_id == 465
-                        }
                         143 => {
                             // SpecializedAmmoHold: charges/ammo (category 8)
                             item_type.category_id == 8
@@ -668,6 +668,27 @@ pub async fn handle(
                         149 => {
                             // SpecializedPlanetaryCommoditiesHold: planetary resources/commodities (cat 42 / 43)
                             matches!(item_type.category_id, 42 | 43)
+                        }
+                        179 => {
+                            // SpecializedMobileDepotHold: Mobile Depots (group 1246)
+                            item_type.group_id == 1246
+                        }
+                        181 => {
+                            // SpecializedIceHold: raw/compressed ice (group 465)
+                            item_type.group_id == 465
+                        }
+                        150 | 185 => {
+                            // InfrastructureHold (`specialColonyResourcesHoldCapacity` attr 5646): Upwell/Starbase/Sov structures, upgrades, orbitals, PI, colony reagents, fuel
+                            matches!(item_type.category_id, 23 | 39 | 40 | 41 | 42 | 43 | 46 | 65 | 66 | 2143)
+                                || matches!(item_type.group_id, 423 | 1136 | 4729)
+                        }
+                        182 => {
+                            if ship_type.default_attributes.get(&5646).copied().unwrap_or(0.0) > 0.0 {
+                                matches!(item_type.category_id, 23 | 39 | 40 | 41 | 42 | 43 | 46 | 65 | 66 | 2143)
+                                    || matches!(item_type.group_id, 423 | 1136 | 4729)
+                            } else {
+                                item_type.category_id == 25
+                            }
                         }
                         _ => true,
                     };
@@ -682,13 +703,21 @@ pub async fn handle(
                     }
 
                     let hold_capacity = match flag_u16 {
+                        133 => ship_type.default_attributes.get(&1549).copied().unwrap_or(0.0),
                         134 | 151 => ship_type.default_attributes.get(&1556).copied()
                             .or_else(|| ship_type.default_attributes.get(&1770).copied())
                             .unwrap_or(0.0),
                         136 => ship_type.default_attributes.get(&1558).copied().unwrap_or(0.0),
-                        135 => ship_type.default_attributes.get(&1557).copied().unwrap_or(0.0),
+                        135 => ship_type.default_attributes.get(&1557).copied()
+                            .or_else(|| ship_type.default_attributes.get(&1556).copied())
+                            .unwrap_or(0.0),
+                        179 => ship_type.default_attributes.get(&5325).copied().unwrap_or(0.0),
                         181 => ship_type.default_attributes.get(&3136).copied()
                             .or_else(|| ship_type.default_attributes.get(&1556).copied())
+                            .unwrap_or(0.0),
+                        150 | 185 => ship_type.default_attributes.get(&5646).copied().unwrap_or(0.0),
+                        182 => ship_type.default_attributes.get(&5646).copied()
+                            .or_else(|| ship_type.default_attributes.get(&3227).copied())
                             .unwrap_or(0.0),
                         143 => ship_type.default_attributes.get(&1573).copied().unwrap_or(0.0),
                         148 => ship_type.default_attributes.get(&1646).copied().unwrap_or(5_000.0),

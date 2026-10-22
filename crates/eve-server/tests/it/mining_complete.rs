@@ -416,22 +416,79 @@ async fn test_mn05_special_holds_and_mining_to_jetcan() {
     });
     ctx.ship_fittings.write().unwrap().remove(&ship_id);
 
-    // Moving Charge/Crystal (cat 8) into Hoarder's SpecializedAmmoHold (143) must succeed
+    // Moving Charge/Crystal (cat 8) into Hoarder's SpecializedAmmoHold (143) must succeed, while minerals are rejected
+    let err_min_to_ammo = ctx
+        .dispatch_rpc(
+            &mut session,
+            "invbroker",
+            None,
+            "Add",
+            &[PyRep::Integer(mineral_stack_id), PyRep::Integer(ship_id), PyRep::Integer(InventoryFlag::SpecializedAmmoHold as i64)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Minerals must be rejected by SpecializedAmmoHold");
+    assert_eq!(err_min_to_ammo.code, "InvalidItemTypeForHold");
     ctx.dispatch_rpc(
         &mut session,
         "invbroker",
         None,
         "Add",
-        &[
-            PyRep::Integer(ammo_stack_id),
-            PyRep::Integer(ship_id),
-            PyRep::Integer(InventoryFlag::SpecializedAmmoHold as i64),
-        ],
+        &[PyRep::Integer(ammo_stack_id), PyRep::Integer(ship_id), PyRep::Integer(InventoryFlag::SpecializedAmmoHold as i64)],
         &kw,
         None,
     )
     .await
     .expect("Charges must be accepted into Hoarder SpecializedAmmoHold");
+
+    // Verify Ice (181), Gas (135), PI Command Center (148), PI Commodities (149), Fuel (133), Infrastructure (185), and Mobile Depot (179) holds
+    let hold_cases: &[(u32, u16, i64, u32, i32)] = &[
+        (22548, InventoryFlag::SpecializedIceHold as u16, 800_000_211, 16262, 1), // Mackinaw Ice Hold: Clear Icicle (group 465)
+        (32880, InventoryFlag::SpecializedGasHold as u16, 800_000_212, 25268, 10), // Venture Gas Hold: Amber Cytoserocin (group 711)
+        (655, InventoryFlag::SpecializedCommandCenterHold as u16, 800_000_213, 2524, 1), // Epithal Command Center Hold: Barren Command Center (group 1027)
+        (655, InventoryFlag::SpecializedPlanetaryCommoditiesHold as u16, 800_000_214, 2389, 50), // Epithal PI Hold: Plasmoids (cat 43)
+        (28352, InventoryFlag::SpecializedFuelBay as u16, 800_000_215, 4247, 20), // Rorqual Fuel Bay: Helium Fuel Block (group 1136)
+        (81008, InventoryFlag::SpecializedInfrastructureHold as u16, 800_000_216, 35832, 1), // Squall Infrastructure Hold: Astrahus (cat 65)
+        (77114, InventoryFlag::SpecializedMobileDepotHold as u16, 800_000_217, 33474, 1), // Metamorphosis Mobile Depot Hold: Mobile Depot (group 1246)
+    ];
+    for &(hull_type, hold_flag, ok_item_id, ok_type_id, ok_qty) in hold_cases {
+        ctx.db.with_mut_snapshot(|snap| {
+            if let Some(ship) = snap.items.get_mut(&ship_id) {
+                ship.type_id = hull_type;
+            }
+            snap.items.insert(ok_item_id, make_item(ok_item_id, ok_type_id, char_id, ship_id, InventoryFlag::Cargo, ok_qty, false));
+        });
+        ctx.ship_fittings.write().unwrap().remove(&ship_id);
+        let rej = ctx
+            .dispatch_rpc(
+                &mut session,
+                "invbroker",
+                None,
+                "Add",
+                &[PyRep::Integer(mineral_stack_id), PyRep::Integer(ship_id), PyRep::Integer(hold_flag as i64)],
+                &kw,
+                None,
+            )
+            .await
+            .expect_err("Non-matching item (Tritanium) must be rejected by specialized hold");
+        assert_eq!(rej.code, "InvalidItemTypeForHold");
+        ctx.dispatch_rpc(
+            &mut session,
+            "invbroker",
+            None,
+            "Add",
+            &[PyRep::Integer(ok_item_id), PyRep::Integer(ship_id), PyRep::Integer(hold_flag as i64)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("Matching item group must be accepted into specialized hold");
+        assert_eq!(
+            ctx.db.with_snapshot(|snap| snap.items[&ok_item_id].flag as u16),
+            hold_flag
+        );
+    }
 
     // 3. Jettison mined ore into a jetcan, loot from a second character (Suspect flag), and verify expiry (`feat:mining.mining-to-jetcan`):
     let jettison_res = ctx

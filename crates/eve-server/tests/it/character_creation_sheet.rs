@@ -459,6 +459,7 @@ async fn test_ch4_character_sheet_biography_and_notes() {
     // parity: feat:character.show-info-public, feat:character.biography, feat:character.employment-history, feat:character.owner-notes, feat:character.character-sheet, rpc:charMgr.AddOwnerNote, rpc:charMgr.EditOwnerNote, rpc:charMgr.GetCharacterDescription, rpc:charMgr.GetOwnerNote, rpc:charMgr.GetOwnerNoteLabels, rpc:charMgr.GetPrivateInfo, rpc:charMgr.GetPublicInfo3, rpc:charMgr.RemoveOwnerNote, rpc:charMgr.SetCharacterDescription, rpc:charUnboundMgr.SelectCharacterID, rpc:corporationSvc.GetEmployementRecordAndCharacterTransfers
     eve_testkit::attest(&["feat:character.show-info-public", "feat:character.biography", "feat:character.employment-history", "feat:character.owner-notes", "feat:character.character-sheet"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let mut sess = SessionState::new(934);
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
@@ -476,8 +477,55 @@ async fn test_ch4_character_sheet_biography_and_notes() {
     .await
     .expect("SelectCharacterID");
 
-    // 1. Show info public (feat:character.show-info-public)
-    let pub_info = ctx
+    // 1. Show info public (feat:character.show-info-public) via charMgr.GetPublicInfo3
+    for method in ["GetPublicInfo3"] {
+        let pub_info = ctx
+            .dispatch_rpc(
+                &mut sess,
+                "charMgr",
+                None,
+                method,
+                &[PyRep::Integer(char_id)],
+                &kw,
+                None,
+            )
+            .await
+            .expect(method);
+        let PyRep::KeyVal(pub_kv) = pub_info else {
+            panic!("Expected KeyVal from {method}");
+        };
+        assert_eq!(pub_kv.get("characterID").unwrap().as_i64(), Some(char_id));
+        assert_eq!(
+            pub_kv.get("characterName"),
+            Some(&PyRep::String("Aura Capsuleer".into()))
+        );
+        assert_eq!(
+            pub_kv.get("corporationID").and_then(|v| v.as_i64()),
+            Some(1_000_170)
+        );
+        assert_eq!(pub_kv.get("allianceID"), Some(&PyRep::None));
+        assert_eq!(pub_kv.get("raceID").and_then(|v| v.as_i64()), Some(2));
+        assert_eq!(pub_kv.get("bloodlineID").and_then(|v| v.as_i64()), Some(3));
+        assert_eq!(pub_kv.get("ancestryID").and_then(|v| v.as_i64()), Some(19));
+        assert_eq!(pub_kv.get("schoolID").and_then(|v| v.as_i64()), Some(14));
+        assert_eq!(pub_kv.get("securityStatus").and_then(|v| v.as_f64()), Some(0.5));
+        assert!(
+            pub_kv.get("createDateTime").and_then(|v| v.as_i64()).unwrap_or(0) > 0,
+            "{method} must return birthday (createDateTime)"
+        );
+        assert!(
+            pub_kv.get("portraitInfo").and_then(|v| v.as_str()).is_some_and(|s| !s.is_empty()),
+            "{method} must return portraitInfo"
+        );
+    }
+
+    // Verify allianceID is populated when character belongs to an alliance
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.alliance_id = Some(99_000_001);
+        }
+    });
+    let pub_with_alliance = ctx
         .dispatch_rpc(
             &mut sess,
             "charMgr",
@@ -488,46 +536,15 @@ async fn test_ch4_character_sheet_biography_and_notes() {
             None,
         )
         .await
-        .expect("GetPublicInfo3");
-    let PyRep::KeyVal(pub_kv) = pub_info else {
-        panic!("Expected KeyVal from GetPublicInfo3");
-    };
-    assert_eq!(
-        pub_kv.get("characterID").unwrap().as_i64(),
-        Some(char_id)
-    );
-    assert_eq!(
-        pub_kv.get("characterName"),
-        Some(&PyRep::String("Aura Capsuleer".into()))
-    );
-    assert_eq!(
-        pub_kv.get("corporationID").and_then(|v| v.as_i64()),
-        Some(1_000_170)
-    );
-    assert_eq!(
-        pub_kv.get("allianceID"),
-        Some(&PyRep::None)
-    );
-    assert_eq!(
-        pub_kv.get("raceID").and_then(|v| v.as_i64()),
-        Some(2)
-    );
-    assert_eq!(
-        pub_kv.get("bloodlineID").and_then(|v| v.as_i64()),
-        Some(3)
-    );
-    assert_eq!(
-        pub_kv.get("ancestryID").and_then(|v| v.as_i64()),
-        Some(19)
-    );
-    assert_eq!(
-        pub_kv.get("schoolID").and_then(|v| v.as_i64()),
-        Some(14)
-    );
-    assert_eq!(
-        pub_kv.get("securityStatus").and_then(|v| v.as_f64()),
-        Some(0.5)
-    );
+        .expect("GetPublicInfo3 with alliance");
+    if let PyRep::KeyVal(kv) = pub_with_alliance {
+        assert_eq!(kv.get("allianceID").and_then(|v| v.as_i64()), Some(99_000_001));
+    }
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.alliance_id = None;
+        }
+    });
 
     // 2. Biography (feat:character.biography)
     let test_bio = "Veteran Capsuleer operating in Lonetrek and The Citadel.";
@@ -673,6 +690,64 @@ async fn test_ch4_character_sheet_biography_and_notes() {
     assert_eq!(remove_note, PyRep::Bool(true));
 
     // 5. Character sheet & Private Info & Neural Remap (feat:character.character-sheet)
+    // Populate implants, jump clones, standings, kill rights, medals, and decorations so all 9 sections are verified non-empty
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.standings.insert(1_000_035, 5.0);
+        }
+        snap.active_implants.entry(char_id).or_default().push(9899); // Ocular Filter - Basic
+        snap.jump_clones.entry(char_id).or_default().push(eve_db::JumpCloneRecord {
+            jump_clone_id: 77_001,
+            character_id: char_id,
+            location_id: 60_003_760,
+            implants: vec![9899],
+        });
+        snap.kill_rights.insert(
+            88_001,
+            eve_db::KillRightRecord {
+                kill_right_id: 88_001,
+                owner_id: char_id,
+                target_id: 90_000_002,
+                activation_fee: IskCents::from_isk(10_000_000),
+                is_active_suspect: false,
+            },
+        );
+    });
+    let medal_res = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "corporationSvc",
+            None,
+            "CreateMedal",
+            &[
+                PyRep::String("Valorous Service".into()),
+                PyRep::String("For fleet valor".into()),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect("CreateMedal");
+    let medal_id = match medal_res {
+        PyRep::KeyVal(ref kv) => kv.get("medalID").and_then(|v| v.as_i64()).unwrap_or(1),
+        _ => 1,
+    };
+    ctx.dispatch_rpc(
+        &mut sess,
+        "corporationSvc",
+        None,
+        "GiveMedalToCharacters",
+        &[
+            PyRep::Integer(medal_id),
+            PyRep::Integer(char_id),
+            PyRep::String("Fleet valor".into()),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("GiveMedalToCharacters");
+
     let priv_info = ctx
         .dispatch_rpc(
             &mut sess,
@@ -693,11 +768,25 @@ async fn test_ch4_character_sheet_biography_and_notes() {
     assert!(priv_kv.contains_key("skillPoints"));
     assert!(priv_kv.contains_key("freeSkillPoints"));
     assert!(priv_kv.contains_key("cloneStationID"));
+    for section in [
+        "skills",
+        "implants",
+        "jumpClones",
+        "standings",
+        "killRights",
+        "medals",
+        "decorations",
+    ] {
+        let Some(PyRep::List(items)) = priv_kv.get(section) else {
+            panic!("GetPrivateInfo must return List for {section}");
+        };
+        assert!(!items.is_empty(), "GetPrivateInfo.{section} must be non-empty");
+    }
 
     let char_sheet = ctx
         .dispatch_rpc(
             &mut sess,
-            "charMgr",
+            "charUnboundMgr",
             None,
             "GetCharacterInfo",
             &[PyRep::Integer(char_id)],
@@ -736,14 +825,28 @@ async fn test_ch4_character_sheet_biography_and_notes() {
     );
     assert_eq!(
         sheet_kv.get("balance").and_then(|v| v.as_f64()),
-        Some(1_000_000_000.0)
+        Some(995_000_000.0)
     );
+    for section in [
+        "skills",
+        "implants",
+        "jumpClones",
+        "standings",
+        "killRights",
+        "medals",
+        "decorations",
+    ] {
+        let Some(PyRep::List(items)) = sheet_kv.get(section) else {
+            panic!("GetCharacterInfo must return List for {section}");
+        };
+        assert!(!items.is_empty(), "GetCharacterInfo.{section} must be non-empty");
+    }
     let PyRep::KeyVal(attr_kv) = sheet_kv.get("attributes").expect("attributes KeyVal") else {
         panic!("Expected KeyVal for attributes");
     };
     assert_eq!(attr_kv.get("intelligence").and_then(|v| v.as_i64()), Some(20));
     assert_eq!(attr_kv.get("memory").and_then(|v| v.as_i64()), Some(20));
-    assert_eq!(attr_kv.get("perception").and_then(|v| v.as_i64()), Some(20));
+    assert_eq!(attr_kv.get("perception").and_then(|v| v.as_i64()), Some(23)); // 20 base + 3 Ocular Filter - Basic (9899)
     assert_eq!(attr_kv.get("willpower").and_then(|v| v.as_i64()), Some(20));
     assert_eq!(attr_kv.get("charisma").and_then(|v| v.as_i64()), Some(19));
 

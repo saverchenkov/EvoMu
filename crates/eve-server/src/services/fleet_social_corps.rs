@@ -42,6 +42,38 @@ pub(super) static CORP_GOV: LazyLock<Mutex<HashMap<i64, CorpGovState>>> =
 pub(crate) static EMP_HISTORY: LazyLock<Mutex<HashMap<i64, Vec<(i64, u64, Option<u64>)>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+pub(crate) fn get_character_medals_and_decorations(char_id: i64) -> (Vec<PyRep>, Vec<PyRep>) {
+    let g = CORP_GOV.lock().unwrap();
+    let mut medals = Vec::new();
+    let mut decorations = Vec::new();
+    for (&corp_id, state) in g.iter() {
+        for (mid, rid, iid, reason, status) in &state.medal_recipients {
+            if *rid == char_id {
+                let title = state
+                    .medals
+                    .iter()
+                    .find(|m| m.0 == *mid)
+                    .map(|m| m.1.clone())
+                    .unwrap_or_else(|| "Medal".into());
+                let kv = PyRep::keyval([
+                    ("medalID", PyRep::Integer(*mid)),
+                    ("wearerID", PyRep::Integer(*rid)),
+                    ("issuerID", PyRep::Integer(*iid)),
+                    ("corporationID", PyRep::Integer(corp_id)),
+                    ("title", PyRep::String(title)),
+                    ("reason", PyRep::String(reason.clone())),
+                    ("status", PyRep::Integer(*status)),
+                ]);
+                decorations.push(kv.clone());
+                if *status > 1 {
+                    medals.push(kv);
+                }
+            }
+        }
+    }
+    (medals, decorations)
+}
+
 pub(super) fn compute_corp_member_limit(
     ctx: &ServerContext,
     snap: &eve_db::WorldStateSnapshot,

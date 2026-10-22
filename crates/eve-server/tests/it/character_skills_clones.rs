@@ -1137,7 +1137,7 @@ async fn test_ch1_ch2_effective_attributes_catchup_and_2arg_free_sp() {
     let info_rep = ctx
         .dispatch_rpc(
             &mut sess,
-            "charMgr",
+            "charUnboundMgr",
             None,
             "GetCharacterInfo",
             &[PyRep::Integer(char_id)],

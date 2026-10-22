@@ -124,7 +124,13 @@ pub fn handle_contacts(
                 }));
             };
             let res = ctx.db.with_snapshot(|snap| {
-                snap.characters.get(&cid).cloned().map(|c| {
+                snap.characters.get(&cid).cloned().map(|mut c| {
+                    if c.alliance_id.is_none() {
+                        c.alliance_id = snap
+                            .corporations
+                            .get(&c.corporation_id)
+                            .and_then(|co| co.alliance_id);
+                    }
                     let (_, portrait) = snap
                         .character_doll_info
                         .get(&cid)
@@ -175,6 +181,64 @@ pub fn handle_contacts(
                     message: format!("Character {char_id} not found"),
                 }));
             };
+            let (skills_list, attrs_kv, implants_list, jump_clones_list, standings_list, kill_rights_list) =
+                ctx.db.with_snapshot(|snap| {
+                    let mut skills_list = Vec::new();
+                    if let Some(smap) = snap.skills.get(&char_id) {
+                        let mut sorted: Vec<_> = smap.values().collect();
+                        sorted.sort_by_key(|s| s.type_id);
+                        for s in sorted {
+                            skills_list.push(PyRep::keyval([
+                                ("typeID", PyRep::Integer(s.type_id as i64)),
+                                ("skillLevel", PyRep::Integer(s.level as i64)),
+                                ("skillPoints", PyRep::Real(s.skill_points)),
+                            ]));
+                        }
+                    }
+                    let (eff_cha, eff_int, eff_mem, eff_per, eff_wil) =
+                        crate::services::character_skills::effective_character_attributes(&ctx.sde, snap, char_id);
+                    let attrs_kv = PyRep::keyval([
+                        ("charisma", PyRep::Integer(eff_cha.round() as i64)),
+                        ("intelligence", PyRep::Integer(eff_int.round() as i64)),
+                        ("memory", PyRep::Integer(eff_mem.round() as i64)),
+                        ("perception", PyRep::Integer(eff_per.round() as i64)),
+                        ("willpower", PyRep::Integer(eff_wil.round() as i64)),
+                    ]);
+                    let implants_list: Vec<PyRep> = snap
+                        .active_implants
+                        .get(&char_id)
+                        .map(|v| v.iter().map(|&tid| PyRep::Integer(tid as i64)).collect())
+                        .unwrap_or_default();
+                    let jump_clones_list: Vec<PyRep> = snap
+                        .jump_clones
+                        .get(&char_id)
+                        .map(|v| {
+                            v.iter()
+                                .map(|jc| {
+                                    PyRep::keyval([
+                                        ("jumpCloneID", PyRep::Integer(jc.jump_clone_id)),
+                                        ("locationID", PyRep::Integer(jc.location_id)),
+                                        ("implants", PyRep::List(jc.implants.iter().map(|&t| PyRep::Integer(t as i64)).collect())),
+                                    ])
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let standings_list: Vec<PyRep> = c
+                        .standings
+                        .iter()
+                        .map(|(&fid, &val)| PyRep::keyval([("fromID", PyRep::Integer(fid)), ("standing", PyRep::Real(val))]))
+                        .collect();
+                    let kill_rights_list: Vec<PyRep> = snap
+                        .kill_rights
+                        .values()
+                        .filter(|kr| kr.owner_id == char_id || kr.target_id == char_id)
+                        .map(|kr| PyRep::keyval([("killRightID", PyRep::Integer(kr.kill_right_id)), ("fromID", PyRep::Integer(kr.owner_id)), ("toID", PyRep::Integer(kr.target_id))]))
+                        .collect();
+                    (skills_list, attrs_kv, implants_list, jump_clones_list, standings_list, kill_rights_list)
+                });
+            let (medals_list, decorations_list) =
+                crate::services::fleet_social::fleet_social_corps::get_character_medals_and_decorations(char_id);
             Some(Ok(PyRep::keyval([
                 ("characterID", PyRep::Integer(c.character_id)),
                 ("charName", PyRep::String(c.name.clone())),
@@ -192,6 +256,14 @@ pub fn handle_contacts(
                 ("freeSkillPoints", PyRep::Real(c.free_skill_points)),
                 ("securityStatus", PyRep::Real(c.security_status)),
                 ("cloneStationID", PyRep::Integer(c.home_station_id)),
+                ("skills", PyRep::List(skills_list)),
+                ("attributes", attrs_kv),
+                ("implants", PyRep::List(implants_list)),
+                ("jumpClones", PyRep::List(jump_clones_list)),
+                ("standings", PyRep::List(standings_list)),
+                ("killRights", PyRep::List(kill_rights_list)),
+                ("medals", PyRep::List(medals_list)),
+                ("decorations", PyRep::List(decorations_list)),
             ])))
         }
 

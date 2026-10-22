@@ -15,6 +15,7 @@ async fn test_inv1_repackage_item() {
     // parity: feat:ships.repackage, rpc:charUnboundMgr.SelectCharacterID, rpc:repackagingSvc.RepackageItems, rpc:ship.AssembleShip
     eve_testkit::attest(&["feat:ships.repackage"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let mut sess = SessionState::new(924);
 
@@ -260,6 +261,46 @@ async fn test_inv1_repackage_item() {
     )
     .await
     .expect("RepairItems on damaged hangar ship");
+
+    // Error case 3b: cannot repackage a non-empty ship (containing cargo or fitted modules)
+    let cargo_in_ship_id = 991_000_204;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            cargo_in_ship_id,
+            InventoryItemRecord {
+                item_id: cargo_in_ship_id,
+                type_id: 34, // Tritanium
+                owner_id: char_id,
+                location_id: damaged_ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 100,
+                singleton: false,
+                version: 1,
+                dynamic_attributes: HashMap::new(),
+                source_mutaplasmid_id: None,
+                insured_payout_isk: 0.0,
+                is_blueprint_copy: false,
+                blueprint_runs_remaining: None,
+            },
+        );
+    });
+    let non_empty_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "repackagingSvc",
+            None,
+            "RepackageItems",
+            &[PyRep::Integer(damaged_ship_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Non-empty ship must not be repackaged");
+    assert_eq!(non_empty_err.code, "CannotRepackageNonEmptyItem");
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.remove(&cargo_in_ship_id);
+    });
+
     let repaired_repack = ctx
         .dispatch_rpc(
             &mut sess,
@@ -273,6 +314,60 @@ async fn test_inv1_repackage_item() {
         .await
         .expect("RepackageItems after repair");
     assert_eq!(repaired_repack.dict_get("singleton"), Some(&PyRep::Bool(false)));
+
+    // Repackaging an unpacked module in station hangar: refuses when damaged, succeeds when undamaged
+    let hangar_module_id = 991_000_205;
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut mod_dmg = HashMap::new();
+        mod_dmg.insert(eve_sde::attr_ids::DAMAGE, 5.0);
+        snap.items.insert(
+            hangar_module_id,
+            InventoryItemRecord {
+                item_id: hangar_module_id,
+                type_id: 2889, // 200mm AutoCannon I
+                owner_id: char_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                dynamic_attributes: mod_dmg,
+                source_mutaplasmid_id: None,
+                insured_payout_isk: 0.0,
+                is_blueprint_copy: false,
+                blueprint_runs_remaining: None,
+            },
+        );
+    });
+    let dmg_mod_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "repackagingSvc",
+            None,
+            "RepackageItems",
+            &[PyRep::Integer(hangar_module_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Damaged module must not be repackaged");
+    assert_eq!(dmg_mod_err.code, "CantRepackageDamagedItem");
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.get_mut(&hangar_module_id).unwrap().dynamic_attributes.clear();
+    });
+    let mod_repack_ok = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "repackagingSvc",
+            None,
+            "RepackageItems",
+            &[PyRep::Integer(hangar_module_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("RepackageItems on undamaged module");
+    assert_eq!(mod_repack_ok.dict_get("singleton"), Some(&PyRep::Bool(false)));
 
     // Error case 4: cannot repackage while undocked
     ctx.db.with_mut_snapshot(|snap| {
@@ -478,6 +573,64 @@ async fn test_inv2_stack_split_destroy_inventory() {
         assert_eq!(snap.items[&item_a_id].quantity, 50);
     });
 
+    // 4b. Dropping an identical stackable item into Cargo via invbroker.Add merges them automatically
+    let active_ship_id = ctx.db.with_snapshot(|snap| snap.characters[&char_id].active_ship_id);
+    let drop_a_id = 991_000_310;
+    let drop_b_id = 991_000_311;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            drop_a_id,
+            InventoryItemRecord {
+                item_id: drop_a_id,
+                type_id: 34,
+                owner_id: char_id,
+                location_id: active_ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 100,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            drop_b_id,
+            InventoryItemRecord {
+                item_id: drop_b_id,
+                type_id: 34,
+                owner_id: char_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 250,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+    ctx.dispatch_rpc(
+        &mut sess,
+        "invbroker",
+        None,
+        "Add",
+        &[
+            PyRep::Integer(drop_b_id),
+            PyRep::Integer(active_ship_id),
+            PyRep::Integer(InventoryFlag::Cargo as i64),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("invbroker.Add identical stackable item into Cargo merges");
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(
+            snap.items[&drop_a_id].quantity,
+            350,
+            "Dropping identical stackable item into Cargo must merge into existing stack"
+        );
+        assert!(!snap.items.contains_key(&drop_b_id));
+    });
+
     // Split 15 again so we can trash the 15-unit stack
     let split_again = ctx
         .dispatch_rpc(
@@ -641,6 +794,38 @@ async fn test_inv2_stack_split_destroy_inventory() {
         .await
         .expect_err("Trashing industry-locked item must fail");
     assert_eq!(industry_err.code, "ItemLocked");
+
+    // Refusal when item is in a remote station hangar the character cannot access while docked at 60003760
+    let remote_item_id = 999_888_004i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            remote_item_id,
+            eve_db::InventoryItemRecord {
+                item_id: remote_item_id,
+                type_id: 34,
+                owner_id: 90_000_001,
+                location_id: 60_008_494, // Amarr VIII
+                flag: eve_db::InventoryFlag::Hangar,
+                quantity: 50,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+    let remote_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "invbroker",
+            None,
+            "TrashItems",
+            &[PyRep::List(vec![PyRep::Integer(remote_item_id)])],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Trashing item in inaccessible remote station hangar must fail");
+    assert_eq!(remote_err.code, "DeleteFailed");
 }
 
 #[tokio::test]
@@ -689,7 +874,7 @@ async fn test_inv3_dna_fitting_string_encoder_decoder() {
         "Invalid ship type ID should error"
     );
 
-    // 2. End-to-end charFittingMgr & corpFittingMgr RPCs + SQLite persistence + max fitting limits
+    // 2. End-to-end charFittingMgr, corpFittingMgr & allianceFittingMgr RPCs + SQLite persistence + max fitting limits
     let db_path =
         std::env::temp_dir().join(format!("evomu_fittings_save_{}.sqlite", std::process::id()));
     let _ = std::fs::remove_file(&db_path);
@@ -700,6 +885,7 @@ async fn test_inv3_dna_fitting_string_encoder_decoder() {
         *snap = eve_db::WorldRepository::with_demo_seed().with_snapshot(|s| s.clone());
     });
     let ctx = ServerContext::with_repository(repo);
+    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let mut sess = SessionState::new(926);
 
@@ -882,6 +1068,79 @@ async fn test_inv3_dna_fitting_string_encoder_decoder() {
     )
     .await
     .expect("corpFittingMgr.DeleteFitting");
+
+    // Alliance fitting save, list & delete via allianceFittingMgr + 300 corp/alliance fitting limit
+    let alliance_id = 99_000_001i64;
+    sess.alliance_id = Some(alliance_id);
+    let alliance_fid = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "allianceFittingMgr",
+            None,
+            "SaveFitting",
+            &[PyRep::Integer(alliance_id), fit_kv.clone()],
+            &kw,
+            None,
+        )
+        .await
+        .expect("allianceFittingMgr.SaveFitting")
+        .as_i64()
+        .unwrap();
+    let alliance_fittings = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "allianceFittingMgr",
+            None,
+            "GetFittings",
+            &[PyRep::Integer(alliance_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("allianceFittingMgr.GetFittings");
+    assert_eq!(alliance_fittings.row_count(), Some(1));
+    ctx.dispatch_rpc(
+        &mut sess,
+        "allianceFittingMgr",
+        None,
+        "DeleteFitting",
+        &[PyRep::Integer(alliance_id), PyRep::Integer(alliance_fid)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("allianceFittingMgr.DeleteFitting");
+
+    // Enforce 300 corp/alliance fitting limit (OwnerMaxFittings)
+    ctx.db.with_mut_snapshot(|snap| {
+        for idx in 0..300 {
+            snap.next_entity_id += 1;
+            let id = snap.next_entity_id;
+            snap.saved_fittings.insert(
+                id,
+                SavedFittingRecord {
+                    fitting_id: id,
+                    owner_id: alliance_id,
+                    name: format!("Alliance Fit {idx}"),
+                    ship_type_id: 587,
+                    description: String::new(),
+                    items: Vec::new(),
+                },
+            );
+        }
+    });
+    let alliance_over_limit = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "allianceFittingMgr",
+            None,
+            "SaveFitting",
+            &[PyRep::Integer(alliance_id), fit_kv.clone()],
+            &kw,
+            None,
+        )
+        .await;
+    assert_eq!(alliance_over_limit.unwrap_err().code, "OwnerMaxFittings");
 
     // Enforce 250 personal fitting limit (OwnerMaxFittings)
     ctx.db.with_mut_snapshot(|snap| {

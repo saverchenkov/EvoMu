@@ -321,7 +321,18 @@ impl ShipFittingEngine {
                         .copied()
                 })
                 .sum();
-            let cal_capacity = self.ship.get_attribute(attr_ids::UPGRADE_CAPACITY, sde);
+            let cal_capacity = self
+                .ship
+                .base_attributes
+                .get(&attr_ids::UPGRADE_CAPACITY)
+                .copied()
+                .or_else(|| {
+                    hull_type
+                        .default_attributes
+                        .get(&attr_ids::UPGRADE_CAPACITY)
+                        .copied()
+                })
+                .unwrap_or(0.0);
             if current_cal_used + cal_need > cal_capacity + 1e-6 {
                 return Err(format!(
                     "Insufficient Calibration: need {cal_need}, available {}",

@@ -312,7 +312,7 @@ async fn test_character_creation_lifecycle_selection_home_station() {
 
 #[tokio::test]
 async fn test_skills_engine_queue_injectors_extractors() {
-    // parity: feat:skills.queue-get, feat:skills.queue-save, feat:skills.queue-training-engine, feat:skills.queue-pause, feat:skills.skill-levels-sp, feat:skills.skill-history, feat:skills.inject-skillbook, feat:skills.prereq-check, feat:skills.alpha-skill-caps, feat:skills.alpha-training-speed, feat:skills.free-sp, feat:skills.skill-catch-up, feat:skills.skill-injector-large, feat:skills.skill-injector-small, feat:skills.skill-extractor
+    // parity: feat:skills.queue-get, feat:skills.queue-save, feat:skills.queue-training-engine, feat:skills.queue-pause, feat:skills.skill-levels-sp, feat:skills.skill-history, feat:skills.inject-skillbook, feat:skills.prereq-check, feat:skills.alpha-training-speed, feat:skills.free-sp, feat:skills.skill-catch-up, feat:skills.skill-injector-large, feat:skills.skill-injector-small, feat:skills.skill-extractor
     eve_testkit::attest(&[
         "feat:skills.queue-get",
         "feat:skills.queue-save",
@@ -322,7 +322,6 @@ async fn test_skills_engine_queue_injectors_extractors() {
         "feat:skills.skill-history",
         "feat:skills.inject-skillbook",
         "feat:skills.prereq-check",
-        "feat:skills.alpha-skill-caps",
         "feat:skills.alpha-training-speed",
         "feat:skills.free-sp",
         "feat:skills.skill-catch-up",

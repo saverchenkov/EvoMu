@@ -947,6 +947,10 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                 }));
             }
             let expected_station = args.get(1).and_then(|a| a.as_i64()).filter(|&st| st > 0);
+            let current_dock = session
+                .station_id
+                .or(session.structure_id)
+                .or_else(|| _bound_entry.map(|b| b.object_id));
             let first_id = item_ids[0];
             let alsc_locked = container_ship_state()
                 .read()
@@ -982,7 +986,7 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                     }
                     let is_fitted = matches!(
                         item.flag as u16,
-                        11..=34 | 87 | 92..=94 | 125..=129 | 158
+                        11..=34 | 87 | 92..=94 | 125..=132 | 158 | 164..=171
                     );
                     if is_fitted {
                         return Err(BridgeRpcError {
@@ -1002,11 +1006,28 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                         });
                     }
                     if let Some(st_id) = expected_station {
-                        if item.location_id != st_id {
+                        if item.location_id != st_id
+                            || current_dock.is_some_and(|dock_id| dock_id != st_id)
+                        {
                             return Err(BridgeRpcError {
                                 code: "DeleteFailed".into(),
                                 message: format!(
-                                    "Item {item_id} is located at {}, not expected station {st_id}",
+                                    "Item {item_id} is located at {}, not accessible station {st_id}",
+                                    item.location_id
+                                ),
+                            });
+                        }
+                    } else if let Some(dock_id) = current_dock {
+                        let in_accessible_hangar = item.location_id == dock_id
+                            || item.location_id == active_ship_id
+                            || snap.items.get(&item.location_id).is_some_and(|parent| {
+                                parent.location_id == dock_id || parent.location_id == active_ship_id
+                            });
+                        if !in_accessible_hangar {
+                            return Err(BridgeRpcError {
+                                code: "DeleteFailed".into(),
+                                message: format!(
+                                    "Item {item_id} at {} is not in an accessible hangar at {dock_id}",
                                     item.location_id
                                 ),
                             });
