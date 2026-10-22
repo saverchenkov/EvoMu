@@ -143,3 +143,5 @@ mod rpc_space_inventory_entity;
 mod rpc_planet_mgr_colonies;
 mod rpc_planet_mgr_orbitals;
 mod rpc_tourney_mgr;
+mod rpc_fleet_object_hierarchy;
+mod rpc_fleet_object_ops;
