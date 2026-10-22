@@ -877,6 +877,16 @@ pub async fn handle(
             Some(handle_mine(ctx, session, bound_entry, args).await)
         }
 
+        // parity: plan:S-7
+        ("reprocessingSvc", "SetSessionCheck") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let ok = ctx.db.with_snapshot(|snap| snap.characters.contains_key(&char_id));
+            Some(Ok(PyRep::Bool(ok)))
+        }
+
         ("reprocessingSvc", "Reprocess") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
@@ -1004,16 +1014,7 @@ pub async fn handle(
 
                 let portions = item.quantity / portion_size;
                 let remainder = item.quantity % portion_size;
-                if remainder > 0 {
-                    if let Some(im) = snap.items.get_mut(&item_id) {
-                        im.quantity = remainder;
-                        im.version += 1;
-                    }
-                } else {
-                    snap.items.remove(&item_id);
-                }
 
-                let mut outputs: Vec<(i64, TypeId, i32)> = Vec::with_capacity(materials.len());
                 let mut gross_value_isk = 0.0_f64;
                 for mat in &materials {
                     let unit_val = ctx
@@ -1024,6 +1025,45 @@ pub async fn handle(
                         .unwrap_or(4.0);
                     gross_value_isk +=
                         (portions as f64) * (mat.quantity as f64) * yield_rate * unit_val;
+                }
+                let tax_isk = if station_tax_rate > 0.0 {
+                    (gross_value_isk * station_tax_rate).max(1.0)
+                } else {
+                    0.0
+                };
+                let tax_cents = if tax_isk > 0.0 {
+                    IskCents::from_f64_isk(tax_isk)
+                } else {
+                    IskCents(0)
+                };
+                if tax_cents.0 > 0 {
+                    let char_balance = snap
+                        .characters
+                        .get(&char_id)
+                        .map(|c| c.balance)
+                        .unwrap_or(IskCents(0));
+                    if char_balance < tax_cents {
+                        return Err(BridgeRpcError {
+                            code: "InsufficientFunds".into(),
+                            message: format!(
+                                "Insufficient ISK to pay reprocessing tax ({:.2} ISK required)",
+                                tax_isk
+                            ),
+                        });
+                    }
+                }
+
+                if remainder > 0 {
+                    if let Some(im) = snap.items.get_mut(&item_id) {
+                        im.quantity = remainder;
+                        im.version += 1;
+                    }
+                } else {
+                    snap.items.remove(&item_id);
+                }
+
+                let mut outputs: Vec<(i64, TypeId, i32)> = Vec::with_capacity(materials.len());
+                for mat in &materials {
                     let out_qty =
                         ((portions as f64) * (mat.quantity as f64) * yield_rate).floor() as i32;
                     if out_qty <= 0 {
@@ -1048,16 +1088,9 @@ pub async fn handle(
                     outputs.push((mid, mat.material_type_id, out_qty));
                 }
 
-                let tax_isk = if station_tax_rate > 0.0 {
-                    (gross_value_isk * station_tax_rate).max(1.0)
-                } else {
-                    0.0
-                };
-                if tax_isk > 0.0 {
-                    let tax_cents = IskCents::from_f64_isk(tax_isk);
+                if tax_cents.0 > 0 {
                     let bal_after = if let Some(ch) = snap.characters.get_mut(&char_id) {
-                        let deduct = tax_cents.min(ch.balance);
-                        ch.balance = ch.balance.checked_sub(deduct).unwrap_or(IskCents(0));
+                        ch.balance = ch.balance.checked_sub(tax_cents).unwrap_or(IskCents(0));
                         ch.balance
                     } else {
                         IskCents(0)

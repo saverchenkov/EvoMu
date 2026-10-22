@@ -244,4 +244,56 @@ async fn test_phase_0_s1_reprocessing_sde_materials_and_remainders() {
         mexallon_qty, 70,
         "S-1: Reprocessing 200 Plagioclase at 0.50 yield must deposit 70 Mexallon (36)"
     );
+
+    // 5. InsufficientFunds rejection when pilot wallet balance cannot cover station reprocessing tax:
+    // ore stack and wallet balance must remain unchanged.
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.balance = eve_db::IskCents(0);
+        }
+        snap.items.insert(
+            100_990_002,
+            InventoryItemRecord {
+                item_id: 100_990_002,
+                type_id: 1230,
+                owner_id: 90_000_001,
+                location_id: 60_003_760,
+                flag: InventoryFlag::Hangar,
+                quantity: 1_000,
+                singleton: false,
+                version: 1,
+                dynamic_attributes: HashMap::new(),
+                source_mutaplasmid_id: None,
+                insured_payout_isk: 0.0,
+                is_blueprint_copy: false,
+                blueprint_runs_remaining: None,
+            },
+        );
+    });
+    let insuff_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "reprocessingSvc",
+            None,
+            "Reprocess",
+            &[PyRep::Integer(100_990_002)],
+            &kw,
+            None,
+        )
+        .await;
+    assert_eq!(
+        insuff_err.unwrap_err().code,
+        "InsufficientFunds",
+        "Reprocess must reject with InsufficientFunds when pilot balance cannot cover station tax"
+    );
+    assert_eq!(
+        ctx.db.get_item(100_990_002).map(|i| i.quantity),
+        Some(1_000),
+        "Failed Reprocess must leave ore item stack untouched"
+    );
+    assert_eq!(
+        ctx.db.with_snapshot(|s| s.characters.get(&90_000_001).map(|c| c.balance)),
+        Some(eve_db::IskCents(0)),
+        "Failed Reprocess must leave pilot wallet balance untouched"
+    );
 }
