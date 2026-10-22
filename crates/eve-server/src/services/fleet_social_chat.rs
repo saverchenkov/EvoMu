@@ -115,12 +115,73 @@ fn handle_chat_rpc(
             ])))
         }
 
-        ("XmppChatMgr", "EnsureResourceWarsChannelExists")
-        | ("XmppChatMgr", "AddCharacterToChannel")
-        | ("XmppChatMgr", "ResyncSystemChannelAccess") => {
-            if method == "AddCharacterToChannel" {
-                return handle_chat_rpc(ctx, session, "LSC", "JoinChannel", args);
+        ("XmppChatMgr", "AddCharacterToChannel") => {
+            let (_, caller_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let Some(chan_id) = args.first().and_then(|a| a.as_str()) else {
+                return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "AddCharacterToChannel requires channelID".into() }));
+            };
+            let (target_char, password_arg) = match (args.get(1), args.get(2)) {
+                (Some(PyRep::Integer(cid)), Some(PyRep::String(pw))) => (*cid, Some(pw.as_str())),
+                (Some(PyRep::Integer(cid)), _) => (*cid, None),
+                (Some(PyRep::String(pw)), _) => (caller_id, Some(pw.as_str())),
+                _ => (caller_id, None),
+            };
+            if ctx.social_extras.lock().unwrap().blocked_in_channel.get(chan_id).is_some_and(|b| b.contains(&target_char)) {
+                return Some(Err(BridgeRpcError { code: "ChannelAccessDenied".into(), message: "Blocked from channel".into() }));
             }
+            let is_delayed = is_delayed_local_channel(chan_id);
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let chan = snap.chat_channels.entry(chan_id.to_string()).or_insert_with(|| ChatChannelRecord {
+                    channel_id: chan_id.to_string(),
+                    name: chan_id.to_string(),
+                    motd: String::new(),
+                    owner_id: Some(caller_id),
+                    members: HashSet::new(),
+                    is_system_local: chan_id.starts_with("solarsystemid2:"),
+                    solar_system_id: parse_channel_system_id(chan_id),
+                    is_private: chan_id.starts_with("private:"),
+                    operators: HashSet::from([caller_id]),
+                    password: None,
+                    is_delayed_local: is_delayed,
+                });
+                if let Some(ref pw) = chan.password {
+                    if !pw.is_empty() && chan.owner_id != Some(caller_id) && !chan.operators.contains(&caller_id) && password_arg != Some(pw.as_str()) {
+                        return Err(BridgeRpcError { code: "InvalidChannelPassword".into(), message: "Incorrect password for channel".into() });
+                    }
+                }
+                chan.members.insert(target_char);
+                let visible_count = if chan.is_delayed_local {
+                    let speakers = ctx.social_extras.lock().unwrap().delayed_local_speakers.get(chan_id).cloned().unwrap_or_default();
+                    chan.members.iter().filter(|m| speakers.contains(m)).count()
+                } else {
+                    chan.members.len()
+                };
+                Ok((chan.name.clone(), chan.motd.clone(), chan.owner_id, visible_count, chan.is_delayed_local))
+            });
+            match res {
+                Ok((name, motd, owner_id, count, delayed)) => {
+                    let jid = format!("{}@chat.evomu.local", chan_id);
+                    if !delayed {
+                        ctx.notify(NotificationTarget::All, "OnChannelJoined", "channelid", vec![PyRep::String(chan_id.to_string()), PyRep::Integer(target_char)]);
+                    }
+                    Some(Ok(PyRep::keyval([
+                        ("channelID", PyRep::String(chan_id.to_string())),
+                        ("characterID", PyRep::Integer(target_char)),
+                        ("jid", PyRep::String(jid)),
+                        ("name", PyRep::String(name)),
+                        ("motd", PyRep::String(motd)),
+                        ("memberCount", PyRep::Integer(count as i64)),
+                        ("isDelayedLocal", PyRep::Bool(delayed)),
+                        ("ownerID", owner_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
+                        ("joined", PyRep::Bool(true)),
+                    ])))
+                }
+                Err(e) => Some(Err(e)),
+            }
+        }
+
+        ("XmppChatMgr", "EnsureResourceWarsChannelExists")
+        | ("XmppChatMgr", "ResyncSystemChannelAccess") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let explicit_arg = args.first().and_then(|a| a.as_str());
             let (local_chan, synced_channels, is_delayed) = ctx.db.with_mut_snapshot(|snap| {
@@ -130,21 +191,14 @@ fn handle_chat_rpc(
                     .or(session.solar_system_id)
                     .or_else(|| ch.map(|c| c.solar_system_id))
                     .unwrap_or(30_000_142);
-                let corp_id = session
-                    .corporation_id
-                    .or_else(|| ch.map(|c| c.corporation_id))
-                    .unwrap_or(1_000_009);
+                let corp_id = session.corporation_id.or_else(|| ch.map(|c| c.corporation_id)).unwrap_or(1_000_009);
                 let alliance_id = session.alliance_id.or_else(|| ch.and_then(|c| c.alliance_id));
-                let fleet_id = session.fleet_id.or_else(|| {
-                    snap.fleets
-                        .values()
-                        .find(|f| f.members.contains(&char_id))
-                        .map(|f| f.fleet_id)
-                });
-                let local_id = explicit_arg
-                    .filter(|s| !s.starts_with("solarsystemid2:"))
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| format!("solarsystemid2:{sys_id}"));
+                let fleet_id = session.fleet_id.or_else(|| snap.fleets.values().find(|f| f.members.contains(&char_id)).map(|f| f.fleet_id));
+                let local_id = if method == "EnsureResourceWarsChannelExists" {
+                    explicit_arg.map(|s| s.to_string()).unwrap_or_else(|| format!("resourcewars:{sys_id}"))
+                } else {
+                    explicit_arg.filter(|s| !s.starts_with("solarsystemid2:")).map(|s| s.to_string()).unwrap_or_else(|| format!("solarsystemid2:{sys_id}"))
+                };
                 let corp_chan = format!("corpid:{corp_id}");
                 let mut target_chans = vec![local_id.clone(), corp_chan];
                 if let Some(aid) = alliance_id {
@@ -189,10 +243,7 @@ fn handle_chat_rpc(
                 ("channelID", PyRep::String(local_chan)),
                 ("exists", PyRep::Bool(true)),
                 ("isDelayedLocal", PyRep::Bool(is_delayed)),
-                (
-                    "channels",
-                    PyRep::List(synced_channels.into_iter().map(PyRep::String).collect()),
-                ),
+                ("channels", PyRep::List(synced_channels.into_iter().map(PyRep::String).collect())),
             ])))
         }
 
@@ -493,10 +544,7 @@ fn handle_chat_rpc(
                         ("motd", PyRep::String(motd)),
                         ("memberCount", PyRep::Integer(count as i64)),
                         ("isDelayedLocal", PyRep::Bool(delayed)),
-                        (
-                            "ownerID",
-                            owner_id.map(PyRep::Integer).unwrap_or(PyRep::None),
-                        ),
+                        ("ownerID", owner_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
                     ])))
                 }
                 Err(e) => Some(Err(e)),
@@ -506,34 +554,15 @@ fn handle_chat_rpc(
         (_, "LeaveChannel") | (_, "LeaveChannels") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let Some(chan_id) = args.first().and_then(|a| a.as_str()) else {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidArgument".into(),
-                    message: "LeaveChannel requires channelID string".into(),
-                }));
+                return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "LeaveChannel requires channelID string".into() }));
             };
             let _ = ctx.db.try_with_mut_snapshot(|snap| {
-                if let Some(chan) = snap.chat_channels.get_mut(chan_id) {
-                    chan.members.remove(&char_id);
-                }
+                if let Some(chan) = snap.chat_channels.get_mut(chan_id) { chan.members.remove(&char_id); }
                 Ok::<(), std::convert::Infallible>(())
             });
-            ctx.social_extras
-                .lock()
-                .unwrap()
-                .delayed_local_speakers
-                .entry(chan_id.to_string())
-                .or_default()
-                .remove(&char_id);
-            ctx.notify(
-                NotificationTarget::All,
-                "OnChannelLeft",
-                "channelid",
-                vec![PyRep::String(chan_id.to_string()), PyRep::Integer(char_id)],
-            );
-            Some(Ok(PyRep::keyval([
-                ("channelID", PyRep::String(chan_id.to_string())),
-                ("left", PyRep::Bool(true)),
-            ])))
+            ctx.social_extras.lock().unwrap().delayed_local_speakers.entry(chan_id.to_string()).or_default().remove(&char_id);
+            ctx.notify(NotificationTarget::All, "OnChannelLeft", "channelid", vec![PyRep::String(chan_id.to_string()), PyRep::Integer(char_id)]);
+            Some(Ok(PyRep::keyval([("channelID", PyRep::String(chan_id.to_string())), ("left", PyRep::Bool(true))])))
         }
 
         (_, "SendMessage") => {
@@ -601,53 +630,17 @@ fn handle_chat_rpc(
             ];
 
             if chan_id.starts_with("solarsystemid2:") {
-                let sys_id: u32 = chan_id
-                    .split(':')
-                    .nth(1)
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(0);
-                ctx.notify(
-                    NotificationTarget::SolarSystem(sys_id),
-                    "OnClientEvent_ChatMessageSent",
-                    "channelid",
-                    notif_args,
-                );
+                let sys_id: u32 = chan_id.split(':').nth(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+                ctx.notify(NotificationTarget::SolarSystem(sys_id), "OnClientEvent_ChatMessageSent", "channelid", notif_args);
             } else if chan_id.starts_with("corpid:") {
-                let corp_id: i64 = chan_id
-                    .split(':')
-                    .nth(1)
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(0);
-                ctx.notify(
-                    NotificationTarget::Corporation(corp_id),
-                    "OnClientEvent_ChatMessageSent",
-                    "channelid",
-                    notif_args,
-                );
+                let corp_id: i64 = chan_id.split(':').nth(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+                ctx.notify(NotificationTarget::Corporation(corp_id), "OnClientEvent_ChatMessageSent", "channelid", notif_args);
             } else if chan_id.starts_with("allianceid:") {
-                let alliance_id: i64 = chan_id
-                    .split(':')
-                    .nth(1)
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(0);
-                ctx.notify(
-                    NotificationTarget::Alliance(alliance_id),
-                    "OnClientEvent_ChatMessageSent",
-                    "channelid",
-                    notif_args,
-                );
+                let alliance_id: i64 = chan_id.split(':').nth(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+                ctx.notify(NotificationTarget::Alliance(alliance_id), "OnClientEvent_ChatMessageSent", "channelid", notif_args);
             } else if chan_id.starts_with("fleetid:") {
-                let fleet_id: i64 = chan_id
-                    .split(':')
-                    .nth(1)
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(0);
-                ctx.notify(
-                    NotificationTarget::Fleet(fleet_id),
-                    "OnClientEvent_ChatMessageSent",
-                    "channelid",
-                    notif_args,
-                );
+                let fleet_id: i64 = chan_id.split(':').nth(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+                ctx.notify(NotificationTarget::Fleet(fleet_id), "OnClientEvent_ChatMessageSent", "channelid", notif_args);
             } else {
                 let members: Vec<i64> = ctx.db.with_snapshot(|snap| {
                     snap.chat_channels

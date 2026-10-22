@@ -9,6 +9,10 @@ use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use glam::DVec3;
 use std::collections::HashMap;
+use std::sync::{LazyLock, RwLock};
+
+pub static GLOBAL_CONFIG_VALUES: LazyLock<RwLock<HashMap<String, PyRep>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
 const V24_01_VERSION: f64 = 24.01;
 const V24_01_BUILD: i64 = 3_619_879;
 
@@ -51,6 +55,92 @@ pub async fn handle(
         ("machoNet", "GetTime") => {
             let ticks = ctx.now_blueos_filetime_ticks();
             Some(Ok(PyRep::Integer(ticks)))
+        }
+
+        ("machoNet", "NoBlock") => {
+            Some(Ok(PyRep::Bool(true)))
+        }
+
+        ("machoNet", "GetCachedObject") => {
+            if let Err(e) = ServerContext::require_auth(session) {
+                return Some(Err(e));
+            }
+            let (shared, object_id) = match (args.first(), args.get(1)) {
+                (Some(PyRep::Bool(b)), Some(oid)) => (*b, oid),
+                (Some(PyRep::Integer(i)), Some(oid)) => (*i != 0, oid),
+                (Some(oid), None) => (true, oid),
+                _ => {
+                    return Some(Err(BridgeRpcError {
+                        code: "InvalidArgument".into(),
+                        message: "machoNet.GetCachedObject requires (shared, objectID) or (objectID,)".into(),
+                    }));
+                }
+            };
+            let Some(rec) = ctx.get_or_populate_cached_object(object_id, shared) else {
+                return Some(Err(BridgeRpcError {
+                    code: "CachedObjectNotFound".into(),
+                    message: format!("Cached object {:?} is not registered", object_id),
+                }));
+            };
+            Some(Ok(rec.to_cached_object_pyrep()))
+        }
+
+        ("machoNet", "ForwardCharacterNotification") => {
+            if let Err(e) = ServerContext::require_auth(session) {
+                return Some(Err(e));
+            }
+            let Some(char_id) = args.first().and_then(|a| a.as_i64()) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidArgument".into(),
+                    message: "ForwardCharacterNotification requires charID as first argument".into(),
+                }));
+            };
+            let notif_name = args.get(1).and_then(|a| a.as_str()).unwrap_or("OnNotificationReceived");
+            let payload: Vec<PyRep> = match args.get(2) {
+                Some(PyRep::List(l)) | Some(PyRep::Tuple(l)) => l.clone(),
+                Some(other) => vec![other.clone()],
+                None => Vec::new(),
+            };
+            ctx.notify(
+                crate::router::NotificationTarget::Character(char_id),
+                notif_name,
+                "charid",
+                payload,
+            );
+            Some(Ok(PyRep::Bool(true)))
+        }
+
+        ("machoNet", "ReloadClientCodeHash") => {
+            if !session.has_gm_role() {
+                return Some(Err(BridgeRpcError {
+                    code: "InsufficientRole".into(),
+                    message: "ReloadClientCodeHash requires GM role".into(),
+                }));
+            }
+            Some(Ok(PyRep::keyval([
+                ("hash", PyRep::String("v24_canonical_code_hash_verified".into())),
+                ("reloaded", PyRep::Bool(true)),
+                ("timestamp", PyRep::Integer(ctx.now_blueos_filetime_ticks())),
+            ])))
+        }
+
+        ("machoNet", "SetGlobalConfigValue") => {
+            if !session.has_gm_role() {
+                return Some(Err(BridgeRpcError {
+                    code: "InsufficientRole".into(),
+                    message: "SetGlobalConfigValue requires GM role".into(),
+                }));
+            }
+            let key = args.first().and_then(|a| a.as_str()).unwrap_or("").to_string();
+            if key.is_empty() {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidArgument".into(),
+                    message: "SetGlobalConfigValue requires config key".into(),
+                }));
+            }
+            let val = args.get(1).cloned().unwrap_or(PyRep::None);
+            GLOBAL_CONFIG_VALUES.write().unwrap().insert(key, val);
+            Some(Ok(PyRep::Bool(true)))
         }
 
         ("cache", "GetServerVersionAndBuild") => {
