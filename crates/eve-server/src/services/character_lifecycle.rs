@@ -23,10 +23,10 @@ pub(crate) const MAX_CHARACTERS_PER_ACCOUNT: usize = 3;
 pub(crate) const BIOMASS_DELAY_SECS: u64 = 10 * 3_600;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-struct LifecycleStore {
+pub struct LifecycleStore {
     /// characterID -> unix time the delete was prepared.
     #[serde(default)]
-    delete_prepared_unix: HashMap<i64, u64>,
+    pub delete_prepared_unix: HashMap<i64, u64>,
 }
 
 fn err(code: &str, message: impl Into<String>) -> BridgeRpcError {
@@ -36,14 +36,14 @@ fn err(code: &str, message: impl Into<String>) -> BridgeRpcError {
     }
 }
 
-fn load_store(snap: &eve_db::WorldStateSnapshot) -> LifecycleStore {
+pub fn load_store(snap: &eve_db::WorldStateSnapshot) -> LifecycleStore {
     snap.item_custom_names
         .get(&CHARACTER_LIFECYCLE_STORE_KEY)
         .and_then(|s| serde_json::from_str(s).ok())
         .unwrap_or_default()
 }
 
-fn save_store(snap: &mut eve_db::WorldStateSnapshot, store: &LifecycleStore) {
+pub fn save_store(snap: &mut eve_db::WorldStateSnapshot, store: &LifecycleStore) {
     if let Ok(json) = serde_json::to_string(store) {
         snap.item_custom_names
             .insert(CHARACTER_LIFECYCLE_STORE_KEY, json);
@@ -150,7 +150,10 @@ pub fn handle(
             Some(Ok(PyRep::Bool(true)))
         }
         ("charUnboundMgr", "UpdateCharacterBloodline") => {
-            let char_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let char_id = match owned_char_arg(ctx, user_id, args, "UpdateCharacterBloodline") {
+                Ok(id) => id,
+                Err(e) => return Some(Err(e)),
+            };
             let bloodline_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1);
             let updated = ctx.db.with_mut_snapshot(|snap| {
                 if let Some(ch) = snap.characters.get_mut(&char_id) {
@@ -164,7 +167,10 @@ pub fn handle(
             Some(Ok(PyRep::Bool(updated)))
         }
         ("charUnboundMgr", "UpdateCharacterGender") => {
-            let char_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let char_id = match owned_char_arg(ctx, user_id, args, "UpdateCharacterGender") {
+                Ok(id) => id,
+                Err(e) => return Some(Err(e)),
+            };
             let gender_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
             let updated = ctx.db.with_mut_snapshot(|snap| {
                 if let Some(ch) = snap.characters.get_mut(&char_id) {
@@ -208,7 +214,7 @@ fn delete(ctx: &ServerContext, session: &SessionState, user_id: u64, args: &[PyR
     let doomheim = doomheim_corp_id(ctx)
         .ok_or_else(|| err("SdeMissing", "Doomheim corporation not found in SDE"))?;
     let now = ctx.now_unix();
-    let is_forced = args.get(1).map(|a| a.as_bool() == Some(true) || a.as_i64() == Some(1)).unwrap_or(false) || session.has_gm_role();
+    let is_forced = session.has_gm_role();
     ctx.db.try_with_mut_snapshot(|snap| {
         let mut store = load_store(snap);
         let prepared = match store.delete_prepared_unix.get(&char_id).copied() {

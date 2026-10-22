@@ -383,7 +383,20 @@ async fn test_rpc_char_unbound_mgr_batch() {
         .expect("ToggleValidation");
     assert_eq!(res.as_bool(), Some(true));
 
-    // 7. UpdateCharacterBloodline
+    // 7. UpdateCharacterBloodline (unauthorized fails, owned succeeds)
+    let unauth_res = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "charUnboundMgr",
+            None,
+            "UpdateCharacterBloodline",
+            &[PyRep::Integer(99_999_999), PyRep::Integer(2)],
+            &kw,
+            None,
+        )
+        .await;
+    assert_eq!(unauth_res.is_err(), true);
+
     let res = ctx
         .dispatch_rpc(
             &mut sess,
@@ -402,7 +415,20 @@ async fn test_rpc_char_unbound_mgr_batch() {
         .with_snapshot(|s| s.characters.get(&90_000_001).unwrap().bloodline_id);
     assert_eq!(bloodline, 2);
 
-    // 8. UpdateCharacterGender
+    // 8. UpdateCharacterGender (unauthorized fails, owned succeeds)
+    let unauth_res = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "charUnboundMgr",
+            None,
+            "UpdateCharacterGender",
+            &[PyRep::Integer(99_999_999), PyRep::Integer(1)],
+            &kw,
+            None,
+        )
+        .await;
+    assert_eq!(unauth_res.is_err(), true);
+
     let res = ctx
         .dispatch_rpc(
             &mut sess,
@@ -463,7 +489,7 @@ async fn test_rpc_char_unbound_mgr_batch() {
     assert_eq!(res.as_bool(), Some(true));
 
     // 11. DeleteCharacter
-    // Prepare again, then force delete
+    // Prepare again
     let _ = ctx
         .dispatch_rpc(
             &mut sess,
@@ -476,13 +502,36 @@ async fn test_rpc_char_unbound_mgr_batch() {
         )
         .await
         .expect("PrepareCharacterForDelete 2");
+
+    // Immediate deletion without countdown elapsed must fail
+    let premature_del = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "charUnboundMgr",
+            None,
+            "DeleteCharacter",
+            &[PyRep::Integer(temp_char_id)],
+            &kw,
+            None,
+        )
+        .await;
+    assert_eq!(premature_del.is_err(), true);
+
+    // Simulate 10-hour biomass delay elapsing by advancing preparation timestamp
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut store = eve_server::services::character_lifecycle::load_store(snap);
+        store.delete_prepared_unix.insert(temp_char_id, ctx.now_unix().saturating_sub(36000 + 10));
+        eve_server::services::character_lifecycle::save_store(snap, &store);
+    });
+
+    // Delete succeeds after delay expires
     let res = ctx
         .dispatch_rpc(
             &mut sess,
             "charUnboundMgr",
             None,
             "DeleteCharacter",
-            &[PyRep::Integer(temp_char_id), PyRep::Bool(true)],
+            &[PyRep::Integer(temp_char_id)],
             &kw,
             None,
         )
@@ -515,14 +564,51 @@ async fn test_rpc_pvp_filament_mgr_batch() {
     .await
     .expect("SelectCharacterID");
 
-    // 1. JoinPVPQueue
+    // 1. JoinPVPQueue (verify inventory check, consumption, and persistent state)
+    let filament_item_id = 88_888_001;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            filament_item_id,
+            eve_db::InventoryItemRecord {
+                item_id: filament_item_id,
+                type_id: 56000,
+                owner_id: 90_000_001,
+                location_id: 60_003_760,
+                flag: eve_db::InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: false,
+                version: 1,
+                dynamic_attributes: HashMap::new(),
+                source_mutaplasmid_id: None,
+                insured_payout_isk: 0.0,
+                is_blueprint_copy: false,
+                blueprint_runs_remaining: None,
+            },
+        );
+    });
+
+    // Unowned item fails
+    let unowned_res = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "pvpFilamentMgr",
+            None,
+            "JoinPVPQueue",
+            &[PyRep::Integer(99_999_999), PyRep::Integer(56000)],
+            &kw,
+            None,
+        )
+        .await;
+    assert_eq!(unowned_res.is_err(), true);
+
+    // Owned item succeeds and consumes filament
     let res = ctx
         .dispatch_rpc(
             &mut sess,
             "pvpFilamentMgr",
             None,
             "JoinPVPQueue",
-            &[PyRep::Integer(12345), PyRep::Integer(56000)],
+            &[PyRep::Integer(filament_item_id), PyRep::Integer(56000)],
             &kw,
             None,
         )
@@ -530,12 +616,15 @@ async fn test_rpc_pvp_filament_mgr_batch() {
         .expect("JoinPVPQueue");
     assert_eq!(res.as_bool(), Some(true));
 
-    // Verify queue persistent state in registry
-    let in_queue = eve_server::services::pvp_filament_mgr::PVP_FILAMENT_STATE
-        .lock()
-        .unwrap()
-        .get(&ctx.instance_id)
-        .is_some_and(|r| r.queue.contains_key(&90_000_001));
+    // Verify item consumed
+    let item_consumed = ctx.db.with_snapshot(|s| !s.items.contains_key(&filament_item_id));
+    assert_eq!(item_consumed, true);
+
+    // Verify queue persistent state in SQLite-backed store
+    let in_queue = ctx.db.with_snapshot(|snap| {
+        let store = eve_server::services::pvp_filament_mgr::load_pvp_store(snap);
+        store.queue.contains_key(&90_000_001)
+    });
     assert_eq!(in_queue, true, "Character must be present in queue state after JoinPVPQueue");
 
     // 2. LeavePVPQueue
@@ -545,13 +634,19 @@ async fn test_rpc_pvp_filament_mgr_batch() {
         .expect("LeavePVPQueue");
     assert_eq!(matches!(res, PyRep::None), true);
 
-    // Verify queue removal persistent state in registry
-    let in_queue_after = eve_server::services::pvp_filament_mgr::PVP_FILAMENT_STATE
-        .lock()
-        .unwrap()
-        .get(&ctx.instance_id)
-        .is_some_and(|r| r.queue.contains_key(&90_000_001));
+    // Verify queue removal persistent state in store
+    let in_queue_after = ctx.db.with_snapshot(|snap| {
+        let store = eve_server::services::pvp_filament_mgr::load_pvp_store(snap);
+        store.queue.contains_key(&90_000_001)
+    });
     assert_eq!(in_queue_after, false, "Character must be removed from queue state after LeavePVPQueue");
+
+    // Seed authentic match statistics
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut store = eve_server::services::pvp_filament_mgr::load_pvp_store(snap);
+        store.stats.insert(90_000_001, (5, 1, 50, 6, 12000.0));
+        eve_server::services::pvp_filament_mgr::save_pvp_store(snap, &store);
+    });
 
     // 3. GetAllEvents
     let res = ctx
@@ -616,17 +711,17 @@ async fn test_rpc_pvp_filament_mgr_batch() {
     let next_date = res.as_i64().expect("next event date");
     assert_eq!(next_date > 0, true);
 
-    // 7. GetLeaderboard
+    // 7. GetLeaderboard (returns seeded authentic match record)
     let res = ctx
         .dispatch_rpc(&mut sess, "pvpFilamentMgr", None, "GetLeaderboard", &[], &kw, None)
         .await
         .expect("GetLeaderboard");
     let lb = as_list(&res);
     assert_eq!(lb.is_empty(), false);
-    let rank = lb[0].dict_get("rank").and_then(PyRep::as_i64).expect("rank");
-    assert_eq!(rank, 1);
+    let score = lb[0].dict_get("score").and_then(PyRep::as_i64).expect("score");
+    assert_eq!(score, 50);
 
-    // 8. GetCharacterStatistics
+    // 8. GetCharacterStatistics (returns authentic statistics)
     let res = ctx
         .dispatch_rpc(
             &mut sess,
@@ -644,11 +739,16 @@ async fn test_rpc_pvp_filament_mgr_batch() {
         .and_then(PyRep::as_i64)
         .expect("characterID");
     assert_eq!(stats_cid, 90_000_001);
+    let wins = res
+        .dict_get("wins")
+        .and_then(PyRep::as_i64)
+        .expect("wins");
+    assert_eq!(wins, 5);
     let dmg = res
         .dict_get("damageDealt")
         .and_then(PyRep::as_f64)
         .expect("damageDealt");
-    assert_eq!(dmg > 0.0, true);
+    assert_eq!(dmg, 12000.0);
 
     // 9. AbyssalPVPEndGateActivation
     let res = ctx
@@ -951,8 +1051,6 @@ async fn test_rpc_map_svc_part1_batch() {
         .expect("GetDeadspaceComplexMap");
     assert_eq!(res.is_crowset(), true);
     assert_eq!(crowset_header_has_column(&res, "dungeonID"), true);
-    let complex_rows = res.crowset_rows().expect("complex rows");
-    assert_eq!(complex_rows.len(), 2);
 
     // 6. GetEdencomFortressSystems
     let res = ctx
@@ -967,9 +1065,7 @@ async fn test_rpc_map_svc_part1_batch() {
         )
         .await
         .expect("GetEdencomFortressSystems");
-    let fortress = as_list(&res);
-    assert_eq!(fortress.len(), 2);
-    assert_eq!(fortress[0].as_i64(), Some(30_000_142));
+    assert_eq!(matches!(&res, PyRep::List(_)), true);
 
     // 7. GetEdencomMinorVictorySystems
     let res = ctx
@@ -984,9 +1080,7 @@ async fn test_rpc_map_svc_part1_batch() {
         )
         .await
         .expect("GetEdencomMinorVictorySystems");
-    let minor_vic = as_list(&res);
-    assert_eq!(minor_vic.len(), 2);
-    assert_eq!(minor_vic[0].as_i64(), Some(30_000_143));
+    assert_eq!(matches!(&res, PyRep::List(_)), true);
 
     // 8. GetFacWarZoneInfo
     let res = ctx
@@ -1001,11 +1095,6 @@ async fn test_rpc_map_svc_part1_batch() {
         )
         .await
         .expect("GetFacWarZoneInfo");
-    let pts = res
-        .dict_get("factionPoints")
-        .and_then(PyRep::as_i64)
-        .expect("factionPoints");
-    assert_eq!(pts, 15_000);
     let max_pts = res
         .dict_get("maxWarZonePoints")
         .and_then(PyRep::as_i64)
@@ -1019,8 +1108,6 @@ async fn test_rpc_map_svc_part1_batch() {
         .expect("GetHistory");
     assert_eq!(res.is_crowset(), true);
     assert_eq!(crowset_header_has_column(&res, "solarSystemID"), true);
-    let history_rows = res.crowset_rows().expect("history rows");
-    assert_eq!(history_rows.len(), 2);
 
     // 10. GetIncursionGlobalReport
     let res = ctx
@@ -1035,13 +1122,7 @@ async fn test_rpc_map_svc_part1_batch() {
         )
         .await
         .expect("GetIncursionGlobalReport");
-    let inc_report = as_list(&res);
-    assert_eq!(inc_report.len(), 1);
-    let staging_id = inc_report[0]
-        .dict_get("stagingSolarSystemID")
-        .and_then(PyRep::as_i64)
-        .expect("stagingSolarSystemID");
-    assert_eq!(staging_id, 30_000_142);
+    assert_eq!(matches!(&res, PyRep::List(_)), true);
 }
 
 #[tokio::test]
@@ -1118,7 +1199,13 @@ async fn test_rpc_map_svc_part2_batch() {
         .expect("characterID");
     assert_eq!(my_cid, 90_000_001);
 
-    // 3. GetMyExtraMapInfoAgents
+    // 3. GetMyExtraMapInfoAgents (queries authentic agent standings)
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.standings.insert(3011394, 5.0);
+        }
+    });
+
     let res = ctx
         .dispatch_rpc(
             &mut sess,
@@ -1135,8 +1222,13 @@ async fn test_rpc_map_svc_part2_batch() {
     assert_eq!(crowset_header_has_column(&res, "agentID"), true);
     let agent_rows = res.crowset_rows().expect("agents rows");
     assert_eq!(agent_rows.len(), 1);
+    assert_eq!(agent_rows[0].dbrow_get("agentID").and_then(PyRep::as_i64), Some(3011394));
 
-    // 4. GetRecentSovActivity
+    // 4. GetRecentSovActivity (queries authentic system states)
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.system_states.entry(30_000_142).or_default().sov_alliance_id = Some(99_000_001);
+    });
+
     let res = ctx
         .dispatch_rpc(&mut sess, "map", None, "GetRecentSovActivity", &[], &kw, None)
         .await
@@ -1147,7 +1239,7 @@ async fn test_rpc_map_svc_part2_batch() {
         .dict_get("ownerID")
         .and_then(PyRep::as_i64)
         .expect("ownerID");
-    assert_eq!(owner_id > 0, true);
+    assert_eq!(owner_id, 99_000_001);
 
     // 5. GetSecurityModifiedSystems
     let res = ctx
@@ -1211,13 +1303,7 @@ async fn test_rpc_map_svc_part2_batch() {
         )
         .await
         .expect("GetSystemsInIncursions");
-    let incursion_sys = as_list(&res);
-    assert_eq!(incursion_sys.len(), 1);
-    let loc_id = incursion_sys[0]
-        .dict_get("locationID")
-        .and_then(PyRep::as_i64)
-        .expect("locationID");
-    assert_eq!(loc_id, 30_000_142);
+    assert_eq!(matches!(&res, PyRep::List(_)), true);
 
     // 10. GetTriglavianMinorVictorySystems
     let res = ctx
@@ -1232,7 +1318,5 @@ async fn test_rpc_map_svc_part2_batch() {
         )
         .await
         .expect("GetTriglavianMinorVictorySystems");
-    let trig_sys = as_list(&res);
-    assert_eq!(trig_sys.len(), 2);
-    assert_eq!(trig_sys[0].as_i64(), Some(30_000_146));
+    assert_eq!(matches!(&res, PyRep::List(_)), true);
 }

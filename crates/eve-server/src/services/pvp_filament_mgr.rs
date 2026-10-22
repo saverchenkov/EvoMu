@@ -6,30 +6,33 @@
 #![forbid(unsafe_code)]
 
 use std::collections::HashMap;
-use std::sync::{LazyLock, Mutex};
+use serde::{Deserialize, Serialize};
 
 use crate::router::ServerContext;
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 
-#[derive(Debug, Clone, Default)]
-pub struct PvpFilamentRegistry {
+pub const PVP_FILAMENT_STORE_KEY: i64 = -990_050;
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PvpFilamentStore {
     /// Queued pilots: characterID -> (itemID, typeID, joined_unix)
     pub queue: HashMap<i64, (i64, i64, u64)>,
-    /// Match statistics: characterID -> (wins, losses, score)
-    pub stats: HashMap<i64, (i64, i64, i64)>,
+    /// Match statistics: characterID -> (wins, losses, score, kills, damage)
+    pub stats: HashMap<i64, (i64, i64, i64, i64, f64)>,
 }
 
-pub static PVP_FILAMENT_STATE: LazyLock<Mutex<HashMap<u64, PvpFilamentRegistry>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+pub fn load_pvp_store(snap: &eve_db::WorldStateSnapshot) -> PvpFilamentStore {
+    snap.item_custom_names
+        .get(&PVP_FILAMENT_STORE_KEY)
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or_default()
+}
 
-fn with_registry<F, R>(ctx: &ServerContext, f: F) -> R
-where
-    F: FnOnce(&mut PvpFilamentRegistry) -> R,
-{
-    let mut guard = PVP_FILAMENT_STATE.lock().unwrap();
-    let reg = guard.entry(ctx.instance_id).or_default();
-    f(reg)
+pub fn save_pvp_store(snap: &mut eve_db::WorldStateSnapshot, store: &PvpFilamentStore) {
+    if let Ok(json) = serde_json::to_string(store) {
+        snap.item_custom_names.insert(PVP_FILAMENT_STORE_KEY, json);
+    }
 }
 
 pub fn handle(
@@ -55,17 +58,52 @@ pub fn handle(
             let item_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
             let type_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
 
-            with_registry(ctx, |reg| {
-                reg.queue.insert(char_id, (item_id, type_id, now_unix));
-                reg.stats.entry(char_id).or_insert((0, 0, 0));
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
+                // If item_id > 0, verify inventory ownership and type
+                if item_id > 0 {
+                    let Some(it) = snap.items.get_mut(&item_id) else {
+                        return Err(BridgeRpcError {
+                            code: "ItemNotFound".into(),
+                            message: "Filament item not found in inventory".into(),
+                        });
+                    };
+                    if it.owner_id != char_id {
+                        return Err(BridgeRpcError {
+                            code: "ItemNotOwned".into(),
+                            message: "Filament item is not owned by pilot".into(),
+                        });
+                    }
+                    if type_id > 0 && it.type_id != type_id as u32 {
+                        return Err(BridgeRpcError {
+                            code: "InvalidFilamentType".into(),
+                            message: "Item type mismatch".into(),
+                        });
+                    }
+                    if it.quantity > 1 {
+                        it.quantity -= 1;
+                    } else {
+                        snap.items.remove(&item_id);
+                    }
+                }
+
+                let mut store = load_pvp_store(snap);
+                store.queue.insert(char_id, (item_id, type_id, now_unix));
+                store.stats.entry(char_id).or_insert((0, 0, 0, 0, 0.0));
+                save_pvp_store(snap, &store);
+                Ok(())
             });
 
-            Some(Ok(PyRep::Bool(true)))
+            match res {
+                Ok(_) => Some(Ok(PyRep::Bool(true))),
+                Err(e) => Some(Err(e)),
+            }
         }
 
         ("pvpFilamentMgr", "LeavePVPQueue") => {
-            with_registry(ctx, |reg| {
-                reg.queue.remove(&char_id);
+            ctx.db.with_mut_snapshot(|snap| {
+                let mut store = load_pvp_store(snap);
+                store.queue.remove(&char_id);
+                save_pvp_store(snap, &store);
             });
             Some(Ok(PyRep::None))
         }
@@ -136,42 +174,37 @@ pub fn handle(
         }
 
         ("pvpFilamentMgr", "GetLeaderboard") => {
-            let lb = with_registry(ctx, |reg| {
-                let mut entries = Vec::new();
-                for (&cid, &(wins, losses, score)) in &reg.stats {
-                    entries.push(PyRep::keyval([
-                        ("characterID", PyRep::Integer(cid)),
-                        ("rank", PyRep::Integer(1)),
-                        ("score", PyRep::Integer(score)),
-                        ("wins", PyRep::Integer(wins)),
-                        ("losses", PyRep::Integer(losses)),
-                    ]));
+            let entries = ctx.db.with_snapshot(|snap| {
+                let store = load_pvp_store(snap);
+                let mut list = Vec::new();
+                for (&cid, &(wins, losses, score, _k, _d)) in &store.stats {
+                    if wins > 0 || losses > 0 || score > 0 {
+                        list.push(PyRep::keyval([
+                            ("characterID", PyRep::Integer(cid)),
+                            ("rank", PyRep::Integer(1)),
+                            ("score", PyRep::Integer(score)),
+                            ("wins", PyRep::Integer(wins)),
+                            ("losses", PyRep::Integer(losses)),
+                        ]));
+                    }
                 }
-                if entries.is_empty() {
-                    entries.push(PyRep::keyval([
-                        ("characterID", PyRep::Integer(char_id)),
-                        ("rank", PyRep::Integer(1)),
-                        ("score", PyRep::Integer(100)),
-                        ("wins", PyRep::Integer(10)),
-                        ("losses", PyRep::Integer(2)),
-                    ]));
-                }
-                entries
+                list
             });
-            Some(Ok(PyRep::List(lb)))
+            Some(Ok(PyRep::List(entries)))
         }
 
         ("pvpFilamentMgr", "GetCharacterStatistics") => {
-            let stats = with_registry(ctx, |reg| {
-                let (w, l, s) = reg.stats.get(&char_id).copied().unwrap_or((10, 2, 100));
+            let stats = ctx.db.with_snapshot(|snap| {
+                let store = load_pvp_store(snap);
+                let (w, l, s, k, d) = store.stats.get(&char_id).copied().unwrap_or((0, 0, 0, 0, 0.0));
                 PyRep::keyval([
                     ("characterID", PyRep::Integer(char_id)),
-                    ("rank", PyRep::Integer(1)),
+                    ("rank", PyRep::Integer(if s > 0 { 1 } else { 0 })),
                     ("score", PyRep::Integer(s)),
                     ("wins", PyRep::Integer(w)),
                     ("losses", PyRep::Integer(l)),
-                    ("kills", PyRep::Integer(w + l)),
-                    ("damageDealt", PyRep::Real(54320.0)),
+                    ("kills", PyRep::Integer(k)),
+                    ("damageDealt", PyRep::Real(d)),
                 ])
             });
             Some(Ok(stats))
@@ -179,8 +212,10 @@ pub fn handle(
 
         ("pvpFilamentMgr", "AbyssalPVPEndGateActivation") => {
             let gate_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            with_registry(ctx, |reg| {
-                reg.queue.remove(&char_id);
+            ctx.db.with_mut_snapshot(|snap| {
+                let mut store = load_pvp_store(snap);
+                store.queue.remove(&char_id);
+                save_pvp_store(snap, &store);
             });
             Some(Ok(PyRep::keyval([
                 ("gateID", PyRep::Integer(gate_id)),

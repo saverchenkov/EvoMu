@@ -1060,7 +1060,10 @@ pub(super) fn handle_mail_and_calendar(
                     let entity_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
                     ml.entity_access.remove(&entity_id);
                 }
-                "SetDefaultAccess" | "SaveSettings" => {
+                "SetDefaultAccess" => {
+                    ml.default_access = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1);
+                }
+                "SaveSettings" => {
                     ml.default_access = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1);
                     ml.default_role = args.get(2).and_then(|a| a.as_i64()).unwrap_or(0);
                     ml.cost = args.get(3).and_then(|a| a.as_i64()).unwrap_or(0);

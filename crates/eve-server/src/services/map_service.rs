@@ -26,7 +26,7 @@ pub fn handle(
         return Some(Err(e));
     }
 
-    let now_unix = ctx.now_unix();
+    let _now_unix = ctx.now_unix();
 
     match (service, method) {
         ("map", "GetBeaconCount") => {
@@ -106,85 +106,54 @@ pub fn handle(
                 ("solarSystemID", DbColumnType::I4),
                 ("difficulty", DbColumnType::I4),
             ]);
-            let rows = vec![
-                vec![
-                    PyRep::Integer(1001),
-                    PyRep::Integer(30_000_142),
-                    PyRep::Integer(3),
-                ],
-                vec![
-                    PyRep::Integer(1002),
-                    PyRep::Integer(30_000_144),
-                    PyRep::Integer(4),
-                ],
-            ];
+            let rows: Vec<Vec<PyRep>> = Vec::new();
             Some(Ok(desc.build_crowset(rows)))
         }
 
         ("map", "GetEdencomFortressSystems") => {
-            // EDENCOM fortress systems
-            let fortress_systems = vec![
-                PyRep::Integer(30000142),
-                PyRep::Integer(30000144),
-            ];
-            Some(Ok(PyRep::List(fortress_systems)))
+            Some(Ok(PyRep::List(Vec::new())))
         }
 
         ("map", "GetEdencomMinorVictorySystems") => {
-            let minor_victory_systems = vec![
-                PyRep::Integer(30000143),
-                PyRep::Integer(30000145),
-            ];
-            Some(Ok(PyRep::List(minor_victory_systems)))
+            Some(Ok(PyRep::List(Vec::new())))
         }
 
         ("map", "GetFacWarZoneInfo") => {
             let _faction_id = args.first().and_then(|a| a.as_i64()).unwrap_or(500_001);
+            let total_vp = crate::services::fw_services::read_fw_runtime(ctx, |rt| {
+                rt.system_victory_points.values().copied().sum::<i64>()
+            });
             Some(Ok(PyRep::keyval([
-                ("factionPoints", PyRep::Integer(15_000)),
+                ("factionPoints", PyRep::Integer(total_vp)),
                 ("maxWarZonePoints", PyRep::Integer(100_000)),
             ])))
         }
 
         ("map", "GetHistory") => {
-            // (statType, timeFrame) -> CRowset of (solarSystemID, value1, value2, value3)
             let desc = DBRowDescriptor::new([
                 ("solarSystemID", DbColumnType::I4),
                 ("value1", DbColumnType::I4),
                 ("value2", DbColumnType::I4),
                 ("value3", DbColumnType::I4),
             ]);
-            let rows = vec![
-                vec![
-                    PyRep::Integer(30000142),
-                    PyRep::Integer(12),
-                    PyRep::Integer(5),
-                    PyRep::Integer(1),
-                ],
-                vec![
-                    PyRep::Integer(30000144),
-                    PyRep::Integer(8),
-                    PyRep::Integer(2),
-                    PyRep::Integer(0),
-                ],
-            ];
+            let rows = ctx.db.with_snapshot(|snap| {
+                snap.characters
+                    .values()
+                    .map(|ch| {
+                        vec![
+                            PyRep::Integer(i64::from(ch.solar_system_id)),
+                            PyRep::Integer(1),
+                            PyRep::Integer(0),
+                            PyRep::Integer(0),
+                        ]
+                    })
+                    .collect::<Vec<_>>()
+            });
             Some(Ok(desc.build_crowset(rows)))
         }
 
         ("map", "GetIncursionGlobalReport") => {
-            let report = vec![PyRep::keyval([
-                ("stagingSolarSystemID", PyRep::Integer(30000142)),
-                ("influence", PyRep::Real(0.75)),
-                ("lastUpdated", PyRep::Integer(now_unix as i64)),
-                ("graceTime", PyRep::Integer(86400)),
-                ("decayRate", PyRep::Real(0.05)),
-                ("constellationID", PyRep::Integer(20000020)),
-                ("factionID", PyRep::Integer(500001)),
-                ("rewardGroupID", PyRep::Integer(101)),
-                ("rewardQuantity", PyRep::Integer(5000)),
-                ("loyaltyPoints", PyRep::Integer(10_000)),
-            ])];
-            Some(Ok(PyRep::List(report)))
+            Some(Ok(PyRep::List(Vec::new())))
         }
 
         ("map", "GetMyExtraMapInfo") => {
@@ -214,7 +183,7 @@ pub fn handle(
         }
 
         ("map", "GetMyExtraMapInfoAgents") => {
-            let _ = match ServerContext::require_character(session) {
+            let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
@@ -222,12 +191,21 @@ pub fn handle(
                 ("agentID", DbColumnType::I4),
                 ("standing", DbColumnType::R8),
             ]);
-            let rows = vec![vec![PyRep::Integer(3011394), PyRep::Real(5.0)]];
+            let rows = ctx.db.with_snapshot(|snap| {
+                let Some(ch) = snap.characters.get(&char_id) else {
+                    return Vec::new();
+                };
+                ch.standings
+                    .iter()
+                    .filter(|(&id, _)| ctx.sde.agents.contains_key(&id))
+                    .map(|(&id, &st)| vec![PyRep::Integer(id), PyRep::Real(st)])
+                    .collect()
+            });
             Some(Ok(desc.build_crowset(rows)))
         }
 
         ("map", "GetRecentSovActivity") => {
-            let mut list = ctx.db.with_snapshot(|snap| {
+            let list = ctx.db.with_snapshot(|snap| {
                 snap.system_states
                     .iter()
                     .filter_map(|(&sys_id, st)| {
@@ -242,14 +220,6 @@ pub fn handle(
                     })
                     .collect::<Vec<PyRep>>()
             });
-            if list.is_empty() {
-                list.push(PyRep::keyval([
-                    ("solarSystemID", PyRep::Integer(30_000_142)),
-                    ("ownerID", PyRep::Integer(99_000_001)),
-                    ("oldOwnerID", PyRep::None),
-                    ("stationID", PyRep::None),
-                ]));
-            }
             Some(Ok(PyRep::List(list)))
         }
 
@@ -267,9 +237,6 @@ pub fn handle(
                     ));
                 }
             });
-            if visits.is_empty() {
-                visits.push((PyRep::Integer(30_000_142), PyRep::Integer(1)));
-            }
             Some(Ok(PyRep::Dict(visits)))
         }
 
@@ -286,19 +253,11 @@ pub fn handle(
         }
 
         ("map", "GetSystemsInIncursions") => {
-            let list = vec![PyRep::keyval([
-                ("locationID", PyRep::Integer(30_000_142)),
-                ("sceneType", PyRep::Integer(1)),
-            ])];
-            Some(Ok(PyRep::List(list)))
+            Some(Ok(PyRep::List(Vec::new())))
         }
 
         ("map", "GetTriglavianMinorVictorySystems") => {
-            let trig_systems = vec![
-                PyRep::Integer(30000146),
-                PyRep::Integer(30000147),
-            ];
-            Some(Ok(PyRep::List(trig_systems)))
+            Some(Ok(PyRep::List(Vec::new())))
         }
 
         _ => None,
