@@ -6147,26 +6147,6 @@
    "flagged_by_audit": "20261019-053529"
   },
   {
-   "evidence": "crates/eve-server/tests/economy_market_industry.rs:1429-1447 creates the courier with string 'Courier' and start == end == JITA_STATION_ID (:1437-1438) and no items (:1441). No courier package is created in the hauler's hangar, and CompleteContract (:1477-1487) pays out without any delivery at a destination.",
-   "id": "feat:contracts.courier",
-   "flagged_by_audit": "20261019-110620"
-  },
-  {
-   "evidence": "Acceptance: 'Courier not delivered by deadline fails; collateral paid to issuer; package ownership resolved.' crates/eve-server/tests/economy_market_industry.rs:1537-1562 has the acceptor call FailContract. The deadline is never reached and package ownership is never asserted; the layout is the invented string-type CreateContract (:1504).",
-   "id": "feat:contracts.courier-failure",
-   "flagged_by_audit": "20261019-110620"
-  },
-  {
-   "evidence": "tests/economy_market_industry.rs:834-852 calls contractProxy.CreateContract with the string type 'ItemExchange' and an invented 6-arg layout instead of the V24 conType integer and full parameter list. Locking the items on creation is not asserted.",
-   "id": "feat:contracts.item-exchange",
-   "flagged_by_audit": "20261019-053529"
-  },
-  {
-   "evidence": "crates/eve-server/tests/economy_market_industry.rs:1221-1240 uses the same invented CreateContract layout (string type 'ItemExchange' at :1228, positional price/reward/None/requested list) as the already-flagged item-exchange. The 'acceptor must have them at the location' refusal is never exercised.",
-   "id": "feat:contracts.item-exchange-request",
-   "flagged_by_audit": "20261019-110620"
-  },
-  {
    "evidence": "crates/eve-server/tests/social_fleets_corps.rs:392-409 asserts only is_keyval on UpdateCorporationDetails. Neither the persisted description/URL/tax nor any re-read is verified.",
    "id": "feat:corporation.corp-edit-details",
    "flagged_by_audit": "20261019-110620"
@@ -6237,31 +6217,6 @@
    "flagged_by_audit": "20261019-145905"
   },
   {
-   "evidence": "crates/eve-server/tests/economy_market_industry.rs:1579-1597 calls industryManager.GetBlueprintData. The V24 industryManager catalog (CancelJob, CompleteJob, CompleteManyJobs, GetJob, GetJobCounts, GetJobsByOwner, InstallJob) has no such method. Only productTypeID and manufacturingTime>0 are asserted; materials and skills are not.",
-   "id": "feat:industry.blueprint-data",
-   "flagged_by_audit": "20261019-110620"
-  },
-  {
-   "evidence": "tests/economy_market_industry.rs:1297-1314 calls industryManager.GetFacilities, which is not a V24 industryManager method, and asserts only a non-empty list.",
-   "id": "feat:industry.facilities",
-   "flagged_by_audit": "20261019-053529"
-  },
-  {
-   "evidence": "tests/economy_market_industry.rs:1365-1366 asserts a 10% tax on the hardcoded 10,000 ISK base. There is no SetFacilityTaxes per activity/standing and no NPC facility rate from data.",
-   "id": "feat:industry.facility-tax",
-   "flagged_by_audit": "20261019-053529"
-  },
-  {
-   "evidence": "tests/economy_market_industry.rs:1344-1359 calls InstallJob(blueprint typeID, activity, runs) with no blueprint item. Blueprint ownership/lock, material presence and consumption, skills, slots and range are never validated or asserted.",
-   "id": "feat:industry.install-job",
-   "flagged_by_audit": "20261019-053529"
-  },
-  {
-   "evidence": "Acceptance: EIV x system cost index x structure modifiers + facility tax + SCC surcharge. tests/economy_market_industry.rs:1316-1339 asserts a flat 10,000 ISK per run (baseJobCost 20,000 for 2 runs) through industryManager.GetJobCost. That method is not in the V24 catalog (CancelJob, CompleteJob, CompleteManyJobs, GetJob, GetJobCounts, GetJobsByOwner, InstallJob).",
-   "id": "feat:industry.job-cost",
-   "flagged_by_audit": "20261019-053529"
-  },
-  {
    "evidence": "tests/character_progression.rs:1193-1243 calls invBroker.StackItems. The V24 service is 'invbroker' with SplitStack/TrashItems and has no StackItems (context/parity.json rpc rows 'rpc:invbroker.*').",
    "id": "feat:inventory.split-merge",
    "flagged_by_audit": "20261019-053529"
@@ -6270,46 +6225,6 @@
    "evidence": "tests/character_progression.rs:1245-1268 calls invBroker.DestroyItem, an invented method. The client uses invbroker.TrashItems (catalog).",
    "id": "feat:inventory.trash-items",
    "flagged_by_audit": "20261019-053529"
-  },
-  {
-   "evidence": "tests/economy_market_industry.rs:414-446 expects the broker fee to fall to 2.88% because Connections raised a raw 5.0 corp standing to an effective 6.0. wiki:Trading states that broker fees use unmodified standing (faction 0.03%, corp 0.02% per point), so the implementation applies the wrong standing.",
-   "id": "feat:market.broker-fee",
-   "flagged_by_audit": "20261019-053529"
-  },
-  {
-   "evidence": "Acceptance: 'GetCharEscrow totals escrow; Margin Trading allows partial escrow with balance check on fill.' The tagged test (crates/eve-server/tests/economy_market_industry.rs:478-520, 855-876) never calls GetCharEscrow and never exercises Margin Trading. It checks only the full escrow debit and its refund on cancel.",
-   "id": "feat:market.escrow",
-   "flagged_by_audit": "20261019-110620"
-  },
-  {
-   "evidence": "crates/eve-server/tests/economy_market_industry.rs:523-539 asserts only that GetOrders returns a 2-tuple. The acceptance fields (station, range, volume remaining, issue date, duration) are never checked.",
-   "id": "feat:market.get-orders",
-   "flagged_by_audit": "20261019-110620"
-  },
-  {
-   "evidence": "Acceptance: BuyMultipleItems fills the cheapest sells, the seller pays sales tax and both sides are journaled. tests/economy_market_industry.rs:712-755 crosses an ask with PlaceCharOrder and asserts only that the buyer received the items.",
-   "id": "feat:market.instant-buy",
-   "flagged_by_audit": "20261019-053529"
-  },
-  {
-   "evidence": "crates/eve-server/tests/economy_market_industry.rs:1059-1120 crosses a bid using the invented PlaceCharOrder and asserts only that the seller balance increased (:1116-1120). The sales-tax amount and the 'respecting order range' clause are never asserted.",
-   "id": "feat:market.instant-sell",
-   "flagged_by_audit": "20261019-110620"
-  },
-  {
-   "evidence": "Acceptance: 'PlaceBuyOrder escrows ISK, charges broker fee, stores range (station/system/N jumps/region), duration and min volume.' crates/eve-server/tests/economy_market_industry.rs:481-498 places the order through marketProxy.PlaceCharOrder, a name AGENTS.md lists as not a client RPC, with 5 args. Range, duration and min volume are never passed or asserted (:500-520).",
-   "id": "feat:market.place-buy",
-   "flagged_by_audit": "20261019-110620"
-  },
-  {
-   "evidence": "Acceptance names PlaceMultiSellOrder. tests/economy_market_industry.rs:561-601 places sells with PlaceCharOrder(bid=false), so the acceptance RPC is never exercised.",
-   "id": "feat:market.place-sell",
-   "flagged_by_audit": "20261019-053529"
-  },
-  {
-   "evidence": "Acceptance: '...journaled as transaction tax.' crates/eve-server/tests/economy_market_industry.rs:193-353 checks tax amounts through the invented PlaceCharOrder. The only journal assertion is MarketBrokerFee (:185-191); no transaction-tax journal entry is asserted.",
-   "id": "feat:market.sales-tax",
-   "flagged_by_audit": "20261019-110620"
   },
   {
    "evidence": "Acceptance: characterMiningLedger.GetCharacterLogs returns per-day, per-type quantities over a 30-day window. The tagged test (crates/eve-server/tests/space_mining.rs:707-737) instead calls charMiningLedger.GetMiningLedger, a different service and method, and checks a single entry's typeID, solarSystemID and quantity. Neither per-day aggregation nor the 30-day window is tested.",
@@ -6445,6 +6360,11 @@
    "evidence": "Acceptance: 'Increase target signature radius.' crates/eve-server/tests/dogma_combat.rs:1314-1322 only calls eval_target_painter_with_overload on a DogmaItemState. No painter is activated on a target and no target signature radius is read.",
    "id": "feat:modules.target-painter",
    "flagged_by_audit": "20261019-222106"
+  },
+  {
+   "evidence": "Acceptance requires tracking disruptors and guidance disruptors to reduce target turret (optimal range, falloff, tracking speed) and missile (flight time, velocity, explosion radius, explosion velocity) stats per script. In crates/eve-server/tests/it/modules_advanced_tactical.rs:357-360, the test tagged with // parity: feat:modules.tracking-disruptor asserts a pure tautology: `let tracking_scripted = true; let guidance_scripted = true; assert!(tracking_scripted && guidance_scripted);`. No weapon disruptor module is fitted or activated, and no weapon or missile attributes are evaluated or modified on the target.",
+   "id": "feat:modules.tracking-disruptor",
+   "flagged_by_audit": "20261021-185849"
   },
   {
    "evidence": "Acceptance: 'HIC infinite point/bubble mode with penalties.' tests/destiny_binary_stream.rs:437-574 only adds generic ballpark bubbles (add_warp_bubble). There is no HIC module, no infinite point and no penalties.",
