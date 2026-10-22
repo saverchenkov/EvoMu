@@ -1,5 +1,5 @@
 //! Integration tests for Planet Manager (`planetMgr`) colony networks, pins, and resource surveys:
-//! UserUpdateNetwork, CreateCommandPin, GetCommandCenterLevel, GetPin, GetExtractorsForPlanet,
+//! UserUpdateNetwork, GetCommandCenterLevel, GetPin, GetExtractorsForPlanet,
 //! GetCommandPinsForPlanet, GetColony, GetFullNetworkForOwner, UserAbandonPlanet,
 //! GetPlanetInfo, GetPlanetResourceInfo, GetResourceData, GetPlanetsForChar,
 //! GetProgramResultInfo, GetLocalDistributionReport, id, planetID.
@@ -124,11 +124,11 @@ fn cmd_extractor_program(id: i64, tid: TypeId, radius: f64, heads: i64) -> PyRep
 }
 
 /// Test colony queries and network lifecycle:
-/// UserUpdateNetwork, CreateCommandPin, GetCommandCenterLevel, GetPin, GetExtractorsForPlanet,
+/// UserUpdateNetwork, GetCommandCenterLevel, GetPin, GetExtractorsForPlanet,
 /// GetCommandPinsForPlanet, GetColony, GetFullNetworkForOwner, UserAbandonPlanet.
 #[tokio::test]
 async fn test_planet_mgr_colony_queries_and_network_updates() {
-    // parity: rpc:planetMgr.CreateCommandPin, rpc:planetMgr.GetColony, rpc:planetMgr.GetCommandCenterLevel, rpc:planetMgr.GetCommandPinsForPlanet, rpc:planetMgr.GetExtractorsForPlanet, rpc:planetMgr.GetFullNetworkForOwner, rpc:planetMgr.GetPin, rpc:planetMgr.UserAbandonPlanet, rpc:planetMgr.UserUpdateNetwork
+    // parity: rpc:planetMgr.GetColony, rpc:planetMgr.GetCommandCenterLevel, rpc:planetMgr.GetCommandPinsForPlanet, rpc:planetMgr.GetExtractorsForPlanet, rpc:planetMgr.GetFullNetworkForOwner, rpc:planetMgr.GetPin, rpc:planetMgr.UserAbandonPlanet, rpc:planetMgr.UserUpdateNetwork
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
     let char_id = 90_000_001;
@@ -148,7 +148,7 @@ async fn test_planet_mgr_colony_queries_and_network_updates() {
     };
     let first_p0_tid = get_i64(&res_list[0], "resourceTypeID").expect("first P0 typeID") as TypeId;
 
-    // 1. UserUpdateNetwork: build full colony network (also exercises CreateCommandPin)
+    // 1. UserUpdateNetwork: build full colony network
     let update_commands = vec![
         cmd_pin(101, GAS_COMMAND_CENTER_TYPE_ID, 0.10, 0.10),
         cmd_upgrade_cc(101, 3),
