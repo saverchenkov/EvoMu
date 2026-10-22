@@ -41,9 +41,19 @@ UNAVAILABLE_EXIT = 4  # every reviewer model was out of quota/capacity: NOTHING 
 QUOTA_RE = re.compile(r"RESOURCE_EXHAUSTED|[Qq]uota|rate.?limit|\b429\b|No capacity|UNAVAILABLE \(code 503\)|"
                       r"\b503\b|overloaded|insufficient (?:credits|balance)|usage limit", re.I)
 FALLBACK_MODELS = [m.strip() for m in os.environ.get(
-    "EVOMU_REVIEW_FALLBACK_MODELS", "gemini-launch-candidate-high,gemini-flash-next").split(",") if m.strip()]
+    "EVOMU_REVIEW_FALLBACK_MODELS", "gemini-pro-next,gemini-flash-next").split(",") if m.strip()]
+# Default reviewer mode (user decision 2026-10-22): `--model auto` tries each model in this order and uses the first
+# one that has quota/capacity. Callers must not pin a weaker model; an explicit --model / EVOMU_REVIEW_MODEL other
+# than `auto` is ignored unless EVOMU_REVIEW_ALLOW_MODEL_OVERRIDE=1 (set only on the user's instruction).
+AUTO_MODE = "auto"
+AUTO_CHAIN = [m.strip() for m in os.environ.get(
+    "EVOMU_REVIEW_AUTO_CHAIN", "opus-5.5-medium,gemini-pro-next,gemini-flash-next").split(",") if m.strip()]
+# Readable EvoMu model names -> agy model ids. agy's own id for Gemini Pro Next is literally "auto"; we never pass
+# EvoMu's AUTO_MODE to agy, only the resolved chain entries.
+AGY_MODEL_IDS = {"gemini-pro-next": "auto"}
 # Models whose agy selection has no effort levels (passing --effort makes agy refuse to start).
-NO_EFFORT_MODELS = {m.strip() for m in os.environ.get("EVOMU_REVIEW_NO_EFFORT_MODELS", "auto,gemini-flash-next,gemini-pro-coordinator").split(",") if m.strip()}
+NO_EFFORT_MODELS = {m.strip() for m in os.environ.get(
+    "EVOMU_REVIEW_NO_EFFORT_MODELS", "gemini-pro-next,gemini-flash-next,gemini-pro-coordinator").split(",") if m.strip()}
 
 # Map model names from agy/review format to Claude CLI format
 CLAUDE_CLI_MODELS = {
@@ -102,13 +112,13 @@ def detect_cli():
     return None, ""
 
 
-def get_launcher_env():
+def get_launcher_env(launcher="agy"):
     """Get environment variables for the launcher.
     NOTE: ANTHROPIC_API_KEY (or ANTHROPIC_AUTH_TOKEN) and ANTHROPIC_BASE_URL must be set
-    in the environment by the user if using a custom API endpoint."""
+    in the environment by the user if using a custom API endpoint (claude launcher only)."""
     env = dict(os.environ)
-    # Verify required environment variables are set
-    if not env.get("ANTHROPIC_API_KEY") and not env.get("ANTHROPIC_AUTH_TOKEN"):
+    # Verify required environment variables are set (agy authenticates on its own)
+    if launcher == "claude" and not env.get("ANTHROPIC_API_KEY") and not env.get("ANTHROPIC_AUTH_TOKEN"):
         print("[review] WARNING: ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN not set in environment")
         print("[review] Set via: export ANTHROPIC_API_KEY='your-key'")
         print("[review] For custom endpoints: export ANTHROPIC_BASE_URL='your-endpoint'")
@@ -319,11 +329,15 @@ def launch_reviewer(first_cmd, root, sdir, run_dir, tree_before, ts, valid_verdi
     was out of quota: nothing was reviewed and the result must never be treated as a pass."""
     i = first_cmd.index("--model")
     primary = first_cmd[i + 1]
-    models = [primary] + [m for m in FALLBACK_MODELS if m != primary]
+    if primary == AUTO_MODE:
+        models = list(AUTO_CHAIN)
+        print("[review] %sreviewer model: auto (%s; first with quota wins)" % (prefix, " > ".join(models)))
+    else:
+        models = [primary] + [m for m in FALLBACK_MODELS if m != primary]
     exhausted = []
     for n, model in enumerate(models):
         cmd = list(first_cmd)
-        cmd[i + 1] = model
+        cmd[i + 1] = AGY_MODEL_IDS.get(model, model) if cmd[0] == "agy" else model
         if model in NO_EFFORT_MODELS and "--effort" in cmd:
             j = cmd.index("--effort")
             del cmd[j:j + 2]  # agy rejects --effort for these models ("--effort is not supported for model ...")
@@ -363,7 +377,7 @@ def _launch_one(first_cmd, root, sdir, run_dir, tree_before, ts, valid_verdicts,
     # The reviewer runs inside the same workspace, so it loads .agents/hooks.json. Without this, the
     # coding-agent Stop hook fires inside the reviewer session, forces "continue", burns the per-tree
     # loop guard, and interrupts the reviewer's stream.
-    reviewer_env = dict(get_launcher_env(), EVOMU_REVIEW_HOOK="off", EVOMU_REVIEWER="1")
+    reviewer_env = dict(get_launcher_env(cli_name), EVOMU_REVIEW_HOOK="off", EVOMU_REVIEWER="1")
     lock = os.path.join(sdir, lock_name)
     write(lock, json.dumps({"pid": os.getpid(), "tree": tree_before, "ts": ts}))
     verdict, so, conv, env = "ERROR", {}, "", {}
@@ -649,7 +663,9 @@ def main():
     ap.add_argument("--base", help="Base ref for the diff (default: last reviewed HEAD, else root commit)")
     ap.add_argument("--mode", choices=["claims", "gap-audit"], default="claims",
                     help="claims = precision review of the change; gap-audit = recall audit of the parity ledger")
-    ap.add_argument("--model", default=os.environ.get("EVOMU_REVIEW_MODEL", "opus-5.5-medium"))
+    ap.add_argument("--model", default=os.environ.get("EVOMU_REVIEW_MODEL", AUTO_MODE),
+                    help="Reviewer model. Default 'auto' = first of %s with quota. Other values are ignored unless "
+                         "EVOMU_REVIEW_ALLOW_MODEL_OVERRIDE=1." % " > ".join(AUTO_CHAIN))
     ap.add_argument("--effort", default=os.environ.get("EVOMU_REVIEW_EFFORT", "high"))
     ap.add_argument("--reviewer-timeout", default=os.environ.get("EVOMU_REVIEW_TIMEOUT", "0s"),
                     help="agy --print-timeout (0s = wait for completion)")
@@ -667,6 +683,10 @@ def main():
     ap.add_argument("--in-place", action="store_true",
                     help="Review this worktree's working tree directly (legacy; the tree must stay untouched)")
     a = ap.parse_args()
+    if a.model != AUTO_MODE and os.environ.get("EVOMU_REVIEW_ALLOW_MODEL_OVERRIDE") != "1":
+        print("[review] NOTE: --model %s ignored; reviews use 'auto' (%s). Pinning a reviewer model needs the user's "
+              "approval (EVOMU_REVIEW_ALLOW_MODEL_OVERRIDE=1)." % (a.model, " > ".join(AUTO_CHAIN)))
+        a.model = AUTO_MODE
 
     root = rl.repo_root(os.getcwd())
     if not (a.in_place or a.reuse_context):

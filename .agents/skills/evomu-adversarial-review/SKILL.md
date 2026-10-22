@@ -35,7 +35,8 @@ Run the review **before** any of the following:
    /usr/bin/python3 .agents/skills/evomu-adversarial-review/scripts/run_review.py --claims-file /tmp/evomu_claims.md
    ```
    - It gathers the diff since the last reviewed commit, runs `cargo test` honestly (wrappers scrubbed, isolated target dir), collects metrics and a toolchain audit, then calls:
-     `agy -p <brief> --model opus-5.5-medium --effort medium --output-format json --json-schema verdict_schema.json --sandbox`
+     `agy -p <brief> --model <first model with quota> --output-format json --json-schema verdict_schema.json --sandbox`
+     The reviewer model is always `auto`: `opus-5.5-medium` > `gemini-pro-next` > `gemini-flash-next`, first with quota wins. Don't pass `--model`; it's ignored unless the user sets `EVOMU_REVIEW_ALLOW_MODEL_OVERRIDE=1`.
    - Exit codes: `0` PASS, `1` PASS_WITH_ISSUES, `2` FAIL, `3` INVALID/ERROR.
    - Useful flags: `--base <ref>`, `--skip-tests` (recorded in the report as *not executed*), `--dry-run` (collect context and print the command only).
    - `--launcher jetski-chat` opens an interactive Jetski chat instead. It can't pin the model or record a verdict, so use it only for manual sessions.
@@ -44,7 +45,7 @@ Run the review **before** any of the following:
    - **FAIL:** fix every P0, plus every FALSE claim or reword it, then rerun. Don't commit, push, or tell the user the work is done.
    - **PASS_WITH_ISSUES:** you may commit. Tell the user the verdict and list the P1s, or fix them and rerun.
    - **PASS:** proceed.
-   - **UNAVAILABLE (exit 4):** every reviewer model (`opus-5.5-medium`, then the fallbacks `gemini-launch-candidate-high` and `gemini-flash-next`) was out of quota or capacity. **Nothing was reviewed.** Follow `AGENTS.md` → "Reviewer unavailable": local `wip/*` branches only, no merge or push to `main`, and queue per-task reviews for when quota returns.
+   - **UNAVAILABLE (exit 4):** every reviewer model in the `auto` chain (`opus-5.5-medium`, `gemini-pro-next`, `gemini-flash-next`) was out of quota or capacity. **Nothing was reviewed.** Follow `AGENTS.md` → "Reviewer unavailable": local `wip/*` branches only, no merge or push to `main`, and queue per-task reviews for when quota returns.
    - **Fallback reviews:** a verdict from a fallback model counts for commits like any other. The final gate still requires a PASS from the primary model.
    - **INVALID / ERROR:** the reviewer wrote to its snapshot, or it failed. Rerun. (Reviews run in a temporary snapshot worktree of the reviewed commit, so your own edits during a review don't invalidate it.) If `agy` is not authenticated, ask the user to run `agy` interactively once.
 5. **Report honestly.** Always tell the user the verdict word, the report path, the number of blocking findings, and whether tests actually executed (`tests_executed` in the report header). Never describe a result more favorably than the report does.

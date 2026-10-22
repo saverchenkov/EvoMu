@@ -119,8 +119,8 @@
 - **Subagent reports to you are claims, not facts.** Verify them with pre-flight and the review before recording anything in `docs/ACTION_PLAN_STATUS.md`.
 
 ## Reviewer unavailable (quota or capacity outages)
-- **How the orchestrator handles quota errors.** `run_review.py` tries the primary reviewer (`opus-5.5-medium`, Claude Opus 5.5 Medium) first, then the fallbacks `gemini-launch-candidate-high` (Gemini 4 Argon High) and `gemini-flash-next` (Gemini Flash Next) (`EVOMU_REVIEW_FALLBACK_MODELS`).
-  - A fallback verdict is a real review and gates merges normally. The report says which model reviewed.
+- **Reviewer model: always `auto` (user decision 2026-10-22).** Run `run_review.py` without `--model` and without `EVOMU_REVIEW_MODEL`. `auto` tries Claude Opus 5.5 Medium (`opus-5.5-medium`), then Gemini Pro Next (`gemini-pro-next`), then Gemini Flash Next (`gemini-flash-next`), and uses the first one with quota. Don't pin a model to get a faster or easier review. `run_review.py` ignores `--model` unless the user sets `EVOMU_REVIEW_ALLOW_MODEL_OVERRIDE=1`.
+  - A verdict from a later model in the chain is a real review and gates merges normally. The report says which model reviewed.
   - The final gate still needs a PASS from the primary model.
 - **If every model is out, the review returns `UNAVAILABLE` (exit code 4).** Nothing was reviewed, so never treat it as a pass. Also don't treat a user instruction to "keep developing while the reviewer is down" as permission to skip the gate. While the reviewer is unavailable:
   1. **Never merge, cherry-pick or push to `main`.** Keep committing to work branches (one task per branch). Subagents follow the same rule in their worktrees.
