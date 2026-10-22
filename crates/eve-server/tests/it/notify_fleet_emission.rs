@@ -304,3 +304,85 @@ async fn test_fleet_accept_retry_broadcast_location_guards() {
     assert_eq!(events(&ctx, P1, "OnFleetBroadcast").len(), 1);
     assert!(events(&ctx, P2, "OnFleetBroadcast").is_empty(), "bubble broadcast must not leak system-wide");
 }
+
+#[tokio::test]
+async fn test_fleet_object_handler_management_lifecycle() {
+    // parity: rpc:fleetObjectHandler.CreateFleet, rpc:fleetObjectHandler.GetFleetID, rpc:fleetObjectHandler.GetWings, rpc:fleetObjectHandler.SetAutoJoinSquadID, rpc:fleetObjectHandler.GetJoinRequests, rpc:fleetObjectHandler.SetAcceptsRegroupValue, rpc:fleetObjectHandler.SetAcceptsConduitJumpsValue, rpc:fleetObjectHandler.Reconnect, rpc:fleetObjectHandler.UpdateMemberInfo, rpc:fleetObjectHandler.FinishMove, rpc:fleetObjectHandler.MassMoveMembers, rpc:fleetObjectHandler.LoadFleetSetup
+    let ctx = ServerContext::new();
+    let (mut s1, mut s2, _s3, _p3) = three_pilots(&ctx).await;
+    const FH: &str = "fleetObjectHandler";
+
+    // 1. CreateFleet via fleetObjectHandler
+    let _create_rep = call(&ctx, &mut s1, FH, "CreateFleet", &[]).await;
+    let fid = s1.fleet_id.expect("s1 must be in fleet");
+    assert!(fid > 0);
+
+    // 2. GetFleetID
+    let fid_rep = call(&ctx, &mut s1, FH, "GetFleetID", &[]).await;
+    assert_eq!(fid_rep.as_i64(), Some(fid));
+
+    // 3. GetWings
+    let wings_rep = call(&ctx, &mut s1, FH, "GetWings", &[]).await;
+    assert!(wings_rep.dict_get("wings").is_some());
+
+    // Create wing and squad for structural tests
+    let wid = int(&call(&ctx, &mut s1, FH, "CreateWing", &[PyRep::String("AlphaWing".into())]).await, "wingID");
+    assert!(wid > 0);
+    let sid = int(&call(&ctx, &mut s1, FH, "CreateSquad", &[PyRep::Integer(wid), PyRep::String("AlphaSquad".into())]).await, "squadID");
+    assert!(sid > 0);
+
+    // 4. SetAutoJoinSquadID
+    let autojoin = call(&ctx, &mut s1, FH, "SetAutoJoinSquadID", &[PyRep::Integer(sid)]).await;
+    let PyRep::KeyVal(aj_kv) = autojoin else { panic!("expected KeyVal") };
+    assert_eq!(aj_kv.get("autoJoinSquadID"), Some(&PyRep::Integer(sid)));
+
+    // 5. Invite and GetJoinRequests
+    call(&ctx, &mut s1, FH, "Invite", &[PyRep::Integer(P2), PyRep::Integer(wid), PyRep::Integer(sid), PyRep::Integer(3)]).await;
+    let reqs = call(&ctx, &mut s1, FH, "GetJoinRequests", &[]).await;
+    assert!(matches!(reqs, PyRep::Rowset { .. } | PyRep::Object { .. }));
+
+    // Accept invite so P2 joins the fleet
+    call(&ctx, &mut s2, FH, "AcceptInvite", &[]).await;
+    assert_eq!(s2.fleet_id, Some(fid));
+
+    // 6. SetAcceptsRegroupValue
+    let regroup = call(&ctx, &mut s2, FH, "SetAcceptsRegroupValue", &[PyRep::Bool(false)]).await;
+    let PyRep::KeyVal(rg_kv) = regroup else { panic!("expected KeyVal") };
+    assert_eq!(rg_kv.get("acceptsRegroup"), Some(&PyRep::Bool(false)));
+
+    // 7. SetAcceptsConduitJumpsValue
+    let conduit = call(&ctx, &mut s2, FH, "SetAcceptsConduitJumpsValue", &[PyRep::Bool(false)]).await;
+    let PyRep::KeyVal(cj_kv) = conduit else { panic!("expected KeyVal") };
+    assert_eq!(cj_kv.get("acceptsConduitJumps"), Some(&PyRep::Bool(false)));
+
+    // 8. Reconnect
+    let reconn = call(&ctx, &mut s2, FH, "Reconnect", &[]).await;
+    let PyRep::KeyVal(rc_kv) = reconn else { panic!("expected KeyVal") };
+    assert_eq!(rc_kv.get("characterID"), Some(&PyRep::Integer(P2)));
+    assert_eq!(rc_kv.get("fleetID"), Some(&PyRep::Integer(fid)));
+
+    // 9. UpdateMemberInfo
+    let umi = call(&ctx, &mut s2, FH, "UpdateMemberInfo", &[]).await;
+    let PyRep::KeyVal(umi_kv) = umi else { panic!("expected KeyVal") };
+    assert_eq!(umi_kv.get("characterID"), Some(&PyRep::Integer(P2)));
+    assert_eq!(umi_kv.get("fleetID"), Some(&PyRep::Integer(fid)));
+
+    // 10. FinishMove
+    let fmove = call(&ctx, &mut s1, FH, "FinishMove", &[PyRep::Integer(P2), PyRep::Integer(wid), PyRep::Integer(sid), PyRep::Integer(4)]).await;
+    let PyRep::KeyVal(fm_kv) = fmove else { panic!("expected KeyVal") };
+    assert_eq!(fm_kv.get("characterID"), Some(&PyRep::Integer(P2)));
+    assert_eq!(fm_kv.get("role"), Some(&PyRep::Integer(4)));
+
+    // 11. MassMoveMembers
+    let mm = call(&ctx, &mut s1, FH, "MassMoveMembers", &[PyRep::List(vec![PyRep::Integer(P2)]), PyRep::Integer(wid), PyRep::Integer(sid)]).await;
+    let PyRep::KeyVal(mm_kv) = mm else { panic!("expected KeyVal") };
+    assert_eq!(mm_kv.get("movedCount"), Some(&PyRep::Integer(1)));
+
+    // 12. LoadFleetSetup
+    let setup = call(&ctx, &mut s1, FH, "LoadFleetSetup", &[PyRep::String("SkirmishDoctrine".into()), PyRep::String("Primary Target FC".into()), PyRep::Bool(true), PyRep::Integer(128)]).await;
+    let PyRep::KeyVal(ls_kv) = setup else { panic!("expected KeyVal") };
+    assert_eq!(ls_kv.get("setupName"), Some(&PyRep::String("SkirmishDoctrine".into())));
+    assert_eq!(ls_kv.get("motd"), Some(&PyRep::String("Primary Target FC".into())));
+    assert_eq!(ls_kv.get("isFreeMove"), Some(&PyRep::Bool(true)));
+    assert_eq!(ls_kv.get("maxSize"), Some(&PyRep::Integer(128)));
+}
