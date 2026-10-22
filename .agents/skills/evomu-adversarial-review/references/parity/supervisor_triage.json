@@ -8740,6 +8740,66 @@
     "notify:OnSkillsChanged": {
       "evidence": "code.ccp bytecode verification: eve/client/script/ui/services/skillsvc.pyj:SkillsSvc.OnServerSkillsChanged (offsets 136-148: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnSkillsChanged'; LOAD_FAST skillInfos; CALL_FUNCTION 2); eve/client/script/ui/services/skillsvc.pyj:SkillsSvc.OnServerSkillsRemoved (offsets 48-60: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnSkillsChanged'; LOAD_FAST skillInfos; CALL_FUNCTION 2). No server emitter needed: server sends OnServerSkillsChanged / OnServerSkillsRemoved; SkillsSvc locally scatters OnSkillsChanged.",
       "disposition": "client_local"
+    },
+    "notify:OnClientContactChangeOnBlockContacts": {
+      "disposition": "dead_client_code",
+      "evidence": "V24.01 code.ccp disassembly: eve/client/script/ui/shared/killRights.pyj:KillRightsEntry (offsets 18-33: LOAD_CONST 'OnContactNoLongerContact'; LOAD_CONST 'OnContactChange'; LOAD_CONST 'OnClientContactChangeOnBlockContacts'; LOAD_CONST 'OnUnblockContacts'; BUILD_LIST 6; STORE_NAME __notifyevents__). No server emitter needed: dead string-concatenation typo in KillRightsEntry.__notifyevents__ with no handler method anywhere in code.ccp (server sends OnContactChange)."
+    },
+    "notify:OnCollapsed": {
+      "disposition": "client_local",
+      "evidence": "V24.01 code.ccp disassembly: carbonui/control/window.pyj:Window.Collapse (offsets 535-547: LOAD_FAST self; LOAD_ATTR sr; LOAD_ATTR stack; LOAD_ATTR OnCollapsed; LOAD_FAST self; CALL_FUNCTION 1). No server emitter needed: CarbonUI Window.Collapse locally calls OnCollapsed on the window/stack."
+    },
+    "notify:OnCombatTimersUpdated": {
+      "disposition": "client_local",
+      "evidence": "V24.01 code.ccp disassembly: eve/client/script/ui/services/crimewatchSvc.pyj:CrimewatchService.ProcessSessionChange (offsets 196-209: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnCombatTimersUpdated'; CALL_FUNCTION 1). No server emitter needed: CrimewatchService.ProcessSessionChange locally scatters OnCombatTimersUpdated after fetching GetClientStates."
+    },
+    "notify:OnCrimewatchEngagementUpdated": {
+      "disposition": "client_local",
+      "evidence": "V24.01 code.ccp disassembly: eve/client/script/ui/services/crimewatchSvc.pyj:CrimewatchService.OnCrimewatchEngagementCreated (offsets 32-47: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnCrimewatchEngagementUpdated'; LOAD_FAST otherCharId; LOAD_FAST timeout; CALL_FUNCTION 3). No server emitter needed: server sends OnCrimewatchEngagementCreated / OnCrimewatchEngagementEnded / OnCrimewatchEngagementStartTimeout / OnCrimewatchEngagementStopTimeout; CrimewatchService locally scatters OnCrimewatchEngagementUpdated."
+    },
+    "notify:OnDockingProgressChanged": {
+      "disposition": "client_local",
+      "evidence": "V24.01 code.ccp disassembly: eve/client/script/ui/shared/dockedUI/undockingSvc.pyj:UndockingSvc._Undock_Thread (offsets 9-24: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnDockingProgressChanged'; LOAD_CONST 0.0; CALL_FUNCTION 2). No server emitter needed: UndockingSvc._Undock_Thread locally scatters OnDockingProgressChanged during undock animation."
+    },
+    "notify:OnDockingRequestWasDenied": {
+      "disposition": "client_local",
+      "evidence": "V24.01 code.ccp disassembly: eve/client/script/ui/services/structure/structureDocking.pyj:StructureDocking.Dock.RequestDocking (offsets 119-134: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnDockingRequestWasDenied'; LOAD_DEREF 0; CALL_FUNCTION 2). No server emitter needed: StructureDocking.Dock.RequestDocking locally scatters OnDockingRequestWasDenied when the Dock RPC raises an exception."
+    },
+    "notify:OnExpanded": {
+      "disposition": "client_local",
+      "evidence": "V24.01 code.ccp disassembly: carbonui/control/window.pyj:Window.Expand (offsets 481-493: LOAD_FAST self; LOAD_ATTR sr; LOAD_ATTR stack; LOAD_ATTR OnExpanded; LOAD_FAST self; CALL_FUNCTION 1). No server emitter needed: CarbonUI Window.Expand locally calls OnExpanded on the window/stack."
+    },
+    "notify:OnFleetFavoriteAdded": {
+      "disposition": "client_local",
+      "evidence": "V24.01 code.ccp disassembly: eve/client/script/parklife/fleetSvc.pyj:FleetSvc.AddFavorite (offsets 368-381: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnFleetFavoriteAdded'; LOAD_FAST charIDs; CALL_FUNCTION 2). No server emitter needed: FleetSvc.AddFavorite locally scatters OnFleetFavoriteAdded when the player adds a watchlist favorite."
+    },
+    "notify:OnFleetFavoriteRemoved": {
+      "disposition": "client_local",
+      "evidence": "V24.01 code.ccp disassembly: eve/client/script/parklife/fleetSvc.pyj:FleetSvc.RemoveFavorite (offsets 79-94: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnFleetFavoriteRemoved'; LOAD_FAST charID; CALL_FUNCTION 2). No server emitter needed: FleetSvc.RemoveFavorite locally scatters OnFleetFavoriteRemoved when the player removes a watchlist favorite."
+    },
+    "notify:OnFleetFormationWndChanged": {
+      "disposition": "client_local",
+      "evidence": "V24.01 code.ccp disassembly: eve/client/script/ui/shared/fleet/fleetFormations.pyj:FleetFormationsPanel.DetachPanel (offsets 32-45: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnFleetFormationWndChanged'; CALL_FUNCTION 1). No server emitter needed: FleetFormationsPanel.DetachPanel / FleetFormationWnd.Close locally scatters OnFleetFormationWndChanged."
+    },
+    "notify:OnSlimItemUpdated": {
+      "disposition": "client_local",
+      "evidence": "V24.01 code.ccp disassembly: eve/client/script/remote/michelle.pyj:Park.OnSlimItemChange (offsets 87-114: LOAD_FAST ball; LOAD_ATTR OnSlimItemUpdated; LOAD_FAST newSlim; CALL_FUNCTION 1). No server emitter needed: server sends OnSlimItemChange(itemID, newSlim); Park.OnSlimItemChange invokes ball.OnSlimItemUpdated(newSlim) locally."
+    },
+    "notify:OnSolarsystemAdvantageStateUpdated_Local": {
+      "disposition": "client_local",
+      "evidence": "V24.01 code.ccp disassembly: eve/client/script/ui/services/fwAdvantageSvc.pyj:FwAdvantageSvc._OnSolarSystemScoresUpdated (offsets 149-162: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnSolarsystemAdvantageStateUpdated_Local'; CALL_FUNCTION 1). No server emitter needed: FwAdvantageSvc._OnSolarSystemScoresUpdated locally scatters OnSolarsystemAdvantageStateUpdated_Local."
+    },
+    "notify:OnUndockingAborted": {
+      "disposition": "client_local",
+      "evidence": "V24.01 code.ccp disassembly: eve/client/script/ui/shared/dockedUI/undockingSvc.pyj:UndockingSvc.AbortUndock (offsets 81-96: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnUndockingAborted'; LOAD_FAST stationID; CALL_FUNCTION 2). No server emitter needed: UndockingSvc.AbortUndock locally scatters OnUndockingAborted when the player aborts undocking."
+    },
+    "notify:OnUndockingCompleted": {
+      "disposition": "client_local",
+      "evidence": "V24.01 code.ccp disassembly: eve/client/script/ui/shared/dockedUI/undockingSvc.pyj:UndockingSvc.UndockAttempt (offsets 133-148: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnUndockingCompleted'; LOAD_FAST stationID; CALL_FUNCTION 2). No server emitter needed: UndockingSvc.UndockAttempt locally scatters OnUndockingCompleted after the Undock RPC returns."
+    },
+    "notify:OnUndockingStarted": {
+      "disposition": "client_local",
+      "evidence": "V24.01 code.ccp disassembly: eve/client/script/ui/shared/dockedUI/undockingSvc.pyj:UndockingSvc._Undock_Thread (offsets 29-44: LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnUndockingStarted'; LOAD_FAST session; LOAD_ATTR stationid; LOAD_ATTR structureid; CALL_FUNCTION 2). No server emitter needed: UndockingSvc._Undock_Thread locally scatters OnUndockingStarted when the player clicks Undock."
     }
   }
 }
