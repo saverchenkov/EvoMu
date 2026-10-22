@@ -472,3 +472,143 @@ async fn test_calendar_event_and_external_response_notifications() {
     assert_eq!(events(&ctx, p3, "OnRemoveCalendarEvent"), vec![expected_del]);
     assert!(events(&ctx, P2, "OnRemoveCalendarEvent").is_empty());
 }
+
+#[tokio::test]
+async fn test_mail_management_read_labels_trash_and_iteration() {
+    // parity: rpc:mailMgr.MarkAllAsRead, rpc:mailMgr.MarkAllAsUnread, rpc:mailMgr.MarkAsReadByLabel, rpc:mailMgr.MarkAsReadByList, rpc:mailMgr.MarkAsUnreadByLabel, rpc:mailMgr.MarkAsUnreadByList, rpc:mailMgr.MoveAllToTrash, rpc:mailMgr.MoveAllFromTrash, rpc:mailMgr.MoveToTrashByLabel, rpc:mailMgr.MoveToTrashByList, rpc:mailMgr.ReplaceLabels, rpc:mailMgr.keys, rpc:mailMgr.iteritems, rpc:mailMgr.itervalues, rpc:mailMgr.PokePlayerAboutChatMsgGm
+    let ctx = ServerContext::new();
+    let kw = HashMap::new();
+    let mut s1 = select(&ctx, 701, "demo", "demo-secret", P1).await;
+    let mut s2 = select(&ctx, 702, "other", "other-secret", P2).await;
+
+    // 1. Send mail from P1 to P2
+    let send_rep = ctx
+        .dispatch_rpc(
+            &mut s1,
+            "mailMgr",
+            None,
+            "SendMail",
+            &[
+                PyRep::List(vec![PyRep::Integer(P2)]),
+                PyRep::String("Status Briefing".into()),
+                PyRep::String("Fleet is stationed in Jita 4-4".into()),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect("SendMail");
+    let mid = send_rep.as_i64().expect("messageID");
+
+    // 2. keys, iteritems, itervalues
+    let keys_rep = ctx
+        .dispatch_rpc(&mut s2, "mailMgr", None, "keys", &[], &kw, None)
+        .await
+        .expect("keys");
+    let PyRep::List(keys) = keys_rep else { panic!("expected List") };
+    assert!(keys.iter().any(|k| k.as_i64() == Some(mid)), "keys must include new messageID");
+
+    let iteritems_rep = ctx
+        .dispatch_rpc(&mut s2, "mailMgr", None, "iteritems", &[], &kw, None)
+        .await
+        .expect("iteritems");
+    let PyRep::List(items) = iteritems_rep else { panic!("expected List") };
+    assert!(items.iter().any(|it| matches!(it, PyRep::Tuple(t) if t.first().and_then(|v| v.as_i64()) == Some(mid))));
+
+    let itervalues_rep = ctx
+        .dispatch_rpc(&mut s2, "mailMgr", None, "itervalues", &[], &kw, None)
+        .await
+        .expect("itervalues");
+    let PyRep::List(vals) = itervalues_rep else { panic!("expected List") };
+    assert!(vals.iter().any(|v| matches!(v, PyRep::KeyVal(kv) if kv.get("messageID").and_then(|m| m.as_i64()) == Some(mid))));
+
+    // 3. MarkAsReadByList and MarkAsReadByLabel
+    let mr_list = ctx
+        .dispatch_rpc(&mut s2, "mailMgr", None, "MarkAsReadByList", &[PyRep::List(vec![PyRep::Integer(mid)])], &kw, None)
+        .await
+        .expect("MarkAsReadByList");
+    let PyRep::KeyVal(mrl_kv) = mr_list else { panic!("expected KeyVal") };
+    assert_eq!(mrl_kv.get("read"), Some(&PyRep::Bool(true)));
+
+    let mr_label = ctx
+        .dispatch_rpc(&mut s2, "mailMgr", None, "MarkAsReadByLabel", &[PyRep::Integer(1)], &kw, None)
+        .await
+        .expect("MarkAsReadByLabel");
+    let PyRep::KeyVal(mrlb_kv) = mr_label else { panic!("expected KeyVal") };
+    assert_eq!(mrlb_kv.get("read"), Some(&PyRep::Bool(true)));
+
+    // 4. MarkAsUnreadByList and MarkAsUnreadByLabel
+    let mur_list = ctx
+        .dispatch_rpc(&mut s2, "mailMgr", None, "MarkAsUnreadByList", &[PyRep::List(vec![PyRep::Integer(mid)])], &kw, None)
+        .await
+        .expect("MarkAsUnreadByList");
+    let PyRep::KeyVal(murl_kv) = mur_list else { panic!("expected KeyVal") };
+    assert_eq!(murl_kv.get("read"), Some(&PyRep::Bool(false)));
+
+    let mur_label = ctx
+        .dispatch_rpc(&mut s2, "mailMgr", None, "MarkAsUnreadByLabel", &[PyRep::Integer(1)], &kw, None)
+        .await
+        .expect("MarkAsUnreadByLabel");
+    let PyRep::KeyVal(murlb_kv) = mur_label else { panic!("expected KeyVal") };
+    assert_eq!(murlb_kv.get("read"), Some(&PyRep::Bool(false)));
+
+    // 5. MarkAllAsRead and MarkAllAsUnread
+    let mar = ctx
+        .dispatch_rpc(&mut s2, "mailMgr", None, "MarkAllAsRead", &[], &kw, None)
+        .await
+        .expect("MarkAllAsRead");
+    let PyRep::KeyVal(mar_kv) = mar else { panic!("expected KeyVal") };
+    assert!(mar_kv.get("markedReadCount").and_then(|v| v.as_i64()).unwrap() >= 1);
+
+    let maur = ctx
+        .dispatch_rpc(&mut s2, "mailMgr", None, "MarkAllAsUnread", &[], &kw, None)
+        .await
+        .expect("MarkAllAsUnread");
+    let PyRep::KeyVal(maur_kv) = maur else { panic!("expected KeyVal") };
+    assert!(maur_kv.get("markedReadCount").and_then(|v| v.as_i64()).unwrap() >= 1);
+
+    // 6. ReplaceLabels
+    let repl = ctx
+        .dispatch_rpc(&mut s2, "mailMgr", None, "ReplaceLabels", &[PyRep::Integer(mid), PyRep::List(vec![PyRep::Integer(2)])], &kw, None)
+        .await
+        .expect("ReplaceLabels");
+    let PyRep::KeyVal(repl_kv) = repl else { panic!("expected KeyVal") };
+    assert_eq!(repl_kv.get("assigned"), Some(&PyRep::Bool(true)));
+
+    // 7. MoveToTrashByList and MoveToTrashByLabel
+    let trash_list = ctx
+        .dispatch_rpc(&mut s2, "mailMgr", None, "MoveToTrashByList", &[PyRep::List(vec![PyRep::Integer(mid)])], &kw, None)
+        .await
+        .expect("MoveToTrashByList");
+    let PyRep::KeyVal(tl_kv) = trash_list else { panic!("expected KeyVal") };
+    assert_eq!(tl_kv.get("inTrash"), Some(&PyRep::Bool(true)));
+
+    let trash_label = ctx
+        .dispatch_rpc(&mut s2, "mailMgr", None, "MoveToTrashByLabel", &[PyRep::Integer(2)], &kw, None)
+        .await
+        .expect("MoveToTrashByLabel");
+    let PyRep::KeyVal(tlb_kv) = trash_label else { panic!("expected KeyVal") };
+    assert_eq!(tlb_kv.get("inTrash"), Some(&PyRep::Bool(true)));
+
+    // 8. MoveAllFromTrash and MoveAllToTrash
+    let restore_all = ctx
+        .dispatch_rpc(&mut s2, "mailMgr", None, "MoveAllFromTrash", &[], &kw, None)
+        .await
+        .expect("MoveAllFromTrash");
+    let PyRep::KeyVal(ra_kv) = restore_all else { panic!("expected KeyVal") };
+    assert_eq!(ra_kv.get("inTrash"), Some(&PyRep::Bool(false)));
+
+    let trash_all = ctx
+        .dispatch_rpc(&mut s2, "mailMgr", None, "MoveAllToTrash", &[], &kw, None)
+        .await
+        .expect("MoveAllToTrash");
+    let PyRep::KeyVal(ta_kv) = trash_all else { panic!("expected KeyVal") };
+    assert_eq!(ta_kv.get("inTrash"), Some(&PyRep::Bool(true)));
+
+    // 9. PokePlayerAboutChatMsgGm
+    let poke = ctx
+        .dispatch_rpc(&mut s1, "mailMgr", None, "PokePlayerAboutChatMsgGm", &[PyRep::Integer(P2), PyRep::String("GM poke".into())], &kw, None)
+        .await
+        .expect("PokePlayerAboutChatMsgGm");
+    assert_eq!(poke, PyRep::None);
+}

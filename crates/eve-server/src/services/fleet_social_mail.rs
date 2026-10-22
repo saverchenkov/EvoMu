@@ -316,6 +316,49 @@ pub(super) fn handle_mail_and_calendar(
         ("mailMgr", m) if m.eq_ignore_ascii_case("getheaders") => {
             handle_mail_headers(ctx, session, method)
         }
+        ("mailMgr", "keys") => {
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let trashed = ctx.social_extras.lock().unwrap().trashed_mails.clone();
+            let keys: Vec<PyRep> = ctx.db.with_snapshot(|snap| {
+                snap.mails.iter()
+                    .filter(|m| (m.recipient_id == char_id || m.sender_id == char_id)
+                        && !snap.deleted_mails.contains(&(char_id, m.message_id))
+                        && !trashed.contains(&(char_id, m.message_id)))
+                    .map(|m| PyRep::Integer(m.message_id))
+                    .collect()
+            });
+            Some(Ok(PyRep::List(keys)))
+        }
+        ("mailMgr", "iteritems") | ("mailMgr", "itervalues") => {
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let trashed = ctx.social_extras.lock().unwrap().trashed_mails.clone();
+            let items: Vec<PyRep> = ctx.db.with_snapshot(|snap| {
+                snap.mails.iter()
+                    .filter(|m| (m.recipient_id == char_id || m.sender_id == char_id)
+                        && !snap.deleted_mails.contains(&(char_id, m.message_id))
+                        && !trashed.contains(&(char_id, m.message_id)))
+                    .map(|m| {
+                        let read = snap.read_mails.contains(&(char_id, m.message_id));
+                        let val = PyRep::keyval([
+                            ("messageID", PyRep::Integer(m.message_id)),
+                            ("senderID", PyRep::Integer(m.sender_id)),
+                            ("title", PyRep::String(m.subject.clone())),
+                            ("read", PyRep::Bool(read)),
+                        ]);
+                        if method == "iteritems" {
+                            PyRep::Tuple(vec![PyRep::Integer(m.message_id), val])
+                        } else {
+                            val
+                        }
+                    })
+                    .collect()
+            });
+            Some(Ok(PyRep::List(items)))
+        }
+        ("mailMgr", "PokePlayerAboutChatMsgGm") => {
+            let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            Some(Ok(PyRep::None))
+        }
 
         ("mailMgr", "GetBody") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
