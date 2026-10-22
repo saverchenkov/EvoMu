@@ -1,76 +1,6 @@
 {
  "fake_done": [
   {
-   "evidence": "The only tagged test asserts `position.x < 5_000.0` after one tick (destiny_parity_complete.rs:534). That is a shape-only check: no follow-range convergence or speed value is tested.",
-   "flagged_by_audit": "20261022-123054",
-   "id": "ballmode:DSTBALL_FOLLOW"
-  },
-  {
-   "evidence": "The only tagged test (destiny_parity_complete.rs:543) asserts `velocity.length() > 0.0`. That is a shape-only check of 'live-server movement physics': no orbit radius, tangential speed or trajectory value is asserted.",
-   "flagged_by_audit": "20261022-123054",
-   "id": "ballmode:DSTBALL_ORBIT"
-  },
-  {
-   "evidence": "The only tagged test asserts `matches!(mode, MovementMode::Warp{..})` (destiny_parity_complete.rs:540). That only checks the mode label: no warp acceleration, cruise or deceleration physics is asserted.",
-   "flagged_by_audit": "20261022-123054",
-   "id": "ballmode:DSTBALL_WARP"
-  },
-  {
-   "evidence": "destiny_parity_complete.rs:286-295 only asserts the action name of a hand-built event with an invented event_name 'res_wars_power_up_play'. No payload check, no emission path.",
-   "flagged_by_audit": "20261022-123054",
-   "id": "destiny:OnClientControllerEvent"
-  },
-  {
-   "evidence": "Only test_destiny_dogma_buffs_dot_and_drone_events (destiny_parity_complete.rs:419-423) covers it, and it asserts just the action name of a hand-built event with invented dbuff ids 101/102. Nothing ties it to the dogma dbuff engine.",
-   "flagged_by_audit": "20261022-123054",
-   "id": "destiny:OnDbuffUpdated"
-  },
-  {
-   "evidence": "destiny_parity_complete.rs:426-434 only asserts the action name for a hand-built event. No damage-over-time simulation emits it, and the payload is unverified.",
-   "flagged_by_audit": "20261022-123054",
-   "id": "destiny:OnDotVictimUpdated"
-  },
-  {
-   "evidence": "destiny_parity_complete.rs:437-448 only asserts the action name of a hand-built event, with typeID 282 labelled 'Hobgoblin I' (Hobgoblin I is 2454). No drone activity in the simulation emits it.",
-   "flagged_by_audit": "20261022-123054",
-   "id": "destiny:OnDroneStateChange"
-  },
-  {
-   "evidence": "destiny_parity_complete.rs:318-326 only asserts action[0] == 'OnFleetDamageStateChange' for a hand-built event. The argument layout is not checked, and no fleet or damage simulation emits it.",
-   "flagged_by_audit": "20261022-123054",
-   "id": "destiny:OnFleetDamageStateChange"
-  },
-  {
-   "evidence": "destiny_parity_complete.rs:340-345 only asserts the action name for a hand-built module_states tuple. Nothing checks the payload or any emission from module state changes.",
-   "flagged_by_audit": "20261022-123054",
-   "id": "destiny:OnShipStateUpdate"
-  },
-  {
-   "evidence": "Only test_destiny_ballpark_state_events_fleet_and_controllers (destiny_parity_complete.rs:354-361) covers it, by encoding a hand-built event with invented ids and echoing them back. No sovereignty change in the simulation triggers it.",
-   "flagged_by_audit": "20261022-123054",
-   "id": "destiny:OnSovereigntyChanged"
-  },
-  {
-   "evidence": "destiny_parity_complete.rs:133-139 wraps arbitrary bytes [1,2,3,4,5] and asserts the same bytes come back. That is a tautology: no real packaged destiny action stream is built or emitted.",
-   "flagged_by_audit": "20261022-123054",
-   "id": "destiny:PackagedAction"
-  },
-  {
-   "evidence": "Only tagged by test_destiny_ball_lifecycle_wire_actions_and_destruction (destiny_parity_complete.rs:102-106). It encodes a hand-constructed DestinyEvent::SetBallFree and checks the echoed tuple. No simulation state change emits it, and no V24 client decode is checked. The acceptance requires 'emitted by the simulation when the corresponding state change happens'.",
-   "flagged_by_audit": "20261022-123054",
-   "id": "destiny:SetBallFree"
-  },
-  {
-   "evidence": "The wire layout is wrong. crates/eve-destiny/tests/destiny_parity_complete.rs:108-112 asserts args (ball_id, harmonic), but the reference layout is (itemID, allianceID, corpID, mass, harmonic) (evemu_Crucible/src/eve-common/packets/Destiny.xmlp:655-668). The test encodes a hand-built DestinyEvent; nothing shows the simulation emits it, as the acceptance requires.",
-   "flagged_by_audit": "20261022-123054",
-   "id": "destiny:SetBallHarmonic"
-  },
-  {
-   "evidence": "destiny_parity_complete.rs:114-118 only checks that the encoder echoes the hand-built event (ball_id, 0). No simulation emission and no client-decode check.",
-   "flagged_by_audit": "20261022-123054",
-   "id": "destiny:SetBallInteractive"
-  },
-  {
    "evidence": "The core 'safe removal' semantics are missing: the ship despawns instantly on Logout even mid-combat. Evidence: crates/eve-server/src/services/account_services.rs:227 (save_location_and_leave_space at :172); shadowed duplicate at crates/eve-server/src/services/auth_cache.rs:271; test: test_account_logout_saves_location_and_removes_ship_from_space (tests/it/account_admin_complete.rs:413) \u2014 asserts the session is cleared, online lock released, solar system persisted, ship ball gone immediately and re-login lands in that system. These are behavioural checks, but they lock in the instant removal.; live: knowledge (EVE logoff mechanics: emergency warp, 60s despawn, aggression timers); client:carbon/common/script/net/machoNet.pyj Expected behaviour: Pilot in space with no timers calls authentication.Logout: the ship ball is still in the ballpark immediately afterwards, enters warp (emergency warp) and is removed only after ~60s of sim time. With an active weapons timer the ball stays (no warp) until the timer expires. On re-login the character's saved position equals the position where the ball despawned.",
    "flagged_by_audit": "supervisor-20261022-F-weak-done",
    "id": "feat:account.logout"
@@ -281,9 +211,44 @@
    "id": "feat:pve.abyssal-weather"
   },
   {
+   "id": "feat:pve.combat-anomalies",
+   "evidence": "crates/eve-server/src/services/pve_exploration.rs:142-229, 336-391, and 884-972 stores anomalies in a non-persistent process-global PVE_EXPLORATION_STATE static, hardcodes every non-wormhole system to 2 Angel Cartel dungeons (2132/1214/1228/2115/2311) with 2-4 generic type 10962 balls regardless of region/faction or SDE dungeon rooms (sde.dungeon_rooms/sde.dungeon_objects are never read), and drives site entry/wave progression through non-catalog RPCs scanSvc.GetCombatAnomalyInstances and scanSvc.EnterCombatAnomaly (crates/eve-server/tests/it/pve_exploration_complete.rs:124-215) instead of real warp/NPC destruction triggers.",
+   "flagged_by_audit": "20261022-154932"
+  },
+  {
+   "id": "feat:pve.combat-signatures",
+   "evidence": "crates/eve-server/src/services/pve_exploration.rs:393-533 and 975-1044 seeds a single fixed signature list per system in volatile PVE_EXPLORATION_STATE and tests scanning via non-catalog RPCs scanSvc.GetSignatureInstances and scanSvc.ScanSignature(sig_id, probe_strength) (crates/eve-server/tests/it/pve_exploration_complete.rs:300-405), which simply adds probe_strength directly to site.signal_strength (pve_exploration.rs:1026) without probe positions, trilateration, or scanSvc.RequestScans.",
+   "flagged_by_audit": "20261022-154932"
+  },
+  {
+   "id": "feat:pve.data-sites",
+   "evidence": "crates/eve-server/src/services/pve_exploration.rs:438-448 seeds one hardcoded Data signature (DAT-{solar_system_id}, dungeon 1133/3729) with 3 cans in volatile PVE_EXPLORATION_STATE, and crates/eve-server/src/services/pve_hacking_sites.rs:134-140 uses a 4-item hardcoded loot slice instead of SDE loot tables (crates/eve-server/tests/it/pve_exploration_complete.rs:462-560).",
+   "flagged_by_audit": "20261022-154932"
+  },
+  {
+   "id": "feat:pve.ded-complexes",
+   "evidence": "crates/eve-server/src/services/pve_exploration.rs:232-272, 393-434, and 1047-1138 hardcodes 10 dungeon IDs (ded_complex_for_rating), never reads SDE dungeon rooms/acceleration gates/overseer NPCs, drops Overseer's Personal Effects directly into the pilot's ship cargo (pve_exploration.rs:723, 793-807) instead of an overseer wreck, and advances rooms via non-catalog keeper.EnterNextDungeonRoom (crates/eve-server/tests/it/pve_exploration_complete.rs:344-456).",
+   "flagged_by_audit": "20261022-154932"
+  },
+  {
+   "id": "feat:pve.drifter-hives",
+   "evidence": "crates/eve-server/src/services/pve_special_sites.rs:386-401, 616-655, and 1242-1264 seeds 5 hardcoded Drifter Hive records in volatile PVE_SPECIAL_STATE, completes all 3 rooms in a single call to keeper.EnterNextDungeonRoom(31_000_001) (crates/eve-server/tests/it/pve_exploration_complete.rs:1173-1187), and queries them by overloading dungeonInstanceCacheMgr.GetTriglavianSiteInstances.",
+   "flagged_by_audit": "20261022-154932"
+  },
+  {
+   "id": "feat:pve.homefront-ops",
+   "evidence": "crates/eve-server/src/services/pve_special_sites.rs:357-371 and 658-697 seeds 2 hardcoded sites (710_001 and 710_002) only in Jita (30_000_142) in volatile PVE_SPECIAL_STATE, with completion driven by calling keeper.EnterNextDungeonRoom with fake instance ID 710_001 and a caller-supplied fleet_count integer argument (crates/eve-server/tests/it/pve_exploration_complete.rs:1149-1161) instead of actual fleet/site objective mechanics.",
+   "flagged_by_audit": "20261022-154932"
+  },
+  {
    "evidence": "The unlock threshold contradicts live (0.25 vs 0%), the min-duration lockout is missing, the incursion is a single hardcoded constellation, and the client chooses the pilots who receive ISK/LP. Evidence: crates/eve-server/src/services/pve_special_sites.rs:837 (incursion.UpdateIncursionLPLog); test: test_pve_incursions_payouts_and_mothership_finale (tests/it/pve_exploration_complete.rs:842) \u2014 removes boss balls by hand and calls UpdateIncursionLPLog(siteID, [pilots]) three times. It asserts the mothership unlocks at influence \u22640.25 and the incursion ends after the mothership site. It locks in a non-live threshold.; live: wiki:Incursions (Mothership sightings: 'influence falls to 0% and a single headquarters site is run'; 3-day highsec / 1-day lowsec lockout) Expected behaviour: With influence at 0.25 (or above 0), the Mothership site is not present or enterable. After influence reaches 0.0 and one HQ site completes, the Mothership site appears, but in highsec only once \u22653 days have passed since the incursion spawned. Payout goes only to fleet members on grid at site completion, never to a list the client supplies.",
    "flagged_by_audit": "supervisor-20261022-F-weak-done",
    "id": "feat:pve.incursion-mothership"
+  },
+  {
+   "id": "feat:pve.loot-spew",
+   "evidence": "Loot spew was removed from live EVE in Odyssey 1.1 / Rubicon; moreover crates/eve-server/src/services/pve_hacking_sites.rs:104-166 and 596-666 implements it in volatile memory via non-catalog hackingMgr.HackContainer (crates/eve-server/tests/it/pve_exploration_complete.rs:514-558, 608-652) rather than placing loot inside the hacked container in WorldRepository.",
+   "flagged_by_audit": "20261022-154932"
   },
   {
    "evidence": "crates/eve-server/src/services/agents_missions.rs:544 hardcodes every courier/trade mission's cargo to type 3683, quantity 10. Line 716 spawns that cargo into the ship rather than using the mission template's cargo or destination. The test (tests/it/agents_missions_complete.rs:569-600) completes delivery at the same agent station, so no destination-station leg is exercised.",
@@ -299,6 +264,11 @@
    "evidence": "agents_missions.rs:535,544: trade missions use the same hardcoded (Some(3683), 10) requirement as courier missions, not the mission template's required item.",
    "flagged_by_audit": "20261022-133752",
    "id": "feat:pve.mission-trade"
+  },
+  {
+   "id": "feat:pve.relic-sites",
+   "evidence": "crates/eve-server/src/services/pve_exploration.rs:449-459 seeds one hardcoded Relic signature (REL-{solar_system_id}, dungeon 1286/3722) with 3 cans in volatile PVE_EXPLORATION_STATE, and crates/eve-server/src/services/pve_hacking_sites.rs:126-133 uses a 4-item hardcoded salvage slice (crates/eve-server/tests/it/pve_exploration_complete.rs:562-653).",
+   "flagged_by_audit": "20261022-154932"
   },
   {
    "evidence": "Fixture-driven site/NPC/loot tables, with wave progression through an invented RPC instead of kill triggers. Evidence: crates/eve-server/src/services/pve_exploration.rs:193 (anomaly_dungeons_for_system: 2 hardcoded dungeons per class band), :563 (build_wave_npc_balls: one NPC type per class, 2-4 balls), :733-735 (blue loot by class), :884/:932 (scanSvc.GetCombatAnomalyInstances / EnterCombatAnomaly); test: test_pve_ghost_sites_sleeper_caches_and_wormhole_sites (tests/it/pve_exploration_complete.rs:656, WH part at :790+) \u2014 clears wave NPCs with a helper, then advances waves via the invented scanSvc.EnterCombatAnomaly(siteID, True), and asserts blue loot in droppedLoot. It does not test killing Sleepers.; live: wiki:Wormhole_space; rpc_service_catalog.json (EnterCombatAnomaly absent) Expected behaviour: In a C3 system, the anomaly list contains C3 Sleeper combat sites. Warping in spawns Sleeper NPCs whose types match the site's dungeon. Destroying the wave trigger NPC through combat spawns the next wave without any client RPC. Sleeper wrecks contain Sleeper loot (e.g. Sleeper Data Library 30745) and no bounty is paid.",
@@ -431,6 +401,11 @@
    "id": "quasar:eveProto/generated/eve_public/cosmetic/character/title/api/notices_pb2.pyj"
   },
   {
+   "id": "quasar:eveProto/generated/eve_public/cosmetic/character/title/api/requests_pb2.pyj",
+   "evidence": "crates/eve-server/src/services/quasar_cosmetics_services.rs:390-463 implements GetOwnedRequest, GetEquippedForCharacterRequest, EquipRequest, and UnequipRequest without reading or writing any character title state in WorldRepository (GetOwnedRequest, GetEquippedForCharacterRequest, and UnequipRequest just echo char_id into field 1 via set_domain_field(reg, resp, 1, char_id, \"\"), while EquipRequest calls generic schema-filler set_domain_attributes(reg, resp, char_id as u64, title_id, \"EquippedTitle\")). In crates/eve-server/tests/it/quasar_space_cosmetics_complete.rs:36-38 and 647-708, encode_id_req(_id) returns Vec::new() (discarding _id) and the test asserts only status_code == STATUS_OK and normalized_type_name().",
+   "flagged_by_audit": "20261022-154932"
+  },
+  {
    "evidence": "crates/eve-server/src/services/quasar_cosmetics_services.rs:543-815 registers a single shared closure in a 46-endpoint loop where title.definition.api.GetLatestRequest and GetAllRequest ignore _dyn_msg and return set_domain_attributes(reg, resp, skin_id, corp_id, \"SKINRParagon\"); crates/eve-server/tests/it/quasar_cosmetics_sovereignty.rs:87-157 sends Vec::new() and asserts only status_code == STATUS_OK and normalized_type_name().",
    "flagged_by_audit": "20261022-091014",
    "id": "quasar:eveProto/generated/eve_public/cosmetic/character/title/definition/api/requests_pb2.pyj"
@@ -481,6 +456,11 @@
    "id": "quasar:eveProto/generated/eve_public/cosmetic/ship/api/request_pb2.pyj"
   },
   {
+   "id": "quasar:eveProto/generated/eve_public/cosmetic/ship/logo/logo_pb2.pyj",
+   "evidence": "crates/eve-server/src/services/quasar_cosmetics_services.rs:48-82 implements DisplayRequest and ClearRequest by ignoring _dyn_msg (ship ID, logo slot/emblem), mutating no ship cosmetic state, emitting no notice, and calling generic schema-filler set_domain_attributes(reg, resp, char_id as u64, corp_id as u64, \"ShipLogoDisplayed\") / \"ShipLogoCleared\". In crates/eve-server/tests/it/quasar_space_cosmetics_complete.rs:36-38 and 555-618, the test sends Vec::new() and asserts only status_code == STATUS_OK and normalized_type_name().",
+   "flagged_by_audit": "20261022-154932"
+  },
+  {
    "evidence": "crates/eve-server/src/services/quasar_cosmetics_services.rs:543-815 registers a single shared closure in a 46-endpoint loop for ship.skin.thirdparty.api.GetRequest returning set_domain_attributes(reg, resp, skin_id, corp_id, \"SKINRParagon\"); crates/eve-server/tests/it/quasar_cosmetics_sovereignty.rs:87-157 sends Vec::new() and asserts only status_code == STATUS_OK and normalized_type_name().",
    "flagged_by_audit": "20261022-091014",
    "id": "quasar:eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/api/requests_pb2.pyj"
@@ -521,6 +501,11 @@
    "id": "quasar:eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/component/license/item/api/requests_pb2.pyj"
   },
   {
+   "id": "quasar:eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/draft/api/requests_pb2.pyj",
+   "evidence": "crates/eve-server/src/services/quasar_cosmetics_services.rs:233-330 implements GetAllSavedRequest, GetRequest, SaveRequest, UpdateRequest, DeleteRequest, and GetSaveCapacityRequest with no SKINR draft storage: GetAllSavedRequest returns hardcoded (char_id, 12_345, \"SavedSkinrDraft\"), SaveRequest returns hardcoded (12_345, 1, &name) without persisting anything, GetRequest/UpdateRequest/DeleteRequest echo draft_id (default 1), and GetSaveCapacityRequest returns constant 20. In crates/eve-server/tests/it/quasar_space_cosmetics_complete.rs:36-42 and 555-618, encode_id_req and encode_string_req both return Vec::new() and the test asserts only status_code == STATUS_OK and normalized_type_name().",
+   "flagged_by_audit": "20261022-154932"
+  },
+  {
    "evidence": "crates/eve-server/src/services/quasar_cosmetics_services.rs:543-815 registers a single shared closure in a 46-endpoint loop where thirdparty.license.api.admin.GrantRequest and RevokeRequest ignore _dyn_msg, mutate no license state, and return set_domain_attributes(reg, resp, skin_id, corp_id, \"SKINRParagon\"); crates/eve-server/tests/it/quasar_cosmetics_sovereignty.rs:164-234 sends Vec::new() for GrantRequest only and asserts only status_code == STATUS_OK and normalized_type_name().",
    "flagged_by_audit": "20261022-091014",
    "id": "quasar:eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/license/api/admin/admin_pb2.pyj"
@@ -556,6 +541,16 @@
    "id": "quasar:eveProto/generated/eve_public/cosmetic/structure/paintwork/api/admin/admin_pb2.pyj"
   },
   {
+   "id": "quasar:eveProto/generated/eve_public/cosmetic/structure/paintwork/api/api_pb2.pyj",
+   "evidence": "crates/eve-server/src/services/quasar_cosmetics_services.rs:466-497 implements GetRequest and GetAllInSolarSystemRequest without reading any structure paintwork state, echoing structure_id (default 1_000_000_001) or sys_id (default 30_000_142) into field 1 via set_domain_field. In crates/eve-server/tests/it/quasar_space_cosmetics_complete.rs:36-38 and 647-708, the test sends Vec::new() via encode_id_req and asserts only status_code == STATUS_OK and normalized_type_name().",
+   "flagged_by_audit": "20261022-154932"
+  },
+  {
+   "id": "quasar:eveProto/generated/eve_public/cosmetic/structure/paintwork/license/api/api_pb2.pyj",
+   "evidence": "crates/eve-server/src/services/quasar_cosmetics_services.rs:498-513 implements GetAllOwnedByCorporationRequest without reading any corporation paintwork license state, echoing corp_id (default 98_000_001) into field 1 via set_domain_field. In crates/eve-server/tests/it/quasar_space_cosmetics_complete.rs:36-38 and 647-708, the test sends Vec::new() via encode_id_req and asserts only status_code == STATUS_OK and normalized_type_name().",
+   "flagged_by_audit": "20261022-154932"
+  },
+  {
    "evidence": "crates/eve-server/src/services/quasar_sov_services.rs:595-713 registers a single shared closure in a 13-endpoint loop for IncrementContributionScoreRequest and SetContributionScoreRequest that ignores _dyn_msg, mutates no faction activity score state, and returns set_domain_attributes(reg, resp, sys_id, fac_id, \"SovResourceState\"); crates/eve-server/tests/it/quasar_feature_packages_complete.rs:329-345 sends empty Vec::new() payloads and checks only status_code == STATUS_OK and normalized_type_name().",
    "flagged_by_audit": "20261022-091014",
    "id": "quasar:eveProto/generated/eve_public/faction/activity/admin_pb2.pyj"
@@ -576,9 +571,54 @@
    "id": "quasar:eveProto/generated/eve_public/goal/contribution/api/notices_pb2.pyj"
   },
   {
+   "id": "quasar:eveProto/generated/eve_public/operation/recommendation/recommendation_pb2.pyj",
+   "evidence": "crates/eve-server/src/services/quasar_sov_services.rs:577-592 implements GetRequest by ignoring character state/progression and calling generic schema-filler set_domain_attributes(reg, resp, cid, 30_000_142, \"AIRDailyOperation\"). In crates/eve-server/tests/it/quasar_space_cosmetics_complete.rs:490-544, the test sends Vec::new() and asserts only status_code == STATUS_OK and normalized_type_name().",
+   "flagged_by_audit": "20261022-154932"
+  },
+  {
    "evidence": "crates/eve-server/src/services/quasar_payment_store.rs:400-431 implements TokenRequest and CostRequest by ignoring _dyn_msg and calling generic schema-filler set_domain_attributes(reg, resp, uid, 1, \"purchase_token\") and set_domain_attributes(reg, resp, 1999, 1, \"USD\"); crates/eve-server/tests/it/quasar_cosmetics_sovereignty.rs:241-308 sends Vec::new() and asserts only status_code == STATUS_OK and normalized_type_name().",
    "flagged_by_audit": "20261022-091014",
    "id": "quasar:eveProto/generated/eve_public/payment/purchase/api_pb2.pyj"
+  },
+  {
+   "id": "quasar:eveProto/generated/eve_public/payment/schedule/notices_pb2.pyj",
+   "evidence": "crates/eve-server/src/services/quasar_payment_store.rs:283-305 and crates/eve-server/tests/it/quasar_identity_complete.rs:536-573 \u2014 payment.schedule.api.GetRequest returns an empty Vec::new() payload and unconditionally emits a hardcoded fake SetNotice (field 1=101, field 2=\"active\") as a side effect of a read-only GetRequest.",
+   "flagged_by_audit": "20261022-153253"
+  },
+  {
+   "id": "quasar:eveProto/generated/eve_public/payment/schedule/requests_pb2.pyj",
+   "evidence": "crates/eve-server/src/services/quasar_payment_store.rs:283-312 and crates/eve-server/tests/it/quasar_identity_complete.rs:536-573 \u2014 payment.schedule.api.GetRequest and GetCostProjectionRequest do not read or persist payment schedules, returning empty Vec::new() for GetRequest and hardcoded constants (1999, \"USD\") for GetCostProjectionRequest.",
+   "flagged_by_audit": "20261022-153253"
+  },
+  {
+   "id": "quasar:eveProto/generated/eve_public/payment/token/api/notices_pb2.pyj",
+   "evidence": "crates/eve-server/src/services/quasar_payment_store.rs:319-341 and crates/eve-server/tests/it/quasar_identity_complete.rs:575-608 \u2014 payment.token.api.GetQuickPayRequest returns an empty Vec::new() payload and unconditionally emits a hardcoded fake QuickPayAddedNotice (\"tok_quickpay_1\") as a side effect of a read-only GetQuickPayRequest.",
+   "flagged_by_audit": "20261022-153253"
+  },
+  {
+   "id": "quasar:eveProto/generated/eve_public/payment/token/api_pb2.pyj",
+   "evidence": "crates/eve-server/src/services/quasar_payment_store.rs:319-341 and crates/eve-server/tests/it/quasar_identity_complete.rs:575-608 \u2014 payment.token.api.GetQuickPayRequest neither reads nor persists quick-pay tokens, returning an empty Vec::new() response payload.",
+   "flagged_by_audit": "20261022-153253"
+  },
+  {
+   "id": "quasar:eveProto/generated/eve_public/pirate/corruption/api/notices_pb2.pyj",
+   "evidence": "No server handler or insurgency mechanic ever emits eve_public.pirate.corruption.api.SystemInfoUpdatedNotice; instead crates/eve-server/tests/it/quasar_space_cosmetics_complete.rs:287-337 manually constructs a dummy message in test code via set_domain_attributes(&ctx.quasar_descriptors, &mut msg, 30_000_142, 3, \"StageChanged\") and calls ctx.quasar_gateway.publish_notice(...) directly, asserting only type_url.ends_with(...).",
+   "flagged_by_audit": "20261022-154932"
+  },
+  {
+   "id": "quasar:eveProto/generated/eve_public/pirate/corruption/api/requests_pb2.pyj",
+   "evidence": "crates/eve-server/src/services/quasar_space_services.rs:567-597 implements GetSystemInfoRequest and GetStageThresholdsRequest without reading any insurgency corruption state, returning hardcoded constants via set_domain_attributes(reg, resp, sys_id as u64, 2, \"CorruptionStage2\") and set_domain_attributes(reg, resp, 10_000, 100_000, \"CorruptionThresholds\"). In crates/eve-server/tests/it/quasar_space_cosmetics_complete.rs:36-38 and 248-285, the test sends Vec::new() via encode_id_req and asserts only status_code == STATUS_OK and normalized_type_name().",
+   "flagged_by_audit": "20261022-154932"
+  },
+  {
+   "id": "quasar:eveProto/generated/eve_public/pirate/suppression/api/notices_pb2.pyj",
+   "evidence": "No server handler or insurgency mechanic ever emits eve_public.pirate.suppression.api.SystemInfoUpdatedNotice; instead crates/eve-server/tests/it/quasar_space_cosmetics_complete.rs:287-337 manually constructs a dummy message in test code via set_domain_attributes(&ctx.quasar_descriptors, &mut msg, 30_000_142, 3, \"StageChanged\") and calls ctx.quasar_gateway.publish_notice(...) directly, asserting only type_url.ends_with(...).",
+   "flagged_by_audit": "20261022-154932"
+  },
+  {
+   "id": "quasar:eveProto/generated/eve_public/pirate/suppression/api/requests_pb2.pyj",
+   "evidence": "crates/eve-server/src/services/quasar_space_services.rs:600-630 implements GetSystemInfoRequest and GetStageThresholdsRequest without reading any insurgency suppression state, returning hardcoded constants via set_domain_attributes(reg, resp, sys_id as u64, 1, \"SuppressionStage1\") and set_domain_attributes(reg, resp, 10_000, 100_000, \"SuppressionThresholds\"). In crates/eve-server/tests/it/quasar_space_cosmetics_complete.rs:36-38 and 248-285, the test sends Vec::new() via encode_id_req and asserts only status_code == STATUS_OK and normalized_type_name().",
+   "flagged_by_audit": "20261022-154932"
   },
   {
    "evidence": "crates/eve-server/src/services/quasar_payment_store.rs:433-479 implements GetAllLoggedForUserRequest, GetLogRequest, and GetStatisticsRequest by ignoring _dyn_msg and PLEX vault state, calling generic schema-filler set_domain_attributes(reg, resp, uid, 1, \"plex_tx_all\"), set_domain_attributes(reg, resp, 1, 100, \"plex_log\"), and set_domain_attributes(reg, resp, 500, 10, \"plex_stats\"); crates/eve-server/tests/it/quasar_cosmetics_sovereignty.rs:241-308 sends Vec::new() and asserts only status_code == STATUS_OK and normalized_type_name().",
@@ -596,9 +636,9 @@
    "id": "quasar:eveProto/generated/eve_public/sovereignty/hub/api/requests_pb2.pyj"
   },
   {
-   "evidence": "quasar_sov_services.rs:186-217: GetRequest returns set_domain_attributes(hub_id, 10_000, \"SovHubFuel\"), a constant 10000. AddRequest echoes hub_id. No fuel bay state is read or written.",
-   "flagged_by_audit": "20261022-133752",
-   "id": "quasar:eveProto/generated/eve_public/sovereignty/hub/fuel/api/requests_pb2.pyj"
+   "id": "quasar:eveProto/generated/eve_public/sovereignty/hub/fuel/api/requests_pb2.pyj",
+   "evidence": "crates/eve-server/src/services/quasar_sov_services.rs:163-199 and crates/eve-server/tests/it/quasar_space_cosmetics_complete.rs:384-403 \u2014 Sov hub fuel AddRequest and GetRequest ignore WorldRepository state and return hardcoded constants (1_000_000_010, 10_000, \"SovHubFuel\") without deducting fuel items or persisting fuel levels; test sends empty request bytes and only checks status_code == STATUS_OK.",
+   "flagged_by_audit": "20261022-153253"
   },
   {
    "evidence": "crates/eve-server/tests/it/quasar_cosmetics_sovereignty.rs:480-587 manually constructs UninstalledNotice, HubUpgradesConfiguredNotice, and HubUpgradesSimulatedNotice in the test via set_domain_attributes and publishes them directly to quasar_gateway (plus calls standalone helper publish_sov_hub_upgrade_notice at crates/eve-server/src/services/quasar_sov_services.rs:741-747 which is never invoked by any handler), asserting only normalized_type_name() / type_url suffix.",
@@ -606,9 +646,9 @@
    "id": "quasar:eveProto/generated/eve_public/sovereignty/hub/upgrade/api/notices_pb2.pyj"
   },
   {
-   "evidence": "quasar_sov_services.rs:285-347: GetDefinitions returns one hardcoded upgrade (81_201, 500, \"MajorThreatDetectionArray\") instead of SDE data. ProcessConfiguration/Uninstall echo hub_id with no state change.",
-   "flagged_by_audit": "20261022-133752",
-   "id": "quasar:eveProto/generated/eve_public/sovereignty/hub/upgrade/api/requests_pb2.pyj"
+   "id": "quasar:eveProto/generated/eve_public/sovereignty/hub/upgrade/api/requests_pb2.pyj",
+   "evidence": "crates/eve-server/src/services/quasar_sov_services.rs:273-332 and crates/eve-server/tests/it/quasar_space_cosmetics_complete.rs:443-478 \u2014 Sov hub upgrade GetHubUpgradesRequest, InstallRequest, UninstallRequest, and ProcessConfigurationRequest do not read or mutate installed upgrades or persisted order, returning hardcoded constants (81_201, 500); test sends empty request bytes and only checks status_code == STATUS_OK.",
+   "flagged_by_audit": "20261022-153253"
   },
   {
    "evidence": "crates/eve-server/tests/it/quasar_cosmetics_sovereignty.rs:480-594 manually constructs ConfiguredNotice and StateChangedNotice in the test via set_domain_attributes and publishes them directly to quasar_gateway (plus calls standalone helper publish_sov_hub_workforce_configured_notice at crates/eve-server/src/services/quasar_sov_services.rs:750-757 which is never invoked by any handler), asserting only normalized_type_name() / type_url suffix.",
@@ -616,9 +656,9 @@
    "id": "quasar:eveProto/generated/eve_public/sovereignty/hub/workforce/api/notices_pb2.pyj"
   },
   {
-   "evidence": "quasar_sov_services.rs:220-282: GetState/GetConfiguration/Configure return constant workforce 2_500. GetNetworkableHubs returns constant hub 1_000_000_001 in Jita 30_000_142. No persistence.",
-   "flagged_by_audit": "20261022-133752",
-   "id": "quasar:eveProto/generated/eve_public/sovereignty/hub/workforce/api/requests_pb2.pyj"
+   "id": "quasar:eveProto/generated/eve_public/sovereignty/hub/workforce/api/requests_pb2.pyj",
+   "evidence": "crates/eve-server/src/services/quasar_sov_services.rs:201-271 and crates/eve-server/tests/it/quasar_space_cosmetics_complete.rs:405-441 \u2014 Sov hub workforce ConfigureRequest, GetConfigurationRequest, GetStateRequest, and GetNetworkableHubsRequest neither persist configuration nor compute workforce state, returning hardcoded constants (1_000_000_010, 2_500); test sends empty request bytes and only checks status_code == STATUS_OK.",
+   "flagged_by_audit": "20261022-153253"
   },
   {
    "evidence": "crates/eve-server/tests/it/quasar_cosmetics_sovereignty.rs:480-601 manually constructs AddedNotice, ExpiryChangedNotice, StartedNotice, CompletedNotice, and RemovedNotice in the test via set_domain_attributes and publishes them directly to quasar_gateway (plus calls standalone helper publish_sov_mercenary_den_activity_notice at crates/eve-server/src/services/quasar_sov_services.rs:760-767 which is never invoked by any handler), asserting only normalized_type_name() / type_url suffix.",
@@ -636,9 +676,9 @@
    "id": "quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/api/notices_pb2.pyj"
   },
   {
-   "evidence": "quasar_sov_services.rs:350-396: GetMaximumForCharacter returns constant 3. GetAllOwned/GetAsOwner fill (char_id, 30_000_142, label) via the generic filler. No mercenary den records exist.",
-   "flagged_by_audit": "20261022-133752",
-   "id": "quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/api/requests_pb2.pyj"
+   "id": "quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/api/requests_pb2.pyj",
+   "evidence": "crates/eve-server/src/services/quasar_sov_services.rs:334-396 and crates/eve-server/tests/it/quasar_space_cosmetics_complete.rs:484-552 \u2014 Mercenary den GetAsOwnerRequest, GetAllOwnedRequest, and GetMaximumForCharacterRequest ignore WorldRepository state and return hardcoded constants (1_000_000_050, 30_000_142, max=3); test sends empty request bytes and only checks status_code == STATUS_OK.",
+   "flagged_by_audit": "20261022-153253"
   },
   {
    "evidence": "crates/eve-server/src/services/quasar_sov_services.rs:595-713 registers a single shared closure in a 13-endpoint loop for GetAllDefinitionsRequest, GetDefinitionsVersionRequest, and GetAllConfigurationsRequest that ignores _dyn_msg and SDE planet resource data, returning hardcoded set_domain_attributes(reg, resp, sys_id, fac_id, \"SovResourceState\"); crates/eve-server/tests/it/quasar_feature_packages_complete.rs:277-301 sends empty Vec::new() payloads and checks only status_code == STATUS_OK and normalized_type_name().",
@@ -661,9 +701,14 @@
    "id": "quasar:eveProto/generated/eve_public/sovereignty/skyhook/api/notices_pb2.pyj"
   },
   {
-   "evidence": "crates/eve-server/src/services/quasar_sov_services.rs:48-183: GetRequest/Activate/Deactivate echo the input structure_id (default 1_000_000_001). GetSolarSystemsWithTheftVulnerableSkyhooks returns constant Jita 30_000_142 / region 10_000_002 (lines 156-166). GetAllByCorporation fills the generic set_domain_attributes filler (quasar_space_services.rs:132-167), which puts arbitrary ids in the first 2 descriptor fields. No skyhook state is read.",
-   "flagged_by_audit": "20261022-133752",
-   "id": "quasar:eveProto/generated/eve_public/sovereignty/skyhook/api/requests_pb2.pyj"
+   "id": "quasar:eveProto/generated/eve_public/sovereignty/skyhook/api/requests_pb2.pyj",
+   "evidence": "crates/eve-server/src/services/quasar_sov_services.rs:48-159 and crates/eve-server/tests/it/quasar_space_cosmetics_complete.rs:36-38, 341-482 \u2014 Skyhook handlers (GetRequest, GetAllInSolarSystemRequest, GetSolarSystemsWithTheftVulnerableSkyhooksRequest, GetAllCorporationModifiedRequest, ModifyReagentSimulationsRequest, ActivateRequest, DeactivateRequest) neither read nor mutate WorldRepository state, returning hardcoded IDs (1_000_000_001, 30_000_142); test sends empty Vec::new() requests and only asserts status_code == STATUS_OK and normalized_type_name().",
+   "flagged_by_audit": "20261022-153253"
+  },
+  {
+   "id": "quasar:eveProto/generated/eve_public/space/api/cdn/requests_pb2.pyj",
+   "evidence": "crates/eve-server/src/services/quasar_space_services.rs:760-802 registers eve_public.space.api.cdn.GetUpdateRequest in the same shared 4-endpoint loop as stargate.lock.api.GetRequest and ai.assistant.chat.api.QueryRequest (both already flagged fake), ignoring _dyn_msg and calling generic schema-filler set_domain_attributes(reg, resp, req_id, owner_corp, \"evomu-tranquility\").",
+   "flagged_by_audit": "20261022-154932"
   },
   {
    "evidence": "crates/eve-server/tests/it/quasar_cosmetics_sovereignty.rs:320-343 manually constructs RestrictedSystemsNotice, ActivatedNotice, and DeactivatedNotice in the test via set_domain_attributes and publishes them directly to quasar_gateway (plus calls standalone helper publish_stargate_lock_activated_notice at crates/eve-server/src/services/quasar_sov_services.rs:789-800 which is never invoked by any server mechanic or handler), asserting only normalized_type_name() / type_url suffix.",
@@ -676,9 +721,34 @@
    "id": "quasar:eveProto/generated/eve_public/stargate/lock/api/requests_pb2.pyj"
   },
   {
+   "id": "quasar:eveProto/generated/eve_public/store/category/api_pb2.pyj",
+   "evidence": "crates/eve-server/src/services/quasar_payment_store.rs:162-177 and crates/eve-server/tests/it/quasar_identity_complete.rs:610-635 \u2014 store.category.api.GetAllRequest returns a hardcoded 4-item loop (\"Category 1\"..\"Category 4\") and test only checks status_code == STATUS_OK and !value.is_empty().",
+   "flagged_by_audit": "20261022-153253"
+  },
+  {
+   "id": "quasar:eveProto/generated/eve_public/store/offer/api_pb2.pyj",
+   "evidence": "crates/eve-server/src/services/quasar_payment_store.rs:198-219 and crates/eve-server/tests/it/quasar_identity_complete.rs:665-691 \u2014 store.offer.api.GetPageRequest returns hardcoded \"Offer 1001\"..\"Offer 1005\" and test only checks status_code == STATUS_OK and !value.is_empty().",
+   "flagged_by_audit": "20261022-153253"
+  },
+  {
+   "id": "quasar:eveProto/generated/eve_public/store/product/api_pb2.pyj",
+   "evidence": "crates/eve-server/src/services/quasar_payment_store.rs:179-196 and crates/eve-server/tests/it/quasar_identity_complete.rs:637-663 \u2014 store.product.api.GetRequest and GetAllRequest ignore request parameters and return hardcoded \"500 PLEX Pack\" / \"Product 101..104\"; test only checks status_code == STATUS_OK and !value.is_empty().",
+   "flagged_by_audit": "20261022-153253"
+  },
+  {
+   "id": "quasar:eveProto/generated/eve_public/store/targetaudience/offer/api/requests_pb2.pyj",
+   "evidence": "crates/eve-server/src/services/quasar_payment_store.rs:221-250 and crates/eve-server/tests/it/quasar_identity_complete.rs:693-753 \u2014 store.targetaudience.offer.api.GetAllRequest and store.personalized.offer.api.GetAllRequest ignore character/audience state and return hardcoded constants (2001 \"Targeted Omega Bundle\", 3001 \"Personalized Starter Offer\"); test only checks status_code == STATUS_OK and !value.is_empty().",
+   "flagged_by_audit": "20261022-153253"
+  },
+  {
    "evidence": "crates/eve-server/tests/it/quasar_cosmetics_sovereignty.rs:350-473 manually constructs StartedNotice and StoppedNotice in the test via set_domain_attributes and publishes them directly to quasar_gateway (plus calls standalone helper publish_tale_started_notice), asserting only normalized_type_name() / type_url suffix without any server-triggered tale lifecycle emission.",
    "flagged_by_audit": "20261022-091014",
    "id": "quasar:eveProto/generated/eve_public/tale/api/notices_pb2.pyj"
+  },
+  {
+   "id": "quasar:eveProto/generated/eve_public/user/license/api/notices_pb2.pyj",
+   "evidence": "crates/eve-server/tests/it/quasar_identity_complete.rs:172-226 \u2014 No server handler emits eve_public.user.license.api.ActivatedNotice; the test itself calls ctx.quasar_gateway.publish_notice with manually encoded bytes and asserts poll_notices returns it.",
+   "flagged_by_audit": "20261022-153253"
   },
   {
    "evidence": "AK balance is volatile process-global memory seeded with a constant 250; not persisted, not tied to LP store spending. Evidence: crates/eve-server/src/services/project_discovery.rs:209; test: test_project_discovery_tutorial_and_rewards (crates/eve-server/tests/it/rpc_discovery_seasons.rs:198) \u2014 asserts == 250 (the magic default) only; live: client:eve/client/script/ui/station/loyaltyPointStore/lpStoreSvc.pyj, projectdiscovery/client/baseservice.pyj; knowledge Expected behaviour: A new character's get_player_analysis_kredits returns 0; after N accepted post_classification calls it returns the earned sum; the value survives a DB save/reload (server restart); buying a Project Discovery LP-store offer priced in AK decrements it by the price and fails with an insufficient-AK UserError when short.",
@@ -909,6 +979,11 @@
    "evidence": "Wrong arg layout and return shape compared with live (no-arg account character list) Evidence: crates/eve-server/src/services/character_clones_implants.rs:28; test: test_phase_0_s4_split_shared_handlers_and_jump_clones (tests/it/character.rs:13) asserts no-arg call FAILS with CharacterNotSelected and arg call returns KeyVal; test_ch3_character_creation_and_starter_assets (character_creation_sheet.rs:16) asserts shipName/paperdollState of a full sheet; z1 is shape-only; live: crucible:src/eve-server/character/CharUnboundMgrService.cpp:100-107 ('called from petitioner when session.characterID is None', 'characterID, characterName'); client:eve/client/script/ui/shared/neocom/petitionWindow.pyj Expected behaviour: With an authenticated session and no character selected, charUnboundMgr.GetCharacterInfo() with no args returns one row per character on the account, each holding characterID and characterName. Characters owned by other accounts never appear, and the call never fails just because no character is selected.",
    "flagged_by_audit": "supervisor-20261022-F-weak-done",
    "id": "rpc:charUnboundMgr.GetCharacterInfo"
+  },
+  {
+   "id": "rpc:colonyResourcesMgr.GetMyCorporationSkyhooks",
+   "evidence": "crates/eve-server/src/services/sov_services.rs:25-33, 424-456 and crates/eve-server/tests/it/rpc_fw_insurgency_crimewatch.rs:77-94 \u2014 GetMyCorporationSkyhooks reads skyhook reagent simulation data from a volatile process-static SOV_RUNTIME (OnceLock<Mutex<SovRuntimeState>>) seeded directly by test helper set_skyhook_reagent_simulation rather than persisted WorldRepository state.",
+   "flagged_by_audit": "20261022-153253"
   },
   {
    "evidence": "Ignores the isAccepted/ownerID filter, which is the core of the query; the return shape probably differs from live Evidence: crates/eve-server/src/services/contracts_service.rs:1301; test: test_contract_proxy_and_insurance_rpcs (tests/it/rpc_market_contracts_bounty.rs:233) asserts pilot 2's bid auction appears in a List; no-arg call only; live: crucible:src/eve-server/contract/ContractUtils.cpp:205-260 (contracts/items/bids result layout); client:eve/client/script/ui/shared/neocom/contracts/contractPanels.pyj Expected behaviour: With pilot B bidding on auction A1 (still outstanding) and having won auction A2, GetMyBids(isAccepted=False) returns only A1 and GetMyBids(isAccepted=True) returns only A2. GetMyBids(..., ownerID=corpID) returns the corp's bids, and only for a caller holding the corp contract role. The result carries the contracts with their bids and items in the same layout as GetContractListForOwner.",
@@ -1231,6 +1306,11 @@
    "id": "rpc:fleetProxy.AddFleetFinderAdvert"
   },
   {
+   "id": "rpc:fwVictoryPointMgr.GetAllVictoryPointStates",
+   "evidence": "crates/eve-server/src/services/fw_services.rs:14-46, 422-462 and crates/eve-server/tests/it/rpc_fw_insurgency_crimewatch.rs:43-50, 96-143 \u2014 GetAllVictoryPointStates and GetLocalVictoryPointState read from a volatile process-static FW_RUNTIME map seeded in the test via with_fw_runtime, which is lost on server restart.",
+   "flagged_by_audit": "20261022-153253"
+  },
+  {
    "evidence": "fw_system_occupations is never populated in production (only tests insert it), so the fallback always runs. It treats every low-sec system (0<sec<0.45) as a warzone, with owner/occupier = first station's owner faction or Caldari. Low-sec systems outside FW regions report a fake occupation, and owner/occupier can't diverge. frontlineStatus is derived from contested% thresholds, but live frontline/command/rearguard is adjacency-based. Field names (ownerFactionID/occupierFactionID/frontlineStatus) may not match the client's occupationState attributes (e.g. occupierID/adjacencyState). Evidence: crates/eve-server/src/services/fw_services.rs:344; test: test_fw_warzone_solarsystem_states_and_queries (tests/it/rpc_sov_fw_warzone.rs:345, ~L430) \u2014 asserts a tuple with sysID and that element 1 exists; shape-only; live: client:eve/client/script/ui/services/fwWarzoneSvc.pyj:74-95 (per handler comment); knowledge Expected behaviour: In a FW warzone system, GetLocalOccupationState() returns (solarSystemID, state) where state's occupier is the faction that currently holds the system (from persistent occupation data, changing when the system flips) and adjacency is frontline/command/rearguard based on neighbouring enemy systems. In a low-sec system outside any warzone it returns (solarSystemID, None).",
    "flagged_by_audit": "supervisor-20261022-F-weak-done",
    "id": "rpc:fwWarzoneSolarsystem.GetLocalOccupationState"
@@ -1241,6 +1321,11 @@
    "id": "rpc:insuranceSvc.GetContractForShip"
   },
   {
+   "id": "rpc:insurgencySolarsystem.GetAllVisibleCampaigns",
+   "evidence": "crates/eve-server/src/services/insurgency_services.rs:14-45, 304-368 and crates/eve-server/tests/it/rpc_fw_insurgency_crimewatch.rs:52-75, 145-190 \u2014 GetAllVisibleCampaigns and GetLocalCampaignClientSnapshot read from a volatile process-static INSURGENCY_RUNTIME map seeded in the test via with_insurgency_runtime rather than persisted WorldRepository state.",
+   "flagged_by_audit": "20261022-153253"
+  },
+  {
    "evidence": "Wrong domain: returns personal industry/contract-locked items instead of corp vote-locked items at the location. Evidence: crates/eve-server/src/services/fitting_containers_ships.rs:972; test: test_jetcan_wreck_sma_fleet_hangar_and_asset_safety (tests/it/inventory_ships_fitting_complete.rs:490) \u2014 result discarded (`let _ =`), no assertion; live: client:eve/client/script/ui/services/corporation/itemLocking.pyj ; knowledge (corp lock/unlock item votes) Expected behaviour: After a corp 'lock item' vote passes for a corp-owned blueprint in an office at station S, GetItemsByLocation(S) for a corp member returns that item (itemID, typeID, locationID); after an unlock vote it is absent; personally-owned items locked by industry jobs are not returned.",
    "flagged_by_audit": "supervisor-20261022-F-weak-done",
    "id": "rpc:itemLocking.GetItemsByLocation"
@@ -1249,6 +1334,16 @@
    "evidence": "Authority hole (offerer can accept own offer) and wrong skill for clone cap. Evidence: crates/eve-server/src/services/fitting_scanners_superweapons.rs:917; test: test_analyzers_cargo_ship_scanners_entosis_and_clone_vat_bay (tests/it/modules_scanners_mutaplasmids_dbuffs.rs:559) \u2014 offerer 90000001 offers to 90000002 then the OFFERER's session accepts and gets the clone (test enshrines the bug); live: crucible:src/eve-server/station/JumpCloneService.cpp (stub) ; knowledge (Clone Vat Bay installs clones for other pilots; cap = Infomorph Psychology levels) Expected behaviour: Only the character named as target in a pending offer can accept; the offering pilot calling Accept gets NoCloneOfferFound. Accept fails with JumpCloneLimitReached when jump_clones count >= Infomorph Psychology(24242)+Advanced Infomorph Psychology(33407) levels; Infomorph Synchronizing(33399) has no effect on the cap.",
    "flagged_by_audit": "supervisor-20261022-F-weak-done",
    "id": "rpc:jumpCloneSvc.AcceptShipCloneInstallation"
+  },
+  {
+   "id": "rpc:killRightMgr.ActivateKillRight",
+   "evidence": "crates/eve-server/src/services/crimewatch_timers.rs:429-467 and crates/eve-server/src/services/combat_crimewatch.rs:79, 87-90, 105-114 \u2014 ActivateKillRight stores kill_right_expires_unix in volatile COMBAT_RUNTIME (not persisted in KillRightRecord/SQLite across restarts) and always applies a global 15-minute suspect flag on the target rather than creating a Limited Engagement when activated privately.",
+   "flagged_by_audit": "20261022-153253"
+  },
+  {
+   "id": "rpc:killRightMgr.BuyKillRight",
+   "evidence": "crates/eve-server/src/services/crimewatch_timers.rs:469-515 \u2014 BuyKillRight immediately activates the kill right and sets a volatile 15-minute suspect flag on the target in COMBAT_RUNTIME, instead of transferring/activating the kill right per EVE mechanics and persisting the activation state in SQLite.",
+   "flagged_by_audit": "20261022-153253"
   },
   {
    "evidence": "Argument semantics wrong: listID treated as messageID. Evidence: crates/eve-server/src/services/fleet_social_mail.rs:403; test: test_mailmgr_read_states_and_trash (tests/it/rpc_user_mail_trade.rs:671) (:777) and test_mail_management_read_labels_trash_and_iteration (tests/it/notify_mail_emission.rs:477) (:526) \u2014 both pass a LIST OF MESSAGE IDs, not a listID; live: crucible:MailMgrService.cpp:262 (MarkAsReadByList(PyInt* listID)) Expected behaviour: With mails m1,m2 delivered to the caller via mailing list L and m3 sent directly, MarkAsReadByList(L) marks m1 and m2 read and leaves m3 unread; an unknown listID changes nothing.",
@@ -1354,6 +1449,11 @@
    "evidence": "Result depends on session region and is truncated; live is universe-wide Evidence: crates/eve-server/src/services/client_login.rs:431; test: test_rpc_map_svc_part2_batch (tests/it/rpc_core_services_batch.rs:1191, assert :1348) \u2014 asserts Rowset has stationID column and is non-empty (shape-only); live: knowledge; client:eve/client/script/ui/shared/maps/mapSvc.pyj (per catalog) Expected behaviour: GetStationInfo() returns one row per NPC station in the whole SDE (count == sde.stations.len()), whatever the caller's region or docked state. Each row carries stationID, solarSystemID, constellationID, regionID, stationTypeID, ownerID.",
    "flagged_by_audit": "supervisor-20261022-F-weak-done",
    "id": "rpc:map.GetStationInfo"
+  },
+  {
+   "id": "rpc:monolithTaskTrackerMgr.HasEverWarped",
+   "evidence": "crates/eve-server/src/services/cosmetics_ui_ops.rs:344-358, 541-574 and crates/eve-server/tests/it/rpc_milestones_telemetry_load.rs:45-62 \u2014 HasEverWarped reads characters_warped from snap.owner_notes (which is not loaded from SQLite on server startup in crates/eve-db/src/sqlite_store/load.rs), and the test directly injects ext.characters_warped.push(char_id) via save_cosmetics_ui_state instead of warping.",
+   "flagged_by_audit": "20261022-153253"
   },
   {
    "evidence": "Corp-admin write without role check; no notification; no state validation Evidence: crates/eve-server/src/services/mining_advanced.rs:521; test: test_mn13_moon_extraction_lifecycle_and_fracture (tests/it/mining_advanced.rs:116, :257-267) asserts returns True and status=='Cancelled' (behavioural); live: knowledge (moon drill scheduling needs Station Manager role; MoonminingExtractionCancelled notification); client:eve/client/script/ui/moonmining/schedulingSvc.pyj Expected behaviour: A corp member without the Station Manager role calling CancelExtraction(structureID) gets a permission UserError and the extraction stays Started. With the role, an active extraction becomes Cancelled, and corp members with structure roles receive a MoonminingExtractionCancelled notification carrying structureID/moonID/cancelledBy. Cancelling when there is no Started extraction raises an error.",
