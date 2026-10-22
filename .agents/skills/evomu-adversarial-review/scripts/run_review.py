@@ -374,7 +374,14 @@ def _launch_one(first_cmd, root, sdir, run_dir, tree_before, ts, valid_verdicts,
             if rnd == 1:
                 run_cmd = first_cmd
             else:
-                run_cmd = [cli_name, "-p", CONTINUE_PROMPT, "--conversation", conv] + base_flags
+                # Resumed rounds may have lost the first prompt (session restart or denied action): restate where
+                # the evidence lives so the reviewer never has to guess paths (review 20261021-165850 failed that way).
+                cont = CONTINUE_PROMPT + (
+                    " Your evidence is in the context directory %s (claims.md, diff.patch, tests.txt, parity.json and "
+                    "the rest); the repository under review is %s. Read files only with file-reading/search tools: do "
+                    "NOT run shell commands (they are denied in headless mode). If you lost the reviewer brief, re-read "
+                    "prompt.md (claims review) or gap_prompt.md (gap audit) in %s." % (os.path.join(run_dir, "context"), root, run_dir))
+                run_cmd = [cli_name, "-p", cont, "--conversation", conv] + base_flags
                 print("[review] %sround %d: resuming conversation %s" % (prefix, rnd, conv))
             p = subprocess.run(run_cmd, cwd=root, capture_output=True, text=True, env=reviewer_env)
             write(os.path.join(run_dir, "%s%s_stdout_r%d.json" % (prefix, cli_name, rnd)), p.stdout)
