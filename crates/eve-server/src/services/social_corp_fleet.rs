@@ -8,7 +8,6 @@ use eve_db::{corp_roles, AllianceRecord, CorpProjectRecord, FleetRecord, Invento
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{LazyLock, Mutex};
 
 #[path = "social_wars.rs"]
@@ -34,7 +33,6 @@ struct AllianceWarState {
     project_meta: HashMap<i64, (String, bool, bool)>,
 }
 
-static NEXT_ALLIANCE_ID: AtomicI64 = AtomicI64::new(99_000_000);
 static ALLIANCE_WAR_STATE: LazyLock<Mutex<AllianceWarState>> =
     LazyLock::new(|| Mutex::new(AllianceWarState::default()));
 
@@ -216,10 +214,12 @@ pub async fn handle(
                 } else {
                     return Err(BridgeRpcError { code: "InsufficientFunds".into(), message: "Creating an alliance requires 1,000,000,000 ISK in the corporation master wallet".into() });
                 }
-                snap.next_entity_id += 1;
-                let aid = NEXT_ALLIANCE_ID.fetch_add(1, Ordering::Relaxed) + 1;
-                corp.alliance_id = Some(aid);
                 let members_snapshot: Vec<i64> = corp.members.iter().copied().collect();
+                snap.next_entity_id += 1;
+                let aid = snap.allocate_alliance_id();
+                if let Some(corp) = snap.corporations.get_mut(&corp_id) {
+                    corp.alliance_id = Some(aid);
+                }
                 for mid in members_snapshot {
                     if let Some(ch) = snap.characters.get_mut(&mid) {
                         ch.alliance_id = Some(aid);

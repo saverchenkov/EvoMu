@@ -1199,6 +1199,7 @@ pub fn sync_dirty_to_sqlite(
 
     cold_changed |= super::sync_ext::sync_extension_tables(tx, snap, fp)?;
     cold_changed |= super::ledger_store::sync_ledger(tx, snap, fp)?;
+    cold_changed |= super::d6_store::sync_d6(tx, snap, fp)?;
 
     if need_wal_delta && cold_changed {
         delta.full_snapshot = Some(snap.clone());
@@ -1259,7 +1260,10 @@ pub fn replace_sqlite_from_snapshot(
          DELETE FROM character_doll_info;
          DELETE FROM wallet_journal_meta;
          DELETE FROM market_transactions;
-         DELETE FROM account_plex_vault;",
+         DELETE FROM account_plex_vault;
+         DELETE FROM owner_notes;
+         DELETE FROM corp_lp_balances;
+         DELETE FROM char_lp_logs;",
     )
     .map_err(|e| e.to_string())?;
     let mut fp = TableFingerprints::default();

@@ -28,5 +28,8 @@ pub use accounts::{base64url_decode_no_pad, base64url_encode_no_pad};
 pub use clock::{ServerClock, VirtualServerClock};
 pub use ledger::{JournalEntryInput, JournalMeta};
 pub use persistence::WorldRepository;
-pub use snapshot_ext::{CorpVoteBallotRecord, CorpVoteCaseRecord, StarbaseDetailSettings};
+pub use snapshot_ext::{
+    reset_ephemeral_id_seeds_for_restart_test, CorpVoteBallotRecord, CorpVoteCaseRecord,
+    LpRewardLogEntry, StarbaseDetailSettings,
+};
 pub use types::*;

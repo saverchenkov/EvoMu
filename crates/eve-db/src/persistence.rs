@@ -85,6 +85,12 @@ impl WorldStateWalDelta {
             && old.wallet_journal_meta == new.wallet_journal_meta
             && old.market_transactions == new.market_transactions
             && old.account_plex_vault == new.account_plex_vault
+            && old.corp_lp_balances == new.corp_lp_balances
+            && old.char_lp_logs == new.char_lp_logs
+            && old.next_alliance_id == new.next_alliance_id
+            && old.next_corporation_id == new.next_corporation_id
+            && old.next_notification_id == new.next_notification_id
+            && old.next_report_id == new.next_report_id
             && new.wallet_journal.len() >= old.wallet_journal.len()
             && new.wallet_journal[..old.wallet_journal.len()] == old.wallet_journal[..]
             && old
@@ -623,6 +629,7 @@ impl WorldRepository {
                 .store(valid_count, std::sync::atomic::Ordering::SeqCst);
         }
         snap.fold_legacy_plex_balances();
+        snap.reconcile_id_counters();
         *fp = sqlite_store::replace_sqlite_from_snapshot(&mut conn, &snap)?;
         *guard = snap;
         Ok(())

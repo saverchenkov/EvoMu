@@ -7,9 +7,6 @@ use crate::router::context::ServerContext;
 use eve_machonet::{MachoAddress, MachoPacket, MachoPacketType};
 use eve_proto::{marshal, PyRep};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicI64, Ordering};
-
-static NEXT_NOTIFICATION_ID: AtomicI64 = AtomicI64::new(500_001);
 
 /// Standard IEEE 802.3 CRC-32 (`0xEDB8_8320`) matching `CRC32::Generate` in `CachedObjectMgr.cpp:238`.
 pub fn crc32_ieee(bytes: &[u8]) -> i32 {
@@ -903,7 +900,17 @@ impl ServerContext {
         group_id: i32,
         data: &str,
     ) -> NotificationRecord {
-        let notification_id = NEXT_NOTIFICATION_ID.fetch_add(1, Ordering::Relaxed);
+        let max_in_mem = self
+            .notification_records
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .map(|r| r.notification_id)
+            .max()
+            .unwrap_or(0);
+        let notification_id = self
+            .db
+            .with_mut_snapshot(|snap| snap.allocate_notification_id_above(max_in_mem));
         let created = self.now_blueos_filetime_ticks();
         let rec = NotificationRecord {
             notification_id,

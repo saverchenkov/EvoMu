@@ -8,7 +8,6 @@
 #![forbid(unsafe_code)]
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::LazyLock;
 use std::sync::Mutex;
 
@@ -17,8 +16,6 @@ use eve_proto::{BridgeRpcError, PyRep};
 use serde::{Deserialize, Serialize};
 
 use crate::router::context::ServerContext;
-
-static NEXT_REPORT_ID: AtomicI64 = AtomicI64::new(700_001);
 
 /// In-game report incident record.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -36,12 +33,27 @@ pub struct InGameReportRecord {
 pub static IN_GAME_REPORTS: LazyLock<Mutex<HashMap<i64, InGameReportRecord>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// Returns a clone of all recorded in-game reports.
+/// Returns a clone of all recorded in-game reports from the in-memory store.
 pub fn get_all_reports() -> Vec<InGameReportRecord> {
     let g = IN_GAME_REPORTS.lock().unwrap();
     let mut list: Vec<InGameReportRecord> = g.values().cloned().collect();
     list.sort_by_key(|r| r.report_id);
     list
+}
+
+/// Returns all persisted in-game reports from `ctx.db` (`owner_notes` under character `-78`),
+/// sorted by `report_id`.
+pub fn get_persisted_reports(ctx: &ServerContext) -> Vec<InGameReportRecord> {
+    ctx.db.with_snapshot(|snap| {
+        let mut list: Vec<InGameReportRecord> = snap
+            .owner_notes
+            .values()
+            .filter(|n| n.character_id == -78)
+            .filter_map(|n| serde_json::from_str::<InGameReportRecord>(&n.note).ok())
+            .collect();
+        list.sort_by_key(|r| r.report_id);
+        list
+    })
 }
 
 /// Clears all recorded in-game reports (test helper).
@@ -120,35 +132,41 @@ fn submit_report(
         .unwrap_or("")
         .to_string();
 
-    let report_id = NEXT_REPORT_ID.fetch_add(1, Ordering::Relaxed);
     let now = ctx.now_unix();
+    let record = ctx.db.with_mut_snapshot(|snap| {
+        let report_id = snap.allocate_report_id();
+        let rec = InGameReportRecord {
+            report_id,
+            reporter_char_id: char_id,
+            reporter_corp_id: corp_id,
+            reported_entity_id: reported_id,
+            category: category.to_string(),
+            reason,
+            details,
+            created_at: now,
+        };
+        if let Ok(serialized) = serde_json::to_string(&rec) {
+            let nid = 780_000_000 + report_id;
+            snap.owner_notes.insert(
+                nid,
+                eve_db::OwnerNoteRecord {
+                    note_id: nid,
+                    character_id: -78,
+                    item_id: reported_id,
+                    label: format!("report:{category}:{report_id}"),
+                    note: serialized,
+                    timestamp_unix: now,
+                },
+            );
+        }
+        rec
+    });
 
-    let record = InGameReportRecord {
-        report_id,
-        reporter_char_id: char_id,
-        reporter_corp_id: corp_id,
-        reported_entity_id: reported_id,
-        category: category.to_string(),
-        reason,
-        details,
-        created_at: now,
-    };
-
-    IN_GAME_REPORTS.lock().unwrap().insert(report_id, record.clone());
-
-    // Also persist in DB owner notes under character -78 for durability
-    if let Ok(serialized) = serde_json::to_string(&record) {
-        let nid = 780_000_000 + report_id;
-        ctx.db.with_mut_snapshot(|snap| {
-            snap.owner_notes.insert(nid, eve_db::OwnerNoteRecord {
-                note_id: nid,
-                character_id: -78,
-                item_id: reported_id,
-                label: format!("report:{category}:{report_id}"),
-                note: serialized,
-                timestamp_unix: now,
-            });
-        });
+    if ctx.db.sqlite_path().is_none() {
+        IN_GAME_REPORTS
+            .lock()
+            .unwrap()
+            .insert(record.report_id, record);
     }
 
     Ok(PyRep::None)

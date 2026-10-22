@@ -719,6 +719,27 @@ pub struct WorldStateSnapshot {
     pub corp_vote_ballots: HashMap<(i64, i64), CorpVoteBallotRecord>,
     #[serde(default)]
     pub orbital_provision_types: HashMap<i64, i64>,
+    #[serde(default, with = "tuple_map_serde")]
+    pub corp_lp_balances: HashMap<(i64, i64), i64>,
+    #[serde(default)]
+    pub char_lp_logs: HashMap<i64, Vec<LpRewardLogEntry>>,
+    #[serde(default)]
+    pub next_alliance_id: i64,
+    #[serde(default)]
+    pub next_corporation_id: i64,
+    #[serde(default)]
+    pub next_notification_id: i64,
+    #[serde(default)]
+    pub next_report_id: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LpRewardLogEntry {
+    pub log_id: i64,
+    pub corp_id: i64,
+    pub amount: i64,
+    pub reason: String,
+    pub timestamp_unix: u64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1106,6 +1127,127 @@ impl WorldStateSnapshot {
         }
         true
     }
+
+    /// Allocates a strictly monotonic alliance ID persisted in `self.next_alliance_id` and `world_meta`,
+    /// guaranteed strictly greater than any existing alliance in `self.alliances` (`feat:invariant.ids-monotonic-across-restart`).
+    pub fn allocate_alliance_id(&mut self) -> i64 {
+        self.next_entity_id += 1;
+        if self.next_alliance_id < 99_000_000 {
+            let seed_offset =
+                NEXT_ALLIANCE_WORLD_SEED.fetch_add(1_000, std::sync::atomic::Ordering::Relaxed);
+            self.next_alliance_id = 99_000_000 + seed_offset;
+        }
+        let max_existing = self.alliances.keys().copied().max().unwrap_or(99_000_000);
+        let next = self.next_alliance_id.max(max_existing) + 1;
+        self.next_alliance_id = next;
+        next
+    }
+
+    /// Allocates a strictly monotonic corporation ID persisted in `self.next_corporation_id` and `world_meta`,
+    /// guaranteed strictly greater than any existing corporation in `self.corporations` (`feat:invariant.ids-monotonic-across-restart`).
+    pub fn allocate_corporation_id(&mut self) -> i64 {
+        self.next_entity_id += 1;
+        if self.next_corporation_id < 98_000_000 {
+            let seed_offset =
+                NEXT_CORP_WORLD_SEED.fetch_add(10_000, std::sync::atomic::Ordering::Relaxed);
+            self.next_corporation_id = 98_000_000 + self.next_entity_id + seed_offset;
+        }
+        let max_existing = self.corporations.keys().copied().max().unwrap_or(98_000_000);
+        let next = self
+            .next_corporation_id
+            .max(98_000_000 + self.next_entity_id)
+            .max(max_existing)
+            + 1;
+        self.next_corporation_id = next;
+        next
+    }
+
+    /// Allocates a strictly monotonic notification ID persisted in `self.next_notification_id` and `world_meta`.
+    pub fn allocate_notification_id(&mut self) -> i64 {
+        self.allocate_notification_id_above(500_000)
+    }
+
+    /// Allocates a strictly monotonic notification ID above `floor` persisted in `self.next_notification_id` and `world_meta`.
+    pub fn allocate_notification_id_above(&mut self, floor: i64) -> i64 {
+        self.next_entity_id += 1;
+        let next = self.next_notification_id.max(500_000).max(floor) + 1;
+        self.next_notification_id = next;
+        next
+    }
+
+    /// Allocates a strictly monotonic in-game report ID persisted in `self.next_report_id` and `world_meta`,
+    /// guaranteed strictly greater than any existing report in `self.owner_notes`.
+    pub fn allocate_report_id(&mut self) -> i64 {
+        self.next_entity_id += 1;
+        let max_existing = self
+            .owner_notes
+            .values()
+            .filter(|n| n.character_id == -78 && n.note_id > 780_000_000)
+            .map(|n| n.note_id - 780_000_000)
+            .max()
+            .unwrap_or(700_000);
+        let next = self.next_report_id.max(700_000).max(max_existing) + 1;
+        self.next_report_id = next;
+        next
+    }
+
+    /// Reconciles all ID counters on load so every counter is at least the maximum ID present across
+    /// all persisted entity tables (`feat:invariant.ids-monotonic-across-restart`).
+    pub fn reconcile_id_counters(&mut self) {
+        let max_entity = self
+            .characters
+            .keys()
+            .copied()
+            .chain(self.items.keys().copied())
+            .chain(self.saved_fittings.keys().copied())
+            .chain(self.market_orders.keys().copied())
+            .chain(self.wallet_journal.iter().map(|e| e.entry_id))
+            .chain(self.contracts.keys().copied())
+            .chain(self.industry_jobs.keys().copied())
+            .chain(self.bookmarks.keys().copied())
+            .chain(self.mails.iter().map(|m| m.message_id))
+            .chain(self.fleets.keys().copied())
+            .chain(self.wars.keys().copied())
+            .chain(self.corp_projects.keys().copied())
+            .chain(self.killmails.keys().copied())
+            .chain(self.kill_rights.keys().copied())
+            .chain(self.market_transactions.iter().map(|t| t.transaction_id))
+            .chain(self.char_lp_logs.values().flatten().map(|l| l.log_id))
+            .filter(|&id| id > 0 && id < 900_000_000)
+            .max()
+            .unwrap_or(200_000_000);
+        self.next_entity_id = self.next_entity_id.max(200_000_000).max(max_entity);
+
+        if let Some(max_aid) = self.alliances.keys().copied().max() {
+            self.next_alliance_id = self.next_alliance_id.max(99_000_000).max(max_aid);
+        }
+        if let Some(max_cid) = self.corporations.keys().copied().max() {
+            if max_cid > 98_000_000 {
+                self.next_corporation_id = self.next_corporation_id.max(max_cid);
+            }
+        }
+        if let Some(max_rid) = self
+            .owner_notes
+            .values()
+            .filter(|n| n.character_id == -78 && n.note_id > 780_000_000)
+            .map(|n| n.note_id - 780_000_000)
+            .max()
+        {
+            self.next_report_id = self.next_report_id.max(700_000).max(max_rid);
+        }
+    }
+}
+
+static NEXT_ALLIANCE_WORLD_SEED: std::sync::atomic::AtomicI64 =
+    std::sync::atomic::AtomicI64::new(0);
+static NEXT_CORP_WORLD_SEED: std::sync::atomic::AtomicI64 =
+    std::sync::atomic::AtomicI64::new(100_000);
+
+/// Resets ephemeral in-memory world seed offsets to their cold-boot initial values so restart tests
+/// verify that ID monotonicity comes strictly from persisted SQLite state.
+pub fn reset_ephemeral_id_seeds_for_restart_test() {
+    NEXT_ALLIANCE_WORLD_SEED.store(0, std::sync::atomic::Ordering::SeqCst);
+    NEXT_CORP_WORLD_SEED.store(100_000, std::sync::atomic::Ordering::SeqCst);
 }
 
 /// Converts a unix timestamp in seconds to an ISO date string "YYYY-MM-DD".

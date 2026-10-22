@@ -11,10 +11,12 @@
 // parity: plan:E-5, plan:E-6
 // parity: feat:lp.lp-balance, feat:lp.lp-store-offers, feat:lp.lp-store-buy
 // parity: feat:lp.lp-corp-wallet, feat:lp.concord-lp, feat:lp.lp-reward-logs, feat:wallet.evermarks
+// parity: feat:lifecycle.lp-durable
 
 #![forbid(unsafe_code)]
 
 use crate::router::ServerContext;
+pub use eve_db::LpRewardLogEntry;
 use eve_db::{InventoryFlag, InventoryItemRecord, IskCents};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
@@ -35,24 +37,11 @@ pub struct LPOffer {
     pub req_items: Vec<(TypeId, i32)>,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct LpRewardLogEntry {
-    pub log_id: i64,
-    pub corp_id: i64,
-    pub amount: i64,
-    pub reason: String,
-    pub timestamp_unix: u64,
-}
-
-fn corp_lp_note_id(corp_id: i64) -> i64 {
-    -(4_000_000_000_000_i64.saturating_add(corp_id.abs()))
-}
-
 pub fn load_corp_lp_balances(snap: &eve_db::WorldStateSnapshot, corp_id: i64) -> HashMap<i64, i64> {
-    snap.owner_notes
-        .get(&corp_lp_note_id(corp_id))
-        .and_then(|n| serde_json::from_str::<HashMap<i64, i64>>(&n.note).ok())
-        .unwrap_or_default()
+    snap.corp_lp_balances
+        .iter()
+        .filter_map(|(&(cid, issuer_id), &lp)| (cid == corp_id).then_some((issuer_id, lp)))
+        .collect()
 }
 
 pub fn save_corp_lp_balances(
@@ -60,24 +49,10 @@ pub fn save_corp_lp_balances(
     corp_id: i64,
     balances: &HashMap<i64, i64>,
 ) {
-    let nid = corp_lp_note_id(corp_id);
-    if let Ok(js) = serde_json::to_string(balances) {
-        snap.owner_notes.insert(
-            nid,
-            eve_db::OwnerNoteRecord {
-                note_id: nid,
-                character_id: -4,
-                item_id: corp_id,
-                label: format!("corp_lp:{corp_id}"),
-                note: js,
-                timestamp_unix: 0,
-            },
-        );
+    snap.corp_lp_balances.retain(|&(cid, _), _| cid != corp_id);
+    for (&issuer_id, &lp) in balances {
+        snap.corp_lp_balances.insert((corp_id, issuer_id), lp);
     }
-}
-
-fn lp_reward_log_note_id(char_id: i64) -> i64 {
-    -(4_100_000_000_000_i64.saturating_add(char_id.abs()))
 }
 
 pub fn record_lp_reward_log(
@@ -88,33 +63,18 @@ pub fn record_lp_reward_log(
     reason: String,
     timestamp_unix: u64,
 ) {
-    let nid = lp_reward_log_note_id(char_id);
-    let mut logs: Vec<LpRewardLogEntry> = snap
-        .owner_notes
-        .get(&nid)
-        .and_then(|n| serde_json::from_str(&n.note).ok())
-        .unwrap_or_default();
     snap.next_entity_id += 1;
-    logs.push(LpRewardLogEntry {
-        log_id: snap.next_entity_id,
-        corp_id,
-        amount,
-        reason,
-        timestamp_unix,
-    });
-    if let Ok(js) = serde_json::to_string(&logs) {
-        snap.owner_notes.insert(
-            nid,
-            eve_db::OwnerNoteRecord {
-                note_id: nid,
-                character_id: -4,
-                item_id: char_id,
-                label: format!("lp_logs:{char_id}"),
-                note: js,
-                timestamp_unix,
-            },
-        );
-    }
+    let log_id = snap.next_entity_id;
+    snap.char_lp_logs
+        .entry(char_id)
+        .or_default()
+        .push(LpRewardLogEntry {
+            log_id,
+            corp_id,
+            amount,
+            reason,
+            timestamp_unix,
+        });
 }
 
 /// DERIVED (OF-36): Live EVE V24 client SDE (`fsdbinary` / `sqlite`) does not ship NPC corporation LP store offer tables;
@@ -900,11 +860,10 @@ pub fn handle(
                 Err(e) => return Some(Err(e)),
             };
             let logs = ctx.db.with_snapshot(|snap| {
-                let nid = lp_reward_log_note_id(char_id);
                 let entries: Vec<LpRewardLogEntry> = snap
-                    .owner_notes
-                    .get(&nid)
-                    .and_then(|n| serde_json::from_str(&n.note).ok())
+                    .char_lp_logs
+                    .get(&char_id)
+                    .cloned()
                     .unwrap_or_default();
                 entries
                     .into_iter()

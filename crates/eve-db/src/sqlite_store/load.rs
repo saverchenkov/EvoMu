@@ -746,8 +746,10 @@ pub fn load_snapshot_from_sqlite(
     }
 
     super::ledger_store::load_ledger(conn, &mut snap);
+    super::d6_store::load_d6(conn, &mut snap);
     let fp = compute_fingerprints(&snap);
     // Migration after fingerprinting so the folded vault/characters are persisted on next sync.
     snap.fold_legacy_plex_balances();
+    snap.reconcile_id_counters();
     Ok((snap, fp))
 }
