@@ -237,6 +237,27 @@ pub(super) fn handle_corps(
             ])))
         }
 
+        ("corpmgr", "allianceID")
+        | ("corpmgr", "ceoID")
+        | ("corpmgr", "corporationID")
+        | ("corpmgr", "stationID") => {
+            let corp_id = args.first().and_then(|a| a.as_i64()).or(session.corporation_id).unwrap_or(1_000_009);
+            let info = ctx.db.with_snapshot(|snap| {
+                snap.corporations.get(&corp_id).map(|c| (c.corporation_id, c.ceo_id, c.alliance_id, c.hq_station_id.unwrap_or(60_003_760)))
+            }).or_else(|| {
+                ctx.sde.npc_corporations.get(&corp_id).map(|c| (c.corporation_id, 0i64, None, c.station_id.unwrap_or(60_003_760)))
+            });
+            let (cid, ceo, aid, st) = info.unwrap_or((corp_id, 0, None, 60_003_760));
+            let rep = match method {
+                "allianceID" => aid.map(PyRep::Integer).unwrap_or(PyRep::None),
+                "ceoID" => PyRep::Integer(ceo),
+                "corporationID" => PyRep::Integer(cid),
+                "stationID" => PyRep::Integer(st),
+                _ => PyRep::None,
+            };
+            Some(Ok(rep))
+        }
+
         ("corpmgr", "GetCorporationIDForCharacter") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,

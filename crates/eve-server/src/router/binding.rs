@@ -130,7 +130,7 @@ impl ServerContext {
                     || object_id == 0
             }
             "agentMgr" | "keeper" | "planetMgr" | "posMgr" | "fleetObjectHandler"
-            | "corpRegistry" | "allianceRegistry" | "warRegistry" | "warStatisticMgr"
+            | "corpRegistry" | "corpmgr" | "allianceRegistry" | "warRegistry" | "warStatisticMgr"
             | "trademgr" | "voucher" => object_id > 0,
             _ => false,
         };
