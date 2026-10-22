@@ -1094,7 +1094,7 @@ mod tests {
 
     #[test]
     fn test_real_sde_sqlite_open_and_counts() {
-        // parity: plan:D-2, plan:S-11, plan:S-1, feat:serverops.static-data, sde:res:/staticdata/types.fsdbinary
+        // parity: plan:D-2, plan:S-11, feat:serverops.static-data, sde:res:/staticdata/types.fsdbinary
         // 1. Missing database path must fail clearly with SdeError::MissingDatabase (D-2)
         let missing = SdeRegistry::open("/tmp/nonexistent_evomu_sde_db_999999.sqlite");
         assert!(
@@ -1326,7 +1326,6 @@ mod tests {
         eve_testkit::attest(&[
             "plan:D-2",
             "plan:S-11",
-            "plan:S-1",
             "feat:serverops.static-data",
             "sde:res:/staticdata/types.fsdbinary",
         ]);

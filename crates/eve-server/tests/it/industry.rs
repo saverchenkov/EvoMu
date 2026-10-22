@@ -43,6 +43,10 @@ async fn test_phase_0_s1_reprocessing_sde_materials_and_remainders() {
 
     // 1. Non-reprocessable items (Tritanium 100_000_011 type 34, and Rifter Blueprint 100_000_007 type 691)
     // must return ItemNotReprocessable and remain untouched.
+    assert!(
+        ctx.sde.type_materials.get(&34).is_none(),
+        "Tritanium (type 34) must not have SDE typeMaterials"
+    );
     let trit_err = ctx
         .dispatch_rpc(
             &mut sess,
@@ -142,6 +146,23 @@ async fn test_phase_0_s1_reprocessing_sde_materials_and_remainders() {
     let PyRep::KeyVal(veld_kv) = reproc_veld else {
         panic!("Expected KeyVal from Veldspar Reprocess");
     };
+    let sde_veldspar_mats = ctx.sde.type_materials.get(&1230).expect("Veldspar typeMaterials");
+    assert_eq!(sde_veldspar_mats.len(), 1);
+    assert_eq!(sde_veldspar_mats[0].material_type_id, 34);
+    assert_eq!(sde_veldspar_mats[0].quantity, 400);
+
+    let outputs = match veld_kv.get("outputs") {
+        Some(PyRep::List(l)) => l,
+        _ => panic!("Expected outputs list in Reprocess result"),
+    };
+    assert_eq!(outputs.len(), 1, "Veldspar must yield exactly 1 material type per SDE invTypeMaterials");
+    if let PyRep::KeyVal(mat_kv) = &outputs[0] {
+        assert_eq!(mat_kv.get("typeID").and_then(|v| v.as_i64()), Some(34));
+        assert_eq!(mat_kv.get("quantity").and_then(|v| v.as_i64()), Some(19_300));
+    } else {
+        panic!("Expected KeyVal in outputs[0]");
+    }
+
     assert_eq!(
         veld_kv.get("tritaniumQuantity").and_then(|v| v.as_i64()),
         Some(19_300),
