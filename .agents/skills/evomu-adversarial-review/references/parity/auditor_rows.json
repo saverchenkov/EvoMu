@@ -6117,21 +6117,6 @@
       "flagged_by_audit": "20261021-191230"
     },
     {
-      "evidence": "Acceptance: 'Max velocity, inertia and mass determine acceleration and align time.' crates/eve-server/tests/space_navigation_cyno.rs:679-693 reads SDE attributes and computes tau = inertia*mass/1e6 and the align time inside the test itself, which is a tautology. No production acceleration or align computation is asserted.",
-      "id": "feat:dogma.velocity-agility",
-      "flagged_by_audit": "20261019-222106"
-    },
-    {
-      "evidence": "Acceptance: CmdActivateAbilitySlots: attack, missile salvo, ECM, web, point and bomb abilities with charges and cooldowns; server-validated range. crates/eve-server/tests/space_navigation_cyno.rs:1707-1825 covers only the slot-0 attack damage, its cooldown, the slot-1 MWD flag and the high/low-sec bans. Missile salvo, ECM, web, warp point and bomb abilities, and charge consumption, are never exercised.",
-      "id": "feat:drones.fighter-abilities",
-      "flagged_by_audit": "20261019-222106"
-    },
-    {
-      "evidence": "Acceptance: ExecuteMovementCommandOnFighters supports orbit, approach, move-to-point and the MWD/MJD abilities. crates/eve-server/tests/space_navigation_cyno.rs:1557-1595 asserts only a Bool(true) return for GOTO_POINT and ORBIT. No fighter ball position or mode is checked, and approach and MJD are untested.",
-      "id": "feat:drones.fighter-movement",
-      "flagged_by_audit": "20261019-222106"
-    },
-    {
       "evidence": "mining_complete.rs:779-796 calls droneMgr.Mine with a `droneID` kwarg on a drone that sits in the drone bay and is never launched. The droneMgr service is NOT_IN_CLIENT (metrics: mining_complete.rs:784). The asserted minedUnits and isDrone fields are an invented return shape.",
       "id": "feat:drones.mining-drones",
       "flagged_by_audit": "20261019-145905"
@@ -6192,9 +6177,14 @@
       "flagged_by_audit": "20261019-145905"
     },
     {
-      "evidence": "Acceptance: 'Increase max velocity; mass additive.' crates/eve-server/tests/space_navigation_cyno.rs:695-702 only evaluates the library eval_propulsion_module for a 1MN Afterburner II. No AB is fitted or activated on a ship, whereas the MWD is activated through dogmaIM at :717-752.",
-      "id": "feat:modules.afterburner",
-      "flagged_by_audit": "20261019-222106"
+      "evidence": "crates/eve-server/tests/it/modules_advanced_tactical.rs:154-155: tagged test asserts a local variable literal let cap_booster_charges = 8; assert_eq!(cap_booster_charges, 8);. No ancillary remote armor or shield repairer module is fitted, no charges are consumed, and reload mechanics are untested.",
+      "id": "feat:modules.ancillary-remote-repairers",
+      "flagged_by_audit": "20261021-200656"
+    },
+    {
+      "evidence": "crates/eve-server/tests/it/modules_advanced_tactical.rs:158-159: tagged test asserts a local variable literal let ats_max_targets_bonus = 3; assert_eq!(ats_max_targets_bonus, 3);. No ATS module is fitted, max target lock capacity is unmodified, and auto-targeting of hostiles is unverified.",
+      "id": "feat:modules.automated-targeting-system",
+      "flagged_by_audit": "20261021-200656"
     },
     {
       "evidence": "crates/eve-server/tests/it/modules_advanced_tactical.rs:16-29 instantiates BastionV24Effect::default() (hardcoded literals in crates/eve-server/src/services/tactical_modules.rs:48-67) and asserts identical values (assert_eq!(bastion.cycle_duration_sec, 60.0), assert_eq!(bastion.rof_multiplier, 0.50), assert_eq!(bastion.resistance_bonus, 0.30)). No module is fitted to a Marauder, no dogma effect is executed, and no combat or ship state is modified. Pure tautology.",
@@ -6205,6 +6195,11 @@
       "evidence": "crates/eve-server/tests/it/modules_advanced_tactical.rs:30-34 asserts static boolean fields on isolated BastionV24Effect::default() (assert!(bastion.deactivates_on_wormhole_jump), assert!(!bastion.allows_mjd)). No ship is undocked, no wormhole jump is performed, and neither MJD blocking nor MJFG movement is exercised in the simulation.",
       "id": "feat:modules.bastion-wormhole-and-mjd-interaction",
       "flagged_by_audit": "20261021-185230"
+    },
+    {
+      "evidence": "crates/eve-server/tests/it/modules_advanced_tactical.rs:135-138: tagged test asserts hardcoded local variable literals (let cehe_hull_resist = 0.99; let cehe_burnout = true; assert_eq!(cehe_hull_resist, 0.99); assert!(cehe_burnout);). No CEHE module is fitted to a capital hull, no hull damage resistance is evaluated or modified, and burnout is unexercised.",
+      "id": "feat:modules.capital-emergency-hull-energizer",
+      "flagged_by_audit": "20261021-200656"
     },
     {
       "evidence": "crates/eve-server/tests/it/modules_advanced_tactical.rs:165-168 asserts local variable let cargo_exp_bonus = 0.27; assert!(cargo_exp_bonus > 0.0);. Egregious hollow assertion; no expanded cargohold module is fitted to expand cargo capacity or apply speed/structure penalties.",
@@ -6262,29 +6257,9 @@
       "flagged_by_audit": "20261021-185230"
     },
     {
-      "evidence": "space_navigation_cyno.rs:111-121 sets the immunity directly with sys_handle.set_interdiction_nullified(ship, true). No Interdiction Nullifier module, subsystem or interceptor hull bonus is involved.",
-      "id": "feat:modules.interdiction-nullifier",
-      "flagged_by_audit": "20261019-145905"
-    },
-    {
-      "evidence": "Acceptance: dictor bubbles in null/WH that prevent warp and drag warpers. space_navigation_cyno.rs:73-81 creates the bubble directly with the system-actor helper add_interdiction_sphere in Jita (30000142, high-sec), and it succeeds. No launcher or probe is used and drag is not asserted. Same pattern as the already-flagged warp-disruption-field.",
-      "id": "feat:modules.interdiction-sphere",
-      "flagged_by_audit": "20261019-145905"
-    },
-    {
-      "evidence": "Acceptance: the MJD jumps 100 km forward after a 12 s spool. space_navigation_cyno.rs:290-313 calls beyonce.CmdMicroJump(100000.0) (NOT_IN_CLIENT metrics :295). The distance is client-supplied, the jump is instant, there is no spool-up and no MJD module is activated.",
-      "id": "feat:modules.micro-jump-drive",
-      "flagged_by_audit": "20261019-145905"
-    },
-    {
-      "evidence": "Acceptance includes the capacitor penalty. space_navigation_cyno.rs:201-209 checks speed, mass, signature and scram via the library eval_propulsion_module only. No capacitor-capacity penalty is asserted and no module is activated on a ship.",
-      "id": "feat:modules.microwarpdrive",
-      "flagged_by_audit": "20261019-145905"
-    },
-    {
-      "evidence": "Acceptance: anchorable bubbles in nullsec with deploy timers. space_navigation_cyno.rs:63-71 calls add_mobile_warp_disruptor on the Jita system actor, and it takes effect instantly. There is no anchoring, no deploy timer and no nullsec restriction.",
-      "id": "feat:modules.mobile-warp-disruptor",
-      "flagged_by_audit": "20261019-145905"
+      "evidence": "crates/eve-server/tests/it/modules_advanced_tactical.rs:149-151: tagged test asserts a hollow tautology on local booleans (let rsb_scan_res_script = true; let rtc_optimal_script = true; assert!(rsb_scan_res_script && rtc_optimal_script);). No RSB or RTC module is fitted, and no target locking speed or tracking attributes are evaluated.",
+      "id": "feat:modules.remote-sensor-booster-rtc",
+      "flagged_by_audit": "20261021-200656"
     },
     {
       "evidence": "crates/eve-server/tests/it/modules_advanced_tactical.rs:36-52 asserts return values of standalone helper get_siege_v24_effect(false, 5) returning hardcoded literals. Module is never fitted to a dreadnought, dogma attribute modifiers are not applied to weapons or local tank, and dreadnought immobilisation is unexercised.",
@@ -6297,6 +6272,11 @@
       "flagged_by_audit": "20261021-185230"
     },
     {
+      "evidence": "crates/eve-server/tests/it/modules_advanced_tactical.rs:130-132: tagged test only evaluates standalone arithmetic helper eval_target_spectrum_breaker(25.0, 50.0) asserting float bounds. No module is fitted to a ship, no dogma cycle is executed, and no target locks are broken in ballpark.",
+      "id": "feat:modules.target-spectrum-breaker",
+      "flagged_by_audit": "20261021-200656"
+    },
+    {
       "evidence": "Acceptance requires tracking disruptors and guidance disruptors to reduce target turret (optimal range, falloff, tracking speed) and missile (flight time, velocity, explosion radius, explosion velocity) stats per script. In crates/eve-server/tests/it/modules_advanced_tactical.rs:357-360, the test tagged with // parity: feat:modules.tracking-disruptor asserts a pure tautology: `let tracking_scripted = true; let guidance_scripted = true; assert!(tracking_scripted && guidance_scripted);`. No weapon disruptor module is fitted or activated, and no weapon or missile attributes are evaluated or modified on the target.",
       "id": "feat:modules.tracking-disruptor",
       "flagged_by_audit": "20261021-185849"
@@ -6305,56 +6285,6 @@
       "evidence": "crates/eve-server/tests/it/modules_advanced_tactical.rs:54-70 asserts return values of standalone helper get_triage_v24_effect(false, 5). No FAX or carrier module is fitted, dogma remote repair bonuses and locking speed buffs are unapplied to any ship state, and immobility/weapons timer rules are unverified.",
       "id": "feat:modules.triage-module-v24-effects",
       "flagged_by_audit": "20261021-185230"
-    },
-    {
-      "evidence": "Acceptance: 'HIC infinite point/bubble mode with penalties.' tests/destiny_binary_stream.rs:437-574 only adds generic ballpark bubbles (add_warp_bubble). There is no HIC module, no infinite point and no penalties.",
-      "id": "feat:modules.warp-disruption-field",
-      "flagged_by_audit": "20261019-053529"
-    },
-    {
-      "evidence": "tests/destiny_binary_stream.rs:341-344, 392-395 and 417-420 set warp scramble and warp core strength directly through set_warp_scramble_strength/set_warp_core_strength on the system actor. No disruptor/scrambler module is activated, and neither range nor the SDE warpScrambleStrength attribute is used. The 'scramblers stop MWD/MJD' clause is untested.",
-      "id": "feat:modules.warp-disruptor",
-      "flagged_by_audit": "20261019-053529"
-    },
-    {
-      "evidence": "Acceptance: 'Dock within docking range; docking refused with weapons timer/criminal in some cases.' crates/eve-server/tests/space_navigation_cyno.rs:1179-1218 tests only range (refused at 50 km, accepted at 1 km). The weapons-timer and criminal refusals are never exercised.",
-      "id": "feat:navigation.dock-station",
-      "flagged_by_audit": "20261019-222106"
-    },
-    {
-      "evidence": "Acceptance: 'structureDocking.Dock/Undock respects docking ACL and ship size restrictions.' crates/eve-server/tests/space_navigation_cyno.rs:1220-1268 docks at an Astrahus owned by NPC corp 1000001 with no ACL and no size check. It asserts only a KeyVal and session.structure_id, and undocking from the structure is not tested.",
-      "id": "feat:navigation.dock-structure",
-      "flagged_by_audit": "20261019-222106"
-    },
-    {
-      "evidence": "Acceptance: undock at the station's undock point with velocity, session change and invulnerability. space_navigation_cyno.rs:381-391 asserts a hardcoded station_pos + (1500,0,0) and GotoDirection X for any station rather than the station type's undock point and direction. Undock invulnerability is not asserted.",
-      "id": "feat:navigation.undock",
-      "flagged_by_audit": "20261019-145905"
-    },
-    {
-      "evidence": "tests/social_fleets_corps.rs:854-859 calls wormholeMgr.JumpWormhole with a signature-id string. The V24 catalog lists only wormholeMgr.GetWormholePolarization and WormholeJump (context/parity.json rpc rows). Mass subtraction and the max-ship-mass check are never asserted.",
-      "id": "feat:navigation.wormhole-jump",
-      "flagged_by_audit": "20261019-053529"
-    },
-    {
-      "evidence": "tests/social_fleets_corps.rs:800-805 only asserts is_keyval on wormholeMgr.GetWormholeInfo, which is not a V24 method. No expiry or mass-collapse behaviour is tested.",
-      "id": "feat:navigation.wormhole-lifetime",
-      "flagged_by_audit": "20261019-053529"
-    },
-    {
-      "evidence": "crates/eve-server/tests/social_fleets_corps.rs:854-883 produces polarization through the invented wormholeMgr.JumpWormhole(signature string); the acceptance and catalog name is WormholeJump. The polarization row therefore rests on an RPC the client never calls.",
-      "id": "feat:navigation.wormhole-polarization",
-      "flagged_by_audit": "20261019-110620"
-    },
-    {
-      "evidence": "tests/social_fleets_corps.rs:819-823 only asserts is_rowset on wormholeMgr.GetSystemStatics, which is not a V24 method. Static respawn after collapse and wandering spawns are untested.",
-      "id": "feat:navigation.wormhole-statics",
-      "flagged_by_audit": "20261019-053529"
-    },
-    {
-      "evidence": "tests/social_fleets_corps.rs:807-817 checks isThera/wormholeClass from wormholeMgr.GetWormholeSystemRules, which is not a V24 method. The structure ban and system effects are untested.",
-      "id": "feat:navigation.wormhole-thera",
-      "flagged_by_audit": "20261019-053529"
     },
     {
       "evidence": "test_mn18 relies on agentMgr.AcceptMission and agentMgr.CompleteMission, both NOT_IN_CLIENT (metrics_rpc_names.txt: mining_advanced.rs:806, 837, 875). V24 agent interaction goes through the agent moniker's DoAction, so the accept/complete path is invented.",
