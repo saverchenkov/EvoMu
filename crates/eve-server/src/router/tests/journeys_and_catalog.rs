@@ -880,17 +880,6 @@ async fn test_all_18_e2e_journeys_and_catalog_coverage() {
     assert_ne!(session.ship_id, Some(100_000_001));
     assert!(ctx.db.get_item(100_000_001).is_none());
     let kr_id = cw_kv.get("killRightID").unwrap().as_i64().unwrap();
-    ctx.dispatch_rpc(
-        &mut sess2,
-        "killRightMgr",
-        None,
-        "ActivateKillRight",
-        &[PyRep::Integer(kr_id)],
-        &empty,
-        None,
-    )
-    .await
-    .unwrap();
 
     // CONCORD destroyed 100_000_001 and respawned 90_000_001 in a Capsule at 60_003_760;
     // board spare Rifter 100_000_029 in hangar, undock via RPC, and verify legal kill right engagement by sess2
@@ -927,6 +916,17 @@ async fn test_all_18_e2e_journeys_and_catalog_coverage() {
         Some(b29),
         "CmdStop",
         &[],
+        &empty,
+        None,
+    )
+    .await
+    .unwrap();
+    ctx.dispatch_rpc(
+        &mut sess2,
+        "killRightMgr",
+        None,
+        "ActivateKillRight",
+        &[PyRep::Integer(kr_id)],
         &empty,
         None,
     )

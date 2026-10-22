@@ -136,9 +136,13 @@ async fn test_fw_insurgency_and_security_mgr() {
     assert_eq!(camp_tuple[1].dict_get("corruptionStage"), Some(&PyRep::Integer(3)));
     assert_eq!(camp_tuple[1].dict_get("suppressionStage"), Some(&PyRep::Integer(1)));
 
-    // 3. securityMgr.get_modified_systems
+    // 3. securityMgr.get_modified_systems (both runtime modified security and Stage 5 lawless corruption)
+    let stage5_sys_id = 30_000_142u32;
     with_mut_combat_runtime(&ctx, |rt| {
         rt.modified_system_securities.insert(sys_id, 0.25);
+    });
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.system_states.entry(stage5_sys_id).or_default().insurgency_corruption_stage = 5;
     });
     let mod_sec = ctx
         .dispatch_rpc(&mut sess, "securityMgr", None, "get_modified_systems", &[], &kw, None)
@@ -148,6 +152,8 @@ async fn test_fw_insurgency_and_security_mgr() {
     let found_sec = sec_entries.iter().find(|(k, _)| k == &PyRep::Integer(sys_id as i64));
     assert!(found_sec.is_some(), "Modified system present in securityMgr response");
     assert_eq!(found_sec.unwrap().1, PyRep::Real(0.25));
+    let found_stage5 = sec_entries.iter().find(|(k, _)| k == &PyRep::Integer(stage5_sys_id as i64));
+    assert_eq!(found_stage5.map(|(_, v)| v), Some(&PyRep::Real(0.0)));
 }
 
 #[tokio::test]
@@ -207,6 +213,7 @@ async fn test_killrights_hacking_and_interference() {
     // 1. Setup Kill Rights
     let kr1_id = 70_001i64;
     let kr2_id = 70_002i64;
+    let kr_exp_id = 70_003i64;
     ctx.db.with_mut_snapshot(|snap| {
         snap.kill_rights.insert(
             kr1_id,
@@ -228,6 +235,16 @@ async fn test_killrights_hacking_and_interference() {
                 is_active_suspect: false,
             },
         );
+        snap.kill_rights.insert(
+            kr_exp_id,
+            eve_db::KillRightRecord {
+                kill_right_id: kr_exp_id,
+                owner_id: p1_char,
+                target_id: p2_char,
+                activation_fee: eve_db::IskCents(0),
+                is_active_suspect: false,
+            },
+        );
         if let Some(ch) = snap.characters.get_mut(&p3_char) {
             ch.balance = eve_db::IskCents(100_000_000_00);
         }
@@ -240,7 +257,48 @@ async fn test_killrights_hacking_and_interference() {
     assert!(unauth_act.is_err());
     assert_eq!(unauth_act.unwrap_err().code, "NotKillRightOwner");
 
-    // Owner activates kr1
+    // Negative: Cannot activate while docked
+    let docked_err = ctx
+        .dispatch_rpc(&mut sess1, "killRightMgr", None, "ActivateKillRight", &[PyRep::Integer(kr1_id)], &kw, None)
+        .await
+        .unwrap_err();
+    assert_eq!(docked_err.code, "KillRightCannotActivateDocked");
+
+    // Put p1, p2, p3 undocked in space; first put p2 in a different system to verify KillRightTargetNotInSystem
+    ctx.db.with_mut_snapshot(|snap| {
+        for &cid in &[p1_char, p2_char, p3_char] {
+            if let Some(ch) = snap.characters.get_mut(&cid) {
+                ch.station_id = None;
+                ch.structure_id = None;
+                ch.solar_system_id = 30_000_142;
+            }
+        }
+        if let Some(ch2) = snap.characters.get_mut(&p2_char) {
+            ch2.solar_system_id = 30_000_144;
+        }
+    });
+    let diff_sys_err = ctx
+        .dispatch_rpc(&mut sess1, "killRightMgr", None, "ActivateKillRight", &[PyRep::Integer(kr1_id)], &kw, None)
+        .await
+        .unwrap_err();
+    assert_eq!(diff_sys_err.code, "KillRightTargetNotInSystem");
+
+    // Put p2 in same system (30_000_142) and verify expired kill right is rejected
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch2) = snap.characters.get_mut(&p2_char) {
+            ch2.solar_system_id = 30_000_142;
+        }
+    });
+    with_mut_combat_runtime(&ctx, |rt| {
+        rt.kill_right_expires_unix.insert(kr_exp_id, ctx.now_unix().saturating_sub(1));
+    });
+    let exp_err = ctx
+        .dispatch_rpc(&mut sess1, "killRightMgr", None, "ActivateKillRight", &[PyRep::Integer(kr_exp_id)], &kw, None)
+        .await
+        .unwrap_err();
+    assert_eq!(exp_err.code, "KillRightExpired");
+
+    // Owner activates kr1 when both undocked in same system
     let act_rep = ctx
         .dispatch_rpc(&mut sess1, "killRightMgr", None, "ActivateKillRight", &[PyRep::Integer(kr1_id)], &kw, None)
         .await

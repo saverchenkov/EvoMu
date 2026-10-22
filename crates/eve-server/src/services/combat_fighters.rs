@@ -100,6 +100,9 @@ pub async fn handle_fighters(
     args: &[PyRep],
     _kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
+    if service == "fighterMgr" && method == "CmdScoopAbandonedFighterFromSpace" {
+        return handle_scoop_abandoned_fighter(ctx, session, args).await;
+    }
     match (service, method) {
         ("fighterMgr", "GetFightersForShip") => {
             let _ = match ServerContext::require_character(session) {
@@ -952,142 +955,146 @@ pub async fn handle_fighters(
             )))
         }
 
-        ("fighterMgr", "CmdScoopAbandonedFighterFromSpace") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            if session.station_id.is_some() || session.structure_id.is_some() {
-                return Some(Err(BridgeRpcError {
-                    code: "ShipDocked".into(),
-                    message: "Cannot scoop abandoned fighters while docked".into(),
-                }));
-            }
-            let Some(ship_id) = session.ship_id else {
-                return Some(Err(BridgeRpcError {
-                    code: "NoActiveShip".into(),
-                    message: "Session has no active ship".into(),
-                }));
-            };
-            let Some(sys_id) = session.solar_system_id else {
-                return Some(Err(BridgeRpcError {
-                    code: "NoSolarSystem".into(),
-                    message: "Session has no active solar system".into(),
-                }));
-            };
-            let target_fighter_id = match args.first().and_then(|a| a.as_i64()) {
-                Some(id) if id > 0 => id,
-                _ => {
-                    return Some(Err(BridgeRpcError {
-                        code: "InvalidFighterID".into(),
-                        message: "CmdScoopAbandonedFighterFromSpace requires a valid target fighter squadron ID".into(),
-                    }));
-                }
-            };
-            let squad = {
-                let fighters = ctx.active_fighters.read().unwrap();
-                let Some(squad) = fighters.get(&target_fighter_id).cloned() else {
-                    return Some(Err(BridgeRpcError {
-                        code: "FighterNotFound".into(),
-                        message: format!("Fighter squadron {target_fighter_id} not found in space"),
-                    }));
-                };
-                if !squad.is_abandoned {
-                    return Some(Err(BridgeRpcError {
-                        code: "FighterNotAbandoned".into(),
-                        message: format!("Fighter squadron {target_fighter_id} is active and cannot be scooped"),
-                    }));
-                }
-                if squad.owner_char_id != char_id {
-                    let authorized = ctx.db.with_snapshot(|snap| {
-                        let caller_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
-                        let owner_corp = snap.characters.get(&squad.owner_char_id).map(|c| c.corporation_id).unwrap_or(0);
-                        caller_corp != 0 && caller_corp == owner_corp
-                    });
-                    if !authorized {
-                        return Some(Err(BridgeRpcError {
-                            code: "NotFighterOwner".into(),
-                            message: "Cannot scoop an abandoned fighter squadron belonging to another pilot or corporation".into(),
-                        }));
-                    }
-                }
-                squad
-            };
-
-            let f_pos = ctx.systems.get_ball_position_sync(sys_id, squad.ball_id);
-            let s_pos = ctx.systems.get_ball_position_sync(sys_id, ship_id);
-            let Some(f_pos) = f_pos else {
-                return Some(Err(BridgeRpcError {
-                    code: "FighterNotInSystem".into(),
-                    message: format!("Fighter ball {} not found in system {sys_id}", squad.ball_id),
-                }));
-            };
-            let Some(s_pos) = s_pos else {
-                return Some(Err(BridgeRpcError {
-                    code: "ShipNotInSystem".into(),
-                    message: format!("Ship ball {ship_id} not found in system {sys_id}"),
-                }));
-            };
-            let dist = (f_pos - s_pos).length();
-            if dist > 2500.0 {
-                return Some(Err(BridgeRpcError {
-                    code: "FighterOutOfRange".into(),
-                    message: format!("Fighter squadron is {dist:.1}m away, must be within 2500m to scoop"),
-                }));
-            }
-
-            let db_res = ctx.db.try_with_mut_snapshot(|snap| {
-                let ship_type = snap.items.get(&ship_id).map(|s| s.type_id).unwrap_or(0);
-                let bay_capacity = ctx.sde.types.get(&ship_type).and_then(|t| {
-                    t.default_attributes.get(&2055).copied().or_else(|| t.default_attributes.get(&2216).copied())
-                }).unwrap_or(0.0);
-                let has_fighter_bay = bay_capacity > 0.0
-                    || snap.items.values().any(|it| it.location_id == ship_id && it.flag == InventoryFlag::FighterBay);
-                if !has_fighter_bay {
-                    return Err(BridgeRpcError {
-                        code: "NoFighterBay".into(),
-                        message: "Caller ship has no fighter bay capacity".into(),
-                    });
-                }
-                let fighter_unit_vol = ctx.sde.types.get(&squad.type_id).map(|t| t.volume).unwrap_or(100.0);
-                let squad_size = snap.items.get(&squad.item_id).map(|it| it.quantity as f64).unwrap_or(1.0);
-                let total_fighter_vol = fighter_unit_vol * squad_size;
-                let current_used_vol: f64 = snap.items.values()
-                    .filter(|it| it.location_id == ship_id && it.flag == InventoryFlag::FighterBay)
-                    .map(|it| {
-                        let unit_v = ctx.sde.types.get(&it.type_id).map(|t| t.volume).unwrap_or(100.0);
-                        unit_v * (it.quantity as f64)
-                    })
-                    .sum();
-                if bay_capacity > 0.0 && current_used_vol + total_fighter_vol > bay_capacity {
-                    return Err(BridgeRpcError {
-                        code: "FighterBayFull".into(),
-                        message: format!("Fighter bay volume full: requires {total_fighter_vol:.1}m3, available {:.1}m3", bay_capacity - current_used_vol),
-                    });
-                }
-
-                // DB update FIRST before in-memory active fighter removal
-                if let Some(item) = snap.items.get_mut(&squad.item_id) {
-                    item.location_id = ship_id;
-                    item.owner_id = char_id;
-                    item.flag = InventoryFlag::FighterBay;
-                    item.version += 1;
-                }
-                Ok(())
-            });
-            if let Err(e) = db_res {
-                return Some(Err(e));
-            }
-
-            {
-                let mut fighters = ctx.active_fighters.write().unwrap();
-                fighters.remove(&target_fighter_id);
-            }
-            let sys_handle = ctx.systems.get_or_spawn(sys_id);
-            let _ = sys_handle.remove_ball(squad.ball_id).await;
-            Some(Ok(PyRep::Bool(true)))
-        }
-
         _ => None,
     }
+}
+
+async fn handle_scoop_abandoned_fighter(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    args: &[PyRep],
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    let (_, char_id) = match ServerContext::require_character(session) {
+        Ok(v) => v,
+        Err(e) => return Some(Err(e)),
+    };
+    if session.station_id.is_some() || session.structure_id.is_some() {
+        return Some(Err(BridgeRpcError {
+            code: "ShipDocked".into(),
+            message: "Cannot scoop abandoned fighters while docked".into(),
+        }));
+    }
+    let Some(ship_id) = session.ship_id else {
+        return Some(Err(BridgeRpcError {
+            code: "NoActiveShip".into(),
+            message: "Session has no active ship".into(),
+        }));
+    };
+    let Some(sys_id) = session.solar_system_id else {
+        return Some(Err(BridgeRpcError {
+            code: "NoSolarSystem".into(),
+            message: "Session has no active solar system".into(),
+        }));
+    };
+    let target_fighter_id = match args.first().and_then(|a| a.as_i64()) {
+        Some(id) if id > 0 => id,
+        _ => {
+            return Some(Err(BridgeRpcError {
+                code: "InvalidFighterID".into(),
+                message: "CmdScoopAbandonedFighterFromSpace requires a valid target fighter squadron ID".into(),
+            }));
+        }
+    };
+    let squad = {
+        let fighters = ctx.active_fighters.read().unwrap();
+        let Some(squad) = fighters.get(&target_fighter_id).cloned() else {
+            return Some(Err(BridgeRpcError {
+                code: "FighterNotFound".into(),
+                message: format!("Fighter squadron {target_fighter_id} not found in space"),
+            }));
+        };
+        if !squad.is_abandoned {
+            return Some(Err(BridgeRpcError {
+                code: "FighterNotAbandoned".into(),
+                message: format!("Fighter squadron {target_fighter_id} is active and cannot be scooped"),
+            }));
+        }
+        if squad.owner_char_id != char_id {
+            let authorized = ctx.db.with_snapshot(|snap| {
+                let caller_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
+                let owner_corp = snap.characters.get(&squad.owner_char_id).map(|c| c.corporation_id).unwrap_or(0);
+                caller_corp != 0 && caller_corp == owner_corp
+            });
+            if !authorized {
+                return Some(Err(BridgeRpcError {
+                    code: "NotFighterOwner".into(),
+                    message: "Cannot scoop an abandoned fighter squadron belonging to another pilot or corporation".into(),
+                }));
+            }
+        }
+        squad
+    };
+
+    let f_pos = ctx.systems.get_ball_position_sync(sys_id, squad.ball_id);
+    let s_pos = ctx.systems.get_ball_position_sync(sys_id, ship_id);
+    let Some(f_pos) = f_pos else {
+        return Some(Err(BridgeRpcError {
+            code: "FighterNotInSystem".into(),
+            message: format!("Fighter ball {} not found in system {sys_id}", squad.ball_id),
+        }));
+    };
+    let Some(s_pos) = s_pos else {
+        return Some(Err(BridgeRpcError {
+            code: "ShipNotInSystem".into(),
+            message: format!("Ship ball {ship_id} not found in system {sys_id}"),
+        }));
+    };
+    let dist = (f_pos - s_pos).length();
+    if dist > 2500.0 {
+        return Some(Err(BridgeRpcError {
+            code: "FighterOutOfRange".into(),
+            message: format!("Fighter squadron is {dist:.1}m away, must be within 2500m to scoop"),
+        }));
+    }
+
+    let db_res = ctx.db.try_with_mut_snapshot(|snap| {
+        let ship_type = snap.items.get(&ship_id).map(|s| s.type_id).unwrap_or(0);
+        let bay_capacity = ctx.sde.types.get(&ship_type).and_then(|t| {
+            t.default_attributes.get(&2055).copied().or_else(|| t.default_attributes.get(&2216).copied())
+        }).unwrap_or(0.0);
+        let has_fighter_bay = bay_capacity > 0.0
+            || snap.items.values().any(|it| it.location_id == ship_id && it.flag == InventoryFlag::FighterBay);
+        if !has_fighter_bay {
+            return Err(BridgeRpcError {
+                code: "NoFighterBay".into(),
+                message: "Caller ship has no fighter bay capacity".into(),
+            });
+        }
+        let fighter_unit_vol = ctx.sde.types.get(&squad.type_id).map(|t| t.volume).unwrap_or(100.0);
+        let squad_size = snap.items.get(&squad.item_id).map(|it| it.quantity as f64).unwrap_or(1.0);
+        let total_fighter_vol = fighter_unit_vol * squad_size;
+        let current_used_vol: f64 = snap.items.values()
+            .filter(|it| it.location_id == ship_id && it.flag == InventoryFlag::FighterBay)
+            .map(|it| {
+                let unit_v = ctx.sde.types.get(&it.type_id).map(|t| t.volume).unwrap_or(100.0);
+                unit_v * (it.quantity as f64)
+            })
+            .sum();
+        if bay_capacity > 0.0 && current_used_vol + total_fighter_vol > bay_capacity {
+            return Err(BridgeRpcError {
+                code: "FighterBayFull".into(),
+                message: format!("Fighter bay volume full: requires {total_fighter_vol:.1}m3, available {:.1}m3", bay_capacity - current_used_vol),
+            });
+        }
+
+        // DB update FIRST before in-memory active fighter removal
+        if let Some(item) = snap.items.get_mut(&squad.item_id) {
+            item.location_id = ship_id;
+            item.owner_id = char_id;
+            item.flag = InventoryFlag::FighterBay;
+            item.version += 1;
+        }
+        Ok(())
+    });
+    if let Err(e) = db_res {
+        return Some(Err(e));
+    }
+
+    {
+        let mut fighters = ctx.active_fighters.write().unwrap();
+        fighters.remove(&target_fighter_id);
+    }
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let _ = sys_handle.remove_ball(squad.ball_id).await;
+    Some(Ok(PyRep::Bool(true)))
 }

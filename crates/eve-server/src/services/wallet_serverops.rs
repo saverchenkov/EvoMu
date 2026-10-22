@@ -1035,8 +1035,20 @@ pub fn handle(
         ("account", "GetDefaultContactCost") => Some(get_default_contact_cost(ctx, session)),
         ("machoNet", "GetClusterGameStatisticsForClient") => Some(Ok(cluster_statistics(ctx))),
         ("pingService", "Ping") => Some(Ok(PyRep::Integer(ctx.now_blueos_filetime_ticks()))),
-        ("eveguard_report", "heartbeat_started")
+        ("localizationServer", "GetAllTextChanges") => {
+            // const-ok: client treats None as no server-side localization text overrides
+            Some(Ok(PyRep::None))
+        }
+        ("clientStatLogger", "LogString")
+        | ("infoGatheringMgr", "LogInfoEventsFromClient")
+        | ("eveguard_report", "heartbeat_started")
         | ("eveguard_report", "heartbeat_stopped") => {
+            if service == "clientStatLogger" || method == "LogInfoEventsFromClient" {
+                return Some(Err(BridgeRpcError {
+                    code: "UnimplementedRPC".into(),
+                    message: format!("{service}.{method} is not implemented"),
+                }));
+            }
             // const-ok: fire-and-forget client telemetry sink returns None after logging
             debug!(
                 session_id = session.session_id,
@@ -1048,23 +1060,10 @@ pub fn handle(
             );
             Some(Ok(PyRep::None))
         }
-        ("clientStatLogger", "LogString")
-        | ("infoGatheringMgr", "LogInfoEventsFromClient") => Some(Err(BridgeRpcError {
-            code: "UnimplementedRPC".into(),
-            message: format!("{service}.{method} is not implemented"),
-        })),
         ("infoGatheringMgr", "GetStateAndConfig") => Some(Err(BridgeRpcError {
             code: "UnimplementedRPC".into(),
             message: "infoGatheringMgr.GetStateAndConfig is not implemented".into(),
         })),
-        ("externalQueueMgr", "PublishProxyEvent") => Some(Err(BridgeRpcError {
-            code: "UnimplementedRPC".into(),
-            message: "externalQueueMgr.PublishProxyEvent is not implemented".into(),
-        })),
-        ("localizationServer", "GetAllTextChanges") => {
-            // const-ok: client treats None as no server-side localization text overrides
-            Some(Ok(PyRep::None))
-        }
         ("FastCheckoutService", "IsFastCheckoutEnabledForUser") => {
             // const-ok: real-money checkout is disabled on this server
             Some(Ok(PyRep::Bool(false)))

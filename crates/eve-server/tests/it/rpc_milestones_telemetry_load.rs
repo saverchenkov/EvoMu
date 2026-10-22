@@ -335,7 +335,6 @@ async fn test_milestones_task_tracker_and_fighters() {
 // parity: rpc:rewardMgr.GetRewardLPLogs
 // parity: rpc:colonyResourcesMgr.GetMyCorporationSkyhooks
 // parity: rpc:devIndexManager.GetAllDevelopmentIndices
-// parity: rpc:epicArcStatus.AgentHasEpicMissionsForCharacter
 async fn test_rewards_sov_and_epic_arc_status() {
     let ctx = ServerContext::new();
     let kw = HashMap::new();
@@ -460,36 +459,20 @@ async fn test_rewards_sov_and_epic_arc_status() {
     assert_eq!(idx_kv.dict_get("military"), Some(&PyRep::Integer(3)));
     assert_eq!(idx_kv.dict_get("industrial"), Some(&PyRep::Integer(2)));
 
-    // 5. epicArcStatus.AgentHasEpicMissionsForCharacter
-    // Non-epic agent returns false
-    let non_epic = ctx
+    // 5. epicArcStatus.AgentHasEpicMissionsForCharacter returns UnimplementedRPC
+    let epic_err = ctx
         .dispatch_rpc(
             &mut sess,
             "epicArcStatus",
             None,
             "AgentHasEpicMissionsForCharacter",
-            &[PyRep::Integer(999_999_999)],
+            &[PyRep::Integer(3_019_356)],
             &kw,
             None,
         )
         .await
-        .expect("AgentHasEpicMissionsForCharacter non-epic");
-    assert_eq!(non_epic, PyRep::Bool(false));
-
-    let agent_id = 3_019_356i64; // Blood-Stained Stars starter agent
-    let epic_rep = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "epicArcStatus",
-            None,
-            "AgentHasEpicMissionsForCharacter",
-            &[PyRep::Integer(agent_id)],
-            &kw,
-            None,
-        )
-        .await
-        .expect("AgentHasEpicMissionsForCharacter");
-    assert_eq!(epic_rep, PyRep::Bool(true));
+        .unwrap_err();
+    assert_eq!(epic_err.code, "UnimplementedRPC");
 }
 
 #[tokio::test]

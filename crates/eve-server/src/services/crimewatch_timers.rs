@@ -350,6 +350,7 @@ pub async fn handle_crimewatch(
                         message: format!("Kill right {kr_id} is already activated"),
                     });
                 }
+                super::validate_kill_right_live_preconditions(ctx, snap, kr_id, char_id, kr.target_id)?;
                 if let Some(kr_mut) = snap.kill_rights.get_mut(&kr_id) {
                     kr_mut.is_active_suspect = true;
                 }
@@ -428,6 +429,7 @@ pub async fn handle_crimewatch(
                         message: format!("Kill right {kr_id} is not listed for public sale"),
                     });
                 }
+                super::validate_kill_right_live_preconditions(ctx, snap, kr_id, char_id, kr.target_id)?;
                 let fee = kr.activation_fee;
                 let Some(owner) = snap.characters.get(&kr.owner_id) else {
                     return Err(BridgeRpcError {

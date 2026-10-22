@@ -383,6 +383,7 @@ pub struct CombatRuntimeState {
     pub bounty_hunter_claimed: HashMap<i64, f64>,
     pub fighter_unit_damage_accum: HashMap<i64, f64>,
     pub fighter_tube_rearm_until: HashMap<(i64, usize), u64>,
+    pub kill_right_expires_unix: HashMap<i64, u64>,
     pub behavior_debugging_active: std::collections::HashSet<i64>,
     pub ess_main_bank_thefts: HashMap<u32, Vec<(i64, f64, u64)>>,
     pub ess_reserve_bank_thefts: HashMap<u32, Vec<(i64, f64, u64)>>,
@@ -1076,6 +1077,10 @@ pub fn gm_admin_bounty_action(
 /// Creates a kill right from `owner_id` against `target_id` and emits `OnKillRightCreated`.
 pub fn create_kill_right(ctx: &ServerContext, kr_id: i64, owner_id: i64, target_id: i64, fee_isk: f64) {
     let expiry_ft = ctx.now_blueos_filetime_ticks() + (30 * 86_400 * 10_000_000);
+    let expires_unix = ctx.now_unix().saturating_add(30 * 86_400);
+    with_mut_combat_runtime(ctx, |rt| {
+        rt.kill_right_expires_unix.insert(kr_id, expires_unix);
+    });
     ctx.db.with_mut_snapshot(|snap| {
         snap.kill_rights.insert(
             kr_id,
@@ -1106,6 +1111,64 @@ pub fn create_kill_right(ctx: &ServerContext, kr_id: i64, owner_id: i64, target_
         "charid",
         args,
     );
+}
+
+pub(crate) fn validate_kill_right_live_preconditions(
+    ctx: &ServerContext,
+    snap: &mut eve_db::WorldStateSnapshot,
+    kr_id: i64,
+    caller_id: i64,
+    target_id: i64,
+) -> Result<(), BridgeRpcError> {
+    let exp_opt = with_combat_runtime(ctx, |rt| rt.kill_right_expires_unix.get(&kr_id).copied());
+    if let Some(exp) = exp_opt {
+        if ctx.now_unix() >= exp {
+            snap.kill_rights.remove(&kr_id);
+            return Err(BridgeRpcError {
+                code: "KillRightExpired".into(),
+                message: format!("Kill right {kr_id} has expired (30-day lifetime)"),
+            });
+        }
+    }
+    let Some(caller) = snap.characters.get(&caller_id) else {
+        return Err(BridgeRpcError {
+            code: "CharacterNotFound".into(),
+            message: format!("Character {caller_id} not found"),
+        });
+    };
+    if caller.station_id.is_some() || caller.structure_id.is_some() {
+        return Err(BridgeRpcError {
+            code: "KillRightCannotActivateDocked".into(),
+            message: "Cannot activate or buy a kill right while docked".into(),
+        });
+    }
+    let Some(target) = snap.characters.get(&target_id) else {
+        return Err(BridgeRpcError {
+            code: "TargetNotFound".into(),
+            message: format!("Kill right target {target_id} not found"),
+        });
+    };
+    if target.station_id.is_some()
+        || target.structure_id.is_some()
+        || caller.solar_system_id != target.solar_system_id
+    {
+        return Err(BridgeRpcError {
+            code: "KillRightTargetNotInSystem".into(),
+            message: "Target pilot must be undocked in the same solar system".into(),
+        });
+    }
+    let sys_id = caller.solar_system_id;
+    let c_pos = ctx.systems.get_ball_position_sync(sys_id, caller.active_ship_id);
+    let t_pos = ctx.systems.get_ball_position_sync(sys_id, target.active_ship_id);
+    if let (Some(cp), Some(tp)) = (c_pos, t_pos) {
+        if (cp - tp).length() > 8_000_000.0 {
+            return Err(BridgeRpcError {
+                code: "KillRightTargetNotOnGrid".into(),
+                message: "Target pilot is not on grid with caller".into(),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Emits limited engagement timeout start/stop and end notifications to `char_id`.

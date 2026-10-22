@@ -923,11 +923,6 @@ pub fn handle(
             Some(Ok(PyRep::List(logs)))
         }
 
-        ("rewardMgr", "GetDelayedRewardsByGroupIDs") => Some(Err(BridgeRpcError {
-            code: "UnimplementedRPC".into(),
-            message: "rewardMgr.GetDelayedRewardsByGroupIDs is not implemented".into(),
-        })),
-
         _ => None,
     }
 }

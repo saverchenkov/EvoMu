@@ -915,21 +915,10 @@ pub async fn handle_extended(
             Some(Ok(PyRep::List(msgs)))
         }
 
-        ("epicArcStatus", "AgentHasEpicMissionsForCharacter") => {
-            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let agent_id = args.first().and_then(|a| a.as_i64()).unwrap_or(3_019_356);
-            if !ctx.sde.agents.get(&agent_id).is_some_and(|a| a.agent_type_id == 10) {
-                return Some(Ok(PyRep::Bool(false)));
-            }
-            let (arc_id, _) = resolve_epic_arc_id_for_agent(ctx, agent_id);
-            let now_unix = ctx.now_unix();
-            let available = ctx.db.with_snapshot(|snap| {
-                !load_epic_arc_states(snap, char_id)
-                    .iter()
-                    .any(|a| a.epic_arc_id == arc_id && a.cooldown_until_unix.is_some_and(|until| now_unix < until))
-            });
-            Some(Ok(PyRep::Bool(available)))
-        }
+        ("epicArcStatus", "AgentHasEpicMissionsForCharacter") => Some(Err(BridgeRpcError {
+            code: "UnimplementedRPC".into(),
+            message: "epicArcStatus.AgentHasEpicMissionsForCharacter is not implemented".into(),
+        })),
 
         ("missionTrackerMgr", "GetAllMissionObjectives")
         | ("missionTrackerMgr", "UpdateAllMissions")

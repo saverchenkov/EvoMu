@@ -548,6 +548,15 @@ async fn test_crimewatch_duels_kill_rights_and_bounties_notifications() {
     assert_eq!(kr_created.len(), 1);
     assert_eq!(kr_created[0][0], PyRep::Integer(7_001));
 
+    ctx.db.with_mut_snapshot(|snap| {
+        for cid in [P1, P2, p3] {
+            if let Some(ch) = snap.characters.get_mut(&cid) {
+                ch.station_id = None;
+                ch.structure_id = None;
+                ch.solar_system_id = JITA;
+            }
+        }
+    });
     call(&ctx, &mut s1, "killRightMgr", "ActivateKillRight", &[PyRep::Integer(7_001)]).await;
     assert_eq!(events(&ctx, P1, "OnKillRightActivated"), vec![vec![]]);
     assert_eq!(events(&ctx, P1, "OnKillRightUsed"), vec![vec![PyRep::Integer(7_001), PyRep::Integer(P2)]]);
@@ -571,8 +580,10 @@ async fn test_crimewatch_duels_kill_rights_and_bounties_notifications() {
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&P1) {
             ch.security_status = -1.5;
+            ch.station_id = Some(JITA_44);
         }
     });
+    s1.station_id = Some(JITA_44);
     seed_item(&ctx, 970_001, 35664, P1, JITA_44, InventoryFlag::Hangar, 2);
     call(&ctx, &mut s1, "crimewatch", "ApplyTagsForSecStatus", &[PyRep::Integer(2)]).await;
     assert_eq!(events(&ctx, P1, "OnSecurityStatusUpdate"), vec![vec![PyRep::Real(-0.5)]]);
