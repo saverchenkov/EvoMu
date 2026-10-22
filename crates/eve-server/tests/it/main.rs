@@ -166,3 +166,5 @@ mod rpc_account_air_banned;
 mod rpc_calendar_kiring_notifs;
 mod rpc_corprec_fleet_proxy;
 mod rpc_missions_industry_campaigns;
+mod notify_fleet_corp_standings;
+

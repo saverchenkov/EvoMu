@@ -355,3 +355,46 @@ pub(crate) fn handle_mail_headers(
         Some(Ok(headers_rowset))
     }
 }
+
+/// `gameui.OnCreateNewMailWindow(recipients, corpOrAllianceRecipient, toListID, subject, body)`:
+/// prompts the client to open a new mail composition window prefilled with recipients and text.
+pub fn emit_create_new_mail_window(
+    ctx: &ServerContext,
+    char_id: i64,
+    recipients: &[i64],
+    corp_or_alliance: Option<i64>,
+    to_list_id: Option<i64>,
+    subject: &str,
+    body: &str,
+) {
+    let opt = |v: Option<i64>| v.map(PyRep::Integer).unwrap_or(PyRep::None);
+    let args = vec![
+        PyRep::List(recipients.iter().copied().map(PyRep::Integer).collect()),
+        opt(corp_or_alliance),
+        opt(to_list_id),
+        PyRep::String(subject.to_string()),
+        PyRep::String(body.to_string()),
+    ];
+    ctx.notify(NotificationTarget::Character(char_id), "OnCreateNewMailWindow", "charid", args);
+}
+
+/// `transmissionMgr.OnIncomingTransmission(transmission, isAgentMission)`:
+/// delivers an incoming transmission packet (e.g. agent briefing / mission video transmission) to the client.
+pub fn emit_incoming_transmission(
+    ctx: &ServerContext,
+    char_id: i64,
+    header: &str,
+    text: &str,
+    is_agent_mission: bool,
+) {
+    let transmission = PyRep::keyval([
+        ("header", PyRep::String(header.to_string())),
+        ("text", PyRep::String(text.to_string())),
+    ]);
+    ctx.notify(
+        NotificationTarget::Character(char_id),
+        "OnIncomingTransmission",
+        "charid",
+        vec![transmission, PyRep::Bool(is_agent_mission)],
+    );
+}

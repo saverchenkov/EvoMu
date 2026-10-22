@@ -1219,44 +1219,42 @@ pub async fn handle_gm_slash_ext(
     }
 
     if cmd == "/online" || cmd.starts_with("/online ") {
-        let user_ids: Vec<u64> = ctx.db.with_snapshot(|snap| {
-            snap.accounts.values().map(|a| a.user_id).collect()
-        });
+        let user_ids: Vec<u64> = ctx.db.with_snapshot(|snap| snap.accounts.values().map(|a| a.user_id).collect());
         let mut online_pairs = Vec::new();
         for uid in user_ids {
-            if let Some(os) = ctx.db.get_online_session(uid) {
-                online_pairs.push((uid, os.character_id.unwrap_or(0)));
-            }
+            if let Some(os) = ctx.db.get_online_session(uid) { online_pairs.push((uid, os.character_id.unwrap_or(0))); }
         }
-        let rows = ctx.db.with_snapshot(|snap| {
-            let mut out = Vec::new();
-            for (uid, char_id_val) in online_pairs {
-                let (name, sys_id) = snap
-                    .characters
-                    .get(&char_id_val)
-                    .map(|c| (c.name.clone(), c.solar_system_id as i64))
-                    .unwrap_or_else(|| ("Unselected".to_string(), 0));
-                out.push(vec![
-                    PyRep::Integer(uid as i64),
-                    PyRep::Integer(char_id_val),
-                    PyRep::String(name),
-                    PyRep::Integer(sys_id),
-                ]);
-            }
-            out
+        let rows: Vec<Vec<PyRep>> = ctx.db.with_snapshot(|snap| {
+            online_pairs.into_iter().map(|(uid, char_id_val)| {
+                let (name, sys_id) = snap.characters.get(&char_id_val).map(|c| (c.name.clone(), c.solar_system_id as i64)).unwrap_or_else(|| ("Unselected".to_string(), 0));
+                vec![PyRep::Integer(uid as i64), PyRep::Integer(char_id_val), PyRep::String(name), PyRep::Integer(sys_id)]
+            }).collect()
         });
         let count = rows.len() as i64;
         return Some(Ok(PyRep::keyval([
             ("command", PyRep::String(cmd.to_string())),
             ("onlineCount", PyRep::Integer(count)),
-            (
-                "characters",
-                PyRep::rowset(
-                    vec!["userID", "characterID", "characterName", "solarSystemID"],
-                    rows,
-                ),
-            ),
+            ("characters", PyRep::rowset(vec!["userID", "characterID", "characterName", "solarSystemID"], rows)),
         ])));
+    }
+
+    if cmd.starts_with("/contact ") || cmd.starts_with("/standing ") {
+        let parts: Vec<&str> = cmd.split_whitespace().collect();
+        let target_id = parts.get(1).and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
+        let standing = parts.get(2).and_then(|s| s.parse::<f64>().ok()).unwrap_or(5.0).clamp(-10.0, 10.0);
+        if let Ok(mut guard) = ctx.esi_state.char_contacts.write() {
+            let list = guard.entry(cid).or_default();
+            if let Some(entry) = list.iter_mut().find(|e| e.contact_id == target_id) {
+                entry.standing = standing;
+            } else {
+                list.push(crate::esi::runtime_state::EsiContactEntry {
+                    contact_id: target_id, contact_type: "character".into(), standing, is_watched: false, is_blocked: false, label_ids: Vec::new(),
+                });
+            }
+        }
+        ctx.notify(crate::router::NotificationTarget::Character(cid), "OnContactSlashCommand", "charid", vec![PyRep::Integer(target_id), PyRep::Real(standing)]);
+        ctx.notify(crate::router::NotificationTarget::Character(cid), "OnSetPlayerStanding", "charid", vec![]);
+        return Some(Ok(PyRep::keyval([("contactID", PyRep::Integer(target_id)), ("standing", PyRep::Real(standing))])));
     }
 
     None

@@ -633,6 +633,20 @@ pub async fn handle(
                 (PyRep::String(("labelMask").into()), PyRep::Tuple(vec![old_mask, PyRep::Integer(label_mask as i64)])),
             ]);
             ctx.notify(NotificationTarget::Alliance(aid), "OnAllianceRelationshipChanged", "allianceid", vec![PyRep::Integer(aid), PyRep::Integer(contact_id), rel_change]);
+            ctx.notify(NotificationTarget::Alliance(aid), "OnSetAllianceStanding", "allianceid", vec![PyRep::Integer(contact_id), PyRep::Real(standing)]);
+            ctx.notify(
+                NotificationTarget::Alliance(aid),
+                "OnOrganizationContactsUpdated",
+                "allianceid",
+                vec![
+                    PyRep::Integer(aid),
+                    PyRep::List(vec![PyRep::keyval([
+                        ("contactID", PyRep::Integer(contact_id)),
+                        ("standing", PyRep::Real(standing)),
+                        ("labelMask", PyRep::Integer(label_mask as i64)),
+                    ])]),
+                ],
+            );
             Some(Ok(PyRep::keyval([
                 ("contactID", PyRep::Integer(contact_id)),
                 ("relationshipID", PyRep::Real(standing)),

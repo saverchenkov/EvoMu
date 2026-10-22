@@ -708,6 +708,7 @@ pub fn handle_contacts(
                     PyRep::Integer(label_mask),
                 ],
             );
+            ctx.notify(NotificationTarget::Character(char_id), "OnSetPlayerStanding", "charid", vec![]);
 
             Some(Ok(PyRep::keyval([
                 ("contactID", PyRep::Integer(contact_id)),
@@ -783,6 +784,7 @@ pub fn handle_contacts(
                     watchlist_opt.map(PyRep::Bool).unwrap_or(PyRep::None),
                 ],
             );
+            ctx.notify(NotificationTarget::Character(char_id), "OnSetPlayerStanding", "charid", vec![]);
             Some(Ok(PyRep::keyval([
                 ("updatedCount", PyRep::Integer(updated_count as i64)),
                 ("standing", PyRep::Real(standing)),
@@ -791,19 +793,11 @@ pub fn handle_contacts(
         }
 
         ("charMgr", "DeleteContacts") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let _ = ctx
-                .db
-                .with_snapshot(|snap| snap.characters.contains_key(&char_id));
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let _ = ctx.db.with_snapshot(|snap| snap.characters.contains_key(&char_id));
             let contact_ids = parse_id_list(args.first());
             if contact_ids.is_empty() {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidArgument".into(),
-                    message: "DeleteContacts requires contactIDs".into(),
-                }));
+                return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "DeleteContacts requires contactIDs".into() }));
             }
             let mut removed = 0usize;
             if let Ok(mut guard) = ctx.esi_state.char_contacts.write() {
@@ -825,6 +819,9 @@ pub fn handle_contacts(
                 "charid",
                 vec![PyRep::List(deleted)],
             );
+            for &cid in &contact_ids {
+                ctx.notify(NotificationTarget::Character(char_id), "OnContactNoLongerContact", "charid", vec![PyRep::Integer(cid)]);
+            }
             Some(Ok(PyRep::keyval([
                 ("deletedCount", PyRep::Integer(removed as i64)),
                 ("contactIDs", PyRep::List(id_reps)),

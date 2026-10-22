@@ -969,6 +969,9 @@ pub async fn handle_extended(
                 list.sort_by_key(|r| r.dict_get("missionID").and_then(|v| v.as_i64()).unwrap_or(0));
                 list
             });
+            if method == "UpdateAllMissions" {
+                ctx.notify(NotificationTarget::Character(char_id), "OnMissionsUpdated", "charid", vec![PyRep::List(items.clone())]);
+            }
             Some(Ok(PyRep::List(items)))
         }
 

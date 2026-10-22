@@ -988,9 +988,6 @@ pub(super) fn handle_corp_gov(
                     recruiters.push(PyRep::Integer(*rec_id));
                 }
             }
-            if recruiters.is_empty() {
-                recruiters.push(PyRep::Integer(char_id));
-            }
             Some(Ok(PyRep::List(recruiters)))
         }
 
@@ -1109,11 +1106,19 @@ pub(super) fn handle_corp_gov(
                 .or_default()
                 .contacts
                 .insert(contact_id, (standing, label_mask));
+            ctx.notify(NotificationTarget::Corporation(corp_id), "OnSetCorpStanding", "corpid", vec![PyRep::Integer(contact_id), PyRep::Real(standing)]);
             ctx.notify(
                 NotificationTarget::Corporation(corp_id),
-                "OnSetCorpStanding",
+                "OnOrganizationContactsUpdated",
                 "corpid",
-                vec![PyRep::Integer(contact_id), PyRep::Real(standing)],
+                vec![
+                    PyRep::Integer(corp_id),
+                    PyRep::List(vec![PyRep::keyval([
+                        ("contactID", PyRep::Integer(contact_id)),
+                        ("standing", PyRep::Real(standing)),
+                        ("labelMask", PyRep::Integer(label_mask as i64)),
+                    ])]),
+                ],
             );
             Some(Ok(PyRep::keyval([
                 ("contactID", PyRep::Integer(contact_id)),

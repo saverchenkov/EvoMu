@@ -404,7 +404,7 @@ pub(super) fn handle_corps(
                 let state = g.entry(corp_id).or_default();
                 std::mem::replace(&mut state.logo, (s1, s2, s3, c1))
             };
-            ctx.notify(NotificationTarget::Corporation(corp_id), "OnCorpLogoReady", "corpid", vec![PyRep::Integer(corp_id)]);
+            ctx.notify(NotificationTarget::Corporation(corp_id), "OnCorpLogoReady", "corpid", vec![PyRep::Integer(corp_id), PyRep::Integer(128)]);
             let change = PyRep::Dict(vec![
                 (PyRep::String(("shape1").into()), PyRep::Tuple(vec![PyRep::Integer(old_logo.0), PyRep::Integer(s1)])),
                 (PyRep::String(("shape2").into()), PyRep::Tuple(vec![PyRep::Integer(old_logo.1), PyRep::Integer(s2)])),

@@ -938,26 +938,16 @@ pub(super) async fn handle_fleet_ops(
         | ("fleetProxy", "UpdateAdvertInfo")
         | ("fleetProxy", "UpdateAdvertAllowedEntities")
         | ("fleetProxy", "UpdateFleetAdvertWithNewLeader") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let fleet_id = match session.fleet_id {
                 Some(fid) => fid,
-                None => {
-                    return Some(Err(BridgeRpcError {
-                        code: "NotInFleet".into(),
-                        message: "Character is not in a fleet".into(),
-                    }))
-                }
+                None => return Some(Err(BridgeRpcError { code: "NotInFleet".into(), message: "Character is not in a fleet".into() })),
             };
             if method == "UpdateAdvertAllowedEntities" {
                 let mut entities = std::collections::HashSet::new();
                 if let Some(PyRep::List(list) | PyRep::Tuple(list)) = args.first() {
                     for v in list {
-                        if let Some(id) = v.as_i64() {
-                            entities.insert(id);
-                        }
+                        if let Some(id) = v.as_i64() { entities.insert(id); }
                     }
                 }
                 if let Some(ad) = ctx.fleet_extras.lock().unwrap().adverts.get_mut(&fleet_id) {
@@ -968,8 +958,23 @@ pub(super) async fn handle_fleet_ops(
                     ("allowedCount", PyRep::Integer(entities.len() as i64)),
                 ])));
             }
+            if matches!(method, "UpdateFleetAdvertWithNewLeader" | "UpdateAdvertInfo") {
+                let is_auth = ctx.db.with_snapshot(|snap| {
+                    snap.fleets.get(&fleet_id).is_some_and(|fl| fl.boss_id == char_id)
+                        || ctx.fleet_extras.lock().unwrap().adverts.get(&fleet_id).is_some_and(|ad| ad.leader_id == char_id)
+                });
+                if !is_auth {
+                    return Some(Err(BridgeRpcError { code: "FleetRoleDenied".into(), message: "Only fleet boss or advert leader can modify advert".into() }));
+                }
+            }
             if method == "UpdateFleetAdvertWithNewLeader" {
                 let new_leader = args.first().and_then(|a| a.as_i64()).unwrap_or(char_id);
+                let is_member = ctx.db.with_snapshot(|snap| {
+                    snap.fleets.get(&fleet_id).is_some_and(|fl| fl.members.contains(&new_leader) || fl.member_details.contains_key(&new_leader))
+                });
+                if !is_member {
+                    return Some(Err(BridgeRpcError { code: "CustomError".into(), message: "New advert leader must be an active member of the fleet".into() }));
+                }
                 if let Some(ad) = ctx.fleet_extras.lock().unwrap().adverts.get_mut(&fleet_id) {
                     ad.leader_id = new_leader;
                 }
@@ -981,15 +986,9 @@ pub(super) async fn handle_fleet_ops(
             if method == "UpdateAdvertInfo" {
                 let mut ex = ctx.fleet_extras.lock().unwrap();
                 if let Some(ad) = ex.adverts.get_mut(&fleet_id) {
-                    if let Some(s) = args.first().and_then(|a| a.as_str()) {
-                        ad.fleet_name = s.to_string();
-                    }
-                    if let Some(s) = args.get(1).and_then(|a| a.as_str()) {
-                        ad.description = s.to_string();
-                    }
-                    if let Some(s) = args.get(2).and_then(|a| a.as_i64()) {
-                        ad.invite_scope = s as u8;
-                    }
+                    if let Some(s) = args.first().and_then(|a| a.as_str()) { ad.fleet_name = s.to_string(); }
+                    if let Some(s) = args.get(1).and_then(|a| a.as_str()) { ad.description = s.to_string(); }
+                    if let Some(s) = args.get(2).and_then(|a| a.as_i64()) { ad.invite_scope = s as u8; }
                     return Some(Ok(PyRep::keyval([
                         ("fleetID", PyRep::Integer(fleet_id)),
                         ("fleetName", PyRep::String(ad.fleet_name.clone())),
