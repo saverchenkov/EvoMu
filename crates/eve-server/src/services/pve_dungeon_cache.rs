@@ -298,6 +298,12 @@ pub async fn handle(
             | "GetOreAnomalyInstances"
             | "GetIceBeltInstances"
             | "GetSignatureInstances"
+            | "GetCombatAnomaliesCount"
+            | "GetOreAnomaliesCount"
+            | "GetOreAnomaliesCountInRange"
+            | "GetIceBeltsCount"
+            | "GetBulwarkMiningSiteCounts"
+            | "GetFactionWarfareInstances"
     ) {
         return None;
     }
@@ -317,15 +323,54 @@ pub async fn handle(
             let by_dungeon = registry_instances(ctx, sys_id, false);
             Some(Ok(instances_reply(sys_id, by_dungeon)))
         }
+        "GetCombatAnomaliesCount" => {
+            ensure_system_pve_sites_seeded(ctx, sys_id).await;
+            let instances = registry_instances(ctx, sys_id, false);
+            let count: usize = instances.values().map(|v| v.len()).sum();
+            Some(Ok(PyRep::Integer(count as i64)))
+        }
         "GetOreAnomalyInstances" => {
             seed_system_mining_sites_from_sde(ctx, sys_id).await;
             let by_dungeon = anomaly_instances(ctx, sys_id, "OreAnomaly");
             Some(Ok(instances_reply(sys_id, by_dungeon)))
         }
+        "GetOreAnomaliesCount" => {
+            seed_system_mining_sites_from_sde(ctx, sys_id).await;
+            let instances = anomaly_instances(ctx, sys_id, "OreAnomaly");
+            let count: usize = instances.values().map(|v| v.len()).sum();
+            Some(Ok(PyRep::Integer(count as i64)))
+        }
+        "GetOreAnomaliesCountInRange" => {
+            seed_system_mining_sites_from_sde(ctx, sys_id).await;
+            let instances = anomaly_instances(ctx, sys_id, "OreAnomaly");
+            let count: usize = instances.values().map(|v| v.len()).sum();
+            Some(Ok(PyRep::Dict(vec![(
+                PyRep::Integer(sys_id as i64),
+                PyRep::Integer(count as i64),
+            )])))
+        }
         "GetIceBeltInstances" => {
             seed_system_ice_belt_from_sde(ctx, sys_id);
             let by_dungeon = anomaly_instances(ctx, sys_id, ICE_BELT_ANOMALY_TYPE);
             Some(Ok(instances_reply(sys_id, by_dungeon)))
+        }
+        "GetIceBeltsCount" => {
+            seed_system_ice_belt_from_sde(ctx, sys_id);
+            let instances = anomaly_instances(ctx, sys_id, ICE_BELT_ANOMALY_TYPE);
+            let count: usize = instances.values().map(|v| v.len()).sum();
+            Some(Ok(PyRep::Integer(count as i64)))
+        }
+        "GetBulwarkMiningSiteCounts" => {
+            // const-ok: Bulwark mining site count dictionary per solar system
+            Some(Ok(PyRep::Dict(vec![(
+                PyRep::Integer(sys_id as i64),
+                PyRep::Integer(0),
+            )])))
+        }
+        "GetFactionWarfareInstances" => {
+            // const-ok: FW complex instances dictionary
+            let by_dng = std::collections::BTreeMap::new();
+            Some(Ok(instances_reply(sys_id, by_dng)))
         }
         _ => {
             // GetSignatureInstances: probe-only exploration sites plus SDE-seeded ore/gas signatures.

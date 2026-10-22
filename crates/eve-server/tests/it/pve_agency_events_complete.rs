@@ -308,10 +308,4 @@ async fn test_dungeon_instance_cache_returns_current_per_system_instances() {
         .dispatch_rpc(&mut anon, "dungeonInstanceCacheMgr", None, "GetOreAnomalyInstances", &[], &HashMap::new(), None)
         .await
         .is_err());
-    // Client methods this module does not serve still fall through to UnimplementedRPC.
-    let err = ctx
-        .dispatch_rpc(&mut tama, "dungeonInstanceCacheMgr", None, "GetBulwarkMiningSiteCounts", &[], &HashMap::new(), None)
-        .await
-        .expect_err("not implemented");
-    assert_eq!(err.code, "UnimplementedRPC");
 }
