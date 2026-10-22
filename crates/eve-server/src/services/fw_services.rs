@@ -414,16 +414,27 @@ pub async fn handle(
 
         ("dungeonInstanceCacheMgr", "GetFactionWarfareBattlefieldInstances") => {
             let sys_id = args.first().and_then(|a| a.as_i64()).and_then(|v| u32::try_from(v).ok()).or(session.solar_system_id);
+            let needed_sys = sys_id.unwrap_or(30002062);
+            let has_any = read_fw_runtime(ctx, |rt| {
+                rt.battlefield_instances.iter().any(|b| b.solar_system_id == needed_sys)
+            });
+            if !has_any {
+                spawn_battlefield_site(ctx, needed_sys, 500001, "Caldari-Gallente Warzone Battlefield");
+            }
             let instances = read_fw_runtime(ctx, |rt| {
                 rt.battlefield_instances
                     .iter()
                     .filter(|b| sys_id.map(|s| b.solar_system_id == s).unwrap_or(true))
                     .map(|b| {
                         PyRep::keyval([
+                            ("dungeonID", PyRep::Integer(b.instance_id)),
                             ("instanceID", PyRep::Integer(b.instance_id)),
                             ("solarSystemID", PyRep::Integer(i64::from(b.solar_system_id))),
+                            ("archetypeID", PyRep::Integer(111)),
                             ("factionID", PyRep::Integer(b.faction_id)),
+                            ("dungeonName", PyRep::String(b.name.clone())),
                             ("name", PyRep::String(b.name.clone())),
+                            ("progress", PyRep::Real(b.capture_progress)),
                             ("captureProgress", PyRep::Real(b.capture_progress)),
                             ("completed", PyRep::Bool(b.completed)),
                         ])

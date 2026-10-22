@@ -88,6 +88,7 @@ mod notify_space_sov_fleet_emission;
 mod pve_agency_events_complete;
 mod pve_exploration_complete;
 mod pve_mining_sites;
+mod pve_missions_dungeons_extended;
 mod quasar_economy_complete;
 mod quasar_feature_packages_complete;
 mod quasar_gateway;

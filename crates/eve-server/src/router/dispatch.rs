@@ -242,6 +242,15 @@ impl ServerContext {
             // rpc-lint: allow pre-existing GM gate for a server-internal name; refusing it is the point
             && method == "MaterializeSystemLOD2")
             || (effective_service == "keeper" && method == "GetLevelEditor")
+            || (effective_service == "dungeon"
+                && matches!(
+                    method,
+                    "DEGetDungeons"
+                        | "DEGetRooms"
+                        | "DEGetArchetypes"
+                        | "DEGetFactions"
+                        | "DEGetRoomObjectPaletteData"
+                ))
             || method.starts_with("GM_")
             || method.starts_with("QA_")
             || method.starts_with("qa_")
@@ -639,6 +648,18 @@ impl ServerContext {
             return res;
         }
         if let Some(res) = Box::pin(services::pve_dungeon_cache::handle(
+            self,
+            session,
+            effective_service,
+            method,
+            args,
+            kwargs,
+        ))
+        .await
+        {
+            return res;
+        }
+        if let Some(res) = Box::pin(services::pve_dungeon_system::handle(
             self,
             session,
             effective_service,

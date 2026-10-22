@@ -42,6 +42,7 @@ pub mod mining_sites;
 pub mod operations_manager;
 pub mod project_discovery;
 pub mod pve_dungeon_cache;
+pub mod pve_dungeon_system;
 pub mod pve_exploration;
 pub mod pve_hacking_sites;
 pub mod pve_special_sites;
