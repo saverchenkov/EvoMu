@@ -170,6 +170,7 @@ pub struct NotificationRecord {
     pub created: i64,
     pub data: String,
     pub deleted: bool,
+    pub interacted: bool,
 }
 
 /// Maximum queued real-time notifications per online character (`R51-P1-3`).
@@ -914,6 +915,7 @@ impl ServerContext {
             created,
             data: data.to_string(),
             deleted: false,
+            interacted: false,
         };
         self.notification_records
             .write()

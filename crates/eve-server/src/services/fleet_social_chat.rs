@@ -34,17 +34,6 @@ pub(super) struct CalendarEventState {
 }
 
 #[derive(Clone, Debug, Default)]
-pub(super) struct NotificationItem {
-    pub(super) notification_id: i64,
-    pub(super) type_id: i64,
-    pub(super) sender_id: i64,
-    pub(super) receiver_id: i64,
-    pub(super) processed: bool,
-    pub(super) created_ft: i64,
-    pub(super) data: String,
-}
-
-#[derive(Clone, Debug, Default)]
 pub(crate) struct SocialExtrasState {
     pub(super) next_id: i64,
     pub(super) cspa_charges: HashMap<i64, IskCents>, // char_id -> CSPA charge
@@ -53,7 +42,6 @@ pub(crate) struct SocialExtrasState {
     pub(super) contacts: HashMap<i64, HashMap<i64, (f64, bool, u64)>>, // char_id -> (contact_id -> (standing, in_watchlist, label_mask))
     pub(super) blocked: HashMap<i64, HashSet<i64>>,                    // char_id -> blocked_ids
     pub(super) char_notes: HashMap<(i64, i64), String>,                // (char_id, item_id) -> note
-    pub(super) notifications: HashMap<i64, Vec<NotificationItem>>,     // char_id -> notifications (cap 500)
     pub(super) calendar_events: HashMap<i64, CalendarEventState>,
     pub(super) muted_in_channel: HashMap<(String, i64), (u64, String)>, // (chan_id, char_id) -> (until_unix, reason)
     pub(super) blocked_in_channel: HashMap<String, HashSet<i64>>,       // chan_id -> blocked char_ids
@@ -90,7 +78,7 @@ pub(super) fn handle_chat_and_social(
 
     if matches!(
         service,
-        "notificationMgr" | "addressbook" | "charMgr"
+        "addressbook" | "charMgr"
     ) {
         return handle_contacts_notifications_calendar(ctx, session, service, method, args);
     }
@@ -129,8 +117,19 @@ fn handle_chat_rpc(
             if ctx.social_extras.lock().unwrap().blocked_in_channel.get(chan_id).is_some_and(|b| b.contains(&target_char)) {
                 return Some(Err(BridgeRpcError { code: "ChannelAccessDenied".into(), message: "Blocked from channel".into() }));
             }
+            if target_char != caller_id {
+                let blocked_in_contacts = crate::services::character_skills::character_contacts::is_blocked_by(ctx, target_char, caller_id);
+                let blocked_in_social = ctx.social_extras.lock().unwrap().blocked.get(&target_char).is_some_and(|b| b.contains(&caller_id));
+                if blocked_in_contacts || blocked_in_social {
+                    return Some(Err(BridgeRpcError { code: "ChannelAccessDenied".into(), message: "Target character has blocked caller".into() }));
+                }
+            }
             let is_delayed = is_delayed_local_channel(chan_id);
             let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let chan_exists = snap.chat_channels.contains_key(chan_id);
+                if !chan_exists && target_char != caller_id {
+                    return Err(BridgeRpcError { code: "ChannelAccessDenied".into(), message: "Cannot add another character to non-existent channel".into() });
+                }
                 let chan = snap.chat_channels.entry(chan_id.to_string()).or_insert_with(|| ChatChannelRecord {
                     channel_id: chan_id.to_string(),
                     name: chan_id.to_string(),
@@ -144,6 +143,9 @@ fn handle_chat_rpc(
                     password: None,
                     is_delayed_local: is_delayed,
                 });
+                if target_char != caller_id && chan.owner_id != Some(caller_id) && !chan.operators.contains(&caller_id) {
+                    return Err(BridgeRpcError { code: "ChannelAccessDenied".into(), message: "Only channel owner or operator may add other characters".into() });
+                }
                 if let Some(ref pw) = chan.password {
                     if !pw.is_empty() && chan.owner_id != Some(caller_id) && !chan.operators.contains(&caller_id) && password_arg != Some(pw.as_str()) {
                         return Err(BridgeRpcError { code: "InvalidChannelPassword".into(), message: "Incorrect password for channel".into() });
@@ -1007,87 +1009,6 @@ fn handle_contacts_notifications_calendar(
     args: &[PyRep],
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
-        ("notificationMgr", "GetAllNotifications")
-        | ("notificationMgr", "GetFormattedNotifications")
-        | ("notificationMgr", "GetUnprocessed")
-        | ("notificationMgr", "GetByGroupID")
-        | ("notificationMgr", "FormatNotifications") => {
-            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let items = ctx.social_extras
-                .lock()
-                .unwrap()
-                .notifications
-                .get(&char_id)
-                .cloned()
-                .unwrap_or_default();
-            let rows: Vec<Vec<PyRep>> = items
-                .into_iter()
-                .filter(|n| method != "GetUnprocessed" || !n.processed)
-                .map(|n| {
-                    vec![
-                        PyRep::Integer(n.notification_id),
-                        PyRep::Integer(n.type_id),
-                        PyRep::Integer(n.sender_id),
-                        PyRep::Integer(n.receiver_id),
-                        PyRep::Bool(n.processed),
-                        PyRep::Integer(n.created_ft),
-                        PyRep::String(n.data),
-                    ]
-                })
-                .collect();
-            Some(Ok(PyRep::rowset(
-                vec![
-                    "notificationID",
-                    "typeID",
-                    "senderID",
-                    "receiverID",
-                    "processed",
-                    "created",
-                    "data",
-                ],
-                rows,
-            )))
-        }
-
-        ("notificationMgr", "MarkAllAsProcessed")
-        | ("notificationMgr", "MarkAsProcessed")
-        | ("notificationMgr", "MarkGroupAsProcessed") => {
-            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let ids = extract_id_list(args.first());
-            if let Some(list) = ctx.social_extras.lock().unwrap().notifications.get_mut(&char_id) {
-                for n in list.iter_mut() {
-                    if ids.is_empty() || ids.contains(&n.notification_id) {
-                        n.processed = true;
-                    }
-                }
-            }
-            ctx.notify(
-                NotificationTarget::Character(char_id),
-                "OnNotificationChange",
-                "charid",
-                vec![PyRep::Integer(char_id)],
-            );
-            Some(Ok(PyRep::Bool(true)))
-        }
-
-        ("notificationMgr", "DeleteAllNotifications")
-        | ("notificationMgr", "DeleteGroupNotifications")
-        | ("notificationMgr", "DeleteNotifications") => {
-            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            ctx.social_extras
-                .lock()
-                .unwrap()
-                .notifications
-                .remove(&char_id);
-            ctx.notify(
-                NotificationTarget::Character(char_id),
-                "OnNotificationDeleted",
-                "charid",
-                vec![PyRep::Integer(char_id)],
-            );
-            Some(Ok(PyRep::Bool(true)))
-        }
-
         ("addressbook", "GetContactList") | ("charMgr", "GetContactList") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let s = ctx.social_extras.lock().unwrap();

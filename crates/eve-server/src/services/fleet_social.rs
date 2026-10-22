@@ -93,7 +93,15 @@ pub(super) fn handle_calendar_create(
     }
     let (scope, owner_id) = match method {
         "CreateCorporationEvent" => ("Corporation".to_string(), corp_id),
-        "CreateAllianceEvent" => ("Alliance".to_string(), ally_id),
+        "CreateAllianceEvent" => {
+            if session.alliance_id.or(char_ally).is_none() {
+                return Err(BridgeRpcError {
+                    code: "CalendarAccessDenied".into(),
+                    message: "Creating alliance calendar events requires membership in an alliance".into(),
+                });
+            }
+            ("Alliance".to_string(), ally_id)
+        }
         _ => ("Personal".to_string(), char_id),
     };
     let eid = {
@@ -140,15 +148,39 @@ pub(super) fn handle_calendar_mutate(
     use crate::services::mail_notify::{emit_edit_calendar_event, emit_new_calendar_event, emit_remove_calendar_event};
     use fleet_social_chat::extract_id_list;
     let (_, char_id) = ServerContext::require_character(session)?;
-    let eid = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+    let (char_corp, char_ally) = ctx.db.with_snapshot(|snap| {
+        snap.characters
+            .get(&char_id)
+            .map(|c| (c.corporation_id, c.alliance_id))
+            .unwrap_or((session.corporation_id.unwrap_or(char_id), session.alliance_id))
+    });
+    let corp_id = session.corporation_id.unwrap_or(char_corp);
+    let ally_id = session.alliance_id.or(char_ally);
+    let (is_ceo, roles) = get_effective_corp_roles(ctx, corp_id, char_id);
+    let has_comm_or_director = is_ceo || eve_db::corp_roles::has_role(roles, eve_db::corp_roles::ROLE_DIRECTOR | (1u64 << 40));
+    let check_auth = |ev: &fleet_social_chat::CalendarEventState| -> bool {
+        match ev._scope.as_str() {
+            "Alliance" => ally_id == Some(ev.owner_id) && (ev.creator_id == char_id || has_comm_or_director),
+            "Corporation" => corp_id == ev.owner_id && (ev.creator_id == char_id || has_comm_or_director),
+            _ => ev.owner_id == char_id || ev.creator_id == char_id,
+        }
+    };
+
+    let eid = match args.first().and_then(|a| a.as_i64()) {
+        Some(id) if id > 0 => id,
+        _ => return Err(BridgeRpcError {
+            code: "CalendarEventNotFound".into(),
+            message: "Calendar mutation requires a valid positive eventID".into(),
+        }),
+    };
     if method == "DeleteEvent" {
         let removed = {
             let mut s = ctx.social_extras.lock().unwrap();
             let Some(ev) = s.calendar_events.get(&eid) else {
                 return Err(BridgeRpcError { code: "CalendarEventNotFound".into(), message: format!("Calendar event {eid} not found") });
             };
-            if ev.owner_id != char_id && ev.creator_id != char_id {
-                return Err(BridgeRpcError { code: "CalendarAccessDenied".into(), message: "Only the event creator or owner may delete it".into() });
+            if !check_auth(ev) {
+                return Err(BridgeRpcError { code: "CalendarAccessDenied".into(), message: "Only the event creator or authorized director may delete it".into() });
             }
             s.calendar_events.remove(&eid).unwrap()
         };
@@ -172,8 +204,8 @@ pub(super) fn handle_calendar_mutate(
             let Some(ev) = s.calendar_events.get_mut(&eid) else {
                 return Err(BridgeRpcError { code: "CalendarEventNotFound".into(), message: format!("Calendar event {eid} not found") });
             };
-            if ev.owner_id != char_id && ev.creator_id != char_id {
-                return Err(BridgeRpcError { code: "CalendarAccessDenied".into(), message: "Only the event owner may update participants".into() });
+            if !check_auth(ev) {
+                return Err(BridgeRpcError { code: "CalendarAccessDenied".into(), message: "Only the event owner or authorized director may update participants".into() });
             }
             let (mut added, mut removed) = (Vec::new(), Vec::new());
             for cid in chars_to_add {
@@ -202,32 +234,33 @@ pub(super) fn handle_calendar_mutate(
     let mut edit_info = None;
     {
         let mut s = ctx.social_extras.lock().unwrap();
-        if let Some(ev) = s.calendar_events.get_mut(&eid) {
-            if method == "SendEventResponse" || method == "RespondToEvent" {
-                resp_val = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1);
-                ev.responses.insert(char_id, resp_val);
-            } else {
-                if ev.owner_id != char_id && ev.creator_id != char_id {
-                    return Err(BridgeRpcError { code: "CalendarAccessDenied".into(), message: "Only the event creator or owner may edit it".into() });
-                }
-                let mut old_dt = ev.event_date_time;
-                if let Some(new_dt) = args.get(2).and_then(|a| a.as_i64()).filter(|&v| v > 10_000) {
-                    if let Some(o) = args.get(1).and_then(|a| a.as_i64()).filter(|&v| v > 10_000) { old_dt = o; }
-                    ev.event_date_time = new_dt;
-                    if let Some(dur) = args.get(3).and_then(|a| a.as_i64()).filter(|&v| v > 0 && v <= 10_000) { ev.duration = dur; }
-                    if let Some(t) = args.get(4).and_then(|a| a.as_str()) { ev.title = t.to_string(); }
-                    if let Some(d) = args.get(5).and_then(|a| a.as_str()) { ev.description = d.to_string(); }
-                    if let Some(imp) = args.get(6).and_then(|a| a.as_i64()) { ev.importance = imp; }
-                } else {
-                    if let Some(dt) = args.get(1).and_then(|a| a.as_i64()).filter(|&v| v > 10_000) { ev.event_date_time = dt; }
-                    if let Some(dur) = args.get(2).and_then(|a| a.as_i64()).filter(|&v| v > 0 && v <= 10_000) { ev.duration = dur; }
-                    if let Some(t) = args.get(3).and_then(|a| a.as_str()).or_else(|| args.get(1).and_then(|a| a.as_str())) { ev.title = t.to_string(); }
-                    if let Some(d) = args.get(4).and_then(|a| a.as_str()).or_else(|| args.get(2).and_then(|a| a.as_str())) { ev.description = d.to_string(); }
-                    if let Some(imp) = args.get(5).and_then(|a| a.as_i64()) { ev.importance = imp; }
-                }
-                let participants: Vec<i64> = ev.responses.keys().copied().collect();
-                edit_info = Some((ev._scope.clone(), ev.owner_id, old_dt, ev.event_date_time, ev.duration, ev.title.clone(), ev.importance, participants));
+        let Some(ev) = s.calendar_events.get_mut(&eid) else {
+            return Err(BridgeRpcError { code: "CalendarEventNotFound".into(), message: format!("Calendar event {eid} not found") });
+        };
+        if method == "SendEventResponse" || method == "RespondToEvent" {
+            resp_val = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1);
+            ev.responses.insert(char_id, resp_val);
+        } else {
+            if !check_auth(ev) {
+                return Err(BridgeRpcError { code: "CalendarAccessDenied".into(), message: "Only the event creator or authorized director may edit it".into() });
             }
+            let mut old_dt = ev.event_date_time;
+            if let Some(new_dt) = args.get(2).and_then(|a| a.as_i64()).filter(|&v| v > 10_000) {
+                if let Some(o) = args.get(1).and_then(|a| a.as_i64()).filter(|&v| v > 10_000) { old_dt = o; }
+                ev.event_date_time = new_dt;
+                if let Some(dur) = args.get(3).and_then(|a| a.as_i64()).filter(|&v| v > 0 && v <= 10_000) { ev.duration = dur; }
+                if let Some(t) = args.get(4).and_then(|a| a.as_str()) { ev.title = t.to_string(); }
+                if let Some(d) = args.get(5).and_then(|a| a.as_str()) { ev.description = d.to_string(); }
+                if let Some(imp) = args.get(6).and_then(|a| a.as_i64()) { ev.importance = imp; }
+            } else {
+                if let Some(dt) = args.get(1).and_then(|a| a.as_i64()).filter(|&v| v > 10_000) { ev.event_date_time = dt; }
+                if let Some(dur) = args.get(2).and_then(|a| a.as_i64()).filter(|&v| v > 0 && v <= 10_000) { ev.duration = dur; }
+                if let Some(t) = args.get(3).and_then(|a| a.as_str()).or_else(|| args.get(1).and_then(|a| a.as_str())) { ev.title = t.to_string(); }
+                if let Some(d) = args.get(4).and_then(|a| a.as_str()).or_else(|| args.get(2).and_then(|a| a.as_str())) { ev.description = d.to_string(); }
+                if let Some(imp) = args.get(5).and_then(|a| a.as_i64()) { ev.importance = imp; }
+            }
+            let participants: Vec<i64> = ev.responses.keys().copied().collect();
+            edit_info = Some((ev._scope.clone(), ev.owner_id, old_dt, ev.event_date_time, ev.duration, ev.title.clone(), ev.importance, participants));
         }
     }
     if let Some((scope, owner_id, old_dt, dt, dur, title, imp, participants)) = edit_info {

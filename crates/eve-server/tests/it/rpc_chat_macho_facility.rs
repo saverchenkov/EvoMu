@@ -121,6 +121,51 @@ async fn test_xmpp_chat_mgr_and_macho_net() {
         assert!(ch.members.contains(&PILOT_2), "pilot2 added to channel members");
     });
 
+    // Negative verification: Pilot 2 (non-owner/non-operator) cannot add arbitrary pilots
+    let unauth_add = rpc(
+        &ctx,
+        &mut sess2,
+        "XmppChatMgr",
+        "AddCharacterToChannel",
+        &[PyRep::String(chan_name.into()), PyRep::Integer(999_888)],
+    )
+    .await;
+    assert!(unauth_add.is_err());
+    assert_eq!(unauth_add.unwrap_err().code, "ChannelAccessDenied");
+
+    // Blocked target verification: blocked pilot cannot be added by caller
+    ctx.esi_state
+        .char_contacts
+        .write()
+        .unwrap()
+        .entry(PILOT_2)
+        .or_default()
+        .push(eve_server::esi::runtime_state::EsiContactEntry {
+            contact_id: PILOT_1,
+            contact_type: "character".into(),
+            standing: 0.0,
+            is_watched: false,
+            is_blocked: true,
+            label_ids: vec![],
+        });
+    let blocked_add = rpc(
+        &ctx,
+        &mut sess1,
+        "XmppChatMgr",
+        "AddCharacterToChannel",
+        &[PyRep::String(chan_name.into()), PyRep::Integer(PILOT_2)],
+    )
+    .await;
+    assert!(blocked_add.is_err());
+    assert_eq!(blocked_add.unwrap_err().code, "ChannelAccessDenied");
+    ctx.esi_state
+        .char_contacts
+        .write()
+        .unwrap()
+        .get_mut(&PILOT_2)
+        .unwrap()
+        .retain(|c| c.contact_id != PILOT_1);
+
     // 5. XmppChatMgr.GrantChannelOwnership: transfers channel ownership from Pilot 1 to Pilot 2
     let grant_rep = rpc(
         &ctx,
@@ -177,7 +222,19 @@ async fn test_xmpp_chat_mgr_and_macho_net() {
     assert!(unk_obj.is_err());
     assert_eq!(unk_obj.unwrap_err().code, "CachedObjectNotFound");
 
-    // 9. machoNet.ForwardCharacterNotification: routes character notification to target session
+    // 9. machoNet.ForwardCharacterNotification: requires GM privileges and routes notification
+    let fwd_unauth = rpc(
+        &ctx,
+        &mut sess1,
+        "machoNet",
+        "ForwardCharacterNotification",
+        &[PyRep::Integer(PILOT_2), PyRep::String("OnNotificationReceived".into()), PyRep::String("hello_pilot2".into())],
+    )
+    .await;
+    assert!(fwd_unauth.is_err());
+    assert_eq!(fwd_unauth.unwrap_err().code, "InsufficientRole");
+
+    sess1.role = eve_machonet::service_roles::ROLE_GMS;
     let fwd_rep = rpc(
         &ctx,
         &mut sess1,
@@ -188,6 +245,10 @@ async fn test_xmpp_chat_mgr_and_macho_net() {
     .await
     .expect("ForwardCharacterNotification");
     assert_eq!(fwd_rep, PyRep::Bool(true));
+    let pilot2_notifs = ctx.drain_notifications_for_char(PILOT_2);
+    assert!(pilot2_notifs.iter().any(|n| n.event == "OnNotificationReceived"));
+
+    sess1.role = eve_machonet::service_roles::ROLE_PLAYER;
 
     // 10. machoNet.ReloadClientCodeHash: requires GM role
     let reload_err = rpc(&ctx, &mut sess1, "machoNet", "ReloadClientCodeHash", &[]).await;

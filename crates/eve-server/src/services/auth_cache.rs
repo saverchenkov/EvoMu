@@ -86,8 +86,11 @@ pub async fn handle(
         }
 
         ("machoNet", "ForwardCharacterNotification") => {
-            if let Err(e) = ServerContext::require_auth(session) {
-                return Some(Err(e));
+            if !session.has_gm_role() {
+                return Some(Err(BridgeRpcError {
+                    code: "InsufficientRole".into(),
+                    message: "machoNet.ForwardCharacterNotification requires GM privileges".into(),
+                }));
             }
             let Some(char_id) = args.first().and_then(|a| a.as_i64()) else {
                 return Some(Err(BridgeRpcError {

@@ -725,6 +725,14 @@ pub fn handle(
                     updated += 1;
                 }
             }
+            if updated > 0 {
+                let _ = ctx.notify(
+                    crate::router::NotificationTarget::Character(char_id),
+                    "OnNotificationChange",
+                    "charid",
+                    vec![PyRep::Integer(char_id)],
+                );
+            }
             Some(Ok(PyRep::Integer(updated)))
         }
 
@@ -743,6 +751,14 @@ pub fn handle(
                     n.processed = true;
                     updated += 1;
                 }
+            }
+            if updated > 0 {
+                let _ = ctx.notify(
+                    crate::router::NotificationTarget::Character(char_id),
+                    "OnNotificationChange",
+                    "charid",
+                    vec![PyRep::Integer(char_id)],
+                );
             }
             Some(Ok(PyRep::Integer(updated)))
         }
@@ -773,6 +789,14 @@ pub fn handle(
                     updated += 1;
                 }
             }
+            if updated > 0 {
+                let _ = ctx.notify(
+                    crate::router::NotificationTarget::Character(char_id),
+                    "OnNotificationChange",
+                    "charid",
+                    vec![PyRep::Integer(char_id)],
+                );
+            }
             Some(Ok(PyRep::Integer(updated)))
         }
 
@@ -796,6 +820,14 @@ pub fn handle(
                     n.deleted = true;
                     deleted += 1;
                 }
+            }
+            if deleted > 0 {
+                let _ = ctx.notify(
+                    crate::router::NotificationTarget::Character(char_id),
+                    "OnNotificationDeleted",
+                    "charid",
+                    vec![PyRep::Integer(char_id)],
+                );
             }
             Some(Ok(PyRep::Integer(deleted)))
         }
@@ -822,6 +854,14 @@ pub fn handle(
                     deleted += 1;
                 }
             }
+            if deleted > 0 {
+                let _ = ctx.notify(
+                    crate::router::NotificationTarget::Character(char_id),
+                    "OnNotificationDeleted",
+                    "charid",
+                    vec![PyRep::Integer(char_id)],
+                );
+            }
             Some(Ok(PyRep::Integer(deleted)))
         }
 
@@ -841,14 +881,32 @@ pub fn handle(
                     deleted += 1;
                 }
             }
+            if deleted > 0 {
+                let _ = ctx.notify(
+                    crate::router::NotificationTarget::Character(char_id),
+                    "OnNotificationDeleted",
+                    "charid",
+                    vec![PyRep::Integer(char_id)],
+                );
+            }
             Some(Ok(PyRep::Integer(deleted)))
         }
 
         ("notificationMgr", "LogNotificationInteraction") => {
-            let _ = match ServerContext::require_character(session) {
+            let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            let notif_id = args.first().and_then(|a| a.as_i64());
+            if let Some(nid) = notif_id {
+                let mut recs = ctx
+                    .notification_records
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner());
+                if let Some(r) = recs.iter_mut().find(|r| r.notification_id == nid && r.receiver_id == char_id) {
+                    r.interacted = true;
+                }
+            }
             Some(Ok(PyRep::Bool(true)))
         }
 
