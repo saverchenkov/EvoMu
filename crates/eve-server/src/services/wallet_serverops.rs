@@ -34,7 +34,6 @@ fn check_starbase_auth(
 ) -> Result<(), BridgeRpcError> {
     if session.has_gm_role() { return Ok(()); }
     let owner_corp = snap.structures.get(&structure_id).map(|s| s.owner_corp_id)
-        .or_else(|| snap.items.get(&structure_id).map(|i| i.owner_id))
         .ok_or_else(|| rpc_err("StructureNotFound", format!("Starbase structure {structure_id} not found")))?;
     let char_corp = session.corporation_id
         .or_else(|| snap.characters.get(&char_id).map(|c| c.corporation_id)).unwrap_or(0);
@@ -650,15 +649,16 @@ pub fn handle(
             let now_unix = ctx.now_unix();
             let res = ctx.db.try_with_mut_snapshot(|snap| -> Result<i64, BridgeRpcError> {
                 check_starbase_auth(snap, session, char_id, tower_id)?;
-                if let Some(st) = snap.structures.get_mut(&tower_id) {
-                    if st.state == "Unanchored" || st.state == "Anchoring" || st.state == "Destroyed" {
-                        return Err(rpc_err("StarbaseNotOnline", format!("Starbase is in {} state", st.state)));
-                    }
-                    if st.fuel_blocks == 0 {
-                        return Err(rpc_err("StarbaseNoFuel", "Starbase requires fuel blocks for moon harvesting"));
-                    }
-                    st.fuel_blocks = st.fuel_blocks.saturating_sub(5);
+                let Some(st) = snap.structures.get_mut(&tower_id) else {
+                    return Err(rpc_err("StarbaseNotFound", format!("Starbase structure {tower_id} not found")));
+                };
+                if st.state != "Online" {
+                    return Err(rpc_err("StarbaseNotOnline", format!("Starbase is in {} state", st.state)));
                 }
+                if st.fuel_blocks < 5 {
+                    return Err(rpc_err("StarbaseNoFuel", "Starbase requires fuel blocks for moon harvesting"));
+                }
+                st.fuel_blocks = st.fuel_blocks.saturating_sub(5);
                 let st = snap.starbase_settings.entry(tower_id).or_default();
                 if st.last_moon_process_unix > 0 && now_unix < st.last_moon_process_unix.saturating_add(3600) {
                     return Err(rpc_err("CycleInProgress", "Moon harvesting cycle is in progress"));
