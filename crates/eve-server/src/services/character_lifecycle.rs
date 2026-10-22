@@ -83,6 +83,10 @@ fn owned_char_arg(
     Ok(char_id)
 }
 
+fn unix_to_filetime(unix_secs: u64) -> i64 {
+    (unix_secs as i64 + 11_644_473_600) * 10_000_000
+}
+
 /// Returns `Some(result)` for RPCs fully handled here; `None` lets the regular handler run.
 pub fn handle(
     ctx: &ServerContext,
@@ -91,6 +95,9 @@ pub fn handle(
     method: &str,
     args: &[PyRep],
 ) -> Option<Result<PyRep, BridgeRpcError>> {
+    if service == "charMgr" {
+        return handle_char_mgr(ctx, session, method, args);
+    }
     if service != "charUnboundMgr" {
         return None;
     }
@@ -200,4 +207,178 @@ fn delete(ctx: &ServerContext, user_id: u64, args: &[PyRep]) -> Result<PyRep, Br
         ("corporationID", PyRep::Integer(doomheim)),
         ("deleted", PyRep::Bool(true)),
     ]))
+}
+
+fn handle_char_mgr(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    method: &str,
+    args: &[PyRep],
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    match method {
+        "GetCharacterCreationDate" => {
+            let (_, session_char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let char_id = args.first().and_then(|a| a.as_i64()).unwrap_or(session_char_id);
+            let dt = ctx.db.with_snapshot(|snap| {
+                snap.characters
+                    .get(&char_id)
+                    .map(|c| unix_to_filetime(c.create_date_unix))
+                    .unwrap_or_else(|| ctx.now_blueos_filetime_ticks())
+            });
+            Some(Ok(PyRep::Integer(dt)))
+        }
+        "GetHomeStationRow" => {
+            let (_, session_char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let char_id = args.first().and_then(|a| a.as_i64()).unwrap_or(session_char_id);
+            let station_id = ctx.db.with_snapshot(|snap| {
+                snap.characters
+                    .get(&char_id)
+                    .map(|c| c.home_station_id)
+                    .unwrap_or(60_003_760)
+            });
+            Some(Ok(PyRep::keyval([
+                ("stationID", PyRep::Integer(station_id)),
+                ("typeID", PyRep::Integer(1531)),
+            ])))
+        }
+        "stationID" => {
+            let (_, session_char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let st_id = session.station_id.unwrap_or_else(|| {
+                ctx.db.with_snapshot(|snap| {
+                    snap.characters
+                        .get(&session_char_id)
+                        .and_then(|c| c.station_id.or(Some(c.home_station_id)))
+                        .unwrap_or(60_003_760)
+                })
+            });
+            Some(Ok(PyRep::Integer(st_id)))
+        }
+        "GetOrganizationInfoForCharacters" => {
+            let _ = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let char_ids: Vec<i64> = match args.first() {
+                Some(PyRep::List(list)) | Some(PyRep::Tuple(list)) => {
+                    list.iter().filter_map(|v| v.as_i64()).collect()
+                }
+                Some(PyRep::Integer(id)) => vec![*id],
+                _ => Vec::new(),
+            };
+            let res = ctx.db.with_snapshot(|snap| {
+                char_ids
+                    .into_iter()
+                    .map(|cid| {
+                        let ch = snap.characters.get(&cid);
+                        let corp = ch.map(|c| c.corporation_id).unwrap_or(1000044);
+                        let ally = ch.and_then(|c| c.alliance_id);
+                        (
+                            PyRep::Integer(cid),
+                            PyRep::keyval([
+                                ("characterID", PyRep::Integer(cid)),
+                                ("corporationID", PyRep::Integer(corp)),
+                                ("allianceID", ally.map(PyRep::Integer).unwrap_or(PyRep::None)),
+                            ]),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            });
+            Some(Ok(PyRep::Dict(res)))
+        }
+        "GetPrivateInfoOnCorpChange" => {
+            let (_, session_char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let char_id = args.first().and_then(|a| a.as_i64()).unwrap_or(session_char_id);
+            let corp_id = ctx.db.with_snapshot(|snap| {
+                snap.characters
+                    .get(&char_id)
+                    .map(|c| c.corporation_id)
+                    .unwrap_or(1000044)
+            });
+            Some(Ok(PyRep::keyval([
+                ("characterID", PyRep::Integer(char_id)),
+                ("corporationID", PyRep::Integer(corp_id)),
+                ("roles", PyRep::Integer(0)),
+            ])))
+        }
+        "GetPublicInfo" => {
+            let (_, session_char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let char_id = args.first().and_then(|a| a.as_i64()).unwrap_or(session_char_id);
+            let info = ctx.db.with_snapshot(|snap| {
+                snap.characters.get(&char_id).map(|c| {
+                    (
+                        c.name.clone(),
+                        c.corporation_id,
+                        c.alliance_id,
+                        c.security_status,
+                        c.description.clone(),
+                        unix_to_filetime(c.create_date_unix),
+                    )
+                })
+            });
+            let (name, corp, ally, sec, desc, cdate) = info.unwrap_or((
+                "Unknown".into(),
+                1000044,
+                None,
+                0.0,
+                String::new(),
+                ctx.now_blueos_filetime_ticks(),
+            ));
+            Some(Ok(PyRep::keyval([
+                ("characterID", PyRep::Integer(char_id)),
+                ("characterName", PyRep::String(name)),
+                ("corporationID", PyRep::Integer(corp)),
+                ("allianceID", ally.map(PyRep::Integer).unwrap_or(PyRep::None)),
+                ("securityStatus", PyRep::Real(sec)),
+                ("description", PyRep::String(desc)),
+                ("createDateTime", PyRep::Integer(cdate)),
+            ])))
+        }
+        "GetRecentShipKillsAndLosses" => {
+            let _ = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            Some(Ok(PyRep::rowset(
+                vec!["killID", "victimID", "solarSystemID", "killTime"],
+                vec![],
+            )))
+        }
+        "SetActivityStatus" => {
+            let _ = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            Some(Ok(PyRep::Bool(true)))
+        }
+        "GetCohortsForCharacter" => {
+            let _ = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            Some(Ok(PyRep::List(Vec::new())))
+        }
+        "SetSessionCheck" | "clear_memoized" => {
+            let _ = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            Some(Ok(PyRep::Bool(true)))
+        }
+        _ => None,
+    }
 }

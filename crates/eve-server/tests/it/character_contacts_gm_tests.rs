@@ -645,3 +645,135 @@ async fn test_ch5_gm_spawn_attr_fit_kill_location_online_and_qa_tools() {
     };
     assert_eq!(move_kv.get("solarSystemID").and_then(|v| v.as_i64()), Some(30_002_537));
 }
+
+#[tokio::test]
+async fn test_char_mgr_character_profile_info_and_lifecycle() {
+    // parity: rpc:charMgr.GetCharacterCreationDate, rpc:charMgr.GetHomeStationRow, rpc:charMgr.stationID, rpc:charMgr.GetOrganizationInfoForCharacters, rpc:charMgr.GetPrivateInfoOnCorpChange, rpc:charMgr.GetPublicInfo, rpc:charMgr.GetRecentShipKillsAndLosses, rpc:charMgr.SetActivityStatus, rpc:charMgr.GetCohortsForCharacter, rpc:charMgr.SetSessionCheck, rpc:charMgr.clear_memoized, rpc:charMgr.GetPaperdollState, rpc:charMgr.SetNote, rpc:charMgr.GetNote
+    let ctx = ServerContext::new();
+    let kw = HashMap::new();
+    let mut sess = SessionState::new(1001);
+    common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
+    ctx.dispatch_rpc(
+        &mut sess,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(90_000_001)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("SelectCharacterID");
+
+    // 1. GetCharacterCreationDate
+    let cdate = ctx
+        .dispatch_rpc(&mut sess, "charMgr", None, "GetCharacterCreationDate", &[PyRep::Integer(90_000_001)], &kw, None)
+        .await
+        .expect("GetCharacterCreationDate");
+    let cdate_ft = cdate.as_i64().expect("creation filetime");
+    assert!(cdate_ft > 116_444_736_000_000_000);
+
+    // 2. GetHomeStationRow
+    let home = ctx
+        .dispatch_rpc(&mut sess, "charMgr", None, "GetHomeStationRow", &[], &kw, None)
+        .await
+        .expect("GetHomeStationRow");
+    let PyRep::KeyVal(home_kv) = home else { panic!("expected KeyVal") };
+    assert_eq!(home_kv.get("stationID"), Some(&PyRep::Integer(60_003_760)));
+
+    // 3. stationID
+    let sta = ctx
+        .dispatch_rpc(&mut sess, "charMgr", None, "stationID", &[], &kw, None)
+        .await
+        .expect("stationID");
+    assert_eq!(sta, PyRep::Integer(60_003_760));
+
+    // 4. GetOrganizationInfoForCharacters
+    let orgs = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "charMgr",
+            None,
+            "GetOrganizationInfoForCharacters",
+            &[PyRep::List(vec![PyRep::Integer(90_000_001)])],
+            &kw,
+            None,
+        )
+        .await
+        .expect("GetOrganizationInfoForCharacters");
+    let PyRep::Dict(org_map) = orgs else { panic!("expected Dict") };
+    assert_eq!(org_map.len(), 1);
+
+    // 5. GetPrivateInfoOnCorpChange
+    let priv_info = ctx
+        .dispatch_rpc(&mut sess, "charMgr", None, "GetPrivateInfoOnCorpChange", &[PyRep::Integer(90_000_001)], &kw, None)
+        .await
+        .expect("GetPrivateInfoOnCorpChange");
+    let PyRep::KeyVal(priv_kv) = priv_info else { panic!("expected KeyVal") };
+    assert_eq!(priv_kv.get("characterID"), Some(&PyRep::Integer(90_000_001)));
+
+    // 6. GetPublicInfo
+    let pub_info = ctx
+        .dispatch_rpc(&mut sess, "charMgr", None, "GetPublicInfo", &[PyRep::Integer(90_000_001)], &kw, None)
+        .await
+        .expect("GetPublicInfo");
+    let PyRep::KeyVal(pub_kv) = pub_info else { panic!("expected KeyVal") };
+    assert_eq!(pub_kv.get("characterID"), Some(&PyRep::Integer(90_000_001)));
+    assert_eq!(pub_kv.get("characterName"), Some(&PyRep::String("Aura Capsuleer".into())));
+
+    // 7. GetRecentShipKillsAndLosses
+    let kills = ctx
+        .dispatch_rpc(&mut sess, "charMgr", None, "GetRecentShipKillsAndLosses", &[PyRep::Integer(90_000_001)], &kw, None)
+        .await
+        .expect("GetRecentShipKillsAndLosses");
+    let PyRep::Rowset { rows, .. } = kills else { panic!("expected Rowset") };
+    assert!(rows.is_empty());
+
+    // 8. SetActivityStatus
+    let act = ctx
+        .dispatch_rpc(&mut sess, "charMgr", None, "SetActivityStatus", &[PyRep::Integer(1)], &kw, None)
+        .await
+        .expect("SetActivityStatus");
+    assert_eq!(act, PyRep::Bool(true));
+
+    // 9. GetCohortsForCharacter
+    let cohorts = ctx
+        .dispatch_rpc(&mut sess, "charMgr", None, "GetCohortsForCharacter", &[PyRep::Integer(90_000_001)], &kw, None)
+        .await
+        .expect("GetCohortsForCharacter");
+    let PyRep::List(c_list) = cohorts else { panic!("expected List") };
+    assert!(c_list.is_empty());
+
+    // 10. SetSessionCheck & clear_memoized
+    let sc = ctx
+        .dispatch_rpc(&mut sess, "charMgr", None, "SetSessionCheck", &[], &kw, None)
+        .await
+        .expect("SetSessionCheck");
+    assert_eq!(sc, PyRep::Bool(true));
+
+    let cm = ctx
+        .dispatch_rpc(&mut sess, "charMgr", None, "clear_memoized", &[], &kw, None)
+        .await
+        .expect("clear_memoized");
+    assert_eq!(cm, PyRep::Bool(true));
+
+    // 11. GetPaperdollState
+    let pd = ctx
+        .dispatch_rpc(&mut sess, "charMgr", None, "GetPaperdollState", &[], &kw, None)
+        .await
+        .expect("GetPaperdollState");
+    assert_eq!(pd, PyRep::Integer(0));
+
+    // 12. SetNote & GetNote
+    let sn = ctx
+        .dispatch_rpc(&mut sess, "charMgr", None, "SetNote", &[PyRep::Integer(90_000_002), PyRep::String("Ally scout".into())], &kw, None)
+        .await
+        .expect("SetNote");
+    assert_eq!(sn, PyRep::Bool(true));
+
+    let gn = ctx
+        .dispatch_rpc(&mut sess, "charMgr", None, "GetNote", &[PyRep::Integer(90_000_002)], &kw, None)
+        .await
+        .expect("GetNote");
+    assert_eq!(gn, PyRep::String("Ally scout".into()));
+}
