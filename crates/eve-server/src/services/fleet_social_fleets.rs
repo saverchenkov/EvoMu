@@ -168,6 +168,8 @@ pub(super) async fn handle_fleets(
                             wing_id: Some(wid),
                             squad_id: Some(sid),
                             takes_fleet_warp: true,
+                            accepts_regroup: true,
+                            accepts_conduit_jumps: true,
                             job: 2, // fleet boss bit
                             role_name: "Fleet Commander".into(),
                             join_time_unix: ctx.now_unix(),
@@ -812,6 +814,8 @@ pub(super) async fn handle_fleets(
                         wing_id: Some(wid),
                         squad_id: Some(sid),
                         takes_fleet_warp: true,
+                        accepts_regroup: true,
+                        accepts_conduit_jumps: true,
                         job: 0,
                         role_name: role_name_str(role).into(),
                         join_time_unix: ctx.now_unix(),

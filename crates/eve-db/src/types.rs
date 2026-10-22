@@ -833,6 +833,10 @@ pub enum FleetRole {
     SquadMember = 4,
 }
 
+const fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FleetMemberRecord {
     pub character_id: i64,
@@ -843,6 +847,10 @@ pub struct FleetMemberRecord {
     pub squad_id: Option<i64>,
     #[serde(default)]
     pub takes_fleet_warp: bool,
+    #[serde(default = "default_true")]
+    pub accepts_regroup: bool,
+    #[serde(default = "default_true")]
+    pub accepts_conduit_jumps: bool,
     #[serde(default)]
     pub job: u32,
     #[serde(default)]

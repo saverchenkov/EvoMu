@@ -458,7 +458,7 @@ async fn test_fleet_object_sizing_warp_and_composition() {
         .expect("GetFleetMaxSize");
     assert_eq!(get_size_rep.as_i64(), Some(64));
 
-    // 3. SetTakesFleetWarp: Pilot 2 disables takesFleetWarp
+    // 3. SetTakesFleetWarp: Pilot 2 disables takesFleetWarp (regroup and conduit stay true)
     let warp_rep = rpc(
         &ctx,
         &mut sess2,
@@ -470,35 +470,41 @@ async fn test_fleet_object_sizing_warp_and_composition() {
 
     assert_eq!(get_i64(&warp_rep, "characterID"), Some(PILOT2));
     assert_eq!(get_bool(&warp_rep, "takesFleetWarp"), Some(false));
-    assert_eq!(get_bool(&warp_rep, "acceptsRegroup"), Some(false));
-    assert_eq!(get_bool(&warp_rep, "acceptsConduitJumps"), Some(false));
+    assert_eq!(get_bool(&warp_rep, "acceptsRegroup"), Some(true));
+    assert_eq!(get_bool(&warp_rep, "acceptsConduitJumps"), Some(true));
 
     ctx.db.with_snapshot(|snap| {
         let fleet = snap.fleets.get(&fid).expect("fleet");
-        assert!(!fleet.member_details[&PILOT2].takes_fleet_warp);
+        let m = &fleet.member_details[&PILOT2];
+        assert!(!m.takes_fleet_warp);
+        assert!(m.accepts_regroup);
+        assert!(m.accepts_conduit_jumps);
     });
 
-    // 4. SetAcceptsRegroupValue: Pilot 2 re-enables regroup and warp
+    // 4. SetAcceptsRegroupValue: Pilot 2 disables regroup independently (warp remains false, conduit stays true)
     let regroup_rep = rpc(
         &ctx,
         &mut sess2,
         "SetAcceptsRegroupValue",
-        &[PyRep::Bool(true)],
+        &[PyRep::Bool(false)],
     )
     .await
-    .expect("SetAcceptsRegroupValue true");
+    .expect("SetAcceptsRegroupValue false");
 
     assert_eq!(get_i64(&regroup_rep, "characterID"), Some(PILOT2));
-    assert_eq!(get_bool(&regroup_rep, "takesFleetWarp"), Some(true));
-    assert_eq!(get_bool(&regroup_rep, "acceptsRegroup"), Some(true));
+    assert_eq!(get_bool(&regroup_rep, "takesFleetWarp"), Some(false));
+    assert_eq!(get_bool(&regroup_rep, "acceptsRegroup"), Some(false));
     assert_eq!(get_bool(&regroup_rep, "acceptsConduitJumps"), Some(true));
 
     ctx.db.with_snapshot(|snap| {
         let fleet = snap.fleets.get(&fid).expect("fleet");
-        assert!(fleet.member_details[&PILOT2].takes_fleet_warp);
+        let m = &fleet.member_details[&PILOT2];
+        assert!(!m.takes_fleet_warp);
+        assert!(!m.accepts_regroup);
+        assert!(m.accepts_conduit_jumps);
     });
 
-    // 5. SetAcceptsConduitJumpsValue: Pilot 2 disables conduit jumps and warp
+    // 5. SetAcceptsConduitJumpsValue: Pilot 2 disables conduit jumps independently
     let conduit_rep = rpc(
         &ctx,
         &mut sess2,
@@ -515,7 +521,32 @@ async fn test_fleet_object_sizing_warp_and_composition() {
 
     ctx.db.with_snapshot(|snap| {
         let fleet = snap.fleets.get(&fid).expect("fleet");
-        assert!(!fleet.member_details[&PILOT2].takes_fleet_warp);
+        let m = &fleet.member_details[&PILOT2];
+        assert!(!m.takes_fleet_warp);
+        assert!(!m.accepts_regroup);
+        assert!(!m.accepts_conduit_jumps);
+    });
+
+    // Verify independent toggle: re-enabling regroup does NOT alter warp or conduit jump settings
+    let regroup_re_enable = rpc(
+        &ctx,
+        &mut sess2,
+        "SetAcceptsRegroupValue",
+        &[PyRep::Bool(true)],
+    )
+    .await
+    .expect("SetAcceptsRegroupValue true");
+
+    assert_eq!(get_bool(&regroup_re_enable, "takesFleetWarp"), Some(false));
+    assert_eq!(get_bool(&regroup_re_enable, "acceptsRegroup"), Some(true));
+    assert_eq!(get_bool(&regroup_re_enable, "acceptsConduitJumps"), Some(false));
+
+    ctx.db.with_snapshot(|snap| {
+        let fleet = snap.fleets.get(&fid).expect("fleet");
+        let m = &fleet.member_details[&PILOT2];
+        assert!(!m.takes_fleet_warp);
+        assert!(m.accepts_regroup);
+        assert!(!m.accepts_conduit_jumps);
     });
 
     // 6. GetFleetComposition: Fleet Commander inspects real-time ship & spatial telemetry

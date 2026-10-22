@@ -678,52 +678,16 @@ pub(super) async fn handle_fleet_ops(
             Some(Ok(PyRep::Integer(max_size as i64)))
         }
 
-        ("fleetObjectHandler", "SetTakesFleetWarp")
-        | ("fleetObjectHandler", "SetAcceptsRegroupValue")
-        | ("fleetObjectHandler", "SetAcceptsConduitJumpsValue") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let fleet_id = match session.fleet_id {
-                Some(fid) => fid,
-                None => {
-                    return Some(Err(BridgeRpcError {
-                        code: "NotInFleet".into(),
-                        message: "Character is not in a fleet".into(),
-                    }))
-                }
-            };
-            let flag = match args.first() {
-                Some(PyRep::Bool(b)) => *b,
-                Some(PyRep::Integer(i)) => *i != 0,
-                _ => true,
-            };
-            let res = ctx.db.try_with_mut_snapshot(|snap| {
-                let Some(fleet) = snap.fleets.get_mut(&fleet_id) else {
-                    return Err(BridgeRpcError {
-                        code: "FleetNotFound".into(),
-                        message: format!("Fleet {fleet_id} not found"),
-                    });
-                };
-                let Some(member) = fleet.member_details.get_mut(&char_id) else {
-                    return Err(BridgeRpcError {
-                        code: "MemberNotFound".into(),
-                        message: "Character not in fleet".into(),
-                    });
-                };
-                member.takes_fleet_warp = flag;
-                Ok(())
-            });
-            match res {
-                Ok(()) => Some(Ok(PyRep::keyval([
-                    ("characterID", PyRep::Integer(char_id)),
-                    ("takesFleetWarp", PyRep::Bool(flag)),
-                    ("acceptsRegroup", PyRep::Bool(flag)),
-                    ("acceptsConduitJumps", PyRep::Bool(flag)),
-                ]))),
-                Err(e) => Some(Err(e)),
-            }
+        ("fleetObjectHandler", "SetTakesFleetWarp") => {
+            handle_fleet_member_preference(ctx, session, args, 0)
+        }
+
+        ("fleetObjectHandler", "SetAcceptsRegroupValue") => {
+            handle_fleet_member_preference(ctx, session, args, 1)
+        }
+
+        ("fleetObjectHandler", "SetAcceptsConduitJumpsValue") => {
+            handle_fleet_member_preference(ctx, session, args, 2)
         }
 
         ("fleetObjectHandler", "LoadFleetSetup") => {
@@ -1278,6 +1242,8 @@ pub(super) async fn handle_fleet_ops(
                             wing_id: Some(wid),
                             squad_id: Some(sid),
                             takes_fleet_warp: true,
+                            accepts_regroup: true,
+                            accepts_conduit_jumps: true,
                             job: 0,
                             role_name: "Squad Member".into(),
                             join_time_unix: ctx.now_unix(),
@@ -1332,4 +1298,59 @@ fn handle_get_init_state(
     session: &mut SessionState,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     super::handle_get_init_state(ctx, session)
+}
+
+fn handle_fleet_member_preference(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    args: &[PyRep],
+    pref_type: u8,
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    let (_, char_id) = match ServerContext::require_character(session) {
+        Ok(v) => v,
+        Err(e) => return Some(Err(e)),
+    };
+    let fleet_id = match session.fleet_id {
+        Some(fid) => fid,
+        None => {
+            return Some(Err(BridgeRpcError {
+                code: "NotInFleet".into(),
+                message: "Character is not in a fleet".into(),
+            }))
+        }
+    };
+    let flag = match args.first() {
+        Some(PyRep::Bool(b)) => *b,
+        Some(PyRep::Integer(i)) => *i != 0,
+        _ => true,
+    };
+    let res = ctx.db.try_with_mut_snapshot(|snap| {
+        let Some(fleet) = snap.fleets.get_mut(&fleet_id) else {
+            return Err(BridgeRpcError {
+                code: "FleetNotFound".into(),
+                message: format!("Fleet {fleet_id} not found"),
+            });
+        };
+        let Some(member) = fleet.member_details.get_mut(&char_id) else {
+            return Err(BridgeRpcError {
+                code: "MemberNotFound".into(),
+                message: "Character not in fleet".into(),
+            });
+        };
+        match pref_type {
+            0 => member.takes_fleet_warp = flag,
+            1 => member.accepts_regroup = flag,
+            _ => member.accepts_conduit_jumps = flag,
+        }
+        Ok((member.takes_fleet_warp, member.accepts_regroup, member.accepts_conduit_jumps))
+    });
+    match res {
+        Ok((tfw, arg, acj)) => Some(Ok(PyRep::keyval([
+            ("characterID", PyRep::Integer(char_id)),
+            ("takesFleetWarp", PyRep::Bool(tfw)),
+            ("acceptsRegroup", PyRep::Bool(arg)),
+            ("acceptsConduitJumps", PyRep::Bool(acj)),
+        ]))),
+        Err(e) => Some(Err(e)),
+    }
 }

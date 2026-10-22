@@ -194,6 +194,8 @@ async fn test_esi_fleets_settings_members_invite_move_and_kick_roundtrip() {
                 wing_id: None,
                 squad_id: None,
                 takes_fleet_warp: true,
+                accepts_regroup: true,
+                accepts_conduit_jumps: true,
                 job: 0,
                 role_name: "Fleet Commander".to_string(),
                 join_time_unix: boss_join_unix,

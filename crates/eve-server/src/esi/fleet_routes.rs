@@ -658,6 +658,8 @@ pub fn dispatch_fleet_routes(
                         wing_id: resolved_wing,
                         squad_id: resolved_squad,
                         takes_fleet_warp: true,
+                        accepts_regroup: true,
+                        accepts_conduit_jumps: true,
                         job: 0,
                         role_name: rname.to_string(),
                         join_time_unix: now,
@@ -744,11 +746,11 @@ pub fn dispatch_fleet_routes(
                     }
                 }
                 let (_, rname) = fleet_role_to_str(role);
-                let (takes_fleet_warp, job, join_time_unix) = f
+                let (takes_fleet_warp, accepts_regroup, accepts_conduit_jumps, job, join_time_unix) = f
                     .member_details
                     .get(&member_id)
-                    .map(|md| (md.takes_fleet_warp, md.job, md.join_time_unix))
-                    .unwrap_or((true, 0, 0));
+                    .map(|md| (md.takes_fleet_warp, md.accepts_regroup, md.accepts_conduit_jumps, md.job, md.join_time_unix))
+                    .unwrap_or((true, true, true, 0, 0));
                 f.member_details.insert(
                     member_id,
                     FleetMemberRecord {
@@ -757,6 +759,8 @@ pub fn dispatch_fleet_routes(
                         wing_id: resolved_wing,
                         squad_id: resolved_squad,
                         takes_fleet_warp,
+                        accepts_regroup,
+                        accepts_conduit_jumps,
                         job,
                         role_name: rname.to_string(),
                         join_time_unix,
