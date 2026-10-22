@@ -45,7 +45,7 @@ pub(crate) async fn prepare_ewar_and_capital_module(
     is_overloaded: bool,
     is_mwd: bool,
     is_mjd: bool,
-    kwargs: &HashMap<String, PyRep>,
+    _kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<EwarCapitalPrep, BridgeRpcError>> {
                 let mut warp_scramble_points = 0i32;
                 let mut disables_target_mwd_mjd = false;
@@ -141,13 +141,7 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                         .map(|&v| v.round() as i32)
                         .unwrap_or(0);
                     if fuel_type_id > 0 && fuel_qty_needed > 0 {
-                        let require_strict = is_siege
-                            || is_triage
-                            || is_phenomena
-                            || kwargs
-                                .get("requireFuel")
-                                .and_then(|v| v.as_bool())
-                                .unwrap_or(false);
+                        let require_strict = is_siege || is_triage || is_phenomena;
                         let fuel_check = ctx.db.with_mut_snapshot(|snap| {
                             let cand_id = snap
                                 .items
@@ -247,11 +241,13 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                     }
                 }
 
-                // Microwarpdrive (`group_id == 46` with signatureRadiusBonus `554`, e.g., `5MN Microwarpdrive I` `434`)
-                if is_mwd {
-                    let sig_bonus_pct = mod_state.get_attribute(554, &ctx.sde);
-                    if sig_bonus_pct > 0.0 {
-                        hic_sig_multiplier = Some(1.0 + sig_bonus_pct / 100.0);
+                // Propulsion Modules (`group_id == 46`: Afterburner & Microwarpdrive)
+                if mod_type.group_id == 46 {
+                    if is_mwd {
+                        let sig_bonus_pct = mod_state.get_attribute(554, &ctx.sde);
+                        if sig_bonus_pct > 0.0 {
+                            hic_sig_multiplier = Some(1.0 + sig_bonus_pct / 100.0);
+                        }
                     }
                     let mass_add = mod_state.get_attribute(attr_ids::MASS_ADDITION, &ctx.sde);
                     if mass_add > 0.0 {
@@ -428,17 +424,12 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                             message: "EWAR module requires a locked target".into(),
                         }));
                     };
-                    let mut distance_m = kwargs
-                        .get("distance")
-                        .and_then(|v| v.as_f64())
-                        .unwrap_or(0.0);
-                    if distance_m <= 0.0 {
-                        if let (Ok(Some((_, ship_ball))), Ok(Some((_, target_ball)))) = (
-                            sys.get_ball_snapshot(ship_id).await,
-                            sys.get_ball_snapshot(target_id).await,
-                        ) {
-                            distance_m = (ship_ball.position - target_ball.position).length();
-                        }
+                    let mut distance_m = 0.0;
+                    if let (Ok(Some((_, ship_ball))), Ok(Some((_, target_ball)))) = (
+                        sys.get_ball_snapshot(ship_id).await,
+                        sys.get_ball_snapshot(target_id).await,
+                    ) {
+                        distance_m = (ship_ball.position - target_ball.position).length();
                     }
                     let mut proj_mod_state = mod_state.clone();
                     let mut proj_source_tid = m.type_id;

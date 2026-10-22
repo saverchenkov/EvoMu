@@ -174,16 +174,13 @@ async fn test_tactical_modules_spectrum_breaker_hull_energizer_wubble_and_upgrad
 
 #[tokio::test]
 async fn test_propulsion_and_warp_interdiction_mechanics() {
-    // parity: feat:modules.afterburner, feat:modules.microwarpdrive, feat:modules.micro-jump-drive, feat:modules.warp-disruptor, feat:modules.interdiction-nullifier, feat:modules.mobile-warp-disruptor
-    eve_testkit::attest(&["feat:modules.afterburner", "feat:modules.microwarpdrive", "feat:modules.micro-jump-drive", "feat:modules.warp-disruptor", "feat:modules.interdiction-nullifier", "feat:modules.mobile-warp-disruptor"]);
-
-    // 1. Afterburner: increases max velocity, mass additive, unaffected by scramblers (feat:modules.afterburner)
+    // 1. Afterburner: increases max velocity, mass additive, unaffected by scramblers
     let ab = eval_afterburner_effect(200.0, 1_000_000.0, 1.35, 5_000_000.0);
     assert_eq!(ab.new_velocity, 470.0, "AB gives +135% velocity: 200 * 2.35 = 470 m/s");
     assert_eq!(ab.new_mass, 6_000_000.0, "AB mass is additive: 1,000,000 + 5,000,000 = 6,000,000 kg");
     assert!(ab.unaffected_by_scram, "Afterburners remain operational under warp scramble");
 
-    // 2. Microwarpdrive: speed bonus, signature bloom, capacitor capacity penalty, and scram shutoff (feat:modules.microwarpdrive)
+    // 2. Microwarpdrive: speed bonus, signature bloom, capacitor capacity penalty, and scram shutoff
     let mwd_active = eval_mwd_state(200.0, 100.0, 2_000.0, 5.0, 5.0, 0.25, false);
     assert!(mwd_active.active);
     assert_eq!(mwd_active.velocity, 1_200.0, "50MN MWD gives +500% velocity (1,200 m/s)");
@@ -196,7 +193,7 @@ async fn test_propulsion_and_warp_interdiction_mechanics() {
     assert_eq!(mwd_scrambled.sig_radius, 100.0, "Signature radius returns to base");
     assert_eq!(mwd_scrambled.cap_capacity, 2_000.0, "Capacitor penalty removed when inactive");
 
-    // 3. Micro Jump Drive: 100 km forward jump after 12s spool, MJFG nearby field, scram/bastion locks (feat:modules.micro-jump-drive)
+    // 3. Micro Jump Drive: 100 km forward jump after 12s spool, MJFG nearby field, scram/bastion locks
     let ship_pos = DVec3::new(0.0, 0.0, 0.0);
     let ship_heading = DVec3::new(1.0, 0.0, 0.0);
     let nearby = vec![
@@ -220,7 +217,7 @@ async fn test_propulsion_and_warp_interdiction_mechanics() {
     assert!(eval_mjd_execution(true, false, false, ship_pos, ship_heading, &nearby).is_err(), "MJD disabled by scram");
     assert!(eval_mjd_execution(false, true, false, ship_pos, ship_heading, &nearby).is_err(), "MJD disabled by Bastion");
 
-    // 4. Warp Disruptors & Scramblers: scramble strength vs core strength; scrambler stops MWD/MJD (feat:modules.warp-disruptor)
+    // 4. Warp Disruptors & Scramblers: scramble strength vs core strength; scrambler stops MWD/MJD
     let scram_point = eval_warp_scramble_state(2, 1, true); // Scrambler 2 pts vs core 1
     assert!(scram_point.is_warp_blocked, "2 scramble points >= 1 warp core strength blocks warp");
     assert!(scram_point.stops_mwd, "Warp scramblers shut off target MWD");
@@ -234,12 +231,12 @@ async fn test_propulsion_and_warp_interdiction_mechanics() {
     assert!(!disrupt_point.stops_mwd, "Warp disruptors do NOT shut off target MWD");
     assert!(!disrupt_point.stops_mjd, "Warp disruptors do NOT cancel target MJD spool");
 
-    // 5. Interdiction Nullifier: nullified ships ignore bubbles (feat:modules.interdiction-nullifier)
+    // 5. Interdiction Nullifier: nullified ships ignore bubbles
     assert!(!eval_bubble_warp_immunity(false, true), "Un-nullified ship inside warp bubble cannot initiate warp");
     assert!(eval_bubble_warp_immunity(true, true), "Active Interdiction Nullifier ship ignores bubbles and warps freely");
     assert!(eval_bubble_warp_immunity(false, false), "Ship in clear space warps normally");
 
-    // 6. Mobile Warp Disruptor: anchorable bubbles in nullsec with deploy timers (feat:modules.mobile-warp-disruptor)
+    // 6. Mobile Warp Disruptor: anchorable bubbles in nullsec with deploy timers
     assert!(eval_mobile_warp_disruptor_deploy(0.8, "Small").is_err(), "Mobile warp disruptors prohibited in high-sec");
     assert!(eval_mobile_warp_disruptor_deploy(0.3, "Small").is_err(), "Mobile warp disruptors prohibited in low-sec");
 
@@ -255,10 +252,7 @@ async fn test_propulsion_and_warp_interdiction_mechanics() {
 
 #[tokio::test]
 async fn test_dictor_bubbles_and_hic_warp_disruption_fields() {
-    // parity: feat:modules.interdiction-sphere, feat:modules.warp-disruption-field
-    eve_testkit::attest(&["feat:modules.interdiction-sphere", "feat:modules.warp-disruption-field"]);
-
-    // 1. Interdiction Sphere Launcher: dictor bubbles in null/WH, warp drag (feat:modules.interdiction-sphere)
+    // 1. Interdiction Sphere Launcher: dictor bubbles in null/WH, warp drag
     assert!(eval_dictor_bubble_launch(0.8, false).is_err(), "Dictor bubbles prohibited in high-sec");
     assert!(eval_dictor_bubble_launch(0.4, false).is_err(), "Dictor bubbles prohibited in low-sec");
 
@@ -282,7 +276,7 @@ async fn test_dictor_bubbles_and_hic_warp_disruption_fields() {
     let off_line_bubble = DVec3::new(50_000_000.0, 500_000.0, 0.0);
     assert!(compute_warp_drag(warp_orig, warp_dest, off_line_bubble, 20_000.0).is_none(), "Off-axis bubble does not drag");
 
-    // 2. Warp Disruption Field Generator: HIC infinite point/bubble mode with penalties (feat:modules.warp-disruption-field)
+    // 2. Warp Disruption Field Generator: HIC infinite point/bubble mode with penalties
     let hic_bubble = eval_hic_field(false);
     assert!(!hic_bubble.is_focused_infinite_point);
     assert_eq!(hic_bubble.bubble_radius_m, 20_000.0, "HIC unscripted mode generates 20 km bubble");
@@ -300,10 +294,7 @@ async fn test_dictor_bubbles_and_hic_warp_disruption_fields() {
 
 #[tokio::test]
 async fn test_electronic_warfare_ecm_dampeners_and_target_painters() {
-    // parity: feat:modules.ecm, feat:modules.sensor-dampener, feat:modules.target-painter, feat:modules.tracking-disruptor
-    eve_testkit::attest(&["feat:modules.ecm", "feat:modules.sensor-dampener", "feat:modules.target-painter", "feat:modules.tracking-disruptor"]);
-
-    // 1. ECM Jammers: jam chance formula, 20s lock break, burst jammer AoE (feat:modules.ecm)
+    // 1. ECM Jammers: jam chance formula, 20s lock break, burst jammer AoE
     let jam_p = compute_ecm_jam_probability(12.0, 20.0);
     assert_eq!(jam_p, 0.60, "Jam chance = jammer strength (12) / target sensor strength (20) = 0.60");
 

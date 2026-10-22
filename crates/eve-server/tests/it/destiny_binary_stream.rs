@@ -342,6 +342,7 @@ fn test_warp_continuous_physics_curves_and_visual_handoff() {
 async fn test_server_cmd_warp_to_stuff_uses_sde_ship_warp_speed() {
     // parity: rpc:authentication.Login, rpc:charUnboundMgr.SelectCharacterID
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let mut sess = SessionState::new(9900);
 
@@ -467,6 +468,7 @@ fn grant_fitting_skills(ctx: &ServerContext, char_id: i64) {
             3450,    // Afterburner
             3454,    // High Speed Maneuvering
             3455,    // Warp Drive Operation
+            4385,    // Micro Jump Drive Operation
             11446,   // Graviton Physics
             28609,   // Heavy Interdiction Cruisers
         ] {
@@ -482,11 +484,12 @@ fn grant_fitting_skills(ctx: &ServerContext, char_id: i64) {
     });
 }
 
-// parity: feat:modules.warp-disruptor
 #[tokio::test]
 async fn test_warp_scrambler_disruptor_blocking() {
-    // parity: rpc:authentication.Login, rpc:charUnboundMgr.SelectCharacterID
+    // parity: feat:modules.warp-disruptor, rpc:authentication.Login, rpc:charUnboundMgr.SelectCharacterID
+    eve_testkit::attest(&["feat:modules.warp-disruptor"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
 
     // Pilot 1 (Victim in Rifter 100_000_001)
@@ -560,9 +563,10 @@ async fn test_warp_scrambler_disruptor_blocking() {
     grant_fitting_skills(&ctx, victim_char_id);
     grant_fitting_skills(&ctx, tackler_char_id);
 
-    // Fit 5MN Microwarpdrive I (type 434) and Warp Core Stabilizer I (type 10998) on Victim
+    // Fit 5MN Microwarpdrive I (type 434), Large Micro Jump Drive (type 4383), and Warp Core Stabilizer I (type 10998) on Victim
     let victim_mwd_id = 880_001i64;
     let victim_wcs_id = 880_002i64;
+    let victim_mjd_id = 880_005i64;
     seed_fitting_item(
         &ctx,
         victim_mwd_id,
@@ -570,6 +574,15 @@ async fn test_warp_scrambler_disruptor_blocking() {
         victim_char_id,
         victim_ship_id,
         eve_db::InventoryFlag::MedSlot0,
+        1,
+    );
+    seed_fitting_item(
+        &ctx,
+        victim_mjd_id,
+        4383,
+        victim_char_id,
+        victim_ship_id,
+        eve_db::InventoryFlag::MedSlot1,
         1,
     );
     seed_fitting_item(
@@ -822,7 +835,7 @@ async fn test_warp_scrambler_disruptor_blocking() {
         "Warp Scrambler I must disable MWD and MJD on target"
     );
 
-    // Reactivating MWD while scrambled must fail with WarpScrambled
+    // Reactivating MWD or activating MJD while scrambled must fail with WarpScrambled
     let mwd_blocked = ctx
         .dispatch_rpc(
             &mut sess_victim,
@@ -841,6 +854,24 @@ async fn test_warp_scrambler_disruptor_blocking() {
         .await
         .expect_err("MWD activation must be blocked by Warp Scrambler I");
     assert_eq!(mwd_blocked.code, "WarpScrambled");
+    let mjd_blocked = ctx
+        .dispatch_rpc(
+            &mut sess_victim,
+            "dogmaIM",
+            None,
+            "Activate",
+            &[
+                PyRep::Integer(victim_mjd_id),
+                PyRep::String("microJumpDrive".into()),
+                PyRep::None,
+                PyRep::Integer(1),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("MJD activation must be blocked by Warp Scrambler I");
+    assert_eq!(mjd_blocked.code, "WarpScrambled");
 
     // Victim warp fails with WarpScrambled (scramble 3 >= core strength 3)
     let heavy_scrambled_err = ctx
@@ -878,11 +909,12 @@ async fn test_warp_scrambler_disruptor_blocking() {
     assert!(!cs_after_deact.is_mwd_mjd_disabled);
 }
 
-// parity: feat:modules.warp-disruption-field
 #[tokio::test]
 async fn test_hic_warp_disruption_field_generator_bubble_and_focused_script() {
-    // parity: rpc:authentication.Login, rpc:charUnboundMgr.SelectCharacterID, rpc:dogmaIM.LoadAmmo
+    // parity: feat:modules.warp-disruption-field, rpc:authentication.Login, rpc:charUnboundMgr.SelectCharacterID, rpc:dogmaIM.LoadAmmo
+    eve_testkit::attest(&["feat:modules.warp-disruption-field"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
 
     // Pilot 1 (HIC pilot)
@@ -1279,7 +1311,6 @@ async fn test_hic_warp_disruption_field_generator_bubble_and_focused_script() {
     assert_eq!(inf_warp_err.code, "WarpScrambled");
 }
 
-// parity: feat:modules.warp-disruption-field
 #[test]
 fn test_warp_bubble_interception_stop_and_drag() {
     let mut park = Ballpark::new(30_000_142);

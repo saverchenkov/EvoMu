@@ -21,22 +21,7 @@ fn is_rowset(rep: &PyRep) -> bool {
 #[tokio::test]
 async fn test_so3_corporation_roles_public_info_governance_shares_votes_and_alliances() {
     // parity: feat:corporation.corp-public-info, feat:corporation.corp-edit-details, feat:corporation.invitations, feat:corporation.kick-member, feat:corporation.leave-corp, feat:corporation.titles, feat:corporation.corp-tax, feat:corporation.corp-shares, feat:corporation.corp-votes, feat:corporation.ceo-change, feat:corporation.bulletins, feat:corporation.medals, feat:corporation.member-tracking, feat:corporation.member-audit
-    eve_testkit::attest(&[
-        "feat:corporation.corp-public-info",
-        "feat:corporation.corp-edit-details",
-        "feat:corporation.invitations",
-        "feat:corporation.kick-member",
-        "feat:corporation.leave-corp",
-        "feat:corporation.titles",
-        "feat:corporation.corp-tax",
-        "feat:corporation.corp-shares",
-        "feat:corporation.corp-votes",
-        "feat:corporation.ceo-change",
-        "feat:corporation.bulletins",
-        "feat:corporation.medals",
-        "feat:corporation.member-tracking",
-        "feat:corporation.member-audit",
-    ]);
+    eve_testkit::attest(&["feat:corporation.corp-public-info", "feat:corporation.corp-edit-details", "feat:corporation.invitations", "feat:corporation.kick-member", "feat:corporation.leave-corp", "feat:corporation.titles", "feat:corporation.corp-tax", "feat:corporation.corp-shares", "feat:corporation.corp-votes", "feat:corporation.ceo-change", "feat:corporation.bulletins", "feat:corporation.medals", "feat:corporation.member-tracking", "feat:corporation.member-audit"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
@@ -623,13 +608,7 @@ async fn test_so3_corporation_roles_public_info_governance_shares_votes_and_alli
 #[tokio::test]
 async fn test_so6_wormholes_polarization_lifetime_mass_and_thera() {
     // parity: feat:navigation.wormhole-jump, feat:navigation.wormhole-polarization, feat:navigation.wormhole-lifetime, feat:navigation.wormhole-statics, feat:navigation.wormhole-thera, rpc:charUnboundMgr.SelectCharacterID, rpc:scanMgr.GetSystemScanMgr, rpc:structureDeployment.Anchor, rpc:wormholeMgr.GetWormholePolarization, rpc:wormholeMgr.WormholeJump
-    eve_testkit::attest(&[
-        "feat:navigation.wormhole-jump",
-        "feat:navigation.wormhole-polarization",
-        "feat:navigation.wormhole-lifetime",
-        "feat:navigation.wormhole-statics",
-        "feat:navigation.wormhole-thera",
-    ]);
+    eve_testkit::attest(&["feat:navigation.wormhole-jump", "feat:navigation.wormhole-polarization", "feat:navigation.wormhole-lifetime", "feat:navigation.wormhole-statics", "feat:navigation.wormhole-thera"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
@@ -702,40 +681,40 @@ async fn test_so6_wormholes_polarization_lifetime_mass_and_thera() {
         })
         .unwrap();
 
-    // 1. Max jump mass enforcement: ship exceeding max_jump_mass_kg (375,000,000 kg) is rejected
-    let heavy_ball = Ball {
-        mass: 1_500_000_000.0,
-        ..ship_ball.clone()
-    };
-    let _ = jita_sys.spawn_ball(heavy_ball).await;
+    // 1a. Range check: ship > 2,500m from wormhole is rejected with OutsideWormholeJumpRange
+    let _ = jita_sys
+        .spawn_ball(Ball {
+            position: DVec3::new(wh_pos[0] + 10_000.0, wh_pos[1], wh_pos[2]),
+            ..ship_ball.clone()
+        })
+        .await;
+    let oor_err = ctx
+        .dispatch_rpc(&mut sess, "wormholeMgr", None, "WormholeJump", &[PyRep::Integer(wh_item_id)], &kw, None)
+        .await
+        .expect_err("Ship outside 2,500m wormhole range must be rejected");
+    assert_eq!(oor_err.code, "OutsideWormholeJumpRange");
+
+    // 1b. Max jump mass enforcement: ship exceeding max_jump_mass_kg (375,000,000 kg) is rejected
+    let _ = jita_sys
+        .spawn_ball(Ball {
+            mass: 1_500_000_000.0,
+            ..ship_ball.clone()
+        })
+        .await;
     let heavy_err = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "wormholeMgr",
-            None,
-            "WormholeJump",
-            &[PyRep::Integer(wh_item_id)],
-            &kw,
-            None,
-        )
+        .dispatch_rpc(&mut sess, "wormholeMgr", None, "WormholeJump", &[PyRep::Integer(wh_item_id)], &kw, None)
         .await
         .expect_err("Ship exceeding max_jump_mass_kg must be rejected");
     assert_eq!(heavy_err.code, "ShipTooHeavyForWormhole");
 
-    // Restore normal Rifter mass (1,200,000 kg)
-    let _ = jita_sys.spawn_ball(ship_ball.clone()).await;
-
-    // 2. Jump Wormhole via real V24 wormholeMgr.WormholeJump(wormholeItemID) -> transits to Thera (31000005)
+    // 2. Jump Wormhole with active propulsion mass addition (1,200,000 + 500,000 = 1,700,000 kg) -> transits to Thera (31000005)
+    let prop_ship_ball = Ball {
+        mass: 1_700_000.0,
+        ..ship_ball.clone()
+    };
+    let _ = jita_sys.spawn_ball(prop_ship_ball).await;
     let jump_rep = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "wormholeMgr",
-            None,
-            "WormholeJump",
-            &[PyRep::Integer(wh_item_id)],
-            &kw,
-            None,
-        )
+        .dispatch_rpc(&mut sess, "wormholeMgr", None, "WormholeJump", &[PyRep::Integer(wh_item_id)], &kw, None)
         .await
         .expect("WormholeJump to Thera");
     let PyRep::KeyVal(jkv) = &jump_rep else {
@@ -744,89 +723,109 @@ async fn test_so6_wormholes_polarization_lifetime_mass_and_thera() {
     assert_eq!(sess.solar_system_id, Some(31_000_005));
     assert_eq!(jkv["isThera"], PyRep::Bool(true));
     assert_eq!(jkv["wormholeClass"], PyRep::Integer(12));
+    assert_eq!(jkv["massStage"], PyRep::String("Stable".into()));
     assert_eq!(jkv["wormholeSize"], PyRep::Real(1.0)); // > 50% mass remaining
+    assert_eq!(jkv["lifetimeStage"], PyRep::String("Healthy".into()));
     assert_eq!(jkv["wormholeAge"], PyRep::Integer(1)); // >= 4h remaining
     assert!(
-        (jkv["remainingMassKg"].as_f64().unwrap() - (2_000_000_000.0 - 1_200_000.0)).abs() < 1.0,
-        "WormholeJump must subtract jumping ship mass from remaining_mass_kg"
+        (jkv["remainingMassKg"].as_f64().unwrap() - (2_000_000_000.0 - 1_700_000.0)).abs() < 1.0,
+        "WormholeJump must subtract jumping ship mass (including propulsion mass addition) from remaining_mass_kg"
     );
 
-    // 3. Thera rules: anchoring structures or POS towers in Thera (31000005) is disallowed
+    // 3. Thera & Shattered W-space rules (`feat:navigation.wormhole-thera`):
+    // - Thera (31000005) has multiple static wormhole connections (THS, TLS, TNS)
+    // - No player structure anchoring allowed in Thera or shattered wormholes
+    let thera_scan = ctx
+        .dispatch_rpc(&mut sess, "scanMgr", None, "GetSystemScanMgr", &[PyRep::Integer(31_000_005)], &kw, None)
+        .await
+        .expect("GetSystemScanMgr in Thera");
+    let PyRep::KeyVal(ts_kv) = &thera_scan else { panic!() };
+    assert_eq!(ts_kv["isThera"], PyRep::Bool(true));
+    let PyRep::List(thera_sigs) = &ts_kv["signatures"] else { panic!() };
+    let thera_wh_count = thera_sigs
+        .iter()
+        .filter(|s| s.dict_get("typeID").is_some_and(|v| v != &PyRep::None))
+        .count();
+    assert!(thera_wh_count >= 3, "Thera must have multiple static wormhole connections (got {thera_wh_count})");
+
     let thera_anchor_err = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "structureDeployment",
-            None,
-            "Anchor",
-            &[
-                PyRep::Integer(35832),
-                PyRep::String("Thera Astrahus".into()),
-            ],
-            &kw,
-            None,
-        )
+        .dispatch_rpc(&mut sess, "structureDeployment", None, "Anchor", &[PyRep::Integer(35832), PyRep::String("Thera Astrahus".into())], &kw, None)
         .await
         .expect_err("Anchoring structures in Thera must be rejected");
-    assert_eq!(
-        thera_anchor_err.code,
-        "AnchoringDisallowedInTheraOrShattered"
-    );
+    assert_eq!(thera_anchor_err.code, "AnchoringDisallowedInTheraOrShattered");
 
-    // 4. Polarization Check via real V24 wormholeMgr.GetWormholePolarization
+    // Shattered wormhole system (31_000_010) also disallows structure anchoring and reports isShattered == true
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&90_000_001).unwrap().solar_system_id = 31_000_010;
+    });
+    sess.solar_system_id = Some(31_000_010);
+    let shat_scan = ctx
+        .dispatch_rpc(&mut sess, "scanMgr", None, "GetSystemScanMgr", &[PyRep::Integer(31_000_010)], &kw, None)
+        .await
+        .unwrap();
+    assert_eq!(shat_scan.dict_get("isShattered"), Some(&PyRep::Bool(true)));
+    let shat_anchor_err = ctx
+        .dispatch_rpc(&mut sess, "structureDeployment", None, "Anchor", &[PyRep::Integer(35832), PyRep::String("Shattered Astrahus".into())], &kw, None)
+        .await
+        .unwrap_err();
+    assert_eq!(shat_anchor_err.code, "AnchoringDisallowedInTheraOrShattered");
+
+    // 4. Polarization Check (`feat:navigation.wormhole-polarization`) via wormholeMgr.GetWormholePolarization
     let pol_rep = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "wormholeMgr",
-            None,
-            "GetWormholePolarization",
-            &[PyRep::Integer(31_000_005)],
-            &kw,
-            None,
-        )
+        .dispatch_rpc(&mut sess, "wormholeMgr", None, "GetWormholePolarization", &[PyRep::Integer(31_000_005)], &kw, None)
         .await
         .expect("GetWormholePolarization");
-    if let PyRep::KeyVal(entries) = &pol_rep {
-        let is_polarized = entries
-            .iter()
-            .find(|(k, _)| k.as_str() == "isPolarized")
-            .unwrap()
-            .1
-            .as_bool()
-            .unwrap();
-        assert!(
-            is_polarized,
-            "Pilot must be polarized after jumping wormhole"
-        );
-    }
+    assert_eq!(pol_rep.dict_get("isPolarized"), Some(&PyRep::Bool(true)));
+    assert_eq!(pol_rep.dict_get("remainingSeconds"), Some(&PyRep::Integer(300)));
 
     // Attempting immediate jump on same wormhole while polarized is rejected with WormholePolarized
-    ctx.db
-        .try_with_mut_snapshot(|snap| {
-            snap.characters.get_mut(&90_000_001).unwrap().solar_system_id = 30_000_142;
-            Ok::<(), std::convert::Infallible>(())
-        })
-        .unwrap();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&90_000_001).unwrap().solar_system_id = 30_000_142;
+    });
     let _ = jita_sys.spawn_ball(ship_ball.clone()).await;
     sess.solar_system_id = Some(30_000_142);
     let pol_err = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "wormholeMgr",
-            None,
-            "WormholeJump",
-            &[PyRep::Integer(wh_item_id)],
-            &kw,
-            None,
-        )
+        .dispatch_rpc(&mut sess, "wormholeMgr", None, "WormholeJump", &[PyRep::Integer(wh_item_id)], &kw, None)
         .await
         .expect_err("Polarized pilot cannot jump same wormhole");
     assert_eq!(pol_err.code, "WormholePolarized");
 
-    // Advance virtual clock 301s past 5-minute polarization window
+    // Advance virtual clock 301s past 5-minute polarization window -> polarization clears
     ctx.advance_secs(301);
+    let pol_after = ctx
+        .dispatch_rpc(&mut sess, "wormholeMgr", None, "GetWormholePolarization", &[PyRep::Integer(31_000_005)], &kw, None)
+        .await
+        .unwrap();
+    assert_eq!(pol_after.dict_get("isPolarized"), Some(&PyRep::Bool(false)));
 
-    // 5. Mass exhaustion collapse & automatic static wormhole respawn:
+    // 5. Intermediate mass & lifetime stages (`feat:navigation.wormhole-lifetime`):
+    // - < 50% mass (800M / 2,000M = 40%) -> Destabilized (`wormholeSize == 0.5`)
+    // - < 10% mass (150M / 2,000M = 7.5%) -> Critical (`wormholeSize == 0.1`)
     ctx.db.with_mut_snapshot(|snap| {
+        let wh = snap.cosmic_signatures.get_mut(&30_000_142).unwrap().iter_mut().find(|s| s.signature_id == wh_sig_id).unwrap();
+        wh.remaining_mass_kg = 800_000_000.0;
+        wh.destination_system_id = Some(31_000_003); // Wolf-Rayet W-space
+    });
+    let destab_jump = ctx
+        .dispatch_rpc(&mut sess, "wormholeMgr", None, "WormholeJump", &[PyRep::Integer(wh_item_id)], &kw, None)
+        .await
+        .expect("Jump through destabilized wormhole into Wolf-Rayet W-space");
+    let PyRep::KeyVal(dkv) = &destab_jump else { panic!() };
+    assert_eq!(dkv["massStage"], PyRep::String("Destabilized".into()));
+    assert_eq!(dkv["wormholeSize"], PyRep::Real(0.5));
+    assert_eq!(dkv["environmentalEffect"], PyRep::String("Wolf-Rayet".into()));
+
+    // Verify Wolf-Rayet environmental effect (+30% max_armor_hp and 0.85x signature_radius) applied to ship CombatState in Ballpark
+    let base_rifter_cs = ctx.build_ship_combat_state(90_000_001, 600_000_001, 587);
+    let wr_handle = ctx.systems.get_or_spawn(31_000_003);
+    let wr_cs = wr_handle.get_combat_state(600_000_001).await.unwrap().unwrap();
+    assert!((wr_cs.max_armor_hp - base_rifter_cs.max_armor_hp * 1.30).abs() < 1.0);
+    assert!((wr_cs.signature_radius - base_rifter_cs.signature_radius * 0.85).abs() < 1.0);
+
+    // 6. Mass exhaustion collapse & automatic static wormhole respawn (`feat:navigation.wormhole-statics`)
+    ctx.advance_secs(301);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&90_000_001).unwrap().solar_system_id = 30_000_142;
         if let Some(sigs) = snap.cosmic_signatures.get_mut(&30_000_142) {
             if let Some(wh) = sigs.iter_mut().find(|s| s.signature_id == wh_sig_id) {
                 wh.remaining_mass_kg = 800_000.0;
@@ -834,71 +833,66 @@ async fn test_so6_wormholes_polarization_lifetime_mass_and_thera() {
             }
         }
     });
+    sess.solar_system_id = Some(30_000_142);
+    let _ = jita_sys.spawn_ball(ship_ball.clone()).await;
 
     let collapse_jump = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "wormholeMgr",
-            None,
-            "WormholeJump",
-            &[PyRep::Integer(wh_item_id)],
-            &kw,
-            None,
-        )
+        .dispatch_rpc(&mut sess, "wormholeMgr", None, "WormholeJump", &[PyRep::Integer(wh_item_id)], &kw, None)
         .await
         .expect("WormholeJump collapsing mass");
-    let PyRep::KeyVal(ckv) = &collapse_jump else {
-        panic!()
-    };
-    assert_eq!(
-        ckv["collapsed"],
-        PyRep::Bool(true),
-        "Wormhole must collapse when remaining_mass_kg <= 0"
-    );
-    assert_eq!(
-        ckv["environmentalEffect"],
-        PyRep::String("Magnetar".into())
-    );
+    let PyRep::KeyVal(ckv) = &collapse_jump else { panic!() };
+    assert_eq!(ckv["collapsed"], PyRep::Bool(true));
+    assert_eq!(ckv["massStage"], PyRep::String("Collapsed_Exhausted".into()));
+    assert_eq!(ckv["wormholeSize"], PyRep::Real(0.0));
+    assert_eq!(ckv["environmentalEffect"], PyRep::String("Magnetar".into()));
     let replacement_sig_id = ckv["replacementSignatureID"]
         .as_str()
         .expect("Collapsed static wormhole must spawn a replacement static signature")
         .to_string();
     assert_ne!(replacement_sig_id, wh_sig_id);
+    assert!(jita_sys.get_ball_snapshot(wh_item_id).await.unwrap().is_none(), "Collapsed wormhole ball must be removed from Ballpark");
 
-    // Verify old wormhole ball was removed from Jita and replacement static signature exists
-    assert!(
-        jita_sys
-            .get_ball_snapshot(wh_item_id)
-            .await
-            .unwrap()
-            .is_none(),
-        "Collapsed wormhole ball must be removed from Ballpark"
-    );
+    // Verify C5 system (31_000_004) has both its class static wormhole (`WST-...`, type 30643) AND a wandering wormhole (`WND-...`, type 30645)
+    let c5_scan = ctx
+        .dispatch_rpc(&mut sess, "scanMgr", None, "GetSystemScanMgr", &[PyRep::Integer(31_000_004)], &kw, None)
+        .await
+        .unwrap();
+    let Some(PyRep::List(c5_sigs)) = c5_scan.dict_get("signatures") else { panic!() };
+    assert!(c5_sigs.iter().any(|s| s.dict_get("signatureID").and_then(|v| v.as_str()).is_some_and(|id| id.starts_with("WST-")) && s.dict_get("typeID") == Some(&PyRep::Integer(30643))));
+    assert!(c5_sigs.iter().any(|s| s.dict_get("signatureID").and_then(|v| v.as_str()).is_some_and(|id| id.starts_with("WND-")) && s.dict_get("typeID") == Some(&PyRep::Integer(30645))));
 
-    // 6. Lifetime expiration collapse & static respawn
+    // 7. Natural lifetime progression (< 25% remaining -> ReachingEndOfLifetime, wormholeAge == 2) & natural expiration collapse (0% remaining -> WormholeCollapsed)
     let rep_wh_item_id = eve_server::services::space_destiny::wormhole_item_id_for_signature(
         30_000_142,
         &replacement_sig_id,
     );
-    let rep_pos = ctx.db.with_mut_snapshot(|snap| {
-        let sig = snap
-            .cosmic_signatures
-            .get_mut(&30_000_142)
-            .unwrap()
-            .iter_mut()
+    let rep_pos = ctx.db.with_snapshot(|snap| {
+        snap.cosmic_signatures[&30_000_142]
+            .iter()
             .find(|s| s.signature_id == replacement_sig_id)
-            .unwrap();
-        sig.lifetime_seconds = 0;
-        sig.position
+            .unwrap()
+            .position
     });
-    ctx.advance_secs(301);
-    ctx.db
-        .try_with_mut_snapshot(|snap| {
-            snap.characters.get_mut(&90_000_001).unwrap().solar_system_id = 30_000_142;
-            Ok::<(), std::convert::Infallible>(())
-        })
-        .unwrap();
+    // Replacement wormhole has natural 24h (86,400s) lifetime; advance virtual clock 70,000s so < 25% (16,400s < 21,600s) remains
+    ctx.advance_secs(70_000);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&90_000_001).unwrap().solar_system_id = 30_000_142;
+    });
     sess.solar_system_id = Some(30_000_142);
+    let jita_scan_eol = ctx
+        .dispatch_rpc(&mut sess, "scanMgr", None, "GetSystemScanMgr", &[PyRep::Integer(30_000_142)], &kw, None)
+        .await
+        .unwrap();
+    let Some(PyRep::List(jita_sigs_eol)) = jita_scan_eol.dict_get("signatures") else { panic!() };
+    let rep_sig_eol = jita_sigs_eol
+        .iter()
+        .find(|s| s.dict_get("signatureID") == Some(&PyRep::String(replacement_sig_id.clone())))
+        .expect("Replacement wormhole in EOL stage");
+    assert_eq!(rep_sig_eol.dict_get("lifetimeStage"), Some(&PyRep::String("ReachingEndOfLifetime".into())));
+    assert_eq!(rep_sig_eol.dict_get("wormholeAge"), Some(&PyRep::Integer(2)));
+
+    // Advance virtual clock another 20,000s (total 90,000s > 86,400s natural lifetime) so wormhole naturally expires
+    ctx.advance_secs(20_000);
     let _ = jita_sys
         .spawn_ball(Ball {
             position: DVec3::new(rep_pos[0] + 200.0, rep_pos[1], rep_pos[2]),
@@ -907,41 +901,18 @@ async fn test_so6_wormholes_polarization_lifetime_mass_and_thera() {
         .await;
 
     let expired_err = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "wormholeMgr",
-            None,
-            "WormholeJump",
-            &[PyRep::Integer(rep_wh_item_id)],
-            &kw,
-            None,
-        )
+        .dispatch_rpc(&mut sess, "wormholeMgr", None, "WormholeJump", &[PyRep::Integer(rep_wh_item_id)], &kw, None)
         .await
-        .expect_err("Expired wormhole must collapse on jump attempt");
+        .expect_err("Naturally expired wormhole must collapse on jump attempt");
     assert_eq!(expired_err.code, "WormholeCollapsed");
 }
 
 #[tokio::test]
 async fn test_so_fleets_motd_options_wings_squads_broadcasts_watchlist_formations_boost_bridge_disband() {
     // parity: feat:fleet.wings-squads, feat:fleet.roles-positions, feat:fleet.fleet-motd, feat:fleet.fleet-broadcasts, feat:fleet.fleet-warp-cmd, feat:fleet.fleet-composition, feat:fleet.fleet-watchlist, feat:fleet.fleet-advert, feat:fleet.fleet-free-move, feat:fleet.fleet-formations, feat:fleet.fleet-disband, feat:fleet.fleet-max-size, feat:fleet.fleet-boost-scope, feat:fleet.fleet-bridge, feat:fleet.fleet-registration, rpc:beyonce.GetFormations, rpc:charUnboundMgr.SelectCharacterID, rpc:fleetMgr.AddToWatchlist, rpc:fleetMgr.RegisterForDamageUpdates, rpc:fleetMgr.RemoveFromWatchlist, rpc:fleetObjectHandler.AcceptInvite, rpc:fleetObjectHandler.ChangeSquadName, rpc:fleetObjectHandler.ChangeWingName, rpc:fleetObjectHandler.CreateSquad, rpc:fleetObjectHandler.CreateWing, rpc:fleetObjectHandler.DeleteSquad, rpc:fleetObjectHandler.DeleteWing, rpc:fleetObjectHandler.DisbandFleet, rpc:fleetObjectHandler.GetFleetComposition, rpc:fleetObjectHandler.GetFleetMaxSize, rpc:fleetObjectHandler.GetInitState, rpc:fleetObjectHandler.GetMotd, rpc:fleetObjectHandler.MoveMember, rpc:fleetObjectHandler.SetFleetMaxSize, rpc:fleetObjectHandler.SetMotdEx, rpc:fleetObjectHandler.SetOptions, rpc:fleetObjectHandler.SetTakesFleetWarp, rpc:fleetProxy.AddFleetFinderAdvert, rpc:fleetProxy.ApplyToJoinFleet, rpc:fleetProxy.GetAvailableFleetAds, rpc:fleetProxy.UpdateAdvertAllowedEntities
-    eve_testkit::attest(&[
-        "feat:fleet.wings-squads",
-        "feat:fleet.roles-positions",
-        "feat:fleet.fleet-motd",
-        "feat:fleet.fleet-broadcasts",
-        "feat:fleet.fleet-warp-cmd",
-        "feat:fleet.fleet-composition",
-        "feat:fleet.fleet-watchlist",
-        "feat:fleet.fleet-advert",
-        "feat:fleet.fleet-free-move",
-        "feat:fleet.fleet-formations",
-        "feat:fleet.fleet-disband",
-        "feat:fleet.fleet-max-size",
-        "feat:fleet.fleet-boost-scope",
-        "feat:fleet.fleet-bridge",
-        "feat:fleet.fleet-registration",
-    ]);
+    eve_testkit::attest(&["feat:fleet.wings-squads", "feat:fleet.roles-positions", "feat:fleet.fleet-motd", "feat:fleet.fleet-broadcasts", "feat:fleet.fleet-warp-cmd", "feat:fleet.fleet-composition", "feat:fleet.fleet-watchlist", "feat:fleet.fleet-advert", "feat:fleet.fleet-free-move", "feat:fleet.fleet-formations", "feat:fleet.fleet-disband", "feat:fleet.fleet-max-size", "feat:fleet.fleet-boost-scope", "feat:fleet.fleet-bridge", "feat:fleet.fleet-registration"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
 
     let mut sess1 = SessionState::new(801);
@@ -1111,19 +1082,7 @@ async fn test_so_fleets_motd_options_wings_squads_broadcasts_watchlist_formation
 #[tokio::test]
 async fn test_so_bookmarks_expiry_copy_move_corp_bookmarks_and_scanning_features() {
     // parity: feat:bookmarks.copy-move, feat:bookmarks.warp-to-bm, feat:bookmarks.bm-expiry, feat:bookmarks.corp-bookmarks, feat:scanning.probe-formations, feat:scanning.signatures, feat:scanning.anomalies, feat:scanning.structure-signals, feat:scanning.system-scan, feat:scanning.sig-despawn, feat:scanning.scan-skills, rpc:accessGroupBookmarkMgr.AddFolder, rpc:accessGroupBookmarkMgr.CopyBookmarksToFolderAndSubfolder, rpc:accessGroupBookmarkMgr.MoveBookmarksToFolderAndSubfolder, rpc:charUnboundMgr.SelectCharacterID, rpc:corpRegistry.AddCorporation, rpc:corpRegistry.InsertApplication, rpc:corpRegistry.UpdateApplicationOffer, rpc:scanMgr.SignalTrackerRegister
-    eve_testkit::attest(&[
-        "feat:bookmarks.copy-move",
-        "feat:bookmarks.warp-to-bm",
-        "feat:bookmarks.bm-expiry",
-        "feat:bookmarks.corp-bookmarks",
-        "feat:scanning.probe-formations",
-        "feat:scanning.signatures",
-        "feat:scanning.anomalies",
-        "feat:scanning.structure-signals",
-        "feat:scanning.system-scan",
-        "feat:scanning.sig-despawn",
-        "feat:scanning.scan-skills",
-    ]);
+    eve_testkit::attest(&["feat:bookmarks.copy-move", "feat:bookmarks.warp-to-bm", "feat:bookmarks.bm-expiry", "feat:bookmarks.corp-bookmarks", "feat:scanning.probe-formations", "feat:scanning.signatures", "feat:scanning.anomalies", "feat:scanning.structure-signals", "feat:scanning.system-scan", "feat:scanning.sig-despawn", "feat:scanning.scan-skills"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
@@ -1239,21 +1198,7 @@ async fn test_so_bookmarks_expiry_copy_move_corp_bookmarks_and_scanning_features
 #[tokio::test]
 async fn test_so_social_corp_mail_mailing_lists_cspa_calendar_and_chat_features() {
     // parity: feat:social.mail-corp-alliance, feat:social.mailing-lists, feat:social.mailing-list-admin, feat:social.mailing-list-welcome, feat:social.cspa, feat:social.calendar-personal, feat:social.calendar-corp-alliance, feat:social.calendar-responses, feat:social.calendar-ccp-events, feat:social.calendar-auto-events, feat:social.chat-help-rookie, feat:social.chat-gm-mute, feat:social.chat-motd, rpc:XmppChatMgr.GMMute, rpc:XmppChatMgr.GMUnmute, rpc:XmppChatMgr.GetHelpChannel, rpc:XmppChatMgr.GetRookieChannel, rpc:XmppChatMgr.SetMotd, rpc:calendarMgr.CreateCorporationEvent, rpc:calendarMgr.CreatePersonalEvent, rpc:calendarMgr.DeleteEvent, rpc:calendarMgr.EditCorporationEvent, rpc:calendarMgr.EditPersonalEvent, rpc:calendarMgr.GetResponsesForCharacter, rpc:calendarMgr.GetResponsesToEvent, rpc:calendarMgr.SendEventResponse, rpc:charMgr.GetSettingsInfo, rpc:charMgr.LogSettings, rpc:charUnboundMgr.SelectCharacterID, rpc:corpRegistry.AddCorporation, rpc:corpRegistry.InsertApplication, rpc:corpRegistry.UpdateApplicationOffer, rpc:mailingListsMgr.ClearEntityAccess, rpc:mailingListsMgr.ClearWelcomeMail, rpc:mailingListsMgr.Create, rpc:mailingListsMgr.GetJoinedLists, rpc:mailingListsMgr.GetMembers, rpc:mailingListsMgr.GetWelcomeMail, rpc:mailingListsMgr.Join, rpc:mailingListsMgr.KickMembers, rpc:mailingListsMgr.SaveWelcomeMail, rpc:mailingListsMgr.SetMembersMuted, rpc:mailingListsMgr.SetMembersOperator
-    eve_testkit::attest(&[
-        "feat:social.mail-corp-alliance",
-        "feat:social.mailing-lists",
-        "feat:social.mailing-list-admin",
-        "feat:social.mailing-list-welcome",
-        "feat:social.cspa",
-        "feat:social.calendar-personal",
-        "feat:social.calendar-corp-alliance",
-        "feat:social.calendar-responses",
-        "feat:social.calendar-ccp-events",
-        "feat:social.calendar-auto-events",
-        "feat:social.chat-help-rookie",
-        "feat:social.chat-gm-mute",
-        "feat:social.chat-motd",
-    ]);
+    eve_testkit::attest(&["feat:social.mail-corp-alliance", "feat:social.mailing-lists", "feat:social.mailing-list-admin", "feat:social.mailing-list-welcome", "feat:social.cspa", "feat:social.calendar-personal", "feat:social.calendar-corp-alliance", "feat:social.calendar-responses", "feat:social.calendar-ccp-events", "feat:social.calendar-auto-events", "feat:social.chat-help-rookie", "feat:social.chat-gm-mute", "feat:social.chat-motd"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let kw = HashMap::new();

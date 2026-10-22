@@ -67,22 +67,11 @@ fn kv_map(rep: &PyRep) -> HashMap<String, PyRep> {
 
 #[tokio::test]
 async fn carrier_fighter_tubes_launch_movement_abilities_losses_and_abandon() {
-    // parity: feat:drones.fighter-load-tubes
-    // parity: feat:drones.fighter-launch-recall
-    // parity: feat:drones.fighter-movement
-    // parity: feat:drones.fighter-abilities
-    // parity: feat:drones.fighter-abandon
     // parity: feat:drones.fighter-squadron-losses
-    eve_testkit::attest(&[
-        "feat:drones.fighter-load-tubes",
-        "feat:drones.fighter-launch-recall",
-        "feat:drones.fighter-movement",
-        "feat:drones.fighter-abilities",
-        "feat:drones.fighter-abandon",
-        "feat:drones.fighter-squadron-losses",
-    ]);
+    eve_testkit::attest(&["feat:drones.fighter-squadron-losses"]);
 
     let ctx = build_ctx();
+    crate::common::pin_clock(&ctx);
     let sys_id: u32 = 30_000_142;
     let char_id: i64 = 90_000_001;
     let carrier_id: i64 = 910_001;
@@ -466,13 +455,7 @@ async fn ship_insurance_quotes_purchase_contracts_void_link_and_payout_vs_concor
     // parity: feat:combat.insurance-payout
     // parity: feat:combat.insurance-contracts
     // parity: feat:ships.ship-insurance-link
-    eve_testkit::attest(&[
-        "feat:combat.insurance-quote",
-        "feat:combat.insurance-buy",
-        "feat:combat.insurance-payout",
-        "feat:combat.insurance-contracts",
-        "feat:ships.ship-insurance-link",
-    ]);
+    eve_testkit::attest(&["feat:combat.insurance-quote", "feat:combat.insurance-buy", "feat:combat.insurance-payout", "feat:combat.insurance-contracts", "feat:ships.ship-insurance-link"]);
 
     let ctx = build_ctx();
     let lowsec_sys_id: u32 = 30_002_187; // Amamake (low-sec 0.4)
@@ -823,11 +806,7 @@ async fn player_bounties_claim_leaderboards_and_gm_bounty_tools() {
     // parity: feat:combat.player-bounties
     // parity: feat:combat.bounty-leaderboards
     // parity: feat:admin.gm-bounty-tools
-    eve_testkit::attest(&[
-        "feat:combat.player-bounties",
-        "feat:combat.bounty-leaderboards",
-        "feat:admin.gm-bounty-tools",
-    ]);
+    eve_testkit::attest(&["feat:combat.player-bounties", "feat:combat.bounty-leaderboards", "feat:admin.gm-bounty-tools"]);
 
     let ctx = build_ctx();
     let lowsec_sys_id: u32 = 30_002_187;
@@ -1106,11 +1085,7 @@ async fn nullsec_ess_main_bank_reserve_security_key_and_dynamic_bounty_multiplie
     // parity: feat:pve.ess
     // parity: feat:pve.ess-reserve
     // parity: feat:pve.dynamic-bounty
-    eve_testkit::attest(&[
-        "feat:pve.ess",
-        "feat:pve.ess-reserve",
-        "feat:pve.dynamic-bounty",
-    ]);
+    eve_testkit::attest(&["feat:pve.ess", "feat:pve.ess-reserve", "feat:pve.dynamic-bounty"]);
 
     let ctx = build_ctx();
     let nullsec_sys_id: u32 = 30_004_759; // VFK-IV (K-space null-sec)

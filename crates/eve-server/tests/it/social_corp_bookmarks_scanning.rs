@@ -18,13 +18,7 @@ fn is_keyval(rep: &PyRep) -> bool {
 #[tokio::test]
 async fn test_so4_bookmarks_folders_shared_folders_and_scan_bookmarks() {
     // parity: feat:bookmarks.create, feat:bookmarks.update-delete, feat:bookmarks.folders, feat:bookmarks.shared-folders, feat:scanning.scan-bookmark, rpc:accessGroupBookmarkMgr.AddFolder, rpc:accessGroupBookmarkMgr.AddToKnownFolders, rpc:accessGroupBookmarkMgr.CreateSubfolder, rpc:accessGroupBookmarkMgr.DeleteFolder, rpc:accessGroupBookmarkMgr.DeleteSubfolder, rpc:accessGroupBookmarkMgr.RemoveFromKnownFolders, rpc:corpRegistry.AddCorporation, rpc:corpRegistry.InsertApplication, rpc:corpRegistry.UpdateApplicationOffer, rpc:scanMgr.GetSystemScanMgr
-    eve_testkit::attest(&[
-        "feat:bookmarks.create",
-        "feat:bookmarks.update-delete",
-        "feat:bookmarks.folders",
-        "feat:bookmarks.shared-folders",
-        "feat:scanning.scan-bookmark",
-    ]);
+    eve_testkit::attest(&["feat:bookmarks.create", "feat:bookmarks.update-delete", "feat:bookmarks.folders", "feat:bookmarks.shared-folders", "feat:scanning.scan-bookmark"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
@@ -640,13 +634,7 @@ async fn test_so4_bookmarks_folders_shared_folders_and_scan_bookmarks() {
 #[tokio::test]
 async fn test_so5_scanning_dscan_probes_and_acceleration_gates() {
     // parity: feat:scanning.dscan, feat:scanning.probe-launch, feat:scanning.probe-scan-math, feat:scanning.probe-recall, feat:navigation.acceleration-gates, rpc:charUnboundMgr.SelectCharacterID, rpc:dogmaIM.LoadAmmo, rpc:keeper.ActivateAccelerationGate, rpc:scanMgr.GetSystemScanMgr
-    eve_testkit::attest(&[
-        "feat:scanning.dscan",
-        "feat:scanning.probe-launch",
-        "feat:scanning.probe-scan-math",
-        "feat:scanning.probe-recall",
-        "feat:navigation.acceleration-gates",
-    ]);
+    eve_testkit::attest(&["feat:scanning.dscan", "feat:scanning.probe-launch", "feat:scanning.probe-scan-math", "feat:scanning.probe-recall", "feat:navigation.acceleration-gates"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
@@ -1219,13 +1207,45 @@ async fn test_so5_scanning_dscan_probes_and_acceleration_gates() {
     assert_eq!(capital_err.code, "ShipTooLargeForGate");
 
     // Switch back to Rifter Frigate (ship_id, type 587, group 25): allowed by dungeon difficulty 1,
-    // but rejected with MissingGateKey before placing Gate Key (2076) in cargo
+    // verify OutsideGateActivationRange (> 2,500m from gate) and MissingGateKey before placing Gate Key (2076) in cargo
     let _ = sys.remove_ball(500_000_150).await;
     let _ = sys.remove_ball(500_000_200).await;
     sess.ship_id = Some(ship_id);
     ctx.db.with_mut_snapshot(|snap| {
         snap.characters.get_mut(&char_id).unwrap().active_ship_id = ship_id;
     });
+    let _ = sys.set_ball_position(ship_id, DVec3::new(5_000.0, 0.0, 0.0)).await;
+    let range_err = ctx
+        .dispatch_rpc(&mut sess, "keeper", None, "ActivateAccelerationGate", &[PyRep::Integer(500_000_100)], &kw, None)
+        .await
+        .expect_err("Activating acceleration gate > 2,500m away must fail");
+    assert_eq!(range_err.code, "OutsideGateActivationRange");
+    let _ = sys.set_ball_position(ship_id, DVec3::ZERO).await;
+
+    // Difficulty-2 SDE dungeon gate rejects Battleship (Scorpion, type 640, group 27) with ShipRestrictedByDungeonGate
+    let diff2_did = *ctx.sde.dungeons.iter().find(|(_, d)| d.difficulty == Some(2)).unwrap().0;
+    let bs_ball = Ball {
+        id: 500_000_250, type_id: 640, position: DVec3::new(1_200.0, 0.0, 0.0), velocity: DVec3::ZERO,
+        max_velocity: 120.0, inertia: 0.12, mass: 103_000_000.0, radius: 340.0, speed_fraction: 0.0, mode: MovementMode::Stop,
+    };
+    let _ = sys.spawn_ball(bs_ball).await;
+    sess.ship_id = Some(500_000_250);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().active_ship_id = 500_000_250;
+        snap.items.get_mut(&500_000_100).unwrap().dynamic_attributes.insert(1001, diff2_did as f64);
+    });
+    let bs_err = ctx
+        .dispatch_rpc(&mut sess, "keeper", None, "ActivateAccelerationGate", &[PyRep::Integer(500_000_100)], &kw, None)
+        .await
+        .expect_err("Battleship must be rejected by difficulty-2 dungeon gate");
+    assert_eq!(bs_err.code, "ShipRestrictedByDungeonGate");
+    let _ = sys.remove_ball(500_000_250).await;
+    sess.ship_id = Some(ship_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().active_ship_id = ship_id;
+        snap.items.get_mut(&500_000_100).unwrap().dynamic_attributes.insert(1001, 111.0);
+    });
+
     let no_key_err = ctx
         .dispatch_rpc(
             &mut sess,

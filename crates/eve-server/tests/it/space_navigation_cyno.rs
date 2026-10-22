@@ -14,15 +14,8 @@ use std::collections::HashMap;
 #[tokio::test]
 async fn test_s2_fighter_manager_load_launch_recall_movement_abilities_abandon() {
     // parity: plan:S-2
-    // parity: feat:drones.fighter-load-tubes, feat:drones.fighter-launch-recall, feat:drones.fighter-movement, feat:drones.fighter-abilities, feat:drones.fighter-abandon, rpc:charUnboundMgr.SelectCharacterID, rpc:fighterMgr.CmdAbandonFighter, rpc:fighterMgr.CmdActivateAbilitySlots, rpc:fighterMgr.ExecuteMovementCommandOnFighters, rpc:fighterMgr.GetFightersForShip, rpc:fighterMgr.LaunchFightersFromTubes, rpc:fighterMgr.LoadFightersToTube, rpc:fighterMgr.RecallFightersToTubes, rpc:fighterMgr.UnloadTubeToFighterBay
-    eve_testkit::attest(&[
-        "plan:S-2",
-        "feat:drones.fighter-load-tubes",
-        "feat:drones.fighter-launch-recall",
-        "feat:drones.fighter-movement",
-        "feat:drones.fighter-abilities",
-        "feat:drones.fighter-abandon",
-    ]);
+    // parity: feat:drones.fighter-load-tubes, feat:drones.fighter-launch-recall, feat:drones.fighter-movement, feat:drones.fighter-abilities, feat:drones.fighter-abandon, rpc:charUnboundMgr.SelectCharacterID, rpc:fighterMgr.CmdAbandonFighter, rpc:fighterMgr.CmdActivateAbilitySlots, rpc:fighterMgr.CmdDeactivateAbilitySlots, rpc:fighterMgr.ExecuteMovementCommandOnFighters, rpc:fighterMgr.GetFightersForShip, rpc:fighterMgr.LaunchFightersFromTubes, rpc:fighterMgr.LoadFightersToTube, rpc:fighterMgr.RecallFightersToTubes, rpc:fighterMgr.UnloadTubeToFighterBay
+    eve_testkit::attest(&["plan:S-2", "feat:drones.fighter-load-tubes", "feat:drones.fighter-launch-recall", "feat:drones.fighter-movement", "feat:drones.fighter-abilities", "feat:drones.fighter-abandon"]);
 
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
@@ -381,6 +374,59 @@ async fn test_s2_fighter_manager_load_launch_recall_movement_abilities_abandon()
         "APPROACH must move fighter ball closer to target ship across ticks"
     );
 
+    // Test MWD and MJD movement commands via ExecuteMovementCommandOnFighters (feat:drones.fighter-movement)
+    let f2_base_vmax = f2_after_orbit.max_velocity;
+    let mwd_cmd_res = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "fighterMgr",
+            None,
+            "ExecuteMovementCommandOnFighters",
+            &[
+                PyRep::List(vec![PyRep::Integer(f2_ball_id)]),
+                PyRep::String("MWD".into()),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect("ExecuteMovementCommandOnFighters MWD");
+    assert_eq!(mwd_cmd_res, PyRep::Bool(true));
+    assert!(ctx.active_fighters.read().unwrap()[&f2_ball_id].mwd_active);
+    let (_, f2_after_mwd) = sys_handle.get_ball_snapshot(f2_ball_id).await.unwrap().unwrap();
+    assert!(
+        f2_after_mwd.max_velocity > f2_base_vmax * 4.0,
+        "ExecuteMovementCommandOnFighters MWD must boost fighter max_velocity: {} vs {}",
+        f2_after_mwd.max_velocity,
+        f2_base_vmax
+    );
+
+    let (_, mut f3_before_mjd) = sys_handle.get_ball_snapshot(f3_ball_id).await.unwrap().unwrap();
+    f3_before_mjd.mode = MovementMode::GotoDirection { direction: DVec3::X };
+    let f3_start_pos = f3_before_mjd.position;
+    sys_handle.spawn_ball(f3_before_mjd).await.unwrap();
+    let mjd_cmd_res = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "fighterMgr",
+            None,
+            "ExecuteMovementCommandOnFighters",
+            &[
+                PyRep::List(vec![PyRep::Integer(f3_ball_id)]),
+                PyRep::String("MJD".into()),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect("ExecuteMovementCommandOnFighters MJD");
+    assert_eq!(mjd_cmd_res, PyRep::Bool(true));
+    let (_, f3_after_mjd) = sys_handle.get_ball_snapshot(f3_ball_id).await.unwrap().unwrap();
+    assert!(
+        (f3_after_mjd.position.distance(f3_start_pos) - 100_000.0).abs() < 1.0,
+        "ExecuteMovementCommandOnFighters MJD must jump Heavy Fighter 100,000 m along heading"
+    );
+
     // 5. Fighter Abilities (feat:drones.fighter-abilities)
     let (_, f1_ball) = sys_handle
         .get_ball_snapshot(f1_ball_id)
@@ -551,6 +597,8 @@ async fn test_s2_fighter_manager_load_launch_recall_movement_abilities_abandon()
         .unwrap_err();
     assert_eq!(err_cooldown.code, "AbilityOnCooldown");
 
+    let (_, f1_before_mwd_ab) = sys_handle.get_ball_snapshot(f1_ball_id).await.unwrap().unwrap();
+    let f1_base_vmax = f1_before_mwd_ab.max_velocity;
     let mwd_res = ctx
         .dispatch_rpc(
             &mut sess,
@@ -565,6 +613,28 @@ async fn test_s2_fighter_manager_load_launch_recall_movement_abilities_abandon()
         .expect("CmdActivateAbilitySlots Slot 1 MWD");
     assert!(matches!(mwd_res, PyRep::KeyVal(_)));
     assert!(ctx.active_fighters.read().unwrap()[&f1_ball_id].mwd_active);
+    let (_, f1_with_mwd_ab) = sys_handle.get_ball_snapshot(f1_ball_id).await.unwrap().unwrap();
+    assert!(f1_with_mwd_ab.max_velocity > f1_base_vmax * 4.0);
+
+    let deact_mwd_res = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "fighterMgr",
+            None,
+            "CmdDeactivateAbilitySlots",
+            &[PyRep::List(vec![PyRep::Integer(f1_ball_id)]), PyRep::Integer(1)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("CmdDeactivateAbilitySlots Slot 1 MWD");
+    let PyRep::KeyVal(deact_kv) = deact_mwd_res else {
+        panic!("Expected KeyVal from CmdDeactivateAbilitySlots");
+    };
+    assert_eq!(deact_kv.get("deactivated"), Some(&PyRep::Bool(true)));
+    assert!(!ctx.active_fighters.read().unwrap()[&f1_ball_id].mwd_active);
+    let (_, f1_after_deact_mwd) = sys_handle.get_ball_snapshot(f1_ball_id).await.unwrap().unwrap();
+    assert!((f1_after_deact_mwd.max_velocity - f1_base_vmax).abs() < 1e-3);
 
     let cs_before_salvo = sys_handle.get_combat_state(dummy_target_id).await.unwrap().unwrap();
     let salvo_res = ctx
@@ -632,6 +702,23 @@ async fn test_s2_fighter_manager_load_launch_recall_movement_abilities_abandon()
                 mwd_active: false,
             },
         );
+        if expected_ability_id == 12 {
+            sys_handle
+                .add_target_lock(
+                    dummy_target_id,
+                    eve_destiny::TargetLock {
+                        target_id: ship_id,
+                        lock_time_ms: 1_000.0,
+                        remaining_lock_ms: 0.0,
+                        locked: true,
+                        max_range_m: Some(50_000.0),
+                    },
+                )
+                .await
+                .unwrap();
+        } else if expected_ability_id == 2 {
+            let _ = sys_handle.set_speed_fraction(dummy_target_id, 1.0).await;
+        }
         let sup_res = ctx
             .dispatch_rpc(
                 &mut sess,
@@ -655,6 +742,24 @@ async fn test_s2_fighter_manager_load_launch_recall_movement_abilities_abandon()
             sup_kv.get("abilityID").unwrap().as_i64().unwrap(),
             expected_ability_id
         );
+        if expected_ability_id == 12 {
+            assert!(
+                sys_handle.get_target_locks(dummy_target_id).await.unwrap().is_empty(),
+                "Scarab I ECM ability (12) must break target locks on dummy_target_id"
+            );
+        } else if expected_ability_id == 10 {
+            let scram_cs = sys_handle.get_combat_state(dummy_target_id).await.unwrap().unwrap();
+            assert!(
+                scram_cs.warp_scramble_strength >= 3,
+                "Siren I Warp Disruption ability (10) must apply warp scramble points"
+            );
+        } else if expected_ability_id == 2 {
+            let (_, webbed_b) = sys_handle.get_ball_snapshot(dummy_target_id).await.unwrap().unwrap();
+            assert!(
+                webbed_b.speed_fraction < 1.0,
+                "Dromi I Web ability (2) must reduce target speed_fraction"
+            );
+        }
         ctx.active_fighters.write().unwrap().remove(&sup_ball_id);
         let _ = sys_handle.remove_ball(sup_ball_id).await;
     }
@@ -729,6 +834,36 @@ async fn test_s2_fighter_manager_load_launch_recall_movement_abilities_abandon()
     let bomb_charges = bomb_kv.get("chargeCount").unwrap().as_i64().unwrap();
     let bomb_rem = bomb_kv.get("remainingCharges").unwrap().as_i64().unwrap();
     assert!(bomb_charges > 0 && bomb_rem == bomb_charges - 1);
+
+    // Exhaust remaining bomb charges and verify OutOfCharges
+    for _ in 0..bomb_rem {
+        ctx.advance_secs(120);
+        ctx.dispatch_rpc(
+            &mut sess,
+            "fighterMgr",
+            None,
+            "CmdActivateAbilitySlots",
+            &[PyRep::List(vec![PyRep::Integer(f3_ball_id)]), PyRep::Integer(2)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("Consume remaining bomb charge");
+    }
+    ctx.advance_secs(120);
+    let err_empty_bomb = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "fighterMgr",
+            None,
+            "CmdActivateAbilitySlots",
+            &[PyRep::List(vec![PyRep::Integer(f3_ball_id)]), PyRep::Integer(2)],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err_empty_bomb.code, "OutOfCharges");
 
     ctx.db.with_mut_snapshot(|snap| {
         snap.characters.get_mut(&90_000_001).unwrap().solar_system_id = sys_id;

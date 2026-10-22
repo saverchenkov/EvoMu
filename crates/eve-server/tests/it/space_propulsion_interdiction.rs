@@ -59,33 +59,18 @@ fn grant_all_test_skills(ctx: &ServerContext, char_id: i64) {
 #[tokio::test]
 async fn test_sp2_grid_bubble_splitting_interdiction_and_nullifier() {
     // parity: plan:SP-2
-    // parity: feat:navigation.bubbles-grid, feat:modules.interdiction-sphere, feat:modules.warp-disruption-field, feat:modules.mobile-warp-disruptor, feat:modules.interdiction-nullifier, feat:modules.mobile-warp-disruptor-anchoring-skill, rpc:beyonce.AdminGetBubbleID, rpc:charUnboundMgr.SelectCharacterID, rpc:posMgr.AnchorStructure
-    eve_testkit::attest(&[
-        "plan:SP-2",
-        "feat:navigation.bubbles-grid",
-        "feat:modules.interdiction-sphere",
-        "feat:modules.warp-disruption-field",
-        "feat:modules.mobile-warp-disruptor",
-        "feat:modules.interdiction-nullifier",
-        "feat:modules.mobile-warp-disruptor-anchoring-skill",
-    ]);
+    // parity: feat:navigation.bubbles-grid, feat:modules.interdiction-sphere, feat:modules.mobile-warp-disruptor, feat:modules.interdiction-nullifier, feat:modules.mobile-warp-disruptor-anchoring-skill, rpc:beyonce.AdminGetBubbleID, rpc:charUnboundMgr.SelectCharacterID, rpc:posMgr.AnchorStructure
+    eve_testkit::attest(&["plan:SP-2", "feat:navigation.bubbles-grid", "feat:modules.interdiction-sphere", "feat:modules.mobile-warp-disruptor", "feat:modules.interdiction-nullifier", "feat:modules.mobile-warp-disruptor-anchoring-skill"]);
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let mut sess = SessionState::new(2001);
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
     let char_id = 90_000_001;
-    ctx.dispatch_rpc(
-        &mut sess,
-        "charUnboundMgr",
-        None,
-        "SelectCharacterID",
-        &[PyRep::Integer(char_id)],
-        &kw,
-        None,
-    )
-    .await
-    .expect("SelectCharacterID");
+    ctx.dispatch_rpc(&mut sess, "charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(char_id)], &kw, None)
+        .await
+        .expect("SelectCharacterID");
 
     sess.role = u64::MAX;
     let ship_id = 100_000_001;
@@ -183,6 +168,37 @@ async fn test_sp2_grid_bubble_splitting_interdiction_and_nullifier() {
         assert_eq!(anchor_err.code, "CantAnchorInEmpire");
     }
 
+    // 1c. Wormhole space (J100001 `31_000_005`) allows Interdiction Sphere Probe launch (`feat:modules.interdiction-sphere`)
+    let wh_sys_id = 31_000_005_u32;
+    let wh_handle = ctx.systems.get_or_spawn(wh_sys_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().solar_system_id = wh_sys_id;
+        snap.items.get_mut(&ship_id).unwrap().location_id = wh_sys_id as i64;
+    });
+    sess.solar_system_id = Some(wh_sys_id);
+    wh_handle
+        .spawn_ball(Ball {
+            id: ship_id,
+            type_id: 22456,
+            position: DVec3::ZERO,
+            velocity: DVec3::ZERO,
+            max_velocity: 380.0,
+            inertia: 2.8,
+            mass: 1_350_000.0,
+            radius: 58.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await
+        .unwrap();
+    let wh_launch = ctx
+        .dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &[PyRep::Integer(launcher_item_id)], &kw, None)
+        .await
+        .expect("Launch interdiction probe in wormhole space");
+    let PyRep::KeyVal(wh_lkv) = wh_launch else { panic!() };
+    assert_eq!(wh_lkv["bubbleRadius"], PyRep::Real(20_000.0));
+    wh_handle.remove_warp_bubble(wh_lkv["probeID"].as_i64().unwrap()).await.unwrap();
+
     // 2. Move pilot + Sabre to null-sec system 6VDT-H (30004608, security -0.70 <= 0.0)
     let null_sys_id = 30_004_608;
     let null_handle = ctx.systems.get_or_spawn(null_sys_id);
@@ -217,9 +233,6 @@ async fn test_sp2_grid_bubble_splitting_interdiction_and_nullifier() {
         .expect("spawn Sabre in null-sec");
 
     // 2a. Launch Interdiction Sphere Probe Variants (`feat:modules.interdiction-sphere`, `feat:modules.interdiction-probe-variants`)
-    // - 22778 Warp Disrupt Probe (20 km radius)
-    // - 34260 Surgical Warp Disrupt Probe (10 km radius)
-    // - 41402 Phobetor Warp Disrupt Probe (20 km radius)
     let mut first_probe_bubble_id = 0_i64;
     for (idx, probe_type_id) in [22778_u32, 34260, 41402].into_iter().enumerate() {
         ctx.db.with_mut_snapshot(|snap| {
@@ -228,23 +241,13 @@ async fn test_sp2_grid_bubble_splitting_interdiction_and_nullifier() {
             c.quantity = 5;
         });
         let launch_res = ctx
-            .dispatch_rpc(
-                &mut sess,
-                "dogmaIM",
-                None,
-                "Activate",
-                &[PyRep::Integer(launcher_item_id)],
-                &kw,
-                None,
-            )
+            .dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &[PyRep::Integer(launcher_item_id)], &kw, None)
             .await
             .expect("Launch interdiction probe variant");
-        let PyRep::KeyVal(lkv) = launch_res else {
-            panic!("Expected KeyVal from Interdiction Sphere Launcher activation");
-        };
+        let PyRep::KeyVal(lkv) = launch_res else { panic!() };
         let b_id = lkv.get("probeID").unwrap().as_i64().unwrap();
         let b_rad = lkv.get("bubbleRadius").unwrap().as_f64().unwrap();
-        assert!(b_rad >= 10_000.0, "Probe variant {probe_type_id} must spawn warp bubble (radius={b_rad})");
+        assert!(b_rad >= 10_000.0);
         if idx == 0 {
             first_probe_bubble_id = b_id;
             assert_eq!(b_rad, 20_000.0);
@@ -253,7 +256,7 @@ async fn test_sp2_grid_bubble_splitting_interdiction_and_nullifier() {
         }
     }
 
-    // 2b. Activate Warp Disruption Field Generator I (`28654`, `feat:modules.warp-disruption-field`) on Heavy Interdiction Cruiser (Onyx `11995`)
+    // 2b. Activate Warp Disruption Field Generator I (`28654`) on Heavy Interdiction Cruiser (Onyx `11995`)
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.get_mut(&ship_id).unwrap().type_id = 11995; // Onyx (HIC, group 894)
         snap.items.insert(
@@ -262,41 +265,18 @@ async fn test_sp2_grid_bubble_splitting_interdiction_and_nullifier() {
         );
     });
     ctx.invalidate_ship_fitting(ship_id);
-    let wdfg_pos = DVec3::new(30_000_000.0, 0.0, 0.0);
-    null_handle.set_ball_position(ship_id, wdfg_pos).await;
+    null_handle.set_ball_position(ship_id, DVec3::new(30_000_000.0, 0.0, 0.0)).await;
     let wdfg_res = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "dogmaIM",
-            None,
-            "Activate",
-            &[PyRep::Integer(wdfg_item_id)],
-            &kw,
-            None,
-        )
+        .dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &[PyRep::Integer(wdfg_item_id)], &kw, None)
         .await
         .expect("Activate WDFG in null-sec");
-    let PyRep::KeyVal(wkv) = wdfg_res else {
-        panic!("Expected KeyVal from WDFG activation");
-    };
+    let PyRep::KeyVal(wkv) = wdfg_res else { panic!() };
     assert_eq!(wkv.get("bubbleRadius").unwrap().as_f64().unwrap(), 16_000.0);
-    ctx.dispatch_rpc(
-        &mut sess,
-        "dogmaIM",
-        None,
-        "Deactivate",
-        &[PyRep::Integer(wdfg_item_id)],
-        &kw,
-        None,
-    )
-    .await
-    .expect("Deactivate WDFG");
+    ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Deactivate", &[PyRep::Integer(wdfg_item_id)], &kw, None)
+        .await
+        .expect("Deactivate WDFG");
 
-    // 2c. Mobile Warp Disruptor Anchoring Skill requirements (`feat:modules.mobile-warp-disruptor`, `feat:modules.mobile-warp-disruptor-anchoring-skill`)
-    // Test Anchoring skill (11584):
-    // - Level 0 -> rejected with SkillMissing
-    // - Level 2 -> allows Small I (12198, req lvl 2), rejects Medium II (26890, req lvl 4)
-    // - Level 4 -> allows all variants
+    // 2c. Mobile Warp Disruptor Anchoring Skill & Deploy Timer (`feat:modules.mobile-warp-disruptor`, `feat:modules.mobile-warp-disruptor-anchoring-skill`)
     let mwd_pos = DVec3::new(35_000_000.0, 0.0, 0.0);
     null_handle.set_ball_position(ship_id, mwd_pos).await;
     ctx.db.with_mut_snapshot(|snap| {
@@ -305,15 +285,7 @@ async fn test_sp2_grid_bubble_splitting_interdiction_and_nullifier() {
         }
     });
     let no_skill_err = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "posMgr",
-            None,
-            "AnchorStructure",
-            &[PyRep::Integer(mobile_disruptor_item_id)],
-            &kw,
-            None,
-        )
+        .dispatch_rpc(&mut sess, "posMgr", None, "AnchorStructure", &[PyRep::Integer(mobile_disruptor_item_id)], &kw, None)
         .await
         .unwrap_err();
     assert_eq!(no_skill_err.code, "SkillMissing");
@@ -321,24 +293,12 @@ async fn test_sp2_grid_bubble_splitting_interdiction_and_nullifier() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.skills.entry(char_id).or_default().insert(
             11584,
-            TrainedSkillRecord {
-                type_id: 11584,
-                level: 2,
-                skill_points: 1_415.0,
-            },
+            TrainedSkillRecord { type_id: 11584, level: 2, skill_points: 1_415.0 },
         );
-        snap.items.get_mut(&mobile_disruptor_item_id).unwrap().type_id = 26890; // Mobile Medium Warp Disruptor II (requires Anchoring IV)
+        snap.items.get_mut(&mobile_disruptor_item_id).unwrap().type_id = 26890; // Mobile Medium Warp Disruptor II (req Anchoring IV)
     });
     let t2_skill_err = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "posMgr",
-            None,
-            "AnchorStructure",
-            &[PyRep::Integer(mobile_disruptor_item_id)],
-            &kw,
-            None,
-        )
+        .dispatch_rpc(&mut sess, "posMgr", None, "AnchorStructure", &[PyRep::Integer(mobile_disruptor_item_id)], &kw, None)
         .await
         .unwrap_err();
     assert_eq!(t2_skill_err.code, "SkillMissing");
@@ -348,22 +308,16 @@ async fn test_sp2_grid_bubble_splitting_interdiction_and_nullifier() {
         snap.items.get_mut(&mobile_disruptor_item_id).unwrap().type_id = 12198;
     });
     let anchor_res = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "posMgr",
-            None,
-            "AnchorStructure",
-            &[PyRep::Integer(mobile_disruptor_item_id)],
-            &kw,
-            None,
-        )
+        .dispatch_rpc(&mut sess, "posMgr", None, "AnchorStructure", &[PyRep::Integer(mobile_disruptor_item_id)], &kw, None)
         .await
         .expect("Anchor Mobile Small Warp Disruptor I in null-sec");
-    let PyRep::KeyVal(akv) = anchor_res else {
-        panic!("Expected KeyVal from AnchorStructure");
-    };
+    let PyRep::KeyVal(akv) = anchor_res else { panic!() };
     let mobile_bubble_id = akv.get("itemID").unwrap().as_i64().unwrap();
-    assert_eq!(akv.get("bubbleRadius").unwrap().as_f64().unwrap(), 5_000.0);
+    assert_eq!(akv["state"], PyRep::String("Anchoring".into()));
+    assert_eq!(akv["anchoringDelaySeconds"], PyRep::Real(120.0));
+    assert_eq!(akv["bubbleRadius"], PyRep::Real(5_000.0));
+    // Step 120s deploy timer so the Mobile Small Warp Disruptor I bubble activates in space
+    null_handle.step_manual(120.0).await.expect("Complete 120s deploy timer");
 
     // 3. Verify non-nullified warp is dragged/stopped by bubble, and Interdiction Nullifier (`58919`, `feat:modules.interdiction-nullifier`) bypasses bubbles
     ctx.db.with_mut_snapshot(|snap| {
@@ -412,8 +366,8 @@ async fn test_sp2_grid_bubble_splitting_interdiction_and_nullifier() {
         panic!("Expected ship in Warp mode");
     };
     assert!(
-        caught_dest.x < 36_000_000.0,
-        "Un-nullified warp must be intercepted by interdiction bubble before 40,000 km: got {}",
+        (caught_dest.x - 24_980_000.0).abs() < 1.0,
+        "Un-nullified warp must be stopped/dragged to 20km sphere bubble perimeter at 24,980 km: got {}",
         caught_dest.x
     );
 
@@ -437,17 +391,9 @@ async fn test_sp2_grid_bubble_splitting_interdiction_and_nullifier() {
         .unwrap_err();
     assert_eq!(trapped_err.code, "WarpScrambled");
 
-    ctx.dispatch_rpc(
-        &mut sess,
-        "dogmaIM",
-        None,
-        "Activate",
-        &[PyRep::Integer(nullifier_item_id)],
-        &kw,
-        None,
-    )
-    .await
-    .expect("Activate Interdiction Nullifier I");
+    ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &[PyRep::Integer(nullifier_item_id)], &kw, None)
+        .await
+        .expect("Activate Interdiction Nullifier I");
 
     ctx.dispatch_rpc(
         &mut sess,
@@ -475,19 +421,7 @@ async fn test_sp2_grid_bubble_splitting_interdiction_and_nullifier() {
 async fn test_sp3_propulsion_agility_mjd_mjfg_and_approach() {
     // parity: plan:SP-3
     // parity: feat:navigation.approach, feat:dogma.velocity-agility, feat:modules.afterburner, feat:modules.microwarpdrive, feat:modules.micro-jump-drive, feat:modules.micro-jump-field-generator, feat:modules.micro-jump-field-boosh-limit, feat:modules.mjfg-fleet-jump, feat:modules.capital-micro-jump-drive, feat:navigation.directional-jump-drive, rpc:charUnboundMgr.SelectCharacterID
-    eve_testkit::attest(&[
-        "plan:SP-3",
-        "feat:navigation.approach",
-        "feat:dogma.velocity-agility",
-        "feat:modules.afterburner",
-        "feat:modules.microwarpdrive",
-        "feat:modules.micro-jump-drive",
-        "feat:modules.micro-jump-field-generator",
-        "feat:modules.micro-jump-field-boosh-limit",
-        "feat:modules.mjfg-fleet-jump",
-        "feat:modules.capital-micro-jump-drive",
-        "feat:navigation.directional-jump-drive",
-    ]);
+    eve_testkit::attest(&["plan:SP-3", "feat:navigation.approach", "feat:dogma.velocity-agility", "feat:modules.afterburner", "feat:modules.microwarpdrive", "feat:modules.micro-jump-drive", "feat:modules.micro-jump-field-generator", "feat:modules.micro-jump-field-boosh-limit", "feat:modules.mjfg-fleet-jump", "feat:modules.capital-micro-jump-drive", "feat:navigation.directional-jump-drive"]);
 
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
@@ -538,7 +472,7 @@ async fn test_sp3_propulsion_agility_mjd_mjfg_and_approach() {
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
 
     // 1. Subwarp Velocity & Agility (`feat:dogma.velocity-agility`)
-    let (_, base_ball) = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    let (_, mut base_ball) = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
     let base_vmax = base_ball.max_velocity;
     let base_mass = base_ball.mass;
     let base_inertia = base_ball.inertia;
@@ -549,12 +483,29 @@ async fn test_sp3_propulsion_agility_mjd_mjfg_and_approach() {
         .get_or_rebuild_ship_fitting(char_id, ship_id)
         .unwrap()
         .evaluated_context(&ctx.sde);
+    let base_cap = fit_eval.ship.get_attribute(eve_sde::attr_ids::CAPACITOR_CAPACITY, &ctx.sde);
     assert!(
         (base_vmax - fit_eval.ship.get_attribute(eve_sde::attr_ids::MAX_VELOCITY, &ctx.sde)).abs() < 1e-3
     );
-    let _hull_dogma = DogmaItemState::from_sde(ship_id, base_ball.type_id, &ctx.sde);
-    let align_time = (4.0_f64.ln() * base_inertia * base_mass) / 1_000_000.0;
-    assert!(align_time > 1.0 && align_time < 30.0);
+    base_ball.velocity = DVec3::ZERO;
+    base_ball.speed_fraction = 0.0;
+    base_ball.mode = MovementMode::Stop;
+    sys_handle.spawn_ball_with_combat(base_ball, base_cs.clone()).await.unwrap();
+    let tau = (base_inertia * base_mass) / 1_000_000.0;
+    let align_ticks = (4.0_f64.ln() * tau).ceil() as usize;
+    ctx.dispatch_rpc(&mut sess, "beyonce", Some(beyonce_id), "CmdGotoDirection", &[PyRep::Real(1.0), PyRep::Real(0.0), PyRep::Real(0.0)], &kw, None).await.unwrap();
+    ctx.dispatch_rpc(&mut sess, "beyonce", Some(beyonce_id), "CmdSetSpeedFraction", &[PyRep::Real(1.0)], &kw, None).await.unwrap();
+    for t in 1..=align_ticks {
+        sys_handle.step_manual(1.0).await.unwrap();
+        let (_, b_step) = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+        let expected_v = base_vmax * (1.0 - (-(t as f64) / tau).exp());
+        assert!((b_step.velocity.length() - expected_v).abs() < 1.0);
+        if t < align_ticks {
+            assert!(b_step.velocity.length() < 0.75 * base_vmax);
+        } else {
+            assert!(b_step.velocity.length() >= 0.75 * base_vmax);
+        }
+    }
 
     // 2. Approach (`feat:navigation.approach`)
     let target_ball_id = 89_001;
@@ -579,28 +530,12 @@ async fn test_sp3_propulsion_agility_mjd_mjfg_and_approach() {
         .await
         .expect("spawn approach target");
 
-    ctx.dispatch_rpc(
-        &mut sess,
-        "beyonce",
-        Some(beyonce_id),
-        "CmdFollowBall",
-        &[PyRep::Integer(target_ball_id), PyRep::Real(0.0)],
-        &kw,
-        None,
-    )
-    .await
-    .expect("CmdFollowBall");
-    ctx.dispatch_rpc(
-        &mut sess,
-        "beyonce",
-        Some(beyonce_id),
-        "CmdSetSpeedFraction",
-        &[PyRep::Real(1.0)],
-        &kw,
-        None,
-    )
-    .await
-    .expect("CmdSetSpeedFraction");
+    ctx.dispatch_rpc(&mut sess, "beyonce", Some(beyonce_id), "CmdFollowBall", &[PyRep::Integer(target_ball_id), PyRep::Real(0.0)], &kw, None)
+        .await
+        .expect("CmdFollowBall");
+    ctx.dispatch_rpc(&mut sess, "beyonce", Some(beyonce_id), "CmdSetSpeedFraction", &[PyRep::Real(1.0)], &kw, None)
+        .await
+        .expect("CmdSetSpeedFraction");
 
     let dist_before = cur_ship.position.distance(target_pos);
     for _ in 0..5 {
@@ -610,33 +545,18 @@ async fn test_sp3_propulsion_agility_mjd_mjfg_and_approach() {
     assert!(ship_after_approach.position.distance(target_pos) < dist_before);
 
     // 3. Afterburner (`feat:modules.afterburner`)
-    ctx.dispatch_rpc(
-        &mut sess,
-        "dogmaIM",
-        None,
-        "Activate",
-        &[PyRep::Integer(ab_item_id)],
-        &kw,
-        None,
-    )
-    .await
-    .expect("Activate Afterburner");
+    ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &[PyRep::Integer(ab_item_id)], &kw, None)
+        .await
+        .expect("Activate Afterburner");
     let (_, ab_ball) = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
     let ab_cs = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap();
     assert!(ab_ball.max_velocity > base_vmax);
+    assert_eq!(ab_ball.mass, base_mass + 500_000.0);
     assert!((ab_cs.signature_radius - base_sig).abs() < 1e-3);
 
-    ctx.dispatch_rpc(
-        &mut sess,
-        "dogmaIM",
-        None,
-        "Deactivate",
-        &[PyRep::Integer(ab_item_id)],
-        &kw,
-        None,
-    )
-    .await
-    .expect("Deactivate Afterburner");
+    ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Deactivate", &[PyRep::Integer(ab_item_id)], &kw, None)
+        .await
+        .expect("Deactivate Afterburner");
 
     // 4. Microwarpdrive (`feat:modules.microwarpdrive`) — swap online state from AB to MWD (maxGroupOnline = 1)
     ctx.db.with_mut_snapshot(|snap| {
@@ -644,35 +564,25 @@ async fn test_sp3_propulsion_agility_mjd_mjfg_and_approach() {
         snap.module_online_states.insert(mwd_item_id, true);
     });
     ctx.invalidate_ship_fitting(ship_id);
-    ctx.dispatch_rpc(
-        &mut sess,
-        "dogmaIM",
-        None,
-        "Activate",
-        &[PyRep::Integer(mwd_item_id)],
-        &kw,
-        None,
-    )
-    .await
-    .expect("Activate MWD");
+    let mwd_fit_eval = ctx
+        .get_or_rebuild_ship_fitting(char_id, ship_id)
+        .unwrap()
+        .evaluated_context(&ctx.sde);
+    assert!(
+        mwd_fit_eval.ship.get_attribute(eve_sde::attr_ids::CAPACITOR_CAPACITY, &ctx.sde) < base_cap,
+        "Online Microwarpdrive must apply passive capacitor capacity penalty"
+    );
+    ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &[PyRep::Integer(mwd_item_id)], &kw, None)
+        .await
+        .expect("Activate MWD");
     let (_, mwd_ball) = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
     let mwd_cs = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap();
-    assert!(
-        mwd_ball.max_velocity > ab_ball.max_velocity
-            && mwd_ball.mass > base_mass
-            && mwd_cs.signature_radius > base_sig * 4.0
-    );
-    ctx.dispatch_rpc(
-        &mut sess,
-        "dogmaIM",
-        None,
-        "Deactivate",
-        &[PyRep::Integer(mwd_item_id)],
-        &kw,
-        None,
-    )
-    .await
-    .expect("Deactivate MWD");
+    assert!(mwd_ball.max_velocity > ab_ball.max_velocity);
+    assert_eq!(mwd_ball.mass, base_mass + 500_000.0);
+    assert!(mwd_cs.signature_radius > base_sig * 4.0);
+    ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Deactivate", &[PyRep::Integer(mwd_item_id)], &kw, None)
+        .await
+        .expect("Deactivate MWD");
 
     // Apply an active Warp Scrambler tackle cycle on ship_id (2 scramble points + MWD/MJD suppression)
     sys_handle
@@ -684,97 +594,60 @@ async fn test_sp3_propulsion_agility_mjd_mjfg_and_approach() {
             target_id: Some(ship_id),
             repeat: 1,
             duration_s: 60.0,
-            elapsed_s: 0.0,
-            cap_need_per_cycle: 0.0,
-            speed_boost_factor: 0.0,
-            original_max_velocity: None,
-            linked_turrets: Vec::new(),
-            ammo_type_id: None,
-            damage_vector: eve_destiny::DamageVector::new(0.0, 0.0, 0.0, 0.0),
-            cap_drain_target: 0.0,
-            cap_transfer_target: 0.0,
-            shield_boost_amount: 0.0,
-            armor_repair_amount: 0.0,
-            is_overloaded: false,
             rack_idx: 1,
-            heat_damage_per_cycle: 0.0,
-            reactivation_delay_s: 0.0,
-            is_mwd_or_mjd: false,
             warp_scramble_points: 2,
             disables_target_mwd_mjd: true,
-            warp_core_stab_bonus: 0,
-            hic_bubble_radius_m: None,
-            hic_velocity_multiplier: None,
-            hic_sig_multiplier: None,
-            hic_mass_addition: None,
-            original_signature_radius: None,
-            original_mass: None,
-            mjd_jump_distance_m: None,
-            grants_interdiction_nullification: false,
-            effective_max_capacitor: None,
             ..Default::default()
         })
         .await
         .unwrap();
     let mwd_scram_err = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "dogmaIM",
-            None,
-            "Activate",
-            &[PyRep::Integer(mwd_item_id)],
-            &kw,
-            None,
-        )
+        .dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &[PyRep::Integer(mwd_item_id)], &kw, None)
         .await
         .unwrap_err();
     assert_eq!(mwd_scram_err.code, "WarpScrambled");
 
     // 5. Micro Jump Drive (`feat:modules.micro-jump-drive`, `feat:navigation.directional-jump-drive`)
     let mjd_scram_err = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "dogmaIM",
-            None,
-            "Activate",
-            &[PyRep::Integer(mjd_item_id)],
-            &kw,
-            None,
-        )
+        .dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &[PyRep::Integer(mjd_item_id)], &kw, None)
         .await
         .unwrap_err();
     assert_eq!(mjd_scram_err.code, "WarpScrambled");
 
+    // Afterburner is NOT disabled by warp scramblers
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.module_online_states.insert(mwd_item_id, false);
+        snap.module_online_states.insert(ab_item_id, true);
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+    ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &[PyRep::Integer(ab_item_id)], &kw, None)
+        .await
+        .expect("Afterburner must activate even while warp scrambled");
+    ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Deactivate", &[PyRep::Integer(ab_item_id)], &kw, None)
+        .await
+        .expect("Deactivate Afterburner");
+
     sys_handle.remove_module_cycle(target_ball_id, 999_001).await.unwrap();
 
-    ctx.dispatch_rpc(
-        &mut sess,
-        "beyonce",
-        Some(beyonce_id),
-        "CmdGotoDirection",
-        &[PyRep::Real(1.0), PyRep::Real(0.0), PyRep::Real(0.0)],
-        &kw,
-        None,
-    )
-    .await
-    .expect("Set heading +X");
+    ctx.dispatch_rpc(&mut sess, "beyonce", Some(beyonce_id), "CmdGotoDirection", &[PyRep::Real(1.0), PyRep::Real(0.0), PyRep::Real(0.0)], &kw, None)
+        .await
+        .expect("Set heading +X");
     sys_handle.step_manual(1.0).await.unwrap();
     let (_, ball_before_mjd) = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
     let pos_before = ball_before_mjd.position;
 
-    ctx.dispatch_rpc(
-        &mut sess,
-        "dogmaIM",
-        None,
-        "Activate",
-        &[PyRep::Integer(mjd_item_id)],
-        &kw,
-        None,
-    )
-    .await
-    .expect("Activate MJD");
+    ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &[PyRep::Integer(mjd_item_id)], &kw, None)
+        .await
+        .expect("Activate MJD");
 
-    for _ in 0..12 {
+    for _ in 0..5 {
+        sys_handle.step_manual(1.0).await.unwrap();
+    }
+    let (_, ball_mid_mjd) = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    let cs_mid_mjd = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap();
+    assert!(ball_mid_mjd.position.distance(pos_before) < 5_000.0, "MJD must not jump before 12s spool-up completes");
+    assert!(cs_mid_mjd.signature_radius > base_sig * 2.0, "MJD spool-up must bloom signature radius");
+    for _ in 0..7 {
         sys_handle.step_manual(1.0).await.unwrap();
     }
     let (_, ball_after_mjd) = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
@@ -915,15 +788,10 @@ async fn test_sp3_propulsion_agility_mjd_mjfg_and_approach() {
 async fn test_sp3_cloaking_prototype_covert_decloak_and_stabilization() {
     // parity: plan:SP-3
     // parity: feat:modules.cloak-prototype, feat:modules.cloak-decloak, feat:modules.covert-ops-cloak, feat:modules.cloak-stabilization-timer, rpc:beyonce.UpdateStateRequest, rpc:charUnboundMgr.SelectCharacterID
-    eve_testkit::attest(&[
-        "plan:SP-3",
-        "feat:modules.cloak-prototype",
-        "feat:modules.cloak-decloak",
-        "feat:modules.covert-ops-cloak",
-        "feat:modules.cloak-stabilization-timer",
-    ]);
+    eve_testkit::attest(&["plan:SP-3", "feat:modules.cloak-prototype", "feat:modules.cloak-decloak", "feat:modules.covert-ops-cloak", "feat:modules.cloak-stabilization-timer"]);
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let mut sess = SessionState::new(2099);
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
@@ -1141,16 +1009,10 @@ async fn test_sp3_cloaking_prototype_covert_decloak_and_stabilization() {
 async fn test_sp3_subwarp_navigation_orbit_keep_at_range_align_goto_stop() {
     // parity: plan:SP-3, plan:S-1
     // parity: feat:navigation.orbit, feat:navigation.keep-at-range, feat:navigation.align-to, feat:navigation.goto-point, feat:navigation.stop-ship, rpc:charUnboundMgr.SelectCharacterID
-    eve_testkit::attest(&[
-        "plan:S-1",
-        "feat:navigation.orbit",
-        "feat:navigation.keep-at-range",
-        "feat:navigation.align-to",
-        "feat:navigation.goto-point",
-        "feat:navigation.stop-ship",
-    ]);
+    eve_testkit::attest(&["plan:S-1", "feat:navigation.orbit", "feat:navigation.keep-at-range", "feat:navigation.align-to", "feat:navigation.goto-point", "feat:navigation.stop-ship"]);
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let mut sess = SessionState::new(3001);
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;

@@ -15,14 +15,8 @@ use std::collections::HashMap;
 #[tokio::test]
 async fn test_sp5_docking_and_undocking_station_structure_and_boarding() {
     // parity: plan:SP-5
-    // parity: feat:ships.board-ship, feat:navigation.undock, feat:navigation.dock-station, feat:navigation.dock-structure, rpc:charUnboundMgr.SelectCharacterID, rpc:ship.Board, rpc:structureDocking.Dock, rpc:structureDocking.Undock
-    eve_testkit::attest(&[
-        "plan:SP-5",
-        "feat:ships.board-ship",
-        "feat:navigation.undock",
-        "feat:navigation.dock-station",
-        "feat:navigation.dock-structure",
-    ]);
+    // parity: feat:ships.board-ship, feat:navigation.undock, feat:navigation.dock-station, feat:navigation.dock-structure, notify:OnSessionChanged, rpc:charUnboundMgr.SelectCharacterID, rpc:ship.Board, rpc:structureDocking.Dock, rpc:structureDocking.Undock
+    eve_testkit::attest(&["plan:SP-5", "feat:ships.board-ship", "feat:navigation.undock", "feat:navigation.dock-station", "feat:navigation.dock-structure"]);
 
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
@@ -123,6 +117,7 @@ async fn test_sp5_docking_and_undocking_station_structure_and_boarding() {
     assert_eq!(sess.ship_id, Some(first_ship_id));
 
     // 2. Undock from station along celestial-derived undock vector + 30s invulnerability (feat:navigation.undock)
+    let _ = ctx.drain_notifications_for_char(char_id);
     let undock_res = ctx
         .dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None)
         .await
@@ -130,6 +125,7 @@ async fn test_sp5_docking_and_undocking_station_structure_and_boarding() {
     let PyRep::KeyVal(ukv) = undock_res else {
         panic!("Expected KeyVal from Undock");
     };
+    let beyonce_id = ukv.get("beyonceBoundID").unwrap().as_i64().unwrap() as u64;
     assert_eq!(ukv.get("shipID").unwrap().as_i64().unwrap(), first_ship_id);
     assert_eq!(
         ukv.get("undockInvulnerabilityTicks")
@@ -139,6 +135,11 @@ async fn test_sp5_docking_and_undocking_station_structure_and_boarding() {
         30
     );
     assert_eq!(sess.station_id, None);
+    let undock_notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        undock_notifs.iter().any(|n| n.event == "OnSessionChanged"),
+        "Undock must emit OnSessionChanged notification"
+    );
 
     let sys_id = 30_000_142;
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
@@ -163,6 +164,10 @@ async fn test_sp5_docking_and_undocking_station_structure_and_boarding() {
     let expected_offset = (st_radius * 0.015 + ship_radius).clamp(500.0, 2_000.0);
     let expected_spawn = station_pos + expected_dir * expected_offset;
     assert!(ball.position.distance(expected_spawn) < 1.0);
+    assert!(
+        (ball.velocity - expected_dir * (ball.max_velocity * 0.5)).length() < 1.0,
+        "Undocking ship must spawn with initial velocity along undock vector"
+    );
     assert_eq!(
         ball.mode,
         MovementMode::GotoDirection {
@@ -196,10 +201,17 @@ async fn test_sp5_docking_and_undocking_station_structure_and_boarding() {
         .unwrap();
     assert_eq!(undock_cs_after_hit.shield_hp, hp_before_undock_hit);
 
-    sys_handle
-        .set_speed_fraction(first_ship_id, 0.5)
-        .await
-        .expect("set_speed_fraction breaks undock invulnerability");
+    ctx.dispatch_rpc(
+        &mut sess,
+        "beyonce",
+        Some(beyonce_id),
+        "CmdSetSpeedFraction",
+        &[PyRep::Real(0.5)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("CmdSetSpeedFraction breaks undock invulnerability");
     let undock_cs_broken = sys_handle
         .get_combat_state(first_ship_id)
         .await
@@ -207,7 +219,7 @@ async fn test_sp5_docking_and_undocking_station_structure_and_boarding() {
         .unwrap();
     assert_eq!(undock_cs_broken.undock_invulnerable_remaining_ticks, 0);
 
-    // 3. Docking perimeter check
+    // 3. Docking perimeter & Crimewatch checks (`feat:navigation.dock-station`)
     sys_handle
         .set_ball_position(first_ship_id, station_pos + DVec3::new(50_000.0, 0.0, 0.0))
         .await;
@@ -235,7 +247,7 @@ async fn test_sp5_docking_and_undocking_station_structure_and_boarding() {
     let dock_wpn_err = ctx
         .dispatch_rpc(
             &mut sess,
-            "beyonce",
+            "stationSvc",
             None,
             "Dock",
             &[PyRep::Integer(station_id)],
@@ -255,7 +267,7 @@ async fn test_sp5_docking_and_undocking_station_structure_and_boarding() {
     let dock_crim_err = ctx
         .dispatch_rpc(
             &mut sess,
-            "beyonce",
+            "stationSvc",
             None,
             "Dock",
             &[PyRep::Integer(station_id)],
@@ -265,11 +277,31 @@ async fn test_sp5_docking_and_undocking_station_structure_and_boarding() {
         .await
         .unwrap_err();
     assert_eq!(dock_crim_err.code, "CriminalTimerActive");
+
+    // Capsule (type 670) CAN dock in highsec even while a Criminal Timer is active
+    let (_, mut pod_ball) = sys_handle.get_ball_snapshot(first_ship_id).await.unwrap().unwrap();
+    let saved_hull_tid = pod_ball.type_id;
+    pod_ball.type_id = 670;
+    pod_ball.mode = MovementMode::Stop;
+    sys_handle.spawn_ball(pod_ball).await.unwrap();
+    ctx.dispatch_rpc(&mut sess, "stationSvc", None, "Dock", &[PyRep::Integer(station_id)], &kw, None)
+        .await
+        .expect("Capsule must be allowed to dock in highsec during Criminal Timer");
+    ctx.dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None)
+        .await
+        .expect("Undock capsule");
+    let (_, mut restored_ball) = sys_handle.get_ball_snapshot(first_ship_id).await.unwrap().unwrap();
+    restored_ball.type_id = saved_hull_tid;
+    restored_ball.position = station_pos + DVec3::new(1_000.0, 0.0, 0.0);
+    restored_ball.mode = MovementMode::Stop;
+    sys_handle.spawn_ball(restored_ball).await.unwrap();
+
     {
         let mut cw = ctx.crimewatch.write().unwrap();
         cw.get_or_create(90_000_001).criminal_flag_until_unix = 0;
     }
 
+    let _ = ctx.drain_notifications_for_char(char_id);
     let dock_ok = ctx
         .dispatch_rpc(
             &mut sess,
@@ -284,8 +316,17 @@ async fn test_sp5_docking_and_undocking_station_structure_and_boarding() {
         .expect("Dock at station within docking perimeter");
     assert!(matches!(dock_ok, PyRep::KeyVal(_)));
     assert_eq!(sess.station_id, Some(station_id));
+    assert!(
+        sys_handle.get_ball_snapshot(first_ship_id).await.unwrap().is_none(),
+        "Docking at station must despawn ship from space"
+    );
+    let dock_notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        dock_notifs.iter().any(|n| n.event == "OnSessionChanged"),
+        "Docking must emit OnSessionChanged notification"
+    );
 
-    // 4. Upwell structure docking: ACL denial, hull size restriction, dock & undock (feat:navigation.dock-structure)
+    // 4. Upwell structure docking: ACL denial, hull size restriction, Crimewatch, dock & undock (feat:navigation.dock-structure)
     ctx.dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None)
         .await
         .expect("Undock again");
@@ -339,7 +380,7 @@ async fn test_sp5_docking_and_undocking_station_structure_and_boarding() {
     let acl_err = ctx
         .dispatch_rpc(
             &mut sess,
-            "beyonce",
+            "structureDocking",
             None,
             "Dock",
             &[PyRep::Integer(struct_id)],
@@ -368,7 +409,7 @@ async fn test_sp5_docking_and_undocking_station_structure_and_boarding() {
     let size_err = ctx
         .dispatch_rpc(
             &mut sess,
-            "beyonce",
+            "structureDocking",
             None,
             "Dock",
             &[PyRep::Integer(struct_id)],
@@ -384,7 +425,42 @@ async fn test_sp5_docking_and_undocking_station_structure_and_boarding() {
         .await
         .expect("restore subcap ball");
 
-    // 4c. Authorized subcap within docking perimeter docks and undocks cleanly
+    // 4c. Crimewatch Weapons Timer blocks structureDocking.Dock -> WeaponsTimerActive
+    {
+        let mut cw = ctx.crimewatch.write().unwrap();
+        cw.trigger_weapon_timer(90_000_001, ctx.now_unix());
+    }
+    let struct_wpn_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "structureDocking",
+            None,
+            "Dock",
+            &[PyRep::Integer(struct_id)],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(struct_wpn_err.code, "WeaponsTimerActive");
+    {
+        let mut cw = ctx.crimewatch.write().unwrap();
+        cw.get_or_create(90_000_001).weapon_timer_until_unix = 0;
+    }
+
+    // 4d. Authorized subcap within docking perimeter docks and undocks cleanly (also exercise beyonce.Dock)
+    ctx.dispatch_rpc(&mut sess, "beyonce", None, "Dock", &[PyRep::Integer(struct_id)], &kw, None)
+        .await
+        .expect("beyonce.Dock at structure");
+    ctx.advance_secs(11);
+    ctx.dispatch_rpc(&mut sess, "structureDocking", None, "Undock", &[], &kw, None)
+        .await
+        .expect("Undock after beyonce.Dock");
+    let (_, mut dock_test_ball2) = sys_handle.get_ball_snapshot(first_ship_id).await.unwrap().unwrap();
+    dock_test_ball2.position = struct_pos + DVec3::new(1_500.0, 0.0, 0.0);
+    dock_test_ball2.mode = MovementMode::Stop;
+    sys_handle.spawn_ball(dock_test_ball2).await.unwrap();
+
     let struct_dock = ctx
         .dispatch_rpc(
             &mut sess,
@@ -399,6 +475,7 @@ async fn test_sp5_docking_and_undocking_station_structure_and_boarding() {
         .expect("Dock at Upwell structure");
     assert!(matches!(struct_dock, PyRep::KeyVal(_)));
     assert_eq!(sess.structure_id, Some(struct_id));
+    assert!(sys_handle.get_ball_snapshot(first_ship_id).await.unwrap().is_none());
 
     let struct_undock = ctx
         .dispatch_rpc(&mut sess, "structureDocking", None, "Undock", &[], &kw, None)
@@ -412,21 +489,17 @@ async fn test_sp5_docking_and_undocking_station_structure_and_boarding() {
         .unwrap()
         .expect("Ship must be spawned back in space after undocking from Upwell structure");
     assert!(after_struct_undock_ball.position.distance(struct_pos) < 5_000.0);
+    assert!(after_struct_undock_ball.velocity.length() > 10.0);
 }
 
 #[tokio::test]
 async fn test_sp3_warp_to_disrupted_capacitor_cost_and_exit_invulnerability() {
     // parity: plan:SP-3, plan:S-1
     // parity: feat:navigation.warp-to, feat:navigation.warp-disrupted, feat:navigation.warp-capacitor-cost, feat:navigation.warp-exit-invulnerability, rpc:abyssalMgr.AbyssalEntranceDeployment, rpc:beyonce.UpdateStateRequest, rpc:charUnboundMgr.SelectCharacterID
-    eve_testkit::attest(&[
-        "plan:S-1",
-        "feat:navigation.warp-to",
-        "feat:navigation.warp-disrupted",
-        "feat:navigation.warp-capacitor-cost",
-        "feat:navigation.warp-exit-invulnerability",
-    ]);
+    eve_testkit::attest(&["plan:S-1", "feat:navigation.warp-to", "feat:navigation.warp-disrupted", "feat:navigation.warp-capacitor-cost", "feat:navigation.warp-exit-invulnerability"]);
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let mut sess = SessionState::new(3002);
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
@@ -800,11 +873,7 @@ async fn test_sp3_warp_to_disrupted_capacitor_cost_and_exit_invulnerability() {
 async fn test_sp4_stargate_capital_restriction_session_timers_and_jump_cloak_immunities() {
     // parity: plan:SP-4, plan:S-1
     // parity: feat:navigation.stargate-capital-restriction, feat:navigation.jump-cloak-immunities, rpc:beyonce.SetSessionCheck, rpc:charUnboundMgr.SelectCharacterID
-    eve_testkit::attest(&[
-        "plan:S-1",
-        "feat:navigation.stargate-capital-restriction",
-        "feat:navigation.jump-cloak-immunities",
-    ]);
+    eve_testkit::attest(&["plan:S-1", "feat:navigation.stargate-capital-restriction", "feat:navigation.jump-cloak-immunities"]);
 
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);

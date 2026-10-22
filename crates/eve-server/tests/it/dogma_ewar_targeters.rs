@@ -619,13 +619,18 @@ async fn test_dg5_targeting_state_machine_sensor_strength_and_ewar() {
         .expect("ItemGetInfo victim under unscripted Sensor Dampener");
     let victim_range_un = extract_item_attr(&damp_un_info, 76);
     let victim_scan_un = extract_item_attr(&damp_un_info, 564);
-    assert!(
-        victim_range_un < base_victim_range,
-        "Unscripted Remote Sensor Dampener I must reduce victim maxTargetRange (76): {victim_range_un} vs {base_victim_range}"
+    assert_eq!(
+        (victim_range_un < base_victim_range, victim_scan_un < base_victim_scan),
+        (true, true),
+        "Unscripted Remote Sensor Dampener I must reduce victim maxTargetRange (76): {victim_range_un} vs {base_victim_range} and scanResolution (564): {victim_scan_un} vs {base_victim_scan}"
     );
-    assert!(
-        victim_scan_un < base_victim_scan,
-        "Unscripted Remote Sensor Dampener I must reduce victim scanResolution (564): {victim_scan_un} vs {base_victim_scan}"
+    assert_eq!(
+        (victim_range_un / base_victim_range * 1000.0).round() as i64,
+        (damp_range_un * 1000.0).round() as i64
+    );
+    assert_eq!(
+        (victim_scan_un / base_victim_scan * 1000.0).round() as i64,
+        (damp_scan_un * 1000.0).round() as i64
     );
     ctx.dispatch_rpc(
         &mut sess,
@@ -1121,6 +1126,10 @@ async fn test_dg5_targeting_state_machine_sensor_strength_and_ewar() {
         victim_sig_norm > base_victim_sig * 1.24,
         "Activated Target Painter I must bloom victim signatureRadius (552) by >=25%: {victim_sig_norm} vs {base_victim_sig}"
     );
+    assert_eq!(
+        (victim_sig_norm / base_victim_sig * 100.0).round() as i64,
+        125
+    );
     ctx.dispatch_rpc(
         &mut sess,
         "dogmaIM",
@@ -1161,6 +1170,10 @@ async fn test_dg5_targeting_state_machine_sensor_strength_and_ewar() {
     assert!(
         victim_sig_ovl > victim_sig_norm,
         "Overloaded Target Painter I must bloom victim signatureRadius (552) more than non-overloaded: {victim_sig_ovl} vs {victim_sig_norm}"
+    );
+    assert_eq!(
+        (victim_sig_ovl / base_victim_sig * 100.0).round() as i64,
+        130
     );
     ctx.dispatch_rpc(
         &mut sess,

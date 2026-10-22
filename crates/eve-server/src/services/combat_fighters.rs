@@ -759,6 +759,54 @@ pub async fn handle_fighters(
                 .and_then(|a| a.as_str())
                 .unwrap_or("GOTO_POINT")
                 .to_ascii_uppercase();
+            if cmd == "MWD" {
+                for fid in fighter_ids {
+                    let (ftype_id, was_mwd) = {
+                        let mut fighters = ctx.active_fighters.write().unwrap();
+                        if let Some(f) = fighters.get_mut(&fid) {
+                            let prev = f.mwd_active;
+                            f.mwd_active = true;
+                            (f.type_id, prev)
+                        } else {
+                            continue;
+                        }
+                    };
+                    if !was_mwd {
+                        let speed_bonus_pct = ctx
+                            .sde
+                            .types
+                            .get(&ftype_id)
+                            .and_then(|t| t.default_attributes.get(&2151).copied())
+                            .unwrap_or(400.0);
+                        if let Ok(Some((_, mut b))) = sys_handle.get_ball_snapshot(fid).await {
+                            b.max_velocity *= 1.0 + speed_bonus_pct / 100.0;
+                            b.speed_fraction = 1.0;
+                            let _ = sys_handle.spawn_ball(b).await;
+                        }
+                    }
+                    let _ = sys_handle.set_speed_fraction(fid, 1.0).await;
+                }
+                return Some(Ok(PyRep::Bool(true)));
+            }
+            if cmd == "MJD" {
+                for fid in fighter_ids {
+                    let ftype_id = ctx
+                        .active_fighters
+                        .read()
+                        .unwrap()
+                        .get(&fid)
+                        .map(|f| f.type_id)
+                        .unwrap_or(0);
+                    let mjd_dist = ctx
+                        .sde
+                        .types
+                        .get(&ftype_id)
+                        .and_then(|t| t.default_attributes.get(&2154).copied())
+                        .unwrap_or(100_000.0);
+                    let _ = sys_handle.micro_jump(fid, mjd_dist).await;
+                }
+                return Some(Ok(PyRep::Bool(true)));
+            }
             let mode = match cmd.as_str() {
                 "ORBIT" => {
                     let target_id = args.get(2).and_then(|a| a.as_i64()).unwrap_or(0);
@@ -800,6 +848,10 @@ pub async fn handle_fighters(
 
         ("fighterMgr", "CmdActivateAbilitySlots") => {
             handle_activate_fighter_ability_slots(ctx, session, args).await
+        }
+
+        ("fighterMgr", "CmdDeactivateAbilitySlots") => {
+            handle_deactivate_fighter_ability_slots(ctx, session, args).await
         }
 
         // rpc-lint: allow auditor acceptance explicitly names fighterMgr.ExecuteActivateAbilitySlotsOnPoint

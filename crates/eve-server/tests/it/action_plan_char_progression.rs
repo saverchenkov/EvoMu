@@ -11,7 +11,7 @@
 use crate::common;
 use eve_db::{
     service_roles, AsteroidRecord, InventoryFlag, InventoryItemRecord, IskCents, SkillQueueEntry,
-    TrainedSkillRecord, VirtualServerClock,
+    TrainedSkillRecord,
 };
 use eve_destiny::wire::{decode_add_balls, encode_add_balls};
 use eve_destiny::{Ball, MovementMode};

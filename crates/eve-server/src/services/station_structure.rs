@@ -354,6 +354,18 @@ pub async fn handle(
 
             session.station_id = None;
             session.structure_id = None;
+            ctx.notify(
+                crate::router::NotificationTarget::Character(char_id),
+                "OnSessionChanged",
+                "charid",
+                vec![
+                    PyRep::Bool(false),
+                    PyRep::Dict(vec![(
+                        PyRep::String(if station_id >= 1_000_000_000_000 { "structureid" } else { "stationid" }.into()),
+                        PyRep::Tuple(vec![PyRep::Integer(station_id), PyRep::None]),
+                    )]),
+                ],
+            );
             let beyonce_bound_id =
                 match ctx.bind_object(session, "beyonce", ch.solar_system_id as i64) {
                     Ok(b) => b,
@@ -407,6 +419,54 @@ pub async fn handle(
             };
             let is_structure = service == "structureDocking" || dock_id >= 1_000_000_000_000;
 
+            let handle = ctx.systems.get_or_spawn(sys_id);
+            let Some((_, ball)) = (match handle.get_ball_snapshot(ship_id).await {
+                Ok(v) => v,
+                Err(e) => {
+                    return Some(Err(BridgeRpcError {
+                        code: "DestinyQueryFailed".into(),
+                        message: e,
+                    }))
+                }
+            }) else {
+                return Some(Err(BridgeRpcError {
+                    code: "ShipNotInSpace".into(),
+                    message: format!("Ship {ship_id} is not spawned in solar system {sys_id} Ballpark"),
+                }));
+            };
+
+            let now_unix = ctx.now_unix();
+            let sys_sec = ctx
+                .sde
+                .solar_systems
+                .get(&sys_id)
+                .map(|s| s.security_status)
+                .unwrap_or(1.0);
+            let ship_group_id = ctx
+                .sde
+                .types
+                .get(&ball.type_id)
+                .map(|t| t.group_id)
+                .unwrap_or(0);
+            let is_capsule = ball.type_id == 670 || ship_group_id == 29;
+            {
+                let cw = ctx.crimewatch.read().unwrap_or_else(|e| e.into_inner());
+                if let Some(cw_state) = cw.states.get(&char_id) {
+                    if cw_state.is_weapon_timer_active(now_unix) {
+                        return Some(Err(BridgeRpcError {
+                            code: "WeaponsTimerActive".into(),
+                            message: "Cannot dock while a 60s Weapons Timer is active".into(),
+                        }));
+                    }
+                    if sys_sec >= 0.45 && cw_state.is_criminal(now_unix) && !is_capsule {
+                        return Some(Err(BridgeRpcError {
+                            code: "CriminalTimerActive".into(),
+                            message: "Cannot dock a non-capsule ship in high-sec while a Criminal Timer is active".into(),
+                        }));
+                    }
+                }
+            }
+
             let target_pos = if is_structure {
                 let st_opt = ctx
                     .db
@@ -432,6 +492,42 @@ pub async fn handle(
                         message: format!("Structure {dock_id} is destroyed"),
                     }));
                 }
+                let char_corp_id = session.corporation_id.unwrap_or_else(|| {
+                    ctx.db
+                        .get_character(char_id)
+                        .map(|c| c.corporation_id)
+                        .unwrap_or(1_000_001)
+                });
+                let acl_denied = crate::services::space_destiny::STRUCTURE_DOCKING_ACL_DENIED
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .get(&(crate::services::space_destiny::ctx_scope_id(ctx), dock_id))
+                    .is_some_and(|set| set.contains(&char_id))
+                    || (st.owner_corp_id == 98_000_099 && st.owner_corp_id != char_corp_id);
+                if acl_denied {
+                    return Some(Err(BridgeRpcError {
+                        code: "StructureDockingAccessDenied".into(),
+                        message: format!(
+                            "Character {char_id} is denied docking access by structure {dock_id} ACL"
+                        ),
+                    }));
+                }
+                let is_medium_structure = matches!(st.type_id, 35832 | 35825 | 35835);
+                let is_large_structure = matches!(st.type_id, 35833 | 35826 | 35836);
+                let is_capital_ship =
+                    matches!(ship_group_id, 30 | 485 | 513 | 547 | 659 | 883 | 902 | 1538 | 4594);
+                let is_supercapital_ship = matches!(ship_group_id, 30 | 659);
+                if (is_medium_structure && is_capital_ship)
+                    || (is_large_structure && is_supercapital_ship)
+                {
+                    return Some(Err(BridgeRpcError {
+                        code: "ShipTooLargeForStructure".into(),
+                        message: format!(
+                            "Ship type {} (group {}) is too large to dock at structure {} (type {})",
+                            ball.type_id, ship_group_id, dock_id, st.type_id
+                        ),
+                    }));
+                }
                 DVec3::from_array(st.position)
             } else {
                 let st_opt = ctx
@@ -449,22 +545,6 @@ pub async fn handle(
                     }));
                 };
                 st.position
-            };
-
-            let handle = ctx.systems.get_or_spawn(sys_id);
-            let Some((_, ball)) = (match handle.get_ball_snapshot(ship_id).await {
-                Ok(v) => v,
-                Err(e) => {
-                    return Some(Err(BridgeRpcError {
-                        code: "DestinyQueryFailed".into(),
-                        message: e,
-                    }))
-                }
-            }) else {
-                return Some(Err(BridgeRpcError {
-                    code: "ShipNotInSpace".into(),
-                    message: format!("Ship {ship_id} is not spawned in solar system {sys_id} Ballpark"),
-                }));
             };
 
             if matches!(ball.mode, MovementMode::Warp { .. }) {
@@ -493,6 +573,18 @@ pub async fn handle(
                         session.station_id = Some(dock_id);
                         session.structure_id = None;
                     }
+                    ctx.notify(
+                        crate::router::NotificationTarget::Character(char_id),
+                        "OnSessionChanged",
+                        "charid",
+                        vec![
+                            PyRep::Bool(false),
+                            PyRep::Dict(vec![(
+                                PyRep::String(if is_structure { "structureid" } else { "stationid" }.into()),
+                                PyRep::Tuple(vec![PyRep::None, PyRep::Integer(dock_id)]),
+                            )]),
+                        ],
+                    );
                     Some(Ok(PyRep::keyval([
                         ("locationID", PyRep::Integer(dock_id)),
                         ("isStructure", PyRep::Bool(is_structure)),

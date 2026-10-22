@@ -139,65 +139,64 @@ pub(crate) fn static_wormhole_template(
             make_wh_sig(
                 format!("TLS-{}", 200 + ((sys_id + seq) % 700)),
                 sys_id,
-                ls_wh
-                    .map(|w| w.name.clone())
-                    .unwrap_or_else(|| "Wormhole N944".into()),
+                ls_wh.map(|w| w.name.clone()).unwrap_or_else(|| "Wormhole N944".into()),
                 [-9.0, 4.0, 6.0],
                 30648,
                 30_002_813,
                 now_unix,
-                ls_wh
-                    .map(|w| (w.max_stable_time_min * 60.0) as u64)
-                    .unwrap_or(86_400),
+                ls_wh.map(|w| (w.max_stable_time_min * 60.0) as u64).unwrap_or(86_400),
                 ls_wh.map(|w| w.max_stable_mass).unwrap_or(3_000_000_000.0),
                 375_000_000.0,
             ),
             make_wh_sig(
                 format!("TNS-{}", 300 + ((sys_id + seq) % 600)),
                 sys_id,
-                ns_wh
-                    .map(|w| w.name.clone())
-                    .unwrap_or_else(|| "Wormhole S199".into()),
+                ns_wh.map(|w| w.name.clone()).unwrap_or_else(|| "Wormhole S199".into()),
                 [6.0, -8.0, 5.0],
                 30649,
                 30_002_904,
                 now_unix,
-                ns_wh
-                    .map(|w| (w.max_stable_time_min * 60.0) as u64)
-                    .unwrap_or(57_600),
+                ns_wh.map(|w| (w.max_stable_time_min * 60.0) as u64).unwrap_or(57_600),
                 ns_wh.map(|w| w.max_stable_mass).unwrap_or(3_000_000_000.0),
                 375_000_000.0,
             ),
         ]
     } else if (31_000_000..=31_002_605).contains(&sys_id) {
+        // DERIVED: static (`WST-...`) and wandering (`WND-...`) wormhole connection templates per W-space class
         let (wh_class, _, is_shattered, _) = system_wormhole_profile(sys_id);
-        let (wh_type_id, dest_sys): (u32, u32) = match wh_class {
-            1 => (30579, 30_000_142),
-            2 => (30583, 31_000_001),
-            3 => (30584, 30_002_813),
-            4 => (30642, 31_000_003),
-            5 => (30643, 31_000_004),
-            6 => (30645, 31_000_006),
-            _ => (30660, 30_000_142),
+        let (wh_type_id, dest_sys, wnd_type_id, wnd_dest_sys): (u32, u32, u32, u32) = match wh_class {
+            1 => (30579, 30_000_142, 30584, 30_002_813),
+            2 => (30583, 31_000_001, 30579, 30_000_142),
+            3 => (30584, 30_002_813, 30642, 31_000_003),
+            4 => (30642, 31_000_003, 30643, 31_000_004),
+            5 => (30643, 31_000_004, 30645, 31_000_006),
+            6 => (30645, 31_000_006, 30643, 31_000_004),
+            _ => (30660, 30_000_142, 30584, 30_002_813),
         };
         let wh_info = ctx.sde.wormhole_types.get(&wh_type_id);
-        let max_mass = wh_info
-            .map(|w| w.max_stable_mass)
-            .unwrap_or(2_000_000_000.0);
-        let max_jump = if is_shattered {
-            62_000_000.0
-        } else {
-            wh_info.map(|w| w.max_jump_mass).unwrap_or(375_000_000.0)
-        };
-        let life_s = wh_info
-            .map(|w| (w.max_stable_time_min * 60.0) as u64)
-            .unwrap_or(86_400);
-        vec![make_wh_sig(
+        let max_mass = wh_info.map(|w| w.max_stable_mass).unwrap_or(2_000_000_000.0);
+        let max_jump = if is_shattered { 62_000_000.0 } else { wh_info.map(|w| w.max_jump_mass).unwrap_or(375_000_000.0) };
+        let life_s = wh_info.map(|w| (w.max_stable_time_min * 60.0) as u64).unwrap_or(86_400);
+        let mut out = Vec::new();
+        if seq == 0 {
+            let wnd_info = ctx.sde.wormhole_types.get(&wnd_type_id);
+            out.push(make_wh_sig(
+                format!("WND-{}", 200 + ((sys_id + 13) % 700)),
+                sys_id,
+                wnd_info.map(|w| w.name.clone()).unwrap_or_else(|| "Wandering Wormhole".into()),
+                [-8.0, 5.0, 3.0],
+                wnd_type_id,
+                wnd_dest_sys,
+                now_unix,
+                wnd_info.map(|w| (w.max_stable_time_min * 60.0) as u64).unwrap_or(57_600),
+                wnd_info.map(|w| w.max_stable_mass).unwrap_or(1_000_000_000.0),
+                max_jump,
+            ));
+        }
+        out.push(make_wh_sig(
             format!("WST-{}", 100 + ((sys_id + seq * 17) % 900)),
             sys_id,
-            wh_info
-                .map(|w| w.name.clone())
-                .unwrap_or_else(|| "Unstable Wormhole".into()),
+            wh_info.map(|w| w.name.clone()).unwrap_or_else(|| "Unstable Wormhole".into()),
             [12.0, 2.5, -4.0],
             wh_type_id,
             dest_sys,
@@ -205,7 +204,8 @@ pub(crate) fn static_wormhole_template(
             life_s,
             max_mass,
             max_jump,
-        )]
+        ));
+        out
     } else {
         let sig_prefix = if seq == 0 { "JMM" } else { "STA" };
         vec![make_wh_sig(
@@ -465,8 +465,8 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
         }
 
         let mut spawn_replacement = |sigs_vec: &mut Vec<CosmicSignatureRecord>| {
-            let mut replacements = static_wormhole_template(ctx, old_sys, now_unix, next_seq);
-            if let Some(mut rep) = replacements.pop() {
+            let replacements = static_wormhole_template(ctx, old_sys, now_unix, next_seq);
+            if let Some(mut rep) = replacements.into_iter().next() {
                 rep.destination_system_id = Some(dest_sys);
                 replacement_to_spawn = Some(rep.clone());
                 sigs_vec.push(rep);
@@ -879,7 +879,6 @@ async fn handle_request_scans(
     let override_range_step = args
         .get(1)
         .and_then(|a| a.as_i64())
-        .or_else(|| _kwargs.get("rangeStep").and_then(|v| v.as_i64()))
         .map(|v| (v as i32).clamp(1, 8));
 
     let mut moved_balls: Vec<(i64, DVec3)> = Vec::new();

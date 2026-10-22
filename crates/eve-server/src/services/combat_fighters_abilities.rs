@@ -479,19 +479,28 @@ pub(crate) async fn handle_activate_fighter_ability_slots(
                 let mjd_dist = attr(2154).unwrap_or(100_000.0);
                 let _ = sys_handle.micro_jump(fighter_ball_id, mjd_dist).await;
             }
-            4 | 9 => {
-                let _ = sys_handle.set_speed_fraction(fighter_ball_id, 1.0).await;
-                if let Some(f) = ctx.active_fighters.write().unwrap().get_mut(&fighter_ball_id) {
-                    f.mwd_active = true;
+            4 | 9 | 13 => {
+                // MWD / Evasive Maneuvers (`feat:drones.fighter-movement`, `feat:drones.light-fighter-space-superiority`):
+                // Increases fighter velocity by SDE speed bonus (`2151` / `2124`)
+                let was_mwd = ctx
+                    .active_fighters
+                    .write()
+                    .unwrap()
+                    .get_mut(&fighter_ball_id)
+                    .map(|f| {
+                        let prev = f.mwd_active;
+                        f.mwd_active = true;
+                        prev
+                    })
+                    .unwrap_or(false);
+                if !was_mwd {
+                    let speed_bonus_pct = attr(2151).or_else(|| attr(2124)).unwrap_or(400.0);
+                    let mut b = fighter_ball.clone();
+                    b.max_velocity *= 1.0 + speed_bonus_pct / 100.0;
+                    b.speed_fraction = 1.0;
+                    let _ = sys_handle.spawn_ball(b).await;
                 }
-            }
-            13 => {
-                // Evasive Maneuvers (`feat:drones.light-fighter-space-superiority`):
-                // Increases fighter velocity and reduces signature radius
                 let _ = sys_handle.set_speed_fraction(fighter_ball_id, 1.0).await;
-                if let Some(f) = ctx.active_fighters.write().unwrap().get_mut(&fighter_ball_id) {
-                    f.mwd_active = true;
-                }
             }
             _ => {
                 if let Some(mjd_dist) = attr(2154) {
@@ -675,6 +684,124 @@ pub(crate) async fn handle_activate_fighter_ability_slots_on_point(
             PyRep::Real(target_point.z),
         ])),
         ("remainingCharges", PyRep::Integer(remaining_charges)),
+        ("success", PyRep::Bool(true)),
+    ])))
+}
+
+/// Handles `fighterMgr.CmdDeactivateAbilitySlots` (`feat:drones.fighter-abilities`).
+pub(crate) async fn handle_deactivate_fighter_ability_slots(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    args: &[PyRep],
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    let (_, char_id) = match ServerContext::require_character(session) {
+        Ok(v) => v,
+        Err(e) => return Some(Err(e)),
+    };
+    let Some(sys_id) = session.solar_system_id else {
+        return Some(Err(BridgeRpcError {
+            code: "NoSolarSystem".into(),
+            message: "Session has no active solar system".into(),
+        }));
+    };
+    let fighter_ball_id = match args.first() {
+        Some(PyRep::List(items)) | Some(PyRep::Tuple(items)) => {
+            items.first().and_then(|x| x.as_i64()).unwrap_or(0)
+        }
+        Some(a) => a.as_i64().unwrap_or(0),
+        None => 0,
+    };
+    let raw_slot_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(-1);
+    if !(0..=2).contains(&raw_slot_id) {
+        return Some(Err(BridgeRpcError {
+            code: "InvalidFighterAbilitySlot".into(),
+            message: format!("Fighter ability slot {raw_slot_id} must be in 0..=2"),
+        }));
+    }
+    let slot_id = raw_slot_id as u32;
+
+    let fighter_opt = ctx
+        .active_fighters
+        .read()
+        .unwrap()
+        .get(&fighter_ball_id)
+        .cloned();
+    let Some(fighter) = fighter_opt else {
+        return Some(Err(BridgeRpcError {
+            code: "FighterNotFound".into(),
+            message: format!("Fighter squadron {fighter_ball_id} not found or not launched"),
+        }));
+    };
+    if fighter.owner_char_id != char_id || fighter.is_abandoned {
+        return Some(Err(BridgeRpcError {
+            code: "FighterNotOwned".into(),
+            message: format!(
+                "Fighter squadron {fighter_ball_id} is not controlled by character {char_id}"
+            ),
+        }));
+    }
+
+    let Some(slots) = ctx.sde.fighter_abilities_by_type.get(&fighter.type_id) else {
+        return Some(Err(BridgeRpcError {
+            code: "InvalidFighterAbilitySlot".into(),
+            message: format!(
+                "Fighter type {} has no defined fighter abilities in SDE",
+                fighter.type_id
+            ),
+        }));
+    };
+    let Some(slot_def) = slots.iter().find(|s| s.slot_index as u32 == slot_id) else {
+        return Some(Err(BridgeRpcError {
+            code: "InvalidFighterAbilitySlot".into(),
+            message: format!(
+                "Fighter type {} has no ability in slot {slot_id}",
+                fighter.type_id
+            ),
+        }));
+    };
+    let ability_id = slot_def.ability_id;
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    if matches!(ability_id, 4 | 9 | 13) || slot_id == 1 {
+        let was_mwd = ctx
+            .active_fighters
+            .write()
+            .unwrap()
+            .get_mut(&fighter_ball_id)
+            .map(|f| {
+                let prev = f.mwd_active;
+                f.mwd_active = false;
+                prev
+            })
+            .unwrap_or(false);
+        if was_mwd {
+            let speed_bonus_pct = ctx
+                .sde
+                .types
+                .get(&fighter.type_id)
+                .and_then(|t| {
+                    t.default_attributes
+                        .get(&2151)
+                        .or_else(|| t.default_attributes.get(&2124))
+                        .copied()
+                })
+                .unwrap_or(400.0);
+            if let Ok(Some((_, mut b))) = sys_handle.get_ball_snapshot(fighter_ball_id).await {
+                b.max_velocity /= 1.0 + speed_bonus_pct / 100.0;
+                let _ = sys_handle.spawn_ball(b).await;
+            }
+        }
+    } else if slot_id == 0 {
+        if let Some(f) = ctx.active_fighters.write().unwrap().get_mut(&fighter_ball_id) {
+            f.target_id = None;
+        }
+    }
+
+    Some(Ok(PyRep::keyval([
+        ("fighterID", PyRep::Integer(fighter_ball_id)),
+        ("slotID", PyRep::Integer(slot_id as i64)),
+        ("abilityID", PyRep::Integer(ability_id as i64)),
+        ("deactivated", PyRep::Bool(true)),
         ("success", PyRep::Bool(true)),
     ])))
 }
