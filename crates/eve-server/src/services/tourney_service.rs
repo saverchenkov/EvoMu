@@ -334,7 +334,7 @@ pub async fn handle(
             })
         }
         ("tourneyMgr", "BanShip") => {
-            let _ = require_cid!(session);
+            let caller_cid = require_cid!(session);
             let ban_id = extract_id(args, 0).unwrap_or(1);
             let ban_types = extract_list_i64(args.get(1));
 
@@ -343,6 +343,7 @@ pub async fn handle(
                 store.ban_sessions.insert(ban_id, ban_types.clone());
                 if let Some(mid) = store.active_match_id {
                     let m = store.ensure_match(mid, solarsystem_id);
+                    check_referee_auth(session, caller_cid, m)?;
                     for bt in &ban_types {
                         if !m.banned_ships.contains(bt) {
                             m.banned_ships.push(*bt);
@@ -354,7 +355,7 @@ pub async fn handle(
             })
         }
         ("tourneyMgr", "BanShipType") => {
-            let _ = require_cid!(session);
+            let caller_cid = require_cid!(session);
             let (target_mid, team_idx, ship_type_id) = if args.len() >= 3 {
                 (extract_id(args, 0), extract_id(args, 1).unwrap_or(0), extract_id(args, 2).unwrap_or(0))
             } else {
@@ -364,6 +365,7 @@ pub async fn handle(
             ctx.db.try_with_mut_snapshot(|snap| {
                 let mut store = load_store(snap);
                 let m = store.resolve_match_mut(target_mid, solarsystem_id);
+                check_referee_auth(session, caller_cid, m)?;
                 if team_idx == 0 {
                     if !m.banned_ship_types_red.contains(&ship_type_id) {
                         m.banned_ship_types_red.push(ship_type_id);
@@ -435,6 +437,12 @@ pub async fn handle(
         }
         ("tourneyMgr", "CreateMatch") => {
             let caller_cid = require_cid!(session);
+            if !session.has_gm_role() {
+                return Some(Err(BridgeRpcError {
+                    code: "AdminAccessDenied".into(),
+                    message: "Creating a tournament match requires GM administrator privileges".into(),
+                }));
+            }
             let tourney_id = extract_id(args, 0).unwrap_or(1);
             let match_id = extract_id(args, 1).unwrap_or(1001);
             let max_points = extract_id(args, 2).unwrap_or(100);
@@ -987,7 +995,7 @@ pub async fn handle(
             res
         }
         ("tourneyMgr", "UnBanShipType") => {
-            let _ = require_cid!(session);
+            let caller_cid = require_cid!(session);
             let (target_mid, team_idx, ship_type_id) = if args.len() >= 3 {
                 (extract_id(args, 0), extract_id(args, 1).unwrap_or(0), extract_id(args, 2).unwrap_or(0))
             } else {
@@ -997,6 +1005,7 @@ pub async fn handle(
             ctx.db.try_with_mut_snapshot(|snap| {
                 let mut store = load_store(snap);
                 let m = store.resolve_match_mut(target_mid, solarsystem_id);
+                check_referee_auth(session, caller_cid, m)?;
                 if team_idx == 0 {
                     m.banned_ship_types_red.retain(|&id| id != ship_type_id);
                 } else {

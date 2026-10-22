@@ -57,6 +57,28 @@ async fn test_tourney_match_lifecycle_and_teams() {
     let ctx = ServerContext::new();
     let mut sess = select_pilot(&ctx, 80_001, "demo", "demo-secret", P1).await;
 
+    // Verify non-GM pilot is denied from creating tournament match
+    sess.role = 0;
+    let denied = rpc(
+        &ctx,
+        &mut sess,
+        "tourneyMgr",
+        "CreateMatch",
+        &[
+            PyRep::Integer(1),
+            PyRep::Integer(1001),
+            PyRep::Integer(100),
+            PyRep::Integer(600),
+            PyRep::Integer(0),
+            PyRep::Integer(0),
+        ],
+    )
+    .await;
+    assert_eq!(denied.unwrap_err().code, "AdminAccessDenied");
+
+    // Restore GM role for match creation and administration
+    sess.role = eve_machonet::service_roles::ROLE_GMH;
+
     // 1. Create match
     let create_res = rpc(
         &ctx,
@@ -301,6 +323,9 @@ async fn test_tourney_bans_and_restrictions() {
     assert!(allowed_ships.is_some());
     assert!(!allowed_ships.unwrap().is_empty());
 
+    // Elevate to GM role for match creation
+    sess.role = eve_machonet::service_roles::ROLE_GMH;
+
     // 2. Create match 2001
     rpc(
         &ctx,
@@ -352,7 +377,29 @@ async fn test_tourney_bans_and_restrictions() {
     .expect("BanShip");
     assert_eq!(ban_ship_rep, PyRep::Bool(true));
 
-    // 5. BanShipType for Red and Blue
+    // 5. Verify unauthorized pilot (non-GM, non-referee) is denied from BanShipType / UnBanShipType
+    let mut sess_unauth = select_pilot(&ctx, 80_099, "other", "other-secret", P2).await;
+    let unauth_ban = rpc(
+        &ctx,
+        &mut sess_unauth,
+        "tourneyMgr",
+        "BanShipType",
+        &[PyRep::Integer(2001), PyRep::Integer(0), PyRep::Integer(620)],
+    )
+    .await;
+    assert_eq!(unauth_ban.unwrap_err().code, "AccessDenied");
+
+    let unauth_unban = rpc(
+        &ctx,
+        &mut sess_unauth,
+        "tourneyMgr",
+        "UnBanShipType",
+        &[PyRep::Integer(2001), PyRep::Integer(0), PyRep::Integer(620)],
+    )
+    .await;
+    assert_eq!(unauth_unban.unwrap_err().code, "AccessDenied");
+
+    // 5. BanShipType for Red and Blue (referee/GM authorized)
     let ban_red = rpc(
         &ctx,
         &mut sess,
@@ -467,6 +514,7 @@ async fn test_tourney_referee_overrides_and_teleport() {
     // parity: rpc:tourneyMgr.UpdateFleetDetails, rpc:tourneyMgr.CleanupGrid
     let ctx = ServerContext::new();
     let mut sess = select_pilot(&ctx, 80_003, "demo", "demo-secret", P1).await;
+    sess.role = eve_machonet::service_roles::ROLE_GMH;
 
     // 1. Create match 3001
     rpc(
