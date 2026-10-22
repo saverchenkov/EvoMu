@@ -58,32 +58,36 @@ pub fn handle(
             let item_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
             let type_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
 
+            if item_id <= 0 {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidArgument".into(),
+                    message: "Valid filament itemID is required to join queue".into(),
+                }));
+            }
+
             let res = ctx.db.try_with_mut_snapshot(|snap| {
-                // If item_id > 0, verify inventory ownership and type
-                if item_id > 0 {
-                    let Some(it) = snap.items.get_mut(&item_id) else {
-                        return Err(BridgeRpcError {
-                            code: "ItemNotFound".into(),
-                            message: "Filament item not found in inventory".into(),
-                        });
-                    };
-                    if it.owner_id != char_id {
-                        return Err(BridgeRpcError {
-                            code: "ItemNotOwned".into(),
-                            message: "Filament item is not owned by pilot".into(),
-                        });
-                    }
-                    if type_id > 0 && it.type_id != type_id as u32 {
-                        return Err(BridgeRpcError {
-                            code: "InvalidFilamentType".into(),
-                            message: "Item type mismatch".into(),
-                        });
-                    }
-                    if it.quantity > 1 {
-                        it.quantity -= 1;
-                    } else {
-                        snap.items.remove(&item_id);
-                    }
+                let Some(it) = snap.items.get_mut(&item_id) else {
+                    return Err(BridgeRpcError {
+                        code: "ItemNotFound".into(),
+                        message: "Filament item not found in inventory".into(),
+                    });
+                };
+                if it.owner_id != char_id {
+                    return Err(BridgeRpcError {
+                        code: "ItemNotOwned".into(),
+                        message: "Filament item is not owned by pilot".into(),
+                    });
+                }
+                if type_id > 0 && it.type_id != type_id as u32 {
+                    return Err(BridgeRpcError {
+                        code: "InvalidFilamentType".into(),
+                        message: "Item type mismatch".into(),
+                    });
+                }
+                if it.quantity > 1 {
+                    it.quantity -= 1;
+                } else {
+                    snap.items.remove(&item_id);
                 }
 
                 let mut store = load_pvp_store(snap);

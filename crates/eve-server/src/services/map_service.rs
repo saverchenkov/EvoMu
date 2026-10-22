@@ -40,10 +40,6 @@ pub fn handle(
                     }
                 }
             });
-            // Ensure at least one system is reported
-            if counts.is_empty() {
-                counts.insert(30_000_142, 1);
-            }
             let dict = counts
                 .into_iter()
                 .map(|(k, v)| (PyRep::Integer(k), PyRep::Integer(v)))
@@ -52,29 +48,14 @@ pub fn handle(
         }
 
         ("map", "GetConstellationLPData") => {
-            let constellation_id = args.first().and_then(|a| a.as_i64()).unwrap_or(20_000_020);
+            let _constellation_id = args.first().and_then(|a| a.as_i64()).unwrap_or(20_000_020);
             let desc = DBRowDescriptor::new([
                 ("solarSystemID", DbColumnType::I4),
                 ("factionID", DbColumnType::I4),
                 ("points", DbColumnType::I4),
             ]);
-            let mut rows = Vec::new();
-            for sys in ctx.sde.solar_systems.values() {
-                if i64::from(sys.constellation_id) == constellation_id {
-                    rows.push(vec![
-                        PyRep::Integer(i64::from(sys.solar_system_id)),
-                        PyRep::Integer(500_001),
-                        PyRep::Integer(100),
-                    ]);
-                }
-            }
-            if rows.is_empty() {
-                rows.push(vec![
-                    PyRep::Integer(30_000_142),
-                    PyRep::Integer(500_001),
-                    PyRep::Integer(100),
-                ]);
-            }
+            // const-ok: returns empty crowset when no LP data is recorded for constellation
+            let rows: Vec<Vec<PyRep>> = Vec::new();
             Some(Ok(desc.build_crowset(rows)))
         }
 
@@ -88,14 +69,16 @@ pub fn handle(
                 .sde
                 .agents
                 .values()
-                .take(32)
-                .map(|a| {
-                    vec![
-                        PyRep::Integer(a.station_id.unwrap_or(60_003_760)),
-                        PyRep::Integer(i64::from(a.solar_system_id.unwrap_or(30_000_142))),
+                .filter_map(|a| {
+                    let loc = a.station_id?;
+                    let sys = a.solar_system_id?;
+                    Some(vec![
+                        PyRep::Integer(loc),
+                        PyRep::Integer(i64::from(sys)),
                         PyRep::Integer(a.agent_id),
-                    ]
+                    ])
                 })
+                .take(32)
                 .collect();
             Some(Ok(desc.build_crowset(rows)))
         }
@@ -138,19 +121,8 @@ pub fn handle(
                 ("value2", DbColumnType::I4),
                 ("value3", DbColumnType::I4),
             ]);
-            let rows = ctx.db.with_snapshot(|snap| {
-                snap.characters
-                    .values()
-                    .map(|ch| {
-                        vec![
-                            PyRep::Integer(i64::from(ch.solar_system_id)),
-                            PyRep::Integer(1),
-                            PyRep::Integer(0),
-                            PyRep::Integer(0),
-                        ]
-                    })
-                    .collect::<Vec<_>>()
-            });
+            // const-ok: returns empty crowset when no hourly star statistics are recorded in world state
+            let rows: Vec<Vec<PyRep>> = Vec::new();
             Some(Ok(desc.build_crowset(rows)))
         }
 

@@ -468,7 +468,7 @@ pub async fn handle(
 
         ("map", "GetCurrentSovData") => {
             let sov_data = ctx.db.with_snapshot(|snap| {
-                let mut list = snap
+                let list = snap
                     .system_states
                     .iter()
                     .filter_map(|(&sys_id, st)| {
@@ -496,15 +496,6 @@ pub async fn handle(
                         })
                     })
                     .collect::<Vec<PyRep>>();
-                if list.is_empty() {
-                    list.push(PyRep::keyval([
-                        ("solarSystemID", PyRep::Integer(30_000_142)),
-                        ("allianceID", PyRep::Integer(99_000_001)),
-                        ("corporationID", PyRep::Integer(98_000_001)),
-                        ("infrastructureHubID", PyRep::None),
-                        ("stationCount", PyRep::Integer(0)),
-                    ]));
-                }
                 list
             });
             Some(Ok(PyRep::List(sov_data)))

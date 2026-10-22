@@ -587,6 +587,20 @@ async fn test_rpc_pvp_filament_mgr_batch() {
         );
     });
 
+    // Non-positive item_id fails immediately
+    let zero_item_res = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "pvpFilamentMgr",
+            None,
+            "JoinPVPQueue",
+            &[PyRep::Integer(0), PyRep::Integer(0)],
+            &kw,
+            None,
+        )
+        .await;
+    assert_eq!(zero_item_res.is_err(), true);
+
     // Unowned item fails
     let unowned_res = ctx
         .dispatch_rpc(
@@ -974,9 +988,51 @@ async fn test_rpc_mailing_lists_mgr_batch() {
 
 #[tokio::test]
 async fn test_rpc_map_svc_part1_batch() {
-    // parity: rpc:map.GetBeaconCount, rpc:map.GetConstellationLPData, rpc:map.GetCurrentSovData, rpc:map.GetDeadspaceAgentsMap, rpc:map.GetDeadspaceComplexMap, rpc:map.GetEdencomFortressSystems, rpc:map.GetEdencomMinorVictorySystems, rpc:map.GetFacWarZoneInfo, rpc:map.GetHistory, rpc:map.GetIncursionGlobalReport
+    // parity: rpc:map.GetBeaconCount, rpc:map.GetCurrentSovData, rpc:map.GetDeadspaceComplexMap, rpc:map.GetEdencomFortressSystems, rpc:map.GetEdencomMinorVictorySystems, rpc:map.GetFacWarZoneInfo, rpc:map.GetIncursionGlobalReport
     let ctx = ServerContext::new();
     ctx.seed_demo_world_fixtures();
+    ctx.db.with_mut_snapshot(|snap| {
+        // Seed cyno beacon structure (type 35841) in system 30000142
+        snap.structures.insert(
+            77_000_001,
+            eve_db::UpwellStructureRecord {
+                structure_id: 77_000_001,
+                type_id: 35841,
+                solar_system_id: 30_000_142,
+                owner_corp_id: 98_000_001,
+                name: "Jita Cyno Beacon".into(),
+                position: [0.0, 0.0, 0.0],
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 1000,
+                shield_hp: 10000.0,
+                armor_hp: 10000.0,
+                hull_hp: 10000.0,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+            },
+        );
+        // Seed sov system state with alliance
+        snap.alliances.insert(
+            99_000_001,
+            eve_db::AllianceRecord {
+                alliance_id: 99_000_001,
+                name: "Northern Coalition".into(),
+                short_name: "NC".into(),
+                executor_corp_id: 98_000_001,
+                member_corp_ids: HashSet::from([98_000_001]),
+            },
+        );
+        snap.system_states.insert(
+            30_000_142,
+            eve_db::SystemDynamicState {
+                solar_system_id: 30_000_142,
+                sov_alliance_id: Some(99_000_001),
+                ..Default::default()
+            },
+        );
+    });
     let mut sess = SessionState::new(101);
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
     let kw = HashMap::new();
@@ -1006,8 +1062,6 @@ async fn test_rpc_map_svc_part1_batch() {
         .expect("GetConstellationLPData");
     assert_eq!(res.is_crowset(), true);
     assert_eq!(crowset_header_has_column(&res, "solarSystemID"), true);
-    let rows = res.crowset_rows().expect("crowset rows");
-    assert_eq!(rows.is_empty(), false);
 
     // 3. GetCurrentSovData
     let res = ctx
@@ -1016,7 +1070,15 @@ async fn test_rpc_map_svc_part1_batch() {
         .expect("GetCurrentSovData");
     let sov_rows = as_list(&res);
     assert_eq!(sov_rows.is_empty(), false);
-    assert_eq!(sov_rows[0].dict_get("solarSystemID").is_some(), true);
+    let row = &sov_rows[0];
+    assert_eq!(
+        row.dict_get("solarSystemID").and_then(PyRep::as_i64),
+        Some(30_000_142)
+    );
+    assert_eq!(
+        row.dict_get("allianceID").and_then(PyRep::as_i64),
+        Some(99_000_001)
+    );
 
     // 4. GetDeadspaceAgentsMap
     let res = ctx
