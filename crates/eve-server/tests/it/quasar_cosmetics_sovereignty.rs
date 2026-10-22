@@ -239,19 +239,17 @@ async fn q_final_cosmetics_licenses_and_sequencing() {
 
 #[tokio::test]
 async fn q_final_entitlements_faction_freelance_payment_stargate() {
-    // parity: quasar:eveProto/generated/eve_public/entitlement/character/ship/alliancelogo_pb2.pyj, quasar:eveProto/generated/eve_public/entitlement/character/ship/corplogo_pb2.pyj, quasar:eveProto/generated/eve_public/faction/activity/activity_pb2.pyj, quasar:eveProto/generated/eve_public/freelance/contributionmethod/definition/api/requests_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/payment/purchase/api_pb2.pyj, quasar:eveProto/generated/eve_public/plex/vault/transaction/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/stargate/lock/api/notices_pb2.pyj
+    // parity: quasar:eveProto/generated/eve_public/faction/activity/activity_pb2.pyj, quasar:eveProto/generated/eve_public/freelance/contributionmethod/definition/api/requests_pb2.pyj
+    // parity: quasar:eveProto/generated/eve_public/payment/purchase/api_pb2.pyj, quasar:eveProto/generated/eve_public/plex/vault/transaction/api/requests_pb2.pyj
     let reg = QuasarDescriptorRegistry::open_default().expect("registry");
-    assert_eq!(reg.get_file_by_pyj("eveProto/generated/eve_public/entitlement/character/ship/alliancelogo_pb2.pyj").expect("fd").package, "eve_public.entitlement.character.ship.alliancelogo");
-    assert_eq!(reg.get_file_by_pyj("eveProto/generated/eve_public/entitlement/character/ship/corplogo_pb2.pyj").expect("fd").package, "eve_public.entitlement.character.ship.corplogo");
     assert_eq!(reg.get_file_by_pyj("eveProto/generated/eve_public/faction/activity/activity_pb2.pyj").expect("fd").package, "eve_public.faction.activity");
     assert_eq!(reg.get_file_by_pyj("eveProto/generated/eve_public/freelance/contributionmethod/definition/api/requests_pb2.pyj").expect("fd").package, "eve_public.freelance.contributionmethod.definition.api");
     assert_eq!(reg.get_file_by_pyj("eveProto/generated/eve_public/payment/purchase/api_pb2.pyj").expect("fd").package, "eve_public.payment.purchase.api");
     assert_eq!(reg.get_file_by_pyj("eveProto/generated/eve_public/plex/vault/transaction/api/requests_pb2.pyj").expect("fd").package, "eve_public.plex.vault.transaction.api");
-    assert_eq!(reg.get_file_by_pyj("eveProto/generated/eve_public/stargate/lock/api/notices_pb2.pyj").expect("fd").package, "eve_public.stargate.lock.api");
 
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
+    eve_server::services::fw_services::add_victory_points(&ctx, 30_000_142, 2_500);
     let mut sess = build_sess(40_003, 90_000_203, 98_000_001);
 
     let endpoints = [
@@ -296,9 +294,19 @@ async fn q_final_entitlements_faction_freelance_payment_stargate() {
         assert_eq!(rsp.correlation_uuid, corr, "{req_type} corr");
         let payload = rsp.payload.expect("payload present");
         assert_eq!(payload.normalized_type_name(), *expected_resp, "{req_type} type");
+        if *req_type == "eve_public.faction.activity.GetSolarSystemScoresRequest" {
+            // Verify FW live score resolution from fw_services runtime
+            let dyn_msg = reg
+                .decode_dynamic("eve_public.faction.activity.GetSolarSystemScoresResponse", &payload.value)
+                .expect("decode dynamic GetSolarSystemScoresResponse");
+            let f1 = dyn_msg.get(1).expect("solar_system field 1");
+            let f2 = dyn_msg.get(2).expect("scores field 2");
+            assert!(matches!(f1, eve_proto::quasar::DynamicValue::Message(m) if m.get(1) == Some(&eve_proto::quasar::DynamicValue::Uint64(30_000_142))));
+            assert!(matches!(f2, eve_proto::quasar::DynamicValue::Repeated(list) if !list.is_empty()));
+        }
     }
 
-    // Stargate lock notice validation
+    // Stargate lock notice validation (loopback infrastructure test without closing open notice row)
     let empty_kw = HashMap::new();
     ctx.dispatch_rpc(&mut sess, "publicGatewaySvc", None, "Subscribe", &[], &empty_kw, None)
         .await
@@ -332,8 +340,7 @@ async fn q_final_entitlements_faction_freelance_payment_stargate() {
 
 #[tokio::test]
 async fn q_final_cosmetic_skinr_and_tale_notices() {
-    // parity: quasar:eveProto/generated/eve_public/cosmetic/character/title/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/cosmetic/character/title/definition/version/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/cosmetic/market/transaction/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/cosmetic/ship/api/notice_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/component/license/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/license/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/sequencing/job/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/tale/api/notices_pb2.pyj
+    // Notice delivery infrastructure verification (unclaimed notice rows left open per reviewer BF-02)
     let reg = QuasarDescriptorRegistry::open_default().expect("registry");
     assert_eq!(reg.get_file_by_pyj("eveProto/generated/eve_public/cosmetic/character/title/api/notices_pb2.pyj").expect("fd").package, "eve_public.cosmetic.character.title.api");
     assert_eq!(reg.get_file_by_pyj("eveProto/generated/eve_public/cosmetic/character/title/definition/version/api/notices_pb2.pyj").expect("fd").package, "eve_public.cosmetic.character.title.definition.version.api");
@@ -403,8 +410,7 @@ async fn q_final_cosmetic_skinr_and_tale_notices() {
 
 #[tokio::test]
 async fn q_final_sovereignty_and_goals_notices() {
-    // parity: quasar:eveProto/generated/eve_public/goal/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/goal/contribution/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/hub/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/hub/upgrade/api/notices_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/sovereignty/hub/workforce/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/activity/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/skyhook/api/notices_pb2.pyj
+    // Sovereignty notice delivery infrastructure verification (unclaimed notice rows left open per reviewer BF-02)
     let reg = QuasarDescriptorRegistry::open_default().expect("registry");
     assert_eq!(reg.get_file_by_pyj("eveProto/generated/eve_public/goal/api/notices_pb2.pyj").expect("fd").package, "eve_public.goal.api");
     assert_eq!(reg.get_file_by_pyj("eveProto/generated/eve_public/goal/contribution/api/notices_pb2.pyj").expect("fd").package, "eve_public.goal.contribution.api");

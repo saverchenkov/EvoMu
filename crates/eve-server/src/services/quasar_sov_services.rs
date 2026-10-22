@@ -444,15 +444,20 @@ pub fn register_handlers(
             }),
         );
         let d_pub = Arc::clone(&desc);
+        let db_fw = Arc::clone(&db);
         router.register_handler(
             "eve_public.faction.activity.GetSolarSystemScoresRequest",
             Arc::new(move |_ctx, _any, dyn_msg| {
                 let sys_id = get_int_field(dyn_msg, 1).unwrap_or(30_000_142) as u64;
+                let key = Arc::as_ptr(&db_fw) as usize;
+                let vp = crate::services::fw_services::read_fw_runtime_by_key(key, |rt| {
+                    rt.system_victory_points.get(&(sys_id as u32)).copied().unwrap_or(0)
+                });
                 encode_domain_message(
                     &d_pub,
                     "eve_public.faction.activity.GetSolarSystemScoresResponse",
                     |reg, resp| {
-                        set_domain_field(reg, resp, 1, sys_id, "");
+                        set_domain_attributes(reg, resp, sys_id, vp as u64, "FWSystemScores");
                     },
                 )
             }),

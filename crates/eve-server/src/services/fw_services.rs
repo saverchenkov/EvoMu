@@ -69,12 +69,13 @@ pub fn with_fw_runtime<R>(ctx: &ServerContext, f: impl FnOnce(&mut FwRuntimeStat
 
 pub fn read_fw_runtime<R>(ctx: &ServerContext, f: impl FnOnce(&FwRuntimeState) -> R) -> R {
     let key = ctx_key(ctx);
+    read_fw_runtime_by_key(key, f)
+}
+
+pub fn read_fw_runtime_by_key<R>(key: usize, f: impl FnOnce(&FwRuntimeState) -> R) -> R {
     let mut guard = runtime_map().write().unwrap_or_else(|e| e.into_inner());
     guard.retain(|_, v| v.db_weak.strong_count() > 0);
-    let st = guard.entry(key).or_insert_with(|| FwRuntimeState {
-        db_weak: Arc::downgrade(&ctx.db),
-        ..Default::default()
-    });
+    let st = guard.entry(key).or_default();
     f(st)
 }
 
