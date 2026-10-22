@@ -82,6 +82,8 @@ pub struct AccountServicesStore {
     pub votes: HashMap<(u64, String), i64>,
     #[serde(default)]
     pub resculpt_pending: HashSet<i64>,
+    #[serde(default)]
+    pub account_create_date: HashMap<u64, i64>,
 }
 
 impl AccountServicesStore {
@@ -627,9 +629,25 @@ fn handle_inner(
             Ok(Some(PyRep::Integer(mins as i64)))
         }
         ("userSvc", "GetMultiCharactersTrainingSlots") => {
-            let _ = ServerContext::require_auth(session)?;
-            // const-ok: Multiple character training certificate queue slots dict (empty when no active MCT certs)
-            Ok(Some(PyRep::Dict(Vec::new())))
+            let uid = ServerContext::require_auth(session)?;
+            let slots = with_store(ctx, |_, store| {
+                store.mct_slots.get(&uid).cloned().unwrap_or_default()
+            });
+            let dict: Vec<(PyRep, PyRep)> = slots
+                .into_iter()
+                .enumerate()
+                .map(|(idx, exp)| {
+                    (
+                        PyRep::Integer(idx as i64 + 1),
+                        PyRep::keyval([
+                            ("slotID", PyRep::Integer(idx as i64 + 1)),
+                            ("expiryDate", PyRep::Integer(exp as i64)),
+                            ("active", PyRep::Bool(true)),
+                        ]),
+                    )
+                })
+                .collect();
+            Ok(Some(PyRep::Dict(dict)))
         }
         ("userSvc", "GetUserName") => {
             let uid = ServerContext::require_auth(session)?;
@@ -643,8 +661,13 @@ fn handle_inner(
             Ok(Some(PyRep::String(name)))
         }
         ("userSvc", "GetCreateDate") => {
-            let _ = ServerContext::require_auth(session)?;
-            let dt = ctx.now_blueos_filetime_ticks();
+            let uid = ServerContext::require_auth(session)?;
+            let dt = with_store(ctx, |_, store| {
+                *store
+                    .account_create_date
+                    .entry(uid)
+                    .or_insert_with(|| ctx.now_blueos_filetime_ticks())
+            });
             Ok(Some(PyRep::Integer(dt)))
         }
         ("userSvc", "GetUserToken") => {

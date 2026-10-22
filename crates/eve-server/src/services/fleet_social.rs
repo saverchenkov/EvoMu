@@ -40,6 +40,10 @@ pub fn mailing_list_member_ids(ctx: &ServerContext, list_id: i64) -> Vec<i64> {
         .unwrap_or_default()
 }
 
+pub fn get_trashed_mails(ctx: &ServerContext) -> std::collections::HashSet<(i64, i64)> {
+    ctx.social_extras.lock().unwrap().trashed_mails.clone()
+}
+
 /// Updates `char_id`'s response on a `calendarMgr` event from ESI and returns its metadata
 /// `(owner_id, event_date_time, duration, title, importance)` if found.
 pub(crate) fn update_calendar_response_from_esi(

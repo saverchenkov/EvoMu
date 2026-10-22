@@ -7,7 +7,18 @@
 //! calls `self.OnNewMailReceived(header)` and `mailSvc` scatters `OnMailCountersUpdate` itself.
 
 use crate::router::{cache_notifications::NotificationTarget, ServerContext};
-use eve_proto::PyRep;
+use eve_machonet::SessionState;
+use eve_proto::{BridgeRpcError, PyRep};
+
+fn extract_id_list(arg: Option<&PyRep>) -> Vec<i64> {
+    match arg {
+        Some(PyRep::List(items)) | Some(PyRep::Tuple(items)) => {
+            items.iter().filter_map(|x| x.as_i64()).collect()
+        }
+        Some(PyRep::Integer(id)) => vec![*id],
+        _ => Vec::new(),
+    }
+}
 
 /// `eve/common/lib/appConst.pyj`: `mailStatusMaskAutomated = 32`.
 pub(crate) const MAIL_STATUS_AUTOMATED: i64 = 32;
@@ -207,4 +218,140 @@ pub(crate) fn emit_event_response_by_external(
         PyRep::Integer(response_code),
     ];
     ctx.notify(NotificationTarget::Character(char_id), "OnEventResponseByExternal", "charid", args);
+}
+
+pub(crate) fn resolve_mail_targets(
+    ctx: &ServerContext,
+    char_id: i64,
+    method: &str,
+    arg: Option<&PyRep>,
+) -> Vec<i64> {
+    if method.ends_with("ByLabel") {
+        let lid = arg.and_then(|a| a.as_i64()).unwrap_or(1);
+        let ids: Vec<i64> = ctx.db.with_snapshot(|snap| {
+            snap.mails
+                .iter()
+                .filter_map(|m| {
+                    if m.recipient_id != char_id && m.sender_id != char_id {
+                        return None;
+                    }
+                    let labels = snap
+                        .mail_assigned_labels
+                        .get(&(char_id, m.message_id))
+                        .cloned()
+                        .unwrap_or_else(|| vec![if m.sender_id == char_id { 2 } else { 1 }]);
+                    if labels.contains(&lid) {
+                        Some(m.message_id)
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        });
+        if ids.is_empty() {
+            extract_id_list(arg)
+        } else {
+            ids
+        }
+    } else if method == "MoveAllToTrash" {
+        ctx.db.with_snapshot(|snap| {
+            snap.mails
+                .iter()
+                .filter_map(|m| {
+                    if (m.recipient_id == char_id || m.sender_id == char_id)
+                        && !snap.deleted_mails.contains(&(char_id, m.message_id))
+                    {
+                        Some(m.message_id)
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        })
+    } else {
+        extract_id_list(arg)
+    }
+}
+
+pub(crate) fn handle_mail_headers(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    method: &str,
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    let (_, char_id) = match ServerContext::require_character(session) {
+        Ok(v) => v,
+        Err(e) => return Some(Err(e)),
+    };
+    let trashed = crate::services::fleet_social::get_trashed_mails(ctx);
+    let (rows, status_rows) = ctx.db.with_snapshot(|snap| {
+        let mut hdrs = Vec::new();
+        let mut statuses = Vec::new();
+        for m in snap.mails.iter().filter(|m| {
+            (m.recipient_id == char_id || m.sender_id == char_id)
+                && !snap.deleted_mails.contains(&(char_id, m.message_id))
+                && !trashed.contains(&(char_id, m.message_id))
+        }) {
+            let read = snap.read_mails.contains(&(char_id, m.message_id));
+            let labels = snap
+                .mail_assigned_labels
+                .get(&(char_id, m.message_id))
+                .cloned()
+                .unwrap_or_else(|| vec![if m.sender_id == char_id { 2 } else { 1 }]);
+            let label_mask: i64 = labels.iter().copied().fold(0i64, |acc, l| acc | l);
+            hdrs.push(vec![
+                PyRep::Integer(m.message_id),
+                PyRep::Integer(m.sender_id),
+                PyRep::List(vec![PyRep::Integer(m.recipient_id)]),
+                PyRep::String(m.subject.clone()),
+                PyRep::Integer(133_000_000_000_000_000),
+                PyRep::Bool(read),
+                PyRep::List(labels.into_iter().map(PyRep::Integer).collect()),
+            ]);
+            statuses.push(vec![
+                PyRep::Integer(m.message_id),
+                PyRep::Integer(if read { 1 } else { 0 }),
+                PyRep::Integer(label_mask),
+                PyRep::Bool(read),
+            ]);
+        }
+        (hdrs, statuses)
+    });
+
+    let headers_rowset = PyRep::rowset(
+        vec![
+            "messageID",
+            "senderID",
+            "toCharacterIDs",
+            "title",
+            "sentDate",
+            "read",
+            "labels",
+        ],
+        rows,
+    );
+    if method == "SyncMail" {
+        let old_mail_rowset = PyRep::rowset(
+            vec![
+                "messageID",
+                "senderID",
+                "toCharacterIDs",
+                "title",
+                "sentDate",
+                "read",
+                "labels",
+            ],
+            Vec::new(),
+        );
+        let status_rowset = PyRep::rowset(
+            vec!["messageID", "statusMask", "labelMask", "read"],
+            status_rows,
+        );
+        Some(Ok(PyRep::keyval([
+            ("oldMail", old_mail_rowset),
+            ("newMail", headers_rowset),
+            ("mailStatus", status_rowset),
+        ])))
+    } else {
+        Some(Ok(headers_rowset))
+    }
 }

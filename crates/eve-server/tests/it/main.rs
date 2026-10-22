@@ -134,3 +134,4 @@ mod rpc_core_services_batch;
 mod rpc_station_clones_facwar;
 mod rpc_structures_pos_dogma;
 mod rpc_corp_alliance_fw_enlistment;
+mod rpc_user_mail_trade;

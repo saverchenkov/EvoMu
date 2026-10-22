@@ -308,13 +308,13 @@ pub(super) fn handle_mail_and_calendar(
         }
 
         ("mailMgr", "GetMailHeaders") => {
-            handle_mail_headers(ctx, session, method)
+            crate::services::mail_notify::handle_mail_headers(ctx, session, method)
         }
         ("mailMgr", "SyncMail") => {
-            handle_mail_headers(ctx, session, method)
+            crate::services::mail_notify::handle_mail_headers(ctx, session, method)
         }
         ("mailMgr", m) if m.eq_ignore_ascii_case("getheaders") => {
-            handle_mail_headers(ctx, session, method)
+            crate::services::mail_notify::handle_mail_headers(ctx, session, method)
         }
         ("mailMgr", "keys") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
@@ -403,9 +403,19 @@ pub(super) fn handle_mail_and_calendar(
         ("mailMgr", "MarkAsRead")
         | ("mailMgr", "MarkAsReadByLabel")
         | ("mailMgr", "MarkAsReadByList") => {
-            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let mail_ids = extract_id_list(args.first());
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let mail_ids = crate::services::mail_notify::resolve_mail_targets(ctx, char_id, method, args.first());
             if mail_ids.is_empty() {
+                if method.ends_with("ByLabel") || method.ends_with("ByList") {
+                    return Some(Ok(PyRep::keyval([
+                        ("messageID", PyRep::Integer(0)),
+                        ("messageIDs", PyRep::List(Vec::new())),
+                        ("read", PyRep::Bool(true)),
+                    ])));
+                }
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "MarkAsRead requires messageID or messageIDs list".into(),
@@ -435,9 +445,19 @@ pub(super) fn handle_mail_and_calendar(
         ("mailMgr", "MarkAsUnread")
         | ("mailMgr", "MarkAsUnreadByLabel")
         | ("mailMgr", "MarkAsUnreadByList") => {
-            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let mail_ids = extract_id_list(args.first());
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let mail_ids = crate::services::mail_notify::resolve_mail_targets(ctx, char_id, method, args.first());
             if mail_ids.is_empty() {
+                if method.ends_with("ByLabel") || method.ends_with("ByList") {
+                    return Some(Ok(PyRep::keyval([
+                        ("messageID", PyRep::Integer(0)),
+                        ("messageIDs", PyRep::List(Vec::new())),
+                        ("read", PyRep::Bool(false)),
+                    ])));
+                }
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "MarkAsUnread requires messageID or messageIDs list".into(),
@@ -465,7 +485,10 @@ pub(super) fn handle_mail_and_calendar(
         }
 
         ("mailMgr", "MarkAllAsRead") | ("mailMgr", "MarkAllAsUnread") => {
-            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             let mark_read = method == "MarkAllAsRead";
             let count = ctx
                 .db
@@ -497,8 +520,11 @@ pub(super) fn handle_mail_and_calendar(
         | ("mailMgr", "MoveAllToTrash")
         | ("mailMgr", "MoveToTrashByLabel")
         | ("mailMgr", "MoveToTrashByList") => {
-            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let mail_ids = extract_id_list(args.first());
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let mail_ids = crate::services::mail_notify::resolve_mail_targets(ctx, char_id, method, args.first());
             {
                 let mut s = ctx.social_extras.lock().unwrap();
                 for &mid in &mail_ids {
@@ -518,11 +544,14 @@ pub(super) fn handle_mail_and_calendar(
         }
 
         ("mailMgr", "MoveFromTrash") | ("mailMgr", "MoveAllFromTrash") => {
-            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             let mail_ids = extract_id_list(args.first());
             {
                 let mut s = ctx.social_extras.lock().unwrap();
-                if mail_ids.is_empty() {
+                if mail_ids.is_empty() || method == "MoveAllFromTrash" {
                     s.trashed_mails.retain(|&(cid, _)| cid != char_id);
                 } else {
                     for &mid in &mail_ids {
@@ -1294,88 +1323,5 @@ pub(super) fn handle_mail_and_calendar(
         }
 
         _ => None,
-    }
-}
-
-fn handle_mail_headers(
-    ctx: &ServerContext,
-    session: &mut SessionState,
-    method: &str,
-) -> Option<Result<PyRep, BridgeRpcError>> {
-    let (_, char_id) = match ServerContext::require_character(session) {
-        Ok(v) => v,
-        Err(e) => return Some(Err(e)),
-    };
-    let trashed = ctx.social_extras.lock().unwrap().trashed_mails.clone();
-    let (rows, status_rows) = ctx.db.with_snapshot(|snap| {
-        let mut hdrs = Vec::new();
-        let mut statuses = Vec::new();
-        for m in snap.mails.iter().filter(|m| {
-            (m.recipient_id == char_id || m.sender_id == char_id)
-                && !snap.deleted_mails.contains(&(char_id, m.message_id))
-                && !trashed.contains(&(char_id, m.message_id))
-        }) {
-            let read = snap.read_mails.contains(&(char_id, m.message_id));
-            let labels = snap
-                .mail_assigned_labels
-                .get(&(char_id, m.message_id))
-                .cloned()
-                .unwrap_or_else(|| vec![if m.sender_id == char_id { 2 } else { 1 }]);
-            let label_mask: i64 = labels.iter().copied().fold(0i64, |acc, l| acc | l);
-            hdrs.push(vec![
-                PyRep::Integer(m.message_id),
-                PyRep::Integer(m.sender_id),
-                PyRep::List(vec![PyRep::Integer(m.recipient_id)]),
-                PyRep::String(m.subject.clone()),
-                PyRep::Integer(133_000_000_000_000_000),
-                PyRep::Bool(read),
-                PyRep::List(labels.into_iter().map(PyRep::Integer).collect()),
-            ]);
-            statuses.push(vec![
-                PyRep::Integer(m.message_id),
-                PyRep::Integer(if read { 1 } else { 0 }),
-                PyRep::Integer(label_mask),
-                PyRep::Bool(read),
-            ]);
-        }
-        (hdrs, statuses)
-    });
-
-    let headers_rowset = PyRep::rowset(
-        vec![
-            "messageID",
-            "senderID",
-            "toCharacterIDs",
-            "title",
-            "sentDate",
-            "read",
-            "labels",
-        ],
-        rows,
-    );
-    if method == "SyncMail" {
-        let old_mail_rowset = PyRep::rowset(
-            vec![
-                "messageID",
-                "senderID",
-                "toCharacterIDs",
-                "title",
-                "sentDate",
-                "read",
-                "labels",
-            ],
-            Vec::new(),
-        );
-        let status_rowset = PyRep::rowset(
-            vec!["messageID", "statusMask", "labelMask", "read"],
-            status_rows,
-        );
-        Some(Ok(PyRep::keyval([
-            ("oldMail", old_mail_rowset),
-            ("newMail", headers_rowset),
-            ("mailStatus", status_rowset),
-        ])))
-    } else {
-        Some(Ok(headers_rowset))
     }
 }
