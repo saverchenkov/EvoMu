@@ -719,6 +719,16 @@ pub fn handle(
             "FastCheckoutDisabled",
             "Real-money PLEX checkout is disabled on this server",
         ))),
+        ("FastCheckoutService", "ClearFastCheckoutCacheForUser") => {
+            Some(Ok(PyRep::None))
+        }
+        ("FastCheckoutService", "GetTestingConfiguration") => {
+            Some(Ok(PyRep::Tuple(vec![
+                PyRep::Bool(false),
+                PyRep::String("".into()),
+                PyRep::Bool(false),
+            ])))
+        }
         _ => None,
     }
 }

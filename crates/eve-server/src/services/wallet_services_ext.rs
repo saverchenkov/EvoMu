@@ -302,7 +302,14 @@ pub fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let offer_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let offer_id = args
+                .first()
+                .and_then(|a| match a {
+                    PyRep::Integer(i) => Some(*i),
+                    PyRep::String(s) => s.trim_start_matches("VEVC-").parse::<i64>().ok(),
+                    _ => None,
+                })
+                .unwrap_or(0);
             let currency = args
                 .get(1)
                 .and_then(|a| a.as_str())
