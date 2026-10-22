@@ -165,7 +165,7 @@ async fn test_c3_wrecks_loot_50pct_ownership_killmails_esi_hash_pod_corpse_and_s
     // parity: feat:combat.killmail-assist-timeout-ewar
     // parity: feat:combat.capsule-ejection-items
     // parity: feat:combat.self-destruct-pod
-    // parity: feat:crimewatch.criminal-wreck-auto-abandon
+    // parity: feat:crimewatch.criminal-wreck-auto-abandon, rpc:ship.SelfDestruct
     eve_testkit::attest(&[
         "feat:combat.ship-destruction",
         "feat:combat.pod-destruction",

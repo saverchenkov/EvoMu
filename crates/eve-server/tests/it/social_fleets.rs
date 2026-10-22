@@ -221,7 +221,7 @@ async fn test_so1_fleet_creation_hierarchy_broadcast_and_position_sharing() {
 
 #[tokio::test]
 async fn test_so2_corporation_roles_applications_and_wallet_divisions() {
-    // parity: feat:corporation.create-corp, feat:corporation.applications, feat:corporation.roles, feat:wallet.corp-divisions, rpc:account.GetWalletDivisionsInfo, rpc:account.GiveCashFromCorpAccount, rpc:charUnboundMgr.SelectCharacterID, rpc:corpRegistry.AddCorporation, rpc:corpRegistry.GetApplications, rpc:corpRegistry.InsertApplication, rpc:corpRegistry.UpdateApplicationOffer, rpc:corpRegistry.UpdateMember
+    // parity: feat:corporation.create-corp, feat:corporation.applications, feat:corporation.roles, feat:wallet.corp-divisions, rpc:account.GetWalletDivisionsInfo, rpc:account.GiveCashFromCorpAccount, rpc:charUnboundMgr.SelectCharacterID, rpc:corpRegistry.AddCorporation, rpc:corpRegistry.GetApplications, rpc:corpRegistry.InsertApplication, rpc:corpRegistry.UpdateApplicationOffer, rpc:corpRegistry.UpdateMember, rpc:corpRegistry.UpdateDivisionNames
     eve_testkit::attest(&[
         "feat:corporation.create-corp",
         "feat:corporation.applications",

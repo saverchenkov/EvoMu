@@ -390,7 +390,7 @@ async fn test_sovereignty_and_enlistment_notifications() {
 
 #[tokio::test]
 async fn test_fleet_management_and_cyno_module_notifications() {
-    // parity: notify:OnFleetInvite, notify:OnChangeFleetBoss, notify:OnFleetMove, notify:OnFleetMoveFailed, notify:OnJoinRequestUpdate, notify:OnMemberlessFleetUnregistered, notify:OnFleetStateChange, notify:OnBridgeModeChange, notify:OnFleetJumpBeaconModuleChange
+    // parity: notify:OnFleetInvite, notify:OnChangeFleetBoss, notify:OnFleetMove, notify:OnFleetMoveFailed, notify:OnJoinRequestUpdate, notify:OnMemberlessFleetUnregistered, notify:OnFleetStateChange, notify:OnBridgeModeChange, notify:OnFleetJumpBeaconModuleChange, rpc:fleetObjectHandler.RejectJoinRequest, rpc:fleetObjectHandler.MakeLeader
     eve_testkit::attest(&[
         "notify:OnFleetInvite",
         "notify:OnChangeFleetBoss",

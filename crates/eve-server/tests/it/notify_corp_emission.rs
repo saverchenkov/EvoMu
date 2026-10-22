@@ -55,7 +55,7 @@ fn fund_pilot(ctx: &ServerContext, char_id: i64, isk: i64) {
 
 #[tokio::test]
 async fn test_corporation_lifecycle_recruitment_and_aggression_notifications() {
-    // parity: notify:OnCorporationChanged, notify:OnCorporationMemberChanged, notify:OnCorporationApplicationChanged, notify:OnCorporationRecruitmentAdChanged, notify:OnCorporationWelcomeMailChanged, notify:OnCorpAggressionSettingsChange
+    // parity: notify:OnCorporationChanged, notify:OnCorporationMemberChanged, notify:OnCorporationApplicationChanged, notify:OnCorporationRecruitmentAdChanged, notify:OnCorporationWelcomeMailChanged, notify:OnCorpAggressionSettingsChange, rpc:corpRegistry.UpdateCorporation, rpc:corpRegistry.SetCorpWelcomeMail
     eve_testkit::attest(&[
         "notify:OnCorporationChanged",
         "notify:OnCorporationMemberChanged",
@@ -331,7 +331,7 @@ async fn test_corporation_lifecycle_recruitment_and_aggression_notifications() {
 
 #[tokio::test]
 async fn test_corporation_governance_shares_titles_votes_and_medals_notifications() {
-    // parity: notify:OnTitleChanged, notify:OnShareChange, notify:OnVoteCaseChanged, notify:OnVoteCast, notify:OnSanctionedActionChanged, notify:OnCorporationMedalAdded, notify:OnMedalIssued, notify:OnMedalStatusChanged
+    // parity: notify:OnTitleChanged, notify:OnShareChange, notify:OnVoteCaseChanged, notify:OnVoteCast, notify:OnSanctionedActionChanged, notify:OnCorporationMedalAdded, notify:OnMedalIssued, notify:OnMedalStatusChanged, rpc:corpRegistry.DeleteTitle, rpc:corpRegistry.MoveCompanyShares
     eve_testkit::attest(&[
         "notify:OnTitleChanged",
         "notify:OnShareChange",
@@ -637,7 +637,7 @@ async fn test_corporation_governance_shares_titles_votes_and_medals_notification
 
 #[tokio::test]
 async fn test_alliance_and_war_notifications() {
-    // parity: notify:OnAllianceChanged, notify:OnAllianceApplicationChanged, notify:OnAllianceMemberChanged, notify:OnAllianceRelationshipChanged, notify:OnWarChanged
+    // parity: notify:OnAllianceChanged, notify:OnAllianceApplicationChanged, notify:OnAllianceMemberChanged, notify:OnAllianceRelationshipChanged, notify:OnWarChanged, rpc:corpRegistry.CreateAlliance, rpc:corpRegistry.ApplyToJoinAlliance
     eve_testkit::attest(&[
         "notify:OnAllianceChanged",
         "notify:OnAllianceApplicationChanged",

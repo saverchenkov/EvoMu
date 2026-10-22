@@ -177,7 +177,7 @@ async fn test_fleet_structure_membership_notifications() {
 
 #[tokio::test]
 async fn test_fleet_motd_options_requests_broadcast_notifications() {
-    // parity: notify:OnFleetMotdChanged, notify:OnFleetOptionsChanged, notify:OnFleetJoinReject, notify:OnFleetJoinRequest, notify:OnFleetJoinRejected, notify:OnFleetBroadcast
+    // parity: notify:OnFleetMotdChanged, notify:OnFleetOptionsChanged, notify:OnFleetJoinReject, notify:OnFleetJoinRequest, notify:OnFleetJoinRejected, notify:OnFleetBroadcast, rpc:fleetObjectHandler.RejectInvite
     eve_testkit::attest(&[
         "notify:OnFleetMotdChanged",
         "notify:OnFleetOptionsChanged",

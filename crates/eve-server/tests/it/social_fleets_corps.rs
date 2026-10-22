@@ -1116,7 +1116,7 @@ async fn test_so2_fleet_manager_hierarchy_broadcast_and_fleet_warp() {
 
 #[tokio::test]
 async fn test_so7_chat_channels_local_corp_fleet_player_and_private() {
-    // parity: feat:social.chat-xmpp-auth, feat:social.chat-local, feat:social.chat-corp-alliance-fleet, feat:social.chat-player-channels, feat:social.chat-private, rpc:XmppChatMgr.CreatePlayerOwnedChannel, rpc:XmppChatMgr.CreatePrivateChannel, rpc:charUnboundMgr.SelectCharacterID, rpc:chatAuthenticationService.GetAuthenticationToken
+    // parity: feat:social.chat-xmpp-auth, feat:social.chat-local, feat:social.chat-corp-alliance-fleet, feat:social.chat-player-channels, feat:social.chat-private, rpc:XmppChatMgr.CreatePlayerOwnedChannel, rpc:XmppChatMgr.CreatePrivateChannel, rpc:charUnboundMgr.SelectCharacterID, rpc:chatAuthenticationService.GetAuthenticationToken, rpc:fleetObjectHandler.Init, rpc:fleetObjectHandler.LeaveFleet
     eve_testkit::attest(&[
         "feat:social.chat-xmpp-auth",
         "feat:social.chat-local",

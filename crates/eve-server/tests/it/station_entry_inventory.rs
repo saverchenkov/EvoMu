@@ -312,6 +312,7 @@ async fn station_ui_bootstrap_shapes_match_the_v24_client() {
 
 #[tokio::test]
 async fn station_entry_handlers_match_v24_client_shapes_and_effective_attributes() {
+    // parity: rpc:accessGroupBookmarkMgr.GetMyActiveBookmarks, rpc:ship.GetDirtTimestamp, rpc:userSvc.GetMultiCharactersTrainingSlots, rpc:shipCosmeticsMgr.GetEnabledCosmetics, rpc:nonDiminishingInjectionMgr.GetAvailableNonDiminishingInjections, rpc:dynamicBountyMgr.GetOutputForClientSolarSystem, rpc:crimewatch.GetClientStates, rpc:monolithTaskTrackerMgr.GetCompletedAchievementsAndClientEventCount
     let ctx = ServerContext::new();
     let mut sess = SessionState::new(9_204);
     login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;

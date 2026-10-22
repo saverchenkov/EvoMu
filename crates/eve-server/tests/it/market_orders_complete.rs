@@ -57,7 +57,7 @@ async fn rpc(
 
 #[tokio::test]
 async fn test_tick_size_relist_fee_broker_minimum_scc_surcharge_and_durations() {
-    // parity: feat:market.tick-size-four-significant-digits, feat:market.relist-fee-formula, feat:market.broker-fee-minimum-and-scc-surcharge, feat:market.order-duration-options, feat:market.structure-markets, feat:market.modify-order
+    // parity: feat:market.tick-size-four-significant-digits, feat:market.relist-fee-formula, feat:market.broker-fee-minimum-and-scc-surcharge, feat:market.order-duration-options, feat:market.structure-markets, feat:market.modify-order, rpc:marketProxy.PlacePlexSellOrder, rpc:marketProxy.ModifyPlexCharOrder
     eve_testkit::attest(&["feat:market.tick-size-four-significant-digits", "feat:market.relist-fee-formula", "feat:market.broker-fee-minimum-and-scc-surcharge", "feat:market.order-duration-options", "feat:market.structure-markets", "feat:market.modify-order"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
@@ -585,7 +585,7 @@ async fn test_tick_size_relist_fee_broker_minimum_scc_surcharge_and_durations() 
 
 #[tokio::test]
 async fn test_ranged_buy_orders_corp_divisions_multisell_multibuy_expiry_and_history() {
-    // parity: feat:market.buy-order-range-fill, feat:market.corp-order-wallet-hangar-divisions, feat:market.multisell-quote-fees, feat:market.multibuy-import-order-matching, feat:market.order-expiry, feat:market.order-history, feat:market.remote-orders, feat:market.corp-orders, feat:market.price-history
+    // parity: feat:market.buy-order-range-fill, feat:market.corp-order-wallet-hangar-divisions, feat:market.multisell-quote-fees, feat:market.multibuy-import-order-matching, feat:market.order-expiry, feat:market.order-history, feat:market.remote-orders, feat:market.corp-orders, feat:market.price-history, rpc:marketProxy.GetMarketOrderHistory
     eve_testkit::attest(&["feat:market.buy-order-range-fill", "feat:market.corp-order-wallet-hangar-divisions", "feat:market.multisell-quote-fees", "feat:market.multibuy-import-order-matching", "feat:market.order-expiry", "feat:market.order-history", "feat:market.remote-orders", "feat:market.corp-orders", "feat:market.price-history"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);

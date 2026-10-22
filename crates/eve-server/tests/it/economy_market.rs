@@ -832,7 +832,7 @@ async fn test_market_instant_matching() {
 
 #[tokio::test]
 async fn test_market_modify_relist_tick_size_corp_remote_expiry_sleeper_and_plex() {
-    // parity: feat:market.modify-order, feat:market.remote-orders, feat:market.corp-orders, feat:market.plex-market, feat:market.npc-buy-orders-sleeper-loot, rpc:marketProxy.ModifyCharOrder
+    // parity: feat:market.modify-order, feat:market.remote-orders, feat:market.corp-orders, feat:market.plex-market, feat:market.npc-buy-orders-sleeper-loot, rpc:marketProxy.ModifyCharOrder, rpc:marketProxy.GetCorporationOrders, rpc:marketProxy.GetHistoryForManyTypeIDs, rpc:marketProxy.GetPlexBest, rpc:marketProxy.GetPlexHistory, rpc:marketProxy.GetPlexNewPriceHistory, rpc:marketProxy.GetPlexOldPriceHistory, rpc:marketProxy.GetPlexOrders, rpc:marketProxy.GetSystemAsks, rpc:marketProxy.StartupCheck
     eve_testkit::attest(&["feat:market.modify-order", "feat:market.remote-orders", "feat:market.corp-orders", "feat:market.plex-market", "feat:market.npc-buy-orders-sleeper-loot"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);

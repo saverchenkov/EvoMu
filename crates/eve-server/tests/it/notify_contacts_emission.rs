@@ -33,7 +33,7 @@ fn events(ctx: &ServerContext, char_id: i64, event: &str) -> Vec<Vec<PyRep>> {
 
 #[tokio::test]
 async fn test_personal_contacts_and_watchlist_presence_notifications() {
-    // parity: notify:OnPersonalContactsAdded, notify:OnPersonalContactsUpdated, notify:OnPersonalContactsDeleted, notify:OnClientContactChange
+    // parity: notify:OnPersonalContactsAdded, notify:OnPersonalContactsUpdated, notify:OnPersonalContactsDeleted, notify:OnClientContactChange, rpc:charMgr.EditContactsRelationshipID
     eve_testkit::attest(&[
         "notify:OnPersonalContactsAdded",
         "notify:OnPersonalContactsUpdated",

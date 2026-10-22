@@ -17,7 +17,7 @@ fn is_rowset(rep: &PyRep) -> bool {
 
 #[tokio::test]
 async fn test_alliances_lifecycle_governance_contacts_bulletins_and_rankings() {
-    // parity: feat:alliance.create-alliance, feat:alliance.apply-alliance, feat:alliance.leave-alliance, feat:alliance.alliance-executor, feat:alliance.alliance-info, feat:alliance.alliance-contacts, feat:alliance.alliance-bulletins, feat:alliance.alliance-rankings, feat:alliance.alliance-close
+    // parity: feat:alliance.create-alliance, feat:alliance.apply-alliance, feat:alliance.leave-alliance, feat:alliance.alliance-executor, feat:alliance.alliance-info, feat:alliance.alliance-contacts, feat:alliance.alliance-bulletins, feat:alliance.alliance-rankings, feat:alliance.alliance-close, rpc:corpRegistry.GetAllianceApplications
     eve_testkit::attest(&[
         "feat:alliance.create-alliance",
         "feat:alliance.apply-alliance",
@@ -259,7 +259,7 @@ fn war_field(ctx_rep: &PyRep, war_id: i64, name: &str) -> Option<PyRep> {
 
 #[tokio::test]
 async fn test_wars_declaration_hq_eligibility_mutual_peace_allies_and_stats() {
-    // parity: feat:war.declare-war, feat:war.war-hq, feat:war.war-eligibility-change, feat:war.war-list, feat:war.mutual-war, feat:war.peace-treaty, feat:war.allies, feat:war.war-stats, feat:war.war-retract, feat:corporation.corp-war-eligibility, feat:corporation.corp-ally-cost
+    // parity: feat:war.declare-war, feat:war.war-hq, feat:war.war-eligibility-change, feat:war.war-list, feat:war.mutual-war, feat:war.peace-treaty, feat:war.allies, feat:war.war-stats, feat:war.war-retract, feat:corporation.corp-war-eligibility, feat:corporation.corp-ally-cost, rpc:corpRegistry.DeclareWarAgainst, rpc:corpRegistry.CharGetAllyBaseCost
     eve_testkit::attest(&[
         "feat:war.declare-war",
         "feat:war.war-hq",
