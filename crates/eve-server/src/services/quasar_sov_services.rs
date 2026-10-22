@@ -443,6 +443,20 @@ pub fn register_handlers(
                 )
             }),
         );
+        let d_pub = Arc::clone(&desc);
+        router.register_handler(
+            "eve_public.faction.activity.GetSolarSystemScoresRequest",
+            Arc::new(move |_ctx, _any, dyn_msg| {
+                let sys_id = get_int_field(dyn_msg, 1).unwrap_or(30_000_142) as u64;
+                encode_domain_message(
+                    &d_pub,
+                    "eve_public.faction.activity.GetSolarSystemScoresResponse",
+                    |reg, resp| {
+                        set_domain_field(reg, resp, 1, sys_id, "");
+                    },
+                )
+            }),
+        );
     }
 
     // 7. eve.factionwarfare handlers

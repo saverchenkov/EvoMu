@@ -712,6 +712,14 @@ pub fn register_handlers(
             "eve_public.cosmetic.structure.paintwork.license.api.admin.RevokeRequest",
             "eve_public.cosmetic.structure.paintwork.license.api.admin.RevokeResponse",
         ),
+        (
+            "eve_public.cosmetic.structure.paintwork.api.admin.IssueRequest",
+            "eve_public.cosmetic.structure.paintwork.license.api.admin.IssueResponse",
+        ),
+        (
+            "eve_public.cosmetic.structure.paintwork.api.admin.RevokeRequest",
+            "eve_public.cosmetic.structure.paintwork.license.api.admin.RevokeResponse",
+        ),
     ] {
         let d = Arc::clone(&desc);
         let db_cosm = Arc::clone(&db);

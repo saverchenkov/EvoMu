@@ -97,6 +97,7 @@ mod quasar_progression_complete;
 mod quasar_social_complete;
 mod quasar_space_cosmetics_complete;
 mod quasar_extended_endpoints;
+mod quasar_cosmetics_sovereignty;
 mod regressions_b01_b15;
 mod regressions_r6;
 mod regressions_r8;

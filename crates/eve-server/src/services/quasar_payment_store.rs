@@ -1,6 +1,7 @@
 //! `quasar_payment_store` — Quasar Payment, PLEX, Store & Fulfillment Services (`Q-3`).
 
 use super::quasar_auth_user::get_identity_store;
+use super::quasar_space_services::{encode_domain_message, set_domain_attributes};
 use crate::quasar_gateway::{NoticeScope, PublicGatewayRouter};
 use eve_db::WorldRepository;
 use eve_proto::quasar::{
@@ -395,4 +396,85 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
             })
         }),
     );
+
+    // 14. eve_public.payment.purchase.api handlers
+    {
+        let d = Arc::clone(&router.descriptors);
+        router.register_handler(
+            "eve_public.payment.purchase.api.TokenRequest",
+            Arc::new(move |ctx, _any, _dyn_msg| {
+                let uid = ctx.effective_user_id().unwrap_or(1) as u64;
+                encode_domain_message(
+                    &d,
+                    "eve_public.payment.purchase.api.TokenResponse",
+                    |reg, resp| {
+                        set_domain_attributes(reg, resp, uid, 1, "purchase_token");
+                    },
+                )
+            }),
+        );
+    }
+    {
+        let d = Arc::clone(&router.descriptors);
+        router.register_handler(
+            "eve_public.payment.purchase.api.CostRequest",
+            Arc::new(move |_ctx, _any, _dyn_msg| {
+                encode_domain_message(
+                    &d,
+                    "eve_public.payment.purchase.api.CostResponse",
+                    |reg, resp| {
+                        set_domain_attributes(reg, resp, 1999, 1, "USD");
+                    },
+                )
+            }),
+        );
+    }
+
+    // 15. eve_public.plex.vault.transaction.api handlers
+    {
+        let d = Arc::clone(&router.descriptors);
+        router.register_handler(
+            "eve_public.plex.vault.transaction.api.GetAllLoggedForUserRequest",
+            Arc::new(move |ctx, _any, _dyn_msg| {
+                let uid = ctx.effective_user_id().unwrap_or(1) as u64;
+                encode_domain_message(
+                    &d,
+                    "eve_public.plex.vault.transaction.api.GetAllLoggedForUserResponse",
+                    |reg, resp| {
+                        set_domain_attributes(reg, resp, uid, 1, "plex_tx_all");
+                    },
+                )
+            }),
+        );
+    }
+    {
+        let d = Arc::clone(&router.descriptors);
+        router.register_handler(
+            "eve_public.plex.vault.transaction.api.GetLogRequest",
+            Arc::new(move |_ctx, _any, _dyn_msg| {
+                encode_domain_message(
+                    &d,
+                    "eve_public.plex.vault.transaction.api.GetLogResponse",
+                    |reg, resp| {
+                        set_domain_attributes(reg, resp, 1, 100, "plex_log");
+                    },
+                )
+            }),
+        );
+    }
+    {
+        let d = Arc::clone(&router.descriptors);
+        router.register_handler(
+            "eve_public.plex.vault.transaction.api.GetStatisticsRequest",
+            Arc::new(move |_ctx, _any, _dyn_msg| {
+                encode_domain_message(
+                    &d,
+                    "eve_public.plex.vault.transaction.api.GetStatisticsResponse",
+                    |reg, resp| {
+                        set_domain_attributes(reg, resp, 500, 10, "plex_stats");
+                    },
+                )
+            }),
+        );
+    }
 }

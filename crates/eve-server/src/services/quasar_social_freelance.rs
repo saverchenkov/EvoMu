@@ -10,6 +10,7 @@
 //! - `eve/freelance/project/api/admin/requests.proto`
 
 use super::quasar_social_chat::{ctx_now_unix, ctx_queue_notice};
+use super::quasar_space_services::{encode_domain_message, set_domain_attributes};
 use crate::quasar_gateway::{NoticeScope, PublicGatewayRouter};
 use eve_db::WorldRepository;
 use eve_proto::quasar::{
@@ -649,6 +650,40 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
             })
         }),
     );
+
+    // 21. eve_public.freelance.contributionmethod.definition.api.GetAllLatestRequest
+    {
+        let d = Arc::clone(&router.descriptors);
+        router.register_handler(
+            "eve_public.freelance.contributionmethod.definition.api.GetAllLatestRequest",
+            Arc::new(move |_ctx, _any, _dyn_msg| {
+                encode_domain_message(
+                    &d,
+                    "eve_public.freelance.contributionmethod.definition.api.GetAllLatestResponse",
+                    |reg, resp| {
+                        set_domain_attributes(reg, resp, 1, 1, "all_latest");
+                    },
+                )
+            }),
+        );
+    }
+
+    // 22. eve_public.freelance.contributionmethod.definition.api.GetAllLatestWithinMajorRequest
+    {
+        let d = Arc::clone(&router.descriptors);
+        router.register_handler(
+            "eve_public.freelance.contributionmethod.definition.api.GetAllLatestWithinMajorRequest",
+            Arc::new(move |_ctx, _any, _dyn_msg| {
+                encode_domain_message(
+                    &d,
+                    "eve_public.freelance.contributionmethod.definition.api.GetAllLatestWithinMajorResponse",
+                    |reg, resp| {
+                        set_domain_attributes(reg, resp, 1, 1, "all_latest_within_major");
+                    },
+                )
+            }),
+        );
+    }
 }
 
 fn extract_uuid(val: Option<&DynamicValue>) -> Option<Vec<u8>> {
