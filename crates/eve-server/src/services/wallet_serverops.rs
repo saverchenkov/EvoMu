@@ -1047,34 +1047,6 @@ pub fn handle(
         ("account", "GetDefaultContactCost") => Some(get_default_contact_cost(ctx, session)),
         ("machoNet", "GetClusterGameStatisticsForClient") => Some(Ok(cluster_statistics(ctx))),
         ("pingService", "Ping") => Some(Ok(PyRep::Integer(ctx.now_blueos_filetime_ticks()))),
-        ("eventLog", "LogClientEvent")
-        | ("eventLog", "LogClientStats")
-        | ("eventLog", "LogPlayerRequestedDisconnect") => {
-            // const-ok: fire-and-forget client telemetry sink returns None after logging
-            debug!(
-                session_id = session.session_id,
-                char_id = ?session.character_id,
-                service,
-                method,
-                arg_count = args.len(),
-                "client telemetry received"
-            );
-            Some(Ok(PyRep::None))
-        }
-        ("alert", "BeanDelivery")
-        | ("alert", "GroupBeanDelivery")
-        | ("alert", "SendClientStackTraceAlert") => {
-            // const-ok: fire-and-forget client alert telemetry sink returns None after logging
-            debug!(
-                session_id = session.session_id,
-                char_id = ?session.character_id,
-                service,
-                method,
-                arg_count = args.len(),
-                "client telemetry received"
-            );
-            Some(Ok(PyRep::None))
-        }
         ("clientStatLogger", "LogString")
         | ("infoGatheringMgr", "LogInfoEventsFromClient")
         | ("eveguard_report", "heartbeat_started")
@@ -1089,10 +1061,6 @@ pub fn handle(
                 "client telemetry received"
             );
             Some(Ok(PyRep::None))
-        }
-        ("alert", "BeanCount") => {
-            // const-ok: returns (None, 0) asking client to send stack trace with local logging mode
-            Some(Ok(PyRep::Tuple(vec![PyRep::None, PyRep::Integer(0)])))
         }
         ("infoGatheringMgr", "GetStateAndConfig") => {
             // const-ok: client telemetry batching is disabled via static config

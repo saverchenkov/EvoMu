@@ -991,8 +991,7 @@ pub fn handle_industry_facilities_bps(
         }
 
         ("facilityManager", "GetFacilities")
-        | ("facilityManager", "GetFacilitiesByID")
-        | ("facilityManager", "GetFacilityLocations") => {
+        | ("facilityManager", "GetFacilitiesByID") => {
             let _ = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -1048,6 +1047,26 @@ pub fn handle_industry_facilities_bps(
                 list
             });
             Some(Ok(PyRep::List(facilities)))
+        }
+
+        ("facilityManager", "GetFacilityLocations") => {
+            let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let explicit_ids: Vec<i64> = match args.first() {
+                Some(PyRep::List(ids) | PyRep::Tuple(ids)) => ids.iter().filter_map(|v| v.as_i64()).collect(),
+                _ => Vec::new(),
+            };
+            let locs = ctx.db.with_snapshot(|snap| {
+                explicit_ids.into_iter().filter_map(|fid| {
+                    if let Some(s) = snap.structures.get(&fid) {
+                        let reg = ctx.sde.solar_systems.get(&s.solar_system_id).map(|sys| sys.region_id as i64).unwrap_or(0);
+                        Some(PyRep::keyval([("facilityID", PyRep::Integer(fid)), ("solarSystemID", PyRep::Integer(s.solar_system_id as i64)), ("regionID", PyRep::Integer(reg))]))
+                    } else if let Some(st) = ctx.sde.stations.get(&fid) {
+                        let reg = ctx.sde.solar_systems.get(&(st.solar_system_id as u32)).map(|sys| sys.region_id as i64).unwrap_or(0);
+                        Some(PyRep::keyval([("facilityID", PyRep::Integer(fid)), ("solarSystemID", PyRep::Integer(st.solar_system_id as i64)), ("regionID", PyRep::Integer(reg))]))
+                    } else { None }
+                }).collect::<Vec<_>>()
+            });
+            Some(Ok(PyRep::List(locs)))
         }
 
         ("facilityManager", "GetFacility") => {

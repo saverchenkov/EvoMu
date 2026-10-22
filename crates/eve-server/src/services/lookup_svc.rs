@@ -39,7 +39,7 @@ pub fn handle(
     args: &[PyRep],
     _kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
-    if service != "lookupSvc" {
+    if service != "lookupSvc" && service != "bannedwords" {
         return None;
     }
     if let Err(e) = ServerContext::require_auth(session) {
@@ -438,6 +438,50 @@ pub fn handle(
             });
 
             Some(Ok(PyRep::List(results)))
+        }
+
+        ("bannedwords", "fetch_regexes") => {
+            let regexes = vec![
+                PyRep::String(r"(?i)\b(?:badword|bannedword|exploit|scam|hack|profanity)\b".into()),
+            ];
+            Some(Ok(PyRep::List(regexes)))
+        }
+
+        ("bannedwords", "check_words_allowed") => {
+            let banned = ["badword", "bannedword", "exploit", "scam", "hack", "profanity"];
+            let is_allowed = |s: &str| {
+                let lower = s.to_lowercase();
+                !banned.iter().any(|b| lower.contains(b))
+            };
+            match args.first() {
+                Some(PyRep::List(words)) | Some(PyRep::Tuple(words)) => {
+                    let results: Vec<PyRep> = words
+                        .iter()
+                        .map(|w| PyRep::Bool(is_allowed(w.as_str().unwrap_or(""))))
+                        .collect();
+                    Some(Ok(PyRep::List(results)))
+                }
+                Some(PyRep::String(s)) => Some(Ok(PyRep::Bool(is_allowed(s)))),
+                _ => Some(Ok(PyRep::Bool(true))),
+            }
+        }
+
+        ("bannedwords", "check_search_words_allowed") => {
+            let banned = ["badword", "bannedword", "exploit", "scam", "hack", "profanity"];
+            let is_allowed = |s: &str| {
+                let lower = s.to_lowercase();
+                !banned.iter().any(|b| lower.contains(b))
+            };
+            match args.first() {
+                Some(PyRep::List(words)) | Some(PyRep::Tuple(words)) => {
+                    let all_ok = words
+                        .iter()
+                        .all(|w| is_allowed(w.as_str().unwrap_or("")));
+                    Some(Ok(PyRep::Bool(all_ok)))
+                }
+                Some(PyRep::String(s)) => Some(Ok(PyRep::Bool(is_allowed(s)))),
+                _ => Some(Ok(PyRep::Bool(true))),
+            }
         }
 
         _ => None,

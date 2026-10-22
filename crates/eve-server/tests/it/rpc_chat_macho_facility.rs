@@ -223,6 +223,13 @@ async fn test_facility_manager_and_macho_stats() {
         PyRep::Tuple(items) => {
             assert_eq!(items.len(), 3, "expected (pilotsPerSystem, dockedPerSystem, statDivisor)");
             assert_eq!(items[2], PyRep::Real(1.0));
+            let PyRep::Dict(pilots) = &items[0] else { panic!("expected Dict in items[0]") };
+            let pilot_count = pilots
+                .iter()
+                .find(|(k, _)| k.as_i64() == Some(30_000_142))
+                .and_then(|(_, v)| v.as_i64())
+                .unwrap_or(0);
+            assert!(pilot_count >= 1, "expected at least 1 pilot in Jita");
         }
         other => panic!("expected Tuple, got {other:?}"),
     }

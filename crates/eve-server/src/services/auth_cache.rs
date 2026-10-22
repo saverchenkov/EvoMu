@@ -96,6 +96,15 @@ pub async fn handle(
                 }));
             };
             let notif_name = args.get(1).and_then(|a| a.as_str()).unwrap_or("OnNotificationReceived");
+            let is_permitted = session.has_gm_role()
+                || session.character_id == Some(char_id)
+                || matches!(notif_name, "OnNotificationReceived" | "OnNewNotificationReceived");
+            if !is_permitted {
+                return Some(Err(BridgeRpcError {
+                    code: "InsufficientRole".into(),
+                    message: "ForwardCharacterNotification targeting another character with unprivileged notification requires GM role".into(),
+                }));
+            }
             let payload: Vec<PyRep> = match args.get(2) {
                 Some(PyRep::List(l)) | Some(PyRep::Tuple(l)) => l.clone(),
                 Some(other) => vec![other.clone()],

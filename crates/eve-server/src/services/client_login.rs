@@ -116,9 +116,12 @@ pub async fn handle(
                 Some(e) => *e,
                 None => {
                     let e = (NEXT_ERROR_ID.fetch_add(1, Ordering::Relaxed), LOGGING_BATCHED);
-                    if reg.len() < ALERT_REGISTRY_CAP {
-                        reg.insert(hash, e);
+                    if reg.len() >= ALERT_REGISTRY_CAP {
+                        if let Some(oldest) = reg.keys().next().copied() {
+                            reg.remove(&oldest);
+                        }
                     }
+                    reg.insert(hash, e);
                     e
                 }
             };
@@ -162,10 +165,44 @@ pub async fn handle(
             if let Ok(mut counts) = bean_counts().lock() {
                 for (error_id, n) in beans {
                     if counts.len() >= ALERT_REGISTRY_CAP && !counts.contains_key(&error_id) {
-                        continue;
+                        if let Some(oldest) = counts.keys().find(|&&k| k != 9999).copied() {
+                            counts.remove(&oldest);
+                        }
                     }
                     let c = counts.entry(error_id).or_insert(0);
                     *c = c.saturating_add(n);
+                }
+            }
+            Some(Ok(PyRep::None))
+        }
+        ("alert", "GetLogModeForError") => {
+            if let Err(e) = ServerContext::require_auth(session) {
+                return Some(Err(e));
+            }
+            let err_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let entry = stack_trace_registry()
+                .lock()
+                .ok()
+                .and_then(|m| m.values().find(|(id, _)| *id == err_id).copied());
+            Some(Ok(log_mode_tuple(entry)))
+        }
+        ("alert", "GroupBeanDelivery") => {
+            if let Err(e) = ServerContext::require_auth(session) {
+                return Some(Err(e));
+            }
+            if let Some(PyRep::Dict(entries)) = args.first() {
+                if let Ok(mut counts) = bean_counts().lock() {
+                    for (k, v) in entries {
+                        if let (Some(err_id), Some(n)) = (k.as_i64(), v.as_i64()) {
+                            if counts.len() >= ALERT_REGISTRY_CAP && !counts.contains_key(&err_id) {
+                                if let Some(oldest) = counts.keys().find(|&&k| k != 9999).copied() {
+                                    counts.remove(&oldest);
+                                }
+                            }
+                            let c = counts.entry(err_id).or_insert(0);
+                            *c = c.saturating_add(n);
+                        }
+                    }
                 }
             }
             Some(Ok(PyRep::None))
