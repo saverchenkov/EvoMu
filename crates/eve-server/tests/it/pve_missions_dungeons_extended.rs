@@ -19,7 +19,6 @@ use eve_server::router::ServerContext;
 use eve_server::services::agents_missions::*;
 use std::collections::HashMap;
 
-const EXPECTED_ERR: &str = "InsufficientRole";
 
 async fn setup_pilot(
     ctx: &ServerContext,
