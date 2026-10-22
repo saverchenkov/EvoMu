@@ -478,7 +478,8 @@ async fn test_missions_and_mail_notifications() {
     );
 
     // 5. OnMailTrashed: seed a mail and MoveToTrash
-    // BF-NOTIFY-TRASH-01 negative test: trashing foreign or non-existent mail emits zero notifications
+    // BF-NOTIFY-TRASH-01 & BF-NOTIFY-TRASH-02 negative tests:
+    // A. Trashing non-existent mail emits zero notifications
     call(
         &ctx,
         &mut s1,
@@ -491,6 +492,59 @@ async fn test_missions_and_mail_notifications() {
     assert!(
         events_from(&n_trash_neg, "OnMailTrashed").is_empty(),
         "Trashing non-existent mail must emit zero notifications"
+    );
+
+    // B. Trashing foreign mail (owned by P2) when called by P1 emits zero notifications
+    let foreign_mail_id = 888_002;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.mails.push(MailRecord {
+            message_id: foreign_mail_id,
+            sender_id: P2,
+            recipient_id: P2,
+            subject: "P2 Secret Mail".into(),
+            body: "P2 eyes only".into(),
+        });
+    });
+    call(
+        &ctx,
+        &mut s1,
+        "mailMgr",
+        "MoveToTrash",
+        &[PyRep::List(vec![PyRep::Integer(foreign_mail_id)])],
+    )
+    .await;
+    assert!(
+        events_from(&ctx.drain_notifications_for_char(P1), "OnMailTrashed").is_empty(),
+        "Trashing foreign mail must emit zero notifications for caller"
+    );
+    assert!(
+        events_from(&ctx.drain_notifications_for_char(P2), "OnMailTrashed").is_empty(),
+        "Trashing foreign mail must emit zero notifications for owner"
+    );
+
+    // C. Trashing deleted mail (in snap.deleted_mails) emits zero notifications
+    let deleted_mail_id = 888_003;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.mails.push(MailRecord {
+            message_id: deleted_mail_id,
+            sender_id: P1,
+            recipient_id: P1,
+            subject: "Deleted Mail".into(),
+            body: "Already purged".into(),
+        });
+        snap.deleted_mails.insert((P1, deleted_mail_id));
+    });
+    call(
+        &ctx,
+        &mut s1,
+        "mailMgr",
+        "MoveToTrash",
+        &[PyRep::List(vec![PyRep::Integer(deleted_mail_id)])],
+    )
+    .await;
+    assert!(
+        events_from(&ctx.drain_notifications_for_char(P1), "OnMailTrashed").is_empty(),
+        "Trashing deleted mail must emit zero notifications"
     );
 
     let mail_id = 888_001;

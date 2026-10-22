@@ -50,7 +50,7 @@ pub(crate) async fn handle(
             )
             .await,
         ),
-        // parity: plan:SP-4, feat:navigation.stargate-capital-restriction, feat:navigation.session-change-timer-triggers, feat:navigation.jump-cloak-immunities, notify:OnAutoPilotJump, notify:OnAutopilotUpdated
+        // parity: plan:SP-4, feat:navigation.stargate-capital-restriction, feat:navigation.session-change-timer-triggers, feat:navigation.jump-cloak-immunities
         ("beyonce", "CmdStargateJump") | ("beyonce", "StargateJump") => {
             Some(handle_cmd_stargate_jump(ctx, session, bound_entry, args).await)
         }
@@ -820,33 +820,6 @@ async fn handle_cmd_stargate_jump(
         spawn_tick,
         "stargate_jump",
     );
-
-    let has_autopilot = !ctx.esi_state.get_autopilot_waypoints(char_id).is_empty();
-    if has_autopilot {
-        ctx.notify(
-            crate::router::NotificationTarget::Character(char_id),
-            "OnAutoPilotJump",
-            "charid",
-            vec![],
-        );
-        let mut waypoints = ctx.esi_state.get_autopilot_waypoints(char_id);
-        if let Some(pos) = waypoints.iter().position(|&wp| wp == dest_sys_id as i64) {
-            waypoints.remove(pos);
-            let mut guard = ctx
-                .esi_state
-                .autopilot_waypoints
-                .write()
-                .unwrap_or_else(|e| e.into_inner());
-            guard.insert(char_id, waypoints);
-            drop(guard);
-            ctx.notify(
-                crate::router::NotificationTarget::Character(char_id),
-                "OnAutopilotUpdated",
-                "charid",
-                vec![],
-            );
-        }
-    }
 
     let new_beyonce_id = ctx.bind_object(session, BEYONCE_SVC, dest_sys_id as i64)?;
 

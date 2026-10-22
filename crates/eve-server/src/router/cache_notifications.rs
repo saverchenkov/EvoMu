@@ -832,25 +832,6 @@ impl ServerContext {
         )
     }
 
-    /// Emits a `DoDestinyUpdates` batched destiny notification (`updates`).
-    pub fn notify_destiny_updates(
-        &self,
-        target: NotificationTarget,
-        updates: Vec<PyRep>,
-    ) -> Vec<PendingMachoNotification> {
-        let batch = PyRep::List(
-            updates
-                .into_iter()
-                .map(|u| PyRep::Tuple(vec![u, PyRep::Bool(false)]))
-                .collect(),
-        );
-        let id_type = match &target {
-            NotificationTarget::SolarSystem(_) => "solarsystemid2",
-            _ => "charid",
-        };
-        self.notify(target, "DoDestinyUpdates", id_type, vec![batch])
-    }
-
     /// Emits an `OnItemChange` notification (`itemRow` packed `DBRow`, `changeDict`).
     pub fn notify_item_change(
         &self,

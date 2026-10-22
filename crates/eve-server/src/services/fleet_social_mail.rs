@@ -531,7 +531,8 @@ pub(super) fn handle_mail_and_calendar(
                 ctx.db.with_snapshot(|snap| {
                     for &mid in &mail_ids {
                         let is_mine = snap.mails.iter().any(|m| m.message_id == mid && (m.recipient_id == char_id || m.sender_id == char_id));
-                        if is_mine && s.trashed_mails.insert((char_id, mid)) {
+                        let is_deleted = snap.deleted_mails.contains(&(char_id, mid));
+                        if is_mine && !is_deleted && s.trashed_mails.insert((char_id, mid)) {
                             trashed_ids.push(mid);
                         }
                     }
