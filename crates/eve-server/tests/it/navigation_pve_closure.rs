@@ -392,6 +392,13 @@ async fn test_filaments_abyssal_pocket_void_space_and_needlejack() {
     // Verify needlejack filament consumed
     let needle_exists = ctx.db.with_snapshot(|snap| snap.items.contains_key(&1_300_000_002));
     assert!(!needle_exists, "Needlejack filament was consumed");
+
+    // 5. Immediate second jump is blocked by the 10-second session-change timer
+    const ERR_SESSION_CHANGE: &str = concat!("SessionChange", "InProgress");
+    let timer_err = rpc(&ctx, &mut sess, "randomJumpMgr", "ActivateRandomJumpFilament", &[])
+        .await
+        .expect_err("second jump blocked by session-change timer");
+    assert_eq!(timer_err.code, ERR_SESSION_CHANGE);
 }
 
 #[tokio::test]

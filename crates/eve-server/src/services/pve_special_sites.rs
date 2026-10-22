@@ -1,10 +1,8 @@
 //! `pve_special_sites` — Sansha Incursions (Constellation Influence, Site Tiers, Fleet ISK+LP Payouts,
-//! Mothership HQ Finale), Abyssal Deadspace (3-Room Pockets, Gates, 5 Weather Dbuffs, T0–T6 Tiers &
-//! Collapse Timer), Homefront Operations, Metaliminal Roaming Storms, Drifter Hives, Triglavian
+//! Mothership HQ Finale), Homefront Operations, Metaliminal Roaming Storms, Drifter Hives, Triglavian
 //! Pochven/EDENCOM Sites, and Solar System Interference (`Phase 8: W-3 & W-4`).
 //!
 // parity: feat:pve.incursion-system, feat:pve.incursion-payout, feat:pve.incursion-mothership
-// parity: feat:pve.abyssal-pocket, feat:pve.abyssal-gates, feat:pve.abyssal-weather, feat:pve.abyssal-tiers
 // parity: feat:pve.homefront-ops, feat:pve.metaliminal-storms, feat:pve.drifter-hives, feat:pve.triglavian-sites, feat:pve.interference
 
 #![forbid(unsafe_code)]
@@ -15,13 +13,12 @@ use eve_db::{InventoryFlag, InventoryItemRecord, IskCents, WalletJournalEntry};
 use eve_destiny::{Ball, MovementMode};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
-use eve_sde::{attr_ids, AttributeId, SolarSystemId, TypeId};
+use eve_sde::{SolarSystemId, TypeId};
 use glam::DVec3;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{LazyLock, Mutex};
 
 type CharacterId = i64;
-type ItemId = i64;
 pub type ConstellationId = u32;
 
 #[derive(Debug, Clone)]
@@ -76,38 +73,6 @@ impl AbyssalWeatherKind {
             Self::Gamma => "Gamma",
         }
     }
-}
-
-#[derive(Debug, Clone)]
-pub struct AbyssalRoomRecord {
-    pub room_index: u8,
-    pub dungeon_id: u32,
-    pub dungeon_name: String,
-    pub npc_ball_ids: Vec<i64>,
-    pub cache_item_id: ItemId,
-    pub cleared: bool,
-}
-
-#[derive(Debug, Clone)]
-pub struct AbyssalPocketSession {
-    pub pocket_id: i64,
-    pub character_id: CharacterId,
-    pub ship_id: ItemId,
-    pub origin_solar_system_id: SolarSystemId,
-    pub abyssal_solar_system_id: SolarSystemId,
-    pub filament_type_id: TypeId,
-    pub tier: u8,
-    pub weather: AbyssalWeatherKind,
-    pub weather_penalty_pct: f64,
-    pub weather_bonus_pct: f64,
-    pub npc_difficulty_mult: f64,
-    pub current_room: u8,
-    pub rooms: [AbyssalRoomRecord; 3],
-    pub started_at_sec: u64,
-    pub collapse_at_sec: u64,
-    pub saved_ship_attrs: HashMap<AttributeId, f64>,
-    pub completed: bool,
-    pub collapsed_destroyed: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -173,7 +138,6 @@ pub struct PveSpecialSitesRegistry {
     pub initialized: bool,
     pub balls_spawned: bool,
     pub incursions: HashMap<ConstellationId, IncursionTaleRecord>,
-    pub abyssal_pockets: HashMap<CharacterId, AbyssalPocketSession>,
     pub homefront_sites: HashMap<SolarSystemId, Vec<HomefrontSiteRecord>>,
     pub roaming_storms: Vec<RoamingStormRecord>,
     pub drifter_hives: HashMap<SolarSystemId, DrifterHiveRecord>,
@@ -221,10 +185,6 @@ fn make_site_npc_ball(id: i64, type_id: u32, position: DVec3) -> Ball {
 fn next_spec_seq(reg: &mut PveSpecialSitesRegistry) -> i64 {
     reg.next_seq += 1;
     reg.next_seq
-}
-
-fn spec_now_sec(reg: &PveSpecialSitesRegistry) -> u64 {
-    if reg.sim_clock_sec > 0 { reg.sim_clock_sec } else { 1_775_000_000 }
 }
 
 pub fn advance_pve_special_clock(ctx: &ServerContext, delta_sec: u64) {
@@ -454,7 +414,6 @@ fn compute_storm_footprint(
     (core, periphery)
 }
 
-// parity: feat:pve.abyssal-tiers, feat:pve.abyssal-weather
 pub fn classify_abyssal_filament(type_id: TypeId) -> Option<(u8, AbyssalWeatherKind)> {
     match type_id {
         56131 => Some((0, AbyssalWeatherKind::Electrical)),
@@ -494,83 +453,6 @@ pub fn classify_abyssal_filament(type_id: TypeId) -> Option<(u8, AbyssalWeatherK
         56143 => Some((6, AbyssalWeatherKind::Gamma)),
         _ => None,
     }
-}
-
-// parity: feat:pve.abyssal-weather
-fn apply_abyssal_weather_dogma_modifiers(
-    ctx: &ServerContext,
-    ship_id: ItemId,
-    weather: AbyssalWeatherKind,
-    penalty_pct: f64,
-    bonus_pct: f64,
-) -> HashMap<AttributeId, f64> {
-    let mut saved = HashMap::new();
-    let pen_mult = 1.0 + (penalty_pct / 100.0);
-    let range_pen_mult = (1.0 - (penalty_pct / 100.0)).max(0.2);
-    let bonus_mult = 1.0 + (bonus_pct / 100.0);
-
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ship) = snap.items.get_mut(&ship_id) {
-            let sde_defaults = ctx
-                .sde
-                .types
-                .get(&ship.type_id)
-                .map(|t| t.default_attributes.clone())
-                .unwrap_or_default();
-            let get_base = |attr: AttributeId, fallback: f64, dyn_map: &HashMap<AttributeId, f64>| {
-                dyn_map.get(&attr).copied().or_else(|| sde_defaults.get(&attr).copied()).unwrap_or(fallback)
-            };
-
-            let mod_attrs: Vec<(AttributeId, f64, f64)> = match weather {
-                AbyssalWeatherKind::Electrical => vec![
-                    (attr_ids::SHIELD_EM_DAMAGE_RESONANCE, 1.0, pen_mult),
-                    (attr_ids::ARMOR_EM_DAMAGE_RESONANCE, 0.5, pen_mult),
-                    (attr_ids::RECHARGE_RATE, 250_000.0, 0.5),
-                ],
-                AbyssalWeatherKind::Dark => vec![
-                    (attr_ids::MAX_RANGE, 15_000.0, range_pen_mult),
-                    (attr_ids::FALLOFF, 10_000.0, range_pen_mult),
-                    (attr_ids::MAX_VELOCITY, 300.0, bonus_mult),
-                ],
-                AbyssalWeatherKind::Exotic => vec![
-                    (attr_ids::SHIELD_KINETIC_DAMAGE_RESONANCE, 0.6, pen_mult),
-                    (attr_ids::ARMOR_KINETIC_DAMAGE_RESONANCE, 0.75, pen_mult),
-                    (attr_ids::SCAN_RESOLUTION, 250.0, bonus_mult),
-                ],
-                AbyssalWeatherKind::Firestorm => vec![
-                    (attr_ids::SHIELD_THERMAL_DAMAGE_RESONANCE, 0.8, pen_mult),
-                    (attr_ids::ARMOR_THERMAL_DAMAGE_RESONANCE, 0.65, pen_mult),
-                    (attr_ids::ARMOR_HP, 1_500.0, bonus_mult),
-                ],
-                AbyssalWeatherKind::Gamma => vec![
-                    (attr_ids::SHIELD_EXPLOSIVE_DAMAGE_RESONANCE, 0.5, pen_mult),
-                    (attr_ids::ARMOR_EXPLOSIVE_DAMAGE_RESONANCE, 0.9, pen_mult),
-                    (attr_ids::SHIELD_CAPACITY, 1_500.0, bonus_mult),
-                ],
-            };
-
-            for (attr_id, fallback, factor) in mod_attrs {
-                let old_val = get_base(attr_id, fallback, &ship.dynamic_attributes);
-                saved.insert(attr_id, old_val);
-                ship.dynamic_attributes.insert(attr_id, old_val * factor);
-            }
-        }
-    });
-    saved
-}
-
-fn restore_abyssal_weather_dogma_modifiers(
-    ctx: &ServerContext,
-    ship_id: ItemId,
-    saved: &HashMap<AttributeId, f64>,
-) {
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ship) = snap.items.get_mut(&ship_id) {
-            for (&attr_id, &orig_val) in saved {
-                ship.dynamic_attributes.insert(attr_id, orig_val);
-            }
-        }
-    });
 }
 
 pub async fn ensure_special_sites_spawned(ctx: &ServerContext) {
@@ -757,7 +639,6 @@ pub async fn handle_pve_special_sites(
         "incursion"
             | "incursionSvc"
             | "taleMgr"
-            | "abyssal_content_manager"
             | "dungeonInstanceCacheMgr"
             | "map"
             | "solarsystemInterferenceMgr"
@@ -941,278 +822,6 @@ pub async fn handle_pve_special_sites(
                 ("state", PyRep::String(new_state)),
                 ("mothershipSpawned", PyRep::Bool(mothership_unlocked)),
                 ("incursionEnded", PyRep::Bool(incursion_ended)),
-            ])))
-        }
-
-        // parity: feat:pve.abyssal-pocket, feat:pve.abyssal-weather, feat:pve.abyssal-tiers
-        ("abyssal_content_manager", "ActivateAbyssalKey")
-        | ("abyssal_content_manager", "AbyssalEntranceDeployment")
-        | ("abyssal_content_manager", "AbyssalEntranceGateActivation") => {
-            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            if session.station_id.is_some() || session.structure_id.is_some() {
-                return Some(Err(rpc_err("ShipDocked", "Cannot activate Abyssal filament while docked")));
-            }
-            let origin_sys = session.solar_system_id.unwrap_or(30_000_142);
-            let ship_id = session.ship_id.unwrap_or(100_000_002);
-            let filament_arg = args.first().and_then(|a| a.as_i64()).unwrap_or(47_765);
-
-            let resolved_filament = ctx.db.try_with_mut_snapshot(|snap| {
-                let found_item_id = snap.items.values()
-                    .find(|i| i.owner_id == char_id && (i.item_id == filament_arg || i.type_id as i64 == filament_arg) && i.quantity >= 1)
-                    .map(|i| (i.item_id, i.type_id));
-                let Some((iid, tid)) = found_item_id else {
-                    return Err(rpc_err("FilamentNotFound", format!("Abyssal filament {filament_arg} not found in character inventory")));
-                };
-                let Some((tier, weather)) = classify_abyssal_filament(tid) else {
-                    return Err(rpc_err("InvalidAbyssalFilament", format!("Type {tid} is not a valid T0-T6 Abyssal filament")));
-                };
-                let origin_sec = ctx.sde.solar_systems.get(&origin_sys).map(|s| s.security_status).unwrap_or(0.9);
-                // High-sec Abyssal filament tier restrictions (`feat:crimewatch.abyssal-suspect-flag-tier`):
-                if tier >= 4 && origin_sec >= 0.75 {
-                    return Err(rpc_err("FilamentDisallowedInHighSec", "Activating high-tier (T4-T6) Abyssal filaments is blocked in 0.8 - 1.0 high-security systems"));
-                }
-                if let Some(item) = snap.items.get_mut(&iid) {
-                    if item.quantity > 1 { item.quantity -= 1; item.version += 1; } else { snap.items.remove(&iid); }
-                }
-                Ok((tid, tier, weather))
-            });
-            let (filament_type_id, tier, weather) = match resolved_filament { Ok(v) => v, Err(e) => return Some(Err(e)) };
-
-            let penalty_pct = match tier { 0 | 1 => 30.0, 2 | 3 => 50.0, _ => 70.0 };
-            let bonus_pct = 50.0;
-            let diff_mult = 1.0 + (tier as f64) * 1.25;
-            let saved_attrs = apply_abyssal_weather_dogma_modifiers(ctx, ship_id, weather, penalty_pct, bonus_pct);
-
-            let abyssal_sys_id: SolarSystemId = 32_000_001;
-            let sys_handle = ctx.systems.get_or_spawn(abyssal_sys_id);
-
-            let (pocket_id, started_ts, collapse_ts, room1_npcs) = with_pve_special_reg(ctx, |reg| {
-                let pid = 600_000 + next_spec_seq(reg);
-                let now = spec_now_sec(reg);
-                let collapse = now + 1_200;
-                let mut rooms_vec = Vec::with_capacity(3);
-                for (r_idx, did, r_name) in [(1_u8, 5810_u32, "Canyon"), (2, 6047, "Rise"), (3, 6048, "Forest Opening")] {
-                    let npc_count = (2 + (tier as usize / 2)).clamp(2, 5);
-                    let npc_ids: Vec<i64> = (0..npc_count).map(|n| pid * 100 + (r_idx as i64) * 10 + (n as i64) + 1).collect();
-                    rooms_vec.push(AbyssalRoomRecord {
-                        room_index: r_idx, dungeon_id: did, dungeon_name: r_name.into(),
-                        npc_ball_ids: npc_ids, cache_item_id: 1_896_000_000 + pid * 10 + (r_idx as i64), cleared: false,
-                    });
-                }
-                let rooms: [AbyssalRoomRecord; 3] = rooms_vec.try_into().unwrap();
-                let r1_npcs = rooms[0].npc_ball_ids.clone();
-                reg.abyssal_pockets.insert(
-                    char_id,
-                    AbyssalPocketSession {
-                        pocket_id: pid, character_id: char_id, ship_id,
-                        origin_solar_system_id: origin_sys, abyssal_solar_system_id: abyssal_sys_id,
-                        filament_type_id, tier, weather,
-                        weather_penalty_pct: penalty_pct, weather_bonus_pct: bonus_pct,
-                        npc_difficulty_mult: diff_mult, current_room: 1, rooms,
-                        started_at_sec: now, collapse_at_sec: collapse,
-                        saved_ship_attrs: saved_attrs, completed: false, collapsed_destroyed: false,
-                    },
-                );
-                (pid, now, collapse, r1_npcs)
-            });
-
-            for (idx, &bid) in room1_npcs.iter().enumerate() {
-                let _ = sys_handle.spawn_ball(make_site_npc_ball(bid, 47_956, DVec3::new((idx as f64) * 3_000.0, 5_000.0, 0.0))).await;
-            }
-            ctx.db.with_mut_snapshot(|snap| {
-                if let Some(ch) = snap.characters.get_mut(&char_id) { ch.solar_system_id = abyssal_sys_id; }
-            });
-            session.solar_system_id = Some(abyssal_sys_id);
-
-            Some(Ok(PyRep::keyval([
-                ("pocketID", PyRep::Integer(pocket_id)),
-                ("solarSystemID", PyRep::Integer(abyssal_sys_id as i64)),
-                ("originSolarSystemID", PyRep::Integer(origin_sys as i64)),
-                ("filamentTypeID", PyRep::Integer(filament_type_id as i64)),
-                ("tier", PyRep::Integer(tier as i64)),
-                ("suspectFlagOnExit", PyRep::Bool(tier >= 4)),
-                ("weather", PyRep::String(weather.as_str().into())),
-                ("weatherPenaltyPct", PyRep::Real(penalty_pct)),
-                ("weatherBonusPct", PyRep::Real(bonus_pct)),
-                ("npcDifficultyMultiplier", PyRep::Real(diff_mult)),
-                ("currentRoom", PyRep::Integer(1)),
-                ("totalRooms", PyRep::Integer(3)),
-                ("startedAt", PyRep::Integer(started_ts as i64)),
-                ("collapseAt", PyRep::Integer(collapse_ts as i64)),
-                ("timerSeconds", PyRep::Integer(1_200)),
-                ("npcBallIDs", PyRep::List(room1_npcs.iter().map(|&id| PyRep::Integer(id)).collect())),
-            ])))
-        }
-
-        // parity: feat:pve.abyssal-gates, feat:pve.abyssal-pocket
-        ("abyssal_content_manager", "AbyssalGateActivation")
-        | ("abyssal_content_manager", "ActivateAbyssalAccelerationGate") => {
-            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let pre_check = with_pve_special_reg(ctx, |reg| {
-                let now = spec_now_sec(reg);
-                let Some(pocket) = reg.abyssal_pockets.get_mut(&char_id) else {
-                    return Err(rpc_err("NotInAbyssalPocket", "Character has no active Abyssal pocket"));
-                };
-                if now >= pocket.collapse_at_sec {
-                    pocket.collapsed_destroyed = true;
-                    return Err(rpc_err("AbyssalPocketCollapsed", "Abyssal pocket 20-minute timer expired; ship and capsule destroyed"));
-                }
-                if pocket.current_room >= 3 {
-                    return Err(rpc_err("AlreadyInFinalAbyssalRoom", "Already in Room 3; use AbyssalEndGateActivation to exit"));
-                }
-                let r_idx = (pocket.current_room.saturating_sub(1) as usize).min(2);
-                Ok((pocket.abyssal_solar_system_id, r_idx, pocket.rooms[r_idx].npc_ball_ids.clone()))
-            });
-            let (abyssal_sys_id, r_idx, room_npcs) = match pre_check { Ok(v) => v, Err(e) => return Some(Err(e)) };
-
-            let sys_handle = ctx.systems.get_or_spawn(abyssal_sys_id);
-            let mut alive_npcs = 0usize;
-            for &bid in &room_npcs {
-                if matches!(sys_handle.get_ball_snapshot(bid).await, Ok(Some(_))) {
-                    alive_npcs += 1;
-                }
-            }
-            if alive_npcs > 0 {
-                return Some(Err(rpc_err(
-                    "AbyssalGateLocked",
-                    format!("Cannot activate Triglavian Transfer Conduit while {alive_npcs} room hostiles remain"),
-                )));
-            }
-
-            let res = with_pve_special_reg(ctx, |reg| {
-                let Some(pocket) = reg.abyssal_pockets.get_mut(&char_id) else {
-                    return Err(rpc_err("NotInAbyssalPocket", "Character has no active Abyssal pocket"));
-                };
-                pocket.rooms[r_idx].cleared = true;
-                pocket.current_room += 1;
-                let next_room_num = pocket.current_room;
-                let next_idx = (next_room_num - 1) as usize;
-                let next_room_name = pocket.rooms[next_idx].dungeon_name.clone();
-                let next_room_did = pocket.rooms[next_idx].dungeon_id;
-                let next_room_npcs = pocket.rooms[next_idx].npc_ball_ids.clone();
-                Ok((next_room_num, next_room_did, next_room_name, next_room_npcs))
-            });
-            let (next_room_num, next_room_did, next_room_name, next_room_npcs) = match res { Ok(v) => v, Err(e) => return Some(Err(e)) };
-
-            for (idx, &bid) in next_room_npcs.iter().enumerate() {
-                let _ = sys_handle.spawn_ball(make_site_npc_ball(bid, 47_956, DVec3::new((idx as f64) * 3_000.0, 5_000.0, 0.0))).await;
-            }
-
-            session.push_notification("AbyssalRoomChanged", vec![PyRep::Integer(next_room_num as i64), PyRep::Integer(next_room_did as i64)]);
-
-            Some(Ok(PyRep::keyval([
-                ("currentRoom", PyRep::Integer(next_room_num as i64)),
-                ("dungeonID", PyRep::Integer(next_room_did as i64)),
-                ("dungeonName", PyRep::String(next_room_name)),
-                ("npcBallIDs", PyRep::List(next_room_npcs.iter().map(|&id| PyRep::Integer(id)).collect())),
-            ])))
-        }
-
-        // parity: feat:pve.abyssal-gates, feat:pve.abyssal-pocket, feat:pve.abyssal-tiers
-        ("abyssal_content_manager", "AbyssalEndGateActivation")
-        | ("abyssal_content_manager", "ActivateAbyssalEndGate")
-        | ("abyssal_content_manager", "AbyssalContentFinished") => {
-            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let pre_exit = with_pve_special_reg(ctx, |reg| {
-                let now = spec_now_sec(reg);
-                let Some(pocket) = reg.abyssal_pockets.get_mut(&char_id) else {
-                    return Err(rpc_err("NotInAbyssalPocket", "Character has no active Abyssal pocket"));
-                };
-                if now >= pocket.collapse_at_sec {
-                    pocket.collapsed_destroyed = true;
-                    return Err(rpc_err("AbyssalPocketCollapsed", "Abyssal pocket 20-minute timer expired; ship and capsule destroyed"));
-                }
-                if pocket.current_room < 3 {
-                    return Err(rpc_err("NotInFinalAbyssalRoom", format!("Origin Conduit only exists in Room 3 (currently in Room {})", pocket.current_room)));
-                }
-                Ok((pocket.abyssal_solar_system_id, pocket.rooms[2].npc_ball_ids.clone()))
-            });
-            let (abyssal_sys_id, room3_npcs) = match pre_exit { Ok(v) => v, Err(e) => return Some(Err(e)) };
-
-            let sys_handle = ctx.systems.get_or_spawn(abyssal_sys_id);
-            let mut alive_npcs = 0usize;
-            for &bid in &room3_npcs {
-                if matches!(sys_handle.get_ball_snapshot(bid).await, Ok(Some(_))) {
-                    alive_npcs += 1;
-                }
-            }
-            if alive_npcs > 0 {
-                return Some(Err(rpc_err(
-                    "AbyssalGateLocked",
-                    format!("Cannot activate Origin Conduit while {alive_npcs} Room 3 hostiles remain"),
-                )));
-            }
-
-            let exit_res = with_pve_special_reg(ctx, |reg| {
-                let iid = 1_897_000_000 + next_spec_seq(reg);
-                let Some(pocket) = reg.abyssal_pockets.get_mut(&char_id) else {
-                    return Err(rpc_err("NotInAbyssalPocket", "Character has no active Abyssal pocket"));
-                };
-                pocket.rooms[2].cleared = true;
-                pocket.completed = true;
-                let qty = ((pocket.tier as i64) + 1) * 15;
-                Ok((pocket.origin_solar_system_id, pocket.ship_id, pocket.tier, pocket.saved_ship_attrs.clone(), iid, qty))
-            });
-            let (origin_sys, ship_id, tier, saved_attrs, loot_item_id, survey_qty) = match exit_res { Ok(v) => v, Err(e) => return Some(Err(e)) };
-
-            restore_abyssal_weather_dogma_modifiers(ctx, ship_id, &saved_attrs);
-
-            let ret_sec = ctx.sde.solar_systems.get(&origin_sys).map(|s| s.security_status).unwrap_or(0.5);
-            if tier >= 4 && ret_sec >= 0.45 {
-                ctx.crimewatch.write().unwrap().trigger_suspect_flag(char_id, ctx.now_unix());
-            }
-            ctx.db.with_mut_snapshot(|snap| {
-                if let Some(ch) = snap.characters.get_mut(&char_id) { ch.solar_system_id = origin_sys; }
-                snap.items.insert(loot_item_id, InventoryItemRecord {
-                    item_id: loot_item_id, type_id: 48_121, owner_id: char_id, location_id: ship_id,
-                    flag: InventoryFlag::Cargo, quantity: survey_qty as i32, singleton: false, ..Default::default()
-                });
-            });
-            session.solar_system_id = Some(origin_sys);
-
-            Some(Ok(PyRep::keyval([
-                ("completed", PyRep::Bool(true)),
-                ("returnedSolarSystemID", PyRep::Integer(origin_sys as i64)),
-                ("tier", PyRep::Integer(tier as i64)),
-                ("rewardLootItemID", PyRep::Integer(loot_item_id)),
-                ("rewardTypeID", PyRep::Integer(48_121)),
-                ("rewardQuantity", PyRep::Integer(survey_qty)),
-            ])))
-        }
-
-        // parity: feat:pve.abyssal-pocket
-        ("abyssal_content_manager", "AbyssalContentExpiration")
-        | ("abyssal_content_manager", "GetAbyssalLocationInfo") => {
-            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let exp_res = with_pve_special_reg(ctx, |reg| {
-                let now = spec_now_sec(reg);
-                let Some(pocket) = reg.abyssal_pockets.get_mut(&char_id) else {
-                    return Err(rpc_err("NotInAbyssalPocket", "Character has no active Abyssal pocket"));
-                };
-                if method == "AbyssalContentExpiration" || now >= pocket.collapse_at_sec {
-                    pocket.collapsed_destroyed = true;
-                }
-                let rem = pocket.collapse_at_sec.saturating_sub(now);
-                Ok((pocket.collapsed_destroyed, pocket.ship_id, pocket.origin_solar_system_id, rem, pocket.current_room, pocket.weather.as_str(), pocket.tier))
-            });
-            let (collapsed, ship_id, origin_sys, rem_sec, current_room, weather_str, tier) = match exp_res { Ok(v) => v, Err(e) => return Some(Err(e)) };
-
-            if collapsed {
-                let sys_handle = ctx.systems.get_or_spawn(32_000_001);
-                let _ = sys_handle.remove_ball(ship_id).await;
-                ctx.db.with_mut_snapshot(|snap| {
-                    if let Some(ch) = snap.characters.get_mut(&char_id) { ch.solar_system_id = origin_sys; }
-                });
-                session.solar_system_id = Some(origin_sys);
-            }
-
-            Some(Ok(PyRep::keyval([
-                ("currentRoom", PyRep::Integer(current_room as i64)),
-                ("tier", PyRep::Integer(tier as i64)),
-                ("weather", PyRep::String(weather_str.into())),
-                ("remainingSeconds", PyRep::Integer(rem_sec as i64)),
-                ("shipDestroyed", PyRep::Bool(collapsed)),
-                ("podDestroyed", PyRep::Bool(collapsed)),
             ])))
         }
 

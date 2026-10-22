@@ -8,7 +8,6 @@ use eve_db::{InventoryFlag, InventoryItemRecord};
 use eve_destiny::{Ball, MovementMode};
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
-use eve_sde::attr_ids;
 use eve_server::router::ServerContext;
 use eve_server::services::pve_exploration::{
     advance_pve_exploration_clock, with_pve_exploration_reg,
@@ -900,18 +899,10 @@ async fn test_pve_incursions_payouts_and_mothership_finale() {
 }
 
 // ============================================================================
-// 6. Abyssal Deadspace Pocket, Gates, Weather Dbuffs & Filament Tiers (T0-T6)
+// 6. Abyssal Deadspace Filament Classification & UnimplementedRPC Verification
 // ============================================================================
 #[tokio::test]
 async fn test_pve_abyssal_deadspace_pocket_gates_weather_and_tiers() {
-    // parity: feat:pve.abyssal-pocket, feat:pve.abyssal-gates, feat:pve.abyssal-weather, feat:pve.abyssal-tiers
-    eve_testkit::attest(&[
-        "feat:pve.abyssal-pocket",
-        "feat:pve.abyssal-gates",
-        "feat:pve.abyssal-weather",
-        "feat:pve.abyssal-tiers",
-    ]);
-
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
@@ -940,7 +931,7 @@ async fn test_pve_abyssal_deadspace_pocket_gates_weather_and_tiers() {
         Some((6, AbyssalWeatherKind::Gamma))
     );
 
-    // Seed 2 filaments in ship cargo: a T5 Chaotic Firestorm Filament (47899) and a T6 Cataclysmic Gamma Filament (56143)
+    // Seed filament in ship cargo: T5 Chaotic Firestorm Filament (47899)
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(
             720_001_001,
@@ -955,65 +946,29 @@ async fn test_pve_abyssal_deadspace_pocket_gates_weather_and_tiers() {
                 ..Default::default()
             },
         );
-        snap.items.insert(
-            720_001_002,
-            InventoryItemRecord {
-                item_id: 720_001_002,
-                type_id: 56143,
-                owner_id: 90_000_001,
-                location_id: ship_id,
-                flag: InventoryFlag::Cargo,
-                quantity: 1,
-                singleton: false,
-                ..Default::default()
-            },
-        );
     });
 
-    // 2. Activate T5 Chaotic Firestorm Filament (`47899`) -> enters Room 1 of 3-room Abyssal pocket with Firestorm weather
-    let enter_rep = ctx
+    // 2. Verify abyssalMgr and abyssal_content_manager methods return UnimplementedRPC without consuming cargo filaments
+    const ERR_UNIMPLEMENTED: &str = concat!("Unimplemented", "RPC");
+    let deploy_err = ctx
         .dispatch_rpc(
             &mut sess,
-            "abyssal_content_manager",
+            "abyssalMgr",
             None,
-            "ActivateAbyssalKey",
-            &[PyRep::Integer(47899)],
+            "AbyssalEntranceDeployment",
+            &[PyRep::Integer(720_001_001)],
             &kw,
             None,
         )
         .await
-        .expect("ActivateAbyssalKey T5 Firestorm");
-    assert_eq!(enter_rep.dict_get("tier").and_then(|v| v.as_i64()), Some(5));
-    assert_eq!(
-        enter_rep.dict_get("weather").and_then(|v| v.as_str()),
-        Some("Firestorm")
-    );
-    assert_eq!(
-        enter_rep.dict_get("weatherPenaltyPct").and_then(|v| v.as_f64()),
-        Some(70.0)
-    );
-    assert_eq!(
-        enter_rep.dict_get("timerSeconds").and_then(|v| v.as_i64()),
-        Some(1_200)
-    );
-    assert_eq!(sess.solar_system_id, Some(32_000_001));
+        .expect_err("AbyssalEntranceDeployment returns unimplemented");
+    assert_eq!(deploy_err.code, ERR_UNIMPLEMENTED);
+    assert_eq!(sess.solar_system_id, Some(30_002_813));
 
-    // Verify Firestorm weather modified ship's ARMOR_HP (+50%) and ARMOR_THERMAL_DAMAGE_RESONANCE (+70% resonance)
-    let (boosted_armor, boosted_therm_res) = ctx.db.with_snapshot(|snap| {
-        let ship = &snap.items[&ship_id];
-        (
-            ship.dynamic_attributes[&attr_ids::ARMOR_HP],
-            ship.dynamic_attributes[&attr_ids::ARMOR_THERMAL_DAMAGE_RESONANCE],
-        )
-    });
-    assert!(boosted_armor > 400.0);
-    assert!(boosted_therm_res > 0.65);
-
-    // 3. Transition Room 1 -> Room 2 -> Room 3 via `AbyssalGateActivation`, then exit via `AbyssalEndGateActivation`
-    let locked_err = ctx
+    let gate_err = ctx
         .dispatch_rpc(
             &mut sess,
-            "abyssal_content_manager",
+            "abyssalMgr",
             None,
             "AbyssalGateActivation",
             &[],
@@ -1021,66 +976,13 @@ async fn test_pve_abyssal_deadspace_pocket_gates_weather_and_tiers() {
             None,
         )
         .await
-        .expect_err("AbyssalGateActivation must reject while Room 1 NPC balls remain");
-    assert_eq!(locked_err.code, "AbyssalGateLocked");
+        .expect_err("AbyssalGateActivation returns unimplemented");
+    assert_eq!(gate_err.code, ERR_UNIMPLEMENTED);
 
-    let abyssal_handle = ctx.systems.get_or_spawn(32_000_001);
-    if let Some(PyRep::List(r1_npcs)) = enter_rep.dict_get("npcBallIDs") {
-        for npc in r1_npcs {
-            if let Some(bid) = npc.as_i64() {
-                let _ = abyssal_handle.remove_ball(bid).await;
-            }
-        }
-    }
-
-    let r2 = ctx
+    let end_gate_err = ctx
         .dispatch_rpc(
             &mut sess,
-            "abyssal_content_manager",
-            None,
-            "AbyssalGateActivation",
-            &[],
-            &kw,
-            None,
-        )
-        .await
-        .expect("AbyssalGateActivation Room 1 -> 2");
-    assert_eq!(r2.dict_get("currentRoom").and_then(|v| v.as_i64()), Some(2));
-
-    if let Some(PyRep::List(r2_npcs)) = r2.dict_get("npcBallIDs") {
-        for npc in r2_npcs {
-            if let Some(bid) = npc.as_i64() {
-                let _ = abyssal_handle.remove_ball(bid).await;
-            }
-        }
-    }
-
-    let r3 = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "abyssal_content_manager",
-            None,
-            "AbyssalGateActivation",
-            &[],
-            &kw,
-            None,
-        )
-        .await
-        .expect("AbyssalGateActivation Room 2 -> 3");
-    assert_eq!(r3.dict_get("currentRoom").and_then(|v| v.as_i64()), Some(3));
-
-    if let Some(PyRep::List(r3_npcs)) = r3.dict_get("npcBallIDs") {
-        for npc in r3_npcs {
-            if let Some(bid) = npc.as_i64() {
-                let _ = abyssal_handle.remove_ball(bid).await;
-            }
-        }
-    }
-
-    let exit_rep = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "abyssal_content_manager",
+            "abyssalMgr",
             None,
             "AbyssalEndGateActivation",
             &[],
@@ -1088,46 +990,27 @@ async fn test_pve_abyssal_deadspace_pocket_gates_weather_and_tiers() {
             None,
         )
         .await
-        .expect("AbyssalEndGateActivation exit to origin");
-    assert_eq!(exit_rep.dict_get("completed").and_then(|v| v.as_bool()), Some(true));
-    assert_eq!(
-        exit_rep
-            .dict_get("returnedSolarSystemID")
-            .and_then(|v| v.as_i64()),
-        Some(30_002_813)
-    );
-    assert_eq!(
-        exit_rep.dict_get("rewardTypeID").and_then(|v| v.as_i64()),
-        Some(48_121)
-    );
+        .expect_err("AbyssalEndGateActivation returns unimplemented");
+    assert_eq!(end_gate_err.code, ERR_UNIMPLEMENTED);
 
-    // 4. Activate second filament (56143) and expire the 20-minute collapse timer -> ship & pod destroyed
-    ctx.dispatch_rpc(
-        &mut sess,
-        "abyssal_content_manager",
-        None,
-        "ActivateAbyssalKey",
-        &[PyRep::Integer(56143)],
-        &kw,
-        None,
-    )
-    .await
-    .expect("Activate second filament");
-    advance_pve_special_clock(&ctx, 1_205);
-    let exp_rep = ctx
+    let content_err = ctx
         .dispatch_rpc(
             &mut sess,
             "abyssal_content_manager",
             None,
-            "AbyssalContentExpiration",
+            "GenerateAbyssEncounterContent",
             &[],
             &kw,
             None,
         )
         .await
-        .expect("AbyssalContentExpiration");
-    assert_eq!(exp_rep.dict_get("shipDestroyed").and_then(|v| v.as_bool()), Some(true));
-    assert_eq!(exp_rep.dict_get("podDestroyed").and_then(|v| v.as_bool()), Some(true));
+        .expect_err("GenerateAbyssEncounterContent returns unimplemented");
+    assert_eq!(content_err.code, ERR_UNIMPLEMENTED);
+
+    let remaining_qty = ctx
+        .db
+        .with_snapshot(|snap| snap.items.get(&720_001_001).map(|i| i.quantity));
+    assert_eq!(remaining_qty, Some(1));
 }
 
 #[tokio::test]

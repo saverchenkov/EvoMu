@@ -298,7 +298,7 @@ async fn handle_random_jump_filament(
     };
 
     let old_handle = ctx.systems.get_or_spawn(old_sys);
-    let Some((_, mut current_ball)) = (match old_handle.get_ball_snapshot(ship_id).await {
+    let Some((cur_tick, mut current_ball)) = (match old_handle.get_ball_snapshot(ship_id).await {
         Ok(v) => v,
         Err(e) => {
             return Err(BridgeRpcError {
@@ -312,6 +312,21 @@ async fn handle_random_jump_filament(
             message: "Active ship ball is not in space".into(),
         });
     };
+    let now_unix = ctx.now_unix();
+    if let Some(active_timer) = crate::services::space_destiny::check_session_change_timer_active(
+        ctx,
+        char_id,
+        now_unix,
+        Some((old_sys, cur_tick)),
+    ) {
+        return Err(BridgeRpcError {
+            code: "SessionChangeInProgress".into(),
+            message: format!(
+                "Cannot activate jump filament while 10s session-change timer ({}) is active",
+                active_timer.reason
+            ),
+        });
+    }
     crate::services::tactical_modules::prepare_ship_for_wormhole_jump(
         ctx,
         &old_handle,
@@ -410,7 +425,18 @@ async fn handle_random_jump_filament(
     new_ball.speed_fraction = 0.0;
     new_ball.mode = MovementMode::Stop;
     let combat_state = ctx.build_ship_combat_state(char_id, ship_id, new_ball.type_id);
-    let _ = new_handle.spawn_ball_with_combat(new_ball, combat_state).await;
+    let dest_tick = new_handle
+        .spawn_ball_with_combat(new_ball, combat_state)
+        .await
+        .unwrap_or(0);
+    crate::services::space_destiny::record_session_change_timer(
+        ctx,
+        char_id,
+        now_unix,
+        dest_sys_id,
+        dest_tick,
+        "filamentJump",
+    );
 
     session.solar_system_id = Some(updated_ch.solar_system_id);
     session.constellation_id = Some(updated_ch.constellation_id);
