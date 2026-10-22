@@ -144,6 +144,13 @@ pub fn set_skyhook_hackable(ctx: &ServerContext, sys_id: u32, skyhook_id: i64, c
     }
 }
 
+/// Sets the reagent type and quantity for a Skyhook in the runtime state.
+pub fn set_skyhook_reagents(ctx: &ServerContext, skyhook_id: i64, reagent_type_id: u32, quantity: u64) {
+    with_sov_runtime(ctx, |rt| {
+        rt.skyhook_reagents.insert(skyhook_id, (reagent_type_id, quantity));
+    });
+}
+
 /// Records a successful hack on a Sovereignty Hub, temporarily disabling upgrades and emitting `OnSovHubHacked`.
 pub fn record_hub_hack(ctx: &ServerContext, sys_id: u32, hub_id: i64, disruption_seconds: u64) {
     let now = ctx.now_unix();
@@ -430,7 +437,7 @@ pub async fn handle(
                     .filter(|s| s.type_id == TYPE_ORBITAL_SKYHOOK && s.owner_corp_id == corp_id)
                     .map(|s| {
                         let reagents = read_sov_runtime(ctx, |rt| {
-                            rt.skyhook_reagents.get(&s.structure_id).copied().unwrap_or((TYPE_MAGMATIC_GAS, 100))
+                            rt.skyhook_reagents.get(&s.structure_id).copied().unwrap_or((0, 0))
                         });
                         PyRep::keyval([
                             ("skyhookID", PyRep::Integer(s.structure_id)),

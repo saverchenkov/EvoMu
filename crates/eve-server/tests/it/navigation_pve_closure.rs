@@ -510,8 +510,8 @@ async fn test_air_npe_state_persistence_and_career_goals() {
 
 #[tokio::test]
 async fn test_crates_claim_loot_and_milestones_one_time_rewards() {
-    // parity: feat:pve.crates, feat:pve.milestones
-    eve_testkit::attest(&["feat:pve.crates", "feat:pve.milestones"]);
+    // parity: feat:pve.crates
+    eve_testkit::attest(&["feat:pve.crates"]);
 
     let ctx = ServerContext::new();
     let char_id = 90_000_001;
@@ -596,44 +596,16 @@ async fn test_crates_claim_loot_and_milestones_one_time_rewards() {
         "CrateNotOpened" | "SkillBundleAlreadyClaimed"
     ));
 
-    // 4. Milestone Logon & Claim
-    ctx.db.with_mut_snapshot(|snap| {
-        let mut ext = eve_server::services::cosmetics_ui_ops::load_cosmetics_ui_state(snap);
-        ext.completed_milestones.entry(char_id).or_default().push(1);
-        eve_server::services::cosmetics_ui_ops::save_cosmetics_ui_state(snap, &ext);
-    });
-
-    let logon_res = rpc(&ctx, &mut sess, "milestoneMgr", "ProcessCharacterLogon", &[])
+    // 4. Milestone Logon & Claim returns UnimplementedRPC
+    let logon_err = rpc(&ctx, &mut sess, "milestoneMgr", "ProcessCharacterLogon", &[])
         .await
-        .expect("ProcessCharacterLogon");
-    assert_eq!(logon_res.dict_get("characterID").and_then(|v| v.as_i64()), Some(char_id));
+        .expect_err("ProcessCharacterLogon must return UnimplementedRPC");
+    assert_eq!(logon_err.code, "UnimplementedRPC");
 
-    let milestone_res = rpc(
-        &ctx,
-        &mut sess,
-        "milestoneMgr",
-        "ClaimRewards",
-        &[PyRep::Integer(1)],
-    )
-    .await
-    .expect("ClaimRewards milestone 1");
-    assert_eq!(milestone_res.dict_get("milestoneID").and_then(|v| v.as_i64()), Some(1));
-    assert_eq!(
-        milestone_res.dict_get("spRewarded").and_then(|v| v.as_f64()),
-        Some(10_000.0)
-    );
-
-    // Second claim of milestone 1 must fail
-    let repeat_milestone = rpc(
-        &ctx,
-        &mut sess,
-        "milestoneMgr",
-        "ClaimRewards",
-        &[PyRep::Integer(1)],
-    )
-    .await
-    .expect_err("Milestone must only be claimable once");
-    assert_eq!(repeat_milestone.code, "MilestoneAlreadyClaimed");
+    let claim_err = rpc(&ctx, &mut sess, "milestoneMgr", "ClaimRewards", &[PyRep::Integer(1)])
+        .await
+        .expect_err("ClaimRewards must return UnimplementedRPC");
+    assert_eq!(claim_err.code, "UnimplementedRPC");
 }
 
 #[tokio::test]

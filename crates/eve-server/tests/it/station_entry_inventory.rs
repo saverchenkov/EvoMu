@@ -965,29 +965,31 @@ async fn native_client_undock_and_space_entry_delivers_set_state_and_destiny_upd
     write_framed_pyrep(&mut s, &goto_pkt.to_pyrep())
         .await
         .unwrap();
-    let p1 =
-        MachoPacket::from_pyrep(&read_framed_pyrep(&mut s).await.unwrap().unwrap()).unwrap();
-    let p2 =
-        MachoPacket::from_pyrep(&read_framed_pyrep(&mut s).await.unwrap().unwrap()).unwrap();
-    let (goto_rsp, goto_notif) = if p1.packet_type == MachoPacketType::CallRsp {
-        (p1, p2)
-    } else {
-        (p2, p1)
-    };
-    assert_eq!(goto_rsp.packet_type, MachoPacketType::CallRsp);
-    assert_eq!(goto_notif.packet_type, MachoPacketType::Notification);
-    let (goto_bcast, goto_args) = goto_notif
-        .extract_broadcast_notification()
-        .expect("GotoDirection DoDestinyUpdate notification");
-    assert_eq!(goto_bcast, "DoDestinyUpdate");
-    let PyRep::List(goto_updates) = &goto_args[0] else {
-        panic!("DoDestinyUpdate list");
-    };
-    let has_goto = goto_updates.iter().any(|u| {
-        let PyRep::Tuple(sc) = u else { return false };
-        let PyRep::Tuple(fa) = &sc[1] else { return false };
-        fa[0].as_str() == Some("GotoDirection")
-    });
+    let mut goto_rsp = None;
+    let mut has_goto = false;
+    for _ in 0..15 {
+        if let Ok(Ok(Some(rep))) = tokio::time::timeout(std::time::Duration::from_millis(500), read_framed_pyrep(&mut s)).await {
+            if let Some(pkt) = MachoPacket::from_pyrep(&rep) {
+                if pkt.packet_type == MachoPacketType::CallRsp {
+                    goto_rsp = Some(pkt);
+                } else if pkt.packet_type == MachoPacketType::Notification {
+                    if let Some((bcast, args)) = pkt.extract_broadcast_notification() {
+                        if bcast == "DoDestinyUpdate" {
+                            if let Some(PyRep::List(updates)) = args.get(0) {
+                                if updates.iter().any(|u| matches!(u, PyRep::Tuple(sc) if matches!(&sc[1], PyRep::Tuple(fa) if fa[0].as_str() == Some("GotoDirection")))) {
+                                    has_goto = true;
+                                }
+                            }
+                        }
+                    }
+                }
+                if goto_rsp.is_some() && has_goto {
+                    break;
+                }
+            }
+        }
+    }
+    assert!(goto_rsp.is_some(), "CmdGotoDirection must receive CallRsp");
     assert!(
         has_goto,
         "CmdGotoDirection must emit GotoDirection in DoDestinyUpdate"

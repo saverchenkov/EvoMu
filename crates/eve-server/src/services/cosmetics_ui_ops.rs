@@ -408,9 +408,14 @@ pub async fn handle(ctx: &ServerContext, session: &mut SessionState, service: &s
         ("crateService", "ClaimLootFromCrateStack") => Some(handle_crate_claim_loot_stack(ctx, session, args)),
         ("crateService", "GetCrateLocation") => Some(handle_crate_get_location(ctx, session, args)),
         ("crateService", "PeekInsideFixedCrate") => Some(handle_crate_peek(ctx, session, args)),
-        // parity: feat:pve.milestones
-        ("milestoneMgr", "ClaimRewards") => Some(handle_milestone_claim_rewards(ctx, session, args)),
-        ("milestoneMgr", "ProcessCharacterLogon") => Some(handle_milestone_process_logon(ctx, session)),
+        ("milestoneMgr", "ClaimRewards") => Some(Err(BridgeRpcError {
+            code: "UnimplementedRPC".into(),
+            message: "milestoneMgr.ClaimRewards is not implemented".into(),
+        })),
+        ("milestoneMgr", "ProcessCharacterLogon") => Some(Err(BridgeRpcError {
+            code: "UnimplementedRPC".into(),
+            message: "milestoneMgr.ProcessCharacterLogon is not implemented".into(),
+        })),
         // parity: feat:pve.login-campaign
         ("loginCampaignManager", "get_client_campaign_state") => Some(handle_login_campaign_get_state(ctx, session)),
         ("loginCampaignManager", "claim_reward") => Some(handle_login_campaign_claim_reward(ctx, session)),
@@ -892,6 +897,7 @@ fn handle_crate_claim_skill_bundle(ctx: &ServerContext, session: &mut SessionSta
     })
 }
 
+#[allow(dead_code)]
 fn handle_milestone_process_logon(ctx: &ServerContext, session: &mut SessionState) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
     ctx.db.with_snapshot(|snap| {
@@ -907,6 +913,7 @@ fn handle_milestone_process_logon(ctx: &ServerContext, session: &mut SessionStat
     })
 }
 
+#[allow(dead_code)]
 fn handle_milestone_claim_rewards(ctx: &ServerContext, session: &mut SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
     let milestone_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);

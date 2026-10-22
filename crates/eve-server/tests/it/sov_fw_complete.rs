@@ -787,6 +787,7 @@ async fn skyhook_acquisition_theft_and_reagent_loss() {
             },
         );
     });
+    sov_services::set_skyhook_reagents(&ctx, skyhook_id, sov_services::TYPE_MAGMATIC_GAS, 100);
 
     let mut sess = SessionState::new(42_004);
     select(&ctx, &mut sess, "demo", "demo-secret", PILOT).await;

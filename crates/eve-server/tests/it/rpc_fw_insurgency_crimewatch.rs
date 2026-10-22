@@ -154,7 +154,6 @@ async fn test_fw_insurgency_and_security_mgr() {
 // parity: rpc:killRightMgr.ActivateKillRight
 // parity: rpc:killRightMgr.BuyKillRight
 // parity: rpc:hackingMgr.QuitHackingAttempt
-// parity: rpc:hackingMgr.UsedUtilityElementOnVirus
 // parity: rpc:solarsystemInterferenceMgr.GetAllInterferenceBands
 async fn test_killrights_hacking_and_interference() {
     let ctx = ServerContext::new();
@@ -319,25 +318,8 @@ async fn test_killrights_hacking_and_interference() {
         );
     });
 
-    // 2a. hackingMgr.UsedUtilityElementOnVirus
-    let util_rep = ctx
-        .dispatch_rpc(
-            &mut sess1,
-            "hackingMgr",
-            None,
-            "UsedUtilityElementOnVirus",
-            &[PyRep::Integer(container_id), PyRep::Integer(0)],
-            &kw,
-            None,
-        )
-        .await
-        .expect("UsedUtilityElementOnVirus");
-    assert!(is_keyval(&util_rep));
-    assert_eq!(util_rep.dict_get("playerCoherence"), Some(&PyRep::Integer(80))); // 60 + 20
-    assert_eq!(util_rep.dict_get("playerStrength"), Some(&PyRep::Integer(30)));
-
-    // Second use on slot 0 must fail with UtilitySlotEmpty
-    let empty_slot_err = ctx
+    // 2a. hackingMgr.UsedUtilityElementOnVirus returns UnimplementedRPC
+    let util_err = ctx
         .dispatch_rpc(
             &mut sess1,
             "hackingMgr",
@@ -349,7 +331,7 @@ async fn test_killrights_hacking_and_interference() {
         )
         .await
         .unwrap_err();
-    assert_eq!(empty_slot_err.code, "UtilitySlotEmpty");
+    assert_eq!(util_err.code, "UnimplementedRPC");
 
     // 2b. hackingMgr.QuitHackingAttempt
     let quit_rep = ctx
@@ -368,6 +350,21 @@ async fn test_killrights_hacking_and_interference() {
     with_pve_exploration_reg(&ctx, |reg| {
         assert!(!reg.hacking_games.contains_key(&(p1_char, container_id)), "Hacking game terminated");
     });
+
+    // Calling QuitHackingAttempt again fails with NoActiveHackingGame
+    let re_quit_err = ctx
+        .dispatch_rpc(
+            &mut sess1,
+            "hackingMgr",
+            None,
+            "QuitHackingAttempt",
+            &[PyRep::Integer(container_id)],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(re_quit_err.code, "NoActiveHackingGame");
 
     // 3. solarsystemInterferenceMgr.GetAllInterferenceBands
     let sys_id = 30_000_142u32;

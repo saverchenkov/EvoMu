@@ -16,7 +16,7 @@ use super::wallet_services_ext;
 pub use super::wallet_services_ext::*;
 
 use crate::router::{NotificationTarget, ServerContext};
-use eve_db::{InventoryFlag, InventoryItemRecord, IskCents, WorldStateSnapshot};
+use eve_db::{InventoryFlag, IskCents, WorldStateSnapshot};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use std::collections::{BTreeMap, HashMap};
@@ -640,7 +640,7 @@ pub fn handle(
                         let is_valid_target = if let Some(target_struct) = snap.structures.get(tid) {
                             target_struct.owner_corp_id == tower_corp
                         } else if let Some(item) = snap.items.get(tid) {
-                            item.location_id == tower_id || item.owner_id == tower_corp || item.owner_id == char_id
+                            item.location_id == tower_id && item.type_id == 14343
                         } else {
                             false
                         };
@@ -657,61 +657,10 @@ pub fn handle(
             Some(res.map(|()| PyRep::None))
         }
 
-        ("posMgr", "RunMoonProcessCycleforTower") => {
-            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let tower_id = args.first().and_then(|a| a.as_i64()).unwrap_or(100_000_001);
-            let now_unix = ctx.now_unix();
-            let res = ctx.db.try_with_mut_snapshot(|snap| -> Result<i64, BridgeRpcError> {
-                check_starbase_auth(snap, session, char_id, tower_id)?;
-                let Some(st) = snap.structures.get_mut(&tower_id) else {
-                    return Err(rpc_err("StarbaseNotFound", format!("Starbase structure {tower_id} not found")));
-                };
-                if st.state != "Online" {
-                    return Err(rpc_err("StarbaseNotOnline", format!("Starbase is in {} state", st.state)));
-                }
-                if st.fuel_blocks < 5 {
-                    return Err(rpc_err("StarbaseNoFuel", "Starbase requires fuel blocks for moon harvesting"));
-                }
-                st.fuel_blocks = st.fuel_blocks.saturating_sub(5);
-                let st_settings = snap.starbase_settings.entry(tower_id).or_default();
-                if st_settings.linked_resources.is_empty() {
-                    return Err(rpc_err("NoLinkedResources", "Starbase requires linked moon harvesting silo/resources"));
-                }
-                if st_settings.last_moon_process_unix > 0 && now_unix < st_settings.last_moon_process_unix.saturating_add(3600) {
-                    return Err(rpc_err("CycleInProgress", "Moon harvesting cycle is in progress"));
-                }
-                st_settings.last_moon_process_unix = now_unix;
-                let target_loc = st_settings.linked_resources[0];
-                let moon_mat_type = snap.orbital_provision_types.get(&target_loc).copied()
-                    .and_then(|t| u32::try_from(t).ok())
-                    .filter(|&t| ctx.sde.types.get(&t).map(|sd| sd.group_id == 427).unwrap_or(false))
-                    .unwrap_or(16633);
-                let existing = snap.items.values_mut().find(|i| i.location_id == target_loc && i.type_id == moon_mat_type);
-                let qty = if let Some(item) = existing {
-                    item.quantity += 100;
-                    item.quantity
-                } else {
-                    snap.next_entity_id += 1;
-                    let nid = snap.next_entity_id;
-                    snap.items.insert(nid, InventoryItemRecord {
-                        item_id: nid,
-                        type_id: moon_mat_type,
-                        owner_id: session.corporation_id.unwrap_or(char_id),
-                        location_id: target_loc,
-                        flag: InventoryFlag::Hangar,
-                        quantity: 100,
-                        ..Default::default()
-                    });
-                    100
-                };
-                Ok(qty as i64)
-            });
-            Some(res.map(|qty| PyRep::keyval([
-                ("towerID", PyRep::Integer(tower_id)),
-                ("cycleTimestamp", PyRep::Integer(now_unix as i64)),
-                ("harvestedUnits", PyRep::Integer(qty)),
-            ])))
-        }
+        ("posMgr", "RunMoonProcessCycleforTower") => Some(Err(BridgeRpcError {
+            code: "UnimplementedRPC".into(),
+            message: "posMgr.RunMoonProcessCycleforTower is not implemented".into(),
+        })),
 
         ("posMgr", "ChangeStructureProvisionType") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
@@ -730,9 +679,13 @@ pub fn handle(
                 let target = if snap.structures.contains_key(&item_id) {
                     item_id
                 } else if let Some(item) = snap.items.get(&item_id) {
-                    if item.location_id == tower_id { tower_id } else { item_id }
+                    if item.location_id == tower_id && item.type_id == 14343 {
+                        tower_id
+                    } else {
+                        return Err(rpc_err("InvalidTarget", format!("Target {item_id} is not an anchored silo for tower {tower_id}")));
+                    }
                 } else {
-                    tower_id
+                    return Err(rpc_err("InvalidTarget", format!("Target {item_id} not found")));
                 };
                 check_starbase_auth(snap, session, char_id, target)?;
                 snap.orbital_provision_types.insert(item_id, provision_type as i64);

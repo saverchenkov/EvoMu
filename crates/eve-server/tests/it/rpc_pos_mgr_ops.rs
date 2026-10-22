@@ -365,7 +365,7 @@ async fn test_pos_mgr_control_and_permissions() {
 
 #[tokio::test]
 async fn test_pos_mgr_moon_silo_and_orbital() {
-    // parity: rpc:posMgr.SetTowerPassword, rpc:posMgr.GetConsumptionFactor, rpc:posMgr.GetSiloCapacityByItemID, rpc:posMgr.LinkResourceForTower, rpc:posMgr.RunMoonProcessCycleforTower, rpc:posMgr.ChangeStructureProvisionType, rpc:posMgr.UnanchorOrbital
+    // parity: rpc:posMgr.SetTowerPassword, rpc:posMgr.GetConsumptionFactor, rpc:posMgr.GetSiloCapacityByItemID, rpc:posMgr.LinkResourceForTower, rpc:posMgr.ChangeStructureProvisionType, rpc:posMgr.UnanchorOrbital
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
 
@@ -465,7 +465,7 @@ async fn test_pos_mgr_moon_silo_and_orbital() {
     });
     assert!(has_linked, "LinkResourceForTower must persist linkages in starbase_settings");
 
-    // 5. posMgr.RunMoonProcessCycleforTower
+    // 5. posMgr.RunMoonProcessCycleforTower returns UnimplementedRPC
     let cycle_res = rpc(
         &ctx,
         &mut sess,
@@ -474,49 +474,8 @@ async fn test_pos_mgr_moon_silo_and_orbital() {
         &[PyRep::Integer(tower_id)],
     )
     .await
-    .expect("posMgr.RunMoonProcessCycleforTower");
-    assert_eq!(cycle_res.dict_get("harvestedUnits"), Some(&PyRep::Integer(100)));
-
-    let has_harvested = ctx.db.with_snapshot(|snap| {
-        snap.items.values().any(|it| it.type_id == 16633 && it.location_id == silo_id && it.quantity >= 100)
-    });
-    assert!(has_harvested, "RunMoonProcessCycleforTower must persist harvested moon material in silo");
-
-    // Cycle rate-limit test: calling immediately fails with CycleInProgress
-    let cycle_in_progress = rpc(
-        &ctx,
-        &mut sess,
-        "posMgr",
-        "RunMoonProcessCycleforTower",
-        &[PyRep::Integer(tower_id)],
-    )
-    .await
-    .expect_err("Calling moon cycle before cooldown must fail");
-    assert_eq!(cycle_in_progress.code, "CycleInProgress");
-
-    // Advance clock past 1h cycle duration: cycle succeeds and increments quantity
-    ctx.advance_secs(3601);
-    let cycle_res2 = rpc(
-        &ctx,
-        &mut sess,
-        "posMgr",
-        "RunMoonProcessCycleforTower",
-        &[PyRep::Integer(tower_id)],
-    )
-    .await
-    .expect("RunMoonProcessCycleforTower after 1h cooldown");
-    assert_eq!(cycle_res2.dict_get("harvestedUnits"), Some(&PyRep::Integer(200)));
-
-    // Unfueled tower fails with StarbaseNoFuel
-    let unfueled_tower = 140_000_109_i64;
-    seed_test_structure(&ctx, unfueled_tower, 12235, 1_000_170, SYS_LOWSEC, "Empty Tower", "Online");
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(st) = snap.structures.get_mut(&unfueled_tower) { st.fuel_blocks = 0; }
-    });
-    let fuel_err = rpc(&ctx, &mut sess, "posMgr", "RunMoonProcessCycleforTower", &[PyRep::Integer(unfueled_tower)])
-        .await
-        .expect_err("Unfueled tower must fail");
-    assert_eq!(fuel_err.code, "StarbaseNoFuel");
+    .expect_err("posMgr.RunMoonProcessCycleforTower must return UnimplementedRPC");
+    assert_eq!(cycle_res.code, "UnimplementedRPC");
 
     // 6. posMgr.ChangeStructureProvisionType
     let prov_res = rpc(

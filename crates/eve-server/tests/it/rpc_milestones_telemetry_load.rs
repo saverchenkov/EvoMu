@@ -1,7 +1,7 @@
 //! Parity integration tests for Milestones (`milestoneMgr`), Monolith Task Tracker (`monolithTaskTrackerMgr`),
 //! Fighters (`fighterMgr`), Rewards (`rewardMgr`), Colony Skyhooks (`colonyResourcesMgr`),
 //! Dev Indices (`devIndexManager`), Epic Arcs (`epicArcStatus`), Client Telemetry (`infoGatheringMgr`, `clientStatLogger`),
-//! External Queue (`externalQueueMgr`), and Server Load Monitoring (`loadService`).
+//! and External Queue (`externalQueueMgr`).
 
 use std::collections::HashMap;
 
@@ -32,8 +32,6 @@ fn make_test_ball(id: i64, type_id: u32, pos: glam::DVec3) -> eve_destiny::Ball 
 }
 
 #[tokio::test]
-// parity: rpc:milestoneMgr.ClaimRewards
-// parity: rpc:milestoneMgr.ProcessCharacterLogon
 // parity: rpc:monolithTaskTrackerMgr.HasEverWarped
 // parity: rpc:monolithTaskTrackerMgr.UpdateClientAchievmentsAndCounters
 // parity: rpc:fighterMgr.CmdScoopAbandonedFighterFromSpace
@@ -62,57 +60,18 @@ async fn test_milestones_task_tracker_and_fighters() {
     sess.station_id = None;
     sess.structure_id = None;
 
-    // 1. milestoneMgr.ClaimRewards: uncompleted milestone rejects with MilestoneNotCompleted
-    let uncompleted_claim = ctx
-        .dispatch_rpc(&mut sess, "milestoneMgr", None, "ClaimRewards", &[PyRep::Integer(1)], &kw, None)
-        .await;
-    assert!(uncompleted_claim.is_err());
-    assert_eq!(uncompleted_claim.unwrap_err().code, "MilestoneNotCompleted");
-
-    // 1b. milestoneMgr.ProcessCharacterLogon: initial state has no active or claimed milestones
-    let logon_initial = ctx
-        .dispatch_rpc(&mut sess, "milestoneMgr", None, "ProcessCharacterLogon", &[], &kw, None)
-        .await
-        .expect("ProcessCharacterLogon initial");
-    assert!(is_keyval(&logon_initial));
-    assert_eq!(logon_initial.dict_get("characterID"), Some(&PyRep::Integer(char_id)));
-    assert_eq!(logon_initial.dict_get("activeMilestoneIDs"), Some(&PyRep::List(vec![])));
-    assert_eq!(logon_initial.dict_get("claimedMilestoneIDs"), Some(&PyRep::List(vec![])));
-
-    // Mark milestone 1 completed
-    ctx.db.with_mut_snapshot(|snap| {
-        let mut ext = eve_server::services::cosmetics_ui_ops::load_cosmetics_ui_state(snap);
-        ext.completed_milestones.entry(char_id).or_default().push(1);
-        eve_server::services::cosmetics_ui_ops::save_cosmetics_ui_state(snap, &ext);
-    });
-
-    let logon_active = ctx
-        .dispatch_rpc(&mut sess, "milestoneMgr", None, "ProcessCharacterLogon", &[], &kw, None)
-        .await
-        .expect("ProcessCharacterLogon with active milestone");
-    assert_eq!(logon_active.dict_get("activeMilestoneIDs"), Some(&PyRep::List(vec![PyRep::Integer(1)])));
-
-    // Claim rewards for completed milestone 1
-    let claim_rep = ctx
+    // 1. milestoneMgr returns UnimplementedRPC
+    let claim_err = ctx
         .dispatch_rpc(&mut sess, "milestoneMgr", None, "ClaimRewards", &[PyRep::Integer(1)], &kw, None)
         .await
-        .expect("ClaimRewards");
-    assert!(is_keyval(&claim_rep));
-    assert_eq!(claim_rep.dict_get("milestoneID"), Some(&PyRep::Integer(1)));
+        .expect_err("ClaimRewards must return UnimplementedRPC");
+    assert_eq!(claim_err.code, "UnimplementedRPC");
 
-    // Claiming again fails with MilestoneAlreadyClaimed
-    let reclaim_err = ctx
-        .dispatch_rpc(&mut sess, "milestoneMgr", None, "ClaimRewards", &[PyRep::Integer(1)], &kw, None)
-        .await
-        .unwrap_err();
-    assert_eq!(reclaim_err.code, "MilestoneAlreadyClaimed");
-
-    let logon_claimed = ctx
+    let logon_err = ctx
         .dispatch_rpc(&mut sess, "milestoneMgr", None, "ProcessCharacterLogon", &[], &kw, None)
         .await
-        .expect("ProcessCharacterLogon after claim");
-    assert_eq!(logon_claimed.dict_get("activeMilestoneIDs"), Some(&PyRep::List(vec![])));
-    assert_eq!(logon_claimed.dict_get("claimedMilestoneIDs"), Some(&PyRep::List(vec![PyRep::Integer(1)])));
+        .expect_err("ProcessCharacterLogon must return UnimplementedRPC");
+    assert_eq!(logon_err.code, "UnimplementedRPC");
 
     // 2. monolithTaskTrackerMgr.HasEverWarped
     // Fresh character has not warped
@@ -495,6 +454,8 @@ async fn test_rewards_sov_and_epic_arc_status() {
     assert!(!skyhook_list.is_empty(), "Skyhook list not empty");
     assert_eq!(skyhook_list[0].dict_get("skyhookID"), Some(&PyRep::Integer(skyhook_id)));
     assert_eq!(skyhook_list[0].dict_get("corporationID"), Some(&PyRep::Integer(corp_id)));
+    assert_eq!(skyhook_list[0].dict_get("reagentTypeID"), Some(&PyRep::Integer(0)));
+    assert_eq!(skyhook_list[0].dict_get("reagentQuantity"), Some(&PyRep::Integer(0)));
 
     // 4. devIndexManager.GetAllDevelopmentIndices
     ctx.db.with_mut_snapshot(|snap| {
@@ -626,47 +587,4 @@ async fn test_telemetry_logging_and_load_service() {
         let found = q.iter().any(|r| r.event_name == "ClusterNodeHeartbeat" && r.payload == PyRep::Integer(1001));
         assert!(found, "Event record should be queued in ctx.proxy_event_queue");
     }
-
-    // 5. loadService.SetConfig (GM role required)
-    let unauth_set = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "loadService",
-            None,
-            "SetConfig",
-            &[PyRep::Dict(vec![(PyRep::String("sampleInterval".into()), PyRep::Integer(2500))])],
-            &kw,
-            None,
-        )
-        .await;
-    assert!(unauth_set.is_err());
-    assert_eq!(unauth_set.unwrap_err().code, "InsufficientRole");
-
-    sess.role = eve_machonet::service_roles::ROLE_GMS;
-    let auth_set = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "loadService",
-            None,
-            "SetConfig",
-            &[PyRep::Dict(vec![(PyRep::String("sampleInterval".into()), PyRep::Integer(2500))])],
-            &kw,
-            None,
-        )
-        .await
-        .expect("SetConfig GM");
-    assert_eq!(auth_set, PyRep::Bool(true));
-
-    // 6. loadService.GetTotalStats returns configured sampleInterval and live server stats
-    let stats_rep = ctx
-        .dispatch_rpc(&mut sess, "loadService", None, "GetTotalStats", &[], &kw, None)
-        .await
-        .expect("GetTotalStats");
-    assert!(is_keyval(&stats_rep));
-    assert_eq!(stats_rep.dict_get("isOverloaded"), Some(&PyRep::Bool(false)));
-    assert_eq!(stats_rep.dict_get("nodeID"), Some(&PyRep::Integer(1001)));
-    assert_eq!(stats_rep.dict_get("sampleInterval"), Some(&PyRep::Integer(2500)));
-    assert!(stats_rep.dict_get("currentTick").is_some());
-    assert!(stats_rep.dict_get("activeSessions").is_some());
-    assert!(stats_rep.dict_get("activeBallparks").is_some());
 }

@@ -463,41 +463,22 @@ pub async fn handle_pve_hacking(
                 Err(e) => return Some(Err(e)),
             };
             let container_id = args.first().and_then(|a| a.as_i64()).unwrap_or(1_870_000_000);
-            with_pve_exploration_reg(ctx, |reg| {
-                reg.hacking_games.remove(&(char_id, container_id));
+            let removed = with_pve_exploration_reg(ctx, |reg| {
+                reg.hacking_games.remove(&(char_id, container_id)).is_some()
             });
+            if !removed {
+                return Some(Err(BridgeRpcError {
+                    code: "NoActiveHackingGame".into(),
+                    message: format!("No active hacking game on container {container_id}"),
+                }));
+            }
             Some(Ok(PyRep::Bool(true)))
         }
 
-        ("hackingMgr", "UsedUtilityElementOnVirus") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let container_id = args.first().and_then(|a| a.as_i64()).unwrap_or(1_870_000_000);
-            let slot_idx = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0) as usize;
-            let res = with_pve_exploration_reg(ctx, |reg| {
-                let Some(game) = reg.hacking_games.get_mut(&(char_id, container_id)) else {
-                    return Err(BridgeRpcError {
-                        code: "NoActiveHackingGame".into(),
-                        message: format!("No active hacking game on container {container_id}"),
-                    });
-                };
-                let util_opt = game.utilities.get_mut(slot_idx).and_then(|u| u.take());
-                if util_opt.is_none() {
-                    return Err(BridgeRpcError {
-                        code: "UtilitySlotEmpty".into(),
-                        message: format!("Utility slot {slot_idx} is empty"),
-                    });
-                }
-                game.virus_coherence = (game.virus_coherence + 20).min(game.max_virus_coherence);
-                Ok(PyRep::keyval([
-                    ("playerCoherence", PyRep::Integer(game.virus_coherence as i64)),
-                    ("playerStrength", PyRep::Integer(game.base_virus_strength as i64)),
-                ]))
-            });
-            Some(res)
-        }
+        ("hackingMgr", "UsedUtilityElementOnVirus") => Some(Err(BridgeRpcError {
+            code: "UnimplementedRPC".into(),
+            message: "hackingMgr.UsedUtilityElementOnVirus is not implemented".into(),
+        })),
 
         ("hackingMgr", "values") => {
             let (_, char_id) = match ServerContext::require_character(session) {

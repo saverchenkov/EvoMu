@@ -926,55 +926,7 @@ pub fn handle(
             Some(Ok(PyRep::List(keys)))
         }
 
-        ("loadService", "GetTotalStats") => {
-            if let Err(e) = ServerContext::require_auth(session) {
-                return Some(Err(e));
-            }
-            let active_sessions = ctx.db.with_snapshot(|snap| {
-                snap.characters
-                    .values()
-                    .filter(|ch| ctx.is_character_online(ch.character_id, ch.user_id))
-                    .count() as i64
-            });
-            let active_ballparks = ctx.systems.active_systems_count() as i64;
-            let sample_interval = ctx.load_sample_interval_ms.load(std::sync::atomic::Ordering::Relaxed) as i64;
-            let current_tick = ctx.now_blueos_filetime_ticks() / 10_000_000;
-            Some(Ok(PyRep::keyval([
-                ("cpuPercentage", PyRep::Real(1.5)),
-                ("memoryUsageMB", PyRep::Integer(256)),
-                ("activeSessions", PyRep::Integer(active_sessions)),
-                ("activeBallparks", PyRep::Integer(active_ballparks)),
-                ("sampleInterval", PyRep::Integer(sample_interval)),
-                ("currentTick", PyRep::Integer(current_tick)),
-                ("nodeID", PyRep::Integer(1001)),
-                ("isOverloaded", PyRep::Bool(false)),
-            ])))
-        }
 
-        ("loadService", "SetConfig") => {
-            if !session.has_gm_role() {
-                return Some(Err(BridgeRpcError {
-                    code: "InsufficientRole".into(),
-                    message: "loadService.SetConfig requires GM role".into(),
-                }));
-            }
-            let interval = match args.first() {
-                Some(PyRep::Integer(i)) => Some(*i as u64),
-                Some(PyRep::Dict(entries)) => entries.iter().find_map(|(k, v)| {
-                    if k.as_str() == Some("sampleInterval") {
-                        v.as_i64().map(|i| i as u64)
-                    } else {
-                        None
-                    }
-                }),
-                Some(PyRep::KeyVal(kv)) => kv.get("sampleInterval").and_then(|v| v.as_i64()).map(|i| i as u64),
-                _ => None,
-            };
-            if let Some(ms) = interval {
-                ctx.load_sample_interval_ms.store(ms, std::sync::atomic::Ordering::Relaxed);
-            }
-            Some(Ok(PyRep::Bool(true)))
-        }
 
         _ => None,
     }
