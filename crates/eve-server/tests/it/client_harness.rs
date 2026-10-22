@@ -239,7 +239,7 @@ async fn test_t6_client_harness_run_journeys_two_clients_and_log_hygiene() {
             100_000_019,
             eve_db::InventoryItemRecord {
                 item_id: 100_000_019,
-                type_id: 47763,
+                type_id: 53977,
                 owner_id: 90_000_001,
                 location_id: 100_000_001,
                 flag: eve_db::InventoryFlag::Cargo,

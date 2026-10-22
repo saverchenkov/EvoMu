@@ -6,7 +6,6 @@ use crate::router::{BoundObjectEntry, ServerContext};
 use eve_destiny::{Ball, MovementMode};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
-use eve_sde::SolarSystemId;
 use glam::DVec3;
 use std::collections::HashMap;
 
@@ -30,10 +29,6 @@ pub(crate) async fn handle(
         // parity: feat:navigation.wormhole-jump, feat:navigation.wormhole-lifetime, feat:navigation.wormhole-statics, feat:navigation.wormhole-thera
         // parity: rpc:wormholeMgr.WormholeJump
         ("wormholeMgr", "WormholeJump") => Some(handle_wormhole_jump(ctx, session, args).await),
-
-        ("abyssalMgr", "AbyssalEntranceDeployment") => {
-            Some(handle_filament_deployment(ctx, session, args).await)
-        }
 
         ("randomJumpMgr", "ActivateRandomJumpFilament") => {
             Some(handle_random_jump_filament(ctx, session, args).await)
@@ -277,156 +272,6 @@ async fn handle_wormhole_jump(
     ]))
 }
 
-async fn handle_filament_deployment(
-    ctx: &ServerContext,
-    session: &mut SessionState,
-    args: &[PyRep],
-) -> Result<PyRep, BridgeRpcError> {
-    const GROUP_ABYSSAL_FILAMENTS: u32 = 1979;
-    let (_, char_id) = ServerContext::require_character(session)?;
-    if session.station_id.is_some() || session.structure_id.is_some() {
-        return Err(BridgeRpcError {
-            code: "ShipDocked".into(),
-            message: "Cannot activate filament while docked".into(),
-        });
-    }
-
-    let Some(old_sys) = session.solar_system_id else {
-        return Err(BridgeRpcError {
-            code: "NoSolarSystem".into(),
-            message: "Session has no active solarSystemID".into(),
-        });
-    };
-    let Some(ship_id) = session.ship_id else {
-        return Err(BridgeRpcError {
-            code: "NoActiveShip".into(),
-            message: "Session has no active ship".into(),
-        });
-    };
-
-    let old_handle = ctx.systems.get_or_spawn(old_sys);
-    let Some((_, mut current_ball)) = (match old_handle.get_ball_snapshot(ship_id).await {
-        Ok(v) => v,
-        Err(e) => {
-            return Err(BridgeRpcError {
-                code: "DestinyQueryFailed".into(),
-                message: e,
-            })
-        }
-    }) else {
-        return Err(BridgeRpcError {
-            code: "ShipNotInSpace".into(),
-            message: "Active ship ball is not in space".into(),
-        });
-    };
-    crate::services::tactical_modules::prepare_ship_for_wormhole_jump(
-        ctx,
-        &old_handle,
-        char_id,
-        ship_id,
-        &mut current_ball,
-    )
-    .await?;
-
-    if let Ok(Some(mut cs)) = old_handle.get_combat_state(ship_id).await {
-        cs.sync_action_breaks();
-        if cs.is_warp_exit_invulnerable() {
-            return Err(BridgeRpcError {
-                code: "ShipInvulnerable".into(),
-                message: "Cannot activate filament while ship is in 10s post-warp invulnerability window".into(),
-            });
-        }
-    }
-
-    let dest_sys = ctx
-        .sde
-        .solar_systems
-        .values()
-        .filter(|s| (12_000_000..13_000_000).contains(&s.region_id))
-        .min_by_key(|s| s.solar_system_id)
-        .ok_or_else(|| BridgeRpcError {
-            code: "NoAbyssalSystemInSde".into(),
-            message: "No Abyssal Deadspace solar system found in SDE".into(),
-        })?;
-    let dest_sys_id: SolarSystemId = dest_sys.solar_system_id;
-    let requested_item_id = args.first().and_then(|a| a.as_i64());
-
-    let updated_ch = ctx.db.try_with_mut_snapshot(|snap| {
-        let fil_id = snap
-            .items
-            .values()
-            .find(|i| {
-                i.owner_id == char_id
-                    && i.location_id == ship_id
-                    && i.flag == eve_db::InventoryFlag::Cargo
-                    && requested_item_id.is_none_or(|req_id| i.item_id == req_id)
-                    && ctx
-                        .sde
-                        .types
-                        .get(&i.type_id)
-                        .is_some_and(|t| t.group_id == GROUP_ABYSSAL_FILAMENTS)
-                    && i.quantity >= 1
-            })
-            .map(|i| i.item_id);
-        let Some(iid) = fil_id else {
-            return Err(BridgeRpcError {
-                code: "FilamentNotInCargo".into(),
-                message: format!(
-                    "Activating an Abyssal filament requires an Abyssal Filaments item in active ship {ship_id} Cargo"
-                ),
-            });
-        };
-        let Some(ch) = snap.characters.get_mut(&char_id) else {
-            return Err(BridgeRpcError {
-                code: "CharacterNotFound".into(),
-                message: format!("Character {char_id} not found"),
-            });
-        };
-        ch.solar_system_id = dest_sys_id;
-        ch.constellation_id = dest_sys.constellation_id;
-        ch.region_id = dest_sys.region_id;
-        ch.station_id = None;
-        ch.structure_id = None;
-        let updated = ch.clone();
-        if let Some(item) = snap.items.get_mut(&iid) {
-            if item.quantity > 1 {
-                item.quantity -= 1;
-                item.version += 1;
-            } else {
-                snap.items.remove(&iid);
-            }
-        }
-        Ok(updated)
-    })?;
-    let existing_ball = old_handle.remove_ball(ship_id).await;
-    ctx.sync_character_local_chat(char_id, Some(old_sys), dest_sys_id);
-
-    let new_handle = ctx.systems.get_or_spawn(dest_sys_id);
-    let mut new_ball = existing_ball.unwrap_or(current_ball);
-    new_ball.position = DVec3::new(50_000.0, 0.0, 0.0);
-    new_ball.velocity = DVec3::ZERO;
-    new_ball.speed_fraction = 0.0;
-    new_ball.mode = MovementMode::Stop;
-    let combat_state = ctx.build_ship_combat_state(char_id, ship_id, new_ball.type_id);
-    let _ = new_handle.spawn_ball_with_combat(new_ball, combat_state).await;
-    let _ = ctx
-        .living_world
-        .materialize_system_lod2(dest_sys_id, &ctx.systems, &ctx.sde)
-        .await;
-
-    session.solar_system_id = Some(updated_ch.solar_system_id);
-    session.constellation_id = Some(updated_ch.constellation_id);
-    session.region_id = Some(updated_ch.region_id);
-    session.station_id = None;
-    session.structure_id = None;
-
-    let new_beyonce_id = ctx.bind_object(session, BEYONCE_SVC, dest_sys_id as i64)?;
-    Ok(PyRep::keyval([
-        ("solarSystemID", PyRep::Integer(dest_sys_id as i64)),
-        ("beyonceBoundID", PyRep::Integer(new_beyonce_id as i64)),
-    ]))
-}
-
 async fn handle_random_jump_filament(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -493,12 +338,14 @@ async fn handle_random_jump_filament(
         .filter(|(&sid, s)| sid != old_sys && s.security_status < 0.0 && sid < 31_000_000)
         .map(|(&sid, _)| sid)
         .collect();
-    let dest_sys_id = if !nullsec_systems.is_empty() {
-        let idx = ((char_id as usize) ^ (old_sys as usize) ^ (ctx.now_unix() as usize)) % nullsec_systems.len();
-        nullsec_systems[idx]
-    } else {
-        30_002_904
-    };
+    if nullsec_systems.is_empty() {
+        return Err(BridgeRpcError {
+            code: "NoNullsecSystemInSde".into(),
+            message: "No destination nullsec solar system found in SDE".into(),
+        });
+    }
+    let idx = ((char_id as usize) ^ (old_sys as usize) ^ (ctx.now_unix() as usize)) % nullsec_systems.len();
+    let dest_sys_id = nullsec_systems[idx];
     let dest_sys = ctx.sde.solar_systems.get(&dest_sys_id).ok_or_else(|| BridgeRpcError {
         code: "NoNullsecSystemInSde".into(),
         message: "Destination nullsec solar system not found in SDE".into(),

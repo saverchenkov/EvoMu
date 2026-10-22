@@ -352,15 +352,12 @@ async fn test_filaments_abyssal_pocket_void_space_and_needlejack() {
         )
         .await;
 
-    // 1. Abyssal filament deployment
-    let abyssal_res = rpc(&ctx, &mut sess, "abyssalMgr", "AbyssalEntranceDeployment", &[])
+    // 1. Abyssal filament deployment returns UnimplementedRPC
+    let abyssal_err = rpc(&ctx, &mut sess, "abyssalMgr", "AbyssalEntranceDeployment", &[])
         .await
-        .expect("AbyssalEntranceDeployment");
-    assert_eq!(
-        abyssal_res.dict_get("solarSystemID").and_then(|v| v.as_i64()),
-        Some(32_000_001)
-    );
-    assert_eq!(sess.solar_system_id, Some(32_000_001));
+        .expect_err("AbyssalEntranceDeployment returns UnimplementedRPC");
+    assert_eq!(abyssal_err.code, "UnimplementedRPC");
+    assert_eq!(sess.solar_system_id, Some(start_sys));
 
     // 2. Abyssal entrance gate activation returns UnimplementedRPC (stripped down)
     let gate_err = rpc(&ctx, &mut sess, "abyssalMgr", "AbyssalEntranceGateActivation", &[])

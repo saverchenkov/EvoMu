@@ -532,7 +532,7 @@ async fn test_e2e_journeys_13_to_18_and_catalog_coverage() {
     };
     assert_eq!(ckv.get("completed"), Some(&PyRep::Bool(true)));
 
-    // Undock via RPC and test Abyssal Filament consumption (`abyssalMgr.AbyssalEntranceDeployment`)
+    // Undock via RPC and verify AbyssalEntranceDeployment returns UnimplementedRPC
     ctx.dispatch_rpc(
         &mut session,
         "stationSvc",
@@ -544,17 +544,18 @@ async fn test_e2e_journeys_13_to_18_and_catalog_coverage() {
     )
     .await
     .unwrap();
-    ctx.dispatch_rpc(
-        &mut session,
-        "abyssalMgr",
-        None,
-        "AbyssalEntranceDeployment",
-        &[],
-        &empty,
-        None,
-    )
-    .await
-    .unwrap();
+    let abyss_res = ctx
+        .dispatch_rpc(
+            &mut session,
+            "abyssalMgr",
+            None,
+            "AbyssalEntranceDeployment",
+            &[],
+            &empty,
+            None,
+        )
+        .await;
+    assert_eq!(abyss_res.unwrap_err().code, "UnimplementedRPC");
 
     // E2E-16: Non-V24 air_npe.AdvanceNode and seasonManager.claim_goal_reward return UnimplementedRPC
     let npe_res = ctx

@@ -458,24 +458,24 @@ def run_two_client_bridge_probe(host, bridge_port, client_1_log_path, client_2_l
         stop_warp = beyonce1.CmdStop()
         log1.info("beyonce1.CmdStop() after warp command -> %r" % (stop_warp,))
 
-        # Activate Abyssal filament (47763 Calm Firestorm Filament) from ship Cargo
-        fil_res = sm1.RemoteSvc("abyssalMgr").AbyssalEntranceDeployment()
-        log1.info("abyssalMgr.AbyssalEntranceDeployment -> %r" % (fil_res,))
+        # Activate Needlejack filament (53977 Noise-5 'Needlejack' Filament) from ship Cargo
+        fil_res = sm1.RemoteSvc("randomJumpMgr").ActivateRandomJumpFilament()
+        log1.info("randomJumpMgr.ActivateRandomJumpFilament -> %r" % (fil_res,))
         time.sleep(0.2)
 
-        # Check session change on Client 1 to Abyssal deadspace (32000001)
+        # Check session change on Client 1 to destination nullsec system
+        abyssal_sys = int(getattr(fil_res, "solarSystemID", 0) or 0) if fil_res else 0
         abyssal_session_changed = any(
-            ev[0] == "OnSessionChanged" and "32000001" in str(ev[1])
+            ev[0] == "OnSessionChanged" and str(abyssal_sys) in str(ev[1])
             for ev in sm1.events
         )
-        abyssal_sys = getattr(fil_res, "solarSystemID", 32000001) if fil_res else 32000001
         abyssal_beyonce, _ = sm1.RemoteSvc("beyonce").MachoBindObject(abyssal_sys, None)
         abyssal_beyonce.UpdateStateRequest()
-        log1.info("Bound to abyssal beyonce in %d and called UpdateStateRequest" % int(abyssal_sys))
+        log1.info("Bound to destination beyonce in %d and called UpdateStateRequest" % int(abyssal_sys))
 
         outcomes["wormholes_filaments"] = {
-            "bridge_verified": bool(warp1 is not None and fil_res and getattr(fil_res, "solarSystemID", None) == 32000001 and abyssal_session_changed),
-            "evidence": "Client 1 warped towards stargate 50001249, activated Abyssal filament 47763, executed session change to abyssal pocket 32000001, and bound destination beyonce",
+            "bridge_verified": bool(warp1 is not None and fil_res and abyssal_sys > 30000000 and abyssal_sys != 30000142 and abyssal_session_changed),
+            "evidence": "Client 1 warped towards stargate 50001249, activated Needlejack filament 53977, executed session change to nullsec system %d, and bound destination beyonce" % int(abyssal_sys),
         }
     finally:
         b1.close()

@@ -511,7 +511,7 @@ async fn test_sp3_warp_to_disrupted_capacitor_cost_and_exit_invulnerability() {
             89_001_001,
             InventoryItemRecord {
                 item_id: 89_001_001,
-                type_id: 47763,
+                type_id: 53977,
                 owner_id: char_id,
                 location_id: ship_id,
                 flag: InventoryFlag::Cargo,
@@ -843,6 +843,20 @@ async fn test_sp3_warp_to_disrupted_capacitor_cost_and_exit_invulnerability() {
     let fil_err = ctx
         .dispatch_rpc(
             &mut sess,
+            "randomJumpMgr",
+            None,
+            "ActivateRandomJumpFilament",
+            &[],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(fil_err.code, "ShipInvulnerable");
+
+    let abyss_unimpl = ctx
+        .dispatch_rpc(
+            &mut sess,
             "abyssalMgr",
             None,
             "AbyssalEntranceDeployment",
@@ -852,7 +866,7 @@ async fn test_sp3_warp_to_disrupted_capacitor_cost_and_exit_invulnerability() {
         )
         .await
         .unwrap_err();
-    assert_eq!(fil_err.code, "ShipInvulnerable");
+    assert_eq!(abyss_unimpl.code, "UnimplementedRPC");
 
     ctx.dispatch_rpc(
         &mut sess,
