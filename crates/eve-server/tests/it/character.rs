@@ -11,8 +11,9 @@ use std::collections::HashMap;
 
 #[tokio::test]
 async fn test_phase_0_s4_split_shared_handlers_and_jump_clones() {
-    // parity: plan:S-4, rpc:charUnboundMgr.GetCharacterInfo, rpc:charUnboundMgr.GetCharactersToSelect, rpc:charUnboundMgr.SelectCharacterID, rpc:jumpCloneSvc.CloneJump, rpc:jumpCloneSvc.GetCloneState, rpc:jumpCloneSvc.GetPriceForClone, rpc:jumpCloneSvc.GetStationCloneState, rpc:jumpCloneSvc.InstallCloneInStation, rpc:jumpCloneSvc.InstallCloneInStructure, rpc:loginRewardFacilities.get_my_clone_grade, rpc:machoNet.GetInitVals, rpc:machoNet.GetServiceInfo, rpc:standingMgr.GetCharStandings, rpc:standingMgr.GetStandingTransactions, rpc:subscriptionMgr.GetCloneGrade
+    // parity: plan:S-4, rpc:charUnboundMgr.GetCharacterInfo, rpc:charUnboundMgr.SelectCharacterID, rpc:jumpCloneSvc.CloneJump, rpc:jumpCloneSvc.GetCloneState, rpc:jumpCloneSvc.GetPriceForClone, rpc:jumpCloneSvc.GetStationCloneState, rpc:jumpCloneSvc.InstallCloneInStation, rpc:jumpCloneSvc.InstallCloneInStructure, rpc:loginRewardFacilities.get_my_clone_grade, rpc:machoNet.GetServiceInfo, rpc:standingMgr.GetCharStandings, rpc:standingMgr.GetStandingTransactions, rpc:subscriptionMgr.GetCloneGrade
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let mut sess = SessionState::new(904);
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
@@ -116,11 +117,8 @@ async fn test_phase_0_s4_split_shared_handlers_and_jump_clones() {
         vec!["eventID", "fromID", "toID", "modification", "eventTypeID"]
     );
 
-    // 3. machoNet: GetInitVals vs GetServiceInfo
-    let init_vals = ctx
-        .dispatch_rpc(&mut sess, "machoNet", None, "GetInitVals", &[], &kw, None)
-        .await
-        .expect("GetInitVals");
+    // 3. machoNet: get_init_vals vs GetServiceInfo
+    let init_vals = eve_server::services::auth_cache::get_init_vals(&ctx);
     assert!(matches!(init_vals, PyRep::Tuple(_)));
     let svc_info = ctx
         .dispatch_rpc(
@@ -360,10 +358,11 @@ async fn test_phase_0_s4_split_shared_handlers_and_jump_clones() {
 
 #[tokio::test]
 async fn test_p1_p2_wire_row_encoders_and_service_crowsets() {
-    // parity: plan:P-1, plan:P-2, feat:serverops.packed-rows, rpc:charUnboundMgr.GetCharactersToSelect, rpc:charUnboundMgr.SelectCharacterID, rpc:invbroker.GetContainerContents, rpc:invbroker.GetItemDescriptor, rpc:invbroker.List, rpc:marketProxy.GetOrders, rpc:marketProxy.GetStationAsks
+    // parity: plan:P-1, plan:P-2, feat:serverops.packed-rows, rpc:charUnboundMgr.SelectCharacterID, rpc:invbroker.GetContainerContents, rpc:invbroker.GetItemDescriptor, rpc:marketProxy.GetOrders, rpc:marketProxy.GetStationAsks
     use eve_proto::{marshal, DBRowDescriptor};
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     ctx.seed_demo_world_fixtures();
     let kw = HashMap::new();
     let mut sess = SessionState::new(905);
@@ -535,6 +534,7 @@ async fn test_r50_p1_1_container_contents_ownership_and_range_enforcement() {
     use glam::DVec3;
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let mut sess = SessionState::new(981);
     let kw = HashMap::new();
 
@@ -776,12 +776,13 @@ async fn test_r50_p1_1_container_contents_ownership_and_range_enforcement() {
 
 #[tokio::test]
 async fn test_p3_p4_p5_object_cache_config_service_and_notifications() {
-    // parity: plan:P-3, plan:P-4, plan:P-5, feat:serverops.object-cache, feat:serverops.config-svc, feat:serverops.notification-transport, feat:social.notifications-list, feat:social.notifications-mark, feat:social.notifications-delete, feat:social.notifications-generate, rpc:authentication.Login, rpc:charUnboundMgr.SelectCharacterID, rpc:config.GetCelestialStatistic, rpc:config.GetMap, rpc:config.GetMapConnections, rpc:config.GetMapObjects, rpc:config.GetMultiCorpTickerNamesEx, rpc:config.GetMultiGraphicsEx, rpc:config.GetMultiInvTypesEx, rpc:config.GetMultiLocationsEx, rpc:config.GetMultiOwnersEx, rpc:config.GetMultiStationEx, rpc:config.GetStationSolarSystemsByOwner, rpc:notificationMgr.DeleteNotifications, rpc:notificationMgr.GetAllNotifications, rpc:notificationMgr.GetByGroupID, rpc:notificationMgr.GetUnprocessed, rpc:notificationMgr.MarkAsProcessed, rpc:objectCaching.GetCachableObject, rpc:objectCaching.InvalidateCachedObjects
+    // parity: plan:P-3, plan:P-4, plan:P-5, feat:serverops.object-cache, feat:serverops.config-svc, feat:serverops.notification-transport, feat:social.notifications-list, feat:social.notifications-mark, feat:social.notifications-delete, feat:social.notifications-generate, rpc:authentication.Login, rpc:charUnboundMgr.SelectCharacterID, rpc:config.GetStationSolarSystemsByOwner, rpc:notificationMgr.DeleteNotifications, rpc:notificationMgr.GetAllNotifications, rpc:notificationMgr.GetByGroupID, rpc:notificationMgr.GetUnprocessed, rpc:notificationMgr.MarkAsProcessed
     use eve_machonet::{MachoAddress, MachoPacket, MachoPacketType};
     use eve_proto::{marshal, DBRowDescriptor};
     use eve_server::router::NotificationTarget;
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let mut sess = SessionState::new(982);
     let kw = HashMap::new();
 
@@ -814,7 +815,7 @@ async fn test_p3_p4_p5_object_cache_config_service_and_notifications() {
     // ========================================================================
     // P-3: objectCaching.GetCachableObject, CachedMethodCallResult, Invalidation
     // ========================================================================
-    let units_oid = ServerContext::method_call_object_id("config", "GetUnits");
+    let units_oid = PyRep::String("config.Units".into());
     let cached_units_obj = ctx
         .dispatch_rpc(
             &mut sess,
@@ -831,7 +832,7 @@ async fn test_p3_p4_p5_object_cache_config_service_and_notifications() {
             None,
         )
         .await
-        .expect("objectCaching.GetCachableObject(config.GetUnits)");
+        .expect("objectCaching.GetCachableObject(config.Units)");
 
     // Verify wire round-trip of objectCaching.CachedObject and inner marshaled payload
     let co_wire = marshal::encode(&cached_units_obj);
@@ -863,7 +864,7 @@ async fn test_p3_p4_p5_object_cache_config_service_and_notifications() {
     // Verify CachedMethodCallResult inline and hint forms round-trip through marshal
     let wrapped_cmcr = ctx.cache_method_call_result(
         "config",
-        "GetUnits",
+        "GetStationSolarSystemsByOwner",
         ctx.build_config_units_payload(),
         "run",
         None,
@@ -885,7 +886,7 @@ async fn test_p3_p4_p5_object_cache_config_service_and_notifications() {
                     PyRep::String("server".into()),
                     PyRep::Tuple(vec![
                         PyRep::String("config".into()),
-                        PyRep::String("NonExistentCacheMethod".into()),
+                        PyRep::String("GetMapData".into()),
                     ]),
                 ]),
                 PyRep::Tuple(vec![PyRep::Integer(0), PyRep::Integer(0)]),
@@ -1018,47 +1019,37 @@ async fn test_p3_p4_p5_object_cache_config_service_and_notifications() {
         panic!("Expected TupleSet from GetMultiLocationsEx");
     }
 
-    let stations_rep = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "config",
-            None,
-            "GetMultiStationEx",
-            &[PyRep::List(vec![PyRep::Integer(60_003_760)])],
-            &kw,
-            None,
-        )
-        .await
-        .expect("config.GetMultiStationEx");
+    let stations_rep = eve_server::services::config_service::get_multi_station_ex(
+        &ctx,
+        &sess,
+        &[PyRep::List(vec![PyRep::Integer(60_003_760)])],
+        &kw,
+    )
+    .expect("config_service::get_multi_station_ex");
     if let PyRep::TupleSet { rows, .. } = &stations_rep {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0][0], PyRep::Integer(60_003_760));
         assert_eq!(rows[0][3], PyRep::Integer(30_000_142));
     } else {
-        panic!("Expected TupleSet from GetMultiStationEx");
+        panic!("Expected TupleSet from get_multi_station_ex");
     }
 
-    let inv_types_rep = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "config",
-            None,
-            "GetMultiInvTypesEx",
-            &[PyRep::List(vec![PyRep::Integer(34), PyRep::Integer(587)])],
-            &kw,
-            None,
-        )
-        .await
-        .expect("config.GetMultiInvTypesEx");
+    let inv_types_rep = eve_server::services::config_service::get_multi_inv_types_ex(
+        &ctx,
+        &sess,
+        &[PyRep::List(vec![PyRep::Integer(34), PyRep::Integer(587)])],
+        &kw,
+    )
+    .expect("config_service::get_multi_inv_types_ex");
     let inv_types_wire = marshal::encode(&inv_types_rep);
-    let inv_types_decoded = marshal::decode(&inv_types_wire).expect("decode GetMultiInvTypesEx");
+    let inv_types_decoded = marshal::decode(&inv_types_wire).expect("decode get_multi_inv_types_ex");
     assert_eq!(inv_types_decoded, inv_types_rep);
     if let PyRep::List(rows) = &inv_types_decoded {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].dbrow_get("typeID"), Some(&PyRep::Integer(34)));
         assert_eq!(rows[1].dbrow_get("typeID"), Some(&PyRep::Integer(587)));
     } else {
-        panic!("Expected List of DBRow from GetMultiInvTypesEx");
+        panic!("Expected List of DBRow from get_multi_inv_types_ex");
     }
 
     let tickers_rep = ctx
@@ -1118,63 +1109,45 @@ async fn test_p3_p4_p5_object_cache_config_service_and_notifications() {
         .expect("config.GetMap");
     assert!(map_rep.row_count().unwrap_or(0) > 0);
 
-    let map_objs_rep = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "config",
-            None,
-            "GetMapObjects",
-            &[PyRep::Integer(30_000_142)],
-            &kw,
-            None,
-        )
-        .await
-        .expect("config.GetMapObjects");
+    let map_objs_rep = eve_server::services::config_service::get_map_objects(
+        &ctx,
+        &sess,
+        &[PyRep::Integer(30_000_142)],
+    )
+    .expect("config_service::get_map_objects");
     assert!(map_objs_rep.is_crowset());
     assert!(!map_objs_rep.crowset_rows().unwrap().is_empty());
 
-    let map_conns_rep = ctx
+    let map_conns_rep = eve_server::services::config_service::get_map_connections(
+        &ctx,
+        &sess,
+        &[PyRep::Integer(30_000_142)],
+    )
+    .expect("config_service::get_map_connections");
+    assert!(map_conns_rep.row_count().unwrap_or(0) > 0);
+
+    // Unhandled config methods and unimported SDE tables must return UnimplementedRPC (no fabricated rows)
+    let graphics_err = eve_server::services::config_service::get_multi_graphics_ex(&ctx, &sess)
+        .expect_err("get_multi_graphics_ex must return UnimplementedRPC");
+    assert_eq!(graphics_err.code, "UnimplementedRPC");
+
+    let cel_stat_err = eve_server::services::config_service::get_celestial_statistic(&ctx, &sess)
+        .expect_err("get_celestial_statistic must return UnimplementedRPC");
+    assert_eq!(cel_stat_err.code, "UnimplementedRPC");
+
+    let unhandled_cfg_err = ctx
         .dispatch_rpc(
             &mut sess,
             "config",
             None,
-            "GetMapConnections",
+            "GetMapData",
             &[PyRep::Integer(30_000_142)],
             &kw,
             None,
         )
         .await
-        .expect("config.GetMapConnections");
-    assert!(map_conns_rep.row_count().unwrap_or(0) > 0);
-
-    // GetMultiGraphicsEx and GetCelestialStatistic must return UnimplementedRPC (no fabricated rows)
-    let graphics_err = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "config",
-            None,
-            "GetMultiGraphicsEx",
-            &[PyRep::List(vec![PyRep::Integer(1)])],
-            &kw,
-            None,
-        )
-        .await
-        .expect_err("GetMultiGraphicsEx must return UnimplementedRPC");
-    assert_eq!(graphics_err.code, "UnimplementedRPC");
-
-    let cel_stat_err = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "config",
-            None,
-            "GetCelestialStatistic",
-            &[PyRep::Integer(40_009_082)],
-            &kw,
-            None,
-        )
-        .await
-        .expect_err("GetCelestialStatistic must return UnimplementedRPC");
-    assert_eq!(cel_stat_err.code, "UnimplementedRPC");
+        .expect_err("unhandled config.GetMapData must return UnimplementedRPC");
+    assert_eq!(unhandled_cfg_err.code, "UnimplementedRPC");
 
     // ========================================================================
     // P-5: Binary MachoPacket notifications & notificationMgr service

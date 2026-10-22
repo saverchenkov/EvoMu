@@ -632,7 +632,7 @@ async fn test_mn15_corp_mining_ledger_service_and_observer_tracking() {
 // ============================================================================
 #[tokio::test]
 async fn test_mn16_in_space_and_structure_compression_and_decompression() {
-    // parity: feat:mining.compression-space, feat:mining.compression-structure, feat:mining.gas-decompression, rpc:dogmaIM.Activate, rpc:inSpaceCompressionMgr.CompressItemInSpace, rpc:stationSvc.Undock, rpc:structureCompressionMgr.CompressItemInStructure, rpc:structureCompressionMgr.DecompressGasInStructure, rpc:structureCompressionMgr.GetMyGasDecompressionEfficiency
+    // parity: feat:mining.compression-space, feat:mining.compression-structure, feat:mining.gas-decompression, rpc:inSpaceCompressionMgr.CompressItemInSpace, rpc:structureCompressionMgr.CompressItemInStructure, rpc:structureCompressionMgr.DecompressGasInStructure, rpc:structureCompressionMgr.GetMyGasDecompressionEfficiency
     eve_testkit::attest(&["feat:mining.compression-space", "feat:mining.compression-structure", "feat:mining.gas-decompression"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();
@@ -1247,7 +1247,7 @@ async fn test_mn17_living_world_npc_mining_ops_and_market_hauling() {
 // ============================================================================
 #[tokio::test]
 async fn test_mn18_mining_missions_and_career_goals_from_ledger() {
-    // parity: feat:mining.mining-missions, feat:mining.mining-goals, rpc:agentMgr.DoAction, rpc:agentMgr.GetAgents, rpc:agentMgr.GetMyJournalDetails, rpc:agentMgr.MachoBindObject, rpc:seasonManager.get_character_progress_by_character_id
+    // parity: feat:mining.mining-missions, feat:mining.mining-goals, rpc:agentMgr.GetAgents, rpc:agentMgr.GetMyJournalDetails, rpc:seasonManager.get_character_progress_by_character_id
     eve_testkit::attest(&["feat:mining.mining-missions", "feat:mining.mining-goals"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);

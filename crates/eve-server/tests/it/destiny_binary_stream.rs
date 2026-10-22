@@ -340,7 +340,7 @@ fn test_warp_continuous_physics_curves_and_visual_handoff() {
 // parity: feat:navigation.warp-speed-formula
 #[tokio::test]
 async fn test_server_cmd_warp_to_stuff_uses_sde_ship_warp_speed() {
-    // parity: rpc:authentication.Login, rpc:beyonce.CmdWarpToStuff, rpc:charUnboundMgr.SelectCharacterID, rpc:stationSvc.Undock
+    // parity: rpc:authentication.Login, rpc:charUnboundMgr.SelectCharacterID
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let mut sess = SessionState::new(9900);
@@ -485,7 +485,7 @@ fn grant_fitting_skills(ctx: &ServerContext, char_id: i64) {
 // parity: feat:modules.warp-disruptor
 #[tokio::test]
 async fn test_warp_scrambler_disruptor_blocking() {
-    // parity: rpc:authentication.Login, rpc:beyonce.CmdWarpToStuff, rpc:charUnboundMgr.SelectCharacterID, rpc:dogmaIM.Activate, rpc:dogmaIM.AddTarget, rpc:dogmaIM.Deactivate, rpc:stationSvc.Undock
+    // parity: rpc:authentication.Login, rpc:charUnboundMgr.SelectCharacterID
     let ctx = ServerContext::new();
     let kw = HashMap::new();
 
@@ -881,7 +881,7 @@ async fn test_warp_scrambler_disruptor_blocking() {
 // parity: feat:modules.warp-disruption-field
 #[tokio::test]
 async fn test_hic_warp_disruption_field_generator_bubble_and_focused_script() {
-    // parity: rpc:authentication.Login, rpc:beyonce.CmdWarpToStuff, rpc:charUnboundMgr.SelectCharacterID, rpc:dogmaIM.Activate, rpc:dogmaIM.AddTarget, rpc:dogmaIM.Deactivate, rpc:dogmaIM.LoadAmmo, rpc:invbroker.Add, rpc:stationSvc.Undock
+    // parity: rpc:authentication.Login, rpc:charUnboundMgr.SelectCharacterID, rpc:dogmaIM.LoadAmmo
     let ctx = ServerContext::new();
     let kw = HashMap::new();
 

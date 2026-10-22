@@ -25,7 +25,7 @@ fn root_dir() -> PathBuf {
 #[tokio::test]
 // parity: plan:P-2, plan:P-3, plan:P-4
 async fn test_z1_systematic_rpc_catalog_dispatch_closure_and_wire_formatting() {
-    // parity: rpc:bookmark.GetBookmarks, rpc:charFittingMgr.GetFittings, rpc:charUnboundMgr.GetCharacterInfo, rpc:charUnboundMgr.GetCharactersToSelect, rpc:charUnboundMgr.SelectCharacterID, rpc:corpmgr.CreateCorporation, rpc:corpmgr.GetMembers, rpc:corpmgr.GetWalletDivisions, rpc:fleetMgr.CreateFleet, rpc:fleetMgr.GetFleet, rpc:invbroker.MachoBindObject, rpc:lscService.JoinChannel, rpc:lscService.SendMessage, rpc:mailMgr.GetHeaders, rpc:marketProxy.GetCharOrders, rpc:marketProxy.GetOrders, rpc:slash.SlashCmd, rpc:stationSvc.GetStation
+    // parity: rpc:charUnboundMgr.GetCharacterInfo, rpc:charUnboundMgr.SelectCharacterID, rpc:corpRegistry.AddCorporation, rpc:account.GetWalletDivisionsInfo, rpc:marketProxy.GetCharOrders, rpc:marketProxy.GetOrders, rpc:slash.SlashCmd, rpc:stationSvc.GetStation
     let ctx = ServerContext::new();
     ctx.seed_demo_world_fixtures();
     let empty_kw = HashMap::new();
@@ -244,7 +244,7 @@ async fn test_z1_systematic_rpc_catalog_dispatch_closure_and_wire_formatting() {
         .expect("fleetMgr.GetFleet");
     assert!(matches!(get_fleet, PyRep::KeyVal(_)));
 
-    // e) corpmgr.GetMembers, CreateCorporation, & GetWalletDivisions
+    // e) corpmgr.GetMembers, corpRegistry.AddCorporation, & account.GetWalletDivisionsInfo
     let corp_members = ctx
         .dispatch_rpc(&mut sess, "corpmgr", None, "GetMembers", &[], &empty_kw, None)
         .await
@@ -254,9 +254,9 @@ async fn test_z1_systematic_rpc_catalog_dispatch_closure_and_wire_formatting() {
     let create_corp = ctx
         .dispatch_rpc(
             &mut sess,
-            "corpmgr",
+            "corpRegistry",
             None,
-            "CreateCorporation",
+            "AddCorporation",
             &[
                 PyRep::String("Z1 Closure Corp".into()),
                 PyRep::String("Z1CC".into()),
@@ -266,28 +266,28 @@ async fn test_z1_systematic_rpc_catalog_dispatch_closure_and_wire_formatting() {
             None,
         )
         .await
-        .expect("corpmgr.CreateCorporation");
+        .expect("corpRegistry.AddCorporation");
     assert!(matches!(create_corp, PyRep::KeyVal(_)));
 
     let corp_wallets = ctx
         .dispatch_rpc(
             &mut sess,
-            "corpmgr",
+            "account",
             None,
-            "GetWalletDivisions",
+            "GetWalletDivisionsInfo",
             &[],
             &empty_kw,
             None,
         )
         .await
-        .expect("corpmgr.GetWalletDivisions");
+        .expect("account.GetWalletDivisionsInfo");
     assert!(matches!(corp_wallets, PyRep::Rowset { .. }));
 
-    // f) lscService.JoinChannel & SendMessage
+    // f) LSC.JoinChannel & SendMessage
     let join_rep = ctx
         .dispatch_rpc(
             &mut sess,
-            "lscService",
+            "LSC",
             None,
             "JoinChannel",
             &[PyRep::String("test_chan".into())],
@@ -295,13 +295,13 @@ async fn test_z1_systematic_rpc_catalog_dispatch_closure_and_wire_formatting() {
             None,
         )
         .await
-        .expect("lscService.JoinChannel");
+        .expect("LSC.JoinChannel");
     assert!(matches!(join_rep, PyRep::KeyVal(_)));
 
     let msg_rep = ctx
         .dispatch_rpc(
             &mut sess,
-            "lscService",
+            "LSC",
             None,
             "SendMessage",
             &[
@@ -312,7 +312,7 @@ async fn test_z1_systematic_rpc_catalog_dispatch_closure_and_wire_formatting() {
             None,
         )
         .await
-        .expect("lscService.SendMessage");
+        .expect("LSC.SendMessage");
     assert!(matches!(msg_rep, PyRep::KeyVal(_)));
 
     // g) mailMgr.GetHeaders
@@ -664,7 +664,7 @@ async fn test_z2_systematic_notification_emission_pipelines_and_scope_multicast(
     );
 
     // =========================================================================
-    // Pipeline 7: OnLSC (Chat broadcast message)
+    // Pipeline 7: OnClientEvent_ChatMessageSent (Chat broadcast message)
     // =========================================================================
     let notifs7 = ctx.notify_lsc_message(
         NotificationTarget::SolarSystem(30_000_142),
@@ -673,7 +673,7 @@ async fn test_z2_systematic_notification_emission_pipelines_and_scope_multicast(
         "Local broadcast test",
     );
     assert_eq!(notifs7.len(), 2);
-    assert_eq!(notifs7[0].event, "OnLSC");
+    assert_eq!(notifs7[0].event, "OnClientEvent_ChatMessageSent");
     assert_eq!(notifs7[0].id_type, "channelid");
     assert_eq!(
         notifs7[0].args,
@@ -730,7 +730,7 @@ async fn test_z2_systematic_notification_emission_pipelines_and_scope_multicast(
     // Corporation scope (Pilot 1 and Pilot 2 are in corp 98000001)
     let corp_notifs = ctx.notify(
         NotificationTarget::Corporation(98_000_001),
-        "OnCorpNews",
+        "OnCorporationChanged",
         "corpid",
         vec![PyRep::String("Corp announcement".into())],
     );
@@ -743,7 +743,7 @@ async fn test_z2_systematic_notification_emission_pipelines_and_scope_multicast(
     // Station scope (Pilot 1 and Pilot 2 are in station 60003760)
     let station_notifs = ctx.notify(
         NotificationTarget::Station(60_003_760),
-        "OnStationAlert",
+        "OnCharNowInStation",
         "stationid",
         vec![PyRep::String("Station notice".into())],
     );
@@ -752,7 +752,7 @@ async fn test_z2_systematic_notification_emission_pipelines_and_scope_multicast(
     // All scope (all 3 online pilots)
     let all_notifs = ctx.notify(
         NotificationTarget::All,
-        "OnServerBroadcast",
+        "OnServerMessage",
         "all",
         vec![PyRep::String("Maintenance in 15 minutes".into())],
     );

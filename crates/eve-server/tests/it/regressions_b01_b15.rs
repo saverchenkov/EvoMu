@@ -9,7 +9,7 @@ use std::collections::HashMap;
 
 #[tokio::test]
 async fn test_blocking_findings_b01_to_b15_regressions() {
-    // parity: rpc:air_npe.AdvanceNode, rpc:authentication.Login, rpc:beyonce.CmdGotoDirection, rpc:beyonce.CmdStargateJump, rpc:beyonce.CmdStop, rpc:beyonce.CmdWarpToPoint, rpc:charUnboundMgr.SelectCharacterID, rpc:corpmgr.CreateCorporation, rpc:fighterMgr.CmdActivateAbilitySlots, rpc:fighterMgr.GetFightersForShip, rpc:home_station.set_home_station, rpc:industryManager.CompleteJob, rpc:industryManager.InstallJob, rpc:jumpCloneSvc.CloneJump, rpc:jumpCloneSvc.InstallCloneInStation, rpc:jumpCloneSvc.InstallCloneInStructure, rpc:planetMgr.Flush, rpc:planetMgr.UserUpdateNetwork, rpc:ship.Board, rpc:shipCosmeticsMgr.ActivateSkinLicense, rpc:shipCosmeticsMgr.ApplySkinToShip, rpc:stationSvc.Dock, rpc:stationSvc.Undock, rpc:structureControl.FuelStructure, rpc:structureCynoBeaconMgr.CmdJumpToStructureBeacon, rpc:structureDeployment.Anchor, rpc:structureDocking.Dock, rpc:structureDocking.Undock, rpc:taleMgr.MaterializeSystemLOD2
+    // parity: rpc:authentication.Login, rpc:charUnboundMgr.SelectCharacterID, rpc:fighterMgr.CmdActivateAbilitySlots, rpc:fighterMgr.GetFightersForShip, rpc:home_station.set_home_station, rpc:industryManager.CompleteJob, rpc:industryManager.InstallJob, rpc:jumpCloneSvc.CloneJump, rpc:jumpCloneSvc.InstallCloneInStation, rpc:jumpCloneSvc.InstallCloneInStructure, rpc:planetMgr.Flush, rpc:planetMgr.UserUpdateNetwork, rpc:ship.Board, rpc:shipCosmeticsMgr.ActivateSkinLicense, rpc:shipCosmeticsMgr.ApplySkinToShip, rpc:structureCynoBeaconMgr.CmdJumpToStructureBeacon, rpc:structureDeployment.Anchor, rpc:structureDocking.Dock, rpc:structureDocking.Undock
     use eve_db::{InventoryFlag, InventoryItemRecord, TrainedSkillRecord};
 
     let ctx = ServerContext::new();
@@ -572,32 +572,22 @@ async fn test_blocking_findings_b01_to_b15_regressions() {
     }
     assert_eq!(sess.solar_system_id, Some(30002813));
 
-    // R36-P1-1 & R2-P0-01: MaterializeSystemLOD2 rejects non-GMs with InsufficientRole, and rejects remote solar system arguments from GMs with CannotMaterializeRemoteSystem
-    let non_gm_mat_err = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "taleMgr",
-            None,
-            "MaterializeSystemLOD2", // rpc-lint: allow legacy/negative-test RPC (taleMgr.MaterializeSystemLOD2)
-            &[PyRep::Integer(30_000_142)],
-            &kw,
-            None,
-        )
-        .await;
+    // R36-P1-1 & R2-P0-01: materialize_system_lod2 rejects non-GMs with InsufficientRole, and rejects remote solar system arguments from GMs with CannotMaterializeRemoteSystem
+    let non_gm_mat_err = eve_server::services::cosmetics_events::materialize_system_lod2(
+        &ctx,
+        &sess,
+        &[PyRep::Integer(30_000_142)],
+    )
+    .await;
     assert_eq!(non_gm_mat_err.unwrap_err().code, "InsufficientRole");
     let saved_role = sess.role;
     sess.role |= eve_machonet::service_roles::ROLE_GMH;
-    let remote_mat_err = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "taleMgr",
-            None,
-            "MaterializeSystemLOD2", // rpc-lint: allow legacy/negative-test RPC (taleMgr.MaterializeSystemLOD2)
-            &[PyRep::Integer(30_000_142)],
-            &kw,
-            None,
-        )
-        .await;
+    let remote_mat_err = eve_server::services::cosmetics_events::materialize_system_lod2(
+        &ctx,
+        &sess,
+        &[PyRep::Integer(30_000_142)],
+    )
+    .await;
     sess.role = saved_role;
     assert_eq!(
         remote_mat_err.unwrap_err().code,
@@ -848,45 +838,30 @@ async fn test_blocking_findings_b01_to_b15_regressions() {
             .map(|c| c.lod_level),
         Some(2)
     );
-    let non_gm_mat = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "taleMgr",
-            None,
-            "MaterializeSystemLOD2", // rpc-lint: allow legacy/negative-test RPC (taleMgr.MaterializeSystemLOD2)
-            &[PyRep::Integer(30_000_142)],
-            &kw,
-            None,
-        )
-        .await;
+    let non_gm_mat = eve_server::services::cosmetics_events::materialize_system_lod2(
+        &ctx,
+        &sess,
+        &[PyRep::Integer(30_000_142)],
+    )
+    .await;
     assert_eq!(non_gm_mat.unwrap_err().code, "InsufficientRole");
     sess.role |= 0x02;
-    let legacy_bit_mat = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "taleMgr",
-            None,
-            "MaterializeSystemLOD2", // rpc-lint: allow legacy/negative-test RPC (taleMgr.MaterializeSystemLOD2)
-            &[PyRep::Integer(30_000_142)],
-            &kw,
-            None,
-        )
-        .await;
+    let legacy_bit_mat = eve_server::services::cosmetics_events::materialize_system_lod2(
+        &ctx,
+        &sess,
+        &[PyRep::Integer(30_000_142)],
+    )
+    .await;
     assert_eq!(legacy_bit_mat.unwrap_err().code, "InsufficientRole");
     sess.role =
         eve_machonet::service_roles::ROLE_PLAYER_DEFAULT | eve_machonet::service_roles::ROLE_GML;
-    let mat_second = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "taleMgr",
-            None,
-            "MaterializeSystemLOD2", // rpc-lint: allow legacy/negative-test RPC (taleMgr.MaterializeSystemLOD2)
-            &[PyRep::Integer(30_000_142)],
-            &kw,
-            None,
-        )
-        .await
-        .expect("GM MaterializeSystemLOD2");
+    let mat_second = eve_server::services::cosmetics_events::materialize_system_lod2(
+        &ctx,
+        &sess,
+        &[PyRep::Integer(30_000_142)],
+    )
+    .await
+    .expect("GM materialize_system_lod2");
     assert_eq!(mat_second.as_i64(), Some(0));
     sess.role = eve_machonet::service_roles::ROLE_PLAYER_DEFAULT;
 

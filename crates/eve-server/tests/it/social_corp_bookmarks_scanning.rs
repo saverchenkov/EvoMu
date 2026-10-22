@@ -17,7 +17,7 @@ fn is_keyval(rep: &PyRep) -> bool {
 
 #[tokio::test]
 async fn test_so4_bookmarks_folders_shared_folders_and_scan_bookmarks() {
-    // parity: feat:bookmarks.create, feat:bookmarks.update-delete, feat:bookmarks.folders, feat:bookmarks.shared-folders, feat:scanning.scan-bookmark, rpc:accessGroupBookmarkMgr.AddFolder, rpc:accessGroupBookmarkMgr.AddToKnownFolders, rpc:accessGroupBookmarkMgr.CreateSubfolder, rpc:accessGroupBookmarkMgr.DeleteFolder, rpc:accessGroupBookmarkMgr.DeleteSubfolder, rpc:accessGroupBookmarkMgr.RemoveFromKnownFolders, rpc:bookmark.BookmarkLocation, rpc:bookmark.BookmarkScanResult, rpc:bookmark.DeleteBookmarks, rpc:bookmark.GetBookmarks, rpc:bookmark.GetFolders, rpc:bookmark.UpdateBookmark, rpc:charUnboundMgr.SelectCharacterID, rpc:corpRegistry.AddCorporation, rpc:corpRegistry.InsertApplication, rpc:corpRegistry.UpdateApplicationOffer, rpc:dogmaIM.Activate, rpc:scanMgr.GetSystemScanMgr, rpc:scanMgr.RequestScans, rpc:stationSvc.Undock
+    // parity: feat:bookmarks.create, feat:bookmarks.update-delete, feat:bookmarks.folders, feat:bookmarks.shared-folders, feat:scanning.scan-bookmark, rpc:accessGroupBookmarkMgr.AddFolder, rpc:accessGroupBookmarkMgr.AddToKnownFolders, rpc:accessGroupBookmarkMgr.CreateSubfolder, rpc:accessGroupBookmarkMgr.DeleteFolder, rpc:accessGroupBookmarkMgr.DeleteSubfolder, rpc:accessGroupBookmarkMgr.RemoveFromKnownFolders, rpc:charUnboundMgr.SelectCharacterID, rpc:corpRegistry.AddCorporation, rpc:corpRegistry.InsertApplication, rpc:corpRegistry.UpdateApplicationOffer, rpc:scanMgr.GetSystemScanMgr
     eve_testkit::attest(&[
         "feat:bookmarks.create",
         "feat:bookmarks.update-delete",
@@ -674,7 +674,7 @@ async fn test_so4_bookmarks_folders_shared_folders_and_scan_bookmarks() {
 
 #[tokio::test]
 async fn test_so5_scanning_dscan_probes_and_acceleration_gates() {
-    // parity: feat:scanning.dscan, feat:scanning.probe-launch, feat:scanning.probe-scan-math, feat:scanning.probe-recall, feat:navigation.acceleration-gates, rpc:charUnboundMgr.SelectCharacterID, rpc:dogmaIM.Activate, rpc:dogmaIM.LoadAmmo, rpc:keeper.ActivateAccelerationGate, rpc:scanMgr.ConeScan, rpc:scanMgr.DestroyProbe, rpc:scanMgr.GetSystemScanMgr, rpc:scanMgr.ReconnectToLostProbes, rpc:scanMgr.RecoverProbes, rpc:scanMgr.RequestScans, rpc:stationSvc.Undock
+    // parity: feat:scanning.dscan, feat:scanning.probe-launch, feat:scanning.probe-scan-math, feat:scanning.probe-recall, feat:navigation.acceleration-gates, rpc:charUnboundMgr.SelectCharacterID, rpc:dogmaIM.LoadAmmo, rpc:keeper.ActivateAccelerationGate, rpc:scanMgr.GetSystemScanMgr
     eve_testkit::attest(&[
         "feat:scanning.dscan",
         "feat:scanning.probe-launch",

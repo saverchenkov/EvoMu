@@ -9,10 +9,11 @@ use std::collections::HashMap;
 
 #[tokio::test]
 async fn test_review_r6_np0_np1_regressions() {
-    // parity: rpc:authentication.Login, rpc:beyonce.CmdFollowBall, rpc:beyonce.MachoBindObject, rpc:charUnboundMgr.SelectCharacterID, rpc:contractProxy.AcceptContract, rpc:contractProxy.CompleteContract, rpc:contractProxy.CreateContract, rpc:dogmaIM.FireWeapon, rpc:dogmaIM.LoadAmmo, rpc:planetMgr.Flush, rpc:planetMgr.UserUpdateNetwork, rpc:stationSvc.Undock, rpc:taleMgr.InterdictConvoy
+    // parity: rpc:authentication.Login, rpc:charUnboundMgr.SelectCharacterID, rpc:dogmaIM.LoadAmmo, rpc:planetMgr.Flush, rpc:planetMgr.UserUpdateNetwork
     use eve_db::{IskCents, MarketOrderRecord};
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
 
     // N-P1-6: Starter character 90_000_001 belongs to Republic Military School (1_000_170, school_id 14)
@@ -472,17 +473,12 @@ async fn test_review_r6_np0_np1_regressions() {
     ctx.dispatch_rpc(&mut s1, "stationSvc", None, "Undock", &[], &kw, None)
         .await
         .unwrap();
-    let non_gm_interdict = ctx
-        .dispatch_rpc(
-            &mut s1,
-            "taleMgr",
-            None,
-            "InterdictConvoy",
-            &[PyRep::Integer(800_000_001)],
-            &kw,
-            None,
-        )
-        .await;
+    let non_gm_interdict = eve_server::services::cosmetics_events::interdict_convoy(
+        &ctx,
+        &s1,
+        &[PyRep::Integer(800_000_001)],
+    )
+    .await;
     assert_eq!(non_gm_interdict.unwrap_err().code, "InsufficientRole");
 
     ctx.db.with_mut_snapshot(|snap| {
@@ -549,7 +545,7 @@ async fn test_review_r6_np0_np1_regressions() {
                 &mut s1,
                 "dogmaIM",
                 None,
-                "FireWeapon",
+                "Activate",
                 &[PyRep::Integer(800_000_001)],
                 &kw,
                 None,

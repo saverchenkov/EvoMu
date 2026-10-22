@@ -176,7 +176,7 @@ async fn test_ch5_gm_command_dispatcher() {
 
 #[tokio::test]
 async fn test_ch3_ch4_paperdoll_contacts_blocklist_labels_and_watchlist() {
-    // parity: feat:character.paperdoll-store, feat:social.contacts-add, feat:social.contacts-edit-delete, feat:social.contacts-block, feat:social.contacts-labels, feat:social.contacts-buddy-online, feat:character.sp-summary, rpc:charMgr.AddContact, rpc:charMgr.AssignLabels, rpc:charMgr.BlockOwners, rpc:charMgr.CreateLabel, rpc:charMgr.DeleteContacts, rpc:charMgr.EditContact, rpc:charMgr.GetContactList, rpc:charMgr.UnblockOwners, rpc:charUnboundMgr.SelectCharacterID, rpc:mailMgr.SendMail, rpc:paperDollServer.GetMyPaperDollData, rpc:paperDollServer.UpdateExistingCharacterFull
+    // parity: feat:character.paperdoll-store, feat:social.contacts-add, feat:social.contacts-edit-delete, feat:social.contacts-block, feat:social.contacts-labels, feat:social.contacts-buddy-online, feat:character.sp-summary, rpc:charMgr.AddContact, rpc:charMgr.BlockOwners, rpc:charMgr.DeleteContacts, rpc:charMgr.GetContactList, rpc:charMgr.UnblockOwners, rpc:charUnboundMgr.SelectCharacterID, rpc:paperDollServer.GetMyPaperDollData, rpc:paperDollServer.UpdateExistingCharacterFull
     eve_testkit::attest(&["feat:character.paperdoll-store", "feat:social.contacts-add", "feat:social.contacts-edit-delete", "feat:social.contacts-block", "feat:social.contacts-labels", "feat:social.contacts-buddy-online", "feat:character.sp-summary"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();

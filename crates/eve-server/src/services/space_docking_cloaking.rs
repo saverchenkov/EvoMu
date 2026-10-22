@@ -701,7 +701,7 @@ pub(crate) async fn handle_scan_and_wormhole_extras(
     _kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     // parity: feat:scanning.probe-launch, feat:scanning.probe-recall, feat:scanning.probe-scan-math
-    // parity: rpc:scanMgr.GetSystemScanMgr, rpc:scanMgr.RequestScans, rpc:scanMgr.RecoverProbes, rpc:scanMgr.ReconnectToLostProbes, rpc:scanMgr.DestroyProbe
+    // parity: rpc:scanMgr.GetSystemScanMgr
     match (service, method) {
         ("scanMgr", "GetSystemScanMgr") => handle_get_system_scan_mgr(ctx, session, service, args).await,
         ("scanMgr", "GetAnomalies") => handle_get_anomalies(ctx, session, bound_entry).await,

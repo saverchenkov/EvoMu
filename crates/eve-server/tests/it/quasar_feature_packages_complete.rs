@@ -207,7 +207,7 @@ async fn test_quasar_campaign_requests_and_track_progress() {
 
 #[tokio::test]
 async fn test_quasar_sovereignty_resources_mercenaryden_stargate_and_admin_requests() {
-    // parity: quasar:eveProto/generated/eve_public/ai/assistant/chat/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/faction/activity/admin_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/activity/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/resource/planet/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/resource/star/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/skyhook/api/admin/admin_pb2.pyj, quasar:eveProto/generated/eve_public/stargate/lock/api/requests_pb2.pyj, rpc:publicGatewaySvc.SendRequest
+    // parity: quasar:eveProto/generated/eve_public/ai/assistant/chat/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/faction/activity/admin_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/activity/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/resource/planet/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/resource/star/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/skyhook/api/admin/admin_pb2.pyj, quasar:eveProto/generated/eve_public/stargate/lock/api/requests_pb2.pyj
     eve_testkit::attest(&[
         "quasar:eveProto/generated/eve_public/ai/assistant/chat/api/requests_pb2.pyj",
         "quasar:eveProto/generated/eve_public/faction/activity/admin_pb2.pyj",

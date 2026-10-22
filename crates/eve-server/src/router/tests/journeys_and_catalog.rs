@@ -744,30 +744,20 @@ async fn test_all_18_e2e_journeys_and_catalog_coverage() {
         "16th mission must trigger storyline offer"
     );
 
-    // E2E-17 (while in space in Jita): Living World 3-Tier LOD Materialization (auto-triggered on Undock), Convoy Combat Destruction via FireWeapon, & +15% NPC Price Spike
-    let non_gm_mat = ctx
-        .dispatch_rpc(
-            &mut session,
-            "taleMgr",
-            None,
-            "MaterializeSystemLOD2", // rpc-lint: allow legacy/negative-test RPC (taleMgr.MaterializeSystemLOD2)
-            &[PyRep::Integer(30_000_142)],
-            &empty,
-            None,
-        )
-        .await;
+    // E2E-17 (while in space in Jita): Living World 3-Tier LOD Materialization (auto-triggered on Undock), Convoy Combat Destruction, & +15% NPC Price Spike
+    let non_gm_mat = crate::services::cosmetics_events::materialize_system_lod2(
+        &ctx,
+        &session,
+        &[PyRep::Integer(30_000_142)],
+    )
+    .await;
     assert_eq!(non_gm_mat.unwrap_err().code, "InsufficientRole");
-    let non_gm_int = ctx
-        .dispatch_rpc(
-            &mut session,
-            "taleMgr",
-            None,
-            "InterdictConvoy", // rpc-lint: allow legacy/negative-test RPC (taleMgr.InterdictConvoy)
-            &[PyRep::Integer(800_000_001)],
-            &empty,
-            None,
-        )
-        .await;
+    let non_gm_int = crate::services::cosmetics_events::interdict_convoy(
+        &ctx,
+        &session,
+        &[PyRep::Integer(800_000_001)],
+    )
+    .await;
     assert_eq!(non_gm_int.unwrap_err().code, "InsufficientRole");
     let mut lw_destroyed = false;
     let mut lw_new_ask = 0.0;

@@ -313,7 +313,7 @@ async fn test_titan_doomsday_single_target_and_lance_slash() {
 
 #[tokio::test]
 async fn test_command_bursts_dbuff_aggregation_and_system_wide_effects() {
-    // parity: feat:modules.command-bursts, feat:dogma.dbuffs, feat:dogma.system-wide-effects, rpc:dogmaIM.LoadAmmo, notify:OnModuleAttributeChanges, notify:OnGodmaShipEffect, notify:OnGodmaFlushLocation, notify:ProcessGodmaPrimeLocation, notify:OnSpecialFX, rpc:charUnboundMgr.SelectCharacterID, rpc:dogmaIM.Activate, rpc:dogmaIM.ApplyBuffsToItems, rpc:dogmaIM.GetAllInfo, rpc:dogmaIM.GetDbuffStateForClient, rpc:dogmaIM.GetMappedDbuffsForItem, rpc:dogmaIM.GetSystemWideEffectsInfo, rpc:dogmaIM.GetSystemWideEffectsOnShip, rpc:dogmaIM.RefreshSystemWideEnvironment, rpc:dogmaIM.ResetSystemWideEffects
+    // parity: feat:modules.command-bursts, feat:dogma.dbuffs, feat:dogma.system-wide-effects, rpc:dogmaIM.LoadAmmo, notify:OnModuleAttributeChanges, notify:OnGodmaShipEffect, notify:OnGodmaFlushLocation, notify:ProcessGodmaPrimeLocation, notify:OnSpecialFX, rpc:charUnboundMgr.SelectCharacterID
     eve_testkit::attest(&["feat:modules.command-bursts", "feat:dogma.dbuffs", "feat:dogma.system-wide-effects", "rpc:dogmaIM.LoadAmmo", "notify:OnModuleAttributeChanges", "notify:OnGodmaShipEffect", "notify:OnGodmaFlushLocation", "notify:ProcessGodmaPrimeLocation", "notify:OnSpecialFX"]);
     let ctx = new_sqlite_ctx();
     let kw = HashMap::new();
@@ -557,7 +557,7 @@ async fn test_command_bursts_dbuff_aggregation_and_system_wide_effects() {
 
 #[tokio::test]
 async fn test_analyzers_cargo_ship_scanners_entosis_and_clone_vat_bay() {
-    // parity: feat:modules.data-relic-analyzer, feat:modules.entosis-link, feat:modules.clone-vat-bay, rpc:jumpCloneSvc.OfferShipCloneInstallation, rpc:jumpCloneSvc.AcceptShipCloneInstallation, rpc:jumpCloneSvc.GetShipCloneState, notify:OnShipJumpCloneCacheInvalidated, notify:OnJumpCloneCacheInvalidated, notify:OnSpecialFX, notify:OnGodmaShipEffect, rpc:charUnboundMgr.SelectCharacterID, rpc:dogmaIM.Activate
+    // parity: feat:modules.data-relic-analyzer, feat:modules.entosis-link, feat:modules.clone-vat-bay, rpc:jumpCloneSvc.OfferShipCloneInstallation, rpc:jumpCloneSvc.AcceptShipCloneInstallation, rpc:jumpCloneSvc.GetShipCloneState, notify:OnShipJumpCloneCacheInvalidated, notify:OnJumpCloneCacheInvalidated, notify:OnSpecialFX, notify:OnGodmaShipEffect, rpc:charUnboundMgr.SelectCharacterID
     eve_testkit::attest(&["feat:modules.data-relic-analyzer", "feat:modules.entosis-link", "feat:modules.clone-vat-bay", "rpc:jumpCloneSvc.OfferShipCloneInstallation", "rpc:jumpCloneSvc.AcceptShipCloneInstallation", "rpc:jumpCloneSvc.GetShipCloneState", "notify:OnShipJumpCloneCacheInvalidated", "notify:OnJumpCloneCacheInvalidated", "notify:OnSpecialFX", "notify:OnGodmaShipEffect"]);
     let ctx = new_sqlite_ctx();
     let kw = HashMap::new();
@@ -809,7 +809,7 @@ async fn test_analyzers_cargo_ship_scanners_entosis_and_clone_vat_bay() {
 
 #[tokio::test]
 async fn test_abyssal_mutaplasmid_mutation_and_inspection() {
-    // parity: feat:modules.mutaplasmids, feat:modules.abyssal-modules-trade, rpc:dynamicItemService.CreateDynamicItem, rpc:dynamicItemService.GetDynamicItemInfo, notify:OnItemChange, rpc:charUnboundMgr.SelectCharacterID, rpc:dogmaIM.ItemGetInfo
+    // parity: feat:modules.mutaplasmids, feat:modules.abyssal-modules-trade, rpc:dynamicItemService.CreateDynamicItem, rpc:dynamicItemService.GetDynamicItemInfo, notify:OnItemChange, rpc:charUnboundMgr.SelectCharacterID
     eve_testkit::attest(&["feat:modules.mutaplasmids", "feat:modules.abyssal-modules-trade", "rpc:dynamicItemService.CreateDynamicItem", "rpc:dynamicItemService.GetDynamicItemInfo", "notify:OnItemChange"]);
     let ctx = new_sqlite_ctx();
     let kw = HashMap::new();
@@ -903,7 +903,7 @@ async fn test_abyssal_mutaplasmid_mutation_and_inspection() {
 
 #[tokio::test]
 async fn test_cargo_and_ship_scanner_show_target_cargo_fitting_and_capacitor() {
-    // parity: feat:modules.cargo-scanner, feat:modules.ship-scanner, rpc:charUnboundMgr.SelectCharacterID, rpc:dogmaIM.Activate
+    // parity: feat:modules.cargo-scanner, feat:modules.ship-scanner, rpc:charUnboundMgr.SelectCharacterID
     eve_testkit::attest(&["feat:modules.cargo-scanner", "feat:modules.ship-scanner"]);
     let ctx = new_sqlite_ctx();
     let kw = HashMap::new();

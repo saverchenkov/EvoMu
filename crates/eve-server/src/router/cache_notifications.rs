@@ -1015,7 +1015,7 @@ impl ServerContext {
         )
     }
 
-    /// Emits an `OnLSC` chat message notification (`channelID`, `senderID`, `text`) (`Z-2`).
+    /// Emits an `OnClientEvent_ChatMessageSent` chat message notification (`channelID`, `senderID`, `text`) (`Z-2`).
     pub fn notify_lsc_message(
         &self,
         target: NotificationTarget,
@@ -1025,7 +1025,7 @@ impl ServerContext {
     ) -> Vec<PendingMachoNotification> {
         self.notify(
             target,
-            "OnLSC",
+            "OnClientEvent_ChatMessageSent",
             "channelid",
             vec![
                 PyRep::String(channel_id.to_string()),
@@ -1117,7 +1117,7 @@ impl ServerContext {
 
         self.notify(
             NotificationTarget::SolarSystem(new_sys),
-            "OnLSC",
+            "OnChannelJoined",
             "channelid",
             vec![
                 PyRep::String(format!("solarsystemid2:{}", new_sys)),

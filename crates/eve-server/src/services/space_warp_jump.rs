@@ -39,7 +39,6 @@ pub(crate) async fn handle(
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
         // parity: plan:SP-3, feat:navigation.warp-to, feat:navigation.warp-disrupted, feat:navigation.warp-capacitor-cost, feat:navigation.warp-exit-invulnerability
-        // parity: rpc:beyonce.CmdWarpToStuff, rpc:beyonce.CmdWarpToStuffAutopilot
         ("beyonce", "CmdWarpToStuff") | ("beyonce", "CmdWarpToStuffAutopilot") => Some(
             handle_cmd_warp_to_stuff(
                 ctx,
@@ -52,12 +51,11 @@ pub(crate) async fn handle(
             .await,
         ),
         // parity: plan:SP-4, feat:navigation.stargate-capital-restriction, feat:navigation.session-change-timer-triggers, feat:navigation.jump-cloak-immunities
-        // parity: rpc:beyonce.CmdStargateJump, rpc:beyonce.StargateJump
         ("beyonce", "CmdStargateJump") | ("beyonce", "StargateJump") => {
             Some(handle_cmd_stargate_jump(ctx, session, bound_entry, args).await)
         }
         // parity: plan:SP-4, plan:SP-5, feat:navigation.dock-station, feat:navigation.dock-structure, feat:navigation.undock, feat:navigation.session-change-timer-triggers
-        // parity: rpc:beyonce.Dock, rpc:beyonce.CmdDock, rpc:beyonce.Undock, rpc:beyonce.SetSessionCheck
+        // parity: rpc:beyonce.SetSessionCheck
         ("beyonce", "Dock") | ("beyonce", "CmdDock") => {
             Some(handle_dock(ctx, session, bound_entry, args).await)
         }
@@ -278,6 +276,9 @@ async fn handle_cmd_warp_to_stuff(
     kwargs: &HashMap<String, PyRep>,
     is_autopilot: bool,
 ) -> Result<PyRep, BridgeRpcError> {
+    if args.len() == 3 && args.iter().all(|a| matches!(a, PyRep::Real(_))) {
+        return handle_legacy_warp_to_point(ctx, session, bound_entry, args).await;
+    }
     let (_, char_id) = ServerContext::require_character(session)?;
     let sys_id = ServerContext::require_bound_system(bound_entry, BEYONCE_SVC)?;
     let Some(ship_id) = session.ship_id else {

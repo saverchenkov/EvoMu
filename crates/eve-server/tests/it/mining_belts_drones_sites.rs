@@ -127,7 +127,7 @@ async fn activate_in_range(
 // ============================================================================
 #[tokio::test]
 async fn test_mn15_mining_sites_gas_anomalies_signatures_sov() {
-    // parity: plan:MN-15, feat:mining.gas-sites, feat:mining.ore-anomalies, feat:mining.ore-signatures, feat:mining.sov-ore-sites, rpc:beyonce.CmdFollowBall, rpc:beyonce.CmdWarpToStuff, rpc:beyonce.MachoBindObject, rpc:dogmaIM.Activate, rpc:scanSvc.ConeScan, rpc:scanSvc.GetScanResults, rpc:scanSvc.GetSystemScanMgr, rpc:scanSvc.RequestScans, rpc:sovHubSvc.GetInstalledUpgradesLocal, rpc:sovHubSvc.SaveUpgradeConfiguration, rpc:sovMgr.AcquireSkyhooks
+    // parity: plan:MN-15, feat:mining.gas-sites, feat:mining.ore-anomalies, feat:mining.ore-signatures, feat:mining.sov-ore-sites, rpc:sovMgr.AcquireSkyhooks
     eve_testkit::attest(&["plan:MN-15", "feat:mining.gas-sites", "feat:mining.ore-anomalies", "feat:mining.ore-signatures", "feat:mining.sov-ore-sites"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);

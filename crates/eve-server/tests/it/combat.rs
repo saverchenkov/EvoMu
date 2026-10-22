@@ -11,7 +11,7 @@ use std::collections::HashMap;
 
 #[tokio::test]
 async fn test_phase_0_s2_fighter_mgr_unimplemented_rpc() {
-    // parity: plan:S-2, rpc:charUnboundMgr.SelectCharacterID, rpc:fighterMgr.CmdActivateAbilitySlots, rpc:stationSvc.Undock
+    // parity: plan:S-2, rpc:charUnboundMgr.SelectCharacterID, rpc:fighterMgr.CmdActivateAbilitySlots
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let mut sess = SessionState::new(902);

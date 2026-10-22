@@ -48,7 +48,7 @@ pub(crate) async fn handle(
         }
 
         // parity: plan:S-3, feat:navigation.pharolux-beacon
-        // parity: rpc:structureCynoBeaconMgr.GetMyAccessibleOnlineCynoBeaconStructures, rpc:structureCynoBeaconMgr.CmdJumpToStructureBeacon, rpc:structureCynoBeaconMgr.CmdBridgeToStructureBeacon, rpc:structureCynoBeaconMgr.CmdGroupJumpToStructureBeacon
+        // parity: rpc:structureCynoBeaconMgr.CmdJumpToStructureBeacon, rpc:structureCynoBeaconMgr.CmdBridgeToStructureBeacon, rpc:structureCynoBeaconMgr.CmdGroupJumpToStructureBeacon
         ("structureCynoBeaconMgr", "GetMyAccessibleOnlineCynoBeaconStructures") => {
             Some(handle_get_beacon_structures(ctx, session))
         }
@@ -63,19 +63,16 @@ pub(crate) async fn handle(
         }
 
         // parity: feat:scanning.dscan
-        // parity: rpc:scanMgr.ConeScan
         ("scanMgr", "ConeScan") | ("scanMgr", "DirectionalScan") => {
             handle_cone_scan(ctx, session, bound_entry, method, args).await
         }
 
-        // parity: rpc:beyonce.CmdMineRepeatedly, rpc:dogmaIM.Mine
         ("entity", "CmdMineRepeatedly")
         | ("beyonce", "CmdMineRepeatedly")
         | ("dogmaIM", "Mine") => {
             Some(crate::services::space_entity_mining::handle_mine(ctx, session, bound_entry, args).await)
         }
 
-        // parity: rpc:charMiningLedger.GetMiningLedger, rpc:charMiningLedger.GetLedger
         ("charMiningLedger", "GetMiningLedger") | ("charMiningLedger", "GetLedger") => {
             Some(handle_get_mining_ledger(ctx, session))
         }

@@ -14,7 +14,7 @@ use std::collections::HashMap;
 
 #[tokio::test]
 async fn test_ch3_character_creation_and_starter_assets() {
-    // parity: feat:character.list-characters, feat:character.select-character, feat:character.create-character, feat:character.starter-skills, feat:character.school-corp, feat:character.random-name, feat:character.name-validation, rpc:charUnboundMgr.CreateCharacterWithDoll, rpc:charUnboundMgr.GetCharacterInfo, rpc:charUnboundMgr.GetCharactersToSelect, rpc:charUnboundMgr.GetValidRandomName, rpc:charUnboundMgr.SelectCharacterID, rpc:charUnboundMgr.ValidateNameEx, rpc:invbroker.SetLabel
+    // parity: feat:character.list-characters, feat:character.select-character, feat:character.create-character, feat:character.starter-skills, feat:character.school-corp, feat:character.random-name, feat:character.name-validation, rpc:charUnboundMgr.CreateCharacterWithDoll, rpc:charUnboundMgr.GetCharacterInfo, rpc:charUnboundMgr.GetValidRandomName, rpc:charUnboundMgr.SelectCharacterID, rpc:charUnboundMgr.ValidateNameEx, rpc:invbroker.SetLabel
     eve_testkit::attest(&["feat:character.list-characters", "feat:character.select-character", "feat:character.create-character", "feat:character.starter-skills", "feat:character.school-corp", "feat:character.random-name", "feat:character.name-validation"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
@@ -456,7 +456,7 @@ async fn test_ch3_character_creation_and_starter_assets() {
 
 #[tokio::test]
 async fn test_ch4_character_sheet_biography_and_notes() {
-    // parity: feat:character.show-info-public, feat:character.biography, feat:character.employment-history, feat:character.owner-notes, feat:character.character-sheet, rpc:charMgr.AddOwnerNote, rpc:charMgr.EditOwnerNote, rpc:charMgr.GetCharacterDescription, rpc:charMgr.GetCharacterInfo, rpc:charMgr.GetOwnerNote, rpc:charMgr.GetOwnerNoteLabels, rpc:charMgr.GetPrivateInfo, rpc:charMgr.GetPublicInfo3, rpc:charMgr.RemoveOwnerNote, rpc:charMgr.RespecCharacter, rpc:charMgr.SetCharacterDescription, rpc:charUnboundMgr.SelectCharacterID, rpc:corporationSvc.GetEmployementRecordAndCharacterTransfers
+    // parity: feat:character.show-info-public, feat:character.biography, feat:character.employment-history, feat:character.owner-notes, feat:character.character-sheet, rpc:charMgr.AddOwnerNote, rpc:charMgr.EditOwnerNote, rpc:charMgr.GetCharacterDescription, rpc:charMgr.GetOwnerNote, rpc:charMgr.GetOwnerNoteLabels, rpc:charMgr.GetPrivateInfo, rpc:charMgr.GetPublicInfo3, rpc:charMgr.RemoveOwnerNote, rpc:charMgr.SetCharacterDescription, rpc:charUnboundMgr.SelectCharacterID, rpc:corporationSvc.GetEmployementRecordAndCharacterTransfers
     eve_testkit::attest(&["feat:character.show-info-public", "feat:character.biography", "feat:character.employment-history", "feat:character.owner-notes", "feat:character.character-sheet"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();

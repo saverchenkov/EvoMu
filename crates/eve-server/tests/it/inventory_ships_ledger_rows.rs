@@ -688,7 +688,7 @@ async fn test_cargo_capacity_move_items_and_packaged_volumes() {
 
 #[tokio::test]
 async fn test_containers_secure_alsc_and_station_containers() {
-    // parity: feat:inventory.containers, feat:inventory.secure-containers, feat:inventory.station-containers, rpc:invbroker.Add, rpc:invbroker.GetContainerContents
+    // parity: feat:inventory.containers, feat:inventory.secure-containers, feat:inventory.station-containers, rpc:invbroker.GetContainerContents
     eve_testkit::attest(&[
         "feat:inventory.containers",
         "feat:inventory.secure-containers",

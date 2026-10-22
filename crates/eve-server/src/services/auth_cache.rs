@@ -12,6 +12,23 @@ use std::collections::HashMap;
 const V24_01_VERSION: f64 = 24.01;
 const V24_01_BUILD: i64 = 3_619_879;
 
+pub fn get_init_vals(ctx: &ServerContext) -> PyRep {
+    let mut sorted_svcs: Vec<&String> = ctx.cataloged_services.iter().collect();
+    sorted_svcs.sort();
+    let service_entries: Vec<(PyRep, PyRep)> = sorted_svcs
+        .into_iter()
+        .map(|svc| (PyRep::String(svc.clone()), PyRep::String("sol".into())))
+        .collect();
+    let cluster_info = vec![(
+        PyRep::String("catalogedServices".into()),
+        PyRep::Integer(ctx.cataloged_services.len() as i64),
+    )];
+    PyRep::Tuple(vec![
+        PyRep::Dict(service_entries),
+        PyRep::Dict(cluster_info),
+    ])
+}
+
 pub async fn handle(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -21,23 +38,6 @@ pub async fn handle(
     _kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
-        ("machoNet", "GetInitVals") => {
-            let mut sorted_svcs: Vec<&String> = ctx.cataloged_services.iter().collect();
-            sorted_svcs.sort();
-            let service_entries: Vec<(PyRep, PyRep)> = sorted_svcs
-                .into_iter()
-                .map(|svc| (PyRep::String(svc.clone()), PyRep::String("sol".into())))
-                .collect();
-            let cluster_info = vec![(
-                PyRep::String("catalogedServices".into()),
-                PyRep::Integer(ctx.cataloged_services.len() as i64),
-            )];
-            Some(Ok(PyRep::Tuple(vec![
-                PyRep::Dict(service_entries),
-                PyRep::Dict(cluster_info),
-            ])))
-        }
-
         ("machoNet", "GetServiceInfo") => {
             let mut sorted_svcs: Vec<&String> = ctx.cataloged_services.iter().collect();
             sorted_svcs.sort();

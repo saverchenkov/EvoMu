@@ -21,7 +21,7 @@ use tokio::net::{TcpListener, TcpStream};
 #[tokio::test]
 async fn test_phase_1_d1_to_d5_sde_sqlite_persistence_auth_sso_and_config() {
     // parity: plan:S-11, plan:D-2
-    // parity: feat:serverops.static-data, feat:account.multi-login-block, feat:account.account-bans, feat:admin.gm-ban, rpc:agentMgr.DoAction, rpc:authentication.List, rpc:authentication.Login, rpc:authentication.Logout, rpc:charUnboundMgr.GetCharactersToSelect, rpc:charUnboundMgr.SelectCharacterID, rpc:invbroker.MachoBindObject, rpc:multiLoginBlocker.Login, rpc:publicGatewaySvc.SendRequest, rpc:slash.SlashCmd
+    // parity: feat:serverops.static-data, feat:account.multi-login-block, feat:account.account-bans, feat:admin.gm-ban, rpc:authentication.Login, rpc:authentication.Logout, rpc:charUnboundMgr.SelectCharacterID, rpc:multiLoginBlocker.Login, rpc:slash.SlashCmd
     use eve_server::config::ServerConfig;
     use std::path::Path;
 
@@ -1004,6 +1004,9 @@ async fn test_phase_1_d1_to_d5_sde_sqlite_persistence_auth_sso_and_config() {
         .db
         .exchange_pkce_code(&other_code, "evomu-launcher", verifier, now_unix + 1)
         .expect("exchange_pkce_code on other_ctx");
+    // Pinned virtual clock: the token was exchanged at `now_unix + 1` (its `iat`), so let that
+    // second pass explicitly instead of relying on Argon2 wall time elapsing before Login.
+    ctx.advance_secs(1);
     let forged_login = ctx
         .dispatch_rpc(
             &mut sess2,
@@ -1024,9 +1027,6 @@ async fn test_phase_1_d1_to_d5_sde_sqlite_persistence_auth_sso_and_config() {
         "R34-P0-1: SSO JWT signed by a different deployment key must be rejected"
     );
 
-    // Pinned virtual clock: the token was exchanged at `now_unix + 1` (its `iat`), so let that
-    // second pass explicitly instead of relying on Argon2 wall time elapsing before Login.
-    ctx.advance_secs(1);
     ctx.dispatch_rpc(
         &mut sess2,
         "authentication",

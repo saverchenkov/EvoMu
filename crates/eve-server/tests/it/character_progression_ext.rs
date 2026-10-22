@@ -12,7 +12,7 @@ use std::collections::HashMap;
 
 #[tokio::test]
 async fn test_inv1_repackage_item() {
-    // parity: feat:ships.repackage, rpc:charUnboundMgr.SelectCharacterID, rpc:repackagingSvc.RepackageItems, rpc:repairSvc.RepairItems, rpc:ship.AssembleShip
+    // parity: feat:ships.repackage, rpc:charUnboundMgr.SelectCharacterID, rpc:repackagingSvc.RepackageItems, rpc:ship.AssembleShip
     eve_testkit::attest(&["feat:ships.repackage"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();
@@ -295,7 +295,7 @@ async fn test_inv1_repackage_item() {
 
 #[tokio::test]
 async fn test_inv2_stack_split_destroy_inventory() {
-    // parity: feat:inventory.split-merge, feat:inventory.trash-items, rpc:charUnboundMgr.SelectCharacterID, rpc:invbroker.Add, rpc:invbroker.MultiMerge, rpc:invbroker.SplitStack, rpc:invbroker.StackAll, rpc:invbroker.TrashItems
+    // parity: feat:inventory.split-merge, feat:inventory.trash-items, rpc:charUnboundMgr.SelectCharacterID, rpc:invbroker.SplitStack, rpc:invbroker.TrashItems
     eve_testkit::attest(&["feat:inventory.split-merge", "feat:inventory.trash-items"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
@@ -645,7 +645,7 @@ async fn test_inv2_stack_split_destroy_inventory() {
 
 #[tokio::test]
 async fn test_inv3_dna_fitting_string_encoder_decoder() {
-    // parity: feat:fitting.fittings-save, rpc:charFittingMgr.DeleteManyFittings, rpc:charFittingMgr.GetFittings, rpc:charFittingMgr.SaveFitting, rpc:charFittingMgr.SaveManyFittings, rpc:charFittingMgr.UpdateNameAndDescription, rpc:charUnboundMgr.SelectCharacterID, rpc:corpFittingMgr.DeleteFitting, rpc:corpFittingMgr.GetFittings, rpc:corpFittingMgr.SaveFitting
+    // parity: feat:fitting.fittings-save, rpc:charUnboundMgr.SelectCharacterID
     eve_testkit::attest(&["feat:fitting.fittings-save"]);
     // 1. DNA format encode/decode unit checks: <ship_type_id>:<type_id_1>;<qty_1>:<type_id_2>;<qty_2>:...::
     let ship_type_id = 587; // Rifter

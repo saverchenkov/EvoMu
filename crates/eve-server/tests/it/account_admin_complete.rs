@@ -151,7 +151,7 @@ async fn test_account_bans_suspensions_and_gm_ban_live_session_kick() {
 
 #[tokio::test]
 async fn test_account_alpha_omega_switch_and_subscription_time() {
-    // parity: feat:account.alpha-omega-switch, feat:account.clone-state-subscription, rpc:charUnboundMgr.SelectCharacterID, rpc:skillMgr2.GetSkills, rpc:slash.SlashCmd, rpc:subscriptionMgr.GetCloneGrade, rpc:subscriptionMgr.GetSubscriptionTime
+    // parity: feat:account.alpha-omega-switch, feat:account.clone-state-subscription, rpc:charUnboundMgr.SelectCharacterID, rpc:slash.SlashCmd, rpc:subscriptionMgr.GetCloneGrade, rpc:subscriptionMgr.GetSubscriptionTime
     eve_testkit::attest(&["feat:account.alpha-omega-switch", "feat:account.clone-state-subscription"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
@@ -411,7 +411,7 @@ async fn test_account_redeem_tokens_claim_to_character_station() {
 
 #[tokio::test]
 async fn test_account_logout_saves_location_and_removes_ship_from_space() {
-    // parity: feat:account.logout, rpc:authentication.Logout, rpc:charUnboundMgr.SelectCharacterID, rpc:skillMgr2.GetSkills, rpc:stationSvc.Undock
+    // parity: feat:account.logout, rpc:authentication.Logout, rpc:charUnboundMgr.SelectCharacterID
     eve_testkit::attest(&["feat:account.logout"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();

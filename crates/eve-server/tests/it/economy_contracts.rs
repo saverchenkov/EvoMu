@@ -900,7 +900,7 @@ async fn test_contracts_auction_and_courier() {
 
 #[tokio::test]
 async fn test_contracts_visibility_search_fees_limits_reject_blueprints_and_gm_expire() {
-    // parity: feat:contracts.visibility, feat:contracts.search, feat:contracts.my-contracts, feat:contracts.fees-limits, feat:contracts.expiry, feat:contracts.reject, feat:admin.gm-contract-expire, feat:contracts.blueprint-singleton-preservation, feat:contracts.item-exchange-blueprints-metadata, feat:contracts.courier-plastic-wrap-break, rpc:contractProxy.GM_ExpireContract, rpc:contractProxy.CreateContract, rpc:contractProxy.GetMyCurrentContractList, rpc:contractProxy.SearchContracts
+    // parity: feat:contracts.visibility, feat:contracts.search, feat:contracts.my-contracts, feat:contracts.fees-limits, feat:contracts.expiry, feat:contracts.reject, feat:admin.gm-contract-expire, feat:contracts.blueprint-singleton-preservation, feat:contracts.item-exchange-blueprints-metadata, feat:contracts.courier-plastic-wrap-break, rpc:contractProxy.GM_ExpireContract, rpc:contractProxy.GetMyCurrentContractList, rpc:contractProxy.SearchContracts
     eve_testkit::attest(&["feat:contracts.visibility", "feat:contracts.search", "feat:contracts.my-contracts", "feat:contracts.fees-limits", "feat:contracts.expiry", "feat:contracts.reject", "feat:admin.gm-contract-expire", "feat:contracts.blueprint-singleton-preservation", "feat:contracts.item-exchange-blueprints-metadata", "feat:contracts.courier-plastic-wrap-break", "rpc:contractProxy.GM_ExpireContract"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);

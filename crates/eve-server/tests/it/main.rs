@@ -94,6 +94,8 @@ mod quasar_space_cosmetics_complete;
 mod regressions_b01_b15;
 mod regressions_r6;
 mod regressions_r8;
+mod regressions_r8_part2;
+mod regressions_r8_part3;
 mod rpc_notification_closure;
 mod security_auditor_flags;
 mod seeded_rng;

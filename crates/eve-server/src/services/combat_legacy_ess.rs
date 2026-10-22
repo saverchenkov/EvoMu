@@ -75,7 +75,16 @@ pub async fn handle_legacy_and_ess(
 
         // Turret / Missile / Vorton / Entropic / Breacher Combat Engagement & CrimeWatch 2.0 Enforcement
         // rpc-lint: allow legacy combat_death_crimewatch test alias
-        ("dogmaIM", "FireWeapon") | ("beyonce", "CmdAttackTarget") => {
+        ("dogmaIM", "FireWeapon") | ("beyonce", "CmdAttackTarget") | ("dogmaIM", "Activate")
+            if method != "Activate"
+                || (args.len() == 1
+                    && session.ship_id.is_some_and(|sid| {
+                        let first_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+                        !ctx.db.with_snapshot(|snap| {
+                            snap.items.get(&first_id).is_some_and(|i| i.location_id == sid)
+                        })
+                    })) =>
+        {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),

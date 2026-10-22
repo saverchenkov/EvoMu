@@ -813,7 +813,7 @@ async fn test_ch4_slash_gm_commands() {
 
 #[tokio::test]
 async fn test_ch5_neural_attribute_remap_and_cooldown() {
-    // parity: feat:attributes.neural-remap, feat:attributes.bonus-remap, rpc:charMgr.RespecCharacter, rpc:charUnboundMgr.SelectCharacterID, rpc:skillMgr2.GetRespecInfo
+    // parity: feat:attributes.neural-remap, feat:attributes.bonus-remap, rpc:charUnboundMgr.SelectCharacterID
     eve_testkit::attest(&[
         "feat:attributes.neural-remap",
         "feat:attributes.bonus-remap",

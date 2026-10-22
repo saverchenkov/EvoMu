@@ -155,7 +155,7 @@ async fn test_set_state_emitted_on_update_state_request() {
 
 #[tokio::test]
 async fn test_warp_to_and_warp_special_fx_emitted_on_warp() {
-    // parity: destiny:WarpTo, destiny:OnSpecialFX, rpc:beyonce.CmdWarpToStuff
+    // parity: destiny:WarpTo, destiny:OnSpecialFX
     eve_testkit::attest(&["destiny:WarpTo", "destiny:OnSpecialFX"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
@@ -215,7 +215,7 @@ async fn test_warp_to_and_warp_special_fx_emitted_on_warp() {
 
 #[tokio::test]
 async fn test_goto_point_emitted_by_cmd_goto_point() {
-    // parity: destiny:GotoPoint, rpc:beyonce.CmdGotoPoint
+    // parity: destiny:GotoPoint
     eve_testkit::attest(&["destiny:GotoPoint"]);
     let ctx = ServerContext::new();
     let (mut sess, beyonce, ship_id) = login_and_undock(&ctx, 8103).await;
@@ -307,7 +307,7 @@ async fn test_damage_state_change_emitted_on_damage() {
 
 #[tokio::test]
 async fn test_cloak_ball_emitted_on_cloak_toggle() {
-    // parity: destiny:CloakBall, destiny:OnShipStateUpdate, rpc:beyonce.CmdStop
+    // parity: destiny:CloakBall, destiny:OnShipStateUpdate
     eve_testkit::attest(&["destiny:CloakBall", "destiny:OnShipStateUpdate"]);
     let ctx = ServerContext::new();
     let (mut sess, beyonce, ship_id) = login_and_undock(&ctx, 8105).await;
@@ -519,7 +519,7 @@ async fn test_slim_item_interactive_and_packaged_action_on_eject_and_board() {
 #[tokio::test]
 async fn test_set_ball_free_radius_harmonic_sovereignty_and_controller_event() {
     // parity: destiny:SetBallFree, destiny:SetBallRadius, destiny:SetBallHarmonic
-    // parity: destiny:OnSovereigntyChanged, destiny:OnClientControllerEvent, rpc:beyonce.CmdStargateJump, rpc:posMgr.AnchorStructure, rpc:sovMgr.AcquireSkyhooks
+    // parity: destiny:OnSovereigntyChanged, destiny:OnClientControllerEvent, rpc:posMgr.AnchorStructure, rpc:sovMgr.AcquireSkyhooks
     eve_testkit::attest(&[
         "destiny:SetBallFree",
         "destiny:SetBallRadius",

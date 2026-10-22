@@ -95,6 +95,19 @@ pub(crate) async fn handle_module_cycles(
                 })
             });
             let Some(m) = m_opt else {
+                let has_online_weapon = fit.modules.values().any(|wm| {
+                    (27..=34).contains(&wm.flag_id)
+                        && wm.state != eve_dogma::ModuleState::Offline
+                        && ctx.sde.types.get(&wm.type_id).is_some_and(|t| {
+                            matches!(
+                                t.group_id,
+                                53 | 55 | 74 | 506..=511 | 1986 | 4060 | 4500 | 4805 | 4807
+                            )
+                        })
+                });
+                if method == "Activate" && args.len() == 1 && raw_module_id > 0 && has_online_weapon {
+                    return None;
+                }
                 return Some(Err(BridgeRpcError {
                     code: "ModuleNotFound".into(),
                     message: format!("Module {module_id} not found on ship"),

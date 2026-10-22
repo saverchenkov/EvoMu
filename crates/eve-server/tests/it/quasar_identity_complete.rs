@@ -47,7 +47,6 @@ fn build_public_request(now_unix: u64, type_name: &str, payload_value: Vec<u8>) 
 
 #[tokio::test]
 async fn test_q3_auth_login_device() {
-    // parity: rpc:publicGatewaySvc.SendRequest
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let empty_kw = HashMap::new();
@@ -113,7 +112,6 @@ async fn test_q3_auth_login_device() {
 
 #[tokio::test]
 async fn test_q3_user_accounts_lifecycle() {
-    // parity: rpc:publicGatewaySvc.SendRequest
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let empty_kw = HashMap::new();
@@ -172,7 +170,7 @@ async fn test_q3_user_accounts_lifecycle() {
 
 #[tokio::test]
 async fn test_q3_user_license_and_subscription() {
-    // parity: quasar:eveProto/generated/eve_public/user/license/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/user/license/api/requests_pb2.pyj, rpc:publicGatewaySvc.SendRequest, rpc:publicGatewaySvc.Subscribe
+    // parity: quasar:eveProto/generated/eve_public/user/license/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/user/license/api/requests_pb2.pyj
     eve_testkit::attest(&[
         "quasar:eveProto/generated/eve_public/user/license/api/notices_pb2.pyj",
         "quasar:eveProto/generated/eve_public/user/license/api/requests_pb2.pyj",
@@ -253,7 +251,7 @@ async fn test_q3_user_license_and_subscription() {
 
 #[tokio::test]
 async fn test_q3_entitlements_omega_and_membership() {
-    // parity: quasar:eveProto/generated/eve_public/entitlement/character/character_pb2.pyj, quasar:eveProto/generated/eve_public/entitlement/character/ship/admin/alliancelogo_pb2.pyj, quasar:eveProto/generated/eve_public/entitlement/character/ship/admin/corplogo_pb2.pyj, rpc:publicGatewaySvc.SendRequest
+    // parity: quasar:eveProto/generated/eve_public/entitlement/character/character_pb2.pyj, quasar:eveProto/generated/eve_public/entitlement/character/ship/admin/alliancelogo_pb2.pyj, quasar:eveProto/generated/eve_public/entitlement/character/ship/admin/corplogo_pb2.pyj
     eve_testkit::attest(&[
         "quasar:eveProto/generated/eve_public/entitlement/character/character_pb2.pyj",
         "quasar:eveProto/generated/eve_public/entitlement/character/ship/admin/alliancelogo_pb2.pyj",
@@ -390,7 +388,7 @@ async fn test_q3_entitlements_omega_and_membership() {
 
 #[tokio::test]
 async fn test_q3_payment_purchase_and_schedules() {
-    // parity: quasar:eveProto/generated/eve_public/payment/schedule/notices_pb2.pyj, quasar:eveProto/generated/eve_public/payment/schedule/requests_pb2.pyj, quasar:eveProto/generated/eve_public/payment/token/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/payment/token/api_pb2.pyj, rpc:publicGatewaySvc.SendRequest, rpc:publicGatewaySvc.Subscribe
+    // parity: quasar:eveProto/generated/eve_public/payment/schedule/notices_pb2.pyj, quasar:eveProto/generated/eve_public/payment/schedule/requests_pb2.pyj, quasar:eveProto/generated/eve_public/payment/token/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/payment/token/api_pb2.pyj
     eve_testkit::attest(&[
         "quasar:eveProto/generated/eve_public/payment/schedule/notices_pb2.pyj",
         "quasar:eveProto/generated/eve_public/payment/schedule/requests_pb2.pyj",
@@ -499,7 +497,7 @@ async fn test_q3_payment_purchase_and_schedules() {
 
 #[tokio::test]
 async fn test_q3_plex_vault_and_isk_wallets() {
-    // parity: quasar:eveProto/generated/eve_public/plex/vault/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/plex/vault/api/requests_pb2.pyj, rpc:publicGatewaySvc.SendRequest, rpc:publicGatewaySvc.Subscribe
+    // parity: quasar:eveProto/generated/eve_public/plex/vault/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/plex/vault/api/requests_pb2.pyj
     eve_testkit::attest(&[
         "quasar:eveProto/generated/eve_public/plex/vault/api/notices_pb2.pyj",
         "quasar:eveProto/generated/eve_public/plex/vault/api/requests_pb2.pyj",
@@ -610,7 +608,7 @@ async fn test_q3_plex_vault_and_isk_wallets() {
 
 #[tokio::test]
 async fn test_q3_store_categories_and_products() {
-    // parity: quasar:eveProto/generated/eve_public/store/category/api_pb2.pyj, quasar:eveProto/generated/eve_public/store/product/api_pb2.pyj, rpc:publicGatewaySvc.SendRequest
+    // parity: quasar:eveProto/generated/eve_public/store/category/api_pb2.pyj, quasar:eveProto/generated/eve_public/store/product/api_pb2.pyj
     eve_testkit::attest(&[
         "quasar:eveProto/generated/eve_public/store/category/api_pb2.pyj",
         "quasar:eveProto/generated/eve_public/store/product/api_pb2.pyj",
@@ -673,7 +671,7 @@ async fn test_q3_store_categories_and_products() {
 
 #[tokio::test]
 async fn test_q3_store_offers_and_targetaudience() {
-    // parity: quasar:eveProto/generated/eve_public/store/offer/api_pb2.pyj, quasar:eveProto/generated/eve_public/store/targetaudience/offer/api/requests_pb2.pyj, rpc:publicGatewaySvc.SendRequest
+    // parity: quasar:eveProto/generated/eve_public/store/offer/api_pb2.pyj, quasar:eveProto/generated/eve_public/store/targetaudience/offer/api/requests_pb2.pyj
     eve_testkit::attest(&[
         "quasar:eveProto/generated/eve_public/store/offer/api_pb2.pyj",
         "quasar:eveProto/generated/eve_public/store/targetaudience/offer/api/requests_pb2.pyj",
@@ -756,7 +754,6 @@ async fn test_q3_store_offers_and_targetaudience() {
 
 #[tokio::test]
 async fn test_q3_vendors_and_fulfillment() {
-    // parity: rpc:publicGatewaySvc.SendRequest
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let empty_kw = HashMap::new();
@@ -838,7 +835,7 @@ async fn test_q3_vendors_and_fulfillment() {
 
 #[tokio::test]
 async fn test_q3_legal_pii_cdn_localization() {
-    // parity: quasar:eveProto/generated/eve_public/achievement/definition/api/cdn/requests_pb2.pyj, quasar:eveProto/generated/eve_public/space/api/cdn/requests_pb2.pyj, rpc:publicGatewaySvc.SendRequest
+    // parity: quasar:eveProto/generated/eve_public/achievement/definition/api/cdn/requests_pb2.pyj, quasar:eveProto/generated/eve_public/space/api/cdn/requests_pb2.pyj
     eve_testkit::attest(&[
         "quasar:eveProto/generated/eve_public/achievement/definition/api/cdn/requests_pb2.pyj",
         "quasar:eveProto/generated/eve_public/space/api/cdn/requests_pb2.pyj",

@@ -29,6 +29,7 @@ async fn test_esi4_character_clones_skills_location_fittings_assets_wallet_loyal
     // parity: esi:GET /characters/{character_id}/fittings, feat:esi.fittings.list, esi:GET /characters/{character_id}/mail, esi:POST /characters/{character_id}/mail, esi:GET /characters/{character_id}/mail/{mail_id}
     // parity: esi:POST /characters/{character_id}/fittings, esi:DELETE /characters/{character_id}/fittings/{fitting_id}, feat:esi.fittings.write, rpc:invbroker.SetLabel, rpc:structureCynoBeaconMgr.CmdJumpToStructureBeacon
     let ctx = Arc::new(ServerContext::new());
+    crate::common::pin_clock(&ctx);
     let router = EsiRouter::new(Arc::clone(&ctx));
     let spec = OpenApiSpec::pinned();
     let now = ctx.now_unix();

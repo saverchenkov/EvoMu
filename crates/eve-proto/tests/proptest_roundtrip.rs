@@ -710,7 +710,7 @@ fn test_marshal_and_gateway_wire_edge_cases_and_bounds() {
 
     let msgpack_env = BridgeEnvelope::ServerEvent {
         tick: 7,
-        event: "OnTest".into(),
+        event: "OnSkillTrained".into(),
         args: vec![PyRep::Integer(42)],
     };
     let msgpack_bytes = rmp_serde::to_vec_named(&msgpack_env).unwrap();

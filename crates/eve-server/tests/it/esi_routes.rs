@@ -102,6 +102,7 @@ async fn test_esi3_dogma_insurance_killmails_sovereignty_routes_and_wars() {
     // parity: esi:GET /wars/{war_id}
     // parity: esi:GET /wars/{war_id}/killmails, feat:esi.wars.killmails, rpc:sovMgr.AcquireSkyhooks
     let ctx = Arc::new(ServerContext::new());
+    crate::common::pin_clock(&ctx);
     let router = EsiRouter::new(Arc::clone(&ctx));
     let spec = OpenApiSpec::pinned();
     let now = ctx.now_unix();
@@ -783,69 +784,10 @@ async fn test_esi3_universe_hierarchy_celestials_stargates_structures_and_bulk_r
     // parity: esi:GET /universe/regions, esi:GET /universe/regions/{region_id}
     // parity: esi:GET /universe/constellations, esi:GET /universe/constellations/{constellation_id}
     // parity: esi:GET /universe/systems, esi:GET /universe/systems/{system_id}, feat:esi.universe.regions-constellations-systems
-    // parity: esi:GET /universe/planets/{planet_id}, esi:GET /universe/moons/{moon_id}
-    // parity: esi:GET /universe/asteroid_belts/{asteroid_belt_id}, esi:GET /universe/stargates/{stargate_id}
-    // parity: esi:GET /universe/structures, esi:GET /universe/structures/{structure_id}
-    // parity: esi:GET /universe/factions, esi:GET /universe/bloodlines, esi:GET /universe/ancestries
-    // parity: esi:POST /universe/names, esi:POST /universe/ids, feat:esi.universe.names-ids
     let ctx = Arc::new(ServerContext::new());
+    crate::common::pin_clock(&ctx);
     let router = EsiRouter::new(Arc::clone(&ctx));
     let spec = OpenApiSpec::pinned();
-
-    let allowed_struct_id = 1_030_000_006_001;
-    let denied_struct_id = 1_030_000_006_002;
-    let _: Result<(), ()> = ctx.db.try_with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
-            ch.standings.insert(98_000_602, -5.0);
-        }
-        snap.structures.insert(
-            allowed_struct_id,
-            UpwellStructureRecord {
-                structure_id: allowed_struct_id,
-                type_id: 35832,
-                owner_corp_id: 1_000_125,
-                solar_system_id: 30_000_142,
-                name: "Jita Public Hub".to_string(),
-                position: [500.0, 600.0, 700.0],
-                state: "ShieldVulnerable".to_string(),
-                quantum_core_installed: true,
-                fuel_blocks: 100,
-                shield_hp: 5000.0,
-                armor_hp: 5000.0,
-                hull_hp: 5000.0,
-                reinforced_until_unix: 0,
-                last_damage_tick: 0,
-                last_damage_unix: 0,
-            },
-        );
-        snap.structures.insert(
-            denied_struct_id,
-            UpwellStructureRecord {
-                structure_id: denied_struct_id,
-                type_id: 35832,
-                owner_corp_id: 98_000_602,
-                solar_system_id: 30_000_142,
-                name: "Locked Pirate Citadel".to_string(),
-                position: [1500.0, 1600.0, 1700.0],
-                state: "ShieldVulnerable".to_string(),
-                quantum_core_installed: true,
-                fuel_blocks: 100,
-                shield_hp: 5000.0,
-                armor_hp: 5000.0,
-                hull_hp: 5000.0,
-                reinforced_until_unix: 0,
-                last_damage_tick: 0,
-                last_damage_unix: 0,
-            },
-        );
-        Ok(())
-    });
-
-    let struct_token = issue_token_with_scopes(
-        &ctx,
-        90_000_001,
-        vec!["esi-universe.read_structures.v1".to_string()],
-    );
 
     // 1. Categories, Groups, Types (+ Type detail with Dogma attributes & effects)
     let cats = validate_and_json(
@@ -976,6 +918,82 @@ async fn test_esi3_universe_hierarchy_celestials_stargates_structures_and_bulk_r
     assert!(tanoo["star_id"].as_i64().is_some());
     let tanoo_planets = tanoo["planets"].as_array().expect("tanoo planets");
     assert!(!tanoo_planets.is_empty());
+}
+
+#[tokio::test]
+async fn test_esi3_universe_celestials_stargates_structures_and_bulk_resolution() {
+    // parity: esi:GET /universe/planets/{planet_id}, esi:GET /universe/moons/{moon_id}
+    // parity: esi:GET /universe/asteroid_belts/{asteroid_belt_id}, esi:GET /universe/stargates/{stargate_id}
+    // parity: esi:GET /universe/structures, esi:GET /universe/structures/{structure_id}
+    // parity: esi:GET /universe/factions, esi:GET /universe/bloodlines, esi:GET /universe/ancestries
+    // parity: esi:POST /universe/names, esi:POST /universe/ids, feat:esi.universe.names-ids
+    let ctx = Arc::new(ServerContext::new());
+    crate::common::pin_clock(&ctx);
+    let router = EsiRouter::new(Arc::clone(&ctx));
+    let spec = OpenApiSpec::pinned();
+
+    let allowed_struct_id = 1_030_000_006_001;
+    let denied_struct_id = 1_030_000_006_002;
+    let _: Result<(), ()> = ctx.db.try_with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.standings.insert(98_000_602, -5.0);
+        }
+        snap.structures.insert(
+            allowed_struct_id,
+            UpwellStructureRecord {
+                structure_id: allowed_struct_id,
+                type_id: 35832,
+                owner_corp_id: 1_000_125,
+                solar_system_id: 30_000_142,
+                name: "Jita Public Hub".to_string(),
+                position: [500.0, 600.0, 700.0],
+                state: "ShieldVulnerable".to_string(),
+                quantum_core_installed: true,
+                fuel_blocks: 100,
+                shield_hp: 5000.0,
+                armor_hp: 5000.0,
+                hull_hp: 5000.0,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+            },
+        );
+        snap.structures.insert(
+            denied_struct_id,
+            UpwellStructureRecord {
+                structure_id: denied_struct_id,
+                type_id: 35832,
+                owner_corp_id: 98_000_602,
+                solar_system_id: 30_000_142,
+                name: "Locked Pirate Citadel".to_string(),
+                position: [1500.0, 1600.0, 1700.0],
+                state: "ShieldVulnerable".to_string(),
+                quantum_core_installed: true,
+                fuel_blocks: 100,
+                shield_hp: 5000.0,
+                armor_hp: 5000.0,
+                hull_hp: 5000.0,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+            },
+        );
+        Ok(())
+    });
+
+    let struct_token = issue_token_with_scopes(
+        &ctx,
+        90_000_001,
+        vec!["esi-universe.read_structures.v1".to_string()],
+    );
+
+    let tanoo = validate_and_json(
+        &router,
+        &spec,
+        &EsiHttpRequest::new("GET", "/v4/universe/systems/30000001/"),
+        200,
+    );
+    let tanoo_planets = tanoo["planets"].as_array().expect("tanoo planets");
     let first_planet_id = tanoo_planets[0]["planet_id"].as_i64().expect("planet_id");
     let first_moon_id = tanoo_planets
         .iter()

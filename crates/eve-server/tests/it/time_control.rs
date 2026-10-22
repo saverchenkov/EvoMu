@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 #[tokio::test]
 async fn test_t7_injectable_server_clock_time_acceleration_and_pause_on_tick() {
-    // parity: plan:T-7, rpc:charUnboundMgr.SelectCharacterID, rpc:industryManager.CompleteJob, rpc:industryManager.InstallJob, rpc:miningScanMgr.perform_scan, rpc:planetMgr.Flush, rpc:planetMgr.UserUpdateNetwork, rpc:skillMgr2.SaveSkillQueue
+    // parity: plan:T-7, rpc:charUnboundMgr.SelectCharacterID, rpc:industryManager.CompleteJob, rpc:industryManager.InstallJob, rpc:miningScanMgr.perform_scan, rpc:planetMgr.Flush, rpc:planetMgr.UserUpdateNetwork
     // Verify wall-anchored VirtualServerClock pause/unpause monotonicity and tick_wall_second
     let wall_clock = VirtualServerClock::new();
     let t0 = wall_clock.now_unix_secs();

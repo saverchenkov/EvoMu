@@ -397,52 +397,6 @@ pub fn handle(
             )))
         }
 
-        ("config", "GetMultiStationEx") => {
-            if let Err(e) = ServerContext::require_auth(session) {
-                return Some(Err(e));
-            }
-            let station_ids = match parse_id_list(args, kwargs, "stationIDs", "GetMultiStationEx") {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let mut seen = HashSet::new();
-            let mut rows = Vec::new();
-            for id in station_ids {
-                if !seen.insert(id) {
-                    continue;
-                }
-                if let Some((sys_id, st)) = ctx
-                    .sde
-                    .solar_systems
-                    .values()
-                    .flat_map(|s| s.stations.iter().map(move |st| (s.solar_system_id, st)))
-                    .find(|(_, st)| st.station_id == id)
-                {
-                    rows.push(vec![
-                        PyRep::Integer(st.station_id),
-                        PyRep::String(st.name.clone()),
-                        PyRep::Integer(st.station_type_id as i64),
-                        PyRep::Integer(sys_id as i64),
-                        PyRep::Real(st.position.x),
-                        PyRep::Real(st.position.y),
-                        PyRep::Real(st.position.z),
-                    ]);
-                }
-            }
-            Some(Ok(PyRep::tuple_set(
-                vec![
-                    "stationID",
-                    "stationName",
-                    "stationTypeID",
-                    "solarSystemID",
-                    "x",
-                    "y",
-                    "z",
-                ],
-                rows,
-            )))
-        }
-
         ("config", "GetMultiAllianceShortNamesEx") => {
             if let Err(e) = ServerContext::require_auth(session) {
                 return Some(Err(e));
@@ -523,59 +477,6 @@ pub fn handle(
             ))
         }
 
-        ("config", "GetMultiInvTypesEx") => {
-            if let Err(e) = ServerContext::require_auth(session) {
-                return Some(Err(e));
-            }
-            let type_ids = match parse_id_list(args, kwargs, "typeIDs", "GetMultiInvTypesEx") {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let mut seen = HashSet::new();
-            let mut rows = Vec::new();
-            for id in type_ids {
-                if !seen.insert(id) {
-                    continue;
-                }
-                if let Some(t) = u32::try_from(id).ok().and_then(|tid| ctx.sde.types.get(&tid)) {
-                    rows.push(vec![
-                        PyRep::Integer(t.type_id as i64),
-                        PyRep::Integer(t.group_id as i64),
-                        PyRep::String(t.name.clone()),
-                        PyRep::String(t.name.clone()),
-                        PyRep::Integer(0),
-                        PyRep::Real(t.radius),
-                        PyRep::Real(t.mass),
-                        PyRep::Real(t.volume),
-                        PyRep::Real(t.capacity),
-                        PyRep::Integer(t.portion_size as i64),
-                        t.race_id
-                            .map(|r| PyRep::Integer(r as i64))
-                            .unwrap_or(PyRep::None),
-                        PyRep::Real(t.base_price),
-                        PyRep::Bool(t.published),
-                        t.market_group_id
-                            .map(|mg| PyRep::Integer(mg as i64))
-                            .unwrap_or(PyRep::None),
-                        PyRep::Real(0.0),
-                    ]);
-                }
-            }
-            Some(Ok(
-                DBRowDescriptor::inv_type_header().build_packed_row_list(rows),
-            ))
-        }
-
-        ("config", "GetMultiGraphicsEx") => {
-            if let Err(e) = ServerContext::require_auth(session) {
-                return Some(Err(e));
-            }
-            Some(Err(BridgeRpcError {
-                code: "UnimplementedRPC".into(),
-                message: "config.GetMultiGraphicsEx requires sde_graphics table import".into(),
-            }))
-        }
-
         ("config", "GetStationSolarSystemsByOwner") => {
             if let Err(e) = ServerContext::require_auth(session) {
                 return Some(Err(e));
@@ -617,13 +518,6 @@ pub fn handle(
                 vec!["stationID", "solarSystemID"],
                 py_rows,
             )))
-        }
-
-        ("config", "GetUnits") => {
-            if let Err(e) = ServerContext::require_auth(session) {
-                return Some(Err(e));
-            }
-            Some(Ok(ctx.build_config_units_payload()))
         }
 
         ("config", "GetMap") => {
@@ -716,419 +610,6 @@ pub fn handle(
                 ],
                 rows,
             )))
-        }
-
-        ("config", "GetMapOffices") => {
-            if let Err(e) = ServerContext::require_auth(session) {
-                return Some(Err(e));
-            }
-            let Some(sys_id) = args
-                .first()
-                .and_then(|a| a.as_i64())
-                .or_else(|| session.solar_system_id.map(|s| s as i64))
-                .and_then(|v| u32::try_from(v).ok())
-            else {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidArgument".into(),
-                    message: "config.GetMapOffices requires solarSystemID".into(),
-                }));
-            };
-            let Some(sys) = ctx.sde.solar_systems.get(&sys_id) else {
-                return Some(Err(BridgeRpcError {
-                    code: "SolarSystemNotFound".into(),
-                    message: format!("Solar system {sys_id} not found"),
-                }));
-            };
-            let rows = sys
-                .stations
-                .iter()
-                .map(|st| {
-                    vec![
-                        PyRep::Integer(st.owner_corporation_id),
-                        PyRep::Integer(st.station_id),
-                        PyRep::Integer(sys_id as i64),
-                        PyRep::Integer(st.station_type_id as i64),
-                        PyRep::Integer(st.station_id + 6_000_000),
-                    ]
-                })
-                .collect();
-            Some(Ok(PyRep::rowset(
-                vec![
-                    "corporationID",
-                    "stationID",
-                    "solarSystemID",
-                    "typeID",
-                    "officeFolderID",
-                ],
-                rows,
-            )))
-        }
-
-        ("config", "GetMapObjects") => {
-            if let Err(e) = ServerContext::require_auth(session) {
-                return Some(Err(e));
-            }
-            let Some(entity_id) = args
-                .first()
-                .and_then(|a| a.as_i64())
-                .or_else(|| session.solar_system_id.map(|s| s as i64))
-            else {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidArgument".into(),
-                    message: "config.GetMapObjects requires entityID".into(),
-                }));
-            };
-            let explicit_flags = args.len() > 1;
-            let want_regions = if explicit_flags {
-                args.get(1).and_then(|v| v.as_i64()).unwrap_or(0) != 0
-            } else {
-                entity_id == 9
-            };
-            let want_constellations = if explicit_flags {
-                args.get(2).and_then(|v| v.as_i64()).unwrap_or(0) != 0
-            } else {
-                u32::try_from(entity_id)
-                    .ok()
-                    .is_some_and(|rid| ctx.sde.regions.contains_key(&rid))
-            };
-            let want_systems = if explicit_flags {
-                args.get(3).and_then(|v| v.as_i64()).unwrap_or(0) != 0
-            } else {
-                u32::try_from(entity_id)
-                    .ok()
-                    .is_some_and(|cid| ctx.sde.constellations.contains_key(&cid))
-            };
-            let want_stations = if explicit_flags {
-                args.get(4).and_then(|v| v.as_i64()).unwrap_or(0) != 0
-            } else {
-                u32::try_from(entity_id)
-                    .ok()
-                    .is_some_and(|sid| ctx.sde.solar_systems.contains_key(&sid))
-            };
-
-            let mut rows = Vec::new();
-            if want_regions {
-                let mut regs: Vec<&eve_sde::RegionInfo> = ctx.sde.regions.values().collect();
-                regs.sort_by_key(|r| r.region_id);
-                for r in regs {
-                    if entity_id == 9 || i64::from(r.region_id) == entity_id {
-                        rows.push(vec![
-                            PyRep::Integer(3),
-                            PyRep::Integer(3),
-                            PyRep::Integer(r.region_id as i64),
-                            PyRep::String(r.name.clone()),
-                            PyRep::Integer(9),
-                            PyRep::Integer(0),
-                            PyRep::Real(r.center[0]),
-                            PyRep::Real(r.center[1]),
-                            PyRep::Real(r.center[2]),
-                        ]);
-                    }
-                }
-            }
-            if want_constellations {
-                let mut cons: Vec<&eve_sde::ConstellationInfo> =
-                    ctx.sde.constellations.values().collect();
-                cons.sort_by_key(|c| c.constellation_id);
-                for c in cons {
-                    if entity_id == 9
-                        || i64::from(c.region_id) == entity_id
-                        || i64::from(c.constellation_id) == entity_id
-                    {
-                        rows.push(vec![
-                            PyRep::Integer(4),
-                            PyRep::Integer(4),
-                            PyRep::Integer(c.constellation_id as i64),
-                            PyRep::String(c.name.clone()),
-                            PyRep::Integer(c.region_id as i64),
-                            PyRep::Integer(0),
-                            PyRep::Real(c.center[0]),
-                            PyRep::Real(c.center[1]),
-                            PyRep::Real(c.center[2]),
-                        ]);
-                    }
-                }
-            }
-            if want_systems {
-                let mut syss: Vec<&eve_sde::SolarSystem> = ctx.sde.solar_systems.values().collect();
-                syss.sort_by_key(|s| s.solar_system_id);
-                for s in syss {
-                    if entity_id == 9
-                        || i64::from(s.region_id) == entity_id
-                        || i64::from(s.constellation_id) == entity_id
-                        || i64::from(s.solar_system_id) == entity_id
-                    {
-                        rows.push(vec![
-                            PyRep::Integer(5),
-                            PyRep::Integer(5),
-                            PyRep::Integer(s.solar_system_id as i64),
-                            PyRep::String(s.name.clone()),
-                            PyRep::Integer(s.constellation_id as i64),
-                            PyRep::Integer(0),
-                            PyRep::Real(s.galactic_pos_ly[0]),
-                            PyRep::Real(s.galactic_pos_ly[1]),
-                            PyRep::Real(s.galactic_pos_ly[2]),
-                        ]);
-                    }
-                }
-            }
-            if let Some(sys_id) = u32::try_from(entity_id).ok() {
-                if let Some(sys) = ctx.sde.solar_systems.get(&sys_id) {
-                    if want_stations {
-                        for st in &sys.stations {
-                            rows.push(vec![
-                                PyRep::Integer(15),
-                                PyRep::Integer(st.station_type_id as i64),
-                                PyRep::Integer(st.station_id),
-                                PyRep::String(st.name.clone()),
-                                PyRep::Integer(sys_id as i64),
-                                PyRep::Integer(0),
-                                PyRep::Real(st.position.x),
-                                PyRep::Real(st.position.y),
-                                PyRep::Real(st.position.z),
-                            ]);
-                        }
-                    }
-                    if !explicit_flags || want_stations {
-                        for c in ctx.sde.celestials_in_system(sys_id) {
-                            rows.push(vec![
-                                PyRep::Integer(c.group_id as i64),
-                                PyRep::Integer(c.type_id as i64),
-                                PyRep::Integer(c.celestial_id),
-                                PyRep::String(c.name),
-                                PyRep::Integer(sys_id as i64),
-                                PyRep::Integer(c.orbit_id.unwrap_or(0)),
-                                PyRep::Real(c.position.x),
-                                PyRep::Real(c.position.y),
-                                PyRep::Real(c.position.z),
-                            ]);
-                        }
-                    }
-                }
-            }
-            Some(Ok(DBRowDescriptor::map_objects_header().build_crowset(rows)))
-        }
-
-        ("config", "GetMapConnections") => {
-            if let Err(e) = ServerContext::require_auth(session) {
-                return Some(Err(e));
-            }
-            let Some(item_id) = args
-                .first()
-                .and_then(|a| a.as_i64())
-                .or_else(|| session.solar_system_id.map(|s| s as i64))
-            else {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidArgument".into(),
-                    message: "config.GetMapConnections requires itemID".into(),
-                }));
-            };
-            let explicit_flags = args.len() > 1;
-            let want_reg = if explicit_flags {
-                args.get(1).and_then(|v| v.as_i64()).unwrap_or(0) != 0
-            } else {
-                true
-            };
-            let want_con = if explicit_flags {
-                args.get(2).and_then(|v| v.as_i64()).unwrap_or(0) != 0
-            } else {
-                true
-            };
-            let want_sol = if explicit_flags {
-                args.get(3).and_then(|v| v.as_i64()).unwrap_or(0) != 0
-            } else {
-                true
-            };
-
-            let item_u32 = u32::try_from(item_id).ok();
-            let filter_sys = item_u32.filter(|s| ctx.sde.solar_systems.contains_key(s));
-            let filter_con = item_u32.filter(|c| ctx.sde.constellations.contains_key(c));
-            let filter_reg = item_u32.filter(|r| ctx.sde.regions.contains_key(r));
-
-            let mut gate_ids: Vec<i64> = ctx.sde.jumps.keys().copied().collect();
-            gate_ids.sort_unstable();
-            let mut rows = Vec::new();
-            for gid in gate_ids {
-                let jmp = &ctx.sde.jumps[&gid];
-                let (from_reg, from_con) = ctx
-                    .sde
-                    .solar_systems
-                    .get(&jmp.from_solar_system_id)
-                    .map(|s| (s.region_id, s.constellation_id))
-                    .unwrap_or((0, 0));
-                let (to_reg, to_con) = ctx
-                    .sde
-                    .solar_systems
-                    .get(&jmp.to_solar_system_id)
-                    .map(|s| (s.region_id, s.constellation_id))
-                    .unwrap_or((0, 0));
-
-                if let Some(fs) = filter_sys {
-                    if jmp.from_solar_system_id != fs && jmp.to_solar_system_id != fs {
-                        continue;
-                    }
-                } else if let Some(fc) = filter_con {
-                    if from_con != fc && to_con != fc {
-                        continue;
-                    }
-                } else if let Some(fr) = filter_reg {
-                    if from_reg != fr && to_reg != fr {
-                        continue;
-                    }
-                } else if item_id != 9 {
-                    continue;
-                }
-
-                let is_inter_reg = from_reg != to_reg;
-                let is_inter_con = from_con != to_con;
-                let level_match = if is_inter_reg {
-                    want_reg || want_sol
-                } else if is_inter_con {
-                    want_con || want_sol
-                } else {
-                    want_sol
-                };
-                if !level_match {
-                    continue;
-                }
-
-                rows.push(vec![
-                    PyRep::String("stargate".into()),
-                    PyRep::Integer(from_reg as i64),
-                    PyRep::Integer(from_con as i64),
-                    PyRep::Integer(jmp.from_solar_system_id as i64),
-                    PyRep::Integer(jmp.stargate_id),
-                    PyRep::Integer(jmp.destination_stargate_id),
-                    PyRep::Integer(jmp.to_solar_system_id as i64),
-                    PyRep::Integer(to_con as i64),
-                    PyRep::Integer(to_reg as i64),
-                ]);
-            }
-            Some(Ok(PyRep::rowset(
-                vec![
-                    "ctype",
-                    "fromreg",
-                    "fromcon",
-                    "fromsol",
-                    "stargateID",
-                    "celestialID",
-                    "tosol",
-                    "tocon",
-                    "toreg",
-                ],
-                rows,
-            )))
-        }
-
-        ("config", "GetCelestialStatistic") => {
-            if let Err(e) = ServerContext::require_auth(session) {
-                return Some(Err(e));
-            }
-            Some(Err(BridgeRpcError {
-                code: "UnimplementedRPC".into(),
-                message: "config.GetCelestialStatistic requires sde_celestial_statistics table import".into(),
-            }))
-        }
-
-        ("config", "GetDynamicCelestials") => {
-            if let Err(e) = ServerContext::require_auth(session) {
-                return Some(Err(e));
-            }
-            let Some(sys_id) = args
-                .first()
-                .and_then(|a| a.as_i64())
-                .and_then(|v| u32::try_from(v).ok())
-            else {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidArgument".into(),
-                    message: "config.GetDynamicCelestials requires solarSystemID".into(),
-                }));
-            };
-            if !ctx.sde.solar_systems.contains_key(&sys_id) {
-                return Some(Ok(PyRep::Integer(0)));
-            }
-            let rows = ctx.db.with_snapshot(|snap| {
-                snap.structures
-                    .values()
-                    .filter(|st| st.solar_system_id == sys_id)
-                    .map(|st| {
-                        vec![
-                            PyRep::Integer(365),
-                            PyRep::Integer(st.type_id as i64),
-                            PyRep::Integer(st.structure_id),
-                            PyRep::String(st.name.clone()),
-                            PyRep::Integer(sys_id as i64),
-                            PyRep::Integer(0),
-                            PyRep::Real(st.position[0]),
-                            PyRep::Real(st.position[1]),
-                            PyRep::Real(st.position[2]),
-                        ]
-                    })
-                    .collect()
-            });
-            Some(Ok(DBRowDescriptor::map_objects_header().build_crowset(rows)))
-        }
-
-        ("config", "GetMapLandmarks") => {
-            if let Err(e) = ServerContext::require_auth(session) {
-                return Some(Err(e));
-            }
-            let landmarks = ctx
-                .map_landmarks
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone();
-            let rows = landmarks
-                .into_iter()
-                .map(|(lid, name, x, y, z)| {
-                    vec![
-                        PyRep::Integer(lid),
-                        PyRep::String(name),
-                        PyRep::Real(x),
-                        PyRep::Real(y),
-                        PyRep::Real(z),
-                    ]
-                })
-                .collect();
-            Some(Ok(PyRep::rowset(
-                vec!["landmarkID", "landmarkName", "x", "y", "z"],
-                rows,
-            )))
-        }
-
-        ("config", "SetMapLandmarks") => {
-            if let Err(e) = ServerContext::require_auth(session) {
-                return Some(Err(e));
-            }
-            if !session.has_gm_role() {
-                return Some(Err(BridgeRpcError {
-                    code: "InsufficientRole".into(),
-                    message: "config.SetMapLandmarks requires GM/Admin role".into(),
-                }));
-            }
-            let Some(PyRep::List(items) | PyRep::Tuple(items)) = args.first() else {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidArgument".into(),
-                    message: "config.SetMapLandmarks requires landmarkData list".into(),
-                }));
-            };
-            let mut stored = ctx.map_landmarks.write().unwrap_or_else(|e| e.into_inner());
-            stored.clear();
-            for (idx, item) in items.iter().enumerate() {
-                if let PyRep::Tuple(t) | PyRep::List(t) = item {
-                    let lid = t.first().and_then(|v| v.as_i64()).unwrap_or((idx + 1) as i64);
-                    let name = t
-                        .get(1)
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("Landmark")
-                        .to_string();
-                    let x = t.get(2).and_then(|v| v.as_f64()).unwrap_or(0.0);
-                    let y = t.get(3).and_then(|v| v.as_f64()).unwrap_or(0.0);
-                    let z = t.get(4).and_then(|v| v.as_f64()).unwrap_or(0.0);
-                    stored.push((lid, name, x, y, z));
-                }
-            }
-            Some(Ok(PyRep::Integer(stored.len() as i64)))
         }
 
         // ====================================================================
@@ -1389,4 +870,372 @@ pub fn handle(
 
         _ => None,
     }
+}
+
+pub fn get_multi_station_ex(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Result<PyRep, BridgeRpcError> {
+    ServerContext::require_auth(session)?;
+    let station_ids = parse_id_list(args, kwargs, "stationIDs", "GetMultiStationEx")?;
+    let mut seen = HashSet::new();
+    let mut rows = Vec::new();
+    for id in station_ids {
+        if !seen.insert(id) {
+            continue;
+        }
+        if let Some((sys_id, st)) = ctx
+            .sde
+            .solar_systems
+            .values()
+            .flat_map(|s| s.stations.iter().map(move |st| (s.solar_system_id, st)))
+            .find(|(_, st)| st.station_id == id)
+        {
+            rows.push(vec![
+                PyRep::Integer(st.station_id),
+                PyRep::String(st.name.clone()),
+                PyRep::Integer(st.station_type_id as i64),
+                PyRep::Integer(sys_id as i64),
+                PyRep::Real(st.position.x),
+                PyRep::Real(st.position.y),
+                PyRep::Real(st.position.z),
+            ]);
+        }
+    }
+    Ok(PyRep::tuple_set(
+        vec![
+            "stationID",
+            "stationName",
+            "stationTypeID",
+            "solarSystemID",
+            "x",
+            "y",
+            "z",
+        ],
+        rows,
+    ))
+}
+
+pub fn get_multi_inv_types_ex(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Result<PyRep, BridgeRpcError> {
+    ServerContext::require_auth(session)?;
+    let type_ids = parse_id_list(args, kwargs, "typeIDs", "GetMultiInvTypesEx")?;
+    let mut seen = HashSet::new();
+    let mut rows = Vec::new();
+    for id in type_ids {
+        if !seen.insert(id) {
+            continue;
+        }
+        if let Some(t) = u32::try_from(id).ok().and_then(|tid| ctx.sde.types.get(&tid)) {
+            rows.push(vec![
+                PyRep::Integer(t.type_id as i64),
+                PyRep::Integer(t.group_id as i64),
+                PyRep::String(t.name.clone()),
+                PyRep::String(t.name.clone()),
+                PyRep::Integer(0),
+                PyRep::Real(t.radius),
+                PyRep::Real(t.mass),
+                PyRep::Real(t.volume),
+                PyRep::Real(t.capacity),
+                PyRep::Integer(t.portion_size as i64),
+                t.race_id
+                    .map(|r| PyRep::Integer(r as i64))
+                    .unwrap_or(PyRep::None),
+                PyRep::Real(t.base_price),
+                PyRep::Bool(t.published),
+                t.market_group_id
+                    .map(|mg| PyRep::Integer(mg as i64))
+                    .unwrap_or(PyRep::None),
+                PyRep::Real(0.0),
+            ]);
+        }
+    }
+    Ok(DBRowDescriptor::inv_type_header().build_packed_row_list(rows))
+}
+
+pub fn get_multi_graphics_ex(
+    _ctx: &ServerContext,
+    session: &SessionState,
+) -> Result<PyRep, BridgeRpcError> {
+    ServerContext::require_auth(session)?;
+    Err(BridgeRpcError {
+        code: "UnimplementedRPC".into(),
+        message: "GetMultiGraphicsEx requires sde_graphics table import".into(),
+    })
+}
+
+pub fn get_celestial_statistic(
+    _ctx: &ServerContext,
+    session: &SessionState,
+) -> Result<PyRep, BridgeRpcError> {
+    ServerContext::require_auth(session)?;
+    Err(BridgeRpcError {
+        code: "UnimplementedRPC".into(),
+        message: "GetCelestialStatistic requires sde_celestial_statistics table import".into(),
+    })
+}
+
+pub fn get_map_objects(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+) -> Result<PyRep, BridgeRpcError> {
+    ServerContext::require_auth(session)?;
+    let Some(entity_id) = args
+        .first()
+        .and_then(|a| a.as_i64())
+        .or_else(|| session.solar_system_id.map(|s| s as i64))
+    else {
+        return Err(BridgeRpcError {
+            code: "InvalidArgument".into(),
+            message: "GetMapObjects requires entityID".into(),
+        });
+    };
+    let explicit_flags = args.len() > 1;
+    let want_regions = if explicit_flags {
+        args.get(1).and_then(|v| v.as_i64()).unwrap_or(0) != 0
+    } else {
+        entity_id == 9
+    };
+    let want_constellations = if explicit_flags {
+        args.get(2).and_then(|v| v.as_i64()).unwrap_or(0) != 0
+    } else {
+        u32::try_from(entity_id)
+            .ok()
+            .is_some_and(|rid| ctx.sde.regions.contains_key(&rid))
+    };
+    let want_systems = if explicit_flags {
+        args.get(3).and_then(|v| v.as_i64()).unwrap_or(0) != 0
+    } else {
+        u32::try_from(entity_id)
+            .ok()
+            .is_some_and(|cid| ctx.sde.constellations.contains_key(&cid))
+    };
+    let want_stations = if explicit_flags {
+        args.get(4).and_then(|v| v.as_i64()).unwrap_or(0) != 0
+    } else {
+        u32::try_from(entity_id)
+            .ok()
+            .is_some_and(|sid| ctx.sde.solar_systems.contains_key(&sid))
+    };
+
+    let mut rows = Vec::new();
+    if want_regions {
+        let mut regs: Vec<&eve_sde::RegionInfo> = ctx.sde.regions.values().collect();
+        regs.sort_by_key(|r| r.region_id);
+        for r in regs {
+            if entity_id == 9 || i64::from(r.region_id) == entity_id {
+                rows.push(vec![
+                    PyRep::Integer(3),
+                    PyRep::Integer(3),
+                    PyRep::Integer(r.region_id as i64),
+                    PyRep::String(r.name.clone()),
+                    PyRep::Integer(9),
+                    PyRep::Integer(0),
+                    PyRep::Real(r.center[0]),
+                    PyRep::Real(r.center[1]),
+                    PyRep::Real(r.center[2]),
+                ]);
+            }
+        }
+    }
+    if want_constellations {
+        let mut cons: Vec<&eve_sde::ConstellationInfo> = ctx.sde.constellations.values().collect();
+        cons.sort_by_key(|c| c.constellation_id);
+        for c in cons {
+            if entity_id == 9
+                || i64::from(c.region_id) == entity_id
+                || i64::from(c.constellation_id) == entity_id
+            {
+                rows.push(vec![
+                    PyRep::Integer(4),
+                    PyRep::Integer(4),
+                    PyRep::Integer(c.constellation_id as i64),
+                    PyRep::String(c.name.clone()),
+                    PyRep::Integer(c.region_id as i64),
+                    PyRep::Integer(0),
+                    PyRep::Real(c.center[0]),
+                    PyRep::Real(c.center[1]),
+                    PyRep::Real(c.center[2]),
+                ]);
+            }
+        }
+    }
+    if want_systems {
+        let mut syss: Vec<&eve_sde::SolarSystem> = ctx.sde.solar_systems.values().collect();
+        syss.sort_by_key(|s| s.solar_system_id);
+        for s in syss {
+            if entity_id == 9
+                || i64::from(s.region_id) == entity_id
+                || i64::from(s.constellation_id) == entity_id
+                || i64::from(s.solar_system_id) == entity_id
+            {
+                rows.push(vec![
+                    PyRep::Integer(5),
+                    PyRep::Integer(5),
+                    PyRep::Integer(s.solar_system_id as i64),
+                    PyRep::String(s.name.clone()),
+                    PyRep::Integer(s.constellation_id as i64),
+                    PyRep::Integer(0),
+                    PyRep::Real(s.galactic_pos_ly[0]),
+                    PyRep::Real(s.galactic_pos_ly[1]),
+                    PyRep::Real(s.galactic_pos_ly[2]),
+                ]);
+            }
+        }
+    }
+    if let Some(sys_id) = u32::try_from(entity_id).ok() {
+        if let Some(sys) = ctx.sde.solar_systems.get(&sys_id) {
+            if want_stations {
+                for st in &sys.stations {
+                    rows.push(vec![
+                        PyRep::Integer(15),
+                        PyRep::Integer(st.station_type_id as i64),
+                        PyRep::Integer(st.station_id),
+                        PyRep::String(st.name.clone()),
+                        PyRep::Integer(sys_id as i64),
+                        PyRep::Integer(0),
+                        PyRep::Real(st.position.x),
+                        PyRep::Real(st.position.y),
+                        PyRep::Real(st.position.z),
+                    ]);
+                }
+            }
+            if !explicit_flags || want_stations {
+                for c in ctx.sde.celestials_in_system(sys_id) {
+                    rows.push(vec![
+                        PyRep::Integer(c.group_id as i64),
+                        PyRep::Integer(c.type_id as i64),
+                        PyRep::Integer(c.celestial_id),
+                        PyRep::String(c.name),
+                        PyRep::Integer(sys_id as i64),
+                        PyRep::Integer(c.orbit_id.unwrap_or(0)),
+                        PyRep::Real(c.position.x),
+                        PyRep::Real(c.position.y),
+                        PyRep::Real(c.position.z),
+                    ]);
+                }
+            }
+        }
+    }
+    Ok(DBRowDescriptor::map_objects_header().build_crowset(rows))
+}
+
+pub fn get_map_connections(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+) -> Result<PyRep, BridgeRpcError> {
+    ServerContext::require_auth(session)?;
+    let Some(item_id) = args
+        .first()
+        .and_then(|a| a.as_i64())
+        .or_else(|| session.solar_system_id.map(|s| s as i64))
+    else {
+        return Err(BridgeRpcError {
+            code: "InvalidArgument".into(),
+            message: "GetMapConnections requires itemID".into(),
+        });
+    };
+    let explicit_flags = args.len() > 1;
+    let want_reg = if explicit_flags {
+        args.get(1).and_then(|v| v.as_i64()).unwrap_or(0) != 0
+    } else {
+        true
+    };
+    let want_con = if explicit_flags {
+        args.get(2).and_then(|v| v.as_i64()).unwrap_or(0) != 0
+    } else {
+        true
+    };
+    let want_sol = if explicit_flags {
+        args.get(3).and_then(|v| v.as_i64()).unwrap_or(0) != 0
+    } else {
+        true
+    };
+
+    let item_u32 = u32::try_from(item_id).ok();
+    let filter_sys = item_u32.filter(|s| ctx.sde.solar_systems.contains_key(s));
+    let filter_con = item_u32.filter(|c| ctx.sde.constellations.contains_key(c));
+    let filter_reg = item_u32.filter(|r| ctx.sde.regions.contains_key(r));
+
+    let mut gate_ids: Vec<i64> = ctx.sde.jumps.keys().copied().collect();
+    gate_ids.sort_unstable();
+    let mut rows = Vec::new();
+    for gid in gate_ids {
+        let jmp = &ctx.sde.jumps[&gid];
+        let (from_reg, from_con) = ctx
+            .sde
+            .solar_systems
+            .get(&jmp.from_solar_system_id)
+            .map(|s| (s.region_id, s.constellation_id))
+            .unwrap_or((0, 0));
+        let (to_reg, to_con) = ctx
+            .sde
+            .solar_systems
+            .get(&jmp.to_solar_system_id)
+            .map(|s| (s.region_id, s.constellation_id))
+            .unwrap_or((0, 0));
+
+        if let Some(fs) = filter_sys {
+            if jmp.from_solar_system_id != fs && jmp.to_solar_system_id != fs {
+                continue;
+            }
+        } else if let Some(fc) = filter_con {
+            if from_con != fc && to_con != fc {
+                continue;
+            }
+        } else if let Some(fr) = filter_reg {
+            if from_reg != fr && to_reg != fr {
+                continue;
+            }
+        } else if item_id != 9 {
+            continue;
+        }
+
+        let is_inter_reg = from_reg != to_reg;
+        let is_inter_con = from_con != to_con;
+        let level_match = if is_inter_reg {
+            want_reg || want_sol
+        } else if is_inter_con {
+            want_con || want_sol
+        } else {
+            want_sol
+        };
+        if !level_match {
+            continue;
+        }
+
+        rows.push(vec![
+            PyRep::String("stargate".into()),
+            PyRep::Integer(from_reg as i64),
+            PyRep::Integer(from_con as i64),
+            PyRep::Integer(jmp.from_solar_system_id as i64),
+            PyRep::Integer(jmp.stargate_id),
+            PyRep::Integer(jmp.destination_stargate_id),
+            PyRep::Integer(jmp.to_solar_system_id as i64),
+            PyRep::Integer(to_con as i64),
+            PyRep::Integer(to_reg as i64),
+        ]);
+    }
+    Ok(PyRep::rowset(
+        vec![
+            "ctype",
+            "fromreg",
+            "fromcon",
+            "fromsol",
+            "stargateID",
+            "celestialID",
+            "tosol",
+            "tocon",
+            "toreg",
+        ],
+        rows,
+    ))
 }

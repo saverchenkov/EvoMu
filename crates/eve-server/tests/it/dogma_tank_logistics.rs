@@ -95,7 +95,7 @@ fn extract_attr_from_info(info_rep: &PyRep, attr_id: i64) -> f64 {
 
 #[tokio::test]
 async fn test_phase_4_dg4_and_exit_gate_full_cycle_journey() {
-    // parity: plan:DG-4, feat:dogma.module-cycle, notify:OnGodmaShipEffect, notify:OnModuleActivated, notify:OnModulesDeactivating, rpc:charUnboundMgr.SelectCharacterID, rpc:dogmaIM.Activate, rpc:dogmaIM.AddTarget, rpc:dogmaIM.Deactivate, rpc:dogmaIM.LinkAllWeapons, rpc:dogmaIM.LoadAmmo, rpc:invbroker.Add, rpc:stationSvc.Undock
+    // parity: plan:DG-4, feat:dogma.module-cycle, notify:OnGodmaShipEffect, notify:OnModuleActivated, notify:OnModulesDeactivating, rpc:charUnboundMgr.SelectCharacterID, rpc:dogmaIM.LinkAllWeapons, rpc:dogmaIM.LoadAmmo
     eve_testkit::attest(&["feat:dogma.module-cycle", "notify:OnGodmaShipEffect", "notify:OnModuleActivated", "notify:OnModulesDeactivating"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
@@ -424,7 +424,7 @@ async fn test_phase_4_dg4_and_exit_gate_full_cycle_journey() {
 
 #[tokio::test]
 async fn test_dg4_local_tank_asb_aar_rah_hull_adc_and_cap_booster() {
-    // parity: feat:modules.ancillary-shield-booster, feat:modules.armor-repairer, feat:modules.ancillary-armor-repairer, feat:modules.reactive-armor-hardener, feat:modules.hull-repairer, feat:modules.assault-damage-control, feat:modules.cap-booster, rpc:charUnboundMgr.SelectCharacterID, rpc:dogmaIM.Activate, rpc:dogmaIM.Deactivate, rpc:dogmaIM.ItemGetInfo, rpc:dogmaIM.LoadAmmo, rpc:dogmaIM.UnloadAmmo, rpc:invbroker.Add, rpc:stationSvc.Undock
+    // parity: feat:modules.ancillary-shield-booster, feat:modules.armor-repairer, feat:modules.ancillary-armor-repairer, feat:modules.reactive-armor-hardener, feat:modules.hull-repairer, feat:modules.assault-damage-control, feat:modules.cap-booster, rpc:charUnboundMgr.SelectCharacterID, rpc:dogmaIM.LoadAmmo, rpc:dogmaIM.UnloadAmmo
     eve_testkit::attest(&["feat:modules.ancillary-shield-booster", "feat:modules.armor-repairer", "feat:modules.ancillary-armor-repairer", "feat:modules.reactive-armor-hardener", "feat:modules.hull-repairer", "feat:modules.assault-damage-control", "feat:modules.cap-booster"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();
@@ -1016,7 +1016,7 @@ async fn test_dg4_local_tank_asb_aar_rah_hull_adc_and_cap_booster() {
 
 #[tokio::test]
 async fn test_dg4_remote_logistics_mutadaptive_spool_and_impedance() {
-    // parity: feat:modules.remote-shield, feat:modules.remote-armor, feat:modules.remote-hull, feat:modules.remote-cap, feat:modules.remote-assistance-impedance, rpc:charUnboundMgr.SelectCharacterID, rpc:dogmaIM.Activate, rpc:dogmaIM.Deactivate, rpc:invbroker.Add, rpc:stationSvc.Undock
+    // parity: feat:modules.remote-shield, feat:modules.remote-armor, feat:modules.remote-hull, feat:modules.remote-cap, feat:modules.remote-assistance-impedance, rpc:charUnboundMgr.SelectCharacterID
     eve_testkit::attest(&["feat:modules.remote-shield", "feat:modules.remote-armor", "feat:modules.remote-hull", "feat:modules.remote-cap", "feat:modules.remote-assistance-impedance"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);

@@ -172,7 +172,7 @@ fn expected_anomalies(ctx: &ServerContext, sys: u32, kind: &str) -> BTreeMap<u32
 
 #[tokio::test]
 async fn test_dungeon_instance_cache_returns_current_per_system_instances() {
-    // parity: feat:pve.dungeon-instance-cache, rpc:dungeonInstanceCacheMgr.GetBulwarkMiningSiteCounts, rpc:dungeonInstanceCacheMgr.GetOreAnomalyInstances
+    // parity: feat:pve.dungeon-instance-cache, rpc:dungeonInstanceCacheMgr.GetOreAnomalyInstances
     eve_testkit::attest(&["feat:pve.dungeon-instance-cache"]);
 
     let ctx = ServerContext::new();

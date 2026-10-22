@@ -291,7 +291,7 @@ async fn test_account_roles_bitmask_checks() {
 
 #[tokio::test]
 async fn test_multi_login_block_enforcement() {
-    // parity: feat:account.multi-login-block, rpc:authentication.Login, rpc:charUnboundMgr.GetCharactersToSelect, rpc:charUnboundMgr.SelectCharacterID, rpc:multiLoginBlocker.Login
+    // parity: feat:account.multi-login-block, rpc:authentication.Login, rpc:charUnboundMgr.SelectCharacterID, rpc:multiLoginBlocker.Login
     let ctx = ServerContext::new();
     let kw = HashMap::new();
 
@@ -932,7 +932,7 @@ async fn test_s10_doc_reconciliation_and_labels() {
 
 #[tokio::test]
 async fn test_s7_structures_skyhooks_pi_range_checks() {
-    // parity: plan:S-7, rpc:charUnboundMgr.SelectCharacterID, rpc:mailMgr.SendMail, rpc:planetMgr.GetPlanetInfo, rpc:planetMgr.GetPlanetsForChar, rpc:planetMgr.UserUpdateNetwork, rpc:shipCosmeticsMgr.ApplySkinToShip, rpc:sovMgr.AcquireSkyhooks
+    // parity: plan:S-7, rpc:charUnboundMgr.SelectCharacterID, rpc:planetMgr.GetPlanetInfo, rpc:planetMgr.GetPlanetsForChar, rpc:planetMgr.UserUpdateNetwork, rpc:shipCosmeticsMgr.ApplySkinToShip, rpc:sovMgr.AcquireSkyhooks
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let mut sess = SessionState::new(20_701);

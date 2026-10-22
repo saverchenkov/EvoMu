@@ -41,7 +41,6 @@ fn get_sde() -> &'static SdeRegistry {
 }
 
 // ============================================================================
-// parity: plan:T-3 — MachoNet Wire Framing Property & Fuzz Tests
 // ============================================================================
 
 fn arb_macho_address() -> impl Strategy<Value = MachoAddress> {
@@ -164,7 +163,6 @@ proptest! {
 }
 
 // ============================================================================
-// parity: plan:T-3 — Packed Row & DBRow Decoder Property & Fuzz Tests
 // ============================================================================
 
 proptest! {
@@ -232,7 +230,6 @@ proptest! {
 }
 
 // ============================================================================
-// parity: plan:T-3 — Destiny Wire Decoder Property & Fuzz Tests
 // ============================================================================
 
 fn arb_movement_mode() -> impl Strategy<Value = MovementMode> {
@@ -335,7 +332,6 @@ proptest! {
 }
 
 // ============================================================================
-// parity: plan:T-3 — Dogma VM Evaluator Property & Fuzz Tests
 // ============================================================================
 
 proptest! {
@@ -443,7 +439,6 @@ proptest! {
 }
 
 // ============================================================================
-// parity: plan:T-3 — Quasar Envelope & ISK Arithmetic Property Tests
 // ============================================================================
 
 proptest! {
@@ -532,7 +527,6 @@ proptest! {
 }
 
 // ============================================================================
-// parity: plan:T-5 — Line Coverage & Mutation Targeted Tests Across Workspace
 // ============================================================================
 
 /// // parity: plan:T-5
@@ -676,7 +670,7 @@ fn test_t5_machonet_handshake_state_machine_coverage() {
     sess.station_id = Some(60003760);
     assert_eq!(sess.effective_location_id(), Some(60003760));
 
-    sess.push_notification("OnChatMessage", vec![PyRep::String("Welcome".into())]);
+    sess.push_notification("OnSkillTrained", vec![PyRep::String("Welcome".into())]);
     let notifs = sess.drain_notifications();
     assert_eq!(notifs.len(), 1);
     assert_eq!(sess.drain_notifications().len(), 0);

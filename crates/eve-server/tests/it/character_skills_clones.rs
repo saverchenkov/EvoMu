@@ -17,7 +17,7 @@ use std::collections::HashMap;
 
 #[tokio::test]
 async fn test_ch1_skill_training_engine_and_caps() {
-    // parity: feat:skills.queue-training-engine, feat:skills.queue-pause, feat:skills.skill-levels-sp, feat:skills.alpha-skill-caps, feat:skills.alpha-training-speed, rpc:charUnboundMgr.GetCharacterInfo, rpc:charUnboundMgr.SelectCharacterID, rpc:skillMgr2.AbortTraining, rpc:skillMgr2.GetSkillQueue, rpc:skillMgr2.SaveSkillQueue
+    // parity: feat:skills.queue-training-engine, feat:skills.queue-pause, feat:skills.skill-levels-sp, feat:skills.alpha-skill-caps, feat:skills.alpha-training-speed, rpc:charUnboundMgr.GetCharacterInfo, rpc:charUnboundMgr.SelectCharacterID
     eve_testkit::attest(&["feat:skills.queue-training-engine", "feat:skills.queue-pause", "feat:skills.skill-levels-sp", "feat:skills.alpha-skill-caps", "feat:skills.alpha-training-speed"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
@@ -610,7 +610,7 @@ async fn test_ch1_skill_training_engine_and_caps() {
 
 #[tokio::test]
 async fn test_ch2_skill_handling_and_prerequisites() {
-    // parity: feat:skills.queue-get, feat:skills.queue-save, feat:skills.skill-history, feat:skills.inject-skillbook, feat:skills.prereq-check, rpc:charUnboundMgr.SelectCharacterID, rpc:skillMgr2.GetSkillHistory, rpc:skillMgr2.GetSkillQueue, rpc:skillMgr2.InjectSkillIntoBrain, rpc:skillMgr2.SaveSkillQueue
+    // parity: feat:skills.queue-get, feat:skills.queue-save, feat:skills.skill-history, feat:skills.inject-skillbook, feat:skills.prereq-check, rpc:charUnboundMgr.SelectCharacterID
     eve_testkit::attest(&["feat:skills.queue-get", "feat:skills.queue-save", "feat:skills.skill-history", "feat:skills.inject-skillbook", "feat:skills.prereq-check"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
@@ -1051,7 +1051,7 @@ async fn test_r66_p1_3_nine_maps_durability_restart_and_rollback() {
 
 #[tokio::test]
 async fn test_ch1_ch2_effective_attributes_catchup_and_2arg_free_sp() {
-    // parity: feat:skills.skill-catch-up, feat:attributes.attributes-base, feat:skills.free-sp, rpc:charMgr.GetCharacterInfo, rpc:charUnboundMgr.SelectCharacterID, rpc:skillMgr2.ApplyFreeSkillPoints, rpc:skillMgr2.GetRespecInfo, rpc:skillMgr2.GetSkillQueueAndFreePoints
+    // parity: feat:skills.skill-catch-up, feat:attributes.attributes-base, feat:skills.free-sp, rpc:charUnboundMgr.SelectCharacterID
     eve_testkit::attest(&["feat:skills.skill-catch-up", "feat:attributes.attributes-base", "feat:skills.free-sp"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);

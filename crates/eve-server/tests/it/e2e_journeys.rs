@@ -9,10 +9,11 @@ use std::collections::HashMap;
 
 #[tokio::test]
 async fn test_e2e_01_to_18_integration_journeys() {
-    // parity: rpc:authentication.Login, rpc:beyonce.CmdStargateJump, rpc:beyonce.CmdWarpToPoint, rpc:charUnboundMgr.CreateCharacterWithDoll, rpc:charUnboundMgr.SelectCharacterID, rpc:dogmaIM.FireWeapon, rpc:dogmaIM.LoadAmmo, rpc:dogmaIM.Overload, rpc:essMgr.AttemptLinkToMainBank, rpc:invbroker.Add, rpc:marketProxy.GetOrders, rpc:scanMgr.ConeScan, rpc:scanMgr.RequestScans, rpc:skillMgr2.ApplyFreeSkillPoints, rpc:skillMgr2.InjectSkillpoints, rpc:skillMgr2.MachoBindObject, rpc:skillMgr2.SaveSkillQueue, rpc:stationSvc.Dock, rpc:stationSvc.Undock, rpc:wormholeMgr.WormholeJump
+    // parity: rpc:authentication.Login, rpc:charUnboundMgr.CreateCharacterWithDoll, rpc:charUnboundMgr.SelectCharacterID, rpc:dogmaIM.LoadAmmo, rpc:essMgr.AttemptLinkToMainBank, rpc:marketProxy.GetOrders, rpc:wormholeMgr.WormholeJump
     use eve_db::{InventoryFlag, InventoryItemRecord};
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     ctx.seed_demo_world_fixtures();
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(
@@ -199,7 +200,7 @@ async fn test_e2e_01_to_18_integration_journeys() {
         &mut sess,
         "beyonce",
         Some(jita_bound),
-        "CmdWarpToPoint",
+        "CmdWarpToStuff",
         &[
             PyRep::Real(jita_to_perim_pos.x),
             PyRep::Real(jita_to_perim_pos.y),
@@ -265,7 +266,7 @@ async fn test_e2e_01_to_18_integration_journeys() {
                 &mut sess,
                 "beyonce",
                 Some(cur_bound),
-                "CmdWarpToPoint",
+                "CmdWarpToStuff",
                 &[
                     PyRep::Real(gate_pos.x),
                     PyRep::Real(gate_pos.y),
@@ -348,7 +349,7 @@ async fn test_e2e_01_to_18_integration_journeys() {
         &mut sess,
         "beyonce",
         Some(tama_bound),
-        "CmdWarpToPoint",
+        "CmdWarpToStuff",
         &[PyRep::Real(15_000.0), PyRep::Real(0.0), PyRep::Real(0.0)],
         &kw,
         None,
@@ -471,7 +472,7 @@ async fn test_e2e_01_to_18_integration_journeys() {
             &mut sess,
             "dogmaIM",
             None,
-            "FireWeapon",
+            "Activate",
             &[PyRep::Integer(700_000_001)],
             &kw,
             None,
@@ -508,7 +509,7 @@ async fn test_e2e_01_to_18_integration_journeys() {
             &mut sess,
             "dogmaIM",
             None,
-            "FireWeapon",
+            "Activate",
             &[PyRep::Integer(750_000_002)],
             &kw,
             None,
@@ -530,7 +531,7 @@ async fn test_e2e_01_to_18_integration_journeys() {
                 &mut sess,
                 "dogmaIM",
                 None,
-                "FireWeapon",
+                "Activate",
                 &[PyRep::Integer(700_000_001)],
                 &kw,
                 None,
@@ -631,7 +632,7 @@ async fn test_e2e_01_to_18_integration_journeys() {
             &mut sess,
             "beyonce",
             Some(ret_bound),
-            "CmdWarpToPoint",
+            "CmdWarpToStuff",
             &[
                 PyRep::Real(gate_pos.x),
                 PyRep::Real(gate_pos.y),
@@ -668,7 +669,7 @@ async fn test_e2e_01_to_18_integration_journeys() {
         &mut sess,
         "beyonce",
         Some(jita_bound_2),
-        "CmdWarpToPoint",
+        "CmdWarpToStuff",
         &[
             PyRep::Real(-107_303_362_560.0),
             PyRep::Real(-18_744_975_360.0),

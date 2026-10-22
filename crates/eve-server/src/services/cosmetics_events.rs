@@ -9,6 +9,194 @@ use eve_proto::{BridgeRpcError, PyRep};
 use glam::DVec3;
 use std::collections::HashMap;
 
+pub async fn materialize_system_lod2(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+) -> Result<PyRep, BridgeRpcError> {
+    let _ = ServerContext::require_character(session)?;
+    if !session.has_gm_role() {
+        return Err(BridgeRpcError {
+            code: "InsufficientRole".into(),
+            message: "materialize_system_lod2 requires GM role; normal players trigger LOD 2 automatically on system entry or undock".into(),
+        });
+    }
+    let Some(session_sys_id) = session.solar_system_id else {
+        return Err(BridgeRpcError {
+            code: "UnknownSolarSystem".into(),
+            message: "Session has no active solar system".into(),
+        });
+    };
+    if let Some(arg_sys) = args.first().and_then(|a| a.as_i64()) {
+        let Ok(req_sys_id) = u32::try_from(arg_sys) else {
+            return Err(BridgeRpcError {
+                code: "UnknownSolarSystem".into(),
+                message: format!("Invalid solar system ID {arg_sys}"),
+            });
+        };
+        if !ctx.sde.solar_systems.contains_key(&req_sys_id) {
+            return Err(BridgeRpcError {
+                code: "UnknownSolarSystem".into(),
+                message: format!("Solar system {req_sys_id} does not exist in SDE"),
+            });
+        }
+        if req_sys_id != session_sys_id {
+            return Err(BridgeRpcError {
+                code: "CannotMaterializeRemoteSystem".into(),
+                message: format!(
+                    "Cannot materialize LOD 2 in remote solar system {req_sys_id} while in system {session_sys_id}"
+                ),
+            });
+        }
+    }
+    if !ctx.sde.solar_systems.contains_key(&session_sys_id) {
+        return Err(BridgeRpcError {
+            code: "UnknownSolarSystem".into(),
+            message: format!("Solar system {session_sys_id} does not exist in SDE"),
+        });
+    }
+    let count = ctx
+        .living_world
+        .materialize_system_lod2(session_sys_id, &ctx.systems, &ctx.sde)
+        .await;
+    Ok(PyRep::Integer(count as i64))
+}
+
+pub async fn interdict_convoy(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    if !session.has_gm_role() {
+        return Err(BridgeRpcError {
+            code: "InsufficientRole".into(),
+            message: "interdict_convoy requires GM role; normal players must destroy convoys in space via combat".into(),
+        });
+    }
+    if session.station_id.is_some() || session.structure_id.is_some() {
+        return Err(BridgeRpcError {
+            code: "ShipDocked".into(),
+            message: "Cannot interdict a space convoy while docked".into(),
+        });
+    }
+    let Some(ship_id) = session.ship_id else {
+        return Err(BridgeRpcError {
+            code: "NoActiveShip".into(),
+            message: "Session has no active ship".into(),
+        });
+    };
+    let Some(convoy_id) = args.first().and_then(|a| a.as_i64()) else {
+        return Err(BridgeRpcError {
+            code: "InvalidArgument".into(),
+            message: "interdict_convoy requires convoyID".into(),
+        });
+    };
+    let Some(convoy) = ctx.living_world.get_convoy(convoy_id) else {
+        return Err(BridgeRpcError {
+            code: "ConvoyNotFound".into(),
+            message: format!("Convoy {convoy_id} does not exist"),
+        });
+    };
+    if session.solar_system_id != Some(convoy.current_system_id) {
+        return Err(BridgeRpcError {
+            code: "ConvoyWrongSystem".into(),
+            message: format!(
+                "Convoy {convoy_id} is in system {}, but attacker is in {:?}",
+                convoy.current_system_id, session.solar_system_id
+            ),
+        });
+    }
+
+    let sys_handle = ctx.systems.get_or_spawn(convoy.current_system_id);
+    let Some((_, ship_ball)) = (match sys_handle.get_ball_snapshot(ship_id).await {
+        Ok(v) => v,
+        Err(e) => {
+            return Err(BridgeRpcError {
+                code: "DestinyQueryFailed".into(),
+                message: e,
+            })
+        }
+    }) else {
+        return Err(BridgeRpcError {
+            code: "ShipNotInSpace".into(),
+            message: "Attacker ship is not in space".into(),
+        });
+    };
+
+    let Some((_, convoy_ball)) = (match sys_handle.get_ball_snapshot(convoy_id).await {
+        Ok(v) => v,
+        Err(e) => {
+            return Err(BridgeRpcError {
+                code: "DestinyQueryFailed".into(),
+                message: e,
+            })
+        }
+    }) else {
+        return Err(BridgeRpcError {
+            code: "ConvoyNotMaterializedOnGrid".into(),
+            message: format!(
+                "Convoy {convoy_id} is not materialized on grid in Ballpark"
+            ),
+        });
+    };
+
+    let dist = ship_ball.position.distance(convoy_ball.position);
+    if dist > 30_000.0 {
+        return Err(BridgeRpcError {
+            code: "OutsideConvoyInterdictionRange".into(),
+            message: format!(
+                "Ship is {:.1} m from convoy {convoy_id} (must be <= 30000 m)",
+                dist
+            ),
+        });
+    }
+
+    let _ = sys_handle.remove_ball(convoy_id).await;
+    match ctx
+        .living_world
+        .interdict_convoy(convoy_id, char_id, &ctx.db)
+    {
+        Ok((wreck_item_id, loot_item_id, spiked_ask)) => {
+            let _ = sys_handle
+                .spawn_ball_with_combat(
+                    Ball {
+                        id: wreck_item_id,
+                        type_id: 26557,
+                        position: convoy_ball.position,
+                        velocity: DVec3::ZERO,
+                        max_velocity: 0.0,
+                        inertia: 1.0,
+                        mass: 10_000.0,
+                        radius: 50.0,
+                        speed_fraction: 0.0,
+                        mode: MovementMode::Stop,
+                    },
+                    CombatState {
+                        shield_hp: 0.0,
+                        max_shield_hp: 0.0,
+                        armor_hp: 0.0,
+                        max_armor_hp: 0.0,
+                        structure_hp: 500.0,
+                        max_structure_hp: 500.0,
+                        ..CombatState::default()
+                    },
+                )
+                .await;
+            Ok(PyRep::keyval([
+                ("convoyID", PyRep::Integer(convoy_id)),
+                ("wreckItemID", PyRep::Integer(wreck_item_id)),
+                ("lootItemID", PyRep::Integer(loot_item_id)),
+                ("newDestinationAskISK", PyRep::Real(spiked_ask.to_wire_f64())),
+            ]))
+        }
+        Err(e) => Err(BridgeRpcError {
+            code: "InterdictionFailed".into(),
+            message: e,
+        }),
+    }
+}
+
 pub async fn handle(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -18,193 +206,6 @@ pub async fn handle(
     _kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
-        // Living World NPC Ecology & Supply-Chain Convoy Interdiction (`taleMgr` / `E2E-17`)
-        ("taleMgr", "MaterializeSystemLOD2") => {
-            let _ = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let Some(session_sys_id) = session.solar_system_id else {
-                return Some(Err(BridgeRpcError {
-                    code: "UnknownSolarSystem".into(),
-                    message: "Session has no active solar system".into(),
-                }));
-            };
-            if let Some(arg_sys) = args.first().and_then(|a| a.as_i64()) {
-                let Ok(req_sys_id) = u32::try_from(arg_sys) else {
-                    return Some(Err(BridgeRpcError {
-                        code: "UnknownSolarSystem".into(),
-                        message: format!("Invalid solar system ID {arg_sys}"),
-                    }));
-                };
-                if !ctx.sde.solar_systems.contains_key(&req_sys_id) {
-                    return Some(Err(BridgeRpcError {
-                        code: "UnknownSolarSystem".into(),
-                        message: format!("Solar system {req_sys_id} does not exist in SDE"),
-                    }));
-                }
-                if req_sys_id != session_sys_id {
-                    return Some(Err(BridgeRpcError {
-                        code: "CannotMaterializeRemoteSystem".into(),
-                        message: format!(
-                            "Cannot materialize LOD 2 in remote solar system {req_sys_id} while in system {session_sys_id}"
-                        ),
-                    }));
-                }
-            }
-            if !ctx.sde.solar_systems.contains_key(&session_sys_id) {
-                return Some(Err(BridgeRpcError {
-                    code: "UnknownSolarSystem".into(),
-                    message: format!("Solar system {session_sys_id} does not exist in SDE"),
-                }));
-            }
-            if !session.has_gm_role() {
-                return Some(Err(BridgeRpcError {
-                    code: "InsufficientRole".into(),
-                    message: "taleMgr.MaterializeSystemLOD2 requires GM role; normal players trigger LOD 2 automatically on system entry or undock".into(),
-                }));
-            }
-            let count = ctx
-                .living_world
-                .materialize_system_lod2(session_sys_id, &ctx.systems, &ctx.sde)
-                .await;
-            Some(Ok(PyRep::Integer(count as i64)))
-        }
-
-        ("taleMgr", "InterdictConvoy") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            if !session.has_gm_role() {
-                return Some(Err(BridgeRpcError {
-                    code: "InsufficientRole".into(),
-                    message: "taleMgr.InterdictConvoy requires GM role; normal players must destroy convoys in space via combat".into(),
-                }));
-            }
-            if session.station_id.is_some() || session.structure_id.is_some() {
-                return Some(Err(BridgeRpcError {
-                    code: "ShipDocked".into(),
-                    message: "Cannot interdict a space convoy while docked".into(),
-                }));
-            }
-            let Some(ship_id) = session.ship_id else {
-                return Some(Err(BridgeRpcError {
-                    code: "NoActiveShip".into(),
-                    message: "Session has no active ship".into(),
-                }));
-            };
-            let Some(convoy_id) = args.first().and_then(|a| a.as_i64()) else {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidArgument".into(),
-                    message: "InterdictConvoy requires convoyID".into(),
-                }));
-            };
-            let Some(convoy) = ctx.living_world.get_convoy(convoy_id) else {
-                return Some(Err(BridgeRpcError {
-                    code: "ConvoyNotFound".into(),
-                    message: format!("Convoy {convoy_id} does not exist"),
-                }));
-            };
-            if session.solar_system_id != Some(convoy.current_system_id) {
-                return Some(Err(BridgeRpcError {
-                    code: "ConvoyWrongSystem".into(),
-                    message: format!(
-                        "Convoy {convoy_id} is in system {}, but attacker is in {:?}",
-                        convoy.current_system_id, session.solar_system_id
-                    ),
-                }));
-            }
-
-            let sys_handle = ctx.systems.get_or_spawn(convoy.current_system_id);
-            let Some((_, ship_ball)) = (match sys_handle.get_ball_snapshot(ship_id).await {
-                Ok(v) => v,
-                Err(e) => {
-                    return Some(Err(BridgeRpcError {
-                        code: "DestinyQueryFailed".into(),
-                        message: e,
-                    }))
-                }
-            }) else {
-                return Some(Err(BridgeRpcError {
-                    code: "ShipNotInSpace".into(),
-                    message: "Attacker ship is not in space".into(),
-                }));
-            };
-
-            let Some((_, convoy_ball)) = (match sys_handle.get_ball_snapshot(convoy_id).await {
-                Ok(v) => v,
-                Err(e) => {
-                    return Some(Err(BridgeRpcError {
-                        code: "DestinyQueryFailed".into(),
-                        message: e,
-                    }))
-                }
-            }) else {
-                return Some(Err(BridgeRpcError {
-                    code: "ConvoyNotMaterializedOnGrid".into(),
-                    message: format!(
-                        "Convoy {convoy_id} is not materialized on grid in Ballpark"
-                    ),
-                }));
-            };
-
-            let dist = ship_ball.position.distance(convoy_ball.position);
-            if dist > 30_000.0 {
-                return Some(Err(BridgeRpcError {
-                    code: "OutsideConvoyInterdictionRange".into(),
-                    message: format!(
-                        "Ship is {:.1} m from convoy {convoy_id} (must be <= 30000 m)",
-                        dist
-                    ),
-                }));
-            }
-
-            let _ = sys_handle.remove_ball(convoy_id).await;
-            match ctx
-                .living_world
-                .interdict_convoy(convoy_id, char_id, &ctx.db)
-            {
-                Ok((wreck_item_id, loot_item_id, spiked_ask)) => {
-                    let _ = sys_handle
-                        .spawn_ball_with_combat(
-                            Ball {
-                                id: wreck_item_id,
-                                type_id: 26557,
-                                position: convoy_ball.position,
-                                velocity: DVec3::ZERO,
-                                max_velocity: 0.0,
-                                inertia: 1.0,
-                                mass: 10_000.0,
-                                radius: 50.0,
-                                speed_fraction: 0.0,
-                                mode: MovementMode::Stop,
-                            },
-                            CombatState {
-                                shield_hp: 0.0,
-                                max_shield_hp: 0.0,
-                                armor_hp: 0.0,
-                                max_armor_hp: 0.0,
-                                structure_hp: 500.0,
-                                max_structure_hp: 500.0,
-                                ..CombatState::default()
-                            },
-                        )
-                        .await;
-                    Some(Ok(PyRep::keyval([
-                        ("convoyID", PyRep::Integer(convoy_id)),
-                        ("wreckItemID", PyRep::Integer(wreck_item_id)),
-                        ("lootItemID", PyRep::Integer(loot_item_id)),
-                        ("newDestinationAskISK", PyRep::Real(spiked_ask.to_wire_f64())),
-                    ])))
-                }
-                Err(e) => Some(Err(BridgeRpcError {
-                    code: "InterdictionFailed".into(),
-                    message: e,
-                })),
-            }
-        }
-
         ("shipCosmeticsMgr", "GiveSkin") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,

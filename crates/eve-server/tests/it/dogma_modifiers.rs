@@ -120,7 +120,7 @@ fn test_implant_sets_pirate_compounding_snake_crystal_halo_ascendancy_asklepian_
 }
 #[tokio::test]
 async fn test_tactical_destroyer_ship_stances_and_cooldown_confessor_svipul_jackdaw_hecate() {
-    // parity: feat:ships.ship-stance, rpc:charUnboundMgr.SelectCharacterID, rpc:dogmaIM.GetAllInfo, rpc:shipStanceMgr.SetShipStance
+    // parity: feat:ships.ship-stance, rpc:charUnboundMgr.SelectCharacterID, rpc:shipStanceMgr.SetShipStance
     eve_testkit::attest(&["feat:ships.ship-stance"]);
     let sde = sde();
     // 1. Confessor (34317): Defense (34319), Sharpshooter (34321), Propulsion (34323)
@@ -264,7 +264,7 @@ async fn test_tactical_destroyer_ship_stances_and_cooldown_confessor_svipul_jack
 }
 #[tokio::test]
 async fn test_dogma_attribute_sync_and_location_prime_wire_format() {
-    // parity: feat:dogma.attribute-sync, feat:dogma.location-prime, rpc:charUnboundMgr.SelectCharacterID, rpc:dogmaIM.GetAllInfo, rpc:dogmaIM.ItemGetInfo, rpc:invbroker.Add
+    // parity: feat:dogma.attribute-sync, feat:dogma.location-prime, rpc:charUnboundMgr.SelectCharacterID
     eve_testkit::attest(&["feat:dogma.attribute-sync", "feat:dogma.location-prime"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();

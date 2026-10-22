@@ -15,7 +15,7 @@ use std::collections::HashMap;
 #[tokio::test]
 async fn test_sp5_docking_and_undocking_station_structure_and_boarding() {
     // parity: plan:SP-5
-    // parity: feat:ships.board-ship, feat:navigation.undock, feat:navigation.dock-station, feat:navigation.dock-structure, rpc:beyonce.Dock, rpc:charUnboundMgr.SelectCharacterID, rpc:ship.Board, rpc:stationSvc.Dock, rpc:stationSvc.Undock, rpc:structureDocking.Dock, rpc:structureDocking.Undock
+    // parity: feat:ships.board-ship, feat:navigation.undock, feat:navigation.dock-station, feat:navigation.dock-structure, rpc:charUnboundMgr.SelectCharacterID, rpc:ship.Board, rpc:structureDocking.Dock, rpc:structureDocking.Undock
     eve_testkit::attest(&[
         "plan:SP-5",
         "feat:ships.board-ship",
@@ -417,7 +417,7 @@ async fn test_sp5_docking_and_undocking_station_structure_and_boarding() {
 #[tokio::test]
 async fn test_sp3_warp_to_disrupted_capacitor_cost_and_exit_invulnerability() {
     // parity: plan:SP-3, plan:S-1
-    // parity: feat:navigation.warp-to, feat:navigation.warp-disrupted, feat:navigation.warp-capacitor-cost, feat:navigation.warp-exit-invulnerability, rpc:abyssalMgr.AbyssalEntranceDeployment, rpc:beyonce.CmdSetSpeedFraction, rpc:beyonce.CmdWarpToStuff, rpc:beyonce.UpdateStateRequest, rpc:charUnboundMgr.SelectCharacterID, rpc:stationSvc.Undock
+    // parity: feat:navigation.warp-to, feat:navigation.warp-disrupted, feat:navigation.warp-capacitor-cost, feat:navigation.warp-exit-invulnerability, rpc:abyssalMgr.AbyssalEntranceDeployment, rpc:beyonce.UpdateStateRequest, rpc:charUnboundMgr.SelectCharacterID
     eve_testkit::attest(&[
         "plan:S-1",
         "feat:navigation.warp-to",
@@ -799,7 +799,7 @@ async fn test_sp3_warp_to_disrupted_capacitor_cost_and_exit_invulnerability() {
 #[tokio::test]
 async fn test_sp4_stargate_capital_restriction_session_timers_and_jump_cloak_immunities() {
     // parity: plan:SP-4, plan:S-1
-    // parity: feat:navigation.stargate-capital-restriction, feat:navigation.jump-cloak-immunities, rpc:beyonce.CmdSetSpeedFraction, rpc:beyonce.CmdStargateJump, rpc:beyonce.SetSessionCheck, rpc:charUnboundMgr.SelectCharacterID, rpc:stationSvc.Undock
+    // parity: feat:navigation.stargate-capital-restriction, feat:navigation.jump-cloak-immunities, rpc:beyonce.SetSessionCheck, rpc:charUnboundMgr.SelectCharacterID
     eve_testkit::attest(&[
         "plan:S-1",
         "feat:navigation.stargate-capital-restriction",

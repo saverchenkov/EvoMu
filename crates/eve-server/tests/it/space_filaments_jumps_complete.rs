@@ -279,7 +279,7 @@ fn fuel_left(ctx: &ServerContext, id: i64) -> i32 {
 #[tokio::test]
 async fn test_jump_drive_range_fuel_fatigue_and_highsec_restriction() {
     // parity: feat:navigation.jump-drive, feat:navigation.jump-fatigue, feat:navigation.jump-range-restrictions
-    // parity: rpc:jumpTimers.GetTimers, notify:OnJumpTimersUpdated, rpc:beyonce.CmdStargateJump
+    // parity: rpc:jumpTimers.GetTimers, notify:OnJumpTimersUpdated
     eve_testkit::attest(&[
         "feat:navigation.jump-drive",
         "feat:navigation.jump-fatigue",

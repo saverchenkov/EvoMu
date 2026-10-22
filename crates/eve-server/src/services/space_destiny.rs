@@ -246,8 +246,6 @@ pub async fn handle(
     match (service, method) {
         // parity: plan:P-7, plan:SP-1, plan:SP-2, plan:SP-3
         // parity: feat:navigation.destiny-updates, feat:navigation.celestials-balls, feat:navigation.bubbles-grid, feat:navigation.approach, feat:dogma.velocity-agility, feat:modules.micro-jump-drive
-        // parity: rpc:beyonce.CmdGotoDirection, rpc:beyonce.CmdSteerDirection, rpc:beyonce.CmdGotoPoint
-        // parity: rpc:beyonce.CmdStop, rpc:beyonce.CmdSetSpeedFraction, rpc:beyonce.CmdOrbit, rpc:beyonce.CmdFollowBall, rpc:beyonce.CmdAlignTo
         // parity: rpc:beyonce.UpdateStateRequest, rpc:beyonce.AdminGetBubbleID, rpc:beyonce.GetFormations
         // parity: destiny:AddBalls2, destiny:RemoveBalls, destiny:RemoveBall
         // parity: destiny:GotoDirection, destiny:FollowBall, destiny:Orbit, destiny:Stop
