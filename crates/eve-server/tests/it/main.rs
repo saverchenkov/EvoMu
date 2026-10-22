@@ -145,3 +145,5 @@ mod rpc_planet_mgr_orbitals;
 mod rpc_tourney_mgr;
 mod rpc_fleet_object_hierarchy;
 mod rpc_fleet_object_ops;
+mod rpc_bounty_crimewatch;
+mod rpc_ess_mgr;

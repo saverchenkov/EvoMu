@@ -384,6 +384,9 @@ pub struct CombatRuntimeState {
     pub fighter_unit_damage_accum: HashMap<i64, f64>,
     pub fighter_tube_rearm_until: HashMap<(i64, usize), u64>,
     pub behavior_debugging_active: std::collections::HashSet<i64>,
+    pub ess_main_bank_thefts: HashMap<u32, Vec<(i64, f64, u64)>>,
+    pub ess_reserve_bank_thefts: HashMap<u32, Vec<(i64, f64, u64)>>,
+    pub ess_reserve_unlocked_until: HashMap<u32, u64>,
 }
 
 impl CombatRuntimeState {

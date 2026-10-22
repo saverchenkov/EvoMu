@@ -771,8 +771,27 @@ pub async fn handle_crimewatch(
                     message: "Security status tag turn-in requires being docked at a CONCORD station".into(),
                 }));
             }
-            let tag_type_id = args.first().and_then(|a| a.as_i64()).unwrap_or(35661) as u32;
-            let qty = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1).max(1) as i32;
+            let cur_sec = ctx
+                .db
+                .with_snapshot(|s| s.characters.get(&char_id).map(|c| c.security_status))
+                .unwrap_or(0.0);
+            let (tag_type_id, qty) = if args.len() >= 2 {
+                let t = args.first().and_then(|a| a.as_i64()).unwrap_or(35661) as u32;
+                let q = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1).max(1) as i32;
+                (t, q)
+            } else {
+                let t = if cur_sec < -8.0 {
+                    35661
+                } else if cur_sec < -5.0 {
+                    35662
+                } else if cur_sec < -2.0 {
+                    35663
+                } else {
+                    35664
+                };
+                let q = args.first().and_then(|a| a.as_i64()).unwrap_or(1).max(1) as i32;
+                (t, q)
+            };
             let now_unix = ctx.now_unix();
             let sys_id = session.solar_system_id.unwrap_or(30_000_142);
 
@@ -1110,7 +1129,10 @@ pub async fn handle_crimewatch(
             Some(Ok(PyRep::List(rows)))
         }
 
-        ("bountyProxy", "SearchBounties") => {
+        ("bountyProxy", "SearchBounties")
+        | ("bountyProxy", "SearchCharBounties")
+        | ("bountyProxy", "SearchCorpBounties")
+        | ("bountyProxy", "SearchAllianceBounties") => {
             let (_, _char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -1122,22 +1144,36 @@ pub async fn handle_crimewatch(
                 .unwrap_or("")
                 .to_lowercase();
             let matching_ids: std::collections::HashSet<i64> = ctx.db.with_snapshot(|snap| {
-                snap.characters
-                    .values()
-                    .filter(|c| query_str.is_empty() || c.name.to_lowercase().contains(&query_str))
-                    .map(|c| c.character_id)
-                    .collect()
+                if method == "SearchAllianceBounties" {
+                    snap.alliances
+                        .values()
+                        .filter(|a| query_str.is_empty() || a.name.to_lowercase().contains(&query_str))
+                        .map(|a| a.alliance_id)
+                        .collect()
+                } else if method == "SearchCorpBounties" {
+                    snap.corporations
+                        .values()
+                        .filter(|c| query_str.is_empty() || c.name.to_lowercase().contains(&query_str))
+                        .map(|c| c.corporation_id)
+                        .collect()
+                } else {
+                    snap.characters
+                        .values()
+                        .filter(|c| query_str.is_empty() || c.name.to_lowercase().contains(&query_str))
+                        .map(|c| c.character_id)
+                        .collect()
+                }
             });
             let rows = with_combat_runtime(ctx, |rt| {
                 rt.player_bounty_pool
                     .iter()
                     .filter(|(&tid, _)| {
                         if let Some(qid) = query_id {
-                            tid == qid
+                            tid == qid && (query_str.is_empty() || matching_ids.contains(&tid))
                         } else if !query_str.is_empty() {
                             matching_ids.contains(&tid) || tid.to_string().contains(&query_str)
                         } else {
-                            true
+                            matching_ids.contains(&tid)
                         }
                     })
                     .map(|(&tid, &amt)| {
@@ -1149,6 +1185,14 @@ pub async fn handle_crimewatch(
                     .collect::<Vec<_>>()
             });
             Some(Ok(PyRep::List(rows)))
+        }
+
+        ("bountyProxy", "clear_memoized") => {
+            let _ = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            Some(Ok(PyRep::None))
         }
 
         ("bountyProxy", "GetTopPilotBounties")

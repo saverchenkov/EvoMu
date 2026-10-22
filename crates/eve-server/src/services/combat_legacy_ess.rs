@@ -1361,12 +1361,25 @@ pub async fn handle_legacy_and_ess(
                 Ok((bank.to_wire_f64(), false))
             });
             match res {
-                Ok((payout, link_started_only)) => Some(Ok(PyRep::keyval([
-                    ("solarSystemID", PyRep::Integer(sys_id as i64)),
-                    ("linked", PyRep::Bool(true)),
-                    ("linkStartedOnly", PyRep::Bool(link_started_only)),
-                    ("stolenISK", PyRep::Real(payout)),
-                ]))),
+                Ok((payout, link_started_only)) => {
+                    if payout > 0.0 {
+                        let now_u = ctx.now_unix();
+                        with_mut_combat_runtime(ctx, |rt| {
+                            let list = if method == "AttemptLinkToReserveBank" {
+                                rt.ess_reserve_bank_thefts.entry(sys_id).or_default()
+                            } else {
+                                rt.ess_main_bank_thefts.entry(sys_id).or_default()
+                            };
+                            list.push((char_id, payout, now_u));
+                        });
+                    }
+                    Some(Ok(PyRep::keyval([
+                        ("solarSystemID", PyRep::Integer(sys_id as i64)),
+                        ("linked", PyRep::Bool(true)),
+                        ("linkStartedOnly", PyRep::Bool(link_started_only)),
+                        ("stolenISK", PyRep::Real(payout)),
+                    ])))
+                }
                 Err(e) => Some(Err(e)),
             }
         }

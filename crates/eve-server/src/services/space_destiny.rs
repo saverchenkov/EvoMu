@@ -334,6 +334,213 @@ pub async fn handle(
             Some(Ok(rep))
         }
 
+        ("essMgr", "GetMainBankTheftsForClientSolarSystem") => {
+            let _ = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let Some(sys_id) = session.solar_system_id else {
+                return Some(Ok(PyRep::List(Vec::new())));
+            };
+            let thefts = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+                rt.ess_main_bank_thefts
+                    .get(&sys_id)
+                    .cloned()
+                    .unwrap_or_default()
+            });
+            let rows: Vec<PyRep> = thefts
+                .into_iter()
+                .map(|(char_id, amount, ts)| {
+                    PyRep::keyval([
+                        ("characterID", PyRep::Integer(char_id)),
+                        ("stolenISK", PyRep::Real(amount)),
+                        ("timestamp", PyRep::Integer(ts as i64)),
+                    ])
+                })
+                .collect();
+            Some(Ok(PyRep::List(rows)))
+        }
+
+        ("essMgr", "GetReserveBankTheftsForClientSolarSystem") => {
+            let _ = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let Some(sys_id) = session.solar_system_id else {
+                return Some(Ok(PyRep::List(Vec::new())));
+            };
+            let thefts = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+                rt.ess_reserve_bank_thefts
+                    .get(&sys_id)
+                    .cloned()
+                    .unwrap_or_default()
+            });
+            let rows: Vec<PyRep> = thefts
+                .into_iter()
+                .map(|(char_id, amount, ts)| {
+                    PyRep::keyval([
+                        ("characterID", PyRep::Integer(char_id)),
+                        ("stolenISK", PyRep::Real(amount)),
+                        ("timestamp", PyRep::Integer(ts as i64)),
+                    ])
+                })
+                .collect();
+            Some(Ok(PyRep::List(rows)))
+        }
+
+        ("essMgr", "IsClientLinkedToReserveBank") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let Some(sys_id) = session.solar_system_id else {
+                return Some(Ok(PyRep::Bool(false)));
+            };
+            let is_linked = ctx.db.with_snapshot(|snap| {
+                snap.system_states
+                    .get(&sys_id)
+                    .map(|st| st.ess_linked_character_id == Some(char_id))
+                    .unwrap_or(false)
+            });
+            Some(Ok(PyRep::Bool(is_linked)))
+        }
+
+        ("essMgr", "RequestMainBankUnlink") | ("essMgr", "RequestReserveBankUnlink") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let Some(sys_id) = session.solar_system_id else {
+                return Some(Ok(PyRep::Bool(true)));
+            };
+            let unlinked = ctx.db.with_mut_snapshot(|snap| {
+                if let Some(st) = snap.system_states.get_mut(&sys_id) {
+                    if st.ess_linked_character_id == Some(char_id) {
+                        st.ess_linked_character_id = None;
+                        st.ess_link_started_tick = None;
+                        return true;
+                    }
+                }
+                false
+            });
+            Some(Ok(PyRep::Bool(unlinked)))
+        }
+
+        ("essMgr", "RequestUnlockReserveBank") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            if session.station_id.is_some() || session.structure_id.is_some() {
+                return Some(Err(BridgeRpcError {
+                    code: "ShipDocked".into(),
+                    message: "Cannot unlock ESS Reserve Bank while docked".into(),
+                }));
+            }
+            let Some(ship_id) = session.ship_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "NoActiveShip".into(),
+                    message: "Session has no active ship".into(),
+                }));
+            };
+            let Some(sys_id) = session.solar_system_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "NoSolarSystem".into(),
+                    message: "Session has no active solar system".into(),
+                }));
+            };
+            let sys_sec = ctx
+                .sde
+                .solar_systems
+                .get(&sys_id)
+                .map(|s| s.security_status)
+                .unwrap_or(1.0);
+            if !(sys_sec <= 0.0 && sys_id < 31_000_000) {
+                return Some(Err(BridgeRpcError {
+                    code: "EssOnlyInNullSec".into(),
+                    message: format!(
+                        "ESS Reserve Bank only exists in K-space null-sec systems (system {sys_id} has security {sys_sec:.2})"
+                    ),
+                }));
+            }
+            let key_item_id_arg = args.first().and_then(|a| a.as_i64());
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let key_item_opt = snap
+                    .items
+                    .values()
+                    .find(|i| {
+                        i.owner_id == char_id
+                            && i.location_id == ship_id
+                            && i.flag == eve_db::InventoryFlag::Cargo
+                            && i.quantity >= 1
+                            && (if let Some(target_iid) = key_item_id_arg {
+                                i.item_id == target_iid || i.type_id as i64 == target_iid
+                            } else {
+                                (57714..=57721).contains(&i.type_id)
+                                    || ctx
+                                        .sde
+                                        .types
+                                        .get(&i.type_id)
+                                        .map(|t| t.group_id == 4102)
+                                        .unwrap_or(false)
+                            })
+                    })
+                    .map(|i| (i.item_id, i.type_id));
+                let Some((key_item_id, key_type_id)) = key_item_opt else {
+                    return Err(BridgeRpcError {
+                        code: "MissingEssReserveSecurityKey".into(),
+                        message: "Unlocking the ESS Reserve Bank requires an ESS Reserve Security Key (type 57714..57721) in cargo".into(),
+                    });
+                };
+                if let Some(it) = snap.items.get_mut(&key_item_id) {
+                    if it.quantity > 1 {
+                        it.quantity -= 1;
+                        it.version += 1;
+                    } else {
+                        snap.items.remove(&key_item_id);
+                    }
+                }
+                let duration_mins = match key_type_id {
+                    57715 | 57718 | 57719 | 57721 => 45,
+                    _ => 15,
+                };
+                Ok((key_type_id, duration_mins))
+            });
+            match res {
+                Ok((key_type_id, duration_mins)) => {
+                    let now_unix = ctx.now_unix();
+                    let unlock_until = now_unix + (duration_mins as u64) * 60;
+                    crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
+                        rt.ess_reserve_unlocked_until.insert(sys_id, unlock_until);
+                    });
+                    Some(Ok(PyRep::keyval([
+                        ("solarSystemID", PyRep::Integer(sys_id as i64)),
+                        ("unlocked", PyRep::Bool(true)),
+                        ("keyTypeID", PyRep::Integer(key_type_id as i64)),
+                        ("durationMinutes", PyRep::Integer(duration_mins as i64)),
+                        ("unlockedUntil", PyRep::Integer(unlock_until as i64)),
+                    ])))
+                }
+                Err(e) => Some(Err(e)),
+            }
+        }
+
+        ("essMgr", "clear_cache") => {
+            let _ = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            Some(Ok(PyRep::None))
+        }
+
+        ("essMgr", "prime_cache_result") => {
+            let _ = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            Some(Ok(PyRep::Bool(true)))
+        }
+
         _ => {
             if service == BEYONCE_SVC
                 && (method.ends_with("Approach") || method.ends_with("KeepAtRange"))

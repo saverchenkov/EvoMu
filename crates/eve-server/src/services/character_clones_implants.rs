@@ -3,7 +3,7 @@
 #![forbid(unsafe_code)]
 
 use super::{alpha_skill_cap_for_character, catch_up_skill_queue, effective_character_attributes, parse_id_list};
-use crate::formulas::{apply_security_tag_repair, clone_jump_cooldown_seconds};
+use crate::formulas::clone_jump_cooldown_seconds;
 use crate::router::ServerContext;
 use eve_db::{InventoryFlag, IskCents, JumpCloneRecord};
 use eve_machonet::SessionState;
@@ -992,89 +992,6 @@ pub fn handle_clones_and_sheet(
                 vec!["eventID", "fromID", "toID", "modification", "eventTypeID"],
                 rows,
             )))
-        }
-
-        ("crimewatch", "ApplyTagsForSecStatus") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            if session.station_id.is_none() {
-                return Some(Err(BridgeRpcError {
-                    code: "NotDockedInStation".into(),
-                    message:
-                        "Security status tag turn-in requires being docked at a CONCORD station"
-                            .into(),
-                }));
-            }
-            let raw_tags = args.first().and_then(|a| a.as_i64()).unwrap_or(1);
-            let Ok(tags_i32) = i32::try_from(raw_tags) else {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidTagQuantity".into(),
-                    message: format!("Invalid security tag quantity {raw_tags}"),
-                }));
-            };
-            if tags_i32 <= 0 {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidTagQuantity".into(),
-                    message: "Security tag quantity must be strictly positive".into(),
-                }));
-            }
-            let tags_requested = tags_i32 as u32;
-            let current_dock = session.station_id.or(session.structure_id);
-            let current_ship = session.ship_id;
-            let res = ctx.db.try_with_mut_snapshot(|snap| {
-                // Find owned, unlocked, reachable Clone Soldier Tag stack (35661..=35664) with sufficient quantity
-                let tag_item_id = snap
-                    .items
-                    .values()
-                    .find(|i| {
-                        (35661..=35664).contains(&i.type_id)
-                            && i.quantity >= tags_i32
-                            && snap.is_item_consumable_by(i, char_id, current_dock, current_ship)
-                    })
-                    .map(|i| i.item_id);
-                let Some(item_id) = tag_item_id else {
-                    return Err(BridgeRpcError {
-                        code: "InsufficientSecurityTags".into(),
-                        message: format!(
-                            "Character does not own {tags_requested} Clone Soldier Tag(s) (35661..35664)"
-                        ),
-                    });
-                };
-
-                if let Some(item) = snap.items.get_mut(&item_id) {
-                    if item.quantity > tags_i32 {
-                        item.quantity -= tags_i32;
-                        item.version += 1;
-                    } else {
-                        snap.items.remove(&item_id);
-                    }
-                }
-
-                if let Some(ch) = snap.characters.get_mut(&char_id) {
-                    ch.security_status =
-                        apply_security_tag_repair(ch.security_status, tags_requested, 0.0);
-                    Ok(ch.security_status)
-                } else {
-                    Err(BridgeRpcError {
-                        code: "CharacterNotFound".into(),
-                        message: format!("Character {char_id} not found"),
-                    })
-                }
-            });
-            match res {
-                Ok(new_sec) => {
-                    ctx.notify(
-                        crate::router::NotificationTarget::Character(char_id),
-                        "OnSecurityStatusUpdate",
-                        "charid",
-                        vec![PyRep::Real(new_sec)],
-                    );
-                    Some(Ok(PyRep::Real(new_sec)))
-                }
-                Err(e) => Some(Err(e)),
-            }
         }
 
         ("paperDollServer", "GetMyPaperDollData") => {
